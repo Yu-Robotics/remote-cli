@@ -3,6 +3,7 @@ import { WebSocketClient } from '../client/WebSocketClient';
 import { createClaudeExecutor } from '../executor';
 import { MessageHandler } from '../client/MessageHandler';
 import { DirectoryGuard } from '../security/DirectoryGuard';
+import { HooksConfigurator } from '../security/HooksConfigurator';
 import ora from 'ora';
 
 /**
@@ -75,6 +76,18 @@ export async function startCommand(
     spinner.text = 'Initializing components...';
 
     const directoryGuard = new DirectoryGuard(security.allowedDirectories);
+
+    // Configure Claude Code security hooks
+    spinner.text = 'Configuring security hooks...';
+    const hooksConfigurator = new HooksConfigurator();
+    try {
+      await hooksConfigurator.configure();
+      console.log('🔒 Security hooks configured');
+    } catch (hookError) {
+      // Non-fatal: warn but continue
+      console.warn('⚠️  Failed to configure security hooks:', hookError instanceof Error ? hookError.message : 'Unknown error');
+      console.warn('   File operations may not be restricted to working directory.');
+    }
 
     // Get last working directory from config (if set) to initialize executor with correct path
     // This ensures .claude-session file is stored in the working directory, not startup directory
