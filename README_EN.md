@@ -17,6 +17,12 @@ Remote control your Claude Code CLI from anywhere using your mobile phone throug
 - ⚡ **Persistent Process**: Long-running Claude process with bidirectional streaming via stdio
 - 🚀 **Easy Setup**: One-command installation and initialization
 
+### Usage Examples
+
+<p align="center">
+  <img src="example_0.jpg" alt="Usage Example 1" width="45%" />
+</p>
+
 ## Recommended Use Cases
 
 ### Scenario 1: Enterprise Teams (Intranet Deployment)
