@@ -1,6 +1,6 @@
 {
   "name": "@yu_robotics/remote-cli-router",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Router server for remote CLI - message forwarding between Feishu and local clients",
   "main": "dist/cli.js",
   "types": "dist/cli.d.ts",
