@@ -233,6 +233,10 @@ export class ClaudePersistentExecutor extends EventEmitter {
 
   /**
    * Set working directory
+   *
+   * When working directory changes, we start a fresh session without inheriting
+   * the previous session. This prevents session conflicts when switching between
+   * directories that may have their own .claude-session files.
    */
   async setWorkingDirectory(targetPath: string): Promise<void> {
     const resolvedPath = this.directoryGuard.resolveWorkingDirectory(
@@ -240,15 +244,19 @@ export class ClaudePersistentExecutor extends EventEmitter {
       this.currentWorkingDirectory
     );
 
-    // If directory changes, we need to restart the process
+    // If directory changes, we need to restart the process with a fresh session
     const needsRestart = this.currentWorkingDirectory !== resolvedPath && this.claudeProcess !== null;
 
     this.currentWorkingDirectory = resolvedPath;
     this.sessionFilePath = path.join(this.currentWorkingDirectory, '.claude-session');
-    this.loadSessionId();
+
+    // Start fresh session when changing directories - don't inherit previous session
+    // This prevents errors when switching to a directory with old session files
+    this.sessionId = null;
+    console.log('[ClaudePersistent] Working directory changed, starting fresh session (no session inheritance)');
 
     if (needsRestart) {
-      console.log('[ClaudePersistent] Working directory changed, restarting process...');
+      console.log('[ClaudePersistent] Restarting process in new directory...');
       await this.stopProcess();
       await this.startProcess();
     }

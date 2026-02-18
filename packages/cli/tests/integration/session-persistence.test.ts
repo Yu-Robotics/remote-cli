@@ -229,16 +229,63 @@ describe('Integration: Session Persistence Across Directory Changes', () => {
       JSON.stringify({ id: session1Id, savedAt: new Date().toISOString() })
     );
 
-    // Change working directory
+    // Change working directory - should start fresh session, not inherit
     await executor.setWorkingDirectory(dir2);
 
     // Verify working directory changed
     expect(executor.getCurrentWorkingDirectory()).toBe(dir2);
+
+    // Verify session was cleared (not inherited from dir1)
+    expect(executor.getSessionId()).toBeNull();
 
     // New session would be created in dir2
     const session2Path = path.join(dir2, '.claude-session');
 
     // Verify session paths are different
     expect(session1Path).not.toBe(session2Path);
+  });
+
+  it('should start fresh session when switching directories back and forth', async () => {
+    // Scenario: Reproduce the loop crash bug
+    // 1. Start in workspace, /cd to remote-cli (works fine)
+    // 2. Then /cd back to workspace (should not crash)
+
+    const testRoot = path.join(process.cwd(), 'test-workspace');
+    const workspaceDir = testRoot;
+    const remoteCliDir = path.join(testRoot, 'remote-cli');
+
+    const executor = new ClaudePersistentExecutor(directoryGuard, workspaceDir);
+
+    // Simulate working in workspace - create a session
+    const session1Id = 'workspace-session';
+    const session1Path = path.join(workspaceDir, '.claude-session');
+    sessionFiles.set(
+      session1Path,
+      JSON.stringify({ id: session1Id, savedAt: new Date().toISOString() })
+    );
+
+    // Step 1: /cd to remote-cli - should start fresh session
+    await executor.setWorkingDirectory(remoteCliDir);
+    expect(executor.getCurrentWorkingDirectory()).toBe(remoteCliDir);
+    expect(executor.getSessionId()).toBeNull(); // Fresh session
+
+    // Simulate creating a session in remote-cli
+    const session2Id = 'remote-cli-session';
+    const session2Path = path.join(remoteCliDir, '.claude-session');
+    sessionFiles.set(
+      session2Path,
+      JSON.stringify({ id: session2Id, savedAt: new Date().toISOString() })
+    );
+
+    // Step 2: /cd back to workspace - should start fresh session again
+    // This is the scenario that was causing crash
+    await executor.setWorkingDirectory(workspaceDir);
+    expect(executor.getCurrentWorkingDirectory()).toBe(workspaceDir);
+    expect(executor.getSessionId()).toBeNull(); // Fresh session, NOT session1Id
+
+    // Verify no crash - session ID is null, will create new session on next command
+    // Old bug: would try to use session1Id from old .claude-session file
+    expect(executor.getSessionId()).not.toBe(session1Id);
+    expect(executor.getSessionId()).not.toBe(session2Id);
   });
 });
