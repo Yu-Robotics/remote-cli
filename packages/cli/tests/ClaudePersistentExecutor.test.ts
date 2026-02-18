@@ -77,6 +77,21 @@ describe('ClaudePersistentExecutor', () => {
       expect(cwd).toBeDefined();
       expect(typeof cwd).toBe('string');
     });
+
+    it('should initialize with custom working directory', () => {
+      const customDir = '~/test-project';
+      const customExecutor = new ClaudePersistentExecutor(directoryGuard, customDir);
+      const cwd = customExecutor.getCurrentWorkingDirectory();
+      expect(cwd).toContain('test-project');
+    });
+
+    it('should fall back to process.cwd() if custom directory is invalid', () => {
+      const invalidDir = '/etc/passwd'; // Not in allowed directories
+      const customExecutor = new ClaudePersistentExecutor(directoryGuard, invalidDir);
+      const cwd = customExecutor.getCurrentWorkingDirectory();
+      // Should fall back to process.cwd()
+      expect(cwd).toBe(process.cwd());
+    });
   });
 
   describe('working directory management', () => {

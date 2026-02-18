@@ -166,10 +166,25 @@ export class ClaudePersistentExecutor extends EventEmitter {
   // Activity tracking for timeout extension (optional, can be disabled)
   private activityTrackingEnabled = false;
 
-  constructor(directoryGuard: DirectoryGuard) {
+  constructor(directoryGuard: DirectoryGuard, initialWorkingDirectory?: string) {
     super();
     this.directoryGuard = directoryGuard;
-    this.currentWorkingDirectory = process.cwd();
+    // Use provided working directory or fall back to process.cwd()
+    // If a working directory is provided, validate it first
+    if (initialWorkingDirectory) {
+      try {
+        this.currentWorkingDirectory = this.directoryGuard.resolveWorkingDirectory(
+          initialWorkingDirectory,
+          process.cwd()
+        );
+      } catch (error) {
+        // If validation fails, fall back to process.cwd()
+        console.warn(`[ClaudePersistent] Failed to use initial working directory: ${initialWorkingDirectory}`, error);
+        this.currentWorkingDirectory = process.cwd();
+      }
+    } else {
+      this.currentWorkingDirectory = process.cwd();
+    }
     this.sessionFilePath = path.join(this.currentWorkingDirectory, '.claude-session');
     this.loadSessionId();
   }

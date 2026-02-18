@@ -75,10 +75,13 @@ export async function startCommand(
     spinner.text = 'Initializing components...';
 
     const directoryGuard = new DirectoryGuard(security.allowedDirectories);
-    const executor = createClaudeExecutor(directoryGuard, 'auto');
 
-    // Check if lastWorkingDirectory is set, if not warn user
-    const lastWorkingDirectory = config.get('lastWorkingDirectory');
+    // Get last working directory from config (if set) to initialize executor with correct path
+    // This ensures .claude-session file is stored in the working directory, not startup directory
+    const lastWorkingDirectory = config.get('lastWorkingDirectory') as string | undefined;
+    const executor = createClaudeExecutor(directoryGuard, 'auto', lastWorkingDirectory);
+
+    // If lastWorkingDirectory is set, verify it was applied correctly
     if (!lastWorkingDirectory) {
       spinner.warn('Working directory not set');
       console.log('');
@@ -91,14 +94,9 @@ export async function startCommand(
       console.log('');
       spinner.start('Continuing without working directory...');
     } else {
-      // Try to set the last working directory
-      try {
-        await executor.setWorkingDirectory(lastWorkingDirectory);
-        console.log(`📂 Working directory: ${lastWorkingDirectory}`);
-      } catch (error) {
-        console.warn(`⚠️  Failed to set working directory: ${lastWorkingDirectory}`);
-        console.log('You can change it later with `/cd <directory>` command.');
-      }
+      // Executor was initialized with lastWorkingDirectory, just display it
+      const currentDir = executor.getCurrentWorkingDirectory();
+      console.log(`📂 Working directory: ${currentDir}`);
     }
 
     // Create WebSocket URL

@@ -34,11 +34,13 @@ export type ExecutorType = 'persistent' | 'spawn' | 'auto';
  *
  * @param directoryGuard Directory guard instance
  * @param type Executor type: 'persistent' (long-running process), 'spawn' (one-shot process), or 'auto' (choose based on environment)
+ * @param initialWorkingDirectory Optional initial working directory for persistent executor
  * @returns Executor instance
  */
 export function createClaudeExecutor(
   directoryGuard: DirectoryGuard,
-  type: ExecutorType = 'auto'
+  type: ExecutorType = 'auto',
+  initialWorkingDirectory?: string
 ): ClaudeExecutor | ClaudePersistentExecutor {
   if (type === 'auto') {
     // Auto-detect: use spawn mode if running inside Claude Code to avoid nested session error
@@ -48,11 +50,11 @@ export function createClaudeExecutor(
     }
     // Otherwise use persistent mode
     console.log('[ExecutorFactory] Using persistent mode for better performance');
-    return new ClaudePersistentExecutor(directoryGuard);
+    return new ClaudePersistentExecutor(directoryGuard, initialWorkingDirectory);
   }
 
   if (type === 'persistent') {
-    return new ClaudePersistentExecutor(directoryGuard);
+    return new ClaudePersistentExecutor(directoryGuard, initialWorkingDirectory);
   }
 
   return new ClaudeExecutor(directoryGuard);
