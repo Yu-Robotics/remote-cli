@@ -4,13 +4,19 @@ import { registerConfigCommands } from './commands/config';
 import { startCommand } from './commands/start';
 import { stopCommand } from './commands/stop';
 import { statusCommand } from './commands/status';
+import path from 'path';
+import fs from 'fs';
 
 const program = new Command();
+
+// Read package.json for version
+const packageJsonPath = path.join(__dirname, '../package.json');
+const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
 
 program
   .name('remote-cli-router')
   .description('Router server for remote CLI')
-  .version('1.0.0');
+  .version(packageJson.version);
 
 // Register config commands
 registerConfigCommands(program);
