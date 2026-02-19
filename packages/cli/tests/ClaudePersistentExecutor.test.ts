@@ -12,14 +12,14 @@ vi.mock('child_process', () => ({
 vi.mock('fs', () => ({
   default: {
     existsSync: vi.fn(() => true),  // Default to true for working directory checks
-    readFileSync: vi.fn(),
+    readFileSync: vi.fn(() => JSON.stringify({ id: 'test-session' })),
     writeFileSync: vi.fn(),
     unlinkSync: vi.fn(),
     readdirSync: vi.fn(() => []),
     statSync: vi.fn(),
   },
   existsSync: vi.fn(() => true),  // Default to true for working directory checks
-  readFileSync: vi.fn(),
+  readFileSync: vi.fn(() => JSON.stringify({ id: 'test-session' })),
   writeFileSync: vi.fn(),
   unlinkSync: vi.fn(),
   readdirSync: vi.fn(() => []),
@@ -41,7 +41,7 @@ describe('ClaudePersistentExecutor', () => {
 
     // Reset mock implementations
     mockFs.existsSync.mockReturnValue(true);  // Default: files and directories exist
-    mockFs.readFileSync.mockReturnValue('undefined');  // Default: no session file data
+    mockFs.readFileSync.mockReturnValue(JSON.stringify({ id: 'test-session' }));  // Default: valid session
 
     directoryGuard = new DirectoryGuard(['~/test-project', './work']);
 

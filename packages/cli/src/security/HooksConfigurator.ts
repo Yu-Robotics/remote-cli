@@ -177,6 +177,9 @@ export class HooksConfigurator {
    */
   getSecurityGuardPath(): string {
     // The security guard script is in the same directory as this module
-    return path.join(__dirname, 'security-guard.js');
+    // Try .ts first (for development), then .js (for production)
+    const tsPath = path.join(__dirname, 'security-guard.ts');
+    const jsPath = path.join(__dirname, 'security-guard.js');
+    return fs.existsSync(tsPath) ? tsPath : jsPath;
   }
 }

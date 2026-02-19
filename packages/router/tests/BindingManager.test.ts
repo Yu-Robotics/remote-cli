@@ -22,6 +22,9 @@ describe('BindingManager', () => {
   });
 
   afterEach(async () => {
+    // Flush pending saves before cleanup
+    await store.flush();
+
     // Clean up test directory
     try {
       await fs.rm(testDir, { recursive: true, force: true });
