@@ -1,6 +1,6 @@
 {
   "name": "remote-cli-monorepo",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "Remote control Claude Code CLI via Feishu bot",
   "private": true,
   "workspaces": [
