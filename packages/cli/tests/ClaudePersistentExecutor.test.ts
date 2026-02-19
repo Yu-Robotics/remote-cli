@@ -156,4 +156,145 @@ describe('ClaudePersistentExecutor', () => {
       expect(result.error).toContain('destroyed');
     });
   });
+
+  describe('session resumption', () => {
+    it('should handle non-existent session ID gracefully', async () => {
+      // Mock a session file with a non-existent session ID
+      const nonExistentSessionId = 'non-existent-session-id-12345';
+
+      // Setup mocks to allow reading session file AND ensure working directory exists
+      let existsCallCount = 0;
+      mockFs.existsSync.mockImplementation((path: string) => {
+        existsCallCount++;
+        // First call: check for session file (return true - session file exists)
+        if (existsCallCount === 1) {
+          return true;
+        }
+        // Second call: check working directory exists before starting process (return true)
+        return true;
+      });
+
+      mockFs.readFileSync.mockReturnValue(JSON.stringify({ id: nonExistentSessionId }));
+
+      // Create a new executor that will load the non-existent session
+      const testExecutor = new ClaudePersistentExecutor(directoryGuard, '~/test-project');
+
+      // Verify the session ID was loaded
+      expect(testExecutor.getSessionId()).toBe(nonExistentSessionId);
+
+      // Mock spawn to simulate Claude CLI error when resuming non-existent session
+      const mockErrorProcess = new EventEmitter() as any;
+      mockErrorProcess.stdout = new EventEmitter();
+      mockErrorProcess.stderr = new EventEmitter();
+      mockErrorProcess.stdin = {
+        write: vi.fn(),
+        end: vi.fn(),
+      };
+      mockErrorProcess.kill = vi.fn();
+      mockErrorProcess.pid = 99999;
+
+      mockSpawn.mockReturnValue(mockErrorProcess);
+
+      // Execute a command - this should trigger process start with --resume
+      const executePromise = testExecutor.execute('test command');
+
+      // Wait for process to start
+      await new Promise(resolve => setTimeout(resolve, 1100));
+
+      // Verify spawn was called with --resume and the non-existent session ID
+      expect(mockSpawn).toHaveBeenCalledWith(
+        'claude',
+        expect.arrayContaining(['--resume', nonExistentSessionId]),
+        expect.any(Object)
+      );
+
+      // Simulate Claude CLI error output on stderr
+      const errorMessage = 'Error: Session not found: non-existent-session-id-12345\nPlease check your session ID or start a new session.\n';
+      mockErrorProcess.stderr.emit('data', Buffer.from(errorMessage));
+
+      // Simulate process exit with error code (this triggers the error handling)
+      mockErrorProcess.emit('exit', 1, null);
+
+      // The execution should be rejected with a user-friendly error about session not found
+      await expect(executePromise).rejects.toThrow(/Session not found.*start a fresh session/s);
+
+      // Cleanup
+      await testExecutor.destroy();
+    });
+
+    it('should start fresh session if session file does not exist', async () => {
+      // Setup mocks: session file doesn't exist, but working directory does
+      let existsCallCount = 0;
+      mockFs.existsSync.mockImplementation((path: string) => {
+        existsCallCount++;
+        // First call: check for session file (return false - no session file)
+        if (existsCallCount === 1) {
+          return false;
+        }
+        // Second call: check working directory exists (return true)
+        return true;
+      });
+
+      // Create a new executor
+      const testExecutor = new ClaudePersistentExecutor(directoryGuard, '~/test-project');
+
+      // Session ID should be null since no session file exists
+      expect(testExecutor.getSessionId()).toBeNull();
+
+      // Mock a fresh child process for this test
+      const freshMockProcess = new EventEmitter() as any;
+      freshMockProcess.stdout = new EventEmitter();
+      freshMockProcess.stderr = new EventEmitter();
+      freshMockProcess.stdin = {
+        write: vi.fn(),
+        end: vi.fn(),
+      };
+      freshMockProcess.kill = vi.fn();
+      freshMockProcess.pid = 88888;
+
+      mockSpawn.mockReturnValue(freshMockProcess);
+
+      // Execute a command
+      const executePromise = testExecutor.execute('test command');
+
+      // Wait for process to start
+      await new Promise(resolve => setTimeout(resolve, 1100));
+
+      // Verify spawn was called WITHOUT --resume flag
+      const spawnCalls = mockSpawn.mock.calls;
+      const lastCall = spawnCalls[spawnCalls.length - 1];
+      expect(lastCall).toBeDefined();
+      expect(lastCall[0]).toBe('claude');
+      expect(lastCall[1]).not.toContain('--resume');
+
+      // Simulate successful process initialization
+      freshMockProcess.stdout.emit('data', Buffer.from(JSON.stringify({
+        type: 'system',
+        subtype: 'init',
+        session_id: 'new-session-12345',
+        cwd: '/home/user/test-project'
+      }) + '\n'));
+
+      // Simulate result message
+      freshMockProcess.stdout.emit('data', Buffer.from(JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        result: 'Command executed successfully',
+        is_error: false
+      }) + '\n'));
+
+      const result = await executePromise;
+      expect(result.success).toBe(true);
+      expect(testExecutor.getSessionId()).toBe('new-session-12345');
+
+      // Simulate process exit before cleanup to prevent timeout
+      freshMockProcess.emit('exit', 0, null);
+
+      // Wait a bit for exit handler to complete
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      // Cleanup
+      await testExecutor.destroy();
+    }, 10000); // Increase timeout to 10 seconds
+  });
 });

@@ -225,6 +225,51 @@ export class ClaudePersistentExecutor extends EventEmitter {
   }
 
   /**
+   * Parse error message from stderr to provide user-friendly error messages
+   * @param code Exit code
+   * @param stderrOutput Stderr output from the process
+   * @returns User-friendly error message
+   */
+  private parseErrorMessage(code: number | null, stderrOutput: string): string {
+    // Check for session not found error
+    if (stderrOutput.includes('Session not found')) {
+      return '❌ Session not found. The previous session may have expired or been deleted.\n\n' +
+        'To start a fresh session, use the /clear command.';
+    }
+
+    // Check for session ID errors
+    if (stderrOutput.includes('session') && stderrOutput.includes('error')) {
+      return `❌ Session error occurred:\n${stderrOutput.trim()}\n\n` +
+        'Try using /clear to start a new session.';
+    }
+
+    // Check for authentication errors
+    if (stderrOutput.includes('authentication') || stderrOutput.includes('unauthorized')) {
+      return '❌ Authentication error. Please check your Claude CLI credentials.\n\n' +
+        'You may need to run: claude auth login';
+    }
+
+    // Check for network errors
+    if (stderrOutput.includes('network') || stderrOutput.includes('connection')) {
+      return '❌ Network connection error. Please check your internet connection.';
+    }
+
+    // Generic error with stderr
+    if (stderrOutput) {
+      // Truncate very long error messages
+      const truncatedError = stderrOutput.length > 500
+        ? stderrOutput.substring(0, 500) + '...(truncated)'
+        : stderrOutput;
+
+      return `❌ Claude process exited with error (code: ${code})\n\n${truncatedError.trim()}`;
+    }
+
+    // Generic error without stderr
+    return `❌ Claude process exited unexpectedly (code: ${code})\n\n` +
+      'This may be a temporary issue. Please try again or use /clear to start fresh.';
+  }
+
+  /**
    * Get current working directory
    */
   getCurrentWorkingDirectory(): string {
@@ -377,10 +422,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
 
         // Reject current command if any (only for unexpected exits)
         if (this.currentCommandReject && !wasIntentionalStop) {
-          let errorMsg = `Claude process exited unexpectedly (code: ${code})`;
-          if (stderrOutput) {
-            errorMsg += `\nstderr: ${stderrOutput.substring(0, 500)}`;
-          }
+          let errorMsg = this.parseErrorMessage(code, stderrOutput);
           this.currentCommandReject(new Error(errorMsg));
           this.resetCurrentCommand();
         }
