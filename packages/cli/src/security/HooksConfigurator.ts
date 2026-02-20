@@ -10,11 +10,16 @@ import * as path from 'path';
 import * as os from 'os';
 
 /**
- * Claude Code hook configuration
+ * Claude Code hook configuration (new format with matcher)
  */
 interface HookConfig {
-  command: string;
-  tools?: string[];
+  matcher: {
+    tools: string[];
+  };
+  hooks: Array<{
+    type: 'command';
+    command: string;
+  }>;
 }
 
 /**
@@ -22,8 +27,8 @@ interface HookConfig {
  */
 interface ClaudeSettings {
   hooks?: {
-    PreToolUse?: (string | HookConfig)[];
-    PostToolUse?: (string | HookConfig)[];
+    PreToolUse?: HookConfig[];
+    PostToolUse?: HookConfig[];
     [key: string]: any;
   };
   [key: string]: any;
@@ -80,15 +85,21 @@ export class HooksConfigurator {
     // Check if security guard hook is already configured
     const hookCommand = `node "${securityGuardPath}"`;
     const existingHook = settings.hooks.PreToolUse.find((hook) => {
-      const command = typeof hook === 'string' ? hook : hook.command;
-      return command.includes('security-guard');
+      return hook.hooks?.some(h => h.command.includes('security-guard'));
     });
 
     // Add hook if not already present
     if (!existingHook) {
       const newHook: HookConfig = {
-        command: hookCommand,
-        tools: FILE_TOOLS
+        matcher: {
+          tools: FILE_TOOLS
+        },
+        hooks: [
+          {
+            type: 'command',
+            command: hookCommand
+          }
+        ]
       };
       settings.hooks.PreToolUse.push(newHook);
     }
@@ -128,8 +139,7 @@ export class HooksConfigurator {
     // Remove security guard hooks from PreToolUse
     if (settings.hooks?.PreToolUse) {
       settings.hooks.PreToolUse = settings.hooks.PreToolUse.filter((hook) => {
-        const command = typeof hook === 'string' ? hook : hook.command;
-        return !command.includes('security-guard');
+        return !hook.hooks?.some(h => h.command.includes('security-guard'));
       });
     }
 
@@ -167,8 +177,7 @@ export class HooksConfigurator {
     }
 
     return settings.hooks.PreToolUse.some((hook) => {
-      const command = typeof hook === 'string' ? hook : hook.command;
-      return command.includes('security-guard');
+      return hook.hooks?.some(h => h.command.includes('security-guard'));
     });
   }
 
