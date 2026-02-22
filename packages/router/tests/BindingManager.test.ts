@@ -150,6 +150,44 @@ describe('BindingManager', () => {
       expect(binding?.devices.length).toBe(1); // Still only 1 device
       expect(binding?.devices[0].deviceName).toBe('Device-1-Updated'); // Name updated
     });
+
+    it('should reject binding device that is already bound to another user', async () => {
+      const user1OpenId = 'ou_user_001';
+      const user2OpenId = 'ou_user_002';
+      const sharedDeviceId = 'dev_shared_123';
+
+      // User 1 binds the device first
+      await bindingManager.bindUser(user1OpenId, sharedDeviceId, 'Device-1');
+
+      // User 2 tries to bind the same device - should be rejected
+      await expect(
+        bindingManager.bindUser(user2OpenId, sharedDeviceId, 'Device-2')
+      ).rejects.toThrow(/already bound to another user/);
+
+      // Verify only user 1 has the device
+      const user1Binding = await bindingManager.getUserBinding(user1OpenId);
+      const user2Binding = await bindingManager.getUserBinding(user2OpenId);
+
+      expect(user1Binding?.devices.some(d => d.deviceId === sharedDeviceId)).toBe(true);
+      expect(user2Binding).toBeNull(); // User 2 has no devices
+    });
+
+    it('should allow same user to rebind their own device', async () => {
+      const openId = 'ou_test_user';
+      const deviceId = 'dev_test_123';
+
+      // Bind device first time
+      await bindingManager.bindUser(openId, deviceId, 'Device-Old-Name');
+
+      // Same user rebinds the same device with new name - should succeed
+      await expect(
+        bindingManager.bindUser(openId, deviceId, 'Device-New-Name')
+      ).resolves.not.toThrow();
+
+      // Verify device name was updated
+      const binding = await bindingManager.getUserBinding(openId);
+      expect(binding?.devices[0].deviceName).toBe('Device-New-Name');
+    });
   });
 
   describe('getUserBinding', () => {

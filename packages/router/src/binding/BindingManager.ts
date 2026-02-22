@@ -51,6 +51,17 @@ export class BindingManager {
    */
   async bindUser(openId: string, deviceId: string, deviceName: string): Promise<void> {
     const now = Date.now();
+
+    // Security check: Prevent device from being bound to multiple users
+    // This prevents cross-user data leakage and routing confusion
+    const existingOwner = this.store.getUserByDeviceId(deviceId);
+    if (existingOwner && existingOwner !== openId) {
+      throw new Error(
+        `Device ${deviceId} is already bound to another user. ` +
+        `Please unbind it first or use a different device ID.`
+      );
+    }
+
     const existingBinding = await this.getUserBinding(openId);
 
     if (existingBinding) {
@@ -58,7 +69,7 @@ export class BindingManager {
       const deviceIndex = existingBinding.devices.findIndex(d => d.deviceId === deviceId);
 
       if (deviceIndex >= 0) {
-        // Update existing device entry
+        // Update existing device entry (same user rebinding their own device)
         existingBinding.devices[deviceIndex].deviceName = deviceName;
         existingBinding.devices[deviceIndex].lastActiveAt = now;
       } else {
@@ -92,6 +103,9 @@ export class BindingManager {
 
       await this.store.setUserBinding(openId, binding);
     }
+
+    // Update device-to-user reverse mapping to ensure consistency
+    await this.store.setDeviceToUserMap(deviceId, openId);
   }
 
   /**
