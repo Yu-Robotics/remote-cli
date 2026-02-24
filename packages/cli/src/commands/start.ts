@@ -7,7 +7,7 @@ import { HooksConfigurator } from '../security/HooksConfigurator';
 import { CLI_VERSION } from '../types';
 import axios from 'axios';
 import * as readline from 'readline';
-import ora from 'ora';
+import ora, { type Ora } from 'ora';
 
 /**
  * Start command options
@@ -56,7 +56,7 @@ export function promptYesNo(question: string): Promise<boolean> {
  * the local CLI, prompt the user whether to continue or abort.
  * Returns false if the user chooses to abort.
  */
-export async function checkServerVersion(serverUrl: string): Promise<boolean> {
+export async function checkServerVersion(serverUrl: string, spinner?: Ora): Promise<boolean> {
   try {
     const response = await axios.get<{ success: boolean; version: string }>(
       `${serverUrl}/api/version`,
@@ -66,6 +66,10 @@ export async function checkServerVersion(serverUrl: string): Promise<boolean> {
     if (!data?.success || !data?.version) return true;
 
     if (isNewerVersion(data.version, CLI_VERSION)) {
+      // Stop spinner before prompting to avoid stdin interference
+      if (spinner) {
+        spinner.stop();
+      }
       console.log('');
       console.log(`⚠️  Version mismatch detected:`);
       console.log(`   Router version : ${data.version}`);
@@ -77,6 +81,10 @@ export async function checkServerVersion(serverUrl: string): Promise<boolean> {
       if (!proceed) {
         console.log('Aborted. Please upgrade and try again.');
         return false;
+      }
+      // Resume spinner after user input
+      if (spinner) {
+        spinner.start();
       }
     }
   } catch {
@@ -136,7 +144,7 @@ export async function startCommand(
 
     // Check for newer router version — blocking prompt if outdated
     spinner.text = 'Checking server version...';
-    const shouldContinue = await checkServerVersion(serverUrl);
+    const shouldContinue = await checkServerVersion(serverUrl, spinner);
     if (!shouldContinue) {
       spinner.fail('Startup aborted by user');
       return { success: false, error: 'Startup aborted: please upgrade remote-cli to the latest version.' };
