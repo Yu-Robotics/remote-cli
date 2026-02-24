@@ -185,11 +185,8 @@ export class MessageHandler {
       // Detect file-reading intent and inject hint for mobile optimization
       const processedContent = processFileReadContent(expandedContent);
 
-      // Disable AskUserQuestion tool since it requires an interactive terminal and fails in stream-json mode
-      const finalContent = `${processedContent}\n\n[System hint: Do NOT use the AskUserQuestion tool. If you need to ask the user a question, ask it directly in your normal text response so they can reply in the chat.]`;
-
       // Execute Claude command
-      await this.executeCommand(messageId, finalContent);
+      await this.executeCommand(messageId, processedContent);
     } catch (error) {
       this.sendResponse(messageId, {
         success: false,
