@@ -13,9 +13,7 @@ import * as os from 'os';
  * Claude Code hook configuration (new format with matcher)
  */
 interface HookConfig {
-  matcher: {
-    tools: string[];
-  };
+  matcher: string;
   hooks: Array<{
     type: 'command';
     command: string;
@@ -91,9 +89,7 @@ export class HooksConfigurator {
     // Add hook if not already present
     if (!existingHook) {
       const newHook: HookConfig = {
-        matcher: {
-          tools: FILE_TOOLS
-        },
+        matcher: FILE_TOOLS.join('|'),
         hooks: [
           {
             type: 'command',
