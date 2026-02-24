@@ -1,6 +1,6 @@
 {
   "name": "@yu_robotics/remote-cli",
-  "version": "1.0.11",
+  "version": "1.1.0",
   "description": "Remote control Claude Code CLI via mobile",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

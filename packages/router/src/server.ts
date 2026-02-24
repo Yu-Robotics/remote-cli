@@ -8,7 +8,7 @@ import { JsonStore } from './storage/JsonStore';
 import { FeishuLongConnHandler } from './feishu/FeishuLongConnHandler';
 import { ConnectionHub } from './websocket/ConnectionHub';
 import { BindingManager } from './binding/BindingManager';
-import { MessageType, ToolUseInfo, ToolResultInfo, PROTOCOL_VERSION, MIN_SUPPORTED_CLI_VERSION } from './types';
+import { MessageType, ToolUseInfo, ToolResultInfo, PROTOCOL_VERSION, MIN_SUPPORTED_CLI_VERSION, ROUTER_VERSION } from './types';
 import { FeishuCardElement, createToolUseElement, createToolResultElement, createMarkdownElement, createRedactedThinkingElement } from './utils/ToolFormatter';
 
 /**
@@ -118,6 +118,16 @@ export class RouterServer {
         timestamp: Date.now(),
         connections: stats.totalConnections,
         devices: stats.deviceIds
+      };
+    });
+
+    // Version info endpoint — used by CLI to check for upgrades
+    router.get('/api/version', (ctx) => {
+      ctx.body = {
+        success: true,
+        version: ROUTER_VERSION,
+        protocolVersion: PROTOCOL_VERSION,
+        minSupportedCliVersion: MIN_SUPPORTED_CLI_VERSION,
       };
     });
 

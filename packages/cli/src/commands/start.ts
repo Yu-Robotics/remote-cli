@@ -4,6 +4,9 @@ import { createClaudeExecutor } from '../executor';
 import { MessageHandler } from '../client/MessageHandler';
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import { HooksConfigurator } from '../security/HooksConfigurator';
+import { CLI_VERSION } from '../types';
+import axios from 'axios';
+import * as readline from 'readline';
 import ora from 'ora';
 
 /**
@@ -21,6 +24,65 @@ export interface StartCommandResult {
   success: boolean;
   daemonMode?: boolean;
   error?: string;
+}
+
+/**
+ * Compare two semver strings. Returns true if remote is strictly newer than local.
+ */
+export function isNewerVersion(remote: string, local: string): boolean {
+  const parse = (v: string) => v.split('.').map(Number);
+  const [rMaj, rMin, rPatch] = parse(remote);
+  const [lMaj, lMin, lPatch] = parse(local);
+  if (rMaj !== lMaj) return rMaj > lMaj;
+  if (rMin !== lMin) return rMin > lMin;
+  return rPatch > lPatch;
+}
+
+/**
+ * Prompt the user with a y/n question on stdin. Returns true if user answers 'y'.
+ */
+export function promptYesNo(question: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    rl.question(question, (answer) => {
+      rl.close();
+      resolve(answer.trim().toLowerCase() === 'y');
+    });
+  });
+}
+
+/**
+ * Query the router's /api/version endpoint and, if the router is newer than
+ * the local CLI, prompt the user whether to continue or abort.
+ * Returns false if the user chooses to abort.
+ */
+export async function checkServerVersion(serverUrl: string): Promise<boolean> {
+  try {
+    const response = await axios.get<{ success: boolean; version: string }>(
+      `${serverUrl}/api/version`,
+      { timeout: 5000 }
+    );
+    const data = response.data;
+    if (!data?.success || !data?.version) return true;
+
+    if (isNewerVersion(data.version, CLI_VERSION)) {
+      console.log('');
+      console.log(`⚠️  Version mismatch detected:`);
+      console.log(`   Router version : ${data.version}`);
+      console.log(`   CLI version    : ${CLI_VERSION}`);
+      console.log(`   The router has been upgraded. It is recommended to upgrade your CLI:`);
+      console.log(`   npm install -g @yu_robotics/remote-cli`);
+      console.log('');
+      const proceed = await promptYesNo('Continue with the current version? (y/n): ');
+      if (!proceed) {
+        console.log('Aborted. Please upgrade and try again.');
+        return false;
+      }
+    }
+  } catch {
+    // Non-fatal: old routers without the endpoint, network errors, etc. — just continue.
+  }
+  return true;
 }
 
 /**
@@ -70,6 +132,14 @@ export async function startCommand(
         success: false,
         error: 'Configuration error: allowedDirectories is missing',
       };
+    }
+
+    // Check for newer router version — blocking prompt if outdated
+    spinner.text = 'Checking server version...';
+    const shouldContinue = await checkServerVersion(serverUrl);
+    if (!shouldContinue) {
+      spinner.fail('Startup aborted by user');
+      return { success: false, error: 'Startup aborted: please upgrade remote-cli to the latest version.' };
     }
 
     // Initialize components

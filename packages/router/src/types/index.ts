@@ -1,3 +1,5 @@
+import { version } from '../../package.json';
+
 /**
  * Common type definitions
  */
@@ -15,6 +17,12 @@ export const PROTOCOL_VERSION = 1;
  * Old CLIs below this version receive a PROTOCOL_VERSION_INCOMPATIBLE error.
  */
 export const MIN_SUPPORTED_CLI_VERSION = 1;
+
+/**
+ * Router npm package version, returned by the /api/version endpoint.
+ * Auto-imported from package.json.
+ */
+export const ROUTER_VERSION = version;
 
 // Binding code (valid for 5 minutes)
 export interface BindingCode {

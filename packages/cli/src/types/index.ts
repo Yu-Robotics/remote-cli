@@ -1,9 +1,17 @@
+import { version } from '../../package.json';
+
 /**
  * WebSocket protocol version.
  * Increment this when making breaking changes to the wire format.
  * See CLAUDE.md § Protocol Versioning for rules on when to bump.
  */
 export const PROTOCOL_VERSION = 1;
+
+/**
+ * CLI npm package version, used to compare against the router version on startup.
+ * Auto-imported from package.json.
+ */
+export const CLI_VERSION = version;
 
 /**
  * Tool use information for structured messages
