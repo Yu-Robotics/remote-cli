@@ -38,6 +38,35 @@ This project maintains two README files:
 
 **Example:** If you add a new feature to Features section in README.md, you MUST also add it to README_EN.md in the same position.
 
+## Version Bump Requirement
+
+**CRITICAL: When bumping version numbers, you MUST update ALL package.json files to maintain consistency.**
+
+This project maintains version numbers in three locations:
+- `package.json` - Root package version
+- `packages/cli/package.json` - CLI package (`@yu_robotics/remote-cli`)
+- `packages/router/package.json` - Router package (`@yu_robotics/remote-cli-router`)
+
+**Rules:**
+1. **Always update all three package.json files** when bumping versions
+2. **Keep versions synchronized** - all packages must use the same version number
+3. **Commit together** - version bumps must be committed as a single commit
+4. **Verify before pushing** - ensure all version numbers match
+
+**Example:** When bumping from 1.1.0 to 1.1.1:
+```bash
+# Update all three package.json files
+# package.json
+# packages/cli/package.json
+# packages/router/package.json
+
+# Verify
+npm run build
+
+# Commit as single commit
+git commit -m "chore: bump version to 1.1.1"
+```
+
 ## Testing Requirement
 
 **CRITICAL: All code changes MUST include corresponding test coverage.**
