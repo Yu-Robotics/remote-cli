@@ -77,8 +77,9 @@ describe('HooksConfigurator', () => {
       const hooks = content.hooks.PreToolUse;
 
       expect(hooks.length).toBeGreaterThan(0);
+      // New format: each entry has { matcher, hooks: [{ type, command }] }
       const securityHook = hooks.find((h: any) =>
-        (typeof h === 'string' ? h : h.command).includes('security-guard')
+        h.hooks?.some((inner: any) => inner.command?.includes('security-guard'))
       );
       expect(securityHook).toBeDefined();
     });
@@ -87,10 +88,16 @@ describe('HooksConfigurator', () => {
       const existingSettings = {
         hooks: {
           PreToolUse: [
-            { command: 'echo "existing hook"', tools: ['Bash'] }
+            {
+              matcher: { tools: ['Bash'] },
+              hooks: [{ type: 'command', command: 'echo "existing hook"' }]
+            }
           ],
           PostToolUse: [
-            { command: 'echo "post hook"' }
+            {
+              matcher: { tools: ['Write'] },
+              hooks: [{ type: 'command', command: 'echo "post hook"' }]
+            }
           ]
         },
         someOtherSetting: 'value'
@@ -103,11 +110,8 @@ describe('HooksConfigurator', () => {
       const writeCall = mockWriteFileSync.mock.calls[0];
       const content = JSON.parse(writeCall[1] as string);
 
-      // Should preserve existing PreToolUse hook
+      // Should preserve existing PreToolUse hook + add security hook
       expect(content.hooks.PreToolUse.length).toBeGreaterThanOrEqual(2);
-      expect(content.hooks.PreToolUse).toContainEqual(
-        expect.objectContaining({ command: 'echo "existing hook"' })
-      );
       // Should preserve PostToolUse
       expect(content.hooks.PostToolUse).toBeDefined();
       // Should preserve other settings
@@ -118,7 +122,10 @@ describe('HooksConfigurator', () => {
       const existingSettings = {
         hooks: {
           PreToolUse: [
-            { command: 'node "/path/to/security-guard.js"', tools: ['Read'] }
+            {
+              matcher: { tools: ['Read'] },
+              hooks: [{ type: 'command', command: 'node "/path/to/security-guard.js"' }]
+            }
           ]
         }
       };
@@ -130,7 +137,7 @@ describe('HooksConfigurator', () => {
       const writeCall = mockWriteFileSync.mock.calls[0];
       const content = JSON.parse(writeCall[1] as string);
       const securityHooks = content.hooks.PreToolUse.filter((h: any) =>
-        (typeof h === 'string' ? h : h.command).includes('security-guard')
+        h.hooks?.some((inner: any) => inner.command?.includes('security-guard'))
       );
 
       expect(securityHooks.length).toBe(1);
@@ -176,14 +183,15 @@ describe('HooksConfigurator', () => {
 
       const writeCall = mockWriteFileSync.mock.calls[0];
       const content = JSON.parse(writeCall[1] as string);
+      // New format: tools are inside matcher.tools
       const securityHook = content.hooks.PreToolUse.find((h: any) =>
-        (typeof h === 'string' ? h : h.command).includes('security-guard')
+        h.hooks?.some((inner: any) => inner.command?.includes('security-guard'))
       );
 
-      expect(securityHook.tools).toBeDefined();
-      expect(securityHook.tools).toContain('Read');
-      expect(securityHook.tools).toContain('Write');
-      expect(securityHook.tools).toContain('Edit');
+      expect(securityHook.matcher.tools).toBeDefined();
+      expect(securityHook.matcher.tools).toContain('Read');
+      expect(securityHook.matcher.tools).toContain('Write');
+      expect(securityHook.matcher.tools).toContain('Edit');
     });
   });
 
@@ -192,8 +200,14 @@ describe('HooksConfigurator', () => {
       const existingSettings = {
         hooks: {
           PreToolUse: [
-            { command: 'node "/path/to/security-guard.js"', tools: ['Read'] },
-            { command: 'echo "other hook"', tools: ['Bash'] }
+            {
+              matcher: { tools: ['Read'] },
+              hooks: [{ type: 'command', command: 'node "/path/to/security-guard.js"' }]
+            },
+            {
+              matcher: { tools: ['Bash'] },
+              hooks: [{ type: 'command', command: 'echo "other hook"' }]
+            }
           ]
         }
       };
@@ -206,7 +220,7 @@ describe('HooksConfigurator', () => {
       const content = JSON.parse(writeCall[1] as string);
 
       expect(content.hooks.PreToolUse.length).toBe(1);
-      expect(content.hooks.PreToolUse[0].command).toBe('echo "other hook"');
+      expect(content.hooks.PreToolUse[0].hooks[0].command).toBe('echo "other hook"');
     });
 
     it('should do nothing if settings file does not exist', async () => {
@@ -221,11 +235,20 @@ describe('HooksConfigurator', () => {
       const existingSettings = {
         hooks: {
           PreToolUse: [
-            { command: 'security-guard.js' },
-            { command: 'my-custom-hook.js' }
+            {
+              matcher: { tools: ['Read'] },
+              hooks: [{ type: 'command', command: 'security-guard.js' }]
+            },
+            {
+              matcher: { tools: ['Bash'] },
+              hooks: [{ type: 'command', command: 'my-custom-hook.js' }]
+            }
           ],
           PostToolUse: [
-            { command: 'post-hook.js' }
+            {
+              matcher: { tools: ['Write'] },
+              hooks: [{ type: 'command', command: 'post-hook.js' }]
+            }
           ]
         }
       };
@@ -238,7 +261,7 @@ describe('HooksConfigurator', () => {
       const content = JSON.parse(writeCall[1] as string);
 
       expect(content.hooks.PreToolUse).toHaveLength(1);
-      expect(content.hooks.PreToolUse[0].command).toBe('my-custom-hook.js');
+      expect(content.hooks.PreToolUse[0].hooks[0].command).toBe('my-custom-hook.js');
       expect(content.hooks.PostToolUse).toHaveLength(1);
     });
   });
@@ -248,7 +271,10 @@ describe('HooksConfigurator', () => {
       const existingSettings = {
         hooks: {
           PreToolUse: [
-            { command: 'node "/path/to/security-guard.js"' }
+            {
+              matcher: { tools: ['Read'] },
+              hooks: [{ type: 'command', command: 'node "/path/to/security-guard.js"' }]
+            }
           ]
         }
       };
@@ -264,7 +290,10 @@ describe('HooksConfigurator', () => {
       const existingSettings = {
         hooks: {
           PreToolUse: [
-            { command: 'other-hook.js' }
+            {
+              matcher: { tools: ['Bash'] },
+              hooks: [{ type: 'command', command: 'other-hook.js' }]
+            }
           ]
         }
       };
