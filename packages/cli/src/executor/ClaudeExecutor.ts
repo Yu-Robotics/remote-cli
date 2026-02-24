@@ -200,7 +200,7 @@ export class ClaudeExecutor {
     if (this.isExecuting) {
       return {
         success: false,
-        error: 'Executor is busy, please wait for current task to complete',
+        error: 'Executor is busy, please wait for current task to complete. Send the abort command to cancel the running task.',
       };
     }
 
