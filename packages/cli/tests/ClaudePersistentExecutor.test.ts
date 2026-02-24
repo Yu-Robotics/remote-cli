@@ -213,7 +213,9 @@ describe('ClaudePersistentExecutor', () => {
       mockErrorProcess.stderr.emit('data', Buffer.from(errorMessage));
 
       // Simulate process exit with error code (this triggers the error handling)
+      // Emit both 'exit' and 'close' - 'close' fires after all stdio streams close
       mockErrorProcess.emit('exit', 1, null);
+      mockErrorProcess.emit('close', 1, null);
 
       // The execution should be rejected with a user-friendly error about session not found
       await expect(executePromise).rejects.toThrow(/Session not found.*start a fresh session/s);
@@ -288,7 +290,9 @@ describe('ClaudePersistentExecutor', () => {
       expect(testExecutor.getSessionId()).toBe('new-session-12345');
 
       // Simulate process exit before cleanup to prevent timeout
+      // Emit both 'exit' and 'close' - 'close' fires after all stdio streams close
       freshMockProcess.emit('exit', 0, null);
+      freshMockProcess.emit('close', 0, null);
 
       // Wait a bit for exit handler to complete
       await new Promise(resolve => setTimeout(resolve, 100));

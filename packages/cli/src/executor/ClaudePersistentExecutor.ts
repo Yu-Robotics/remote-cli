@@ -81,6 +81,8 @@ interface ClaudeOutputMessage {
   result?: string;
   /** Error flag (for result messages) */
   is_error?: boolean;
+  /** Errors array (for result messages with error_during_execution subtype) */
+  errors?: string[];
   /** Duration in milliseconds (for result messages) */
   duration_ms?: number;
 }
@@ -135,6 +137,8 @@ export class ClaudePersistentExecutor extends EventEmitter {
   private claudeProcess: ChildProcess | null = null;
   private isStarting = false;
   private isStopping = false; // Flag to indicate intentional process stop
+  private isSessionError = false; // Flag to suppress auto-restart on session-not-found errors
+  private lastStderrOutput = ''; // Last process stderr, available in 'close' handler
   private commandQueue: Array<{
     prompt: string;
     options: PersistentClaudeOptions;
@@ -408,6 +412,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
         isStartupPhase = false;
         const stderrOutput = stderrBuffer.join('');
         stderrBuffer = []; // Clear buffer
+        this.lastStderrOutput = stderrOutput; // Save for 'close' handler
 
         if (code !== 0 && code !== null) {
           console.error(`[ClaudePersistent] Process exited with code ${code}, signal ${signal}`);
@@ -417,7 +422,11 @@ export class ClaudePersistentExecutor extends EventEmitter {
         } else {
           console.log(`[ClaudePersistent] Process exited with code ${code}, signal ${signal}`);
         }
+      });
 
+      // Use 'close' event (fires after all I/O streams are closed, i.e. after all stdout
+      // data events have been processed) instead of 'exit' for command completion logic.
+      child.on('close', (code, signal) => {
         this.claudeProcess = null;
 
         // Check if this was an intentional stop (abort/reset)
@@ -426,7 +435,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
 
         // Reject current command if any (only for unexpected exits)
         if (this.currentCommandReject && !wasIntentionalStop) {
-          let errorMsg = this.parseErrorMessage(code, stderrOutput);
+          let errorMsg = this.parseErrorMessage(code, this.lastStderrOutput);
           this.currentCommandReject(new Error(errorMsg));
           this.resetCurrentCommand();
         }
@@ -436,9 +445,24 @@ export class ClaudePersistentExecutor extends EventEmitter {
 
         // Auto-restart if not destroyed and there are pending commands
         // Don't auto-restart if this was an intentional stop (let processQueue handle it)
-        if (!this.isDestroyed && !wasIntentionalStop && this.commandQueue.length > 0) {
+        // Don't auto-restart if this was a session error (session is invalid, restarting would loop)
+        const hasSessionError = this.isSessionError ||
+          this.lastStderrOutput.includes('No conversation found') ||
+          this.lastStderrOutput.includes('Session not found');
+        this.isSessionError = false; // Reset session error flag
+
+        if (!this.isDestroyed && !wasIntentionalStop && !hasSessionError && this.commandQueue.length > 0) {
           console.log('[ClaudePersistent] Auto-restarting process...');
           setTimeout(() => this.startProcess(), 1000);
+        } else if (hasSessionError && this.commandQueue.length > 0) {
+          // Session is invalid - drain the queue with a friendly error rather than restarting
+          const sessionErrorMsg = '❌ Session not found. The previous session may have expired or been deleted.\n\n' +
+            'To start a fresh session, use the /clear command.';
+          console.log(`[ClaudePersistent] Session error - draining ${this.commandQueue.length} queued command(s)`);
+          for (const cmd of this.commandQueue) {
+            cmd.reject(new Error(sessionErrorMsg));
+          }
+          this.commandQueue = [];
         }
       });
 
@@ -510,7 +534,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
         return;
       }
 
-      this.claudeProcess.on('exit', () => {
+      this.claudeProcess.on('close', () => {
         clearTimeout(killTimeout);
         resolve();
       });
@@ -640,7 +664,30 @@ export class ClaudePersistentExecutor extends EventEmitter {
           if (!this.isWaitingForInput) {
             // Complete the command with success or error based on is_error flag
             if (message.is_error) {
-              this.completeCurrentCommand(false, message.result || 'Command failed');
+              // Check for session-not-found error in the errors array first
+              const sessionError = message.errors?.find(e =>
+                e.includes('No conversation found') || e.includes('session')
+              );
+              if (sessionError) {
+                const errorMsg = '❌ Session not found. The previous session may have expired or been deleted.\n\n' +
+                  'To start a fresh session, use the /clear command.';
+                this.isSessionError = true; // Prevent auto-restart on session errors
+                this.isStopping = true; // Treat as intentional stop to suppress close-handler reject
+
+                if (this.currentCommandReject) {
+                  // Normal path: command was already shifted and is being processed
+                  this.completeCurrentCommand(false, errorMsg);
+                } else if (this.commandQueue.length > 0) {
+                  // Race condition path: process exited before processQueue could shift the command
+                  console.log('[ClaudePersistent] Session error before command was dequeued - rejecting from queue');
+                  const pendingCmd = this.commandQueue.shift();
+                  if (pendingCmd) {
+                    pendingCmd.reject(new Error(errorMsg));
+                  }
+                }
+              } else {
+                this.completeCurrentCommand(false, message.result || 'Command failed');
+              }
             } else {
               this.completeCurrentCommand(true);
             }

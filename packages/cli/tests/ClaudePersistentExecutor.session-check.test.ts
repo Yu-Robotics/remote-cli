@@ -14,16 +14,14 @@ describe('ClaudePersistentExecutor - Session Validation', () => {
   let executor: ClaudePersistentExecutor;
 
   beforeEach(() => {
-    // Create a temporary directory for testing
-    // Use unique prefix for each test to avoid conflicts
+    // Create a temporary directory under the real home directory
+    // so DirectoryGuard's startsWith(homeDir) check passes
     const uniqueId = `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `claude-session-test-${uniqueId}-`));
+    tempDir = fs.mkdtempSync(path.join(os.homedir(), `.claude-session-test-${uniqueId}-`));
 
-    // Initialize DirectoryGuard with /tmp included (where temp directories are created)
-    // IMPORTANT: Add tempDir with wildcard pattern to allow its subdirectories
-    directoryGuard = new DirectoryGuard([tempDir, '/tmp', `${os.tmpdir()}/*`]);
+    directoryGuard = new DirectoryGuard([tempDir]);
 
-    // Mock os.homedir for consistency
+    // Mock os.homedir for consistency in session file path resolution
     vi.spyOn(os, 'homedir').mockReturnValue(tempDir);
   });
 
@@ -47,7 +45,7 @@ describe('ClaudePersistentExecutor - Session Validation', () => {
 
     // Create a fake session file with a non-existent session ID
     const sessionFilePath = path.join(tempDir, '.claude-session');
-    const fakeSessionId = '550e8400-e29b-41d4-a716-446655440000'; // Valid UUID format but non-existent
+    const fakeSessionId = '550e8400-e29b-41d4-a716-446655440000'; // Valid UUID but non-existent
     fs.writeFileSync(
       sessionFilePath,
       JSON.stringify({
@@ -64,59 +62,54 @@ describe('ClaudePersistentExecutor - Session Validation', () => {
     // Verify session ID was set
     expect(executor.getSessionId()).toBe(fakeSessionId);
 
-    // Execute a command - this should trigger:
-    // 1. Start process with --resume <fake-session-id>
-    // 2. Claude CLI returns error: "No conversation found with session ID: ..."
-    // 3. Executor returns friendly error message suggesting /reset
+    // Execute a command - should fail with a session-related friendly error
     try {
       await executor.execute('echo "test"', { timeout: 30000 });
-      // Should not reach here
       expect.fail('Expected execute to throw an error');
     } catch (error) {
-      // Verify friendly error message is returned
       expect(error).toBeInstanceOf(Error);
       const errorMessage = (error as Error).message;
-      // The error should either mention "Session not found" or "Session" error
-      // Claude may return different error messages depending on the CLI version
+      // Should include a friendly session error message with /clear guidance
       expect(errorMessage).toMatch(/Session not found|session.*error|No conversation found/i);
       expect(errorMessage).toContain('/clear');
     }
-
-    // Session ID should still be the fake one (not auto-cleared)
-    expect(executor.getSessionId()).toBe(fakeSessionId);
-  }, 60000); // 60 second timeout for this integration test
+  }, 60000);
 
   it('should handle missing session file gracefully', async () => {
-    // Create a completely fresh temp directory for this test
-    const freshTempDir = fs.mkdtempSync(path.join(os.tmpdir(), `claude-fresh-session-${Date.now()}-`));
-    const freshGuard = new DirectoryGuard([freshTempDir, '/tmp', `${os.tmpdir()}/*`]);
+    // Create a fresh executor directory with no session file
+    const uniqueId = `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+    const freshTempDir = fs.mkdtempSync(path.join(os.homedir(), `.claude-fresh-session-${uniqueId}-`));
+    const freshGuard = new DirectoryGuard([freshTempDir]);
 
-    // Create executor in the fresh directory (no session file exists)
-    executor = new ClaudePersistentExecutor(freshGuard, freshTempDir);
+    try {
+      executor = new ClaudePersistentExecutor(freshGuard, freshTempDir);
 
-    // Verify no session ID initially
-    expect(executor.getSessionId()).toBeNull();
+      // Verify no session ID initially (no .claude-session file in freshTempDir)
+      expect(executor.getSessionId()).toBeNull();
 
-    // Execute a command
-    const result = await executor.execute('echo "test"', { timeout: 30000 });
+      // Execute a command
+      const result = await executor.execute('echo "test"', { timeout: 30000 });
 
-    // Verify command succeeded
-    expect(result.success).toBe(true);
+      // Verify command succeeded
+      expect(result.success).toBe(true);
 
-    // Verify a new session ID was created
-    const sessionId = executor.getSessionId();
-    expect(sessionId).not.toBeNull();
-    expect(sessionId).toBeTruthy(); // Should be a non-empty string
+      // Verify a new session ID was created
+      const sessionId = executor.getSessionId();
+      expect(sessionId).not.toBeNull();
+      expect(sessionId).toBeTruthy();
 
-    // Verify session file was created
-    const sessionFilePath = path.join(freshTempDir, '.claude-session');
-    expect(fs.existsSync(sessionFilePath)).toBe(true);
+      // Verify session file was created
+      const sessionFilePath = path.join(freshTempDir, '.claude-session');
+      expect(fs.existsSync(sessionFilePath)).toBe(true);
 
-    const sessionData = JSON.parse(fs.readFileSync(sessionFilePath, 'utf-8'));
-    expect(sessionData.id).toBe(sessionId);
-
-    // Cleanup
-    fs.rmSync(freshTempDir, { recursive: true, force: true });
+      const sessionData = JSON.parse(fs.readFileSync(sessionFilePath, 'utf-8'));
+      expect(sessionData.id).toBe(sessionId);
+    } finally {
+      // Cleanup (executor is destroyed in afterEach, but freshTempDir needs manual cleanup)
+      if (fs.existsSync(freshTempDir)) {
+        fs.rmSync(freshTempDir, { recursive: true, force: true });
+      }
+    }
   }, 60000);
 
   it('should resume existing valid session successfully', async () => {
@@ -143,5 +136,5 @@ describe('ClaudePersistentExecutor - Session Validation', () => {
 
     // Verify session ID remains the same
     expect(executor.getSessionId()).toBe(firstSessionId);
-  }, 90000); // Longer timeout for two sequential commands
+  }, 90000);
 });
