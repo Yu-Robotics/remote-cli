@@ -99,10 +99,10 @@ describe('RouterServer - handleRedactedThinking', () => {
 
       await handleRedactedThinking('msg-1', data.openId, streamingMessages, updateStreamingMessage);
 
-      // Elements should contain the redacted thinking notification (hr + note)
+      // Elements should contain the redacted thinking notification (hr + markdown)
       const elementTags = data.elements.map((e: any) => e.tag);
       expect(elementTags).toContain('hr');
-      expect(elementTags).toContain('note');
+      expect(elementTags).toContain('markdown');
     });
 
     it('should call updateStreamingMessage once with the correct feishu message id', async () => {
@@ -143,7 +143,7 @@ describe('RouterServer - handleRedactedThinking', () => {
       // Redacted elements should follow
       const tags = data.elements.map((e: any) => e.tag);
       expect(tags).toContain('hr');
-      expect(tags).toContain('note');
+      expect(tags).toContain('markdown');
     });
 
     it('should not create a spurious markdown element when text is only whitespace', async () => {
@@ -153,8 +153,9 @@ describe('RouterServer - handleRedactedThinking', () => {
       await handleRedactedThinking('msg-5', data.openId, streamingMessages, updateStreamingMessage);
 
       // Whitespace-only text should NOT be flushed as a markdown element
+      // Only the redacted thinking markdown element should exist
       const markdownElements = data.elements.filter((e: any) => e.tag === 'markdown');
-      expect(markdownElements.length).toBe(0);
+      expect(markdownElements.length).toBe(1); // Only the redacted thinking notification
     });
   });
 
@@ -183,7 +184,7 @@ describe('RouterServer - handleRedactedThinking', () => {
 
       expect(data.elements[0]).toBe(existingEl);
       expect(data.elements[1]).toMatchObject({ tag: 'hr' });
-      expect(data.elements[2]).toMatchObject({ tag: 'note' });
+      expect(data.elements[2]).toMatchObject({ tag: 'markdown' });
     });
   });
 
@@ -195,8 +196,8 @@ describe('RouterServer - handleRedactedThinking', () => {
       await handleRedactedThinking('msg-8', data.openId, streamingMessages, updateStreamingMessage);
       await handleRedactedThinking('msg-8', data.openId, streamingMessages, updateStreamingMessage);
 
-      const noteTags = data.elements.filter((e: any) => e.tag === 'note');
-      expect(noteTags.length).toBe(2);
+      const markdownTags = data.elements.filter((e: any) => e.tag === 'markdown');
+      expect(markdownTags.length).toBe(2); // Two redacted thinking notifications
       expect(updateStreamingMessage).toHaveBeenCalledTimes(2);
     });
   });

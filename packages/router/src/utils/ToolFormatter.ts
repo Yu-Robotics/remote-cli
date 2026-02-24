@@ -387,17 +387,8 @@ export function createRedactedThinkingElement(): FeishuCardElement[] {
   return [
     createDividerElement(),
     {
-      tag: 'note',
-      elements: [
-        {
-          tag: 'plain_text',
-          content: '💭 Some reasoning was filtered by safety systems and is not displayed.',
-        },
-        {
-          tag: 'plain_text',
-          content: '(This does not affect the response quality - the AI can still use this reasoning internally)',
-        }
-      ]
+      tag: 'markdown',
+      content: '💭 *Some reasoning was filtered by safety systems and is not displayed.*\n*(This does not affect the response quality - the AI can still use this reasoning internally)*',
     }
   ];
 }

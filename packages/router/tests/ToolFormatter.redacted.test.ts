@@ -11,45 +11,30 @@ describe('ToolFormatter - Redacted Thinking', () => {
       expect(elements.length).toBeGreaterThan(0);
     });
 
-    it('should include divider and note elements', () => {
+    it('should include divider and markdown elements', () => {
       const elements = createRedactedThinkingElement();
 
-      // Should have at least 2 elements (divider + note)
-      expect(elements.length).toBeGreaterThanOrEqual(2);
+      // Should have exactly 2 elements (divider + markdown)
+      expect(elements.length).toBe(2);
 
       // First element should be divider (hr)
       expect(elements[0].tag).toBe('hr');
 
-      // Should have a note element
-      const noteElement = elements.find((el: any) => el.tag === 'note');
-      expect(noteElement).toBeDefined();
+      // Second element should be markdown (note tag not supported in Card 2.0)
+      expect(elements[1].tag).toBe('markdown');
     });
 
     it('should contain user-friendly notification text', () => {
       const elements = createRedactedThinkingElement();
-      const noteElement = elements.find((el: any) => el.tag === 'note');
+      const markdownElement = elements.find((el: any) => el.tag === 'markdown');
 
-      expect(noteElement).toBeDefined();
-      expect(noteElement.elements).toBeDefined();
-      expect(Array.isArray(noteElement.elements)).toBe(true);
-
-      // Should have plain_text elements with notification
-      const textElements = noteElement.elements.filter((el: any) => el.tag === 'plain_text');
-      expect(textElements.length).toBeGreaterThan(0);
+      expect(markdownElement).toBeDefined();
+      expect(markdownElement.content).toBeDefined();
+      expect(typeof markdownElement.content).toBe('string');
 
       // Check for key phrases
-      const allText = textElements.map((el: any) => el.content).join(' ');
-      expect(allText).toContain('filtered by safety systems');
-      expect(allText.toLowerCase()).toContain('reasoning');
-    });
-
-    it('should have exactly 2 plain_text child elements in note', () => {
-      const elements = createRedactedThinkingElement();
-      const noteElement = elements.find((el: any) => el.tag === 'note');
-
-      const textElements = noteElement.elements.filter((el: any) => el.tag === 'plain_text');
-      // Expecting: primary notification + reassurance sentence
-      expect(textElements.length).toBe(2);
+      expect(markdownElement.content).toContain('filtered by safety systems');
+      expect(markdownElement.content.toLowerCase()).toContain('reasoning');
     });
 
     it('should not contain encrypted content', () => {
@@ -118,9 +103,9 @@ describe('ToolFormatter - Redacted Thinking', () => {
       // All elements must have a tag property
       combined.forEach(el => expect(el).toHaveProperty('tag'));
 
-      // Note element should appear exactly once
-      const noteCount = combined.filter((el: any) => el.tag === 'note').length;
-      expect(noteCount).toBe(1);
+      // Markdown elements should appear (including the redacted thinking one)
+      const markdownCount = combined.filter((el: any) => el.tag === 'markdown').length;
+      expect(markdownCount).toBeGreaterThanOrEqual(3); // 'some text' + redacted + 'after redacted'
     });
   });
 
@@ -133,12 +118,12 @@ describe('ToolFormatter - Redacted Thinking', () => {
       expect(jsonStr).toContain('💭');
     });
 
-    it('should use note tag for visual distinction', () => {
+    it('should use markdown tag for Card 2.0 compatibility', () => {
       const elements = createRedactedThinkingElement();
 
-      // Note tag creates a visually distinct box in Feishu
-      const hasNoteTag = elements.some((el: any) => el.tag === 'note');
-      expect(hasNoteTag).toBe(true);
+      // Markdown tag is used for Card 2.0 (note tag is not supported)
+      const hasMarkdownTag = elements.some((el: any) => el.tag === 'markdown');
+      expect(hasMarkdownTag).toBe(true);
     });
 
     it('should use hr divider before note, not a markdown element', () => {
@@ -161,36 +146,30 @@ describe('ToolFormatter - Redacted Thinking', () => {
       expect(elements.length).toBeGreaterThan(0);
     });
 
-    it('should include divider and note elements', () => {
+    it('should include divider and markdown elements', () => {
       const elements = createRedactedThinkingElement();
 
-      // Should have at least 2 elements (divider + note)
-      expect(elements.length).toBeGreaterThanOrEqual(2);
+      // Should have exactly 2 elements (divider + markdown)
+      expect(elements.length).toBe(2);
 
       // First element should be divider (hr)
       expect(elements[0].tag).toBe('hr');
 
-      // Should have a note element
-      const noteElement = elements.find((el: any) => el.tag === 'note');
-      expect(noteElement).toBeDefined();
+      // Second element should be markdown (note tag not supported in Card 2.0)
+      expect(elements[1].tag).toBe('markdown');
     });
 
     it('should contain user-friendly notification text', () => {
       const elements = createRedactedThinkingElement();
-      const noteElement = elements.find((el: any) => el.tag === 'note');
+      const markdownElement = elements.find((el: any) => el.tag === 'markdown');
 
-      expect(noteElement).toBeDefined();
-      expect(noteElement.elements).toBeDefined();
-      expect(Array.isArray(noteElement.elements)).toBe(true);
-
-      // Should have plain_text elements with notification
-      const textElements = noteElement.elements.filter((el: any) => el.tag === 'plain_text');
-      expect(textElements.length).toBeGreaterThan(0);
+      expect(markdownElement).toBeDefined();
+      expect(markdownElement.content).toBeDefined();
+      expect(typeof markdownElement.content).toBe('string');
 
       // Check for key phrases
-      const allText = textElements.map((el: any) => el.content).join(' ');
-      expect(allText).toContain('filtered by safety systems');
-      expect(allText.toLowerCase()).toContain('reasoning');
+      expect(markdownElement.content).toContain('filtered by safety systems');
+      expect(markdownElement.content.toLowerCase()).toContain('reasoning');
     });
 
     it('should not contain encrypted content', () => {
@@ -251,12 +230,12 @@ describe('ToolFormatter - Redacted Thinking', () => {
       expect(jsonStr).toContain('💭');
     });
 
-    it('should use note tag for visual distinction', () => {
+    it('should use markdown tag for Card 2.0 compatibility', () => {
       const elements = createRedactedThinkingElement();
 
-      // Note tag creates a visually distinct box in Feishu
-      const hasNoteTag = elements.some((el: any) => el.tag === 'note');
-      expect(hasNoteTag).toBe(true);
+      // Markdown tag is used for Card 2.0 (note tag is not supported)
+      const hasMarkdownTag = elements.some((el: any) => el.tag === 'markdown');
+      expect(hasMarkdownTag).toBe(true);
     });
   });
 });
