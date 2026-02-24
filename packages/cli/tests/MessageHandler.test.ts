@@ -559,4 +559,77 @@ describe('MessageHandler', () => {
       );
     });
   });
+
+  describe('file read detection', () => {
+    it('should inject hint for Chinese read commands', async () => {
+      mockExecutor.execute.mockResolvedValue({ success: true, output: 'ok' });
+
+      const message = {
+        type: 'command',
+        messageId: 'msg-123',
+        content: '读取 config.ts',
+        timestamp: Date.now(),
+      };
+
+      await handler.handleMessage(message);
+
+      expect(mockExecutor.execute).toHaveBeenCalledWith(
+        expect.stringContaining('[System hint:'),
+        expect.any(Object)
+      );
+    });
+
+    it('should inject hint for English read commands', async () => {
+      mockExecutor.execute.mockResolvedValue({ success: true, output: 'ok' });
+
+      const message = {
+        type: 'command',
+        messageId: 'msg-123',
+        content: 'show file package.json',
+        timestamp: Date.now(),
+      };
+
+      await handler.handleMessage(message);
+
+      expect(mockExecutor.execute).toHaveBeenCalledWith(
+        expect.stringContaining('[System hint:'),
+        expect.any(Object)
+      );
+    });
+
+    it('should not inject hint for general commands', async () => {
+      mockExecutor.execute.mockResolvedValue({ success: true, output: 'ok' });
+
+      const message = {
+        type: 'command',
+        messageId: 'msg-123',
+        content: 'fix the login bug',
+        timestamp: Date.now(),
+      };
+
+      await handler.handleMessage(message);
+
+      expect(mockExecutor.execute).toHaveBeenCalledWith(
+        'fix the login bug',
+        expect.any(Object)
+      );
+    });
+
+    it('should strip --full and skip hint', async () => {
+      mockExecutor.execute.mockResolvedValue({ success: true, output: 'ok' });
+
+      const message = {
+        type: 'command',
+        messageId: 'msg-123',
+        content: 'read file.ts --full',
+        timestamp: Date.now(),
+      };
+
+      await handler.handleMessage(message);
+
+      const executedContent = mockExecutor.execute.mock.calls[0][0];
+      expect(executedContent).not.toContain('--full');
+      expect(executedContent).not.toContain('[System hint:');
+    });
+  });
 });
