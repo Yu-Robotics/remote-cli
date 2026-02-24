@@ -1,5 +1,6 @@
 import WebSocket from 'ws';
 import { v4 as uuidv4 } from 'uuid';
+import { PROTOCOL_VERSION } from '../types';
 
 /**
  * WebSocket client configuration
@@ -86,6 +87,17 @@ export class WebSocketClient {
         const onMessage = (data: WebSocket.Data) => {
           try {
             const message = JSON.parse(data.toString());
+
+            // Stop reconnecting if the router rejects this CLI version
+            if (
+              message.type === 'error' &&
+              message.data?.code === 'PROTOCOL_VERSION_INCOMPATIBLE'
+            ) {
+              console.error(`\n[remote-cli] ${message.data.message}`);
+              console.error('[remote-cli] Disconnecting — please upgrade and restart.\n');
+              this.manualDisconnect = true;
+            }
+
             this.messageHandlers.forEach(handler => handler(message));
           } catch (error) {
             // Ignore malformed messages
@@ -223,7 +235,8 @@ export class WebSocketClient {
         messageId: uuidv4(),
         timestamp: Date.now(),
         data: {
-          deviceId: this.deviceId
+          deviceId: this.deviceId,
+          protocolVersion: PROTOCOL_VERSION,
         }
       }));
     }

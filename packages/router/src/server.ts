@@ -8,7 +8,7 @@ import { JsonStore } from './storage/JsonStore';
 import { FeishuLongConnHandler } from './feishu/FeishuLongConnHandler';
 import { ConnectionHub } from './websocket/ConnectionHub';
 import { BindingManager } from './binding/BindingManager';
-import { MessageType, ToolUseInfo, ToolResultInfo } from './types';
+import { MessageType, ToolUseInfo, ToolResultInfo, PROTOCOL_VERSION, MIN_SUPPORTED_CLI_VERSION } from './types';
 import { FeishuCardElement, createToolUseElement, createToolResultElement, createMarkdownElement, createRedactedThinkingElement } from './utils/ToolFormatter';
 
 /**
@@ -205,11 +205,30 @@ export class RouterServer {
 
           switch (message.type) {
             case MessageType.BINDING_REQUEST:
-              // Device sends binding request with deviceId
+              // Device sends binding request with deviceId and optional protocolVersion
               deviceId = message.data.deviceId;
               if (deviceId) {
+                // Version check: missing protocolVersion defaults to 1 (current baseline)
+                const clientVersion: number = message.data?.protocolVersion ?? 1;
+                if (clientVersion < MIN_SUPPORTED_CLI_VERSION) {
+                  console.log(`Device ${deviceId} rejected: protocol version ${clientVersion} < minimum ${MIN_SUPPORTED_CLI_VERSION}`);
+                  ws.send(JSON.stringify({
+                    type: MessageType.ERROR,
+                    messageId: message.messageId,
+                    timestamp: Date.now(),
+                    data: {
+                      code: 'PROTOCOL_VERSION_INCOMPATIBLE',
+                      message: `CLI protocol version ${clientVersion} is no longer supported. Please upgrade remote-cli to the latest version.`,
+                      minimumVersion: MIN_SUPPORTED_CLI_VERSION,
+                      currentRouterVersion: PROTOCOL_VERSION,
+                    },
+                  }));
+                  ws.close();
+                  break;
+                }
+
                 this.connectionHub.registerConnection(deviceId, ws);
-                console.log('Device registered:', deviceId);
+                console.log(`Device registered: ${deviceId} (protocol v${clientVersion})`);
 
                 // Send confirmation
                 ws.send(JSON.stringify({

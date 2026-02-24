@@ -1,4 +1,11 @@
 /**
+ * WebSocket protocol version.
+ * Increment this when making breaking changes to the wire format.
+ * See CLAUDE.md § Protocol Versioning for rules on when to bump.
+ */
+export const PROTOCOL_VERSION = 1;
+
+/**
  * Tool use information for structured messages
  */
 export interface ToolUseInfo {

@@ -325,6 +325,46 @@ ANTHROPIC_MAGIC_STRING_TRIGGER_REDACTED_THINKING_46C9A13E193C177646C7398A98432EC
 3. **Path handling**: Always use DirectoryGuard for path validation - never trust user input directly
 4. **WebSocketClient state**: The client maintains connection state - always check `isConnected` before sending
 
+## Protocol Versioning
+
+The CLI and Router communicate over WebSocket using a versioned protocol. Breaking changes to the wire format MUST be managed carefully because users run the CLI locally and may not upgrade immediately.
+
+### Key constants
+
+| Constant | Location | Purpose |
+|---|---|---|
+| `PROTOCOL_VERSION` | `packages/cli/src/types/index.ts` | Version this CLI speaks |
+| `PROTOCOL_VERSION` | `packages/router/src/types/index.ts` | Current router version |
+| `MIN_SUPPORTED_CLI_VERSION` | `packages/router/src/types/index.ts` | Oldest CLI version the router accepts |
+
+### What requires a version bump
+
+**Do NOT bump — these are safe (additive) changes:**
+- Adding a new optional field to any message
+- Adding a new message type that the other side can safely ignore
+- Relaxing a field constraint (required → optional)
+
+**MUST bump `PROTOCOL_VERSION` in both packages AND bump `MIN_SUPPORTED_CLI_VERSION` in router:**
+- Removing or renaming any field
+- Changing a field's type or semantics
+- Removing a message type
+- Changing the handshake sequence
+
+### How to bump
+
+1. Increment `PROTOCOL_VERSION` in `packages/cli/src/types/index.ts`
+2. Increment `PROTOCOL_VERSION` in `packages/router/src/types/index.ts`
+3. Set `MIN_SUPPORTED_CLI_VERSION` in `packages/router/src/types/index.ts` to the new version
+4. Update the snapshot tests in `packages/*/tests/compatibility/protocol-compat.test.ts`
+5. Announce to users: they must upgrade before the new router is deployed
+
+### Change detector tests
+
+`packages/router/tests/compatibility/protocol-compat.test.ts` and
+`packages/cli/tests/compatibility/protocol-compat.test.ts` are **wire format snapshot tests**.
+If changes to the code cause these tests to fail, stop and ask:
+> "Is this a breaking wire format change? Do I need to bump the protocol version?"
+
 ## References
 
 - See [PLAN.md](PLAN.md) for complete implementation plan with architecture diagrams, security design, and deployment strategies

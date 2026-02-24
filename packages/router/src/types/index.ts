@@ -2,6 +2,20 @@
  * Common type definitions
  */
 
+/**
+ * Router's current protocol version.
+ * Increment when making any breaking wire format change.
+ * See CLAUDE.md § Protocol Versioning for rules on when to bump.
+ */
+export const PROTOCOL_VERSION = 1;
+
+/**
+ * Oldest CLI protocol version the router will accept.
+ * Bump this (along with PROTOCOL_VERSION) only when dropping backward compat.
+ * Old CLIs below this version receive a PROTOCOL_VERSION_INCOMPATIBLE error.
+ */
+export const MIN_SUPPORTED_CLI_VERSION = 1;
+
 // Binding code (valid for 5 minutes)
 export interface BindingCode {
   code: string;           // "ABC-123-XYZ"
