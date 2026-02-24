@@ -77,11 +77,15 @@ describe('HooksConfigurator', () => {
       const hooks = content.hooks.PreToolUse;
 
       expect(hooks.length).toBeGreaterThan(0);
-      // New format: each entry has { matcher, hooks: [{ type, command }] }
+      // New format: matcher is a string
       const securityHook = hooks.find((h: any) =>
         h.hooks?.some((inner: any) => inner.command?.includes('security-guard'))
       );
       expect(securityHook).toBeDefined();
+      expect(typeof securityHook.matcher).toBe('string');
+      // The matcher should contain the tool names joined by pipes
+      expect(securityHook.matcher).toContain('Read');
+      expect(securityHook.matcher).toContain('Write');
     });
 
     it('should preserve existing hooks in settings', async () => {
@@ -89,13 +93,13 @@ describe('HooksConfigurator', () => {
         hooks: {
           PreToolUse: [
             {
-              matcher: { tools: ['Bash'] },
+              matcher: 'Bash',
               hooks: [{ type: 'command', command: 'echo "existing hook"' }]
             }
           ],
           PostToolUse: [
             {
-              matcher: { tools: ['Write'] },
+              matcher: 'Write',
               hooks: [{ type: 'command', command: 'echo "post hook"' }]
             }
           ]
@@ -183,15 +187,16 @@ describe('HooksConfigurator', () => {
 
       const writeCall = mockWriteFileSync.mock.calls[0];
       const content = JSON.parse(writeCall[1] as string);
-      // New format: tools are inside matcher.tools
+      // New format: matcher is a string
       const securityHook = content.hooks.PreToolUse.find((h: any) =>
         h.hooks?.some((inner: any) => inner.command?.includes('security-guard'))
       );
 
-      expect(securityHook.matcher.tools).toBeDefined();
-      expect(securityHook.matcher.tools).toContain('Read');
-      expect(securityHook.matcher.tools).toContain('Write');
-      expect(securityHook.matcher.tools).toContain('Edit');
+      expect(securityHook.matcher).toBeDefined();
+      expect(typeof securityHook.matcher).toBe('string');
+      expect(securityHook.matcher).toContain('Read');
+      expect(securityHook.matcher).toContain('Write');
+      expect(securityHook.matcher).toContain('Edit');
     });
   });
 
@@ -201,11 +206,11 @@ describe('HooksConfigurator', () => {
         hooks: {
           PreToolUse: [
             {
-              matcher: { tools: ['Read'] },
+              matcher: 'Read',
               hooks: [{ type: 'command', command: 'node "/path/to/security-guard.js"' }]
             },
             {
-              matcher: { tools: ['Bash'] },
+              matcher: 'Bash',
               hooks: [{ type: 'command', command: 'echo "other hook"' }]
             }
           ]
@@ -236,17 +241,17 @@ describe('HooksConfigurator', () => {
         hooks: {
           PreToolUse: [
             {
-              matcher: { tools: ['Read'] },
+              matcher: 'Read',
               hooks: [{ type: 'command', command: 'security-guard.js' }]
             },
             {
-              matcher: { tools: ['Bash'] },
+              matcher: 'Bash',
               hooks: [{ type: 'command', command: 'my-custom-hook.js' }]
             }
           ],
           PostToolUse: [
             {
-              matcher: { tools: ['Write'] },
+              matcher: 'Write',
               hooks: [{ type: 'command', command: 'post-hook.js' }]
             }
           ]
@@ -291,7 +296,8 @@ describe('HooksConfigurator', () => {
         hooks: {
           PreToolUse: [
             {
-              matcher: { tools: ['Bash'] },
+              // Invalid format still used in test case to verify behavior with legacy format
+              matcher: 'Bash',
               hooks: [{ type: 'command', command: 'other-hook.js' }]
             }
           ]

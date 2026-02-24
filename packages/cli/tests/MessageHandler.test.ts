@@ -77,7 +77,7 @@ describe('MessageHandler', () => {
       await handler.handleMessage(message);
 
       expect(mockExecutor.execute).toHaveBeenCalledWith(
-        'list files',
+        expect.stringContaining('list files'),
         expect.any(Object)
       );
       expect(mockWsClient.send).toHaveBeenCalledWith(
@@ -223,7 +223,10 @@ describe('MessageHandler', () => {
 
       await handler.handleMessage(message);
 
-      expect(mockExecutor.execute).toHaveBeenCalledWith('some /r text', expect.any(Object));
+      expect(mockExecutor.execute).toHaveBeenCalledWith(
+        expect.stringContaining('some /r text'),
+        expect.any(Object)
+      );
     });
   });
 
@@ -610,7 +613,11 @@ describe('MessageHandler', () => {
       await handler.handleMessage(message);
 
       expect(mockExecutor.execute).toHaveBeenCalledWith(
-        'fix the login bug',
+        expect.stringContaining('fix the login bug'),
+        expect.any(Object)
+      );
+      expect(mockExecutor.execute).toHaveBeenCalledWith(
+        expect.stringContaining('AskUserQuestion'),
         expect.any(Object)
       );
     });
@@ -629,7 +636,8 @@ describe('MessageHandler', () => {
 
       const executedContent = mockExecutor.execute.mock.calls[0][0];
       expect(executedContent).not.toContain('--full');
-      expect(executedContent).not.toContain('[System hint:');
+      expect(executedContent).not.toContain('For files exceeding 50 lines');
+      expect(executedContent).toContain('AskUserQuestion');
     });
   });
 });
