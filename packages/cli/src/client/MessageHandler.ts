@@ -287,12 +287,6 @@ export class MessageHandler {
 - /abort - Abort the currently executing command
 - /clear - Clear conversation context
 - /cd <directory> - Change working directory
-- /r or /resume - Resume previous conversation
-- /c or /continue - Continue previous conversation
-- /review - Review changes (supports remote interaction)
-
-💡 Interactive commands like /review will prompt you for input via Feishu when needed.
-
 You can also use natural language commands to control Claude Code CLI.`,
       });
       return true;

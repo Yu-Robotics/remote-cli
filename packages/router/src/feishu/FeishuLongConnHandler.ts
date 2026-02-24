@@ -573,16 +573,21 @@ export class FeishuLongConnHandler {
   private async handleHelpCommand(openId: string, messageId: string): Promise<void> {
     const helpMessage = `📖 Feishu Remote Control Help
 
-Available commands:
+Device management commands:
 /bind <binding-code> - Bind a new device
-/status - View all device statuses
 /unbind - Unbind all devices
 /device - List all your devices
 /device list - List all your devices
 /device switch <device-id-or-index> - Switch active device
 /device <device-id-or-index> - Quick switch to device
 /device unbind <device-id-or-index> - Unbind a specific device
+/status - View all device statuses
 /help - Show help information
+
+Claude Code commands (sent to active device):
+/cd <directory> - Change working directory
+/clear - Clear conversation context and start fresh session
+/abort - Abort the currently executing command
 
 Regular messages will be sent to your active device for execution.
 
@@ -597,7 +602,8 @@ Multi-device support:
 Examples:
 • "/device" - List all devices
 • "/device 1" - Switch to device #1
-• "/device switch 2" - Switch to device #2
+• "/cd ~/projects/myapp" - Change to project directory
+• "/clear" - Start a fresh Claude conversation
 • "List files in current directory"
 • "Run tests"
 • "View recent git commits"`;
