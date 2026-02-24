@@ -4,6 +4,7 @@ import { IncomingMessage, OutgoingMessage, StructuredContent, ToolUseInfo, ToolR
 import type { ClaudeExecutor, ClaudePersistentExecutor } from '../executor';
 import { FeishuNotificationAdapter } from '../hooks';
 import { ConfigManager } from '../config/ConfigManager';
+import { processFileReadContent } from '../utils/FileReadDetector';
 import { spawn } from 'child_process';
 
 /**
@@ -139,7 +140,7 @@ export class MessageHandler {
     if (this.isExecuting) {
       this.sendResponse(messageId, {
         success: false,
-        error: 'Executor is busy, please wait for current task to complete',
+        error: 'Executor is busy, please wait for current task to complete. Send the abort command to cancel the running task.',
       });
       return;
     }
@@ -181,8 +182,11 @@ export class MessageHandler {
       // Expand command shortcuts
       const expandedContent = this.expandCommandShortcuts(content!);
 
+      // Detect file-reading intent and inject hint for mobile optimization
+      const processedContent = processFileReadContent(expandedContent);
+
       // Execute Claude command
-      await this.executeCommand(messageId, expandedContent);
+      await this.executeCommand(messageId, processedContent);
     } catch (error) {
       this.sendResponse(messageId, {
         success: false,
