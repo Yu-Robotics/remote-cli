@@ -1,6 +1,6 @@
 import WebSocket from 'ws';
 import { v4 as uuidv4 } from 'uuid';
-import { PROTOCOL_VERSION } from '../types';
+import { PROTOCOL_VERSION, CLI_VERSION } from '../types';
 
 /**
  * WebSocket client configuration
@@ -96,6 +96,15 @@ export class WebSocketClient {
               console.error(`\n[remote-cli] ${message.data.message}`);
               console.error('[remote-cli] Disconnecting — please upgrade and restart.\n');
               this.manualDisconnect = true;
+            }
+
+            // Check for version mismatch on binding confirmation
+            if (message.type === 'binding_confirm' && message.data?.routerVersion) {
+              const routerVersion = message.data.routerVersion;
+              if (routerVersion !== CLI_VERSION) {
+                console.warn(`\n[remote-cli] ⚠️  Version mismatch: CLI ${CLI_VERSION} ↔ Router ${routerVersion}`);
+                console.warn('[remote-cli] Consider upgrading to the latest version for best compatibility.\n');
+              }
             }
 
             this.messageHandlers.forEach(handler => handler(message));

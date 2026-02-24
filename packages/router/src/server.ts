@@ -240,12 +240,16 @@ export class RouterServer {
                 this.connectionHub.registerConnection(deviceId, ws);
                 console.log(`Device registered: ${deviceId} (protocol v${clientVersion})`);
 
-                // Send confirmation
+                // Send confirmation with version info for client-side version check
                 ws.send(JSON.stringify({
                   type: MessageType.BINDING_CONFIRM,
                   messageId: message.messageId,
                   timestamp: Date.now(),
-                  data: { success: true }
+                  data: {
+                    success: true,
+                    routerVersion: ROUTER_VERSION,
+                    minCliVersion: MIN_SUPPORTED_CLI_VERSION,
+                  }
                 }));
               }
               break;
