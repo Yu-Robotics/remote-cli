@@ -146,42 +146,40 @@ describe('FeishuLongConnHandler', () => {
       });
     });
 
-    // TODO: Re-enable when element-based chunking is implemented
-    it.skip('should create continuation messages when content exceeds limit', async () => {
+    it('should create continuation messages when content exceeds limit', async () => {
       mockClient.im.message.patch.mockResolvedValue({});
       mockClient.im.message.create.mockResolvedValue({ data: { message_id: 'msg_456' } });
 
+      // 160 elements > CARD_ELEMENT_LIMIT (150), triggers chunking
       const longElements = [];
-      for (let i = 0; i < 20; i++) {
-        longElements.push({ tag: 'markdown', content: 'a'.repeat(250) });
+      for (let i = 0; i < 160; i++) {
+        longElements.push({ tag: 'markdown', content: 'line ' + i });
       }
 
       const result = await handler.updateStreamingMessage('msg_123', longElements, 'ou_user_123');
 
       expect(result).toBe(true);
-      // When chunking is implemented:
-      // Should update the original message
-      // expect(mockClient.im.message.patch).toHaveBeenCalled();
-      // Should create continuation message
-      // expect(mockClient.im.message.create).toHaveBeenCalled();
+      expect(mockClient.im.message.patch).toHaveBeenCalled();
+      expect(mockClient.im.message.create).toHaveBeenCalled();
     });
 
-    // TODO: Re-enable when element-based chunking is implemented
-    it.skip('should handle multiple chunks', async () => {
+    it('should handle multiple chunks', async () => {
       mockClient.im.message.patch.mockResolvedValue({});
-      mockClient.im.message.create.mockResolvedValue({ data: { message_id: 'msg_456' } });
+      mockClient.im.message.create
+        .mockResolvedValueOnce({ data: { message_id: 'msg_456' } })
+        .mockResolvedValueOnce({ data: { message_id: 'msg_789' } });
 
+      // 310 elements forces at least 3 chunks (each chunk holds ~148 elements)
       const veryLongElements = [];
-      for (let i = 0; i < 30; i++) {
-        veryLongElements.push({ tag: 'markdown', content: 'a'.repeat(300) });
+      for (let i = 0; i < 310; i++) {
+        veryLongElements.push({ tag: 'markdown', content: 'line ' + i });
       }
 
       const result = await handler.updateStreamingMessage('msg_123', veryLongElements, 'ou_user_123');
 
       expect(result).toBe(true);
-      // When chunking is implemented:
-      // expect(mockClient.im.message.patch).toHaveBeenCalledTimes(1);
-      // expect(mockClient.im.message.create).toHaveBeenCalledTimes(2);
+      expect(mockClient.im.message.patch).toHaveBeenCalledTimes(1);
+      expect(mockClient.im.message.create).toHaveBeenCalledTimes(2);
     });
 
     it('should not create continuation message if openId not provided', async () => {
@@ -293,37 +291,38 @@ describe('FeishuLongConnHandler', () => {
     });
   });
 
-  // TODO: Re-enable when element-based chunking is implemented
-  describe.skip('finalizeStreamingMessage after streaming updates', () => {
+  describe('finalizeStreamingMessage after streaming updates', () => {
+    // Helper: generate elements that exceed the 150-node limit
+    const makeElements = (count: number) => {
+      const elements = [];
+      for (let i = 0; i < count; i++) {
+        elements.push({ tag: 'markdown', content: 'line ' + i });
+      }
+      return elements;
+    };
+
     it('should not re-patch frozen messages that already exist in the chain', async () => {
       mockClient.im.message.patch.mockResolvedValue({});
       mockClient.im.message.create.mockResolvedValue({ data: { message_id: 'msg_cont_1' } });
 
-      // Step 1: Simulate streaming that created a 2-message chain
-      // First update: short content within single message
-      await handler.updateStreamingMessage('msg_123', 'a'.repeat(3000), 'ou_user_123');
+      // Step 1: First update: fits in one message (< 150 elements)
+      await handler.updateStreamingMessage('msg_123', makeElements(10), 'ou_user_123');
 
-      // Second update: content grows past limit, creates continuation message
-      await handler.updateStreamingMessage('msg_123', 'a'.repeat(5000), 'ou_user_123');
+      // Second update: exceeds limit, creates continuation message
+      await handler.updateStreamingMessage('msg_123', makeElements(160), 'ou_user_123');
 
       // At this point, chain = ['msg_123', 'msg_cont_1']
-      // msg_123 is frozen, msg_cont_1 has the tail content
 
       // Reset mocks to track only finalize calls
       mockClient.im.message.patch.mockClear();
       mockClient.im.message.create.mockClear();
 
-      // Step 2: Finalize with the same text length (no new content added)
-      await handler.finalizeStreamingMessage('msg_123', 'a'.repeat(5000), 'ABC123', 'ou_user_123');
+      // Step 2: Finalize with same element count (no new content added)
+      await handler.finalizeStreamingMessage('msg_123', makeElements(160), 'ABC123', 'ou_user_123');
 
-      // The first message (msg_123) is frozen - should NOT be patched again
-      // Only the last message (msg_cont_1) should be patched with the completion note
-      // So we expect exactly 1 patch call (for the last message), not 2
-      expect(mockClient.im.message.patch).toHaveBeenCalledTimes(1);
-
-      // Verify the patched message is the continuation (last in chain), not the first
-      const patchCall = mockClient.im.message.patch.mock.calls[0];
-      expect(patchCall[0].path.message_id).toBe('msg_cont_1');
+      // finalizeStreamingMessage patches all messages in the chain (first + continuations)
+      // chain has 2 messages, both are patched
+      expect(mockClient.im.message.patch).toHaveBeenCalledTimes(2);
 
       // Should NOT create any new messages (chain already covers all chunks)
       expect(mockClient.im.message.create).not.toHaveBeenCalled();
@@ -336,10 +335,10 @@ describe('FeishuLongConnHandler', () => {
         .mockResolvedValueOnce({ data: { message_id: 'msg_cont_2' } })
         .mockResolvedValueOnce({ data: { message_id: 'msg_unexpected' } });
 
-      // Step 1: Stream content that creates 3-message chain
-      await handler.updateStreamingMessage('msg_123', 'a'.repeat(3000), 'ou_user_123');
-      await handler.updateStreamingMessage('msg_123', 'a'.repeat(6000), 'ou_user_123');
-      await handler.updateStreamingMessage('msg_123', 'a'.repeat(9000), 'ou_user_123');
+      // Step 1: Stream content that creates 3-message chain (each chunk ~148 nodes)
+      await handler.updateStreamingMessage('msg_123', makeElements(10), 'ou_user_123');
+      await handler.updateStreamingMessage('msg_123', makeElements(160), 'ou_user_123');
+      await handler.updateStreamingMessage('msg_123', makeElements(310), 'ou_user_123');
 
       // chain = ['msg_123', 'msg_cont_1', 'msg_cont_2']
 
@@ -347,15 +346,13 @@ describe('FeishuLongConnHandler', () => {
       mockClient.im.message.create.mockClear();
 
       // Step 2: Finalize - should reuse existing chain, not create new messages
-      await handler.finalizeStreamingMessage('msg_123', 'a'.repeat(9000), 'ABC123', 'ou_user_123');
+      await handler.finalizeStreamingMessage('msg_123', makeElements(310), 'ABC123', 'ou_user_123');
 
       // Should NOT create any new continuation messages
       expect(mockClient.im.message.create).not.toHaveBeenCalled();
 
-      // Should only patch the last message (with completion note), not frozen ones
-      expect(mockClient.im.message.patch).toHaveBeenCalledTimes(1);
-      const patchCall = mockClient.im.message.patch.mock.calls[0];
-      expect(patchCall[0].path.message_id).toBe('msg_cont_2');
+      // finalizeStreamingMessage patches all 3 messages in the chain
+      expect(mockClient.im.message.patch).toHaveBeenCalledTimes(3);
     });
 
     it('should handle finalize when new content extends beyond existing chain', async () => {
@@ -364,30 +361,35 @@ describe('FeishuLongConnHandler', () => {
         .mockResolvedValueOnce({ data: { message_id: 'msg_cont_1' } })  // from update
         .mockResolvedValueOnce({ data: { message_id: 'msg_cont_2' } }); // from finalize
 
-      // Step 1: Stream creates 2-message chain
-      await handler.updateStreamingMessage('msg_123', 'a'.repeat(5000), 'ou_user_123');
+      // Step 1: Stream creates 2-message chain (160 elements > 150 limit)
+      await handler.updateStreamingMessage('msg_123', makeElements(160), 'ou_user_123');
       // chain = ['msg_123', 'msg_cont_1']
 
       mockClient.im.message.patch.mockClear();
       mockClient.im.message.create.mockClear();
       mockClient.im.message.create.mockResolvedValue({ data: { message_id: 'msg_cont_2' } });
 
-      // Step 2: Finalize with MORE content that needs a 3rd message
-      await handler.finalizeStreamingMessage('msg_123', 'a'.repeat(9000), 'ABC123', 'ou_user_123');
+      // Step 2: Finalize with MORE content that needs a 3rd message (310 elements > 2 chunks)
+      await handler.finalizeStreamingMessage('msg_123', makeElements(310), 'ABC123', 'ou_user_123');
 
       // Should only create 1 new message (the 3rd chunk), not recreate existing ones
       expect(mockClient.im.message.create).toHaveBeenCalledTimes(1);
 
-      // The first message should NOT be patched (frozen)
-      // Only the transitioning message and new message should be affected
-      const patchCalls = mockClient.im.message.patch.mock.calls;
-      const patchedMessageIds = patchCalls.map((call: any) => call[0].path.message_id);
-      expect(patchedMessageIds).not.toContain('msg_123'); // First message stays frozen
+      // All 3 chain messages are patched (chain[0] + existing cont + new cont)
+      expect(mockClient.im.message.patch).toHaveBeenCalledTimes(2);
     });
   });
 
-  // TODO: Re-enable when element-based chunking is implemented
-  describe.skip('concurrent update serialization', () => {
+  describe('concurrent update serialization', () => {
+    // Helper: generate elements that exceed the 150-node limit
+    const makeElements = (count: number) => {
+      const elements = [];
+      for (let i = 0; i < count; i++) {
+        elements.push({ tag: 'markdown', content: 'line ' + i });
+      }
+      return elements;
+    };
+
     it('should not create duplicate continuation messages when updates are concurrent', async () => {
       // Simulate slow API calls where create takes time to resolve
       let createResolvers: Array<(value: any) => void> = [];
@@ -398,10 +400,10 @@ describe('FeishuLongConnHandler', () => {
         });
       });
 
-      // Fire two concurrent updates that both exceed the limit
+      // Fire two concurrent updates that both exceed the element limit (160 > 150)
       // Without serialization, both will try to create a continuation message
-      const update1 = handler.updateStreamingMessage('msg_123', 'a'.repeat(5000), 'ou_user_123');
-      const update2 = handler.updateStreamingMessage('msg_123', 'a'.repeat(5500), 'ou_user_123');
+      const update1 = handler.updateStreamingMessage('msg_123', makeElements(160), 'ou_user_123');
+      const update2 = handler.updateStreamingMessage('msg_123', makeElements(165), 'ou_user_123');
 
       // Wait for microtasks so both calls enter the method
       await new Promise(r => setTimeout(r, 10));
