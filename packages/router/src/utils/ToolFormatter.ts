@@ -378,3 +378,26 @@ export function createToolResultElement(resultInfo: ToolResultInfo): FeishuCardE
 
   return [collapsiblePanel];
 }
+
+/**
+ * Create a Feishu Card 2.0 redacted thinking element
+ * Displays a user-friendly notification when AI reasoning is filtered by safety systems
+ */
+export function createRedactedThinkingElement(): FeishuCardElement[] {
+  return [
+    createDividerElement(),
+    {
+      tag: 'note',
+      elements: [
+        {
+          tag: 'plain_text',
+          content: '💭 Some reasoning was filtered by safety systems and is not displayed.',
+        },
+        {
+          tag: 'plain_text',
+          content: '(This does not affect the response quality - the AI can still use this reasoning internally)',
+        }
+      ]
+    }
+  ];
+}

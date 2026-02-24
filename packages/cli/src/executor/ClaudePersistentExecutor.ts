@@ -30,18 +30,19 @@ interface ClaudeInputMessage {
  * Content block in assistant message
  */
 interface ContentBlock {
-  type: 'text' | 'tool_use' | 'tool_result';
+  type: 'text' | 'tool_use' | 'tool_result' | 'redacted_thinking';
   text?: string;
   id?: string;
   name?: string;
   input?: Record<string, unknown>;
   content?: string;
   is_error?: boolean;
+  redacted_thinking?: string;  // Encrypted thinking content
 }
 
 interface ClaudeOutputMessage {
   /** Message type */
-  type: 'message' | 'thinking' | 'error' | 'usage' | 'system' | 'stream_event' | 'result' | 'assistant' | 'user';
+  type: 'message' | 'thinking' | 'redacted_thinking' | 'error' | 'usage' | 'system' | 'stream_event' | 'result' | 'assistant' | 'user';
   /** Message content (string or array of content blocks) */
   content?: string | ContentBlock[];
   /** Nested message object (for assistant type with full message structure) */
@@ -96,6 +97,8 @@ export interface PersistentClaudeOptions {
   onToolUse?: (toolUse: ToolUseInfo) => void;
   /** Tool result callback (for rich formatting) */
   onToolResult?: (toolResult: ToolResultInfo) => void;
+  /** Redacted thinking callback (for safety-filtered reasoning) */
+  onRedactedThinking?: () => void;
   /** Execution timeout (milliseconds), default 300000 (5 minutes) */
   timeout?: number;
 }
@@ -145,6 +148,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
   private currentStreamCallback?: (chunk: string) => void;
   private currentToolUseCallback?: (toolUse: ToolUseInfo) => void;
   private currentToolResultCallback?: (toolResult: ToolResultInfo) => void;
+  private currentRedactedThinkingCallback?: () => void;
   private currentCommandResolve?: (result: PersistentClaudeResult) => void;
   private currentCommandReject?: (error: Error) => void;
   private currentTimeoutTimer?: NodeJS.Timeout;
@@ -567,12 +571,26 @@ export class ClaudePersistentExecutor extends EventEmitter {
       switch (message.type) {
         case 'message':
         case 'thinking':
+        case 'redacted_thinking':
           const contentLength = typeof message.content === 'string' ? message.content.length : JSON.stringify(message.content).length;
           console.log(`[ClaudePersistent] Received ${message.type} message, partial=${message.partial}, content length=${contentLength}`);
           if (message.content) {
             const contentStr = typeof message.content === 'string' ? message.content : JSON.stringify(message.content);
+
+            // Store in output buffer for session continuity
             this.currentOutputBuffer.push(contentStr);
-            if (this.currentStreamCallback) {
+
+            // For redacted_thinking, trigger callback and log (don't stream encrypted content)
+            if (message.type === 'redacted_thinking') {
+              console.log('[ClaudePersistent] Redacted thinking received (encrypted, stored for API continuity)');
+              // Trigger redacted thinking callback for structured notification
+              if (this.currentRedactedThinkingCallback) {
+                this.currentRedactedThinkingCallback();
+              }
+              // Don't send encrypted content or notification through onStream
+              // The router will handle the user-facing notification via structured elements
+            } else if (this.currentStreamCallback) {
+              // For normal message and thinking, stream to user
               this.currentStreamCallback(contentStr);
             }
 
@@ -667,6 +685,23 @@ export class ClaudePersistentExecutor extends EventEmitter {
                 this.currentOutputBuffer.push(block.text);
                 if (this.currentStreamCallback) {
                   this.currentStreamCallback(block.text);
+                }
+              } else if (block.type === 'redacted_thinking') {
+                // Handle redacted thinking blocks (Claude 3.7 Sonnet, Gemini models)
+                console.log('[ClaudePersistent] Redacted thinking block detected in assistant message');
+
+                // Store the encrypted content for API continuity
+                // This is critical - the encrypted block must be preserved for multi-turn conversations
+                if (block.redacted_thinking) {
+                  // Store marker in output buffer for debugging (truncated)
+                  const preview = block.redacted_thinking.substring(0, 20);
+                  this.currentOutputBuffer.push(`[REDACTED_THINKING:${preview}...]`);
+                  console.log(`[ClaudePersistent] Stored redacted thinking (${block.redacted_thinking.length} chars)`);
+                }
+
+                // Trigger structured notification callback instead of text stream
+                if (this.currentRedactedThinkingCallback) {
+                  this.currentRedactedThinkingCallback();
                 }
               }
             }
@@ -972,6 +1007,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
     this.currentStreamCallback = undefined;
     this.currentToolUseCallback = undefined;
     this.currentToolResultCallback = undefined;
+    this.currentRedactedThinkingCallback = undefined;
     this.currentCommandResolve = undefined;
     this.currentCommandReject = undefined;
     if (this.currentTimeoutTimer) {
@@ -1030,6 +1066,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
     this.currentStructuredCallback = command.options.onStructuredContent;
     this.currentToolUseCallback = command.options.onToolUse;
     this.currentToolResultCallback = command.options.onToolResult;
+    this.currentRedactedThinkingCallback = command.options.onRedactedThinking;
     this.currentCommandResolve = command.resolve;
     this.currentCommandReject = command.reject;
 

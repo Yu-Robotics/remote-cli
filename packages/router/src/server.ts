@@ -9,7 +9,7 @@ import { FeishuLongConnHandler } from './feishu/FeishuLongConnHandler';
 import { ConnectionHub } from './websocket/ConnectionHub';
 import { BindingManager } from './binding/BindingManager';
 import { MessageType, ToolUseInfo, ToolResultInfo } from './types';
-import { FeishuCardElement, createToolUseElement, createToolResultElement, createMarkdownElement } from './utils/ToolFormatter';
+import { FeishuCardElement, createToolUseElement, createToolResultElement, createMarkdownElement, createRedactedThinkingElement } from './utils/ToolFormatter';
 
 /**
  * Router Server
@@ -293,6 +293,9 @@ export class RouterServer {
                       await this.handleToolResult(message.messageId, message.openId, message.toolResult);
                     }
                     break;
+                  case 'redacted_thinking':
+                    await this.handleRedactedThinking(message.messageId, message.openId);
+                    break;
                 }
               }
               break;
@@ -500,6 +503,41 @@ export class RouterServer {
     streamData.createdAt = Date.now();
 
     // Immediately update card to show tool result
+    if (streamData.feishuMessageId) {
+      await this.feishuLongConnHandler.updateStreamingMessage(
+        streamData.feishuMessageId,
+        streamData.elements,
+        openId
+      );
+      streamData.hasUpdated = true;
+    }
+  }
+
+  /**
+   * Handle redacted thinking event
+   * This occurs when AI reasoning is filtered by safety systems (Claude 3.7 Sonnet, Gemini)
+   */
+  private async handleRedactedThinking(messageId: string, openId: string): Promise<void> {
+    console.log(`[RouterServer] Received redacted_thinking for ${messageId}`);
+
+    const streamData = this.streamingMessages.get(messageId);
+    if (!streamData) {
+      console.log(`[RouterServer] No streaming session found for ${messageId}`);
+      return;
+    }
+
+    // Flush current text content to elements if any
+    if (streamData.currentTextContent.trim()) {
+      streamData.elements.push(createMarkdownElement(streamData.currentTextContent));
+      streamData.currentTextContent = '';
+    }
+
+    // Add redacted thinking notification elements
+    const redactedThinkingElements = createRedactedThinkingElement();
+    streamData.elements.push(...redactedThinkingElements);
+    streamData.createdAt = Date.now();
+
+    // Immediately update card to show redacted thinking notification
     if (streamData.feishuMessageId) {
       await this.feishuLongConnHandler.updateStreamingMessage(
         streamData.feishuMessageId,

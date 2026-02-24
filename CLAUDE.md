@@ -287,6 +287,37 @@ interface WSMessage {
 }
 ```
 
+### Redacted Thinking Handling
+
+When AI models' internal reasoning is flagged by safety systems, some or all of the thinking
+block is encrypted and returned as a `redacted_thinking` block. This applies to Claude 3.7 Sonnet
+and Gemini models.
+
+**Implementation**:
+- `redacted_thinking` message type and content block type are fully supported in the CLI and Router
+- Encrypted content is stored in output buffer for API continuity but NOT displayed to users
+- Users see a friendly notification via Feishu Card 2.0: "💭 Some reasoning was filtered by safety systems"
+- Session continuity is maintained - the AI can use the redacted reasoning in future turns
+- The encrypted block must be preserved unmodified when passed back to the API
+
+**Architecture**:
+1. **CLI Side**: `ClaudePersistentExecutor` detects `redacted_thinking` type in stream
+2. **Callback**: Triggers `onRedactedThinking()` callback (not `onStream` - encrypted content not shown)
+3. **Storage**: Encrypted content stored in output buffer for session continuity
+4. **Router Side**: Receives `streamType: 'redacted_thinking'` message
+5. **Feishu Display**: `createRedactedThinkingElement()` renders user-friendly note card
+
+**Testing**:
+To test redacted thinking handling in development, use Anthropic's magic test string:
+```
+ANTHROPIC_MAGIC_STRING_TRIGGER_REDACTED_THINKING_46C9A13E193C177646C7398A98432ECCCE4C1253D5E2D82641AC0E52CC2876CB
+```
+
+**References**:
+- Anthropic Extended Thinking documentation
+- Claude 3.7 Sonnet safety features
+- Gemini thinking modes
+
 ## Common Pitfalls
 
 1. **Forgetting to reload ConfigManager**: Always call `initialize()` again after commands that modify config

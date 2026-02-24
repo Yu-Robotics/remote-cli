@@ -446,6 +446,9 @@ You can also use natural language commands to control Claude Code CLI.`,
         onToolResult: (toolResult: ToolResultInfo) => {
           this.sendToolResult(messageId, toolResult);
         },
+        onRedactedThinking: () => {
+          this.sendRedactedThinking(messageId);
+        },
       });
 
       // Only send success status, not the output
@@ -514,6 +517,24 @@ You can also use natural language commands to control Claude Code CLI.`,
       });
     } catch (error) {
       console.error('Failed to send tool result:', error);
+    }
+  }
+
+  /**
+   * Send redacted thinking event
+   * This occurs when AI reasoning is filtered by safety systems (Claude 3.7 Sonnet, Gemini)
+   */
+  private sendRedactedThinking(messageId: string): void {
+    try {
+      this.wsClient.send({
+        type: 'stream',
+        messageId,
+        streamType: 'redacted_thinking',
+        openId: this.currentOpenId,
+        timestamp: Date.now(),
+      });
+    } catch (error) {
+      console.error('Failed to send redacted thinking:', error);
     }
   }
 

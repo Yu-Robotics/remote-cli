@@ -78,7 +78,7 @@ export interface ResponseMessage extends WSMessage {
 }
 
 // Content block types for structured messages
-export type ContentBlockType = 'text' | 'tool_use' | 'tool_result' | 'divider';
+export type ContentBlockType = 'text' | 'tool_use' | 'tool_result' | 'divider' | 'redacted_thinking';
 
 // Base content block
 export interface ContentBlock {
@@ -122,8 +122,18 @@ export interface DividerBlock extends ContentBlock {
   type: 'divider';
 }
 
+// Redacted thinking content block (for safety-filtered reasoning)
+// When AI models' internal reasoning is flagged by safety systems,
+// the thinking block is encrypted and returned as redacted_thinking.
+// This applies to Claude 3.7 Sonnet and Gemini models.
+export interface RedactedThinkingBlock extends ContentBlock {
+  type: 'redacted_thinking';
+  /** Encrypted thinking content (not human-readable) */
+  redacted_thinking: string;
+}
+
 // Union type for all content blocks
-export type ContentBlockUnion = TextBlock | ToolUseBlock | ToolResultBlock | DividerBlock;
+export type ContentBlockUnion = TextBlock | ToolUseBlock | ToolResultBlock | DividerBlock | RedactedThinkingBlock;
 
 // Structured content for rich message formatting
 export interface StructuredContent {
