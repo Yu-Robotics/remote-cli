@@ -9,7 +9,7 @@
  * 5. Message routing correctness under load
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi, beforeAll } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { ConnectionHub } from '../../src/websocket/ConnectionHub';
 import { BindingManager } from '../../src/binding/BindingManager';
 import { JsonStore } from '../../src/storage/JsonStore';
@@ -23,10 +23,6 @@ import * as os from 'os';
 vi.mock('ws');
 
 describe('ConcurrentRouting - Integration Tests', () => {
-  // Increase test timeout for long-running tests
-  beforeAll(() => {
-    vi.setConfig({ testTimeout: 30000 });
-  });
 
   let tempDir: string;
   let store: JsonStore;
@@ -37,7 +33,7 @@ describe('ConcurrentRouting - Integration Tests', () => {
     // Create temporary directory for test data
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'router-concurrent-test-'));
     const storeFilePath = path.join(tempDir, 'bindings.json');
-    store = new JsonStore(storeFilePath);
+    store = new JsonStore(storeFilePath, 0);
     await store.initialize(); // Initialize the store
     connectionHub = new ConnectionHub();
     bindingManager = new BindingManager(store);
@@ -537,39 +533,23 @@ describe('ConcurrentRouting - Integration Tests', () => {
   });
 
   describe('Device ID Collision Detection', () => {
-    it('should detect when same device ID is bound to multiple users', async () => {
+    it('should prevent same device ID from being bound to multiple users', async () => {
       const sharedDeviceId = 'dev_shared_001';
 
-      // Bind device to multiple users
+      // Bind device to first user successfully
       await bindingManager.bindUser('user_001', sharedDeviceId, 'Device-1');
-      await bindingManager.bindUser('user_002', sharedDeviceId, 'Device-2');
 
-      // Verify both users have the device
+      // Attempt to bind same device to a different user should throw
+      await expect(
+        bindingManager.bindUser('user_002', sharedDeviceId, 'Device-2')
+      ).rejects.toThrow('already bound to another user');
+
+      // Verify only the first user has the device
       const binding1 = await bindingManager.getUserBinding('user_001');
       const binding2 = await bindingManager.getUserBinding('user_002');
 
       expect(binding1!.devices.some(d => d.deviceId === sharedDeviceId)).toBe(true);
-      expect(binding2!.devices.some(d => d.deviceId === sharedDeviceId)).toBe(true);
-
-      // Now, when the device connects, only one user can receive messages
-      // This is a CRITICAL ISSUE - the router will route messages based on
-      // the binding lookup, which might return the wrong user
-
-      // Register the device connection
-      const ws = createMockWebSocket();
-      connectionHub.registerConnection(sharedDeviceId, ws);
-
-      // Try to send a message to this device from both users' perspective
-      const message1 = { type: MessageType.COMMAND, messageId: 'msg_001', content: 'cmd1', openId: 'user_001', timestamp: Date.now() };
-      const message2 = { type: MessageType.COMMAND, messageId: 'msg_002', content: 'cmd2', openId: 'user_002', timestamp: Date.now() };
-
-      await connectionHub.sendToDevice(sharedDeviceId, message1);
-      await connectionHub.sendToDevice(sharedDeviceId, message2);
-
-      // Both messages go to the same device - this could cause routing errors!
-      expect(ws.send).toHaveBeenCalledTimes(2);
-      expect(ws.send).toHaveBeenCalledWith(JSON.stringify(message1));
-      expect(ws.send).toHaveBeenCalledWith(JSON.stringify(message2));
+      expect(binding2).toBeNull();
     });
   });
 

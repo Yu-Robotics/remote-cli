@@ -16,7 +16,7 @@ describe('BindingManager', () => {
     await fs.mkdir(testDir, { recursive: true });
 
     const storePath = path.join(testDir, 'bindings.json');
-    store = new JsonStore(storePath);
+    store = new JsonStore(storePath, 0);
     await store.initialize();
     bindingManager = new BindingManager(store);
   });
@@ -470,7 +470,7 @@ describe('BindingManager', () => {
       await fs.writeFile(storePath, JSON.stringify(legacyData, null, 2), 'utf-8');
 
       // Load with new JsonStore (should trigger migration)
-      const legacyStore = new JsonStore(storePath);
+      const legacyStore = new JsonStore(storePath, 0);
       await legacyStore.initialize();
       const manager = new BindingManager(legacyStore);
 

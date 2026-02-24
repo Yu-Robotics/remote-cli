@@ -18,11 +18,13 @@ export class JsonStore {
   private storePath: string;
   private data: StoreData;
   private saveTimer: NodeJS.Timeout | null = null;
-  private readonly SAVE_DELAY = 1000; // Debounce saves by 1 second
+  private pendingResolvers: Array<() => void> = [];
+  private readonly SAVE_DELAY: number;
   private static readonly CURRENT_VERSION = 1;
 
-  constructor(storePath?: string) {
+  constructor(storePath?: string, saveDelay = 1000) {
     this.storePath = storePath || path.join(os.homedir(), '.remote-cli-router', 'bindings.json');
+    this.SAVE_DELAY = saveDelay;
     this.data = {
       version: JsonStore.CURRENT_VERSION,
       bindingCodes: {},
@@ -234,7 +236,9 @@ export class JsonStore {
   }
 
   /**
-   * Schedule a save operation (debounced)
+   * Schedule a save operation (debounced).
+   * All callers share the same pending save — when the timer fires and the
+   * write completes, every awaiting caller is resolved at once.
    */
   private async scheduleSave(): Promise<void> {
     if (this.saveTimer) {
@@ -242,9 +246,12 @@ export class JsonStore {
     }
 
     return new Promise((resolve) => {
+      this.pendingResolvers.push(resolve);
       this.saveTimer = setTimeout(async () => {
+        this.saveTimer = null;
         await this.save();
-        resolve();
+        const resolvers = this.pendingResolvers.splice(0);
+        for (const r of resolvers) r();
       }, this.SAVE_DELAY);
     });
   }

@@ -14,7 +14,7 @@ describe('JsonStore', () => {
     testDir = path.join(os.tmpdir(), `jsonstore-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     await fs.mkdir(testDir, { recursive: true });
     storePath = path.join(testDir, 'bindings.json');
-    store = new JsonStore(storePath);
+    store = new JsonStore(storePath, 0);
   });
 
   afterEach(async () => {
@@ -386,7 +386,7 @@ describe('JsonStore', () => {
       await store.flush();
 
       // Create a new store instance
-      const newStore = new JsonStore(storePath);
+      const newStore = new JsonStore(storePath, 0);
       await newStore.initialize();
 
       const retrieved = newStore.getUserBinding(openId);
