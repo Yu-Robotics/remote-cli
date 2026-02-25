@@ -3,6 +3,7 @@ import { startCommand, checkServerVersion, isNewerVersion } from '../../src/comm
 import { ConfigManager } from '../../src/config/ConfigManager';
 import { WebSocketClient } from '../../src/client/WebSocketClient';
 import { CLI_VERSION } from '../../src/types';
+import axios from 'axios';
 
 // ---------------------------------------------------------------------------
 // Module-level mocks
@@ -35,15 +36,9 @@ vi.mock('readline', () => ({
 // Helpers
 // ---------------------------------------------------------------------------
 
-async function getAxios() {
-  return (await import('axios')).default;
-}
-
 // Default: axios returns "same version" so existing tests are not disturbed
 function mockAxiosVersionSame() {
-  return vi.mocked(getAxios()).then((axios) => {
-    (axios.get as any).mockResolvedValue({ data: { success: true, version: CLI_VERSION } });
-  });
+  vi.mocked(axios.get).mockResolvedValue({ data: { success: true, version: CLI_VERSION } });
 }
 
 // ---------------------------------------------------------------------------
@@ -82,7 +77,7 @@ describe('start command', () => {
     (WebSocketClient as any).mockImplementation(() => mockWsClient);
 
     // Default: no version mismatch — axios returns same version
-    await mockAxiosVersionSame();
+    mockAxiosVersionSame();
   });
 
   afterEach(() => {
@@ -267,8 +262,7 @@ describe('checkServerVersion', () => {
   });
 
   it('returns true and prompts when router is newer, user answers y', async () => {
-    const axios = (await import('axios')).default;
-    (axios.get as any).mockResolvedValueOnce({ data: { success: true, version: '99.0.0' } });
+    vi.mocked(axios.get).mockResolvedValueOnce({ data: { success: true, version: '99.0.0' } });
     mockReadlineAnswer = 'y';
 
     const result = await checkServerVersion('http://localhost:3000');
@@ -276,8 +270,7 @@ describe('checkServerVersion', () => {
   });
 
   it('returns false when router is newer, user answers n', async () => {
-    const axios = (await import('axios')).default;
-    (axios.get as any).mockResolvedValueOnce({ data: { success: true, version: '99.0.0' } });
+    vi.mocked(axios.get).mockResolvedValueOnce({ data: { success: true, version: '99.0.0' } });
     mockReadlineAnswer = 'n';
 
     const result = await checkServerVersion('http://localhost:3000');
@@ -285,8 +278,7 @@ describe('checkServerVersion', () => {
   });
 
   it('returns true without prompting when versions are equal', async () => {
-    const axios = (await import('axios')).default;
-    (axios.get as any).mockResolvedValueOnce({ data: { success: true, version: CLI_VERSION } });
+    vi.mocked(axios.get).mockResolvedValueOnce({ data: { success: true, version: CLI_VERSION } });
 
     const readline = await import('readline');
     const result = await checkServerVersion('http://localhost:3000');
@@ -295,8 +287,7 @@ describe('checkServerVersion', () => {
   });
 
   it('returns true without prompting when CLI is newer', async () => {
-    const axios = (await import('axios')).default;
-    (axios.get as any).mockResolvedValueOnce({ data: { success: true, version: '0.0.1' } });
+    vi.mocked(axios.get).mockResolvedValueOnce({ data: { success: true, version: '0.0.1' } });
 
     const readline = await import('readline');
     const result = await checkServerVersion('http://localhost:3000');
@@ -305,16 +296,14 @@ describe('checkServerVersion', () => {
   });
 
   it('returns true on network error (non-fatal)', async () => {
-    const axios = (await import('axios')).default;
-    (axios.get as any).mockRejectedValueOnce(new Error('ECONNREFUSED'));
+    vi.mocked(axios.get).mockRejectedValueOnce(new Error('ECONNREFUSED'));
 
     const result = await checkServerVersion('http://localhost:3000');
     expect(result).toBe(true);
   });
 
   it('returns true when response has no version field', async () => {
-    const axios = (await import('axios')).default;
-    (axios.get as any).mockResolvedValueOnce({ data: { success: false } });
+    vi.mocked(axios.get).mockResolvedValueOnce({ data: { success: false } });
 
     const result = await checkServerVersion('http://localhost:3000');
     expect(result).toBe(true);
@@ -355,8 +344,7 @@ describe('startCommand version check integration', () => {
   });
 
   it('aborts startup when router is newer and user answers n', async () => {
-    const axios = (await import('axios')).default;
-    (axios.get as any).mockResolvedValueOnce({ data: { success: true, version: '99.0.0' } });
+    vi.mocked(axios.get).mockResolvedValueOnce({ data: { success: true, version: '99.0.0' } });
     mockReadlineAnswer = 'n';
 
     const result = await startCommand({ daemon: false });
@@ -367,8 +355,7 @@ describe('startCommand version check integration', () => {
   });
 
   it('continues startup when router is newer and user answers y', async () => {
-    const axios = (await import('axios')).default;
-    (axios.get as any).mockResolvedValueOnce({ data: { success: true, version: '99.0.0' } });
+    vi.mocked(axios.get).mockResolvedValueOnce({ data: { success: true, version: '99.0.0' } });
     mockReadlineAnswer = 'y';
 
     const result = await startCommand({ daemon: false });
@@ -378,8 +365,7 @@ describe('startCommand version check integration', () => {
   });
 
   it('continues startup normally when version check fails (network error)', async () => {
-    const axios = (await import('axios')).default;
-    (axios.get as any).mockRejectedValueOnce(new Error('timeout'));
+    vi.mocked(axios.get).mockRejectedValueOnce(new Error('timeout'));
 
     const result = await startCommand({ daemon: false });
 
