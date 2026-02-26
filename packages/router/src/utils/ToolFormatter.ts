@@ -392,3 +392,41 @@ export function createRedactedThinkingElement(): FeishuCardElement[] {
     }
   ];
 }
+
+/**
+ * Create a Feishu Card 2.0 plan mode element
+ * Displays the plan Claude produced between EnterPlanMode and ExitPlanMode.
+ * Execution is auto-approved; this element is for user visibility only.
+ */
+export function createPlanModeElement(planContent: string): FeishuCardElement[] {
+  const headerTitle = `<text_tag color='blue'>📋 PLAN</text_tag> · *Auto-approved*`;
+
+  const collapsiblePanel: FeishuCardElement = {
+    tag: 'collapsible_panel',
+    expanded: true,
+    header: {
+      title: {
+        tag: 'markdown',
+        content: headerTitle,
+      },
+      vertical_align: 'center',
+      icon: {
+        tag: 'standard_icon',
+        token: 'down-small-ccm_outlined',
+        size: '14px 14px',
+      },
+      icon_position: 'right',
+      icon_expanded_angle: -180,
+    },
+    vertical_spacing: '8px',
+    padding: '4px 8px',
+    elements: [
+      createMarkdownElement(truncate(planContent, 2000)),
+    ],
+  };
+
+  return [
+    createDividerElement(),
+    collapsiblePanel,
+  ];
+}

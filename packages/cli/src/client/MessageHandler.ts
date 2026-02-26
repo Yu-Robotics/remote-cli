@@ -447,6 +447,9 @@ You can also use natural language commands to control Claude Code CLI.`,
         onRedactedThinking: () => {
           this.sendRedactedThinking(messageId);
         },
+        onPlanMode: (planContent: string) => {
+          this.sendPlanMode(messageId, planContent);
+        },
       });
 
       // Only send success status, not the output
@@ -533,6 +536,26 @@ You can also use natural language commands to control Claude Code CLI.`,
       });
     } catch (error) {
       console.error('Failed to send redacted thinking:', error);
+    }
+  }
+
+  /**
+   * Send plan mode event
+   * Fired when Claude completes its plan between EnterPlanMode and ExitPlanMode tool calls.
+   * Execution is auto-approved; this event is for user visibility only.
+   */
+  private sendPlanMode(messageId: string, planContent: string): void {
+    try {
+      this.wsClient.send({
+        type: 'stream',
+        messageId,
+        streamType: 'plan_mode',
+        planContent,
+        openId: this.currentOpenId,
+        timestamp: Date.now(),
+      });
+    } catch (error) {
+      console.error('Failed to send plan mode:', error);
     }
   }
 

@@ -9,7 +9,7 @@ import { FeishuLongConnHandler } from './feishu/FeishuLongConnHandler';
 import { ConnectionHub } from './websocket/ConnectionHub';
 import { BindingManager } from './binding/BindingManager';
 import { MessageType, ToolUseInfo, ToolResultInfo, PROTOCOL_VERSION, MIN_SUPPORTED_CLI_VERSION, ROUTER_VERSION } from './types';
-import { FeishuCardElement, createToolUseElement, createToolResultElement, createMarkdownElement, createRedactedThinkingElement } from './utils/ToolFormatter';
+import { FeishuCardElement, createToolUseElement, createToolResultElement, createMarkdownElement, createRedactedThinkingElement, createPlanModeElement } from './utils/ToolFormatter';
 
 /**
  * Router Server
@@ -329,6 +329,11 @@ export class RouterServer {
                   case 'redacted_thinking':
                     await this.handleRedactedThinking(message.messageId, message.openId);
                     break;
+                  case 'plan_mode':
+                    if (message.planContent !== undefined) {
+                      await this.handlePlanMode(message.messageId, message.openId, message.planContent);
+                    }
+                    break;
                 }
               }
               break;
@@ -571,6 +576,40 @@ export class RouterServer {
     streamData.createdAt = Date.now();
 
     // Immediately update card to show redacted thinking notification
+    if (streamData.feishuMessageId) {
+      await this.feishuLongConnHandler.updateStreamingMessage(
+        streamData.feishuMessageId,
+        streamData.elements,
+        openId
+      );
+      streamData.hasUpdated = true;
+    }
+  }
+
+  /**
+   * Handle plan mode event
+   * Fired when Claude completes its plan between EnterPlanMode and ExitPlanMode.
+   * Execution is auto-approved; this handler renders the plan for user visibility.
+   */
+  private async handlePlanMode(messageId: string, openId: string, planContent: string): Promise<void> {
+    console.log(`[RouterServer] Received plan_mode for ${messageId}, plan length=${planContent.length}`);
+
+    const streamData = this.streamingMessages.get(messageId);
+    if (!streamData) {
+      console.log(`[RouterServer] No streaming session found for ${messageId}`);
+      return;
+    }
+
+    // Flush current text content (the plan text was already streamed inline,
+    // so we reset the text buffer to avoid duplication in the card)
+    streamData.currentTextContent = '';
+
+    // Add plan mode elements (collapsible panel showing the plan)
+    const planModeElements = createPlanModeElement(planContent);
+    streamData.elements.push(...planModeElements);
+    streamData.createdAt = Date.now();
+
+    // Immediately update card to show the plan section
     if (streamData.feishuMessageId) {
       await this.feishuLongConnHandler.updateStreamingMessage(
         streamData.feishuMessageId,

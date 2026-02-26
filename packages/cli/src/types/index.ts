@@ -118,7 +118,7 @@ export interface IncomingMessage {
 /**
  * Stream message types
  */
-export type StreamType = 'text' | 'tool_use' | 'tool_result' | 'redacted_thinking';
+export type StreamType = 'text' | 'tool_use' | 'tool_result' | 'redacted_thinking' | 'plan_mode';
 
 /**
  * Outgoing message to router server
@@ -145,4 +145,6 @@ export interface OutgoingMessage {
   toolUse?: ToolUseInfo;
   /** Tool result info (when streamType === 'tool_result') */
   toolResult?: ToolResultInfo;
+  /** Plan content (when streamType === 'plan_mode') */
+  planContent?: string;
 }

@@ -100,7 +100,7 @@ export interface ResponseMessage extends WSMessage {
 }
 
 // Content block types for structured messages
-export type ContentBlockType = 'text' | 'tool_use' | 'tool_result' | 'divider' | 'redacted_thinking';
+export type ContentBlockType = 'text' | 'tool_use' | 'tool_result' | 'divider' | 'redacted_thinking' | 'plan_mode';
 
 // Base content block
 export interface ContentBlock {
@@ -154,8 +154,17 @@ export interface RedactedThinkingBlock extends ContentBlock {
   redacted_thinking: string;
 }
 
+// Plan mode content block
+// Represents the plan that Claude produces when entering plan mode.
+// Execution is auto-approved; this block is for user visibility only.
+export interface PlanModeBlock extends ContentBlock {
+  type: 'plan_mode';
+  /** The plan text produced by Claude between EnterPlanMode and ExitPlanMode */
+  planContent: string;
+}
+
 // Union type for all content blocks
-export type ContentBlockUnion = TextBlock | ToolUseBlock | ToolResultBlock | DividerBlock | RedactedThinkingBlock;
+export type ContentBlockUnion = TextBlock | ToolUseBlock | ToolResultBlock | DividerBlock | RedactedThinkingBlock | PlanModeBlock;
 
 // Structured content for rich message formatting
 export interface StructuredContent {

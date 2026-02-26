@@ -101,6 +101,8 @@ export interface PersistentClaudeOptions {
   onToolResult?: (toolResult: ToolResultInfo) => void;
   /** Redacted thinking callback (for safety-filtered reasoning) */
   onRedactedThinking?: () => void;
+  /** Plan mode callback (fires when Claude completes plan between EnterPlanMode and ExitPlanMode) */
+  onPlanMode?: (planContent: string) => void;
   /** Execution timeout (milliseconds), default 300000 (5 minutes) */
   timeout?: number;
 }
@@ -153,9 +155,14 @@ export class ClaudePersistentExecutor extends EventEmitter {
   private currentToolUseCallback?: (toolUse: ToolUseInfo) => void;
   private currentToolResultCallback?: (toolResult: ToolResultInfo) => void;
   private currentRedactedThinkingCallback?: () => void;
+  private currentPlanModeCallback?: (planContent: string) => void;
   private currentCommandResolve?: (result: PersistentClaudeResult) => void;
   private currentCommandReject?: (error: Error) => void;
   private currentTimeoutTimer?: NodeJS.Timeout;
+
+  // Plan mode state
+  private isInPlanMode = false;
+  private planModeBuffer: string[] = [];
 
   // Structured content collection for rich formatting
   private structuredContentBlocks: ContentBlockUnion[] = [];
@@ -711,6 +718,27 @@ export class ClaudePersistentExecutor extends EventEmitter {
               if (block.type === 'tool_use') {
                 console.log(`[ClaudePersistent] Tool use detected: ${block.name}, id=${block.id}`);
 
+                // Handle plan mode transitions
+                if (block.name === 'EnterPlanMode') {
+                  console.log('[ClaudePersistent] Entering plan mode - buffering plan content');
+                  this.isInPlanMode = true;
+                  this.planModeBuffer = [];
+                  // Do not forward EnterPlanMode as a tool_use card to the user
+                  break;
+                }
+
+                if (block.name === 'ExitPlanMode') {
+                  console.log('[ClaudePersistent] Exiting plan mode - flushing plan content');
+                  this.isInPlanMode = false;
+                  const planContent = this.planModeBuffer.join('');
+                  this.planModeBuffer = [];
+                  if (planContent.trim() && this.currentPlanModeCallback) {
+                    this.currentPlanModeCallback(planContent);
+                  }
+                  // Do not forward ExitPlanMode as a tool_use card to the user
+                  break;
+                }
+
                 // Send structured tool use event if callback is available
                 if (this.currentToolUseCallback) {
                   this.currentToolUseCallback({
@@ -731,6 +759,10 @@ export class ClaudePersistentExecutor extends EventEmitter {
               } else if (block.type === 'text' && block.text) {
                 // Stream text content to callback for real-time display
                 this.currentOutputBuffer.push(block.text);
+                if (this.isInPlanMode) {
+                  // Buffer plan content instead of streaming; still stream for real-time visibility
+                  this.planModeBuffer.push(block.text);
+                }
                 if (this.currentStreamCallback) {
                   this.currentStreamCallback(block.text);
                 }
@@ -1056,6 +1088,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
     this.currentToolUseCallback = undefined;
     this.currentToolResultCallback = undefined;
     this.currentRedactedThinkingCallback = undefined;
+    this.currentPlanModeCallback = undefined;
     this.currentCommandResolve = undefined;
     this.currentCommandReject = undefined;
     if (this.currentTimeoutTimer) {
@@ -1067,6 +1100,8 @@ export class ClaudePersistentExecutor extends EventEmitter {
       this.inputDetectionTimer = undefined;
     }
     this.isWaitingForInput = false;
+    this.isInPlanMode = false;
+    this.planModeBuffer = [];
     // Note: currentTaskId and currentTaskStartTime are cleared separately after hooks
   }
 
@@ -1115,11 +1150,16 @@ export class ClaudePersistentExecutor extends EventEmitter {
     this.currentToolUseCallback = command.options.onToolUse;
     this.currentToolResultCallback = command.options.onToolResult;
     this.currentRedactedThinkingCallback = command.options.onRedactedThinking;
+    this.currentPlanModeCallback = command.options.onPlanMode;
     this.currentCommandResolve = command.resolve;
     this.currentCommandReject = command.reject;
 
     // Reset structured content collection
     this.structuredContentBlocks = [];
+
+    // Reset plan mode state
+    this.isInPlanMode = false;
+    this.planModeBuffer = [];
 
     // Generate task ID and track start time for hooks
     this.currentTaskId = `task_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
