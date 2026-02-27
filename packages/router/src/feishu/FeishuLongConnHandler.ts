@@ -1157,7 +1157,10 @@ Examples:
 
       // Reuse streaming update logic: only create cards, never delete.
       // Whatever layout was built during streaming stays as-is.
-      await this._updateStreamingMessage(messageId, finalElements, openId);
+      const updated = await this._updateStreamingMessage(messageId, finalElements, openId);
+      if (!updated) {
+        return false;
+      }
 
       // Clean up tracking state
       this.messageChains.delete(messageId);

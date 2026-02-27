@@ -285,7 +285,7 @@ describe('FeishuLongConnHandler', () => {
     it('should return false when patch fails', async () => {
       mockClient.im.message.patch.mockRejectedValue(new Error('API Error'));
 
-      const result = await handler.finalizeStreamingMessage('msg_123', 'Content');
+      const result = await handler.finalizeStreamingMessage('msg_123', []);
 
       expect(result).toBe(false);
     });
@@ -966,7 +966,7 @@ describe('FeishuLongConnHandler', () => {
       expect(createCallCount2).toBeGreaterThan(createCallCount1);
     });
 
-    it('should delete excess continuation cards when content shrinks', async () => {
+    it('should not delete excess continuation cards when content shrinks (streaming never deletes)', async () => {
       const messageId = 'msg_shrink';
       const openId = 'test_open_id';
 
@@ -993,13 +993,11 @@ describe('FeishuLongConnHandler', () => {
 
       await handler.updateStreamingMessage(messageId, elements2, openId);
 
-      // Should have called delete for the excess continuation cards
-      expect(mockClient.im.message.delete).toHaveBeenCalled();
-      const deleteCallCount = mockClient.im.message.delete.mock.calls.length;
-      expect(deleteCallCount).toBeGreaterThan(0);
+      // Should NOT delete cards during streaming to avoid "message retracted" in Feishu UI
+      expect(mockClient.im.message.delete).not.toHaveBeenCalled();
     });
 
-    it('should delete all continuation cards when no longer needed', async () => {
+    it('should not delete continuation cards even when no longer needed (streaming never deletes)', async () => {
       const messageId = 'msg_cleanup';
       const openId = 'test_open_id';
 
@@ -1028,8 +1026,8 @@ describe('FeishuLongConnHandler', () => {
 
       await handler.updateStreamingMessage(messageId, elements2, openId);
 
-      // Should delete all continuation cards
-      expect(mockClient.im.message.delete).toHaveBeenCalled();
+      // Should NOT delete cards during streaming to avoid "message retracted" in Feishu UI
+      expect(mockClient.im.message.delete).not.toHaveBeenCalled();
     });
   });
 });
