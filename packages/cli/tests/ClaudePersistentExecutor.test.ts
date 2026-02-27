@@ -301,4 +301,104 @@ describe('ClaudePersistentExecutor', () => {
       await testExecutor.destroy();
     }, 10000); // Increase timeout to 10 seconds
   });
+
+  describe('compact()', () => {
+    it('should resolve immediately when no active session exists', async () => {
+      mockFs.existsSync.mockReturnValue(false);
+      const noSessionExecutor = new ClaudePersistentExecutor(directoryGuard, '~/test-project');
+
+      const result = await noSessionExecutor.compact();
+
+      expect(result.success).toBe(true);
+      expect(result.output).toContain('No active session');
+      await noSessionExecutor.destroy();
+    });
+
+    it('should send /compact as a slash command to stdin', async () => {
+      const testExecutor = new ClaudePersistentExecutor(directoryGuard, '~/test-project');
+
+      const freshProcess = new EventEmitter() as any;
+      freshProcess.stdout = new EventEmitter();
+      freshProcess.stderr = new EventEmitter();
+      freshProcess.stdin = { write: vi.fn(), end: vi.fn() };
+      freshProcess.kill = vi.fn();
+      freshProcess.pid = 99999;
+      mockSpawn.mockReturnValue(freshProcess);
+
+      // Start compact (which will spawn process and queue the command)
+      const compactPromise = testExecutor.compact();
+
+      // Wait for process to start
+      await new Promise(resolve => setTimeout(resolve, 1100));
+
+      // Simulate process init
+      freshProcess.stdout.emit('data', Buffer.from(JSON.stringify({
+        type: 'system',
+        subtype: 'init',
+        session_id: 'compact-session',
+        cwd: '/home/user/test-project',
+      }) + '\n'));
+
+      // Verify stdin received a message with isSlashCommand: true
+      expect(freshProcess.stdin.write).toHaveBeenCalled();
+      const writtenArg = freshProcess.stdin.write.mock.calls[0][0] as string;
+      const parsed = JSON.parse(writtenArg.trim());
+      expect(parsed.isSlashCommand).toBe(true);
+      expect(parsed.message.content).toBe('/compact');
+
+      // Simulate successful result
+      freshProcess.stdout.emit('data', Buffer.from(JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        result: 'Conversation compacted.',
+        is_error: false,
+      }) + '\n'));
+
+      const result = await compactPromise;
+      expect(result.success).toBe(true);
+
+      freshProcess.emit('exit', 0, null);
+      freshProcess.emit('close', 0, null);
+      await new Promise(resolve => setTimeout(resolve, 100));
+      await testExecutor.destroy();
+    }, 10000);
+
+    it('should resolve with error when compact fails', async () => {
+      const testExecutor = new ClaudePersistentExecutor(directoryGuard, '~/test-project');
+
+      const freshProcess = new EventEmitter() as any;
+      freshProcess.stdout = new EventEmitter();
+      freshProcess.stderr = new EventEmitter();
+      freshProcess.stdin = { write: vi.fn(), end: vi.fn() };
+      freshProcess.kill = vi.fn();
+      freshProcess.pid = 77777;
+      mockSpawn.mockReturnValue(freshProcess);
+
+      const compactPromise = testExecutor.compact();
+
+      await new Promise(resolve => setTimeout(resolve, 1100));
+
+      freshProcess.stdout.emit('data', Buffer.from(JSON.stringify({
+        type: 'system',
+        subtype: 'init',
+        session_id: 'compact-fail-session',
+        cwd: '/home/user/test-project',
+      }) + '\n'));
+
+      // Simulate error result
+      freshProcess.stdout.emit('data', Buffer.from(JSON.stringify({
+        type: 'result',
+        subtype: 'error',
+        result: 'Compaction failed: internal error',
+        is_error: true,
+      }) + '\n'));
+
+      await expect(compactPromise).rejects.toThrow('Compaction failed');
+
+      freshProcess.emit('exit', 0, null);
+      freshProcess.emit('close', 0, null);
+      await new Promise(resolve => setTimeout(resolve, 100));
+      await testExecutor.destroy();
+    }, 10000);
+  });
 });

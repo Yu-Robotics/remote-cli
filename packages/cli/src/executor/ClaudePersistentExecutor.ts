@@ -21,6 +21,8 @@ interface ClaudeInputMessage {
     /** Message content */
     content: string;
   };
+  /** Whether this is a slash command (e.g. /compact) to be interpreted by Claude CLI */
+  isSlashCommand?: boolean;
 }
 
 /**
@@ -146,6 +148,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
     options: PersistentClaudeOptions;
     resolve: (result: PersistentClaudeResult) => void;
     reject: (error: Error) => void;
+    isSlashCommand?: boolean;
   }> = [];
   private isProcessing = false;
 
@@ -1192,10 +1195,11 @@ export class ClaudePersistentExecutor extends EventEmitter {
         role: 'user',
         content: command.prompt,
       },
+      ...(command.isSlashCommand ? { isSlashCommand: true } : {}),
     };
 
     const inputLine = JSON.stringify(inputMessage);
-    console.log(`[ClaudePersistent] Sending command: ${command.prompt.substring(0, 100)}...`);
+    console.log(`[ClaudePersistent] Sending command${command.isSlashCommand ? ' (slash)' : ''}: ${command.prompt.substring(0, 100)}...`);
 
     this.claudeProcess.stdin?.write(inputLine + '\n');
   }
@@ -1317,6 +1321,36 @@ export class ClaudePersistentExecutor extends EventEmitter {
     // Note: We intentionally do NOT stop the process here.
     // The process keeps running, and on the next command it will
     // start a new session automatically (since sessionId is null).
+  }
+
+  /**
+   * Send /compact slash command to the running Claude process to compress conversation history.
+   * This asks Claude CLI to summarize the conversation and reduce context size.
+   * Returns a promise that resolves when compaction is complete.
+   */
+  compact(onStream?: (chunk: string) => void): Promise<PersistentClaudeResult> {
+    console.log('[ClaudePersistent] Sending /compact slash command');
+    return new Promise((resolve, reject) => {
+      if (this.isDestroyed) {
+        resolve({ success: false, error: 'Executor has been destroyed' });
+        return;
+      }
+
+      // If no session exists yet, nothing to compact
+      if (!this.sessionId) {
+        resolve({ success: true, output: 'No active session to compact.' });
+        return;
+      }
+
+      this.commandQueue.push({
+        prompt: '/compact',
+        options: { onStream },
+        resolve,
+        reject,
+        isSlashCommand: true,
+      });
+      this.processQueue();
+    });
   }
 
   /**

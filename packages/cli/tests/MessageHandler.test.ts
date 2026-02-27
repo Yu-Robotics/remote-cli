@@ -635,4 +635,191 @@ describe('MessageHandler', () => {
       expect(executedContent).not.toContain('For files exceeding 50 lines');
     });
   });
+
+  describe('compact command', () => {
+    it('should handle /compact when executor supports it', async () => {
+      mockExecutor.compact = vi.fn().mockResolvedValue({ success: true });
+
+      const message = {
+        type: 'command',
+        messageId: 'msg-compact',
+        content: '/compact',
+        timestamp: Date.now(),
+      };
+
+      await handler.handleMessage(message);
+
+      expect(mockExecutor.compact).toHaveBeenCalled();
+      // First response: "Compressing..."
+      expect(mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'response',
+          messageId: 'msg-compact',
+          success: true,
+          output: expect.stringContaining('Compressing'),
+        })
+      );
+      // Second response: "Compressed"
+      expect(mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'response',
+          messageId: 'msg-compact',
+          success: true,
+          output: expect.stringContaining('compressed'),
+        })
+      );
+      expect(mockExecutor.execute).not.toHaveBeenCalled();
+    });
+
+    it('should report error when compact fails', async () => {
+      mockExecutor.compact = vi.fn().mockResolvedValue({
+        success: false,
+        error: 'Compaction failed: internal error',
+      });
+
+      const message = {
+        type: 'command',
+        messageId: 'msg-compact-fail',
+        content: '/compact',
+        timestamp: Date.now(),
+      };
+
+      await handler.handleMessage(message);
+
+      expect(mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'response',
+          messageId: 'msg-compact-fail',
+          success: false,
+          error: expect.stringContaining('Compaction failed'),
+        })
+      );
+    });
+
+    it('should reject /compact when executor does not support it', async () => {
+      // mockExecutor has no compact() method (ClaudeExecutor case)
+      const message = {
+        type: 'command',
+        messageId: 'msg-compact-unsupported',
+        content: '/compact',
+        timestamp: Date.now(),
+      };
+
+      await handler.handleMessage(message);
+
+      expect(mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'response',
+          messageId: 'msg-compact-unsupported',
+          success: false,
+          error: expect.stringContaining('not supported'),
+        })
+      );
+      expect(mockExecutor.execute).not.toHaveBeenCalled();
+    });
+
+    it('should stream compact output chunks', async () => {
+      mockExecutor.compact = vi.fn().mockImplementation(async (onStream: (chunk: string) => void) => {
+        onStream('Summarizing conversation...');
+        onStream('Done.');
+        return { success: true };
+      });
+
+      const message = {
+        type: 'command',
+        messageId: 'msg-compact-stream',
+        content: '/compact',
+        timestamp: Date.now(),
+      };
+
+      await handler.handleMessage(message);
+
+      expect(mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'stream',
+          messageId: 'msg-compact-stream',
+          chunk: 'Summarizing conversation...',
+        })
+      );
+      expect(mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'stream',
+          messageId: 'msg-compact-stream',
+          chunk: 'Done.',
+        })
+      );
+    });
+
+    it('should include /compact in /help output', async () => {
+      const message = {
+        type: 'command',
+        messageId: 'msg-help',
+        content: '/help',
+        timestamp: Date.now(),
+      };
+
+      await handler.handleMessage(message);
+
+      expect(mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          output: expect.stringContaining('/compact'),
+        })
+      );
+    });
+  });
+
+  describe('Prompt too long error handling', () => {
+    it('should return friendly message with /compact hint on Prompt too long error', async () => {
+      mockExecutor.execute.mockResolvedValue({
+        success: false,
+        error: 'Prompt too long: context exceeds model limit',
+      });
+
+      const message = {
+        type: 'command',
+        messageId: 'msg-toolong',
+        content: 'do something',
+        timestamp: Date.now(),
+      };
+
+      await handler.handleMessage(message);
+
+      expect(mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'response',
+          messageId: 'msg-toolong',
+          success: false,
+          error: expect.stringContaining('/compact'),
+        })
+      );
+      expect(mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          error: expect.stringContaining('/clear'),
+        })
+      );
+    });
+
+    it('should pass through other errors unchanged', async () => {
+      mockExecutor.execute.mockResolvedValue({
+        success: false,
+        error: 'Some other error',
+      });
+
+      const message = {
+        type: 'command',
+        messageId: 'msg-other-error',
+        content: 'do something',
+        timestamp: Date.now(),
+      };
+
+      await handler.handleMessage(message);
+
+      expect(mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          success: false,
+          error: 'Some other error',
+        })
+      );
+    });
+  });
 });

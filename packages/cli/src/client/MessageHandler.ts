@@ -286,6 +286,7 @@ export class MessageHandler {
 - /status - Show current status
 - /abort - Abort the currently executing command
 - /clear - Clear conversation context
+- /compact - Compress conversation history to reduce context size
 - /cd <directory> - Change working directory
 You can also use natural language commands to control Claude Code CLI.`,
       });
@@ -299,6 +300,37 @@ You can also use natural language commands to control Claude Code CLI.`,
         success: true,
         output: '✅ Conversation context cleared',
       });
+      return true;
+    }
+
+    // /compact command - compress conversation history via Claude CLI's built-in /compact
+    if (trimmed === '/compact') {
+      if (!('compact' in this.executor && typeof this.executor.compact === 'function')) {
+        this.sendResponse(messageId, {
+          success: false,
+          error: '/compact is not supported in this executor mode',
+        });
+        return true;
+      }
+      this.sendResponse(messageId, {
+        success: true,
+        output: '🗜️ Compressing conversation history...',
+      });
+      const persistentExecutor = this.executor as ClaudePersistentExecutor;
+      const result = await persistentExecutor.compact((chunk: string) => {
+        this.sendStreamChunk(messageId, chunk);
+      });
+      if (!result.success) {
+        this.sendResponse(messageId, {
+          success: false,
+          error: result.error || 'Compaction failed',
+        });
+      } else {
+        this.sendResponse(messageId, {
+          success: true,
+          output: '✅ Conversation history compressed',
+        });
+      }
       return true;
     }
 
@@ -454,6 +486,32 @@ You can also use natural language commands to control Claude Code CLI.`,
 
       // Only send success status, not the output
       // Output has already been streamed via onStream callback
+      if (!result.success && result.error && result.error.includes('Prompt too long')) {
+        if ('compact' in this.executor && typeof this.executor.compact === 'function') {
+          // Auto-compact and retry the original command
+          this.sendStreamChunk(messageId, '⚠️ Conversation history too long, auto-compressing...\n');
+          const persistentExecutor = this.executor as ClaudePersistentExecutor;
+          await persistentExecutor.compact();
+          this.sendStreamChunk(messageId, '✅ Compressed. Retrying...\n');
+          const retryResult = await this.executor.execute(content, {
+            onStream: (chunk: string) => { this.sendStreamChunk(messageId, chunk); },
+            onToolUse: (toolUse: ToolUseInfo) => { this.sendToolUse(messageId, toolUse); },
+            onToolResult: (toolResult: ToolResultInfo) => { this.sendToolResult(messageId, toolResult); },
+            onRedactedThinking: () => { this.sendRedactedThinking(messageId); },
+            onPlanMode: (planContent: string) => { this.sendPlanMode(messageId, planContent); },
+          });
+          this.sendResponse(messageId, {
+            success: retryResult.success,
+            error: retryResult.error,
+          });
+          return;
+        }
+        this.sendResponse(messageId, {
+          success: false,
+          error: '❌ Conversation history too long.\n\nUse /compact to compress it, or /clear to start fresh.',
+        });
+        return;
+      }
       this.sendResponse(messageId, {
         success: result.success,
         error: result.error,
