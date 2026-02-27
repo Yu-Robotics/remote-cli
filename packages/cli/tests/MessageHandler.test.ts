@@ -638,7 +638,7 @@ describe('MessageHandler', () => {
 
   describe('compact command', () => {
     it('should handle /compact when executor supports it', async () => {
-      mockExecutor.compact = vi.fn().mockResolvedValue({ success: true });
+      mockExecutor.compactWhenFull = vi.fn().mockResolvedValue({ success: true });
 
       const message = {
         type: 'command',
@@ -649,7 +649,7 @@ describe('MessageHandler', () => {
 
       await handler.handleMessage(message);
 
-      expect(mockExecutor.compact).toHaveBeenCalled();
+      expect(mockExecutor.compactWhenFull).toHaveBeenCalled();
       // First response: "Compressing..."
       expect(mockWsClient.send).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -672,7 +672,7 @@ describe('MessageHandler', () => {
     });
 
     it('should report error when compact fails', async () => {
-      mockExecutor.compact = vi.fn().mockResolvedValue({
+      mockExecutor.compactWhenFull = vi.fn().mockResolvedValue({
         success: false,
         error: 'Compaction failed: internal error',
       });
@@ -697,7 +697,7 @@ describe('MessageHandler', () => {
     });
 
     it('should reject /compact when executor does not support it', async () => {
-      // mockExecutor has no compact() method (ClaudeExecutor case)
+      // mockExecutor has no compactWhenFull() method (ClaudeExecutor case)
       const message = {
         type: 'command',
         messageId: 'msg-compact-unsupported',
@@ -719,7 +719,7 @@ describe('MessageHandler', () => {
     });
 
     it('should stream compact output chunks', async () => {
-      mockExecutor.compact = vi.fn().mockImplementation(async (onStream: (chunk: string) => void) => {
+      mockExecutor.compactWhenFull = vi.fn().mockImplementation(async (onStream: (chunk: string) => void) => {
         onStream('Summarizing conversation...');
         onStream('Done.');
         return { success: true };

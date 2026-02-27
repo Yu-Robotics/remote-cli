@@ -305,7 +305,7 @@ You can also use natural language commands to control Claude Code CLI.`,
 
     // /compact command - compress conversation history via Claude CLI's built-in /compact
     if (trimmed === '/compact') {
-      if (!('compact' in this.executor && typeof this.executor.compact === 'function')) {
+      if (!('compactWhenFull' in this.executor && typeof this.executor.compactWhenFull === 'function')) {
         this.sendResponse(messageId, {
           success: false,
           error: '/compact is not supported in this executor mode',
@@ -317,7 +317,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         output: '🗜️ Compressing conversation history...',
       });
       const persistentExecutor = this.executor as ClaudePersistentExecutor;
-      const result = await persistentExecutor.compact((chunk: string) => {
+      const result = await persistentExecutor.compactWhenFull((chunk: string) => {
         this.sendStreamChunk(messageId, chunk);
       });
       if (!result.success) {
@@ -487,11 +487,20 @@ You can also use natural language commands to control Claude Code CLI.`,
       // Only send success status, not the output
       // Output has already been streamed via onStream callback
       if (!result.success && result.error && result.error.includes('Prompt too long')) {
-        if ('compact' in this.executor && typeof this.executor.compact === 'function') {
-          // Auto-compact and retry the original command
+        if ('compactWhenFull' in this.executor && typeof this.executor.compactWhenFull === 'function') {
+          // Context is full - use external compact which stops/restarts the process
           this.sendStreamChunk(messageId, '⚠️ Conversation history too long, auto-compressing...\n');
           const persistentExecutor = this.executor as ClaudePersistentExecutor;
-          await persistentExecutor.compact();
+          const compactResult = await persistentExecutor.compactWhenFull((chunk: string) => {
+            this.sendStreamChunk(messageId, chunk);
+          });
+          if (!compactResult.success) {
+            this.sendResponse(messageId, {
+              success: false,
+              error: `❌ Auto-compact failed: ${compactResult.error}\n\nUse /compact to try again, or /clear to start fresh.`,
+            });
+            return;
+          }
           this.sendStreamChunk(messageId, '✅ Compressed. Retrying...\n');
           const retryResult = await this.executor.execute(content, {
             onStream: (chunk: string) => { this.sendStreamChunk(messageId, chunk); },

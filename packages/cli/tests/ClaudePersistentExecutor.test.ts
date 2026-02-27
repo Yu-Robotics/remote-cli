@@ -401,4 +401,157 @@ describe('ClaudePersistentExecutor', () => {
       await testExecutor.destroy();
     }, 10000);
   });
+
+  describe('compactWhenFull()', () => {
+    it('should return error when no active session exists', async () => {
+      // When session file doesn't exist, sessionId will be null
+      mockFs.existsSync.mockReturnValue(false);
+      const noSessionExecutor = new ClaudePersistentExecutor(directoryGuard, '~/test-project');
+
+      const result = await noSessionExecutor.compactWhenFull();
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('No active session');
+      await noSessionExecutor.destroy();
+    });
+
+    it('should run external compact, reload session, and restart', async () => {
+      // Constructor reads session from disk via loadSessionId() — mock returns 'test-session'
+      // No persistent process is running (constructor doesn't spawn one)
+      // So stopProcess() returns immediately
+
+      const compactProcess = new EventEmitter() as any;
+      compactProcess.stdout = new EventEmitter();
+      compactProcess.stderr = new EventEmitter();
+      compactProcess.stdin = { write: vi.fn(), end: vi.fn() };
+      compactProcess.kill = vi.fn();
+      compactProcess.pid = 22222;
+
+      const restartProcess = new EventEmitter() as any;
+      restartProcess.stdout = new EventEmitter();
+      restartProcess.stderr = new EventEmitter();
+      restartProcess.stdin = { write: vi.fn(), end: vi.fn() };
+      restartProcess.kill = vi.fn();
+      restartProcess.pid = 33333;
+
+      mockSpawn
+        .mockReturnValueOnce(compactProcess)   // external compact (first spawn)
+        .mockReturnValueOnce(restartProcess);  // restart after compact (second spawn)
+
+      const testExecutor = new ClaudePersistentExecutor(directoryGuard, '~/test-project');
+      // sessionId = 'test-session' from mockFs.readFileSync default
+
+      const compactPromise = testExecutor.compactWhenFull();
+
+      // Compact process emits output and exits successfully
+      await new Promise(resolve => setTimeout(resolve, 10));
+      compactProcess.stdout.emit('data', Buffer.from('Compacted successfully.\n'));
+      compactProcess.emit('exit', 0, null);
+      compactProcess.emit('close', 0, null);
+
+      // After compact, loadSessionId() re-reads from disk — return new session
+      mockFs.readFileSync.mockReturnValue(JSON.stringify({ id: 'new-compacted-session' }));
+
+      // startProcess() waits 1000ms internally; let it complete
+      const result = await compactPromise;
+
+      expect(result.success).toBe(true);
+      expect(result.output).toContain('Compacted');
+
+      // Verify external compact spawned with --resume and --print
+      expect(mockSpawn).toHaveBeenCalledTimes(2);
+      const compactCall = mockSpawn.mock.calls[0];
+      expect(compactCall[1]).toContain('--resume');
+      expect(compactCall[1]).toContain('test-session');
+      expect(compactCall[1]).toContain('--print');
+      expect(compactCall[1]).toContain('/compact');
+
+      restartProcess.emit('exit', 0, null);
+      restartProcess.emit('close', 0, null);
+      await testExecutor.destroy();
+    }, 10000);
+
+    it('should restart process if external compact fails', async () => {
+      // No persistent process running — stopProcess() returns immediately
+      const failingCompactProcess = new EventEmitter() as any;
+      failingCompactProcess.stdout = new EventEmitter();
+      failingCompactProcess.stderr = new EventEmitter();
+      failingCompactProcess.stdin = { write: vi.fn(), end: vi.fn() };
+      failingCompactProcess.kill = vi.fn();
+      failingCompactProcess.pid = 55555;
+
+      const restartProcess = new EventEmitter() as any;
+      restartProcess.stdout = new EventEmitter();
+      restartProcess.stderr = new EventEmitter();
+      restartProcess.stdin = { write: vi.fn(), end: vi.fn() };
+      restartProcess.kill = vi.fn();
+      restartProcess.pid = 66666;
+
+      mockSpawn
+        .mockReturnValueOnce(failingCompactProcess)
+        .mockReturnValueOnce(restartProcess);
+
+      const testExecutor = new ClaudePersistentExecutor(directoryGuard, '~/test-project');
+
+      const compactPromise = testExecutor.compactWhenFull();
+
+      // Compact process fails (non-zero exit)
+      await new Promise(resolve => setTimeout(resolve, 10));
+      failingCompactProcess.emit('exit', 1, null);
+      failingCompactProcess.emit('close', 1, null);
+
+      const result = await compactPromise;
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('code 1');
+
+      // Verify process was restarted despite compact failure
+      expect(mockSpawn).toHaveBeenCalledTimes(2);
+
+      restartProcess.emit('exit', 0, null);
+      restartProcess.emit('close', 0, null);
+      await testExecutor.destroy();
+    }, 10000);
+
+    it('should stream compact output to onStream callback', async () => {
+      // No persistent process running — stopProcess() returns immediately
+      const compactProcess = new EventEmitter() as any;
+      compactProcess.stdout = new EventEmitter();
+      compactProcess.stderr = new EventEmitter();
+      compactProcess.stdin = { write: vi.fn(), end: vi.fn() };
+      compactProcess.kill = vi.fn();
+      compactProcess.pid = 88888;
+
+      const restartProcess = new EventEmitter() as any;
+      restartProcess.stdout = new EventEmitter();
+      restartProcess.stderr = new EventEmitter();
+      restartProcess.stdin = { write: vi.fn(), end: vi.fn() };
+      restartProcess.kill = vi.fn();
+      restartProcess.pid = 99999;
+
+      mockSpawn
+        .mockReturnValueOnce(compactProcess)
+        .mockReturnValueOnce(restartProcess);
+
+      const testExecutor = new ClaudePersistentExecutor(directoryGuard, '~/test-project');
+
+      const chunks: string[] = [];
+      const compactPromise = testExecutor.compactWhenFull((chunk) => chunks.push(chunk));
+
+      await new Promise(resolve => setTimeout(resolve, 10));
+      compactProcess.stdout.emit('data', Buffer.from('Summarizing...'));
+      compactProcess.stdout.emit('data', Buffer.from('Done.'));
+      compactProcess.emit('exit', 0, null);
+      compactProcess.emit('close', 0, null);
+
+      await compactPromise;
+
+      expect(chunks).toContain('Summarizing...');
+      expect(chunks).toContain('Done.');
+
+      restartProcess.emit('exit', 0, null);
+      restartProcess.emit('close', 0, null);
+      await testExecutor.destroy();
+    }, 10000);
+  });
 });

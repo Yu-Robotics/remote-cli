@@ -1354,6 +1354,83 @@ export class ClaudePersistentExecutor extends EventEmitter {
   }
 
   /**
+   * Compact the conversation when context is full (Prompt too long).
+   *
+   * When the context window is already full, we cannot send /compact via stdin
+   * because Claude CLI will reject it with "Prompt too long" as well.
+   * Instead, we:
+   * 1. Stop the current persistent process
+   * 2. Run `claude --resume <sessionId> -p /compact` as a one-shot process
+   *    so Claude CLI can compact the session externally
+   * 3. Reload the session ID from disk (Claude CLI writes a new one after compact)
+   * 4. Restart the persistent process with the new session ID
+   */
+  async compactWhenFull(onStream?: (chunk: string) => void): Promise<PersistentClaudeResult> {
+    console.log('[ClaudePersistent] Context full - running external compact');
+
+    if (this.isDestroyed) {
+      return { success: false, error: 'Executor has been destroyed' };
+    }
+
+    const sessionIdBeforeCompact = this.sessionId;
+    if (!sessionIdBeforeCompact) {
+      return { success: false, error: 'No active session to compact.' };
+    }
+
+    // Step 1: Stop the persistent process so it doesn't conflict
+    await this.stopProcess();
+
+    // Step 2: Run compact as a one-shot process outside the full context
+    const compactResult = await new Promise<PersistentClaudeResult>((resolve) => {
+      const child = spawn(
+        'claude',
+        ['--resume', sessionIdBeforeCompact, '--print', '/compact'],
+        {
+          cwd: this.currentWorkingDirectory,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: { ...process.env, FORCE_COLOR: '0', CLAUDECODE: '' },
+        }
+      );
+
+      let output = '';
+      child.stdout?.on('data', (data: Buffer) => {
+        const chunk = data.toString();
+        output += chunk;
+        onStream?.(chunk);
+      });
+      child.stderr?.on('data', (data: Buffer) => {
+        console.error('[ClaudePersistent] compact stderr:', data.toString());
+      });
+      child.on('close', (code: number | null) => {
+        if (code === 0) {
+          resolve({ success: true, output });
+        } else {
+          resolve({ success: false, error: `Compact process exited with code ${code}` });
+        }
+      });
+      child.on('error', (err: Error) => {
+        resolve({ success: false, error: err.message });
+      });
+    });
+
+    if (!compactResult.success) {
+      console.error('[ClaudePersistent] External compact failed:', compactResult.error);
+      // Restart process with original session so the user is not left without a session
+      await this.startProcess();
+      return compactResult;
+    }
+
+    // Step 3: Reload session ID - Claude CLI writes a new session after compact
+    this.loadSessionId();
+    console.log(`[ClaudePersistent] Session after compact: ${this.sessionId}`);
+
+    // Step 4: Restart the persistent process with the new (compacted) session
+    await this.startProcess();
+
+    return compactResult;
+  }
+
+  /**
    * Destroy executor and cleanup
    */
   async destroy(): Promise<void> {
