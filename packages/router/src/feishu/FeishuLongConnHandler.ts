@@ -628,6 +628,7 @@ Claude Code commands (sent to active device):
 /cd <directory> - Change working directory
 /clear - Clear conversation context and start fresh session
 /abort - Abort the currently executing command
+/backend - List available AI backends and switch between them
 
 Regular messages will be sent to your active device for execution.
 
