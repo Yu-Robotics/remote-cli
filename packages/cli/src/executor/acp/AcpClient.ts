@@ -95,7 +95,7 @@ export class AcpClient {
   }
 
   async prompt(sessionId: string, text: string): Promise<AcpPromptResult> {
-    const result = await this.sendRequest('session/prompt', { sessionId, prompt: text }) as AcpPromptResult;
+    const result = await this.sendRequest('session/prompt', { sessionId, prompt: [{ type: 'text', text }] }) as AcpPromptResult;
     return result;
   }
 
@@ -141,16 +141,20 @@ export class AcpClient {
 
   private writeLine(msg: object): void {
     if (this.destroyed || !this.child.stdin) return;
-    this.child.stdin.write(JSON.stringify(msg) + '\n');
+    const line = JSON.stringify(msg);
+    console.log(`[AcpClient] → Sending: ${line.slice(0, 200)}${line.length > 200 ? '...' : ''}`);
+    this.child.stdin.write(line + '\n');
   }
 
   private handleLine(line: string): void {
     if (!line.trim()) return;
+    console.log(`[AcpClient] ← Raw line: ${line.slice(0, 300)}${line.length > 300 ? '...' : ''}`);
     let msg: unknown;
     try {
       msg = JSON.parse(line);
     } catch {
       // Non-JSON output from Gemini CLI — ignore (e.g. startup logs)
+      console.log(`[AcpClient] ← Non-JSON output: ${line.slice(0, 200)}`);
       return;
     }
 
@@ -170,12 +174,18 @@ export class AcpClient {
 
   private handleResponse(msg: JsonRpcResponse): void {
     const pending = this.pendingRequests.get(msg.id);
-    if (!pending) return;
+    if (!pending) {
+      console.log(`[AcpClient] ⚠️ No pending request for id=${msg.id}`);
+      return;
+    }
     this.pendingRequests.delete(msg.id);
 
     if ('error' in msg) {
+      console.error(`[AcpClient] ❌ JSON-RPC Error: code=${msg.error.code}, message=${msg.error.message}`);
+      console.error(`[AcpClient] ❌ Full error data:`, JSON.stringify(msg.error, null, 2));
       pending.reject(new Error(`ACP error ${msg.error.code}: ${msg.error.message}`));
     } else {
+      console.log(`[AcpClient] ✅ Response received for id=${msg.id}`);
       pending.resolve(msg.result);
     }
   }

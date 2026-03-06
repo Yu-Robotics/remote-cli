@@ -82,7 +82,9 @@ export class GeminiExecutor implements IExecutor {
     this.isExecuting = true;
 
     try {
+      console.log(`[GeminiExecutor] Sending prompt (length=${finalPrompt.length})...`);
       const promptResult = await client.prompt(sessionId, finalPrompt);
+      console.log(`[GeminiExecutor] Prompt completed, stopReason=${promptResult.stopReason}`);
 
       this.sessionManager.append(sessionId, 'assistant', accumulatedOutput);
 
@@ -92,6 +94,7 @@ export class GeminiExecutor implements IExecutor {
         sessionAbbr: sessionId.slice(0, 8),
       };
     } catch (error) {
+      console.error(`[GeminiExecutor] ❌ Execute error:`, error);
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Unknown error',
@@ -155,7 +158,13 @@ export class GeminiExecutor implements IExecutor {
   // ─── Internal helpers ───────────────────────────────────────────────────────
 
   private async ensureClient(): Promise<ActiveSession> {
-    if (this.active) return this.active;
+    if (this.active) {
+      console.log(`[GeminiExecutor] Reusing existing ACP session: ${this.active.sessionId.slice(0, 8)}`);
+      return this.active;
+    }
+
+    console.log(`[GeminiExecutor] Creating new ACP client for cwd: ${this.currentWorkingDirectory}`);
+    console.log(`[GeminiExecutor] Gemini command: ${this.geminiCommand} ${this.buildGeminiArgs().join(' ')}`);
 
     // Build ACP callbacks that forward to the mutable slots
     // Using arrow functions that close over `this` so they always call the
@@ -188,8 +197,11 @@ export class GeminiExecutor implements IExecutor {
       acpCallbacks
     );
 
+    console.log(`[GeminiExecutor] Initializing ACP client...`);
     await client.initialize();
+    console.log(`[GeminiExecutor] ACP initialized, creating new session...`);
     const sessionId = await client.newSession(this.currentWorkingDirectory);
+    console.log(`[GeminiExecutor] ACP session created: ${sessionId.slice(0, 8)}`);
 
     this.active = { client, sessionId };
     return this.active;
