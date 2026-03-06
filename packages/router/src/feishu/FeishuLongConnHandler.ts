@@ -87,11 +87,17 @@ export class FeishuLongConnHandler {
 
       // Only handle text and post (rich text) messages; skip images, files, etc.
       if (message.message_type !== 'text' && message.message_type !== 'post') {
+        console.log(`[FeishuHandler] Skipping message type: ${message.message_type}`);
         return;
       }
 
       const openId = sender.sender_id.open_id;
       const messageId = message.message_id;
+
+      if (message.message_type === 'post') {
+        console.log(`[FeishuHandler] Post message raw content: ${message.content}`);
+      }
+
       const content = this.parseMessageContent(message);
 
       console.log(`[FeishuHandler] Received message from ${openId}: ${content}, msgId=${messageId}`);
