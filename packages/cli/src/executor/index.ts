@@ -1,11 +1,16 @@
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import { ClaudeExecutor } from './ClaudeExecutor';
 import { ClaudePersistentExecutor } from './ClaudePersistentExecutor';
+import { GeminiExecutor } from './GeminiExecutor';
+import type { IExecutor } from './IExecutor';
+import type { ExecutorConfig } from '../types/config';
 
 export type { ClaudeExecuteOptions, ClaudeExecuteResult } from './ClaudeExecutor';
 export type { PersistentClaudeOptions, PersistentClaudeResult } from './ClaudePersistentExecutor';
 export { ClaudeExecutor } from './ClaudeExecutor';
 export { ClaudePersistentExecutor } from './ClaudePersistentExecutor';
+export { GeminiExecutor } from './GeminiExecutor';
+export type { IExecutor } from './IExecutor';
 
 /**
  * Check if we're running inside a Claude Code session
@@ -30,7 +35,7 @@ function isRunningInsideClaudeCode(): boolean {
 export type ExecutorType = 'persistent' | 'spawn' | 'auto';
 
 /**
- * Create an appropriate Claude executor
+ * Create an appropriate Claude executor (legacy API — preserved for backward compatibility)
  *
  * @param directoryGuard Directory guard instance
  * @param type Executor type: 'persistent' (long-running process), 'spawn' (one-shot process), or 'auto' (choose based on environment)
@@ -58,4 +63,48 @@ export function createClaudeExecutor(
   }
 
   return new ClaudeExecutor(directoryGuard);
+}
+
+/**
+ * Create an executor based on the executor config.
+ * Supports Claude (persistent / spawn / auto) and Gemini (via ACP).
+ *
+ * @param directoryGuard Directory guard instance
+ * @param executorConfig Executor config from remote-cli config (defaults to auto)
+ * @param initialWorkingDirectory Optional initial working directory
+ * @returns IExecutor instance
+ */
+export function createExecutor(
+  directoryGuard: DirectoryGuard,
+  executorConfig: ExecutorConfig = { type: 'auto' },
+  initialWorkingDirectory?: string
+): IExecutor {
+  switch (executorConfig.type) {
+    case 'gemini':
+      console.log('[ExecutorFactory] Using Gemini CLI executor (ACP)');
+      return new GeminiExecutor(directoryGuard, {
+        model: executorConfig.gemini?.model,
+        autoApprove: executorConfig.gemini?.autoApprove ?? true,
+        initialWorkingDirectory,
+        geminiCommand: executorConfig.gemini?.command,
+        geminiVersion: executorConfig.gemini?.version,
+      });
+
+    case 'claude-persistent':
+      console.log('[ExecutorFactory] Using Claude persistent executor');
+      return new ClaudePersistentExecutor(directoryGuard, initialWorkingDirectory);
+
+    case 'claude-spawn':
+      console.log('[ExecutorFactory] Using Claude spawn executor');
+      return new ClaudeExecutor(directoryGuard);
+
+    case 'auto':
+    default:
+      if (isRunningInsideClaudeCode()) {
+        console.log('[ExecutorFactory] Detected nested Claude Code session, using spawn mode');
+        return new ClaudeExecutor(directoryGuard);
+      }
+      console.log('[ExecutorFactory] Using Claude persistent executor (auto)');
+      return new ClaudePersistentExecutor(directoryGuard, initialWorkingDirectory);
+  }
 }

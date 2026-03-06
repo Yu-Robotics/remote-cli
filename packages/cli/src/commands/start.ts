@@ -1,10 +1,11 @@
 import { ConfigManager } from '../config/ConfigManager';
 import { WebSocketClient } from '../client/WebSocketClient';
-import { createClaudeExecutor } from '../executor';
+import { createExecutor } from '../executor';
 import { MessageHandler } from '../client/MessageHandler';
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import { HooksConfigurator } from '../security/HooksConfigurator';
 import { CLI_VERSION } from '../types';
+import type { ExecutorConfig } from '../types/config';
 import axios from 'axios';
 import * as readline from 'readline';
 import ora, { type Ora } from 'ora';
@@ -170,7 +171,8 @@ export async function startCommand(
     // Get last working directory from config (if set) to initialize executor with correct path
     // This ensures .claude-session file is stored in the working directory, not startup directory
     const lastWorkingDirectory = config.get('lastWorkingDirectory') as string | undefined;
-    const executor = createClaudeExecutor(directoryGuard, 'auto', lastWorkingDirectory);
+    const executorConfig = (config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' as const };
+    const executor = createExecutor(directoryGuard, executorConfig, lastWorkingDirectory);
 
     // If lastWorkingDirectory is set, verify it was applied correctly
     if (!lastWorkingDirectory) {
