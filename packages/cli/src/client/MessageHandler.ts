@@ -5,7 +5,17 @@ import type { IExecutor } from '../executor/IExecutor';
 import { FeishuNotificationAdapter } from '../hooks';
 import { ConfigManager } from '../config/ConfigManager';
 import { processFileReadContent } from '../utils/FileReadDetector';
-import { spawn } from 'child_process';
+import { spawn, execFile } from 'child_process';
+import type { ExecutorConfig } from '../types/config';
+
+/**
+ * Detected backend information
+ */
+interface BackendInfo {
+  id: 'claude-persistent' | 'claude-spawn' | 'gemini';
+  label: string;
+  installed: boolean;
+}
 
 /**
  * Legacy message type for backward compatibility
@@ -288,6 +298,7 @@ export class MessageHandler {
 - /clear - Clear conversation context
 - /compact - Compress conversation history to reduce context size
 - /cd <directory> - Change working directory
+- /backend - List available AI backends and switch between them
 You can also use natural language commands to control Claude Code CLI.`,
       });
       return true;
@@ -331,6 +342,12 @@ You can also use natural language commands to control Claude Code CLI.`,
           output: '✅ Conversation history compressed',
         });
       }
+      return true;
+    }
+
+    // /backend command
+    if (trimmed === '/backend' || trimmed.startsWith('/backend ')) {
+      await this.handleBackendCommand(messageId, trimmed);
       return true;
     }
 
@@ -666,6 +683,101 @@ You can also use natural language commands to control Claude Code CLI.`,
     } catch (error) {
       console.error('Failed to send response:', error);
     }
+  }
+
+  /**
+   * Detect whether a command is available on PATH
+   */
+  private checkCommand(cmd: string, args: string[]): Promise<boolean> {
+    return new Promise((resolve) => {
+      execFile(cmd, args, { timeout: 5000 }, (err) => resolve(!err));
+    });
+  }
+
+  /**
+   * Detect all installed AI backends
+   */
+  private async detectBackends(): Promise<BackendInfo[]> {
+    const [claudeInstalled, geminiInstalled] = await Promise.all([
+      this.checkCommand('claude', ['--version']),
+      this.checkCommand('npx', ['--no', '@google/gemini-cli', '--version']),
+    ]);
+
+    return [
+      { id: 'claude-persistent', label: 'Claude Code (persistent session)', installed: claudeInstalled },
+      { id: 'claude-spawn',      label: 'Claude Code (spawn per command)',  installed: claudeInstalled },
+      { id: 'gemini',            label: 'Gemini CLI',                        installed: geminiInstalled },
+    ];
+  }
+
+  /**
+   * Handle /backend command
+   * Usage:
+   *   /backend              — list available backends
+   *   /backend <name|index> — switch to the specified backend
+   */
+  private async handleBackendCommand(messageId: string, trimmed: string): Promise<void> {
+    const parts = trimmed.split(/\s+/);
+    const arg = parts[1];
+
+    const currentConfig = (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
+    const currentType = currentConfig.type;
+
+    const backends = await this.detectBackends();
+    const installed = backends.filter((b) => b.installed);
+
+    // List mode
+    if (!arg) {
+      if (installed.length === 0) {
+        this.sendResponse(messageId, {
+          success: false,
+          error: 'No supported AI backends found.\n\nInstall Claude Code: npm install -g @anthropic-ai/claude-code\nInstall Gemini CLI: npm install -g @google/gemini-cli',
+        });
+        return;
+      }
+
+      const lines = installed.map((b, i) => {
+        const active = b.id === currentType || (currentType === 'auto' && b.id === 'claude-persistent')
+          ? ' ★ (active)'
+          : '';
+        return `${i + 1}. ${b.label}${active}`;
+      });
+
+      this.sendResponse(messageId, {
+        success: true,
+        output: `🤖 Available AI backends:\n${lines.join('\n')}\n\nSwitch with: /backend <index> or /backend <name>`,
+      });
+      return;
+    }
+
+    // Switch mode — resolve by index or name
+    const index = parseInt(arg, 10);
+    let target: BackendInfo | undefined;
+
+    if (!isNaN(index) && index >= 1 && index <= installed.length) {
+      target = installed[index - 1];
+    } else {
+      target = installed.find(
+        (b) => b.id === arg || b.label.toLowerCase().includes(arg.toLowerCase())
+      );
+    }
+
+    if (!target) {
+      this.sendResponse(messageId, {
+        success: false,
+        error: `Backend "${arg}" not found. Use /backend to see available options.`,
+      });
+      return;
+    }
+
+    // Persist to config
+    const newConfig: ExecutorConfig = { ...currentConfig, type: target.id };
+    await this.config.set('executor', newConfig);
+
+    this.sendResponse(messageId, {
+      success: true,
+      output: `✅ Backend switched to: ${target.label}\n\nRestart the service to apply: remote-cli restart`,
+    });
   }
 
   /**
