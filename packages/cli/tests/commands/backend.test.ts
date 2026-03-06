@@ -16,7 +16,20 @@ vi.mock('child_process', async (importOriginal) => {
   };
 });
 
+// Mock createExecutor to avoid real executor creation
+vi.mock('../../src/executor', () => ({
+  createExecutor: vi.fn(() => ({
+    execute: vi.fn(),
+    setWorkingDirectory: vi.fn(),
+    getCurrentWorkingDirectory: vi.fn(() => '/home/user/project'),
+    resetContext: vi.fn(),
+    abort: vi.fn().mockResolvedValue(false),
+    destroy: vi.fn(),
+  })),
+}));
+
 import { execFile } from 'child_process';
+import { createExecutor } from '../../src/executor';
 
 /** Helper: make execFile call its callback with no error (command found) or an error (not found) */
 function mockInstalled(...installedCmds: string[]) {
@@ -174,7 +187,7 @@ describe('/backend command', () => {
   // ── switch mode ───────────────────────────────────────────────────────────────
 
   describe('switch mode (/backend <target>)', () => {
-    it('switches to Gemini by 1-based index', async () => {
+    it('switches to Gemini by 1-based index and hot-swaps executor', async () => {
       mockInstalled('claude', 'npx');
 
       await send('/backend 2'); // index 2 = Gemini
@@ -182,7 +195,13 @@ describe('/backend command', () => {
       const res = sentResponse();
       expect(res.success).toBe(true);
       expect(res.output).toContain('Gemini CLI');
+      expect(res.output).not.toContain('restart');
       expect(mockConfig.set).toHaveBeenCalledWith('executor', expect.objectContaining({ type: 'gemini' }));
+      expect(createExecutor).toHaveBeenCalledWith(
+        expect.any(DirectoryGuard),
+        expect.objectContaining({ type: 'gemini' }),
+        '/home/user/project'
+      );
     });
 
     it('switches to Claude Code by index', async () => {
