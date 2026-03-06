@@ -228,7 +228,7 @@ packages/cli/src/
   commands/      # CLI command implementations (init, start, stop, status, config)
   client/        # WebSocket client and message handling
   config/        # Configuration management
-  executor/      # Claude Code integration (ClaudeExecutor + ClaudePersistentExecutor)
+  executor/      # AI CLI integration (ClaudeExecutor, ClaudePersistentExecutor, GeminiExecutor, IExecutor, acp/)
   hooks/         # Claude Code hooks and Feishu notification adapter
   security/      # Directory guard (CommandFilter planned, not yet implemented)
   types/         # TypeScript type definitions
@@ -346,6 +346,57 @@ ANTHROPIC_MAGIC_STRING_TRIGGER_REDACTED_THINKING_46C9A13E193C177646C7398A98432EC
 - Anthropic Extended Thinking documentation
 - Claude 3.7 Sonnet safety features
 - Gemini thinking modes
+
+## Gemini CLI Support
+
+The CLI supports Gemini CLI as an alternative AI backend via ACP (Agent Client Protocol).
+
+### Setup
+
+1. Install Gemini CLI and authenticate:
+   ```bash
+   npx @google/gemini-cli auth login
+   ```
+
+2. Configure remote-cli to use Gemini:
+   ```bash
+   remote-cli config set executor.type gemini
+   remote-cli config set executor.gemini.model gemini-2.5-pro  # optional
+   ```
+
+3. Start the service as normal:
+   ```bash
+   remote-cli start
+   ```
+
+### Executor Config Fields (`executor` in config)
+
+| Field | Values | Default | Description |
+|-------|--------|---------|-------------|
+| `executor.type` | `auto`, `claude-persistent`, `claude-spawn`, `gemini` | `auto` | Which AI CLI backend to use |
+| `executor.gemini.model` | any Gemini model name | (Gemini default) | Gemini model to use |
+| `executor.gemini.autoApprove` | `true`/`false` | `true` | Auto-approve tool permissions |
+| `executor.gemini.command` | CLI command | `npx` | Override Gemini CLI command |
+| `executor.gemini.version` | npm version spec | `@google/gemini-cli@latest` | Pin Gemini CLI version |
+
+### Architecture (Gemini)
+
+```
+packages/cli/src/executor/
+  IExecutor.ts              # Shared interface for all executor backends
+  GeminiExecutor.ts         # ACP-based executor (implements IExecutor)
+  acp/
+    AcpClient.ts            # JSON-RPC 2.0 bidirectional transport over stdio
+    AcpTypes.ts             # ACP wire format type definitions
+    SessionManager.ts       # JSONL-based session history persistence
+```
+
+Session history is stored in `~/.remote-cli/gemini-sessions/{sessionId}.jsonl` and replayed
+as context when creating new ACP sessions (since ACP `session/resume` is experimental).
+
+Tool permissions are auto-approved by default (`allow_once`), equivalent to `--yolo`.
+
+---
 
 ## Common Pitfalls
 
