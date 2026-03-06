@@ -123,19 +123,25 @@ export class FeishuLongConnHandler {
 
   /**
    * Parse message content from text or post (rich text) messages.
-   * Post message content structure:
-   *   {"zh_cn": {"title": "...", "content": [[{tag, text}, ...], ...]}}
-   * Each inner array is a paragraph; text nodes have tag="text", mentions have tag="at".
+   * Post message content has two possible structures:
+   *   Direct (message events): {"title":"","content":[[{tag,text,style}],...]}
+   *   Wrapped (legacy/API):    {"zh_cn":{"title":"","content":[[...]]}}
+   * Each inner array is a paragraph; only tag="text" nodes are extracted.
    */
   private parseMessageContent(message: any): string {
     try {
       const content = JSON.parse(message.content);
 
       if (message.message_type === 'post') {
-        // Pick the first language block available
-        const langBlock = content.zh_cn ?? content.en_us ?? Object.values(content)[0] as any;
-        if (!langBlock) return '';
-        const paragraphs: string[][] = langBlock.content ?? [];
+        let paragraphs: any[][];
+        if (Array.isArray(content.content)) {
+          // Direct format
+          paragraphs = content.content;
+        } else {
+          // Wrapped format: pick first language block available
+          const langBlock = content.zh_cn ?? content.en_us ?? Object.values(content)[0] as any;
+          paragraphs = langBlock?.content ?? [];
+        }
         return paragraphs
           .map((nodes: any[]) =>
             nodes
@@ -143,6 +149,7 @@ export class FeishuLongConnHandler {
               .map((n: any) => n.text ?? '')
               .join('')
           )
+          .filter((line: string) => line.trim() !== '')
           .join('\n')
           .trim();
       }
