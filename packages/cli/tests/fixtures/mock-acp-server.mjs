@@ -73,8 +73,16 @@ rl.on('line', async (line) => {
       // Wait briefly to receive the permission response
       await sleep(50);
 
+      // Extract text from content blocks array (ACP format)
+      let promptText = '';
+      if (Array.isArray(prompt)) {
+        promptText = prompt.map(block => block.text || '').join('');
+      } else {
+        promptText = String(prompt);
+      }
+
       // Send text chunks
-      const words = `Response to: ${prompt}`.split(' ');
+      const words = `Response to: ${promptText}`.split(' ');
       for (const word of words) {
         sendNotification('session/update', {
           sessionId,
