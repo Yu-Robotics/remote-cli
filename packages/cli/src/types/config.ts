@@ -27,6 +27,27 @@ export interface ServerConfig {
 }
 
 /**
+ * Gemini executor configuration
+ */
+export interface GeminiExecutorConfig {
+  model?: string;
+  /** Auto-approve all tool permissions. Default: true. False = future Feishu approval flow. */
+  autoApprove?: boolean;
+  /** Override CLI command (default: 'npx') */
+  command?: string;
+  /** Pin gemini-cli version (default: '@google/gemini-cli@latest') */
+  version?: string;
+}
+
+/**
+ * Executor configuration — controls which AI CLI backend is used
+ */
+export interface ExecutorConfig {
+  type: 'auto' | 'claude-persistent' | 'claude-spawn' | 'gemini';
+  gemini?: GeminiExecutorConfig;
+}
+
+/**
  * Complete configuration
  */
 export interface Config {
@@ -42,6 +63,8 @@ export interface Config {
     stoppedAt?: number;
     pid?: number;
   };
+  /** Executor backend selection. Defaults to 'auto' (Claude persistent or spawn). */
+  executor?: ExecutorConfig;
 }
 
 /**

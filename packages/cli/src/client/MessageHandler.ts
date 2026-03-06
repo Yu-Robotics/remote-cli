@@ -1,7 +1,7 @@
 import { WebSocketClient } from './WebSocketClient';
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import { IncomingMessage, OutgoingMessage, StructuredContent, ToolUseInfo, ToolResultInfo } from '../types';
-import type { ClaudeExecutor, ClaudePersistentExecutor } from '../executor';
+import type { IExecutor } from '../executor/IExecutor';
 import { FeishuNotificationAdapter } from '../hooks';
 import { ConfigManager } from '../config/ConfigManager';
 import { processFileReadContent } from '../utils/FileReadDetector';
@@ -23,7 +23,7 @@ export interface Message {
  */
 export class MessageHandler {
   private wsClient: WebSocketClient;
-  private executor: ClaudeExecutor | ClaudePersistentExecutor;
+  private executor: IExecutor;
   private directoryGuard: DirectoryGuard;
   private config: ConfigManager;
   private isDestroyed = false;
@@ -33,7 +33,7 @@ export class MessageHandler {
 
   constructor(
     wsClient: WebSocketClient,
-    executor: ClaudeExecutor | ClaudePersistentExecutor,
+    executor: IExecutor,
     directoryGuard: DirectoryGuard,
     config: ConfigManager
   ) {
@@ -316,8 +316,8 @@ You can also use natural language commands to control Claude Code CLI.`,
         success: true,
         output: '🗜️ Compressing conversation history...',
       });
-      const persistentExecutor = this.executor as ClaudePersistentExecutor;
-      const result = await persistentExecutor.compactWhenFull((chunk: string) => {
+      const persistentExecutor = this.executor as IExecutor;
+      const result = await persistentExecutor.compactWhenFull!((chunk: string) => {
         this.sendStreamChunk(messageId, chunk);
       });
       if (!result.success) {
@@ -490,8 +490,8 @@ You can also use natural language commands to control Claude Code CLI.`,
         if ('compactWhenFull' in this.executor && typeof this.executor.compactWhenFull === 'function') {
           // Context is full - use external compact which stops/restarts the process
           this.sendStreamChunk(messageId, '⚠️ Conversation history too long, auto-compressing...\n');
-          const persistentExecutor = this.executor as ClaudePersistentExecutor;
-          const compactResult = await persistentExecutor.compactWhenFull((chunk: string) => {
+          const persistentExecutor = this.executor as IExecutor;
+          const compactResult = await persistentExecutor.compactWhenFull!((chunk: string) => {
             this.sendStreamChunk(messageId, chunk);
           });
           if (!compactResult.success) {

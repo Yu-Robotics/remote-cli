@@ -485,12 +485,37 @@ MIT License - see [LICENSE](LICENSE) file for details.
       "/Users/yourname/work"
     ]
   },
+  "executor": {
+    "type": "gemini",
+    "gemini": {
+      "model": "gemini-2.5-pro",
+      "autoApprove": true
+    }
+  },
   "service": {
     "running": true,
     "startedAt": 1234567890,
     "pid": 12345
   }
 }
+```
+
+`executor.type` options: `auto` (default, Claude), `claude-persistent`, `claude-spawn`, `gemini`.
+
+#### Using Gemini CLI
+
+```bash
+# 1. Install and authenticate Gemini CLI
+npx @google/gemini-cli auth login
+
+# 2. Switch to Gemini backend
+remote-cli config set executor.type gemini
+
+# 3. Optionally specify a model
+remote-cli config set executor.gemini.model gemini-2.5-pro
+
+# 4. Start as normal
+remote-cli start
 ```
 
 ### Development

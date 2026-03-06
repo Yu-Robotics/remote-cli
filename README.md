@@ -484,12 +484,37 @@ MIT 许可证 - 详见 [LICENSE](LICENSE) 文件。
       "/Users/yourname/work"
     ]
   },
+  "executor": {
+    "type": "gemini",
+    "gemini": {
+      "model": "gemini-2.5-pro",
+      "autoApprove": true
+    }
+  },
   "service": {
     "running": true,
     "startedAt": 1234567890,
     "pid": 12345
   }
 }
+```
+
+`executor.type` 可选值：`auto`（默认，Claude）、`claude-persistent`、`claude-spawn`、`gemini`。
+
+#### 使用 Gemini CLI
+
+```bash
+# 1. 安装并认证 Gemini CLI
+npx @google/gemini-cli auth login
+
+# 2. 切换到 Gemini 后端
+remote-cli config set executor.type gemini
+
+# 3. 可选：指定模型
+remote-cli config set executor.gemini.model gemini-2.5-pro
+
+# 4. 正常启动
+remote-cli start
 ```
 
 ### 开发
