@@ -100,7 +100,13 @@ export class FeishuLongConnHandler {
 
       const content = this.parseMessageContent(message);
 
-      console.log(`[FeishuHandler] Received message from ${openId}: ${content}, msgId=${messageId}`);
+      console.log(`[FeishuHandler] Received message from ${openId}: "${content}", msgId=${messageId}`);
+
+      // If content is empty after parsing, ignore the message
+      if (!content) {
+        console.log(`[FeishuHandler] Empty content after parsing, ignoring message`);
+        return;
+      }
 
       // Check if it's a command
       if (this.isCommand(content)) {
