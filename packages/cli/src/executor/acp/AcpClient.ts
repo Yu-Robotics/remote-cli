@@ -90,7 +90,7 @@ export class AcpClient {
   }
 
   async newSession(cwd: string): Promise<string> {
-    const result = await this.sendRequest('session/new', { cwd }) as AcpNewSessionResult;
+    const result = await this.sendRequest('session/new', { cwd, mcpServers: [] }) as AcpNewSessionResult;
     return result.sessionId;
   }
 
