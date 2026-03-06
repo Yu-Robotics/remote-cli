@@ -85,8 +85,8 @@ export class FeishuLongConnHandler {
       const message = data.message;
       const sender = data.sender;
 
-      // Skip non-text messages
-      if (message.message_type !== 'text') {
+      // Only handle text and post (rich text) messages; skip images, files, etc.
+      if (message.message_type !== 'text' && message.message_type !== 'post') {
         return;
       }
 
@@ -110,13 +110,34 @@ export class FeishuLongConnHandler {
   }
 
   /**
-   * Parse message content
+   * Parse message content from text or post (rich text) messages.
+   * Post message content structure:
+   *   {"zh_cn": {"title": "...", "content": [[{tag, text}, ...], ...]}}
+   * Each inner array is a paragraph; text nodes have tag="text", mentions have tag="at".
    */
   private parseMessageContent(message: any): string {
     try {
       const content = JSON.parse(message.content);
+
+      if (message.message_type === 'post') {
+        // Pick the first language block available
+        const langBlock = content.zh_cn ?? content.en_us ?? Object.values(content)[0] as any;
+        if (!langBlock) return '';
+        const paragraphs: string[][] = langBlock.content ?? [];
+        return paragraphs
+          .map((nodes: any[]) =>
+            nodes
+              .filter((n: any) => n.tag === 'text')
+              .map((n: any) => n.text ?? '')
+              .join('')
+          )
+          .join('\n')
+          .trim();
+      }
+
+      // Default: plain text message
       return (content.text || '').trim();
-    } catch (error) {
+    } catch {
       return '';
     }
   }

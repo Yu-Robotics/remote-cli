@@ -1030,4 +1030,85 @@ describe('FeishuLongConnHandler', () => {
       expect(mockClient.im.message.delete).not.toHaveBeenCalled();
     });
   });
+
+  describe('parseMessageContent', () => {
+    const parse = (messageType: string, rawContent: object) =>
+      (handler as any).parseMessageContent({
+        message_type: messageType,
+        content: JSON.stringify(rawContent),
+      });
+
+    it('parses plain text message', () => {
+      expect(parse('text', { text: 'hello world' })).toBe('hello world');
+    });
+
+    it('trims whitespace from plain text', () => {
+      expect(parse('text', { text: '  hello  ' })).toBe('hello');
+    });
+
+    it('returns empty string for empty text message', () => {
+      expect(parse('text', { text: '' })).toBe('');
+    });
+
+    it('parses post message with single paragraph', () => {
+      const content = {
+        zh_cn: {
+          title: '',
+          content: [[{ tag: 'text', text: 'hello world' }]],
+        },
+      };
+      expect(parse('post', content)).toBe('hello world');
+    });
+
+    it('parses post message with multiple paragraphs joined by newline', () => {
+      const content = {
+        zh_cn: {
+          title: '',
+          content: [
+            [{ tag: 'text', text: 'line one' }],
+            [{ tag: 'text', text: 'line two' }],
+          ],
+        },
+      };
+      expect(parse('post', content)).toBe('line one\nline two');
+    });
+
+    it('ignores mention (at) nodes in post message', () => {
+      const content = {
+        zh_cn: {
+          content: [
+            [
+              { tag: 'text', text: 'hello ' },
+              { tag: 'at', user_id: 'ou_xxx', user_name: 'Bob' },
+            ],
+          ],
+        },
+      };
+      expect(parse('post', content)).toBe('hello');
+    });
+
+    it('falls back to en_us block when zh_cn is absent', () => {
+      const content = {
+        en_us: {
+          content: [[{ tag: 'text', text: 'hello en' }]],
+        },
+      };
+      expect(parse('post', content)).toBe('hello en');
+    });
+
+    it('trims leading/trailing whitespace from post message', () => {
+      const content = {
+        zh_cn: {
+          content: [[{ tag: 'text', text: '  spaced  ' }]],
+        },
+      };
+      expect(parse('post', content)).toBe('spaced');
+    });
+
+    it('returns empty string for malformed JSON', () => {
+      expect(
+        (handler as any).parseMessageContent({ message_type: 'text', content: 'not-json' })
+      ).toBe('');
+    });
+  });
 });
