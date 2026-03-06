@@ -730,7 +730,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       if (installed.length === 0) {
         this.sendResponse(messageId, {
           success: false,
-          error: 'No supported AI backends found.\n\nInstall Claude Code: npm install -g @anthropic-ai/claude-code\nInstall Gemini CLI: npm install -g @google/gemini-cli',
+          error: 'No supported AI backends found.\n\nMake sure Claude Code is installed: npm install -g @anthropic-ai/claude-code',
         });
         return;
       }
