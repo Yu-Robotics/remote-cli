@@ -1060,6 +1060,21 @@ describe('FeishuLongConnHandler', () => {
       expect(parse('post', content)).toBe('hello world');
     });
 
+    it('parses post message in direct format (no language wrapper)', () => {
+      // This is the actual format received from Feishu message events
+      const content = {
+        title: '',
+        content: [
+          [{ tag: 'text', text: '做几件事：', style: [] }],
+          [{ tag: 'text', text: '1. ', style: [] }, { tag: 'text', text: '全量测试', style: [] }],
+          [{ tag: 'text', text: '2. ', style: [] }, { tag: 'text', text: '全量编译', style: [] }],
+          [],
+          [{ tag: 'text', text: '测试', style: [] }],
+        ],
+      };
+      expect(parse('post', content)).toBe('做几件事：\n1. 全量测试\n2. 全量编译\n测试');
+    });
+
     it('parses post message with multiple paragraphs joined by newline', () => {
       const content = {
         zh_cn: {
