@@ -2,6 +2,7 @@ import { WebSocketClient } from './WebSocketClient';
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import { IncomingMessage, OutgoingMessage, StructuredContent, ToolUseInfo, ToolResultInfo } from '../types';
 import type { IExecutor } from '../executor/IExecutor';
+import { createExecutor } from '../executor';
 import { FeishuNotificationAdapter } from '../hooks';
 import { ConfigManager } from '../config/ConfigManager';
 import { processFileReadContent } from '../utils/FileReadDetector';
@@ -773,9 +774,16 @@ You can also use natural language commands to control Claude Code CLI.`,
     const newConfig: ExecutorConfig = { ...currentConfig, type: target.id };
     await this.config.set('executor', newConfig);
 
+    // Hot-swap executor without restart
+    const cwd = this.executor.getCurrentWorkingDirectory();
+    if (typeof (this.executor as any).destroy === 'function') {
+      (this.executor as any).destroy();
+    }
+    this.executor = createExecutor(this.directoryGuard, newConfig, cwd);
+
     this.sendResponse(messageId, {
       success: true,
-      output: `✅ Backend switched to: ${target.label}\n\nRestart the service to apply: remote-cli restart`,
+      output: `✅ Backend switched to: ${target.label}`,
     });
   }
 
