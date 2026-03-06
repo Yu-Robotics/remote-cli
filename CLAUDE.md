@@ -353,27 +353,29 @@ The CLI supports Gemini CLI as an alternative AI backend via ACP (Agent Client P
 
 ### Setup
 
-1. Install Gemini CLI and authenticate:
+Gemini CLI is auto-detected if already installed on the local machine. No installation is performed by remote-cli.
+
+1. Ensure Gemini CLI is installed and authenticated on the local machine:
    ```bash
    npx @google/gemini-cli auth login
    ```
 
-2. Configure remote-cli to use Gemini:
-   ```bash
-   remote-cli config set executor.type gemini
-   remote-cli config set executor.gemini.model gemini-2.5-pro  # optional
+2. Switch backend via Feishu chat (no manual config needed):
+   ```
+   /backend
+   /backend 2
    ```
 
-3. Start the service as normal:
+3. Restart the service to apply:
    ```bash
-   remote-cli start
+   remote-cli restart
    ```
 
 ### Executor Config Fields (`executor` in config)
 
 | Field | Values | Default | Description |
 |-------|--------|---------|-------------|
-| `executor.type` | `auto`, `claude-persistent`, `claude-spawn`, `gemini` | `auto` | Which AI CLI backend to use |
+| `executor.type` | `auto`, `claude-persistent`, `claude-spawn`, `gemini` | `auto` | Which AI CLI backend to use (managed via `/backend` command) |
 | `executor.gemini.model` | any Gemini model name | (Gemini default) | Gemini model to use |
 | `executor.gemini.autoApprove` | `true`/`false` | `true` | Auto-approve tool permissions |
 | `executor.gemini.command` | CLI command | `npx` | Override Gemini CLI command |
