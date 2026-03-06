@@ -12,7 +12,7 @@ import type { ExecutorConfig } from '../types/config';
  * Detected backend information
  */
 interface BackendInfo {
-  id: 'claude-persistent' | 'claude-spawn' | 'gemini';
+  id: 'auto' | 'gemini';
   label: string;
   installed: boolean;
 }
@@ -704,9 +704,8 @@ You can also use natural language commands to control Claude Code CLI.`,
     ]);
 
     return [
-      { id: 'claude-persistent', label: 'Claude Code (persistent session)', installed: claudeInstalled },
-      { id: 'claude-spawn',      label: 'Claude Code (spawn per command)',  installed: claudeInstalled },
-      { id: 'gemini',            label: 'Gemini CLI',                        installed: geminiInstalled },
+      { id: 'auto',   label: 'Claude Code', installed: claudeInstalled },
+      { id: 'gemini', label: 'Gemini CLI',  installed: geminiInstalled },
     ];
   }
 
@@ -737,9 +736,9 @@ You can also use natural language commands to control Claude Code CLI.`,
       }
 
       const lines = installed.map((b, i) => {
-        const active = b.id === currentType || (currentType === 'auto' && b.id === 'claude-persistent')
-          ? ' ★ (active)'
-          : '';
+        const isClaudeActive = b.id === 'auto' &&
+          (currentType === 'auto' || currentType === 'claude-persistent' || currentType === 'claude-spawn');
+        const active = b.id === currentType || isClaudeActive ? ' ★ (active)' : '';
         return `${i + 1}. ${b.label}${active}`;
       });
 
