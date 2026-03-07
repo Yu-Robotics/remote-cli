@@ -190,7 +190,7 @@ Without this mock, tests will write to the real home directory and contaminate e
 
 The security model has **three layers**:
 1. **Directory whitelist**: `DirectoryGuard.isAllowed()` checks working directories
-2. **Command filtering**: `CommandFilter` blocks dangerous bash commands (planned, not yet implemented)
+2. **Command filtering**: `validateBashCommand()` in `security/security-guard.ts` blocks dangerous bash commands (implemented)
 3. **Device authentication**: Router server binds devices to specific users via Feishu binding flow
 
 ## Key Implementation Patterns
@@ -230,7 +230,7 @@ packages/cli/src/
   config/        # Configuration management
   executor/      # AI CLI integration (ClaudeExecutor, ClaudePersistentExecutor, GeminiExecutor, IExecutor, acp/)
   hooks/         # Claude Code hooks and Feishu notification adapter
-  security/      # Directory guard (CommandFilter planned, not yet implemented)
+  security/      # Directory guard, bash command validation (validateBashCommand in security-guard.ts)
   types/         # TypeScript type definitions
   utils/         # Utility functions (FeishuMessageFormatter, stripAnsi)
 

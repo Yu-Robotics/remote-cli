@@ -671,7 +671,7 @@ volumes:
 
 ### Phase 2 Features
 - [ ] Support file upload (send files to working directory through Feishu)
-- [ ] Support multi-device binding (same account binds multiple computers, switch via device selector)
+- [x] Support multi-device binding (same account binds multiple computers, switch via `/device` command)
 - [ ] Command history (view recently executed commands in Feishu)
 - [ ] Scheduled tasks (set scheduled Claude tasks)
 
