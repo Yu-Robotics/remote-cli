@@ -94,6 +94,36 @@ describe('AcpClient', () => {
     }
   });
 
+  it('should send correct outcome format when auto-approving permission', async () => {
+    // Track all lines written to the mock server's stdin
+    const writtenLines: string[] = [];
+    const originalWrite = (client as any).child.stdin.write.bind((client as any).child.stdin);
+    (client as any).child.stdin.write = (data: string) => {
+      writtenLines.push(data.trim());
+      return originalWrite(data);
+    };
+
+    await client.initialize();
+    const sessionId = await client.newSession(process.cwd());
+    await client.prompt(sessionId, 'read a file');
+
+    // Find the permission response message
+    const permResponseLine = writtenLines.find((line) => {
+      try {
+        const msg = JSON.parse(line);
+        return typeof msg.id === 'number' && msg.id >= 9000 && msg.result;
+      } catch { return false; }
+    });
+
+    expect(permResponseLine).toBeDefined();
+    const permResponse = JSON.parse(permResponseLine!);
+    // Must use the ACP SDK outcome format, not the old selectedOptionKind format
+    expect(permResponse.result).toHaveProperty('outcome');
+    expect(permResponse.result.outcome).toHaveProperty('outcome', 'selected');
+    expect(permResponse.result.outcome).toHaveProperty('optionId', 'proceed_once');
+    expect(permResponse.result).not.toHaveProperty('selectedOptionKind');
+  });
+
   it('should clean up child process on destroy', async () => {
     await client.initialize();
 

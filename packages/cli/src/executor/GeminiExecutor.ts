@@ -14,42 +14,31 @@ export interface GeminiExecutorOptions {
   geminiVersion?: string;
 }
 
-interface ActiveSession {
-  client: AcpClient;
-  sessionId: string;
-}
-
 /**
  * IExecutor implementation for Gemini CLI via ACP (Agent Client Protocol).
  *
- * One ACP child process is maintained per working directory.
- * On setWorkingDirectory, the existing process is terminated and a fresh
- * session is created on the next execute() call.
+ * Each execute() call spawns a fresh Gemini CLI subprocess (vibe-kanban style).
+ * This ensures full isolation between turns — a broken session in one turn
+ * cannot affect subsequent turns.
  *
- * Session history is persisted as JSONL and replayed as context when creating
- * new ACP sessions (since ACP session/resume is experimental).
- *
- * Callbacks are held as mutable references so the same AcpClient instance can
- * serve multiple sequential execute() calls without being recreated.
+ * Conversation history is persisted as JSONL via SessionManager and replayed
+ * as context prefix on subsequent calls within the same conversation.
  */
 export class GeminiExecutor implements IExecutor {
   private directoryGuard: DirectoryGuard;
   private currentWorkingDirectory: string;
   private sessionManager: SessionManager;
-  private active: ActiveSession | null = null;
-  private isExecuting = false;
 
   private readonly model: string;
   private readonly autoApprove: boolean;
   private readonly geminiCommand: string;
   private readonly geminiVersion: string;
 
-  // Mutable callback slots — updated before each execute() call
-  private currentOnStream: ((chunk: string) => void) | undefined;
-  private currentOnToolUse: ((toolUse: { id: string; name: string; input: Record<string, unknown> }) => void) | undefined;
-  private currentOnToolResult: ((result: { tool_use_id: string; content: string; is_error: boolean }) => void) | undefined;
-  private currentOnPlanMode: ((planContent: string) => void) | undefined;
-  private currentAccumulate: (text: string) => void = () => {};
+  /** Stable ID for JSONL history file, survives across spawns. */
+  private conversationId: string | null = null;
+
+  /** Reference to the in-flight AcpClient for abort support. */
+  private inflightClient: AcpClient | null = null;
 
   constructor(directoryGuard: DirectoryGuard, options: GeminiExecutorOptions = {}) {
     this.directoryGuard = directoryGuard;
@@ -64,34 +53,71 @@ export class GeminiExecutor implements IExecutor {
   // ─── IExecutor required ─────────────────────────────────────────────────────
 
   async execute(prompt: string, options: ExecuteOptions): Promise<ExecuteResult> {
-    // Update mutable callback slots before the call
+    // Ensure a stable conversation ID exists for history tracking across spawns
+    if (!this.conversationId) {
+      this.conversationId = `conv-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    }
+
     let accumulatedOutput = '';
-    this.currentAccumulate = (text: string) => { accumulatedOutput += text; };
-    this.currentOnStream = options.onStream;
-    this.currentOnToolUse = options.onToolUse;
-    this.currentOnToolResult = options.onToolResult;
-    this.currentOnPlanMode = options.onPlanMode;
 
-    const { client, sessionId } = await this.ensureClient();
+    const acpCallbacks: AcpEventCallbacks = {
+      onTextChunk: (text) => {
+        accumulatedOutput += text;
+        options.onStream?.(text);
+      },
+      onToolCall: (toolCallId, title, kind) => {
+        options.onToolUse?.({ id: toolCallId, name: title, input: { kind } });
+      },
+      onToolResult: (toolCallId, status, output) => {
+        options.onToolResult?.({
+          tool_use_id: toolCallId,
+          content: output ?? '',
+          is_error: status !== 'completed',
+        });
+      },
+      onPlan: (text) => {
+        options.onPlanMode?.(text);
+      },
+      onPermissionRequest: this.autoApprove ? undefined : async () => 0,
+    };
 
-    // Prepend history context for session continuity
-    const historyContext = this.sessionManager.buildResumeContext(sessionId);
+    // Prepend history context for follow-up turns within the same conversation
+    const historyContext = this.sessionManager.buildResumeContext(this.conversationId);
     const finalPrompt = historyContext ? `${historyContext}${prompt}` : prompt;
 
-    this.sessionManager.append(sessionId, 'user', prompt);
-    this.isExecuting = true;
+    this.sessionManager.append(this.conversationId, 'user', prompt);
+
+    const client = new AcpClient(
+      this.geminiCommand,
+      this.buildGeminiArgs(),
+      this.currentWorkingDirectory,
+      acpCallbacks
+    );
+    this.inflightClient = client;
 
     try {
+      console.log(`[GeminiExecutor] Spawning new ACP client for cwd: ${this.currentWorkingDirectory}`);
+      console.log(`[GeminiExecutor] Gemini command: ${this.geminiCommand} ${this.buildGeminiArgs().join(' ')}`);
+
+      await client.initialize();
+      const sessionId = await client.newSession(this.currentWorkingDirectory);
+      console.log(`[GeminiExecutor] ACP session created: ${sessionId.slice(0, 8)}`);
+
+      if (this.autoApprove) {
+        console.log(`[GeminiExecutor] Switching session to YOLO mode...`);
+        await client.setSessionMode(sessionId, 'yolo');
+      }
+
       console.log(`[GeminiExecutor] Sending prompt (length=${finalPrompt.length})...`);
       const promptResult = await client.prompt(sessionId, finalPrompt);
       console.log(`[GeminiExecutor] Prompt completed, stopReason=${promptResult.stopReason}`);
 
-      this.sessionManager.append(sessionId, 'assistant', accumulatedOutput);
+      this.sessionManager.append(this.conversationId, 'assistant', accumulatedOutput);
 
       return {
         success: promptResult.stopReason !== 'refusal',
         output: accumulatedOutput,
-        sessionAbbr: sessionId.slice(0, 8),
+        sessionAbbr: this.conversationId.slice(0, 8),
       };
     } catch (error) {
       console.error(`[GeminiExecutor] ❌ Execute error:`, error);
@@ -100,7 +126,8 @@ export class GeminiExecutor implements IExecutor {
         error: error instanceof Error ? error.message : 'Unknown error',
       };
     } finally {
-      this.isExecuting = false;
+      client.destroy();
+      this.inflightClient = null;
     }
   }
 
@@ -110,107 +137,41 @@ export class GeminiExecutor implements IExecutor {
 
   async setWorkingDirectory(targetPath: string): Promise<void> {
     const resolved = this.directoryGuard.resolveWorkingDirectory(targetPath);
-
-    // Tear down current ACP process — new session will start in new directory
-    if (this.active) {
-      try {
-        this.active.client.sendCancel(this.active.sessionId);
-      } catch {
-        // best-effort cancel
-      }
-      this.active.client.destroy();
-      this.active = null;
-    }
-
     this.currentWorkingDirectory = resolved;
+    // Changing directory resets the conversation context
+    this.conversationId = null;
   }
 
   resetContext(): void {
-    if (this.active) {
-      this.sessionManager.remove(this.active.sessionId);
-      this.active = null;
+    if (this.conversationId) {
+      this.sessionManager.remove(this.conversationId);
+      this.conversationId = null;
     }
-    // Note: does NOT destroy the child process — a new ACP session is cheaper than a new process.
-    // However since we null active, ensureClient() will create a fresh session (and process,
-    // because the old one has no reference anymore).
   }
 
   async abort(): Promise<boolean> {
-    if (!this.active) return false;
-    try {
-      this.active.client.sendCancel(this.active.sessionId);
-    } catch {
-      // ignore
-    }
-    this.active.client.destroy();
-    this.active = null;
-    this.isExecuting = false;
+    if (!this.inflightClient) return false;
+    this.inflightClient.destroy();
+    this.inflightClient = null;
     return true;
   }
 
   async destroy(): Promise<void> {
-    if (this.active) {
-      this.active.client.destroy();
-      this.active = null;
+    if (this.inflightClient) {
+      this.inflightClient.destroy();
+      this.inflightClient = null;
     }
   }
 
   // ─── Internal helpers ───────────────────────────────────────────────────────
 
-  private async ensureClient(): Promise<ActiveSession> {
-    if (this.active) {
-      console.log(`[GeminiExecutor] Reusing existing ACP session: ${this.active.sessionId.slice(0, 8)}`);
-      return this.active;
-    }
-
-    console.log(`[GeminiExecutor] Creating new ACP client for cwd: ${this.currentWorkingDirectory}`);
-    console.log(`[GeminiExecutor] Gemini command: ${this.geminiCommand} ${this.buildGeminiArgs().join(' ')}`);
-
-    // Build ACP callbacks that forward to the mutable slots
-    // Using arrow functions that close over `this` so they always call the
-    // currently-set callbacks for the in-flight execute() call.
-    const acpCallbacks: AcpEventCallbacks = {
-      onTextChunk: (text) => {
-        this.currentAccumulate(text);
-        this.currentOnStream?.(text);
-      },
-      onToolCall: (toolCallId, title, kind) => {
-        this.currentOnToolUse?.({ id: toolCallId, name: title, input: { kind } });
-      },
-      onToolResult: (toolCallId, status, output) => {
-        this.currentOnToolResult?.({
-          tool_use_id: toolCallId,
-          content: output ?? '',
-          is_error: status !== 'completed',
-        });
-      },
-      onPlan: (text) => {
-        this.currentOnPlanMode?.(text);
-      },
-      onPermissionRequest: this.autoApprove ? undefined : async () => 0,
-    };
-
-    const client = new AcpClient(
-      this.geminiCommand,
-      this.buildGeminiArgs(),
-      this.currentWorkingDirectory,
-      acpCallbacks
-    );
-
-    console.log(`[GeminiExecutor] Initializing ACP client...`);
-    await client.initialize();
-    console.log(`[GeminiExecutor] ACP initialized, creating new session...`);
-    const sessionId = await client.newSession(this.currentWorkingDirectory);
-    console.log(`[GeminiExecutor] ACP session created: ${sessionId.slice(0, 8)}`);
-
-    this.active = { client, sessionId };
-    return this.active;
-  }
-
   private buildGeminiArgs(): string[] {
     const args: string[] = ['-y', this.geminiVersion, '--experimental-acp'];
     if (this.model) {
       args.push('--model', this.model);
+    }
+    if (this.autoApprove) {
+      args.push('--yolo');
     }
     return args;
   }
