@@ -9,6 +9,7 @@ import {
   AcpSessionUpdateParams,
   AcpRequestPermissionParams,
   AcpPermissionOption,
+  AcpPermissionResponse,
   AcpInitializeResult,
   AcpNewSessionResult,
   AcpPromptResult,
@@ -92,6 +93,11 @@ export class AcpClient {
   async newSession(cwd: string): Promise<string> {
     const result = await this.sendRequest('session/new', { cwd, mcpServers: [] }) as AcpNewSessionResult;
     return result.sessionId;
+  }
+
+  /** Switch a session to YOLO mode so no per-tool permission requests are sent. */
+  async setSessionMode(sessionId: string, modeId: string): Promise<void> {
+    await this.sendRequest('session/set_mode', { sessionId, modeId });
   }
 
   async prompt(sessionId: string, text: string): Promise<AcpPromptResult> {
@@ -238,9 +244,9 @@ export class AcpClient {
       }
       case 'plan': {
         if (this.callbacks.onPlan) {
-          const text = (update as AcpUpdatePlan).content
-            .map((b) => b.text ?? '')
-            .join('');
+          const text = (update as AcpUpdatePlan).entries
+            .map((e) => `[${e.status}] ${e.content}`)
+            .join('\n');
           this.callbacks.onPlan(text);
         }
         break;
@@ -252,7 +258,7 @@ export class AcpClient {
   }
 
   private async handlePermissionRequest(id: number, params: AcpRequestPermissionParams): Promise<void> {
-    let chosenIndex = 0; // default: first option = allow_once
+    let chosenIndex = 0; // default: first option = allow_once / proceed_once
 
     if (this.callbacks.onPermissionRequest) {
       try {
@@ -266,7 +272,10 @@ export class AcpClient {
     }
 
     const chosen = params.options[chosenIndex] ?? params.options[0];
-    this.sendResponse(id, { selectedOptionKind: chosen.kind });
+    const response: AcpPermissionResponse = chosen.kind.startsWith('reject')
+      ? { outcome: { outcome: 'cancelled' } }
+      : { outcome: { outcome: 'selected', optionId: chosen.optionId } };
+    this.sendResponse(id, response);
   }
 
   private rejectAllPending(error: Error): void {

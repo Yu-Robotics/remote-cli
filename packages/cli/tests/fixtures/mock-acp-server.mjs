@@ -64,8 +64,8 @@ rl.on('line', async (line) => {
           sessionId,
           toolCall: { toolCallId: 'tc-1', title: 'read_file' },
           options: [
-            { kind: 'allow_once' },
-            { kind: 'reject_once' },
+            { optionId: 'proceed_once', name: 'Allow', kind: 'allow_once' },
+            { optionId: 'cancel',       name: 'Reject', kind: 'reject_once' },
           ],
         },
       });

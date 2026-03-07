@@ -70,7 +70,11 @@ export interface AcpUpdateToolCallUpdate {
 
 export interface AcpUpdatePlan {
   sessionUpdate: 'plan';
-  content: AcpContentBlock[];
+  entries: Array<{
+    content: string;
+    priority: 'high' | 'medium' | 'low';
+    status: 'pending' | 'in_progress' | 'completed';
+  }>;
 }
 
 export interface AcpUpdateUnknown {
@@ -94,7 +98,16 @@ export interface AcpSessionUpdateParams {
 // ─── session/request_permission ───────────────────────────────────────────────
 
 export interface AcpPermissionOption {
+  /** ACP SDK optionId — must be echoed back in the response outcome */
+  optionId: string;
+  name: string;
   kind: 'allow_once' | 'allow_always' | 'reject_once' | 'reject_always';
+}
+
+export interface AcpPermissionResponse {
+  outcome:
+    | { outcome: 'selected'; optionId: string }
+    | { outcome: 'cancelled' };
 }
 
 export interface AcpRequestPermissionParams {
