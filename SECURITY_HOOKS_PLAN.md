@@ -148,7 +148,7 @@ function validateToolUse(hookData) {
 
   if (!fileTools.includes(tool_name)) {
     // Non-file tools (Bash, Task, etc.) - allow for now
-    // TODO: Add Bash command filtering in Phase 2
+    // Bash command filtering is handled by validateBashCommand() in security/security-guard.ts
     return { allowed: true, reason: 'Non-file tool' };
   }
 
