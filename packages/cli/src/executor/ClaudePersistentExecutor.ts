@@ -477,7 +477,39 @@ export class ClaudePersistentExecutor extends EventEmitter {
         }
       });
 
-      // Handle process error
+      // Wait for the process to confirm it is alive, or fail fast on spawn errors
+      // (e.g. ENOENT when claude binary is missing). We race a short timer against
+      // the 'error' event so that spawn failures reject startProcess() immediately,
+      // which lets processQueue() surface the error to the caller via command.resolve().
+      let earlyError: Error | null = null;
+      await new Promise<void>((resolve) => {
+        // Arm a one-shot error listener that captures the error and resolves the
+        // startup promise (we intentionally resolve, not reject, so the outer
+        // try/catch in startProcess can inspect earlyError and re-throw cleanly).
+        const onEarlyError = (error: NodeJS.ErrnoException) => {
+          earlyError = error;
+          child.removeListener('error', onEarlyError);
+          clearTimeout(timer);
+          resolve();
+        };
+        child.once('error', onEarlyError);
+        const timer = setTimeout(() => {
+          child.removeListener('error', onEarlyError);
+          resolve();
+        }, 1000);
+      });
+
+      if (earlyError) {
+        this.claudeProcess = null;
+        this.isStarting = false;
+        const err = earlyError as NodeJS.ErrnoException;
+        if (err.message.includes('ENOENT') || err.code === 'ENOENT') {
+          throw new Error('Claude Code CLI not found. Use /backend to switch to another AI backend.');
+        }
+        throw err;
+      }
+
+      // Long-running error handler for errors that occur after startup
       child.on('error', (error) => {
         console.error('[ClaudePersistent] Process error:', error);
         this.claudeProcess = null;
@@ -486,7 +518,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
         if (this.currentCommandReject) {
           if (error.message.includes('ENOENT')) {
             this.currentCommandReject(new Error(
-              'Claude Code CLI not found. Please ensure Claude Code is installed and available in PATH.'
+              'Claude Code CLI not found. Use /backend to switch to another AI backend.'
             ));
           } else {
             this.currentCommandReject(error);
@@ -494,9 +526,6 @@ export class ClaudePersistentExecutor extends EventEmitter {
           this.resetCurrentCommand();
         }
       });
-
-      // Wait a bit for process to be ready
-      await new Promise(resolve => setTimeout(resolve, 1000));
 
       // Clear startup phase after a few seconds (stderr won't be buffered anymore)
       setTimeout(() => {

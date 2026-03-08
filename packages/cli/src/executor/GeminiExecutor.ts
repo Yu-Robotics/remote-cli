@@ -121,9 +121,13 @@ export class GeminiExecutor implements IExecutor {
       };
     } catch (error) {
       console.error(`[GeminiExecutor] ❌ Execute error:`, error);
+      const msg = error instanceof Error ? error.message : 'Unknown error';
+      const friendlyMsg = msg.includes('ENOENT') || msg.includes('not found')
+        ? 'Gemini CLI is not installed or not found on PATH. Use /backend to switch to another AI backend.'
+        : msg;
       return {
         success: false,
-        error: error instanceof Error ? error.message : 'Unknown error',
+        error: friendlyMsg,
       };
     } finally {
       client.destroy();
