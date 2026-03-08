@@ -8,6 +8,7 @@ import { CLI_VERSION } from '../types';
 import type { ExecutorConfig } from '../types/config';
 import axios from 'axios';
 import * as readline from 'readline';
+import { execFile } from 'child_process';
 import ora, { type Ora } from 'ora';
 
 /**
@@ -37,6 +38,32 @@ export function isNewerVersion(remote: string, local: string): boolean {
   if (rMaj !== lMaj) return rMaj > lMaj;
   if (rMin !== lMin) return rMin > lMin;
   return rPatch > lPatch;
+}
+
+/**
+ * Check that the CLI binary for the chosen backend is reachable.
+ * Prints a clear warning (non-fatal) if not found so the local operator
+ * knows why commands will fail before the first Feishu message arrives.
+ */
+async function checkBackendAvailability(type: string, spinner: Ora): Promise<void> {
+  const isGemini = type === 'gemini';
+  const cmd = isGemini ? 'npx' : 'claude';
+  const args = isGemini ? ['--no', '@google/gemini-cli', '--version'] : ['--version'];
+  const label = isGemini ? 'Gemini CLI' : 'Claude Code';
+
+  const available = await new Promise<boolean>((resolve) => {
+    execFile(cmd, args, { timeout: 5000 }, (err) => resolve(!err));
+  });
+
+  if (!available) {
+    spinner.warn(`${label} not found on PATH`);
+    console.log('');
+    console.log(`⚠️  The selected backend "${type}" (${label}) is not installed.`);
+    console.log('Users will receive an error message via Feishu when they send commands.');
+    console.log('You can switch backends with the /backend command in Feishu chat.');
+    console.log('');
+    spinner.start('Continuing...');
+  }
 }
 
 /**
@@ -173,6 +200,9 @@ export async function startCommand(
     const lastWorkingDirectory = config.get('lastWorkingDirectory') as string | undefined;
     const executorConfig = (config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' as const };
     const executor = createExecutor(directoryGuard, executorConfig, lastWorkingDirectory);
+
+    // Warn if the selected backend CLI is not installed
+    await checkBackendAvailability(executorConfig.type ?? 'auto', spinner);
 
     // If lastWorkingDirectory is set, verify it was applied correctly
     if (!lastWorkingDirectory) {
