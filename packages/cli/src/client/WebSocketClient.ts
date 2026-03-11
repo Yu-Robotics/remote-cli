@@ -145,6 +145,13 @@ export class WebSocketClient {
   }
 
   /**
+   * Stop the WebSocket client (alias for disconnect)
+   */
+  stop(): void {
+    this.disconnect();
+  }
+
+  /**
    * Send message
    * @param message Message object
    */

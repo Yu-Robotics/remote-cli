@@ -1,5 +1,6 @@
 import { spawn } from 'child_process';
 import { DirectoryGuard } from '../security/DirectoryGuard';
+import type { IExecutor, ExecuteOptions, ExecuteResult } from './IExecutor';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -25,6 +26,7 @@ function getClaudeSessionsDir(): string | null {
 
 /**
  * Claude execution options
+ * @deprecated Use ExecuteOptions instead
  */
 export interface ClaudeExecuteOptions {
   /** Stream output callback */
@@ -35,6 +37,7 @@ export interface ClaudeExecuteOptions {
 
 /**
  * Claude execution result
+ * @deprecated Use ExecuteResult instead
  */
 export interface ClaudeExecuteResult {
   /** Whether execution was successful */
@@ -58,7 +61,7 @@ interface SessionInfo {
  * Claude Executor
  * Manages session ID for continuity using --resume
  */
-export class ClaudeExecutor {
+export class ClaudeExecutor implements IExecutor {
   private directoryGuard: DirectoryGuard;
   private currentWorkingDirectory: string;
   private isExecuting = false;
@@ -188,8 +191,8 @@ export class ClaudeExecutor {
    */
   async execute(
     prompt: string,
-    options: ClaudeExecuteOptions = {}
-  ): Promise<ClaudeExecuteResult> {
+    options: ExecuteOptions = {}
+  ): Promise<ExecuteResult> {
     if (this.isDestroyed) {
       return {
         success: false,

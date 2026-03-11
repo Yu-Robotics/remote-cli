@@ -4,6 +4,7 @@ import { ClaudeExecutor } from '../src/executor/ClaudeExecutor';
 import { WebSocketClient } from '../src/client/WebSocketClient';
 import { DirectoryGuard } from '../src/security/DirectoryGuard';
 import { ConfigManager } from '../src/config/ConfigManager';
+import type { IExecutor } from '../src/executor';
 
 // Mock dependencies
 vi.mock('../src/executor/ClaudeExecutor');
@@ -35,6 +36,8 @@ describe('MessageHandler', () => {
     mockWsClient = {
       send: vi.fn(),
       isConnected: vi.fn(() => true),
+      stop: vi.fn(),
+      disconnect: vi.fn(),
     };
 
     // Mock ConfigManager
@@ -820,6 +823,322 @@ describe('MessageHandler', () => {
           error: 'Some other error',
         })
       );
+    });
+  });
+
+  describe('Auto-compact recovery', () => {
+    beforeEach(() => {
+      mockExecutor.compactWhenFull = vi.fn().mockResolvedValue({ success: true });
+    });
+
+    it('should auto-compact and retry on Prompt too long error', async () => {
+      // First call fails with Prompt too long, second succeeds
+      mockExecutor.execute
+        .mockResolvedValueOnce({
+          success: false,
+          error: 'Prompt too long: context exceeds model limit',
+        })
+        .mockResolvedValueOnce({
+          success: true,
+          output: 'Task completed after compaction',
+        });
+
+      const message = {
+        type: 'command',
+        messageId: 'msg-autocompact',
+        content: 'do something big',
+        timestamp: Date.now(),
+      };
+
+      await handler.handleMessage(message);
+
+      // Should have called execute twice
+      expect(mockExecutor.execute).toHaveBeenCalledTimes(2);
+      // Should have called compactWhenFull
+      expect(mockExecutor.compactWhenFull).toHaveBeenCalled();
+      // Should have sent "auto-compressing" stream message
+      expect(mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'stream',
+          chunk: expect.stringContaining('auto-compressing'),
+        })
+      );
+      // Should have sent "compressed" stream message
+      expect(mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'stream',
+          chunk: expect.stringContaining('Compressed'),
+        })
+      );
+    });
+
+    it('should handle auto-compact failure gracefully', async () => {
+      mockExecutor.execute.mockResolvedValue({
+        success: false,
+        error: 'Prompt too long: context exceeds model limit',
+      });
+      mockExecutor.compactWhenFull.mockResolvedValue({
+        success: false,
+        error: 'Compaction failed: process error',
+      });
+
+      const message = {
+        type: 'command',
+        messageId: 'msg-compact-fail',
+        content: 'do something',
+        timestamp: Date.now(),
+      };
+
+      await handler.handleMessage(message);
+
+      expect(mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'response',
+          success: false,
+          error: expect.stringContaining('Auto-compact failed'),
+        })
+      );
+    });
+
+    it('should not retry more than maxRetries times', async () => {
+      mockExecutor.execute.mockResolvedValue({
+        success: false,
+        error: 'Prompt too long: context exceeds model limit',
+      });
+
+      const message = {
+        type: 'command',
+        messageId: 'msg-max-retries',
+        content: 'do something',
+        timestamp: Date.now(),
+      };
+
+      await handler.handleMessage(message);
+
+      // Should have called execute maxRetries + 1 times (initial + 2 retries = 3 total)
+      expect(mockExecutor.execute).toHaveBeenCalledTimes(3);
+      // Final response should tell user to use /clear
+      expect(mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'response',
+          success: false,
+          error: expect.stringContaining('after multiple compaction attempts'),
+        })
+      );
+    });
+
+    it('should detect various context full error patterns', async () => {
+      const errorMessages = [
+        'Prompt too long',
+        'context too long',
+        'context length exceeded',
+        'token limit exceeded',
+        'maximum context length',
+      ];
+
+      for (const errorMsg of errorMessages) {
+        mockExecutor.execute.mockClear();
+        mockExecutor.compactWhenFull.mockClear();
+        mockWsClient.send.mockClear();
+
+        mockExecutor.execute
+          .mockResolvedValueOnce({
+            success: false,
+            error: errorMsg,
+          })
+          .mockResolvedValueOnce({
+            success: true,
+            output: 'ok',
+          });
+
+        const message = {
+          type: 'command',
+          messageId: `msg-${errorMsg.replace(/\s+/g, '-')}`,
+          content: 'test',
+          timestamp: Date.now(),
+        };
+
+        await handler.handleMessage(message);
+
+        expect(mockExecutor.compactWhenFull).toHaveBeenCalled();
+      }
+    });
+
+    it('should stream compact output during auto-compact', async () => {
+      mockExecutor.execute.mockResolvedValueOnce({
+        success: false,
+        error: 'Prompt too long',
+      });
+      mockExecutor.execute.mockResolvedValueOnce({
+        success: true,
+        output: 'done',
+      });
+      mockExecutor.compactWhenFull.mockImplementation(async (onStream: (chunk: string) => void) => {
+        onStream('Compacting step 1...');
+        onStream('Compacting step 2...');
+        return { success: true };
+      });
+
+      const message = {
+        type: 'command',
+        messageId: 'msg-stream-compact',
+        content: 'do something',
+        timestamp: Date.now(),
+      };
+
+      await handler.handleMessage(message);
+
+      expect(mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'stream',
+          chunk: 'Compacting step 1...',
+        })
+      );
+      expect(mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'stream',
+          chunk: 'Compacting step 2...',
+        })
+      );
+    });
+
+    it('should fall back to manual compact message if compactWhenFull not available', async () => {
+      mockExecutor.execute.mockResolvedValue({
+        success: false,
+        error: 'Prompt too long',
+      });
+      // Remove compactWhenFull method
+      delete mockExecutor.compactWhenFull;
+
+      const message = {
+        type: 'command',
+        messageId: 'msg-no-compact',
+        content: 'do something',
+        timestamp: Date.now(),
+      };
+
+      await handler.handleMessage(message);
+
+      expect(mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'response',
+          success: false,
+          error: expect.stringContaining('Use /compact'),
+        })
+      );
+    });
+  });
+
+  describe('WebSocketClient stop method', () => {
+    it('should call wsClient.stop() when handler is destroyed', () => {
+      handler.destroy();
+
+      expect(mockWsClient.stop).toHaveBeenCalled();
+    });
+
+    it('should call executor.destroy() when handler is destroyed', () => {
+      handler.destroy();
+
+      expect(mockExecutor.destroy).toHaveBeenCalled();
+    });
+
+    it('should be able to destroy multiple times safely', () => {
+      expect(() => {
+        handler.destroy();
+        handler.destroy();
+      }).not.toThrow();
+
+      expect(mockWsClient.stop).toHaveBeenCalledTimes(2);
+      expect(mockExecutor.destroy).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('IExecutor interface compatibility', () => {
+    it('should work with any IExecutor implementation', async () => {
+      // Create a minimal IExecutor mock
+      const customExecutor: IExecutor = {
+        execute: vi.fn().mockResolvedValue({ success: true, output: 'custom result' }),
+        setWorkingDirectory: vi.fn(),
+        getCurrentWorkingDirectory: vi.fn(() => '/custom/path'),
+        resetContext: vi.fn(),
+        abort: vi.fn().mockResolvedValue(true),
+        destroy: vi.fn(),
+      };
+
+      const customHandler = new MessageHandler(mockWsClient, customExecutor, directoryGuard, mockConfig);
+
+      const message = {
+        type: 'command',
+        messageId: 'msg-custom',
+        content: 'test command',
+        timestamp: Date.now(),
+      };
+
+      await customHandler.handleMessage(message);
+
+      expect(customExecutor.execute).toHaveBeenCalled();
+    });
+
+    it('should handle optional methods on IExecutor', async () => {
+      // Create an IExecutor with only required methods
+      const minimalExecutor: IExecutor = {
+        execute: vi.fn().mockResolvedValue({ success: true }),
+        setWorkingDirectory: vi.fn(),
+        getCurrentWorkingDirectory: vi.fn(() => '/minimal/path'),
+        resetContext: vi.fn(),
+        abort: vi.fn().mockResolvedValue(false),
+        destroy: vi.fn(),
+        // No optional methods
+      };
+
+      const minimalHandler = new MessageHandler(mockWsClient, minimalExecutor, directoryGuard, mockConfig);
+
+      // Test /compact (should fail gracefully without compactWhenFull)
+      const compactMessage = {
+        type: 'command',
+        messageId: 'msg-minimal-compact',
+        content: '/compact',
+        timestamp: Date.now(),
+      };
+
+      await minimalHandler.handleMessage(compactMessage);
+
+      expect(mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          success: false,
+          error: expect.stringContaining('not supported'),
+        })
+      );
+    });
+
+    it('should call optional isWaitingInput and sendInput when available', async () => {
+      const executorWithInput: IExecutor = {
+        execute: vi.fn().mockResolvedValue({ success: true }),
+        setWorkingDirectory: vi.fn(),
+        getCurrentWorkingDirectory: vi.fn(() => '/path'),
+        resetContext: vi.fn(),
+        abort: vi.fn().mockResolvedValue(true),
+        destroy: vi.fn(),
+        isWaitingInput: vi.fn().mockReturnValue(true),
+        sendInput: vi.fn().mockReturnValue(true),
+      };
+
+      const inputHandler = new MessageHandler(mockWsClient, executorWithInput, directoryGuard, mockConfig);
+
+      // Simulate waiting for input state
+      (inputHandler as any).isExecuting = true;
+
+      const inputMessage = {
+        type: 'command',
+        messageId: 'msg-input',
+        content: 'user input',
+        timestamp: Date.now(),
+      };
+
+      await inputHandler.handleMessage(inputMessage);
+
+      expect(executorWithInput.isWaitingInput).toHaveBeenCalled();
+      expect(executorWithInput.sendInput).toHaveBeenCalledWith('user input');
     });
   });
 });

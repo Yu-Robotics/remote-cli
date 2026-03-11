@@ -1,7 +1,7 @@
 import { WebSocketClient } from './WebSocketClient';
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import { IncomingMessage, OutgoingMessage, StructuredContent, ToolUseInfo, ToolResultInfo } from '../types';
-import type { ClaudeExecutor, ClaudePersistentExecutor } from '../executor';
+import type { IExecutor } from '../executor';
 import { FeishuNotificationAdapter } from '../hooks';
 import { ConfigManager } from '../config/ConfigManager';
 import { processFileReadContent } from '../utils/FileReadDetector';
@@ -23,7 +23,7 @@ export interface Message {
  */
 export class MessageHandler {
   private wsClient: WebSocketClient;
-  private executor: ClaudeExecutor | ClaudePersistentExecutor;
+  private executor: IExecutor;
   private directoryGuard: DirectoryGuard;
   private config: ConfigManager;
   private isDestroyed = false;
@@ -33,7 +33,7 @@ export class MessageHandler {
 
   constructor(
     wsClient: WebSocketClient,
-    executor: ClaudeExecutor | ClaudePersistentExecutor,
+    executor: IExecutor,
     directoryGuard: DirectoryGuard,
     config: ConfigManager
   ) {
@@ -109,12 +109,11 @@ export class MessageHandler {
     }
 
     // Check if executor is waiting for interactive input
-    if ('isWaitingInput' in this.executor && typeof this.executor.isWaitingInput === 'function') {
-      const executor = this.executor as { isWaitingInput(): boolean; sendInput(input: string): boolean };
-      if (executor.isWaitingInput()) {
+    if (this.executor.isWaitingInput && typeof this.executor.isWaitingInput === 'function') {
+      if (this.executor.isWaitingInput()) {
         const input = content?.trim();
-        if (input) {
-          const sent = executor.sendInput(input);
+        if (input && this.executor.sendInput) {
+          const sent = this.executor.sendInput(input);
           if (sent) {
             this.sendResponse(messageId, {
               success: true,
@@ -305,7 +304,7 @@ You can also use natural language commands to control Claude Code CLI.`,
 
     // /compact command - compress conversation history via Claude CLI's built-in /compact
     if (trimmed === '/compact') {
-      if (!('compactWhenFull' in this.executor && typeof this.executor.compactWhenFull === 'function')) {
+      if (!this.executor.compactWhenFull || typeof this.executor.compactWhenFull !== 'function') {
         this.sendResponse(messageId, {
           success: false,
           error: '/compact is not supported in this executor mode',
@@ -316,8 +315,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         success: true,
         output: '🗜️ Compressing conversation history...',
       });
-      const persistentExecutor = this.executor as ClaudePersistentExecutor;
-      const result = await persistentExecutor.compactWhenFull((chunk: string) => {
+      const result = await this.executor.compactWhenFull((chunk: string) => {
         this.sendStreamChunk(messageId, chunk);
       });
       if (!result.success) {
@@ -459,12 +457,37 @@ You can also use natural language commands to control Claude Code CLI.`,
   }
 
   /**
-   * Execute Claude command
+   * Execute Claude command with auto-compact recovery
    */
   private async executeCommand(
     messageId: string,
     content: string
   ): Promise<void> {
+    try {
+      const result = await this.executeWithAutoCompact(messageId, content);
+      this.sendResponse(messageId, {
+        success: result.success,
+        error: result.error,
+      });
+    } catch (error) {
+      this.sendResponse(messageId, {
+        success: false,
+        error: error instanceof Error ? error.message : 'Execution error',
+      });
+    }
+  }
+
+  /**
+   * Execute command with auto-compact recovery logic
+   * Handles "Prompt too long" errors by automatically compacting and retrying
+   */
+  private async executeWithAutoCompact(
+    messageId: string,
+    content: string,
+    retryCount: number = 0
+  ): Promise<{ success: boolean; error?: string }> {
+    const maxRetries = 2;
+
     try {
       const result = await this.executor.execute(content, {
         onStream: (chunk: string) => {
@@ -484,53 +507,68 @@ You can also use natural language commands to control Claude Code CLI.`,
         },
       });
 
-      // Only send success status, not the output
-      // Output has already been streamed via onStream callback
-      if (!result.success && result.error && result.error.includes('Prompt too long')) {
-        if ('compactWhenFull' in this.executor && typeof this.executor.compactWhenFull === 'function') {
-          // Context is full - use external compact which stops/restarts the process
-          this.sendStreamChunk(messageId, '⚠️ Conversation history too long, auto-compressing...\n');
-          const persistentExecutor = this.executor as ClaudePersistentExecutor;
-          const compactResult = await persistentExecutor.compactWhenFull((chunk: string) => {
-            this.sendStreamChunk(messageId, chunk);
-          });
-          if (!compactResult.success) {
-            this.sendResponse(messageId, {
-              success: false,
-              error: `❌ Auto-compact failed: ${compactResult.error}\n\nUse /compact to try again, or /clear to start fresh.`,
-            });
-            return;
-          }
-          this.sendStreamChunk(messageId, '✅ Compressed. Retrying...\n');
-          const retryResult = await this.executor.execute(content, {
-            onStream: (chunk: string) => { this.sendStreamChunk(messageId, chunk); },
-            onToolUse: (toolUse: ToolUseInfo) => { this.sendToolUse(messageId, toolUse); },
-            onToolResult: (toolResult: ToolResultInfo) => { this.sendToolResult(messageId, toolResult); },
-            onRedactedThinking: () => { this.sendRedactedThinking(messageId); },
-            onPlanMode: (planContent: string) => { this.sendPlanMode(messageId, planContent); },
-          });
-          this.sendResponse(messageId, {
-            success: retryResult.success,
-            error: retryResult.error,
-          });
-          return;
+      // Check for context full error
+      if (!result.success && result.error && this.isContextFullError(result.error)) {
+        // Don't retry if we've already tried max times
+        if (retryCount >= maxRetries) {
+          return {
+            success: false,
+            error: '❌ Conversation history too long after multiple compaction attempts.\n\nUse /clear to start fresh.'
+          };
         }
-        this.sendResponse(messageId, {
-          success: false,
-          error: '❌ Conversation history too long.\n\nUse /compact to compress it, or /clear to start fresh.',
+
+        // Check if compaction is supported
+        if (!this.executor.compactWhenFull || typeof this.executor.compactWhenFull !== 'function') {
+          return {
+            success: false,
+            error: '❌ Conversation history too long.\n\nUse /compact to compress it, or /clear to start fresh.'
+          };
+        }
+
+        // Try to compact and retry
+        this.sendStreamChunk(messageId, '⚠️ Conversation history too long, auto-compressing...\n');
+
+        const compactResult = await this.executor.compactWhenFull((chunk: string) => {
+          this.sendStreamChunk(messageId, chunk);
         });
-        return;
+
+        if (!compactResult.success) {
+          return {
+            success: false,
+            error: `❌ Auto-compact failed: ${compactResult.error}\n\nUse /compact to try again, or /clear to start fresh.`
+          };
+        }
+
+        this.sendStreamChunk(messageId, '✅ Compressed. Retrying...\n');
+
+        // Recursive retry with incremented count
+        return await this.executeWithAutoCompact(messageId, content, retryCount + 1);
       }
-      this.sendResponse(messageId, {
-        success: result.success,
-        error: result.error,
-      });
+
+      return result;
     } catch (error) {
-      this.sendResponse(messageId, {
+      // If we get an unexpected error during execution, don't retry
+      return {
         success: false,
-        error: error instanceof Error ? error.message : 'Execution error',
-      });
+        error: error instanceof Error ? error.message : 'Execution error'
+      };
     }
+  }
+
+  /**
+   * Check if an error indicates the context is full
+   */
+  private isContextFullError(error: string): boolean {
+    const contextFullPatterns = [
+      'Prompt too long',
+      'context too long',
+      'context length exceeded',
+      'token limit exceeded',
+      'maximum context length'
+    ];
+    return contextFullPatterns.some(pattern =>
+      error.toLowerCase().includes(pattern.toLowerCase())
+    );
   }
 
   /**
@@ -675,5 +713,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     this.isDestroyed = true;
     this.isExecuting = false;
     this.notificationAdapter.unregister();
+    this.wsClient.stop();
+    this.executor.destroy();
   }
 }

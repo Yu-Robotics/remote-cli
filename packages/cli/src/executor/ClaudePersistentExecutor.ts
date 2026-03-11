@@ -2,6 +2,7 @@ import { spawn, ChildProcess } from 'child_process';
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import { claudeCodeHooks } from '../hooks/ClaudeCodeHooks';
 import { StructuredContent, ContentBlockUnion, ToolUseInfo, ToolResultInfo } from '../types';
+import type { IExecutor, ExecuteOptions, ExecuteResult } from './IExecutor';
 import fs from 'fs';
 import path from 'path';
 import { EventEmitter } from 'events';
@@ -129,7 +130,7 @@ export interface PersistentClaudeResult {
  * Maintains a long-running Claude process and communicates via stdin/stdout
  * using stream-json format for real-time bidirectional communication.
  */
-export class ClaudePersistentExecutor extends EventEmitter {
+export class ClaudePersistentExecutor extends EventEmitter implements IExecutor {
   private directoryGuard: DirectoryGuard;
   private currentWorkingDirectory: string;
   private isDestroyed = false;
@@ -1209,8 +1210,8 @@ export class ClaudePersistentExecutor extends EventEmitter {
    */
   async execute(
     prompt: string,
-    options: PersistentClaudeOptions = {}
-  ): Promise<PersistentClaudeResult> {
+    options: ExecuteOptions = {}
+  ): Promise<ExecuteResult> {
     if (this.isDestroyed) {
       return {
         success: false,

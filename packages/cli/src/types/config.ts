@@ -1,3 +1,5 @@
+import type { ExecutorType } from '../executor';
+
 /**
  * Configuration type definitions
  */
@@ -39,6 +41,40 @@ export interface FeishuConfig {
 }
 
 /**
+ * Gemini executor configuration
+ */
+export interface GeminiExecutorConfig {
+  /** Gemini model to use */
+  model?: string;
+  /** Auto-approve tool permissions */
+  autoApprove?: boolean;
+  /** Override Gemini CLI command */
+  command?: string;
+  /** Pin Gemini CLI version */
+  version?: string;
+}
+
+/**
+ * Claude executor configuration
+ */
+export interface ClaudeExecutorConfig {
+  /** Whether to use persistent mode */
+  persistent?: boolean;
+}
+
+/**
+ * Executor configuration
+ */
+export interface ExecutorConfig {
+  /** Type of executor to use */
+  type: ExecutorType;
+  /** Gemini-specific configuration */
+  gemini?: GeminiExecutorConfig;
+  /** Claude-specific configuration */
+  claude?: ClaudeExecutorConfig;
+}
+
+/**
  * Complete configuration
  */
 export interface Config {
@@ -49,6 +85,7 @@ export interface Config {
   security: SecurityConfig;
   server: ServerConfig;
   feishu?: FeishuConfig;
+  executor?: ExecutorConfig;
   service?: {
     running?: boolean;
     startedAt?: number;
@@ -73,5 +110,8 @@ export const DEFAULT_CONFIG: Config = {
   },
   feishu: {
     directMode: false
+  },
+  executor: {
+    type: 'auto'
   }
 };

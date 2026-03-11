@@ -1,6 +1,6 @@
 import { ConfigManager } from '../config/ConfigManager';
 import { WebSocketClient } from '../client/WebSocketClient';
-import { createClaudeExecutor } from '../executor';
+import { createExecutor, type ExecutorConfig } from '../executor';
 import { MessageHandler } from '../client/MessageHandler';
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import { HooksConfigurator } from '../security/HooksConfigurator';
@@ -146,7 +146,11 @@ async function startRouterMode(
 
   // Get last working directory from config (if set) to initialize executor with correct path
   const lastWorkingDirectory = config.get('lastWorkingDirectory') as string | undefined;
-  const executor = createClaudeExecutor(directoryGuard, 'auto', lastWorkingDirectory);
+  const executorConfig: ExecutorConfig = {
+    type: config.get('executor.type') as any || 'auto',
+    initialWorkingDirectory: lastWorkingDirectory
+  };
+  const executor = createExecutor(directoryGuard, executorConfig);
 
   // If lastWorkingDirectory is set, verify it was applied correctly
   if (!lastWorkingDirectory) {
@@ -258,7 +262,11 @@ async function startDirectMode(
 
   // Get last working directory from config (if set) to initialize executor with correct path
   const lastWorkingDirectory = config.get('lastWorkingDirectory') as string | undefined;
-  const executor = createClaudeExecutor(directoryGuard, 'auto', lastWorkingDirectory);
+  const executorConfig: ExecutorConfig = {
+    type: config.get('executor.type') as any || 'auto',
+    initialWorkingDirectory: lastWorkingDirectory
+  };
+  const executor = createExecutor(directoryGuard, executorConfig);
 
   // If lastWorkingDirectory is set, verify it was applied correctly
   if (!lastWorkingDirectory) {
