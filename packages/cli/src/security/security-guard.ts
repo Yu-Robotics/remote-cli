@@ -284,8 +284,9 @@ export function validateToolUse(hookData: HookData, allowedDirs: string[]): Vali
 }
 
 /**
- * Load allowed directories from config file
- * If lastWorkingDirectory is set, use it as the primary allowed directory
+ * Load allowed directories from config file.
+ * Merges allowedDirectories and lastWorkingDirectory so that both the
+ * user-configured whitelist and the current working directory are permitted.
  */
 export function loadAllowedDirs(configPath?: string): string[] {
   const effectivePath = configPath ||
@@ -295,14 +296,15 @@ export function loadAllowedDirs(configPath?: string): string[] {
   try {
     const config = JSON.parse(fs.readFileSync(effectivePath, 'utf8'));
 
-    // If lastWorkingDirectory is set, use it as the primary (and only) allowed directory
-    // This ensures security is tied to the current working directory
+    const configured: string[] = config.security?.allowedDirectories || [];
+
+    // Include lastWorkingDirectory in addition to (not instead of) the configured list
     if (config.lastWorkingDirectory) {
-      return [config.lastWorkingDirectory];
+      const merged = new Set([...configured, config.lastWorkingDirectory]);
+      return Array.from(merged);
     }
 
-    // Fallback to allowedDirectories if no working directory is set
-    return config.security?.allowedDirectories || [];
+    return configured;
   } catch {
     return [];
   }
