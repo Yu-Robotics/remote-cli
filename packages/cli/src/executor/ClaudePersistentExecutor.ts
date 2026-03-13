@@ -846,13 +846,23 @@ export class ClaudePersistentExecutor extends EventEmitter {
             for (const block of userContentBlocks) {
               if (block.type === 'tool_result') {
                 const isError = block.is_error === true;
-                console.log(`[ClaudePersistent] Tool result received: tool_use_id=${block.id}, is_error=${isError}`);
+                // tool_use_id lives on block.tool_use_id in tool_result blocks (not block.id)
+                const toolUseId = (block as any).tool_use_id || (block as any).id || '';
+                console.log(`[ClaudePersistent] Tool result received: tool_use_id=${toolUseId}, is_error=${isError}`);
                 console.log(`[ClaudePersistent] Tool result full: ${JSON.stringify(message).substring(0, 500)}`);
+
+                // ExitPlanMode returns is_error=true with content "Exit plan mode?" when Claude Code
+                // requires user confirmation before exiting plan mode. This is a normal internal state
+                // transition, not a user-facing error — skip emitting it as a tool result card.
+                if (isError && typeof block.content === 'string' && /exit plan mode\??/i.test(block.content)) {
+                  console.log('[ClaudePersistent] Suppressing ExitPlanMode pseudo-error tool result');
+                  continue;
+                }
 
                 // Send structured tool result event if callback is available
                 if (this.currentToolResultCallback) {
                   this.currentToolResultCallback({
-                    tool_use_id: block.id || '',
+                    tool_use_id: toolUseId,
                     content: block.content || '(no content)',
                     is_error: isError
                   });
@@ -866,7 +876,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
                 // Note: We don't have the original tool name here, but we have the tool_use_id
                 claudeCodeHooks.notifyToolExecuted(
                   {
-                    toolName: block.id || 'unknown', // Use tool_use_id as identifier
+                    toolName: toolUseId || 'unknown', // Use tool_use_id as identifier
                     params: {}, // Original params not available in tool_result
                     timestamp: Date.now(),
                     taskId: this.currentTaskId || undefined,
