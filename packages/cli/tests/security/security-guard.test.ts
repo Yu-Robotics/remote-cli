@@ -4,7 +4,7 @@ import * as fs from 'fs';
 
 // We'll test the validateToolUse function exported from security-guard
 // The module should export this function for testing
-import { validateToolUse, ValidationResult } from '../../src/security/security-guard';
+import { validateToolUse, loadAllowedDirs, ValidationResult } from '../../src/security/security-guard';
 
 describe('security-guard', () => {
   const mockHome = '/home/testuser';
@@ -530,6 +530,60 @@ describe('security-guard', () => {
 
         expect(result.allowed).toBe(false);
       });
+    });
+  });
+
+  describe('loadAllowedDirs', () => {
+    let tmpConfig: string;
+
+    beforeEach(() => {
+      tmpConfig = path.join('/tmp', '.remote-cli-test-config.json');
+    });
+
+    afterEach(() => {
+      if (fs.existsSync(tmpConfig)) {
+        fs.unlinkSync(tmpConfig);
+      }
+    });
+
+    it('should return allowedDirectories when lastWorkingDirectory is absent', () => {
+      fs.writeFileSync(tmpConfig, JSON.stringify({
+        security: { allowedDirectories: ['/home/user/projectA'] }
+      }));
+
+      const dirs = loadAllowedDirs(tmpConfig);
+
+      expect(dirs).toEqual(['/home/user/projectA']);
+    });
+
+    it('should merge lastWorkingDirectory into allowedDirectories, not replace them', () => {
+      fs.writeFileSync(tmpConfig, JSON.stringify({
+        security: { allowedDirectories: ['/home/user/projectA'] },
+        lastWorkingDirectory: '/home/user/projectB'
+      }));
+
+      const dirs = loadAllowedDirs(tmpConfig);
+
+      expect(dirs).toContain('/home/user/projectA');
+      expect(dirs).toContain('/home/user/projectB');
+      expect(dirs).toHaveLength(2);
+    });
+
+    it('should deduplicate when lastWorkingDirectory already exists in allowedDirectories', () => {
+      fs.writeFileSync(tmpConfig, JSON.stringify({
+        security: { allowedDirectories: ['/home/user/projectA'] },
+        lastWorkingDirectory: '/home/user/projectA'
+      }));
+
+      const dirs = loadAllowedDirs(tmpConfig);
+
+      expect(dirs).toEqual(['/home/user/projectA']);
+    });
+
+    it('should return empty array when config file does not exist', () => {
+      const dirs = loadAllowedDirs('/nonexistent/path/config.json');
+
+      expect(dirs).toEqual([]);
     });
   });
 });
