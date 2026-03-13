@@ -381,6 +381,76 @@ describe('ClaudePersistentExecutor - Plan Mode', () => {
     });
   });
 
+  describe('ExitPlanMode pseudo-error suppression', () => {
+    it('should suppress ExitPlanMode tool_result with "exit plan mode?" error content', () => {
+      const handleOutputLine = (executor as any).handleOutputLine.bind(executor);
+      const mockToolResultCallback = vi.fn();
+      (executor as any).currentToolResultCallback = mockToolResultCallback;
+
+      handleOutputLine(JSON.stringify({
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [{
+            type: 'tool_result',
+            content: 'Exit plan mode?',
+            is_error: true,
+            tool_use_id: 'toolu_01ShaFVAHWeaKihWZYqb8nsX'
+          }]
+        }
+      }));
+
+      // Should not emit a tool result card for this pseudo-error
+      expect(mockToolResultCallback).not.toHaveBeenCalled();
+    });
+
+    it('should still emit real tool_result errors to callback', () => {
+      const handleOutputLine = (executor as any).handleOutputLine.bind(executor);
+      const mockToolResultCallback = vi.fn();
+      (executor as any).currentToolResultCallback = mockToolResultCallback;
+
+      handleOutputLine(JSON.stringify({
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [{
+            type: 'tool_result',
+            content: 'File not found',
+            is_error: true,
+            tool_use_id: 'toolu_abc123'
+          }]
+        }
+      }));
+
+      expect(mockToolResultCallback).toHaveBeenCalledWith(
+        expect.objectContaining({ is_error: true, content: 'File not found' })
+      );
+    });
+
+    it('should read tool_use_id from block.tool_use_id field', () => {
+      const handleOutputLine = (executor as any).handleOutputLine.bind(executor);
+      const mockToolResultCallback = vi.fn();
+      (executor as any).currentToolResultCallback = mockToolResultCallback;
+
+      handleOutputLine(JSON.stringify({
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [{
+            type: 'tool_result',
+            content: 'ok',
+            is_error: false,
+            tool_use_id: 'toolu_correct_id'
+          }]
+        }
+      }));
+
+      expect(mockToolResultCallback).toHaveBeenCalledWith(
+        expect.objectContaining({ tool_use_id: 'toolu_correct_id' })
+      );
+    });
+  });
+
   describe('Defensive behavior', () => {
     it('should not throw when no onPlanMode callback is registered', () => {
       const handleOutputLine = (executor as any).handleOutputLine.bind(executor);
