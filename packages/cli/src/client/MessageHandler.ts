@@ -324,10 +324,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         });
         return true;
       }
-      this.sendResponse(messageId, {
-        success: true,
-        output: '🗜️ Compressing conversation history...',
-      });
+      this.sendStreamChunk(messageId, '🗜️ Compressing conversation history...\n');
       const persistentExecutor = this.executor as IExecutor;
       const result = await persistentExecutor.compactWhenFull!((chunk: string) => {
         this.sendStreamChunk(messageId, chunk);

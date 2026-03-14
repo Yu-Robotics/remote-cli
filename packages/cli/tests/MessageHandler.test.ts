@@ -650,16 +650,15 @@ describe('MessageHandler', () => {
       await handler.handleMessage(message);
 
       expect(mockExecutor.compactWhenFull).toHaveBeenCalled();
-      // First response: "Compressing..."
+      // First: stream chunk "Compressing..." (card stays in loading state)
       expect(mockWsClient.send).toHaveBeenCalledWith(
         expect.objectContaining({
-          type: 'response',
+          type: 'stream',
           messageId: 'msg-compact',
-          success: true,
-          output: expect.stringContaining('Compressing'),
+          chunk: expect.stringContaining('Compressing'),
         })
       );
-      // Second response: "Compressed"
+      // Final response: "Compressed" (triggers finalize)
       expect(mockWsClient.send).toHaveBeenCalledWith(
         expect.objectContaining({
           type: 'response',
