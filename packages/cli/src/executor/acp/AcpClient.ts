@@ -1,24 +1,24 @@
 import { ChildProcess, spawn } from 'child_process';
 import * as readline from 'readline';
-import {
+import type {
+  PermissionOption,
+  SessionUpdate,
+  ContentChunk,
+  ToolCall,
+  ToolCallUpdate,
+  Plan,
+} from '@agentclientprotocol/sdk';
+import type {
   JsonRpcRequest,
   JsonRpcNotification,
   JsonRpcResponse,
   JsonRpcSuccessResponse,
   JsonRpcErrorResponse,
   AcpSessionUpdateParams,
-  AcpRequestPermissionParams,
-  AcpPermissionOption,
-  AcpPermissionResponse,
-  AcpInitializeResult,
-  AcpNewSessionResult,
-  AcpPromptResult,
-  AcpUpdateAgentMessageChunk,
-  AcpUpdateAgentThoughtChunk,
-  AcpUpdateToolCall,
-  AcpUpdateToolCallUpdate,
-  AcpUpdatePlan,
 } from './AcpTypes';
+
+// ─── Grace period before SIGKILL after SIGTERM (mirrors acpx) ─────────────────
+const SIGKILL_GRACE_MS = 5_000;
 
 export interface AcpEventCallbacks {
   onTextChunk: (text: string) => void;
@@ -27,7 +27,7 @@ export interface AcpEventCallbacks {
   onToolResult?: (toolCallId: string, status: string, output?: string) => void;
   onPlan?: (text: string) => void;
   /** Returns the index of the chosen option (0 = first = typically allow_once). */
-  onPermissionRequest?: (title: string, options: AcpPermissionOption[]) => Promise<number>;
+  onPermissionRequest?: (title: string, options: PermissionOption[]) => Promise<number>;
 }
 
 interface PendingRequest {
@@ -38,12 +38,12 @@ interface PendingRequest {
 /**
  * Bidirectional JSON-RPC 2.0 transport for Gemini CLI ACP.
  *
- * Manages a single Gemini CLI child process and routes messages:
- *  - Outgoing: sendRequest / sendNotification over stdin
- *  - Incoming: responses, notifications, server-side requests (permission) over stdout
- *
- * Permissions are auto-approved with allow_once unless a custom onPermissionRequest
- * callback is provided.
+ * Improvements over the previous version (inspired by acpx):
+ *  - Uses canonical types from @agentclientprotocol/sdk
+ *  - Multi-stage graceful shutdown: stdin close → SIGTERM → SIGKILL
+ *  - Explicit sendCancel() for cooperative in-flight cancellation
+ *  - Strict JSON-RPC message validation before routing
+ *  - Handles the 'close' event in addition to 'exit' for reliable cleanup
  */
 export class AcpClient {
   private child: ChildProcess;
@@ -52,6 +52,7 @@ export class AcpClient {
   private callbacks: AcpEventCallbacks;
   private rl: readline.Interface;
   private destroyed = false;
+  private killTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     geminiCommand: string,
@@ -75,9 +76,11 @@ export class AcpClient {
       this.rejectAllPending(err);
     });
 
-    this.child.on('exit', (code, signal) => {
+    // Use 'close' (fires after stdio is drained) rather than 'exit' alone
+    this.child.on('close', (code, signal) => {
+      this.clearKillTimer();
       if (!this.destroyed) {
-        console.warn(`[AcpClient] Child exited unexpectedly: code=${code} signal=${signal}`);
+        console.warn(`[AcpClient] Child closed unexpectedly: code=${code} signal=${signal}`);
         this.rejectAllPending(new Error(`Gemini CLI exited: code=${code} signal=${signal}`));
       }
     });
@@ -86,12 +89,12 @@ export class AcpClient {
   // ─── ACP lifecycle ──────────────────────────────────────────────────────────
 
   async initialize(): Promise<void> {
-    const result = await this.sendRequest('initialize', { protocolVersion: 1 }) as AcpInitializeResult;
+    const result = await this.sendRequest('initialize', { protocolVersion: 1 }) as { protocolVersion: number };
     console.log(`[AcpClient] Initialized, server protocol version: ${result.protocolVersion}`);
   }
 
   async newSession(cwd: string): Promise<string> {
-    const result = await this.sendRequest('session/new', { cwd, mcpServers: [] }) as AcpNewSessionResult;
+    const result = await this.sendRequest('session/new', { cwd, mcpServers: [] }) as { sessionId: string };
     return result.sessionId;
   }
 
@@ -100,22 +103,53 @@ export class AcpClient {
     await this.sendRequest('session/set_mode', { sessionId, modeId });
   }
 
-  async prompt(sessionId: string, text: string): Promise<AcpPromptResult> {
-    const result = await this.sendRequest('session/prompt', { sessionId, prompt: [{ type: 'text', text }] }) as AcpPromptResult;
+  async prompt(sessionId: string, text: string): Promise<{ stopReason: string }> {
+    const result = await this.sendRequest('session/prompt', {
+      sessionId,
+      prompt: [{ type: 'text', text }],
+    }) as { stopReason: string };
     return result;
   }
 
+  /**
+   * Send a cooperative cancel notification for an in-flight prompt.
+   * The agent may still send final updates before replying with stopReason='cancelled'.
+   */
   sendCancel(sessionId: string): void {
     this.sendNotification('session/cancel', { sessionId });
   }
 
+  /**
+   * Graceful multi-stage shutdown (mirrors acpx):
+   *   1. Close stdin so the agent sees EOF
+   *   2. Send SIGTERM and wait SIGKILL_GRACE_MS
+   *   3. If still alive, send SIGKILL
+   */
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
     this.rl.close();
-    if (!this.child.killed) {
-      this.child.kill('SIGTERM');
+
+    // Stage 1: close stdin (EOF signal to the child)
+    try {
+      this.child.stdin?.end();
+    } catch {
+      // ignore
     }
+
+    if (!this.child.killed) {
+      // Stage 2: SIGTERM
+      this.child.kill('SIGTERM');
+
+      // Stage 3: escalate to SIGKILL if still running after grace period
+      this.killTimer = setTimeout(() => {
+        if (!this.child.killed) {
+          console.warn('[AcpClient] Grace period elapsed, sending SIGKILL');
+          this.child.kill('SIGKILL');
+        }
+      }, SIGKILL_GRACE_MS);
+    }
+
     this.rejectAllPending(new Error('AcpClient destroyed'));
   }
 
@@ -148,50 +182,60 @@ export class AcpClient {
   private writeLine(msg: object): void {
     if (this.destroyed || !this.child.stdin) return;
     const line = JSON.stringify(msg);
-    console.log(`[AcpClient] → Sending: ${line.slice(0, 200)}${line.length > 200 ? '...' : ''}`);
+    console.log(`[AcpClient] → ${line.slice(0, 200)}${line.length > 200 ? '...' : ''}`);
     this.child.stdin.write(line + '\n');
   }
 
   private handleLine(line: string): void {
     if (!line.trim()) return;
-    console.log(`[AcpClient] ← Raw line: ${line.slice(0, 300)}${line.length > 300 ? '...' : ''}`);
+    console.log(`[AcpClient] ← ${line.slice(0, 300)}${line.length > 300 ? '...' : ''}`);
+
     let msg: unknown;
     try {
       msg = JSON.parse(line);
     } catch {
-      // Non-JSON output from Gemini CLI — ignore (e.g. startup logs)
-      console.log(`[AcpClient] ← Non-JSON output: ${line.slice(0, 200)}`);
+      // Non-JSON output (e.g. Gemini startup logs) — ignore
+      console.log(`[AcpClient] ← Non-JSON: ${line.slice(0, 200)}`);
       return;
     }
 
+    // ── Strict JSON-RPC 2.0 validation ──────────────────────────────────────
+    if (typeof msg !== 'object' || msg === null) return;
     const obj = msg as Record<string, unknown>;
+    if (obj['jsonrpc'] !== '2.0') {
+      console.warn('[AcpClient] ⚠️ Dropping non-JSON-RPC-2.0 message');
+      return;
+    }
 
-    if (typeof obj['id'] === 'number' && obj['method']) {
-      // Server-side request (e.g. session/request_permission)
+    const hasId = typeof obj['id'] === 'number';
+    const hasMethod = typeof obj['method'] === 'string';
+
+    if (hasId && hasMethod) {
+      // Server→client request (e.g. session/request_permission)
       this.handleServerRequest(obj as unknown as JsonRpcRequest);
-    } else if (typeof obj['id'] === 'number') {
+    } else if (hasId) {
       // Response to one of our requests
       this.handleResponse(obj as unknown as JsonRpcResponse);
-    } else if (obj['method']) {
-      // Notification from server
+    } else if (hasMethod) {
+      // Notification
       this.handleNotification(obj as unknown as JsonRpcNotification);
+    } else {
+      console.warn('[AcpClient] ⚠️ Unrecognized JSON-RPC message shape');
     }
   }
 
   private handleResponse(msg: JsonRpcResponse): void {
     const pending = this.pendingRequests.get(msg.id);
     if (!pending) {
-      console.log(`[AcpClient] ⚠️ No pending request for id=${msg.id}`);
+      console.warn(`[AcpClient] ⚠️ No pending request for id=${msg.id}`);
       return;
     }
     this.pendingRequests.delete(msg.id);
 
     if ('error' in msg) {
-      console.error(`[AcpClient] ❌ JSON-RPC Error: code=${msg.error.code}, message=${msg.error.message}`);
-      console.error(`[AcpClient] ❌ Full error data:`, JSON.stringify(msg.error, null, 2));
+      console.error(`[AcpClient] ❌ RPC error id=${msg.id} code=${msg.error.code}: ${msg.error.message}`);
       pending.reject(new Error(`ACP error ${msg.error.code}: ${msg.error.message}`));
     } else {
-      console.log(`[AcpClient] ✅ Response received for id=${msg.id}`);
       pending.resolve(msg.result);
     }
   }
@@ -200,14 +244,18 @@ export class AcpClient {
     if (msg.method === 'session/update') {
       this.handleSessionUpdate(msg.params as AcpSessionUpdateParams);
     }
-    // Other notifications are silently ignored
+    // Other notifications silently ignored
   }
 
   private handleServerRequest(msg: JsonRpcRequest): void {
     if (msg.method === 'session/request_permission') {
-      void this.handlePermissionRequest(msg.id, msg.params as AcpRequestPermissionParams);
+      void this.handlePermissionRequest(msg.id, msg.params as {
+        sessionId: string;
+        toolCall: { toolCallId: string; title: string };
+        options: PermissionOption[];
+      });
     } else {
-      // Unsupported method — return method_not_found (Gemini falls back to local filesystem ops)
+      // Unknown method — reply method_not_found so the agent can fall back gracefully
       this.sendErrorResponse(msg.id, -32601, 'Method not found');
     }
   }
@@ -217,34 +265,41 @@ export class AcpClient {
 
     switch (update.sessionUpdate) {
       case 'agent_message_chunk': {
-        const text = (update as AcpUpdateAgentMessageChunk).content.text;
+        const block = (update as ContentChunk & { sessionUpdate: string }).content;
+        const text = block.type === 'text' ? block.text : undefined;
         if (text) this.callbacks.onTextChunk(text);
         break;
       }
       case 'agent_thought_chunk': {
-        const text = (update as AcpUpdateAgentThoughtChunk).content.text;
+        const block = (update as ContentChunk & { sessionUpdate: string }).content;
+        const text = block.type === 'text' ? block.text : undefined;
         if (text && this.callbacks.onThoughtChunk) {
           this.callbacks.onThoughtChunk(text);
         }
         break;
       }
       case 'tool_call': {
-        const u = update as AcpUpdateToolCall;
+        const u = update as ToolCall & { sessionUpdate: string };
         if (this.callbacks.onToolCall) {
-          this.callbacks.onToolCall(u.toolCallId, u.title, u.kind);
+          this.callbacks.onToolCall(u.toolCallId, u.title ?? u.toolCallId, u.kind ?? undefined);
         }
         break;
       }
       case 'tool_call_update': {
-        const u = update as AcpUpdateToolCallUpdate;
+        const u = update as ToolCallUpdate & { sessionUpdate: string };
         if (u.status === 'completed' && this.callbacks.onToolResult) {
-          this.callbacks.onToolResult(u.toolCallId, u.status, u.rawOutput);
+          const rawOutput = u.content
+            ?.map((c) => ('text' in c ? (c as { text?: string }).text : ''))
+            .filter(Boolean)
+            .join('');
+          this.callbacks.onToolResult(u.toolCallId, u.status, rawOutput);
         }
         break;
       }
       case 'plan': {
         if (this.callbacks.onPlan) {
-          const text = (update as AcpUpdatePlan).entries
+          const u = update as Plan & { sessionUpdate: string };
+          const text = u.entries
             .map((e) => `[${e.status}] ${e.content}`)
             .join('\n');
           this.callbacks.onPlan(text);
@@ -252,13 +307,16 @@ export class AcpClient {
         break;
       }
       default:
-        // Unknown update type — ignore
+        // Unknown update type — silently ignore for forward compatibility
         break;
     }
   }
 
-  private async handlePermissionRequest(id: number, params: AcpRequestPermissionParams): Promise<void> {
-    let chosenIndex = 0; // default: first option = allow_once / proceed_once
+  private async handlePermissionRequest(
+    id: number,
+    params: { sessionId: string; toolCall: { toolCallId: string; title: string }; options: PermissionOption[] }
+  ): Promise<void> {
+    let chosenIndex = 0; // default: first option (allow_once / proceed_once)
 
     if (this.callbacks.onPermissionRequest) {
       try {
@@ -272,16 +330,23 @@ export class AcpClient {
     }
 
     const chosen = params.options[chosenIndex] ?? params.options[0];
-    const response: AcpPermissionResponse = chosen.kind.startsWith('reject')
-      ? { outcome: { outcome: 'cancelled' } }
-      : { outcome: { outcome: 'selected', optionId: chosen.optionId } };
-    this.sendResponse(id, response);
+    const outcome = chosen.kind.startsWith('reject')
+      ? { outcome: 'cancelled' as const }
+      : { outcome: 'selected' as const, optionId: chosen.optionId };
+    this.sendResponse(id, { outcome });
   }
 
   private rejectAllPending(error: Error): void {
-    for (const [id, pending] of this.pendingRequests) {
+    for (const [, pending] of this.pendingRequests) {
       pending.reject(error);
-      this.pendingRequests.delete(id);
+    }
+    this.pendingRequests.clear();
+  }
+
+  private clearKillTimer(): void {
+    if (this.killTimer !== null) {
+      clearTimeout(this.killTimer);
+      this.killTimer = null;
     }
   }
 }

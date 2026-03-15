@@ -1,10 +1,39 @@
 /**
- * ACP wire format type definitions (subset needed for our client role).
- * Gemini CLI exposes Agent Client Protocol (ACP) via --experimental-acp.
- * ACP is JSON-RPC 2.0 over stdio (newline-delimited).
+ * ACP type re-exports from @agentclientprotocol/sdk.
+ *
+ * We delegate all wire-format types to the official SDK rather than
+ * maintaining hand-written duplicates.  Only project-specific additions
+ * (that the SDK does not cover) live here.
  */
 
-// ─── JSON-RPC 2.0 envelope ────────────────────────────────────────────────────
+// ─── Re-export canonical SDK types ───────────────────────────────────────────
+
+export type {
+  // Session lifecycle
+  NewSessionResponse,
+  PromptResponse,
+  StopReason,
+
+  // Session updates
+  SessionUpdate,
+  ContentChunk,
+  ToolCall,
+  ToolCallUpdate,
+  Plan,
+  PlanEntry,
+  PlanEntryStatus,
+  PlanEntryPriority,
+
+  // Permissions
+  PermissionOption,
+  PermissionOptionKind,
+  PermissionOptionId,
+  RequestPermissionRequest,
+  RequestPermissionResponse,
+  RequestPermissionOutcome,
+} from '@agentclientprotocol/sdk';
+
+// ─── JSON-RPC 2.0 envelope (not exported by SDK — it only exposes ACP-level types) ──
 
 export interface JsonRpcRequest {
   jsonrpc: '2.0';
@@ -17,7 +46,6 @@ export interface JsonRpcNotification {
   jsonrpc: '2.0';
   method: string;
   params: unknown;
-  // No id field — notifications don't expect a response
 }
 
 export interface JsonRpcSuccessResponse {
@@ -34,99 +62,9 @@ export interface JsonRpcErrorResponse {
 
 export type JsonRpcResponse = JsonRpcSuccessResponse | JsonRpcErrorResponse;
 
-// ─── ACP content blocks ───────────────────────────────────────────────────────
-
-export interface AcpContentBlock {
-  type: 'text' | 'image' | 'resource_link' | 'resource';
-  text?: string;
-}
-
-// ─── session/update notification payload variants ─────────────────────────────
-
-export interface AcpUpdateAgentMessageChunk {
-  sessionUpdate: 'agent_message_chunk';
-  content: AcpContentBlock;
-}
-
-export interface AcpUpdateAgentThoughtChunk {
-  sessionUpdate: 'agent_thought_chunk';
-  content: AcpContentBlock;
-}
-
-export interface AcpUpdateToolCall {
-  sessionUpdate: 'tool_call';
-  toolCallId: string;
-  title: string;
-  kind?: string;
-  status?: string;
-}
-
-export interface AcpUpdateToolCallUpdate {
-  sessionUpdate: 'tool_call_update';
-  toolCallId: string;
-  status: string;
-  rawOutput?: string;
-}
-
-export interface AcpUpdatePlan {
-  sessionUpdate: 'plan';
-  entries: Array<{
-    content: string;
-    priority: 'high' | 'medium' | 'low';
-    status: 'pending' | 'in_progress' | 'completed';
-  }>;
-}
-
-export interface AcpUpdateUnknown {
-  sessionUpdate: string;
-  [key: string]: unknown;
-}
-
-export type AcpSessionUpdate =
-  | AcpUpdateAgentMessageChunk
-  | AcpUpdateAgentThoughtChunk
-  | AcpUpdateToolCall
-  | AcpUpdateToolCallUpdate
-  | AcpUpdatePlan
-  | AcpUpdateUnknown;
+// ─── Session update notification envelope (not in SDK public types) ──────────
 
 export interface AcpSessionUpdateParams {
   sessionId: string;
-  update: AcpSessionUpdate;
-}
-
-// ─── session/request_permission ───────────────────────────────────────────────
-
-export interface AcpPermissionOption {
-  /** ACP SDK optionId — must be echoed back in the response outcome */
-  optionId: string;
-  name: string;
-  kind: 'allow_once' | 'allow_always' | 'reject_once' | 'reject_always';
-}
-
-export interface AcpPermissionResponse {
-  outcome:
-    | { outcome: 'selected'; optionId: string }
-    | { outcome: 'cancelled' };
-}
-
-export interface AcpRequestPermissionParams {
-  sessionId: string;
-  toolCall: { toolCallId: string; title: string };
-  options: AcpPermissionOption[];
-}
-
-// ─── Method results ───────────────────────────────────────────────────────────
-
-export interface AcpInitializeResult {
-  protocolVersion: number;
-}
-
-export interface AcpNewSessionResult {
-  sessionId: string;
-}
-
-export interface AcpPromptResult {
-  sessionId: string;
-  stopReason: 'end_turn' | 'max_tokens' | 'cancelled' | 'refusal' | 'max_turn_requests';
+  update: import('@agentclientprotocol/sdk').SessionUpdate;
 }

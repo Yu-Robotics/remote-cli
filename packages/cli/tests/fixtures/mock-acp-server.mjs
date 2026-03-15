@@ -111,7 +111,7 @@ rl.on('line', async (line) => {
           sessionUpdate: 'tool_call_update',
           toolCallId: 'tc-2',
           status: 'completed',
-          rawOutput: 'file1.txt\nfile2.txt',
+          content: [{ type: 'text', text: 'file1.txt\nfile2.txt' }],
         },
       });
 
