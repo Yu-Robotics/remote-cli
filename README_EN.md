@@ -58,6 +58,33 @@ Remote control your Claude Code or Gemini CLI from anywhere using your mobile ph
 - 💡 **Development Convenience**: Continue programming, check logs, and fix issues when temporarily away from your computer
 - 🆓 **Completely Free**: No need to purchase cloud servers; utilize existing equipment
 
+### Scenario 3: Remotely Maintaining Open Source Projects (Real World Example)
+
+**Target Users**: Open source project maintainers, active contributors
+
+**Real Story**: You're out having coffee when your phone buzzes with a GitHub notification — someone filed a bug report on your open source project [openclaw](https://github.com/openclaw/openclaw). In the past, you'd have to wait until you got home to deal with it. Now you just open Feishu:
+
+```
+You:  Check issue #42 in ~/projects/openclaw about the parser crash,
+      find the root cause and submit a fix
+
+Bot:  📂 Switching to ~/projects/openclaw
+      🔍 Analyzing issue #42...
+      🔧 Reading src/parser/index.ts...
+      ✅ Found the bug: line 87 doesn't handle Unicode boundary cases
+      📝 Writing fix...
+      🧪 Running tests: all passed
+      📦 Committed: fix: handle Unicode boundary in parser (#42)
+      🚀 Pushed to origin/main
+```
+
+You only need to send one message from your phone. Claude Code or Gemini CLI autonomously handles analysis, debugging, fixing, testing, and committing — all on your computer.
+
+**This scenario is ideal for**:
+- Developers who independently maintain multiple open source projects
+- Project maintainers who need to respond quickly to community issues
+- Engineers who want to make progress during spare moments
+
 ## Architecture
 
 ```

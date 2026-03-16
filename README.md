@@ -58,6 +58,33 @@
 - 💡 **开发便利**：临时离开电脑也能继续编程、查看日志、修复问题
 - 🆓 **完全免费**：无需购买云服务器，利用现有设备即可
 
+### 场景三：远程维护开源项目（真实案例）
+
+**适用对象**：开源项目维护者、活跃贡献者
+
+**真实故事**：你正在外面喝咖啡，手机弹出 GitHub 通知——你的开源项目 [openclaw](https://github.com/openclaw/openclaw) 来了一个 bug report。以前你只能记下来回家再处理，现在你直接打开飞书：
+
+```
+你：  帮我看一下 ~/projects/openclaw 里 issue #42 描述的 parser crash，
+      找到根本原因并提交修复
+
+Bot： 📂 切换到 ~/projects/openclaw
+      🔍 正在分析 issue #42...
+      🔧 读取 src/parser/index.ts...
+      ✅ 找到问题：第 87 行未处理 Unicode 边界情况
+      📝 正在写修复...
+      🧪 运行测试：全部通过
+      📦 已提交：fix: handle Unicode boundary in parser (#42)
+      🚀 已推送到 origin/main
+```
+
+整个过程你只需要在手机上发一条消息，Claude Code 或 Gemini CLI 在你的电脑上自主完成分析、修复、测试、提交全流程。
+
+**这个场景特别适合**：
+- 独立维护多个开源项目的开发者
+- 需要快速响应社区 issue 的项目维护者
+- 希望利用碎片时间推进项目的工程师
+
 ## 系统架构
 
 ```
