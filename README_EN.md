@@ -32,7 +32,7 @@ Remote control your Claude Code or Gemini CLI from anywhere using your mobile ph
 
 **Target Users**: [openclaw](https://github.com/openclaw/openclaw) users and heavy users of any self-modifying CLI tool
 
-**Background**: openclaw is an AI-powered crawling tool that can sometimes corrupt its own config files during execution, causing it to fail to start. Previously, you'd have to sit down at your computer to diagnose and fix it manually. Now you just open Feishu from wherever you are:
+**Background**: [openclaw](https://github.com/openclaw/openclaw) is a self-hosted personal AI assistant that can sometimes corrupt its own config files during execution, causing it to fail to start. Previously, you'd have to sit down at your computer to diagnose and fix it manually. Now you just open Feishu from wherever you are:
 
 ```
 You:  /cd ~/projects/.openclaw

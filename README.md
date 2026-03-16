@@ -32,7 +32,7 @@
 
 **适用对象**：[openclaw](https://github.com/openclaw/openclaw) 用户及各类工具的重度使用者
 
-**背景**：openclaw 是一款 AI 驱动的爪爬工具，但它有时会在运行过程中把自己的配置文件改坏，导致工具无法正常启动。以往你必须坐到电脑前才能手动排查修复。现在，你在外面直接打开飞书：
+**背景**：[openclaw](https://github.com/openclaw/openclaw) 是一款自托管的个人 AI 助手，但它有时会在运行过程中把自己的配置文件改坏，导致无法正常启动。以往你必须坐到电脑前才能手动排查修复。现在，你在外面直接打开飞书：
 
 ```
 你：  /cd ~/projects/.openclaw
