@@ -23,8 +23,17 @@ export interface GeminiExecutorOptions {
  *
  * Conversation history is persisted as JSONL via SessionManager and replayed
  * as context prefix on subsequent calls within the same conversation.
+ *
+ * When a quota error is returned by the configured model, the executor
+ * automatically retries with QUOTA_FALLBACK_MODELS in order until one succeeds.
  */
 export class GeminiExecutor implements IExecutor {
+  /** Models tried in order when the configured model returns a quota error. */
+  private static readonly QUOTA_FALLBACK_MODELS = ['gemini-2.5-flash', 'gemini-1.5-flash'];
+
+  private static isQuotaError(error: unknown): boolean {
+    return error instanceof Error && error.message.includes('exhausted your capacity');
+  }
   private directoryGuard: DirectoryGuard;
   private currentWorkingDirectory: string;
   private sessionManager: SessionManager;
@@ -60,11 +69,8 @@ export class GeminiExecutor implements IExecutor {
       this.conversationId = `conv-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     }
 
-    let accumulatedOutput = '';
-
     const acpCallbacks: AcpEventCallbacks = {
       onTextChunk: (text) => {
-        accumulatedOutput += text;
         options.onStream?.(text);
       },
       onToolCall: (toolCallId, title, kind) => {
@@ -89,52 +95,83 @@ export class GeminiExecutor implements IExecutor {
 
     this.sessionManager.append(this.conversationId, 'user', prompt);
 
-    const client = new AcpClient(
-      this.geminiCommand,
-      this.buildGeminiArgs(),
-      this.currentWorkingDirectory,
-      acpCallbacks
-    );
-    this.inflightClient = client;
+    // Try the configured model first, then fallback models on quota exhaustion
+    const modelsToTry = [
+      this.model,
+      ...GeminiExecutor.QUOTA_FALLBACK_MODELS.filter(m => m !== this.model),
+    ];
 
-    try {
-      console.log(`[GeminiExecutor] Spawning new ACP client for cwd: ${this.currentWorkingDirectory}`);
-      console.log(`[GeminiExecutor] Gemini command: ${this.geminiCommand} ${this.buildGeminiArgs().join(' ')}`);
+    let lastError: unknown;
+    for (const model of modelsToTry) {
+      let accumulatedOutput = '';
+      const callbacks: AcpEventCallbacks = {
+        ...acpCallbacks,
+        onTextChunk: (text) => {
+          accumulatedOutput += text;
+          options.onStream?.(text);
+        },
+      };
 
-      await client.initialize();
-      const sessionId = await client.newSession(this.currentWorkingDirectory);
-      console.log(`[GeminiExecutor] ACP session created: ${sessionId.slice(0, 8)}`);
+      const client = new AcpClient(
+        this.geminiCommand,
+        this.buildGeminiArgs(model),
+        this.currentWorkingDirectory,
+        callbacks
+      );
+      this.inflightClient = client;
 
-      if (this.autoApprove) {
-        console.log(`[GeminiExecutor] Switching session to YOLO mode...`);
-        await client.setSessionMode(sessionId, 'yolo');
+      try {
+        console.log(`[GeminiExecutor] Spawning new ACP client for cwd: ${this.currentWorkingDirectory}`);
+        console.log(`[GeminiExecutor] Gemini command: ${this.geminiCommand} ${this.buildGeminiArgs(model).join(' ')}`);
+
+        await client.initialize();
+        const sessionId = await client.newSession(this.currentWorkingDirectory);
+        console.log(`[GeminiExecutor] ACP session created: ${sessionId.slice(0, 8)}`);
+
+        if (this.autoApprove) {
+          console.log(`[GeminiExecutor] Switching session to YOLO mode...`);
+          await client.setSessionMode(sessionId, 'yolo');
+        }
+
+        console.log(`[GeminiExecutor] Sending prompt (length=${finalPrompt.length})...`);
+        const promptResult = await client.prompt(sessionId, finalPrompt);
+        console.log(`[GeminiExecutor] Prompt completed, stopReason=${promptResult.stopReason}`);
+
+        this.sessionManager.append(this.conversationId, 'assistant', accumulatedOutput);
+
+        return {
+          success: promptResult.stopReason !== 'refusal',
+          output: accumulatedOutput,
+          sessionAbbr: this.conversationId.slice(0, 8),
+        };
+      } catch (error) {
+        lastError = error;
+        if (GeminiExecutor.isQuotaError(error)) {
+          const quotaMsg = error instanceof Error ? error.message : String(error);
+          console.warn(`[GeminiExecutor] ⚠️ Quota exhausted for model "${model}": ${quotaMsg}`);
+          if (model !== modelsToTry[modelsToTry.length - 1]) {
+            const nextModel = modelsToTry[modelsToTry.indexOf(model) + 1];
+            console.warn(`[GeminiExecutor] Retrying with fallback model: ${nextModel}`);
+          }
+          continue;
+        }
+        // Non-quota error — surface immediately, no retry
+        console.error(`[GeminiExecutor] ❌ Execute error:`, error);
+        const msg = error instanceof Error ? error.message : 'Unknown error';
+        const friendlyMsg = msg.includes('ENOENT') || msg.includes('not found')
+          ? 'Gemini CLI is not installed or not found on PATH. Use /backend to switch to another AI backend.'
+          : msg;
+        return { success: false, error: friendlyMsg };
+      } finally {
+        client.destroy();
+        this.inflightClient = null;
       }
-
-      console.log(`[GeminiExecutor] Sending prompt (length=${finalPrompt.length})...`);
-      const promptResult = await client.prompt(sessionId, finalPrompt);
-      console.log(`[GeminiExecutor] Prompt completed, stopReason=${promptResult.stopReason}`);
-
-      this.sessionManager.append(this.conversationId, 'assistant', accumulatedOutput);
-
-      return {
-        success: promptResult.stopReason !== 'refusal',
-        output: accumulatedOutput,
-        sessionAbbr: this.conversationId.slice(0, 8),
-      };
-    } catch (error) {
-      console.error(`[GeminiExecutor] ❌ Execute error:`, error);
-      const msg = error instanceof Error ? error.message : 'Unknown error';
-      const friendlyMsg = msg.includes('ENOENT') || msg.includes('not found')
-        ? 'Gemini CLI is not installed or not found on PATH. Use /backend to switch to another AI backend.'
-        : msg;
-      return {
-        success: false,
-        error: friendlyMsg,
-      };
-    } finally {
-      client.destroy();
-      this.inflightClient = null;
     }
+
+    // All models exhausted
+    const exhaustedMsg = lastError instanceof Error ? lastError.message : 'All models quota exhausted';
+    console.error(`[GeminiExecutor] ❌ All fallback models quota exhausted`);
+    return { success: false, error: exhaustedMsg };
   }
 
   getCurrentWorkingDirectory(): string {
@@ -171,10 +208,10 @@ export class GeminiExecutor implements IExecutor {
 
   // ─── Internal helpers ───────────────────────────────────────────────────────
 
-  private buildGeminiArgs(): string[] {
+  private buildGeminiArgs(model: string = this.model): string[] {
     const args: string[] = ['-y', this.geminiVersion, '--experimental-acp'];
-    if (this.model) {
-      args.push('--model', this.model);
+    if (model) {
+      args.push('--model', model);
     }
     if (this.autoApprove) {
       args.push('--yolo');
