@@ -28,37 +28,7 @@ Remote control your Claude Code or Gemini CLI from anywhere using your mobile ph
 
 ## Recommended Use Cases
 
-### Scenario 1: Enterprise Teams (Intranet Deployment)
-
-**Target Users**: Development teams with a unified Feishu organization
-
-**Deployment**:
-- Deploy a router server on the company intranet
-- Team members install the CLI client on their local machines
-- Provide unified service through the Feishu bot
-
-**Advantages**:
-- 🔒 **Secure**: Only Feishu external communication is needed; the router server and clients are within the internal network
-- 🏢 **Centralized Management**: One Feishu bot serves the entire organization, with administrators managing centrally
-- 💰 **Cost-Effective**: A single low-configuration server can support the whole team
-- 🔐 **Device Isolation**: Each member can only control their own computer, with no access to others' devices
-
-### Scenario 2: Individual Developers (Home Intranet)
-
-**Target Users**: Independent developers, freelancers
-
-**Deployment**:
-- Deploy the router server on your home intranet (e.g., NAS, Raspberry Pi, or spare computer)
-- Run the CLI client on your local development machine
-- Provide service externally through Feishu
-
-**Advantages**:
-- 🏠 **Zero Public Exposure**: The router server doesn't need a public IP; it communicates via Feishu long connection
-- 📱 **Access Anywhere**: Control your home computer from your phone via Feishu when you're out
-- 💡 **Development Convenience**: Continue programming, check logs, and fix issues when temporarily away from your computer
-- 🆓 **Completely Free**: No need to purchase cloud servers; utilize existing equipment
-
-### Scenario 3: Remotely Fixing a Broken openclaw Config (Real World Example)
+### 🦞 Scenario 1: Remotely Fixing a Broken openclaw Config (Real World Example)
 
 **Target Users**: [openclaw](https://github.com/openclaw/openclaw) users and heavy users of any self-modifying CLI tool
 
@@ -84,6 +54,36 @@ You only need to send one message from your phone. Claude Code or Gemini CLI han
 - Emergency recovery when any CLI tool corrupts its own config
 - Remote diagnosis of service crashes, config conflicts, or missing environment variables
 - No IDE needed — one Feishu message and the AI handles it for you
+
+### Scenario 2: Enterprise Teams (Intranet Deployment)
+
+**Target Users**: Development teams with a unified Feishu organization
+
+**Deployment**:
+- Deploy a router server on the company intranet
+- Team members install the CLI client on their local machines
+- Provide unified service through the Feishu bot
+
+**Advantages**:
+- 🔒 **Secure**: Only Feishu external communication is needed; the router server and clients are within the internal network
+- 🏢 **Centralized Management**: One Feishu bot serves the entire organization, with administrators managing centrally
+- 💰 **Cost-Effective**: A single low-configuration server can support the whole team
+- 🔐 **Device Isolation**: Each member can only control their own computer, with no access to others' devices
+
+### Scenario 3: Individual Developers (Home Intranet)
+
+**Target Users**: Independent developers, freelancers
+
+**Deployment**:
+- Deploy the router server on your home intranet (e.g., NAS, Raspberry Pi, or spare computer)
+- Run the CLI client on your local development machine
+- Provide service externally through Feishu
+
+**Advantages**:
+- 🏠 **Zero Public Exposure**: The router server doesn't need a public IP; it communicates via Feishu long connection
+- 📱 **Access Anywhere**: Control your home computer from your phone via Feishu when you're out
+- 💡 **Development Convenience**: Continue programming, check logs, and fix issues when temporarily away from your computer
+- 🆓 **Completely Free**: No need to purchase cloud servers; utilize existing equipment
 
 ## Architecture
 
