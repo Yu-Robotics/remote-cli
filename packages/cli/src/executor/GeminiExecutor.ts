@@ -42,7 +42,9 @@ export class GeminiExecutor implements IExecutor {
 
   constructor(directoryGuard: DirectoryGuard, options: GeminiExecutorOptions = {}) {
     this.directoryGuard = directoryGuard;
-    this.model = options.model ?? '';
+    // Default to 'auto' so Gemini CLI picks the best available model
+    // rather than defaulting to the highest-quota-consuming pro model.
+    this.model = options.model ?? 'auto';
     this.autoApprove = options.autoApprove ?? true;
     this.geminiCommand = options.geminiCommand ?? 'npx';
     this.geminiVersion = options.geminiVersion ?? '@google/gemini-cli@latest';
