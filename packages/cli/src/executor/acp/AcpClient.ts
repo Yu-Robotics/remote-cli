@@ -62,8 +62,19 @@ export class AcpClient {
 
     this.child = spawn(geminiCommand, geminiArgs, {
       cwd,
-      stdio: ['pipe', 'pipe', 'inherit'],
+      stdio: ['pipe', 'pipe', 'pipe'],
       env: process.env,
+    });
+
+    // Suppress EPIPE noise from Gemini CLI writing to our closed read-end
+    this.child.stdout!.on('error', () => {});
+
+    // Pipe child stderr: forward real errors, suppress EPIPE chatter during shutdown
+    this.child.stderr?.on('data', (chunk: Buffer) => {
+      const msg = chunk.toString().trimEnd();
+      if (msg && !msg.includes('EPIPE') && !msg.includes('write EPIPE')) {
+        console.error(`[AcpClient stderr] ${msg}`);
+      }
     });
 
     this.rl = readline.createInterface({ input: this.child.stdout! });
@@ -181,7 +192,11 @@ export class AcpClient {
     if (this.destroyed || !this.child.stdin) return;
     const line = JSON.stringify(msg);
     console.log(`[AcpClient] → ${line.slice(0, 200)}${line.length > 200 ? '...' : ''}`);
-    this.child.stdin.write(line + '\n');
+    try {
+      this.child.stdin.write(line + '\n');
+    } catch {
+      // stdin may be closed (EPIPE) if the child exited unexpectedly — ignore
+    }
   }
 
   private handleLine(line: string): void {
