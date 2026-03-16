@@ -35,12 +35,12 @@
 **背景**：openclaw 是一款 AI 驱动的爪爬工具，但它有时会在运行过程中把自己的配置文件改坏，导致工具无法正常启动。以往你必须坐到电脑前才能手动排查修复。现在，你在外面直接打开飞书：
 
 ```
-你：  openclaw 的配置文件又坏了，帮我修一下
-      工作目录：~/projects/openclaw
+你：  /cd ~/projects/.openclaw
+      配置文件又坏了，帮我修一下
 
-Bot： 📂 切换到 ~/projects/openclaw
+Bot： 📂 已切换到 ~/projects/.openclaw
       🔍 检查配置文件...
-      🔧 读取 ~/.openclaw/config.json...
+      🔧 读取 config.json...
       ✅ 发现问题：`apiEndpoints` 字段被写入了非法的 null 值
       📝 恢复默认值并修复格式...
       🧪 验证配置合法性...通过

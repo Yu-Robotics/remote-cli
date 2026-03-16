@@ -35,12 +35,12 @@ Remote control your Claude Code or Gemini CLI from anywhere using your mobile ph
 **Background**: openclaw is an AI-powered crawling tool that can sometimes corrupt its own config files during execution, causing it to fail to start. Previously, you'd have to sit down at your computer to diagnose and fix it manually. Now you just open Feishu from wherever you are:
 
 ```
-You:  openclaw's config is broken again, please fix it
-      Working directory: ~/projects/openclaw
+You:  /cd ~/projects/.openclaw
+      The config is broken again, please fix it
 
-Bot:  📂 Switching to ~/projects/openclaw
+Bot:  📂 Switched to ~/projects/.openclaw
       🔍 Checking config files...
-      🔧 Reading ~/.openclaw/config.json...
+      🔧 Reading config.json...
       ✅ Found the issue: `apiEndpoints` field was written with an
          illegal null value
       📝 Restoring defaults and fixing the format...
