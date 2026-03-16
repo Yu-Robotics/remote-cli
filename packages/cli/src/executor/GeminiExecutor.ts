@@ -308,7 +308,7 @@ export class GeminiExecutor implements IExecutor {
     if (msg.includes('ENOENT') || msg.includes('not found')) {
       return 'Gemini CLI is not installed or not found on PATH. Use /backend to switch to another AI backend.';
     }
-    if (isQuotaError({ message: msg } as Error)) {
+    if (msg.includes('exhausted your capacity') || msg.includes('quota')) {
       const resetMatch = msg.match(/reset after ([^\s.]+)/i);
       const resetHint = resetMatch ? ` Quota resets in ${resetMatch[1]}.` : '';
       return (

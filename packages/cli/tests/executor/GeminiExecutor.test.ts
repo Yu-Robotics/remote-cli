@@ -60,9 +60,10 @@ describe('GeminiExecutor', () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gemini-exec-test-'));
     executor = createExecutor(tmpDir);
     vi.clearAllMocks();
-    mockPrompt.mockResolvedValue({ sessionId: 'mock-session-id', stopReason: 'end_turn' });
+    mockInitialize.mockResolvedValue(undefined);
     mockNewSession.mockResolvedValue('mock-session-id');
     mockSetSessionMode.mockResolvedValue(undefined);
+    mockPrompt.mockResolvedValue({ sessionId: 'mock-session-id', stopReason: 'end_turn' });
   });
 
   it('should return getCurrentWorkingDirectory', () => {
@@ -273,6 +274,204 @@ describe('GeminiExecutor', () => {
 
     it('should be discoverable via in operator (IExecutor optional method)', () => {
       expect('compactWhenFull' in executor).toBe(true);
+    });
+  });
+
+  // ─── Quota fallback chain ─────────────────────────────────────────────────
+
+  describe('quota fallback chain', () => {
+    it('should retry with flash when configured model exhausts quota', async () => {
+      const { AcpClient } = await import('../../src/executor/acp/AcpClient');
+      const MockAcpClient = vi.mocked(AcpClient);
+      MockAcpClient.mockClear();
+
+      // First call throws quota error, second succeeds
+      mockPrompt
+        .mockRejectedValueOnce(new Error('You have exhausted your capacity for today'))
+        .mockResolvedValueOnce({ sessionId: 'mock-session-id', stopReason: 'end_turn' });
+
+      const onStream = vi.fn();
+      const guard = new DirectoryGuard([tmpDir]);
+      const ex = new GeminiExecutor(guard, { initialWorkingDirectory: tmpDir, model: 'pro' });
+      const result = await ex.execute('prompt', { onStream });
+
+      expect(result.success).toBe(true);
+      // Fallback notice streamed to user
+      expect(onStream).toHaveBeenCalledWith(expect.stringContaining('Quota exhausted'));
+      expect(onStream).toHaveBeenCalledWith(expect.stringContaining('flash'));
+      // Two ACP clients spawned (one per model attempt)
+      expect(MockAcpClient).toHaveBeenCalledTimes(2);
+    });
+
+    it('should retry with flash-lite when both pro and flash exhaust quota', async () => {
+      const { AcpClient } = await import('../../src/executor/acp/AcpClient');
+      const MockAcpClient = vi.mocked(AcpClient);
+      MockAcpClient.mockClear();
+
+      mockPrompt
+        .mockRejectedValueOnce(new Error('You have exhausted your capacity'))
+        .mockRejectedValueOnce(new Error('quota exceeded'))
+        .mockResolvedValueOnce({ sessionId: 'mock-session-id', stopReason: 'end_turn' });
+
+      const guard = new DirectoryGuard([tmpDir]);
+      const ex = new GeminiExecutor(guard, { initialWorkingDirectory: tmpDir, model: 'pro' });
+      const result = await ex.execute('prompt', {});
+
+      expect(result.success).toBe(true);
+      expect(MockAcpClient).toHaveBeenCalledTimes(3);
+    });
+
+    it('should not retry the same model alias that is already configured', async () => {
+      const { AcpClient } = await import('../../src/executor/acp/AcpClient');
+      const MockAcpClient = vi.mocked(AcpClient);
+      MockAcpClient.mockClear();
+
+      // model='flash' is in the fallback list — it should be skipped so only flash-lite is tried
+      mockPrompt
+        .mockRejectedValueOnce(new Error('exhausted your capacity'))
+        .mockResolvedValueOnce({ sessionId: 'mock-session-id', stopReason: 'end_turn' });
+
+      const guard = new DirectoryGuard([tmpDir]);
+      const ex = new GeminiExecutor(guard, { initialWorkingDirectory: tmpDir, model: 'flash' });
+      const result = await ex.execute('prompt', {});
+
+      expect(result.success).toBe(true);
+      // Should only try flash (configured) + flash-lite — not flash twice
+      expect(MockAcpClient).toHaveBeenCalledTimes(2);
+    });
+
+    it('should return failure with friendly error when all models exhaust quota', async () => {
+      mockPrompt.mockRejectedValue(new Error('You have exhausted your capacity'));
+
+      const guard = new DirectoryGuard([tmpDir]);
+      const ex = new GeminiExecutor(guard, { initialWorkingDirectory: tmpDir, model: 'pro' });
+      const result = await ex.execute('prompt', {});
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('All Gemini models');
+      expect(result.error).toContain('exhausted quota');
+      expect(result.error).toContain('/backend');
+    });
+
+    it('should NOT retry on non-quota errors', async () => {
+      const { AcpClient } = await import('../../src/executor/acp/AcpClient');
+      const MockAcpClient = vi.mocked(AcpClient);
+      MockAcpClient.mockClear();
+
+      mockPrompt.mockRejectedValueOnce(new Error('Network connection refused'));
+
+      const result = await executor.execute('prompt', {});
+
+      expect(result.success).toBe(false);
+      // Only one attempt made — no fallback for non-quota errors
+      expect(MockAcpClient).toHaveBeenCalledTimes(1);
+      expect(result.error).toContain('Network connection refused');
+    });
+
+    it('should include quota reset hint in error when reset time is in message', async () => {
+      mockPrompt.mockRejectedValue(new Error('You have exhausted your capacity. Quota will reset after 2h30m.'));
+
+      const guard = new DirectoryGuard([tmpDir]);
+      const ex = new GeminiExecutor(guard, { initialWorkingDirectory: tmpDir });
+      const result = await ex.execute('prompt', {});
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('2h30m');
+    });
+
+    it('should stream fallback notice before each retry', async () => {
+      mockPrompt
+        .mockRejectedValueOnce(new Error('exhausted your capacity'))
+        .mockRejectedValueOnce(new Error('quota exceeded'))
+        .mockResolvedValueOnce({ sessionId: 'mock-session-id', stopReason: 'end_turn' });
+
+      const streamedChunks: string[] = [];
+      const guard = new DirectoryGuard([tmpDir]);
+      const ex = new GeminiExecutor(guard, { initialWorkingDirectory: tmpDir, model: 'pro' });
+      await ex.execute('prompt', { onStream: (c) => streamedChunks.push(c) });
+
+      const notices = streamedChunks.filter((c) => c.includes('Quota exhausted'));
+      // Two quota failures → two notices streamed
+      expect(notices).toHaveLength(2);
+    });
+  });
+
+  // ─── buildFriendlyError ───────────────────────────────────────────────────
+
+  describe('buildFriendlyError', () => {
+    it('should suggest /backend switch on ENOENT error', async () => {
+      mockPrompt.mockRejectedValueOnce(new Error('ENOENT: no such file or directory'));
+      const result = await executor.execute('prompt', {});
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('not installed');
+      expect(result.error).toContain('/backend');
+    });
+
+    it('should suggest /backend switch on "not found" error', async () => {
+      mockPrompt.mockRejectedValueOnce(new Error('command not found: gemini'));
+      const result = await executor.execute('prompt', {});
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('not installed');
+      expect(result.error).toContain('/backend');
+    });
+
+    it('should return raw message for unknown errors', async () => {
+      mockPrompt.mockRejectedValueOnce(new Error('Something completely unexpected'));
+      const result = await executor.execute('prompt', {});
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('Something completely unexpected');
+    });
+
+    it('should include all model names in quota exhausted error', async () => {
+      mockPrompt.mockRejectedValue(new Error('exhausted your capacity'));
+
+      const guard = new DirectoryGuard([tmpDir]);
+      const ex = new GeminiExecutor(guard, { initialWorkingDirectory: tmpDir, model: 'pro' });
+      const result = await ex.execute('prompt', {});
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('pro');
+      expect(result.error).toContain('flash');
+      expect(result.error).toContain('flash-lite');
+      expect(result.error).toContain('/backend');
+    });
+
+    it('should match quota error on "quota" keyword in message', async () => {
+      mockPrompt.mockRejectedValue(new Error('API quota limit reached'));
+
+      const result = await executor.execute('prompt', {});
+
+      expect(result.success).toBe(false);
+      // When all models exhaust quota, buildFriendlyError returns the "All Gemini models" message
+      expect(result.error).toContain('All Gemini models');
+      expect(result.error).toContain('/backend');
+    });
+
+    it('should extract reset time hint from error message', async () => {
+      mockPrompt.mockRejectedValue(new Error('exhausted your capacity, reset after 1h'));
+
+      const guard = new DirectoryGuard([tmpDir]);
+      const ex = new GeminiExecutor(guard, { initialWorkingDirectory: tmpDir });
+      const result = await ex.execute('prompt', {});
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('1h');
+    });
+
+    it('should not include reset hint when no reset time in message', async () => {
+      mockPrompt.mockRejectedValue(new Error('exhausted your capacity'));
+
+      const guard = new DirectoryGuard([tmpDir]);
+      const ex = new GeminiExecutor(guard, { initialWorkingDirectory: tmpDir });
+      const result = await ex.execute('prompt', {});
+
+      expect(result.success).toBe(false);
+      // No spurious "Quota resets in undefined" text
+      expect(result.error).not.toContain('undefined');
+      expect(result.error).not.toContain('resets in');
     });
   });
 });
