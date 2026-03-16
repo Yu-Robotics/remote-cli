@@ -15,6 +15,24 @@ export interface GeminiExecutorOptions {
 }
 
 /**
+ * Gemini CLI stable model aliases used for quota fallback.
+ *
+ * These are Gemini CLI's own named aliases (not versioned model strings), so
+ * they remain valid across model releases. Gemini CLI's ACP mode does NOT
+ * implement automatic model fallback on quota exhaustion (unlike interactive
+ * mode), so we handle it here instead.
+ *
+ * Fallback order: user-configured model → flash → flash-lite
+ */
+const QUOTA_FALLBACK_ALIASES = ['flash', 'flash-lite'];
+
+/** Returns true when the error message indicates a quota-exhaustion condition. */
+function isQuotaError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return error.message.includes('exhausted your capacity') || error.message.includes('quota');
+}
+
+/**
  * IExecutor implementation for Gemini CLI via ACP (Agent Client Protocol).
  *
  * Each execute() call spawns a fresh Gemini CLI subprocess (vibe-kanban style).
@@ -42,9 +60,11 @@ export class GeminiExecutor implements IExecutor {
 
   constructor(directoryGuard: DirectoryGuard, options: GeminiExecutorOptions = {}) {
     this.directoryGuard = directoryGuard;
-    // Default to 'auto' so Gemini CLI picks the best available model
-    // rather than defaulting to the highest-quota-consuming pro model.
-    this.model = options.model ?? 'auto';
+    // Leave model unset by default so Gemini CLI uses its own default
+    // (gemini-2.5-pro). NOTE: '--model auto' maps to gemini-3-pro-preview
+    // which has stricter quota limits — do NOT default to 'auto'.
+    // Users can override via executor.gemini.model in config.
+    this.model = options.model ?? '';
     this.autoApprove = options.autoApprove ?? true;
     this.geminiCommand = options.geminiCommand ?? 'npx';
     this.geminiVersion = options.geminiVersion ?? '@google/gemini-cli@latest';
@@ -60,78 +80,44 @@ export class GeminiExecutor implements IExecutor {
       this.conversationId = `conv-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     }
 
-    let accumulatedOutput = '';
-
-    const acpCallbacks: AcpEventCallbacks = {
-      onTextChunk: (text) => {
-        accumulatedOutput += text;
-        options.onStream?.(text);
-      },
-      onToolCall: (toolCallId, title, kind) => {
-        options.onToolUse?.({ id: toolCallId, name: title, input: { kind } });
-      },
-      onToolResult: (toolCallId, status, output) => {
-        options.onToolResult?.({
-          tool_use_id: toolCallId,
-          content: output ?? '',
-          is_error: status !== 'completed',
-        });
-      },
-      onPlan: (text) => {
-        options.onPlanMode?.(text);
-      },
-      onPermissionRequest: this.autoApprove ? undefined : async () => 0,
-    };
-
     // Prepend history context for follow-up turns within the same conversation
     const historyContext = this.sessionManager.buildResumeContext(this.conversationId);
     const finalPrompt = historyContext ? `${historyContext}${prompt}` : prompt;
-
     this.sessionManager.append(this.conversationId, 'user', prompt);
 
-    const client = new AcpClient(
-      this.geminiCommand,
-      this.buildGeminiArgs(),
-      this.currentWorkingDirectory,
-      acpCallbacks
-    );
-    this.inflightClient = client;
+    // Build fallback chain: configured model first, then quota fallback aliases.
+    // Filter out aliases that are already the configured model to avoid retrying
+    // the same model twice.
+    const fallbackAliases = QUOTA_FALLBACK_ALIASES.filter(a => a !== this.model);
+    const modelsToTry = [this.model, ...fallbackAliases];
 
-    try {
-      console.log(`[GeminiExecutor] Spawning new ACP client for cwd: ${this.currentWorkingDirectory}`);
-      console.log(`[GeminiExecutor] Gemini command: ${this.geminiCommand} ${this.buildGeminiArgs().join(' ')}`);
+    for (let attempt = 0; attempt < modelsToTry.length; attempt++) {
+      const modelForAttempt = modelsToTry[attempt];
+      const modelLabel = modelForAttempt || 'pro (default)';
 
-      await client.initialize();
-      const sessionId = await client.newSession(this.currentWorkingDirectory);
-      console.log(`[GeminiExecutor] ACP session created: ${sessionId.slice(0, 8)}`);
-
-      if (this.autoApprove) {
-        console.log(`[GeminiExecutor] Switching session to YOLO mode...`);
-        await client.setSessionMode(sessionId, 'yolo');
+      if (attempt > 0) {
+        const notice = `⚠️ Quota exhausted on **${modelsToTry[attempt - 1] || 'pro'}**, switching to **${modelLabel}**...\n\n`;
+        options.onStream?.(notice);
+        console.warn(`[GeminiExecutor] Quota exhausted on "${modelsToTry[attempt - 1] || 'pro'}", retrying with "${modelLabel}"`);
       }
 
-      console.log(`[GeminiExecutor] Sending prompt (length=${finalPrompt.length})...`);
-      const promptResult = await client.prompt(sessionId, finalPrompt);
-      console.log(`[GeminiExecutor] Prompt completed, stopReason=${promptResult.stopReason}`);
-
-      this.sessionManager.append(this.conversationId, 'assistant', accumulatedOutput);
-
-      return {
-        success: promptResult.stopReason !== 'refusal',
-        output: accumulatedOutput,
-        sessionAbbr: this.conversationId.slice(0, 8),
-      };
-    } catch (error) {
-      console.error(`[GeminiExecutor] ❌ Execute error:`, error);
-      const msg = error instanceof Error ? error.message : 'Unknown error';
-      const friendlyMsg = msg.includes('ENOENT') || msg.includes('not found')
-        ? 'Gemini CLI is not installed or not found on PATH. Use /backend to switch to another AI backend.'
-        : msg;
-      return { success: false, error: friendlyMsg };
-    } finally {
-      client.destroy();
-      this.inflightClient = null;
+      try {
+        const result = await this.executeWithModel(modelForAttempt, modelLabel, finalPrompt, prompt, options);
+        return result;
+      } catch (error) {
+        if (isQuotaError(error) && attempt < modelsToTry.length - 1) {
+          // Quota exhausted on this model — try the next one in the chain
+          continue;
+        }
+        // Final attempt or non-quota error: surface a friendly message
+        console.error(`[GeminiExecutor] ❌ Execute error:`, error);
+        const msg = error instanceof Error ? error.message : 'Unknown error';
+        return { success: false, error: this.buildFriendlyError(msg, modelLabel) };
+      }
     }
+
+    // Should never reach here, but satisfy TypeScript
+    return { success: false, error: 'All Gemini models exhausted quota.' };
   }
 
   getCurrentWorkingDirectory(): string {
@@ -168,14 +154,103 @@ export class GeminiExecutor implements IExecutor {
 
   // ─── Internal helpers ───────────────────────────────────────────────────────
 
-  private buildGeminiArgs(): string[] {
+  /**
+   * Runs a single attempt with a specific model alias.
+   * Throws on quota errors so the caller can retry with the next model.
+   */
+  private async executeWithModel(
+    model: string,
+    modelLabel: string,
+    finalPrompt: string,
+    originalPrompt: string,
+    options: ExecuteOptions,
+  ): Promise<ExecuteResult> {
+    let accumulatedOutput = '';
+
+    const acpCallbacks: AcpEventCallbacks = {
+      onTextChunk: (text) => {
+        accumulatedOutput += text;
+        options.onStream?.(text);
+      },
+      onToolCall: (toolCallId, title, kind) => {
+        options.onToolUse?.({ id: toolCallId, name: title, input: { kind } });
+      },
+      onToolResult: (toolCallId, status, output) => {
+        options.onToolResult?.({
+          tool_use_id: toolCallId,
+          content: output ?? '',
+          is_error: status !== 'completed',
+        });
+      },
+      onPlan: (text) => {
+        options.onPlanMode?.(text);
+      },
+      onPermissionRequest: this.autoApprove ? undefined : async () => 0,
+    };
+
+    const args = this.buildGeminiArgs(model);
+    const client = new AcpClient(
+      this.geminiCommand,
+      args,
+      this.currentWorkingDirectory,
+      acpCallbacks
+    );
+    this.inflightClient = client;
+
+    try {
+      console.log(`[GeminiExecutor] Spawning ACP client (model=${modelLabel}) for cwd: ${this.currentWorkingDirectory}`);
+      console.log(`[GeminiExecutor] Gemini command: ${this.geminiCommand} ${args.join(' ')}`);
+
+      await client.initialize();
+      const sessionId = await client.newSession(this.currentWorkingDirectory);
+      console.log(`[GeminiExecutor] ACP session created: ${sessionId.slice(0, 8)}`);
+
+      if (this.autoApprove) {
+        await client.setSessionMode(sessionId, 'yolo');
+      }
+
+      console.log(`[GeminiExecutor] Sending prompt (length=${finalPrompt.length})...`);
+      const promptResult = await client.prompt(sessionId, finalPrompt);
+      console.log(`[GeminiExecutor] Prompt completed, stopReason=${promptResult.stopReason}, model=${modelLabel}`);
+
+      this.sessionManager.append(this.conversationId!, 'assistant', accumulatedOutput);
+
+      return {
+        success: promptResult.stopReason !== 'refusal',
+        output: accumulatedOutput,
+        sessionAbbr: this.conversationId!.slice(0, 8),
+      };
+    } finally {
+      client.destroy();
+      this.inflightClient = null;
+    }
+  }
+
+  private buildGeminiArgs(model?: string): string[] {
     const args: string[] = ['-y', this.geminiVersion, '--acp'];
-    if (this.model) {
-      args.push('--model', this.model);
+    const resolvedModel = model ?? this.model;
+    if (resolvedModel) {
+      args.push('--model', resolvedModel);
     }
     if (this.autoApprove) {
       args.push('--yolo');
     }
     return args;
+  }
+
+  private buildFriendlyError(msg: string, modelLabel: string): string {
+    if (msg.includes('ENOENT') || msg.includes('not found')) {
+      return 'Gemini CLI is not installed or not found on PATH. Use /backend to switch to another AI backend.';
+    }
+    if (isQuotaError({ message: msg } as Error)) {
+      const resetMatch = msg.match(/reset after ([^\s.]+)/i);
+      const resetHint = resetMatch ? ` Quota resets in ${resetMatch[1]}.` : '';
+      return (
+        `⚠️ All Gemini models (${[this.model || 'pro', ...QUOTA_FALLBACK_ALIASES].join(' → ')}) have exhausted quota.${resetHint}\n\n` +
+        `Wait for quota to reset, or switch backends:\n` +
+        `\`/backend\``
+      );
+    }
+    return msg;
   }
 }

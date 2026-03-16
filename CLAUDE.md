@@ -376,7 +376,7 @@ Gemini CLI is auto-detected if already installed on the local machine. No instal
 | Field | Values | Default | Description |
 |-------|--------|---------|-------------|
 | `executor.type` | `auto`, `claude-persistent`, `claude-spawn`, `gemini` | `auto` | Which AI CLI backend to use (managed via `/backend` command) |
-| `executor.gemini.model` | any Gemini model name | `auto` | Gemini model to use (`auto` lets Gemini CLI pick the best available model) |
+| `executor.gemini.model` | any Gemini model name | *(unset)* | Gemini model to use. Leave unset to use Gemini CLI's default (`gemini-2.5-pro`). Use `flash` for higher quota limits. **Do NOT use `auto`** — it maps to `gemini-3-pro-preview` which has stricter quotas. |
 | `executor.gemini.autoApprove` | `true`/`false` | `true` | Auto-approve tool permissions |
 | `executor.gemini.command` | CLI command | `npx` | Override Gemini CLI command |
 | `executor.gemini.version` | npm version spec | `@google/gemini-cli@latest` | Pin Gemini CLI version |
