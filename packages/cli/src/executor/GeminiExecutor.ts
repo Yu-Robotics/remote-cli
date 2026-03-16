@@ -168,11 +168,20 @@ export class GeminiExecutor implements IExecutor {
     let accumulatedOutput = '';
 
     const acpCallbacks: AcpEventCallbacks = {
+      onThoughtChunk: (text) => {
+        // Stream Gemini's thinking to the user, same as Claude does for thinking blocks
+        accumulatedOutput += text;
+        options.onStream?.(text);
+      },
       onTextChunk: (text) => {
         accumulatedOutput += text;
         options.onStream?.(text);
       },
       onToolCall: (toolCallId, title, kind) => {
+        // Stream tool activity so the user can see Gemini is working,
+        // not silent/stuck during long-running commands (e.g. npm test).
+        // Do NOT add to accumulatedOutput — this is UI-only, not session history.
+        options.onStream?.(`\n🔧 ${title}...\n`);
         options.onToolUse?.({ id: toolCallId, name: title, input: { kind } });
       },
       onToolResult: (toolCallId, status, output) => {
