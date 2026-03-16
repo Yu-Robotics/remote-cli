@@ -1,10 +1,10 @@
-# Remote CLI - Control Claude Code from Mobile via Feishu
+# Remote CLI - Control Claude Code / Gemini CLI from Mobile via Feishu
 
 [![npm version](https://img.shields.io/npm/v/@yu_robotics/remote-cli.svg)](https://www.npmjs.com/package/@yu_robotics/remote-cli)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js Version](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](https://nodejs.org/)
 
-Remote control your Claude Code CLI from anywhere using your mobile phone through Feishu (Lark) messaging. Continue coding when away from your computer with a mobile-friendly interface.
+Remote control your Claude Code or Gemini CLI from anywhere using your mobile phone through Feishu (Lark) messaging. Continue coding when away from your computer with a mobile-friendly interface.
 
 [中文文档](README.md)
 
@@ -13,8 +13,8 @@ Remote control your Claude Code CLI from anywhere using your mobile phone throug
 - 🌍 **Remote Control**: Control your local development environment from anywhere via mobile phone
 - 🔒 **Secure**: Directory whitelisting, command filtering, and device authentication
 - 📱 **Mobile-Optimized**: Simplified commands and rich text formatting for Feishu
-- 🤖 **Claude Code Integration**: Full access to Claude Code's capabilities and context
-- ⚡ **Persistent Process**: Long-running Claude process with bidirectional streaming via stdio
+- 🤖 **Multi-Backend Support**: Supports Claude Code (default) and Gemini CLI, switchable at any time
+- ⚡ **Persistent Process**: Long-running AI process with bidirectional streaming via stdio
 - 🚀 **Easy Setup**: One-command installation and initialization
 
 ### Usage Examples
@@ -67,13 +67,14 @@ Remote control your Claude Code CLI from anywhere using your mobile phone throug
 │  Developer A's  │◀───────▶│  ┌─────────────────────────┐ │
 │  Phone          │         │  │  remote-cli (local)     │ │
 │  Private Chat   │         │  │  - WebSocket Client     │ │
-│  with Bot       │         │  │  - Claude Code Executor │ │
-└─────────────────┘         │  │  - Security Directory   │ │
+│  with Bot       │         │  │  - AI CLI Executor      │ │
+└─────────────────┘         │  │    (Claude / Gemini)    │ │
+        │                   │  │  - Security Directory   │ │
         │                   │  │    Guard                │ │
         │                   │  └──────────┬──────────────┘ │
         │                   │             ▼                 │
-        │                   │  Local Claude Code CLI        │
-        ▼                   │  (Using Agent SDK)            │
+        │                   │  Claude Code / Gemini CLI    │
+        ▼                   │  (Local AI Backend)           │
 ┌─────────────────┐         └──────────────────────────────┘
 │  Router Server  │
 │  (Team Deploy)  │         ┌──────────────────────────────┐
@@ -117,7 +118,7 @@ Before you begin, ensure you have:
 
 - **Node.js** >= 18.0.0
 - **npm** or **yarn** package manager
-- **Claude Code CLI** installed and configured
+- **Claude Code CLI** or **Gemini CLI** (at least one installed and configured)
 - Access to a **Feishu (Lark) bot** (your team should deploy a router server)
 
 ## Router Server Deployment
@@ -357,9 +358,9 @@ Once connected, use these commands in Feishu:
 | `/device unbind <device-id-or-index>` | Unbind a specific device |
 | `/help` | Show help information |
 
-### Claude Code Commands Passthrough
+### AI CLI Commands Passthrough
 
-All commands/skills supported by local Claude Code are passed through directly, for example:
+All commands/skills supported by the local Claude Code or Gemini CLI are passed through directly, for example:
 - `/commit` - Commit code changes
 - `/review` - Code review
 - `/test` - Run tests
@@ -387,7 +388,7 @@ All commands/skills supported by local Claude Code are passed through directly, 
    /device 1
    ```
 
-4. **Ask Claude Code to help:**
+4. **Ask AI to help:**
    ```
    Review the authentication code in src/auth.ts and suggest improvements
    ```

@@ -1,10 +1,10 @@
-# Remote CLI - 通过飞书远程控制 Claude Code
+# Remote CLI - 通过飞书远程控制 Claude Code / Gemini CLI
 
 [![npm version](https://img.shields.io/npm/v/@yu_robotics/remote-cli.svg)](https://www.npmjs.com/package/@yu_robotics/remote-cli)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js Version](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](https://nodejs.org/)
 
-通过飞书（Lark）消息从手机上远程控制你的 Claude Code CLI。即使不在电脑前，也能继续编程。
+通过飞书（Lark）消息从手机上远程控制你的 Claude Code 或 Gemini CLI。即使不在电脑前，也能继续编程。
 
 [English Documentation](README_EN.md)
 
@@ -13,8 +13,8 @@
 - 🌍 **远程控制**：通过手机随时随地控制本地开发环境
 - 🔒 **安全可靠**：目录白名单、命令过滤、设备认证三重保护
 - 📱 **移动优化**：为飞书定制的简化命令和富文本格式
-- 🤖 **Claude Code 集成**：完整使用 Claude Code 的能力和上下文
-- ⚡ **持久进程**：通过 stdio 双向流保持 Claude 进程长期运行
+- 🤖 **多后端支持**：支持 Claude Code（默认）和 Gemini CLI，可随时切换
+- ⚡ **持久进程**：通过 stdio 双向流保持 AI 进程长期运行
 - 🚀 **简单 setup**：一键安装和初始化
 
 ### 使用示例
@@ -67,12 +67,12 @@
 │   开发者 A 的    │◀───────▶│  ┌─────────────────────────┐ │
 │   手机          │         │  │  remote-cli (本地)       │ │
 │   与机器人私聊   │         │  │  - WebSocket 客户端      │ │
-│                 │         │  │  - Claude Code 执行器    │ │
+│                 │         │  │  - AI CLI 执行器         │ │
 └─────────────────┘         │  │  - 安全目录守卫           │ │
         │                   │  └──────────┬──────────────┘ │
         │                   │             ▼                 │
-        │                   │  本地 Claude Code CLI        │
-        ▼                   │  (使用 Agent SDK)            │
+        │                   │  Claude Code / Gemini CLI    │
+        ▼                   │  (本地 AI 后端)               │
 ┌─────────────────┐         └──────────────────────────────┘
 │   路由服务器     │
 │  (团队部署)      │         ┌──────────────────────────────┐
@@ -116,7 +116,7 @@ remote-cli start
 
 - **Node.js** >= 18.0.0
 - **npm** 或 **yarn** 包管理器
-- **Claude Code CLI** 并已配置
+- **Claude Code CLI** 或 **Gemini CLI**（至少安装并配置其中一个）
 - 可访问的**飞书机器人**（团队应部署一个路由服务器）
 
 ## 路由服务器部署
@@ -356,9 +356,9 @@ remote-cli stop
 | `/device unbind <设备ID或序号>` | 解绑指定设备 |
 | `/help` | 显示帮助信息 |
 
-### Claude Code 命令透传
+### AI CLI 命令透传
 
-本地 Claude Code 支持的所有 commands/skills 指令会直接透传执行，例如：
+本地 Claude Code 或 Gemini CLI 支持的所有 commands/skills 指令会直接透传执行，例如：
 - `/commit` - 提交代码变更
 - `/review` - 代码审查
 - `/test` - 运行测试
@@ -386,7 +386,7 @@ remote-cli stop
    /device 1
    ```
 
-4. **让 Claude Code 帮忙：**
+4. **让 AI 帮忙：**
    ```
    审查 src/auth.ts 中的认证代码并提出改进建议
    ```
