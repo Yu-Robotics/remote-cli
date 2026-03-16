@@ -342,16 +342,16 @@ describe('ConnectionHub', () => {
     it('should close all WebSocket connections', () => {
       const device1 = 'dev_test_001';
       const device2 = 'dev_test_002';
-      const mockWs1 = { ...mockWs, close: vi.fn() };
-      const mockWs2 = { ...mockWs, close: vi.fn() };
+      const mockWs1 = { ...mockWs, terminate: vi.fn() };
+      const mockWs2 = { ...mockWs, terminate: vi.fn() };
 
       hub.registerConnection(device1, mockWs1);
       hub.registerConnection(device2, mockWs2);
 
       hub.closeAllConnections();
 
-      expect(mockWs1.close).toHaveBeenCalled();
-      expect(mockWs2.close).toHaveBeenCalled();
+      expect(mockWs1.terminate).toHaveBeenCalled();
+      expect(mockWs2.terminate).toHaveBeenCalled();
       expect(hub.getOnlineDevices()).toHaveLength(0);
     });
 

@@ -738,12 +738,17 @@ export class RouterServer {
       this.wss = null;
     }
 
-    // Close HTTP server
+    // Close HTTP server — with a 3s timeout so lingering sockets don't block shutdown
     if (this.httpServer) {
-      await new Promise<void>((resolve, reject) => {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(() => {
+          console.warn('HTTP server close timed out, forcing shutdown');
+          resolve();
+        }, 3000);
         this.httpServer!.close((err) => {
-          if (err) reject(err);
-          else resolve();
+          clearTimeout(timer);
+          if (err) console.error('HTTP server close error:', err);
+          resolve();
         });
       });
       this.httpServer = null;
