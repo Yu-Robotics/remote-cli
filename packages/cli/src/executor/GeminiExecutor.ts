@@ -15,6 +15,39 @@ export interface GeminiExecutorOptions {
 }
 
 /**
+ * Maps a Gemini ACP tool call (kind + title) to a Claude-compatible
+ * { name, input } shape so the router's ToolFormatter renders it with
+ * the same collapsible card style as Claude tools.
+ *
+ * Gemini ACP kinds: 'exec' | 'read' | 'write' | 'list' | 'service' | ...
+ */
+function mapAcpToolCall(
+  kind: string | undefined,
+  title: string,
+): { name: string; input: Record<string, string> } {
+  switch (kind) {
+    case 'exec':
+      // Shell command — map to Bash so extractBashContext renders it
+      return { name: 'Bash', input: { command: title } };
+    case 'read':
+      // File read — map to Read so extractReadContext renders it
+      return { name: 'Read', input: { file_path: title } };
+    case 'write':
+      // File write/edit — map to Write
+      return { name: 'Write', input: { file_path: title } };
+    case 'list':
+      // Directory listing — map to Glob
+      return { name: 'Glob', input: { pattern: title } };
+    case 'service':
+      // MCP / service call
+      return { name: 'Service', input: { call: title } };
+    default:
+      // Unknown kind — show raw title under generic tool name
+      return { name: kind ?? 'Tool', input: { command: title } };
+  }
+}
+
+/**
  * Gemini CLI stable model aliases used for quota fallback.
  *
  * These are Gemini CLI's own named aliases (not versioned model strings), so
@@ -178,11 +211,11 @@ export class GeminiExecutor implements IExecutor {
         options.onStream?.(text);
       },
       onToolCall: (toolCallId, title, kind) => {
-        // Stream tool activity so the user can see Gemini is working,
-        // not silent/stuck during long-running commands (e.g. npm test).
-        // Do NOT add to accumulatedOutput — this is UI-only, not session history.
-        options.onStream?.(`\n🔧 ${title}...\n`);
-        options.onToolUse?.({ id: toolCallId, name: title, input: { kind } });
+        // Map Gemini ACP kind → Claude-compatible tool name + structured input
+        // so the router's ToolFormatter renders it consistently with Claude tools.
+        // The tool card itself provides the progress indicator — no extra onStream needed.
+        const { name, input } = mapAcpToolCall(kind, title);
+        options.onToolUse?.({ id: toolCallId, name, input });
       },
       onToolResult: (toolCallId, status, output) => {
         options.onToolResult?.({

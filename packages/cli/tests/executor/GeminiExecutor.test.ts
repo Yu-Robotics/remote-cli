@@ -33,7 +33,8 @@ vi.mock('../../src/executor/acp/AcpClient', () => ({
       callbacks.onTextChunk('Hello ');
       callbacks.onTextChunk('world');
       if (callbacks.onToolCall) {
-        callbacks.onToolCall('tc-1', 'read_file', 'file');
+        // Use real ACP kind ('read') + a file path as title
+        callbacks.onToolCall('tc-1', '/src/index.ts', 'read');
       }
       if (callbacks.onToolResult) {
         callbacks.onToolResult('tc-1', 'completed', 'file contents');
@@ -88,7 +89,8 @@ describe('GeminiExecutor', () => {
 
     await executor.execute('list files', { onToolUse, onToolResult });
 
-    expect(onToolUse).toHaveBeenCalledWith(expect.objectContaining({ id: 'tc-1', name: 'read_file' }));
+    // mapAcpToolCall maps kind='read' → name='Read', input.file_path = title
+    expect(onToolUse).toHaveBeenCalledWith(expect.objectContaining({ id: 'tc-1', name: 'Read' }));
     expect(onToolResult).toHaveBeenCalledWith(expect.objectContaining({ tool_use_id: 'tc-1', is_error: false }));
   });
 
