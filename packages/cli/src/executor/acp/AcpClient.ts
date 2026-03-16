@@ -7,8 +7,6 @@ import type {
   ToolCall,
   ToolCallUpdate,
   Plan,
-} from '@agentclientprotocol/sdk';
-import type {
   JsonRpcRequest,
   JsonRpcNotification,
   JsonRpcResponse,
@@ -266,13 +264,13 @@ export class AcpClient {
     switch (update.sessionUpdate) {
       case 'agent_message_chunk': {
         const block = (update as ContentChunk & { sessionUpdate: string }).content;
-        const text = block.type === 'text' ? block.text : undefined;
+        const text = block.type === 'text' ? (block as { type: 'text'; text: string }).text : undefined;
         if (text) this.callbacks.onTextChunk(text);
         break;
       }
       case 'agent_thought_chunk': {
         const block = (update as ContentChunk & { sessionUpdate: string }).content;
-        const text = block.type === 'text' ? block.text : undefined;
+        const text = block.type === 'text' ? (block as { type: 'text'; text: string }).text : undefined;
         if (text && this.callbacks.onThoughtChunk) {
           this.callbacks.onThoughtChunk(text);
         }
