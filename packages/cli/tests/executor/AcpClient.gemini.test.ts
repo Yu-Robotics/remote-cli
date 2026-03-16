@@ -6,7 +6,7 @@
  * to the model to prevent flakiness and API quota consumption.
  *
  * What is tested:
- *   - Gemini CLI binary can be spawned with --experimental-acp
+ *   - Gemini CLI binary can be spawned with --acp
  *   - ACP JSON-RPC handshake (initialize → session/new → set_mode) succeeds
  *   - destroy() terminates the subprocess cleanly
  *   - A second destroy() is a no-op (idempotent)
@@ -39,7 +39,7 @@ const SKIP = !GEMINI_PATH;
 function makeClient(callbacks: Partial<AcpEventCallbacks> = {}): AcpClient {
   return new AcpClient(
     GEMINI_PATH!,
-    ['--experimental-acp', '--yolo'],
+    ['--acp', '--yolo'],
     os.tmpdir(),
     {
       onTextChunk: () => {},
