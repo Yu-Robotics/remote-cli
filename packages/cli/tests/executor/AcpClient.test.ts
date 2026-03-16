@@ -68,7 +68,7 @@ beforeEach(() => {
     onPlan: vi.fn(),
   };
 
-  client = new AcpClient('gemini', ['--experimental-acp'], '/tmp', callbacks);
+  client = new AcpClient('gemini', ['--acp'], '/tmp', callbacks);
 });
 
 afterEach(() => {
@@ -276,7 +276,7 @@ describe('AcpClient - permission handling', () => {
   });
 
   it('sends cancelled outcome when reject option is chosen', async () => {
-    const rejectClient = new AcpClient('g', ['--experimental-acp'], '/tmp', {
+    const rejectClient = new AcpClient('g', ['--acp'], '/tmp', {
       ...callbacks,
       onPermissionRequest: async () => 1, // index 1 = reject_once
     });

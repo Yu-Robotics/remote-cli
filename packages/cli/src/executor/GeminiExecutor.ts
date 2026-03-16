@@ -169,7 +169,7 @@ export class GeminiExecutor implements IExecutor {
   // ─── Internal helpers ───────────────────────────────────────────────────────
 
   private buildGeminiArgs(): string[] {
-    const args: string[] = ['-y', this.geminiVersion, '--experimental-acp'];
+    const args: string[] = ['-y', this.geminiVersion, '--acp'];
     if (this.model) {
       args.push('--model', this.model);
     }
