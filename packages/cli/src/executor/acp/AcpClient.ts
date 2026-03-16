@@ -137,6 +137,11 @@ export class AcpClient {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
+
+    // Reject all pending requests FIRST so callers get a clean error even if
+    // readline emits buffered lines during the shutdown sequence below.
+    this.rejectAllPending(new Error('AcpClient destroyed'));
+
     this.rl.close();
 
     // Stage 1: close stdin (EOF signal to the child)
@@ -158,8 +163,6 @@ export class AcpClient {
         }
       }, SIGKILL_GRACE_MS);
     }
-
-    this.rejectAllPending(new Error('AcpClient destroyed'));
   }
 
   // ─── Internal message routing ───────────────────────────────────────────────
@@ -238,6 +241,7 @@ export class AcpClient {
   }
 
   private handleResponse(msg: JsonRpcResponse): void {
+    if (this.destroyed) return; // ignore late responses after shutdown
     const pending = this.pendingRequests.get(msg.id);
     if (!pending) {
       console.warn(`[AcpClient] ⚠️ No pending request for id=${msg.id}`);
