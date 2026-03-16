@@ -68,6 +68,16 @@ function isQuotaError(error: unknown): boolean {
   return error.message.includes('exhausted your capacity') || error.message.includes('quota');
 }
 
+/** Returns true when the error is a transient ACP-level failure that can be retried. */
+function isTransientAcpError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  // ACP 500 "Premature close" — Gemini CLI subprocess exited mid-stream
+  return error.message.includes('Premature close') || error.message.includes('Gemini CLI exited');
+}
+
+/** Maximum number of retries for transient ACP errors (e.g., Premature close). */
+const TRANSIENT_MAX_RETRIES = 2;
+
 /**
  * IExecutor implementation for Gemini CLI via ACP (Agent Client Protocol).
  *
@@ -137,18 +147,30 @@ export class GeminiExecutor implements IExecutor {
         console.warn(`[GeminiExecutor] Quota exhausted on "${modelsToTry[attempt - 1] || 'pro'}", retrying with "${modelLabel}"`);
       }
 
-      try {
-        const result = await this.executeWithModel(modelForAttempt, modelLabel, finalPrompt, prompt, options);
-        return result;
-      } catch (error) {
-        if (isQuotaError(error) && attempt < modelsToTry.length - 1) {
-          // Quota exhausted on this model — try the next one in the chain
-          continue;
+      // Retry loop for transient errors (e.g. ACP "Premature close")
+      for (let retry = 0; retry <= TRANSIENT_MAX_RETRIES; retry++) {
+        try {
+          if (retry > 0) {
+            const notice = `⚠️ Connection dropped mid-execution, retrying (${retry}/${TRANSIENT_MAX_RETRIES})...\n\n`;
+            options.onStream?.(notice);
+            console.warn(`[GeminiExecutor] Transient ACP error, retry ${retry}/${TRANSIENT_MAX_RETRIES}`);
+          }
+          const result = await this.executeWithModel(modelForAttempt, modelLabel, finalPrompt, prompt, options);
+          return result;
+        } catch (error) {
+          if (isQuotaError(error) && attempt < modelsToTry.length - 1) {
+            // Quota exhausted on this model — break inner retry loop and try next model
+            break;
+          }
+          if (isTransientAcpError(error) && retry < TRANSIENT_MAX_RETRIES) {
+            // Transient ACP failure — retry same model
+            continue;
+          }
+          // Final attempt or non-retriable error: surface a friendly message
+          console.error(`[GeminiExecutor] ❌ Execute error:`, error);
+          const msg = error instanceof Error ? error.message : 'Unknown error';
+          return { success: false, error: this.buildFriendlyError(msg, modelLabel) };
         }
-        // Final attempt or non-quota error: surface a friendly message
-        console.error(`[GeminiExecutor] ❌ Execute error:`, error);
-        const msg = error instanceof Error ? error.message : 'Unknown error';
-        return { success: false, error: this.buildFriendlyError(msg, modelLabel) };
       }
     }
 
@@ -316,6 +338,9 @@ export class GeminiExecutor implements IExecutor {
         `Wait for quota to reset, or switch backends:\n` +
         `\`/backend\``
       );
+    }
+    if (msg.includes('Premature close') || msg.includes('Gemini CLI exited')) {
+      return `⚠️ Gemini CLI disconnected mid-execution after ${TRANSIENT_MAX_RETRIES} retries. The session may have been interrupted by a timeout or restart. Try again or use \`/backend\` to switch.`;
     }
     return msg;
   }
