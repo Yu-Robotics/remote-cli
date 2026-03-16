@@ -396,6 +396,92 @@ describe('GeminiExecutor', () => {
     });
   });
 
+  // ─── Transient ACP error retry ───────────────────────────────────────────
+
+  describe('transient ACP error retry', () => {
+    it('should retry on Premature close and succeed on second attempt', async () => {
+      const { AcpClient } = await import('../../src/executor/acp/AcpClient');
+      const MockAcpClient = vi.mocked(AcpClient);
+      MockAcpClient.mockClear();
+
+      mockPrompt
+        .mockRejectedValueOnce(new Error('ACP error 500: Premature close'))
+        .mockResolvedValueOnce({ sessionId: 'mock-session-id', stopReason: 'end_turn' });
+
+      const onStream = vi.fn();
+      const result = await executor.execute('task', { onStream });
+
+      expect(result.success).toBe(true);
+      expect(MockAcpClient).toHaveBeenCalledTimes(2);
+      expect(onStream).toHaveBeenCalledWith(expect.stringContaining('Connection dropped'));
+    });
+
+    it('should retry on Gemini CLI exited error', async () => {
+      const { AcpClient } = await import('../../src/executor/acp/AcpClient');
+      const MockAcpClient = vi.mocked(AcpClient);
+      MockAcpClient.mockClear();
+
+      mockPrompt
+        .mockRejectedValueOnce(new Error('Gemini CLI exited: code=1 signal=null'))
+        .mockResolvedValueOnce({ sessionId: 'mock-session-id', stopReason: 'end_turn' });
+
+      const result = await executor.execute('task', {});
+
+      expect(result.success).toBe(true);
+      expect(MockAcpClient).toHaveBeenCalledTimes(2);
+    });
+
+    it('should retry up to TRANSIENT_MAX_RETRIES times then fail with friendly error', async () => {
+      const { AcpClient } = await import('../../src/executor/acp/AcpClient');
+      const MockAcpClient = vi.mocked(AcpClient);
+      MockAcpClient.mockClear();
+
+      // Always fail with Premature close
+      mockPrompt.mockRejectedValue(new Error('ACP error 500: Premature close'));
+
+      const result = await executor.execute('task', {});
+
+      expect(result.success).toBe(false);
+      // 1 original + 2 retries = 3 total ACP client spawns
+      expect(MockAcpClient).toHaveBeenCalledTimes(3);
+      expect(result.error).toContain('disconnected mid-execution');
+    });
+
+    it('should NOT retry transient error when quota model fallback is active', async () => {
+      const { AcpClient } = await import('../../src/executor/acp/AcpClient');
+      const MockAcpClient = vi.mocked(AcpClient);
+      MockAcpClient.mockClear();
+
+      // First model: quota, second model: Premature close then success
+      mockPrompt
+        .mockRejectedValueOnce(new Error('exhausted your capacity'))
+        .mockRejectedValueOnce(new Error('ACP error 500: Premature close'))
+        .mockResolvedValueOnce({ sessionId: 'mock-session-id', stopReason: 'end_turn' });
+
+      const guard = new DirectoryGuard([tmpDir]);
+      const ex = new GeminiExecutor(guard, { initialWorkingDirectory: tmpDir, model: 'pro' });
+      const result = await ex.execute('task', {});
+
+      expect(result.success).toBe(true);
+      // 1 (pro quota fail) + 1 (flash premature close) + 1 (flash retry success) = 3
+      expect(MockAcpClient).toHaveBeenCalledTimes(3);
+    });
+
+    it('should stream retry notice for each transient retry', async () => {
+      mockPrompt
+        .mockRejectedValueOnce(new Error('ACP error 500: Premature close'))
+        .mockRejectedValueOnce(new Error('ACP error 500: Premature close'))
+        .mockResolvedValueOnce({ sessionId: 'mock-session-id', stopReason: 'end_turn' });
+
+      const streamedChunks: string[] = [];
+      const result = await executor.execute('task', { onStream: (c) => streamedChunks.push(c) });
+
+      expect(result.success).toBe(true);
+      const retryNotices = streamedChunks.filter((c) => c.includes('Connection dropped'));
+      expect(retryNotices).toHaveLength(2);
+    });
+  });
+
   // ─── buildFriendlyError ───────────────────────────────────────────────────
 
   describe('buildFriendlyError', () => {
@@ -459,6 +545,15 @@ describe('GeminiExecutor', () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toContain('1h');
+    });
+
+    it('should return friendly message after all retries exhausted on Premature close', async () => {
+      mockPrompt.mockRejectedValue(new Error('ACP error 500: Premature close'));
+      const result = await executor.execute('task', {});
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('disconnected mid-execution');
+      expect(result.error).toContain('/backend');
     });
 
     it('should not include reset hint when no reset time in message', async () => {
