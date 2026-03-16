@@ -181,7 +181,10 @@ export class ConnectionHub {
   closeAllConnections(): void {
     for (const ws of this.connections.values()) {
       try {
-        ws.close();
+        // Use terminate() instead of close() to immediately destroy the socket
+        // without waiting for the WebSocket close handshake (which has a 30s timeout
+        // per connection and blocks httpServer.close() during shutdown)
+        ws.terminate();
       } catch (error) {
         // Ignore close errors
       }

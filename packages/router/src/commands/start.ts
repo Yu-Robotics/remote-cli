@@ -47,11 +47,27 @@ export async function startCommand(): Promise<void> {
     await server.start();
 
     // Handle graceful shutdown
+    let isShuttingDown = false;
     const shutdown = async (signal: string) => {
+      if (isShuttingDown) {
+        // Second Ctrl+C: force exit immediately
+        console.log('\nForce exiting...');
+        process.exit(1);
+      }
+      isShuttingDown = true;
       console.log(`\n\nReceived ${signal}, shutting down gracefully...`);
+
+      // Hard kill after 5 seconds in case stop() hangs
+      const forceExit = setTimeout(() => {
+        console.error('Shutdown timed out, forcing exit');
+        process.exit(1);
+      }, 5000);
+      forceExit.unref();
+
       try {
         await server.stop();
         await pidManager.removePid();
+        clearTimeout(forceExit);
         process.exit(0);
       } catch (error) {
         console.error('Error during shutdown:', error);

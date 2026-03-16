@@ -1252,9 +1252,14 @@ Examples:
     try {
       console.log('Stopping Feishu WebSocket connection...');
 
-      // Close WebSocket connection
+      // Close WebSocket connection — must call close() to stop internal ping
+      // timers and reconnect loops; simply nulling the reference leaves them running
       if (this.wsClient) {
-        // The SDK doesn't provide a stop method, but closing the instance should work
+        try {
+          this.wsClient.close({ force: true });
+        } catch {
+          // ignore SDK close errors
+        }
         this.wsClient = null;
       }
 
