@@ -87,4 +87,49 @@ describe('SessionManager', () => {
   it('should not throw when removing a nonexistent session', () => {
     expect(() => manager.remove('does-not-exist')).not.toThrow();
   });
+
+  describe('truncate()', () => {
+    it('should remove older entries and keep the most recent ones', () => {
+      for (let i = 0; i < 15; i++) {
+        manager.append('trunc-1', i % 2 === 0 ? 'user' : 'assistant', `msg-${i}`);
+      }
+
+      const removed = manager.truncate('trunc-1', 10);
+      expect(removed).toBe(5);
+
+      const context = manager.buildResumeContext('trunc-1');
+      // Oldest entries (msg-0 through msg-4) should be gone
+      expect(context).not.toContain('msg-0');
+      expect(context).not.toContain('msg-4');
+      // Most recent 10 entries should remain
+      expect(context).toContain('msg-5');
+      expect(context).toContain('msg-14');
+    });
+
+    it('should return 0 when history is already within keepCount', () => {
+      manager.append('trunc-2', 'user', 'only one');
+      const removed = manager.truncate('trunc-2', 10);
+      expect(removed).toBe(0);
+    });
+
+    it('should return 0 for a nonexistent session', () => {
+      const removed = manager.truncate('no-session', 10);
+      expect(removed).toBe(0);
+    });
+
+    it('should keep exactly keepCount entries when truncating', () => {
+      for (let i = 0; i < 20; i++) {
+        manager.append('trunc-3', 'user', `item-${i}`);
+      }
+
+      manager.truncate('trunc-3', 5);
+
+      const file = path.join(tmpDir, 'trunc-3.jsonl');
+      const lines = fs.readFileSync(file, 'utf8').trim().split('\n').filter(Boolean);
+      expect(lines).toHaveLength(5);
+
+      const last = JSON.parse(lines[4]);
+      expect(last.text).toBe('item-19');
+    });
+  });
 });

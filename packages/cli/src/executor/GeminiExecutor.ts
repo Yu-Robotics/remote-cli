@@ -3,6 +3,9 @@ import { IExecutor, ExecuteOptions, ExecuteResult } from './IExecutor';
 import { AcpClient, AcpEventCallbacks } from './acp/AcpClient';
 import { SessionManager } from './acp/SessionManager';
 
+/** Number of most-recent conversation turns to keep after compaction. */
+const COMPACT_KEEP_TURNS = 10;
+
 export interface GeminiExecutorOptions {
   model?: string;
   /** Auto-approve all tool permission requests. Default: true. */
@@ -169,6 +172,27 @@ export class GeminiExecutor implements IExecutor {
       this.sessionManager.remove(this.conversationId);
       this.conversationId = null;
     }
+  }
+
+  /**
+   * Compact conversation history by truncating to the most recent turns.
+   * Gemini ACP has no built-in /compact command, so we reduce context size
+   * by keeping only the last COMPACT_KEEP_TURNS entries from the JSONL history.
+   */
+  async compactWhenFull(onStream?: (chunk: string) => void): Promise<ExecuteResult> {
+    if (!this.conversationId) {
+      return { success: true, output: 'No active conversation to compact.' };
+    }
+
+    onStream?.(`Truncating history to last ${COMPACT_KEEP_TURNS} turns...\n`);
+    const removed = this.sessionManager.truncate(this.conversationId, COMPACT_KEEP_TURNS);
+
+    if (removed === 0) {
+      return { success: true, output: 'Conversation history is already compact.' };
+    }
+
+    onStream?.(`Removed ${removed} older entries from conversation history.\n`);
+    return { success: true, output: `Compacted: removed ${removed} older entries, kept ${COMPACT_KEEP_TURNS} most recent turns.` };
   }
 
   async abort(): Promise<boolean> {

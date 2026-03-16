@@ -238,4 +238,41 @@ describe('GeminiExecutor', () => {
     await executor.execute('test', {});
     expect(mockSetSessionMode).toHaveBeenCalledWith('mock-session-id', 'yolo');
   });
+
+  describe('compactWhenFull()', () => {
+    it('should return success with no-op message when no active conversation', async () => {
+      const result = await executor.compactWhenFull!();
+      expect(result.success).toBe(true);
+      expect(result.output).toContain('No active conversation');
+    });
+
+    it('should truncate history and return removed count after conversation starts', async () => {
+      // Build up history by executing 12 turns
+      for (let i = 0; i < 6; i++) {
+        await executor.execute(`question ${i}`, {});
+      }
+
+      const chunks: string[] = [];
+      const result = await executor.compactWhenFull!((chunk) => chunks.push(chunk));
+
+      expect(result.success).toBe(true);
+      // 12 entries (6 user + 6 assistant) minus 10 kept = 2 removed
+      expect(result.output).toContain('removed 2');
+      expect(chunks.some((c) => c.includes('Truncating'))).toBe(true);
+    });
+
+    it('should return already compact message when history fits within keepCount', async () => {
+      // Only 2 turns (4 entries) — well within the default 10 keep
+      await executor.execute('turn 1', {});
+      await executor.execute('turn 2', {});
+
+      const result = await executor.compactWhenFull!();
+      expect(result.success).toBe(true);
+      expect(result.output).toContain('already compact');
+    });
+
+    it('should be discoverable via in operator (IExecutor optional method)', () => {
+      expect('compactWhenFull' in executor).toBe(true);
+    });
+  });
 });

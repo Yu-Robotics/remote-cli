@@ -61,6 +61,25 @@ export class SessionManager {
     }
   }
 
+  /**
+   * Truncate session history to the most recent `keepCount` entries.
+   * Used by GeminiExecutor's compactWhenFull to reduce context size while
+   * preserving recent conversation turns.
+   *
+   * @returns The number of entries removed.
+   */
+  truncate(sessionId: string, keepCount: number): number {
+    const file = this.filePath(sessionId);
+    if (!fs.existsSync(file)) return 0;
+
+    const lines = fs.readFileSync(file, 'utf8').trim().split('\n').filter(Boolean);
+    if (lines.length <= keepCount) return 0;
+
+    const kept = lines.slice(lines.length - keepCount);
+    fs.writeFileSync(file, kept.join('\n') + '\n', 'utf8');
+    return lines.length - keepCount;
+  }
+
   remove(sessionId: string): void {
     const file = this.filePath(sessionId);
     if (fs.existsSync(file)) {
