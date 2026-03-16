@@ -58,32 +58,32 @@ Remote control your Claude Code or Gemini CLI from anywhere using your mobile ph
 - 💡 **Development Convenience**: Continue programming, check logs, and fix issues when temporarily away from your computer
 - 🆓 **Completely Free**: No need to purchase cloud servers; utilize existing equipment
 
-### Scenario 3: Remotely Maintaining Open Source Projects (Real World Example)
+### Scenario 3: Remotely Fixing a Broken openclaw Config (Real World Example)
 
-**Target Users**: Open source project maintainers, active contributors
+**Target Users**: [openclaw](https://github.com/openclaw/openclaw) users and heavy users of any self-modifying CLI tool
 
-**Real Story**: You're out having coffee when your phone buzzes with a GitHub notification — someone filed a bug report on your open source project [openclaw](https://github.com/openclaw/openclaw). In the past, you'd have to wait until you got home to deal with it. Now you just open Feishu:
+**Background**: openclaw is an AI-powered crawling tool that can sometimes corrupt its own config files during execution, causing it to fail to start. Previously, you'd have to sit down at your computer to diagnose and fix it manually. Now you just open Feishu from wherever you are:
 
 ```
-You:  Check issue #42 in ~/projects/openclaw about the parser crash,
-      find the root cause and submit a fix
+You:  openclaw's config is broken again, please fix it
+      Working directory: ~/projects/openclaw
 
 Bot:  📂 Switching to ~/projects/openclaw
-      🔍 Analyzing issue #42...
-      🔧 Reading src/parser/index.ts...
-      ✅ Found the bug: line 87 doesn't handle Unicode boundary cases
-      📝 Writing fix...
-      🧪 Running tests: all passed
-      📦 Committed: fix: handle Unicode boundary in parser (#42)
-      🚀 Pushed to origin/main
+      🔍 Checking config files...
+      🔧 Reading ~/.openclaw/config.json...
+      ✅ Found the issue: `apiEndpoints` field was written with an
+         illegal null value
+      📝 Restoring defaults and fixing the format...
+      🧪 Validating config...passed
+      ✅ Config fixed — openclaw can start normally now
 ```
 
-You only need to send one message from your phone. Claude Code or Gemini CLI autonomously handles analysis, debugging, fixing, testing, and committing — all on your computer.
+You only need to send one message from your phone. Claude Code or Gemini CLI handles the investigation, fix, and validation autonomously on your computer.
 
-**This scenario is ideal for**:
-- Developers who independently maintain multiple open source projects
-- Project maintainers who need to respond quickly to community issues
-- Engineers who want to make progress during spare moments
+**This pattern applies broadly**:
+- Emergency recovery when any CLI tool corrupts its own config
+- Remote diagnosis of service crashes, config conflicts, or missing environment variables
+- No IDE needed — one Feishu message and the AI handles it for you
 
 ## Architecture
 
