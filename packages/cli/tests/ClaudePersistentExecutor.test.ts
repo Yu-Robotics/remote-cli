@@ -300,6 +300,113 @@ describe('ClaudePersistentExecutor', () => {
       // Cleanup
       await testExecutor.destroy();
     }, 10000); // Increase timeout to 10 seconds
+
+    it('should resume existing valid session after destroy and recreate', async () => {
+      // Step 1: First executor, no session file yet
+      let existsCallCount = 0;
+      mockFs.existsSync.mockImplementation(() => {
+        existsCallCount++;
+        // First call: session file check on init (not found)
+        if (existsCallCount === 1) return false;
+        // Subsequent calls: working directory exists
+        return true;
+      });
+
+      const firstExecutor = new ClaudePersistentExecutor(directoryGuard, '~/test-project');
+      expect(firstExecutor.getSessionId()).toBeNull();
+
+      const firstProcess = new EventEmitter() as any;
+      firstProcess.stdout = new EventEmitter();
+      firstProcess.stderr = new EventEmitter();
+      firstProcess.stdin = { write: vi.fn(), end: vi.fn() };
+      firstProcess.kill = vi.fn();
+      firstProcess.pid = 11111;
+      mockSpawn.mockReturnValue(firstProcess);
+
+      const firstExecutePromise = firstExecutor.execute('echo "first"');
+      await new Promise(resolve => setTimeout(resolve, 1100));
+
+      // Simulate session init with a session ID
+      firstProcess.stdout.emit('data', Buffer.from(JSON.stringify({
+        type: 'system',
+        subtype: 'init',
+        session_id: 'saved-session-abc123',
+        cwd: '/home/user/test-project',
+      }) + '\n'));
+
+      firstProcess.stdout.emit('data', Buffer.from(JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        result: 'first command',
+        is_error: false,
+      }) + '\n'));
+
+      const firstResult = await firstExecutePromise;
+      expect(firstResult.success).toBe(true);
+      expect(firstExecutor.getSessionId()).toBe('saved-session-abc123');
+
+      // Simulate clean exit
+      firstProcess.emit('exit', 0, null);
+      firstProcess.emit('close', 0, null);
+      await new Promise(resolve => setTimeout(resolve, 100));
+      await firstExecutor.destroy();
+
+      // Step 2: Second executor, session file exists with saved ID
+      existsCallCount = 0;
+      mockFs.existsSync.mockImplementation(() => {
+        existsCallCount++;
+        // First call: session file check (found)
+        if (existsCallCount === 1) return true;
+        return true;
+      });
+      mockFs.readFileSync.mockReturnValue(JSON.stringify({ id: 'saved-session-abc123' }));
+
+      const secondExecutor = new ClaudePersistentExecutor(directoryGuard, '~/test-project');
+
+      // Verify session ID was loaded from file
+      expect(secondExecutor.getSessionId()).toBe('saved-session-abc123');
+
+      const secondProcess = new EventEmitter() as any;
+      secondProcess.stdout = new EventEmitter();
+      secondProcess.stderr = new EventEmitter();
+      secondProcess.stdin = { write: vi.fn(), end: vi.fn() };
+      secondProcess.kill = vi.fn();
+      secondProcess.pid = 22222;
+      mockSpawn.mockReturnValue(secondProcess);
+
+      const secondExecutePromise = secondExecutor.execute('echo "second"');
+      await new Promise(resolve => setTimeout(resolve, 1100));
+
+      // Verify spawn was called with --resume and the saved session ID
+      expect(mockSpawn).toHaveBeenCalledWith(
+        'claude',
+        expect.arrayContaining(['--resume', 'saved-session-abc123']),
+        expect.any(Object)
+      );
+
+      secondProcess.stdout.emit('data', Buffer.from(JSON.stringify({
+        type: 'system',
+        subtype: 'init',
+        session_id: 'saved-session-abc123',
+        cwd: '/home/user/test-project',
+      }) + '\n'));
+
+      secondProcess.stdout.emit('data', Buffer.from(JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        result: 'second command',
+        is_error: false,
+      }) + '\n'));
+
+      const secondResult = await secondExecutePromise;
+      expect(secondResult.success).toBe(true);
+      expect(secondExecutor.getSessionId()).toBe('saved-session-abc123');
+
+      secondProcess.emit('exit', 0, null);
+      secondProcess.emit('close', 0, null);
+      await new Promise(resolve => setTimeout(resolve, 100));
+      await secondExecutor.destroy();
+    }, 10000);
   });
 
   describe('compact()', () => {

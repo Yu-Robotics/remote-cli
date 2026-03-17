@@ -17,8 +17,8 @@
     "build": "tsc",
     "dev": "tsx watch src/cli.ts -- start",
     "start": "node dist/cli.js start",
-    "test": "vitest",
-    "test:coverage": "vitest --coverage",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "prepublishOnly": "npm run build && npm test"
   },
   "publishConfig": {
