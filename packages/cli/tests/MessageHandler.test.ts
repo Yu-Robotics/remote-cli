@@ -620,5 +620,250 @@ describe('MessageHandler', () => {
       // Pool should be asked for the other thread's executor
       expect(ctx.mockThreadPool.getExecutor).toHaveBeenCalledWith('other-id');
     });
+
+    it('returns error when threadId does not exist', async () => {
+      ctx.mockThreadManager.getThread = vi.fn().mockReturnValue(undefined);
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-notfound', content: 'hello', threadId: 'ghost-id', timestamp: Date.now() });
+
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({ success: false, error: expect.stringContaining('Thread not found') })
+      );
+      expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
+    });
+
+    it('routes to default thread when threadId is absent', async () => {
+      ctx.mockExecutor.execute.mockResolvedValue({ success: true });
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-nothread', content: 'hello', timestamp: Date.now() });
+
+      expect(ctx.mockThreadManager.getDefaultThread).toHaveBeenCalled();
+      expect(ctx.mockThreadPool.getExecutor).toHaveBeenCalledWith('default-thread-id');
+    });
+
+    it('should auto-generate thread name when /thread new has no name', async () => {
+      ctx.mockThreadManager.listThreads = vi.fn().mockReturnValue([
+        { id: 'default-thread-id', name: 'default', workingDirectory: '/tmp', sessionId: null, createdAt: 0, lastActiveAt: 0 },
+      ]);
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-tn-auto', content: '/thread new', timestamp: Date.now() });
+
+      expect(ctx.mockThreadManager.createThread).toHaveBeenCalledWith('thread-2', expect.any(String));
+    });
+
+    it('should use timestamp fallback when all auto thread names are taken', async () => {
+      const existingThreads = Array.from({ length: 98 }, (_, i) => ({
+        id: `id-${i + 2}`, name: `thread-${i + 2}`, workingDirectory: '/tmp', sessionId: null, createdAt: i, lastActiveAt: i,
+      }));
+      existingThreads.unshift({ id: 'default-thread-id', name: 'default', workingDirectory: '/tmp', sessionId: null, createdAt: 0, lastActiveAt: 0 });
+      ctx.mockThreadManager.listThreads = vi.fn().mockReturnValue(existingThreads);
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-tn-ts', content: '/thread new', timestamp: Date.now() });
+
+      const callArg = (ctx.mockThreadManager.createThread as any).mock.calls[0][0];
+      expect(callArg).toMatch(/^thread-\d+$/);
+      expect(callArg).not.toBe('thread-99');
+    });
+
+    it('should return error when /thread delete has no name argument', async () => {
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-td-noname', content: '/thread delete', timestamp: Date.now() });
+
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({ success: false, error: expect.stringContaining('Usage') })
+      );
+    });
+
+    it('should return error when /thread delete targets non-existent thread', async () => {
+      ctx.mockThreadManager.getThreadByName = vi.fn().mockReturnValue(undefined);
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-td-ghost', content: '/thread delete ghost', timestamp: Date.now() });
+
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({ success: false, error: expect.stringContaining('not found') })
+      );
+    });
+
+    it('should return error when deleteThread throws', async () => {
+      const targetThread = { id: 'target-id', name: 'my-thread', workingDirectory: '/tmp', sessionId: null, createdAt: 0, lastActiveAt: 0 };
+      ctx.mockThreadManager.getThreadByName = vi.fn().mockReturnValue(targetThread);
+      ctx.mockThreadPool.isThreadBusy = vi.fn().mockReturnValue(false);
+      ctx.mockThreadManager.deleteThread = vi.fn().mockRejectedValue(new Error('Cannot delete default thread'));
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-td-throw', content: '/thread delete my-thread', timestamp: Date.now() });
+
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({ success: false, error: expect.stringContaining('Cannot delete default thread') })
+      );
+    });
+
+    it('should return error on unknown /thread subcommand', async () => {
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-tu', content: '/thread foo', timestamp: Date.now() });
+
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({ success: false, error: expect.stringContaining('Unknown /thread subcommand') })
+      );
+    });
+
+    it('should return error when /thread new fails (MAX_THREADS reached)', async () => {
+      ctx.mockThreadManager.createThread = vi.fn().mockRejectedValue(new Error('Maximum 5 threads allowed'));
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-tn-max', content: '/thread new feat', timestamp: Date.now() });
+
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({ success: false, error: expect.stringContaining('Maximum 5 threads allowed') })
+      );
+    });
+
+    it('should include threads in /thread new success response', async () => {
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-tn-threads', content: '/thread new my-feat', timestamp: Date.now() });
+
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({ success: true, threads: expect.any(Array) })
+      );
+    });
+
+    it('should include threads in /thread delete success response', async () => {
+      const targetThread = { id: 'target-id', name: 'my-feat', workingDirectory: '/tmp', sessionId: null, createdAt: 0, lastActiveAt: 0 };
+      ctx.mockThreadManager.getThreadByName = vi.fn().mockReturnValue(targetThread);
+      ctx.mockThreadPool.isThreadBusy = vi.fn().mockReturnValue(false);
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-td-threads', content: '/thread delete my-feat', timestamp: Date.now() });
+
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({ success: true, threads: expect.any(Array) })
+      );
+    });
+  });
+
+  describe('/abort command', () => {
+    it('should abort running command and clear busy flag', async () => {
+      ctx.mockThreadPool.isThreadBusy = vi.fn().mockReturnValue(true);
+      ctx.mockExecutor.abort = vi.fn().mockResolvedValue(true);
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-abort', content: '/abort', timestamp: Date.now() });
+
+      expect(ctx.mockExecutor.abort).toHaveBeenCalled();
+      expect(ctx.mockThreadPool.setThreadBusy).toHaveBeenCalledWith('default-thread-id', false);
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({ success: true, output: expect.stringContaining('aborted') })
+      );
+    });
+
+    it('should respond gracefully when abort returns false (nothing executing)', async () => {
+      ctx.mockThreadPool.isThreadBusy = vi.fn().mockReturnValue(false);
+      ctx.mockExecutor.abort = vi.fn().mockResolvedValue(false);
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-abort-noop', content: '/abort', timestamp: Date.now() });
+
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({ success: true, output: expect.stringContaining('No command is currently executing') })
+      );
+    });
+
+    it('should abort command on a specific thread (not default)', async () => {
+      const otherThread = { id: 'other-id', name: 'thread-2', workingDirectory: '/tmp', sessionId: null, createdAt: 0, lastActiveAt: 0 };
+      ctx.mockThreadManager.getThread = vi.fn().mockImplementation((id: string) =>
+        id === 'other-id' ? otherThread : undefined
+      );
+      ctx.mockExecutor.abort = vi.fn().mockResolvedValue(true);
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-abort-t2', content: '/abort', threadId: 'other-id', timestamp: Date.now() });
+
+      expect(ctx.mockThreadPool.getExecutor).toHaveBeenCalledWith('other-id');
+      expect(ctx.mockExecutor.abort).toHaveBeenCalled();
+    });
+
+    it('should notify user if abort was called when not busy (executor reset)', async () => {
+      ctx.mockThreadPool.isThreadBusy = vi.fn().mockReturnValue(false);
+      ctx.mockExecutor.abort = vi.fn().mockResolvedValue(true);
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-abort-reset', content: '/abort', timestamp: Date.now() });
+
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({ success: true, output: expect.stringContaining('No command was executing') })
+      );
+    });
+  });
+
+  describe('interactive input mode', () => {
+    it('should call sendInput when executor is waiting for input', async () => {
+      ctx = buildHandler({
+        isWaitingInput: vi.fn().mockReturnValue(true),
+        sendInput: vi.fn().mockReturnValue(true),
+      });
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-input', content: 'yes', timestamp: Date.now() });
+
+      expect(ctx.mockExecutor.sendInput).toHaveBeenCalledWith('yes');
+      expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({ success: true, output: expect.stringContaining('yes') })
+      );
+    });
+
+    it('should return error when sendInput returns false', async () => {
+      ctx = buildHandler({
+        isWaitingInput: vi.fn().mockReturnValue(true),
+        sendInput: vi.fn().mockReturnValue(false),
+      });
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-input-fail', content: 'yes', timestamp: Date.now() });
+
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({ success: false, error: expect.stringContaining('Failed') })
+      );
+    });
+
+    it('should return error when interactive input is empty', async () => {
+      ctx = buildHandler({
+        isWaitingInput: vi.fn().mockReturnValue(true),
+        sendInput: vi.fn().mockReturnValue(true),
+      });
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-input-empty', content: '   ', timestamp: Date.now() });
+
+      expect(ctx.mockExecutor.sendInput).not.toHaveBeenCalled();
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({ success: false, error: expect.stringContaining('non-empty input') })
+      );
+    });
+  });
+
+  describe('status query', () => {
+    it('should include thread summaries in status response', async () => {
+      await ctx.handler.handleMessage({ type: 'status', messageId: 'msg-status', timestamp: Date.now() });
+
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'status',
+          status: expect.objectContaining({ threads: expect.any(Array) }),
+        })
+      );
+    });
+  });
+
+  describe('/cd command', () => {
+    it('should persist working directory to ThreadManager after /cd', async () => {
+      ctx.mockExecutor.setWorkingDirectory = vi.fn().mockResolvedValue(undefined);
+      ctx.mockExecutor.getCurrentWorkingDirectory = vi.fn().mockReturnValue('/new/dir');
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-cd', content: '/cd /new/dir', timestamp: Date.now() });
+
+      expect(ctx.mockThreadManager.updateThread).toHaveBeenCalledWith(
+        'default-thread-id',
+        expect.objectContaining({ workingDirectory: '/new/dir' })
+      );
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({ success: true, output: expect.stringContaining('/new/dir') })
+      );
+    });
+
+    it('should return error when /cd is called without directory argument', async () => {
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-cd-noarg', content: '/cd', timestamp: Date.now() });
+
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({ success: false, error: expect.stringContaining('Usage') })
+      );
+    });
   });
 });

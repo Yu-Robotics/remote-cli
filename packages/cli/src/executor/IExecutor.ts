@@ -36,4 +36,11 @@ export interface IExecutor {
   compactWhenFull?(onStream?: (chunk: string) => void): Promise<ExecuteResult>;
   isProcessRunning?(): boolean;
   getSessionId?(): string | null;
+
+  /**
+   * Delete all persistent state (session files, history) associated with a thread.
+   * Called by ThreadExecutorPool.destroyThread before removing the executor.
+   * Each backend cleans up its own storage format and location.
+   */
+  deleteThreadData?(threadId: string): Promise<void>;
 }

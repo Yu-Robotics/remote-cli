@@ -1505,6 +1505,18 @@ export class ClaudePersistentExecutor extends EventEmitter {
     this.removeAllListeners();
   }
 
+  /**
+   * Delete the per-thread session file (.json) stored in claude-sessions/.
+   * Called by ThreadExecutorPool before removing this executor from the pool.
+   */
+  async deleteThreadData(threadId: string): Promise<void> {
+    const sessionPath = this.sessionFilePath;
+    try {
+      await fs.promises.unlink(sessionPath);
+    } catch {
+      // File may not exist — not an error
+    }
+  }
 
   /**
    * Check if process is running

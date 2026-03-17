@@ -91,6 +91,10 @@ export interface CommandMessage extends WSMessage {
 // Response message
 export interface ResponseMessage extends WSMessage {
   type: MessageType.RESPONSE;
+  /** Thread that produced this response (optional — new CLIs only) */
+  threadId?: string;
+  /** Runtime thread summaries for card button rendering (optional — new CLIs only) */
+  threads?: ThreadSummary[];
   data: {
     success: boolean;
     output?: string;
@@ -189,6 +193,10 @@ export interface StructuredContent {
 // Structured message from client
 export interface StructuredMessage extends WSMessage {
   type: MessageType.RESPONSE;
+  /** Thread that produced this response (optional — new CLIs only) */
+  threadId?: string;
+  /** Runtime thread summaries for card button rendering (optional — new CLIs only) */
+  threads?: ThreadSummary[];
   data: {
     success: boolean;
     output?: string;

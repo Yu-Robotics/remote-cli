@@ -153,7 +153,7 @@ export class MessageHandler {
       }
     }
 
-    // Per-thread busy check
+    // Per-thread busy check — set busy immediately to close the race window
     if (this.threadPool.isThreadBusy(resolvedThreadId)) {
       this.sendResponse(messageId, resolvedThreadId, {
         success: false,
@@ -161,24 +161,23 @@ export class MessageHandler {
       });
       return;
     }
-
-    // Validate and set working directory if provided
-    if (workingDirectory) {
-      if (!this.directoryGuard.isSafePath(workingDirectory)) {
-        this.sendResponse(messageId, resolvedThreadId, {
-          success: false,
-          error: `Directory not in whitelist: ${workingDirectory}\n\nAllowed directories:\n${this.directoryGuard
-            .getAllowedDirectories()
-            .map((d) => `• ${d}`)
-            .join('\n')}`,
-        });
-        return;
-      }
-      await executor.setWorkingDirectory(workingDirectory);
-    }
+    this.threadPool.setThreadBusy(resolvedThreadId, true);
 
     try {
-      this.threadPool.setThreadBusy(resolvedThreadId, true);
+      // Validate and set working directory if provided
+      if (workingDirectory) {
+        if (!this.directoryGuard.isSafePath(workingDirectory)) {
+          this.sendResponse(messageId, resolvedThreadId, {
+            success: false,
+            error: `Directory not in whitelist: ${workingDirectory}\n\nAllowed directories:\n${this.directoryGuard
+              .getAllowedDirectories()
+              .map((d) => `• ${d}`)
+              .join('\n')}`,
+          });
+          return;
+        }
+        await executor.setWorkingDirectory(workingDirectory);
+      }
 
       // Update thread activity timestamp
       await this.threadManager.updateThread(resolvedThreadId, { lastActiveAt: Date.now() });

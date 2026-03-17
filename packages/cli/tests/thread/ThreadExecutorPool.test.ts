@@ -145,6 +145,18 @@ describe('ThreadExecutorPool', () => {
       expect(executor.destroy).toHaveBeenCalled();
     });
 
+    it('calls deleteThreadData before destroy when executor supports it', async () => {
+      const deleteThreadData = vi.fn().mockResolvedValue(undefined);
+      mockExecutorFactory.mockImplementationOnce(() => makeMockExecutor({ deleteThreadData }));
+
+      const t = await manager.createThread('with-cleanup', tmpDir);
+      pool.getExecutor(t.id);
+
+      await pool.destroyThread(t.id);
+
+      expect(deleteThreadData).toHaveBeenCalledWith(t.id);
+    });
+
     it('removes executor from pool after destroy', async () => {
       const t = await manager.createThread('removed', tmpDir);
       pool.getExecutor(t.id);
@@ -175,6 +187,60 @@ describe('ThreadExecutorPool', () => {
       expect(e1.destroy).toHaveBeenCalled();
       expect(e2.destroy).toHaveBeenCalled();
     });
+
+    it('is a no-op when pool is empty', async () => {
+      await expect(pool.destroyAll()).resolves.not.toThrow();
+    });
+  });
+
+  describe('error state transitions', () => {
+    it('setThreadBusy(true) clears the error flag', () => {
+      const defaultThread = manager.getDefaultThread();
+      pool.setThreadError(defaultThread.id, true);
+      expect(pool.getStatus(defaultThread.id)).toBe('error');
+
+      pool.setThreadBusy(defaultThread.id, true);
+      expect(pool.getStatus(defaultThread.id)).toBe('running');
+    });
+
+    it('setThreadError(true) clears the busy flag', () => {
+      const defaultThread = manager.getDefaultThread();
+      pool.setThreadBusy(defaultThread.id, true);
+      expect(pool.isThreadBusy(defaultThread.id)).toBe(true);
+
+      pool.setThreadError(defaultThread.id, true);
+      expect(pool.isThreadBusy(defaultThread.id)).toBe(false);
+      expect(pool.getStatus(defaultThread.id)).toBe('error');
+    });
+
+    it('destroyThread clears busy and error flags when executor exists', async () => {
+      const t = await manager.createThread('flagged', tmpDir);
+      // Must get executor first, otherwise destroyThread is a no-op
+      pool.getExecutor(t.id);
+      pool.setThreadBusy(t.id, true);
+      pool.setThreadError(t.id, true);
+
+      await pool.destroyThread(t.id);
+
+      expect(pool.isThreadBusy(t.id)).toBe(false);
+      expect(pool.getStatus(t.id)).toBe('idle');
+    });
+  });
+
+  describe('getSummaries', () => {
+    it('includes threads that have no executor yet', async () => {
+      const t2 = await manager.createThread('lazy', tmpDir);
+      const defaultThread = manager.getDefaultThread();
+
+      // Only get executor for default thread
+      pool.getExecutor(defaultThread.id);
+
+      const summaries = pool.getSummaries();
+      expect(summaries).toHaveLength(2);
+      const lazySummary = summaries.find(s => s.id === t2.id);
+      expect(lazySummary).toBeDefined();
+      expect(lazySummary!.status).toBe('idle');
+    });
   });
 
   describe('backend switch', () => {
@@ -200,6 +266,36 @@ describe('ThreadExecutorPool', () => {
         newConfig,
         expect.anything(), // workingDir
         expect.anything()  // threadId
+      );
+    });
+
+    it('passes thread workingDirectory to executor factory', async () => {
+      const subDir = path.join(tmpDir, 'workdir');
+      await fs.mkdir(subDir);
+      const t = await manager.createThread('wd-thread', subDir);
+
+      pool.getExecutor(t.id);
+
+      expect(mockExecutorFactory).toHaveBeenCalledWith(
+        expect.anything(),
+        executorConfig,
+        subDir,
+        t.id
+      );
+    });
+
+    it('passes undefined to factory when thread workingDirectory is empty string', async () => {
+      const t = await manager.createThread('empty-wd', tmpDir);
+      // Force empty workingDirectory
+      await manager.updateThread(t.id, { workingDirectory: '' });
+
+      pool.getExecutor(t.id);
+
+      expect(mockExecutorFactory).toHaveBeenCalledWith(
+        expect.anything(),
+        executorConfig,
+        undefined,
+        t.id
       );
     });
   });

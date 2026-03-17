@@ -209,7 +209,15 @@ export class GeminiExecutor implements IExecutor {
     }
   }
 
-  // ─── Internal helpers ───────────────────────────────────────────────────────
+  /**
+   * Delete the Gemini session history file for a thread.
+   * Called by ThreadExecutorPool before removing this executor from the pool.
+   */
+  async deleteThreadData(threadId: string): Promise<void> {
+    if (this.conversationId) {
+      this.sessionManager.remove(this.conversationId);
+    }
+  }
 
   /**
    * Runs a single attempt with a specific model alias.

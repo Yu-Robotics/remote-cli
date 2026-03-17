@@ -12,12 +12,14 @@ import {
 /**
  * Manages thread lifecycle: create, list, update, delete.
  * Persists thread metadata to ~/.remote-cli/threads.json.
- * Session files are stored at ~/.remote-cli/claude-sessions/<threadId>.jsonl
+ * Session files are managed by each executor backend (ClaudePersistentExecutor,
+ * GeminiExecutor) and cleaned up via IExecutor.deleteThreadData().
  */
 export class ThreadManager {
   private store: ThreadStore;
   private storePath: string;
   private sessionsDir: string;
+  private persistQueue: Promise<void> = Promise.resolve();
 
   private constructor(storePath: string, sessionsDir: string, store: ThreadStore) {
     this.storePath = storePath;
@@ -171,35 +173,37 @@ export class ThreadManager {
 
     delete this.store.threads[id];
     await this.persist();
-
-    // Remove session file
-    const sessionPath = this.getSessionFilePath(id);
-    try {
-      await fs.unlink(sessionPath);
-    } catch {
-      // File may not exist, that's fine
-    }
   }
 
   /**
    * List all threads sorted by createdAt ascending.
-   */
-  listThreads(): Thread[] {
+   */  listThreads(): Thread[] {
     return Object.values(this.store.threads).sort((a, b) => a.createdAt - b.createdAt);
   }
 
   /**
-   * Get the session file path for a thread.
-   * Session files are stored as ~/.remote-cli/claude-sessions/<threadId>.jsonl
+   * Get the Claude session file path for a thread.
+   * ClaudePersistentExecutor stores sessions as ~/.remote-cli/claude-sessions/<threadId>.json
+   * (used by ClaudePersistentExecutor.deleteThreadData and tests)
    */
   getSessionFilePath(threadId: string): string {
-    return path.join(this.sessionsDir, `${threadId}.jsonl`);
+    return path.join(this.sessionsDir, `${threadId}.json`);
   }
 
   /**
    * Persist store to disk.
+   * Serialized through a promise queue to prevent concurrent writes from
+   * overwriting each other when multiple operations fire simultaneously.
+   * Errors are logged but swallowed in the queue so a single failure does
+   * not disable persistence for subsequent operations.
    */
-  private async persist(): Promise<void> {
-    await fs.writeFile(this.storePath, JSON.stringify(this.store, null, 2), 'utf-8');
+  private persist(): Promise<void> {
+    const write = () =>
+      fs.writeFile(this.storePath, JSON.stringify(this.store, null, 2), 'utf-8');
+    this.persistQueue = this.persistQueue.then(write).catch((err) => {
+      console.error('[ThreadManager] Persistence error:', err);
+      return write();
+    });
+    return this.persistQueue;
   }
 }
