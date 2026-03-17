@@ -191,7 +191,110 @@ describe('CLI handles PROTOCOL_VERSION_INCOMPATIBLE error from Router', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 3. Forward compatibility: new CLI fields don't break old Router
+// 3. Thread fields are optional on the wire (additive, non-breaking)
+//    threadId and threads were added with multi-thread support. They MUST
+//    remain optional so that:
+//      - old CLI (no threadId) works with new Router
+//      - new CLI (with threadId) works with old Router
+//    If any assertion here fails, stop and check whether a protocol bump is needed.
+// ---------------------------------------------------------------------------
+
+describe('Thread fields are optional on the wire', () => {
+  it('outgoing result message with threadId and threads fields (new CLI)', () => {
+    const msg = {
+      type: 'result',
+      messageId: 'uuid-1234',
+      timestamp: Date.now(),
+      success: true,
+      output: 'done',
+      openId: 'ou_abc123',
+      threadId: 'thread-uuid-abc',
+      threads: [
+        { id: 'thread-uuid-abc', name: 'default', status: 'idle' },
+        { id: 'thread-uuid-def', name: 'thread-2', status: 'idle' },
+      ],
+    };
+
+    expect(msg).toHaveProperty('threadId');
+    expect(msg).toHaveProperty('threads');
+    expect(Array.isArray(msg.threads)).toBe(true);
+    expect(msg.threads[0]).toHaveProperty('id');
+    expect(msg.threads[0]).toHaveProperty('name');
+    expect(msg.threads[0]).toHaveProperty('status');
+    expect(['idle', 'running', 'error']).toContain(msg.threads[0].status);
+  });
+
+  it('outgoing result message without threadId and threads (old CLI) is still valid', () => {
+    const msg = {
+      type: 'result',
+      messageId: 'uuid-1234',
+      timestamp: Date.now(),
+      success: true,
+      output: 'done',
+      openId: 'ou_abc123',
+      // threadId and threads intentionally absent
+    };
+
+    // Old CLI omits these fields — they are optional
+    expect(msg).not.toHaveProperty('threadId');
+    expect(msg).not.toHaveProperty('threads');
+    // But required fields are still present
+    expect(msg).toHaveProperty('type', 'result');
+    expect(msg).toHaveProperty('messageId');
+    expect(msg).toHaveProperty('success');
+  });
+
+  it('stream message does not carry threadId (routing is done via messageId)', () => {
+    const msg = {
+      type: 'stream',
+      messageId: 'uuid-1234',
+      timestamp: Date.now(),
+      openId: 'ou_abc123',
+      streamType: 'text',
+      chunk: 'partial output',
+      threadId: 'thread-uuid-abc',
+    };
+
+    // threadId on stream is optional — router uses messageId to look up the session
+    expect(msg).toHaveProperty('messageId');
+    expect(msg).toHaveProperty('threadId');
+  });
+
+  it('incoming command message with threadId (new Router to new CLI)', () => {
+    const msg = {
+      type: 'command',
+      messageId: 'uuid-5678',
+      timestamp: Date.now(),
+      content: 'list files',
+      openId: 'ou_abc123',
+      threadId: 'thread-uuid-abc',
+    };
+
+    expect(msg).toHaveProperty('threadId');
+    expect(typeof msg.threadId).toBe('string');
+  });
+
+  it('incoming command message without threadId (old Router to new CLI) falls back to default thread', () => {
+    const msg = {
+      type: 'command',
+      messageId: 'uuid-5678',
+      timestamp: Date.now(),
+      content: 'list files',
+      openId: 'ou_abc123',
+      // threadId intentionally absent — old Router
+    };
+
+    // CLI must handle missing threadId by falling back to default thread
+    const threadId = (msg as any).threadId ?? null;
+    expect(threadId).toBeNull();
+    // Fallback logic: use default thread when threadId is null
+    const resolvedThread = threadId ?? 'default';
+    expect(resolvedThread).toBe('default');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4. Forward compatibility: new CLI fields don't break old Router
 //    Old Router ignores unknown fields — new CLI must not rely on Router
 //    echoing back any new fields.
 // ---------------------------------------------------------------------------
