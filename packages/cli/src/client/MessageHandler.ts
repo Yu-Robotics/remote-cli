@@ -601,7 +601,7 @@ You can also use natural language commands to control Claude Code CLI.`,
             onRedactedThinking: () => this.sendRedactedThinking(messageId, threadId),
             onPlanMode: (planContent: string) => this.sendPlanMode(messageId, threadId, planContent),
           });
-          this.sendResponse(messageId, threadId, { success: retryResult.success, error: retryResult.error });
+          this.sendResponse(messageId, threadId, { success: retryResult.success, error: retryResult.error, threads: this.threadPool.getSummaries() });
           return;
         }
         this.sendResponse(messageId, threadId, {
@@ -611,7 +611,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         return;
       }
 
-      this.sendResponse(messageId, threadId, { success: result.success, error: result.error });
+      this.sendResponse(messageId, threadId, { success: result.success, error: result.error, threads: this.threadPool.getSummaries() });
     } catch (error) {
       this.sendResponse(messageId, threadId, {
         success: false,

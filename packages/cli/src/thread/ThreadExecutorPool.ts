@@ -16,7 +16,8 @@ type ThreadStatus = 'idle' | 'running' | 'error';
 export type ExecutorFactory = (
   directoryGuard: DirectoryGuard,
   config: ExecutorConfig,
-  initialWorkingDirectory?: string
+  initialWorkingDirectory?: string,
+  threadId?: string
 ) => IExecutor;
 
 /**
@@ -58,7 +59,8 @@ export class ThreadExecutorPool {
       executor = this.factory(
         this.directoryGuard,
         this.executorConfig,
-        thread.workingDirectory || undefined
+        thread.workingDirectory || undefined,
+        threadId
       );
       this.executors.set(threadId, executor);
     }

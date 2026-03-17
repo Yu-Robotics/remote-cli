@@ -35,6 +35,8 @@ export class FeishuLongConnHandler {
   private readonly CARD_SIZE_BUFFER = 100000; // Safety buffer: use 2.9MB instead of 3MB
   // Track message chains: messageId -> [messageId1, messageId2, ...]
   private messageChains: Map<string, string[]> = new Map();
+  // Store thread switch card state for re-patching after thread switch
+  private threadSwitchCardState = new Map<string, { baseElements: any[]; threads: ThreadSummary[]; activeThreadId?: string }>();
   // Track the last processed text length for each message chain
   // This helps us only send NEW content to existing messages, preventing duplication
   private lastProcessedLengths: Map<string, number> = new Map();
@@ -1253,8 +1255,8 @@ Examples:
         { tag: 'markdown', content: noteContent },
       ];
 
-      // Append thread switch buttons when multiple threads exist
-      if (threads && threads.length > 1) {
+      // Append thread switch buttons when at least one thread exists
+      if (threads && threads.length >= 1) {
         finalElements.push(...this.createThreadSwitchElements(threads, activeThreadId));
       }
 
@@ -1263,6 +1265,17 @@ Examples:
       const updated = await this._updateStreamingMessage(messageId, finalElements, openId);
       if (!updated) {
         return false;
+      }
+
+      // Store thread switch card state for later refresh (before cleanup)
+      if (threads && threads.length >= 1) {
+        const chain = this.messageChains.get(messageId);
+        const lastCardId = chain ? chain[chain.length - 1] : messageId;
+        this.threadSwitchCardState.set(lastCardId, {
+          baseElements: [...elements, { tag: 'markdown', content: noteContent }],
+          threads,
+          activeThreadId,
+        });
       }
 
       // Clean up tracking state
@@ -1290,7 +1303,7 @@ Examples:
           text: { tag: 'plain_text', content: t.id === activeThreadId ? `★ ${t.name}` : t.name },
           type: t.id === activeThreadId ? 'primary' : 'default',
           disabled: t.id === activeThreadId,
-          value: JSON.stringify({ action: 'switch_thread', threadId: t.id, threadName: t.name }),
+          behaviors: [{ type: 'callback', value: { action: 'switch_thread', threadId: t.id, threadName: t.name } }],
         },
       ],
     }));
@@ -1304,7 +1317,7 @@ Examples:
           tag: 'button',
           text: { tag: 'plain_text', content: '+ New' },
           type: 'default',
-          value: JSON.stringify({ action: 'new_thread' }),
+          behaviors: [{ type: 'callback', value: { action: 'new_thread' } }],
         },
       ],
     };
@@ -1320,10 +1333,33 @@ Examples:
   }
 
   /**
+   * Refresh thread switch buttons on a card after the active thread changes.
+   * Re-patches the card with updated button states (new active thread highlighted).
+   */
+  private async refreshThreadSwitchButtons(cardMessageId: string, newActiveThreadId: string): Promise<void> {
+    const state = this.threadSwitchCardState.get(cardMessageId);
+    if (!state) {
+      console.warn(`[FeishuHandler] No thread switch state found for card ${cardMessageId}`);
+      return;
+    }
+    const updatedElements = [
+      ...state.baseElements,
+      ...this.createThreadSwitchElements(state.threads, newActiveThreadId),
+    ];
+    await this.client.im.message.patch({
+      path: { message_id: cardMessageId },
+      data: {
+        content: JSON.stringify({ schema: '2.0', body: { elements: updatedElements } }),
+      },
+    });
+    this.threadSwitchCardState.set(cardMessageId, { ...state, activeThreadId: newActiveThreadId });
+  }
+
+  /**
    * Handle Feishu card interactive action (button click).
    * Called by card.action.trigger event from Feishu long connection.
    */
-  private async handleCardAction(data: any): Promise<{ toast?: any } | void> {
+  async handleCardAction(data: any): Promise<{ toast?: any } | void> {
     const openId = data?.operator?.open_id;
     const actionValue = data?.action?.value;
     if (!openId || !actionValue) return;
@@ -1336,8 +1372,14 @@ Examples:
     }
 
     if (parsed.action === 'switch_thread' && parsed.threadId) {
+      const openMessageId = data?.context?.open_message_id;
       try {
         await this.onCardSwitchThread?.(openId, parsed.threadId, parsed.threadName ?? parsed.threadId);
+        if (openMessageId) {
+          this.refreshThreadSwitchButtons(openMessageId, parsed.threadId).catch((err) =>
+            console.error('[FeishuLongConnHandler] Failed to refresh thread switch buttons:', err)
+          );
+        }
         return { toast: { type: 'success', content: `Switched to: ${parsed.threadName ?? parsed.threadId}` } };
       } catch (error) {
         console.error('[FeishuLongConnHandler] Card action switch_thread failed:', error);

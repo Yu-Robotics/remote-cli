@@ -218,6 +218,16 @@ export class RouterServer {
       }
     });
 
+    // Feishu card callback endpoint — receives button click events from Feishu
+    router.post('/api/feishu/card-callback', async (ctx) => {
+      const body = ctx.request.body as any;
+      // Feishu card callback wraps the action data under body.event
+      const eventData = body?.event ?? body;
+      const result = await this.feishuLongConnHandler.handleCardAction(eventData);
+      ctx.status = 200;
+      ctx.body = result ?? {};
+    });
+
     this.app.use(router.routes());
     this.app.use(router.allowedMethods());
   }

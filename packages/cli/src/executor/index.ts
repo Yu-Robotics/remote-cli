@@ -77,7 +77,8 @@ export function createClaudeExecutor(
 export function createExecutor(
   directoryGuard: DirectoryGuard,
   executorConfig: ExecutorConfig = { type: 'auto' },
-  initialWorkingDirectory?: string
+  initialWorkingDirectory?: string,
+  threadId?: string
 ): IExecutor {
   switch (executorConfig.type) {
     case 'gemini':
@@ -92,7 +93,7 @@ export function createExecutor(
 
     case 'claude-persistent':
       console.log('[ExecutorFactory] Using Claude persistent executor');
-      return new ClaudePersistentExecutor(directoryGuard, initialWorkingDirectory);
+      return new ClaudePersistentExecutor(directoryGuard, initialWorkingDirectory, threadId);
 
     case 'claude-spawn':
       console.log('[ExecutorFactory] Using Claude spawn executor');
@@ -105,6 +106,6 @@ export function createExecutor(
         return new ClaudeExecutor(directoryGuard);
       }
       console.log('[ExecutorFactory] Using Claude persistent executor (auto)');
-      return new ClaudePersistentExecutor(directoryGuard, initialWorkingDirectory);
+      return new ClaudePersistentExecutor(directoryGuard, initialWorkingDirectory, threadId);
   }
 }
