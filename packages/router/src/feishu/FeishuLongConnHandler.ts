@@ -2,7 +2,7 @@ import * as lark from '@larksuiteoapi/node-sdk';
 import { v4 as uuidv4 } from 'uuid';
 import { BindingManager } from '../binding/BindingManager';
 import { ConnectionHub } from '../websocket/ConnectionHub';
-import { MessageType, ThreadSummary } from '../types';
+import { MAX_THREADS, MessageType, ThreadSummary } from '../types';
 import { JsonStore } from '../storage/JsonStore';
 
 /**
@@ -1318,15 +1318,17 @@ Examples:
       ],
     }));
 
-    // Always add a "+ New" button at the end
+    // Add a "+ New" button; disabled when the thread limit is reached
+    const atLimit = threads.length >= MAX_THREADS;
     const newThreadColumn = {
       tag: 'column',
       width: 'auto',
       elements: [
         {
           tag: 'button',
-          text: { tag: 'plain_text', content: '+ New' },
+          text: { tag: 'plain_text', content: atLimit ? '+ New (max)' : '+ New' },
           type: 'default',
+          disabled: atLimit,
           behaviors: [{ type: 'callback', value: { action: 'new_thread' } }],
         },
       ],
