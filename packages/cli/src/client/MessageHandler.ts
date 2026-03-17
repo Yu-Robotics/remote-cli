@@ -1,6 +1,9 @@
 import { WebSocketClient } from './WebSocketClient';
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import { IncomingMessage, OutgoingMessage, StructuredContent, ToolUseInfo, ToolResultInfo } from '../types';
+import { ThreadExecutorPool } from '../thread/ThreadExecutorPool';
+import { ThreadManager } from '../thread/ThreadManager';
+import { DEFAULT_THREAD_NAME } from '../thread/types';
 import type { IExecutor } from '../executor/IExecutor';
 import { createExecutor } from '../executor';
 import { FeishuNotificationAdapter } from '../hooks';
@@ -29,55 +32,51 @@ export interface Message {
 }
 
 /**
- * Message Handler
- * Responsible for handling messages from WebSocket and invoking Claude executor
+ * Thread-aware Message Handler.
+ * Each thread has its own executor process managed by ThreadExecutorPool.
+ * Commands without a threadId are routed to the default thread.
  */
 export class MessageHandler {
   private wsClient: WebSocketClient;
-  private executor: IExecutor;
+  private threadPool: ThreadExecutorPool;
+  private threadManager: ThreadManager;
   private directoryGuard: DirectoryGuard;
   private config: ConfigManager;
   private isDestroyed = false;
-  private isExecuting = false;
   private currentOpenId?: string;
   private notificationAdapter: FeishuNotificationAdapter;
 
   constructor(
     wsClient: WebSocketClient,
-    executor: IExecutor,
+    threadPool: ThreadExecutorPool,
+    threadManager: ThreadManager,
     directoryGuard: DirectoryGuard,
     config: ConfigManager
   ) {
     this.wsClient = wsClient;
-    this.executor = executor;
+    this.threadPool = threadPool;
+    this.threadManager = threadManager;
     this.directoryGuard = directoryGuard;
     this.config = config;
 
-    // Initialize Feishu notification adapter
     this.notificationAdapter = new FeishuNotificationAdapter(wsClient);
     this.notificationAdapter.register();
   }
 
   /**
    * Handle message (supports new IncomingMessage format)
-   * @param message Message object
    */
   async handleMessage(message: Message | IncomingMessage): Promise<void> {
-    // Check if already destroyed
-    if (this.isDestroyed) {
-      return;
-    }
+    if (this.isDestroyed) return;
 
-    // Validate message structure
     if (!message || !this.isValidMessage(message)) {
-      this.sendResponse(message?.messageId || 'unknown', {
+      this.sendResponse(message?.messageId || 'unknown', undefined, {
         success: false,
         error: 'Invalid message format',
       });
       return;
     }
 
-    // Handle different types of messages
     switch (message.type) {
       case 'status':
         await this.handleStatusQuery(message.messageId!);
@@ -88,15 +87,13 @@ export class MessageHandler {
         return;
 
       case 'heartbeat':
-        // Silently ignore heartbeat responses from server
         return;
 
       case 'binding_confirm':
-        // Silently ignore binding confirmation from server
         return;
 
       default:
-        this.sendResponse(message.messageId!, {
+        this.sendResponse(message.messageId!, undefined, {
           success: false,
           error: `Unknown message type: ${message.type}`,
         });
@@ -104,41 +101,50 @@ export class MessageHandler {
   }
 
   /**
-   * Handle command message
+   * Handle command message — route to the correct thread executor.
    */
   private async handleCommandMessage(message: IncomingMessage): Promise<void> {
-    const { messageId, content, workingDirectory, openId, isSlashCommand } = message;
+    const { messageId, content, workingDirectory, openId, isSlashCommand, threadId } = message;
 
-    // Store openId for response routing and notifications
     this.currentOpenId = openId;
     this.notificationAdapter.setCurrentOpenId(openId);
 
-    // Handle /abort command first, even when busy
+    // Resolve target thread — fall back to default if not specified
+    const thread = threadId
+      ? this.threadManager.getThread(threadId)
+      : this.threadManager.getDefaultThread();
+
+    if (!thread) {
+      this.sendResponse(messageId, undefined, {
+        success: false,
+        error: `Thread not found: ${threadId}`,
+      });
+      return;
+    }
+
+    const resolvedThreadId = thread.id;
+    const executor = this.threadPool.getExecutor(resolvedThreadId);
+
+    // Handle /abort for this specific thread (bypasses busy check)
     if (content?.trim() === '/abort') {
-      await this.handleAbortCommand(messageId);
+      await this.handleAbortCommand(messageId, resolvedThreadId, executor);
       return;
     }
 
     // Check if executor is waiting for interactive input
-    if ('isWaitingInput' in this.executor && typeof this.executor.isWaitingInput === 'function') {
-      const executor = this.executor as { isWaitingInput(): boolean; sendInput(input: string): boolean };
-      if (executor.isWaitingInput()) {
+    if ('isWaitingInput' in executor && typeof executor.isWaitingInput === 'function') {
+      const ex = executor as { isWaitingInput(): boolean; sendInput(input: string): boolean };
+      if (ex.isWaitingInput()) {
         const input = content?.trim();
         if (input) {
-          const sent = executor.sendInput(input);
-          if (sent) {
-            this.sendResponse(messageId, {
-              success: true,
-              output: `✅ Sent: "${input}"`,
-            });
-          } else {
-            this.sendResponse(messageId, {
-              success: false,
-              error: '❌ Failed to send input - executor is no longer waiting',
-            });
-          }
+          const sent = ex.sendInput(input);
+          this.sendResponse(messageId, resolvedThreadId, {
+            success: sent,
+            output: sent ? `✅ Sent: "${input}"` : undefined,
+            error: sent ? undefined : '❌ Failed to send input - executor is no longer waiting',
+          });
         } else {
-          this.sendResponse(messageId, {
+          this.sendResponse(messageId, resolvedThreadId, {
             success: false,
             error: '❌ Please provide a non-empty input',
           });
@@ -147,20 +153,19 @@ export class MessageHandler {
       }
     }
 
-    // Check if there is a task currently executing
-    if (this.isExecuting) {
-      this.sendResponse(messageId, {
+    // Per-thread busy check
+    if (this.threadPool.isThreadBusy(resolvedThreadId)) {
+      this.sendResponse(messageId, resolvedThreadId, {
         success: false,
-        error: 'Executor is busy, please wait for current task to complete. Send the abort command to cancel the running task.',
+        error: `Thread "${thread.name}" is busy. Send /abort to cancel the running task, or use another thread.`,
       });
       return;
     }
 
-    // If working directory is provided, validate and set it
+    // Validate and set working directory if provided
     if (workingDirectory) {
-      // Verify directory is in the whitelist
       if (!this.directoryGuard.isSafePath(workingDirectory)) {
-        this.sendResponse(messageId, {
+        this.sendResponse(messageId, resolvedThreadId, {
           success: false,
           error: `Directory not in whitelist: ${workingDirectory}\n\nAllowed directories:\n${this.directoryGuard
             .getAllowedDirectories()
@@ -169,63 +174,64 @@ export class MessageHandler {
         });
         return;
       }
-
-      // Set working directory
-      await this.executor.setWorkingDirectory(workingDirectory);
+      await executor.setWorkingDirectory(workingDirectory);
     }
 
     try {
-      this.isExecuting = true;
+      this.threadPool.setThreadBusy(resolvedThreadId, true);
 
-      // Handle built-in commands (except /abort which was handled above)
-      const builtInResult = await this.handleBuiltInCommand(messageId, content!);
-      if (builtInResult) {
-        return;
-      }
+      // Update thread activity timestamp
+      await this.threadManager.updateThread(resolvedThreadId, { lastActiveAt: Date.now() });
 
-      // Check if this is a passthrough slash command from server
+      const builtInResult = await this.handleBuiltInCommand(
+        messageId,
+        resolvedThreadId,
+        content!,
+        executor
+      );
+      if (builtInResult) return;
+
       if (isSlashCommand) {
         console.log(`[MessageHandler] Executing passthrough slash command: ${content}`);
-        await this.executeSlashCommand(messageId, content!);
+        await this.executeSlashCommand(messageId, resolvedThreadId, content!, executor);
         return;
       }
 
-      // Expand command shortcuts
       const expandedContent = this.expandCommandShortcuts(content!);
-
-      // Detect file-reading intent and inject hint for mobile optimization
       const processedContent = processFileReadContent(expandedContent);
-
-      // Execute Claude command
-      await this.executeCommand(messageId, processedContent);
+      await this.executeCommand(messageId, resolvedThreadId, processedContent, executor);
     } catch (error) {
-      this.sendResponse(messageId, {
+      this.threadPool.setThreadError(resolvedThreadId, true);
+      this.sendResponse(messageId, resolvedThreadId, {
         success: false,
         error: error instanceof Error ? error.message : 'Unknown error',
       });
     } finally {
-      this.isExecuting = false;
+      this.threadPool.setThreadBusy(resolvedThreadId, false);
     }
   }
 
   /**
-   * Handle abort command
-   * Can be executed even when executor is busy
+   * Handle /abort command for a specific thread executor
    */
-  private async handleAbortCommand(messageId: string): Promise<void> {
-    const wasExecuting = this.isExecuting;
-    const aborted = await this.executor.abort();
+  private async handleAbortCommand(
+    messageId: string,
+    threadId: string,
+    executor: IExecutor
+  ): Promise<void> {
+    const wasExecuting = this.threadPool.isThreadBusy(threadId);
+    const aborted = await executor.abort();
 
     if (aborted) {
-      this.isExecuting = false;
-      this.sendResponse(messageId, {
+      this.threadPool.setThreadBusy(threadId, false);
+      this.sendResponse(messageId, threadId, {
         success: true,
         output: wasExecuting
           ? '✅ Current command has been aborted'
           : '⚠️ No command was executing, but executor has been reset',
       });
     } else {
-      this.sendResponse(messageId, {
+      this.sendResponse(messageId, threadId, {
         success: true,
         output: 'ℹ️ No command is currently executing',
       });
@@ -236,151 +242,138 @@ export class MessageHandler {
    * Handle status query
    */
   private async handleStatusQuery(messageId: string): Promise<void> {
+    const defaultThread = this.threadManager.getDefaultThread();
+    const defaultExecutor = this.threadPool.getExecutor(defaultThread.id);
+
     this.wsClient.send({
       type: 'status',
       messageId,
       status: {
         connected: this.wsClient.isConnected(),
         allowedDirectories: this.directoryGuard.getAllowedDirectories(),
-        currentWorkingDirectory: this.executor.getCurrentWorkingDirectory(),
+        currentWorkingDirectory: defaultExecutor.getCurrentWorkingDirectory(),
+        threads: this.threadPool.getSummaries(),
       },
       timestamp: Date.now(),
     });
   }
 
-  /**
-   * Validate message structure
-   */
   private isValidMessage(message: Message): boolean {
-    if (!message || typeof message !== 'object') {
-      return false;
-    }
-
-    if (message.type !== 'command') {
-      return true; // Non-command messages don't need further validation
-    }
-
+    if (!message || typeof message !== 'object') return false;
+    if (message.type !== 'command') return true;
     return Boolean(message.messageId && message.content);
   }
 
   /**
-   * Handle built-in commands
-   * @returns Returns true if built-in command was handled, otherwise false
+   * Handle built-in commands (thread-scoped).
+   * Returns true if handled.
    */
   private async handleBuiltInCommand(
     messageId: string,
-    content: string
+    threadId: string,
+    content: string,
+    executor: IExecutor
   ): Promise<boolean> {
     const trimmed = content.trim();
 
-    // /status command
     if (trimmed === '/status') {
-      const cwd = this.executor.getCurrentWorkingDirectory();
+      const cwd = executor.getCurrentWorkingDirectory();
       const allowedDirs = this.directoryGuard.getAllowedDirectories();
+      const threads = this.threadPool.getSummaries();
+      const threadList = threads
+        .map(t => `  • ${t.name}${t.status === 'running' ? ' 🔄' : t.status === 'error' ? ' ❌' : ' ✅'} (${t.status})`)
+        .join('\n');
 
-      this.sendResponse(messageId, {
+      this.sendResponse(messageId, threadId, {
         success: true,
         output: `📊 Status:
 - Working Directory: ${cwd}
 - Allowed Directories: ${allowedDirs.join(', ')}
-- Connection: Active`,
+- Connection: Active
+- Threads:\n${threadList}`,
       });
       return true;
     }
 
-    // /help command
     if (trimmed === '/help') {
-      this.sendResponse(messageId, {
+      this.sendResponse(messageId, threadId, {
         success: true,
         output: `📖 Available commands:
 - /help - Show this help message
-- /status - Show current status
-- /abort - Abort the currently executing command
-- /clear - Clear conversation context
+- /status - Show current status and threads
+- /abort - Abort the currently executing command in this thread
+- /clear - Clear conversation context for this thread
 - /compact - Compress conversation history to reduce context size
-- /cd <directory> - Change working directory
+- /cd <directory> - Change working directory for this thread
 - /backend - List available AI backends and switch between them
+- /thread list - List all threads with their status
+- /thread new [name] - Create a new thread
+- /thread delete <name> - Delete a thread (only when idle)
 You can also use natural language commands to control Claude Code CLI.`,
       });
       return true;
     }
 
-    // /clear command
     if (trimmed === '/clear') {
-      this.executor.resetContext();
-      this.sendResponse(messageId, {
+      executor.resetContext();
+      this.sendResponse(messageId, threadId, {
         success: true,
         output: '✅ Conversation context cleared',
       });
       return true;
     }
 
-    // /compact command - compress conversation history via Claude CLI's built-in /compact
     if (trimmed === '/compact') {
-      if (!('compactWhenFull' in this.executor && typeof this.executor.compactWhenFull === 'function')) {
-        this.sendResponse(messageId, {
+      if (!('compactWhenFull' in executor && typeof executor.compactWhenFull === 'function')) {
+        this.sendResponse(messageId, threadId, {
           success: false,
           error: '/compact is not supported in this executor mode',
         });
         return true;
       }
-      this.sendStreamChunk(messageId, '🗜️ Compressing conversation history...\n');
-      const persistentExecutor = this.executor as IExecutor;
-      const result = await persistentExecutor.compactWhenFull!((chunk: string) => {
-        this.sendStreamChunk(messageId, chunk);
+      this.sendStreamChunk(messageId, threadId, '🗜️ Compressing conversation history...\n');
+      const result = await executor.compactWhenFull!((chunk: string) => {
+        this.sendStreamChunk(messageId, threadId, chunk);
       });
-      if (!result.success) {
-        this.sendResponse(messageId, {
-          success: false,
-          error: result.error || 'Compaction failed',
-        });
-      } else {
-        this.sendResponse(messageId, {
-          success: true,
-          output: '✅ Conversation history compressed',
-        });
-      }
+      this.sendResponse(messageId, threadId, result.success
+        ? { success: true, output: '✅ Conversation history compressed' }
+        : { success: false, error: result.error || 'Compaction failed' }
+      );
       return true;
     }
 
-    // /backend command
     if (trimmed === '/backend' || trimmed.startsWith('/backend ')) {
-      await this.handleBackendCommand(messageId, trimmed);
+      await this.handleBackendCommand(messageId, threadId, trimmed);
       return true;
     }
 
-    // /cd command
     if (trimmed.startsWith('/cd')) {
       const parts = trimmed.split(/\s+/);
       if (parts.length < 2) {
-        this.sendResponse(messageId, {
-          success: false,
-          error: 'Usage: /cd <directory>',
-        });
+        this.sendResponse(messageId, threadId, { success: false, error: 'Usage: /cd <directory>' });
         return true;
       }
-
       const targetDir = parts.slice(1).join(' ');
       try {
-        await this.executor.setWorkingDirectory(targetDir);
-        const newCwd = this.executor.getCurrentWorkingDirectory();
-
-        // Save lastWorkingDirectory to config (set() already saves)
-        await this.config.set('lastWorkingDirectory', newCwd);
-
-        this.sendResponse(messageId, {
+        await executor.setWorkingDirectory(targetDir);
+        const newCwd = executor.getCurrentWorkingDirectory();
+        // Persist the thread's working directory (restored on next startup via ThreadExecutorPool)
+        await this.threadManager.updateThread(threadId, { workingDirectory: newCwd });
+        this.sendResponse(messageId, threadId, {
           success: true,
           output: `✅ Changed working directory to: ${newCwd}`,
         });
       } catch (error) {
-        this.sendResponse(messageId, {
+        this.sendResponse(messageId, threadId, {
           success: false,
-          error:
-            error instanceof Error
-              ? error.message
-              : 'Failed to change directory',
+          error: error instanceof Error ? error.message : 'Failed to change directory',
         });
       }
+      return true;
+    }
+
+    if (trimmed === '/thread' || trimmed.startsWith('/thread ')) {
+      await this.handleThreadCommand(messageId, threadId, trimmed);
       return true;
     }
 
@@ -388,72 +381,169 @@ You can also use natural language commands to control Claude Code CLI.`,
   }
 
   /**
+   * Handle /thread subcommands
+   */
+  private async handleThreadCommand(
+    messageId: string,
+    callerThreadId: string,
+    trimmed: string
+  ): Promise<void> {
+    const parts = trimmed.split(/\s+/);
+    const sub = parts[1]; // list | new | delete
+
+    if (!sub || sub === 'list') {
+      const summaries = this.threadPool.getSummaries();
+      const lines = summaries.map(t => {
+        const icon = t.status === 'running' ? '🔄' : t.status === 'error' ? '❌' : '✅';
+        const current = t.id === callerThreadId ? ' ← (this thread)' : '';
+        return `${icon} ${t.name}${current}`;
+      });
+      this.sendResponse(messageId, callerThreadId, {
+        success: true,
+        output: `🧵 Threads:\n${lines.join('\n')}\n\nUse /thread new [name] to create a new thread.\nReply to a thread's card to send commands to it.`,
+      });
+      return;
+    }
+
+    if (sub === 'new') {
+      const name = parts[2];
+      const callerThread = this.threadManager.getThread(callerThreadId) || this.threadManager.getDefaultThread();
+      const callerExecutor = this.threadPool.getExecutor(callerThread.id);
+      const cwd = callerExecutor.getCurrentWorkingDirectory();
+      try {
+        const newThread = await this.threadManager.createThread(
+          name || this.generateThreadName(),
+          cwd
+        );
+        // Use newThread.id so the router maps this card to the new thread,
+        // enabling the user to reply to this card to target the new thread.
+        this.sendResponse(messageId, newThread.id, {
+          success: true,
+          output: `✅ Thread "${newThread.name}" created.\nReply to this card to send the first command to the new thread.`,
+          threads: this.threadPool.getSummaries(),
+        });
+      } catch (error) {
+        this.sendResponse(messageId, callerThreadId, {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to create thread',
+        });
+      }
+      return;
+    }
+
+    if (sub === 'delete') {
+      const name = parts[2];
+      if (!name) {
+        this.sendResponse(messageId, callerThreadId, {
+          success: false,
+          error: 'Usage: /thread delete <name>',
+        });
+        return;
+      }
+
+      const target = this.threadManager.getThreadByName(name);
+      if (!target) {
+        this.sendResponse(messageId, callerThreadId, {
+          success: false,
+          error: `Thread "${name}" not found.`,
+        });
+        return;
+      }
+
+      if (this.threadPool.isThreadBusy(target.id)) {
+        this.sendResponse(messageId, callerThreadId, {
+          success: false,
+          error: `Cannot delete thread "${name}" while it is running. Send /abort first.`,
+        });
+        return;
+      }
+
+      try {
+        await this.threadPool.destroyThread(target.id);
+        await this.threadManager.deleteThread(target.id);
+        this.sendResponse(messageId, callerThreadId, {
+          success: true,
+          output: `✅ Thread "${name}" deleted.`,
+          threads: this.threadPool.getSummaries(),
+        });
+      } catch (error) {
+        this.sendResponse(messageId, callerThreadId, {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to delete thread',
+        });
+      }
+      return;
+    }
+
+    this.sendResponse(messageId, callerThreadId, {
+      success: false,
+      error: `Unknown /thread subcommand: ${sub}\nUsage: /thread list | /thread new [name] | /thread delete <name>`,
+    });
+  }
+
+  /**
+   * Generate a unique auto-name for a new thread (e.g. "thread-2")
+   */
+  private generateThreadName(): string {
+    const existing = new Set(this.threadManager.listThreads().map(t => t.name));
+    for (let i = 2; i <= 99; i++) {
+      const name = `thread-${i}`;
+      if (!existing.has(name)) return name;
+    }
+    return `thread-${Date.now()}`;
+  }
+
+  /**
    * Expand command shortcuts
    */
   private expandCommandShortcuts(content: string): string {
     const trimmed = content.trim();
-
-    // Only expand when command is the entire content
-    if (trimmed === '/r' || trimmed === '/resume') {
-      return 'Please resume the previous conversation';
-    }
-
-    if (trimmed === '/c' || trimmed === '/continue') {
-      return 'Please continue from where we left off';
-    }
-
+    if (trimmed === '/r' || trimmed === '/resume') return 'Please resume the previous conversation';
+    if (trimmed === '/c' || trimmed === '/continue') return 'Please continue from where we left off';
     return content;
   }
 
   /**
    * Execute passthrough slash command using local Claude CLI
-   * This allows users to use their custom slash commands
    */
-  private async executeSlashCommand(messageId: string, command: string): Promise<void> {
+  private async executeSlashCommand(
+    messageId: string,
+    threadId: string,
+    command: string,
+    executor: IExecutor
+  ): Promise<void> {
     return new Promise((resolve) => {
       const chunks: string[] = [];
       const errorChunks: string[] = [];
 
       console.log(`[MessageHandler] Spawning Claude CLI for command: ${command}`);
 
-      // Spawn Claude CLI with the slash command
-      // Use --print to get output and exit
       const child = spawn('claude', [command, '--print'], {
-        cwd: this.executor.getCurrentWorkingDirectory(),
+        cwd: executor.getCurrentWorkingDirectory(),
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: {
-          ...process.env,
-          CLAUDECODE: '', // Prevent nested session error
-        },
+        env: { ...process.env, CLAUDECODE: '' },
       });
 
-      // Handle stdout (stream chunks)
       child.stdout?.on('data', (data: Buffer) => {
         const chunk = data.toString();
         chunks.push(chunk);
-        this.sendStreamChunk(messageId, chunk);
+        this.sendStreamChunk(messageId, threadId, chunk);
       });
 
-      // Handle stderr
       child.stderr?.on('data', (data: Buffer) => {
-        const chunk = data.toString();
-        errorChunks.push(chunk);
-        console.error(`[MessageHandler] Claude stderr: ${chunk}`);
+        errorChunks.push(data.toString());
       });
 
-      // Handle process exit
       child.on('exit', (code) => {
-        console.log(`[MessageHandler] Claude process exited with code: ${code}`);
-
         if (code === 0) {
           const output = chunks.join('');
-          this.sendResponse(messageId, {
+          this.sendResponse(messageId, threadId, {
             success: true,
             output: output.trim() || '✅ Command executed successfully',
           });
         } else {
           const errorOutput = errorChunks.join('') || chunks.join('');
-          this.sendResponse(messageId, {
+          this.sendResponse(messageId, threadId, {
             success: false,
             error: errorOutput.trim() || `Command failed with exit code ${code}`,
           });
@@ -461,10 +551,9 @@ You can also use natural language commands to control Claude Code CLI.`,
         resolve();
       });
 
-      // Handle process error
       child.on('error', (error) => {
-        console.error(`[MessageHandler] Failed to spawn Claude:`, error);
-        this.sendResponse(messageId, {
+        console.error('[MessageHandler] Failed to spawn Claude:', error);
+        this.sendResponse(messageId, threadId, {
           success: false,
           error: `Failed to execute command: ${error.message}`,
         });
@@ -474,84 +563,66 @@ You can also use natural language commands to control Claude Code CLI.`,
   }
 
   /**
-   * Execute Claude command
+   * Execute AI command on a specific executor
    */
   private async executeCommand(
     messageId: string,
-    content: string
+    threadId: string,
+    content: string,
+    executor: IExecutor
   ): Promise<void> {
     try {
-      const result = await this.executor.execute(content, {
-        onStream: (chunk: string) => {
-          this.sendStreamChunk(messageId, chunk);
-        },
-        onToolUse: (toolUse: ToolUseInfo) => {
-          this.sendToolUse(messageId, toolUse);
-        },
-        onToolResult: (toolResult: ToolResultInfo) => {
-          this.sendToolResult(messageId, toolResult);
-        },
-        onRedactedThinking: () => {
-          this.sendRedactedThinking(messageId);
-        },
-        onPlanMode: (planContent: string) => {
-          this.sendPlanMode(messageId, planContent);
-        },
+      const result = await executor.execute(content, {
+        onStream: (chunk: string) => this.sendStreamChunk(messageId, threadId, chunk),
+        onToolUse: (toolUse: ToolUseInfo) => this.sendToolUse(messageId, threadId, toolUse),
+        onToolResult: (toolResult: ToolResultInfo) => this.sendToolResult(messageId, threadId, toolResult),
+        onRedactedThinking: () => this.sendRedactedThinking(messageId, threadId),
+        onPlanMode: (planContent: string) => this.sendPlanMode(messageId, threadId, planContent),
       });
 
-      // Only send success status, not the output
-      // Output has already been streamed via onStream callback
       if (!result.success && result.error && result.error.includes('Prompt too long')) {
-        if ('compactWhenFull' in this.executor && typeof this.executor.compactWhenFull === 'function') {
-          // Context is full - use external compact which stops/restarts the process
-          this.sendStreamChunk(messageId, '⚠️ Conversation history too long, auto-compressing...\n');
-          const persistentExecutor = this.executor as IExecutor;
-          const compactResult = await persistentExecutor.compactWhenFull!((chunk: string) => {
-            this.sendStreamChunk(messageId, chunk);
+        if ('compactWhenFull' in executor && typeof executor.compactWhenFull === 'function') {
+          this.sendStreamChunk(messageId, threadId, '⚠️ Conversation history too long, auto-compressing...\n');
+          const compactResult = await executor.compactWhenFull!((chunk: string) => {
+            this.sendStreamChunk(messageId, threadId, chunk);
           });
           if (!compactResult.success) {
-            this.sendResponse(messageId, {
+            this.sendResponse(messageId, threadId, {
               success: false,
               error: `❌ Auto-compact failed: ${compactResult.error}\n\nUse /compact to try again, or /clear to start fresh.`,
             });
             return;
           }
-          this.sendStreamChunk(messageId, '✅ Compressed. Retrying...\n');
-          const retryResult = await this.executor.execute(content, {
-            onStream: (chunk: string) => { this.sendStreamChunk(messageId, chunk); },
-            onToolUse: (toolUse: ToolUseInfo) => { this.sendToolUse(messageId, toolUse); },
-            onToolResult: (toolResult: ToolResultInfo) => { this.sendToolResult(messageId, toolResult); },
-            onRedactedThinking: () => { this.sendRedactedThinking(messageId); },
-            onPlanMode: (planContent: string) => { this.sendPlanMode(messageId, planContent); },
+          this.sendStreamChunk(messageId, threadId, '✅ Compressed. Retrying...\n');
+          const retryResult = await executor.execute(content, {
+            onStream: (chunk: string) => this.sendStreamChunk(messageId, threadId, chunk),
+            onToolUse: (toolUse: ToolUseInfo) => this.sendToolUse(messageId, threadId, toolUse),
+            onToolResult: (toolResult: ToolResultInfo) => this.sendToolResult(messageId, threadId, toolResult),
+            onRedactedThinking: () => this.sendRedactedThinking(messageId, threadId),
+            onPlanMode: (planContent: string) => this.sendPlanMode(messageId, threadId, planContent),
           });
-          this.sendResponse(messageId, {
-            success: retryResult.success,
-            error: retryResult.error,
-          });
+          this.sendResponse(messageId, threadId, { success: retryResult.success, error: retryResult.error });
           return;
         }
-        this.sendResponse(messageId, {
+        this.sendResponse(messageId, threadId, {
           success: false,
           error: '❌ Conversation history too long.\n\nUse /compact to compress it, or /clear to start fresh.',
         });
         return;
       }
-      this.sendResponse(messageId, {
-        success: result.success,
-        error: result.error,
-      });
+
+      this.sendResponse(messageId, threadId, { success: result.success, error: result.error });
     } catch (error) {
-      this.sendResponse(messageId, {
+      this.sendResponse(messageId, threadId, {
         success: false,
         error: error instanceof Error ? error.message : 'Execution error',
       });
     }
   }
 
-  /**
-   * Send streaming output chunk
-   */
-  private sendStreamChunk(messageId: string, chunk: string): void {
+  // ── Outgoing message helpers ──────────────────────────────────────────────
+
+  private sendStreamChunk(messageId: string, threadId: string | undefined, chunk: string): void {
     try {
       this.wsClient.send({
         type: 'stream',
@@ -559,18 +630,15 @@ You can also use natural language commands to control Claude Code CLI.`,
         chunk,
         streamType: 'text',
         openId: this.currentOpenId,
+        threadId,
         timestamp: Date.now(),
       });
     } catch (error) {
-      // Ignore send errors, don't affect main flow
       console.error('Failed to send stream chunk:', error);
     }
   }
 
-  /**
-   * Send tool use event
-   */
-  private sendToolUse(messageId: string, toolUse: ToolUseInfo): void {
+  private sendToolUse(messageId: string, threadId: string | undefined, toolUse: ToolUseInfo): void {
     try {
       this.wsClient.send({
         type: 'stream',
@@ -578,6 +646,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         streamType: 'tool_use',
         toolUse,
         openId: this.currentOpenId,
+        threadId,
         timestamp: Date.now(),
       });
     } catch (error) {
@@ -585,10 +654,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     }
   }
 
-  /**
-   * Send tool result event
-   */
-  private sendToolResult(messageId: string, toolResult: ToolResultInfo): void {
+  private sendToolResult(messageId: string, threadId: string | undefined, toolResult: ToolResultInfo): void {
     try {
       this.wsClient.send({
         type: 'stream',
@@ -596,6 +662,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         streamType: 'tool_result',
         toolResult,
         openId: this.currentOpenId,
+        threadId,
         timestamp: Date.now(),
       });
     } catch (error) {
@@ -603,17 +670,14 @@ You can also use natural language commands to control Claude Code CLI.`,
     }
   }
 
-  /**
-   * Send redacted thinking event
-   * This occurs when AI reasoning is filtered by safety systems (Claude 3.7 Sonnet, Gemini)
-   */
-  private sendRedactedThinking(messageId: string): void {
+  private sendRedactedThinking(messageId: string, threadId: string | undefined): void {
     try {
       this.wsClient.send({
         type: 'stream',
         messageId,
         streamType: 'redacted_thinking',
         openId: this.currentOpenId,
+        threadId,
         timestamp: Date.now(),
       });
     } catch (error) {
@@ -621,12 +685,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     }
   }
 
-  /**
-   * Send plan mode event
-   * Fired when Claude completes its plan between EnterPlanMode and ExitPlanMode tool calls.
-   * Execution is auto-approved; this event is for user visibility only.
-   */
-  private sendPlanMode(messageId: string, planContent: string): void {
+  private sendPlanMode(messageId: string, threadId: string | undefined, planContent: string): void {
     try {
       this.wsClient.send({
         type: 'stream',
@@ -634,6 +693,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         streamType: 'plan_mode',
         planContent,
         openId: this.currentOpenId,
+        threadId,
         timestamp: Date.now(),
       });
     } catch (error) {
@@ -641,32 +701,47 @@ You can also use natural language commands to control Claude Code CLI.`,
     }
   }
 
-  /**
-   * Send structured content for rich formatting
-   */
-  private sendStructuredContent(messageId: string, structuredContent: StructuredContent): void {
+  private sendStructuredContent(
+    messageId: string,
+    threadId: string | undefined,
+    structuredContent: StructuredContent
+  ): void {
     try {
       this.wsClient.send({
         type: 'structured',
         messageId,
         structuredContent,
         openId: this.currentOpenId,
+        threadId,
         timestamp: Date.now(),
-        cwd: this.executor.getCurrentWorkingDirectory(),
       } as OutgoingMessage);
     } catch (error) {
       console.error('Failed to send structured content:', error);
     }
   }
 
-  /**
-   * Send response
-   */
   private sendResponse(
     messageId: string,
-    result: { success: boolean; output?: string; error?: string; sessionAbbr?: string }
+    threadId: string | undefined,
+    result: {
+      success: boolean;
+      output?: string;
+      error?: string;
+      sessionAbbr?: string;
+      threads?: import('../thread/types').ThreadSummary[];
+    }
   ): void {
     try {
+      // Resolve CWD from thread executor if possible
+      let cwd: string | undefined;
+      try {
+        if (threadId) {
+          cwd = this.threadPool.getExecutor(threadId).getCurrentWorkingDirectory();
+        }
+      } catch {
+        // Ignore — thread may have been deleted
+      }
+
       this.wsClient.send({
         type: 'response',
         messageId,
@@ -675,82 +750,71 @@ You can also use natural language commands to control Claude Code CLI.`,
         error: result.error,
         sessionAbbr: result.sessionAbbr,
         openId: this.currentOpenId,
+        threadId,
+        threads: result.threads,
+        cwd,
         timestamp: Date.now(),
-        cwd: this.executor.getCurrentWorkingDirectory(),
       });
     } catch (error) {
       console.error('Failed to send response:', error);
     }
   }
 
-  /**
-   * Detect whether a command is available on PATH
-   */
+  // ── Backend switching ─────────────────────────────────────────────────────
+
   private checkCommand(cmd: string, args: string[]): Promise<boolean> {
     return new Promise((resolve) => {
       execFile(cmd, args, { timeout: 5000 }, (err) => resolve(!err));
     });
   }
 
-  /**
-   * Detect all installed AI backends
-   */
   private async detectBackends(): Promise<BackendInfo[]> {
     const [claudeInstalled, geminiInstalled] = await Promise.all([
       this.checkCommand('claude', ['--version']),
       this.checkCommand('npx', ['--no', '@google/gemini-cli', '--version']),
     ]);
-
     return [
       { id: 'auto',   label: 'Claude Code', installed: claudeInstalled },
       { id: 'gemini', label: 'Gemini CLI',  installed: geminiInstalled },
     ];
   }
 
-  /**
-   * Handle /backend command
-   * Usage:
-   *   /backend              — list available backends
-   *   /backend <name|index> — switch to the specified backend
-   */
-  private async handleBackendCommand(messageId: string, trimmed: string): Promise<void> {
+  private async handleBackendCommand(
+    messageId: string,
+    threadId: string,
+    trimmed: string
+  ): Promise<void> {
     const parts = trimmed.split(/\s+/);
     const arg = parts[1];
 
     const currentConfig = (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
     const currentType = currentConfig.type;
-
     const backends = await this.detectBackends();
     const installed = backends.filter((b) => b.installed);
 
-    // List mode
     if (!arg) {
       if (installed.length === 0) {
-        this.sendResponse(messageId, {
+        this.sendResponse(messageId, threadId, {
           success: false,
           error: 'No supported AI backends found.\n\nMake sure Claude Code is installed: npm install -g @anthropic-ai/claude-code',
         });
         return;
       }
-
       const lines = installed.map((b, i) => {
         const isClaudeActive = b.id === 'auto' &&
           (currentType === 'auto' || currentType === 'claude-persistent' || currentType === 'claude-spawn');
         const active = b.id === currentType || isClaudeActive ? ' ★ (active)' : '';
         return `${i + 1}. ${b.label}${active}`;
       });
-
-      this.sendResponse(messageId, {
+      this.sendResponse(messageId, threadId, {
         success: true,
         output: `🤖 Available AI backends:\n${lines.join('\n')}\n\nSwitch with: /backend <index> or /backend <name>`,
       });
       return;
     }
 
-    // Switch mode — resolve by index or name
     const index = parseInt(arg, 10);
     let target: BackendInfo | undefined;
-
     if (!isNaN(index) && index >= 1 && index <= installed.length) {
       target = installed[index - 1];
     } else {
@@ -760,36 +824,33 @@ You can also use natural language commands to control Claude Code CLI.`,
     }
 
     if (!target) {
-      this.sendResponse(messageId, {
+      this.sendResponse(messageId, threadId, {
         success: false,
         error: `Backend "${arg}" not found. Use /backend to see available options.`,
       });
       return;
     }
 
-    // Persist to config
     const newConfig: ExecutorConfig = { ...currentConfig, type: target.id };
     await this.config.set('executor', newConfig);
+    await this.threadPool.switchBackend(newConfig);
 
-    // Hot-swap executor without restart
-    const cwd = this.executor.getCurrentWorkingDirectory();
-    if (typeof (this.executor as any).destroy === 'function') {
-      (this.executor as any).destroy();
-    }
-    this.executor = createExecutor(this.directoryGuard, newConfig, cwd);
-
-    this.sendResponse(messageId, {
+    this.sendResponse(messageId, threadId, {
       success: true,
-      output: `✅ Backend switched to: ${target.label}`,
+      output: `✅ Backend switched to: ${target.label}\n\nAll threads will use the new backend for future commands.`,
     });
   }
 
   /**
-   * Destroy handler
+   * Destroy handler and all executors
    */
-  destroy(): void {
+  async destroy(): Promise<void> {
     this.isDestroyed = true;
-    this.isExecuting = false;
     this.notificationAdapter.unregister();
+    try {
+      await this.threadPool.destroyAll();
+    } catch (err) {
+      console.error('Error destroying thread executors:', err);
+    }
   }
 }

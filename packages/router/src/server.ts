@@ -8,7 +8,7 @@ import { JsonStore } from './storage/JsonStore';
 import { FeishuLongConnHandler } from './feishu/FeishuLongConnHandler';
 import { ConnectionHub } from './websocket/ConnectionHub';
 import { BindingManager } from './binding/BindingManager';
-import { MessageType, ToolUseInfo, ToolResultInfo, PROTOCOL_VERSION, MIN_SUPPORTED_CLI_VERSION, ROUTER_VERSION } from './types';
+import { MessageType, ToolUseInfo, ToolResultInfo, PROTOCOL_VERSION, MIN_SUPPORTED_CLI_VERSION, ROUTER_VERSION, ThreadSummary } from './types';
 import { FeishuCardElement, createToolUseElement, createToolResultElement, createMarkdownElement, createRedactedThinkingElement, createPlanModeElement } from './utils/ToolFormatter';
 
 /**
@@ -25,7 +25,7 @@ export class RouterServer {
   private connectionHub: ConnectionHub;
   private bindingManager: BindingManager;
   private cleanupInterval: NodeJS.Timeout | null = null;
-  // Track streaming messages: messageId -> { openId, feishuMessageId, elements, currentTextContent, hasUpdated, createdAt, deviceId }
+  // Track streaming messages: messageId -> { openId, feishuMessageId, elements, currentTextContent, hasUpdated, createdAt, deviceId, threadId, threadName }
   private streamingMessages: Map<string, {
     openId: string;
     feishuMessageId: string | null;
@@ -34,8 +34,16 @@ export class RouterServer {
     hasUpdated: boolean;
     createdAt: number;
     deviceId: string;
+    threadId?: string;   // Which thread produced this stream (optional — new CLIs only)
+    threadName?: string; // Human-friendly thread name, resolved from CLI response threads[]
   }> = new Map();
   private readonly STREAMING_SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes timeout
+  // TTL for cardThreadMap entries: 7 days (allows users to reply to old cards)
+  private readonly CARD_THREAD_MAP_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+  // Map from Feishu card message_id to threadId for parent_id-based routing.
+  // Entries are NOT removed on finalize so users can reply to completed cards.
+  // Each entry carries an expiresAt timestamp for TTL-based eviction.
+  private cardThreadMap = new Map<string, { threadId: string; deviceId: string; expiresAt: number }>();
 
   constructor(config: ConfigManager, store: JsonStore) {
     this.config = config;
@@ -55,10 +63,8 @@ export class RouterServer {
     this.feishuLongConnHandler.setConnectionHub(this.connectionHub);
 
     // Register callback for streaming message start
-    this.feishuLongConnHandler.setOnStartStreaming((messageId: string, openId: string, feishuMessageId: string | null, deviceId: string) => {
-      console.log(`[RouterServer] Registering streaming session: msgId=${messageId}, feishuMsgId=${feishuMessageId}, deviceId=${deviceId}`);
-      // Register this message as a streaming message so chunks and response update the same card
-      // hasUpdated starts as false to ensure first content is immediately shown
+    this.feishuLongConnHandler.setOnStartStreaming((messageId: string, openId: string, feishuMessageId: string | null, deviceId: string, threadId?: string) => {
+      console.log(`[RouterServer] Registering streaming session: msgId=${messageId}, feishuMsgId=${feishuMessageId}, deviceId=${deviceId}, threadId=${threadId}`);
       this.streamingMessages.set(messageId, {
         openId,
         feishuMessageId,
@@ -66,9 +72,26 @@ export class RouterServer {
         currentTextContent: '',
         hasUpdated: false,
         createdAt: Date.now(),
-        deviceId
+        deviceId,
+        threadId,
       });
+      // Populate cardThreadMap for parent_id-based routing
+      if (feishuMessageId && threadId) {
+        this.cardThreadMap.set(feishuMessageId, { threadId, deviceId, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS });
+      }
       console.log(`[RouterServer] Total streaming sessions: ${this.streamingMessages.size}`);
+    });
+
+    // Register callback for thread resolution from Feishu parent_id
+    this.feishuLongConnHandler.setOnResolveThread((feishuMessageId: string) => {
+      const entry = this.cardThreadMap.get(feishuMessageId);
+      if (!entry) return undefined;
+      // Evict expired entries on read
+      if (Date.now() > entry.expiresAt) {
+        this.cardThreadMap.delete(feishuMessageId);
+        return undefined;
+      }
+      return entry;
     });
 
     this.setupMiddleware();
@@ -274,6 +297,25 @@ export class RouterServer {
               const responseMessageId = message.messageId;
               const sessionAbbr = message.sessionAbbr || message.data?.sessionAbbr;
               const cwd = message.cwd || message.data?.cwd;
+              const responseThreadId = message.threadId || message.data?.threadId;
+              const responseThreads: ThreadSummary[] | undefined = message.threads || message.data?.threads;
+
+              // If CLI reported a threadId and there is a streaming session for this message,
+              // ensure the cardThreadMap is up to date (in case the CLI-reported threadId differs).
+              if (responseThreadId && responseMessageId) {
+                const session = this.streamingMessages.get(responseMessageId);
+                if (session) {
+                  if (session.feishuMessageId && !session.threadId) {
+                    session.threadId = responseThreadId;
+                    this.cardThreadMap.set(session.feishuMessageId, { threadId: responseThreadId, deviceId: session.deviceId, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS });
+                  }
+                  // Resolve thread name from the threads summary array
+                  if (!session.threadName && responseThreads) {
+                    const match = responseThreads.find(t => t.id === responseThreadId);
+                    if (match) session.threadName = match.name;
+                  }
+                }
+              }
               if (responseMessageId && responseOpenId) {
                 // Check if this was a streaming message (stream chunks were sent)
                 if (this.streamingMessages.has(responseMessageId)) {
@@ -647,7 +689,8 @@ export class RouterServer {
           streamData.elements,
           sessionAbbr,
           openId,
-          cwd
+          cwd,
+          streamData.threadName
         );
       } else {
         // Add error message to elements
@@ -662,7 +705,8 @@ export class RouterServer {
       }
     }
 
-    // Clean up
+    // Clean up streaming session state (but NOT cardThreadMap — keep it alive
+    // so users can reply to the completed card and route to the same thread).
     this.streamingMessages.delete(messageId);
     this.lastStreamUpdateTime.delete(messageId);
   }
@@ -678,9 +722,21 @@ export class RouterServer {
     for (const [messageId, session] of this.streamingMessages.entries()) {
       if (now - session.createdAt > this.STREAMING_SESSION_TIMEOUT_MS) {
         console.log(`[RouterServer] Cleaning up stale streaming session: ${messageId}`);
+        // Stale in-flight sessions have their cardThreadMap entry removed;
+        // completed sessions deliberately keep theirs (see finalizeStreamingMessage).
+        if (session.feishuMessageId) {
+          this.cardThreadMap.delete(session.feishuMessageId);
+        }
         this.streamingMessages.delete(messageId);
         this.lastStreamUpdateTime.delete(messageId);
         cleanedCount++;
+      }
+    }
+
+    // Evict expired cardThreadMap entries (TTL-based, independent of streaming sessions)
+    for (const [feishuMessageId, entry] of this.cardThreadMap.entries()) {
+      if (now > entry.expiresAt) {
+        this.cardThreadMap.delete(feishuMessageId);
       }
     }
 
@@ -699,9 +755,20 @@ export class RouterServer {
     for (const [messageId, session] of this.streamingMessages.entries()) {
       if (session.deviceId === deviceId) {
         console.log(`[RouterServer] Cleaning up streaming session for disconnected device: ${messageId}`);
+        // Also clean up any cardThreadMap entries associated with this session's feishuMessageId
+        if (session.feishuMessageId) {
+          this.cardThreadMap.delete(session.feishuMessageId);
+        }
         this.streamingMessages.delete(messageId);
         this.lastStreamUpdateTime.delete(messageId);
         cleanedCount++;
+      }
+    }
+
+    // Clean up any orphaned cardThreadMap entries for this device
+    for (const [feishuMessageId, entry] of this.cardThreadMap.entries()) {
+      if (entry.deviceId === deviceId) {
+        this.cardThreadMap.delete(feishuMessageId);
       }
     }
 

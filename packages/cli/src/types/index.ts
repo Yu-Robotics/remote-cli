@@ -1,4 +1,5 @@
 import { version } from '../../package.json';
+import type { ThreadSummary } from '../thread/types';
 
 /**
  * WebSocket protocol version.
@@ -113,6 +114,8 @@ export interface IncomingMessage {
   timestamp: number;
   /** Whether this is a passthrough slash command */
   isSlashCommand?: boolean;
+  /** Target thread ID for multi-thread routing (optional — defaults to default thread) */
+  threadId?: string;
 }
 
 /**
@@ -124,7 +127,7 @@ export type StreamType = 'text' | 'tool_use' | 'tool_result' | 'redacted_thinkin
  * Outgoing message to router server
  */
 export interface OutgoingMessage {
-  type: 'result' | 'progress' | 'status' | 'pong' | 'structured' | 'stream';
+  type: 'result' | 'progress' | 'status' | 'pong' | 'structured' | 'stream' | 'response';
   messageId: string;
   success?: boolean;
   /** Plain text output (for backward compatibility) */
@@ -147,4 +150,12 @@ export interface OutgoingMessage {
   toolResult?: ToolResultInfo;
   /** Plan content (when streamType === 'plan_mode') */
   planContent?: string;
+  /** Thread ID that produced this output (optional — for multi-thread routing) */
+  threadId?: string;
+  /** Runtime thread summaries (for card display) */
+  threads?: ThreadSummary[];
+  /** Current working directory (for response messages) */
+  cwd?: string;
+  /** Session abbreviation */
+  sessionAbbr?: string;
 }
