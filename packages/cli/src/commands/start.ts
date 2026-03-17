@@ -6,9 +6,12 @@ import { DirectoryGuard } from '../security/DirectoryGuard';
 import { HooksConfigurator } from '../security/HooksConfigurator';
 import { CLI_VERSION } from '../types';
 import type { ExecutorConfig } from '../types/config';
+import { ThreadManager } from '../thread/ThreadManager';
 import axios from 'axios';
 import * as readline from 'readline';
 import { execFile } from 'child_process';
+import * as os from 'os';
+import * as path from 'path';
 import ora, { type Ora } from 'ora';
 
 /**
@@ -199,13 +202,31 @@ export async function startCommand(
     // This ensures .claude-session file is stored in the working directory, not startup directory
     const lastWorkingDirectory = config.get('lastWorkingDirectory') as string | undefined;
     const executorConfig = (config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' as const };
-    const executor = createExecutor(directoryGuard, executorConfig, lastWorkingDirectory);
+
+    // Initialize ThreadManager and migrate from single-session if needed
+    const configDir = path.join(os.homedir(), '.remote-cli');
+    const threadManager = new ThreadManager(configDir);
+    if (threadManager.listThreads().length === 0) {
+      threadManager.migrateFromSingleSession(lastWorkingDirectory, null);
+    }
+
+    // Determine working directory from active thread (falls back to configLastWorkingDirectory)
+    const activeThread = threadManager.getActiveThread();
+    const initialCwd = activeThread?.workingDirectory ?? lastWorkingDirectory;
+    const executor = createExecutor(directoryGuard, executorConfig, initialCwd);
+
+    // Apply active thread's session to executor
+    if (activeThread) {
+      (executor as any).enableExternalSessionManagement?.();
+      (executor as any).setSessionFilePath?.(threadManager.sessionFilePath(activeThread.id));
+      (executor as any).setSessionId?.(threadManager.loadSessionId(activeThread.id));
+    }
 
     // Warn if the selected backend CLI is not installed
     await checkBackendAvailability(executorConfig.type ?? 'auto', spinner);
 
-    // If lastWorkingDirectory is set, verify it was applied correctly
-    if (!lastWorkingDirectory) {
+    // If initialCwd is set, verify it was applied correctly
+    if (!initialCwd) {
       spinner.warn('Working directory not set');
       console.log('');
       console.log('⚠️  **Working Directory Not Set**');
@@ -226,7 +247,7 @@ export async function startCommand(
     const wsUrl = serverUrl.replace(/^http/, 'ws') + '/ws';
     const wsClient = new WebSocketClient(wsUrl, deviceId);
 
-    const messageHandler = new MessageHandler(wsClient, executor, directoryGuard, config);
+    const messageHandler = new MessageHandler(wsClient, executor, directoryGuard, config, threadManager);
 
     // Setup event handlers
     wsClient.on('connected', () => {

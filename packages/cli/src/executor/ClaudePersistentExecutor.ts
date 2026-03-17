@@ -184,6 +184,9 @@ export class ClaudePersistentExecutor extends EventEmitter {
   // Activity tracking for timeout extension (optional, can be disabled)
   private activityTrackingEnabled = false;
 
+  // External session management (used with ThreadManager)
+  private externalSessionManagement = false;
+
   constructor(directoryGuard: DirectoryGuard, initialWorkingDirectory?: string) {
     super();
     this.directoryGuard = directoryGuard;
@@ -311,18 +314,47 @@ export class ClaudePersistentExecutor extends EventEmitter {
     const needsRestart = this.currentWorkingDirectory !== resolvedPath && this.claudeProcess !== null;
 
     this.currentWorkingDirectory = resolvedPath;
-    this.sessionFilePath = path.join(this.currentWorkingDirectory, '.claude-session');
 
-    // Start fresh session when changing directories - don't inherit previous session
-    // This prevents errors when switching to a directory with old session files
-    this.sessionId = null;
-    console.log('[ClaudePersistent] Working directory changed, starting fresh session (no session inheritance)');
+    if (!this.externalSessionManagement) {
+      this.sessionFilePath = path.join(this.currentWorkingDirectory, '.claude-session');
+      // Start fresh session when changing directories - don't inherit previous session
+      // This prevents errors when switching to a directory with old session files
+      this.sessionId = null;
+      console.log('[ClaudePersistent] Working directory changed, starting fresh session (no session inheritance)');
+    } else {
+      console.log('[ClaudePersistent] Working directory changed (external session management active, session preserved)');
+    }
 
     if (needsRestart) {
       console.log('[ClaudePersistent] Restarting process in new directory...');
       await this.stopProcess();
       await this.startProcess();
     }
+  }
+
+  /**
+   * Override the session file path (used by ThreadManager).
+   * Reloads session ID from the new file path.
+   */
+  setSessionFilePath(filePath: string): void {
+    this.sessionFilePath = filePath;
+    this.loadSessionId();
+  }
+
+  /**
+   * Directly set the session ID (used by ThreadManager when switching threads).
+   */
+  setSessionId(sessionId: string | null): void {
+    this.sessionId = sessionId;
+  }
+
+  /**
+   * Enable external session management mode.
+   * When active, setWorkingDirectory will NOT reset sessionFilePath or sessionId.
+   * The caller (ThreadManager via MessageHandler) is responsible for managing them.
+   */
+  enableExternalSessionManagement(): void {
+    this.externalSessionManagement = true;
   }
 
   /**
