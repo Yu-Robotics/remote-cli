@@ -99,6 +99,9 @@ export interface ResponseMessage extends WSMessage {
   };
 }
 
+/** Maximum number of threads allowed per user (mirrors CLI-side MAX_THREADS). */
+export const MAX_THREADS = 5;
+
 /**
  * Thread runtime summary.
  * Sent from CLI to router in response messages so the router can
