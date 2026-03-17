@@ -4,6 +4,7 @@ import { claudeCodeHooks } from '../hooks/ClaudeCodeHooks';
 import { StructuredContent, ContentBlockUnion, ToolUseInfo, ToolResultInfo } from '../types';
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import { EventEmitter } from 'events';
 
 /**
@@ -184,7 +185,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
   // Activity tracking for timeout extension (optional, can be disabled)
   private activityTrackingEnabled = false;
 
-  constructor(directoryGuard: DirectoryGuard, initialWorkingDirectory?: string) {
+  constructor(directoryGuard: DirectoryGuard, initialWorkingDirectory?: string, threadId?: string) {
     super();
     this.directoryGuard = directoryGuard;
     // Use provided working directory or fall back to process.cwd()
@@ -203,7 +204,15 @@ export class ClaudePersistentExecutor extends EventEmitter {
     } else {
       this.currentWorkingDirectory = process.cwd();
     }
-    this.sessionFilePath = path.join(this.currentWorkingDirectory, '.claude-session');
+    if (threadId) {
+      // Per-thread session file: each thread gets its own isolated session
+      const sessionsDir = path.join(os.homedir(), '.remote-cli', 'claude-sessions');
+      fs.mkdirSync(sessionsDir, { recursive: true });
+      this.sessionFilePath = path.join(sessionsDir, `${threadId}.json`);
+    } else {
+      // Legacy: session file in working directory (for backward compatibility)
+      this.sessionFilePath = path.join(this.currentWorkingDirectory, '.claude-session');
+    }
     this.loadSessionId();
   }
 
@@ -311,7 +320,8 @@ export class ClaudePersistentExecutor extends EventEmitter {
     const needsRestart = this.currentWorkingDirectory !== resolvedPath && this.claudeProcess !== null;
 
     this.currentWorkingDirectory = resolvedPath;
-    this.sessionFilePath = path.join(this.currentWorkingDirectory, '.claude-session');
+    // Note: sessionFilePath is NOT updated here — per-thread session files are bound to the
+    // thread ID, not the working directory. For legacy (no threadId), session resets on dir change.
 
     // Start fresh session when changing directories - don't inherit previous session
     // This prevents errors when switching to a directory with old session files
