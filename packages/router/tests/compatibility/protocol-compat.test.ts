@@ -150,6 +150,81 @@ describe('Wire format snapshots', () => {
       // workingDirectory and isSlashCommand are optional
     });
 
+    it('command shape with threadId (new Router, multi-thread)', () => {
+      const msg = {
+        type: MessageType.COMMAND,
+        messageId: 'uuid-5678',
+        timestamp: 1000000,
+        content: 'list files',
+        openId: 'ou_abc123',
+        workingDirectory: '/home/user/project',
+        isSlashCommand: false,
+        threadId: 'thread-uuid-abc',
+      };
+
+      expect(msg).toHaveProperty('type', 'command');
+      expect(msg).toHaveProperty('threadId');
+      expect(typeof msg.threadId).toBe('string');
+    });
+
+    it('command shape without threadId (old Router) is still valid', () => {
+      const msg = {
+        type: MessageType.COMMAND,
+        messageId: 'uuid-5678',
+        timestamp: 1000000,
+        content: 'list files',
+        openId: 'ou_abc123',
+        // threadId intentionally absent — old Router
+      };
+
+      expect(msg).toHaveProperty('type', 'command');
+      expect(msg).toHaveProperty('messageId');
+      expect(msg).toHaveProperty('content');
+      expect(msg).not.toHaveProperty('threadId');
+    });
+
+    it('response shape with threadId and threads (new CLI, multi-thread)', () => {
+      const msg = {
+        type: 'response',
+        messageId: 'uuid-1234',
+        timestamp: 1000000,
+        openId: 'ou_abc123',
+        success: true,
+        output: 'done',
+        threadId: 'thread-uuid-abc',
+        threads: [
+          { id: 'thread-uuid-abc', name: 'default', status: 'idle' },
+          { id: 'thread-uuid-def', name: 'thread-2', status: 'idle' },
+        ],
+      };
+
+      expect(msg).toHaveProperty('threadId');
+      expect(msg).toHaveProperty('threads');
+      expect(Array.isArray(msg.threads)).toBe(true);
+      expect(msg.threads[0]).toHaveProperty('id');
+      expect(msg.threads[0]).toHaveProperty('name');
+      expect(msg.threads[0]).toHaveProperty('status');
+      expect(['idle', 'running', 'error']).toContain(msg.threads[0].status);
+    });
+
+    it('response shape without threadId and threads (old CLI) is still valid', () => {
+      const msg = {
+        type: 'response',
+        messageId: 'uuid-1234',
+        timestamp: 1000000,
+        openId: 'ou_abc123',
+        success: true,
+        output: 'done',
+        // threadId and threads intentionally absent — old CLI
+      };
+
+      expect(msg).not.toHaveProperty('threadId');
+      expect(msg).not.toHaveProperty('threads');
+      // Router must handle missing threadId gracefully (skip thread-routing logic)
+      const threadId = (msg as any).threadId ?? null;
+      expect(threadId).toBeNull();
+    });
+
     it('heartbeat response shape', () => {
       const msg = {
         type: MessageType.HEARTBEAT,
