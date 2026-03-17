@@ -3,6 +3,7 @@ import bodyParser from 'koa-bodyparser';
 import Router from '@koa/router';
 import { WebSocketServer, WebSocket } from 'ws';
 import { Server as HttpServer } from 'http';
+import { v4 as uuidv4 } from 'uuid';
 import { ConfigManager } from './config/ConfigManager';
 import { JsonStore } from './storage/JsonStore';
 import { FeishuLongConnHandler } from './feishu/FeishuLongConnHandler';
@@ -70,6 +71,38 @@ export class RouterServer {
       });
       console.log(`[RouterServer] Total streaming sessions: ${this.streamingMessages.size}`);
     });
+
+    // Register card button callback: thread switch triggered from Feishu card
+    this.feishuLongConnHandler.onCardSwitchThread = async (openId: string, threadId: string) => {
+      const activeDevice = await this.bindingManager.getActiveDevice(openId);
+      if (!activeDevice || !this.connectionHub.isDeviceOnline(activeDevice.deviceId)) {
+        await this.feishuLongConnHandler.sendMessage(openId, '❌ Device is offline. Cannot switch thread.');
+        return;
+      }
+
+      const commandMessageId = uuidv4();
+      const feishuMessageId = await this.feishuLongConnHandler.sendStreamingStart(openId, '🔄 Switching thread...');
+      if (feishuMessageId) {
+        this.streamingMessages.set(commandMessageId, {
+          openId,
+          feishuMessageId,
+          elements: [],
+          currentTextContent: '',
+          hasUpdated: false,
+          createdAt: Date.now(),
+          deviceId: activeDevice.deviceId,
+        });
+      }
+
+      await this.connectionHub.sendToDevice(activeDevice.deviceId, {
+        type: MessageType.COMMAND,
+        messageId: commandMessageId,
+        timestamp: Date.now(),
+        content: `/thread switch ${threadId}`,
+        openId,
+        isSlashCommand: false,
+      });
+    };
 
     this.setupMiddleware();
     this.setupRoutes();
@@ -274,6 +307,7 @@ export class RouterServer {
               const responseMessageId = message.messageId;
               const sessionAbbr = message.sessionAbbr || message.data?.sessionAbbr;
               const cwd = message.cwd || message.data?.cwd;
+              const threads = message.threads || message.data?.threads;
               if (responseMessageId && responseOpenId) {
                 // Check if this was a streaming message (stream chunks were sent)
                 if (this.streamingMessages.has(responseMessageId)) {
@@ -283,7 +317,8 @@ export class RouterServer {
                     message.output || message.data?.output,
                     message.error || message.data?.error,
                     sessionAbbr,
-                    cwd
+                    cwd,
+                    threads
                   );
                 } else {
                   // No streaming session found - session should have been created when command was sent
@@ -623,7 +658,7 @@ export class RouterServer {
   /**
    * Finalize streaming message
    */
-  private async finalizeStreamingMessage(messageId: string, success: boolean, output?: string, error?: string, sessionAbbr?: string, cwd?: string): Promise<void> {
+  private async finalizeStreamingMessage(messageId: string, success: boolean, output?: string, error?: string, sessionAbbr?: string, cwd?: string, threads?: any[]): Promise<void> {
     const streamData = this.streamingMessages.get(messageId);
     if (!streamData) return;
 
@@ -647,7 +682,8 @@ export class RouterServer {
           streamData.elements,
           sessionAbbr,
           openId,
-          cwd
+          cwd,
+          threads
         );
       } else {
         // Add error message to elements

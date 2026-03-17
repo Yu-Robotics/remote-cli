@@ -1126,4 +1126,73 @@ describe('FeishuLongConnHandler', () => {
       ).toBe('');
     });
   });
+
+  describe('thread switch card buttons', () => {
+    const threads = [
+      { id: 'id-main', name: 'main', isActive: true },
+      { id: 'id-feat', name: 'feature', isActive: false },
+    ];
+
+    it('should append thread buttons to finalizeStreamingMessage when threads.length > 1', async () => {
+      mockClient.im.message.patch.mockClear();
+      mockClient.im.message.patch.mockResolvedValue({});
+
+      const result = await handler.finalizeStreamingMessage('msg_thread_1', [], undefined, 'ou_user_123', undefined, threads);
+
+      expect(result).toBe(true);
+      const patchCall = mockClient.im.message.patch.mock.calls.at(-1);
+      const body = JSON.parse(patchCall[0].data.content);
+      const allTags = JSON.stringify(body);
+      expect(allTags).toContain('column_set');
+      expect(allTags).toContain('button');
+      expect(allTags).toContain('★ main');
+      expect(allTags).toContain('feature');
+    });
+
+    it('should NOT append thread buttons when threads.length <= 1', async () => {
+      mockClient.im.message.patch.mockClear();
+      mockClient.im.message.patch.mockResolvedValue({});
+
+      const result = await handler.finalizeStreamingMessage('msg_thread_2', [], undefined, 'ou_user_123', undefined, [threads[0]]);
+
+      expect(result).toBe(true);
+      const patchCall = mockClient.im.message.patch.mock.calls.at(-1);
+      const body = JSON.parse(patchCall[0].data.content);
+      const allTags = JSON.stringify(body);
+      expect(allTags).not.toContain('column_set');
+    });
+  });
+
+  describe('handleCardAction (thread switch)', () => {
+    it('should call onCardSwitchThread callback and return toast on valid action', async () => {
+      const callback = vi.fn().mockResolvedValue(undefined);
+      handler.onCardSwitchThread = callback;
+
+      const result = await (handler as any).handleCardAction({
+        operator: { open_id: 'ou_user123' },
+        action: { value: JSON.stringify({ action: 'switch_thread', threadId: 'id-feat' }) },
+      });
+
+      expect(callback).toHaveBeenCalledWith('ou_user123', 'id-feat');
+      expect(result?.toast?.type).toBe('success');
+    });
+
+    it('should ignore unknown action types', async () => {
+      const callback = vi.fn();
+      handler.onCardSwitchThread = callback;
+
+      const result = await (handler as any).handleCardAction({
+        operator: { open_id: 'ou_user123' },
+        action: { value: JSON.stringify({ action: 'unknown_action' }) },
+      });
+
+      expect(callback).not.toHaveBeenCalled();
+      expect(result).toBeUndefined();
+    });
+
+    it('should return undefined when operator or action is missing', async () => {
+      const result = await (handler as any).handleCardAction({});
+      expect(result).toBeUndefined();
+    });
+  });
 });

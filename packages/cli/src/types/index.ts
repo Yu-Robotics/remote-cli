@@ -147,4 +147,6 @@ export interface OutgoingMessage {
   toolResult?: ToolResultInfo;
   /** Plan content (when streamType === 'plan_mode') */
   planContent?: string;
+  /** Thread summaries — only sent by new CLI; old routers safely ignore this field */
+  threads?: import('../thread/types').ThreadSummary[];
 }
