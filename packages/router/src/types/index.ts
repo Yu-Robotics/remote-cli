@@ -183,18 +183,5 @@ export interface StructuredMessage extends WSMessage {
     sessionAbbr?: string;
     openId?: string;
     cwd?: string;
-    /** Thread summaries — only present when CLI supports multi-thread mode */
-    threads?: ThreadSummary[];
   };
-}
-
-/**
- * Compact thread summary sent by the CLI in every response.
- * Used by the Router to render thread switch buttons in Feishu cards.
- * Additive field — old CLIs omit it and old Routers ignore it.
- */
-export interface ThreadSummary {
-  id: string;
-  name: string;
-  isActive: boolean;
 }

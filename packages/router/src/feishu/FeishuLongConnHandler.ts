@@ -2,7 +2,7 @@ import * as lark from '@larksuiteoapi/node-sdk';
 import { v4 as uuidv4 } from 'uuid';
 import { BindingManager } from '../binding/BindingManager';
 import { ConnectionHub } from '../websocket/ConnectionHub';
-import { MessageType, ThreadSummary } from '../types';
+import { MessageType } from '../types';
 import { JsonStore } from '../storage/JsonStore';
 
 /**
@@ -43,12 +43,6 @@ export class FeishuLongConnHandler {
   // Pattern to match tool use separator lines
   private readonly TOOL_USE_PATTERN = /─+ TOOL USE ─+/;
   private readonly TOOL_SEPARATOR_PATTERN = /─{20,}/;
-
-  /**
-   * Callback invoked when a user clicks a thread switch button on a Feishu card.
-   * Set by RouterServer after construction.
-   */
-  onCardSwitchThread?: (openId: string, threadId: string) => Promise<void>;
 
   constructor(config: FeishuLongConnHandlerConfig) {
     this.appId = config.appId;
@@ -1181,11 +1175,11 @@ Examples:
    * @param sessionAbbr Optional session abbreviation
    * @param openId User's open_id for creating continuation messages
    */
-  async finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threads?: ThreadSummary[]): Promise<boolean> {
-    return this.withMessageLock(messageId, () => this._finalizeStreamingMessage(messageId, elements, sessionAbbr, openId, cwd, threads));
+  async finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string): Promise<boolean> {
+    return this.withMessageLock(messageId, () => this._finalizeStreamingMessage(messageId, elements, sessionAbbr, openId, cwd));
   }
 
-  private async _finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threads?: ThreadSummary[]): Promise<boolean> {
+  private async _finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string): Promise<boolean> {
     try {
       // Build completion note
       let noteContent = '✅ Completed';
@@ -1197,16 +1191,10 @@ Examples:
         noteContent += `\n📂 **Working Directory:** \`${formattedCwd}\``;
       }
 
-      const finalElements: any[] = [
+      const finalElements = [
         ...elements,
         { tag: 'markdown', content: noteContent },
       ];
-
-      // Append thread switch buttons when multiple threads exist
-      if (threads && threads.length > 1) {
-        const threadElements = this.createThreadSwitchElements(threads);
-        finalElements.push(...threadElements);
-      }
 
       // Reuse streaming update logic: only create cards, never delete.
       // Whatever layout was built during streaming stays as-is.
@@ -1223,61 +1211,6 @@ Examples:
     } catch (error: any) {
       console.error('Failed to finalize streaming message:', error?.message || error);
       return false;
-    }
-  }
-
-  /**
-   * Create Feishu Card 2.0 elements for thread switching buttons.
-   */
-  private createThreadSwitchElements(threads: ThreadSummary[]): any[] {
-    const columns = threads.map((t) => ({
-      tag: 'column',
-      width: 'auto',
-      elements: [
-        {
-          tag: 'button',
-          text: { tag: 'plain_text', content: t.isActive ? `★ ${t.name}` : t.name },
-          type: t.isActive ? 'primary' : 'default',
-          disabled: t.isActive,
-          value: JSON.stringify({ action: 'switch_thread', threadId: t.id }),
-        },
-      ],
-    }));
-
-    return [
-      { tag: 'hr' },
-      {
-        tag: 'column_set',
-        flex_mode: 'stretch',
-        columns,
-      },
-    ];
-  }
-
-  /**
-   * Handle Feishu card interactive action (button click).
-   */
-  private async handleCardAction(data: any): Promise<{ toast?: any } | void> {
-    const openId = data?.operator?.open_id;
-    const actionValue = data?.action?.value;
-    if (!openId || !actionValue) return;
-
-    let parsed: { action: string; threadId?: string };
-    try {
-      parsed = typeof actionValue === 'string' ? JSON.parse(actionValue) : actionValue;
-    } catch {
-      return;
-    }
-
-    if (parsed.action === 'switch_thread' && parsed.threadId) {
-      try {
-        await this.onCardSwitchThread?.(openId, parsed.threadId);
-      } catch (error) {
-        console.error('[FeishuLongConnHandler] Card action switch_thread failed:', error);
-      }
-      return {
-        toast: { type: 'success', content: 'Switching thread...' },
-      };
     }
   }
 
@@ -1300,10 +1233,7 @@ Examples:
         eventDispatcher: new lark.EventDispatcher({}).register({
           'im.message.receive_v1': async (data: any) => {
             await this.handleMessageEvent(data);
-          },
-          'card.action.trigger': async (data: any) => {
-            return this.handleCardAction(data);
-          },
+          }
         })
       });
 
