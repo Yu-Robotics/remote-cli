@@ -198,7 +198,8 @@ describe('ThreadExecutorPool', () => {
       expect(mockExecutorFactory).toHaveBeenCalledWith(
         expect.anything(), // directoryGuard
         newConfig,
-        expect.anything() // workingDir
+        expect.anything(), // workingDir
+        expect.anything()  // threadId
       );
     });
   });

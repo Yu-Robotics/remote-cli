@@ -1367,9 +1367,11 @@ export class ClaudePersistentExecutor extends EventEmitter {
       console.error('[ClaudePersistent] Failed to remove session file:', error);
     }
 
-    // Note: We intentionally do NOT stop the process here.
-    // The process keeps running, and on the next command it will
-    // start a new session automatically (since sessionId is null).
+    // Kill the running process — the session ID is baked in at startup via --resume,
+    // so clearing it in memory is not enough. The process must be restarted fresh.
+    this.stopProcess().catch((err) =>
+      console.error('[ClaudePersistent] Failed to stop process on reset:', err)
+    );
   }
 
   /**
