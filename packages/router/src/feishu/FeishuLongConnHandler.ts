@@ -2,7 +2,7 @@ import * as lark from '@larksuiteoapi/node-sdk';
 import { v4 as uuidv4 } from 'uuid';
 import { BindingManager } from '../binding/BindingManager';
 import { ConnectionHub } from '../websocket/ConnectionHub';
-import { MessageType } from '../types';
+import { MessageType, ThreadSummary } from '../types';
 import { JsonStore } from '../storage/JsonStore';
 
 /**
@@ -66,14 +66,16 @@ export class FeishuLongConnHandler {
   }
 
   /**
-   * Callback to register streaming message with RouterServer
+   * Callback to register streaming message with RouterServer.
+   * pendingNewThread=true signals that this command will create a new thread,
+   * so the server should update activeThreadMap when the response arrives.
    */
-  private onStartStreaming?: (messageId: string, openId: string, feishuMessageId: string | null, deviceId: string, threadId?: string) => void;
+  private onStartStreaming?: (messageId: string, openId: string, feishuMessageId: string | null, deviceId: string, threadId?: string, pendingNewThread?: boolean) => void;
 
   /**
    * Set streaming start callback
    */
-  setOnStartStreaming(callback: (messageId: string, openId: string, feishuMessageId: string | null, deviceId: string, threadId?: string) => void): void {
+  setOnStartStreaming(callback: (messageId: string, openId: string, feishuMessageId: string | null, deviceId: string, threadId?: string, pendingNewThread?: boolean) => void): void {
     this.onStartStreaming = callback;
   }
 
@@ -87,6 +89,31 @@ export class FeishuLongConnHandler {
    */
   setOnResolveThread(callback: (feishuMessageId: string) => { threadId: string; deviceId: string } | undefined): void {
     this.onResolveThread = callback;
+  }
+
+  /**
+   * Callback invoked when a user clicks a thread switch button on a Feishu card.
+   * RouterServer sets this directly after construction.
+   */
+  onCardSwitchThread?: (openId: string, threadId: string, threadName: string) => Promise<void>;
+
+  /**
+   * Callback invoked when a user clicks the "+ New" thread button on a Feishu card.
+   * RouterServer sets this directly after construction.
+   */
+  onCardNewThread?: (openId: string) => Promise<void>;
+
+  /**
+   * Callback to resolve the user's currently active thread (for new top-level messages
+   * that have no parent_id).
+   */
+  private onResolveActiveThread?: (openId: string) => { threadId: string; threadName: string } | undefined;
+
+  /**
+   * Set active thread resolution callback
+   */
+  setOnResolveActiveThread(callback: (openId: string) => { threadId: string; threadName: string } | undefined): void {
+    this.onResolveActiveThread = callback;
   }
 
   /**
@@ -126,13 +153,17 @@ export class FeishuLongConnHandler {
 
       // Check if it's a command
       if (this.isCommand(content)) {
-        // Resolve threadId from parent_id if available
-        const threadId = parentId ? this.onResolveThread?.(parentId)?.threadId : undefined;
+        // parent_id → resolve thread from card; otherwise check active thread for this user
+        const threadId = parentId
+          ? this.onResolveThread?.(parentId)?.threadId
+          : this.onResolveActiveThread?.(openId)?.threadId;
         await this.handleCommand(openId, messageId, content, threadId);
       } else {
         console.log(`[FeishuHandler] Handling regular command, msgId=${messageId}`);
-        // Resolve threadId from parent_id if available
-        const threadId = parentId ? this.onResolveThread?.(parentId)?.threadId : undefined;
+        // parent_id → resolve thread from card; otherwise check active thread for this user
+        const threadId = parentId
+          ? this.onResolveThread?.(parentId)?.threadId
+          : this.onResolveActiveThread?.(openId)?.threadId;
         await this.handleRegularCommand(openId, messageId, content, threadId);
         console.log(`[FeishuHandler] Finished handling regular command, msgId=${messageId}`);
       }
@@ -677,7 +708,7 @@ Examples:
   /**
    * Handle regular command (non-slash commands)
    */
-  private async handleRegularCommand(openId: string, messageId: string, content: string, threadId?: string): Promise<void> {
+  private async handleRegularCommand(openId: string, messageId: string, content: string, threadId?: string, pendingNewThread = false): Promise<void> {
     try {
       // Find user binding
       const binding = await this.bindingManager.getUserBinding(openId);
@@ -716,14 +747,14 @@ Examples:
 
       // Generate message ID first
       const commandMessageId = uuidv4();
-      console.log(`[FeishuHandler] Creating streaming card for command ${commandMessageId}${threadId ? ` (threadId=${threadId})` : ''}`);
+      console.log(`[FeishuHandler] Creating streaming card for command ${commandMessageId}${threadId ? ` (threadId=${threadId})` : ''}${pendingNewThread ? ' (pendingNewThread)' : ''}`);
 
       // Register streaming session BEFORE sending command to avoid race condition
       // where stream chunks arrive before registration
       const feishuMessageId = await this.sendStreamingStart(openId, '🤔 Processing...');
       console.log(`[FeishuHandler] Created card ${feishuMessageId} for command ${commandMessageId}`);
       if (this.onStartStreaming) {
-        this.onStartStreaming(commandMessageId, openId, feishuMessageId, activeDevice.deviceId, threadId);
+        this.onStartStreaming(commandMessageId, openId, feishuMessageId, activeDevice.deviceId, threadId, pendingNewThread);
       }
 
       // Send command to device
@@ -1198,11 +1229,11 @@ Examples:
    * @param sessionAbbr Optional session abbreviation
    * @param openId User's open_id for creating continuation messages
    */
-  async finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string): Promise<boolean> {
-    return this.withMessageLock(messageId, () => this._finalizeStreamingMessage(messageId, elements, sessionAbbr, openId, cwd, threadName));
+  async finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string, threads?: ThreadSummary[], activeThreadId?: string): Promise<boolean> {
+    return this.withMessageLock(messageId, () => this._finalizeStreamingMessage(messageId, elements, sessionAbbr, openId, cwd, threadName, threads, activeThreadId));
   }
 
-  private async _finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string): Promise<boolean> {
+  private async _finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string, threads?: ThreadSummary[], activeThreadId?: string): Promise<boolean> {
     try {
       // Build completion note
       let noteContent = '✅ Completed';
@@ -1217,10 +1248,15 @@ Examples:
         noteContent += `\n📂 **Working Directory:** \`${formattedCwd}\``;
       }
 
-      const finalElements = [
+      const finalElements: any[] = [
         ...elements,
         { tag: 'markdown', content: noteContent },
       ];
+
+      // Append thread switch buttons when multiple threads exist
+      if (threads && threads.length > 1) {
+        finalElements.push(...this.createThreadSwitchElements(threads, activeThreadId));
+      }
 
       // Reuse streaming update logic: only create cards, never delete.
       // Whatever layout was built during streaming stays as-is.
@@ -1238,6 +1274,95 @@ Examples:
       console.error('Failed to finalize streaming message:', error?.message || error);
       return false;
     }
+  }
+
+  /**
+   * Create Feishu Card 2.0 elements for thread switching buttons.
+   * Renders one button per thread (active is highlighted) plus a "+ New" button.
+   */
+  private createThreadSwitchElements(threads: ThreadSummary[], activeThreadId?: string): any[] {
+    const threadColumns = threads.map((t) => ({
+      tag: 'column',
+      width: 'auto',
+      elements: [
+        {
+          tag: 'button',
+          text: { tag: 'plain_text', content: t.id === activeThreadId ? `★ ${t.name}` : t.name },
+          type: t.id === activeThreadId ? 'primary' : 'default',
+          disabled: t.id === activeThreadId,
+          value: JSON.stringify({ action: 'switch_thread', threadId: t.id, threadName: t.name }),
+        },
+      ],
+    }));
+
+    // Always add a "+ New" button at the end
+    const newThreadColumn = {
+      tag: 'column',
+      width: 'auto',
+      elements: [
+        {
+          tag: 'button',
+          text: { tag: 'plain_text', content: '+ New' },
+          type: 'default',
+          value: JSON.stringify({ action: 'new_thread' }),
+        },
+      ],
+    };
+
+    return [
+      { tag: 'hr' },
+      {
+        tag: 'column_set',
+        flex_mode: 'stretch',
+        columns: [...threadColumns, newThreadColumn],
+      },
+    ];
+  }
+
+  /**
+   * Handle Feishu card interactive action (button click).
+   * Called by card.action.trigger event from Feishu long connection.
+   */
+  private async handleCardAction(data: any): Promise<{ toast?: any } | void> {
+    const openId = data?.operator?.open_id;
+    const actionValue = data?.action?.value;
+    if (!openId || !actionValue) return;
+
+    let parsed: { action: string; threadId?: string; threadName?: string };
+    try {
+      parsed = typeof actionValue === 'string' ? JSON.parse(actionValue) : actionValue;
+    } catch {
+      return;
+    }
+
+    if (parsed.action === 'switch_thread' && parsed.threadId) {
+      try {
+        await this.onCardSwitchThread?.(openId, parsed.threadId, parsed.threadName ?? parsed.threadId);
+        return { toast: { type: 'success', content: `Switched to: ${parsed.threadName ?? parsed.threadId}` } };
+      } catch (error) {
+        console.error('[FeishuLongConnHandler] Card action switch_thread failed:', error);
+      }
+    }
+
+    if (parsed.action === 'new_thread') {
+      try {
+        await this.onCardNewThread?.(openId);
+        return { toast: { type: 'info', content: 'Creating new thread...' } };
+      } catch (error) {
+        console.error('[FeishuLongConnHandler] Card action new_thread failed:', error);
+      }
+    }
+  }
+
+  /**
+   * Send a command triggered by a card button action (no real Feishu messageId).
+   * Reuses handleRegularCommand flow: creates streaming card, sends command to device.
+   */
+  async sendCommandFromCardAction(openId: string, content: string, pendingNewThread = false): Promise<void> {
+    // Generate a synthetic message ID — card actions don't have a Feishu message to reply to,
+    // so error replies fall back to sendMessage (plain text, not threaded).
+    const syntheticMessageId = uuidv4();
+    await this.handleRegularCommand(openId, syntheticMessageId, content, undefined, pendingNewThread);
   }
 
   /**
@@ -1259,7 +1384,10 @@ Examples:
         eventDispatcher: new lark.EventDispatcher({}).register({
           'im.message.receive_v1': async (data: any) => {
             await this.handleMessageEvent(data);
-          }
+          },
+          'card.action.trigger': async (data: any) => {
+            return this.handleCardAction(data);
+          },
         })
       });
 

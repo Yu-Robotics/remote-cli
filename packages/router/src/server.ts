@@ -25,7 +25,7 @@ export class RouterServer {
   private connectionHub: ConnectionHub;
   private bindingManager: BindingManager;
   private cleanupInterval: NodeJS.Timeout | null = null;
-  // Track streaming messages: messageId -> { openId, feishuMessageId, elements, currentTextContent, hasUpdated, createdAt, deviceId, threadId, threadName }
+  // Track streaming messages: messageId -> { openId, feishuMessageId, elements, currentTextContent, hasUpdated, createdAt, deviceId, threadId, threadName, threads, pendingNewThread }
   private streamingMessages: Map<string, {
     openId: string;
     feishuMessageId: string | null;
@@ -36,6 +36,8 @@ export class RouterServer {
     deviceId: string;
     threadId?: string;   // Which thread produced this stream (optional — new CLIs only)
     threadName?: string; // Human-friendly thread name, resolved from CLI response threads[]
+    threads?: ThreadSummary[]; // Full thread list for rendering switch buttons
+    pendingNewThread?: boolean; // True when this command was triggered by the "+ New" card button
   }> = new Map();
   private readonly STREAMING_SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes timeout
   // TTL for cardThreadMap entries: 7 days (allows users to reply to old cards)
@@ -44,6 +46,9 @@ export class RouterServer {
   // Entries are NOT removed on finalize so users can reply to completed cards.
   // Each entry carries an expiresAt timestamp for TTL-based eviction.
   private cardThreadMap = new Map<string, { threadId: string; deviceId: string; expiresAt: number }>();
+  // Map from openId to the user's currently active thread (set by card button click).
+  // New top-level messages (no parent_id) are routed to this thread.
+  private activeThreadMap = new Map<string, { threadId: string; threadName: string }>();
 
   constructor(config: ConfigManager, store: JsonStore) {
     this.config = config;
@@ -63,8 +68,8 @@ export class RouterServer {
     this.feishuLongConnHandler.setConnectionHub(this.connectionHub);
 
     // Register callback for streaming message start
-    this.feishuLongConnHandler.setOnStartStreaming((messageId: string, openId: string, feishuMessageId: string | null, deviceId: string, threadId?: string) => {
-      console.log(`[RouterServer] Registering streaming session: msgId=${messageId}, feishuMsgId=${feishuMessageId}, deviceId=${deviceId}, threadId=${threadId}`);
+    this.feishuLongConnHandler.setOnStartStreaming((messageId: string, openId: string, feishuMessageId: string | null, deviceId: string, threadId?: string, pendingNewThread?: boolean) => {
+      console.log(`[RouterServer] Registering streaming session: msgId=${messageId}, feishuMsgId=${feishuMessageId}, deviceId=${deviceId}, threadId=${threadId}, pendingNewThread=${pendingNewThread}`);
       this.streamingMessages.set(messageId, {
         openId,
         feishuMessageId,
@@ -74,6 +79,7 @@ export class RouterServer {
         createdAt: Date.now(),
         deviceId,
         threadId,
+        pendingNewThread,
       });
       // Populate cardThreadMap for parent_id-based routing
       if (feishuMessageId && threadId) {
@@ -93,6 +99,23 @@ export class RouterServer {
       }
       return entry;
     });
+
+    // Register callback for resolving user's active thread (new top-level messages)
+    this.feishuLongConnHandler.setOnResolveActiveThread((openId: string) => {
+      return this.activeThreadMap.get(openId);
+    });
+
+    // Register callback for card button thread switching
+    this.feishuLongConnHandler.onCardSwitchThread = async (openId: string, threadId: string, threadName: string) => {
+      this.activeThreadMap.set(openId, { threadId, threadName });
+      console.log(`[RouterServer] Active thread set for ${openId}: ${threadName} (${threadId})`);
+    };
+
+    // Register callback for creating a new thread via card button
+    this.feishuLongConnHandler.onCardNewThread = async (openId: string) => {
+      console.log(`[RouterServer] Creating new thread for ${openId} via card button`);
+      await this.feishuLongConnHandler.sendCommandFromCardAction(openId, '/thread new', true);
+    };
 
     this.setupMiddleware();
     this.setupRoutes();
@@ -313,6 +336,19 @@ export class RouterServer {
                   if (!session.threadName && responseThreads) {
                     const match = responseThreads.find(t => t.id === responseThreadId);
                     if (match) session.threadName = match.name;
+                  }
+                  // Store full threads list for button rendering
+                  if (responseThreads) {
+                    session.threads = responseThreads;
+                  }
+                  // When the "+ New" card button triggered this command, update activeThreadMap
+                  // so the user's next new message routes to the newly created thread.
+                  if (session.pendingNewThread && responseThreadId && responseThreads && responseOpenId) {
+                    const newThread = responseThreads.find(t => t.id === responseThreadId);
+                    if (newThread) {
+                      this.activeThreadMap.set(responseOpenId, { threadId: responseThreadId, threadName: newThread.name });
+                      console.log(`[RouterServer] activeThreadMap updated for ${responseOpenId} after new thread: ${newThread.name} (${responseThreadId})`);
+                    }
                   }
                 }
               }
@@ -690,7 +726,9 @@ export class RouterServer {
           sessionAbbr,
           openId,
           cwd,
-          streamData.threadName
+          streamData.threadName,
+          streamData.threads,
+          streamData.threadId
         );
       } else {
         // Add error message to elements
@@ -700,7 +738,11 @@ export class RouterServer {
           feishuMessageId,
           streamData.elements,
           undefined,
-          openId
+          openId,
+          undefined,
+          undefined,
+          streamData.threads,
+          streamData.threadId
         );
       }
     }
