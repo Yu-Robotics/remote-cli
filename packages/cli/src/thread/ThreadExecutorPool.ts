@@ -116,6 +116,9 @@ export class ThreadExecutorPool {
   async destroyThread(threadId: string): Promise<void> {
     const executor = this.executors.get(threadId);
     if (executor) {
+      if (executor.deleteThreadData) {
+        await executor.deleteThreadData(threadId);
+      }
       await executor.destroy();
       this.executors.delete(threadId);
       this.busy.delete(threadId);

@@ -167,6 +167,65 @@ describe('ThreadManager', () => {
     });
   });
 
+  describe('concurrent persist safety', () => {
+    it('persists all threads when multiple createThread calls fire simultaneously', async () => {
+      // Fire 4 createThread calls concurrently — without a write queue the last
+      // writeFile wins and earlier writes are silently dropped.
+      await Promise.all([
+        manager.createThread('t1', tmpDir),
+        manager.createThread('t2', tmpDir),
+        manager.createThread('t3', tmpDir),
+        manager.createThread('t4', tmpDir),
+      ]);
+
+      const manager2 = await ThreadManager.initialize(tmpDir);
+      const names = manager2.listThreads().map(t => t.name);
+      expect(names).toContain('t1');
+      expect(names).toContain('t2');
+      expect(names).toContain('t3');
+      expect(names).toContain('t4');
+    });
+
+    it('persists all updates when multiple updateThread calls fire simultaneously', async () => {
+      const t = await manager.createThread('concurrent-update', tmpDir);
+
+      // Fire 4 rapid updates — the last writeFile to finish would overwrite the others
+      // without a write queue, potentially reverting earlier updates.
+      await Promise.all([
+        manager.updateThread(t.id, { sessionId: 'session-1' }),
+        manager.updateThread(t.id, { workingDirectory: '/dir/1' }),
+        manager.updateThread(t.id, { lastActiveAt: 1000 }),
+        manager.updateThread(t.id, { sessionId: 'session-final' }),
+      ]);
+
+      // Re-read from disk — all operations should have completed sequentially
+      const manager2 = await ThreadManager.initialize(tmpDir);
+      const saved = manager2.getThread(t.id);
+      expect(saved).toBeDefined();
+      // The in-memory state should reflect the last applied update
+      const inMem = manager.getThread(t.id)!;
+      const onDisk = manager2.getThread(t.id)!;
+      // Disk must match in-memory (no lost-write scenario)
+      expect(onDisk.sessionId).toBe(inMem.sessionId);
+      expect(onDisk.workingDirectory).toBe(inMem.workingDirectory);
+    });
+
+    it('persists final state correctly when create and delete race', async () => {
+      const [t1, t2] = await Promise.all([
+        manager.createThread('race-a', tmpDir),
+        manager.createThread('race-b', tmpDir),
+      ]);
+      await Promise.all([
+        manager.deleteThread(t1.id),
+        manager.updateThread(t2.id, { sessionId: 'kept' }),
+      ]);
+
+      const manager2 = await ThreadManager.initialize(tmpDir);
+      expect(manager2.getThread(t1.id)).toBeUndefined();
+      expect(manager2.getThread(t2.id)).toBeDefined();
+    });
+  });
+
   describe('listThreads', () => {
     it('returns all threads sorted by createdAt', async () => {
       await manager.createThread('b', tmpDir);
@@ -186,20 +245,21 @@ describe('ThreadManager', () => {
   });
 
   describe('session file management', () => {
-    it('returns session file path for a thread', async () => {
+    it('returns Claude session file path (.json) for a thread', async () => {
       const t = await manager.createThread('sess', tmpDir);
       const filePath = manager.getSessionFilePath(t.id);
       expect(filePath).toContain(t.id);
-      expect(filePath).toMatch(/\.jsonl?$/);
+      expect(filePath).toMatch(/\.json$/);
     });
 
-    it('clears session file on deleteThread', async () => {
+    it('does not delete session file on deleteThread (executor is responsible)', async () => {
       const t = await manager.createThread('sess-del', tmpDir);
       const sessionPath = manager.getSessionFilePath(t.id);
       await fs.writeFile(sessionPath, 'some session data');
       await manager.deleteThread(t.id);
+      // ThreadManager no longer deletes session files — that is ThreadExecutorPool's job
       const exists = await fs.access(sessionPath).then(() => true).catch(() => false);
-      expect(exists).toBe(false);
+      expect(exists).toBe(true);
     });
   });
 
@@ -217,6 +277,85 @@ describe('ThreadManager', () => {
       const freshManager = await ThreadManager.initialize(tmpDir);
       const defaultThread = freshManager.getDefaultThread();
       expect(defaultThread.sessionId).toBe('legacy-session-id-123');
+    });
+
+    it('uses null sessionId when legacy claude-session file is empty (whitespace only)', async () => {
+      const legacySessionFile = path.join(tmpDir, '.remote-cli', 'claude-session');
+      await fs.mkdir(path.join(tmpDir, '.remote-cli'), { recursive: true });
+      await fs.writeFile(legacySessionFile, '   \n  ');
+
+      const threadsFile = path.join(tmpDir, '.remote-cli', 'threads.json');
+      await fs.rm(threadsFile, { force: true });
+
+      const freshManager = await ThreadManager.initialize(tmpDir);
+      expect(freshManager.getDefaultThread().sessionId).toBeNull();
+    });
+  });
+
+  describe('initialization edge cases', () => {
+    it('recovers gracefully from corrupt threads.json and recreates default thread', async () => {
+      const threadsFile = path.join(tmpDir, '.remote-cli', 'threads.json');
+      await fs.mkdir(path.join(tmpDir, '.remote-cli'), { recursive: true });
+      await fs.writeFile(threadsFile, '{ invalid json !!!');
+
+      const freshManager = await ThreadManager.initialize(tmpDir);
+      const threads = freshManager.listThreads();
+      expect(threads).toHaveLength(1);
+      expect(threads[0].name).toBe(DEFAULT_THREAD_NAME);
+    });
+  });
+
+  describe('createThread name validation boundaries', () => {
+    it('accepts a single-character name', async () => {
+      await expect(manager.createThread('a', tmpDir)).resolves.toBeDefined();
+    });
+
+    it('accepts a 30-character name (max length)', async () => {
+      const name = 'a' + 'b'.repeat(28) + 'c'; // 30 chars
+      await expect(manager.createThread(name, tmpDir)).resolves.toBeDefined();
+    });
+
+    it('rejects names with only hyphens or leading/trailing hyphens', async () => {
+      await expect(manager.createThread('-bad', tmpDir)).rejects.toThrow();
+      await expect(manager.createThread('bad-', tmpDir)).rejects.toThrow();
+    });
+
+    it('accepts two-character alphanumeric name', async () => {
+      await expect(manager.createThread('ab', tmpDir)).resolves.toBeDefined();
+    });
+
+    it('rejects two-character name with trailing hyphen', async () => {
+      await expect(manager.createThread('a-', tmpDir)).rejects.toThrow();
+    });
+  });
+
+  describe('deleteThread edge cases', () => {
+    it('succeeds silently when session file does not exist', async () => {
+      const t = await manager.createThread('no-session', tmpDir);
+      // Do not create session file — delete should still work
+      await expect(manager.deleteThread(t.id)).resolves.toBeUndefined();
+      expect(manager.getThread(t.id)).toBeUndefined();
+    });
+  });
+
+  describe('updateThread', () => {
+    it('updates multiple fields simultaneously', async () => {
+      const t = await manager.createThread('multi-update', tmpDir);
+      const newTime = Date.now() + 9999;
+      await manager.updateThread(t.id, { sessionId: 'xyz', workingDirectory: '/other', lastActiveAt: newTime });
+      const updated = manager.getThread(t.id)!;
+      expect(updated.sessionId).toBe('xyz');
+      expect(updated.workingDirectory).toBe('/other');
+      expect(updated.lastActiveAt).toBe(newTime);
+    });
+
+    it('returns a new object reference (immutability)', async () => {
+      const t = await manager.createThread('immutable', tmpDir);
+      const before = manager.getThread(t.id)!;
+      await manager.updateThread(t.id, { sessionId: 'new-session' });
+      const after = manager.getThread(t.id)!;
+      expect(after).not.toBe(before);
+      expect(before.sessionId).toBeNull(); // original not mutated
     });
   });
 });

@@ -35,8 +35,11 @@ export class FeishuLongConnHandler {
   private readonly CARD_SIZE_BUFFER = 100000; // Safety buffer: use 2.9MB instead of 3MB
   // Track message chains: messageId -> [messageId1, messageId2, ...]
   private messageChains: Map<string, string[]> = new Map();
-  // Store thread switch card state for re-patching after thread switch
-  private threadSwitchCardState = new Map<string, { baseElements: any[]; threads: ThreadSummary[]; activeThreadId?: string }>();
+  // Store thread switch card state for re-patching after thread switch.
+  // Entries are cleaned up after THREAD_SWITCH_STATE_TTL_MS (1 day).
+  private threadSwitchCardState = new Map<string, { baseElements: any[]; threads: ThreadSummary[]; activeThreadId?: string; createdAt: number }>();
+  private readonly THREAD_SWITCH_STATE_TTL_MS = 24 * 60 * 60 * 1000; // 1 day
+  private threadSwitchStateCleanupTimer: NodeJS.Timeout | null = null;
   // Track the last processed text length for each message chain
   // This helps us only send NEW content to existing messages, preventing duplication
   private lastProcessedLengths: Map<string, number> = new Map();
@@ -1285,6 +1288,7 @@ Examples:
           baseElements,
           threads,
           activeThreadId,
+          createdAt: Date.now(),
         });
       }
 
@@ -1447,6 +1451,16 @@ Examples:
 
       console.log('✅ Feishu WebSocket long connection established');
       console.log('   Listening for messages from Feishu...');
+
+      // Periodically evict stale threadSwitchCardState entries (1-day TTL, checked hourly)
+      this.threadSwitchStateCleanupTimer = setInterval(() => {
+        const cutoff = Date.now() - this.THREAD_SWITCH_STATE_TTL_MS;
+        for (const [id, state] of this.threadSwitchCardState.entries()) {
+          if (state.createdAt < cutoff) {
+            this.threadSwitchCardState.delete(id);
+          }
+        }
+      }, 60 * 60 * 1000); // every hour
     } catch (error) {
       console.error('Failed to start Feishu WebSocket connection:', error);
       throw error;
@@ -1469,6 +1483,12 @@ Examples:
           // ignore SDK close errors
         }
         this.wsClient = null;
+      }
+
+      // Stop thread switch state cleanup timer
+      if (this.threadSwitchStateCleanupTimer) {
+        clearInterval(this.threadSwitchStateCleanupTimer);
+        this.threadSwitchStateCleanupTimer = null;
       }
 
       await this.bindingManager.close();
