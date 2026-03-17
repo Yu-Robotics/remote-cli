@@ -156,17 +156,17 @@ export class FeishuLongConnHandler {
       // Check if it's a command
       if (this.isCommand(content)) {
         // parent_id → resolve thread from card; otherwise check active thread for this user
-        const threadId = parentId
-          ? this.onResolveThread?.(parentId)?.threadId
-          : this.onResolveActiveThread?.(openId)?.threadId;
-        await this.handleCommand(openId, messageId, content, threadId);
+        const resolved = parentId
+          ? { threadId: this.onResolveThread?.(parentId)?.threadId, threadName: undefined }
+          : this.onResolveActiveThread?.(openId);
+        await this.handleCommand(openId, messageId, content, resolved?.threadId, resolved?.threadName);
       } else {
         console.log(`[FeishuHandler] Handling regular command, msgId=${messageId}`);
         // parent_id → resolve thread from card; otherwise check active thread for this user
-        const threadId = parentId
-          ? this.onResolveThread?.(parentId)?.threadId
-          : this.onResolveActiveThread?.(openId)?.threadId;
-        await this.handleRegularCommand(openId, messageId, content, threadId);
+        const resolved = parentId
+          ? { threadId: this.onResolveThread?.(parentId)?.threadId, threadName: undefined }
+          : this.onResolveActiveThread?.(openId);
+        await this.handleRegularCommand(openId, messageId, content, resolved?.threadId, false, resolved?.threadName);
         console.log(`[FeishuHandler] Finished handling regular command, msgId=${messageId}`);
       }
     } catch (error) {
@@ -224,7 +224,7 @@ export class FeishuLongConnHandler {
   /**
    * Handle command
    */
-  private async handleCommand(openId: string, messageId: string, content: string, threadId?: string): Promise<void> {
+  private async handleCommand(openId: string, messageId: string, content: string, threadId?: string, threadName?: string): Promise<void> {
     const parts = content.split(/\s+/);
     const command = parts[0].toLowerCase();
 
@@ -256,7 +256,7 @@ export class FeishuLongConnHandler {
       default:
         // Pass through unknown slash commands to the client
         // This allows users to use their local Claude Code custom commands
-        await this.handleSlashCommandPassthrough(openId, messageId, content, command, threadId);
+        await this.handleSlashCommandPassthrough(openId, messageId, content, command, threadId, threadName);
     }
   }
 
@@ -269,7 +269,8 @@ export class FeishuLongConnHandler {
     messageId: string,
     content: string,
     command: string,
-    threadId?: string
+    threadId?: string,
+    threadName?: string
   ): Promise<void> {
     try {
       // Find user binding
@@ -313,7 +314,7 @@ export class FeishuLongConnHandler {
       const commandMessageId = uuidv4();
 
       // Register streaming session BEFORE sending command
-      const feishuMessageId = await this.sendStreamingStart(openId, `🤔 Executing ${command}...`);
+      const feishuMessageId = await this.sendStreamingStart(openId, `🤔 Executing ${command}...`, threadName);
       console.log(`[FeishuHandler] Created card ${feishuMessageId} for slash command ${commandMessageId}`);
       if (this.onStartStreaming) {
         this.onStartStreaming(commandMessageId, openId, feishuMessageId, activeDevice.deviceId, threadId);
@@ -710,7 +711,7 @@ Examples:
   /**
    * Handle regular command (non-slash commands)
    */
-  private async handleRegularCommand(openId: string, messageId: string, content: string, threadId?: string, pendingNewThread = false): Promise<void> {
+  private async handleRegularCommand(openId: string, messageId: string, content: string, threadId?: string, pendingNewThread = false, threadName?: string): Promise<void> {
     try {
       // Find user binding
       const binding = await this.bindingManager.getUserBinding(openId);
@@ -753,7 +754,7 @@ Examples:
 
       // Register streaming session BEFORE sending command to avoid race condition
       // where stream chunks arrive before registration
-      const feishuMessageId = await this.sendStreamingStart(openId, '🤔 Processing...');
+      const feishuMessageId = await this.sendStreamingStart(openId, '🤔 Processing...', threadName);
       console.log(`[FeishuHandler] Created card ${feishuMessageId} for command ${commandMessageId}`);
       if (this.onStartStreaming) {
         this.onStartStreaming(commandMessageId, openId, feishuMessageId, activeDevice.deviceId, threadId, pendingNewThread);
@@ -823,9 +824,16 @@ Examples:
    * Send streaming message with card update support
    * Returns message_id for updating
    */
-  async sendStreamingStart(openId: string, initialText: string = '🤔 Thinking...'): Promise<string | null> {
+  async sendStreamingStart(openId: string, initialText: string = '🤔 Thinking...', threadName?: string): Promise<string | null> {
     console.log(`[FeishuHandler] Creating interactive card v2 for ${openId}`);
     try {
+      const elements: any[] = [];
+      if (threadName) {
+        elements.push({ tag: 'markdown', content: `🧵 **${threadName}**` });
+        elements.push({ tag: 'hr' });
+      }
+      elements.push({ tag: 'markdown', content: initialText });
+
       const result = await this.client.im.message.create({
         params: { receive_id_type: 'open_id' },
         data: {
@@ -833,14 +841,7 @@ Examples:
           msg_type: 'interactive',
           content: JSON.stringify({
             schema: '2.0',
-            body: {
-              elements: [
-                {
-                  tag: 'markdown',
-                  content: initialText,
-                },
-              ],
-            },
+            body: { elements },
           }),
         },
       });
@@ -1237,23 +1238,31 @@ Examples:
 
   private async _finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string, threads?: ThreadSummary[], activeThreadId?: string): Promise<boolean> {
     try {
+      // Build header element (thread name + working directory) at the top
+      const headerParts: string[] = [];
+      if (threadName) {
+        headerParts.push(`🧵 **${threadName}**`);
+      }
+      if (cwd) {
+        const formattedCwd = cwd.replace(process.env.HOME || '/Users', '~');
+        headerParts.push(`📂 \`${formattedCwd}\``);
+      }
+
       // Build completion note
       let noteContent = '✅ Completed';
       if (sessionAbbr) {
         noteContent += ` · Session: ${sessionAbbr}`;
       }
-      if (threadName) {
-        noteContent += ` · 🧵 ${threadName}`;
-      }
-      if (cwd) {
-        const formattedCwd = cwd.replace(process.env.HOME || '/Users', '~');
-        noteContent += `\n📂 **Working Directory:** \`${formattedCwd}\``;
-      }
 
-      const finalElements: any[] = [
-        ...elements,
-        { tag: 'markdown', content: noteContent },
-      ];
+      const finalElements: any[] = [];
+      if (headerParts.length > 0) {
+        finalElements.push({ tag: 'markdown', content: headerParts.join('  ·  ') });
+        finalElements.push({ tag: 'hr' });
+      }
+      finalElements.push(...elements, { tag: 'markdown', content: noteContent });
+
+      // Capture base elements (without thread switch buttons) for later refresh
+      const baseElements = [...finalElements];
 
       // Append thread switch buttons when at least one thread exists
       if (threads && threads.length >= 1) {
@@ -1271,8 +1280,9 @@ Examples:
       if (threads && threads.length >= 1) {
         const chain = this.messageChains.get(messageId);
         const lastCardId = chain ? chain[chain.length - 1] : messageId;
+        // baseElements must match finalElements (header + content + note) for accurate refresh
         this.threadSwitchCardState.set(lastCardId, {
-          baseElements: [...elements, { tag: 'markdown', content: noteContent }],
+          baseElements,
           threads,
           activeThreadId,
         });
