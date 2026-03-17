@@ -582,7 +582,7 @@ You can also use natural language commands to control Claude Code CLI.`,
 
       if (!result.success && result.error && result.error.includes('Prompt too long')) {
         if ('compactWhenFull' in executor && typeof executor.compactWhenFull === 'function') {
-          this.sendStreamChunk(messageId, threadId, '⚠️ Conversation history too long, auto-compressing...\n');
+          this.sendStreamChunk(messageId, threadId, '🔄 Context window full. Compacting conversation history, please wait...\n');
           const compactResult = await executor.compactWhenFull!((chunk: string) => {
             this.sendStreamChunk(messageId, threadId, chunk);
           });
@@ -593,7 +593,7 @@ You can also use natural language commands to control Claude Code CLI.`,
             });
             return;
           }
-          this.sendStreamChunk(messageId, threadId, '✅ Compressed. Retrying...\n');
+          this.sendStreamChunk(messageId, threadId, '✅ Compaction done. Retrying your request...\n');
           const retryResult = await executor.execute(content, {
             onStream: (chunk: string) => this.sendStreamChunk(messageId, threadId, chunk),
             onToolUse: (toolUse: ToolUseInfo) => this.sendToolUse(messageId, threadId, toolUse),
