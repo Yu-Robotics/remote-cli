@@ -115,51 +115,6 @@ describe('ClaudePersistentExecutor', () => {
     });
   });
 
-  describe('external session management', () => {
-    it('setSessionId should override session ID', () => {
-      executor.setSessionId('custom-session-id');
-      // Verify by checking the session is used in execute (we check via spawn args indirectly)
-      // Direct accessor isn't exposed, so we test via setSessionId + setWorkingDirectory behavior
-      expect(() => executor.setSessionId('another-id')).not.toThrow();
-      expect(() => executor.setSessionId(null)).not.toThrow();
-    });
-
-    it('setSessionFilePath should update session file path and reload session', () => {
-      const customPath = '/tmp/custom-session.json';
-      // mockFs.existsSync returns false by default, so loadSessionId will find no file
-      mockFs.existsSync.mockImplementation((p: string) => p === customPath);
-      mockFs.readFileSync.mockImplementation((p: string) => {
-        if (p === customPath) return JSON.stringify({ id: 'session-from-file' });
-        return '{}';
-      });
-
-      executor.setSessionFilePath(customPath);
-      // After setSessionFilePath, the new session from file is picked up
-      // (internal state — we verify no throw and the method is callable)
-      expect(() => executor.setSessionFilePath(customPath)).not.toThrow();
-    });
-
-    it('enableExternalSessionManagement preserves session on setWorkingDirectory', async () => {
-      executor.setSessionId('preserved-session');
-      executor.enableExternalSessionManagement();
-
-      // Change working directory — session should NOT be reset
-      await executor.setWorkingDirectory('~/test-project');
-
-      // setSessionId was called with 'preserved-session'; if it were reset, a second
-      // setSessionId call should still work without error
-      expect(() => executor.setSessionId('preserved-session')).not.toThrow();
-    });
-
-    it('without enableExternalSessionManagement, setWorkingDirectory resets session', async () => {
-      executor.setSessionId('will-be-reset');
-      // Do NOT call enableExternalSessionManagement
-      await executor.setWorkingDirectory('~/test-project');
-      // Session was reset internally — we verify the executor is still functional
-      expect(executor.getCurrentWorkingDirectory()).toContain('test-project');
-    });
-  });
-
   describe('process startup', () => {
     it('should return error if working directory does not exist', async () => {
       // Set working directory to a safe path

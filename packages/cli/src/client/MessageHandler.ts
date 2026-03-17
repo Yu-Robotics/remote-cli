@@ -8,8 +8,6 @@ import { ConfigManager } from '../config/ConfigManager';
 import { processFileReadContent } from '../utils/FileReadDetector';
 import { spawn, execFile } from 'child_process';
 import type { ExecutorConfig } from '../types/config';
-import type { ThreadManager } from '../thread/ThreadManager';
-import type { Thread } from '../thread/types';
 
 /**
  * Detected backend information
@@ -43,25 +41,17 @@ export class MessageHandler {
   private isExecuting = false;
   private currentOpenId?: string;
   private notificationAdapter: FeishuNotificationAdapter;
-  private threadManager?: ThreadManager;
 
   constructor(
     wsClient: WebSocketClient,
     executor: IExecutor,
     directoryGuard: DirectoryGuard,
-    config: ConfigManager,
-    threadManager?: ThreadManager
+    config: ConfigManager
   ) {
     this.wsClient = wsClient;
     this.executor = executor;
     this.directoryGuard = directoryGuard;
     this.config = config;
-    this.threadManager = threadManager;
-
-    if (threadManager) {
-      // Enable external session management so directory changes don't wipe session
-      (executor as any).enableExternalSessionManagement?.();
-    }
 
     // Initialize Feishu notification adapter
     this.notificationAdapter = new FeishuNotificationAdapter(wsClient);
@@ -287,25 +277,19 @@ export class MessageHandler {
     if (trimmed === '/status') {
       const cwd = this.executor.getCurrentWorkingDirectory();
       const allowedDirs = this.directoryGuard.getAllowedDirectories();
-      const threadInfo = this.threadManager
-        ? `\n- Active Thread: ${this.threadManager.getActiveThread()?.name ?? 'none'} (${this.threadManager.listThreads().length}/${10} threads)`
-        : '';
 
       this.sendResponse(messageId, {
         success: true,
         output: `📊 Status:
 - Working Directory: ${cwd}
 - Allowed Directories: ${allowedDirs.join(', ')}
-- Connection: Active${threadInfo}`,
+- Connection: Active`,
       });
       return true;
     }
 
     // /help command
     if (trimmed === '/help') {
-      const threadHelp = this.threadManager
-        ? `\n- /thread - List all threads\n- /thread new [name] - Create a new thread\n- /thread switch <name|id> - Switch active thread\n- /thread delete <name> - Delete a thread`
-        : '';
       this.sendResponse(messageId, {
         success: true,
         output: `📖 Available commands:
@@ -315,7 +299,7 @@ export class MessageHandler {
 - /clear - Clear conversation context
 - /compact - Compress conversation history to reduce context size
 - /cd <directory> - Change working directory
-- /backend - List available AI backends and switch between them${threadHelp}
+- /backend - List available AI backends and switch between them
 You can also use natural language commands to control Claude Code CLI.`,
       });
       return true;
@@ -365,12 +349,6 @@ You can also use natural language commands to control Claude Code CLI.`,
       return true;
     }
 
-    // /thread command
-    if (trimmed === '/thread' || trimmed.startsWith('/thread ')) {
-      await this.handleThreadCommand(messageId, trimmed);
-      return true;
-    }
-
     // /cd command
     if (trimmed.startsWith('/cd')) {
       const parts = trimmed.split(/\s+/);
@@ -389,14 +367,6 @@ You can also use natural language commands to control Claude Code CLI.`,
 
         // Save lastWorkingDirectory to config (set() already saves)
         await this.config.set('lastWorkingDirectory', newCwd);
-
-        // Sync working directory back to the active thread
-        if (this.threadManager) {
-          const active = this.threadManager.getActiveThread();
-          if (active) {
-            this.threadManager.updateWorkingDirectory(active.id, newCwd);
-          }
-        }
 
         this.sendResponse(messageId, {
           success: true,
@@ -575,8 +545,6 @@ You can also use natural language commands to control Claude Code CLI.`,
         success: false,
         error: error instanceof Error ? error.message : 'Execution error',
       });
-    } finally {
-      this.saveCurrentThreadState();
     }
   }
 
@@ -709,7 +677,6 @@ You can also use natural language commands to control Claude Code CLI.`,
         openId: this.currentOpenId,
         timestamp: Date.now(),
         cwd: this.executor.getCurrentWorkingDirectory(),
-        threads: this.threadManager?.getThreadSummaries(),
       });
     } catch (error) {
       console.error('Failed to send response:', error);
@@ -815,187 +782,6 @@ You can also use natural language commands to control Claude Code CLI.`,
       success: true,
       output: `✅ Backend switched to: ${target.label}`,
     });
-  }
-
-  /**
-   * Handle /thread commands
-   * Usage:
-   *   /thread                    — list threads
-   *   /thread list               — list threads
-   *   /thread new [name]         — create & switch to new thread
-   *   /thread switch <name|id>   — switch active thread (also accepts UUID for card buttons)
-   *   /thread delete <name>      — delete a thread
-   */
-  private async handleThreadCommand(messageId: string, trimmed: string): Promise<void> {
-    if (!this.threadManager) {
-      this.sendResponse(messageId, {
-        success: false,
-        error: '/thread commands are not available (thread manager not initialized)',
-      });
-      return;
-    }
-
-    const parts = trimmed.split(/\s+/);
-    const sub = parts[1];
-
-    // list
-    if (!sub || sub === 'list') {
-      const threads = this.threadManager.listThreads();
-      const activeId = this.threadManager.getActiveThread()?.id;
-      const lines = threads.map((t, i) => {
-        const active = t.id === activeId ? ' ★' : '';
-        const session = t.sessionId ? ` · ...${t.sessionId.slice(-8)}` : ' · No session';
-        return `${i + 1}. **${t.name}**${active}${session}\n   📂 ${t.workingDirectory}`;
-      });
-      const maxThreads = 10;
-      this.sendResponse(messageId, {
-        success: true,
-        output: `📋 Threads (${threads.length}/${maxThreads}):\n${lines.join('\n')}\n★ = active thread`,
-      });
-      return;
-    }
-
-    // new
-    if (sub === 'new') {
-      const name = parts[2]; // optional
-      try {
-        const thread = this.threadManager.createThread(name, this.executor.getCurrentWorkingDirectory());
-        await this.applyThread(thread);
-        this.sendResponse(messageId, {
-          success: true,
-          output: `✅ Created and switched to thread: **${thread.name}**\n📂 ${thread.workingDirectory}`,
-        });
-      } catch (error) {
-        this.sendResponse(messageId, {
-          success: false,
-          error: error instanceof Error ? error.message : 'Failed to create thread',
-        });
-      }
-      return;
-    }
-
-    // switch
-    if (sub === 'switch') {
-      const identifier = parts[2];
-      if (!identifier) {
-        this.sendResponse(messageId, { success: false, error: 'Usage: /thread switch <name|id>' });
-        return;
-      }
-
-      // Try by ID first (for card button clicks), then by name
-      const thread =
-        this.threadManager.getThread(identifier) ??
-        this.threadManager.getThreadByName(identifier);
-
-      if (!thread) {
-        this.sendResponse(messageId, { success: false, error: `Thread "${identifier}" not found.` });
-        return;
-      }
-
-      try {
-        this.threadManager.switchThread(thread.id);
-        await this.applyThread(thread);
-        const sessionHint = thread.sessionId
-          ? `\n🔗 Resuming session ...${thread.sessionId.slice(-8)}`
-          : '\n🆕 No previous session';
-        this.sendResponse(messageId, {
-          success: true,
-          output: `✅ Switched to thread: **${thread.name}**\n📂 ${thread.workingDirectory}${sessionHint}`,
-        });
-      } catch (error) {
-        this.sendResponse(messageId, {
-          success: false,
-          error: error instanceof Error ? error.message : 'Failed to switch thread',
-        });
-      }
-      return;
-    }
-
-    // delete
-    if (sub === 'delete') {
-      const name = parts[2];
-      if (!name) {
-        this.sendResponse(messageId, { success: false, error: 'Usage: /thread delete <name>' });
-        return;
-      }
-
-      const thread = this.threadManager.getThreadByName(name);
-      if (!thread) {
-        this.sendResponse(messageId, { success: false, error: `Thread "${name}" not found.` });
-        return;
-      }
-
-      try {
-        const wasActive = this.threadManager.getActiveThread()?.id === thread.id;
-        this.threadManager.deleteThread(thread.id);
-
-        if (wasActive) {
-          const newActive = this.threadManager.getActiveThread();
-          if (newActive) {
-            await this.applyThread(newActive);
-          }
-          this.sendResponse(messageId, {
-            success: true,
-            output: `✅ Deleted thread: **${name}**\nSwitched to: **${newActive?.name ?? 'none'}**`,
-          });
-        } else {
-          this.sendResponse(messageId, { success: true, output: `✅ Deleted thread: **${name}**` });
-        }
-      } catch (error) {
-        this.sendResponse(messageId, {
-          success: false,
-          error: error instanceof Error ? error.message : 'Failed to delete thread',
-        });
-      }
-      return;
-    }
-
-    this.sendResponse(messageId, {
-      success: false,
-      error: `Unknown /thread subcommand: ${sub}\nUse: /thread [list|new|switch|delete]`,
-    });
-  }
-
-  /**
-   * Apply a thread's state to the executor (cwd + sessionId + sessionFilePath).
-   */
-  private async applyThread(thread: Thread): Promise<void> {
-    if (!this.threadManager) return;
-
-    // Sync session file and session ID before changing directory
-    // (externalSessionManagement must be enabled so setWorkingDirectory won't reset them)
-    const sessionId = this.threadManager.loadSessionId(thread.id);
-    (this.executor as any).setSessionFilePath?.(this.threadManager.sessionFilePath(thread.id));
-    (this.executor as any).setSessionId?.(sessionId);
-
-    // Now change working directory (won't reset session because externalSessionManagement is on)
-    if (this.executor.getCurrentWorkingDirectory() !== thread.workingDirectory) {
-      try {
-        await this.executor.setWorkingDirectory(thread.workingDirectory);
-      } catch {
-        // Directory may no longer exist; leave executor's cwd unchanged
-      }
-    }
-  }
-
-  /**
-   * Save the executor's current session ID back to the active thread.
-   */
-  private saveCurrentThreadState(): void {
-    if (!this.threadManager) return;
-    const active = this.threadManager.getActiveThread();
-    if (!active) return;
-
-    // Read session ID from executor if exposed
-    const execAny = this.executor as any;
-    const sessionId: string | null =
-      typeof execAny.getSessionId === 'function' ? execAny.getSessionId() : null;
-
-    if (sessionId && sessionId !== active.sessionId) {
-      this.threadManager.saveSessionId(active.id, sessionId);
-      this.threadManager.updateSessionId(active.id, sessionId);
-    }
-    this.threadManager.touchActiveThread();
   }
 
   /**
