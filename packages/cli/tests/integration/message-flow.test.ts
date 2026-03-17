@@ -1,51 +1,76 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { WebSocketClient } from '../../src/client/WebSocketClient';
 import { MessageHandler } from '../../src/client/MessageHandler';
-import { ClaudeExecutor } from '../../src/executor/ClaudeExecutor';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
-import { IncomingMessage, OutgoingMessage } from '../../src/types';
+import { ThreadExecutorPool } from '../../src/thread/ThreadExecutorPool';
+import { ThreadManager } from '../../src/thread/ThreadManager';
+import { IncomingMessage } from '../../src/types';
 
-// Mock dependencies
 vi.mock('../../src/client/WebSocketClient');
-vi.mock('../../src/executor/ClaudeExecutor');
 
 describe('Integration: Message Flow', () => {
   let wsClient: any;
   let executor: any;
   let guard: DirectoryGuard;
   let handler: MessageHandler;
-  let messageCallback: (message: IncomingMessage) => void;
+  let mockThreadPool: any;
+  let mockThreadManager: any;
 
   beforeEach(() => {
     vi.clearAllMocks();
 
-    // Setup mock WebSocket client
     wsClient = {
       send: vi.fn(),
-      on: vi.fn((event: string, callback: any) => {
-        if (event === 'message') {
-          messageCallback = callback;
-        }
-      }),
+      on: vi.fn(),
       isConnected: vi.fn(() => true),
     };
     (WebSocketClient as any).mockImplementation(() => wsClient);
 
-    // Setup mock executor
     executor = {
       execute: vi.fn(),
       getCurrentWorkingDirectory: vi.fn(() => '~/projects'),
       setWorkingDirectory: vi.fn().mockResolvedValue(undefined),
-      isExecuting: vi.fn(() => false),
       abort: vi.fn().mockResolvedValue(true),
+      resetContext: vi.fn(),
+      destroy: vi.fn().mockResolvedValue(undefined),
     };
-    (ClaudeExecutor as any).mockImplementation(() => executor);
 
-    // Setup directory guard with ~ paths (always safe within home directory)
     guard = new DirectoryGuard(['~/projects', '~/work']);
 
-    // Create message handler
-    handler = new MessageHandler(wsClient, executor, guard);
+    const defaultThread = { id: 'default-id', name: 'default', workingDirectory: '~/projects', sessionId: null, createdAt: 0, lastActiveAt: 0 };
+
+    mockThreadManager = {
+      getDefaultThread: vi.fn().mockReturnValue(defaultThread),
+      getThread: vi.fn().mockImplementation((id: string) => id === defaultThread.id ? defaultThread : undefined),
+      getThreadByName: vi.fn().mockImplementation((name: string) => name === 'default' ? defaultThread : undefined),
+      listThreads: vi.fn().mockReturnValue([defaultThread]),
+      createThread: vi.fn().mockResolvedValue({ id: 'new-id', name: 'thread-2', workingDirectory: '~/projects', sessionId: null, createdAt: Date.now(), lastActiveAt: Date.now() }),
+      deleteThread: vi.fn().mockResolvedValue(undefined),
+      updateThread: vi.fn().mockImplementation(async (_id: string, updates: any) => ({ ...defaultThread, ...updates })),
+      getSessionFilePath: vi.fn().mockReturnValue('/tmp/session.jsonl'),
+    } as unknown as ThreadManager;
+
+    mockThreadPool = {
+      getExecutor: vi.fn().mockReturnValue(executor),
+      isThreadBusy: vi.fn().mockReturnValue(false),
+      setThreadBusy: vi.fn(),
+      setThreadError: vi.fn(),
+      getStatus: vi.fn().mockReturnValue('idle'),
+      getSummaries: vi.fn().mockReturnValue([{ id: defaultThread.id, name: 'default', status: 'idle' }]),
+      destroyThread: vi.fn().mockResolvedValue(undefined),
+      destroyAll: vi.fn().mockResolvedValue(undefined),
+      switchBackend: vi.fn().mockResolvedValue(undefined),
+    } as unknown as ThreadExecutorPool;
+
+    const mockConfig: any = {
+      get: vi.fn(),
+      set: vi.fn().mockResolvedValue(undefined),
+      has: vi.fn(() => true),
+      getAll: vi.fn(() => ({})),
+      save: vi.fn().mockResolvedValue(undefined),
+    };
+
+    handler = new MessageHandler(wsClient, mockThreadPool, mockThreadManager, guard, mockConfig);
   });
 
   afterEach(() => {
@@ -54,10 +79,7 @@ describe('Integration: Message Flow', () => {
 
   describe('Command execution flow', () => {
     it('should handle simple command message', async () => {
-      executor.execute.mockResolvedValueOnce({
-        success: true,
-        output: 'Task completed successfully',
-      });
+      executor.execute.mockResolvedValueOnce({ success: true, output: 'Task completed successfully' });
 
       const message: IncomingMessage = {
         type: 'command',
@@ -71,17 +93,10 @@ describe('Integration: Message Flow', () => {
 
       expect(executor.execute).toHaveBeenCalledWith(
         'List files in current directory',
-        expect.objectContaining({
-          onStream: expect.any(Function),
-        })
+        expect.objectContaining({ onStream: expect.any(Function) })
       );
-
       expect(wsClient.send).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: 'response',
-          messageId: 'msg_001',
-          success: true,
-        })
+        expect.objectContaining({ type: 'response', messageId: 'msg_001', success: true })
       );
     });
 
@@ -98,34 +113,18 @@ describe('Integration: Message Flow', () => {
 
       expect(executor.execute).not.toHaveBeenCalled();
       expect(wsClient.send).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: 'response',
-          messageId: 'msg_002',
-          success: false,
-          error: expect.stringContaining('whitelist'),
-        })
+        expect.objectContaining({ type: 'response', messageId: 'msg_002', success: false, error: expect.stringContaining('whitelist') })
       );
     });
 
     it('should handle command with streaming progress', async () => {
-      const progressUpdates: string[] = [];
-
-      executor.execute.mockImplementationOnce(async (content: string, options: any) => {
+      executor.execute.mockImplementationOnce(async (_content: string, options: any) => {
         options.onStream?.('Starting code analysis...');
-        progressUpdates.push('Starting code analysis...');
-
-        await new Promise((resolve) => setTimeout(resolve, 10));
+        await new Promise((r) => setTimeout(r, 10));
         options.onStream?.('Fixing errors...');
-        progressUpdates.push('Fixing errors...');
-
-        await new Promise((resolve) => setTimeout(resolve, 10));
+        await new Promise((r) => setTimeout(r, 10));
         options.onStream?.('Running tests...');
-        progressUpdates.push('Running tests...');
-
-        return {
-          success: true,
-          output: 'All tests passed',
-        };
+        return { success: true, output: 'All tests passed' };
       });
 
       const message: IncomingMessage = {
@@ -138,45 +137,18 @@ describe('Integration: Message Flow', () => {
 
       await handler.handleMessage(message);
 
-      // Verify progress messages were sent (using 'stream' type not 'progress')
       expect(wsClient.send).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: 'stream',
-          messageId: 'msg_003',
-          chunk: 'Starting code analysis...',
-        })
+        expect.objectContaining({ type: 'stream', messageId: 'msg_003', chunk: 'Starting code analysis...' })
       );
-
       expect(wsClient.send).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: 'stream',
-          messageId: 'msg_003',
-          chunk: 'Fixing errors...',
-        })
+        expect.objectContaining({ type: 'stream', messageId: 'msg_003', chunk: 'Fixing errors...' })
       );
-
       expect(wsClient.send).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: 'stream',
-          messageId: 'msg_003',
-          chunk: 'Running tests...',
-        })
+        expect.objectContaining({ type: 'stream', messageId: 'msg_003', chunk: 'Running tests...' })
       );
-
-      // Verify final result (no output in response since it was streamed)
       expect(wsClient.send).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: 'response',
-          messageId: 'msg_003',
-          success: true,
-        })
+        expect.objectContaining({ type: 'response', messageId: 'msg_003', success: true })
       );
-
-      expect(progressUpdates).toEqual([
-        'Starting code analysis...',
-        'Fixing errors...',
-        'Running tests...',
-      ]);
     });
 
     it('should handle command execution error', async () => {
@@ -193,245 +165,116 @@ describe('Integration: Message Flow', () => {
       await handler.handleMessage(message);
 
       expect(wsClient.send).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: 'response',
-          messageId: 'msg_004',
-          success: false,
-          error: 'Execution timeout',
-        })
+        expect.objectContaining({ type: 'response', messageId: 'msg_004', success: false, error: 'Execution timeout' })
       );
     });
   });
 
   describe('Special command handling', () => {
     it('should handle resume command', async () => {
-      executor.execute.mockResolvedValueOnce({
-        success: true,
-        output: 'Session resumed',
-      });
+      executor.execute.mockResolvedValueOnce({ success: true, output: 'Session resumed' });
 
-      const message: IncomingMessage = {
-        type: 'command',
-        messageId: 'msg_005',
-        content: '/resume',
-        workingDirectory: '~/projects',
-        timestamp: Date.now(),
-      };
+      await handler.handleMessage({ type: 'command', messageId: 'msg_005', content: '/resume', workingDirectory: '~/projects', timestamp: Date.now() });
 
-      await handler.handleMessage(message);
-
-      // The MessageHandler expands /resume to natural language
-      expect(executor.execute).toHaveBeenCalledWith(
-        'Please resume the previous conversation',
-        expect.any(Object)
-      );
+      expect(executor.execute).toHaveBeenCalledWith('Please resume the previous conversation', expect.any(Object));
     });
 
     it('should handle continue command', async () => {
-      executor.execute.mockResolvedValueOnce({
-        success: true,
-        output: 'Continuing previous task',
-      });
+      executor.execute.mockResolvedValueOnce({ success: true, output: 'Continuing' });
 
-      const message: IncomingMessage = {
-        type: 'command',
-        messageId: 'msg_006',
-        content: '/continue',
-        workingDirectory: '~/work',
-        timestamp: Date.now(),
-      };
+      await handler.handleMessage({ type: 'command', messageId: 'msg_006', content: '/continue', workingDirectory: '~/work', timestamp: Date.now() });
 
-      await handler.handleMessage(message);
-
-      // The MessageHandler expands /continue to natural language
-      expect(executor.execute).toHaveBeenCalledWith(
-        'Please continue from where we left off',
-        expect.any(Object)
-      );
+      expect(executor.execute).toHaveBeenCalledWith('Please continue from where we left off', expect.any(Object));
     });
 
     it('should handle status query', async () => {
-      const message: IncomingMessage = {
-        type: 'status',
-        messageId: 'msg_007',
-        timestamp: Date.now(),
-      };
-
-      await handler.handleMessage(message);
+      await handler.handleMessage({ type: 'status', messageId: 'msg_007', timestamp: Date.now() });
 
       expect(wsClient.send).toHaveBeenCalledWith(
         expect.objectContaining({
           type: 'status',
           messageId: 'msg_007',
-          status: {
+          status: expect.objectContaining({
             connected: true,
-            allowedDirectories: ['~/projects', '~/work'],
+            allowedDirectories: expect.arrayContaining(['~/projects', '~/work']),
             currentWorkingDirectory: expect.any(String),
-          },
+          }),
         })
       );
     });
   });
 
-  describe('Concurrent command handling', () => {
-    it('should reject concurrent commands (one at a time)', async () => {
-      // Track execution state
-      let isExecuting = false;
+  describe('Concurrent command handling (per-thread)', () => {
+    it('should reject concurrent commands on same thread (one at a time)', async () => {
+      let callCount = 0;
+      mockThreadPool.isThreadBusy = vi.fn().mockImplementation(() => callCount++ > 0);
 
-      // Mock isExecuting to track state
-      executor.isExecuting.mockImplementation(() => isExecuting);
-
-      // First command takes time and tracks execution state
-      executor.execute.mockImplementationOnce(async () => {
-        isExecuting = true;
-        await new Promise((resolve) => setTimeout(resolve, 100));
-        isExecuting = false;
-        return { success: true, output: 'Done' };
-      });
-
-      const message1: IncomingMessage = {
-        type: 'command',
-        messageId: 'msg_008',
-        content: 'Long running task',
-        workingDirectory: '~/projects',
-        timestamp: Date.now(),
-      };
-
-      const message2: IncomingMessage = {
-        type: 'command',
-        messageId: 'msg_009',
-        content: 'Another task',
-        workingDirectory: '~/projects',
-        timestamp: Date.now() + 1,
-      };
-
-      // Start first command
-      const promise1 = handler.handleMessage(message1);
-
-      // Wait a bit for first command to start executing
-      await new Promise((resolve) => setTimeout(resolve, 10));
-
-      // Try to start second command while first is running
-      await handler.handleMessage(message2);
-
-      // Second command should be rejected
-      expect(wsClient.send).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: 'response',
-          messageId: 'msg_009',
-          success: false,
-          error: expect.stringContaining('busy'),
-        })
+      executor.execute.mockImplementationOnce(
+        () => new Promise((resolve) => setTimeout(() => resolve({ success: true, output: 'Done' }), 100))
       );
 
-      // Wait for first command to complete
-      await promise1;
+      const message1: IncomingMessage = {
+        type: 'command', messageId: 'msg_008', content: 'Long running task', workingDirectory: '~/projects', timestamp: Date.now(),
+      };
+      const message2: IncomingMessage = {
+        type: 'command', messageId: 'msg_009', content: 'Another task', workingDirectory: '~/projects', timestamp: Date.now() + 1,
+      };
 
+      const promise1 = handler.handleMessage(message1);
+      await new Promise((r) => setTimeout(r, 10));
+      await handler.handleMessage(message2);
+
+      expect(wsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'response', messageId: 'msg_009', success: false, error: expect.stringContaining('busy') })
+      );
+
+      await promise1;
       expect(executor.execute).toHaveBeenCalledTimes(1);
     });
   });
 
   describe('Directory path resolution', () => {
     it('should resolve tilde paths', async () => {
-      executor.execute.mockResolvedValueOnce({
-        success: true,
-        output: 'File created',
-      });
+      executor.execute.mockResolvedValueOnce({ success: true, output: 'File created' });
 
-      const message: IncomingMessage = {
-        type: 'command',
-        messageId: 'msg_010',
-        content: 'Create file',
-        workingDirectory: '~/projects',
-        timestamp: Date.now(),
-      };
+      await handler.handleMessage({ type: 'command', messageId: 'msg_010', content: 'Create file', workingDirectory: '~/projects', timestamp: Date.now() });
 
-      await handler.handleMessage(message);
-
-      expect(executor.execute).toHaveBeenCalledWith(
-        'Create file',
-        expect.any(Object)
-      );
+      expect(executor.execute).toHaveBeenCalledWith('Create file', expect.any(Object));
     });
 
     it('should handle relative paths from allowed directories', async () => {
-      executor.execute.mockResolvedValueOnce({
-        success: true,
-        output: 'Task done',
-      });
+      executor.execute.mockResolvedValueOnce({ success: true, output: 'Task done' });
 
-      const message: IncomingMessage = {
-        type: 'command',
-        messageId: 'msg_011',
-        content: 'Execute task',
-        workingDirectory: '~/projects/my-app',
-        timestamp: Date.now(),
-      };
+      await handler.handleMessage({ type: 'command', messageId: 'msg_011', content: 'Execute task', workingDirectory: '~/projects/my-app', timestamp: Date.now() });
 
-      await handler.handleMessage(message);
-
-      expect(executor.execute).toHaveBeenCalledWith(
-        'Execute task',
-        expect.any(Object)
-      );
+      expect(executor.execute).toHaveBeenCalledWith('Execute task', expect.any(Object));
     });
 
     it('should reject path traversal attempts', async () => {
-      const message: IncomingMessage = {
-        type: 'command',
-        messageId: 'msg_012',
-        content: 'Read file',
-        workingDirectory: '~/projects/../../../etc',
-        timestamp: Date.now(),
-      };
-
-      await handler.handleMessage(message);
+      await handler.handleMessage({ type: 'command', messageId: 'msg_012', content: 'Read file', workingDirectory: '~/projects/../../../etc', timestamp: Date.now() });
 
       expect(executor.execute).not.toHaveBeenCalled();
       expect(wsClient.send).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: 'response',
-          messageId: 'msg_012',
-          success: false,
-          error: expect.stringContaining('whitelist'),
-        })
+        expect.objectContaining({ type: 'response', messageId: 'msg_012', success: false, error: expect.stringContaining('whitelist') })
       );
     });
   });
 
   describe('Message validation', () => {
     it('should reject malformed messages', async () => {
-      const invalidMessage: any = {
-        type: 'command',
-        // Missing required fields
-      };
-
-      await handler.handleMessage(invalidMessage);
+      await handler.handleMessage({ type: 'command' } as any);
 
       expect(executor.execute).not.toHaveBeenCalled();
       expect(wsClient.send).toHaveBeenCalledWith(
-        expect.objectContaining({
-          success: false,
-          error: expect.stringContaining('Invalid'),
-        })
+        expect.objectContaining({ success: false, error: expect.stringContaining('Invalid') })
       );
     });
 
     it('should handle unknown message types', async () => {
-      const unknownMessage: any = {
-        type: 'unknown_type',
-        messageId: 'msg_013',
-        timestamp: Date.now(),
-      };
-
-      await handler.handleMessage(unknownMessage);
+      await handler.handleMessage({ type: 'unknown_type', messageId: 'msg_013', timestamp: Date.now() } as any);
 
       expect(wsClient.send).toHaveBeenCalledWith(
-        expect.objectContaining({
-          messageId: 'msg_013',
-          success: false,
-          error: expect.stringContaining('Unknown message type'),
-        })
+        expect.objectContaining({ messageId: 'msg_013', success: false, error: expect.stringContaining('Unknown message type') })
       );
     });
   });

@@ -1,9 +1,10 @@
 import { ConfigManager } from '../config/ConfigManager';
 import { WebSocketClient } from '../client/WebSocketClient';
-import { createExecutor } from '../executor';
 import { MessageHandler } from '../client/MessageHandler';
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import { HooksConfigurator } from '../security/HooksConfigurator';
+import { ThreadManager } from '../thread/ThreadManager';
+import { ThreadExecutorPool } from '../thread/ThreadExecutorPool';
 import { CLI_VERSION } from '../types';
 import type { ExecutorConfig } from '../types/config';
 import axios from 'axios';
@@ -195,17 +196,25 @@ export async function startCommand(
       console.warn('   File operations may not be restricted to working directory.');
     }
 
-    // Get last working directory from config (if set) to initialize executor with correct path
-    // This ensures .claude-session file is stored in the working directory, not startup directory
-    const lastWorkingDirectory = config.get('lastWorkingDirectory') as string | undefined;
+    // Get executor config
     const executorConfig = (config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' as const };
-    const executor = createExecutor(directoryGuard, executorConfig, lastWorkingDirectory);
+
+    // Initialize thread manager (creates default thread if not exists, migrates from single session)
+    spinner.text = 'Initializing thread manager...';
+    const threadManager = await ThreadManager.initialize();
+
+    // Initialize executor pool (lazily creates executors per thread)
+    const threadPool = new ThreadExecutorPool(threadManager, directoryGuard, executorConfig);
 
     // Warn if the selected backend CLI is not installed
     await checkBackendAvailability(executorConfig.type ?? 'auto', spinner);
 
-    // If lastWorkingDirectory is set, verify it was applied correctly
-    if (!lastWorkingDirectory) {
+    // Check if any thread has a working directory configured.
+    // Each thread restores its own workingDirectory lazily via ThreadExecutorPool.getExecutor(),
+    // so no explicit setup is needed here. We only warn the user when no directory is set at all.
+    const threads = threadManager.listThreads();
+    const anyThreadHasWorkingDir = threads.some(t => t.workingDirectory);
+    if (!anyThreadHasWorkingDir) {
       spinner.warn('Working directory not set');
       console.log('');
       console.log('⚠️  **Working Directory Not Set**');
@@ -217,16 +226,20 @@ export async function startCommand(
       console.log('');
       spinner.start('Continuing without working directory...');
     } else {
-      // Executor was initialized with lastWorkingDirectory, just display it
-      const currentDir = executor.getCurrentWorkingDirectory();
-      console.log(`📂 Working directory: ${currentDir}`);
+      // Log active working directories for each thread on startup
+      for (const thread of threads) {
+        if (thread.workingDirectory) {
+          const label = threads.length > 1 ? ` [${thread.name}]` : '';
+          console.log(`📂 Working directory${label}: ${thread.workingDirectory}`);
+        }
+      }
     }
 
     // Create WebSocket URL
     const wsUrl = serverUrl.replace(/^http/, 'ws') + '/ws';
     const wsClient = new WebSocketClient(wsUrl, deviceId);
 
-    const messageHandler = new MessageHandler(wsClient, executor, directoryGuard, config);
+    const messageHandler = new MessageHandler(wsClient, threadPool, threadManager, directoryGuard, config);
 
     // Setup event handlers
     wsClient.on('connected', () => {

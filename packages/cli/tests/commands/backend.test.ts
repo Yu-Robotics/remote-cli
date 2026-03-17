@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { MessageHandler } from '../../src/client/MessageHandler';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
+import { ThreadExecutorPool } from '../../src/thread/ThreadExecutorPool';
+import { ThreadManager } from '../../src/thread/ThreadManager';
 
 // Mock child_process so we can control which backends appear "installed"
 vi.mock('child_process', async (importOriginal) => {
@@ -16,20 +18,7 @@ vi.mock('child_process', async (importOriginal) => {
   };
 });
 
-// Mock createExecutor to avoid real executor creation
-vi.mock('../../src/executor', () => ({
-  createExecutor: vi.fn(() => ({
-    execute: vi.fn(),
-    setWorkingDirectory: vi.fn(),
-    getCurrentWorkingDirectory: vi.fn(() => '/home/user/project'),
-    resetContext: vi.fn(),
-    abort: vi.fn().mockResolvedValue(false),
-    destroy: vi.fn(),
-  })),
-}));
-
 import { execFile } from 'child_process';
-import { createExecutor } from '../../src/executor';
 
 /** Helper: make execFile call its callback with no error (command found) or an error (not found) */
 function mockInstalled(...installedCmds: string[]) {
@@ -45,6 +34,8 @@ describe('/backend command', () => {
   let mockWsClient: { send: ReturnType<typeof vi.fn>; isConnected: ReturnType<typeof vi.fn> };
   let mockExecutor: any;
   let mockConfig: { get: ReturnType<typeof vi.fn>; set: ReturnType<typeof vi.fn> };
+  let mockThreadPool: any;
+  let mockThreadManager: any;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -56,24 +47,49 @@ describe('/backend command', () => {
 
     mockExecutor = {
       execute: vi.fn(),
-      setWorkingDirectory: vi.fn(),
+      setWorkingDirectory: vi.fn().mockResolvedValue(undefined),
       getCurrentWorkingDirectory: vi.fn(() => '/home/user/project'),
       resetContext: vi.fn(),
       abort: vi.fn().mockResolvedValue(false),
-      destroy: vi.fn(),
+      destroy: vi.fn().mockResolvedValue(undefined),
     };
 
     mockConfig = {
-      get: vi.fn().mockReturnValue(undefined), // no executor config by default
+      get: vi.fn().mockReturnValue(undefined),
       set: vi.fn().mockResolvedValue(undefined),
     };
 
+    const defaultThread = { id: 'default-id', name: 'default', workingDirectory: '/home/user/project', sessionId: null, createdAt: 0, lastActiveAt: 0 };
+
+    mockThreadManager = {
+      getDefaultThread: vi.fn().mockReturnValue(defaultThread),
+      getThread: vi.fn().mockImplementation((id: string) => id === defaultThread.id ? defaultThread : undefined),
+      getThreadByName: vi.fn().mockImplementation((name: string) => name === 'default' ? defaultThread : undefined),
+      listThreads: vi.fn().mockReturnValue([defaultThread]),
+      createThread: vi.fn(),
+      deleteThread: vi.fn(),
+      updateThread: vi.fn().mockImplementation(async (_id: string, updates: any) => ({ ...defaultThread, ...updates })),
+      getSessionFilePath: vi.fn().mockReturnValue('/tmp/session.jsonl'),
+    } as unknown as ThreadManager;
+
+    mockThreadPool = {
+      getExecutor: vi.fn().mockReturnValue(mockExecutor),
+      isThreadBusy: vi.fn().mockReturnValue(false),
+      setThreadBusy: vi.fn(),
+      setThreadError: vi.fn(),
+      getStatus: vi.fn().mockReturnValue('idle'),
+      getSummaries: vi.fn().mockReturnValue([{ id: defaultThread.id, name: 'default', status: 'idle' }]),
+      destroyThread: vi.fn().mockResolvedValue(undefined),
+      destroyAll: vi.fn().mockResolvedValue(undefined),
+      switchBackend: vi.fn().mockResolvedValue(undefined),
+    } as unknown as ThreadExecutorPool;
+
     const guard = new DirectoryGuard(['~/project']);
-    handler = new MessageHandler(mockWsClient as any, mockExecutor, guard, mockConfig as any);
+    handler = new MessageHandler(mockWsClient as any, mockThreadPool, mockThreadManager, guard, mockConfig as any);
   });
 
-  afterEach(() => {
-    handler.destroy();
+  afterEach(async () => {
+    await handler.destroy();
   });
 
   function sentResponse() {
@@ -82,12 +98,7 @@ describe('/backend command', () => {
   }
 
   async function send(content: string) {
-    await handler.handleMessage({
-      type: 'command',
-      messageId: 'msg-1',
-      content,
-      timestamp: Date.now(),
-    });
+    await handler.handleMessage({ type: 'command', messageId: 'msg-1', content, timestamp: Date.now() });
   }
 
   // ── list mode ────────────────────────────────────────────────────────────────
@@ -129,7 +140,7 @@ describe('/backend command', () => {
     });
 
     it('returns error when no backends are installed', async () => {
-      mockInstalled(); // nothing installed
+      mockInstalled();
 
       await send('/backend');
 
@@ -175,7 +186,6 @@ describe('/backend command', () => {
       await send('/backend');
 
       const res = sentResponse();
-      // Only Gemini should have the active marker
       const lines = res.output.split('\n');
       const geminiLine = lines.find((l: string) => l.includes('Gemini CLI'));
       const claudeLine = lines.find((l: string) => l.includes('Claude Code'));
@@ -187,7 +197,7 @@ describe('/backend command', () => {
   // ── switch mode ───────────────────────────────────────────────────────────────
 
   describe('switch mode (/backend <target>)', () => {
-    it('switches to Gemini by 1-based index and hot-swaps executor', async () => {
+    it('switches to Gemini by 1-based index and swaps all thread executors', async () => {
       mockInstalled('claude', 'npx');
 
       await send('/backend 2'); // index 2 = Gemini
@@ -195,13 +205,8 @@ describe('/backend command', () => {
       const res = sentResponse();
       expect(res.success).toBe(true);
       expect(res.output).toContain('Gemini CLI');
-      expect(res.output).not.toContain('restart');
       expect(mockConfig.set).toHaveBeenCalledWith('executor', expect.objectContaining({ type: 'gemini' }));
-      expect(createExecutor).toHaveBeenCalledWith(
-        expect.any(DirectoryGuard),
-        expect.objectContaining({ type: 'gemini' }),
-        '/home/user/project'
-      );
+      expect(mockThreadPool.switchBackend).toHaveBeenCalledWith(expect.objectContaining({ type: 'gemini' }));
     });
 
     it('switches to Claude Code by index', async () => {

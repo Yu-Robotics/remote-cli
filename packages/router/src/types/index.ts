@@ -99,6 +99,17 @@ export interface ResponseMessage extends WSMessage {
   };
 }
 
+/**
+ * Thread runtime summary.
+ * Sent from CLI to router in response messages so the router can
+ * display per-thread status in Feishu cards.
+ */
+export interface ThreadSummary {
+  id: string;
+  name: string;
+  status: 'idle' | 'running' | 'error';
+}
+
 // Content block types for structured messages
 export type ContentBlockType = 'text' | 'tool_use' | 'tool_result' | 'divider' | 'redacted_thinking' | 'plan_mode';
 

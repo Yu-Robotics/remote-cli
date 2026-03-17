@@ -12,6 +12,38 @@ import axios from 'axios';
 vi.mock('../../src/config/ConfigManager');
 vi.mock('../../src/client/WebSocketClient');
 vi.mock('axios');
+vi.mock('../../src/thread/ThreadManager', () => ({
+  ThreadManager: {
+    initialize: vi.fn().mockResolvedValue({
+      getDefaultThread: vi.fn().mockReturnValue({ id: 'default-id', name: 'default', workingDirectory: '/tmp', sessionId: null, createdAt: 0, lastActiveAt: 0 }),
+      getThread: vi.fn(),
+      getThreadByName: vi.fn(),
+      listThreads: vi.fn().mockReturnValue([]),
+      createThread: vi.fn(),
+      deleteThread: vi.fn(),
+      updateThread: vi.fn().mockResolvedValue({}),
+      getSessionFilePath: vi.fn().mockReturnValue('/tmp/session.jsonl'),
+    }),
+  },
+}));
+vi.mock('../../src/thread/ThreadExecutorPool', () => ({
+  ThreadExecutorPool: vi.fn().mockImplementation(() => ({
+    getExecutor: vi.fn().mockReturnValue({
+      getCurrentWorkingDirectory: vi.fn().mockReturnValue('/tmp'),
+      setWorkingDirectory: vi.fn().mockResolvedValue(undefined),
+      execute: vi.fn(),
+      abort: vi.fn(),
+      destroy: vi.fn(),
+      resetContext: vi.fn(),
+    }),
+    isThreadBusy: vi.fn().mockReturnValue(false),
+    setThreadBusy: vi.fn(),
+    setThreadError: vi.fn(),
+    getSummaries: vi.fn().mockReturnValue([]),
+    destroyAll: vi.fn().mockResolvedValue(undefined),
+    switchBackend: vi.fn().mockResolvedValue(undefined),
+  })),
+}));
 vi.mock('ora', () => ({
   default: vi.fn(() => ({
     start: vi.fn().mockReturnThis(),

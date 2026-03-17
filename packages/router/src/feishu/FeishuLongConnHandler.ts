@@ -68,13 +68,25 @@ export class FeishuLongConnHandler {
   /**
    * Callback to register streaming message with RouterServer
    */
-  private onStartStreaming?: (messageId: string, openId: string, feishuMessageId: string | null, deviceId: string) => void;
+  private onStartStreaming?: (messageId: string, openId: string, feishuMessageId: string | null, deviceId: string, threadId?: string) => void;
 
   /**
    * Set streaming start callback
    */
-  setOnStartStreaming(callback: (messageId: string, openId: string, feishuMessageId: string | null, deviceId: string) => void): void {
+  setOnStartStreaming(callback: (messageId: string, openId: string, feishuMessageId: string | null, deviceId: string, threadId?: string) => void): void {
     this.onStartStreaming = callback;
+  }
+
+  /**
+   * Callback to resolve threadId from a Feishu card message_id (for parent_id routing)
+   */
+  private onResolveThread?: (feishuMessageId: string) => { threadId: string; deviceId: string } | undefined;
+
+  /**
+   * Set thread resolution callback
+   */
+  setOnResolveThread(callback: (feishuMessageId: string) => { threadId: string; deviceId: string } | undefined): void {
+    this.onResolveThread = callback;
   }
 
   /**
@@ -94,6 +106,10 @@ export class FeishuLongConnHandler {
       const openId = sender.sender_id.open_id;
       const messageId = message.message_id;
 
+      // Extract parent_id for reply-based thread routing
+      // When a user replies to a specific card, Feishu includes parent_id pointing to the card
+      const parentId: string | undefined = message.parent_id || undefined;
+
       if (message.message_type === 'post') {
         console.log(`[FeishuHandler] Post message raw content: ${message.content}`);
       }
@@ -110,10 +126,14 @@ export class FeishuLongConnHandler {
 
       // Check if it's a command
       if (this.isCommand(content)) {
-        await this.handleCommand(openId, messageId, content);
+        // Resolve threadId from parent_id if available
+        const threadId = parentId ? this.onResolveThread?.(parentId)?.threadId : undefined;
+        await this.handleCommand(openId, messageId, content, threadId);
       } else {
         console.log(`[FeishuHandler] Handling regular command, msgId=${messageId}`);
-        await this.handleRegularCommand(openId, messageId, content);
+        // Resolve threadId from parent_id if available
+        const threadId = parentId ? this.onResolveThread?.(parentId)?.threadId : undefined;
+        await this.handleRegularCommand(openId, messageId, content, threadId);
         console.log(`[FeishuHandler] Finished handling regular command, msgId=${messageId}`);
       }
     } catch (error) {
@@ -171,7 +191,7 @@ export class FeishuLongConnHandler {
   /**
    * Handle command
    */
-  private async handleCommand(openId: string, messageId: string, content: string): Promise<void> {
+  private async handleCommand(openId: string, messageId: string, content: string, threadId?: string): Promise<void> {
     const parts = content.split(/\s+/);
     const command = parts[0].toLowerCase();
 
@@ -203,7 +223,7 @@ export class FeishuLongConnHandler {
       default:
         // Pass through unknown slash commands to the client
         // This allows users to use their local Claude Code custom commands
-        await this.handleSlashCommandPassthrough(openId, messageId, content, command);
+        await this.handleSlashCommandPassthrough(openId, messageId, content, command, threadId);
     }
   }
 
@@ -215,7 +235,8 @@ export class FeishuLongConnHandler {
     openId: string,
     messageId: string,
     content: string,
-    command: string
+    command: string,
+    threadId?: string
   ): Promise<void> {
     try {
       // Find user binding
@@ -253,7 +274,7 @@ export class FeishuLongConnHandler {
         return;
       }
 
-      console.log(`[FeishuHandler] Passing through slash command: ${command}`);
+      console.log(`[FeishuHandler] Passing through slash command: ${command}${threadId ? ` (threadId=${threadId})` : ''}`);
 
       // Generate message ID first
       const commandMessageId = uuidv4();
@@ -262,7 +283,7 @@ export class FeishuLongConnHandler {
       const feishuMessageId = await this.sendStreamingStart(openId, `🤔 Executing ${command}...`);
       console.log(`[FeishuHandler] Created card ${feishuMessageId} for slash command ${commandMessageId}`);
       if (this.onStartStreaming) {
-        this.onStartStreaming(commandMessageId, openId, feishuMessageId, activeDevice.deviceId);
+        this.onStartStreaming(commandMessageId, openId, feishuMessageId, activeDevice.deviceId, threadId);
       }
 
       // Send slash command to device - the client will execute it locally
@@ -270,9 +291,10 @@ export class FeishuLongConnHandler {
         type: MessageType.COMMAND,
         messageId: commandMessageId,
         timestamp: Date.now(),
-        content, // Send the full command including arguments
+        content,
         openId,
-        isSlashCommand: true, // Flag to indicate this is a slash command
+        isSlashCommand: true,
+        threadId, // Forward threadId to CLI for per-thread routing
       });
 
       if (!success) {
@@ -655,7 +677,7 @@ Examples:
   /**
    * Handle regular command (non-slash commands)
    */
-  private async handleRegularCommand(openId: string, messageId: string, content: string): Promise<void> {
+  private async handleRegularCommand(openId: string, messageId: string, content: string, threadId?: string): Promise<void> {
     try {
       // Find user binding
       const binding = await this.bindingManager.getUserBinding(openId);
@@ -694,14 +716,14 @@ Examples:
 
       // Generate message ID first
       const commandMessageId = uuidv4();
-      console.log(`[FeishuHandler] Creating streaming card for command ${commandMessageId}`);
+      console.log(`[FeishuHandler] Creating streaming card for command ${commandMessageId}${threadId ? ` (threadId=${threadId})` : ''}`);
 
       // Register streaming session BEFORE sending command to avoid race condition
       // where stream chunks arrive before registration
       const feishuMessageId = await this.sendStreamingStart(openId, '🤔 Processing...');
       console.log(`[FeishuHandler] Created card ${feishuMessageId} for command ${commandMessageId}`);
       if (this.onStartStreaming) {
-        this.onStartStreaming(commandMessageId, openId, feishuMessageId, activeDevice.deviceId);
+        this.onStartStreaming(commandMessageId, openId, feishuMessageId, activeDevice.deviceId, threadId);
       }
 
       // Send command to device
@@ -710,7 +732,8 @@ Examples:
         messageId: commandMessageId,
         timestamp: Date.now(),
         content,
-        openId
+        openId,
+        threadId, // Forward threadId to CLI for per-thread routing
       });
 
       if (!success) {
@@ -1175,16 +1198,19 @@ Examples:
    * @param sessionAbbr Optional session abbreviation
    * @param openId User's open_id for creating continuation messages
    */
-  async finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string): Promise<boolean> {
-    return this.withMessageLock(messageId, () => this._finalizeStreamingMessage(messageId, elements, sessionAbbr, openId, cwd));
+  async finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string): Promise<boolean> {
+    return this.withMessageLock(messageId, () => this._finalizeStreamingMessage(messageId, elements, sessionAbbr, openId, cwd, threadName));
   }
 
-  private async _finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string): Promise<boolean> {
+  private async _finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string): Promise<boolean> {
     try {
       // Build completion note
       let noteContent = '✅ Completed';
       if (sessionAbbr) {
         noteContent += ` · Session: ${sessionAbbr}`;
+      }
+      if (threadName) {
+        noteContent += ` · 🧵 ${threadName}`;
       }
       if (cwd) {
         const formattedCwd = cwd.replace(process.env.HOME || '/Users', '~');
