@@ -167,11 +167,31 @@ describe('CLI handles PROTOCOL_VERSION_INCOMPATIBLE error from Router', () => {
     const mockGuard = { isAllowed: vi.fn().mockReturnValue(true) } as any;
     const mockConfig = {
       get: vi.fn().mockReturnValue(''),
-      set: vi.fn(),
+      set: vi.fn().mockResolvedValue(undefined),
       save: vi.fn(),
+      getConfigDir: vi.fn().mockReturnValue('/tmp/.remote-cli'),
+    } as any;
+    const mockThreadPool = {
+      getExecutor: vi.fn().mockReturnValue(mockExecutor),
+      isThreadBusy: vi.fn().mockReturnValue(false),
+      setThreadBusy: vi.fn(),
+      setThreadError: vi.fn(),
+      getSummaries: vi.fn().mockReturnValue([]),
+      destroyAll: vi.fn().mockResolvedValue(undefined),
+      switchBackend: vi.fn().mockResolvedValue(undefined),
+    } as any;
+    const mockThreadManager = {
+      getDefaultThread: vi.fn().mockReturnValue({ id: 'default', name: 'default', workingDirectory: '/tmp', sessionId: null, createdAt: 0, lastActiveAt: 0 }),
+      getThread: vi.fn(),
+      getThreadByName: vi.fn(),
+      listThreads: vi.fn().mockReturnValue([]),
+      createThread: vi.fn(),
+      deleteThread: vi.fn(),
+      updateThread: vi.fn().mockResolvedValue({}),
+      getSessionFilePath: vi.fn().mockReturnValue('/tmp/session.jsonl'),
     } as any;
 
-    const handler = new MessageHandler(mockWsClient, mockExecutor, mockGuard, mockConfig);
+    const handler = new MessageHandler(mockWsClient, mockThreadPool, mockThreadManager, mockGuard, mockConfig);
 
     // Should not throw
     await expect(handler.handleMessage(incompatibleErrorMsg as any)).resolves.not.toThrow();
