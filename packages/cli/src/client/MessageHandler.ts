@@ -9,6 +9,8 @@ import { createExecutor } from '../executor';
 import { FeishuNotificationAdapter } from '../hooks';
 import { ConfigManager } from '../config/ConfigManager';
 import { processFileReadContent } from '../utils/FileReadDetector';
+import { MachineCommands } from '../machines/MachineCommands';
+import type { PendingReplace } from '../machines/types';
 import { spawn, execFile } from 'child_process';
 import type { ExecutorConfig } from '../types/config';
 
@@ -45,6 +47,8 @@ export class MessageHandler {
   private isDestroyed = false;
   private currentOpenId?: string;
   private notificationAdapter: FeishuNotificationAdapter;
+  private machineCommands: MachineCommands;
+  private pendingReplaces: Map<string, PendingReplace> = new Map();
 
   constructor(
     wsClient: WebSocketClient,
@@ -61,6 +65,9 @@ export class MessageHandler {
 
     this.notificationAdapter = new FeishuNotificationAdapter(wsClient);
     this.notificationAdapter.register();
+
+    // Initialize machine commands
+    this.machineCommands = new MachineCommands(config);
   }
 
   /**
@@ -155,6 +162,12 @@ export class MessageHandler {
 
     // Per-thread busy check — set busy immediately to close the race window
     if (this.threadPool.isThreadBusy(resolvedThreadId)) {
+      // Allow pending replace even when busy
+      const pendingKey = openId || messageId;
+      if (this.pendingReplaces.has(pendingKey) && content && !content.startsWith('/')) {
+        await this.executePendingReplace(messageId, resolvedThreadId, pendingKey, content);
+        return;
+      }
       this.sendResponse(messageId, resolvedThreadId, {
         success: false,
         error: `Thread "${thread.name}" is busy. Send /abort to cancel the running task, or use another thread.`,
@@ -181,6 +194,13 @@ export class MessageHandler {
 
       // Update thread activity timestamp
       await this.threadManager.updateThread(resolvedThreadId, { lastActiveAt: Date.now() });
+
+      // Check for pending replace state (user sending file content)
+      const pendingKey = openId || messageId;
+      if (this.pendingReplaces.has(pendingKey) && content && !content.startsWith('/')) {
+        await this.executePendingReplace(messageId, resolvedThreadId, pendingKey, content);
+        return;
+      }
 
       const builtInResult = await this.handleBuiltInCommand(
         messageId,
@@ -308,6 +328,22 @@ export class MessageHandler {
 - /thread list - List all threads with their status
 - /thread new [name] - Create a new thread
 - /thread delete <name> - Delete a thread (only when idle)
+
+Remote Machine commands:
+- /proxy set <proxyHost> <proxyPort> <hostSuffix> [proxyAuth] - Configure global proxy
+- /proxy show - Show proxy configuration
+- /machines - List configured machines
+- /machine add <id> <user> [password] [--port N] - Add a machine
+- /machine remove <id> - Remove a machine
+- /machine show <id> - Show machine details
+- /containers <machineId> - List Docker containers
+- /search <machineId> <path> <pattern> [--container <id>] [--host] - Search files
+- /view <machineId> <filePath> [--container <id>] [--lines N] [--host] - View file
+- /replace <machineId> <filePath> [--container <id>] [--host] - Replace file (with backup)
+- /backups <machineId> [filePath] - List backups
+- /restore <machineId> <backupPath> <targetPath> [--container <id>] [--host] - Restore from backup
+- /cancel - Cancel pending replace operation
+
 You can also use natural language commands to control Claude Code CLI.`,
       });
       return true;
@@ -373,6 +409,12 @@ You can also use natural language commands to control Claude Code CLI.`,
 
     if (trimmed === '/thread' || trimmed.startsWith('/thread ')) {
       await this.handleThreadCommand(messageId, threadId, trimmed);
+      return true;
+    }
+
+    // Machine management commands
+    const machineResult = await this.handleMachineCommand(messageId, threadId, trimmed);
+    if (machineResult) {
       return true;
     }
 
@@ -490,6 +532,261 @@ You can also use natural language commands to control Claude Code CLI.`,
       if (!existing.has(name)) return name;
     }
     return `thread-${Date.now()}`;
+  }
+
+  /**
+   * Handle machine management commands
+   * @returns true if command was handled
+   */
+  private async handleMachineCommand(
+    messageId: string,
+    threadId: string,
+    trimmed: string
+  ): Promise<boolean> {
+    // /proxy set|show - global proxy configuration
+    if (trimmed.startsWith('/proxy ')) {
+      const parts = trimmed.slice('/proxy '.length).trim().split(/\s+/);
+      const subCmd = parts[0];
+
+      if (subCmd === 'set') {
+        if (parts.length < 4) {
+          this.sendResponse(messageId, threadId, {
+            success: false,
+            error: 'Usage: /proxy set <proxyHost> <proxyPort> <hostSuffix> [proxyAuth]',
+          });
+          return true;
+        }
+        const result = await this.machineCommands.setProxy(
+          parts[1], parseInt(parts[2], 10), parts[3], parts[4]
+        );
+        this.sendResponse(messageId, threadId, result);
+        return true;
+      }
+
+      if (subCmd === 'show') {
+        const result = this.machineCommands.showProxy();
+        this.sendResponse(messageId, threadId, result);
+        return true;
+      }
+
+      this.sendResponse(messageId, threadId, {
+        success: false,
+        error: 'Usage: /proxy set|show',
+      });
+      return true;
+    }
+
+    // /machines - list all machines
+    if (trimmed === '/machines') {
+      const result = await this.machineCommands.listMachines();
+      this.sendResponse(messageId, threadId, result);
+      return true;
+    }
+
+    // /machine add|remove|show
+    if (trimmed.startsWith('/machine ')) {
+      const parts = trimmed.slice('/machine '.length).trim().split(/\s+/);
+      const subCmd = parts[0];
+
+      if (subCmd === 'add') {
+        const flags = this.parseFlags(parts.slice(1));
+        const args = flags.positional;
+        if (args.length < 2) {
+          this.sendResponse(messageId, threadId, {
+            success: false,
+            error: 'Usage: /machine add <id> <user> [password] [--port N]',
+          });
+          return true;
+        }
+        const port = flags.named.port ? parseInt(flags.named.port, 10) : 22;
+        const result = await this.machineCommands.addMachine(args[0], args[1], args[2], port);
+        this.sendResponse(messageId, threadId, result);
+        return true;
+      }
+
+      if (subCmd === 'remove' && parts[1]) {
+        const result = await this.machineCommands.removeMachine(parts[1]);
+        this.sendResponse(messageId, threadId, result);
+        return true;
+      }
+
+      if (subCmd === 'show' && parts[1]) {
+        const result = this.machineCommands.showMachine(parts[1]);
+        this.sendResponse(messageId, threadId, result);
+        return true;
+      }
+
+      this.sendResponse(messageId, threadId, {
+        success: false,
+        error: 'Usage: /machine add|remove|show <id> ...',
+      });
+      return true;
+    }
+
+    // /containers <machineId>
+    if (trimmed.startsWith('/containers ')) {
+      const machineId = trimmed.slice('/containers '.length).trim();
+      const result = await this.machineCommands.listContainers(machineId);
+      this.sendResponse(messageId, threadId, result);
+      return true;
+    }
+
+    // /search <machineId> <path> <pattern> [--container <id>] [--host]
+    if (trimmed.startsWith('/search ')) {
+      const flags = this.parseFlags(trimmed.slice('/search '.length).trim().split(/\s+/));
+      if (flags.positional.length < 3) {
+        this.sendResponse(messageId, threadId, {
+          success: false,
+          error: 'Usage: /search <machineId> <path> <pattern> [--container <id>] [--host]',
+        });
+        return true;
+      }
+      const containerId = flags.boolean.has('host') ? undefined : (flags.named.container || 'welding');
+      const result = await this.machineCommands.searchFiles(
+        flags.positional[0], flags.positional[1], flags.positional[2],
+        containerId
+      );
+      this.sendResponse(messageId, threadId, result);
+      return true;
+    }
+
+    // /view <machineId> <filePath> [--container <id>] [--lines N] [--host]
+    if (trimmed.startsWith('/view ')) {
+      const flags = this.parseFlags(trimmed.slice('/view '.length).trim().split(/\s+/));
+      if (flags.positional.length < 2) {
+        this.sendResponse(messageId, threadId, {
+          success: false,
+          error: 'Usage: /view <machineId> <filePath> [--container <id>] [--lines N] [--host]',
+        });
+        return true;
+      }
+      const lines = flags.named.lines ? parseInt(flags.named.lines, 10) : undefined;
+      const containerId = flags.boolean.has('host') ? undefined : (flags.named.container || 'welding');
+      const result = await this.machineCommands.viewFile(
+        flags.positional[0], flags.positional[1],
+        containerId, lines
+      );
+      this.sendResponse(messageId, threadId, result);
+      return true;
+    }
+
+    // /replace <machineId> <filePath> [--container <id>] [--host]
+    if (trimmed.startsWith('/replace ')) {
+      const flags = this.parseFlags(trimmed.slice('/replace '.length).trim().split(/\s+/));
+      if (flags.positional.length < 2) {
+        this.sendResponse(messageId, threadId, {
+          success: false,
+          error: 'Usage: /replace <machineId> <filePath> [--container <id>] [--host]',
+        });
+        return true;
+      }
+      const containerId = flags.boolean.has('host') ? undefined : (flags.named.container || 'welding');
+      const result = this.machineCommands.initiateReplace(
+        flags.positional[0], flags.positional[1],
+        containerId
+      );
+      if (result.success && result.pending) {
+        const pendingKey = this.currentOpenId || messageId;
+        const pending = { ...result.pending, messageId, openId: this.currentOpenId };
+        this.pendingReplaces.set(pendingKey, pending);
+      }
+      this.sendResponse(messageId, threadId, { success: result.success, output: result.output, error: result.error });
+      return true;
+    }
+
+    // /cancel - cancel pending replace
+    if (trimmed === '/cancel') {
+      const pendingKey = this.currentOpenId || messageId;
+      if (this.pendingReplaces.has(pendingKey)) {
+        this.pendingReplaces.delete(pendingKey);
+        this.sendResponse(messageId, threadId, { success: true, output: 'Pending replace operation cancelled.' });
+      } else {
+        this.sendResponse(messageId, threadId, { success: true, output: 'No pending operation to cancel.' });
+      }
+      return true;
+    }
+
+    // /backups <machineId> [filePath]
+    if (trimmed.startsWith('/backups')) {
+      const args = trimmed.slice('/backups'.length).trim().split(/\s+/).filter(Boolean);
+      if (args.length < 1) {
+        this.sendResponse(messageId, threadId, {
+          success: false,
+          error: 'Usage: /backups <machineId> [filePath]',
+        });
+        return true;
+      }
+      const result = await this.machineCommands.listBackups(args[0], args[1]);
+      this.sendResponse(messageId, threadId, result);
+      return true;
+    }
+
+    // /restore <machineId> <backupPath> <targetPath> [--container <id>] [--host]
+    if (trimmed.startsWith('/restore ')) {
+      const flags = this.parseFlags(trimmed.slice('/restore '.length).trim().split(/\s+/));
+      if (flags.positional.length < 3) {
+        this.sendResponse(messageId, threadId, {
+          success: false,
+          error: 'Usage: /restore <machineId> <backupPath> <targetPath> [--container <id>] [--host]',
+        });
+        return true;
+      }
+      const containerId = flags.boolean.has('host') ? undefined : (flags.named.container || 'welding');
+      const result = await this.machineCommands.restoreBackup(
+        flags.positional[0], flags.positional[1], flags.positional[2],
+        containerId
+      );
+      this.sendResponse(messageId, threadId, result);
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Execute a pending replace operation
+   */
+  private async executePendingReplace(
+    messageId: string,
+    threadId: string,
+    pendingKey: string,
+    content: string
+  ): Promise<void> {
+    const pending = this.pendingReplaces.get(pendingKey);
+    if (!pending) {
+      this.sendResponse(messageId, threadId, { success: false, error: 'No pending replace operation found.' });
+      return;
+    }
+
+    this.pendingReplaces.delete(pendingKey);
+    const result = await this.machineCommands.executeReplace(pending, content);
+    this.sendResponse(messageId, threadId, result);
+  }
+
+  /**
+   * Parse flags from argument array
+   */
+  private parseFlags(args: string[]): { positional: string[]; named: Record<string, string>; boolean: Set<string> } {
+    const positional: string[] = [];
+    const named: Record<string, string> = {};
+    const booleanFlags = new Set<string>();
+    const knownBooleans = new Set(['host']);
+
+    for (let i = 0; i < args.length; i++) {
+      if (args[i].startsWith('--')) {
+        const key = args[i].slice(2);
+        if (knownBooleans.has(key)) {
+          booleanFlags.add(key);
+        } else if (i + 1 < args.length) {
+          named[key] = args[i + 1];
+          i++;
+        }
+      } else {
+        positional.push(args[i]);
+      }
+    }
+
+    return { positional, named, boolean: booleanFlags };
   }
 
   /**
