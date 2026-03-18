@@ -240,6 +240,66 @@ describe('GeminiExecutor', () => {
     expect(mockSetSessionMode).toHaveBeenCalledWith('mock-session-id', 'yolo');
   });
 
+  describe('multi-thread isolation', () => {
+    it('should not clear conversationId when setWorkingDirectory is called with threadId', async () => {
+      const subDir = path.join(tmpDir, 'sub');
+      fs.mkdirSync(subDir, { recursive: true });
+      const guard = new DirectoryGuard([tmpDir, subDir]);
+      
+      // Override the internal allowed directories to bypass any resolution issues during testing
+      (guard as any).allowedDirs = new Set([tmpDir, subDir, fs.realpathSync(tmpDir), fs.realpathSync(subDir)]);
+      
+      const ex = new GeminiExecutor(guard, { initialWorkingDirectory: tmpDir, threadId: 'thread-123' });
+      await ex.execute('first', {});
+      
+      const sessionManagerRemove = vi.spyOn((ex as any).sessionManager, 'remove');
+      
+      await ex.setWorkingDirectory(subDir);
+      
+      expect((ex as any).conversationId).toBe('thread-123');
+      expect(ex.getCurrentWorkingDirectory()).toBe(subDir);
+      expect(sessionManagerRemove).not.toHaveBeenCalled();
+    });
+
+    it('should not clear conversationId on resetContext but should remove session file when threadId is set', async () => {
+      const guard = new DirectoryGuard([tmpDir]);
+      const ex = new GeminiExecutor(guard, { initialWorkingDirectory: tmpDir, threadId: 'thread-456' });
+      await ex.execute('first', {});
+      
+      const sessionManagerRemove = vi.spyOn((ex as any).sessionManager, 'remove');
+      
+      ex.resetContext();
+      
+      expect((ex as any).conversationId).toBe('thread-456');
+      expect(sessionManagerRemove).toHaveBeenCalledWith('thread-456');
+    });
+
+    it('should remove conversationId on resetContext when threadId is NOT set', async () => {
+      await executor.execute('first', {});
+      const convId = (executor as any).conversationId;
+      expect(convId).toBeTruthy();
+
+      const sessionManagerRemove = vi.spyOn((executor as any).sessionManager, 'remove');
+      
+      executor.resetContext();
+      
+      expect((executor as any).conversationId).toBeNull();
+      expect(sessionManagerRemove).toHaveBeenCalledWith(convId);
+    });
+
+    it('deleteThreadData should remove conversation file', async () => {
+      const guard = new DirectoryGuard([tmpDir]);
+      const ex = new GeminiExecutor(guard, { initialWorkingDirectory: tmpDir, threadId: 'thread-789' });
+      await ex.execute('first', {});
+
+      const sessionManagerRemove = vi.spyOn((ex as any).sessionManager, 'remove');
+      
+      await ex.deleteThreadData!('thread-789');
+      
+      expect(sessionManagerRemove).toHaveBeenCalledWith('thread-789');
+    });
+  });
+
   describe('compactWhenFull()', () => {
     it('should return success with no-op message when no active conversation', async () => {
       const result = await executor.compactWhenFull!();

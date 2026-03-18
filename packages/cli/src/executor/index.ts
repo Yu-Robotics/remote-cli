@@ -89,6 +89,7 @@ export function createExecutor(
         initialWorkingDirectory,
         geminiCommand: executorConfig.gemini?.command,
         geminiVersion: executorConfig.gemini?.version,
+        threadId,
       });
 
     case 'claude-persistent':

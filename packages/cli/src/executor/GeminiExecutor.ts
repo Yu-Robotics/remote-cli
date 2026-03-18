@@ -15,6 +15,8 @@ export interface GeminiExecutorOptions {
   geminiCommand?: string;
   /** Gemini CLI npm package version specifier. Default: '@google/gemini-cli@latest' */
   geminiVersion?: string;
+  /** Thread ID for session isolation */
+  threadId?: string;
 }
 
 /**
@@ -87,6 +89,7 @@ export class GeminiExecutor implements IExecutor {
   private readonly autoApprove: boolean;
   private readonly geminiCommand: string;
   private readonly geminiVersion: string;
+  private readonly threadId?: string;
 
   /** Stable ID for JSONL history file, survives across spawns. */
   private conversationId: string | null = null;
@@ -106,6 +109,10 @@ export class GeminiExecutor implements IExecutor {
     this.geminiVersion = options.geminiVersion ?? '@google/gemini-cli@latest';
     this.currentWorkingDirectory = options.initialWorkingDirectory ?? process.cwd();
     this.sessionManager = new SessionManager();
+    this.threadId = options.threadId;
+    if (this.threadId) {
+      this.conversationId = this.threadId;
+    }
   }
 
   // ─── IExecutor required ─────────────────────────────────────────────────────
@@ -163,14 +170,18 @@ export class GeminiExecutor implements IExecutor {
   async setWorkingDirectory(targetPath: string): Promise<void> {
     const resolved = this.directoryGuard.resolveWorkingDirectory(targetPath);
     this.currentWorkingDirectory = resolved;
-    // Changing directory resets the conversation context
-    this.conversationId = null;
+    // Changing directory resets the conversation context if not using a thread-bound session
+    if (!this.threadId) {
+      this.conversationId = null;
+    }
   }
 
   resetContext(): void {
     if (this.conversationId) {
       this.sessionManager.remove(this.conversationId);
-      this.conversationId = null;
+      if (!this.threadId) {
+        this.conversationId = null;
+      }
     }
   }
 
@@ -183,6 +194,12 @@ export class GeminiExecutor implements IExecutor {
     if (!this.conversationId) {
       return { success: true, output: 'No active conversation to compact.' };
     }
+
+    // The previous execute() attempt failed (likely Prompt too long), but it already
+    // appended the user's prompt to the history. When the caller retries, they will
+    // send the exact same prompt again. To avoid duplicating it, we pop the last entry
+    // if it's a 'user' entry.
+    this.sessionManager.popLastUserEntry(this.conversationId);
 
     onStream?.(`Truncating history to last ${COMPACT_KEEP_TURNS} turns...\n`);
     const removed = this.sessionManager.truncate(this.conversationId, COMPACT_KEEP_TURNS);
@@ -216,7 +233,13 @@ export class GeminiExecutor implements IExecutor {
   async deleteThreadData(threadId: string): Promise<void> {
     if (this.conversationId) {
       this.sessionManager.remove(this.conversationId);
+    } else {
+      this.sessionManager.remove(threadId);
     }
+  }
+
+  getSessionId(): string | null {
+    return this.conversationId;
   }
 
   /**
@@ -280,7 +303,12 @@ export class GeminiExecutor implements IExecutor {
       console.log(`[GeminiExecutor] ACP session created: ${sessionId.slice(0, 8)}`);
 
       if (this.autoApprove) {
-        await client.setSessionMode(sessionId, 'yolo');
+        try {
+          await client.setSessionMode(sessionId, 'yolo');
+        } catch (e) {
+          console.warn(`[GeminiExecutor] Optional session mode 'yolo' not supported or rejected:`, e);
+          // Non-fatal: AcpClient will still auto-approve individual permissions if setSessionMode fails
+        }
       }
 
       console.log(`[GeminiExecutor] Sending prompt (length=${finalPrompt.length})...`);
@@ -315,6 +343,9 @@ export class GeminiExecutor implements IExecutor {
   private buildFriendlyError(msg: string, modelLabel: string): string {
     if (msg.includes('ENOENT') || msg.includes('not found')) {
       return 'Gemini CLI is not installed or not found on PATH. Use /backend to switch to another AI backend.';
+    }
+    if (msg.includes('invalid argument') || msg.includes('400')) {
+      return `❌ Prompt too long (Context full). Try cleaning up with /compact or /clear.\n\nRaw error: ${msg}`;
     }
     if (msg.includes('exhausted your capacity') || msg.includes('quota')) {
       const resetMatch = msg.match(/reset after ([^\s.]+)/i);
