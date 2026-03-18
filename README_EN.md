@@ -14,6 +14,8 @@ Remote control your Claude Code or Gemini CLI from anywhere using your mobile ph
 - 🔒 **Secure**: Directory whitelisting, command filtering, and device authentication
 - 📱 **Mobile-Optimized**: Simplified commands and rich text formatting for Feishu
 - 🤖 **Multi-Backend Support**: Supports Claude Code (default) and Gemini CLI, switchable at any time
+- 🧵 **Multi-session Management**: Create multiple independent chat threads to handle different tasks in parallel
+- 🖥️ **Remote Machine Management**: Control remote servers or Docker containers via SSH through the CLI
 - ⚡ **Persistent Process**: Long-running AI process with bidirectional streaming via stdio
 - 🚀 **Easy Setup**: One-command installation and initialization
 
@@ -371,20 +373,48 @@ remote-cli stop
 
 Once connected, use these commands in Feishu:
 
-### Device Management Commands
+### Core Management
 
 | Command | Description |
 |---------|-------------|
-| `/bind <binding-code>` | Bind a new device |
-| `/status` | View status of all devices |
-| `/unbind` | Unbind all devices |
-| `/device` | List all your bound devices |
-| `/device list` | List all your bound devices |
-| `/device switch <device-id-or-index>` | Switch to a specific device |
-| `/device <device-id-or-index>` | Quick switch to a device |
-| `/device unbind <device-id-or-index>` | Unbind a specific device |
-| `/backend` | List available AI backends and switch between them |
 | `/help` | Show help information |
+| `/status` | View current status, directories, and all threads |
+| `/abort` | Abort the currently executing task in this thread |
+| `/clear` | Clear conversation context for this thread |
+| `/compact` | Compress conversation history to save tokens |
+| `/cd <dir>` | Change working directory for this thread |
+| `/backend` | List and switch between available AI backends |
+| `/bind <码>` | Bind a new device |
+| `/unbind` | Unbind all devices |
+| `/device` | List and switch between bound devices |
+
+### Multi-session (Threads)
+
+Start multiple independent sessions simultaneously.
+
+| Command | Description |
+|---------|-------------|
+| `/thread list` | List all threads and their status |
+| `/thread new [name]` | Create a new session thread |
+| `/thread delete <name>`| Delete an idle thread |
+
+*Tip: Reply directly to a card message from a specific thread to continue the conversation in that thread.*
+
+### Remote Machine Management
+
+Control remote servers or Docker through `remote-cli` proxies.
+
+| Command | Description |
+|---------|-------------|
+| `/machines` | List all configured remote machines |
+| `/machine add` | Add a new remote machine (SSH) |
+| `/containers <ID>`| List Docker containers on a specific machine |
+| `/search <ID> <path>`| Search files on a remote machine/container |
+| `/view <ID> <path>` | View remote file content |
+| `/replace <ID> <path>`| Replace a remote file (with automatic backup) |
+| `/backups <ID>` | View file backup history |
+| `/restore <ID>` | Restore a file from backup |
+| `/proxy set/show` | Configure global access proxy |
 
 ### AI CLI Commands Passthrough
 
@@ -392,8 +422,7 @@ All commands/skills supported by the local Claude Code or Gemini CLI are passed 
 - `/commit` - Commit code changes
 - `/review` - Code review
 - `/test` - Run tests
-- `/clear` - Clear current session
-- And all other built-in Claude Code commands
+- And all other built-in AI engine commands
 
 ### Example Workflow
 
@@ -505,46 +534,43 @@ MIT License - see [LICENSE](LICENSE) file for details.
 
 ```json
 {
-  "deviceId": "dev_darwin_xxx",
+  "deviceId": "dev_xxx",
   "serverUrl": "https://your-router-server.com",
-  "openId": "ou_xxx",
   "security": {
-    "allowedDirectories": [
-      "/Users/yourname/projects",
-      "/Users/yourname/work"
-    ]
+    "allowedDirectories": ["/path/to/project"]
   },
   "executor": {
     "type": "gemini",
     "gemini": {
       "model": "gemini-2.5-pro",
-      "autoApprove": true
+      "autoApprove": true,
+      "command": "npx",
+      "version": "@google/gemini-cli@latest"
     }
   },
-  "service": {
-    "running": true,
-    "startedAt": 1234567890,
-    "pid": 12345
-  }
+  "machines": {},
+  "remote": {}
 }
 ```
 
-`executor.type` options: `auto` (default, Claude), `claude-persistent`, `claude-spawn`, `gemini`.
+- `executor.type`: Options are `auto` (Claude), `claude-persistent`, `claude-spawn`, `gemini`.
+- `executor.gemini`: 
+    - `model`: Model name (Avoid `auto`, explicit names like `flash` recommended).
+    - `autoApprove`: Automatically approve tool permissions (default true).
+    - `command`: Command to invoke (default `npx`).
+    - `version`: CLI version spec (default `@latest`).
 
 #### Using Gemini CLI
 
 ```bash
-# 1. Install and authenticate Gemini CLI
+# 1. Authenticate (If @google/gemini-cli is already installed)
 npx @google/gemini-cli auth login
 
-# 2. Switch to Gemini backend
+# 2. Switch backend (Can also use /backend command in Feishu)
 remote-cli config set executor.type gemini
 
-# 3. Optionally specify a model
-remote-cli config set executor.gemini.model gemini-2.5-pro
-
-# 4. Start as normal
-remote-cli start
+# 3. Specify model (Recommend flash for higher quotas)
+remote-cli config set executor.gemini.model gemini-2.5-flash
 ```
 
 ### Development

@@ -14,6 +14,8 @@
 - 🔒 **安全可靠**：目录白名单、命令过滤、设备认证三重保护
 - 📱 **移动优化**：为飞书定制的简化命令和富文本格式
 - 🤖 **多后端支持**：支持 Claude Code（默认）和 Gemini CLI，可随时切换
+- 🧵 **多会话管理**：支持创建多个独立的会话线程（Threads），并行处理不同任务
+- 🖥️ **远程机器管理**：支持通过 SSH 控制远程服务器或 Docker 容器
 - ⚡ **持久进程**：通过 stdio 双向流保持 AI 进程长期运行
 - 🚀 **简单 setup**：一键安装和初始化
 
@@ -368,20 +370,48 @@ remote-cli stop
 
 连接后，在飞书中可以使用以下命令：
 
-### 设备管理命令
+### 核心管理命令
 
 | 命令 | 说明 |
 |---------|-------------|
-| `/bind <绑定码>` | 绑定新设备 |
-| `/status` | 查看所有设备状态 |
-| `/unbind` | 解绑所有设备 |
-| `/device` | 列出你绑定的所有设备 |
-| `/device list` | 列出你绑定的所有设备 |
-| `/device switch <设备ID或序号>` | 切换到指定设备 |
-| `/device <设备ID或序号>` | 快速切换到指定设备 |
-| `/device unbind <设备ID或序号>` | 解绑指定设备 |
-| `/backend` | 列出可用 AI 后端并进行切换 |
 | `/help` | 显示帮助信息 |
+| `/status` | 查看当前设备、目录及所有线程状态 |
+| `/abort` | 中止当前线程正在运行的 AI 任务 |
+| `/clear` | 清除当前线程的对话上下文 |
+| `/compact` | 压缩对话历史以节省 Token |
+| `/cd <dir>` | 切换当前线程的工作目录 |
+| `/backend` | 列出可用 AI 后端并进行切换 |
+| `/bind <码>` | 绑定新设备 |
+| `/unbind` | 解绑所有设备 |
+| `/device` | 列出及切换绑定的设备 |
+
+### 多会话（Thread）管理
+
+支持同时开启多个会话，互不干扰。
+
+| 命令 | 说明 |
+|---------|-------------|
+| `/thread list` | 列出所有会话线程及其状态 |
+| `/thread new [名]` | 创建一个新的会话线程 |
+| `/thread delete <名>`| 删除指定的空闲线程 |
+
+*提示：直接回复某个线程发出的卡片消息，即可在该线程中继续对话。*
+
+### 远程机器管理（Machine）
+
+通过 `remote-cli` 代理控制远程服务器或 Docker。
+
+| 命令 | 说明 |
+|---------|-------------|
+| `/machines` | 列出已配置的所有远程机器 |
+| `/machine add` | 添加远程机器 (SSH) |
+| `/containers <ID>`| 列出指定机器上的 Docker 容器 |
+| `/search <ID> <路径>`| 在远程机器/容器中搜索文件 |
+| `/view <ID> <路径>` | 查看远程文件内容 |
+| `/replace <ID> <路径>`| 替换远程文件（自动备份） |
+| `/backups <ID>` | 查看文件备份记录 |
+| `/restore <ID>` | 从备份恢复文件 |
+| `/proxy set/show` | 配置全局访问代理 |
 
 ### AI CLI 命令透传
 
@@ -389,8 +419,7 @@ remote-cli stop
 - `/commit` - 提交代码变更
 - `/review` - 代码审查
 - `/test` - 运行测试
-- `/clear` - 清除当前会话
-- 以及其他所有 Claude Code 内置命令
+- 以及其他所有 AI 引擎内置命令
 
 ### 示例工作流程
 
@@ -502,46 +531,43 @@ MIT 许可证 - 详见 [LICENSE](LICENSE) 文件。
 
 ```json
 {
-  "deviceId": "dev_darwin_xxx",
+  "deviceId": "dev_xxx",
   "serverUrl": "https://your-router-server.com",
-  "openId": "ou_xxx",
   "security": {
-    "allowedDirectories": [
-      "/Users/yourname/projects",
-      "/Users/yourname/work"
-    ]
+    "allowedDirectories": ["/path/to/project"]
   },
   "executor": {
     "type": "gemini",
     "gemini": {
       "model": "gemini-2.5-pro",
-      "autoApprove": true
+      "autoApprove": true,
+      "command": "npx",
+      "version": "@google/gemini-cli@latest"
     }
   },
-  "service": {
-    "running": true,
-    "startedAt": 1234567890,
-    "pid": 12345
-  }
+  "machines": {},
+  "remote": {}
 }
 ```
 
-`executor.type` 可选值：`auto`（默认，Claude）、`claude-persistent`、`claude-spawn`、`gemini`。
+- `executor.type`: 可选值 `auto` (Claude), `claude-persistent`, `claude-spawn`, `gemini`。
+- `executor.gemini`: 
+    - `model`: 模型名称（不建议用 `auto`，建议显式指定如 `flash`）。
+    - `autoApprove`: 是否自动同意工具权限（默认 true）。
+    - `command`: 调用指令（默认 `npx`）。
+    - `version`: CLI 版本 spec（默认 `@latest`）。
 
 #### 使用 Gemini CLI
 
 ```bash
-# 1. 安装并认证 Gemini CLI
+# 1. 认证（已安装 @google/gemini-cli 的情况下）
 npx @google/gemini-cli auth login
 
-# 2. 切换到 Gemini 后端
+# 2. 切换后端（也可通过飞书 /backend 指令切换）
 remote-cli config set executor.type gemini
 
-# 3. 可选：指定模型
-remote-cli config set executor.gemini.model gemini-2.5-pro
-
-# 4. 正常启动
-remote-cli start
+# 3. 指定模型（推荐使用 flash 获取更高配额）
+remote-cli config set executor.gemini.model gemini-2.5-flash
 ```
 
 ### 开发
