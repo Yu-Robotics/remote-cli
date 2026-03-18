@@ -381,6 +381,7 @@ remote-cli stop
 | `/device switch <设备ID或序号>` | 切换到指定设备 |
 | `/device <设备ID或序号>` | 快速切换到指定设备 |
 | `/device unbind <设备ID或序号>` | 解绑指定设备 |
+| `/backend` | 列出可用 AI 后端并进行切换 |
 | `/help` | 显示帮助信息 |
 
 ### AI CLI 命令透传

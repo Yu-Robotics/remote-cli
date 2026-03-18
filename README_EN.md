@@ -384,6 +384,7 @@ Once connected, use these commands in Feishu:
 | `/device switch <device-id-or-index>` | Switch to a specific device |
 | `/device <device-id-or-index>` | Quick switch to a device |
 | `/device unbind <device-id-or-index>` | Unbind a specific device |
+| `/backend` | List available AI backends and switch between them |
 | `/help` | Show help information |
 
 ### AI CLI Commands Passthrough

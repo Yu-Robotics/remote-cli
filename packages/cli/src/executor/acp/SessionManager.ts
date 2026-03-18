@@ -73,6 +73,29 @@ export class SessionManager {
     return `=== PREVIOUS CONVERSATION ===\n${formatted}\n=== NEW REQUEST ===\n`;
   }
 
+  /**
+   * Removes the last entry in the session history if it belongs to the user.
+   * Useful when an execution fails and we want to retry without duplicating the prompt.
+   */
+  popLastUserEntry(sessionId: string): void {
+    const file = this.filePath(sessionId);
+    if (!fs.existsSync(file)) return;
+
+    const lines = fs.readFileSync(file, 'utf8').trim().split('\n').filter(Boolean);
+    if (lines.length === 0) return;
+
+    try {
+      const lastLine = lines[lines.length - 1];
+      const lastEntry = JSON.parse(lastLine) as SessionEntry;
+      if (lastEntry.role === 'user') {
+        const kept = lines.slice(0, lines.length - 1);
+        fs.writeFileSync(file, kept.join('\n') + (kept.length > 0 ? '\n' : ''), 'utf8');
+      }
+    } catch {
+      // Ignore parse errors
+    }
+  }
+
   clear(sessionId: string): void {
     const file = this.filePath(sessionId);
     if (fs.existsSync(file)) {
