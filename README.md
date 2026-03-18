@@ -200,8 +200,7 @@ remote-cli-router config
 5. 在**事件与回调**部分开启**长连接**
 6. 订阅事件：`im.message.receive_v1` ([接收消息 v2.0](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/events/receive))
 7. 开启消息卡片回调：`card.action.trigger`（用于处理卡片上的交互按钮）
-8. 配置 webhook URL：`https://your-domain.com/webhook/feishu`
-9. 获取凭证（App ID、App Secret）并发布应用
+8. 获取凭证（App ID、App Secret）并发布应用
 
 ### 启动路由服务器
 

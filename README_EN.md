@@ -203,8 +203,7 @@ You will be prompted for:
 5. Enable **Long Connection** in Event & Callback section
 6. Subscribe to event: `im.message.receive_v1` ([Receive Message v2.0](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/events/receive))
 7. Enable message card callback: `card.action.trigger` (for interactive card buttons)
-8. Configure webhook URL: `https://your-domain.com/webhook/feishu`
-9. Get credentials (App ID, App Secret) and publish the app
+8. Get credentials (App ID, App Secret) and publish the app
 
 ### Start Router Server
 
