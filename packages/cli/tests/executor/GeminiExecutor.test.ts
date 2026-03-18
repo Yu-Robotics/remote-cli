@@ -5,13 +5,18 @@ import * as path from 'path';
 import { GeminiExecutor } from '../../src/executor/GeminiExecutor';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 
-// Mock os module so homedir() returns tmpdir() — allows /tmp test directories to
-// be treated as "inside home directory" by DirectoryGuard
+// Mock os module so homedir() and tmpdir() return paths that DirectoryGuard allows.
+// On macOS, os.tmpdir() may return /var/folders/... which is blocked as a system dir.
+// We resolve to the real path (e.g. /private/tmp on macOS) to avoid symlink issues.
 vi.mock('os', async (importOriginal) => {
   const original = await importOriginal<typeof os>();
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const fsSync = require('fs') as typeof import('fs');
+  const realTmpDir = fsSync.realpathSync(original.tmpdir());
   return {
     ...original,
-    homedir: () => original.tmpdir(),
+    homedir: () => realTmpDir,
+    tmpdir: () => realTmpDir,
   };
 });
 
@@ -245,9 +250,12 @@ describe('GeminiExecutor', () => {
       const subDir = path.join(tmpDir, 'sub');
       fs.mkdirSync(subDir, { recursive: true });
       const guard = new DirectoryGuard([tmpDir, subDir]);
-      
-      // Override the internal allowed directories to bypass any resolution issues during testing
-      (guard as any).allowedDirs = new Set([tmpDir, subDir, fs.realpathSync(tmpDir), fs.realpathSync(subDir)]);
+
+      // Override internal state to allow /tmp paths regardless of homeDir
+      const realTmpDir = fs.realpathSync(tmpDir);
+      const realSubDir = fs.realpathSync(subDir);
+      (guard as any).allowedDirs = new Set([tmpDir, subDir, realTmpDir, realSubDir]);
+      (guard as any).homeDir = path.dirname(tmpDir); // set homeDir to parent of tmpDir so check passes
       
       const ex = new GeminiExecutor(guard, { initialWorkingDirectory: tmpDir, threadId: 'thread-123' });
       await ex.execute('first', {});

@@ -57,6 +57,7 @@ describe('/backend command', () => {
     mockConfig = {
       get: vi.fn().mockReturnValue(undefined),
       set: vi.fn().mockResolvedValue(undefined),
+      getConfigDir: vi.fn().mockReturnValue('/tmp/.remote-cli'),
     };
 
     const defaultThread = { id: 'default-id', name: 'default', workingDirectory: '/home/user/project', sessionId: null, createdAt: 0, lastActiveAt: 0 };
