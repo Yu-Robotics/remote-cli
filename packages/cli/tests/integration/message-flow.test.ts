@@ -68,6 +68,7 @@ describe('Integration: Message Flow', () => {
       has: vi.fn(() => true),
       getAll: vi.fn(() => ({})),
       save: vi.fn().mockResolvedValue(undefined),
+      getConfigDir: vi.fn(() => '/tmp/test-config'),
     };
 
     handler = new MessageHandler(wsClient, mockThreadPool, mockThreadManager, guard, mockConfig);
