@@ -537,7 +537,7 @@ remote-cli/
     - `packages/cli/src/commands/init.ts`
     - Interactive guidance
 
-### Phase 4: Mobile Interaction Optimization (Partial)
+### Phase 4: Mobile Interaction Optimization ✅
 
 14. **Implement Simplified Command Mapping** ✅
     - Slash commands handled via MessageHandler
@@ -550,17 +550,27 @@ remote-cli/
     - `packages/cli/src/hooks/FeishuNotificationAdapter.ts`
     - Processing, completion, error messages
 
-### Phase 5: Testing and Documentation (Partial)
+17. **Implement Multi-session (Threads)** ✅
+    - Parallel chat threads support in CLI and Router
 
-17. **Integration Testing** ✅
+18. **Implement Remote Machine Management** ✅
+    - SSH and Docker control via CLI
+
+19. **Implement Gemini CLI Backend** ✅
+    - Support for Gemini via ACP protocol
+
+20. **Implement Redacted Thinking Handling** ✅
+    - Support for safety-filtered reasoning blocks
+
+### Phase 5: Testing and Documentation (In Progress)
+
+21. **Integration Testing** ✅
     - Unit tests and integration tests for both packages
 
-18. **Write Documentation** (partial)
-    - CLAUDE.md, PLAN.md, README.md completed
-    - ROUTER_CONFIG.md, QUICKSTART.md completed
-    - Detailed docs/ directory not yet created
+22. **Write Documentation** ✅
+    - READMEs, PLAN.md, CLAUDE.md updated to reflect current state
 
-19. **Deploy Router Server** (not yet completed)
+23. **Deploy Router Server** (not yet completed)
     - Docker packaging not yet created
 
 ---

@@ -7,8 +7,10 @@ Remote control your [Claude Code](https://claude.ai/code) CLI from anywhere usin
 - **Remote Control**: Control your local development environment from anywhere via mobile
 - **Secure**: Directory whitelisting, command filtering, and device authentication
 - **Mobile-Optimized**: Simplified commands and rich text formatting for Feishu
-- **Claude Code Integration**: Full access to Claude Code's capabilities and context
-- **Persistent Process**: Long-running Claude process with bidirectional streaming (no repeated spawn overhead)
+- **Multi-Backend Support**: Supports Claude Code and Gemini CLI
+- **Multi-session (Threads)**: Create independent chat threads to parallelize tasks
+- **Remote Machine Management**: Control remote servers or Docker via SSH
+- **Persistent Process**: Long-running AI process with bidirectional streaming
 
 ## Prerequisites
 
@@ -69,28 +71,39 @@ Help me fix TypeScript errors in ~/projects/my-app
 
 ## Feishu Bot Commands
 
-### Device Management
+### Core Management
 
 | Command | Description |
 |---------|-------------|
-| `/bind <binding-code>` | Bind a new device |
-| `/status` | View status of all devices |
-| `/unbind` | Unbind all devices |
-| `/device` | List all your bound devices |
-| `/device list` | List all your bound devices |
-| `/device switch <device-id-or-index>` | Switch to a specific device |
-| `/device <device-id-or-index>` | Quick switch to a device |
-| `/device unbind <device-id-or-index>` | Unbind a specific device |
 | `/help` | Show help information |
+| `/status` | View status and all threads |
+| `/abort` | Abort executing task in current thread |
+| `/clear` | Clear context for this thread |
+| `/compact` | Compress history to save tokens |
+| `/cd <dir>` | Change working directory for this thread |
+| `/backend` | List and switch AI backends |
+| `/bind <码>` | Bind a new device |
+| `/unbind` | Unbind all devices |
+| `/device` | List and switch between bound devices |
 
-### Claude Code Commands
+### Threads & Machines
 
-All commands/skills supported by local Claude Code are passed through directly, for example:
+| Command | Description |
+|---------|-------------|
+| `/thread list/new/delete` | Manage session threads |
+| `/machines` | List configured remote machines |
+| `/machine add/remove/show` | Manage remote SSH machines |
+| `/containers <ID>` | List Docker containers on a machine |
+| `/search/view/replace` | Remote file operations |
+| `/backups/restore` | Manage remote file backups |
+
+### AI CLI Commands Passthrough
+
+All commands/skills supported by local Claude Code or Gemini CLI are passed through directly, for example:
 - `/commit` - Commit code changes
 - `/review` - Code review
 - `/test` - Run tests
-- `/clear` - Clear current session
-- And all other built-in Claude Code commands
+- And all other built-in AI engine commands
 
 ## Security
 
