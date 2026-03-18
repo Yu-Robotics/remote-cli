@@ -250,8 +250,10 @@ export class AcpClient {
     this.pendingRequests.delete(msg.id);
 
     if ('error' in msg) {
-      console.error(`[AcpClient] ❌ RPC error id=${msg.id} code=${msg.error.code}: ${msg.error.message}`);
-      pending.reject(new Error(`ACP error ${msg.error.code}: ${msg.error.message}`));
+      const dataStr = msg.error.data ? ` (data: ${JSON.stringify(msg.error.data)})` : '';
+      const errMsg = `ACP error ${msg.error.code}: ${msg.error.message}${dataStr}`;
+      console.error(`[AcpClient] ❌ ${errMsg}`);
+      pending.reject(new Error(errMsg));
     } else {
       pending.resolve(msg.result);
     }

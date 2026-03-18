@@ -30,8 +30,27 @@ export class SessionManager {
   }
 
   append(sessionId: string, role: 'user' | 'assistant', text: string): void {
+    const file = this.filePath(sessionId);
+    
+    // If we're appending a user prompt, avoid duplicating the exact same prompt
+    // that might be stuck at the end of the history due to a previous failed turn (e.g. Prompt too long error).
+    if (role === 'user' && fs.existsSync(file)) {
+      const lines = fs.readFileSync(file, 'utf8').trim().split('\n').filter(Boolean);
+      if (lines.length > 0) {
+        try {
+          const lastEntry = JSON.parse(lines[lines.length - 1]) as SessionEntry;
+          if (lastEntry.role === 'user' && lastEntry.text === text) {
+            // Last entry is identical, do not append again
+            return;
+          }
+        } catch {
+          // Ignore JSON parse errors
+        }
+      }
+    }
+
     const entry: SessionEntry = { role, text, ts: Date.now() };
-    fs.appendFileSync(this.filePath(sessionId), JSON.stringify(entry) + '\n', 'utf8');
+    fs.appendFileSync(file, JSON.stringify(entry) + '\n', 'utf8');
   }
 
   /**
