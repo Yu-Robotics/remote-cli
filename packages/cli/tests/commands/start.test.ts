@@ -44,6 +44,18 @@ vi.mock('../../src/thread/ThreadExecutorPool', () => ({
     switchBackend: vi.fn().mockResolvedValue(undefined),
   })),
 }));
+vi.mock('../../src/client/MessageHandler', () => ({
+  MessageHandler: vi.fn().mockImplementation(() => ({
+    handleMessage: vi.fn().mockResolvedValue(undefined),
+  })),
+}));
+
+vi.mock('../../src/security/HooksConfigurator', () => ({
+  HooksConfigurator: vi.fn().mockImplementation(() => ({
+    configure: vi.fn().mockResolvedValue(undefined),
+  })),
+}));
+
 vi.mock('ora', () => ({
   default: vi.fn(() => ({
     start: vi.fn().mockReturnThis(),
@@ -95,8 +107,9 @@ describe('start command', () => {
           allowedDirectories: ['~/projects'],
         },
       })),
-      set: vi.fn(),
+      set: vi.fn().mockResolvedValue(undefined),
       save: vi.fn().mockResolvedValue(undefined),
+      getConfigDir: vi.fn().mockReturnValue('/tmp/.remote-cli'),
     };
     vi.spyOn(ConfigManager, 'initialize').mockResolvedValue(mockConfig);
 
@@ -361,8 +374,9 @@ describe('startCommand version check integration', () => {
         serverUrl: 'http://test-server.com',
         security: { allowedDirectories: ['~/projects'] },
       })),
-      set: vi.fn(),
+      set: vi.fn().mockResolvedValue(undefined),
       save: vi.fn().mockResolvedValue(undefined),
+      getConfigDir: vi.fn().mockReturnValue('/tmp/.remote-cli'),
     };
     vi.spyOn(ConfigManager, 'initialize').mockResolvedValue(mockConfig);
 
