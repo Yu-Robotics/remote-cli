@@ -65,6 +65,10 @@ export interface Config {
   };
   /** Executor backend selection. Defaults to 'auto' (Claude persistent or spawn). */
   executor?: ExecutorConfig;
+  /** Remote machine configurations */
+  machines?: Record<string, any>;
+  /** Remote proxy/host configuration */
+  remote?: any;
 }
 
 /**
