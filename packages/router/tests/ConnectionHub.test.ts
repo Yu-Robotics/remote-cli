@@ -223,6 +223,29 @@ describe('ConnectionHub', () => {
       expect(stats.totalConnections).toBe(0);
       expect(stats.deviceIds).toEqual([]);
     });
+
+    it('should return accurate connection stats after multiple register/unregister cycles', () => {
+      const device1 = 'dev_test_001';
+      const device2 = 'dev_test_002';
+      const device3 = 'dev_test_003';
+      const mockWs1 = { ...mockWs, send: vi.fn(), close: vi.fn() };
+      const mockWs2 = { ...mockWs, send: vi.fn(), close: vi.fn() };
+      const mockWs3 = { ...mockWs, send: vi.fn(), close: vi.fn() };
+
+      // Register 3 connections
+      hub.registerConnection(device1, mockWs1);
+      hub.registerConnection(device2, mockWs2);
+      hub.registerConnection(device3, mockWs3);
+
+      // Unregister 1
+      hub.unregisterConnection(device2);
+
+      const stats = hub.getConnectionStats();
+      expect(stats.totalConnections).toBe(2);
+      expect(stats.deviceIds).toContain(device1);
+      expect(stats.deviceIds).toContain(device3);
+      expect(stats.deviceIds).not.toContain(device2);
+    });
   });
 
   describe('broadcast', () => {

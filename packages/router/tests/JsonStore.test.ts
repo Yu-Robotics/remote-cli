@@ -573,6 +573,48 @@ describe('JsonStore', () => {
     });
   });
 
+  describe('concurrent flush safety', () => {
+    beforeEach(async () => {
+      await store.initialize();
+    });
+
+    it('should handle concurrent flush calls without corrupting file data', async () => {
+      // Add some data first
+      await store.setUserBinding('ou_user_1', {
+        openId: 'ou_user_1',
+        devices: [{
+          deviceId: 'dev_1',
+          deviceName: 'Device-1',
+          boundAt: Date.now(),
+          lastActiveAt: Date.now(),
+          isActive: true
+        }],
+        activeDeviceId: 'dev_1',
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      });
+
+      await store.setBindingCode('ABC-123', {
+        code: 'ABC-123',
+        deviceId: 'dev_2',
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 60000
+      });
+
+      // Call flush() twice concurrently
+      await Promise.all([store.flush(), store.flush()]);
+
+      // Verify the file contains valid JSON with the expected data
+      const content = await fs.readFile(storePath, 'utf-8');
+      const data = JSON.parse(content);
+
+      expect(data.version).toBe(1);
+      expect(data.userBindings['ou_user_1']).toBeDefined();
+      expect(data.userBindings['ou_user_1'].devices.length).toBe(1);
+      expect(data.bindingCodes['ABC-123']).toBeDefined();
+    });
+  });
+
   describe('debounced save', () => {
     beforeEach(async () => {
       await store.initialize();

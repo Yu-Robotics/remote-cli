@@ -88,6 +88,35 @@ describe('SessionManager', () => {
     expect(() => manager.remove('does-not-exist')).not.toThrow();
   });
 
+  describe('duplicate detection', () => {
+    it('should not treat identical text from different roles as a duplicate', () => {
+      manager.append('dup-test', 'user', 'hello');
+      manager.append('dup-test', 'assistant', 'hello');
+
+      const file = path.join(tmpDir, 'dup-test.jsonl');
+      const lines = fs.readFileSync(file, 'utf8').trim().split('\n').filter(Boolean);
+
+      expect(lines).toHaveLength(2);
+
+      const first = JSON.parse(lines[0]);
+      const second = JSON.parse(lines[1]);
+      expect(first.role).toBe('user');
+      expect(first.text).toBe('hello');
+      expect(second.role).toBe('assistant');
+      expect(second.text).toBe('hello');
+    });
+
+    it('should deduplicate consecutive user entries with the same text', () => {
+      manager.append('dup-test-2', 'user', 'hello');
+      manager.append('dup-test-2', 'user', 'hello');
+
+      const file = path.join(tmpDir, 'dup-test-2.jsonl');
+      const lines = fs.readFileSync(file, 'utf8').trim().split('\n').filter(Boolean);
+
+      expect(lines).toHaveLength(1);
+    });
+  });
+
   describe('truncate()', () => {
     it('should remove older entries and keep the most recent ones', () => {
       for (let i = 0; i < 15; i++) {
