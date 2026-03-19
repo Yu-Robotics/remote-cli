@@ -24,6 +24,7 @@ vi.mock('os', async (importOriginal) => {
 
 const mockPrompt = vi.fn();
 const mockDestroy = vi.fn();
+const mockSendCancel = vi.fn();
 const mockInitialize = vi.fn().mockResolvedValue(undefined);
 const mockNewSession = vi.fn().mockResolvedValue('mock-session-id');
 const mockSetSessionMode = vi.fn().mockResolvedValue(undefined);
@@ -33,6 +34,7 @@ vi.mock('../../src/executor/acp/AcpClient', () => ({
     initialize: mockInitialize,
     newSession: mockNewSession,
     setSessionMode: mockSetSessionMode,
+    sendCancel: mockSendCancel,
     prompt: async (sessionId: string, promptText: string) => {
       // Simulate streaming text chunks via callback
       callbacks.onTextChunk('Hello ');
@@ -158,26 +160,105 @@ describe('GeminiExecutor', () => {
     expect(lastCall[1]).toBe('after dir change');
   });
 
-  it('should return true on abort when in-flight', async () => {
-    // Simulate a slow prompt so inflightClient is set
-    let resolvePrompt!: () => void;
-    mockPrompt.mockImplementationOnce(() => new Promise<{ sessionId: string; stopReason: string }>((resolve) => {
-      resolvePrompt = () => resolve({ sessionId: 'mock-session-id', stopReason: 'cancelled' });
+  it('should return true on abort when in-flight and send ACP cancel before force-kill', async () => {
+    const mockSendCancel = vi.fn();
+    let resolvePrompt!: (v: { stopReason: string }) => void;
+
+    const { AcpClient } = await import('../../src/executor/acp/AcpClient');
+    vi.mocked(AcpClient).mockImplementationOnce((_cmd, _args, _cwd, _callbacks) => ({
+      initialize: mockInitialize,
+      newSession: mockNewSession,
+      setSessionMode: mockSetSessionMode,
+      sendCancel: mockSendCancel,
+      // prompt resolves when the test triggers resolvePrompt (simulates Gemini responding to cancel)
+      prompt: () => new Promise<{ stopReason: string }>((resolve) => { resolvePrompt = resolve; }),
+      destroy: mockDestroy,
     }));
 
     const executePromise = executor.execute('long task', {});
-    // Allow microtasks for initialize/newSession to run
+    // Allow microtasks for initialize/newSession to complete
     await new Promise((r) => setTimeout(r, 10));
 
     const aborted = await executor.abort();
     expect(aborted).toBe(true);
-    resolvePrompt();
-    await executePromise;
+    // sendCancel must be called with the ACP session ID
+    expect(mockSendCancel).toHaveBeenCalledWith('mock-session-id');
+
+    // Simulate Gemini acknowledging the cancel
+    resolvePrompt({ stopReason: 'cancelled' });
+    const result = await executePromise;
+    expect(result.success).toBe(false); // cancelled = not successful
   });
 
   it('should return false on abort when no in-flight request', async () => {
     const result = await executor.abort();
     expect(result).toBe(false);
+  });
+
+  it('should treat cancelled stopReason as unsuccessful result', async () => {
+    mockPrompt.mockResolvedValueOnce({ sessionId: 'mock-session-id', stopReason: 'cancelled' });
+    const result = await executor.execute('task', {});
+    expect(result.success).toBe(false);
+  });
+
+  it('should force-destroy after CANCEL_GRACE_MS if Gemini does not respond to cancel', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const localDestroy = vi.fn();
+
+    const { AcpClient } = await import('../../src/executor/acp/AcpClient');
+    vi.mocked(AcpClient).mockImplementationOnce((_cmd, _args, _cwd, _callbacks) => ({
+      initialize: vi.fn().mockResolvedValue(undefined),
+      newSession: vi.fn().mockResolvedValue('mock-session-id'),
+      setSessionMode: vi.fn().mockResolvedValue(undefined),
+      sendCancel: vi.fn(),
+      // prompt never resolves — simulates Gemini ignoring the cancel notification
+      prompt: () => new Promise(() => {}),
+      destroy: localDestroy,
+    }));
+
+    executor.execute('slow task', {});
+    // Allow initialize + newSession promises to settle (they use real async, not timers)
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    await executor.abort();
+    expect(localDestroy).not.toHaveBeenCalled(); // not yet — still in grace period
+
+    // Advance past CANCEL_GRACE_MS (3000ms)
+    vi.advanceTimersByTime(3_000);
+    expect(localDestroy).toHaveBeenCalled(); // force-killed after timeout
+
+    vi.useRealTimers();
+  }, 10_000);
+
+  it('should save partial output to history even when cancelled', async () => {
+    // Simulate: some text streamed, then cancel
+    const { AcpClient } = await import('../../src/executor/acp/AcpClient');
+    vi.mocked(AcpClient).mockImplementationOnce((_cmd, _args, _cwd, callbacks) => ({
+      initialize: mockInitialize,
+      newSession: mockNewSession,
+      setSessionMode: mockSetSessionMode,
+      sendCancel: vi.fn(),
+      prompt: async () => {
+        callbacks.onTextChunk('partial output before cancel');
+        return { stopReason: 'cancelled' };
+      },
+      destroy: mockDestroy,
+    }));
+
+    await executor.execute('task', {});
+
+    // Second call should include the partial output from the cancelled turn in history
+    await executor.execute('follow-up', {});
+    const secondCall = mockPrompt.mock.calls[0]; // mockPrompt not called in first (custom mock)
+    // The second execute uses the default mock — check sessionManager directly
+    const sessionFile = (executor as any).sessionManager.filePath((executor as any).conversationId);
+    const { readFileSync } = await import('fs');
+    const lines = readFileSync(sessionFile, 'utf8').trim().split('\n').filter(Boolean);
+    const entries = lines.map((l: string) => JSON.parse(l));
+    const assistantEntries = entries.filter((e: any) => e.role === 'assistant');
+    expect(assistantEntries.some((e: any) => e.text.includes('partial output before cancel'))).toBe(true);
   });
 
   it('should reject setWorkingDirectory to disallowed path', async () => {
@@ -186,19 +267,35 @@ describe('GeminiExecutor', () => {
     ).rejects.toThrow();
   });
 
-  it('should destroy in-flight client on destroy()', async () => {
-    let resolvePrompt!: () => void;
-    mockPrompt.mockImplementationOnce(() => new Promise<{ sessionId: string; stopReason: string }>((resolve) => {
-      resolvePrompt = () => resolve({ sessionId: 'mock-session-id', stopReason: 'end_turn' });
+  it('should send ACP cancel and destroy in-flight client on destroy()', async () => {
+    const localSendCancel = vi.fn();
+    let rejectPrompt!: (e: Error) => void;
+    let promptRejected = false;
+
+    const { AcpClient } = await import('../../src/executor/acp/AcpClient');
+    vi.mocked(AcpClient).mockImplementationOnce((_cmd, _args, _cwd, _callbacks) => ({
+      initialize: mockInitialize,
+      newSession: mockNewSession,
+      setSessionMode: mockSetSessionMode,
+      sendCancel: localSendCancel,
+      prompt: () => new Promise<{ stopReason: string }>((_resolve, reject) => { rejectPrompt = reject; }),
+      // Simulate real AcpClient.destroy() rejecting all pending requests (idempotent)
+      destroy: vi.fn().mockImplementation(() => {
+        if (!promptRejected) {
+          promptRejected = true;
+          rejectPrompt(new Error('AcpClient destroyed'));
+        }
+      }),
     }));
 
     const executePromise = executor.execute('test', {});
     await new Promise((r) => setTimeout(r, 10));
 
     await executor.destroy();
-    expect(mockDestroy).toHaveBeenCalled();
-    resolvePrompt();
-    await executePromise;
+    expect(localSendCancel).toHaveBeenCalledWith('mock-session-id');
+
+    const result = await executePromise;
+    expect(result.success).toBe(false); // destroyed = not successful
   });
 
   it('should handle refusal stop reason as failure', async () => {
