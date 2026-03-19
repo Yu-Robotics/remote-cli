@@ -343,6 +343,17 @@ describe('GeminiExecutor', () => {
     it('should be discoverable via in operator (IExecutor optional method)', () => {
       expect('compactWhenFull' in executor).toBe(true);
     });
+
+    it('should call sessionManager.popLastUserEntry before truncating to avoid duplicate user prompts', async () => {
+      // Build up history so conversationId is set
+      await executor.execute('question 1', {});
+
+      const popSpy = vi.spyOn((executor as any).sessionManager, 'popLastUserEntry');
+
+      await executor.compactWhenFull!();
+
+      expect(popSpy).toHaveBeenCalledWith((executor as any).conversationId);
+    });
   });
 
   // ─── Quota fallback chain ─────────────────────────────────────────────────

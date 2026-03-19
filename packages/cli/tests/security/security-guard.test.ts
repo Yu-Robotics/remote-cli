@@ -485,6 +485,39 @@ describe('security-guard', () => {
         expect(result.reason).toContain('outside allowed directories');
       });
 
+      it('should block $( ) command substitution even when paths are within allowed dirs', () => {
+        const allowedDirs = ['/home/testuser/projects/myapp'];
+        const hookData = {
+          tool_name: 'Bash',
+          tool_input: {
+            command: 'echo $(cat /home/testuser/projects/myapp/safe.txt)'
+          },
+          cwd: '/home/testuser/projects/myapp'
+        };
+
+        const result = validateToolUse(hookData, allowedDirs);
+
+        // $( ) is blocked as a dangerous pattern regardless of whether the inner path is allowed
+        expect(result.allowed).toBe(false);
+        expect(result.reason).toContain('pipe to shell');
+      });
+
+      it('should block backtick command substitution', () => {
+        const allowedDirs = ['/home/testuser/projects/myapp'];
+        const hookData = {
+          tool_name: 'Bash',
+          tool_input: {
+            command: 'echo `cat /home/testuser/projects/myapp/safe.txt`'
+          },
+          cwd: '/home/testuser/projects/myapp'
+        };
+
+        const result = validateToolUse(hookData, allowedDirs);
+
+        expect(result.allowed).toBe(false);
+        expect(result.reason).toContain('pipe to shell');
+      });
+
       it('should block curl/wget commands that could download malicious content', () => {
         const allowedDirs = ['/home/testuser/projects/myapp'];
         const hookData = {
