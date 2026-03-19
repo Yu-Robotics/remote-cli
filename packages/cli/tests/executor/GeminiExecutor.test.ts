@@ -421,6 +421,38 @@ describe('GeminiExecutor', () => {
       expect(result.error).toContain('/backend');
     });
 
+    it('should retry with flash on "No capacity available" ACP 500 error', async () => {
+      const { AcpClient } = await import('../../src/executor/acp/AcpClient');
+      const MockAcpClient = vi.mocked(AcpClient);
+      MockAcpClient.mockClear();
+
+      mockPrompt
+        .mockRejectedValueOnce(new Error('ACP error 500: No capacity available for model gemini-3.1-pro-preview on the server'))
+        .mockResolvedValueOnce({ sessionId: 'mock-session-id', stopReason: 'end_turn' });
+
+      const onStream = vi.fn();
+      const guard = new DirectoryGuard([tmpDir]);
+      const ex = new GeminiExecutor(guard, { initialWorkingDirectory: tmpDir, model: 'pro' });
+      const result = await ex.execute('prompt', { onStream });
+
+      expect(result.success).toBe(true);
+      expect(onStream).toHaveBeenCalledWith(expect.stringContaining('Quota exhausted'));
+      expect(onStream).toHaveBeenCalledWith(expect.stringContaining('flash'));
+      expect(MockAcpClient).toHaveBeenCalledTimes(2);
+    });
+
+    it('should exhaust all fallbacks on repeated "No capacity available" errors', async () => {
+      mockPrompt.mockRejectedValue(new Error('ACP error 500: No capacity available for model gemini-3.1-pro-preview on the server'));
+
+      const guard = new DirectoryGuard([tmpDir]);
+      const ex = new GeminiExecutor(guard, { initialWorkingDirectory: tmpDir, model: 'pro' });
+      const result = await ex.execute('prompt', {});
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('All Gemini models');
+      expect(result.error).toContain('/backend');
+    });
+
     it('should NOT retry on non-quota errors', async () => {
       const { AcpClient } = await import('../../src/executor/acp/AcpClient');
       const MockAcpClient = vi.mocked(AcpClient);
