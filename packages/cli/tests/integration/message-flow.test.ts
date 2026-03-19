@@ -5,6 +5,11 @@ import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 import { ThreadExecutorPool } from '../../src/thread/ThreadExecutorPool';
 import { ThreadManager } from '../../src/thread/ThreadManager';
 import { IncomingMessage } from '../../src/types';
+import os from 'os';
+
+// Mock os.homedir() to respect process.env.HOME for isolated tests
+const originalHomedir = os.homedir();
+vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || originalHomedir);
 
 vi.mock('../../src/client/WebSocketClient');
 

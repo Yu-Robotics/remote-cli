@@ -3,6 +3,11 @@ import { MessageHandler } from '../../src/client/MessageHandler';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 import { ThreadExecutorPool } from '../../src/thread/ThreadExecutorPool';
 import { ThreadManager } from '../../src/thread/ThreadManager';
+import os from 'os';
+
+// Mock os.homedir() to respect process.env.HOME for isolated tests
+const originalHomedir = os.homedir();
+vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || originalHomedir);
 
 // Mock child_process so we can control which backends appear "installed"
 vi.mock('child_process', async (importOriginal) => {

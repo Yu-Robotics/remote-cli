@@ -5,7 +5,8 @@ import os from 'os';
 import path from 'path';
 
 // Mock os.homedir() BEFORE importing commands
-vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || os.homedir());
+const originalHomedir = os.homedir();
+vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || originalHomedir);
 
 import { initCommand } from '../../src/commands/init';
 import { startCommand } from '../../src/commands/start';
