@@ -6,6 +6,9 @@ import { SessionManager } from './acp/SessionManager';
 /** Number of most-recent conversation turns to keep after compaction. */
 const COMPACT_KEEP_TURNS = 10;
 
+/** Grace period (ms) between cooperative ACP cancel and force SIGTERM/SIGKILL. */
+const CANCEL_GRACE_MS = 3_000;
+
 export interface GeminiExecutorOptions {
   model?: string;
   /** Auto-approve all tool permission requests. Default: true. */
@@ -102,6 +105,12 @@ export class GeminiExecutor implements IExecutor {
   /** Reference to the in-flight AcpClient for abort support. */
   private inflightClient: AcpClient | null = null;
 
+  /** ACP session ID of the in-flight prompt, needed for cooperative sendCancel. */
+  private inflightSessionId: string | null = null;
+
+  /** Handle for the abort grace-period timer so it can be cancelled early. */
+  private abortTimer: ReturnType<typeof setTimeout> | null = null;
+
   constructor(directoryGuard: DirectoryGuard, options: GeminiExecutorOptions = {}) {
     this.directoryGuard = directoryGuard;
     // Leave model unset by default so Gemini CLI uses its own default
@@ -150,7 +159,7 @@ export class GeminiExecutor implements IExecutor {
       }
 
       try {
-        const result = await this.executeWithModel(modelForAttempt, modelLabel, finalPrompt, prompt, options);
+        const result = await this.executeWithModel(modelForAttempt, modelLabel, finalPrompt, options);
         return result;
       } catch (error) {
         if (isQuotaError(error) && attempt < modelsToTry.length - 1) {
@@ -219,15 +228,42 @@ export class GeminiExecutor implements IExecutor {
 
   async abort(): Promise<boolean> {
     if (!this.inflightClient) return false;
-    this.inflightClient.destroy();
-    this.inflightClient = null;
+
+    // Step 1: Send cooperative ACP cancel so Gemini can finish the current
+    // tool call cleanly before exiting (avoids half-written files).
+    if (this.inflightSessionId) {
+      this.inflightClient.sendCancel(this.inflightSessionId);
+      console.log(`[GeminiExecutor] Sent ACP cancel for session ${this.inflightSessionId.slice(0, 8)}`);
+    }
+
+    // Step 2: Give Gemini a short grace period to respond with stopReason='cancelled'.
+    // The timer is stored so the finally block can cancel it if Gemini responds in time.
+    const clientRef = this.inflightClient;
+    this.abortTimer = setTimeout(() => {
+      this.abortTimer = null;
+      if (clientRef === this.inflightClient) {
+        console.warn('[GeminiExecutor] Cancel grace period elapsed, force-destroying ACP client');
+        clientRef.destroy();
+      }
+    }, CANCEL_GRACE_MS);
+
     return true;
   }
 
   async destroy(): Promise<void> {
     if (this.inflightClient) {
+      // Best-effort cooperative cancel before force-kill
+      if (this.inflightSessionId) {
+        this.inflightClient.sendCancel(this.inflightSessionId);
+      }
+      // Cancel the abort grace-period timer if it's still running
+      if (this.abortTimer !== null) {
+        clearTimeout(this.abortTimer);
+        this.abortTimer = null;
+      }
       this.inflightClient.destroy();
       this.inflightClient = null;
+      this.inflightSessionId = null;
     }
   }
 
@@ -255,7 +291,6 @@ export class GeminiExecutor implements IExecutor {
     model: string,
     modelLabel: string,
     finalPrompt: string,
-    originalPrompt: string,
     options: ExecuteOptions,
   ): Promise<ExecuteResult> {
     let accumulatedOutput = '';
@@ -306,6 +341,7 @@ export class GeminiExecutor implements IExecutor {
       await client.initialize();
       const sessionId = await client.newSession(this.currentWorkingDirectory);
       console.log(`[GeminiExecutor] ACP session created: ${sessionId.slice(0, 8)}`);
+      this.inflightSessionId = sessionId;
 
       if (this.autoApprove) {
         try {
@@ -320,16 +356,25 @@ export class GeminiExecutor implements IExecutor {
       const promptResult = await client.prompt(sessionId, finalPrompt);
       console.log(`[GeminiExecutor] Prompt completed, stopReason=${promptResult.stopReason}, model=${modelLabel}`);
 
-      this.sessionManager.append(this.conversationId!, 'assistant', accumulatedOutput);
+      // Save partial output even on cancellation so history stays consistent
+      if (accumulatedOutput) {
+        this.sessionManager.append(this.conversationId!, 'assistant', accumulatedOutput);
+      }
 
       return {
-        success: promptResult.stopReason !== 'refusal',
+        success: promptResult.stopReason !== 'refusal' && promptResult.stopReason !== 'cancelled',
         output: accumulatedOutput,
         sessionAbbr: this.conversationId!.slice(0, 8),
       };
     } finally {
+      // Clear the abort grace-period timer — Gemini responded (or threw) in time.
+      if (this.abortTimer !== null) {
+        clearTimeout(this.abortTimer);
+        this.abortTimer = null;
+      }
       client.destroy();
       this.inflightClient = null;
+      this.inflightSessionId = null;
     }
   }
 
