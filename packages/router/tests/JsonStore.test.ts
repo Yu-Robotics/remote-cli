@@ -4,6 +4,9 @@ import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 
+// Mock os.homedir() to respect process.env.HOME for isolated tests
+vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || os.homedir());
+
 describe('JsonStore', () => {
   let store: JsonStore;
   let testDir: string;
