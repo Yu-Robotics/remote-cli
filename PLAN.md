@@ -685,11 +685,6 @@ volumes:
 - [ ] Command history (view recently executed commands in Feishu)
 - [ ] Scheduled tasks (set scheduled Claude tasks)
 
-### Performance Optimization
-- [ ] Message queue (use Bull/BullMQ for high concurrency)
-- [x] Stream output (real-time push of Claude's output via persistent executor)
-- [ ] Result caching (don't re-execute same questions)
-
 ### Security Hardening
 - [ ] Two-factor authentication (require additional verification during binding)
 - [ ] Audit logs (record all executed commands)
