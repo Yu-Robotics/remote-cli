@@ -6,7 +6,8 @@ import { ThreadManager } from '../../src/thread/ThreadManager';
 import { DEFAULT_THREAD_NAME, MAX_THREADS } from '../../src/thread/types';
 
 // Mock os.homedir() so tests don't write to real home directory
-vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || os.homedir());
+const originalHomedir = os.homedir();
+vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || originalHomedir);
 
 describe('ThreadManager', () => {
   let tmpDir: string;

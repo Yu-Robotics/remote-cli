@@ -8,7 +8,8 @@ import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 import type { IExecutor } from '../../src/executor/IExecutor';
 import type { ExecutorConfig } from '../../src/types/config';
 
-vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || os.homedir());
+const originalHomedir = os.homedir();
+vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || originalHomedir);
 
 /**
  * Create a mock executor that tracks state

@@ -325,28 +325,34 @@ describe('ConcurrentRouting - Integration Tests', () => {
       // Generate binding code
       const code = await bindingManager.generateBindingCode(deviceId, 'Shared Device');
 
-      // Try to bind to multiple users concurrently
-      const bindings = [
-        bindingManager.bindUser('user_001', deviceId, 'Device-1'),
+      // Bind to the first user (must succeed)
+      await bindingManager.bindUser('user_001', deviceId, 'Device-1');
+
+      // Subsequent bindings to different users must be rejected because the
+      // device-to-user reverse map is already populated after the first call.
+      const results = await Promise.allSettled([
         bindingManager.bindUser('user_002', deviceId, 'Device-2'),
         bindingManager.bindUser('user_003', deviceId, 'Device-3'),
-      ];
+      ]);
 
-      // All bindings should succeed (this is actually allowed in current implementation)
-      // The device can be bound to multiple users, but each user sees it as their device
-      await expect(Promise.all(bindings)).resolves.toBeDefined();
+      const fulfilled = results.filter(r => r.status === 'fulfilled');
+      const rejected = results.filter(r => r.status === 'rejected');
 
-      // Verify all users have the device
+      // Neither should succeed because user_001 already owns the device
+      expect(fulfilled.length).toBe(0);
+      expect(rejected.length).toBe(2);
+      for (const r of rejected) {
+        expect((r as PromiseRejectedResult).reason.message).toContain('already bound to another user');
+      }
+
+      // Verify only the first user has the device
       const binding1 = await bindingManager.getUserBinding('user_001');
       const binding2 = await bindingManager.getUserBinding('user_002');
       const binding3 = await bindingManager.getUserBinding('user_003');
 
       expect(binding1!.devices.some(d => d.deviceId === deviceId)).toBe(true);
-      expect(binding2!.devices.some(d => d.deviceId === deviceId)).toBe(true);
-      expect(binding3!.devices.some(d => d.deviceId === deviceId)).toBe(true);
-
-      // NOTE: This is a potential issue - same device can be bound to multiple users
-      // This might cause routing conflicts if the device connects to the router
+      expect(binding2).toBeNull();
+      expect(binding3).toBeNull();
     });
 
     it('should handle concurrent binding code generation for different devices', async () => {

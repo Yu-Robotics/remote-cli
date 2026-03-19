@@ -4,7 +4,8 @@ import path from 'path';
 import os from 'os';
 
 // Mock os.homedir() to respect process.env.HOME for isolated tests
-vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || os.homedir());
+const originalHomedir = os.homedir();
+vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || originalHomedir);
 
 describe('DirectoryGuard', () => {
   let guard: DirectoryGuard;

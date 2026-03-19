@@ -1,6 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ClaudePersistentExecutor } from '../../src/executor/ClaudePersistentExecutor';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
+import os from 'os';
+
+// Mock os.homedir() to respect process.env.HOME for isolated tests
+const originalHomedir = os.homedir();
+vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || originalHomedir);
 
 describe('ClaudePersistentExecutor - Redacted Thinking', () => {
   let executor: ClaudePersistentExecutor;
