@@ -64,10 +64,15 @@ function mapAcpToolCall(
  */
 const QUOTA_FALLBACK_ALIASES = ['flash', 'flash-lite'];
 
-/** Returns true when the error message indicates a quota-exhaustion condition. */
+/** Returns true when the error message indicates a quota-exhaustion or capacity condition. */
 function isQuotaError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
-  return error.message.includes('exhausted your capacity') || error.message.includes('quota');
+  const msg = error.message;
+  return (
+    msg.includes('exhausted your capacity') ||
+    msg.includes('quota') ||
+    msg.includes('No capacity available')
+  );
 }
 
 /**
@@ -347,7 +352,7 @@ export class GeminiExecutor implements IExecutor {
     if (msg.includes('invalid argument') || msg.includes('400')) {
       return `❌ Prompt too long (Context full). Try cleaning up with /compact or /clear.\n\nRaw error: ${msg}`;
     }
-    if (msg.includes('exhausted your capacity') || msg.includes('quota')) {
+    if (msg.includes('exhausted your capacity') || msg.includes('quota') || msg.includes('No capacity available')) {
       const resetMatch = msg.match(/reset after ([^\s.]+)/i);
       const resetHint = resetMatch ? ` Quota resets in ${resetMatch[1]}.` : '';
       return (
