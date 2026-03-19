@@ -1,7 +1,10 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { DirectoryGuard } from '../src/security/DirectoryGuard';
 import path from 'path';
 import os from 'os';
+
+// Mock os.homedir() to respect process.env.HOME for isolated tests
+vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || os.homedir());
 
 describe('DirectoryGuard', () => {
   let guard: DirectoryGuard;
