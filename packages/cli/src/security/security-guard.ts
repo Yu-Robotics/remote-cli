@@ -49,7 +49,8 @@ const PIPE_TO_SHELL_PATTERNS = [
   /\|\s*sh\b/,
   /\|\s*zsh\b/,
   /\|\s*source\b/,
-  /\$\(/,  // Command substitution
+  /\$\(/,  // Command substitution $()
+  /`/,     // Backtick command substitution
 ];
 
 /**

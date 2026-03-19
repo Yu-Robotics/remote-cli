@@ -353,6 +353,40 @@ describe('WebSocketClient', () => {
     });
   });
 
+  describe('protocol version incompatible handling', () => {
+    it('should stop reconnecting when PROTOCOL_VERSION_INCOMPATIBLE error is received', async () => {
+      vi.useFakeTimers();
+
+      const connectPromise = client.connect();
+      const openHandler = mockWs.on.mock.calls.find((call: any) => call[0] === 'open')?.[1];
+      openHandler();
+      await connectPromise;
+
+      // Simulate receiving PROTOCOL_VERSION_INCOMPATIBLE message
+      const messageCallback = mockWs.on.mock.calls.find((call: any) => call[0] === 'message')?.[1];
+      messageCallback(JSON.stringify({
+        type: 'error',
+        data: {
+          code: 'PROTOCOL_VERSION_INCOMPATIBLE',
+          message: 'CLI version too old, please upgrade'
+        }
+      }));
+
+      // Simulate connection close (the server may close the connection after sending the error)
+      const closeHandler = mockWs.on.mock.calls.find((call: any) => call[0] === 'close')?.[1];
+      closeHandler(1000, Buffer.from(''));
+
+      // Wait for reconnect interval -- no reconnection should be attempted
+      await vi.advanceTimersByTimeAsync(10000);
+
+      // WebSocket should only have been constructed once (the initial connect),
+      // not a second time for reconnection
+      expect(WebSocket).toHaveBeenCalledTimes(1);
+
+      vi.useRealTimers();
+    });
+  });
+
   describe('message queue', () => {
     it('should queue messages when not connected', async () => {
       const testMessage = { type: 'result', data: 'test' };
