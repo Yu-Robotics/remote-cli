@@ -16,6 +16,10 @@ describe('FeishuLongConnHandler', () => {
   let mockClient: any;
 
   beforeEach(() => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+
     // Create mock instances
     mockBindingManager = {
       verifyBindingCode: vi.fn(),

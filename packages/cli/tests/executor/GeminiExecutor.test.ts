@@ -63,6 +63,11 @@ describe('GeminiExecutor', () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gemini-exec-test-'));
     executor = createExecutor(tmpDir);
     vi.clearAllMocks();
+
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+
     mockInitialize.mockResolvedValue(undefined);
     mockNewSession.mockResolvedValue('mock-session-id');
     mockSetSessionMode.mockResolvedValue(undefined);
@@ -267,6 +272,7 @@ describe('GeminiExecutor', () => {
   // ─── abort() ─────────────────────────────────────────────────────────────
 
   it('should return true on abort when in-flight and send ACP cancel before force-kill', async () => {
+    vi.useFakeTimers();
     const localSendCancel = vi.fn();
     let resolvePrompt!: (v: { stopReason: string }) => void;
 
@@ -281,15 +287,18 @@ describe('GeminiExecutor', () => {
     }));
 
     const executePromise = executor.execute('long task', {});
-    await new Promise((r) => setTimeout(r, 10));
+    await vi.advanceTimersByTimeAsync(100);
 
     const aborted = await executor.abort();
     expect(aborted).toBe(true);
     expect(localSendCancel).toHaveBeenCalledWith('mock-session-id');
 
+    await vi.advanceTimersByTimeAsync(3100);
+
     resolvePrompt({ stopReason: 'cancelled' });
     const result = await executePromise;
     expect(result.success).toBe(false);
+    vi.useRealTimers();
   });
 
   it('should return false on abort when no in-flight request', async () => {
@@ -474,7 +483,7 @@ describe('GeminiExecutor', () => {
       expect(MockAcpClient).toHaveBeenCalledTimes(1);
     });
 
-    it('should stream a status message during compaction', async () => {
+    it('should stream a status message when resetting context', async () => {
       await executor.execute('question 1', {});
 
       const chunks: string[] = [];

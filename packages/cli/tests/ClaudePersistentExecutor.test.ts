@@ -39,6 +39,10 @@ describe('ClaudePersistentExecutor', () => {
   beforeEach(() => {
     vi.clearAllMocks();
 
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+
     // Reset mock implementations
     mockFs.existsSync.mockReturnValue(true);  // Default: files and directories exist
     mockFs.readFileSync.mockReturnValue(JSON.stringify({ id: 'test-session' }));  // Default: valid session

@@ -1,11 +1,17 @@
 /**
  * Unit tests for error message parsing in ClaudePersistentExecutor
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ClaudePersistentExecutor } from '../src/executor/ClaudePersistentExecutor';
 import { DirectoryGuard } from '../src/security/DirectoryGuard';
 
 describe('ClaudePersistentExecutor - Error Message Parsing', () => {
+  beforeEach(() => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+
   // Access private method for testing
   function parseErrorMessage(executor: ClaudePersistentExecutor, code: number | null, stderr: string): string {
     // @ts-expect-error - accessing private method for testing
