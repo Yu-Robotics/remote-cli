@@ -75,7 +75,7 @@ function isQuotaError(error: unknown): boolean {
  *  - resetContext() is called
  *  - setWorkingDirectory() changes cwd (without threadId)
  *  - compactWhenFull() is called
- *  - abort() fires after grace period
+ *  - abort() grace period elapses without a cancel response (last-resort kill)
  *  - a non-quota error occurs during execute()
  *  - a quota error triggers a model switch
  */
@@ -259,16 +259,28 @@ export class GeminiExecutor implements IExecutor {
   async abort(): Promise<boolean> {
     if (!this.inflightClient) return false;
 
-    // Step 1: Send cooperative ACP cancel so Gemini can finish the current
-    // tool call cleanly before exiting (avoids half-written files).
+    // Clear any existing grace-period timer before starting a new one.
+    // Without this, rapid double-abort would leak the first timer, which could
+    // fire later and unexpectedly destroy the session.
+    if (this.abortTimer !== null) {
+      clearTimeout(this.abortTimer);
+      this.abortTimer = null;
+    }
+
+    // Send cooperative ACP cancel so Gemini can finish the current tool call
+    // cleanly before stopping (avoids half-written files).
+    // NOTE: session/cancel only aborts the current prompt — it does NOT destroy
+    // the session. The persistent client and session are preserved so the user
+    // can continue the conversation after aborting.
     if (this.inflightSessionId) {
       this.inflightClient.sendCancel(this.inflightSessionId);
       console.log(`[GeminiExecutor] Sent ACP cancel for session ${this.inflightSessionId.slice(0, 8)}`);
     }
 
-    // Step 2: Give Gemini a short grace period to respond with stopReason='cancelled'.
-    // After either the grace period or natural completion, we destroy the persistent
-    // client so the next execute() starts a clean session.
+    // Give Gemini a grace period to respond with stopReason='cancelled'.
+    // After the grace period, if Gemini hasn't responded yet, we force-destroy
+    // the persistent client as a last resort (session recovery is not possible
+    // once the subprocess is killed).
     const clientRef = this.inflightClient;
     this.abortTimer = setTimeout(() => {
       this.abortTimer = null;
@@ -282,14 +294,13 @@ export class GeminiExecutor implements IExecutor {
   }
 
   async destroy(): Promise<void> {
-    if (this.inflightClient) {
-      if (this.inflightSessionId) {
-        this.inflightClient.sendCancel(this.inflightSessionId);
-      }
-      if (this.abortTimer !== null) {
-        clearTimeout(this.abortTimer);
-        this.abortTimer = null;
-      }
+    if (this.inflightClient && this.inflightSessionId) {
+      this.inflightClient.sendCancel(this.inflightSessionId);
+    }
+    // Always clear any pending abort timer, regardless of inflightClient state.
+    if (this.abortTimer !== null) {
+      clearTimeout(this.abortTimer);
+      this.abortTimer = null;
     }
     this.destroyPersistentClient();
   }
@@ -419,12 +430,11 @@ export class GeminiExecutor implements IExecutor {
       this.activeOptions = {};
 
       // If abort() was called and its timer is still pending, Gemini responded to
-      // the cancel before the grace period elapsed.  Destroy the persistent client
-      // now (a cancelled session should not be reused) and cancel the timer.
+      // the cancel before the grace period elapsed.  Cancel the timer — the session
+      // remains alive so the user can continue the conversation after aborting.
       if (this.abortTimer !== null) {
         clearTimeout(this.abortTimer);
         this.abortTimer = null;
-        this.destroyPersistentClient();
       }
       this.inflightClient = null;
       this.inflightSessionId = null;
@@ -433,6 +443,12 @@ export class GeminiExecutor implements IExecutor {
 
   /** Destroys the persistent client and clears all related state. */
   private destroyPersistentClient(): void {
+    // Also cancel any pending abort grace-period timer so it doesn't fire
+    // as a spurious no-op after the client is already gone.
+    if (this.abortTimer !== null) {
+      clearTimeout(this.abortTimer);
+      this.abortTimer = null;
+    }
     if (this.persistentClient) {
       this.persistentClient.destroy();
       this.persistentClient = null;
