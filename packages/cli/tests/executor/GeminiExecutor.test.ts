@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -6,8 +6,6 @@ import { GeminiExecutor } from '../../src/executor/GeminiExecutor';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 
 // Mock os module so homedir() and tmpdir() return paths that DirectoryGuard allows.
-// On macOS, os.tmpdir() may return /var/folders/... which is blocked as a system dir.
-// We resolve to the real path (e.g. /private/tmp on macOS) to avoid symlink issues.
 vi.mock('os', async (importOriginal) => {
   const original = await importOriginal<typeof os>();
   // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -20,7 +18,7 @@ vi.mock('os', async (importOriginal) => {
   };
 });
 
-// ─── Mock AcpClient ─────────────────────────────────────────────────────────
+// ─── Mock AcpClient ──────────────────────────────────────────────────────────
 
 const mockPrompt = vi.fn();
 const mockDestroy = vi.fn();
@@ -36,11 +34,9 @@ vi.mock('../../src/executor/acp/AcpClient', () => ({
     setSessionMode: mockSetSessionMode,
     sendCancel: mockSendCancel,
     prompt: async (sessionId: string, promptText: string) => {
-      // Simulate streaming text chunks via callback
       callbacks.onTextChunk('Hello ');
       callbacks.onTextChunk('world');
       if (callbacks.onToolCall) {
-        // Use real ACP kind ('read') + a file path as title
         callbacks.onToolCall('tc-1', '/src/index.ts', 'read');
       }
       if (callbacks.onToolResult) {
@@ -70,8 +66,14 @@ describe('GeminiExecutor', () => {
     mockInitialize.mockResolvedValue(undefined);
     mockNewSession.mockResolvedValue('mock-session-id');
     mockSetSessionMode.mockResolvedValue(undefined);
-    mockPrompt.mockResolvedValue({ sessionId: 'mock-session-id', stopReason: 'end_turn' });
+    mockPrompt.mockResolvedValue({ stopReason: 'end_turn' });
   });
+
+  afterEach(async () => {
+    await executor.destroy();
+  });
+
+  // ─── Basic functionality ──────────────────────────────────────────────────
 
   it('should return getCurrentWorkingDirectory', () => {
     expect(executor.getCurrentWorkingDirectory()).toBe(tmpDir);
@@ -97,168 +99,137 @@ describe('GeminiExecutor', () => {
 
     await executor.execute('list files', { onToolUse, onToolResult });
 
-    // mapAcpToolCall maps kind='read' → name='Read', input.file_path = title
     expect(onToolUse).toHaveBeenCalledWith(expect.objectContaining({ id: 'tc-1', name: 'Read' }));
     expect(onToolResult).toHaveBeenCalledWith(expect.objectContaining({ tool_use_id: 'tc-1', is_error: false }));
   });
 
-  it('should spawn a new ACP client for each execute call', async () => {
+  // ─── Persistent session core behavior ────────────────────────────────────
+
+  it('should reuse the same ACP client across multiple execute calls', async () => {
     const { AcpClient } = await import('../../src/executor/acp/AcpClient');
     const MockAcpClient = vi.mocked(AcpClient);
     MockAcpClient.mockClear();
 
     await executor.execute('first', {});
     await executor.execute('second', {});
+    await executor.execute('third', {});
 
-    // Each execute() spawns a new process
-    expect(MockAcpClient).toHaveBeenCalledTimes(2);
-    expect(mockNewSession).toHaveBeenCalledTimes(2);
+    // Only one process spawned for all three turns
+    expect(MockAcpClient).toHaveBeenCalledTimes(1);
+    expect(mockNewSession).toHaveBeenCalledTimes(1);
   });
 
-  it('should destroy the client after each execute call', async () => {
+  it('should NOT destroy the client after each execute call', async () => {
     await executor.execute('first', {});
-    expect(mockDestroy).toHaveBeenCalledTimes(1);
+    expect(mockDestroy).not.toHaveBeenCalled();
 
     await executor.execute('second', {});
-    expect(mockDestroy).toHaveBeenCalledTimes(2);
+    expect(mockDestroy).not.toHaveBeenCalled();
   });
 
-  it('should include history context on second execute within same conversation', async () => {
+  it('should send prompts directly WITHOUT history prefix on subsequent execute calls', async () => {
     await executor.execute('first question', {});
     await executor.execute('follow-up question', {});
 
-    // Second prompt call should include history from first turn
     const secondCall = mockPrompt.mock.calls[1];
-    expect(secondCall[1]).toContain('=== PREVIOUS CONVERSATION ===');
-    expect(secondCall[1]).toContain('first question');
-    expect(secondCall[1]).toContain('follow-up question');
-  });
-
-  it('should NOT include history after resetContext', async () => {
-    await executor.execute('first question', {});
-    executor.resetContext();
-    await executor.execute('fresh start', {});
-
-    const secondCall = mockPrompt.mock.calls[1];
+    // No history prefix — just the raw prompt
+    expect(secondCall[1]).toBe('follow-up question');
     expect(secondCall[1]).not.toContain('=== PREVIOUS CONVERSATION ===');
-    expect(secondCall[1]).toBe('fresh start');
+    expect(secondCall[1]).not.toContain('first question');
   });
 
-  it('should reset conversation ID on setWorkingDirectory', async () => {
-    await executor.execute('first question', {});
+  it('should use the same sessionId for all prompts in a session', async () => {
+    await executor.execute('first', {});
+    await executor.execute('second', {});
 
-    const guard = new DirectoryGuard([tmpDir]);
-    vi.spyOn(guard, 'resolveWorkingDirectory').mockReturnValue(tmpDir + '/sub');
+    expect(mockPrompt.mock.calls[0][0]).toBe('mock-session-id');
+    expect(mockPrompt.mock.calls[1][0]).toBe('mock-session-id');
+  });
+
+  // ─── Process crash recovery ───────────────────────────────────────────────
+
+  it('should respawn a new ACP client if the process crashes between turns', async () => {
+    const { AcpClient } = await import('../../src/executor/acp/AcpClient');
+    const MockAcpClient = vi.mocked(AcpClient);
+
+    await executor.execute('first', {});
+
+    // Simulate crash: prompt throws — executor destroys client and returns error
+    mockPrompt.mockRejectedValueOnce(new Error('AcpClient destroyed'));
+    await executor.execute('second (crashes)', {});
+
+    // Now persistent client is null — next execute must respawn
+    MockAcpClient.mockClear();
+    mockNewSession.mockResolvedValue('new-session-id');
+    mockPrompt.mockResolvedValueOnce({ stopReason: 'end_turn' });
+
+    await executor.execute('third after crash', {});
+
+    // A new process was spawned for the third call
+    expect(MockAcpClient).toHaveBeenCalledTimes(1);
+  });
+
+  // ─── setWorkingDirectory ──────────────────────────────────────────────────
+
+  it('should destroy persistent client on setWorkingDirectory (no threadId)', async () => {
+    const subDir = path.join(tmpDir, 'sub');
+    fs.mkdirSync(subDir, { recursive: true });
+    const realTmpDir = fs.realpathSync(tmpDir);
+    const realSubDir = fs.realpathSync(subDir);
+    const guard = new DirectoryGuard([tmpDir, subDir]);
+    (guard as any).allowedDirs = new Set([tmpDir, subDir, realTmpDir, realSubDir]);
+    (guard as any).homeDir = path.dirname(tmpDir);
     const ex = new GeminiExecutor(guard, { initialWorkingDirectory: tmpDir });
+
     await ex.execute('first', {});
-    await ex.setWorkingDirectory(tmpDir + '/sub');
-    await ex.execute('after dir change', {});
+    expect(mockDestroy).not.toHaveBeenCalled();
 
-    // After directory change, the second executor's second call has no history
-    const lastCall = mockPrompt.mock.calls[mockPrompt.mock.calls.length - 1];
-    expect(lastCall[1]).not.toContain('=== PREVIOUS CONVERSATION ===');
-    expect(lastCall[1]).toBe('after dir change');
+    await ex.setWorkingDirectory(subDir);
+    expect(mockDestroy).toHaveBeenCalledTimes(1);
   });
 
-  it('should return true on abort when in-flight and send ACP cancel before force-kill', async () => {
-    const mockSendCancel = vi.fn();
-    let resolvePrompt!: (v: { stopReason: string }) => void;
+  it('should destroy persistent client on setWorkingDirectory even when threadId is set (if path changes)', async () => {
+    const subDir = path.join(tmpDir, 'sub');
+    fs.mkdirSync(subDir, { recursive: true });
+    const guard = new DirectoryGuard([tmpDir, subDir]);
+    const realTmpDir = fs.realpathSync(tmpDir);
+    const realSubDir = fs.realpathSync(subDir);
+    (guard as any).allowedDirs = new Set([tmpDir, subDir, realTmpDir, realSubDir]);
+    (guard as any).homeDir = path.dirname(tmpDir);
 
-    const { AcpClient } = await import('../../src/executor/acp/AcpClient');
-    vi.mocked(AcpClient).mockImplementationOnce((_cmd, _args, _cwd, _callbacks) => ({
-      initialize: mockInitialize,
-      newSession: mockNewSession,
-      setSessionMode: mockSetSessionMode,
-      sendCancel: mockSendCancel,
-      // prompt resolves when the test triggers resolvePrompt (simulates Gemini responding to cancel)
-      prompt: () => new Promise<{ stopReason: string }>((resolve) => { resolvePrompt = resolve; }),
-      destroy: mockDestroy,
-    }));
+    const ex = new GeminiExecutor(guard, { initialWorkingDirectory: tmpDir, threadId: 'thread-123' });
+    await ex.execute('first', {});
 
-    const executePromise = executor.execute('long task', {});
-    // Allow microtasks for initialize/newSession to complete
+    await ex.setWorkingDirectory(subDir);
+    // Now destroys on dir change to ensure subprocess is in the correct directory
+    expect(mockDestroy).toHaveBeenCalledTimes(1);
+    expect(ex.getCurrentWorkingDirectory()).toBe(subDir);
+  });
+
+  it('should execute prompts sequentially via command queue', async () => {
+    let resolve1!: (v: { stopReason: string }) => void;
+    let resolve2!: (v: { stopReason: string }) => void;
+
+    mockPrompt
+      .mockImplementationOnce(() => new Promise((r) => { resolve1 = r; }))
+      .mockImplementationOnce(() => new Promise((r) => { resolve2 = r; }));
+
+    const p1 = executor.execute('first', {});
+    const p2 = executor.execute('second', {});
+
+    // second should not have started yet (mockPrompt only called once)
     await new Promise((r) => setTimeout(r, 10));
+    expect(mockPrompt).toHaveBeenCalledTimes(1);
 
-    const aborted = await executor.abort();
-    expect(aborted).toBe(true);
-    // sendCancel must be called with the ACP session ID
-    expect(mockSendCancel).toHaveBeenCalledWith('mock-session-id');
+    resolve1({ stopReason: 'end_turn' });
+    await p1;
 
-    // Simulate Gemini acknowledging the cancel
-    resolvePrompt({ stopReason: 'cancelled' });
-    const result = await executePromise;
-    expect(result.success).toBe(false); // cancelled = not successful
-  });
+    // Now second should start
+    await new Promise((r) => setTimeout(r, 10));
+    expect(mockPrompt).toHaveBeenCalledTimes(2);
 
-  it('should return false on abort when no in-flight request', async () => {
-    const result = await executor.abort();
-    expect(result).toBe(false);
-  });
-
-  it('should treat cancelled stopReason as unsuccessful result', async () => {
-    mockPrompt.mockResolvedValueOnce({ sessionId: 'mock-session-id', stopReason: 'cancelled' });
-    const result = await executor.execute('task', {});
-    expect(result.success).toBe(false);
-  });
-
-  it('should force-destroy after CANCEL_GRACE_MS if Gemini does not respond to cancel', async () => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    const localDestroy = vi.fn();
-
-    const { AcpClient } = await import('../../src/executor/acp/AcpClient');
-    vi.mocked(AcpClient).mockImplementationOnce((_cmd, _args, _cwd, _callbacks) => ({
-      initialize: vi.fn().mockResolvedValue(undefined),
-      newSession: vi.fn().mockResolvedValue('mock-session-id'),
-      setSessionMode: vi.fn().mockResolvedValue(undefined),
-      sendCancel: vi.fn(),
-      // prompt never resolves — simulates Gemini ignoring the cancel notification
-      prompt: () => new Promise(() => {}),
-      destroy: localDestroy,
-    }));
-
-    executor.execute('slow task', {});
-    // Allow initialize + newSession promises to settle (they use real async, not timers)
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
-
-    await executor.abort();
-    expect(localDestroy).not.toHaveBeenCalled(); // not yet — still in grace period
-
-    // Advance past CANCEL_GRACE_MS (3000ms)
-    vi.advanceTimersByTime(3_000);
-    expect(localDestroy).toHaveBeenCalled(); // force-killed after timeout
-
-    vi.useRealTimers();
-  }, 10_000);
-
-  it('should save partial output to history even when cancelled', async () => {
-    // Simulate: some text streamed, then cancel
-    const { AcpClient } = await import('../../src/executor/acp/AcpClient');
-    vi.mocked(AcpClient).mockImplementationOnce((_cmd, _args, _cwd, callbacks) => ({
-      initialize: mockInitialize,
-      newSession: mockNewSession,
-      setSessionMode: mockSetSessionMode,
-      sendCancel: vi.fn(),
-      prompt: async () => {
-        callbacks.onTextChunk('partial output before cancel');
-        return { stopReason: 'cancelled' };
-      },
-      destroy: mockDestroy,
-    }));
-
-    await executor.execute('task', {});
-
-    // Second call should include the partial output from the cancelled turn in history
-    await executor.execute('follow-up', {});
-    const secondCall = mockPrompt.mock.calls[0]; // mockPrompt not called in first (custom mock)
-    // The second execute uses the default mock — check sessionManager directly
-    const sessionFile = (executor as any).sessionManager.filePath((executor as any).conversationId);
-    const { readFileSync } = await import('fs');
-    const lines = readFileSync(sessionFile, 'utf8').trim().split('\n').filter(Boolean);
-    const entries = lines.map((l: string) => JSON.parse(l));
-    const assistantEntries = entries.filter((e: any) => e.role === 'assistant');
-    expect(assistantEntries.some((e: any) => e.text.includes('partial output before cancel'))).toBe(true);
+    resolve2({ stopReason: 'end_turn' });
+    await p2;
   });
 
   it('should reject setWorkingDirectory to disallowed path', async () => {
@@ -267,7 +238,128 @@ describe('GeminiExecutor', () => {
     ).rejects.toThrow();
   });
 
-  it('should send ACP cancel and destroy in-flight client on destroy()', async () => {
+  // ─── resetContext ─────────────────────────────────────────────────────────
+
+  it('should destroy persistent client on resetContext', async () => {
+    await executor.execute('first', {});
+    expect(mockDestroy).not.toHaveBeenCalled();
+
+    executor.resetContext();
+    expect(mockDestroy).toHaveBeenCalledTimes(1);
+  });
+
+  it('should spawn a fresh client after resetContext', async () => {
+    const { AcpClient } = await import('../../src/executor/acp/AcpClient');
+    const MockAcpClient = vi.mocked(AcpClient);
+
+    await executor.execute('first', {});
+    executor.resetContext();
+    mockPrompt.mockClear();
+    MockAcpClient.mockClear();
+
+    await executor.execute('fresh start', {});
+    expect(MockAcpClient).toHaveBeenCalledTimes(1);
+
+    // Fresh start prompt has no history prefix
+    expect(mockPrompt.mock.calls[0][1]).toBe('fresh start');
+  });
+
+  // ─── abort() ─────────────────────────────────────────────────────────────
+
+  it('should return true on abort when in-flight and send ACP cancel before force-kill', async () => {
+    const localSendCancel = vi.fn();
+    let resolvePrompt!: (v: { stopReason: string }) => void;
+
+    const { AcpClient } = await import('../../src/executor/acp/AcpClient');
+    vi.mocked(AcpClient).mockImplementationOnce((_cmd, _args, _cwd, _callbacks) => ({
+      initialize: mockInitialize,
+      newSession: mockNewSession,
+      setSessionMode: mockSetSessionMode,
+      sendCancel: localSendCancel,
+      prompt: () => new Promise<{ stopReason: string }>((resolve) => { resolvePrompt = resolve; }),
+      destroy: mockDestroy,
+    }));
+
+    const executePromise = executor.execute('long task', {});
+    await new Promise((r) => setTimeout(r, 10));
+
+    const aborted = await executor.abort();
+    expect(aborted).toBe(true);
+    expect(localSendCancel).toHaveBeenCalledWith('mock-session-id');
+
+    resolvePrompt({ stopReason: 'cancelled' });
+    const result = await executePromise;
+    expect(result.success).toBe(false);
+  });
+
+  it('should return false on abort when no in-flight request', async () => {
+    const result = await executor.abort();
+    expect(result).toBe(false);
+  });
+
+  it('should clear persistent client after abort so next execute respawns', async () => {
+    const { AcpClient } = await import('../../src/executor/acp/AcpClient');
+    const MockAcpClient = vi.mocked(AcpClient);
+
+    let resolvePrompt!: (v: { stopReason: string }) => void;
+    MockAcpClient.mockImplementationOnce((_cmd, _args, _cwd, _callbacks) => ({
+      initialize: mockInitialize,
+      newSession: mockNewSession,
+      setSessionMode: mockSetSessionMode,
+      sendCancel: vi.fn(),
+      prompt: () => new Promise<{ stopReason: string }>((resolve) => { resolvePrompt = resolve; }),
+      destroy: mockDestroy,
+    }));
+
+    const executePromise = executor.execute('task', {});
+    await new Promise((r) => setTimeout(r, 10));
+
+    await executor.abort();
+    resolvePrompt({ stopReason: 'cancelled' });
+    await executePromise;
+
+    MockAcpClient.mockClear();
+    mockNewSession.mockResolvedValue('new-session-id');
+
+    // After abort, next execute should spawn a new client
+    await executor.execute('after abort', {});
+    expect(MockAcpClient).toHaveBeenCalledTimes(1);
+  });
+
+  it('should force-destroy after CANCEL_GRACE_MS if Gemini does not respond to cancel', async () => {
+    const localDestroy = vi.fn();
+
+    const { AcpClient } = await import('../../src/executor/acp/AcpClient');
+    vi.mocked(AcpClient).mockImplementationOnce((_cmd, _args, _cwd, _callbacks) => ({
+      initialize: vi.fn().mockResolvedValue(undefined),
+      newSession: vi.fn().mockResolvedValue('mock-session-id'),
+      setSessionMode: vi.fn().mockResolvedValue(undefined),
+      sendCancel: vi.fn(),
+      prompt: () => new Promise(() => {}), // never resolves
+      destroy: localDestroy,
+    }));
+
+    executor.execute('slow task', {});
+    // Wait for initialize/newSession/setSessionMode promises to settle
+    await new Promise((r) => setTimeout(r, 20));
+
+    await executor.abort();
+    expect(localDestroy).not.toHaveBeenCalled(); // still in grace period
+
+    // Wait for the real CANCEL_GRACE_MS (3000ms) timer to fire
+    await new Promise((r) => setTimeout(r, 3_100));
+    expect(localDestroy).toHaveBeenCalled();
+  }, 10_000);
+
+  it('should treat cancelled stopReason as unsuccessful result', async () => {
+    mockPrompt.mockResolvedValueOnce({ stopReason: 'cancelled' });
+    const result = await executor.execute('task', {});
+    expect(result.success).toBe(false);
+  });
+
+  // ─── destroy() ───────────────────────────────────────────────────────────
+
+  it('should send ACP cancel and destroy persistent client on destroy()', async () => {
     const localSendCancel = vi.fn();
     let rejectPrompt!: (e: Error) => void;
     let promptRejected = false;
@@ -279,7 +371,6 @@ describe('GeminiExecutor', () => {
       setSessionMode: mockSetSessionMode,
       sendCancel: localSendCancel,
       prompt: () => new Promise<{ stopReason: string }>((_resolve, reject) => { rejectPrompt = reject; }),
-      // Simulate real AcpClient.destroy() rejecting all pending requests (idempotent)
       destroy: vi.fn().mockImplementation(() => {
         if (!promptRejected) {
           promptRejected = true;
@@ -295,21 +386,32 @@ describe('GeminiExecutor', () => {
     expect(localSendCancel).toHaveBeenCalledWith('mock-session-id');
 
     const result = await executePromise;
-    expect(result.success).toBe(false); // destroyed = not successful
+    expect(result.success).toBe(false);
   });
 
+  // ─── Error handling ───────────────────────────────────────────────────────
+
   it('should handle refusal stop reason as failure', async () => {
-    mockPrompt.mockResolvedValueOnce({ sessionId: 'mock-session-id', stopReason: 'refusal' });
+    mockPrompt.mockResolvedValueOnce({ stopReason: 'refusal' });
     const result = await executor.execute('do something refused', {});
     expect(result.success).toBe(false);
   });
 
-  it('should return error on ACP client exception', async () => {
-    mockPrompt.mockRejectedValueOnce(new Error('ACP error'));
+  it('should return error on ACP client exception and destroy persistent client', async () => {
+    mockPrompt.mockRejectedValueOnce(new Error('ACP connection lost'));
     const result = await executor.execute('failing task', {});
     expect(result.success).toBe(false);
-    expect(result.error).toContain('ACP error');
+    expect(result.error).toContain('ACP connection lost');
+
+    // Client destroyed on error — next execute respawns
+    const { AcpClient } = await import('../../src/executor/acp/AcpClient');
+    const MockAcpClient = vi.mocked(AcpClient);
+    MockAcpClient.mockClear();
+    await executor.execute('after error', {});
+    expect(MockAcpClient).toHaveBeenCalledTimes(1);
   });
+
+  // ─── CLI flags ────────────────────────────────────────────────────────────
 
   it('should pass --yolo CLI flag when autoApprove=true', async () => {
     const { AcpClient } = await import('../../src/executor/acp/AcpClient');
@@ -321,7 +423,7 @@ describe('GeminiExecutor', () => {
     await ex.execute('test', {});
 
     const callArgs = MockAcpClient.mock.calls[0];
-    expect(callArgs[1]).toContain('--yolo'); // geminiArgs array
+    expect(callArgs[1]).toContain('--yolo');
   });
 
   it('should NOT pass --yolo CLI flag when autoApprove=false', async () => {
@@ -342,114 +444,59 @@ describe('GeminiExecutor', () => {
     expect(mockSetSessionMode).toHaveBeenCalledWith('mock-session-id', 'yolo');
   });
 
-  describe('multi-thread isolation', () => {
-    it('should not clear conversationId when setWorkingDirectory is called with threadId', async () => {
-      const subDir = path.join(tmpDir, 'sub');
-      fs.mkdirSync(subDir, { recursive: true });
-      const guard = new DirectoryGuard([tmpDir, subDir]);
-
-      // Override internal state to allow /tmp paths regardless of homeDir
-      const realTmpDir = fs.realpathSync(tmpDir);
-      const realSubDir = fs.realpathSync(subDir);
-      (guard as any).allowedDirs = new Set([tmpDir, subDir, realTmpDir, realSubDir]);
-      (guard as any).homeDir = path.dirname(tmpDir); // set homeDir to parent of tmpDir so check passes
-      
-      const ex = new GeminiExecutor(guard, { initialWorkingDirectory: tmpDir, threadId: 'thread-123' });
-      await ex.execute('first', {});
-      
-      const sessionManagerRemove = vi.spyOn((ex as any).sessionManager, 'remove');
-      
-      await ex.setWorkingDirectory(subDir);
-      
-      expect((ex as any).conversationId).toBe('thread-123');
-      expect(ex.getCurrentWorkingDirectory()).toBe(subDir);
-      expect(sessionManagerRemove).not.toHaveBeenCalled();
-    });
-
-    it('should not clear conversationId on resetContext but should remove session file when threadId is set', async () => {
-      const guard = new DirectoryGuard([tmpDir]);
-      const ex = new GeminiExecutor(guard, { initialWorkingDirectory: tmpDir, threadId: 'thread-456' });
-      await ex.execute('first', {});
-      
-      const sessionManagerRemove = vi.spyOn((ex as any).sessionManager, 'remove');
-      
-      ex.resetContext();
-      
-      expect((ex as any).conversationId).toBe('thread-456');
-      expect(sessionManagerRemove).toHaveBeenCalledWith('thread-456');
-    });
-
-    it('should remove conversationId on resetContext when threadId is NOT set', async () => {
-      await executor.execute('first', {});
-      const convId = (executor as any).conversationId;
-      expect(convId).toBeTruthy();
-
-      const sessionManagerRemove = vi.spyOn((executor as any).sessionManager, 'remove');
-      
-      executor.resetContext();
-      
-      expect((executor as any).conversationId).toBeNull();
-      expect(sessionManagerRemove).toHaveBeenCalledWith(convId);
-    });
-
-    it('deleteThreadData should remove conversation file', async () => {
-      const guard = new DirectoryGuard([tmpDir]);
-      const ex = new GeminiExecutor(guard, { initialWorkingDirectory: tmpDir, threadId: 'thread-789' });
-      await ex.execute('first', {});
-
-      const sessionManagerRemove = vi.spyOn((ex as any).sessionManager, 'remove');
-      
-      await ex.deleteThreadData!('thread-789');
-      
-      expect(sessionManagerRemove).toHaveBeenCalledWith('thread-789');
-    });
-  });
+  // ─── compactWhenFull ─────────────────────────────────────────────────────
 
   describe('compactWhenFull()', () => {
-    it('should return success with no-op message when no active conversation', async () => {
+    it('should return success with no-op message when no active session', async () => {
       const result = await executor.compactWhenFull!();
       expect(result.success).toBe(true);
       expect(result.output).toContain('No active conversation');
     });
 
-    it('should truncate history and return removed count after conversation starts', async () => {
-      // Build up history by executing 12 turns
-      for (let i = 0; i < 6; i++) {
-        await executor.execute(`question ${i}`, {});
-      }
-
-      const chunks: string[] = [];
-      const result = await executor.compactWhenFull!((chunk) => chunks.push(chunk));
-
-      expect(result.success).toBe(true);
-      // 12 entries (6 user + 6 assistant) minus 10 kept = 2 removed
-      expect(result.output).toContain('removed 2');
-      expect(chunks.some((c) => c.includes('Truncating'))).toBe(true);
-    });
-
-    it('should return already compact message when history fits within keepCount', async () => {
-      // Only 2 turns (4 entries) — well within the default 10 keep
-      await executor.execute('turn 1', {});
-      await executor.execute('turn 2', {});
+    it('should destroy persistent client to reset context', async () => {
+      await executor.execute('question 1', {});
+      expect(mockDestroy).not.toHaveBeenCalled();
 
       const result = await executor.compactWhenFull!();
       expect(result.success).toBe(true);
-      expect(result.output).toContain('already compact');
+      expect(mockDestroy).toHaveBeenCalledTimes(1);
+    });
+
+    it('should spawn a fresh client after compactWhenFull', async () => {
+      const { AcpClient } = await import('../../src/executor/acp/AcpClient');
+      const MockAcpClient = vi.mocked(AcpClient);
+
+      await executor.execute('question 1', {});
+      await executor.compactWhenFull!();
+
+      MockAcpClient.mockClear();
+      await executor.execute('after compact', {});
+      expect(MockAcpClient).toHaveBeenCalledTimes(1);
+    });
+
+    it('should stream a status message during compaction', async () => {
+      await executor.execute('question 1', {});
+
+      const chunks: string[] = [];
+      await executor.compactWhenFull!((chunk) => chunks.push(chunk));
+      expect(chunks.length).toBeGreaterThan(0);
     });
 
     it('should be discoverable via in operator (IExecutor optional method)', () => {
       expect('compactWhenFull' in executor).toBe(true);
     });
+  });
 
-    it('should call sessionManager.popLastUserEntry before truncating to avoid duplicate user prompts', async () => {
-      // Build up history so conversationId is set
-      await executor.execute('question 1', {});
+  // ─── deleteThreadData ─────────────────────────────────────────────────────
 
-      const popSpy = vi.spyOn((executor as any).sessionManager, 'popLastUserEntry');
+  describe('multi-thread isolation', () => {
+    it('deleteThreadData should destroy client and not leave dangling state', async () => {
+      const guard = new DirectoryGuard([tmpDir]);
+      const ex = new GeminiExecutor(guard, { initialWorkingDirectory: tmpDir, threadId: 'thread-789' });
+      await ex.execute('first', {});
 
-      await executor.compactWhenFull!();
-
-      expect(popSpy).toHaveBeenCalledWith((executor as any).conversationId);
+      await ex.deleteThreadData!('thread-789');
+      expect(mockDestroy).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -461,10 +508,9 @@ describe('GeminiExecutor', () => {
       const MockAcpClient = vi.mocked(AcpClient);
       MockAcpClient.mockClear();
 
-      // First call throws quota error, second succeeds
       mockPrompt
         .mockRejectedValueOnce(new Error('You have exhausted your capacity for today'))
-        .mockResolvedValueOnce({ sessionId: 'mock-session-id', stopReason: 'end_turn' });
+        .mockResolvedValueOnce({ stopReason: 'end_turn' });
 
       const onStream = vi.fn();
       const guard = new DirectoryGuard([tmpDir]);
@@ -472,10 +518,9 @@ describe('GeminiExecutor', () => {
       const result = await ex.execute('prompt', { onStream });
 
       expect(result.success).toBe(true);
-      // Fallback notice streamed to user
       expect(onStream).toHaveBeenCalledWith(expect.stringContaining('Quota exhausted'));
       expect(onStream).toHaveBeenCalledWith(expect.stringContaining('flash'));
-      // Two ACP clients spawned (one per model attempt)
+      // Two ACP clients: one per model attempt (quota error destroys client, respawns with new model)
       expect(MockAcpClient).toHaveBeenCalledTimes(2);
     });
 
@@ -487,7 +532,7 @@ describe('GeminiExecutor', () => {
       mockPrompt
         .mockRejectedValueOnce(new Error('You have exhausted your capacity'))
         .mockRejectedValueOnce(new Error('quota exceeded'))
-        .mockResolvedValueOnce({ sessionId: 'mock-session-id', stopReason: 'end_turn' });
+        .mockResolvedValueOnce({ stopReason: 'end_turn' });
 
       const guard = new DirectoryGuard([tmpDir]);
       const ex = new GeminiExecutor(guard, { initialWorkingDirectory: tmpDir, model: 'pro' });
@@ -502,17 +547,15 @@ describe('GeminiExecutor', () => {
       const MockAcpClient = vi.mocked(AcpClient);
       MockAcpClient.mockClear();
 
-      // model='flash' is in the fallback list — it should be skipped so only flash-lite is tried
       mockPrompt
         .mockRejectedValueOnce(new Error('exhausted your capacity'))
-        .mockResolvedValueOnce({ sessionId: 'mock-session-id', stopReason: 'end_turn' });
+        .mockResolvedValueOnce({ stopReason: 'end_turn' });
 
       const guard = new DirectoryGuard([tmpDir]);
       const ex = new GeminiExecutor(guard, { initialWorkingDirectory: tmpDir, model: 'flash' });
       const result = await ex.execute('prompt', {});
 
       expect(result.success).toBe(true);
-      // Should only try flash (configured) + flash-lite — not flash twice
       expect(MockAcpClient).toHaveBeenCalledTimes(2);
     });
 
@@ -536,7 +579,7 @@ describe('GeminiExecutor', () => {
 
       mockPrompt
         .mockRejectedValueOnce(new Error('ACP error 500: No capacity available for model gemini-3.1-pro-preview on the server'))
-        .mockResolvedValueOnce({ sessionId: 'mock-session-id', stopReason: 'end_turn' });
+        .mockResolvedValueOnce({ stopReason: 'end_turn' });
 
       const onStream = vi.fn();
       const guard = new DirectoryGuard([tmpDir]);
@@ -545,12 +588,11 @@ describe('GeminiExecutor', () => {
 
       expect(result.success).toBe(true);
       expect(onStream).toHaveBeenCalledWith(expect.stringContaining('Quota exhausted'));
-      expect(onStream).toHaveBeenCalledWith(expect.stringContaining('flash'));
       expect(MockAcpClient).toHaveBeenCalledTimes(2);
     });
 
     it('should exhaust all fallbacks on repeated "No capacity available" errors', async () => {
-      mockPrompt.mockRejectedValue(new Error('ACP error 500: No capacity available for model gemini-3.1-pro-preview on the server'));
+      mockPrompt.mockRejectedValue(new Error('ACP error 500: No capacity available'));
 
       const guard = new DirectoryGuard([tmpDir]);
       const ex = new GeminiExecutor(guard, { initialWorkingDirectory: tmpDir, model: 'pro' });
@@ -558,7 +600,6 @@ describe('GeminiExecutor', () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toContain('All Gemini models');
-      expect(result.error).toContain('/backend');
     });
 
     it('should NOT retry on non-quota errors', async () => {
@@ -571,7 +612,6 @@ describe('GeminiExecutor', () => {
       const result = await executor.execute('prompt', {});
 
       expect(result.success).toBe(false);
-      // Only one attempt made — no fallback for non-quota errors
       expect(MockAcpClient).toHaveBeenCalledTimes(1);
       expect(result.error).toContain('Network connection refused');
     });
@@ -591,7 +631,7 @@ describe('GeminiExecutor', () => {
       mockPrompt
         .mockRejectedValueOnce(new Error('exhausted your capacity'))
         .mockRejectedValueOnce(new Error('quota exceeded'))
-        .mockResolvedValueOnce({ sessionId: 'mock-session-id', stopReason: 'end_turn' });
+        .mockResolvedValueOnce({ stopReason: 'end_turn' });
 
       const streamedChunks: string[] = [];
       const guard = new DirectoryGuard([tmpDir]);
@@ -599,7 +639,6 @@ describe('GeminiExecutor', () => {
       await ex.execute('prompt', { onStream: (c) => streamedChunks.push(c) });
 
       const notices = streamedChunks.filter((c) => c.includes('Quota exhausted'));
-      // Two quota failures → two notices streamed
       expect(notices).toHaveLength(2);
     });
   });
@@ -653,7 +692,6 @@ describe('GeminiExecutor', () => {
       const result = await executor.execute('prompt', {});
 
       expect(result.success).toBe(false);
-      // When all models exhaust quota, buildFriendlyError returns the "All Gemini models" message
       expect(result.error).toContain('All Gemini models');
       expect(result.error).toContain('/backend');
     });
@@ -686,7 +724,6 @@ describe('GeminiExecutor', () => {
       const result = await ex.execute('prompt', {});
 
       expect(result.success).toBe(false);
-      // No spurious "Quota resets in undefined" text
       expect(result.error).not.toContain('undefined');
       expect(result.error).not.toContain('resets in');
     });
