@@ -1,10 +1,6 @@
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import { IExecutor, ExecuteOptions, ExecuteResult } from './IExecutor';
 import { AcpClient, AcpEventCallbacks } from './acp/AcpClient';
-import { SessionManager } from './acp/SessionManager';
-
-/** Number of most-recent conversation turns to keep after compaction. */
-const COMPACT_KEEP_TURNS = 10;
 
 /** Grace period (ms) between cooperative ACP cancel and force SIGTERM/SIGKILL. */
 const CANCEL_GRACE_MS = 3_000;
@@ -35,33 +31,22 @@ function mapAcpToolCall(
 ): { name: string; input: Record<string, string> } {
   switch (kind) {
     case 'exec':
-      // Shell command — map to Bash so extractBashContext renders it
       return { name: 'Bash', input: { command: title } };
     case 'read':
-      // File read — map to Read so extractReadContext renders it
       return { name: 'Read', input: { file_path: title } };
     case 'write':
-      // File write/edit — map to Write
       return { name: 'Write', input: { file_path: title } };
     case 'list':
-      // Directory listing — map to Glob
       return { name: 'Glob', input: { pattern: title } };
     case 'service':
-      // MCP / service call
       return { name: 'Service', input: { call: title } };
     default:
-      // Unknown kind — show raw title under generic tool name
       return { name: kind ?? 'Tool', input: { command: title } };
   }
 }
 
 /**
  * Gemini CLI stable model aliases used for quota fallback.
- *
- * These are Gemini CLI's own named aliases (not versioned model strings), so
- * they remain valid across model releases. Gemini CLI's ACP mode does NOT
- * implement automatic model fallback on quota exhaustion (unlike interactive
- * mode), so we handle it here instead.
  *
  * Fallback order: user-configured model → flash → flash-lite
  */
@@ -81,17 +66,34 @@ function isQuotaError(error: unknown): boolean {
 /**
  * IExecutor implementation for Gemini CLI via ACP (Agent Client Protocol).
  *
- * Each execute() call spawns a fresh Gemini CLI subprocess (vibe-kanban style).
- * This ensures full isolation between turns — a broken session in one turn
- * cannot affect subsequent turns.
+ * Uses a persistent ACP client — one long-lived Gemini CLI subprocess per
+ * conversation. Each execute() call sends a new prompt to the same process,
+ * which maintains its own KV cache. This is O(N) in token cost, matching
+ * ClaudePersistentExecutor's approach exactly.
  *
- * Conversation history is persisted as JSONL via SessionManager and replayed
- * as context prefix on subsequent calls within the same conversation.
+ * The persistent client is destroyed (and respawned on next execute) when:
+ *  - resetContext() is called
+ *  - setWorkingDirectory() changes cwd (without threadId)
+ *  - compactWhenFull() is called
+ *  - abort() fires after grace period
+ *  - a non-quota error occurs during execute()
+ *  - a quota error triggers a model switch
  */
+/**
+ * Mutable options holder shared between the persistent AcpClient callbacks
+ * and the per-execute call. Updated each time execute() starts so the
+ * callbacks always reference the current call's options.
+ */
+interface ActiveOptions {
+  onStream?: (chunk: string) => void;
+  onToolUse?: (tool: { id: string; name: string; input: Record<string, unknown> }) => void;
+  onToolResult?: (result: { tool_use_id: string; content: string; is_error: boolean }) => void;
+  onPlanMode?: (text: string) => void;
+}
+
 export class GeminiExecutor implements IExecutor {
   private directoryGuard: DirectoryGuard;
   private currentWorkingDirectory: string;
-  private sessionManager: SessionManager;
 
   private readonly model: string;
   private readonly autoApprove: boolean;
@@ -99,52 +101,84 @@ export class GeminiExecutor implements IExecutor {
   private readonly geminiVersion: string;
   private readonly threadId?: string;
 
-  /** Stable ID for JSONL history file, survives across spawns. */
-  private conversationId: string | null = null;
+  /** Long-lived ACP client — null means not yet spawned or was destroyed. */
+  private persistentClient: AcpClient | null = null;
+  /** ACP session ID of the persistent session. */
+  private persistentSessionId: string | null = null;
+
+  /**
+   * Mutable options for the current execute() call.
+   * The persistent AcpClient callbacks close over this object so they always
+   * dispatch to whichever execute() invocation is currently in flight.
+   */
+  private activeOptions: ActiveOptions = {};
 
   /** Reference to the in-flight AcpClient for abort support. */
   private inflightClient: AcpClient | null = null;
-
   /** ACP session ID of the in-flight prompt, needed for cooperative sendCancel. */
   private inflightSessionId: string | null = null;
-
   /** Handle for the abort grace-period timer so it can be cancelled early. */
   private abortTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /**
+   * Command queue for sequential execution.
+   * Matching ClaudePersistentExecutor's approach to ensure thread-safety.
+   */
+  private commandQueue: Array<{
+    prompt: string;
+    options: ExecuteOptions;
+    resolve: (result: ExecuteResult) => void;
+    reject: (error: Error) => void;
+  }> = [];
+  private isProcessing = false;
+
   constructor(directoryGuard: DirectoryGuard, options: GeminiExecutorOptions = {}) {
     this.directoryGuard = directoryGuard;
-    // Leave model unset by default so Gemini CLI uses its own default
-    // (gemini-2.5-pro). NOTE: '--model auto' maps to gemini-3-pro-preview
-    // which has stricter quota limits — do NOT default to 'auto'.
-    // Users can override via executor.gemini.model in config.
     this.model = options.model ?? '';
     this.autoApprove = options.autoApprove ?? true;
     this.geminiCommand = options.geminiCommand ?? 'npx';
     this.geminiVersion = options.geminiVersion ?? '@google/gemini-cli@latest';
     this.currentWorkingDirectory = options.initialWorkingDirectory ?? process.cwd();
-    this.sessionManager = new SessionManager();
     this.threadId = options.threadId;
-    if (this.threadId) {
-      this.conversationId = this.threadId;
-    }
   }
 
   // ─── IExecutor required ─────────────────────────────────────────────────────
 
   async execute(prompt: string, options: ExecuteOptions): Promise<ExecuteResult> {
-    // Ensure a stable conversation ID exists for history tracking across spawns
-    if (!this.conversationId) {
-      this.conversationId = `conv-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    return new Promise((resolve, reject) => {
+      this.commandQueue.push({ prompt, options, resolve, reject });
+      this.processQueue();
+    });
+  }
+
+  /**
+   * Processes the command queue sequentially.
+   */
+  private async processQueue(): Promise<void> {
+    if (this.isProcessing || this.commandQueue.length === 0) {
+      return;
     }
 
-    // Prepend history context for follow-up turns within the same conversation
-    const historyContext = this.sessionManager.buildResumeContext(this.conversationId);
-    const finalPrompt = historyContext ? `${historyContext}${prompt}` : prompt;
-    this.sessionManager.append(this.conversationId, 'user', prompt);
+    const command = this.commandQueue.shift();
+    if (!command) return;
 
+    this.isProcessing = true;
+    try {
+      const result = await this.executeQueued(command.prompt, command.options);
+      command.resolve(result);
+    } catch (error) {
+      command.reject(error instanceof Error ? error : new Error(String(error)));
+    } finally {
+      this.isProcessing = false;
+      this.processQueue();
+    }
+  }
+
+  /**
+   * Actual execution logic for a single prompt.
+   */
+  private async executeQueued(prompt: string, options: ExecuteOptions): Promise<ExecuteResult> {
     // Build fallback chain: configured model first, then quota fallback aliases.
-    // Filter out aliases that are already the configured model to avoid retrying
-    // the same model twice.
     const fallbackAliases = QUOTA_FALLBACK_ALIASES.filter(a => a !== this.model);
     const modelsToTry = [this.model, ...fallbackAliases];
 
@@ -159,21 +193,24 @@ export class GeminiExecutor implements IExecutor {
       }
 
       try {
-        const result = await this.executeWithModel(modelForAttempt, modelLabel, finalPrompt, options);
+        // Ensure a persistent session exists (spawn if needed)
+        const { client, sessionId } = await this.ensurePersistentSession(modelForAttempt);
+        const result = await this.executeWithClient(client, sessionId, modelLabel, prompt, options);
         return result;
       } catch (error) {
         if (isQuotaError(error) && attempt < modelsToTry.length - 1) {
-          // Quota exhausted on this model — try the next one in the chain
+          // Quota exhausted — destroy current client, next iteration spawns with fallback model
+          this.destroyPersistentClient();
           continue;
         }
-        // Final attempt or non-quota error: surface a friendly message
+        // Final attempt or non-quota error: destroy client (so next call respawns) and surface error
+        this.destroyPersistentClient();
         console.error(`[GeminiExecutor] ❌ Execute error:`, error);
         const msg = error instanceof Error ? error.message : 'Unknown error';
         return { success: false, error: this.buildFriendlyError(msg, modelLabel) };
       }
     }
 
-    // Should never reach here, but satisfy TypeScript
     return { success: false, error: 'All Gemini models exhausted quota.' };
   }
 
@@ -183,47 +220,40 @@ export class GeminiExecutor implements IExecutor {
 
   async setWorkingDirectory(targetPath: string): Promise<void> {
     const resolved = this.directoryGuard.resolveWorkingDirectory(targetPath);
+    
+    // If directory changes, we MUST restart the persistent process in the new directory.
+    // This matches ClaudePersistentExecutor and ensures that tools (ls, read, etc.)
+    // run in the expected location.
+    const needsRestart = this.currentWorkingDirectory !== resolved && this.persistentClient !== null;
+    
     this.currentWorkingDirectory = resolved;
-    // Changing directory resets the conversation context if not using a thread-bound session
-    if (!this.threadId) {
-      this.conversationId = null;
+    
+    if (needsRestart) {
+      console.log(`[GeminiExecutor] Restarting persistent client in new directory: ${resolved}`);
+      this.destroyPersistentClient();
     }
   }
 
   resetContext(): void {
-    if (this.conversationId) {
-      this.sessionManager.remove(this.conversationId);
-      if (!this.threadId) {
-        this.conversationId = null;
-      }
-    }
+    this.destroyPersistentClient();
   }
 
   /**
-   * Compact conversation history by truncating to the most recent turns.
-   * Gemini ACP has no built-in /compact command, so we reduce context size
-   * by keeping only the last COMPACT_KEEP_TURNS entries from the JSONL history.
+   * Compact conversation history by resetting the persistent session.
+   * Gemini ACP has no built-in /compact, so we destroy the client entirely.
+   * The next execute() call will spawn a fresh process with no prior context.
    */
   async compactWhenFull(onStream?: (chunk: string) => void): Promise<ExecuteResult> {
-    if (!this.conversationId) {
+    if (!this.persistentClient) {
       return { success: true, output: 'No active conversation to compact.' };
     }
 
-    // The previous execute() attempt failed (likely Prompt too long), but it already
-    // appended the user's prompt to the history. When the caller retries, they will
-    // send the exact same prompt again. To avoid duplicating it, we pop the last entry
-    // if it's a 'user' entry.
-    this.sessionManager.popLastUserEntry(this.conversationId);
-
-    onStream?.(`Truncating history to last ${COMPACT_KEEP_TURNS} turns...\n`);
-    const removed = this.sessionManager.truncate(this.conversationId, COMPACT_KEEP_TURNS);
-
-    if (removed === 0) {
-      return { success: true, output: 'Conversation history is already compact.' };
-    }
-
-    onStream?.(`Removed ${removed} older entries from conversation history.\n`);
-    return { success: true, output: `Compacted: removed ${removed} older entries, kept ${COMPACT_KEEP_TURNS} most recent turns.` };
+    onStream?.('Resetting conversation context (Gemini has no /compact equivalent — starting fresh session)...\n');
+    this.destroyPersistentClient();
+    return {
+      success: true,
+      output: 'Context reset: conversation history cleared. Next message starts a fresh Gemini session.',
+    };
   }
 
   async abort(): Promise<boolean> {
@@ -237,13 +267,14 @@ export class GeminiExecutor implements IExecutor {
     }
 
     // Step 2: Give Gemini a short grace period to respond with stopReason='cancelled'.
-    // The timer is stored so the finally block can cancel it if Gemini responds in time.
+    // After either the grace period or natural completion, we destroy the persistent
+    // client so the next execute() starts a clean session.
     const clientRef = this.inflightClient;
     this.abortTimer = setTimeout(() => {
       this.abortTimer = null;
       if (clientRef === this.inflightClient) {
-        console.warn('[GeminiExecutor] Cancel grace period elapsed, force-destroying ACP client');
-        clientRef.destroy();
+        console.warn('[GeminiExecutor] Cancel grace period elapsed, force-destroying persistent client');
+        this.destroyPersistentClient();
       }
     }, CANCEL_GRACE_MS);
 
@@ -252,129 +283,160 @@ export class GeminiExecutor implements IExecutor {
 
   async destroy(): Promise<void> {
     if (this.inflightClient) {
-      // Best-effort cooperative cancel before force-kill
       if (this.inflightSessionId) {
         this.inflightClient.sendCancel(this.inflightSessionId);
       }
-      // Cancel the abort grace-period timer if it's still running
       if (this.abortTimer !== null) {
         clearTimeout(this.abortTimer);
         this.abortTimer = null;
       }
-      this.inflightClient.destroy();
-      this.inflightClient = null;
-      this.inflightSessionId = null;
     }
+    this.destroyPersistentClient();
   }
 
   /**
-   * Delete the Gemini session history file for a thread.
+   * Delete session data for a thread.
    * Called by ThreadExecutorPool before removing this executor from the pool.
    */
-  async deleteThreadData(threadId: string): Promise<void> {
-    if (this.conversationId) {
-      this.sessionManager.remove(this.conversationId);
-    } else {
-      this.sessionManager.remove(threadId);
-    }
+  async deleteThreadData(_threadId: string): Promise<void> {
+    this.destroyPersistentClient();
   }
 
   getSessionId(): string | null {
-    return this.conversationId;
+    return this.persistentSessionId;
+  }
+
+  // ─── Internal helpers ────────────────────────────────────────────────────────
+
+  /**
+   * Returns the existing persistent session if alive, or spawns a new one.
+   * The model parameter is only used when spawning a new session.
+   */
+  private async ensurePersistentSession(model: string): Promise<{ client: AcpClient; sessionId: string }> {
+    if (this.persistentClient && this.persistentSessionId) {
+      return { client: this.persistentClient, sessionId: this.persistentSessionId };
+    }
+    return this.spawnNewSession(model);
   }
 
   /**
-   * Runs a single attempt with a specific model alias.
-   * Throws on quota errors so the caller can retry with the next model.
+   * Spawns a fresh Gemini CLI subprocess, initializes ACP, and creates a new session.
+   * The AcpClient callbacks close over `this.activeOptions` so they always dispatch
+   * to whichever execute() call is currently in flight.
    */
-  private async executeWithModel(
-    model: string,
-    modelLabel: string,
-    finalPrompt: string,
-    options: ExecuteOptions,
-  ): Promise<ExecuteResult> {
-    let accumulatedOutput = '';
+  private async spawnNewSession(model: string): Promise<{ client: AcpClient; sessionId: string }> {
+    const args = this.buildGeminiArgs(model);
 
     const acpCallbacks: AcpEventCallbacks = {
       onThoughtChunk: (text) => {
-        // Stream Gemini's thinking to the user, same as Claude does for thinking blocks
-        accumulatedOutput += text;
-        options.onStream?.(text);
+        this.activeOptions.onStream?.(text);
       },
       onTextChunk: (text) => {
-        accumulatedOutput += text;
-        options.onStream?.(text);
+        this.activeOptions.onStream?.(text);
       },
       onToolCall: (toolCallId, title, kind) => {
-        // Map Gemini ACP kind → Claude-compatible tool name + structured input
-        // so the router's ToolFormatter renders it consistently with Claude tools.
-        // The tool card itself provides the progress indicator — no extra onStream needed.
         const { name, input } = mapAcpToolCall(kind, title);
-        options.onToolUse?.({ id: toolCallId, name, input });
+        this.activeOptions.onToolUse?.({ id: toolCallId, name, input });
       },
       onToolResult: (toolCallId, status, output) => {
-        options.onToolResult?.({
+        this.activeOptions.onToolResult?.({
           tool_use_id: toolCallId,
           content: output ?? '',
           is_error: status !== 'completed',
         });
       },
       onPlan: (text) => {
-        options.onPlanMode?.(text);
+        this.activeOptions.onPlanMode?.(text);
       },
       onPermissionRequest: this.autoApprove ? undefined : async () => 0,
     };
 
-    const args = this.buildGeminiArgs(model);
     const client = new AcpClient(
       this.geminiCommand,
       args,
       this.currentWorkingDirectory,
-      acpCallbacks
+      acpCallbacks,
     );
+
+    console.log(`[GeminiExecutor] Spawning persistent ACP client (model=${model || 'pro (default)'}) for cwd: ${this.currentWorkingDirectory}`);
+    await client.initialize();
+    const sessionId = await client.newSession(this.currentWorkingDirectory);
+    console.log(`[GeminiExecutor] Persistent ACP session created: ${sessionId.slice(0, 8)}`);
+
+    if (this.autoApprove) {
+      try {
+        await client.setSessionMode(sessionId, 'yolo');
+      } catch (e) {
+        console.warn(`[GeminiExecutor] Optional session mode 'yolo' not supported or rejected:`, e);
+      }
+    }
+
+    this.persistentClient = client;
+    this.persistentSessionId = sessionId;
+    return { client, sessionId };
+  }
+
+  /**
+   * Sends a single prompt to an existing persistent ACP session.
+   * Sets activeOptions so the persistent callbacks dispatch to this call's handlers.
+   */
+  private async executeWithClient(
+    client: AcpClient,
+    sessionId: string,
+    modelLabel: string,
+    prompt: string,
+    options: ExecuteOptions,
+  ): Promise<ExecuteResult> {
+    let accumulatedOutput = '';
+
+    // Wire per-execute callbacks via activeOptions so the persistent AcpClient
+    // callbacks (which close over this.activeOptions) dispatch to this call.
+    this.activeOptions = {
+      onStream: (chunk) => {
+        accumulatedOutput += chunk;
+        options.onStream?.(chunk);
+      },
+      onToolUse: options.onToolUse,
+      onToolResult: options.onToolResult,
+      onPlanMode: options.onPlanMode,
+    };
+
     this.inflightClient = client;
+    this.inflightSessionId = sessionId;
 
     try {
-      console.log(`[GeminiExecutor] Spawning ACP client (model=${modelLabel}) for cwd: ${this.currentWorkingDirectory}`);
-      console.log(`[GeminiExecutor] Gemini command: ${this.geminiCommand} ${args.join(' ')}`);
-
-      await client.initialize();
-      const sessionId = await client.newSession(this.currentWorkingDirectory);
-      console.log(`[GeminiExecutor] ACP session created: ${sessionId.slice(0, 8)}`);
-      this.inflightSessionId = sessionId;
-
-      if (this.autoApprove) {
-        try {
-          await client.setSessionMode(sessionId, 'yolo');
-        } catch (e) {
-          console.warn(`[GeminiExecutor] Optional session mode 'yolo' not supported or rejected:`, e);
-          // Non-fatal: AcpClient will still auto-approve individual permissions if setSessionMode fails
-        }
-      }
-
-      console.log(`[GeminiExecutor] Sending prompt (length=${finalPrompt.length})...`);
-      const promptResult = await client.prompt(sessionId, finalPrompt);
+      console.log(`[GeminiExecutor] Sending prompt (model=${modelLabel}, length=${prompt.length})...`);
+      const promptResult = await client.prompt(sessionId, prompt);
       console.log(`[GeminiExecutor] Prompt completed, stopReason=${promptResult.stopReason}, model=${modelLabel}`);
-
-      // Save partial output even on cancellation so history stays consistent
-      if (accumulatedOutput) {
-        this.sessionManager.append(this.conversationId!, 'assistant', accumulatedOutput);
-      }
 
       return {
         success: promptResult.stopReason !== 'refusal' && promptResult.stopReason !== 'cancelled',
         output: accumulatedOutput,
-        sessionAbbr: this.conversationId!.slice(0, 8),
+        sessionAbbr: sessionId.slice(0, 8),
       };
     } finally {
-      // Clear the abort grace-period timer — Gemini responded (or threw) in time.
+      // Clear activeOptions so stale callbacks don't fire after this call ends
+      this.activeOptions = {};
+
+      // If abort() was called and its timer is still pending, Gemini responded to
+      // the cancel before the grace period elapsed.  Destroy the persistent client
+      // now (a cancelled session should not be reused) and cancel the timer.
       if (this.abortTimer !== null) {
         clearTimeout(this.abortTimer);
         this.abortTimer = null;
+        this.destroyPersistentClient();
       }
-      client.destroy();
       this.inflightClient = null;
       this.inflightSessionId = null;
+    }
+  }
+
+  /** Destroys the persistent client and clears all related state. */
+  private destroyPersistentClient(): void {
+    if (this.persistentClient) {
+      this.persistentClient.destroy();
+      this.persistentClient = null;
+      this.persistentSessionId = null;
     }
   }
 
