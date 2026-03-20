@@ -306,17 +306,21 @@ describe('GeminiExecutor', () => {
     expect(result).toBe(false);
   });
 
-  it('should clear persistent client after abort so next execute respawns', async () => {
+  it('should preserve persistent session after abort so next execute reuses it', async () => {
     const { AcpClient } = await import('../../src/executor/acp/AcpClient');
     const MockAcpClient = vi.mocked(AcpClient);
 
     let resolvePrompt!: (v: { stopReason: string }) => void;
+    const localPrompt = vi.fn()
+      .mockImplementationOnce(() => new Promise<{ stopReason: string }>((resolve) => { resolvePrompt = resolve; }))
+      .mockResolvedValue({ stopReason: 'end_turn' });
+
     MockAcpClient.mockImplementationOnce((_cmd, _args, _cwd, _callbacks) => ({
       initialize: mockInitialize,
       newSession: mockNewSession,
       setSessionMode: mockSetSessionMode,
       sendCancel: vi.fn(),
-      prompt: () => new Promise<{ stopReason: string }>((resolve) => { resolvePrompt = resolve; }),
+      prompt: localPrompt,
       destroy: mockDestroy,
     }));
 
@@ -328,11 +332,46 @@ describe('GeminiExecutor', () => {
     await executePromise;
 
     MockAcpClient.mockClear();
-    mockNewSession.mockResolvedValue('new-session-id');
 
-    // After abort, next execute should spawn a new client
+    // After abort, session is preserved — next execute reuses the existing client
     await executor.execute('after abort', {});
-    expect(MockAcpClient).toHaveBeenCalledTimes(1);
+    expect(MockAcpClient).not.toHaveBeenCalled();
+    expect(mockDestroy).not.toHaveBeenCalled();
+  });
+
+  it('should not leak timer on double-abort (second abort clears first timer)', async () => {
+    vi.useFakeTimers();
+    const localDestroy = vi.fn();
+
+    const { AcpClient } = await import('../../src/executor/acp/AcpClient');
+    vi.mocked(AcpClient).mockImplementationOnce((_cmd, _args, _cwd, _callbacks) => ({
+      initialize: mockInitialize,
+      newSession: mockNewSession,
+      setSessionMode: mockSetSessionMode,
+      sendCancel: vi.fn(),
+      prompt: () => new Promise(() => {}), // never resolves
+      destroy: localDestroy,
+    }));
+
+    try {
+      executor.execute('slow task', {});
+      await vi.advanceTimersByTimeAsync(20);
+
+      await executor.abort(); // first abort at T=20, timer fires at T=3020
+      await vi.advanceTimersByTimeAsync(100); // advance to T=120
+      await executor.abort(); // second abort at T=120, clears first timer, new timer fires at T=3120
+
+      // Advance past T=3020 (first timer's deadline) but before T=3120 (second timer's deadline).
+      // If first timer wasn't cleared, destroy would fire here.
+      await vi.advanceTimersByTimeAsync(2_950); // now at T=3070 — past 3020 but before 3120
+      expect(localDestroy).not.toHaveBeenCalled(); // first timer was cleared
+
+      // Advance past T=3120 — second timer fires, force-destroy happens.
+      await vi.advanceTimersByTimeAsync(100); // now at T=3170
+      expect(localDestroy).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('should force-destroy after CANCEL_GRACE_MS if Gemini does not respond to cancel', async () => {
