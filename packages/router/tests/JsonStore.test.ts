@@ -14,6 +14,10 @@ describe('JsonStore', () => {
   let storePath: string;
 
   beforeEach(async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+
     // Create a temporary directory for test data
     testDir = path.join(os.tmpdir(), `jsonstore-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     await fs.mkdir(testDir, { recursive: true });
