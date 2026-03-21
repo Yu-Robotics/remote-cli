@@ -225,7 +225,7 @@ describe('AcpClient - session/update notifications', () => {
     });
     await new Promise(r => setImmediate(r));
     expect(callbacks.onPlan).toHaveBeenCalledWith(
-      '[completed] Read the file\n[in_progress] Edit the function'
+      '[completed] (high) Read the file\n[in_progress] (high) Edit the function'
     );
   });
 

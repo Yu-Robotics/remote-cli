@@ -1,5 +1,8 @@
 # File Transfer Design Plan
 
+> **Status: DRAFT / FUTURE 🏗️**
+> This document outlines a planned feature that has not yet been implemented.
+
 ## Executive Summary
 
 This document outlines the design for implementing file transfer functionality in the remote-cli system. The goal is to enable users to upload files from their mobile devices (via Feishu) to their local development machines running the CLI client, and vice versa.
