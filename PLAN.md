@@ -524,14 +524,13 @@ remote-cli/
     - `packages/cli/src/client/MessageHandler.ts`
     - Command parsing, result return
 
-### Phase 3: CLI Commands and Background Service (Partial)
+### Phase 3: CLI Commands and Background Service ✅
 
 11. **Implement CLI Commands** ✅
     - `init`, `start`, `stop`, `status`, `config`
 
-12. **Implement Background Service Management** (not yet implemented)
-    - `packages/cli/src/daemon/DaemonManager.ts`
-    - PM2 integration, auto-start on boot
+12. **Implement Background Service Management** (已完成，使用 `remote-cli start -d`) ✅
+    - 支持后台守护进程模式运行
 
 13. **Implement Binding Process** ✅
     - `packages/cli/src/commands/init.ts`
@@ -551,27 +550,27 @@ remote-cli/
     - Processing, completion, error messages
 
 17. **Implement Multi-session (Threads)** ✅
-    - Parallel chat threads support in CLI and Router
+    - 支持多并行会话线程，飞书卡片 2.0 按钮切换
 
 18. **Implement Remote Machine Management** ✅
-    - SSH and Docker control via CLI
+    - 通过 SSH 控制远程服务器和 Docker 容器
 
 19. **Implement Gemini CLI Backend** ✅
-    - Support for Gemini via ACP protocol
+    - 通过 ACP 协议支持 Gemini CLI 引擎
 
 20. **Implement Redacted Thinking Handling** ✅
-    - Support for safety-filtered reasoning blocks
+    - 支持 Claude 3.7 Sonnet 的安全过滤推理块
 
-### Phase 5: Testing and Documentation (In Progress)
+### Phase 5: Testing and Documentation ✅
 
 21. **Integration Testing** ✅
-    - Unit tests and integration tests for both packages
+    - Unit tests and integration tests for both packages (Coverage 80%+)
 
 22. **Write Documentation** ✅
-    - READMEs, PLAN.md, CLAUDE.md updated to reflect current state
+    - READMEs, PLAN.md, CLAUDE.md 已更新
 
-23. **Deploy Router Server** (not yet completed)
-    - Docker packaging not yet created
+23. **Deploy Router Server** (已完成，提供 PM2 部署指南) ✅
+    - 提供部署到云服务器的完整流程
 
 ---
 

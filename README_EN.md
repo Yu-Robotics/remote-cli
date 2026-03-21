@@ -13,11 +13,12 @@ Remote control your Claude Code or Gemini CLI from anywhere using your mobile ph
 - 🌍 **Remote Control**: Control your local development environment from anywhere via mobile phone
 - 🔒 **Secure**: Directory whitelisting, command filtering, and device authentication
 - 📱 **Mobile-Optimized**: Simplified commands and rich text formatting for Feishu
-- 🤖 **Multi-Backend Support**: Supports Claude Code (default) and Gemini CLI, switchable at any time
-- 🧵 **Multi-session Management**: Create multiple independent chat threads to handle different tasks in parallel
-- 🖥️ **Remote Machine Management**: Control remote servers or Docker containers via SSH through the CLI
-- ⚡ **Persistent Process**: Long-running AI process with bidirectional streaming via stdio
-- 🚀 **Easy Setup**: One-command installation and initialization
+- 🤖 **Multi-backend Support**: Supports Claude Code (default) and Gemini CLI, switchable at any time
+- 🧵 **Multi-session Management**: Create multiple independent chat threads to handle different tasks in parallel. Support switching and creating threads via Feishu card buttons.
+- 🖥️ **Remote Machine Management**: Control remote servers or Docker containers via SSH directly through Feishu. Support `/search`, `/view`, `/replace` and other remote file operations.
+- ⚡ **Persistent Process**: Long-running AI process with bidirectional streaming via stdio for faster response times
+- 🔒 **Security Hardening**: Directory-based security via Claude Code native hooks to ensure AI cannot exceed its sandbox
+- 🚀 **Easy Setup**: One-command installation and initialization, supports background daemon mode (`-d`)
 
 ### Usage Examples
 
@@ -479,6 +480,15 @@ Dangerous commands are automatically blocked:
 - Binding codes **expire after 5 minutes**
 - Each user can only control **their bound devices**
 - Unbind at any time: `/unbind` in Feishu
+
+## Known Behaviors
+
+### Safety-Filtered Reasoning (Claude 3.7 Sonnet)
+
+When using Claude 3.7 Sonnet, you may occasionally see a message like:
+`💭 Some reasoning was filtered by safety systems`
+
+This is normal behavior when Claude's internal reasoning triggers safety filters. The encrypted reasoning is preserved for session continuity, and response quality is not affected. Claude 4 models do not produce these notifications.
 
 ## Troubleshooting
 
