@@ -75,7 +75,7 @@ git commit -m "chore: bump version to 1.1.1"
 - **For bug fixes**: Add regression tests that verify the fix
 - **For refactoring**: Ensure existing tests pass and add new tests for changed behavior
 - **For new files**: Create corresponding test files in the `tests/` directory
-- **Minimum coverage**: 80% code coverage (enforced by testing.md)
+- **Minimum coverage**: 80% code coverage
 
 **Test file organization:**
 - Unit tests: `packages/*/tests/*.test.ts` - Test individual components
@@ -212,7 +212,7 @@ The test suite follows TDD principles:
 - **Unit tests**: Test individual components (`DirectoryGuard`, `ConfigManager`, `WebSocketClient`)
 - **Command tests**: Test CLI commands in isolation with mocked dependencies
 - **Integration tests**: Test complete workflows (init → start → stop)
-- **Coverage requirement**: 80%+ per testing.md
+- **Coverage requirement**: 80%+ (unit + integration + E2E)
 
 Integration tests validate:
 - Full user journey (init, start, status, stop)
@@ -368,7 +368,8 @@ Gemini CLI is auto-detected if already installed on the local machine. No instal
 
 3. Restart the service to apply:
    ```bash
-   remote-cli restart
+   remote-cli stop
+   remote-cli start
    ```
 
 ### Executor Config Fields (`executor` in config)
@@ -393,8 +394,7 @@ packages/cli/src/executor/
     SessionManager.ts       # JSONL-based session history persistence
 ```
 
-Session history is stored in `~/.remote-cli/gemini-sessions/{sessionId}.jsonl` and replayed
-as context when creating new ACP sessions (since ACP `session/resume` is experimental).
+GeminiExecutor uses a **persistent ACP session** — a single long-lived Gemini CLI subprocess that maintains its own context (KV cache) across turns. The process is only restarted when changing directories, switching models, or during context compaction.
 
 Tool permissions are auto-approved by default (`allow_once`), equivalent to `--yolo`.
 
