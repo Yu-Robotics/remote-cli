@@ -306,7 +306,7 @@ export class AcpClient {
       }
       case 'tool_call_update': {
         const u = update as ToolCallUpdate & { sessionUpdate: string };
-        if (u.status === 'completed' && this.callbacks.onToolResult) {
+        if ((u.status === 'completed' || u.status === 'failed') && this.callbacks.onToolResult) {
           const rawOutput = u.content
             ?.map((c) => ('text' in c ? (c as { text?: string }).text : ''))
             .filter(Boolean)
@@ -319,7 +319,7 @@ export class AcpClient {
         if (this.callbacks.onPlan) {
           const u = update as Plan & { sessionUpdate: string };
           const text = u.entries
-            .map((e) => `[${e.status}] ${e.content}`)
+            .map((e) => `[${e.status}]${e.priority ? ` (${e.priority})` : ''} ${e.content}`)
             .join('\n');
           this.callbacks.onPlan(text);
         }
