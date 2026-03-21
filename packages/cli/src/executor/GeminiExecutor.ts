@@ -56,10 +56,23 @@ const QUOTA_FALLBACK_ALIASES = ['flash', 'flash-lite'];
 function isQuotaError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   const msg = error.message;
+
+  // Check for specific ACP HTTP-like error codes (e.g. 429 Too Many Requests, 503 Service Unavailable)
+  const acpErrorMatch = msg.match(/ACP error (\d+):/);
+  if (acpErrorMatch) {
+    const code = parseInt(acpErrorMatch[1], 10);
+    if (code === 429 || code === 503) {
+      return true;
+    }
+  }
+
+  // Stricter string matching to avoid false positives like "quotation marks"
+  const lowerMsg = msg.toLowerCase();
   return (
-    msg.includes('exhausted your capacity') ||
-    msg.includes('quota') ||
-    msg.includes('No capacity available')
+    lowerMsg.includes('exhausted your capacity') ||
+    lowerMsg.includes('quota exceeded') ||
+    lowerMsg.includes('quota exhausted') ||
+    lowerMsg.includes('no capacity available')
   );
 }
 

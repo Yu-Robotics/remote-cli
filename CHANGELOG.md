@@ -8,9 +8,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Initial open source release
-- Git worktree support for isolated session workspaces
-- Comprehensive documentation in English and Chinese
+- Comprehensive test coverage for MessageHandler and ThreadExecutorPool
+- Improved Gemini quota fallback detection logic
+
+## [1.1.39] - 2026-03-20
+
+### Added
+- **Multi-session Threads**: True parallel multi-thread support with per-thread executors
+- Feishu Card 2.0 integration for thread switching and creation
+- **Gemini CLI Support**: Alternative AI backend via ACP (Agent Client Protocol)
+- Gemini automatic quota fallback to Flash models
+- **Remote Machine Management**: SSH and Docker control via chat commands
+- **Redacted Thinking Handling**: Support for safety-filtered reasoning in Claude 3.7 Sonnet
+- **Security Hooks**: Directory-based security via Claude Code native hooks
+
+### Fixed
+- Fixed Gemini session persistence after `/abort` commands
+- Improved test isolation on macOS by mocking `os.homedir()`
+- Fixed memory leaks in thread management
+- Resolved race conditions in busy lock and session cleanup
+
+## [1.1.0] - 2026-03-10
+
+### Added
+- Initial support for multiple devices per user account
+- Switch between active devices via `/device` command
+- Device ID collision protection in Router
 
 ## [1.0.3] - 2026-02-18
 
@@ -58,15 +81,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Claude Code integration via Agent SDK
 - Comprehensive test suite (80%+ coverage)
 
-### Features
-- Remote control Claude Code from mobile via Feishu
-- Directory-based security sandbox
-- Device authentication and binding
-- Real-time message streaming
-- Session management and resumption
-- Mobile-optimized command interface
-
-[Unreleased]: https://github.com/xiaoyu/remote-cli/compare/v1.0.3...HEAD
+[Unreleased]: https://github.com/xiaoyu/remote-cli/compare/v1.1.39...HEAD
+[1.1.39]: https://github.com/xiaoyu/remote-cli/compare/v1.0.3...v1.1.39
 [1.0.3]: https://github.com/xiaoyu/remote-cli/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/xiaoyu/remote-cli/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/xiaoyu/remote-cli/compare/v1.0.0...v1.0.1
