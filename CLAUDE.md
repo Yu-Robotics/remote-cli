@@ -26,8 +26,8 @@ This is a **strictly enforced** rule - any pull request containing Chinese text 
 **CRITICAL: When modifying any README file, you MUST update ALL README files to maintain consistency.**
 
 This project maintains two README files:
-- `README.md` - Chinese documentation (default)
-- `README_EN.md` - English documentation
+- `README.md` - English documentation (default)
+- `README_ZH.md` - Chinese documentation
 
 **Rules:**
 1. **Always modify both files** when updating documentation
@@ -36,7 +36,7 @@ This project maintains two README files:
 4. **Update links** - Ensure cross-references between READMEs are correct
 5. **Verify both files** before committing
 
-**Example:** If you add a new feature to Features section in README.md, you MUST also add it to README_EN.md in the same position.
+**Example:** If you add a new feature to Features section in README.md, you MUST also add it to README_ZH.md in the same position.
 
 ## Version Bump Requirement
 

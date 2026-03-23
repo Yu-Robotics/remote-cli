@@ -1,173 +1,176 @@
-# Remote CLI - 通过飞书远程控制 Claude Code / Gemini CLI
+# Remote CLI - Control Claude Code / Gemini CLI from Mobile via Feishu
 
 [![npm version](https://img.shields.io/npm/v/@yu_robotics/remote-cli.svg)](https://www.npmjs.com/package/@yu_robotics/remote-cli)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js Version](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](https://nodejs.org/)
 
-通过飞书（Lark）消息从手机上远程控制你的 Claude Code 或 Gemini CLI。即使不在电脑前，也能继续编程。
+Remote control your Claude Code or Gemini CLI from anywhere using your mobile phone through Feishu (Lark) messaging. Continue coding when away from your computer with a mobile-friendly interface.
 
-[English Documentation](README_EN.md)
+[中文文档](README_ZH.md)
 
-## 功能特性
+## Features
 
-- 🌍 **远程控制**：通过手机随时随地控制本地开发环境
-- 🔒 **安全可靠**：目录白名单、命令过滤、设备认证三重保护
-- 📱 **移动优化**：为飞书定制的简化命令和富文本格式
-- 🤖 **多后端支持**：支持 Claude Code（默认）和 Gemini CLI，可随时切换
-- 🧵 **多会话管理**：支持创建多个独立的会话线程（Threads），并行处理不同任务。支持通过飞书卡片按钮快速切换和创建新线程。
-- 🖥️ **远程机器管理**：支持通过 SSH 直接在飞书中控制远程服务器或 Docker 容器。支持 `/search`、`/view`、`/replace` 等远程文件操作。
-- ⚡ **持久进程**：通过 stdio 双向流保持 AI 进程长期运行，极大提升响应速度
-- 🔒 **安全增强**：通过 Claude Code 原生 Hooks 实现目录限制，确保 AI 无法越权访问
-- 🚀 **简单 setup**：一键安装和初始化，支持后台守护进程模式 (`-d`)
+- 🌍 **Remote Control**: Control your local development environment from anywhere via mobile phone
+- 🔒 **Secure**: Directory whitelisting, command filtering, and device authentication
+- 📱 **Mobile-Optimized**: Simplified commands and rich text formatting for Feishu
+- 🤖 **Multi-backend Support**: Supports Claude Code (default) and Gemini CLI, switchable at any time
+- 🧵 **Multi-session Management**: Create multiple independent chat threads to handle different tasks in parallel. Support switching and creating threads via Feishu card buttons.
+- 🖥️ **Remote Machine Management**: Control remote servers or Docker containers via SSH directly through Feishu. Support `/search`, `/view`, `/replace` and other remote file operations.
+- ⚡ **Persistent Process**: Long-running AI process with bidirectional streaming via stdio for faster response times
+- 🔒 **Security Hardening**: Directory-based security via Claude Code native hooks to ensure AI cannot exceed its sandbox
+- 🚀 **Easy Setup**: One-command installation and initialization, supports background daemon mode (`-d`)
 
-### 使用示例
+### Usage Examples
 
 <table>
   <tr>
-    <td><img src="example_0.jpg" alt="使用示例 1" height="400" /></td>
-    <td><img src="example_1.jpg" alt="使用示例 2" height="400" /></td>
+    <td><img src="example_0.jpg" alt="Usage Example 1" height="400" /></td>
+    <td><img src="example_1.jpg" alt="Usage Example 2" height="400" /></td>
   </tr>
 </table>
 
-## 推荐使用场景
+## Recommended Use Cases
 
-### 🦞 场景一：远程修复 openclaw 配置损坏（真实案例）
+### 🦞 Scenario 1: Remotely Fixing a Broken openclaw Config (Real World Example)
 
-**适用对象**：[openclaw](https://github.com/openclaw/openclaw) 用户及各类工具的重度使用者
+**Target Users**: [openclaw](https://github.com/openclaw/openclaw) users and heavy users of any self-modifying CLI tool
 
-**背景**：[openclaw](https://github.com/openclaw/openclaw) 是一款自托管的个人 AI 助手，但它有时会在运行过程中把自己的配置文件改坏，导致无法正常启动。以往你必须坐到电脑前才能手动排查修复。现在，你在外面直接打开飞书：
+**Background**: [openclaw](https://github.com/openclaw/openclaw) is a self-hosted personal AI assistant that can sometimes corrupt its own config files during execution, causing it to fail to start. Previously, you'd have to sit down at your computer to diagnose and fix it manually. Now you just open Feishu from wherever you are:
 
 ```
-你：  /cd ~/projects/.openclaw
-      配置文件又坏了，帮我修一下
+You:  /cd ~/projects/.openclaw
+      The config is broken again, please fix it
 
-Bot： 📂 已切换到 ~/projects/.openclaw
-      🔍 检查配置文件...
-      🔧 读取 config.json...
-      ✅ 发现问题：`apiEndpoints` 字段被写入了非法的 null 值
-      📝 恢复默认值并修复格式...
-      🧪 验证配置合法性...通过
-      ✅ 配置已修复，openclaw 可以正常启动了
+Bot:  📂 Switched to ~/projects/.openclaw
+      🔍 Checking config files...
+      🔧 Reading config.json...
+      ✅ Found the issue: `apiEndpoints` field was written with an
+         illegal null value
+      📝 Restoring defaults and fixing the format...
+      🧪 Validating config...passed
+      ✅ Config fixed — openclaw can start normally now
 ```
 
-整个过程你只需要在手机上发一条消息，Claude Code 或 Gemini CLI 在你的电脑上自主完成排查、修复、验证全流程。
+You only need to send one message from your phone. Claude Code or Gemini CLI handles the investigation, fix, and validation autonomously on your computer.
 
-**这个场景推广到更多工具**：
-- 任何会自动修改配置的 CLI 工具损坏后的应急修复
-- 远程排查服务崩溃、配置冲突、环境变量丢失等问题
-- 不需要完整 IDE，只需一条飞书消息即可让 AI 代劳
+**This pattern applies broadly**:
+- Emergency recovery when any CLI tool corrupts its own config
+- Remote diagnosis of service crashes, config conflicts, or missing environment variables
+- No IDE needed — one Feishu message and the AI handles it for you
 
-### 场景二：企业团队（局域网内部署）
+### Scenario 2: Enterprise Teams (Intranet Deployment)
 
-**适用对象**：有统一飞书组织的企业开发团队
+**Target Users**: Development teams with a unified Feishu organization
 
-**部署方式**：
-- 在公司内网部署一台路由服务器
-- 团队成员各自在本地电脑安装 CLI 客户端
-- 通过飞书机器人统一提供服务
+**Deployment**:
+- Deploy a router server on the company intranet
+- Team members install the CLI client on their local machines
+- Provide unified service through the Feishu bot
 
-**优势**：
-- 🔒 **安全可靠**：仅需开放飞书外网通信，路由服务器和客户端均在内部网络
-- 🏢 **统一管理**：一个飞书机器人服务全组织，管理员集中管理
-- 💰 **成本低廉**：单台低配置服务器即可支持整个团队
-- 🔐 **设备隔离**：每个成员只能控制自己的电脑，无法访问他人设备
+**Advantages**:
+- 🔒 **Secure**: Only Feishu external communication is needed; the router server and clients are within the internal network
+- 🏢 **Centralized Management**: One Feishu bot serves the entire organization, with administrators managing centrally
+- 💰 **Cost-Effective**: A single low-configuration server can support the whole team
+- 🔐 **Device Isolation**: Each member can only control their own computer, with no access to others' devices
 
-### 场景三：个人开发者（家庭内网）
+### Scenario 3: Individual Developers (Home Intranet)
 
-**适用对象**：独立开发者、自由职业者
+**Target Users**: Independent developers, freelancers
 
-**部署方式**：
-- 将路由服务器部署在家庭内网（如 NAS、树莓派或闲置电脑）
-- 本地开发电脑运行 CLI 客户端
-- 通过飞书向外提供服务
+**Deployment**:
+- Deploy the router server on your home intranet (e.g., NAS, Raspberry Pi, or spare computer)
+- Run the CLI client on your local development machine
+- Provide service externally through Feishu
 
-**优势**：
-- 🏠 **零公网暴露**：路由服务器无需公网 IP，通过飞书长连接通信
-- 📱 **随时随地**：外出时通过手机飞书控制家中电脑
-- 💡 **开发便利**：临时离开电脑也能继续编程、查看日志、修复问题
-- 🆓 **完全免费**：无需购买云服务器，利用现有设备即可
+**Advantages**:
+- 🏠 **Zero Public Exposure**: The router server doesn't need a public IP; it communicates via Feishu long connection
+- 📱 **Access Anywhere**: Control your home computer from your phone via Feishu when you're out
+- 💡 **Development Convenience**: Continue programming, check logs, and fix issues when temporarily away from your computer
+- 🆓 **Completely Free**: No need to purchase cloud servers; utilize existing equipment
 
-## 系统架构
+## Architecture
 
 ```
 ┌─────────────────┐         ┌──────────────────────────────┐
-│   飞书服务器     │         │      开发者 A 的工作电脑        │
-│                 │         │      (Mac/Linux)             │
-│   开发者 A 的    │◀───────▶│  ┌─────────────────────────┐ │
-│   手机          │         │  │  remote-cli (本地)       │ │
-│   与机器人私聊   │         │  │  - WebSocket 客户端      │ │
-│                 │         │  │  - AI CLI 执行器         │ │
-└─────────────────┘         │  │  - 安全目录守卫           │ │
+│  Feishu Server  │         │  Developer A's Work PC       │
+│                 │         │  (Mac/Linux)                 │
+│  Developer A's  │◀───────▶│  ┌─────────────────────────┐ │
+│  Phone          │         │  │  remote-cli (local)     │ │
+│  Private Chat   │         │  │  - WebSocket Client     │ │
+│  with Bot       │         │  │  - AI CLI Executor      │ │
+└─────────────────┘         │  │    (Claude / Gemini)    │ │
+        │                   │  │  - Security Directory   │ │
+        │                   │  │    Guard                │ │
         │                   │  └──────────┬──────────────┘ │
         │                   │             ▼                 │
         │                   │  Claude Code / Gemini CLI    │
-        ▼                   │  (本地 AI 后端)               │
+        ▼                   │  (Local AI Backend)           │
 ┌─────────────────┐         └──────────────────────────────┘
-│   路由服务器     │
-│  (团队部署)      │         ┌──────────────────────────────┐
-│  ┌───────────┐  │         │      开发者 B 的工作电脑        │
+│  Router Server  │
+│  (Team Deploy)  │         ┌──────────────────────────────┐
+│  ┌───────────┐  │         │  Developer B's Work PC       │
 │  │ Webhook   │  │         │  ┌─────────────────────────┐ │
-│  │ 处理器    │  │◀───────▶│  │  remote-cli (本地)       │ │
+│  │ Handler   │  │◀───────▶│  │  remote-cli (local)     │ │
 │  └───────────┘  │         │  └─────────────────────────┘ │
 │  ┌───────────┐  │         └──────────────────────────────┘
-│  │ WebSocket │  │
-│  │   中心    │  │
+│  │WebSocket  │  │
+│  │   Hub     │  │
 │  └───────────┘  │
 │  ┌───────────┐  │
-│  │   绑定    │  │
-│  │   注册表   │  │
+│  │  Binding  │  │
+│  │  Registry │  │
 │  └───────────┘  │
 └─────────────────┘
 ```
 
-## 快速开始
+## Quick Start
 
 ```bash
-# 安装 CLI
+# Install the CLI
 npm install -g @yu_robotics/remote-cli
 
-# 初始化并获取绑定码
+# Initialize and get binding code
 remote-cli init --server https://your-router-server.com
 
-# 添加允许的目录
+# Add allowed directories
 remote-cli config add-dir ~/projects
 
-# 启动服务
+# Start the service
 remote-cli start
 
-# 现在将绑定码发送给飞书机器人
-# 然后就可以用手机开始编程了！
+# Now send the binding code to your Feishu bot
+# And start coding from your phone!
 ```
 
-## 环境要求
+## Prerequisites
 
-开始前，请确保你已安装：
+Before you begin, ensure you have:
 
 - **Node.js** >= 18.0.0
-- **npm** 或 **yarn** 包管理器
-- **Claude Code CLI** 或 **Gemini CLI**（至少安装并配置其中一个）
-- 可访问的**飞书机器人**（团队应部署一个路由服务器）
+- **npm** or **yarn** package manager
+- **Claude Code CLI** or **Gemini CLI** (at least one installed and configured)
+- Access to a **Feishu (Lark) bot** (your team should deploy a router server)
 
-## 路由服务器部署
+## Router Server Deployment
 
-> **注意**：大多数用户不需要部署路由服务器。团队管理员应该部署一个路由服务器供整个团队共享。
+> **Note**: Most users don't need to deploy the router server. Your team administrator should deploy one router server for the entire team to share.
 
-路由服务器负责在飞书和本地客户端之间转发消息。
+The router server forwards messages between Feishu and local CLI clients.
 
-### 环境要求
+### Prerequisites
 
-- 至少 **1 核 CPU** 和 **1GB 内存** 的服务器
+- A server with at least **1 CPU core** and **1GB RAM**
 - **Node.js** >= 18.0.0
-- **域名**和 SSL 证书（需要 HTTPS）用于公网部署
-- 已创建和配置的**飞书机器人**
+- **Domain name** and SSL certificate (for public deployment with HTTPS)
+- A **Feishu bot** created and configured
 
-### 安装路由服务器
+### Install Router Server
 
 ```bash
-# 从 npm 安装（推荐）
+# Install from npm (recommended)
 npm install -g @yu_robotics/remote-cli-router
 
-# 或从源码安装
+# Or install from source
 git clone <repository-url>
 cd remote-cli
 npm install
@@ -176,48 +179,48 @@ cd packages/router
 npm link
 ```
 
-### 配置路由服务器
+### Configure Router Server
 
 ```bash
 remote-cli-router config
 ```
 
-你将需要输入：
-- **飞书 App ID**（必需）
-- **飞书 App Secret**（必需）
-- 飞书 Encrypt Key（可选）
-- 飞书 Verification Token（可选）
-- 服务器端口（默认：3000）
+You will be prompted for:
+- **Feishu App ID** (required)
+- **Feishu App Secret** (required)
+- Feishu Encrypt Key (optional)
+- Feishu Verification Token (optional)
+- Server Port (default: 3000)
 
-### 设置飞书机器人
+### Setup Feishu Bot
 
-1. 访问[飞书开放平台](https://open.feishu.cn/)
-2. 创建新应用
-3. 启用**机器人**能力
-4. 配置权限（权限管理）：
-   | 权限 | 说明 | API Scope |
-   |------|------|-----------|
-   | 获取与发送单聊、群组消息 | 获取和发送单聊、群组消息 | `im:message` |
-   | 读取用户发给机器人的单聊消息 | 读取用户发给机器人的单聊消息 | `im:message.p2p_msg:readonly` |
-   | 以应用的身份发消息 | 以应用的身份发送消息 | `im:message:send_as_bot` |
-5. 在**事件与回调**部分开启**长连接**
-6. 订阅事件：`im.message.receive_v1` ([接收消息 v2.0](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/events/receive))
-7. 开启消息卡片回调：`card.action.trigger`（用于处理卡片上的交互按钮）
-8. 获取凭证（App ID、App Secret）并发布应用
+1. Go to [Feishu Open Platform](https://open.feishu.cn/)
+2. Create a new app
+3. Enable **Bot** capabilities
+4. Configure permissions:
+   | Permission | Description | API Scope |
+   |------------|-------------|-----------|
+   | 获取与发送单聊、群组消息 | Get and send single/group messages | `im:message` |
+   | 读取用户发给机器人的单聊消息 | Read user's private messages to bot | `im:message.p2p_msg:readonly` |
+   | 以应用的身份发消息 | Send messages as bot | `im:message:send_as_bot` |
+5. Enable **Long Connection** in Event & Callback section
+6. Subscribe to event: `im.message.receive_v1` ([Receive Message v2.0](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/events/receive))
+7. Enable message card callback: `card.action.trigger` (for interactive card buttons)
+8. Get credentials (App ID, App Secret) and publish the app
 
-### 启动路由服务器
+### Start Router Server
 
 ```bash
-# 启动服务
+# Start the service
 remote-cli-router start
 
-# 或使用 PM2 在生产环境运行
+# Or use PM2 for production
 pm2 start remote-cli-router --name router -- start
 ```
 
-### Nginx 配置（生产环境）
+### Nginx Configuration (Production)
 
-如果使用域名和 HTTPS，需要配置 Nginx 反向代理：
+If using a domain with HTTPS, configure Nginx as a reverse proxy:
 
 ```nginx
 server {
@@ -247,297 +250,297 @@ server {
 }
 ```
 
-### 客户端连接地址说明
+### Client Server Address Guide
 
-客户端初始化时需要指定路由服务器地址，根据部署方式不同：
+When initializing the client, you need to specify the router server address. The address format depends on your deployment method:
 
-| 部署方式 | 服务器地址示例 | 说明 |
-|---------|--------------|------|
-| **本地/内网部署** | `http://127.0.0.1:3000` | 路由服务器和客户端在同一台机器 |
-| **局域网部署** | `http://192.168.1.100:3000` | 使用内网 IP + 端口 |
-| **公网部署** | `https://your-domain.com` | 使用域名，需配置 HTTPS |
+| Deployment | Server Address Example | Description |
+|-----------|----------------------|-------------|
+| **Local/Intranet** | `http://127.0.0.1:3000` | Router and client on same machine |
+| **LAN** | `http://192.168.1.100:3000` | Use internal IP + port |
+| **Public** | `https://your-domain.com` | Use domain with HTTPS |
 
-**初始化示例：**
+**Initialization examples:**
 
 ```bash
-# 本地部署
+# Local deployment
 remote-cli init --server http://127.0.0.1:3000
 
-# 局域网部署
+# LAN deployment
 remote-cli init --server http://192.168.1.100:3000
 
-# 公网部署
+# Public deployment
 remote-cli init --server https://your-domain.com
 ```
 
-## 安装
+## Installation
 
-### 从 npm 安装（推荐）
+### From npm (Recommended)
 
 ```bash
 npm install -g @yu_robotics/remote-cli
 ```
 
-或使用 yarn：
+Or using yarn:
 
 ```bash
 yarn global add @yu_robotics/remote-cli
 ```
 
-### 从源码安装
+### From Source
 
 ```bash
-# 克隆仓库（请替换为实际的仓库地址）
+# Clone the repository (replace with actual repository URL)
 git clone <repository-url>
 cd remote-cli
 
-# 安装依赖
+# Install dependencies
 npm install
 
-# 构建所有包
+# Build all packages
 npm run build
 
-# 全局链接 CLI
+# Link the CLI globally
 cd packages/cli
 npm link
 ```
 
-## 使用方法
+## Usage
 
-### 1. 初始化
+### 1. Initialize
 
-生成唯一的设备 ID 和绑定码：
+Generate a unique device ID and binding code:
 
 ```bash
 remote-cli init --server https://your-router-server.com
 ```
 
-示例输出：
+Example output:
 ```
 ✔ Initializing remote CLI...
 ✔ Device ID: dev_darwin_a1b2c3d4e5f6
 ✔ Binding code: ABC-123-XYZ
 
-请在飞书中绑定设备：
-1. 打开飞书，找到机器人
-2. 发送：/bind ABC-123-XYZ
-3. 等待确认
+Please bind your device in Feishu:
+1. Open Feishu and find the bot
+2. Send: /bind ABC-123-XYZ
+3. Wait for confirmation
 
-绑定码将在 5 分钟后过期。
+Binding code expires in 5 minutes.
 ```
 
-### 2. 在飞书中绑定设备
+### 2. Bind Device in Feishu
 
-打开飞书应用，向机器人发送绑定码：
+Open your Feishu app and send the binding code to the bot:
 
 ```
 /bind ABC-123-XYZ
 ```
 
-### 3. 配置安全设置
+### 3. Configure Security
 
-添加允许 Claude Code 操作的目录：
+Add allowed directories where Claude Code can operate:
 
 ```bash
-# 添加单个目录
+# Add a single directory
 remote-cli config add-dir ~/projects
 
-# 添加多个目录
+# Add multiple directories
 remote-cli config add-dir ~/work ~/code/company-repos
 
-# 查看当前配置
+# View current configuration
 remote-cli config show
 ```
 
-### 4. 启动服务
+### 4. Start Service
 
 ```bash
 remote-cli start
 ```
 
-### 5. 查看状态
+### 5. Check Status
 
 ```bash
 remote-cli status
 ```
 
-### 6. 停止服务
+### 6. Stop Service
 
 ```bash
 remote-cli stop
 ```
 
-## 快捷命令
+## Slash Commands
 
-连接后，在飞书中可以使用以下命令：
+Once connected, use these commands in Feishu:
 
-### 核心管理命令
+### Core Management
 
-| 命令 | 说明 |
+| Command | Description |
 |---------|-------------|
-| `/help` | 显示帮助信息 |
-| `/status` | 查看当前设备、目录及所有线程状态 |
-| `/abort` | 中止当前线程正在运行的 AI 任务 |
-| `/clear` | 清除当前线程的对话上下文 |
-| `/compact` | 压缩对话历史以节省 Token |
-| `/cd <dir>` | 切换当前线程的工作目录 |
-| `/backend` | 列出可用 AI 后端并进行切换 |
-| `/bind <码>` | 绑定新设备 |
-| `/unbind` | 解绑所有设备 |
-| `/device` | 列出及切换绑定的设备 |
+| `/help` | Show help information |
+| `/status` | View current status, directories, and all threads |
+| `/abort` | Abort the currently executing task in this thread |
+| `/clear` | Clear conversation context for this thread |
+| `/compact` | Compress conversation history to save tokens |
+| `/cd <dir>` | Change working directory for this thread |
+| `/backend` | List and switch between available AI backends |
+| `/bind <码>` | Bind a new device |
+| `/unbind` | Unbind all devices |
+| `/device` | List and switch between bound devices |
 
-### 多会话（Thread）管理
+### Multi-session (Threads)
 
-支持同时开启多个会话，互不干扰。
+Start multiple independent sessions simultaneously.
 
-| 命令 | 说明 |
+| Command | Description |
 |---------|-------------|
-| `/thread list` | 列出所有会话线程及其状态 |
-| `/thread new [名]` | 创建一个新的会话线程 |
-| `/thread delete <名>`| 删除指定的空闲线程 |
+| `/thread list` | List all threads and their status |
+| `/thread new [name]` | Create a new session thread |
+| `/thread delete <name>`| Delete an idle thread |
 
-*提示：直接回复某个线程发出的卡片消息，即可在该线程中继续对话。*
+*Tip: Reply directly to a card message from a specific thread to continue the conversation in that thread.*
 
-### 远程机器管理（Machine）
+### Remote Machine Management
 
-通过 `remote-cli` 代理控制远程服务器或 Docker。
+Control remote servers or Docker through `remote-cli` proxies.
 
-| 命令 | 说明 |
+| Command | Description |
 |---------|-------------|
-| `/machines` | 列出已配置的所有远程机器 |
-| `/machine add` | 添加远程机器 (SSH) |
-| `/containers <ID>`| 列出指定机器上的 Docker 容器 |
-| `/search <ID> <路径>`| 在远程机器/容器中搜索文件 |
-| `/view <ID> <路径>` | 查看远程文件内容 |
-| `/replace <ID> <路径>`| 替换远程文件（自动备份） |
-| `/backups <ID>` | 查看文件备份记录 |
-| `/restore <ID>` | 从备份恢复文件 |
-| `/proxy set/show` | 配置全局访问代理 |
+| `/machines` | List all configured remote machines |
+| `/machine add` | Add a new remote machine (SSH) |
+| `/containers <ID>`| List Docker containers on a specific machine |
+| `/search <ID> <path>`| Search files on a remote machine/container |
+| `/view <ID> <path>` | View remote file content |
+| `/replace <ID> <path>`| Replace a remote file (with automatic backup) |
+| `/backups <ID>` | View file backup history |
+| `/restore <ID>` | Restore a file from backup |
+| `/proxy set/show` | Configure global access proxy |
 
-### AI CLI 命令透传
+### AI CLI Commands Passthrough
 
-本地 Claude Code 或 Gemini CLI 支持的所有 commands/skills 指令会直接透传执行，例如：
-- `/commit` - 提交代码变更
-- `/review` - 代码审查
-- `/test` - 运行测试
-- 以及其他所有 AI 引擎内置命令
+All commands/skills supported by the local Claude Code or Gemini CLI are passed through directly, for example:
+- `/commit` - Commit code changes
+- `/review` - Code review
+- `/test` - Run tests
+- And all other built-in AI engine commands
 
-### 示例工作流程
+### Example Workflow
 
-1. **绑定新设备：**
+1. **Bind a new device:**
    ```
    /bind ABC-123-XYZ
    ```
 
-2. **查看设备状态：**
+2. **Check device status:**
    ```
    /status
    ```
 
-3. **切换到指定设备：**
+3. **Switch to a specific device:**
    ```
    /device switch dev_darwin_a1b2c3d4
    ```
-   或使用序号快速切换：
+   Or use index for quick switch:
    ```
    /device 1
    ```
 
-4. **让 AI 帮忙：**
+4. **Ask AI to help:**
    ```
-   审查 src/auth.ts 中的认证代码并提出改进建议
+   Review the authentication code in src/auth.ts and suggest improvements
    ```
 
-5. **使用 Claude Code 内置命令：**
+5. **Use Claude Code built-in commands:**
    ```
    /commit
    ```
 
-## 安全机制
+## Security
 
-### 目录白名单
+### Directory Whitelisting
 
-只有显式添加到白名单的目录才能访问：
+Only directories explicitly added to the whitelist are accessible:
 
 ```bash
 remote-cli config add-dir ~/safe/directory
 ```
 
-### 命令过滤
+### Command Filtering
 
-危险命令会被自动拦截：
+Dangerous commands are automatically blocked:
 - `rm -rf /`
-- 系统文件的 `sudo` 操作
-- 直接磁盘写入（`dd`、`mkfs`）
-- Fork 炸弹等恶意模式
+- `sudo` operations on system files
+- Direct disk writes (`dd`, `mkfs`)
+- Fork bombs and other malicious patterns
 
-### 设备认证
+### Device Authentication
 
-- 每台设备基于机器硬件生成**唯一 ID**
-- 绑定码**5 分钟后过期**
-- 每个用户只能控制**自己绑定的设备**
-- 随时解绑：在飞书中发送 `/unbind`
+- Each device generates a **unique ID** based on machine hardware
+- Binding codes **expire after 5 minutes**
+- Each user can only control **their bound devices**
+- Unbind at any time: `/unbind` in Feishu
 
-## 常见已知行为
+## Known Behaviors
 
-### 安全过滤推理块 (Claude 3.7 Sonnet)
+### Safety-Filtered Reasoning (Claude 3.7 Sonnet)
 
-当你使用 Claude 3.7 Sonnet 时，偶尔会看到如下消息：
-`💭 部分推理过程已被安全系统过滤`
+When using Claude 3.7 Sonnet, you may occasionally see a message like:
+`💭 Some reasoning was filtered by safety systems`
 
-这是正常现象，说明 Claude 的内部推理触发了安全过滤机制。加密的推理内容会被完整保留以维持会话上下文的连贯性，不影响响应质量。Claude 4 及更高版本的模型通常不会出现此提示。
+This is normal behavior when Claude's internal reasoning triggers safety filters. The encrypted reasoning is preserved for session continuity, and response quality is not affected. Claude 4 models do not produce these notifications.
 
-## 常见问题
+## Troubleshooting
 
-### 服务无法启动
+### Service won't start
 
 ```bash
-# 检查是否已在运行
+# Check if already running
 remote-cli status
 
-# 查看日志
+# View logs
 remote-cli logs
 
-# 重启
+# Restart
 remote-cli stop
 remote-cli start
 ```
 
-### 连接问题
+### Connection issues
 
 ```bash
-# 检查网络
+# Check network
 ping your-router-server.com
 
-# 验证配置
+# Verify configuration
 remote-cli config show
 
-# 重新初始化
+# Re-initialize
 remote-cli init --server https://your-router-server.com --force
 ```
 
-### 绑定码过期
+### Binding code expired
 
 ```bash
-# 生成新的绑定码
+# Generate new binding code
 remote-cli init --force
 ```
 
-## 贡献指南
+## Contributing
 
-我们欢迎贡献！请查看 [CONTRIBUTING.md](CONTRIBUTING.md) 了解指南。
+We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
-## 许可证
+## License
 
-MIT 许可证 - 详见 [LICENSE](LICENSE) 文件。
+MIT License - see [LICENSE](LICENSE) file for details.
 
 ---
 
-## 附录
+## Appendix
 
-### 配置参考
+### Configuration Reference
 
-#### 本地客户端配置（`~/.remote-cli/config.json`）
+#### Local Client Config (`~/.remote-cli/config.json`)
 
 ```json
 {
@@ -560,50 +563,50 @@ MIT 许可证 - 详见 [LICENSE](LICENSE) 文件。
 }
 ```
 
-- `executor.type`: 可选值 `auto` (Claude), `claude-persistent`, `claude-spawn`, `gemini`。
+- `executor.type`: Options are `auto` (Claude), `claude-persistent`, `claude-spawn`, `gemini`.
 - `executor.gemini`: 
-    - `model`: 模型名称（不建议用 `auto`，建议显式指定如 `flash`）。
-    - `autoApprove`: 是否自动同意工具权限（默认 true）。
-    - `command`: 调用指令（默认 `npx`）。
-    - `version`: CLI 版本 spec（默认 `@latest`）。
+    - `model`: Model name (Avoid `auto`, explicit names like `flash` recommended).
+    - `autoApprove`: Automatically approve tool permissions (default true).
+    - `command`: Command to invoke (default `npx`).
+    - `version`: CLI version spec (default `@latest`).
 
-#### 使用 Gemini CLI
+#### Using Gemini CLI
 
 ```bash
-# 1. 认证（已安装 @google/gemini-cli 的情况下）
+# 1. Authenticate (If @google/gemini-cli is already installed)
 npx @google/gemini-cli auth login
 
-# 2. 切换后端（也可通过飞书 /backend 指令切换）
+# 2. Switch backend (Can also use /backend command in Feishu)
 remote-cli config set executor.type gemini
 
-# 3. 指定模型（推荐使用 flash 获取更高配额）
+# 3. Specify model (Recommend flash for higher quotas)
 remote-cli config set executor.gemini.model gemini-2.5-flash
 ```
 
-### 开发
+### Development
 
 ```bash
-# 克隆仓库（请替换为实际的仓库地址）
+# Clone repository (replace with actual repository URL)
 git clone <repository-url>
 cd remote-cli
 
-# 安装依赖
+# Install dependencies
 npm install
 
-# 构建所有包
+# Build all packages
 npm run build
 
-# 运行测试
+# Run tests
 npm test
 
-# 以开发模式运行 CLI
+# Run CLI in development mode
 npm run cli:dev
 
-# 以开发模式运行路由服务器
+# Run router in development mode
 npm run router:dev
 ```
 
-### 支持
+### Support
 
-- 问题反馈：请通过项目的 Issue 页面提交
-- 讨论交流：请通过项目的 Discussion 页面参与
+- Issues: Please submit via the project's Issue page
+- Discussions: Please participate via the project's Discussion page
