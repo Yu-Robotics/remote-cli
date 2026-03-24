@@ -1,6 +1,7 @@
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import { IExecutor, ExecuteOptions, ExecuteResult } from './IExecutor';
 import { AcpClient, AcpEventCallbacks } from './acp/AcpClient';
+import { ContentBlock } from './acp/AcpTypes';
 
 /** Grace period (ms) between cooperative ACP cancel and force SIGTERM/SIGKILL. */
 const CANCEL_GRACE_MS = 3_000;
@@ -429,8 +430,29 @@ export class GeminiExecutor implements IExecutor {
     this.inflightSessionId = sessionId;
 
     try {
-      console.log(`[GeminiExecutor] Sending prompt (model=${modelLabel}, length=${prompt.length})...`);
-      const promptResult = await client.prompt(sessionId, prompt);
+      // Build prompt blocks from text and attachments
+      const promptBlocks: ContentBlock[] = [];
+      if (prompt) {
+        promptBlocks.push({ type: 'text', text: prompt });
+      }
+      if (options.attachments) {
+        for (const attachment of options.attachments) {
+          if (attachment.type === 'image') {
+            promptBlocks.push({
+              type: 'image',
+              data: attachment.data,
+              mimeType: attachment.mimeType,
+            });
+          }
+        }
+      }
+
+      if (promptBlocks.length === 0) {
+        return { success: false, error: 'Empty prompt' };
+      }
+
+      console.log(`[GeminiExecutor] Sending prompt (model=${modelLabel}, blocks=${promptBlocks.length})...`);
+      const promptResult = await client.prompt(sessionId, promptBlocks);
       console.log(`[GeminiExecutor] Prompt completed, stopReason=${promptResult.stopReason}, model=${modelLabel}`);
 
       return {

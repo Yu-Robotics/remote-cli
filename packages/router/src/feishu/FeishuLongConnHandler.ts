@@ -2,8 +2,9 @@ import * as lark from '@larksuiteoapi/node-sdk';
 import { v4 as uuidv4 } from 'uuid';
 import { BindingManager } from '../binding/BindingManager';
 import { ConnectionHub } from '../websocket/ConnectionHub';
-import { MAX_THREADS, MessageType, ThreadSummary } from '../types';
+import { MAX_THREADS, MessageType, ThreadSummary, Attachment } from '../types';
 import { JsonStore } from '../storage/JsonStore';
+import * as fs from 'fs';
 
 /**
  * Feishu Long Connection Handler configuration
@@ -129,8 +130,8 @@ export class FeishuLongConnHandler {
       const message = data.message;
       const sender = data.sender;
 
-      // Only handle text and post (rich text) messages; skip images, files, etc.
-      if (message.message_type !== 'text' && message.message_type !== 'post') {
+      // Only handle text, post (rich text), and image messages
+      if (message.message_type !== 'text' && message.message_type !== 'post' && message.message_type !== 'image') {
         console.log(`[FeishuHandler] Skipping message type: ${message.message_type}`);
         return;
       }
@@ -139,25 +140,39 @@ export class FeishuLongConnHandler {
       const messageId = message.message_id;
 
       // Extract parent_id for reply-based thread routing
-      // When a user replies to a specific card, Feishu includes parent_id pointing to the card
       const parentId: string | undefined = message.parent_id || undefined;
 
-      if (message.message_type === 'post') {
-        console.log(`[FeishuHandler] Post message raw content: ${message.content}`);
+      let content = '';
+      let attachments: Attachment[] | undefined;
+
+      if (message.message_type === 'image') {
+        console.log(`[FeishuHandler] Received image message, msgId=${messageId}`);
+        const imageKey = JSON.parse(message.content).image_key;
+        if (imageKey) {
+          const imageBase64 = await this.downloadFeishuImage(messageId, imageKey);
+          if (imageBase64) {
+            attachments = [{
+              type: 'image',
+              data: imageBase64,
+              mimeType: 'image/png', // Feishu SDK usually returns PNG for resources
+            }];
+            content = 'Describe this image'; // Default prompt for standalone images
+          }
+        }
+      } else {
+        content = this.parseMessageContent(message);
       }
 
-      const content = this.parseMessageContent(message);
+      console.log(`[FeishuHandler] Received ${message.message_type} from ${openId}: "${content.slice(0, 50)}${content.length > 50 ? '...' : ''}", msgId=${messageId}`);
 
-      console.log(`[FeishuHandler] Received message from ${openId}: "${content}", msgId=${messageId}`);
-
-      // If content is empty after parsing, ignore the message
-      if (!content) {
-        console.log(`[FeishuHandler] Empty content after parsing, ignoring message`);
+      // If content is empty after parsing and no attachments, ignore the message
+      if (!content && (!attachments || attachments.length === 0)) {
+        console.log(`[FeishuHandler] Empty content and no attachments, ignoring message`);
         return;
       }
 
-      // Check if it's a command
-      if (this.isCommand(content)) {
+      // Check if it's a command (only for text messages)
+      if (message.message_type !== 'image' && this.isCommand(content)) {
         // parent_id → resolve thread from card; otherwise check active thread for this user
         const resolved = parentId
           ? { threadId: this.onResolveThread?.(parentId)?.threadId, threadName: undefined }
@@ -169,7 +184,7 @@ export class FeishuLongConnHandler {
         const resolved = parentId
           ? { threadId: this.onResolveThread?.(parentId)?.threadId, threadName: undefined }
           : this.onResolveActiveThread?.(openId);
-        await this.handleRegularCommand(openId, messageId, content, resolved?.threadId, false, resolved?.threadName);
+        await this.handleRegularCommand(openId, messageId, content, resolved?.threadId, false, resolved?.threadName, attachments);
         console.log(`[FeishuHandler] Finished handling regular command, msgId=${messageId}`);
       }
     } catch (error) {
@@ -714,7 +729,7 @@ Examples:
   /**
    * Handle regular command (non-slash commands)
    */
-  private async handleRegularCommand(openId: string, messageId: string, content: string, threadId?: string, pendingNewThread = false, threadName?: string): Promise<void> {
+  private async handleRegularCommand(openId: string, messageId: string, content: string, threadId?: string, pendingNewThread = false, threadName?: string, attachments?: Attachment[]): Promise<void> {
     try {
       // Find user binding
       const binding = await this.bindingManager.getUserBinding(openId);
@@ -757,7 +772,7 @@ Examples:
 
       // Register streaming session BEFORE sending command to avoid race condition
       // where stream chunks arrive before registration
-      const feishuMessageId = await this.sendStreamingStart(openId, '🤔 Processing...', threadName);
+      const feishuMessageId = await this.sendStreamingStart(openId, attachments ? '🖼️ Processing image...' : '🤔 Processing...', threadName);
       console.log(`[FeishuHandler] Created card ${feishuMessageId} for command ${commandMessageId}`);
       if (this.onStartStreaming) {
         this.onStartStreaming(commandMessageId, openId, feishuMessageId, activeDevice.deviceId, threadId, pendingNewThread);
@@ -769,6 +784,7 @@ Examples:
         messageId: commandMessageId,
         timestamp: Date.now(),
         content,
+        attachments,
         openId,
         threadId, // Forward threadId to CLI for per-thread routing
       });
@@ -784,6 +800,48 @@ Examples:
       console.error('Error handling regular command:', error);
       await this.replyToMessage(messageId, '❌ Error processing command, please try again later');
     }
+  }
+
+  /**
+   * Download image from Feishu and return as base64 string
+   */
+  private async downloadFeishuImage(messageId: string, imageKey: string): Promise<string | null> {
+    try {
+      console.log(`[FeishuHandler] Downloading image resource: messageId=${messageId}, imageKey=${imageKey}`);
+      
+      const response = await this.client.im.messageResource.get({
+        path: {
+          message_id: messageId,
+          file_key: imageKey,
+        },
+        params: {
+          type: 'image',
+        }
+      });
+
+      if (!response) {
+        throw new Error('Empty response from Feishu SDK');
+      }
+
+      // Feishu SDK returns a readable stream for resources
+      const buffer = await this.streamToBuffer(response as any);
+      return buffer.toString('base64');
+    } catch (error: any) {
+      console.error('[FeishuHandler] Failed to download Feishu image:', error?.message || error);
+      return null;
+    }
+  }
+
+  /**
+   * Helper to convert readable stream to buffer
+   */
+  private streamToBuffer(stream: NodeJS.ReadableStream): Promise<Buffer> {
+    return new Promise((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      stream.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+      stream.on('error', (err) => reject(err));
+      stream.on('end', () => resolve(Buffer.concat(chunks)));
+    });
   }
 
   /**

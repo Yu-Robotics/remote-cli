@@ -84,7 +84,10 @@ export interface CommandMessage extends WSMessage {
   data: {
     openId: string;
     content: string;
+    attachments?: Attachment[];
     workingDir?: string;
+    isSlashCommand?: boolean;
+    threadId?: string;
   };
 }
 
@@ -118,7 +121,7 @@ export interface ThreadSummary {
 }
 
 // Content block types for structured messages
-export type ContentBlockType = 'text' | 'tool_use' | 'tool_result' | 'divider' | 'redacted_thinking' | 'plan_mode';
+export type ContentBlockType = 'text' | 'tool_use' | 'tool_result' | 'divider' | 'redacted_thinking' | 'plan_mode' | 'image';
 
 // Base content block
 export interface ContentBlock {
@@ -130,6 +133,18 @@ export interface TextBlock extends ContentBlock {
   type: 'text';
   content: string;
 }
+
+// Image content block (base64 encoded)
+export interface ImageBlock extends ContentBlock {
+  type: 'image';
+  data: string; // base64 data
+  mimeType: string;
+}
+
+/**
+ * Attachment for incoming messages
+ */
+export type Attachment = ImageBlock;
 
 // Tool use information
 export interface ToolUseInfo {
@@ -182,7 +197,7 @@ export interface PlanModeBlock extends ContentBlock {
 }
 
 // Union type for all content blocks
-export type ContentBlockUnion = TextBlock | ToolUseBlock | ToolResultBlock | DividerBlock | RedactedThinkingBlock | PlanModeBlock;
+export type ContentBlockUnion = TextBlock | ToolUseBlock | ToolResultBlock | DividerBlock | RedactedThinkingBlock | PlanModeBlock | ImageBlock;
 
 // Structured content for rich message formatting
 export interface StructuredContent {
