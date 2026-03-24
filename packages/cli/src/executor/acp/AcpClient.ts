@@ -13,6 +13,7 @@ import type {
   JsonRpcSuccessResponse,
   JsonRpcErrorResponse,
   AcpSessionUpdateParams,
+  ContentBlock,
 } from './AcpTypes';
 
 // ─── Grace period before SIGKILL after SIGTERM (mirrors acpx) ─────────────────
@@ -112,10 +113,10 @@ export class AcpClient {
     await this.sendRequest('session/set_mode', { sessionId, modeId });
   }
 
-  async prompt(sessionId: string, text: string): Promise<{ stopReason: string }> {
+  async prompt(sessionId: string, blocks: ContentBlock[]): Promise<{ stopReason: string }> {
     const result = await this.sendRequest('session/prompt', {
       sessionId,
-      prompt: [{ type: 'text', text }],
+      prompt: blocks,
     }) as { stopReason: string };
     return result;
   }

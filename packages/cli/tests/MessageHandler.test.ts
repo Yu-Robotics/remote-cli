@@ -92,6 +92,60 @@ describe('MessageHandler', () => {
     await ctx.handler.destroy();
   });
 
+  describe('multimodal prompts', () => {
+    it('should pass attachments to executor.execute', async () => {
+      ctx.mockExecutor.execute.mockResolvedValue({ success: true, output: 'Saw the image' });
+
+      const message = {
+        type: 'command',
+        messageId: 'msg-img',
+        content: 'describe this',
+        attachments: [{
+          type: 'image',
+          data: 'base64data',
+          mimeType: 'image/png'
+        }],
+        timestamp: Date.now(),
+      };
+
+      await ctx.handler.handleMessage(message as any);
+
+      expect(ctx.mockExecutor.execute).toHaveBeenCalledWith(
+        'describe this',
+        expect.objectContaining({
+          attachments: [
+            expect.objectContaining({ type: 'image', data: 'base64data' })
+          ]
+        })
+      );
+    });
+
+    it('should handle images with empty content', async () => {
+      ctx.mockExecutor.execute.mockResolvedValue({ success: true, output: 'Saw the image' });
+
+      const message = {
+        type: 'command',
+        messageId: 'msg-img-only',
+        content: '',
+        attachments: [{
+          type: 'image',
+          data: 'base64data',
+          mimeType: 'image/png'
+        }],
+        timestamp: Date.now(),
+      };
+
+      await ctx.handler.handleMessage(message as any);
+
+      expect(ctx.mockExecutor.execute).toHaveBeenCalledWith(
+        '',
+        expect.objectContaining({
+          attachments: [expect.any(Object)]
+        })
+      );
+    });
+  });
+
   describe('initialization', () => {
     it('should create handler with dependencies', () => {
       expect(ctx.handler).toBeDefined();

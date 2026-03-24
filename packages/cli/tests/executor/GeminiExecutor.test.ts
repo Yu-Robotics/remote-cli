@@ -33,7 +33,7 @@ vi.mock('../../src/executor/acp/AcpClient', () => ({
     newSession: mockNewSession,
     setSessionMode: mockSetSessionMode,
     sendCancel: mockSendCancel,
-    prompt: async (sessionId: string, promptText: string) => {
+    prompt: async (sessionId: string, promptBlocks: any[]) => {
       callbacks.onTextChunk('Hello ');
       callbacks.onTextChunk('world');
       if (callbacks.onToolCall) {
@@ -42,7 +42,7 @@ vi.mock('../../src/executor/acp/AcpClient', () => ({
       if (callbacks.onToolResult) {
         callbacks.onToolResult('tc-1', 'completed', 'file contents');
       }
-      return mockPrompt(sessionId, promptText);
+      return mockPrompt(sessionId, promptBlocks);
     },
     destroy: mockDestroy,
   })),
@@ -137,18 +137,48 @@ describe('GeminiExecutor', () => {
     await executor.execute('follow-up question', {});
 
     const secondCall = mockPrompt.mock.calls[1];
-    // No history prefix — just the raw prompt
-    expect(secondCall[1]).toBe('follow-up question');
-    expect(secondCall[1]).not.toContain('=== PREVIOUS CONVERSATION ===');
-    expect(secondCall[1]).not.toContain('first question');
+    // No history prefix — just the raw prompt blocks
+    const blocks = secondCall[1];
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].text).toBe('follow-up question');
   });
 
   it('should use the same sessionId for all prompts in a session', async () => {
-    await executor.execute('first', {});
-    await executor.execute('second', {});
 
-    expect(mockPrompt.mock.calls[0][0]).toBe('mock-session-id');
-    expect(mockPrompt.mock.calls[1][0]).toBe('mock-session-id');
+    await executor.execute('describe this', {
+      attachments: [{
+        type: 'image',
+        data: 'base64data',
+        mimeType: 'image/png'
+      }]
+    });
+
+    const call = mockPrompt.mock.calls[0];
+    const blocks = call[1];
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0]).toEqual({ type: 'text', text: 'describe this' });
+    expect(blocks[1]).toEqual({ type: 'image', data: 'base64data', mimeType: 'image/png' });
+  });
+
+  it('should handle standalone image prompts', async () => {
+    await executor.execute('', {
+      attachments: [{
+        type: 'image',
+        data: 'base64data',
+        mimeType: 'image/png'
+      }]
+    });
+
+    const call = mockPrompt.mock.calls[0];
+    const blocks = call[1];
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toEqual({ type: 'image', data: 'base64data', mimeType: 'image/png' });
+  });
+
+  it('should return error on empty prompt and no attachments', async () => {
+    const result = await executor.execute('', {});
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('Empty prompt');
   });
 
   // ─── Process crash recovery ───────────────────────────────────────────────
@@ -266,7 +296,9 @@ describe('GeminiExecutor', () => {
     expect(MockAcpClient).toHaveBeenCalledTimes(1);
 
     // Fresh start prompt has no history prefix
-    expect(mockPrompt.mock.calls[0][1]).toBe('fresh start');
+    const blocks = mockPrompt.mock.calls[0][1];
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].text).toBe('fresh start');
   });
 
   // ─── abort() ─────────────────────────────────────────────────────────────

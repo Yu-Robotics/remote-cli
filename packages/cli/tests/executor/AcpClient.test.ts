@@ -116,7 +116,7 @@ describe('AcpClient - JSON-RPC lifecycle', () => {
   });
 
   it('sends session/prompt with correct payload', async () => {
-    const p = client.prompt('sess-1', 'hello world');
+    const p = client.prompt('sess-1', [{ type: 'text', text: 'hello world' }]);
     const req = sentRequest('session/prompt');
     expect(req.params).toMatchObject({
       sessionId: 'sess-1',
@@ -126,6 +126,7 @@ describe('AcpClient - JSON-RPC lifecycle', () => {
     const result = await p;
     expect(result.stopReason).toBe('end_turn');
   });
+
 
   it('rejects when server returns JSON-RPC error', async () => {
     const p = client.initialize();

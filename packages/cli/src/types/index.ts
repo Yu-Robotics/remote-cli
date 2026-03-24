@@ -35,7 +35,7 @@ export interface ToolResultInfo {
 /**
  * Content block types for structured streaming messages
  */
-export type ContentBlockType = 'text' | 'tool_use' | 'tool_result' | 'divider' | 'redacted_thinking';
+export type ContentBlockType = 'text' | 'tool_use' | 'tool_result' | 'divider' | 'redacted_thinking' | 'image';
 
 /**
  * Base content block interface
@@ -51,6 +51,20 @@ export interface TextBlock extends ContentBlock {
   type: 'text';
   content: string;
 }
+
+/**
+ * Image content block (base64 encoded)
+ */
+export interface ImageBlock extends ContentBlock {
+  type: 'image';
+  data: string; // base64 data
+  mimeType: string;
+}
+
+/**
+ * Attachment for incoming messages
+ */
+export type Attachment = ImageBlock;
 
 /**
  * Tool use content block
@@ -90,7 +104,7 @@ export interface RedactedThinkingBlock extends ContentBlock {
 /**
  * Union type for all content blocks
  */
-export type ContentBlockUnion = TextBlock | ToolUseBlock | ToolResultBlock | DividerBlock | RedactedThinkingBlock;
+export type ContentBlockUnion = TextBlock | ToolUseBlock | ToolResultBlock | DividerBlock | RedactedThinkingBlock | ImageBlock;
 
 /**
  * Structured content for rich message formatting
@@ -109,6 +123,8 @@ export interface IncomingMessage {
   type: 'command' | 'status' | 'ping';
   messageId: string;
   content?: string;
+  /** Optional attachments (e.g. images) */
+  attachments?: Attachment[];
   workingDirectory?: string;
   openId?: string;
   timestamp: number;

@@ -46,6 +46,9 @@ describe('FeishuLongConnHandler', () => {
           patch: vi.fn(),
           reply: vi.fn(),
           delete: vi.fn()
+        },
+        messageResource: {
+          get: vi.fn()
         }
       }
     };
@@ -1145,13 +1148,13 @@ describe('FeishuLongConnHandler', () => {
     it('should ignore non-text/post messages', async () => {
       const logSpy = vi.spyOn(console, 'log');
       const data = {
-        message: { message_type: 'image', content: '{}' },
+        message: { message_type: 'file', content: '{}' },
         sender: { sender_id: { open_id: 'ou_123' } }
       };
 
       await (handler as any).handleMessageEvent(data);
 
-      expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Skipping message type: image'));
+      expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Skipping message type: file'));
     });
 
     it('should ignore empty content messages', async () => {
@@ -1192,7 +1195,7 @@ describe('FeishuLongConnHandler', () => {
 
       await (handler as any).handleMessageEvent(data);
 
-      expect(handleRegularCommandSpy).toHaveBeenCalledWith('ou_123', 'msg_123', 'hello', undefined, false, undefined);
+      expect(handleRegularCommandSpy).toHaveBeenCalledWith('ou_123', 'msg_123', 'hello', undefined, false, undefined, undefined);
     });
 
     it('should resolve threadId from parentId if onResolveThread is set', async () => {
@@ -1214,7 +1217,7 @@ describe('FeishuLongConnHandler', () => {
       await (handler as any).handleMessageEvent(data);
 
       expect(onResolveThread).toHaveBeenCalledWith('msg_parent_123');
-      expect(handleRegularCommandSpy).toHaveBeenCalledWith('ou_123', 'msg_456', 'reply', 'thread_abc', false, undefined);
+      expect(handleRegularCommandSpy).toHaveBeenCalledWith('ou_123', 'msg_456', 'reply', 'thread_abc', false, undefined, undefined);
     });
 
     it('should resolve active thread if no parentId and onResolveActiveThread is set', async () => {
@@ -1235,7 +1238,7 @@ describe('FeishuLongConnHandler', () => {
       await (handler as any).handleMessageEvent(data);
 
       expect(onResolveActiveThread).toHaveBeenCalledWith('ou_123');
-      expect(handleRegularCommandSpy).toHaveBeenCalledWith('ou_123', 'msg_789', 'new message', 'thread_active', false, 'Active');
+      expect(handleRegularCommandSpy).toHaveBeenCalledWith('ou_123', 'msg_789', 'new message', 'thread_active', false, 'Active', undefined);
     });
 
     it('should handle errors in handleMessageEvent', async () => {
