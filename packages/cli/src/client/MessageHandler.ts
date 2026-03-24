@@ -1,6 +1,6 @@
 import { WebSocketClient } from './WebSocketClient';
 import { DirectoryGuard } from '../security/DirectoryGuard';
-import { IncomingMessage, OutgoingMessage, StructuredContent, ToolUseInfo, ToolResultInfo } from '../types';
+import { IncomingMessage, OutgoingMessage, StructuredContent, ToolUseInfo, ToolResultInfo, Attachment } from '../types';
 import { ThreadExecutorPool } from '../thread/ThreadExecutorPool';
 import { ThreadManager } from '../thread/ThreadManager';
 import { DEFAULT_THREAD_NAME } from '../thread/types';
@@ -111,7 +111,7 @@ export class MessageHandler {
    * Handle command message — route to the correct thread executor.
    */
   private async handleCommandMessage(message: IncomingMessage): Promise<void> {
-    const { messageId, content, workingDirectory, openId, isSlashCommand, threadId } = message;
+    const { messageId, content, attachments, workingDirectory, openId, isSlashCommand, threadId } = message;
 
     this.currentOpenId = openId;
     this.notificationAdapter.setCurrentOpenId(openId);
@@ -218,7 +218,7 @@ export class MessageHandler {
 
       const expandedContent = this.expandCommandShortcuts(content!);
       const processedContent = processFileReadContent(expandedContent);
-      await this.executeCommand(messageId, resolvedThreadId, processedContent, executor);
+      await this.executeCommand(messageId, resolvedThreadId, processedContent, executor, attachments);
     } catch (error) {
       this.threadPool.setThreadError(resolvedThreadId, true);
       this.sendResponse(messageId, resolvedThreadId, {
@@ -277,10 +277,11 @@ export class MessageHandler {
     });
   }
 
-  private isValidMessage(message: Message): boolean {
+  private isValidMessage(message: Message | IncomingMessage): boolean {
     if (!message || typeof message !== 'object') return false;
     if (message.type !== 'command') return true;
-    return Boolean(message.messageId && message.content);
+    const msg = message as IncomingMessage;
+    return Boolean(msg.messageId && (msg.content || (msg.attachments && msg.attachments.length > 0)));
   }
 
   /**
@@ -865,7 +866,8 @@ You can also use natural language commands to control Claude Code CLI.`,
     messageId: string,
     threadId: string,
     content: string,
-    executor: IExecutor
+    executor: IExecutor,
+    attachments?: Attachment[]
   ): Promise<void> {
     try {
       const result = await executor.execute(content, {
@@ -874,6 +876,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         onToolResult: (toolResult: ToolResultInfo) => this.sendToolResult(messageId, threadId, toolResult),
         onRedactedThinking: () => this.sendRedactedThinking(messageId, threadId),
         onPlanMode: (planContent: string) => this.sendPlanMode(messageId, threadId, planContent),
+        attachments,
       });
 
       if (!result.success && result.error && result.error.includes('Prompt too long')) {
@@ -896,6 +899,7 @@ You can also use natural language commands to control Claude Code CLI.`,
             onToolResult: (toolResult: ToolResultInfo) => this.sendToolResult(messageId, threadId, toolResult),
             onRedactedThinking: () => this.sendRedactedThinking(messageId, threadId),
             onPlanMode: (planContent: string) => this.sendPlanMode(messageId, threadId, planContent),
+            attachments,
           });
           this.sendResponse(messageId, threadId, { success: retryResult.success, error: retryResult.error, threads: this.threadPool.getSummaries() });
           return;
