@@ -20,7 +20,15 @@ interface ClaudeInputMessage {
     /** Role of the message sender */
     role: 'user';
     /** Message content */
-    content: string;
+    content: string | Array<{
+      type: string;
+      text?: string;
+      source?: {
+        type: string;
+        media_type: string;
+        data: string;
+      };
+    }>;
   };
   /** Whether this is a slash command (e.g. /compact) to be interpreted by Claude CLI */
   isSlashCommand?: boolean;
@@ -1237,12 +1245,37 @@ export class ClaudePersistentExecutor extends EventEmitter {
       }, command.options.timeout);
     }
 
+    let content: any = command.prompt;
+    if (command.options.attachments && command.options.attachments.length > 0) {
+      const blocks: any[] = [];
+      if (command.prompt) {
+        blocks.push({ type: 'text', text: command.prompt });
+      }
+      for (const attachment of command.options.attachments) {
+        if (attachment.type === 'image') {
+          blocks.push({
+            type: 'image',
+            source: {
+              type: 'base64',
+              media_type: attachment.mimeType,
+              data: attachment.data,
+            }
+          });
+        }
+      }
+      if (blocks.length > 0) {
+        content = blocks;
+      } else if (!command.prompt) {
+         content = ''; // Fallback for safety
+      }
+    }
+
     // Send the command
     const inputMessage: ClaudeInputMessage = {
       type: 'user',
       message: {
         role: 'user',
-        content: command.prompt,
+        content,
       },
       ...(command.isSlashCommand ? { isSlashCommand: true } : {}),
     };
