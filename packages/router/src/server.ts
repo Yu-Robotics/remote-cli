@@ -117,6 +117,23 @@ export class RouterServer {
       await this.feishuLongConnHandler.sendCommandFromCardAction(openId, '/thread new', true);
     };
 
+    // Register callback for device switch — clear thread state tied to the old device
+    this.feishuLongConnHandler.onDeviceSwitch = (openId: string, oldDeviceId: string | undefined) => {
+      // Clear the active thread so the next message goes to the new device's default thread
+      this.activeThreadMap.delete(openId);
+      console.log(`[RouterServer] Cleared activeThreadMap for ${openId} after device switch`);
+
+      // Remove cardThreadMap entries that belonged to the old device to avoid stale thread lookups
+      if (oldDeviceId) {
+        for (const [feishuMessageId, entry] of this.cardThreadMap.entries()) {
+          if (entry.deviceId === oldDeviceId) {
+            this.cardThreadMap.delete(feishuMessageId);
+          }
+        }
+        console.log(`[RouterServer] Cleared cardThreadMap entries for old device ${oldDeviceId}`);
+      }
+    };
+
     this.setupMiddleware();
     this.setupRoutes();
   }

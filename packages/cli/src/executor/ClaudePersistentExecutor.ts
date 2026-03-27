@@ -1,7 +1,7 @@
 import { spawn, ChildProcess } from 'child_process';
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import { claudeCodeHooks } from '../hooks/ClaudeCodeHooks';
-import { StructuredContent, ContentBlockUnion, ToolUseInfo, ToolResultInfo } from '../types';
+import { StructuredContent, ContentBlockUnion, ToolUseInfo, ToolResultInfo, Attachment } from '../types';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -114,6 +114,8 @@ export interface PersistentClaudeOptions {
   onRedactedThinking?: () => void;
   /** Plan mode callback (fires when Claude completes plan between EnterPlanMode and ExitPlanMode) */
   onPlanMode?: (planContent: string) => void;
+  /** Image and other attachments to include with the prompt */
+  attachments?: Attachment[];
   /** Execution timeout (milliseconds), default 300000 (5 minutes) */
   timeout?: number;
 }
