@@ -200,6 +200,64 @@ describe('stripAnsi', () => {
     });
   });
 
+  describe('DEC private mode sequences', () => {
+    it('should strip synchronized update mode', () => {
+      expect(stripAnsi('\x1B[?2026hHello')).toBe('Hello');
+      expect(stripAnsi('\x1B[?2026lWorld')).toBe('World');
+    });
+
+    it('should strip cursor visibility sequences', () => {
+      expect(stripAnsi('\x1B[?25hVisible')).toBe('Visible');
+      expect(stripAnsi('\x1B[?25lHidden')).toBe('Hidden');
+    });
+
+    it('should strip alternate screen buffer', () => {
+      expect(stripAnsi('\x1B[?1049hContent\x1B[?1049l')).toBe('Content');
+    });
+
+    it('should strip bracketed paste mode', () => {
+      expect(stripAnsi('\x1B[?2004hPaste\x1B[?2004l')).toBe('Paste');
+    });
+  });
+
+  describe('OSC sequences', () => {
+    it('should strip window title sequences (BEL terminated)', () => {
+      expect(stripAnsi('\x1B]0;My Title\x07Content')).toBe('Content');
+    });
+
+    it('should strip window title sequences (ST terminated)', () => {
+      expect(stripAnsi('\x1B]0;My Title\x1B\\Content')).toBe('Content');
+    });
+
+    it('should strip hyperlink sequences', () => {
+      expect(stripAnsi('\x1B]8;;https://example.com\x07Link\x1B]8;;\x07')).toBe('Link');
+    });
+  });
+
+  describe('charset sequences', () => {
+    it('should strip charset selection sequences', () => {
+      expect(stripAnsi('\x1B(BText')).toBe('Text');
+      expect(stripAnsi('\x1B(0Line\x1B(B')).toBe('Line');
+    });
+  });
+
+  describe('Claude Code TUI rendering', () => {
+    it('should fully strip Claude Code v2.1.59 TUI header', () => {
+      // Simulated TUI output with private mode + colors
+      const tui = '\x1B[?2026h\x1B[32m▐▛███▜▌\x1B[1mClaude Code\x1B[0mv2.1.59';
+      const result = stripAnsi(tui);
+      expect(result).not.toContain('[?2026h');
+      expect(result).toContain('Claude Code');
+    });
+
+    it('should strip mixed escape sequences from TUI prompt line', () => {
+      const promptLine = '\x1B[?25l\x1B[36m❯\x1B[0m Try "create a util logging.py..."';
+      const result = stripAnsi(promptLine);
+      expect(result).toBe('❯ Try "create a util logging.py..."');
+      expect(result).not.toContain('[?25l');
+    });
+  });
+
   describe('edge cases', () => {
     it('should handle incomplete ANSI sequences', () => {
       // These are malformed and should be left as-is or partially stripped

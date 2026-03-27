@@ -110,6 +110,12 @@ export class FeishuLongConnHandler {
   onCardNewThread?: (openId: string) => Promise<void>;
 
   /**
+   * Callback invoked after a user switches to a different device.
+   * RouterServer uses this to clear stale thread state tied to the old device.
+   */
+  onDeviceSwitch?: (openId: string, oldDeviceId: string | undefined) => void;
+
+  /**
    * Callback to resolve the user's currently active thread (for new top-level messages
    * that have no parent_id).
    */
@@ -591,6 +597,9 @@ export class FeishuLongConnHandler {
         return;
       }
 
+      // Capture old device ID before switching so we can clear stale thread state
+      const oldDeviceId = userBinding.activeDeviceId;
+
       // Resolve identifier to device ID
       const deviceId = this.resolveDeviceIdentifier(identifier, userBinding);
 
@@ -614,6 +623,9 @@ export class FeishuLongConnHandler {
         await this.replyToMessage(messageId, '❌ Failed to get active device after switch');
         return;
       }
+
+      // Notify RouterServer to clear stale thread state for the old device
+      this.onDeviceSwitch?.(openId, oldDeviceId);
 
       await this.replyToMessage(
         messageId,
