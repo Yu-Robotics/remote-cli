@@ -1502,6 +1502,35 @@ describe('FeishuLongConnHandler', () => {
       expect(replySpy).toHaveBeenCalledWith('msg_1', expect.stringContaining('Switched to device: **D1**'));
     });
 
+    it('should invoke onDeviceSwitch callback with openId and old deviceId after successful switch', async () => {
+      const binding = { activeDeviceId: 'old-device', devices: [{ deviceId: 'new-device', deviceName: 'New' }] };
+      mockBindingManager.getUserBinding.mockResolvedValue(binding);
+      mockBindingManager.switchActiveDevice.mockResolvedValue(true);
+      mockBindingManager.getActiveDevice.mockResolvedValue({ deviceId: 'new-device', deviceName: 'New' });
+      vi.spyOn(handler as any, 'replyToMessage').mockResolvedValue(undefined);
+
+      const onDeviceSwitch = vi.fn();
+      handler.onDeviceSwitch = onDeviceSwitch;
+
+      await (handler as any).handleDeviceSwitch('ou_123', 'msg_1', 'new-device');
+
+      expect(onDeviceSwitch).toHaveBeenCalledWith('ou_123', 'old-device');
+    });
+
+    it('should not invoke onDeviceSwitch callback when switch fails', async () => {
+      const binding = { activeDeviceId: 'old-device', devices: [{ deviceId: 'd1', deviceName: 'D1' }] };
+      mockBindingManager.getUserBinding.mockResolvedValue(binding);
+      mockBindingManager.switchActiveDevice.mockResolvedValue(false);
+      vi.spyOn(handler as any, 'replyToMessage').mockResolvedValue(undefined);
+
+      const onDeviceSwitch = vi.fn();
+      handler.onDeviceSwitch = onDeviceSwitch;
+
+      await (handler as any).handleDeviceSwitch('ou_123', 'msg_1', 'd1');
+
+      expect(onDeviceSwitch).not.toHaveBeenCalled();
+    });
+
     it('should handle identifier not found', async () => {
       mockBindingManager.getUserBinding.mockResolvedValue({ devices: [] });
       const replySpy = vi.spyOn(handler as any, 'replyToMessage').mockResolvedValue(undefined);
