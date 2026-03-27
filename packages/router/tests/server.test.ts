@@ -173,6 +173,57 @@ describe('RouterServer', () => {
     expect(mockFeishuHandler.sendCommandFromCardAction).toHaveBeenCalledWith('user-1', '/thread new', true);
   });
 
+  it('should clear activeThreadMap when device is switched', () => {
+    const onResolveActiveThread = mockFeishuHandler.setOnResolveActiveThread.mock.calls[0][0];
+    const onCardSwitchThread = mockFeishuHandler.onCardSwitchThread;
+    const onDeviceSwitch = mockFeishuHandler.onDeviceSwitch;
+
+    // Populate activeThreadMap for the user
+    onCardSwitchThread('user-1', 'thread-abc', 'My Thread');
+    expect(onResolveActiveThread('user-1')).toEqual({ threadId: 'thread-abc', threadName: 'My Thread' });
+
+    // Switch device — should clear the entry
+    onDeviceSwitch('user-1', 'old-device-id');
+    expect(onResolveActiveThread('user-1')).toBeUndefined();
+  });
+
+  it('should not affect other users activeThreadMap when device is switched', () => {
+    const onResolveActiveThread = mockFeishuHandler.setOnResolveActiveThread.mock.calls[0][0];
+    const onCardSwitchThread = mockFeishuHandler.onCardSwitchThread;
+    const onDeviceSwitch = mockFeishuHandler.onDeviceSwitch;
+
+    onCardSwitchThread('user-1', 'thread-1', 'Thread 1');
+    onCardSwitchThread('user-2', 'thread-2', 'Thread 2');
+
+    onDeviceSwitch('user-1', 'old-device-id');
+
+    expect(onResolveActiveThread('user-1')).toBeUndefined();
+    expect(onResolveActiveThread('user-2')).toEqual({ threadId: 'thread-2', threadName: 'Thread 2' });
+  });
+
+  it('should remove cardThreadMap entries for old device when device is switched', () => {
+    const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
+    const onResolveThread = mockFeishuHandler.setOnResolveThread.mock.calls[0][0];
+    const onDeviceSwitch = mockFeishuHandler.onDeviceSwitch;
+
+    // Populate cardThreadMap via streaming session registrations
+    onStartStreaming('msg-1', 'user-1', 'feishu-card-1', 'old-device', 'thread-1');
+    onStartStreaming('msg-2', 'user-1', 'feishu-card-2', 'old-device', 'thread-2');
+    onStartStreaming('msg-3', 'user-1', 'feishu-card-3', 'other-device', 'thread-3');
+
+    expect(onResolveThread('feishu-card-1')).toBeDefined();
+    expect(onResolveThread('feishu-card-2')).toBeDefined();
+    expect(onResolveThread('feishu-card-3')).toBeDefined();
+
+    // Switch away from old-device — its card entries should be purged
+    onDeviceSwitch('user-1', 'old-device');
+
+    expect(onResolveThread('feishu-card-1')).toBeUndefined();
+    expect(onResolveThread('feishu-card-2')).toBeUndefined();
+    // Entry for other-device should be unaffected
+    expect(onResolveThread('feishu-card-3')).toBeDefined();
+  });
+
   it('should handle streaming message with new thread info in RESPONSE', async () => {
     await server.start();
     const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
