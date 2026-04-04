@@ -70,6 +70,23 @@ program
   .description('Start the remote CLI service')
   .option('-d, --daemon', 'Run as background daemon')
   .action(async (options) => {
+    // In non-interactive environments (nohup, systemd), prevent process exit on stdin EOF.
+    // Without this, Node.js may drain the event loop if stdin reaches EOF (/dev/null).
+    if (!process.stdin.isTTY) {
+      process.stdin.resume();
+    }
+
+    // Catch unhandled errors so that background processes write them to nohup.out
+    // instead of silently exiting.
+    process.on('uncaughtException', (error) => {
+      console.error('[remote-cli] Uncaught exception:', error);
+      process.exit(1);
+    });
+    process.on('unhandledRejection', (reason) => {
+      console.error('[remote-cli] Unhandled rejection:', reason);
+      process.exit(1);
+    });
+
     try {
       const result = await startCommand({
         daemon: options.daemon,
@@ -86,7 +103,12 @@ program
             console.log(chalk.yellow('\n⏹  Shutting down...'));
             process.exit(0);
           });
-          // Wait indefinitely
+          process.on('SIGTERM', () => {
+            console.log('[remote-cli] Received SIGTERM, shutting down...');
+            process.exit(0);
+          });
+          // Wait indefinitely — the WebSocket heartbeat setInterval also keeps
+          // the event loop alive, but this Promise makes the intent explicit.
           await new Promise(() => {});
         }
       } else {
