@@ -310,16 +310,28 @@ describe('checkServerVersion', () => {
     vi.mocked(axios.get).mockResolvedValueOnce({ data: { success: true, version: '99.0.0' } });
     mockReadlineAnswer = 'y';
 
-    const result = await checkServerVersion('http://localhost:3000');
-    expect(result).toBe(true);
+    const originalIsTTY = process.stdin.isTTY;
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+    try {
+      const result = await checkServerVersion('http://localhost:3000');
+      expect(result).toBe(true);
+    } finally {
+      Object.defineProperty(process.stdin, 'isTTY', { value: originalIsTTY, configurable: true });
+    }
   });
 
   it('returns false when router is newer, user answers n', async () => {
     vi.mocked(axios.get).mockResolvedValueOnce({ data: { success: true, version: '99.0.0' } });
     mockReadlineAnswer = 'n';
 
-    const result = await checkServerVersion('http://localhost:3000');
-    expect(result).toBe(false);
+    const originalIsTTY = process.stdin.isTTY;
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+    try {
+      const result = await checkServerVersion('http://localhost:3000');
+      expect(result).toBe(false);
+    } finally {
+      Object.defineProperty(process.stdin, 'isTTY', { value: originalIsTTY, configurable: true });
+    }
   });
 
   it('returns true without prompting when versions are equal', async () => {
@@ -352,6 +364,45 @@ describe('checkServerVersion', () => {
 
     const result = await checkServerVersion('http://localhost:3000');
     expect(result).toBe(true);
+  });
+
+  // nohup / background process: stdin is /dev/null (isTTY is undefined/false).
+  // readline.question() callback is never called on EOF, causing the Promise to
+  // hang indefinitely. The fix skips the interactive prompt in non-TTY environments.
+  it('returns true without prompting when router is newer and stdin is not a TTY (nohup)', async () => {
+    vi.mocked(axios.get).mockResolvedValueOnce({ data: { success: true, version: '99.0.0' } });
+
+    const originalIsTTY = process.stdin.isTTY;
+    // Simulate nohup: stdin is not a TTY
+    Object.defineProperty(process.stdin, 'isTTY', { value: undefined, configurable: true });
+
+    try {
+      const readline = await import('readline');
+      const result = await checkServerVersion('http://localhost:3000');
+
+      expect(result).toBe(true);
+      // Must not attempt to read from stdin in non-TTY environment
+      expect(readline.createInterface).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(process.stdin, 'isTTY', { value: originalIsTTY, configurable: true });
+    }
+  });
+
+  it('returns true without prompting when router is newer and stdin.isTTY is false', async () => {
+    vi.mocked(axios.get).mockResolvedValueOnce({ data: { success: true, version: '99.0.0' } });
+
+    const originalIsTTY = process.stdin.isTTY;
+    Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
+
+    try {
+      const readline = await import('readline');
+      const result = await checkServerVersion('http://localhost:3000');
+
+      expect(result).toBe(true);
+      expect(readline.createInterface).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(process.stdin, 'isTTY', { value: originalIsTTY, configurable: true });
+    }
   });
 });
 
@@ -393,21 +444,48 @@ describe('startCommand version check integration', () => {
     vi.mocked(axios.get).mockResolvedValueOnce({ data: { success: true, version: '99.0.0' } });
     mockReadlineAnswer = 'n';
 
-    const result = await startCommand({ daemon: false });
+    const originalIsTTY = process.stdin.isTTY;
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+    try {
+      const result = await startCommand({ daemon: false });
 
-    expect(result.success).toBe(false);
-    expect(result.error).toContain('upgrade');
-    expect(mockWsClient.connect).not.toHaveBeenCalled();
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('upgrade');
+      expect(mockWsClient.connect).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(process.stdin, 'isTTY', { value: originalIsTTY, configurable: true });
+    }
   });
 
   it('continues startup when router is newer and user answers y', async () => {
     vi.mocked(axios.get).mockResolvedValueOnce({ data: { success: true, version: '99.0.0' } });
     mockReadlineAnswer = 'y';
 
-    const result = await startCommand({ daemon: false });
+    const originalIsTTY = process.stdin.isTTY;
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+    try {
+      const result = await startCommand({ daemon: false });
 
-    expect(result.success).toBe(true);
-    expect(mockWsClient.connect).toHaveBeenCalled();
+      expect(result.success).toBe(true);
+      expect(mockWsClient.connect).toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(process.stdin, 'isTTY', { value: originalIsTTY, configurable: true });
+    }
+  });
+
+  it('continues startup automatically when router is newer and stdin is not TTY (nohup)', async () => {
+    vi.mocked(axios.get).mockResolvedValueOnce({ data: { success: true, version: '99.0.0' } });
+
+    const originalIsTTY = process.stdin.isTTY;
+    Object.defineProperty(process.stdin, 'isTTY', { value: undefined, configurable: true });
+    try {
+      const result = await startCommand({ daemon: false });
+
+      expect(result.success).toBe(true);
+      expect(mockWsClient.connect).toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(process.stdin, 'isTTY', { value: originalIsTTY, configurable: true });
+    }
   });
 
   it('continues startup normally when version check fails (network error)', async () => {
