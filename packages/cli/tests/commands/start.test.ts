@@ -4,6 +4,7 @@ import { ConfigManager } from '../../src/config/ConfigManager';
 import { WebSocketClient } from '../../src/client/WebSocketClient';
 import { CLI_VERSION } from '../../src/types';
 import axios from 'axios';
+import * as processUtils from '../../src/utils/processUtils';
 
 // ---------------------------------------------------------------------------
 // Module-level mocks
@@ -12,6 +13,8 @@ import axios from 'axios';
 vi.mock('../../src/config/ConfigManager');
 vi.mock('../../src/client/WebSocketClient');
 vi.mock('axios');
+// Default: treat tests as running in foreground so prompt tests work correctly.
+vi.mock('../../src/utils/processUtils', () => ({ isBackgroundProcess: vi.fn(() => false) }));
 vi.mock('../../src/thread/ThreadManager', () => ({
   ThreadManager: {
     initialize: vi.fn().mockResolvedValue({
@@ -486,6 +489,17 @@ describe('startCommand version check integration', () => {
     } finally {
       Object.defineProperty(process.stdin, 'isTTY', { value: originalIsTTY, configurable: true });
     }
+  });
+
+  it('continues startup automatically when router is newer and process is backgrounded (&)', async () => {
+    vi.mocked(axios.get).mockResolvedValueOnce({ data: { success: true, version: '99.0.0' } });
+    // Simulate `remote-cli start &`: stdin/stdout are TTY but process is in background group
+    vi.mocked(processUtils.isBackgroundProcess).mockReturnValueOnce(true);
+
+    const result = await startCommand({ daemon: false });
+
+    expect(result.success).toBe(true);
+    expect(mockWsClient.connect).toHaveBeenCalled();
   });
 
   it('continues startup normally when version check fails (network error)', async () => {
