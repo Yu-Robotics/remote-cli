@@ -70,14 +70,25 @@ program
   .description('Start the remote CLI service')
   .option('-d, --daemon', 'Run as background daemon')
   .action(async (options) => {
-    // In non-interactive environments (nohup, &, systemd), prevent process exit on stdin EOF.
-    // Without this, Node.js may drain the event loop if stdin reaches EOF (/dev/null).
+    // Always ignore SIGTTOU and SIGTTIN regardless of how the process was started.
+    //
+    // SIGTTOU: sent when a background process writes to the controlling TTY and the
+    //          terminal has TOSTOP set. Default handler suspends the process.
+    // SIGTTIN: sent when a background process tries to read from the controlling TTY.
+    //          Default handler also suspends the process.
+    //
+    // When the user runs `remote-cli start &`, bash puts the process in a background
+    // process group while stdin/stdout are still attached to the TTY (isTTY === true).
+    // Guarding only on `!stdin.isTTY` does NOT catch this case. Ignoring both signals
+    // unconditionally is safe — we explicitly guard all stdin reads with isBackgroundProcess().
+    process.on('SIGTTOU', () => {});
+    process.on('SIGTTIN', () => {});
+
+    // In non-interactive environments (nohup, systemd, pipes), stdin reaches EOF and
+    // Node.js drains the event loop. resume() keeps the loop alive in those cases.
+    // Not needed when stdin is a TTY (the `&` case) since TTY stdin never closes.
     if (!process.stdin.isTTY) {
       process.stdin.resume();
-      // When backgrounded with &, writing to a TTY stdout can trigger SIGTTOU (if the
-      // terminal has TOSTOP set), which would suspend the process before it ever connects.
-      // Ignoring SIGTTOU lets the process continue and write startup logs to the terminal.
-      process.on('SIGTTOU', () => {});
     }
 
     // Catch unhandled errors so that background processes write them to nohup.out
