@@ -82,6 +82,15 @@ export class ConnectionHub {
   }
 
   /**
+   * Get the WebSocket connection for a device (used to guard against stale close events)
+   * @param deviceId Device unique identifier
+   * @returns The current WebSocket, or undefined if not registered
+   */
+  getConnection(deviceId: string): WebSocket | undefined {
+    return this.connections.get(deviceId);
+  }
+
+  /**
    * Get device last active time
    * @param deviceId Device unique identifier
    * @returns Last active timestamp, returns undefined if device does not exist
