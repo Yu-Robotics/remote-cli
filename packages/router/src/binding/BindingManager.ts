@@ -83,19 +83,6 @@ export class BindingManager {
         });
       }
 
-      // Self-heal: if activeDeviceId points to a device no longer in the devices
-      // array (e.g. data corruption, manual cleanup, new-machine deployment where
-      // the old device record drifted away), promote the newly added/updated device
-      // so the user is not stuck with "No active device found" on every command.
-      const activeStillValid = existingBinding.devices.some(
-        d => d.deviceId === existingBinding.activeDeviceId
-      );
-      if (!activeStillValid) {
-        existingBinding.activeDeviceId = deviceId;
-        const promoted = existingBinding.devices.find(d => d.deviceId === deviceId);
-        if (promoted) promoted.isActive = true;
-      }
-
       existingBinding.updatedAt = now;
       await this.store.setUserBinding(openId, existingBinding);
     } else {
