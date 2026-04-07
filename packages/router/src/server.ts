@@ -475,16 +475,7 @@ export class RouterServer {
       ws.on('close', () => {
         if (heartbeatTimeout) clearTimeout(heartbeatTimeout);
         if (deviceId) {
-          // Guard against race condition: if a new connection for the same deviceId was
-          // registered BEFORE this stale close event fires, do not evict the new connection.
-          // This happens when the CLI restarts: registerConnection() closes the old ws and
-          // immediately registers the new one, but the old ws's async 'close' event fires
-          // afterwards and would otherwise remove the freshly-registered new connection.
-          if (this.connectionHub.getConnection(deviceId) === ws) {
-            this.connectionHub.unregisterConnection(deviceId);
-          } else {
-            console.log('Device close event ignored (stale ws, new ws already registered):', deviceId);
-          }
+          this.connectionHub.unregisterConnection(deviceId);
           // Clean up any streaming sessions for this device
           this.cleanupStreamingSessionsForDevice(deviceId);
           console.log('Device disconnected:', deviceId);

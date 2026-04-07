@@ -103,7 +103,6 @@ describe('RouterServer', () => {
     mockConnectionHub = {
       registerConnection: vi.fn(),
       unregisterConnection: vi.fn(),
-      getConnection: vi.fn().mockReturnValue(undefined),
       updateLastActive: vi.fn(),
       getConnectionStats: vi.fn().mockReturnValue({ totalConnections: 0, deviceIds: [] }),
       cleanupStaleConnections: vi.fn(),
@@ -675,7 +674,7 @@ describe('RouterServer', () => {
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
     const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
     onConnection(mockWs, { socket: { remoteAddress: '1' } });
-
+    
     // Bind to set deviceId
     const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
     await onMessage(Buffer.from(JSON.stringify({
@@ -684,38 +683,10 @@ describe('RouterServer', () => {
       data: { deviceId: 'd1' }
     })));
 
-    // Simulate the hub returning this ws as the current registered connection
-    // (i.e., no newer connection has replaced it)
-    mockConnectionHub.getConnection.mockReturnValue(mockWs);
-
     const onClose = mockWs.on.mock.calls.find(call => call[0] === 'close')[1];
     onClose();
-
+    
     expect(mockConnectionHub.unregisterConnection).toHaveBeenCalledWith('d1');
-  });
-
-  it('should NOT unregister when a newer ws has already replaced the closing one', async () => {
-    await server.start();
-    const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
-    const mockWsOld = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
-    onConnection(mockWsOld, { socket: { remoteAddress: '1' } });
-
-    const onMessage = mockWsOld.on.mock.calls.find(call => call[0] === 'message')[1];
-    await onMessage(Buffer.from(JSON.stringify({
-      type: MessageType.BINDING_REQUEST,
-      messageId: 'm1',
-      data: { deviceId: 'd1' }
-    })));
-
-    // Simulate a newer ws having been registered for the same deviceId
-    const mockWsNew = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
-    mockConnectionHub.getConnection.mockReturnValue(mockWsNew); // hub now points to new ws
-
-    const onClose = mockWsOld.on.mock.calls.find(call => call[0] === 'close')[1];
-    onClose();
-
-    // The stale close event must NOT evict the new connection
-    expect(mockConnectionHub.unregisterConnection).not.toHaveBeenCalled();
   });
 
   it('should stop the server gracefully', async () => {

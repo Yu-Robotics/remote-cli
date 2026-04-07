@@ -139,11 +139,7 @@ export async function checkServerVersion(serverUrl: string, spinner?: Ora): Prom
 export async function startCommand(
   options: StartCommandOptions
 ): Promise<StartCommandResult> {
-  // Disable animated spinner when not fully interactive (e.g. backgrounded with &).
-  // When stdin is not a TTY, stdout may still point to a terminal, and ora's ANSI
-  // escape sequences can trigger SIGTTOU which would suspend the background process.
-  const isInteractive = !!process.stdout.isTTY && !!process.stdin.isTTY;
-  const spinner = ora({ text: 'Starting remote CLI service...', isEnabled: isInteractive }).start();
+  const spinner = ora('Starting remote CLI service...').start();
 
   try {
     const config = await ConfigManager.initialize();
@@ -160,48 +156,6 @@ export async function startCommand(
     // Get configuration
     const allConfig = config.getAll();
     const { deviceId, serverUrl, security, service } = allConfig;
-
-    // Check for a stale/running instance and terminate it before starting.
-    // Only act if service.running is still true (i.e. was never cleanly stopped).
-    // A clean stop via `remote-cli stop` sets running=false AND clears the PID,
-    // so this block is skipped in the normal stop→start workflow.
-    const existingPid = service?.pid as number | undefined;
-    if (existingPid && existingPid !== process.pid && service?.running) {
-      try {
-        process.kill(existingPid, 0); // signal 0 = existence check only
-        // Process is still alive — terminate it gracefully
-        console.log(`Stopping existing instance (PID ${existingPid})...`);
-        try {
-          process.kill(existingPid, 'SIGTERM');
-        } catch {
-          // ignore if it died between the check and the kill
-        }
-        // Give it up to 2 seconds to exit
-        await new Promise<void>((resolve) => {
-          let waited = 0;
-          const interval = setInterval(() => {
-            try {
-              process.kill(existingPid, 0);
-            } catch {
-              clearInterval(interval);
-              resolve();
-              return;
-            }
-            waited += 200;
-            if (waited >= 2000) {
-              try { process.kill(existingPid, 'SIGKILL'); } catch { /* ignore */ }
-              clearInterval(interval);
-              resolve();
-            }
-          }, 200);
-        });
-      } catch (e: any) {
-        if (e.code !== 'ESRCH') {
-          console.warn(`Could not check existing instance: ${e.message}`);
-        }
-        // ESRCH = process already gone, nothing to do
-      }
-    }
 
     // Validate configuration
     if (!deviceId) {
@@ -327,10 +281,12 @@ export async function startCommand(
       };
     }
 
-    // Save service state — always record PID so stop can signal the process
+    // Save service state
     await config.set('service.running', true);
     await config.set('service.startedAt', Date.now());
-    await config.set('service.pid', process.pid);
+    if (options.daemon) {
+      await config.set('service.pid', process.pid);
+    }
 
     spinner.succeed(
       options.daemon
