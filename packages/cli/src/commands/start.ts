@@ -95,6 +95,10 @@ export async function checkServerVersion(serverUrl: string, spinner?: Ora): Prom
     if (!data?.success || !data?.version) return true;
 
     if (isNewerVersion(data.version, CLI_VERSION)) {
+      // Stop spinner before prompting to avoid stdin interference
+      if (spinner) {
+        spinner.stop();
+      }
       console.log('');
       console.log(`⚠️  Version mismatch detected:`);
       console.log(`   Router version : ${data.version}`);
@@ -102,21 +106,6 @@ export async function checkServerVersion(serverUrl: string, spinner?: Ora): Prom
       console.log(`   The router has been upgraded. It is recommended to upgrade your CLI:`);
       console.log(`   npm install -g @yu_robotics/remote-cli`);
       console.log('');
-
-      // In non-TTY environments (nohup, daemon, systemd), stdin is /dev/null.
-      // readline.question() callback is never called on EOF, causing the Promise
-      // to hang indefinitely and the CLI to never connect. Skip the prompt and
-      // continue automatically so background startup works correctly.
-      if (!process.stdin.isTTY) {
-        console.log('[remote-cli] Non-interactive environment detected, continuing automatically...');
-        if (spinner) spinner.start();
-        return true;
-      }
-
-      // Stop spinner before prompting to avoid stdin interference
-      if (spinner) {
-        spinner.stop();
-      }
       const proceed = await promptYesNo('Continue with the current version? (y/n): ');
       if (!proceed) {
         console.log('Aborted. Please upgrade and try again.');
