@@ -7,7 +7,6 @@ import { ThreadManager } from '../thread/ThreadManager';
 import { ThreadExecutorPool } from '../thread/ThreadExecutorPool';
 import { CLI_VERSION } from '../types';
 import type { ExecutorConfig } from '../types/config';
-import { isBackgroundProcess } from '../utils/processUtils';
 import axios from 'axios';
 import * as readline from 'readline';
 import { execFile } from 'child_process';
@@ -104,12 +103,11 @@ export async function checkServerVersion(serverUrl: string, spinner?: Ora): Prom
       console.log(`   npm install -g @yu_robotics/remote-cli`);
       console.log('');
 
-      // In non-interactive environments (nohup, &, systemd), skip the prompt.
-      // When `remote-cli start &` is used, stdin.isTTY is still true but the
-      // process is in a background process group — attempting to read from TTY
-      // stdin would trigger SIGTTIN and suspend the process. isBackgroundProcess()
-      // detects this by comparing our process group to the terminal's foreground group.
-      if (!process.stdin.isTTY || isBackgroundProcess()) {
+      // In non-TTY environments (nohup, daemon, systemd), stdin is /dev/null.
+      // readline.question() callback is never called on EOF, causing the Promise
+      // to hang indefinitely and the CLI to never connect. Skip the prompt and
+      // continue automatically so background startup works correctly.
+      if (!process.stdin.isTTY) {
         console.log('[remote-cli] Non-interactive environment detected, continuing automatically...');
         if (spinner) spinner.start();
         return true;
@@ -142,10 +140,9 @@ export async function startCommand(
   options: StartCommandOptions
 ): Promise<StartCommandResult> {
   // Disable animated spinner when not fully interactive (e.g. backgrounded with &).
-  // When stdin is not a TTY or the process is in a background process group, writing
-  // ANSI escape sequences to TTY stdout (if TOSTOP is set) can trigger SIGTTOU and
-  // suspend the process. Also avoids garbled output in non-interactive contexts.
-  const isInteractive = !!process.stdout.isTTY && !!process.stdin.isTTY && !isBackgroundProcess();
+  // When stdin is not a TTY, stdout may still point to a terminal, and ora's ANSI
+  // escape sequences can trigger SIGTTOU which would suspend the background process.
+  const isInteractive = !!process.stdout.isTTY && !!process.stdin.isTTY;
   const spinner = ora({ text: 'Starting remote CLI service...', isEnabled: isInteractive }).start();
 
   try {
