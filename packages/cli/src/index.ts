@@ -70,14 +70,10 @@ program
   .description('Start the remote CLI service')
   .option('-d, --daemon', 'Run as background daemon')
   .action(async (options) => {
-    // In non-interactive environments (nohup, &, systemd), prevent process exit on stdin EOF.
+    // In non-interactive environments (nohup, systemd), prevent process exit on stdin EOF.
     // Without this, Node.js may drain the event loop if stdin reaches EOF (/dev/null).
     if (!process.stdin.isTTY) {
       process.stdin.resume();
-      // When backgrounded with &, writing to a TTY stdout can trigger SIGTTOU (if the
-      // terminal has TOSTOP set), which would suspend the process before it ever connects.
-      // Ignoring SIGTTOU lets the process continue and write startup logs to the terminal.
-      process.on('SIGTTOU', () => {});
     }
 
     // Catch unhandled errors so that background processes write them to nohup.out
