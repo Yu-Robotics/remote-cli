@@ -107,7 +107,7 @@ export interface ResponseMessage extends WSMessage {
 }
 
 /** Maximum number of threads allowed per user (mirrors CLI-side MAX_THREADS). */
-export const MAX_THREADS = 5;
+export const MAX_THREADS = 10;
 
 /**
  * Thread runtime summary.
