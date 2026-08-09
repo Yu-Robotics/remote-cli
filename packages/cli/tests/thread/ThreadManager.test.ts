@@ -154,6 +154,14 @@ describe('ThreadManager', () => {
       expect(updated.workingDirectory).toBe(newDir);
     });
 
+    it('updates model', async () => {
+      const t = await manager.createThread('model-update', tmpDir);
+      expect(t.model).toBeUndefined();
+      await manager.updateThread(t.id, { model: 'opus' });
+      const updated = manager.getThread(t.id)!;
+      expect(updated.model).toBe('opus');
+    });
+
     it('updates lastActiveAt', async () => {
       const t = await manager.createThread('ts-update', tmpDir);
       const before = t.lastActiveAt;

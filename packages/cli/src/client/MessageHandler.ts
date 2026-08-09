@@ -325,6 +325,7 @@ export class MessageHandler {
 - /clear - Clear conversation context for this thread
 - /compact - Compress conversation history to reduce context size
 - /cd <directory> - Change working directory for this thread
+- /model <name> - Switch the AI model for this thread (persists across sessions)
 - /backend - List available AI backends and switch between them
 - /thread list - List all threads with their status
 - /thread new [name] - Create a new thread
@@ -410,6 +411,34 @@ You can also use natural language commands to control Claude Code CLI.`,
 
     if (trimmed === '/thread' || trimmed.startsWith('/thread ')) {
       await this.handleThreadCommand(messageId, threadId, trimmed);
+      return true;
+    }
+
+    if (trimmed === '/model' || trimmed.startsWith('/model ')) {
+      const parts = trimmed.split(/\s+/);
+      if (parts.length < 2) {
+        this.sendResponse(messageId, threadId, { success: false, error: 'Usage: /model <name>' });
+        return true;
+      }
+      const modelArg = parts.slice(1).join(' ');
+      if (!('setModel' in executor && typeof executor.setModel === 'function')) {
+        this.sendResponse(messageId, threadId, {
+          success: false,
+          error: '/model is not supported in this executor mode',
+        });
+        return true;
+      }
+      const result = await executor.setModel!(modelArg, (chunk: string) => {
+        this.sendStreamChunk(messageId, threadId, chunk);
+      });
+      if (result.success) {
+        // Persist the thread's model selection (restored on next process start via ThreadExecutorPool)
+        await this.threadManager.updateThread(threadId, { model: modelArg });
+      }
+      this.sendResponse(messageId, threadId, result.success
+        ? { success: true, output: result.output || `✅ Model set to ${modelArg}` }
+        : { success: false, error: result.error || 'Failed to set model' }
+      );
       return true;
     }
 

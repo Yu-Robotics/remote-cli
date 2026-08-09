@@ -369,6 +369,50 @@ describe('MessageHandler', () => {
     });
   });
 
+  describe('model command', () => {
+    it('should switch model and persist it to ThreadManager', async () => {
+      ctx.mockExecutor.setModel = vi.fn().mockResolvedValue({ success: true, output: 'Model set to opus.' });
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-model', content: '/model opus', timestamp: Date.now() });
+
+      expect(ctx.mockExecutor.setModel).toHaveBeenCalledWith('opus', expect.any(Function));
+      expect(ctx.mockThreadManager.updateThread).toHaveBeenCalledWith('default-thread-id', { model: 'opus' });
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'response', messageId: 'msg-model', success: true })
+      );
+    });
+
+    it('should not persist model when setModel fails', async () => {
+      ctx.mockExecutor.setModel = vi.fn().mockResolvedValue({ success: false, error: 'Unknown model' });
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-model-fail', content: '/model bogus', timestamp: Date.now() });
+
+      expect(ctx.mockThreadManager.updateThread).not.toHaveBeenCalledWith(
+        'default-thread-id',
+        expect.objectContaining({ model: expect.anything() })
+      );
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'response', messageId: 'msg-model-fail', success: false, error: 'Unknown model' })
+      );
+    });
+
+    it('should return error when /model is called without a model name', async () => {
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-model-noarg', content: '/model', timestamp: Date.now() });
+
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({ success: false, error: expect.stringContaining('Usage') })
+      );
+    });
+
+    it('should return error when executor does not support setModel', async () => {
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-model-unsupported', content: '/model opus', timestamp: Date.now() });
+
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({ success: false, error: expect.stringContaining('not supported') })
+      );
+    });
+  });
+
   describe('streaming output', () => {
     it('should send streaming chunks', async () => {
       ctx.mockExecutor.execute.mockImplementation(async (_prompt: string, options: any) => {

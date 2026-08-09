@@ -266,7 +266,8 @@ describe('ThreadExecutorPool', () => {
         expect.anything(), // directoryGuard
         newConfig,
         expect.anything(), // workingDir
-        expect.anything()  // threadId
+        expect.anything(), // threadId
+        undefined // model
       );
     });
 
@@ -281,7 +282,8 @@ describe('ThreadExecutorPool', () => {
         expect.anything(),
         executorConfig,
         subDir,
-        t.id
+        t.id,
+        undefined
       );
     });
 
@@ -296,7 +298,23 @@ describe('ThreadExecutorPool', () => {
         expect.anything(),
         executorConfig,
         undefined,
-        t.id
+        t.id,
+        undefined
+      );
+    });
+
+    it('passes thread model to executor factory when set', async () => {
+      const t = await manager.createThread('model-thread', tmpDir);
+      await manager.updateThread(t.id, { model: 'opus' });
+
+      pool.getExecutor(t.id);
+
+      expect(mockExecutorFactory).toHaveBeenCalledWith(
+        expect.anything(),
+        executorConfig,
+        tmpDir,
+        t.id,
+        'opus'
       );
     });
   });

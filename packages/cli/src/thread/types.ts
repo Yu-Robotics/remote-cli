@@ -14,6 +14,8 @@ export interface Thread {
   workingDirectory: string;
   createdAt: number;
   lastActiveAt: number;
+  /** Last model explicitly selected via /model for this thread (Claude executor only). Undefined = use backend default. */
+  model?: string;
 }
 
 export interface ThreadStore {
