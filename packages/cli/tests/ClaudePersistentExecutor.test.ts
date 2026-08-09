@@ -17,6 +17,7 @@ vi.mock('fs', () => ({
     unlinkSync: vi.fn(),
     readdirSync: vi.fn(() => []),
     statSync: vi.fn(),
+    mkdirSync: vi.fn(),
   },
   existsSync: vi.fn(() => true),  // Default to true for working directory checks
   readFileSync: vi.fn(() => JSON.stringify({ id: 'test-session' })),
@@ -24,6 +25,7 @@ vi.mock('fs', () => ({
   unlinkSync: vi.fn(),
   readdirSync: vi.fn(() => []),
   statSync: vi.fn(),
+  mkdirSync: vi.fn(),
 }));
 
 import { spawn } from 'child_process';
@@ -506,6 +508,172 @@ describe('ClaudePersistentExecutor', () => {
 
       await expect(compactPromise).rejects.toThrow('Compaction failed');
 
+      freshProcess.emit('exit', 0, null);
+      freshProcess.emit('close', 0, null);
+      await new Promise(resolve => setTimeout(resolve, 100));
+      await testExecutor.destroy();
+    }, 10000);
+  });
+
+  describe('model selection', () => {
+    it('passes --model to spawn args when constructed with a model', async () => {
+      const freshMockProcess = new EventEmitter() as any;
+      freshMockProcess.stdout = new EventEmitter();
+      freshMockProcess.stderr = new EventEmitter();
+      freshMockProcess.stdin = { write: vi.fn(), end: vi.fn() };
+      freshMockProcess.kill = vi.fn();
+      freshMockProcess.pid = 66666;
+      mockSpawn.mockReturnValue(freshMockProcess);
+
+      const modelExecutor = new ClaudePersistentExecutor(directoryGuard, '~/test-project', 'thread-1', 'opus');
+
+      const executePromise = modelExecutor.execute('hello');
+      await new Promise(resolve => setTimeout(resolve, 1100));
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        'claude',
+        expect.arrayContaining(['--model', 'opus']),
+        expect.any(Object)
+      );
+
+      freshMockProcess.stdout.emit('data', Buffer.from(JSON.stringify({
+        type: 'system',
+        subtype: 'init',
+        session_id: 'opus-session',
+        cwd: '/home/user/test-project',
+      }) + '\n'));
+      freshMockProcess.stdout.emit('data', Buffer.from(JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        result: 'hi',
+        is_error: false,
+      }) + '\n'));
+
+      await executePromise;
+      freshMockProcess.emit('exit', 0, null);
+      freshMockProcess.emit('close', 0, null);
+      await new Promise(resolve => setTimeout(resolve, 100));
+      await modelExecutor.destroy();
+    }, 10000);
+
+    it('does not add --model to spawn args when no model is configured', async () => {
+      const freshMockProcess = new EventEmitter() as any;
+      freshMockProcess.stdout = new EventEmitter();
+      freshMockProcess.stderr = new EventEmitter();
+      freshMockProcess.stdin = { write: vi.fn(), end: vi.fn() };
+      freshMockProcess.kill = vi.fn();
+      freshMockProcess.pid = 77777;
+      mockSpawn.mockReturnValue(freshMockProcess);
+
+      const noModelExecutor = new ClaudePersistentExecutor(directoryGuard, '~/test-project');
+
+      const executePromise = noModelExecutor.execute('hello');
+      await new Promise(resolve => setTimeout(resolve, 1100));
+
+      const spawnCalls = mockSpawn.mock.calls;
+      const lastCall = spawnCalls[spawnCalls.length - 1];
+      expect(lastCall[1]).not.toContain('--model');
+
+      freshMockProcess.stdout.emit('data', Buffer.from(JSON.stringify({
+        type: 'system',
+        subtype: 'init',
+        session_id: 'no-model-session',
+        cwd: '/home/user/test-project',
+      }) + '\n'));
+      freshMockProcess.stdout.emit('data', Buffer.from(JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        result: 'hi',
+        is_error: false,
+      }) + '\n'));
+
+      await executePromise;
+      freshMockProcess.emit('exit', 0, null);
+      freshMockProcess.emit('close', 0, null);
+      await new Promise(resolve => setTimeout(resolve, 100));
+      await noModelExecutor.destroy();
+    }, 10000);
+  });
+
+  describe('setModel()', () => {
+    it('sends /model <name> as a slash command to stdin', async () => {
+      const testExecutor = new ClaudePersistentExecutor(directoryGuard, '~/test-project');
+
+      const freshProcess = new EventEmitter() as any;
+      freshProcess.stdout = new EventEmitter();
+      freshProcess.stderr = new EventEmitter();
+      freshProcess.stdin = { write: vi.fn(), end: vi.fn() };
+      freshProcess.kill = vi.fn();
+      freshProcess.pid = 44444;
+      mockSpawn.mockReturnValue(freshProcess);
+
+      const setModelPromise = testExecutor.setModel('opus');
+
+      await new Promise(resolve => setTimeout(resolve, 1100));
+
+      freshProcess.stdout.emit('data', Buffer.from(JSON.stringify({
+        type: 'system',
+        subtype: 'init',
+        session_id: 'model-session',
+        cwd: '/home/user/test-project',
+      }) + '\n'));
+
+      expect(freshProcess.stdin.write).toHaveBeenCalled();
+      const writtenArg = freshProcess.stdin.write.mock.calls[0][0] as string;
+      const parsed = JSON.parse(writtenArg.trim());
+      expect(parsed.isSlashCommand).toBe(true);
+      expect(parsed.message.content).toBe('/model opus');
+
+      freshProcess.stdout.emit('data', Buffer.from(JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        result: 'Model set to opus.',
+        is_error: false,
+      }) + '\n'));
+
+      const result = await setModelPromise;
+      expect(result.success).toBe(true);
+
+      freshProcess.emit('exit', 0, null);
+      freshProcess.emit('close', 0, null);
+      await new Promise(resolve => setTimeout(resolve, 100));
+      await testExecutor.destroy();
+    }, 10000);
+
+    it('includes --model in spawn args for the next process start after setModel', async () => {
+      const testExecutor = new ClaudePersistentExecutor(directoryGuard, '~/test-project');
+
+      const freshProcess = new EventEmitter() as any;
+      freshProcess.stdout = new EventEmitter();
+      freshProcess.stderr = new EventEmitter();
+      freshProcess.stdin = { write: vi.fn(), end: vi.fn() };
+      freshProcess.kill = vi.fn();
+      freshProcess.pid = 55555;
+      mockSpawn.mockReturnValue(freshProcess);
+
+      const setModelPromise = testExecutor.setModel('haiku');
+      await new Promise(resolve => setTimeout(resolve, 1100));
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        'claude',
+        expect.arrayContaining(['--model', 'haiku']),
+        expect.any(Object)
+      );
+
+      freshProcess.stdout.emit('data', Buffer.from(JSON.stringify({
+        type: 'system',
+        subtype: 'init',
+        session_id: 'haiku-session',
+        cwd: '/home/user/test-project',
+      }) + '\n'));
+      freshProcess.stdout.emit('data', Buffer.from(JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        result: 'Model set to haiku.',
+        is_error: false,
+      }) + '\n'));
+
+      await setModelPromise;
       freshProcess.emit('exit', 0, null);
       freshProcess.emit('close', 0, null);
       await new Promise(resolve => setTimeout(resolve, 100));

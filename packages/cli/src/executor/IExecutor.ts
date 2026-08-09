@@ -36,6 +36,8 @@ export interface IExecutor {
   sendInput?(input: string): boolean;
   compact?(onStream?: (chunk: string) => void): Promise<ExecuteResult>;
   compactWhenFull?(onStream?: (chunk: string) => void): Promise<ExecuteResult>;
+  /** Switch the active model for this executor (Claude-backed executors only). */
+  setModel?(model: string, onStream?: (chunk: string) => void): Promise<ExecuteResult>;
   isProcessRunning?(): boolean;
   getSessionId?(): string | null;
 
