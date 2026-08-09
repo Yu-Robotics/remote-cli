@@ -147,6 +147,8 @@ export class ClaudePersistentExecutor extends EventEmitter {
   private defaultTimeout = 600000; // 10 minutes default, but will extend on activity
   private sessionId: string | null = null;
   private sessionFilePath: string;
+  /** Model to pass via --model on process start. Updated by setModel() for future restarts. */
+  private model?: string;
 
   // Persistent process
   private claudeProcess: ChildProcess | null = null;
@@ -195,9 +197,15 @@ export class ClaudePersistentExecutor extends EventEmitter {
   // Activity tracking for timeout extension (optional, can be disabled)
   private activityTrackingEnabled = false;
 
-  constructor(directoryGuard: DirectoryGuard, initialWorkingDirectory?: string, threadId?: string) {
+  constructor(
+    directoryGuard: DirectoryGuard,
+    initialWorkingDirectory?: string,
+    threadId?: string,
+    model?: string
+  ) {
     super();
     this.directoryGuard = directoryGuard;
+    this.model = model;
     // Use provided working directory or fall back to process.cwd()
     // If a working directory is provided, validate it first
     if (initialWorkingDirectory) {
@@ -371,6 +379,10 @@ export class ClaudePersistentExecutor extends EventEmitter {
         '--dangerously-skip-permissions',
         '--disallowedTools=AskUserQuestion'
       ];
+
+      if (this.model) {
+        args.push('--model', this.model);
+      }
 
       if (this.sessionId) {
         args.push('--resume', this.sessionId);
@@ -1407,6 +1419,32 @@ export class ClaudePersistentExecutor extends EventEmitter {
     this.stopProcess().catch((err) =>
       console.error('[ClaudePersistent] Failed to stop process on reset:', err)
     );
+  }
+
+  /**
+   * Send /model slash command to the running Claude process to switch models.
+   * Also stores the model so future process restarts start with --model already set,
+   * since a live /model change does not survive a process respawn on its own.
+   */
+  setModel(model: string, onStream?: (chunk: string) => void): Promise<PersistentClaudeResult> {
+    console.log(`[ClaudePersistent] Sending /model ${model} slash command`);
+    this.model = model;
+
+    return new Promise((resolve, reject) => {
+      if (this.isDestroyed) {
+        resolve({ success: false, error: 'Executor has been destroyed' });
+        return;
+      }
+
+      this.commandQueue.push({
+        prompt: `/model ${model}`,
+        options: { onStream },
+        resolve,
+        reject,
+        isSlashCommand: true,
+      });
+      this.processQueue();
+    });
   }
 
   /**

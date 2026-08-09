@@ -17,7 +17,8 @@ export type ExecutorFactory = (
   directoryGuard: DirectoryGuard,
   config: ExecutorConfig,
   initialWorkingDirectory?: string,
-  threadId?: string
+  threadId?: string,
+  model?: string
 ) => IExecutor;
 
 /**
@@ -60,7 +61,8 @@ export class ThreadExecutorPool {
         this.directoryGuard,
         this.executorConfig,
         thread.workingDirectory || undefined,
-        threadId
+        threadId,
+        thread.model || undefined
       );
       this.executors.set(threadId, executor);
     }
