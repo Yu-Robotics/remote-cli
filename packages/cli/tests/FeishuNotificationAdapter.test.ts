@@ -577,5 +577,39 @@ describe('FeishuNotificationAdapter', () => {
 
       expect(mockWsClient.send).not.toHaveBeenCalled();
     });
+
+    it('should include threadName when a thread name resolver is set', () => {
+      adapter.setThreadNameResolver((threadId: string) =>
+        threadId === 'thread-1' ? 'refactor-login' : undefined
+      );
+      adapter.register();
+      adapter.setCurrentOpenId('user-123');
+
+      emitTaskNotification();
+
+      const msg = mockWsClient.send.mock.calls[0][0];
+      expect(msg.threadName).toBe('refactor-login');
+    });
+
+    it('should omit threadName when the resolver returns undefined', () => {
+      adapter.setThreadNameResolver(() => undefined);
+      adapter.register();
+      adapter.setCurrentOpenId('user-123');
+
+      emitTaskNotification();
+
+      const msg = mockWsClient.send.mock.calls[0][0];
+      expect(msg.threadName).toBeUndefined();
+    });
+
+    it('should omit threadName when no resolver is set', () => {
+      adapter.register();
+      adapter.setCurrentOpenId('user-123');
+
+      emitTaskNotification();
+
+      const msg = mockWsClient.send.mock.calls[0][0];
+      expect(msg.threadName).toBeUndefined();
+    });
   });
 });

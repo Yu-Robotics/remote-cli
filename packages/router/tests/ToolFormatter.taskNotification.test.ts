@@ -80,4 +80,30 @@ describe('ToolFormatter - createTaskNotificationElement', () => {
 
     expect(panelText).toContain('no summary');
   });
+
+  it('should include the thread name in the header when provided', () => {
+    const elements = createTaskNotificationElement(baseInfo, 'refactor-login');
+    const header = findPanels(elements)[0].header.title.content;
+
+    expect(header).toContain('refactor-login');
+  });
+
+  it('should omit the thread segment when no thread name is provided', () => {
+    const withName = findPanels(createTaskNotificationElement(baseInfo, 'refactor-login'))[0].header.title.content;
+    const withoutName = findPanels(createTaskNotificationElement(baseInfo))[0].header.title.content;
+
+    expect(withoutName).not.toContain('refactor-login');
+    expect(withName.length).toBeGreaterThan(withoutName.length);
+  });
+
+  it('should render a neutral header for unknown future statuses (forward compatibility)', () => {
+    const elements = createTaskNotificationElement({ ...baseInfo, status: 'exploded' as any });
+    const header = findPanels(elements)[0].header.title.content;
+
+    // Must not mislabel as stopped/failed — a neutral label is used instead
+    expect(header).toContain('TASK ENDED');
+    expect(header).not.toContain('STOPPED');
+    expect(header).not.toContain('FAILED');
+    expect(header).not.toContain('COMPLETED');
+  });
 });
