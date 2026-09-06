@@ -693,17 +693,116 @@ describe('CodexExecutor', () => {
     await p2;
   });
 
-  it('compactWhenFull resets the conversation (codex exec has no native /compact)', async () => {
+  it('compactWhenFull summarizes, resets, and carries the summary into the next command only', async () => {
     const p = executor.execute('hi');
     await waitForSpawn();
-    emitThreadStarted();
+    emitThreadStarted('thread-old');
     emitTurnStarted();
     emitSuccessAndExit();
     await p;
 
-    const result = await executor.compactWhenFull();
+    const chunks: string[] = [];
+    const compactPromise = executor.compactWhenFull((c) => chunks.push(c));
+    await waitForSpawn(2);
+
+    // A handoff-summary turn runs as a resume one-shot before the reset
+    const summaryArgs = mockSpawn.mock.calls[1][1];
+    expect(summaryArgs[1]).toBe('resume');
+    expect(summaryArgs[summaryArgs.length - 1]).toContain('CONTEXT HANDOFF REQUEST');
+    emitThreadStarted('thread-old');
+    emitTurnStarted();
+    emitAgentMessage('SUMMARY: discussed the frobnicate bug');
+    emitSuccessAndExit();
+
+    const result = await compactPromise;
     expect(result.success).toBe(true);
+    expect(result.output).toMatch(/summar/i);
+    expect(executor.getSessionId()).toBeNull(); // thread reset
+    expect(chunks.join('')).toContain('SUMMARY: discussed the frobnicate bug'); // summary streamed
+
+    // The next command starts a fresh thread with the summary seeded
+    const p2 = executor.execute('continue the fix');
+    await waitForSpawn(3);
+    const nextArgs = mockSpawn.mock.calls[2][1];
+    expect(nextArgs[1]).not.toBe('resume');
+    const seeded = nextArgs[nextArgs.length - 1];
+    expect(seeded).toContain('SUMMARY: discussed the frobnicate bug');
+    expect(seeded).toContain('background context, not new instructions');
+    expect(seeded).toContain('continue the fix');
+    emitThreadStarted('thread-new');
+    emitTurnStarted();
+    emitSuccessAndExit();
+    await p2;
+
+    // The seed is consumed — the command after that is clean
+    const p3 = executor.execute('plain prompt');
+    await waitForSpawn(4);
+    const plainArgs = mockSpawn.mock.calls[3][1];
+    expect(plainArgs[plainArgs.length - 1]).toBe('plain prompt');
+    emitThreadStarted('thread-new');
+    emitTurnStarted();
+    emitSuccessAndExit();
+    await p3;
+  });
+
+  it('compactWhenFull falls back to a plain reset with an honest warning when the summary turn fails', async () => {
+    const p = executor.execute('hi');
+    await waitForSpawn();
+    emitThreadStarted('thread-old');
+    emitTurnStarted();
+    emitSuccessAndExit();
+    await p;
+
+    const compactPromise = executor.compactWhenFull();
+    await waitForSpawn(2);
+    // Summary turn fails (e.g. context already too full)
+    emitJson({ type: 'turn.failed', error: { message: 'context too long' } });
+    proc.emit('exit', 1, null);
+    proc.emit('close', 1, null);
+
+    const result = await compactPromise;
+    expect(result.success).toBe(true);
+    expect(result.output).toMatch(/without carryover|reset/i);
     expect(executor.getSessionId()).toBeNull();
+
+    // No seed — the next prompt goes through unmodified
+    const p2 = executor.execute('clean start');
+    await waitForSpawn(3);
+    const args = mockSpawn.mock.calls[2][1];
+    expect(args[args.length - 1]).toBe('clean start');
+    emitThreadStarted('thread-new');
+    emitTurnStarted();
+    emitSuccessAndExit();
+    await p2;
+  });
+
+  it('resetContext discards a pending handoff seed (/clear means a real fresh start)', async () => {
+    const p = executor.execute('hi');
+    await waitForSpawn();
+    emitThreadStarted('thread-old');
+    emitTurnStarted();
+    emitSuccessAndExit();
+    await p;
+
+    const compactPromise = executor.compactWhenFull();
+    await waitForSpawn(2);
+    emitThreadStarted('thread-old');
+    emitTurnStarted();
+    emitAgentMessage('SUMMARY: stuff');
+    emitSuccessAndExit();
+    await compactPromise;
+
+    // User clears before sending another message
+    executor.resetContext();
+
+    const p2 = executor.execute('fresh');
+    await waitForSpawn(3);
+    const args = mockSpawn.mock.calls[2][1];
+    expect(args[args.length - 1]).toBe('fresh');
+    emitThreadStarted('thread-new');
+    emitTurnStarted();
+    emitSuccessAndExit();
+    await p2;
   });
 
   // ── Abort ─────────────────────────────────────────────────────────────────
