@@ -5,6 +5,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import { IExecutor, ExecuteOptions, ExecuteResult } from './IExecutor';
+import { COMPACT_HANDOFF_PROMPT, seedPromptWithHandoff } from './compactHandoff';
 
 export interface CodexExecutorOptions {
   /** Model passed as -m. Leave unset to use codex's default. */
@@ -102,6 +103,8 @@ export class CodexExecutor implements IExecutor {
   private readonly inactivityTimeoutMs: number;
   private readonly killEscalationMs: number;
   private attachmentWarningShown = false;
+  /** Handoff summary from compactWhenFull, wrapped into the next prompt (consumed once). */
+  private pendingContextSeed: string | null = null;
 
   constructor(directoryGuard: DirectoryGuard, options: CodexExecutorOptions = {}) {
     this.directoryGuard = directoryGuard;
@@ -161,6 +164,8 @@ export class CodexExecutor implements IExecutor {
   resetContext(): void {
     this.killProcess('Context reset');
     this.clearThreadId();
+    // /clear means a real fresh start — drop any carried-over compact seed
+    this.pendingContextSeed = null;
   }
 
   async abort(): Promise<boolean> {
@@ -218,18 +223,41 @@ export class CodexExecutor implements IExecutor {
   }
 
   /**
-   * codex exec has no /compact equivalent. Dropping the thread id starts a
-   * fresh session on the next command, which is the practical equivalent.
+   * Compact via summarize-then-reset. codex has compaction in its interactive
+   * TUI (plus internal auto-compaction at the token limit), but in exec mode
+   * a '/compact' prompt reaches the model as plain text (verified live against
+   * codex-cli 0.153.4). So we:
+   *   1. ask the current thread for a dense handoff summary,
+   *   2. reset the thread,
+   *   3. wrap the summary into the next user prompt (consumed once).
+   * If the summary turn fails (e.g. context already too full), fall back to
+   * a plain reset and say so honestly.
    */
   async compactWhenFull(onStream?: (chunk: string) => void): Promise<ExecuteResult> {
     if (!this.proc && !this.codexThreadId) {
       return { success: true, output: 'No active conversation to compact.' };
     }
-    onStream?.('Resetting conversation context (codex exec has no /compact — starting fresh session)...\n');
+
+    onStream?.('Summarizing the conversation before resetting...\n');
+    let summary: string | null = null;
+    try {
+      const r = await this.execute(COMPACT_HANDOFF_PROMPT, onStream ? { onStream } : {});
+      if (r.success && r.output?.trim()) summary = r.output.trim();
+    } catch (error) {
+      console.warn('[CodexExecutor] Handoff summary failed, falling back to plain reset:', error);
+    }
+
     this.resetContext();
+    if (summary) {
+      this.pendingContextSeed = summary;
+      return {
+        success: true,
+        output: '✅ Context compacted: the conversation was summarized and carried over to a fresh session.',
+      };
+    }
     return {
       success: true,
-      output: 'Context reset: conversation history cleared. Next message starts a fresh codex session.',
+      output: '⚠️ Handoff summary failed — the conversation was reset without carryover. Context starts fresh.',
     };
   }
 
@@ -271,7 +299,12 @@ export class CodexExecutor implements IExecutor {
 
       let proc: ChildProcess;
       try {
-        proc = this.spawnProcess(prompt);
+        // A carried-over compact summary wraps the first prompt after a reset
+        const finalPrompt = this.pendingContextSeed
+          ? seedPromptWithHandoff(this.pendingContextSeed, prompt)
+          : prompt;
+        this.pendingContextSeed = null;
+        proc = this.spawnProcess(finalPrompt);
       } catch (error) {
         resolve({
           success: false,

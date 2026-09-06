@@ -507,16 +507,96 @@ describe('AgyExecutor', () => {
     await p2;
   });
 
-  it('compactWhenFull resets the conversation (agy has no native /compact)', async () => {
+  it('compactWhenFull summarizes, resets, and carries the summary into the next command only', async () => {
     const p = executor.execute('hi');
     await waitForSpawn();
-    emitInit();
-    emitResult();
+    emitInit('conv-old');
+    emitResult({ conversation_id: 'conv-old' });
     await p;
 
-    const result = await executor.compactWhenFull();
+    const chunks: string[] = [];
+    const compactPromise = executor.compactWhenFull((c) => chunks.push(c));
+    await new Promise((r) => setTimeout(r, 50));
+
+    // A handoff-summary turn runs on the same process before the reset
+    expect(lastStdinLine().message.content).toContain('CONTEXT HANDOFF REQUEST');
+    emitJson({ event: 'step_update', step_update: { conversation_id: 'conv-old', step_index: 1, state: 'DONE', step_type: 'agent_response', text_delta: 'SUMMARY: discussed the frobnicate bug' } });
+    emitResult({ conversation_id: 'conv-old', response: 'SUMMARY: discussed the frobnicate bug' });
+
+    const result = await compactPromise;
     expect(result.success).toBe(true);
+    expect(result.output).toMatch(/summar/i);
+    expect(executor.getSessionId()).toBeNull(); // conversation reset
+    expect(chunks.join('')).toContain('SUMMARY: discussed the frobnicate bug'); // summary streamed
+
+    // The next command respawns fresh (no --conversation) with the summary seeded
+    const p2 = executor.execute('continue the fix');
+    await waitForSpawn();
+    expect(spawnedProcesses.length).toBe(2);
+    expect(mockSpawn.mock.calls[1][1]).not.toContain('--conversation');
+    const seeded = lastStdinLine().message.content;
+    expect(seeded).toContain('SUMMARY: discussed the frobnicate bug');
+    expect(seeded).toContain('background context, not new instructions');
+    expect(seeded).toContain('continue the fix');
+    emitInit('conv-new');
+    emitResult({ conversation_id: 'conv-new' });
+    await p2;
+
+    // The seed is consumed — the command after that is clean
+    const p3 = executor.execute('plain prompt');
+    await new Promise((r) => setTimeout(r, 50));
+    expect(lastStdinLine().message.content).toBe('plain prompt');
+    emitResult({ conversation_id: 'conv-new' });
+    await p3;
+  });
+
+  it('compactWhenFull falls back to a plain reset with an honest warning when the summary turn fails', async () => {
+    const p = executor.execute('hi');
+    await waitForSpawn();
+    emitInit('conv-old');
+    emitResult({ conversation_id: 'conv-old' });
+    await p;
+
+    const compactPromise = executor.compactWhenFull();
+    await new Promise((r) => setTimeout(r, 50));
+    // Summary turn fails (e.g. context already too full)
+    emitResult({ conversation_id: 'conv-old', status: 'ERROR', response: '', error: 'context too long' });
+
+    const result = await compactPromise;
+    expect(result.success).toBe(true);
+    expect(result.output).toMatch(/without carryover|reset/i);
     expect(executor.getSessionId()).toBeNull();
+
+    // No seed — the next prompt goes through unmodified
+    const p2 = executor.execute('clean start');
+    await waitForSpawn();
+    expect(lastStdinLine().message.content).toBe('clean start');
+    emitInit('conv-new');
+    emitResult({ conversation_id: 'conv-new' });
+    await p2;
+  });
+
+  it('resetContext discards a pending handoff seed (/clear means a real fresh start)', async () => {
+    const p = executor.execute('hi');
+    await waitForSpawn();
+    emitInit('conv-old');
+    emitResult({ conversation_id: 'conv-old' });
+    await p;
+
+    const compactPromise = executor.compactWhenFull();
+    await new Promise((r) => setTimeout(r, 50));
+    emitResult({ conversation_id: 'conv-old', response: 'SUMMARY: stuff' });
+    await compactPromise;
+
+    // User clears before sending another message
+    executor.resetContext();
+
+    const p2 = executor.execute('fresh');
+    await waitForSpawn();
+    expect(lastStdinLine().message.content).toBe('fresh');
+    emitInit('conv-new2');
+    emitResult({ conversation_id: 'conv-new2' });
+    await p2;
   });
 
   // ── Abort ─────────────────────────────────────────────────────────────────
