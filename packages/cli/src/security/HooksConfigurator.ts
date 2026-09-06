@@ -33,9 +33,13 @@ interface ClaudeSettings {
 }
 
 /**
- * File operation tools that need security validation
+ * Tools guarded by the security hook.
+ * File tools are path-validated; Bash commands are validated by
+ * validateBashCommand() in security-guard (blocked keywords, pipe-to-shell,
+ * path extraction). Bash MUST be in this list — without it, Claude Code never
+ * invokes the hook for Bash calls and the bash validation is dead code.
  */
-const FILE_TOOLS = ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'NotebookEdit'];
+const GUARDED_TOOLS = ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'NotebookEdit', 'Bash'];
 
 /**
  * HooksConfigurator manages Claude Code hooks configuration
@@ -89,7 +93,7 @@ export class HooksConfigurator {
     // Add hook if not already present
     if (!existingHook) {
       const newHook: HookConfig = {
-        matcher: FILE_TOOLS.join('|'),
+        matcher: GUARDED_TOOLS.join('|'),
         hooks: [
           {
             type: 'command',
@@ -98,6 +102,11 @@ export class HooksConfigurator {
         ]
       };
       settings.hooks.PreToolUse.push(newHook);
+    } else if (typeof existingHook.matcher === 'string' && !existingHook.matcher.split('|').includes('Bash')) {
+      // Upgrade in place: hooks written by older versions guard file tools
+      // only, leaving Bash unvalidated. Bring the matcher up to date.
+      console.log('[HooksConfigurator] Upgrading security hook matcher to include Bash');
+      existingHook.matcher = GUARDED_TOOLS.join('|');
     }
 
     // Ensure .claude directory exists
