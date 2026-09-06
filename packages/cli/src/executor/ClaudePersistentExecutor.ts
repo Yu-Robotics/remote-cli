@@ -1256,6 +1256,13 @@ export class ClaudePersistentExecutor extends EventEmitter {
     this.currentCommandResolve = command.resolve;
     this.currentCommandReject = command.reject;
 
+    // Reset output buffer: Claude Code 2.x can emit autonomous turns while
+    // idle (e.g. reacting to a background task completion). That text lands
+    // in the buffer but its trailing result hits the duplicate-completion
+    // guard, which returns early without clearing it — so without this reset
+    // the stale text would leak into this command's final output.
+    this.currentOutputBuffer = [];
+
     // Reset structured content collection
     this.structuredContentBlocks = [];
 
