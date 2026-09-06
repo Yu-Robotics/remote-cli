@@ -212,6 +212,30 @@ describe('/backend command', () => {
       const agyLine = lines.find((l: string) => l.includes('AGY CLI'));
       expect(agyLine).toContain('★ (active)');
     });
+
+    it('shows Codex CLI when codex is installed', async () => {
+      mockInstalled('claude', 'agy', 'codex');
+
+      await send('/backend');
+
+      const res = sentResponse();
+      expect(res.success).toBe(true);
+      expect(res.output).toContain('Codex CLI');
+    });
+
+    it('marks Codex as active when executor.type is codex', async () => {
+      mockInstalled('claude', 'agy', 'codex');
+      mockConfig.get.mockReturnValue({ type: 'codex' });
+
+      await send('/backend');
+
+      const res = sentResponse();
+      const lines = res.output.split('\n');
+      const codexLine = lines.find((l: string) => l.includes('Codex CLI'));
+      const claudeLine = lines.find((l: string) => l.includes('Claude Code'));
+      expect(codexLine).toContain('★ (active)');
+      expect(claudeLine).not.toContain('★ (active)');
+    });
   });
 
   // ── switch mode ───────────────────────────────────────────────────────────────
@@ -302,6 +326,41 @@ describe('/backend command', () => {
       const res = sentResponse();
       expect(res.success).toBe(false);
       expect(res.error).toContain('"agy" not found');
+    });
+
+    it('switches to Codex by 1-based index (third slot)', async () => {
+      mockInstalled('claude', 'agy', 'codex');
+
+      await send('/backend 3'); // index 3 = Codex
+
+      const res = sentResponse();
+      expect(res.success).toBe(true);
+      expect(res.output).toContain('Codex CLI');
+      expect(mockConfig.set).toHaveBeenCalledWith('executor', expect.objectContaining({ type: 'codex' }));
+      expect(mockThreadPool.switchBackend).toHaveBeenCalledWith(expect.objectContaining({ type: 'codex' }));
+    });
+
+    it('switches to Codex by name', async () => {
+      mockInstalled('claude', 'codex');
+
+      await send('/backend codex');
+
+      const res = sentResponse();
+      expect(res.success).toBe(true);
+      expect(res.output).toContain('Codex CLI');
+      expect(mockConfig.set).toHaveBeenCalledWith('executor', expect.objectContaining({ type: 'codex' }));
+    });
+
+    it('preserves existing codex sub-config when switching', async () => {
+      mockInstalled('codex');
+      mockConfig.get.mockReturnValue({ type: 'auto', codex: { model: 'gpt-5.2-codex' } });
+
+      await send('/backend codex');
+
+      expect(mockConfig.set).toHaveBeenCalledWith('executor', {
+        type: 'codex',
+        codex: { model: 'gpt-5.2-codex' },
+      });
     });
   });
 });
