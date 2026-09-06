@@ -1,4 +1,4 @@
-import { ToolUseInfo, ToolResultInfo } from '../types';
+import { ToolUseInfo, ToolResultInfo, TaskNotificationInfo } from '../types';
 
 /**
  * Feishu Card 2.0 element types
@@ -390,6 +390,62 @@ export function createRedactedThinkingElement(): FeishuCardElement[] {
       tag: 'markdown',
       content: '💭 *Some reasoning was filtered by safety systems and is not displayed.*\n*(This does not affect the response quality - the AI can still use this reasoning internally)*',
     }
+  ];
+}
+
+/**
+ * Create a Feishu Card 2.0 background task notification element
+ *
+ * Rendered as a standalone card when a Claude Code 2.x background task
+ * reaches a terminal state (completed/failed/stopped). The card is not part
+ * of any streaming session — it is sent as a one-shot interactive message.
+ * Expanded by default: this is the final result of the task, not noise.
+ */
+export function createTaskNotificationElement(info: TaskNotificationInfo): FeishuCardElement[] {
+  const { taskId, status, summary, outputFile } = info;
+
+  const statusConfig: Record<TaskNotificationInfo['status'], { color: string; emoji: string; text: string }> = {
+    completed: { color: 'green', emoji: '✅', text: 'TASK COMPLETED' },
+    failed: { color: 'red', emoji: '❌', text: 'TASK FAILED' },
+    stopped: { color: 'orange', emoji: '⏹️', text: 'TASK STOPPED' },
+  };
+  const { color, emoji, text } = statusConfig[status] || statusConfig.stopped;
+
+  const headerTitle = `<text_tag color='${color}'>${emoji} ${text}</text_tag> · \`${truncate(taskId, 16)}\``;
+
+  const bodyLines: string[] = [];
+  bodyLines.push(summary.trim() ? truncate(summary, 1500) : '_(no summary)_');
+  if (outputFile) {
+    bodyLines.push(`\n**Output:** \`${truncate(outputFile, 200)}\``);
+  }
+
+  const collapsiblePanel: FeishuCardElement = {
+    tag: 'collapsible_panel',
+    expanded: true,
+    header: {
+      title: {
+        tag: 'markdown',
+        content: headerTitle,
+      },
+      vertical_align: 'center',
+      icon: {
+        tag: 'standard_icon',
+        token: 'down-small-ccm_outlined',
+        size: '14px 14px',
+      },
+      icon_position: 'right',
+      icon_expanded_angle: -180,
+    },
+    vertical_spacing: '8px',
+    padding: '4px 8px',
+    elements: [
+      createMarkdownElement(bodyLines.join('\n')),
+    ],
+  };
+
+  return [
+    collapsiblePanel,
+    createMarkdownElement('💬 *Reply to this card to continue working in this thread.*'),
   ];
 }
 

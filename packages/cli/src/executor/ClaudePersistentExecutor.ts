@@ -69,12 +69,20 @@ interface ClaudeOutputMessage {
     input_tokens: number;
     output_tokens: number;
   };
-  /** Message subtype - varies by type: 'init' for system, 'success'/'error' for result */
-  subtype?: 'init' | 'success' | 'error';
+  /** Message subtype - varies by type: 'init'/'task_notification' for system, 'success'/'error' for result */
+  subtype?: 'init' | 'success' | 'error' | 'task_notification';
   /** Current working directory (for system/init) */
   cwd?: string;
-  /** Session ID (for system/init) */
+  /** Session ID (for system/init and system/task_notification) */
   session_id?: string;
+  /** Background task ID (for system/task_notification, Claude Code 2.x) */
+  task_id?: string;
+  /** Background task terminal status (for system/task_notification) */
+  status?: 'completed' | 'failed' | 'stopped';
+  /** Background task result summary (for system/task_notification) */
+  summary?: string;
+  /** Background task output file path (for system/task_notification) */
+  output_file?: string;
   /** Stream event details (for stream_event) */
   event?: {
     type: string;
@@ -147,6 +155,8 @@ export class ClaudePersistentExecutor extends EventEmitter {
   private defaultTimeout = 600000; // 10 minutes default, but will extend on activity
   private sessionId: string | null = null;
   private sessionFilePath: string;
+  /** Thread this executor belongs to (undefined for the legacy default thread) */
+  private threadId?: string;
   /** Model to pass via --model on process start. Updated by setModel() for future restarts. */
   private model?: string;
 
@@ -224,6 +234,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
     }
     if (threadId) {
       // Per-thread session file: each thread gets its own isolated session
+      this.threadId = threadId;
       const sessionsDir = path.join(os.homedir(), '.remote-cli', 'claude-sessions');
       fs.mkdirSync(sessionsDir, { recursive: true });
       this.sessionFilePath = path.join(sessionsDir, `${threadId}.json`);
@@ -714,6 +725,23 @@ export class ClaudePersistentExecutor extends EventEmitter {
             console.log(`[ClaudePersistent] Session initialized: ${message.session_id}`);
             this.sessionId = message.session_id;
             this.saveSessionId(message.session_id);
+          } else if (message.subtype === 'task_notification') {
+            // Claude Code 2.x: a background task reached a terminal state.
+            // This event is independent of any in-flight command, so it is
+            // surfaced via the hooks event bus rather than per-command callbacks.
+            if (message.task_id && message.status && message.summary !== undefined) {
+              console.log(`[ClaudePersistent] Background task ${message.task_id} ${message.status}`);
+              claudeCodeHooks.notifyTaskNotification({
+                taskId: message.task_id,
+                status: message.status,
+                summary: message.summary,
+                outputFile: message.output_file || '',
+                threadId: this.threadId,
+                sessionId: this.sessionId || undefined,
+              }).catch((err) => {
+                console.error('[ClaudePersistent] Failed to emit task notification:', err);
+              });
+            }
           }
           break;
 

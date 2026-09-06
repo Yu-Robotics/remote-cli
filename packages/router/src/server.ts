@@ -8,8 +8,8 @@ import { JsonStore } from './storage/JsonStore';
 import { FeishuLongConnHandler } from './feishu/FeishuLongConnHandler';
 import { ConnectionHub } from './websocket/ConnectionHub';
 import { BindingManager } from './binding/BindingManager';
-import { MessageType, ToolUseInfo, ToolResultInfo, PROTOCOL_VERSION, MIN_SUPPORTED_CLI_VERSION, ROUTER_VERSION, ThreadSummary } from './types';
-import { FeishuCardElement, createToolUseElement, createToolResultElement, createMarkdownElement, createRedactedThinkingElement, createPlanModeElement } from './utils/ToolFormatter';
+import { MessageType, ToolUseInfo, ToolResultInfo, TaskNotificationInfo, PROTOCOL_VERSION, MIN_SUPPORTED_CLI_VERSION, ROUTER_VERSION, ThreadSummary } from './types';
+import { FeishuCardElement, createToolUseElement, createToolResultElement, createMarkdownElement, createRedactedThinkingElement, createPlanModeElement, createTaskNotificationElement } from './utils/ToolFormatter';
 
 /**
  * Router Server
@@ -463,6 +463,16 @@ export class RouterServer {
               }
               break;
 
+            case MessageType.TASK_NOTIFICATION:
+              // Background task terminal-state event (Claude Code 2.x).
+              // Not tied to any streaming session — rendered as a standalone card.
+              if (message.openId && message.taskNotification) {
+                await this.handleTaskNotification(message.openId, message.taskNotification, message.threadId, deviceId);
+              } else {
+                console.log('[RouterServer] Ignoring task_notification with missing openId or payload');
+              }
+              break;
+
             default:
               console.log('Unknown message type:', message.type);
           }
@@ -722,6 +732,27 @@ export class RouterServer {
         openId
       );
       streamData.hasUpdated = true;
+    }
+  }
+
+  /**
+   * Handle background task notification (Claude Code 2.x)
+   *
+   * Sent as a standalone one-shot card — the event may arrive while no
+   * streaming session exists (the originating command's card is often
+   * already finalized), so it deliberately never touches streamingMessages.
+   * The new card is registered in cardThreadMap so the user can reply to it
+   * to continue working in the originating thread.
+   */
+  private async handleTaskNotification(openId: string, info: TaskNotificationInfo, threadId?: string, deviceId?: string | null): Promise<void> {
+    console.log(`[RouterServer] Task notification for ${openId}: task=${info.taskId} status=${info.status} thread=${threadId || 'default'}`);
+
+    const elements = createTaskNotificationElement(info);
+    const feishuMessageId = await this.feishuLongConnHandler.sendTaskNotificationCard(openId, elements);
+
+    if (feishuMessageId && threadId && deviceId) {
+      this.cardThreadMap.set(feishuMessageId, { threadId, deviceId, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS });
+      console.log(`[RouterServer] Registered task notification card ${feishuMessageId} for thread ${threadId}`);
     }
   }
 

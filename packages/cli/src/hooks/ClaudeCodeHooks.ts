@@ -15,6 +15,9 @@ export enum HookEventType {
   TASK_FAILED = 'task:failed',
   TASK_ABORTED = 'task:aborted',
 
+  // Background task notification (Claude Code 2.x system:task_notification)
+  TASK_NOTIFICATION = 'task:notification',
+
   // Execution hooks
   TOOL_BEFORE_EXECUTION = 'tool:beforeExecution',
   TOOL_AFTER_EXECUTION = 'tool:afterExecution',
@@ -96,6 +99,29 @@ export interface TaskResult {
   duration?: number;
   /** End timestamp */
   endTime: number;
+}
+
+/**
+ * Background task notification (Claude Code 2.x)
+ *
+ * Emitted when a background task (e.g. a background Bash command) reaches a
+ * terminal state. This event is process-level: it is not associated with any
+ * in-flight command, so it travels over the hooks bus rather than per-command
+ * callbacks.
+ */
+export interface TaskNotificationContext {
+  /** Background task ID */
+  taskId: string;
+  /** Terminal status of the task */
+  status: 'completed' | 'failed' | 'stopped';
+  /** Short result summary produced by Claude Code */
+  summary: string;
+  /** Path to the file containing the task's full output (on the local machine) */
+  outputFile: string;
+  /** Thread whose Claude session ran the task (undefined = legacy default thread) */
+  threadId?: string;
+  /** Claude session ID */
+  sessionId?: string;
 }
 
 /**
@@ -185,6 +211,7 @@ export type TaskStartedHandler = (context: TaskContext) => Promise<void> | void;
 export type TaskCompletedHandler = (context: TaskContext, result: TaskResult) => Promise<void> | void;
 export type TaskFailedHandler = (context: TaskContext, error: Error) => Promise<void> | void;
 export type TaskAbortedHandler = (context: TaskContext, reason: string) => Promise<void> | void;
+export type TaskNotificationHandler = (context: TaskNotificationContext) => Promise<void> | void;
 
 export type ToolBeforeExecutionHandler = (
   context: ToolExecutionContext
@@ -282,6 +309,13 @@ export class ClaudeCodeHooks extends EventEmitter {
    */
   onTaskAborted(handler: TaskAbortedHandler): void {
     this.on(HookEventType.TASK_ABORTED, handler);
+  }
+
+  /**
+   * Register background task notification handler (Claude Code 2.x)
+   */
+  onTaskNotification(handler: TaskNotificationHandler): void {
+    this.on(HookEventType.TASK_NOTIFICATION, handler);
   }
 
   /**
@@ -414,6 +448,13 @@ export class ClaudeCodeHooks extends EventEmitter {
    */
   async notifyTaskAborted(context: TaskContext, reason: string): Promise<void> {
     this.emit(HookEventType.TASK_ABORTED, context, reason);
+  }
+
+  /**
+   * Notify background task notification (Claude Code 2.x)
+   */
+  async notifyTaskNotification(context: TaskNotificationContext): Promise<void> {
+    this.emit(HookEventType.TASK_NOTIFICATION, context);
   }
 
   /**

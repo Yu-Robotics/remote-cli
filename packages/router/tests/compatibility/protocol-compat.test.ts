@@ -269,6 +269,7 @@ describe('Wire format snapshots', () => {
         MessageType.RESPONSE,
         MessageType.NOTIFICATION,
         MessageType.ERROR,
+        MessageType.TASK_NOTIFICATION,
       ];
 
       // These string literals are used on the wire but missing from the enum.
@@ -278,6 +279,7 @@ describe('Wire format snapshots', () => {
       expect(routerHandledTypes).toContain('binding_request');
       expect(routerHandledTypes).toContain('heartbeat');
       expect(routerHandledTypes).toContain('response');
+      expect(routerHandledTypes).toContain('task_notification');
       // Document the gap — when these are added to MessageType, remove from wireOnlyStrings
       expect(wireOnlyStrings).toContain('stream');
       expect(wireOnlyStrings).toContain('structured');

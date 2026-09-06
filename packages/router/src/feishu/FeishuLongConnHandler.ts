@@ -1208,6 +1208,18 @@ Examples:
   }
 
   /**
+   * Send a standalone (non-streaming) card for a background task notification.
+   *
+   * Unlike streaming cards, this is a one-shot interactive message: the event
+   * payload is complete at send time and there may be no active streaming
+   * session. Returns the Feishu message ID so the caller can register the
+   * card in cardThreadMap for reply-to-continue-thread routing.
+   */
+  async sendTaskNotificationCard(openId: string, elements: any[]): Promise<string | null> {
+    return this.createContinuationCard(openId, elements);
+  }
+
+  /**
    * Update streaming message content
    * Automatically creates new messages if content exceeds Feishu's size limit
    *
