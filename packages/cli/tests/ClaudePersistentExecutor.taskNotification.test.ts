@@ -232,4 +232,40 @@ describe('ClaudePersistentExecutor - task_notification', () => {
     expect(result.success).toBe(true);
     expect(receivedNotifications).toHaveLength(0);
   }, 10000);
+
+  it('should not leak idle-time autonomous turn output into the next command result', async () => {
+    // Command 1 completes normally
+    const firstPromise = executor.execute('first command');
+    await startProcessAndInit(firstPromise);
+    completeCommand();
+    const firstResult = await firstPromise;
+    expect(firstResult.success).toBe(true);
+
+    // Idle: a background task completes and Claude Code 2.x autonomously
+    // starts a turn to react to it (observed on claude 2.1.231). With no
+    // active command, the assistant text lands in the output buffer and the
+    // trailing result is ignored by the duplicate-completion guard — which
+    // returns early WITHOUT clearing the buffer.
+    emitJson({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'text', text: 'The background task completed successfully.' }] },
+      session_id: 'session-xyz',
+    });
+    emitJson({ type: 'result', subtype: 'success', result: 'The background task completed successfully.', is_error: false });
+
+    // Command 2: its final output must NOT contain the autonomous turn's text
+    const secondPromise = executor.execute('second command');
+    await new Promise(resolve => setTimeout(resolve, 100));
+    emitJson({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'text', text: 'Here is the login fix.' }] },
+      session_id: 'session-xyz',
+    });
+    completeCommand();
+    const secondResult = await secondPromise;
+
+    expect(secondResult.success).toBe(true);
+    expect(secondResult.output).toContain('Here is the login fix.');
+    expect(secondResult.output).not.toContain('background task completed');
+  }, 10000);
 });
