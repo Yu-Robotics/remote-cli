@@ -401,17 +401,22 @@ export function createRedactedThinkingElement(): FeishuCardElement[] {
  * of any streaming session — it is sent as a one-shot interactive message.
  * Expanded by default: this is the final result of the task, not noise.
  */
-export function createTaskNotificationElement(info: TaskNotificationInfo): FeishuCardElement[] {
+export function createTaskNotificationElement(info: TaskNotificationInfo, threadName?: string): FeishuCardElement[] {
   const { taskId, status, summary, outputFile } = info;
 
-  const statusConfig: Record<TaskNotificationInfo['status'], { color: string; emoji: string; text: string }> = {
+  const statusConfig: Record<string, { color: string; emoji: string; text: string }> = {
     completed: { color: 'green', emoji: '✅', text: 'TASK COMPLETED' },
     failed: { color: 'red', emoji: '❌', text: 'TASK FAILED' },
     stopped: { color: 'orange', emoji: '⏹️', text: 'TASK STOPPED' },
   };
-  const { color, emoji, text } = statusConfig[status] || statusConfig.stopped;
+  // Unknown future statuses get a neutral label instead of being mislabeled
+  const { color, emoji, text } = statusConfig[status] || { color: 'grey', emoji: '⚪', text: 'TASK ENDED' };
 
-  const headerTitle = `<text_tag color='${color}'>${emoji} ${text}</text_tag> · \`${truncate(taskId, 16)}\``;
+  let headerTitle = `<text_tag color='${color}'>${emoji} ${text}</text_tag>`;
+  if (threadName) {
+    headerTitle += ` · **${threadName}**`;
+  }
+  headerTitle += ` · \`${truncate(taskId, 16)}\``;
 
   const bodyLines: string[] = [];
   bodyLines.push(summary.trim() ? truncate(summary, 1500) : '_(no summary)_');

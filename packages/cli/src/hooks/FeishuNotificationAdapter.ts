@@ -28,6 +28,8 @@ export class FeishuNotificationAdapter {
   private wsClient: WebSocketClient;
   private currentOpenId?: string;
   private enabledNotifications: Set<string>;
+  /** Resolves a thread ID to its display name (wired by MessageHandler) */
+  private threadNameResolver?: (threadId: string) => string | undefined;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private registeredHandlers: Array<{ event: string; handler: (...args: any[]) => any }> = [];
 
@@ -58,6 +60,14 @@ export class FeishuNotificationAdapter {
    */
   setCurrentOpenId(openId: string | undefined): void {
     this.currentOpenId = openId;
+  }
+
+  /**
+   * Set a resolver that maps thread IDs to display names.
+   * Used to enrich background task notifications with the thread name.
+   */
+  setThreadNameResolver(resolver: (threadId: string) => string | undefined): void {
+    this.threadNameResolver = resolver;
   }
 
   /**
@@ -264,6 +274,7 @@ Please respond with /authorize grant or /authorize deny`;
           messageId: uuidv4(),
           openId: this.currentOpenId,
           threadId: context.threadId,
+          threadName: context.threadId ? this.threadNameResolver?.(context.threadId) : undefined,
           taskNotification: {
             taskId: context.taskId,
             status: context.status,

@@ -467,7 +467,7 @@ export class RouterServer {
               // Background task terminal-state event (Claude Code 2.x).
               // Not tied to any streaming session — rendered as a standalone card.
               if (message.openId && message.taskNotification) {
-                await this.handleTaskNotification(message.openId, message.taskNotification, message.threadId, deviceId);
+                await this.handleTaskNotification(message.openId, message.taskNotification, message.threadId, deviceId, message.threadName);
               } else {
                 console.log('[RouterServer] Ignoring task_notification with missing openId or payload');
               }
@@ -744,10 +744,19 @@ export class RouterServer {
    * The new card is registered in cardThreadMap so the user can reply to it
    * to continue working in the originating thread.
    */
-  private async handleTaskNotification(openId: string, info: TaskNotificationInfo, threadId?: string, deviceId?: string | null): Promise<void> {
+  private async handleTaskNotification(openId: string, info: TaskNotificationInfo, threadId?: string, deviceId?: string | null, threadName?: string): Promise<void> {
+    // Boundary validation — the WS message is external data, never trust it.
+    // Required for rendering: a non-empty taskId and a string summary.
+    // Unknown status values are allowed through (forward compatibility);
+    // createTaskNotificationElement renders them with a neutral label.
+    if (!info || typeof info.taskId !== 'string' || info.taskId.length === 0 || typeof info.summary !== 'string') {
+      console.log('[RouterServer] Ignoring task_notification with invalid payload:', JSON.stringify(info).slice(0, 200));
+      return;
+    }
+
     console.log(`[RouterServer] Task notification for ${openId}: task=${info.taskId} status=${info.status} thread=${threadId || 'default'}`);
 
-    const elements = createTaskNotificationElement(info);
+    const elements = createTaskNotificationElement(info, typeof threadName === 'string' ? threadName : undefined);
     const feishuMessageId = await this.feishuLongConnHandler.sendTaskNotificationCard(openId, elements);
 
     if (feishuMessageId && threadId && deviceId) {

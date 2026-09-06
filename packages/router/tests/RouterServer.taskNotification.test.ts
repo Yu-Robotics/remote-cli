@@ -213,4 +213,46 @@ describe('RouterServer - task_notification', () => {
 
     expect(mockFeishuHandler.sendTaskNotificationCard).not.toHaveBeenCalled();
   });
+
+  it('should include the thread name in the card when provided', async () => {
+    const onMessage = await connectAndBind('device-1');
+
+    await sendTaskNotification(onMessage, { threadName: 'refactor-login' });
+
+    expect(mockFeishuHandler.sendTaskNotificationCard).toHaveBeenCalledTimes(1);
+    const [, elements] = mockFeishuHandler.sendTaskNotificationCard.mock.calls[0];
+    expect(JSON.stringify(elements)).toContain('refactor-login');
+  });
+
+  it('should silently drop payloads missing taskId without throwing', async () => {
+    const onMessage = await connectAndBind('device-1');
+
+    await sendTaskNotification(onMessage, {
+      taskNotification: { status: 'completed', summary: 'no id here', outputFile: '/tmp/x' },
+    });
+
+    expect(mockFeishuHandler.sendTaskNotificationCard).not.toHaveBeenCalled();
+  });
+
+  it('should silently drop payloads with a non-string summary without throwing', async () => {
+    const onMessage = await connectAndBind('device-1');
+
+    await sendTaskNotification(onMessage, {
+      taskNotification: { taskId: 'b4a2f1c9', status: 'completed', summary: 42 },
+    });
+
+    expect(mockFeishuHandler.sendTaskNotificationCard).not.toHaveBeenCalled();
+  });
+
+  it('should still send the card for unknown future statuses (forward compatibility)', async () => {
+    const onMessage = await connectAndBind('device-1');
+
+    await sendTaskNotification(onMessage, {
+      taskNotification: { taskId: 'b4a2f1c9', status: 'exploded', summary: 'weird new status', outputFile: '/tmp/x' },
+    });
+
+    expect(mockFeishuHandler.sendTaskNotificationCard).toHaveBeenCalledTimes(1);
+    const [, elements] = mockFeishuHandler.sendTaskNotificationCard.mock.calls[0];
+    expect(JSON.stringify(elements)).toContain('TASK ENDED');
+  });
 });

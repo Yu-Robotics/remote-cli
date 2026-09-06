@@ -188,6 +188,8 @@ export interface OutgoingMessage {
   taskNotification?: TaskNotificationInfo;
   /** Thread ID that produced this output (optional — for multi-thread routing) */
   threadId?: string;
+  /** Thread display name (optional — for background task notification cards) */
+  threadName?: string;
   /** Runtime thread summaries (for card display) */
   threads?: ThreadSummary[];
   /** Current working directory (for response messages) */

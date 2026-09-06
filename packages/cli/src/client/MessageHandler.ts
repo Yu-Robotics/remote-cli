@@ -64,6 +64,7 @@ export class MessageHandler {
     this.config = config;
 
     this.notificationAdapter = new FeishuNotificationAdapter(wsClient);
+    this.notificationAdapter.setThreadNameResolver((threadId) => this.threadManager.getThread(threadId)?.name);
     this.notificationAdapter.register();
 
     // Initialize machine commands
