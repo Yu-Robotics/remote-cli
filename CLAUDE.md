@@ -407,6 +407,8 @@ AgyExecutor uses a **persistent stream-json process** — a single long-lived ag
 
 Known gaps vs Claude backend: no `task_notification`-style background task events (stream-json emits `init`/`step_update`/`result` only), no native hooks (the PreToolUse security guard is Claude-specific; AGY relies on DirectoryGuard + `--dangerously-skip-permissions`).
 
+**Slash passthrough (AGY)**: `executeSlashCommand` is backend-aware. agy's stream-json protocol explicitly refuses CLI-answered slash commands (`status: ERROR`, "...answered by the CLI itself and is unavailable with --input-format stream-json; run it as its own --print /help invocation" — verified against agy 1.1.26), so whitelisted read-only commands (`/help` `/model` `/skills` `/usage` `/config` `/changelog` `/agents` `/permissions` `/hooks` `/credits` `/effort` — see `MessageHandler.AGY_PASSTHROUGH_COMMANDS`) are forwarded as a one-shot `agy -p "<cmd>"`. These are all read-only: agy rejects arguments ("takes no arguments"), so `/model <slug>` cannot set a model this way (use the built-in `/model`, which goes through `setModel()`). `/compact` is explicitly refused — verified live that outside the TUI the model role-plays a compaction while history stays intact. Anything else is rejected with the supported list.
+
 **Compact**: agy intercepts `/compact` only in its interactive TUI — over stream-json it reaches the model as plain text (verified live against agy 1.1.9: the model role-played a compaction and the transcript kept full history; internal auto-compaction still runs when the window fills). `compactWhenFull()` therefore does **summarize-then-reset** (see `executor/compactHandoff.ts`): ask the current conversation for a dense handoff summary → reset → wrap the summary into the next prompt (consumed once). Summary failure falls back to a plain reset with an honest warning. `/clear` (resetContext) discards any pending seed.
 
 ---
@@ -463,6 +465,8 @@ CodexExecutor is **one-shot per command** (unlike AgyExecutor's persistent proce
 - `/model` is supported: `setModel()` stores the model and the next one-shot spawn picks it up (the running command is undisturbed). Per-thread model takes precedence over `executor.codex.model` in the factory, same as AGY.
 
 Known gaps vs Claude backend: same as AGY (no task_notification events, no native hooks). Image attachments are dropped (exec mode is driven with text prompts only).
+
+**Slash passthrough (Codex)**: none — `codex exec` has no slash-command protocol (every slash command reaches the model as plain text), so `executeSlashCommand` rejects all backend-specific slash commands on the Codex backend with an explanatory message. remote-cli's built-in commands (`/clear`, `/compact`, `/model`, ...) are unaffected.
 
 **Compact**: codex has compaction in its interactive TUI plus core-level auto-compaction (`model_auto_compact_token_limit`, `compact_prompt`, PreCompact/PostCompact hooks — all present in the 0.153.4 binary), but in exec mode `/compact` reaches the model as plain text (verified live). `compactWhenFull()` therefore does the same **summarize-then-reset** as AGY (see `executor/compactHandoff.ts`), with the same failure fallback and `/clear` semantics.
 

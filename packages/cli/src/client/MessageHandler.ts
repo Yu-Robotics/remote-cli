@@ -831,7 +831,38 @@ You can also use natural language commands to control Claude Code CLI.`,
   }
 
   /**
-   * Execute passthrough slash command using local Claude CLI
+   * Slash commands that agy answers locally in non-interactive print mode
+   * (verified live against agy 1.1.26: `agy -p "/<cmd>"`). All are read-only —
+   * agy rejects arguments to them ("takes no arguments"), and its stream-json
+   * protocol refuses them outright ("answered by the CLI itself ... run it as
+   * its own --print invocation").
+   */
+  private static readonly AGY_PASSTHROUGH_COMMANDS = new Set([
+    '/help', '/model', '/skills', '/usage', '/config', '/changelog',
+    '/agents', '/permissions', '/hooks', '/credits', '/effort',
+  ]);
+
+  /**
+   * Which backend slash commands should be forwarded to, based on config.
+   * 'auto'/claude-* always resolve to Claude; legacy 'gemini' means AGY.
+   */
+  private resolveSlashBackend(): 'claude' | 'agy' | 'codex' {
+    const cfg = (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
+    const t = cfg.type as string;
+    if (t === 'agy' || t === 'gemini') return 'agy';
+    if (t === 'codex') return 'codex';
+    return 'claude';
+  }
+
+  /**
+   * Execute passthrough slash command on the active backend's CLI.
+   *
+   * - Claude: `claude <cmd> --print` (full slash-command support).
+   * - AGY: only the read-only informational commands agy answers locally in
+   *   print mode (AGY_PASSTHROUGH_COMMANDS) are forwarded as `agy -p "<cmd>"`.
+   *   /compact is explicitly refused: outside the TUI it reaches the model as
+   *   plain text and the model only pretends to compact (verified live).
+   * - Codex: no passthrough at all — exec mode has no slash-command protocol.
    */
   private async executeSlashCommand(
     messageId: string,
@@ -839,16 +870,63 @@ You can also use natural language commands to control Claude Code CLI.`,
     command: string,
     executor: IExecutor
   ): Promise<void> {
+    const backend = this.resolveSlashBackend();
+
+    if (backend === 'codex') {
+      this.sendResponse(messageId, threadId, {
+        success: false,
+        error: `❌ Slash commands are not supported on the Codex backend — codex exec mode has no slash-command protocol, so "${command}" would reach the model as plain text.\n\nBuilt-in commands (/clear, /compact, /model, /cd, /thread, /backend, /abort, /status, /help) work on every backend.`,
+      });
+      return;
+    }
+
+    if (backend === 'agy') {
+      const name = command.trim().split(/\s+/)[0].toLowerCase();
+      if (name === '/compact') {
+        this.sendResponse(messageId, threadId, {
+          success: false,
+          error: '❌ /compact cannot be forwarded to AGY CLI — in non-interactive mode it is not intercepted and the model would only pretend to compact (history stays intact). Use the built-in /compact (summarize-then-reset) instead.',
+        });
+        return;
+      }
+      if (!MessageHandler.AGY_PASSTHROUGH_COMMANDS.has(name)) {
+        this.sendResponse(messageId, threadId, {
+          success: false,
+          error: `❌ "${command}" is not supported on the AGY backend in non-interactive mode.\n\nSupported passthrough commands: ${[...MessageHandler.AGY_PASSTHROUGH_COMMANDS].join(' ')} (read-only; /model lists models but cannot set one — use the built-in /model <name> for that).`,
+        });
+        return;
+      }
+      const executorConfig = (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
+      const agyCommand = executorConfig.agy?.command ?? 'agy';
+      return this.spawnPassthroughCommand(messageId, threadId, agyCommand, ['-p', command], executor, 'AGY CLI');
+    }
+
+    return this.spawnPassthroughCommand(messageId, threadId, 'claude', [command, '--print'], executor, 'Claude CLI', { CLAUDECODE: '' });
+  }
+
+  /**
+   * Spawn a one-shot CLI process for a passthrough slash command and relay
+   * its output back to the user.
+   */
+  private spawnPassthroughCommand(
+    messageId: string,
+    threadId: string,
+    bin: string,
+    args: string[],
+    executor: IExecutor,
+    label: string,
+    extraEnv: Record<string, string> = {}
+  ): Promise<void> {
     return new Promise((resolve) => {
       const chunks: string[] = [];
       const errorChunks: string[] = [];
 
-      console.log(`[MessageHandler] Spawning Claude CLI for command: ${command}`);
+      console.log(`[MessageHandler] Spawning ${label} for command: ${args.join(' ')}`);
 
-      const child = spawn('claude', [command, '--print'], {
+      const child = spawn(bin, args, {
         cwd: executor.getCurrentWorkingDirectory(),
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, CLAUDECODE: '' },
+        env: { ...process.env, ...extraEnv },
       });
 
       child.stdout?.on('data', (data: Buffer) => {
@@ -879,7 +957,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       });
 
       child.on('error', (error) => {
-        console.error('[MessageHandler] Failed to spawn Claude:', error);
+        console.error(`[MessageHandler] Failed to spawn ${label}:`, error);
         this.sendResponse(messageId, threadId, {
           success: false,
           error: `Failed to execute command: ${error.message}`,

@@ -419,11 +419,13 @@ Control remote servers or Docker through `remote-cli` proxies.
 
 ### AI CLI Commands Passthrough
 
-All commands/skills supported by the local Claude Code, AGY CLI, or Codex CLI are passed through directly, for example:
-- `/commit` - Commit code changes
-- `/review` - Code review
-- `/test` - Run tests
-- And all other built-in AI engine commands
+Slash commands that remote-cli does not handle itself are forwarded to the active AI backend, with per-backend support:
+
+- **Claude Code**: full passthrough via `claude <cmd> --print` — all commands/skills work, e.g. `/commit`, `/review`, `/test`
+- **AGY CLI (Antigravity)**: only the read-only informational commands that agy answers locally are forwarded (`agy -p "<cmd>"`): `/skills`, `/usage`, `/config`, `/changelog`, `/agents`, `/permissions`, `/hooks`, `/credits`, `/effort`. Other commands (including `/compact`, which agy does not intercept outside its TUI) are rejected with a clear message
+- **Codex CLI (OpenAI)**: no passthrough — `codex exec` has no slash-command protocol, so all backend-specific slash commands are rejected
+
+The built-in commands (`/help`, `/status`, `/clear`, `/compact`, `/model`, `/cd`, `/thread`, `/backend`, `/abort`) work identically on every backend.
 
 ### Example Workflow
 

@@ -416,11 +416,13 @@ remote-cli stop
 
 ### AI CLI 命令透传
 
-本地 Claude Code、AGY CLI 或 Codex CLI 支持的所有 commands/skills 指令会直接透传执行，例如：
-- `/commit` - 提交代码变更
-- `/review` - 代码审查
-- `/test` - 运行测试
-- 以及其他所有 AI 引擎内置命令
+remote-cli 自身不处理的斜杠命令会转发给当前 AI 后端，各后端支持程度不同：
+
+- **Claude Code**：完整透传（`claude <cmd> --print`）——所有 commands/skills 指令可用，例如 `/commit`、`/review`、`/test`
+- **AGY CLI (Antigravity)**：仅透传 agy 本地应答的只读信息类命令（`agy -p "<cmd>"`）：`/skills`、`/usage`、`/config`、`/changelog`、`/agents`、`/permissions`、`/hooks`、`/credits`、`/effort`。其他命令（包括 `/compact`——agy 在非交互模式下不会拦截它）会被拒绝并提示原因
+- **Codex CLI (OpenAI)**：不透传——`codex exec` 没有斜杠命令协议，所有后端专属斜杠命令都会被拒绝
+
+内建命令（`/help`、`/status`、`/clear`、`/compact`、`/model`、`/cd`、`/thread`、`/backend`、`/abort`）在所有后端上行为一致。
 
 ### 示例工作流程
 
