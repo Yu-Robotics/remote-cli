@@ -39,6 +39,21 @@ export interface AgyExecutorConfig {
 }
 
 /**
+ * Codex CLI (OpenAI) executor configuration
+ */
+export interface CodexExecutorConfig {
+  /** Model passed as -m (e.g. 'gpt-5.2-codex'). Unset = codex default. */
+  model?: string;
+  /**
+   * Bypass all approvals and the sandbox via
+   * --dangerously-bypass-approvals-and-sandbox. Default: true.
+   */
+  autoApprove?: boolean;
+  /** Override codex binary command (default: 'codex') */
+  command?: string;
+}
+
+/**
  * Legacy Gemini CLI configuration.
  * @deprecated The Gemini/ACP backend was removed; the 'gemini' backend slot
  * now maps to AGY. These fields are read only as fallbacks for `agy.*`
@@ -55,8 +70,9 @@ export interface GeminiExecutorConfig {
  * Executor configuration — controls which AI CLI backend is used
  */
 export interface ExecutorConfig {
-  type: 'auto' | 'claude-persistent' | 'claude-spawn' | 'agy';
+  type: 'auto' | 'claude-persistent' | 'claude-spawn' | 'agy' | 'codex';
   agy?: AgyExecutorConfig;
+  codex?: CodexExecutorConfig;
   /** @deprecated Legacy Gemini config — read as fallback for agy.* during migration. */
   gemini?: GeminiExecutorConfig;
 }

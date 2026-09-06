@@ -49,9 +49,10 @@ export function isNewerVersion(remote: string, local: string): boolean {
 async function checkBackendAvailability(type: string, spinner: Ora): Promise<void> {
   // Legacy 'gemini' configs now mean the AGY backend (Gemini/ACP was removed).
   const isAgy = type === 'agy' || type === 'gemini';
-  const cmd = isAgy ? 'agy' : 'claude';
+  const isCodex = type === 'codex';
+  const cmd = isAgy ? 'agy' : isCodex ? 'codex' : 'claude';
   const args = ['--version'];
-  const label = isAgy ? 'AGY CLI (Antigravity)' : 'Claude Code';
+  const label = isAgy ? 'AGY CLI (Antigravity)' : isCodex ? 'Codex CLI (OpenAI)' : 'Claude Code';
 
   const available = await new Promise<boolean>((resolve) => {
     execFile(cmd, args, { timeout: 5000 }, (err) => resolve(!err));

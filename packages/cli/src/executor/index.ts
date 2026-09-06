@@ -2,6 +2,7 @@ import { DirectoryGuard } from '../security/DirectoryGuard';
 import { ClaudeExecutor } from './ClaudeExecutor';
 import { ClaudePersistentExecutor } from './ClaudePersistentExecutor';
 import { AgyExecutor } from './AgyExecutor';
+import { CodexExecutor } from './CodexExecutor';
 import type { IExecutor } from './IExecutor';
 import type { ExecutorConfig } from '../types/config';
 
@@ -10,6 +11,7 @@ export type { PersistentClaudeOptions, PersistentClaudeResult } from './ClaudePe
 export { ClaudeExecutor } from './ClaudeExecutor';
 export { ClaudePersistentExecutor } from './ClaudePersistentExecutor';
 export { AgyExecutor } from './AgyExecutor';
+export { CodexExecutor } from './CodexExecutor';
 export type { IExecutor } from './IExecutor';
 
 /**
@@ -67,8 +69,8 @@ export function createClaudeExecutor(
 
 /**
  * Create an executor based on the executor config.
- * Supports Claude (persistent / spawn / auto) and AGY (Antigravity CLI,
- * stream-json protocol).
+ * Supports Claude (persistent / spawn / auto), AGY (Antigravity CLI,
+ * stream-json protocol), and Codex (OpenAI codex exec mode).
  *
  * Legacy note: configs written before the Gemini→AGY migration may still
  * say `type: 'gemini'`. That slot now maps to the AGY backend (the Gemini
@@ -114,6 +116,16 @@ export function createExecutor(
         threadId,
       });
     }
+
+    case 'codex':
+      console.log('[ExecutorFactory] Using Codex CLI executor (exec mode)');
+      return new CodexExecutor(directoryGuard, {
+        model: executorConfig.codex?.model,
+        autoApprove: executorConfig.codex?.autoApprove ?? true,
+        initialWorkingDirectory,
+        codexCommand: executorConfig.codex?.command,
+        threadId,
+      });
 
     case 'claude-persistent':
       console.log('[ExecutorFactory] Using Claude persistent executor');
