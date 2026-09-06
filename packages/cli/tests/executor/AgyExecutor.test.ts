@@ -799,6 +799,58 @@ describe('AgyExecutor', () => {
     expect(result.success).toBe(true);
     expect(chunks.join('')).toContain('你好');
   });
+
+  // ── setModel ────────────────────────────────────────────────────────────
+
+  it('setModel kills the idle process so the next command respawns with --model, preserving the conversation', async () => {
+    const p1 = executor.execute('hi');
+    await waitForSpawn();
+    expect(mockSpawn.mock.calls[0][1]).not.toContain('--model');
+    emitInit('conv-keep');
+    emitResult({ conversation_id: 'conv-keep' });
+    await p1;
+
+    const r = await executor.setModel('gemini-3.8-flash-low');
+    expect(r.success).toBe(true);
+    expect(proc.kill).toHaveBeenCalled(); // idle process restarted for the model change
+
+    const p2 = executor.execute('after model switch');
+    await waitForSpawn();
+    expect(spawnedProcesses.length).toBe(2);
+    const args = mockSpawn.mock.calls[1][1];
+    expect(args[args.indexOf('--model') + 1]).toBe('gemini-3.8-flash-low');
+    // Conversation survives the model switch
+    expect(args[args.indexOf('--conversation') + 1]).toBe('conv-keep');
+
+    emitInit('conv-keep');
+    emitResult({ conversation_id: 'conv-keep' });
+    await p2;
+  });
+
+  it('setModel while a command is running defers the respawn until the command finishes', async () => {
+    const p = executor.execute('running');
+    await waitForSpawn();
+    emitInit('conv-keep');
+
+    const r = await executor.setModel('gemini-3.8-flash-low');
+    expect(r.success).toBe(true);
+    expect(proc.kill).not.toHaveBeenCalled(); // running command is not disturbed
+
+    emitResult({ conversation_id: 'conv-keep' });
+    await p;
+
+    // After the command finishes, the process is recycled for the model change
+    expect(proc.kill).toHaveBeenCalled();
+
+    const p2 = executor.execute('next');
+    await waitForSpawn();
+    const args = mockSpawn.mock.calls[1][1];
+    expect(args[args.indexOf('--model') + 1]).toBe('gemini-3.8-flash-low');
+
+    emitInit('conv-keep');
+    emitResult({ conversation_id: 'conv-keep' });
+    await p2;
+  });
 });
 
 describe('createExecutor factory - agy backend', () => {
@@ -876,6 +928,30 @@ describe('createExecutor factory - agy backend', () => {
     const proc = mockSpawn.mock.results[0].value;
     proc.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'init', conversation_id: 'c2', init: {} }) + '\n'));
     proc.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'result', result: { conversation_id: 'c2', status: 'SUCCESS', response: '', duration_seconds: 0, num_turns: 1, usage: {} } }) + '\n'));
+    await p;
+    await executor.destroy();
+  });
+
+  it('per-thread model (from /model) takes precedence over executor.agy.model', async () => {
+    const guard = new DirectoryGuard(['~/test-project']);
+    const executor = createExecutor(
+      guard,
+      { type: 'agy', agy: { model: 'config-model' } },
+      '~/test-project',
+      'thread-x',
+      'thread-model'
+    ) as AgyExecutor;
+
+    const p = executor.execute('hi');
+    for (let i = 0; i < 100 && mockSpawn.mock.calls.length === 0; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    const args = mockSpawn.mock.calls[0][1];
+    expect(args[args.indexOf('--model') + 1]).toBe('thread-model');
+
+    const proc = mockSpawn.mock.results[0].value;
+    proc.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'init', conversation_id: 'c3', init: {} }) + '\n'));
+    proc.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'result', result: { conversation_id: 'c3', status: 'SUCCESS', response: '', duration_seconds: 0, num_turns: 1, usage: {} } }) + '\n'));
     await p;
     await executor.destroy();
   });
