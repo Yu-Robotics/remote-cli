@@ -502,4 +502,80 @@ describe('FeishuNotificationAdapter', () => {
       expect(call?.[0].message).toContain('🔴');
     });
   });
+
+  describe('background task notifications (task_notification)', () => {
+    const emitTaskNotification = (overrides: Record<string, unknown> = {}) => {
+      claudeCodeHooks.emit(HookEventType.TASK_NOTIFICATION, {
+        taskId: 'b4a2f1',
+        status: 'completed',
+        summary: 'Build finished successfully',
+        outputFile: '/tmp/claude-outputs/b4a2f1.log',
+        threadId: 'thread-1',
+        sessionId: 'session-789',
+        ...overrides,
+      });
+    };
+
+    it('should be enabled by default', () => {
+      const defaultAdapter = new FeishuNotificationAdapter(mockWsClient);
+      expect(defaultAdapter.getEnabledNotifications()).toContain('task_notification');
+    });
+
+    it('should send a structured task_notification message when the hook fires', () => {
+      adapter.register();
+      adapter.setCurrentOpenId('user-123');
+
+      emitTaskNotification();
+
+      expect(mockWsClient.send).toHaveBeenCalledTimes(1);
+      const msg = mockWsClient.send.mock.calls[0][0];
+      expect(msg).toMatchObject({
+        type: 'task_notification',
+        openId: 'user-123',
+        threadId: 'thread-1',
+        taskNotification: {
+          taskId: 'b4a2f1',
+          status: 'completed',
+          summary: 'Build finished successfully',
+          outputFile: '/tmp/claude-outputs/b4a2f1.log',
+        },
+      });
+      // A fresh messageId is generated for tracing (no incoming command to reuse)
+      expect(typeof msg.messageId).toBe('string');
+      expect(msg.messageId.length).toBeGreaterThan(0);
+      expect(typeof msg.timestamp).toBe('number');
+    });
+
+    it('should skip sending when no openId is set', () => {
+      adapter.register();
+      // No setCurrentOpenId call
+
+      emitTaskNotification();
+
+      expect(mockWsClient.send).not.toHaveBeenCalled();
+    });
+
+    it('should respect disabled notification type', () => {
+      const customAdapter = new FeishuNotificationAdapter(mockWsClient, {
+        enabledNotifications: ['task_started'],
+      });
+      customAdapter.register();
+      customAdapter.setCurrentOpenId('user-123');
+
+      emitTaskNotification();
+
+      expect(mockWsClient.send).not.toHaveBeenCalled();
+      customAdapter.unregister();
+    });
+
+    it('should not send after unregister', () => {
+      adapter.register();
+      adapter.setCurrentOpenId('user-123');
+      adapter.unregister();
+
+      emitTaskNotification();
+
+      expect(mockWsClient.send).not.toHaveBeenCalled();
+    });
+  });
 });

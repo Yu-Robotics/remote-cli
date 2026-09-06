@@ -140,10 +140,28 @@ export interface IncomingMessage {
 export type StreamType = 'text' | 'tool_use' | 'tool_result' | 'redacted_thinking' | 'plan_mode';
 
 /**
+ * Background task notification payload (Claude Code 2.x)
+ *
+ * Sent by the CLI when a background task reaches a terminal state. Unlike
+ * stream messages, this is not tied to any in-flight command's streaming
+ * card — the router renders it as a standalone card.
+ */
+export interface TaskNotificationInfo {
+  /** Background task ID */
+  taskId: string;
+  /** Terminal status of the task */
+  status: 'completed' | 'failed' | 'stopped';
+  /** Short result summary produced by Claude Code */
+  summary: string;
+  /** Path to the task's full output file on the local machine */
+  outputFile: string;
+}
+
+/**
  * Outgoing message to router server
  */
 export interface OutgoingMessage {
-  type: 'result' | 'progress' | 'status' | 'pong' | 'structured' | 'stream' | 'response';
+  type: 'result' | 'progress' | 'status' | 'pong' | 'structured' | 'stream' | 'response' | 'task_notification';
   messageId: string;
   success?: boolean;
   /** Plain text output (for backward compatibility) */
@@ -166,6 +184,8 @@ export interface OutgoingMessage {
   toolResult?: ToolResultInfo;
   /** Plan content (when streamType === 'plan_mode') */
   planContent?: string;
+  /** Background task notification (when type === 'task_notification') */
+  taskNotification?: TaskNotificationInfo;
   /** Thread ID that produced this output (optional — for multi-thread routing) */
   threadId?: string;
   /** Runtime thread summaries (for card display) */

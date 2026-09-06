@@ -10,6 +10,7 @@ import {
   ProgressUpdate,
   ConfirmationRequest,
   UserInputRequest,
+  TaskNotificationContext,
 } from '../src/hooks/ClaudeCodeHooks';
 
 describe('ClaudeCodeHooks', () => {
@@ -219,6 +220,50 @@ describe('ClaudeCodeHooks', () => {
 
         expect(handler).toHaveBeenCalledWith(context, 'User cancelled');
       });
+    });
+  });
+
+  describe('task notification (Claude Code 2.x background tasks)', () => {
+    const createNotification = (overrides: Partial<TaskNotificationContext> = {}): TaskNotificationContext => ({
+      taskId: 'b4a2f1',
+      status: 'completed',
+      summary: 'Build finished successfully',
+      outputFile: '/tmp/claude-outputs/b4a2f1.log',
+      threadId: 'thread-1',
+      sessionId: 'session-789',
+      ...overrides,
+    });
+
+    it('should register task notification handler and receive context', async () => {
+      const handler = vi.fn();
+      hooks.onTaskNotification(handler);
+
+      const context = createNotification();
+      await hooks.notifyTaskNotification(context);
+
+      expect(handler).toHaveBeenCalledWith(context);
+    });
+
+    it('should support all task statuses', async () => {
+      const handler = vi.fn();
+      hooks.onTaskNotification(handler);
+
+      for (const status of ['completed', 'failed', 'stopped'] as const) {
+        await hooks.notifyTaskNotification(createNotification({ status }));
+      }
+
+      expect(handler).toHaveBeenCalledTimes(3);
+      expect(handler.mock.calls.map(c => c[0].status)).toEqual(['completed', 'failed', 'stopped']);
+    });
+
+    it('should not invoke handler after removeAllHandlers', async () => {
+      const handler = vi.fn();
+      hooks.onTaskNotification(handler);
+      hooks.removeAllHandlers();
+
+      await hooks.notifyTaskNotification(createNotification());
+
+      expect(handler).not.toHaveBeenCalled();
     });
   });
 
