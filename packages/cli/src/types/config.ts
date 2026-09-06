@@ -27,15 +27,27 @@ export interface ServerConfig {
 }
 
 /**
- * Gemini executor configuration
+ * AGY (Antigravity CLI) executor configuration
  */
-export interface GeminiExecutorConfig {
+export interface AgyExecutorConfig {
+  /** Model slug from `agy models` (e.g. 'gemini-3.8-flash-low'). Unset = agy default. */
   model?: string;
   /** Auto-approve all tool permissions. Default: true. False = future Feishu approval flow. */
   autoApprove?: boolean;
-  /** Override CLI command (default: 'npx') */
+  /** Override agy binary command (default: 'agy') */
   command?: string;
-  /** Pin gemini-cli version (default: '@google/gemini-cli@latest') */
+}
+
+/**
+ * Legacy Gemini CLI configuration.
+ * @deprecated The Gemini/ACP backend was removed; the 'gemini' backend slot
+ * now maps to AGY. These fields are read only as fallbacks for `agy.*`
+ * during config migration.
+ */
+export interface GeminiExecutorConfig {
+  model?: string;
+  autoApprove?: boolean;
+  command?: string;
   version?: string;
 }
 
@@ -43,7 +55,9 @@ export interface GeminiExecutorConfig {
  * Executor configuration — controls which AI CLI backend is used
  */
 export interface ExecutorConfig {
-  type: 'auto' | 'claude-persistent' | 'claude-spawn' | 'gemini';
+  type: 'auto' | 'claude-persistent' | 'claude-spawn' | 'agy';
+  agy?: AgyExecutorConfig;
+  /** @deprecated Legacy Gemini config — read as fallback for agy.* during migration. */
   gemini?: GeminiExecutorConfig;
 }
 
