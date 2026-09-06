@@ -80,7 +80,8 @@ export class CodexExecutor implements IExecutor {
   private directoryGuard: DirectoryGuard;
   private currentWorkingDirectory: string;
 
-  private readonly model?: string;
+  /** Model for the next spawn. Mutable: setModel() updates it in place. */
+  private model?: string;
   private readonly autoApprove: boolean;
   private readonly codexCommand: string;
   private readonly threadId?: string;
@@ -199,6 +200,21 @@ export class CodexExecutor implements IExecutor {
 
   getSessionId(): string | null {
     return this.codexThreadId;
+  }
+
+  /**
+   * Switch the model for future commands. codex exec is one-shot per command
+   * and takes -m at spawn, so the running command (if any) is undisturbed and
+   * the next spawn picks the new model up. MessageHandler persists the choice
+   * on the thread; ThreadExecutorPool passes it back via the factory.
+   */
+  async setModel(model: string, _onStream?: (chunk: string) => void): Promise<ExecuteResult> {
+    this.model = model;
+    console.log(`[CodexExecutor] Model set to ${model} (applies from the next command)`);
+    return {
+      success: true,
+      output: `Model set to ${model}. Takes effect on the next command.`,
+    };
   }
 
   /**
@@ -608,9 +624,18 @@ export class CodexExecutor implements IExecutor {
         return;
       }
 
-      case 'reasoning':
-        // Model reasoning summaries are not surfaced to the user
+      case 'reasoning': {
+        // Surface model reasoning summaries as streamed thinking text
+        // (aligned with the Claude backend, which streams thinking through
+        // the same channel) — but keep it out of the final result output.
+        const summary = Array.isArray(item.summary) ? item.summary : [];
+        const text = summary
+          .map((s: any) => (typeof s?.text === 'string' ? s.text : ''))
+          .filter(Boolean)
+          .join('\n');
+        if (text) options.onStream?.(text);
         return;
+      }
 
       case 'function_call_output':
         // Companion record of a function_call — already rendered by it
@@ -621,9 +646,21 @@ export class CodexExecutor implements IExecutor {
         console.warn(`[CodexExecutor] Item error: ${item.message ?? '(no message)'}`);
         return;
 
-      default:
-        // Unknown tool-ish items (mcp_tool_call, future types): ignore quietly
+      default: {
+        // Unknown tool-ish items (mcp_tool_call, file_search, future types):
+        // render a generic card with the raw type as the tool name — same
+        // pass-through policy as the AGY backend.
+        const { id: _id, type, status, result: itemResult, error: itemError, ...rest } = item;
+        options.onToolUse?.({ id: itemId, name: type, input: rest });
+        const isError = !!itemError ||
+          (typeof status === 'string' && !codexItemSucceeded(status, null));
+        const content =
+          typeof itemResult === 'string' ? itemResult
+          : itemResult !== undefined ? JSON.stringify(itemResult).slice(0, 500)
+          : (itemError?.message ?? '');
+        options.onToolResult?.({ tool_use_id: itemId, content, is_error: isError });
         return;
+      }
     }
   }
 
