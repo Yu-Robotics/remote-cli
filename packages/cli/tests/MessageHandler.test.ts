@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { EventEmitter } from 'events';
+import { spawn } from 'child_process';
 import { MessageHandler } from '../src/client/MessageHandler';
 import { WebSocketClient } from '../src/client/WebSocketClient';
 import { DirectoryGuard } from '../src/security/DirectoryGuard';
@@ -6,6 +8,22 @@ import { ThreadExecutorPool } from '../src/thread/ThreadExecutorPool';
 import { ThreadManager } from '../src/thread/ThreadManager';
 
 vi.mock('../src/client/WebSocketClient');
+
+vi.mock('child_process', async (importActual) => {
+  const actual = await importActual<typeof import('child_process')>();
+  return { ...actual, spawn: vi.fn() };
+});
+
+const mockSpawn = vi.mocked(spawn);
+
+/** A fake ChildProcess with EventEmitter stdout/stderr. */
+function fakeChild() {
+  const child: any = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.kill = vi.fn();
+  return child;
+}
 
 /**
  * Build a minimal MessageHandler with mocked threadPool, threadManager, and executor.
@@ -967,6 +985,189 @@ describe('MessageHandler', () => {
 
       expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
         expect.objectContaining({ success: false, error: expect.stringContaining('Usage') })
+      );
+    });
+  });
+
+  describe('slash command passthrough (backend-aware)', () => {
+    function useBackend(executorConfig: any) {
+      ctx.mockConfig.get.mockImplementation((key: string) =>
+        key === 'executor' ? executorConfig : undefined
+      );
+    }
+
+    async function runSlash(content: string) {
+      const child = fakeChild();
+      mockSpawn.mockReturnValue(child);
+      const p = ctx.handler.handleMessage({
+        type: 'command',
+        messageId: 'msg-slash',
+        content,
+        isSlashCommand: true,
+        timestamp: Date.now(),
+      } as any);
+      await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalled());
+      return { child, done: p };
+    }
+
+    it('should keep spawning claude --print on the default (Claude) backend', async () => {
+      useBackend(undefined);
+      const { child, done } = await runSlash('/doctor');
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        'claude',
+        ['/doctor', '--print'],
+        expect.objectContaining({ cwd: '/home/user/test-project' })
+      );
+
+      child.stdout.emit('data', Buffer.from('doctor output'));
+      child.emit('exit', 0);
+      await done;
+
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({ success: true, output: 'doctor output' })
+      );
+    });
+
+    it('should forward whitelisted read-only commands to agy -p on the AGY backend', async () => {
+      useBackend({ type: 'agy' });
+      const { child, done } = await runSlash('/usage');
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        'agy',
+        ['-p', '/usage'],
+        expect.objectContaining({ cwd: '/home/user/test-project' })
+      );
+
+      child.stdout.emit('data', Buffer.from('Weekly Limit Remaining 87%'));
+      child.emit('exit', 0);
+      await done;
+
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({ success: true, output: 'Weekly Limit Remaining 87%' })
+      );
+    });
+
+    it('should treat the legacy "gemini" backend slot as AGY', async () => {
+      useBackend({ type: 'gemini' });
+      const { child, done } = await runSlash('/skills');
+
+      expect(mockSpawn).toHaveBeenCalledWith('agy', ['-p', '/skills'], expect.anything());
+
+      child.emit('exit', 0);
+      await done;
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({ success: true })
+      );
+    });
+
+    it('should honor executor.agy.command override for the agy binary', async () => {
+      useBackend({ type: 'agy', agy: { command: '/opt/agy-custom' } });
+      const { child, done } = await runSlash('/usage');
+
+      expect(mockSpawn).toHaveBeenCalledWith('/opt/agy-custom', ['-p', '/usage'], expect.anything());
+
+      child.emit('exit', 0);
+      await done;
+    });
+
+    // '/help' and '/model' are handled by remote-cli built-ins and never
+    // reach the passthrough, so they are not exercised here.
+    it.each(['/skills', '/usage', '/config', '/changelog', '/agents', '/permissions', '/hooks', '/credits', '/effort'])(
+      'should pass through %s on the AGY backend',
+      async (cmd) => {
+        useBackend({ type: 'agy' });
+        const { child, done } = await runSlash(cmd);
+
+        expect(mockSpawn).toHaveBeenCalledWith('agy', ['-p', cmd], expect.anything());
+        child.emit('exit', 0);
+        await done;
+      }
+    );
+
+    it('should reject /compact on the AGY backend (model would fake a compaction)', async () => {
+      useBackend({ type: 'agy' });
+      // Exact '/compact' is intercepted by the built-in handler; an argument
+      // makes it fall through to the passthrough path.
+      await ctx.handler.handleMessage({
+        type: 'command',
+        messageId: 'msg-slash-compact',
+        content: '/compact now',
+        isSlashCommand: true,
+        timestamp: Date.now(),
+      } as any);
+
+      expect(mockSpawn).not.toHaveBeenCalled();
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          success: false,
+          error: expect.stringContaining('/compact'),
+        })
+      );
+    });
+
+    it('should reject unknown slash commands on the AGY backend with the supported list', async () => {
+      useBackend({ type: 'agy' });
+      await ctx.handler.handleMessage({
+        type: 'command',
+        messageId: 'msg-slash-unknown',
+        content: '/review',
+        isSlashCommand: true,
+        timestamp: Date.now(),
+      } as any);
+
+      expect(mockSpawn).not.toHaveBeenCalled();
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          success: false,
+          error: expect.stringContaining('/usage'),
+        })
+      );
+    });
+
+    it('should reject all slash commands on the Codex backend', async () => {
+      useBackend({ type: 'codex' });
+      await ctx.handler.handleMessage({
+        type: 'command',
+        messageId: 'msg-slash-codex',
+        content: '/usage',
+        isSlashCommand: true,
+        timestamp: Date.now(),
+      } as any);
+
+      expect(mockSpawn).not.toHaveBeenCalled();
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          success: false,
+          error: expect.stringContaining('Codex'),
+        })
+      );
+    });
+
+    it('should surface agy stderr on non-zero exit', async () => {
+      useBackend({ type: 'agy' });
+      const { child, done } = await runSlash('/credits');
+
+      child.stderr.emit('data', Buffer.from('Error: no credits info found'));
+      child.emit('exit', 1);
+      await done;
+
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({ success: false, error: expect.stringContaining('no credits info found') })
+      );
+    });
+
+    it('should report a spawn failure with the backend label', async () => {
+      useBackend({ type: 'codex' });
+      // Codex never spawns; use AGY to exercise the spawn error path.
+      useBackend({ type: 'agy' });
+      const { child, done } = await runSlash('/usage');
+
+      child.emit('error', new Error('spawn agy ENOENT'));
+      await done;
+
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({ success: false, error: expect.stringContaining('spawn agy ENOENT') })
       );
     });
   });
