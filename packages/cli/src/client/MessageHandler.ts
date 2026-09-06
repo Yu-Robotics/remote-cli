@@ -18,7 +18,7 @@ import type { ExecutorConfig } from '../types/config';
  * Detected backend information
  */
 interface BackendInfo {
-  id: 'auto' | 'gemini';
+  id: 'auto' | 'agy';
   label: string;
   installed: boolean;
 }
@@ -1099,13 +1099,13 @@ You can also use natural language commands to control Claude Code CLI.`,
   }
 
   private async detectBackends(): Promise<BackendInfo[]> {
-    const [claudeInstalled, geminiInstalled] = await Promise.all([
+    const [claudeInstalled, agyInstalled] = await Promise.all([
       this.checkCommand('claude', ['--version']),
-      this.checkCommand('npx', ['--no', '@google/gemini-cli', '--version']),
+      this.checkCommand('agy', ['--version']),
     ]);
     return [
-      { id: 'auto',   label: 'Claude Code', installed: claudeInstalled },
-      { id: 'gemini', label: 'Gemini CLI',  installed: geminiInstalled },
+      { id: 'auto', label: 'Claude Code', installed: claudeInstalled },
+      { id: 'agy',  label: 'AGY CLI (Antigravity)', installed: agyInstalled },
     ];
   }
 
@@ -1133,7 +1133,10 @@ You can also use natural language commands to control Claude Code CLI.`,
       const lines = installed.map((b, i) => {
         const isClaudeActive = b.id === 'auto' &&
           (currentType === 'auto' || currentType === 'claude-persistent' || currentType === 'claude-spawn');
-        const active = b.id === currentType || isClaudeActive ? ' ★ (active)' : '';
+        // Legacy configs may still say 'gemini' — that slot now means AGY.
+        const isAgyActive = b.id === 'agy' &&
+          (currentType === 'agy' || (currentType as string) === 'gemini');
+        const active = b.id === currentType || isClaudeActive || isAgyActive ? ' ★ (active)' : '';
         return `${i + 1}. ${b.label}${active}`;
       });
       this.sendResponse(messageId, threadId, {

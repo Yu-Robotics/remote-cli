@@ -1,7 +1,7 @@
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import { ClaudeExecutor } from './ClaudeExecutor';
 import { ClaudePersistentExecutor } from './ClaudePersistentExecutor';
-import { GeminiExecutor } from './GeminiExecutor';
+import { AgyExecutor } from './AgyExecutor';
 import type { IExecutor } from './IExecutor';
 import type { ExecutorConfig } from '../types/config';
 
@@ -9,7 +9,7 @@ export type { ClaudeExecuteOptions, ClaudeExecuteResult } from './ClaudeExecutor
 export type { PersistentClaudeOptions, PersistentClaudeResult } from './ClaudePersistentExecutor';
 export { ClaudeExecutor } from './ClaudeExecutor';
 export { ClaudePersistentExecutor } from './ClaudePersistentExecutor';
-export { GeminiExecutor } from './GeminiExecutor';
+export { AgyExecutor } from './AgyExecutor';
 export type { IExecutor } from './IExecutor';
 
 /**
@@ -67,7 +67,13 @@ export function createClaudeExecutor(
 
 /**
  * Create an executor based on the executor config.
- * Supports Claude (persistent / spawn / auto) and Gemini (via ACP).
+ * Supports Claude (persistent / spawn / auto) and AGY (Antigravity CLI,
+ * stream-json protocol).
+ *
+ * Legacy note: configs written before the Gemini→AGY migration may still
+ * say `type: 'gemini'`. That slot now maps to the AGY backend (the Gemini
+ * CLI/ACP stack was removed), with `executor.gemini.*` read as a fallback
+ * for `executor.agy.*` where applicable.
  *
  * @param directoryGuard Directory guard instance
  * @param executorConfig Executor config from remote-cli config (defaults to auto)
@@ -81,17 +87,33 @@ export function createExecutor(
   threadId?: string,
   model?: string
 ): IExecutor {
-  switch (executorConfig.type) {
-    case 'gemini':
-      console.log('[ExecutorFactory] Using Gemini CLI executor (ACP)');
-      return new GeminiExecutor(directoryGuard, {
-        model: executorConfig.gemini?.model,
-        autoApprove: executorConfig.gemini?.autoApprove ?? true,
+  // Cast to string so the legacy 'gemini' case compiles even though the
+  // ExecutorConfig union no longer includes it.
+  switch (executorConfig.type as string) {
+    case 'agy':
+      console.log('[ExecutorFactory] Using AGY CLI executor (stream-json)');
+      return new AgyExecutor(directoryGuard, {
+        // Legacy fallback: the user may have switched type to 'agy' while
+        // their model still lives under the old executor.gemini key.
+        model: executorConfig.agy?.model ?? executorConfig.gemini?.model,
+        autoApprove: executorConfig.agy?.autoApprove ?? executorConfig.gemini?.autoApprove ?? true,
         initialWorkingDirectory,
-        geminiCommand: executorConfig.gemini?.command,
-        geminiVersion: executorConfig.gemini?.version,
+        agyCommand: executorConfig.agy?.command,
         threadId,
       });
+
+    case 'gemini': {
+      // Legacy alias: the Gemini backend slot was replaced by AGY.
+      console.log('[ExecutorFactory] Legacy "gemini" backend migrated to AGY CLI executor');
+      const legacy = executorConfig.gemini;
+      return new AgyExecutor(directoryGuard, {
+        model: executorConfig.agy?.model ?? legacy?.model,
+        autoApprove: executorConfig.agy?.autoApprove ?? legacy?.autoApprove ?? true,
+        initialWorkingDirectory,
+        agyCommand: executorConfig.agy?.command,
+        threadId,
+      });
+    }
 
     case 'claude-persistent':
       console.log('[ExecutorFactory] Using Claude persistent executor');

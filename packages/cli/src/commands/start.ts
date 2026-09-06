@@ -47,10 +47,11 @@ export function isNewerVersion(remote: string, local: string): boolean {
  * knows why commands will fail before the first Feishu message arrives.
  */
 async function checkBackendAvailability(type: string, spinner: Ora): Promise<void> {
-  const isGemini = type === 'gemini';
-  const cmd = isGemini ? 'npx' : 'claude';
-  const args = isGemini ? ['--no', '@google/gemini-cli', '--version'] : ['--version'];
-  const label = isGemini ? 'Gemini CLI' : 'Claude Code';
+  // Legacy 'gemini' configs now mean the AGY backend (Gemini/ACP was removed).
+  const isAgy = type === 'agy' || type === 'gemini';
+  const cmd = isAgy ? 'agy' : 'claude';
+  const args = ['--version'];
+  const label = isAgy ? 'AGY CLI (Antigravity)' : 'Claude Code';
 
   const available = await new Promise<boolean>((resolve) => {
     execFile(cmd, args, { timeout: 5000 }, (err) => resolve(!err));

@@ -228,7 +228,7 @@ packages/cli/src/
   commands/      # CLI command implementations (init, start, stop, status, config)
   client/        # WebSocket client and message handling
   config/        # Configuration management
-  executor/      # AI CLI integration (ClaudeExecutor, ClaudePersistentExecutor, GeminiExecutor, IExecutor, acp/)
+  executor/      # AI CLI integration (ClaudeExecutor, ClaudePersistentExecutor, AgyExecutor, IExecutor)
   hooks/         # Claude Code hooks and Feishu notification adapter
   security/      # Directory guard, bash command validation (validateBashCommand in security-guard.ts)
   types/         # TypeScript type definitions
@@ -347,17 +347,23 @@ ANTHROPIC_MAGIC_STRING_TRIGGER_REDACTED_THINKING_46C9A13E193C177646C7398A98432EC
 - Claude 3.7 Sonnet safety features
 - Gemini thinking modes
 
-## Gemini CLI Support
+## AGY CLI (Antigravity) Support
 
-The CLI supports Gemini CLI as an alternative AI backend via ACP (Agent Client Protocol).
+The CLI supports AGY CLI (Google Antigravity's agentic CLI, binary `agy`) as an alternative AI backend via its Claude-Code-style **stream-json** protocol.
+
+> The previous Gemini CLI (ACP) backend was removed in 1.3.0. Configs with
+> `executor.type: 'gemini'` are transparently mapped to the AGY backend, and
+> `executor.gemini.model` / `executor.gemini.autoApprove` are read as
+> fallbacks for `executor.agy.*`.
 
 ### Setup
 
-Gemini CLI is auto-detected if already installed on the local machine. No installation is performed by remote-cli.
+AGY CLI is auto-detected if already installed on the local machine (`agy --version`). No installation is performed by remote-cli.
 
-1. Ensure Gemini CLI is installed and authenticated on the local machine:
+1. Install and authenticate AGY CLI (Google OAuth in browser):
    ```bash
-   npx @google/gemini-cli auth login
+   curl -fsSL https://antigravity.google/cli/install.sh | bash
+   agy  # first launch walks through login
    ```
 
 2. Switch backend via Feishu chat (no manual config needed):
@@ -376,27 +382,28 @@ Gemini CLI is auto-detected if already installed on the local machine. No instal
 
 | Field | Values | Default | Description |
 |-------|--------|---------|-------------|
-| `executor.type` | `auto`, `claude-persistent`, `claude-spawn`, `gemini` | `auto` | Which AI CLI backend to use (managed via `/backend` command) |
-| `executor.gemini.model` | any Gemini model name | *(unset)* | Gemini model to use. Leave unset to use Gemini CLI's default (`gemini-2.5-pro`). Use `flash` for higher quota limits. **Do NOT use `auto`** — it maps to `gemini-3-pro-preview` which has stricter quotas. |
-| `executor.gemini.autoApprove` | `true`/`false` | `true` | Auto-approve tool permissions |
-| `executor.gemini.command` | CLI command | `npx` | Override Gemini CLI command |
-| `executor.gemini.version` | npm version spec | `@google/gemini-cli@latest` | Pin Gemini CLI version |
+| `executor.type` | `auto`, `claude-persistent`, `claude-spawn`, `agy` | `auto` | Which AI CLI backend to use (managed via `/backend` command) |
+| `executor.agy.model` | model slug from `agy models` (e.g. `gemini-3.8-flash-low`) | *(unset)* | Model to use. Must be a slug from `agy models`; invalid slugs are rejected by agy with a clear error. Unset = agy default. |
+| `executor.agy.autoApprove` | `true`/`false` | `true` | Auto-approve tool permissions via `--dangerously-skip-permissions` |
+| `executor.agy.command` | binary command | `agy` | Override agy binary |
 
-### Architecture (Gemini)
+### Architecture (AGY)
 
 ```
 packages/cli/src/executor/
   IExecutor.ts              # Shared interface for all executor backends
-  GeminiExecutor.ts         # ACP-based executor (implements IExecutor)
-  acp/
-    AcpClient.ts            # JSON-RPC 2.0 bidirectional transport over stdio
-    AcpTypes.ts             # ACP wire format type definitions
-    SessionManager.ts       # JSONL-based session history persistence
+  AgyExecutor.ts            # stream-json executor (implements IExecutor)
 ```
 
-GeminiExecutor uses a **persistent ACP session** — a single long-lived Gemini CLI subprocess that maintains its own context (KV cache) across turns. The process is only restarted when changing directories, switching models, or during context compaction.
+AgyExecutor uses a **persistent stream-json process** — a single long-lived agy subprocess (`--input-format=stream-json --output-format=stream-json`) that maintains its own context across turns. Wire format (verified against agy 1.1.9):
 
-Tool permissions are auto-approved by default (`allow_once`), equivalent to `--yolo`.
+- **In** (stdin, one NDJSON line per turn): `{"event":"user","message":{"content":"..."}}` — text blocks only; image attachments are dropped with a warning.
+- **Out** (stdout NDJSON): `init` (carries `conversation_id`), `step_update` (`agent_response` text deltas → `onStream`; `tool` steps with `tool_info` → `onToolUse`/`onToolResult`; `user_input`/`system_message`/`checkpoint` ignored), `result` (terminal; `status` SUCCESS/ERROR/INTERRUPTED/CANCELED → command completion).
+- **Resume**: the `conversation_id` is persisted per thread (`~/.remote-cli/agy-sessions/<threadId>.json`) and passed via `--conversation <id>` when respawning (process crash, `setWorkingDirectory`, abort).
+- **Abort**: the protocol has no cancel request (`control_request` is unsupported), so abort kills the process; the next command resumes the conversation.
+- AGY tool names map to Claude-style names for the router's tool cards (`run_command`→Bash, `view_file`→Read, etc.); unknown tools pass through unchanged.
+
+Known gaps vs Claude backend: no `task_notification`-style background task events (stream-json emits `init`/`step_update`/`result` only), no `/compact` equivalent (compactWhenFull resets the conversation), no native hooks (the PreToolUse security guard is Claude-specific; AGY relies on DirectoryGuard + `--dangerously-skip-permissions`).
 
 ---
 

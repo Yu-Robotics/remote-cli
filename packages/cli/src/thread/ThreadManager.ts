@@ -13,7 +13,7 @@ import {
  * Manages thread lifecycle: create, list, update, delete.
  * Persists thread metadata to ~/.remote-cli/threads.json.
  * Session files are managed by each executor backend (ClaudePersistentExecutor,
- * GeminiExecutor) and cleaned up via IExecutor.deleteThreadData().
+ * AgyExecutor) and cleaned up via IExecutor.deleteThreadData().
  */
 export class ThreadManager {
   private store: ThreadStore;
