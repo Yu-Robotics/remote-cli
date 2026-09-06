@@ -228,7 +228,7 @@ packages/cli/src/
   commands/      # CLI command implementations (init, start, stop, status, config)
   client/        # WebSocket client and message handling
   config/        # Configuration management
-  executor/      # AI CLI integration (ClaudeExecutor, ClaudePersistentExecutor, AgyExecutor, IExecutor)
+  executor/      # AI CLI integration (ClaudeExecutor, ClaudePersistentExecutor, AgyExecutor, CodexExecutor, IExecutor)
   hooks/         # Claude Code hooks and Feishu notification adapter
   security/      # Directory guard, bash command validation (validateBashCommand in security-guard.ts)
   types/         # TypeScript type definitions
@@ -404,6 +404,60 @@ AgyExecutor uses a **persistent stream-json process** — a single long-lived ag
 - AGY tool names map to Claude-style names for the router's tool cards (`run_command`→Bash, `view_file`→Read, etc.); unknown tools pass through unchanged.
 
 Known gaps vs Claude backend: no `task_notification`-style background task events (stream-json emits `init`/`step_update`/`result` only), no `/compact` equivalent (compactWhenFull resets the conversation), no native hooks (the PreToolUse security guard is Claude-specific; AGY relies on DirectoryGuard + `--dangerously-skip-permissions`).
+
+---
+
+## Codex CLI (OpenAI) Support
+
+The CLI supports OpenAI's Codex CLI (binary `codex`) as an alternative AI backend via **`codex exec` mode** (one-shot JSONL, not the app-server).
+
+### Setup
+
+Codex CLI is auto-detected if already installed on the local machine (`codex --version`). No installation is performed by remote-cli.
+
+1. Install and authenticate:
+   ```bash
+   npm install -g @openai/codex
+   codex login
+   ```
+
+2. Switch backend via Feishu chat (no manual config needed):
+   ```
+   /backend
+   /backend 3
+   ```
+
+3. Restart the service to apply:
+   ```bash
+   remote-cli stop
+   remote-cli start
+   ```
+
+### Executor Config Fields (`executor` in config)
+
+| Field | Values | Default | Description |
+|-------|--------|---------|-------------|
+| `executor.type` | `auto`, `claude-persistent`, `claude-spawn`, `agy`, `codex` | `auto` | Which AI CLI backend to use (managed via `/backend` command) |
+| `executor.codex.model` | model name (e.g. `gpt-5.2-codex`) | *(unset)* | Model passed as `-m`. Unset = codex default. |
+| `executor.codex.autoApprove` | `true`/`false` | `true` | Bypass approvals and the sandbox via `--dangerously-bypass-approvals-and-sandbox` |
+| `executor.codex.command` | binary command | `codex` | Override codex binary |
+
+### Architecture (Codex)
+
+```
+packages/cli/src/executor/
+  CodexExecutor.ts          # codex exec executor (implements IExecutor)
+```
+
+CodexExecutor is **one-shot per command** (unlike AgyExecutor's persistent process): each `execute()` spawns `codex exec --json --skip-git-repo-check [--dangerously-bypass-approvals-and-sandbox] [-m model] "<prompt>"` and resolves when the process exits. Wire format (verified against codex-cli 0.153.4):
+
+- **Out** (stdout NDJSON): `thread.started` (`thread_id` → captured + persisted), `turn.started`, `item.started`/`item.completed` (`agent_message{text}` → `onStream`; `command_execution` → Bash tool card; `file_change{changes:[{path,kind}]}` → Edit tool card; `web_search` → WebSearch card; `reasoning` ignored; item type `error` is NON-fatal, e.g. model-metadata fallback warnings), `turn.completed`/`turn.failed`/`error` (terminal — recorded, then the command resolves on process exit).
+- **Resume**: the `thread_id` is persisted per thread (`~/.remote-cli/codex-sessions/<threadId>.json`) and the next command spawns `codex exec resume --skip-git-repo-check --json ... <thread_id> "<prompt>"`.
+- **Caveats**: stdin must be ended immediately after spawn (codex reads piped stdin to EOF); `codex exec resume` rejects the `--sandbox` flag (usage error in 0.153.4) — only `--dangerously-bypass-approvals-and-sandbox` is safe to pass on resume.
+- **Abort**: exec mode has no cancel request, so abort kills the process; the thread id survives and the next command resumes.
+
+Known gaps vs Claude backend: same as AGY (no task_notification events, no `/compact` — compactWhenFull resets the conversation, no native hooks). Image attachments are dropped (exec mode is driven with text prompts only).
+
 
 ---
 

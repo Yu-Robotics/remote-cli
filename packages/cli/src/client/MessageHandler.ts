@@ -18,7 +18,7 @@ import type { ExecutorConfig } from '../types/config';
  * Detected backend information
  */
 interface BackendInfo {
-  id: 'auto' | 'agy';
+  id: 'auto' | 'agy' | 'codex';
   label: string;
   installed: boolean;
 }
@@ -1099,13 +1099,15 @@ You can also use natural language commands to control Claude Code CLI.`,
   }
 
   private async detectBackends(): Promise<BackendInfo[]> {
-    const [claudeInstalled, agyInstalled] = await Promise.all([
+    const [claudeInstalled, agyInstalled, codexInstalled] = await Promise.all([
       this.checkCommand('claude', ['--version']),
       this.checkCommand('agy', ['--version']),
+      this.checkCommand('codex', ['--version']),
     ]);
     return [
       { id: 'auto', label: 'Claude Code', installed: claudeInstalled },
       { id: 'agy',  label: 'AGY CLI (Antigravity)', installed: agyInstalled },
+      { id: 'codex', label: 'Codex CLI (OpenAI)', installed: codexInstalled },
     ];
   }
 
