@@ -9,8 +9,10 @@ import {
   ToolExecutionResult,
   ProgressUpdate,
   UserInputRequest,
+  TaskNotificationContext,
 } from './ClaudeCodeHooks';
 import { WebSocketClient } from '../client/WebSocketClient';
+import { v4 as uuidv4 } from 'uuid';
 
 /**
  * Feishu Notification Adapter
@@ -47,6 +49,7 @@ export class FeishuNotificationAdapter {
       'task_failed',
       'task_aborted',
       'authorization_required',
+      'task_notification',
     ]);
   }
 
@@ -66,6 +69,7 @@ export class FeishuNotificationAdapter {
     this.registerToolExecutionHandlers();
     this.registerProgressHandler();
     this.registerUserInputHandler();
+    this.registerTaskNotificationHandler();
   }
 
   /**
@@ -235,6 +239,46 @@ Please respond with /authorize grant or /authorize deny`;
     };
     claudeCodeHooks.onProgress(progressHandler);
     this.registeredHandlers.push({ event: HookEventType.PROGRESS_UPDATE, handler: progressHandler as (...args: unknown[]) => unknown });
+  }
+
+  /**
+   * Register background task notification handler (Claude Code 2.x)
+   *
+   * Unlike the task lifecycle handlers above, these events fire when a
+   * background task finishes — often while no command is running — so they
+   * are sent as a structured `task_notification` message. The router renders
+   * them as a standalone Feishu card (no active streaming card may exist).
+   */
+  private registerTaskNotificationHandler(): void {
+    const handler = (context: TaskNotificationContext) => {
+      if (!this.enabledNotifications.has('task_notification')) return;
+
+      if (!this.currentOpenId) {
+        console.log(`[FeishuAdapter] No OpenID set, skipping task notification: ${context.taskId}`);
+        return;
+      }
+
+      try {
+        this.wsClient.send({
+          type: 'task_notification',
+          messageId: uuidv4(),
+          openId: this.currentOpenId,
+          threadId: context.threadId,
+          taskNotification: {
+            taskId: context.taskId,
+            status: context.status,
+            summary: context.summary,
+            outputFile: context.outputFile,
+          },
+          timestamp: Date.now(),
+        });
+        console.log(`[FeishuAdapter] Sent task notification: ${context.taskId} (${context.status})`);
+      } catch (error) {
+        console.error('[FeishuAdapter] Failed to send task notification:', error);
+      }
+    };
+    claudeCodeHooks.onTaskNotification(handler);
+    this.registeredHandlers.push({ event: HookEventType.TASK_NOTIFICATION, handler });
   }
 
   /**

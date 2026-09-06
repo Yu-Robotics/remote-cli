@@ -67,7 +67,26 @@ export enum MessageType {
   BINDING_CONFIRM = 'binding_confirm',  // Binding confirmation
   HEARTBEAT = 'heartbeat',         // Heartbeat
   ERROR = 'error',                 // Error
-  NOTIFICATION = 'notification'    // Notification message to Feishu
+  NOTIFICATION = 'notification',   // Notification message to Feishu
+  TASK_NOTIFICATION = 'task_notification'  // Background task terminal-state event (Claude Code 2.x)
+}
+
+/**
+ * Background task notification payload (Claude Code 2.x)
+ *
+ * Sent by the CLI when a background task reaches a terminal state. Not tied
+ * to any in-flight command — the router renders it as a standalone Feishu
+ * card and registers it in cardThreadMap for reply-to-continue routing.
+ */
+export interface TaskNotificationInfo {
+  /** Background task ID */
+  taskId: string;
+  /** Terminal status of the task */
+  status: 'completed' | 'failed' | 'stopped';
+  /** Short result summary produced by Claude Code */
+  summary: string;
+  /** Path to the task's full output file on the user's machine */
+  outputFile: string;
 }
 
 // WebSocket message interface
