@@ -198,6 +198,53 @@ describe('HooksConfigurator', () => {
       expect(securityHook.matcher).toContain('Write');
       expect(securityHook.matcher).toContain('Edit');
     });
+
+    it('should include Bash in the hook matcher so bash command validation is active', async () => {
+      mockExistsSync.mockReturnValue(true);
+      mockReadFileSync.mockReturnValue('{}');
+
+      await configurator.configure();
+
+      const writeCall = mockWriteFileSync.mock.calls[0];
+      const content = JSON.parse(writeCall[1] as string);
+      const securityHook = content.hooks.PreToolUse.find((h: any) =>
+        h.hooks?.some((inner: any) => inner.command?.includes('security-guard'))
+      );
+
+      // The security guard implements validateBashCommand, but it only runs if
+      // the PreToolUse matcher includes Bash — otherwise Bash never triggers the hook.
+      expect(securityHook.matcher.split('|')).toContain('Bash');
+    });
+
+    it('should upgrade an existing security guard hook whose matcher lacks Bash', async () => {
+      // Simulates an installation configured by an older version that did not
+      // include Bash in the matcher — the hook exists, so configure() would
+      // previously skip it entirely, leaving Bash unguarded forever.
+      const existingSettings = {
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: 'Read|Write|Edit|Glob|Grep|NotebookEdit',
+              hooks: [{ type: 'command', command: 'node "/path/to/security-guard.js"' }]
+            }
+          ]
+        }
+      };
+      mockExistsSync.mockReturnValue(true);
+      mockReadFileSync.mockReturnValue(JSON.stringify(existingSettings));
+
+      await configurator.configure();
+
+      const writeCall = mockWriteFileSync.mock.calls[0];
+      const content = JSON.parse(writeCall[1] as string);
+      const securityHooks = content.hooks.PreToolUse.filter((h: any) =>
+        h.hooks?.some((inner: any) => inner.command?.includes('security-guard'))
+      );
+
+      expect(securityHooks.length).toBe(1);
+      expect(securityHooks[0].matcher.split('|')).toContain('Bash');
+      expect(securityHooks[0].matcher).toContain('Read');
+    });
   });
 
   describe('unconfigure', () => {
