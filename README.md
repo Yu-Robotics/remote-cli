@@ -1,10 +1,10 @@
-# Remote CLI - Control Claude Code / Gemini CLI from Mobile via Feishu
+# Remote CLI - Control Claude Code / AGY CLI from Mobile via Feishu
 
 [![npm version](https://img.shields.io/npm/v/@yu_robotics/remote-cli.svg)](https://www.npmjs.com/package/@yu_robotics/remote-cli)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js Version](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](https://nodejs.org/)
 
-Remote control your Claude Code or Gemini CLI from anywhere using your mobile phone through Feishu (Lark) messaging. Continue coding when away from your computer with a mobile-friendly interface.
+Remote control your Claude Code or AGY CLI (Antigravity) from anywhere using your mobile phone through Feishu (Lark) messaging. Continue coding when away from your computer with a mobile-friendly interface.
 
 [中文文档](README_ZH.md)
 
@@ -13,7 +13,7 @@ Remote control your Claude Code or Gemini CLI from anywhere using your mobile ph
 - 🌍 **Remote Control**: Control your local development environment from anywhere via mobile phone
 - 🔒 **Secure**: Directory whitelisting, command filtering, and device authentication
 - 📱 **Mobile-Optimized**: Simplified commands and rich text formatting for Feishu
-- 🤖 **Multi-backend Support**: Supports Claude Code (default) and Gemini CLI, switchable at any time
+- 🤖 **Multi-backend Support**: Supports Claude Code (default) and AGY CLI (Antigravity), switchable at any time
 - 🧵 **Multi-session Management**: Create multiple independent chat threads to handle different tasks in parallel. Support switching and creating threads via Feishu card buttons.
 - 🖥️ **Remote Machine Management**: Control remote servers or Docker containers via SSH directly through Feishu. Support `/search`, `/view`, `/replace` and other remote file operations.
 - ⚡ **Persistent Process**: Long-running AI process with bidirectional streaming via stdio for faster response times
@@ -51,7 +51,7 @@ Bot:  📂 Switched to ~/projects/.openclaw
       ✅ Config fixed — openclaw can start normally now
 ```
 
-You only need to send one message from your phone. Claude Code or Gemini CLI handles the investigation, fix, and validation autonomously on your computer.
+You only need to send one message from your phone. Claude Code or AGY CLI handles the investigation, fix, and validation autonomously on your computer.
 
 **This pattern applies broadly**:
 - Emergency recovery when any CLI tool corrupts its own config
@@ -98,12 +98,12 @@ You only need to send one message from your phone. Claude Code or Gemini CLI han
 │  Phone          │         │  │  remote-cli (local)     │ │
 │  Private Chat   │         │  │  - WebSocket Client     │ │
 │  with Bot       │         │  │  - AI CLI Executor      │ │
-└─────────────────┘         │  │    (Claude / Gemini)    │ │
+└─────────────────┘         │  │    (Claude / AGY)        │ │
         │                   │  │  - Security Directory   │ │
         │                   │  │    Guard                │ │
         │                   │  └──────────┬──────────────┘ │
         │                   │             ▼                 │
-        │                   │  Claude Code / Gemini CLI    │
+        │                   │  Claude Code / AGY CLI        │
         ▼                   │  (Local AI Backend)           │
 ┌─────────────────┐         └──────────────────────────────┘
 │  Router Server  │
@@ -148,7 +148,7 @@ Before you begin, ensure you have:
 
 - **Node.js** >= 18.0.0
 - **npm** or **yarn** package manager
-- **Claude Code CLI** or **Gemini CLI** (at least one installed and configured)
+- **Claude Code CLI** or **AGY CLI** (Antigravity, at least one installed and configured)
 - Access to a **Feishu (Lark) bot** (your team should deploy a router server)
 
 ## Router Server Deployment
@@ -419,7 +419,7 @@ Control remote servers or Docker through `remote-cli` proxies.
 
 ### AI CLI Commands Passthrough
 
-All commands/skills supported by the local Claude Code or Gemini CLI are passed through directly, for example:
+All commands/skills supported by the local Claude Code or AGY CLI are passed through directly, for example:
 - `/commit` - Commit code changes
 - `/review` - Code review
 - `/test` - Run tests
@@ -550,12 +550,11 @@ MIT License - see [LICENSE](LICENSE) file for details.
     "allowedDirectories": ["/path/to/project"]
   },
   "executor": {
-    "type": "gemini",
-    "gemini": {
-      "model": "gemini-2.5-pro",
+    "type": "agy",
+    "agy": {
+      "model": "gemini-3.8-flash-low",
       "autoApprove": true,
-      "command": "npx",
-      "version": "@google/gemini-cli@latest"
+      "command": "agy"
     }
   },
   "machines": {},
@@ -563,24 +562,26 @@ MIT License - see [LICENSE](LICENSE) file for details.
 }
 ```
 
-- `executor.type`: Options are `auto` (Claude), `claude-persistent`, `claude-spawn`, `gemini`.
-- `executor.gemini`: 
-    - `model`: Model name (Avoid `auto`, explicit names like `flash` recommended).
-    - `autoApprove`: Automatically approve tool permissions (default true).
-    - `command`: Command to invoke (default `npx`).
-    - `version`: CLI version spec (default `@latest`).
+- `executor.type`: Options are `auto` (Claude), `claude-persistent`, `claude-spawn`, `agy`.
+- `executor.agy`: 
+    - `model`: Model slug from `agy models` (e.g. `gemini-3.8-flash-low`). Unset = agy default. Invalid slugs are rejected by agy with a clear error.
+    - `autoApprove`: Automatically approve tool permissions via `--dangerously-skip-permissions` (default true).
+    - `command`: agy binary to invoke (default `agy`).
 
-#### Using Gemini CLI
+> **Migration note**: configs written before 1.3.0 may still say `"type": "gemini"`. That slot now maps to the AGY backend (the Gemini CLI/ACP integration was removed), and `executor.gemini.model` / `executor.gemini.autoApprove` are read as fallbacks for `executor.agy.*`. No config change is required.
+
+#### Using AGY CLI (Antigravity)
 
 ```bash
-# 1. Authenticate (If @google/gemini-cli is already installed)
-npx @google/gemini-cli auth login
+# 1. Install and authenticate (opens browser for Google OAuth)
+curl -fsSL https://antigravity.google/cli/install.sh | bash
+agy  # first launch walks through login
 
 # 2. Switch backend (Can also use /backend command in Feishu)
-remote-cli config set executor.type gemini
+remote-cli config set executor.type agy
 
-# 3. Specify model (Recommend flash for higher quotas)
-remote-cli config set executor.gemini.model gemini-2.5-flash
+# 3. Optionally pin a model (list valid slugs with: agy models)
+remote-cli config set executor.agy.model gemini-3.8-flash-low
 ```
 
 ### Development

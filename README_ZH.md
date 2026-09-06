@@ -1,10 +1,10 @@
-# Remote CLI - 通过飞书远程控制 Claude Code / Gemini CLI
+# Remote CLI - 通过飞书远程控制 Claude Code / AGY CLI
 
 [![npm version](https://img.shields.io/npm/v/@yu_robotics/remote-cli.svg)](https://www.npmjs.com/package/@yu_robotics/remote-cli)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js Version](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](https://nodejs.org/)
 
-通过飞书（Lark）消息从手机上远程控制你的 Claude Code 或 Gemini CLI。即使不在电脑前，也能继续编程。
+通过飞书（Lark）消息从手机上远程控制你的 Claude Code 或 AGY CLI（Antigravity）。即使不在电脑前，也能继续编程。
 
 [English Documentation](README.md)
 
@@ -13,7 +13,7 @@
 - 🌍 **远程控制**：通过手机随时随地控制本地开发环境
 - 🔒 **安全可靠**：目录白名单、命令过滤、设备认证三重保护
 - 📱 **移动优化**：为飞书定制的简化命令和富文本格式
-- 🤖 **多后端支持**：支持 Claude Code（默认）和 Gemini CLI，可随时切换
+- 🤖 **多后端支持**：支持 Claude Code（默认）和 AGY CLI（Antigravity），可随时切换
 - 🧵 **多会话管理**：支持创建多个独立的会话线程（Threads），并行处理不同任务。支持通过飞书卡片按钮快速切换和创建新线程。
 - 🖥️ **远程机器管理**：支持通过 SSH 直接在飞书中控制远程服务器或 Docker 容器。支持 `/search`、`/view`、`/replace` 等远程文件操作。
 - ⚡ **持久进程**：通过 stdio 双向流保持 AI 进程长期运行，极大提升响应速度
@@ -50,7 +50,7 @@ Bot： 📂 已切换到 ~/projects/.openclaw
       ✅ 配置已修复，openclaw 可以正常启动了
 ```
 
-整个过程你只需要在手机上发一条消息，Claude Code 或 Gemini CLI 在你的电脑上自主完成排查、修复、验证全流程。
+整个过程你只需要在手机上发一条消息，Claude Code 或 AGY CLI 在你的电脑上自主完成排查、修复、验证全流程。
 
 **这个场景推广到更多工具**：
 - 任何会自动修改配置的 CLI 工具损坏后的应急修复
@@ -100,7 +100,7 @@ Bot： 📂 已切换到 ~/projects/.openclaw
 └─────────────────┘         │  │  - 安全目录守卫           │ │
         │                   │  └──────────┬──────────────┘ │
         │                   │             ▼                 │
-        │                   │  Claude Code / Gemini CLI    │
+        │                   │  Claude Code / AGY CLI        │
         ▼                   │  (本地 AI 后端)               │
 ┌─────────────────┐         └──────────────────────────────┘
 │   路由服务器     │
@@ -145,7 +145,7 @@ remote-cli start
 
 - **Node.js** >= 18.0.0
 - **npm** 或 **yarn** 包管理器
-- **Claude Code CLI** 或 **Gemini CLI**（至少安装并配置其中一个）
+- **Claude Code CLI** 或 **AGY CLI**（Antigravity，至少安装并配置其中一个）
 - 可访问的**飞书机器人**（团队应部署一个路由服务器）
 
 ## 路由服务器部署
@@ -416,7 +416,7 @@ remote-cli stop
 
 ### AI CLI 命令透传
 
-本地 Claude Code 或 Gemini CLI 支持的所有 commands/skills 指令会直接透传执行，例如：
+本地 Claude Code 或 AGY CLI 支持的所有 commands/skills 指令会直接透传执行，例如：
 - `/commit` - 提交代码变更
 - `/review` - 代码审查
 - `/test` - 运行测试
@@ -547,12 +547,11 @@ MIT 许可证 - 详见 [LICENSE](LICENSE) 文件。
     "allowedDirectories": ["/path/to/project"]
   },
   "executor": {
-    "type": "gemini",
-    "gemini": {
-      "model": "gemini-2.5-pro",
+    "type": "agy",
+    "agy": {
+      "model": "gemini-3.8-flash-low",
       "autoApprove": true,
-      "command": "npx",
-      "version": "@google/gemini-cli@latest"
+      "command": "agy"
     }
   },
   "machines": {},
@@ -560,24 +559,26 @@ MIT 许可证 - 详见 [LICENSE](LICENSE) 文件。
 }
 ```
 
-- `executor.type`: 可选值 `auto` (Claude), `claude-persistent`, `claude-spawn`, `gemini`。
-- `executor.gemini`: 
-    - `model`: 模型名称（不建议用 `auto`，建议显式指定如 `flash`）。
-    - `autoApprove`: 是否自动同意工具权限（默认 true）。
-    - `command`: 调用指令（默认 `npx`）。
-    - `version`: CLI 版本 spec（默认 `@latest`）。
+- `executor.type`: 可选值 `auto` (Claude), `claude-persistent`, `claude-spawn`, `agy`。
+- `executor.agy`: 
+    - `model`: 模型 slug，取自 `agy models` 列表（如 `gemini-3.8-flash-low`）。不填则用 agy 默认模型。无效 slug 会被 agy 拒绝并返回明确错误。
+    - `autoApprove`: 是否通过 `--dangerously-skip-permissions` 自动同意工具权限（默认 true）。
+    - `command`: agy 二进制命令（默认 `agy`）。
 
-#### 使用 Gemini CLI
+> **迁移说明**：1.3.0 之前的配置可能仍写着 `"type": "gemini"`。该槽位现在映射到 AGY 后端（Gemini CLI/ACP 集成已移除），`executor.gemini.model` / `executor.gemini.autoApprove` 会作为 `executor.agy.*` 的回退值读取。无需修改配置。
+
+#### 使用 AGY CLI（Antigravity）
 
 ```bash
-# 1. 认证（已安装 @google/gemini-cli 的情况下）
-npx @google/gemini-cli auth login
+# 1. 安装并认证（会打开浏览器进行 Google OAuth 登录）
+curl -fsSL https://antigravity.google/cli/install.sh | bash
+agy  # 首次启动会引导登录
 
 # 2. 切换后端（也可通过飞书 /backend 指令切换）
-remote-cli config set executor.type gemini
+remote-cli config set executor.type agy
 
-# 3. 指定模型（推荐使用 flash 获取更高配额）
-remote-cli config set executor.gemini.model gemini-2.5-flash
+# 3. 可选：指定模型（用 agy models 查看有效 slug 列表）
+remote-cli config set executor.agy.model gemini-3.8-flash-low
 ```
 
 ### 开发

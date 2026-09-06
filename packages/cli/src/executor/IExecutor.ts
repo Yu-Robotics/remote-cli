@@ -19,7 +19,7 @@ export interface ExecuteResult {
 }
 
 /**
- * Shared executor interface for all AI CLI backends (Claude, Gemini, etc.)
+ * Shared executor interface for all AI CLI backends (Claude, AGY, etc.)
  * Uses structural typing — existing Claude executors satisfy this without modification.
  */
 export interface IExecutor {

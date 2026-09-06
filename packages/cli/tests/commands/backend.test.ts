@@ -111,7 +111,7 @@ describe('/backend command', () => {
 
   describe('list mode (/backend with no args)', () => {
     it('shows installed backends with active marker', async () => {
-      mockInstalled('claude', 'npx');
+      mockInstalled('claude', 'agy');
       mockConfig.get.mockReturnValue({ type: 'auto' });
 
       await send('/backend');
@@ -120,10 +120,10 @@ describe('/backend command', () => {
       expect(res.success).toBe(true);
       expect(res.output).toContain('Claude Code');
       expect(res.output).toContain('★ (active)');
-      expect(res.output).toContain('Gemini CLI');
+      expect(res.output).toContain('AGY CLI');
     });
 
-    it('shows only Claude when Gemini is not installed', async () => {
+    it('shows only Claude when AGY is not installed', async () => {
       mockInstalled('claude');
 
       await send('/backend');
@@ -131,18 +131,18 @@ describe('/backend command', () => {
       const res = sentResponse();
       expect(res.success).toBe(true);
       expect(res.output).toContain('Claude Code');
-      expect(res.output).not.toContain('Gemini CLI');
+      expect(res.output).not.toContain('AGY CLI');
     });
 
-    it('shows only Gemini when Claude is not installed', async () => {
-      mockInstalled('npx');
+    it('shows only AGY when Claude is not installed', async () => {
+      mockInstalled('agy');
 
       await send('/backend');
 
       const res = sentResponse();
       expect(res.success).toBe(true);
       expect(res.output).not.toContain('Claude Code');
-      expect(res.output).toContain('Gemini CLI');
+      expect(res.output).toContain('AGY CLI');
     });
 
     it('returns error when no backends are installed', async () => {
@@ -185,38 +185,52 @@ describe('/backend command', () => {
       expect(res.output).toContain('★ (active)');
     });
 
-    it('marks Gemini as active when executor.type is gemini', async () => {
-      mockInstalled('claude', 'npx');
+    it('marks AGY as active when executor.type is agy', async () => {
+      mockInstalled('claude', 'agy');
+      mockConfig.get.mockReturnValue({ type: 'agy' });
+
+      await send('/backend');
+
+      const res = sentResponse();
+      const lines = res.output.split('\n');
+      const agyLine = lines.find((l: string) => l.includes('AGY CLI'));
+      const claudeLine = lines.find((l: string) => l.includes('Claude Code'));
+      expect(agyLine).toContain('★ (active)');
+      expect(claudeLine).not.toContain('★ (active)');
+    });
+
+    it('marks AGY as active for legacy configs with executor.type gemini (index slot migration)', async () => {
+      mockInstalled('claude', 'agy');
+      // Configs written before the Gemini→AGY migration still say 'gemini';
+      // that slot now means AGY.
       mockConfig.get.mockReturnValue({ type: 'gemini' });
 
       await send('/backend');
 
       const res = sentResponse();
       const lines = res.output.split('\n');
-      const geminiLine = lines.find((l: string) => l.includes('Gemini CLI'));
-      const claudeLine = lines.find((l: string) => l.includes('Claude Code'));
-      expect(geminiLine).toContain('★ (active)');
-      expect(claudeLine).not.toContain('★ (active)');
+      const agyLine = lines.find((l: string) => l.includes('AGY CLI'));
+      expect(agyLine).toContain('★ (active)');
     });
   });
 
   // ── switch mode ───────────────────────────────────────────────────────────────
 
   describe('switch mode (/backend <target>)', () => {
-    it('switches to Gemini by 1-based index and swaps all thread executors', async () => {
-      mockInstalled('claude', 'npx');
+    it('switches to AGY by 1-based index and swaps all thread executors', async () => {
+      mockInstalled('claude', 'agy');
 
-      await send('/backend 2'); // index 2 = Gemini
+      await send('/backend 2'); // index 2 = AGY
 
       const res = sentResponse();
       expect(res.success).toBe(true);
-      expect(res.output).toContain('Gemini CLI');
-      expect(mockConfig.set).toHaveBeenCalledWith('executor', expect.objectContaining({ type: 'gemini' }));
-      expect(mockThreadPool.switchBackend).toHaveBeenCalledWith(expect.objectContaining({ type: 'gemini' }));
+      expect(res.output).toContain('AGY CLI');
+      expect(mockConfig.set).toHaveBeenCalledWith('executor', expect.objectContaining({ type: 'agy' }));
+      expect(mockThreadPool.switchBackend).toHaveBeenCalledWith(expect.objectContaining({ type: 'agy' }));
     });
 
     it('switches to Claude Code by index', async () => {
-      mockInstalled('claude', 'npx');
+      mockInstalled('claude', 'agy');
 
       await send('/backend 1'); // index 1 = Claude Code
 
@@ -227,18 +241,18 @@ describe('/backend command', () => {
     });
 
     it('switches by partial label match', async () => {
-      mockInstalled('npx');
+      mockInstalled('agy');
 
-      await send('/backend gemini');
+      await send('/backend agy');
 
       const res = sentResponse();
       expect(res.success).toBe(true);
-      expect(res.output).toContain('Gemini CLI');
-      expect(mockConfig.set).toHaveBeenCalledWith('executor', expect.objectContaining({ type: 'gemini' }));
+      expect(res.output).toContain('AGY CLI');
+      expect(mockConfig.set).toHaveBeenCalledWith('executor', expect.objectContaining({ type: 'agy' }));
     });
 
     it('switches to Claude by name', async () => {
-      mockInstalled('claude', 'npx');
+      mockInstalled('claude', 'agy');
 
       await send('/backend claude');
 
@@ -248,15 +262,15 @@ describe('/backend command', () => {
       expect(mockConfig.set).toHaveBeenCalledWith('executor', expect.objectContaining({ type: 'auto' }));
     });
 
-    it('preserves existing gemini sub-config when switching', async () => {
-      mockInstalled('npx');
-      mockConfig.get.mockReturnValue({ type: 'auto', gemini: { model: 'gemini-2.5-pro' } });
+    it('preserves existing agy sub-config when switching', async () => {
+      mockInstalled('agy');
+      mockConfig.get.mockReturnValue({ type: 'auto', agy: { model: 'gemini-3-pro' } });
 
-      await send('/backend gemini');
+      await send('/backend agy');
 
       expect(mockConfig.set).toHaveBeenCalledWith('executor', {
-        type: 'gemini',
-        gemini: { model: 'gemini-2.5-pro' },
+        type: 'agy',
+        agy: { model: 'gemini-3-pro' },
       });
     });
 
@@ -281,13 +295,13 @@ describe('/backend command', () => {
     });
 
     it('returns error when target backend is not installed', async () => {
-      mockInstalled('claude'); // gemini not installed
+      mockInstalled('claude'); // agy not installed
 
-      await send('/backend gemini');
+      await send('/backend agy');
 
       const res = sentResponse();
       expect(res.success).toBe(false);
-      expect(res.error).toContain('"gemini" not found');
+      expect(res.error).toContain('"agy" not found');
     });
   });
 });

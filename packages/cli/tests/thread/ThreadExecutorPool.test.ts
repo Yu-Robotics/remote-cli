@@ -256,7 +256,7 @@ describe('ThreadExecutorPool', () => {
     });
 
     it('uses new config for executors created after switch', async () => {
-      const newConfig: ExecutorConfig = { type: 'gemini' };
+      const newConfig: ExecutorConfig = { type: 'agy' };
       await pool.switchBackend(newConfig);
 
       const defaultThread = manager.getDefaultThread();

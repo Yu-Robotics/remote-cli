@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as os from 'os';
 import * as path from 'path';
-import { GeminiExecutor } from '../../src/executor/GeminiExecutor';
+import { AgyExecutor } from '../../src/executor/AgyExecutor';
 import { ClaudePersistentExecutor } from '../../src/executor/ClaudePersistentExecutor';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 import { ConfigManager } from '../../src/config/ConfigManager';
@@ -22,29 +22,10 @@ vi.mock('os', async (importOriginal) => {
   };
 });
 
-// Mock AcpClient for GeminiExecutor
-const mockPrompt = vi.fn();
-const mockDestroy = vi.fn();
-const mockSendCancel = vi.fn();
-const mockInitialize = vi.fn().mockResolvedValue(undefined);
-const mockNewSession = vi.fn().mockResolvedValue('mock-session-id');
+// Prompts received by agy-format user events (recorded by the stdin mock below)
+const agyPrompts: string[] = [];
 
-vi.mock('../../src/executor/acp/AcpClient', () => ({
-  AcpClient: vi.fn().mockImplementation((_cmd, _args, _cwd, callbacks) => ({
-    initialize: mockInitialize,
-    newSession: mockNewSession,
-    sendCancel: mockSendCancel,
-    prompt: async (sessionId: string, promptText: string) => {
-      // Simulate delay for concurrency testing
-      await new Promise(resolve => setTimeout(resolve, 50));
-      return mockPrompt(sessionId, promptText);
-    },
-    destroy: mockDestroy,
-    close: mockDestroy,
-  })),
-}));
-
-// Mock child_process for ClaudePersistentExecutor
+// Mock child_process for ClaudePersistentExecutor and AgyExecutor
 vi.mock('child_process', () => {
   return {
     spawn: vi.fn().mockImplementation(() => {
@@ -59,8 +40,19 @@ vi.mock('child_process', () => {
               type: 'result',
               success: true
             }) + '\n'));
+            // Emulate a successful agy stream-json response (no conversation_id,
+            // so no session file is written). Claude's parser ignores lines
+            // without a `type` field, agy's parser ignores lines without `event`.
+            mockStdoutOn(Buffer.from(JSON.stringify({
+              event: 'result',
+              result: { conversation_id: '', status: 'SUCCESS', response: 'ok', duration_seconds: 0, num_turns: 1, usage: {} },
+            }) + '\n'));
           }
         }, 10);
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed.event === 'user') agyPrompts.push(parsed.message?.content ?? '');
+        } catch { /* not agy input */ }
         return true;
       });
       const stdinEnd = vi.fn();
@@ -104,7 +96,7 @@ vi.mock('child_process', () => {
       }, 50);
 
       return {
-        stdin: { write: stdinWrite, end: stdinEnd },
+        stdin: { write: stdinWrite, end: stdinEnd, on: vi.fn() },
         stdout,
         stderr: { on: vi.fn(), once: vi.fn() },
         on,
@@ -122,44 +114,40 @@ describe('Executor Concurrency & Rapid Commands', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    agyPrompts.length = 0;
     directoryGuard = new DirectoryGuard([os.tmpdir()]);
-    mockPrompt.mockResolvedValue('Mock response');
   });
 
-  describe('GeminiExecutor', () => {
+  describe('AgyExecutor', () => {
     it('should queue multiple execute calls sequentially', async () => {
-      const executor = new GeminiExecutor(directoryGuard);
-      
+      const executor = new AgyExecutor(directoryGuard);
+
       const p1 = executor.execute('First', {});
       const p2 = executor.execute('Second', {});
       const p3 = executor.execute('Third', {});
 
       const [r1, r2, r3] = await Promise.all([p1, p2, p3]);
-      
+
       expect(r1.success).toBe(true);
       expect(r2.success).toBe(true);
       expect(r3.success).toBe(true);
-      
-      // Calls should be sequential, mockPrompt called 3 times
-      expect(mockPrompt).toHaveBeenCalledTimes(3);
+
+      // All three prompts were sent in order
+      expect(agyPrompts).toEqual(['First', 'Second', 'Third']);
+      await executor.destroy();
     });
 
     it('should handle resetContext concurrently with execute', async () => {
-      const executor = new GeminiExecutor(directoryGuard);
-      
-      // Fire execute which takes 50ms
+      const executor = new AgyExecutor(directoryGuard);
+
+      // Fire execute while immediately resetting context
       const p1 = executor.execute('Long command', {});
-      
-      // Immediately reset context
       executor.resetContext();
-      
-      // Because we reset context, the underlying client might be destroyed
-      // But GeminiExecutor queues commands. If execute started, the client gets destroyed 
-      // during or before. Wait for result:
-      const r1 = await p1;
-      
+
       // It might fail or succeed depending on exact timing, but it shouldn't crash
+      const r1 = await p1;
       expect(r1).toBeDefined();
+      await executor.destroy();
     });
   });
 
