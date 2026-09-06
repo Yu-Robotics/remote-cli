@@ -106,7 +106,8 @@ export class AgyExecutor implements IExecutor {
   private directoryGuard: DirectoryGuard;
   private currentWorkingDirectory: string;
 
-  private readonly model?: string;
+  /** Model for the next spawn. Mutable: setModel() updates it in place. */
+  private model?: string;
   private readonly autoApprove: boolean;
   private readonly agyCommand: string;
   private readonly threadId?: string;
@@ -126,6 +127,8 @@ export class AgyExecutor implements IExecutor {
   private readonly inactivityTimeoutMs: number;
   private readonly killEscalationMs: number;
   private attachmentWarningShown = false;
+  /** Model switch requested while a command was running — respawn when it finishes. */
+  private pendingModelChange = false;
 
   constructor(directoryGuard: DirectoryGuard, options: AgyExecutorOptions = {}) {
     this.directoryGuard = directoryGuard;
@@ -236,6 +239,31 @@ export class AgyExecutor implements IExecutor {
   }
 
   /**
+   * Switch the model. agy takes --model at process start, so the process must
+   * respawn for the change to take effect — the conversation id survives, so
+   * context is preserved. If a command is in flight, the respawn is deferred
+   * until it finishes (the running turn keeps the old model).
+   * MessageHandler persists the choice on the thread; ThreadExecutorPool
+   * passes it back via the factory on restarts.
+   */
+  async setModel(model: string, _onStream?: (chunk: string) => void): Promise<ExecuteResult> {
+    this.model = model;
+    if (this.proc && !this.activeCommand) {
+      console.log(`[AgyExecutor] Model set to ${model} — recycling idle process (conversation preserved)`);
+      this.killProcess();
+    } else if (this.proc) {
+      console.log(`[AgyExecutor] Model set to ${model} — will respawn after the current command`);
+      this.pendingModelChange = true;
+    } else {
+      console.log(`[AgyExecutor] Model set to ${model} (applies from the next command)`);
+    }
+    return {
+      success: true,
+      output: `Model set to ${model}. Takes effect on the next command (the agy process restarts; conversation context is preserved).`,
+    };
+  }
+
+  /**
    * agy has no /compact equivalent. Dropping the conversation id starts a
    * fresh session on the next command, which is the practical equivalent.
    */
@@ -339,6 +367,13 @@ export class AgyExecutor implements IExecutor {
       result.sessionAbbr = this.conversationId?.slice(0, 8);
     }
     active.resolve(result);
+
+    // A model switch requested mid-command takes effect now that the
+    // command has finished — recycle the process (conversation preserved).
+    if (this.pendingModelChange) {
+      this.pendingModelChange = false;
+      if (this.proc) this.killProcess();
+    }
   }
 
   /**

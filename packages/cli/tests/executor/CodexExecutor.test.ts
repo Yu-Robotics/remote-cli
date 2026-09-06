@@ -374,22 +374,112 @@ describe('CodexExecutor', () => {
     expect(result.success).toBe(true);
   });
 
-  it('ignores reasoning items without breaking the command', async () => {
+  it('streams reasoning summaries as thinking text without polluting the final output', async () => {
     const chunks: string[] = [];
     const p = executor.execute('think', { onStream: (c) => chunks.push(c) });
     await waitForSpawn();
     emitThreadStarted();
     emitTurnStarted();
 
+    // Aligned with the Claude backend: thinking content is streamed to the
+    // user through the same channel, but kept out of the final result output.
     emitJson({ type: 'item.completed', item: { id: 'item_0', type: 'reasoning', summary: [{ type: 'summary_text', text: 'thinking...' }] } });
     emitAgentMessage('answer');
     emitSuccessAndExit();
 
     const result = await p;
     expect(result.success).toBe(true);
+    expect(chunks).toEqual(['thinking...', 'answer']);
     expect(result.output).toBe('answer');
-    expect(chunks).toEqual(['answer']);
   });
+
+  it('renders unknown tool-ish items (mcp_tool_call) as generic cards, like AGY pass-through', async () => {
+    const toolUses: any[] = [];
+    const toolResults: any[] = [];
+    const p = executor.execute('call an mcp tool', {
+      onToolUse: (t) => toolUses.push(t),
+      onToolResult: (r) => toolResults.push(r),
+    });
+    await waitForSpawn();
+    emitThreadStarted();
+    emitTurnStarted();
+
+    emitJson({
+      type: 'item.completed',
+      item: {
+        id: 'item_1', type: 'mcp_tool_call', status: 'completed',
+        server: 'github', tool: 'search_repos', arguments: '{"q":"remote-cli"}',
+        result: 'found 3 repos',
+      },
+    });
+    emitSuccessAndExit();
+    await p;
+
+    expect(toolUses).toHaveLength(1);
+    expect(toolUses[0].name).toBe('mcp_tool_call');
+    expect(toolUses[0].input).toEqual({ server: 'github', tool: 'search_repos', arguments: '{"q":"remote-cli"}' });
+    expect(toolResults).toHaveLength(1);
+    expect(toolResults[0]).toEqual({ tool_use_id: 'item_1', content: 'found 3 repos', is_error: false });
+  });
+
+  it('marks unknown tool-ish items as error when they carry an error or failed status', async () => {
+    const toolResults: any[] = [];
+    const p = executor.execute('call an mcp tool', { onToolResult: (r) => toolResults.push(r) });
+    await waitForSpawn();
+    emitThreadStarted();
+    emitTurnStarted();
+
+    emitJson({
+      type: 'item.completed',
+      item: { id: 'item_1', type: 'mcp_tool_call', status: 'failed', server: 'github', tool: 'search_repos', error: { message: 'MCP server unreachable' } },
+    });
+    emitSuccessAndExit();
+    await p;
+
+    expect(toolResults[0].is_error).toBe(true);
+    expect(toolResults[0].content).toContain('MCP server unreachable');
+  });
+
+  // ── setModel ────────────────────────────────────────────────────────────
+
+  it('setModel stores the model for the next spawn (one-shot: no kill needed)', async () => {
+    const p1 = executor.execute('hi');
+    await waitForSpawn();
+    expect(mockSpawn.mock.calls[0][1]).not.toContain('-m');
+    emitThreadStarted();
+    emitTurnStarted();
+    emitSuccessAndExit();
+    await p1;
+
+    const r = await executor.setModel('gpt-5.2-codex');
+    expect(r.success).toBe(true);
+
+    const p2 = executor.execute('after model switch');
+    await waitForSpawn(2);
+    const args = mockSpawn.mock.calls[1][1];
+    expect(args[args.indexOf('-m') + 1]).toBe('gpt-5.2-codex');
+
+    emitThreadStarted('thread-aaa');
+    emitTurnStarted();
+    emitSuccessAndExit();
+    await p2;
+  });
+
+  it('setModel does not disturb a running command', async () => {
+    const p = executor.execute('running');
+    await waitForSpawn();
+    emitThreadStarted();
+    emitTurnStarted();
+
+    const r = await executor.setModel('gpt-5.2-codex');
+    expect(r.success).toBe(true);
+    expect(proc.kill).not.toHaveBeenCalled();
+
+    emitSuccessAndExit();
+    const result = await p;
+    expect(result.success).toBe(true);
+  });
+
 
   // ── Turn-level failure mapping ────────────────────────────────────────────
 
@@ -1035,6 +1125,32 @@ describe('createExecutor factory - codex backend', () => {
     expect(args[args.indexOf('-m') + 1]).toBe('gpt-5.2-codex');
 
     // Cleanup: finish the command and destroy
+    const proc = mockSpawn.mock.results[0].value;
+    proc.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'thread.started', thread_id: 't1' }) + '\n'));
+    proc.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'turn.completed', usage: {} }) + '\n'));
+    proc.emit('exit', 0, null);
+    proc.emit('close', 0, null);
+    await p;
+    await executor.destroy();
+  });
+
+  it('per-thread model (from /model) takes precedence over executor.codex.model', async () => {
+    const guard = new DirectoryGuard(['~/test-project']);
+    const executor = createExecutor(
+      guard,
+      { type: 'codex', codex: { model: 'config-model' } } as any,
+      '~/test-project',
+      'thread-x',
+      'thread-model'
+    ) as CodexExecutor;
+
+    const p = executor.execute('hi');
+    for (let i = 0; i < 100 && mockSpawn.mock.calls.length === 0; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    const args = mockSpawn.mock.calls[0][1];
+    expect(args[args.indexOf('-m') + 1]).toBe('thread-model');
+
     const proc = mockSpawn.mock.results[0].value;
     proc.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'thread.started', thread_id: 't1' }) + '\n'));
     proc.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'turn.completed', usage: {} }) + '\n'));

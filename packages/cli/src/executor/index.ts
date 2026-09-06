@@ -95,9 +95,10 @@ export function createExecutor(
     case 'agy':
       console.log('[ExecutorFactory] Using AGY CLI executor (stream-json)');
       return new AgyExecutor(directoryGuard, {
-        // Legacy fallback: the user may have switched type to 'agy' while
+        // Per-thread model (set via /model, persisted on the thread) wins;
+        // legacy fallback: the user may have switched type to 'agy' while
         // their model still lives under the old executor.gemini key.
-        model: executorConfig.agy?.model ?? executorConfig.gemini?.model,
+        model: model ?? executorConfig.agy?.model ?? executorConfig.gemini?.model,
         autoApprove: executorConfig.agy?.autoApprove ?? executorConfig.gemini?.autoApprove ?? true,
         initialWorkingDirectory,
         agyCommand: executorConfig.agy?.command,
@@ -109,7 +110,7 @@ export function createExecutor(
       console.log('[ExecutorFactory] Legacy "gemini" backend migrated to AGY CLI executor');
       const legacy = executorConfig.gemini;
       return new AgyExecutor(directoryGuard, {
-        model: executorConfig.agy?.model ?? legacy?.model,
+        model: model ?? executorConfig.agy?.model ?? legacy?.model,
         autoApprove: executorConfig.agy?.autoApprove ?? legacy?.autoApprove ?? true,
         initialWorkingDirectory,
         agyCommand: executorConfig.agy?.command,
@@ -120,7 +121,8 @@ export function createExecutor(
     case 'codex':
       console.log('[ExecutorFactory] Using Codex CLI executor (exec mode)');
       return new CodexExecutor(directoryGuard, {
-        model: executorConfig.codex?.model,
+        // Per-thread model (set via /model, persisted on the thread) wins
+        model: model ?? executorConfig.codex?.model,
         autoApprove: executorConfig.codex?.autoApprove ?? true,
         initialWorkingDirectory,
         codexCommand: executorConfig.codex?.command,
