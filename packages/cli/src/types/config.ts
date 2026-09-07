@@ -51,6 +51,8 @@ export interface CodexExecutorConfig {
   autoApprove?: boolean;
   /** Override codex binary command (default: 'codex') */
   command?: string;
+  /** Codex transport. App-server is the default; exec is an emergency fallback. */
+  transport?: 'app-server' | 'exec';
 }
 
 /**
