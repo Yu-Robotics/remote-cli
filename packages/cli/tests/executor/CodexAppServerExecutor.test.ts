@@ -49,7 +49,7 @@ describe('CodexAppServerExecutor', () => {
   let originalHome: string | undefined;
 
   beforeEach(async () => {
-    tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-app-executor-test-'));
+    tempHome = await fs.mkdtemp(path.join(process.cwd(), '.codex-app-executor-test-'));
     originalHome = process.env.HOME;
     process.env.HOME = tempHome;
     projectDir = path.join(tempHome, 'project');
