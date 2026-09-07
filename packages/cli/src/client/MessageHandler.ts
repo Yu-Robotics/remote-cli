@@ -1250,7 +1250,7 @@ You can also use natural language commands to control Claude Code CLI.`,
 
     this.sendResponse(messageId, threadId, {
       success: true,
-      output: `✅ Backend switched to: ${target.label}\n\nAll threads will use the new backend for future commands.`,
+      output: `✅ Backend switched to: ${target.label}\n\nAll threads will use the new backend for future commands. Conversations on the previous backend are preserved — switch back to resume them.`,
     });
   }
 

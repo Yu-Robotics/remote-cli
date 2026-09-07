@@ -114,13 +114,22 @@ export class ThreadExecutorPool {
   /**
    * Destroy a single thread's executor and remove it from the pool.
    * No-op if no executor has been created for this thread.
+   *
+   * By default the executor's persisted session data (claude session file /
+   * agy conversation id / codex thread id) is deleted too — that is what
+   * `/thread delete` wants. Pass `{ deleteData: false }` when only the
+   * process should be torn down (e.g. backend switch), so switching back can
+   * resume the conversation.
    */
-  async destroyThread(threadId: string): Promise<void> {
+  async destroyThread(threadId: string, options: { deleteData?: boolean } = {}): Promise<void> {
+    const deleteData = options.deleteData ?? true;
     const executor = this.executors.get(threadId);
     if (executor) {
-      if (executor.deleteThreadData) {
+      if (deleteData && executor.deleteThreadData) {
         await executor.deleteThreadData(threadId);
       }
+      // Always destroy the process: some deleteThreadData implementations
+      // (e.g. Claude) only unlink the session file. destroy() is idempotent.
       await executor.destroy();
       this.executors.delete(threadId);
       this.busy.delete(threadId);
@@ -130,19 +139,23 @@ export class ThreadExecutorPool {
 
   /**
    * Destroy all executors in the pool.
+   * Pass `{ deleteData: false }` to keep per-backend session files on disk.
    */
-  async destroyAll(): Promise<void> {
+  async destroyAll(options: { deleteData?: boolean } = {}): Promise<void> {
     await Promise.all(
-      Array.from(this.executors.keys()).map(id => this.destroyThread(id))
+      Array.from(this.executors.keys()).map(id => this.destroyThread(id, options))
     );
   }
 
   /**
    * Switch all threads to a new executor backend.
-   * Destroys all existing executors; new ones will be lazily created on next use.
+   * Destroys all existing executor processes; new ones will be lazily created
+   * on next use. Session data is preserved (deleteData: false): each backend
+   * keeps its own per-thread session pointer, so switching back to a backend
+   * resumes the conversation that thread had on it.
    */
   async switchBackend(newConfig: ExecutorConfig): Promise<void> {
-    await this.destroyAll();
+    await this.destroyAll({ deleteData: false });
     this.executorConfig = newConfig;
   }
 }
