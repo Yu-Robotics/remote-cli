@@ -423,7 +423,7 @@ Slash commands that remote-cli does not handle itself are forwarded to the activ
 
 - **Claude Code**: full passthrough via `claude <cmd> --print` — all commands/skills work, e.g. `/commit`, `/review`, `/test`
 - **AGY CLI (Antigravity)**: only the read-only informational commands that agy answers locally are forwarded (`agy -p "<cmd>"`): `/skills`, `/usage`, `/config`, `/changelog`, `/agents`, `/permissions`, `/hooks`, `/credits`, `/effort`. Other commands (including `/compact`, which agy does not intercept outside its TUI) are rejected with a clear message
-- **Codex CLI (OpenAI)**: no passthrough — `codex exec` has no slash-command protocol, so all backend-specific slash commands are rejected
+- **Codex CLI (OpenAI)**: no passthrough — remote-cli uses the app-server API rather than the interactive TUI slash-command layer, so backend-specific slash commands are rejected
 
 The built-in commands (`/help`, `/status`, `/clear`, `/compact`, `/model`, `/cd`, `/thread`, `/backend`, `/abort`) work identically on every backend.
 
@@ -570,9 +570,10 @@ MIT License - see [LICENSE](LICENSE) file for details.
     - `autoApprove`: Automatically approve tool permissions via `--dangerously-skip-permissions` (default true).
     - `command`: agy binary to invoke (default `agy`).
 - `executor.codex`:
-    - `model`: Model passed as `-m` (e.g. `gpt-5.2-codex`). Unset = codex default.
-    - `autoApprove`: Bypass approvals and the sandbox via `--dangerously-bypass-approvals-and-sandbox` (default true).
+    - `model`: Model selected for Codex turns. Unset = codex default. Use `/model` in Feishu to query the authenticated account's available models.
+    - `autoApprove`: Use `approvalPolicy: never` with full access (default true). When false, app-server approval requests are relayed through the existing mobile input flow.
     - `command`: codex binary to invoke (default `codex`).
+    - `transport`: `app-server` (default) or `exec` (emergency compatibility fallback).
 
 > **Migration note**: configs written before 1.3.0 may still say `"type": "gemini"`. That slot now maps to the AGY backend (the Gemini CLI/ACP integration was removed), and `executor.gemini.model` / `executor.gemini.autoApprove` are read as fallbacks for `executor.agy.*`. No config change is required.
 
@@ -604,9 +605,18 @@ remote-cli config set executor.type codex
 remote-cli config set executor.codex.model gpt-5.2-codex
 ```
 
-The Codex backend runs in `codex exec` mode: each message spawns a one-shot
-process, and conversation continuity is preserved across messages (and service
-restarts) by resuming the persisted thread id.
+The Codex backend runs one persistent `codex app-server` process per active
+remote-cli thread. Conversation continuity is preserved across messages,
+working-directory changes, backend switches, and service restarts by resuming
+the persisted Codex thread id. `/model` queries app-server's model catalog,
+`/compact` uses native thread compaction, `/abort` interrupts the active turn,
+and image messages are sent as Codex image inputs.
+
+To temporarily use the legacy one-shot transport for troubleshooting:
+
+```bash
+remote-cli config set executor.codex.transport exec
+```
 
 ### Development
 

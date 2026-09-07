@@ -468,8 +468,8 @@ You can also use natural language commands to control Claude Code CLI.`,
    * the available models. Listing source per backend (all verified live):
    * - claude: `claude --print /model` prints current + available aliases
    * - agy: `agy models` prints "slug<TAB>Display Name" lines
-   * - codex: no non-interactive listing exists (`codex models` is a TUI) —
-   *   show the current selection and point to the terminal command.
+   * - codex app-server: `model/list` returns the authenticated catalog
+   * - codex exec fallback: listing is unavailable
    */
   private async handleModelList(messageId: string, threadId: string): Promise<void> {
     const executorConfig = (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
@@ -484,10 +484,25 @@ You can also use natural language commands to control Claude Code CLI.`,
     ];
 
     if (key === 'codex') {
-      lines.push(
-        '',
-        'Model listing is not available non-interactively for Codex — run `codex models` in a terminal to browse available models.'
-      );
+      const executor = this.threadPool.getExecutor(threadId);
+      if ('listModels' in executor && typeof executor.listModels === 'function') {
+        try {
+          const models = await executor.listModels();
+          if (models.length > 0) {
+            lines.push('', 'Available models:');
+            for (const model of models) {
+              const marker = model.id === current ? ' ★' : model.isDefault ? ' (default)' : '';
+              lines.push(`- ${model.id}${marker}${model.displayName !== model.id ? ` — ${model.displayName}` : ''}`);
+            }
+          } else {
+            lines.push('', '⚠️ Codex returned an empty model list.');
+          }
+        } catch (error) {
+          lines.push('', `⚠️ Could not fetch the model list from Codex: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      } else {
+        lines.push('', 'Model listing is unavailable in the Codex exec fallback transport.');
+      }
     } else {
       const bin = key === 'agy' ? (executorConfig.agy?.command ?? 'agy') : 'claude';
       const args = key === 'agy' ? ['models'] : ['/model', '--print'];
@@ -951,7 +966,8 @@ You can also use natural language commands to control Claude Code CLI.`,
    *   print mode (AGY_PASSTHROUGH_COMMANDS) are forwarded as `agy -p "<cmd>"`.
    *   /compact is explicitly refused: outside the TUI it reaches the model as
    *   plain text and the model only pretends to compact (verified live).
-   * - Codex: no passthrough at all — exec mode has no slash-command protocol.
+   * - Codex: no interactive-TUI slash passthrough. Remote CLI built-ins are
+   *   implemented through app-server methods instead.
    */
   private async executeSlashCommand(
     messageId: string,
@@ -964,7 +980,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     if (backend === 'codex') {
       this.sendResponse(messageId, threadId, {
         success: false,
-        error: `❌ Slash commands are not supported on the Codex backend — codex exec mode has no slash-command protocol, so "${command}" would reach the model as plain text.\n\nBuilt-in commands (/clear, /compact, /model, /cd, /thread, /backend, /abort, /status, /help) work on every backend.`,
+        error: `❌ "${command}" is not exposed as a Codex backend command.\n\nBuilt-in commands (/clear, /compact, /model, /cd, /thread, /backend, /abort, /status, /help) work on every backend.`,
       });
       return;
     }
@@ -1067,14 +1083,24 @@ You can also use natural language commands to control Claude Code CLI.`,
     attachments?: Attachment[]
   ): Promise<void> {
     try {
-      const result = await executor.execute(content, {
+      const executeOptions = {
         onStream: (chunk: string) => this.sendStreamChunk(messageId, threadId, chunk),
         onToolUse: (toolUse: ToolUseInfo) => this.sendToolUse(messageId, threadId, toolUse),
         onToolResult: (toolResult: ToolResultInfo) => this.sendToolResult(messageId, threadId, toolResult),
         onRedactedThinking: () => this.sendRedactedThinking(messageId, threadId),
         onPlanMode: (planContent: string) => this.sendPlanMode(messageId, threadId, planContent),
         attachments,
-      });
+      };
+      let result = await executor.execute(content, executeOptions);
+
+      if (await this.clearInvalidCodexModel(threadId, executor, result.error)) {
+        this.sendStreamChunk(
+          messageId,
+          threadId,
+          '⚠️ The saved Codex model is unavailable for this account. Cleared it and retrying with the backend default...\n'
+        );
+        result = await executor.execute(content, executeOptions);
+      }
 
       if (!result.success && result.error && result.error.includes('Prompt too long')) {
         if ('compactWhenFull' in executor && typeof executor.compactWhenFull === 'function') {
@@ -1115,6 +1141,31 @@ You can also use natural language commands to control Claude Code CLI.`,
         error: error instanceof Error ? error.message : 'Execution error',
       });
     }
+  }
+
+  private async clearInvalidCodexModel(
+    threadId: string,
+    executor: IExecutor,
+    error?: string
+  ): Promise<boolean> {
+    if (!error || !this.isUnavailableCodexModelError(error)) return false;
+
+    const executorConfig = (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
+    if (backendKeyOf(executorConfig.type as string) !== 'codex') return false;
+
+    const thread = this.threadManager.getThread(threadId);
+    if (!thread?.models?.codex) return false;
+
+    const models = { ...thread.models };
+    delete models.codex;
+    await this.threadManager.updateThread(threadId, { models });
+    await executor.clearModel?.();
+    return true;
+  }
+
+  private isUnavailableCodexModelError(error: string): boolean {
+    return /model[^\n]*(?:not supported when using Codex with a ChatGPT account|not found|does not exist)/i.test(error)
+      || /unknown Codex model/i.test(error);
   }
 
   // ── Outgoing message helpers ──────────────────────────────────────────────
@@ -1350,7 +1401,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     this.isDestroyed = true;
     this.notificationAdapter.unregister();
     try {
-      await this.threadPool.destroyAll();
+      await this.threadPool.destroyAll({ deleteData: false });
     } catch (err) {
       console.error('Error destroying thread executors:', err);
     }

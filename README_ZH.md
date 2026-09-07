@@ -420,7 +420,7 @@ remote-cli 自身不处理的斜杠命令会转发给当前 AI 后端，各后�
 
 - **Claude Code**：完整透传（`claude <cmd> --print`）——所有 commands/skills 指令可用，例如 `/commit`、`/review`、`/test`
 - **AGY CLI (Antigravity)**：仅透传 agy 本地应答的只读信息类命令（`agy -p "<cmd>"`）：`/skills`、`/usage`、`/config`、`/changelog`、`/agents`、`/permissions`、`/hooks`、`/credits`、`/effort`。其他命令（包括 `/compact`——agy 在非交互模式下不会拦截它）会被拒绝并提示原因
-- **Codex CLI (OpenAI)**：不透传——`codex exec` 没有斜杠命令协议，所有后端专属斜杠命令都会被拒绝
+- **Codex CLI (OpenAI)**：不透传——remote-cli 使用 app-server API，而不是交互式 TUI 的斜杠命令层，因此后端专属斜杠命令会被拒绝
 
 内建命令（`/help`、`/status`、`/clear`、`/compact`、`/model`、`/cd`、`/thread`、`/backend`、`/abort`）在所有后端上行为一致。
 
@@ -567,9 +567,10 @@ MIT 许可证 - 详见 [LICENSE](LICENSE) 文件。
     - `autoApprove`: 是否通过 `--dangerously-skip-permissions` 自动同意工具权限（默认 true）。
     - `command`: agy 二进制命令（默认 `agy`）。
 - `executor.codex`:
-    - `model`: 通过 `-m` 传入的模型（如 `gpt-5.2-codex`）。不填则用 codex 默认模型。
-    - `autoApprove`: 通过 `--dangerously-bypass-approvals-and-sandbox` 跳过审批与沙箱（默认 true）。
+    - `model`: Codex turn 使用的模型。不填则使用 codex 默认模型。可以在飞书中使用 `/model` 查询当前账号可用的模型。
+    - `autoApprove`: 使用 `approvalPolicy: never` 和完全访问权限（默认 true）。设为 false 时，app-server 的审批请求会通过现有移动端输入流程转发。
     - `command`: codex 二进制命令（默认 `codex`）。
+    - `transport`: `app-server`（默认）或 `exec`（紧急兼容回退）。
 
 > **迁移说明**：1.3.0 之前的配置可能仍写着 `"type": "gemini"`。该槽位现在映射到 AGY 后端（Gemini CLI/ACP 集成已移除），`executor.gemini.model` / `executor.gemini.autoApprove` 会作为 `executor.agy.*` 的回退值读取。无需修改配置。
 
@@ -601,8 +602,17 @@ remote-cli config set executor.type codex
 remote-cli config set executor.codex.model gpt-5.2-codex
 ```
 
-Codex 后端运行在 `codex exec` 模式：每条消息启动一个一次性进程，通过持久化的
-thread id 在消息之间（以及服务重启后）恢复会话上下文。
+Codex 后端为每个活跃的 remote-cli thread 运行一个持久化的
+`codex app-server` 进程。通过恢复已持久化的 Codex thread id，在消息之间、
+工作目录变更、后端切换和服务重启后保持会话连续性。`/model` 查询 app-server
+模型目录，`/compact` 使用原生 thread 压缩，`/abort` 中断当前 turn，图片消息也会
+作为 Codex 图片输入发送。
+
+如需临时使用旧版一次性 transport 排查问题：
+
+```bash
+remote-cli config set executor.codex.transport exec
+```
 
 ### 开发
 

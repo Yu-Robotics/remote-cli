@@ -531,8 +531,12 @@ describe('MessageHandler', () => {
       await done;
     });
 
-    it('codex: shows current selection with a terminal hint, without spawning anything', async () => {
+    it('codex: lists app-server models and shows the current selection', async () => {
       useBackend({ type: 'codex' }, { models: { codex: 'gpt-5.2-codex' } });
+      ctx.mockExecutor.listModels = vi.fn().mockResolvedValue([
+        { id: 'gpt-5.2-codex', displayName: 'GPT-5.2 Codex' },
+        { id: 'gpt-5.3-codex', displayName: 'GPT-5.3 Codex', isDefault: true },
+      ]);
 
       await ctx.handler.handleMessage({
         type: 'command', messageId: 'msg-model-list', content: '/model', timestamp: Date.now(),
@@ -542,7 +546,8 @@ describe('MessageHandler', () => {
       const call = ctx.mockWsClient.send.mock.calls.find((c: any[]) => c[0].messageId === 'msg-model-list' && c[0].type === 'response');
       expect(call[0].success).toBe(true);
       expect(call[0].output).toContain('gpt-5.2-codex');
-      expect(call[0].output).toContain('codex models');
+      expect(call[0].output).toContain('gpt-5.3-codex');
+      expect(ctx.mockExecutor.listModels).toHaveBeenCalledOnce();
     });
 
     it('shows "backend default" when no model has been selected', async () => {
@@ -652,11 +657,56 @@ describe('MessageHandler', () => {
 
       expect(ctx.mockExecutor.execute).toHaveBeenCalledTimes(2);
     });
+
+    it('clears a persisted unavailable Codex model and retries with the default', async () => {
+      const unavailableModelError = '{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The \'gpt-5.2-codex\' model is not supported when using Codex with a ChatGPT account."}}';
+      ctx.mockConfig.get.mockImplementation((key: string) =>
+        key === 'executor' ? { type: 'codex', codex: { transport: 'exec' } } : undefined
+      );
+      ctx.mockThreadManager.getThread.mockReturnValue({
+        id: 'default-thread-id',
+        name: 'default',
+        workingDirectory: '/home/user/test-project',
+        sessionId: null,
+        createdAt: 0,
+        lastActiveAt: 0,
+        models: { agy: 'gemini-3.8-flash-low', codex: 'gpt-5.2-codex' },
+      });
+      ctx.mockExecutor.clearModel = vi.fn();
+      ctx.mockExecutor.execute
+        .mockResolvedValueOnce({ success: false, error: unavailableModelError })
+        .mockResolvedValueOnce({ success: true, output: 'recovered' });
+
+      await ctx.handler.handleMessage({
+        type: 'command',
+        messageId: 'msg-invalid-codex-model',
+        content: 'continue the task',
+        timestamp: Date.now(),
+      });
+
+      expect(ctx.mockThreadManager.updateThread).toHaveBeenCalledWith(
+        'default-thread-id',
+        { models: { agy: 'gemini-3.8-flash-low' } }
+      );
+      expect(ctx.mockExecutor.clearModel).toHaveBeenCalledOnce();
+      expect(ctx.mockExecutor.execute).toHaveBeenCalledTimes(2);
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'stream',
+        messageId: 'msg-invalid-codex-model',
+        chunk: expect.stringContaining('retrying with the backend default'),
+      }));
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'response',
+        messageId: 'msg-invalid-codex-model',
+        success: true,
+      }));
+    });
   });
 
   describe('cleanup', () => {
     it('should cleanup resources on destroy', async () => {
       await ctx.handler.destroy();
+      expect(ctx.mockThreadPool.destroyAll).toHaveBeenCalledWith({ deleteData: false });
       await expect(ctx.handler.destroy()).resolves.not.toThrow();
     });
 

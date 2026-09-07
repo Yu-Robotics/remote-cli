@@ -3,6 +3,7 @@ import { ClaudeExecutor } from './ClaudeExecutor';
 import { ClaudePersistentExecutor } from './ClaudePersistentExecutor';
 import { AgyExecutor } from './AgyExecutor';
 import { CodexExecutor } from './CodexExecutor';
+import { CodexAppServerExecutor } from './CodexAppServerExecutor';
 import type { IExecutor } from './IExecutor';
 import type { ExecutorConfig } from '../types/config';
 
@@ -12,7 +13,8 @@ export { ClaudeExecutor } from './ClaudeExecutor';
 export { ClaudePersistentExecutor } from './ClaudePersistentExecutor';
 export { AgyExecutor } from './AgyExecutor';
 export { CodexExecutor } from './CodexExecutor';
-export type { IExecutor } from './IExecutor';
+export { CodexAppServerExecutor } from './CodexAppServerExecutor';
+export type { ExecutorModelInfo, IExecutor } from './IExecutor';
 
 /**
  * Check if we're running inside a Claude Code session
@@ -70,7 +72,7 @@ export function createClaudeExecutor(
 /**
  * Create an executor based on the executor config.
  * Supports Claude (persistent / spawn / auto), AGY (Antigravity CLI,
- * stream-json protocol), and Codex (OpenAI codex exec mode).
+ * stream-json protocol), and Codex (app-server by default, with exec fallback).
  *
  * Legacy note: configs written before the Gemini→AGY migration may still
  * say `type: 'gemini'`. That slot now maps to the AGY backend (the Gemini
@@ -119,8 +121,18 @@ export function createExecutor(
     }
 
     case 'codex':
-      console.log('[ExecutorFactory] Using Codex CLI executor (exec mode)');
-      return new CodexExecutor(directoryGuard, {
+      if (executorConfig.codex?.transport === 'exec') {
+        console.log('[ExecutorFactory] Using Codex CLI executor (exec fallback)');
+        return new CodexExecutor(directoryGuard, {
+          model: model ?? executorConfig.codex?.model,
+          autoApprove: executorConfig.codex?.autoApprove ?? true,
+          initialWorkingDirectory,
+          codexCommand: executorConfig.codex?.command,
+          threadId,
+        });
+      }
+      console.log('[ExecutorFactory] Using Codex app-server executor');
+      return new CodexAppServerExecutor(directoryGuard, {
         // Per-thread model (set via /model, persisted on the thread) wins
         model: model ?? executorConfig.codex?.model,
         autoApprove: executorConfig.codex?.autoApprove ?? true,
