@@ -327,7 +327,7 @@ export class MessageHandler {
 - /clear - Clear conversation context for this thread
 - /compact - Compress conversation history to reduce context size
 - /cd <directory> - Change working directory for this thread
-- /model <name> - Switch the AI model for this thread (persists across sessions)
+- /model [name] - Show available models, or switch the AI model for this thread (persists across sessions)
 - /backend - List available AI backends and switch between them
 - /thread list - List all threads with their status
 - /thread new [name] - Create a new thread
@@ -419,7 +419,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     if (trimmed === '/model' || trimmed.startsWith('/model ')) {
       const parts = trimmed.split(/\s+/);
       if (parts.length < 2) {
-        this.sendResponse(messageId, threadId, { success: false, error: 'Usage: /model <name>' });
+        await this.handleModelList(messageId, threadId);
         return true;
       }
       const modelArg = parts.slice(1).join(' ');
@@ -461,6 +461,84 @@ You can also use natural language commands to control Claude Code CLI.`,
     }
 
     return false;
+  }
+
+  /**
+   * Bare /model: show the thread's current model on the active backend plus
+   * the available models. Listing source per backend (all verified live):
+   * - claude: `claude --print /model` prints current + available aliases
+   * - agy: `agy models` prints "slug<TAB>Display Name" lines
+   * - codex: no non-interactive listing exists (`codex models` is a TUI) —
+   *   show the current selection and point to the terminal command.
+   */
+  private async handleModelList(messageId: string, threadId: string): Promise<void> {
+    const executorConfig = (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
+    const key = backendKeyOf(executorConfig.type as string);
+    const thread = this.threadManager.getThread(threadId);
+    const current = thread?.models?.[key] ?? (key === 'claude' ? thread?.model : undefined);
+
+    const backendLabel = key === 'claude' ? 'Claude Code' : key === 'agy' ? 'AGY CLI' : 'Codex CLI';
+    const lines: string[] = [
+      `🎯 Backend: ${backendLabel}`,
+      `Current model: ${current ?? 'backend default'}`,
+    ];
+
+    if (key === 'codex') {
+      lines.push(
+        '',
+        'Model listing is not available non-interactively for Codex — run `codex models` in a terminal to browse available models.'
+      );
+    } else {
+      const bin = key === 'agy' ? (executorConfig.agy?.command ?? 'agy') : 'claude';
+      const args = key === 'agy' ? ['models'] : ['/model', '--print'];
+      const listing = await this.runListingCommand(bin, args);
+      if (listing) {
+        lines.push('', 'Available models:', listing.trim());
+      } else {
+        lines.push('', '⚠️ Could not fetch the model list from the backend CLI.');
+      }
+    }
+
+    lines.push('', 'Set with: /model <name>');
+    this.sendResponse(messageId, threadId, { success: true, output: lines.join('\n') });
+  }
+
+  /**
+   * Run a short-lived CLI listing command with a 10s timeout.
+   * Returns null on failure/timeout — callers degrade gracefully.
+   */
+  private runListingCommand(bin: string, args: string[]): Promise<string | null> {
+    return new Promise((resolve) => {
+      let settled = false;
+      let timer: NodeJS.Timeout | undefined;
+      const finish = (value: string | null) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        resolve(value);
+      };
+
+      let child;
+      try {
+        child = spawn(bin, args, {
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: { ...process.env, CLAUDECODE: '' },
+        });
+      } catch {
+        finish(null);
+        return;
+      }
+
+      timer = setTimeout(() => {
+        child.kill();
+        finish(null);
+      }, 10000);
+
+      const chunks: string[] = [];
+      child.stdout?.on('data', (d: Buffer) => chunks.push(d.toString()));
+      child.on('exit', (code) => finish(code === 0 ? chunks.join('') : null));
+      child.on('error', () => finish(null));
+    });
   }
 
   /**
