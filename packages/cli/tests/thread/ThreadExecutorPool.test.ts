@@ -194,6 +194,53 @@ describe('ThreadExecutorPool', () => {
     });
   });
 
+  describe('switchBackend', () => {
+    it('destroys executors WITHOUT deleting per-backend session data', async () => {
+      const deleteThreadData = vi.fn().mockResolvedValue(undefined);
+      mockExecutorFactory.mockImplementationOnce(() => makeMockExecutor({ deleteThreadData }));
+
+      const defaultThread = manager.getDefaultThread();
+      const executor = pool.getExecutor(defaultThread.id);
+
+      await pool.switchBackend({ type: 'agy' });
+
+      // The process is torn down, but the on-disk session pointer
+      // (claude session / agy conversation id / codex thread id) must
+      // survive so switching back can resume the conversation.
+      expect(executor.destroy).toHaveBeenCalled();
+      expect(deleteThreadData).not.toHaveBeenCalled();
+    });
+
+    it('lazily recreates executors with the new backend config on next use', async () => {
+      const defaultThread = manager.getDefaultThread();
+      pool.getExecutor(defaultThread.id);
+
+      await pool.switchBackend({ type: 'codex' });
+      pool.getExecutor(defaultThread.id);
+
+      expect(mockExecutorFactory).toHaveBeenCalledTimes(2);
+      expect(mockExecutorFactory).toHaveBeenLastCalledWith(
+        expect.anything(),
+        expect.objectContaining({ type: 'codex' }),
+        expect.anything(),
+        defaultThread.id,
+        undefined
+      );
+    });
+
+    it('destroyThread (thread delete) still deletes session data by default', async () => {
+      const deleteThreadData = vi.fn().mockResolvedValue(undefined);
+      mockExecutorFactory.mockImplementationOnce(() => makeMockExecutor({ deleteThreadData }));
+
+      const t = await manager.createThread('delete-keeps-deleting', tmpDir);
+      pool.getExecutor(t.id);
+
+      await pool.destroyThread(t.id);
+
+      expect(deleteThreadData).toHaveBeenCalledWith(t.id);
+    });
+  });
+
   describe('error state transitions', () => {
     it('setThreadBusy(true) clears the error flag', () => {
       const defaultThread = manager.getDefaultThread();
