@@ -224,6 +224,7 @@ describe('ThreadExecutorPool', () => {
         expect.objectContaining({ type: 'codex' }),
         expect.anything(),
         defaultThread.id,
+        undefined,
         undefined
       );
     });
@@ -314,7 +315,8 @@ describe('ThreadExecutorPool', () => {
         newConfig,
         expect.anything(), // workingDir
         expect.anything(), // threadId
-        undefined // model
+        undefined, // model
+        undefined // effort
       );
     });
 
@@ -330,6 +332,7 @@ describe('ThreadExecutorPool', () => {
         executorConfig,
         subDir,
         t.id,
+        undefined,
         undefined
       );
     });
@@ -346,6 +349,7 @@ describe('ThreadExecutorPool', () => {
         executorConfig,
         undefined,
         t.id,
+        undefined,
         undefined
       );
     });
@@ -361,7 +365,8 @@ describe('ThreadExecutorPool', () => {
         executorConfig,
         tmpDir,
         t.id,
-        'opus'
+        'opus',
+        undefined
       );
     });
   });
@@ -382,6 +387,7 @@ describe('ThreadExecutorPool', () => {
         expect.objectContaining({ type: 'agy' }),
         tmpDir,
         t.id,
+        undefined,
         undefined
       );
     });
@@ -397,7 +403,8 @@ describe('ThreadExecutorPool', () => {
         expect.objectContaining({ type: 'agy' }),
         tmpDir,
         t.id,
-        'gemini-3.1-pro-high'
+        'gemini-3.1-pro-high',
+        undefined
       );
     });
 
@@ -412,7 +419,8 @@ describe('ThreadExecutorPool', () => {
         expect.objectContaining({ type: 'codex' }),
         tmpDir,
         t.id,
-        'gpt-5.2-codex'
+        'gpt-5.2-codex',
+        undefined
       );
     });
 
@@ -427,7 +435,24 @@ describe('ThreadExecutorPool', () => {
         executorConfig,
         tmpDir,
         t.id,
-        'sonnet'
+        'sonnet',
+        undefined
+      );
+    });
+
+    it('passes thread.efforts.codex only to the codex factory', async () => {
+      const codexThread = await manager.createThread('codex-effort', tmpDir);
+      await manager.updateThread(codexThread.id, { efforts: { codex: 'high' } });
+
+      poolFor('codex').getExecutor(codexThread.id);
+
+      expect(mockExecutorFactory).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ type: 'codex' }),
+        tmpDir,
+        codexThread.id,
+        undefined,
+        'high'
       );
     });
   });

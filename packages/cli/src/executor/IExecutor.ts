@@ -24,6 +24,7 @@ export interface ExecutorModelInfo {
   description?: string;
   isDefault?: boolean;
   supportedReasoningEfforts?: string[];
+  defaultReasoningEffort?: string;
   inputModalities?: string[];
 }
 
@@ -51,6 +52,8 @@ export interface IExecutor {
   clearModel?(): Promise<void> | void;
   /** List models available to the authenticated backend account. */
   listModels?(): Promise<ExecutorModelInfo[]>;
+  /** Set a reasoning effort override, or use "auto" to restore the backend default. */
+  setEffort?(effort: string): Promise<ExecuteResult>;
   isProcessRunning?(): boolean;
   getSessionId?(): string | null;
 

@@ -14,8 +14,8 @@ class FakeTransport implements CodexAppServerTransport {
   nextThreadId = 'codex-thread-1';
   nextTurnId = 'turn-1';
   models = [
-    { id: 'gpt-a', displayName: 'GPT A', isDefault: true, supportedReasoningEfforts: [] },
-    { id: 'gpt-b', displayName: 'GPT B', isDefault: false, supportedReasoningEfforts: [] },
+    { id: 'gpt-a', displayName: 'GPT A', isDefault: true, defaultReasoningEffort: 'medium', supportedReasoningEfforts: [{ reasoningEffort: 'low' }, { reasoningEffort: 'medium' }, { reasoningEffort: 'high' }] },
+    { id: 'gpt-b', displayName: 'GPT B', isDefault: false, defaultReasoningEffort: 'high', supportedReasoningEfforts: [{ reasoningEffort: 'medium' }, { reasoningEffort: 'high' }] },
   ];
   cwd: string | null = null;
 
@@ -128,6 +128,37 @@ describe('CodexAppServerExecutor', () => {
     await promise;
   });
 
+  it('validates reasoning effort and applies it to future turns', async () => {
+    await expect(executor.setEffort('unsupported')).resolves.toMatchObject({ success: false });
+    await expect(executor.setEffort('high')).resolves.toMatchObject({ success: true });
+
+    const promise = executor.execute('think hard', {});
+    await vi.waitFor(() => expect(transport.requests.some((request) => request.method === 'turn/start')).toBe(true));
+    expect(transport.requests.findLast((request) => request.method === 'turn/start')?.params.effort).toBe('high');
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await promise;
+  });
+
+  it('restores the active model default on an existing app-server thread', async () => {
+    const first = executor.execute('start', {});
+    await vi.waitFor(() => expect(transport.requests.some((request) => request.method === 'turn/start')).toBe(true));
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await first;
+
+    await executor.setEffort('high');
+    await expect(executor.setEffort('auto')).resolves.toMatchObject({ success: true });
+    expect(transport.requests.findLast((request) => request.method === 'thread/settings/update')).toEqual({
+      method: 'thread/settings/update',
+      params: { threadId: 'codex-thread-1', effort: 'medium' },
+    });
+
+    const second = executor.execute('use default', {});
+    await vi.waitFor(() => expect(transport.requests.filter((request) => request.method === 'turn/start')).toHaveLength(2));
+    expect(transport.requests.findLast((request) => request.method === 'turn/start')?.params.effort).toBeUndefined();
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await second;
+  });
+
   it('paginates model metadata and ignores malformed catalog entries', async () => {
     vi.spyOn(transport, 'request').mockImplementation(async (method: string, params?: any) => {
       transport.running = true;
@@ -136,7 +167,7 @@ describe('CodexAppServerExecutor', () => {
       if (params.cursor === null) {
         return {
           data: [
-            { id: 'gpt-a', displayName: null, supportedReasoningEfforts: [{ reasoningEffort: 'high' }, {}], inputModalities: ['text'] },
+            { id: 'gpt-a', displayName: null, defaultReasoningEffort: 'medium', supportedReasoningEfforts: [{ reasoningEffort: 'high' }, {}], inputModalities: ['text'] },
             { displayName: 'missing id' },
           ],
           nextCursor: 'page-2',
@@ -146,7 +177,7 @@ describe('CodexAppServerExecutor', () => {
     });
 
     await expect(executor.listModels()).resolves.toEqual([
-      expect.objectContaining({ id: 'gpt-a', displayName: 'gpt-a', supportedReasoningEfforts: ['high'], inputModalities: ['text'] }),
+      expect.objectContaining({ id: 'gpt-a', displayName: 'gpt-a', defaultReasoningEffort: 'medium', supportedReasoningEfforts: ['high'], inputModalities: ['text'] }),
       expect.objectContaining({ id: 'gpt-b', displayName: 'gpt-b' }),
     ]);
     expect(transport.requests.filter((request) => request.method === 'model/list')).toHaveLength(2);

@@ -328,6 +328,7 @@ export class MessageHandler {
 - /compact - Compress conversation history to reduce context size
 - /cd <directory> - Change working directory for this thread
 - /model [name] - Show available models, or switch the AI model for this thread (persists across sessions)
+- /effort [auto|level] - Show or set Codex reasoning effort for this thread
 - /backend - List available AI backends and switch between them
 - /thread list - List all threads with their status
 - /thread new [name] - Create a new thread
@@ -413,6 +414,68 @@ You can also use natural language commands to control Claude Code CLI.`,
 
     if (trimmed === '/thread' || trimmed.startsWith('/thread ')) {
       await this.handleThreadCommand(messageId, threadId, trimmed);
+      return true;
+    }
+
+    if (trimmed === '/effort' || trimmed.startsWith('/effort ')) {
+      const executorConfig = (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
+      const key = backendKeyOf(executorConfig.type as string);
+      if (key !== 'codex') {
+        this.sendResponse(messageId, threadId, {
+          success: false,
+          error: '/effort is not supported yet for Claude Code or AGY.',
+        });
+        return true;
+      }
+
+      const parts = trimmed.split(/\s+/);
+      if (parts.length < 2) {
+        const thread = this.threadManager.getThread(threadId);
+        const configuredModel = thread?.models?.codex ?? executorConfig.codex?.model;
+        const lines = [`Current reasoning effort: ${thread?.efforts?.codex ?? 'auto'}`];
+        if ('listModels' in executor && typeof executor.listModels === 'function') {
+          try {
+            const models = await executor.listModels();
+            const activeModel = models.find((entry) => entry.id === configuredModel)
+              ?? models.find((entry) => entry.isDefault)
+              ?? models[0];
+            if (activeModel) {
+              lines.push(`Model: ${activeModel.id}`);
+              lines.push(`Model default: ${activeModel.defaultReasoningEffort ?? 'unavailable'}`);
+              lines.push(`Supported levels: ${activeModel.supportedReasoningEfforts?.join(', ') || 'unavailable'}`);
+            }
+          } catch (error) {
+            lines.push(`Could not fetch Codex effort metadata: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+        lines.push('Set with: /effort <auto|level>');
+        this.sendResponse(messageId, threadId, { success: true, output: lines.join('\n') });
+        return true;
+      }
+
+      if (!('setEffort' in executor && typeof executor.setEffort === 'function')) {
+        this.sendResponse(messageId, threadId, {
+          success: false,
+          error: '/effort is not supported by this Codex executor version.',
+        });
+        return true;
+      }
+
+      const effortArg = parts.slice(1).join(' ').toLowerCase();
+      const result = await executor.setEffort(effortArg);
+      if (result.success) {
+        const current = this.threadManager.getThread(threadId);
+        const efforts = { ...current?.efforts };
+        if (effortArg === 'auto') delete efforts.codex;
+        else efforts.codex = effortArg;
+        await this.threadManager.updateThread(threadId, {
+          efforts: Object.keys(efforts).length > 0 ? efforts : undefined,
+        });
+      }
+      this.sendResponse(messageId, threadId, result.success
+        ? { success: true, output: result.output || `Reasoning effort set to ${effortArg}.` }
+        : { success: false, error: result.error || 'Failed to set reasoning effort' }
+      );
       return true;
     }
 
@@ -943,7 +1006,7 @@ You can also use natural language commands to control Claude Code CLI.`,
    */
   private static readonly AGY_PASSTHROUGH_COMMANDS = new Set([
     '/help', '/model', '/skills', '/usage', '/config', '/changelog',
-    '/agents', '/permissions', '/hooks', '/credits', '/effort',
+    '/agents', '/permissions', '/hooks', '/credits',
   ]);
 
   /**
@@ -980,7 +1043,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     if (backend === 'codex') {
       this.sendResponse(messageId, threadId, {
         success: false,
-        error: `❌ "${command}" is not exposed as a Codex backend command.\n\nBuilt-in commands (/clear, /compact, /model, /cd, /thread, /backend, /abort, /status, /help) work on every backend.`,
+        error: `❌ "${command}" is not exposed as a Codex backend command.\n\nBuilt-in commands (/clear, /compact, /model, /effort, /cd, /thread, /backend, /abort, /status, /help) work on the supported backends.`,
       });
       return;
     }

@@ -18,6 +18,10 @@ function resolveThreadModel(thread: Thread, config: ExecutorConfig): string | un
   return thread.models?.[key] ?? (key === 'claude' ? thread.model || undefined : undefined);
 }
 
+function resolveThreadEffort(thread: Thread, config: ExecutorConfig): string | undefined {
+  return backendKeyOf(config.type as string) === 'codex' ? thread.efforts?.codex : undefined;
+}
+
 /**
  * Thread runtime status (not persisted — computed from locking state).
  */
@@ -31,7 +35,8 @@ export type ExecutorFactory = (
   config: ExecutorConfig,
   initialWorkingDirectory?: string,
   threadId?: string,
-  model?: string
+  model?: string,
+  effort?: string
 ) => IExecutor;
 
 /**
@@ -75,7 +80,8 @@ export class ThreadExecutorPool {
         this.executorConfig,
         thread.workingDirectory || undefined,
         threadId,
-        resolveThreadModel(thread, this.executorConfig)
+        resolveThreadModel(thread, this.executorConfig),
+        resolveThreadEffort(thread, this.executorConfig)
       );
       this.executors.set(threadId, executor);
     }

@@ -147,6 +147,28 @@ describe('HooksConfigurator', () => {
       expect(securityHooks.length).toBe(1);
     });
 
+    it('should replace an existing TypeScript hook command with compiled JavaScript', async () => {
+      const existingSettings = {
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: 'Read|Write|Edit|Glob|Grep|NotebookEdit|Bash',
+              hooks: [{ type: 'command', command: 'node "/old/path/security-guard.ts"' }]
+            }
+          ]
+        }
+      };
+      mockExistsSync.mockReturnValue(true);
+      mockReadFileSync.mockReturnValue(JSON.stringify(existingSettings));
+
+      await configurator.configure();
+
+      const content = JSON.parse(mockWriteFileSync.mock.calls[0][1] as string);
+      const command = content.hooks.PreToolUse[0].hooks[0].command;
+      expect(command).toContain('security-guard.js');
+      expect(command).not.toContain('security-guard.ts');
+    });
+
     it('should create .claude directory if it does not exist', async () => {
       mockExistsSync.mockImplementation((p: any) => {
         const pathStr = String(p);
@@ -244,6 +266,16 @@ describe('HooksConfigurator', () => {
       expect(securityHooks.length).toBe(1);
       expect(securityHooks[0].matcher.split('|')).toContain('Bash');
       expect(securityHooks[0].matcher).toContain('Read');
+    });
+  });
+
+  describe('getSecurityGuardPath', () => {
+    it('should use compiled dist output when running from source', () => {
+      mockExistsSync.mockImplementation((target: any) =>
+        String(target).endsWith('/dist/security/security-guard.js')
+      );
+
+      expect(configurator.getSecurityGuardPath()).toMatch(/\/dist\/security\/security-guard\.js$/);
     });
   });
 
