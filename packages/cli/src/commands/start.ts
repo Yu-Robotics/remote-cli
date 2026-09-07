@@ -186,16 +186,13 @@ export async function startCommand(
 
     const directoryGuard = new DirectoryGuard(security.allowedDirectories);
 
-    // Configure Claude Code security hooks
-    spinner.text = 'Configuring security hooks...';
+    // Remove the global PreToolUse hook installed by older remote-cli versions.
+    spinner.text = 'Removing legacy security hooks...';
     const hooksConfigurator = new HooksConfigurator();
     try {
-      await hooksConfigurator.configure();
-      console.log('🔒 Security hooks configured');
+      await hooksConfigurator.unconfigure();
     } catch (hookError) {
-      // Non-fatal: warn but continue
-      console.warn('⚠️  Failed to configure security hooks:', hookError instanceof Error ? hookError.message : 'Unknown error');
-      console.warn('   File operations may not be restricted to working directory.');
+      console.warn('⚠️  Failed to remove legacy security hooks:', hookError instanceof Error ? hookError.message : 'Unknown error');
     }
 
     // Get executor config

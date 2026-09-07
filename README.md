@@ -11,13 +11,13 @@ Remote control your Claude Code, AGY CLI (Antigravity), or Codex CLI (OpenAI) fr
 ## Features
 
 - 🌍 **Remote Control**: Control your local development environment from anywhere via mobile phone
-- 🔒 **Secure**: Directory whitelisting, command filtering, and device authentication
+- 🔒 **Controlled Access**: Working-directory selection controls and device authentication
 - 📱 **Mobile-Optimized**: Simplified commands and rich text formatting for Feishu
 - 🤖 **Multi-backend Support**: Supports Claude Code (default), AGY CLI (Antigravity), and Codex CLI (OpenAI), switchable at any time
 - 🧵 **Multi-session Management**: Create multiple independent chat threads to handle different tasks in parallel. Support switching and creating threads via Feishu card buttons.
 - 🖥️ **Remote Machine Management**: Control remote servers or Docker containers via SSH directly through Feishu. Support `/search`, `/view`, `/replace` and other remote file operations.
 - ⚡ **Persistent Process**: Long-running AI process with bidirectional streaming via stdio for faster response times
-- 🔒 **Security Hardening**: Directory-based security via Claude Code native hooks to ensure AI cannot exceed its sandbox
+- 📂 **Working Directory Controls**: Threads can select only explicitly allowed local working directories
 - 🚀 **Easy Setup**: One-command installation and initialization, supports background daemon mode (`-d`)
 
 ### Usage Examples
@@ -460,21 +460,17 @@ The built-in commands (`/help`, `/status`, `/clear`, `/compact`, `/model`, `/cd`
 
 ## Security
 
-### Directory Whitelisting
+### Working Directory Selection
 
-Only directories explicitly added to the whitelist are accessible:
+Only directories explicitly added to the whitelist can be selected as a thread's working directory:
 
 ```bash
 remote-cli config add-dir ~/safe/directory
 ```
 
-### Command Filtering
+### Execution Trust Model
 
-Dangerous commands are automatically blocked:
-- `rm -rf /`
-- `sudo` operations on system files
-- Direct disk writes (`dd`, `mkfs`)
-- Fork bombs and other malicious patterns
+remote-cli does not install a global Claude Code `PreToolUse` hook and does not sandbox AI backend processes. A backend process inherits the permissions of the operating-system user running remote-cli and may access paths outside the selected working directory. For stronger isolation, run remote-cli under a dedicated OS account or inside a container or virtual machine.
 
 ### Device Authentication
 
