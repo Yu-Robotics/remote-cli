@@ -93,7 +93,7 @@ This is a remote CLI tool that allows developers to control Claude Code CLI from
   - `packages/cli`: Local client that runs on the developer's machine
   - `packages/router`: Routing server that manages user binding and message forwarding via Feishu
 - **Local client** connects to a router server via WebSocket and executes Claude Code commands
-- **Security model**: Directory whitelisting + command filtering + device authentication
+- **Security model**: Working-directory selection controls + device authentication; backend processes are not sandboxed
 
 ## Development Commands
 
@@ -188,10 +188,11 @@ Without this mock, tests will write to the real home directory and contaminate e
 2. **Whitelist enforcement**: Only allows operations within directories specified in `config.security.allowedDirectories`
 3. **Path traversal prevention**: Blocks `../../etc/passwd` style attacks
 
-The security model has **three layers**:
+The security model has **two application-level layers**:
 1. **Directory whitelist**: `DirectoryGuard.isAllowed()` checks working directories
-2. **Command filtering**: `validateBashCommand()` in `security/security-guard.ts` blocks dangerous bash commands (implemented)
-3. **Device authentication**: Router server binds devices to specific users via Feishu binding flow
+2. **Device authentication**: Router server binds devices to specific users via Feishu binding flow
+
+remote-cli does not install a global Claude Code `PreToolUse` hook. DirectoryGuard controls which working directory a thread may select, but it is not a process sandbox; AI backend processes inherit the permissions of the operating-system user.
 
 ## Key Implementation Patterns
 
@@ -238,7 +239,7 @@ packages/cli/src/
   config/        # Configuration management
   executor/      # AI CLI integration (ClaudeExecutor, ClaudePersistentExecutor, AgyExecutor, CodexExecutor, IExecutor)
   hooks/         # Claude Code hooks and Feishu notification adapter
-  security/      # Directory guard, bash command validation (validateBashCommand in security-guard.ts)
+  security/      # Directory guard and legacy Claude hook cleanup
   types/         # TypeScript type definitions
   utils/         # Utility functions (FeishuMessageFormatter, stripAnsi)
 
@@ -413,7 +414,7 @@ AgyExecutor uses a **persistent stream-json process** — a single long-lived ag
 - AGY tool names map to Claude-style names for the router's tool cards (`run_command`→Bash, `view_file`→Read, etc.); unknown tools pass through unchanged.
 - `/model` is supported: `setModel()` stores the model and recycles the agy process (immediately when idle, deferred until the running command finishes when busy); the conversation id survives, so context is preserved. MessageHandler persists the choice per backend (`thread.models.agy`), and the factory gives the per-thread model precedence over `executor.agy.model`. Bare `/model` lists available models via `agy models` (verified live: prints `slug<TAB>Display Name` lines — note `agy -p "/model"` only lists one model, use `agy models` for the full list).
 
-Known gaps vs Claude backend: no `task_notification`-style background task events (stream-json emits `init`/`step_update`/`result` only), no native hooks (the PreToolUse security guard is Claude-specific; AGY relies on DirectoryGuard + `--dangerously-skip-permissions`).
+Known gaps vs Claude backend: no `task_notification`-style background task events (stream-json emits `init`/`step_update`/`result` only) and no native hook events. AGY relies on DirectoryGuard for working-directory selection and `--dangerously-skip-permissions` for tool approvals.
 
 **Slash passthrough (AGY)**: `executeSlashCommand` is backend-aware. agy's stream-json protocol explicitly refuses CLI-answered slash commands (`status: ERROR`, "...answered by the CLI itself and is unavailable with --input-format stream-json; run it as its own --print /help invocation" — verified against agy 1.1.26), so whitelisted read-only commands (`/help` `/model` `/skills` `/usage` `/config` `/changelog` `/agents` `/permissions` `/hooks` `/credits` — see `MessageHandler.AGY_PASSTHROUGH_COMMANDS`) are forwarded as a one-shot `agy -p "<cmd>"`. These are all read-only: agy rejects arguments ("takes no arguments"), so `/model <slug>` cannot set a model this way (use the built-in `/model`, which goes through `setModel()`). `/compact` is explicitly refused — verified live that outside the TUI the model role-plays a compaction while history stays intact. Anything else is rejected with the supported list.
 
