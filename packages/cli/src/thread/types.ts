@@ -27,6 +27,8 @@ export interface Thread {
    * Takes precedence over the legacy `model` field.
    */
   models?: Partial<Record<BackendKey, string>>;
+  /** Per-backend reasoning effort overrides. Currently used by Codex only. */
+  efforts?: Partial<Record<BackendKey, string>>;
 }
 
 export interface ThreadStore {

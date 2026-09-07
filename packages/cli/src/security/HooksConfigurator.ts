@@ -102,11 +102,18 @@ export class HooksConfigurator {
         ]
       };
       settings.hooks.PreToolUse.push(newHook);
-    } else if (typeof existingHook.matcher === 'string' && !existingHook.matcher.split('|').includes('Bash')) {
-      // Upgrade in place: hooks written by older versions guard file tools
-      // only, leaving Bash unvalidated. Bring the matcher up to date.
-      console.log('[HooksConfigurator] Upgrading security hook matcher to include Bash');
-      existingHook.matcher = GUARDED_TOOLS.join('|');
+    } else {
+      for (const hook of existingHook.hooks) {
+        if (hook.command.includes('security-guard')) {
+          hook.command = hookCommand;
+        }
+      }
+      if (typeof existingHook.matcher === 'string' && !existingHook.matcher.split('|').includes('Bash')) {
+        // Upgrade in place: hooks written by older versions guard file tools
+        // only, leaving Bash unvalidated. Bring the matcher up to date.
+        console.log('[HooksConfigurator] Upgrading security hook matcher to include Bash');
+        existingHook.matcher = GUARDED_TOOLS.join('|');
+      }
     }
 
     // Ensure .claude directory exists
@@ -190,10 +197,11 @@ export class HooksConfigurator {
    * Get the path to the security guard script
    */
   getSecurityGuardPath(): string {
-    // The security guard script is in the same directory as this module
-    // Try .ts first (for development), then .js (for production)
-    const tsPath = path.join(__dirname, 'security-guard.ts');
+    // Hooks run with plain Node.js, so they must target compiled JavaScript.
+    // When this module runs from dist, the guard is next to it. During source
+    // development, use the package's compiled dist output.
     const jsPath = path.join(__dirname, 'security-guard.js');
-    return fs.existsSync(tsPath) ? tsPath : jsPath;
+    if (fs.existsSync(jsPath)) return jsPath;
+    return path.resolve(__dirname, '../../dist/security/security-guard.js');
   }
 }
