@@ -52,7 +52,7 @@ vi.mock('../../src/client/MessageHandler', () => ({
 
 vi.mock('../../src/security/HooksConfigurator', () => ({
   HooksConfigurator: vi.fn().mockImplementation(() => ({
-    configure: vi.fn().mockResolvedValue(undefined),
+    unconfigure: vi.fn().mockResolvedValue(undefined),
   })),
 }));
 

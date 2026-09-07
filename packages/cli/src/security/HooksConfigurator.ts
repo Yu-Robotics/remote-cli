@@ -1,8 +1,9 @@
 /**
- * HooksConfigurator - Manages Claude Code hooks configuration
+ * HooksConfigurator - Removes legacy remote-cli Claude Code hooks
  *
- * This module handles the configuration of Claude Code's PreToolUse hooks
- * to enforce directory-based security restrictions.
+ * remote-cli no longer installs a global PreToolUse security hook. This
+ * module remains temporarily so upgraded installations can remove hooks
+ * written by older versions without touching user-defined hooks.
  */
 
 import * as fs from 'fs';
@@ -33,17 +34,7 @@ interface ClaudeSettings {
 }
 
 /**
- * Tools guarded by the security hook.
- * File tools are path-validated; Bash commands are validated by
- * validateBashCommand() in security-guard (blocked keywords, pipe-to-shell,
- * path extraction). Bash MUST be in this list — without it, Claude Code never
- * invokes the hook for Bash calls and the bash validation is dead code.
- */
-const GUARDED_TOOLS = ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'NotebookEdit', 'Bash'];
-
-/**
- * HooksConfigurator manages Claude Code hooks configuration
- * for security enforcement
+ * Removes remote-cli's legacy security hook from Claude Code settings.
  */
 export class HooksConfigurator {
   private claudeSettingsPath: string;
@@ -57,81 +48,7 @@ export class HooksConfigurator {
   }
 
   /**
-   * Configure Claude Code hooks for security
-   * Adds the security guard hook to PreToolUse
-   */
-  async configure(): Promise<void> {
-    const securityGuardPath = this.getSecurityGuardPath();
-
-    // Verify security guard script exists
-    if (!fs.existsSync(securityGuardPath)) {
-      throw new Error(`Security guard script not found at: ${securityGuardPath}`);
-    }
-
-    // Read existing settings or create empty object
-    let settings: ClaudeSettings = {};
-    try {
-      if (fs.existsSync(this.claudeSettingsPath)) {
-        const content = fs.readFileSync(this.claudeSettingsPath, 'utf8');
-        settings = JSON.parse(content);
-      }
-    } catch {
-      // If file doesn't exist or can't be parsed, start fresh
-      settings = {};
-    }
-
-    // Initialize hooks structure
-    settings.hooks = settings.hooks || {};
-    settings.hooks.PreToolUse = settings.hooks.PreToolUse || [];
-
-    // Check if security guard hook is already configured
-    const hookCommand = `node "${securityGuardPath}"`;
-    const existingHook = settings.hooks.PreToolUse.find((hook) => {
-      return hook.hooks?.some(h => h.command.includes('security-guard'));
-    });
-
-    // Add hook if not already present
-    if (!existingHook) {
-      const newHook: HookConfig = {
-        matcher: GUARDED_TOOLS.join('|'),
-        hooks: [
-          {
-            type: 'command',
-            command: hookCommand
-          }
-        ]
-      };
-      settings.hooks.PreToolUse.push(newHook);
-    } else {
-      for (const hook of existingHook.hooks) {
-        if (hook.command.includes('security-guard')) {
-          hook.command = hookCommand;
-        }
-      }
-      if (typeof existingHook.matcher === 'string' && !existingHook.matcher.split('|').includes('Bash')) {
-        // Upgrade in place: hooks written by older versions guard file tools
-        // only, leaving Bash unvalidated. Bring the matcher up to date.
-        console.log('[HooksConfigurator] Upgrading security hook matcher to include Bash');
-        existingHook.matcher = GUARDED_TOOLS.join('|');
-      }
-    }
-
-    // Ensure .claude directory exists
-    const claudeDir = path.dirname(this.claudeSettingsPath);
-    fs.mkdirSync(claudeDir, { recursive: true });
-
-    // Write settings
-    fs.writeFileSync(
-      this.claudeSettingsPath,
-      JSON.stringify(settings, null, 2),
-      'utf8'
-    );
-
-    console.log('[HooksConfigurator] Claude Code hooks configured successfully');
-  }
-
-  /**
-   * Remove security guard hooks from Claude settings
+   * Remove legacy remote-cli security guard hooks from Claude settings.
    */
   async unconfigure(): Promise<void> {
     // Check if settings file exists
@@ -148,12 +65,17 @@ export class HooksConfigurator {
       return;
     }
 
-    // Remove security guard hooks from PreToolUse
-    if (settings.hooks?.PreToolUse) {
-      settings.hooks.PreToolUse = settings.hooks.PreToolUse.filter((hook) => {
-        return !hook.hooks?.some(h => h.command.includes('security-guard'));
-      });
-    }
+    const existingHooks = settings.hooks?.PreToolUse;
+    if (!existingHooks) return;
+
+    const remainingHooks = existingHooks.filter((hook) => {
+      return !hook.hooks?.some(h => h.command.includes('security-guard'));
+    });
+    if (remainingHooks.length === existingHooks.length) return;
+
+    if (remainingHooks.length > 0) settings.hooks!.PreToolUse = remainingHooks;
+    else delete settings.hooks!.PreToolUse;
+    if (Object.keys(settings.hooks!).length === 0) delete settings.hooks;
 
     // Write settings back
     fs.writeFileSync(
@@ -162,7 +84,7 @@ export class HooksConfigurator {
       'utf8'
     );
 
-    console.log('[HooksConfigurator] Claude Code hooks removed');
+    console.log('[HooksConfigurator] Legacy remote-cli security hook removed');
   }
 
   /**
@@ -191,17 +113,5 @@ export class HooksConfigurator {
     return settings.hooks.PreToolUse.some((hook) => {
       return hook.hooks?.some(h => h.command.includes('security-guard'));
     });
-  }
-
-  /**
-   * Get the path to the security guard script
-   */
-  getSecurityGuardPath(): string {
-    // Hooks run with plain Node.js, so they must target compiled JavaScript.
-    // When this module runs from dist, the guard is next to it. During source
-    // development, use the package's compiled dist output.
-    const jsPath = path.join(__dirname, 'security-guard.js');
-    if (fs.existsSync(jsPath)) return jsPath;
-    return path.resolve(__dirname, '../../dist/security/security-guard.js');
   }
 }

@@ -1,419 +1,137 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import * as path from 'path';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-// Mock fs before imports
 vi.mock('fs', () => ({
   default: {
     existsSync: vi.fn(),
     readFileSync: vi.fn(),
     writeFileSync: vi.fn(),
-    mkdirSync: vi.fn(),
   },
   existsSync: vi.fn(),
   readFileSync: vi.fn(),
   writeFileSync: vi.fn(),
-  mkdirSync: vi.fn(),
 }));
 
-// Mock os
 vi.mock('os', () => ({
   default: { homedir: () => '/mock/home' },
-  homedir: () => '/mock/home'
+  homedir: () => '/mock/home',
 }));
 
 import * as fs from 'fs';
 import { HooksConfigurator } from '../../src/security/HooksConfigurator';
 
 describe('HooksConfigurator', () => {
+  const existsSync = vi.mocked(fs.existsSync);
+  const readFileSync = vi.mocked(fs.readFileSync);
+  const writeFileSync = vi.mocked(fs.writeFileSync);
   let configurator: HooksConfigurator;
-  const mockExistsSync = vi.mocked(fs.existsSync);
-  const mockReadFileSync = vi.mocked(fs.readFileSync);
-  const mockWriteFileSync = vi.mocked(fs.writeFileSync);
-  const mockMkdirSync = vi.mocked(fs.mkdirSync);
 
   beforeEach(() => {
     vi.clearAllMocks();
-
-    // Default mock implementations
-    mockExistsSync.mockReturnValue(true);
-    mockReadFileSync.mockReturnValue('{}');
-    mockWriteFileSync.mockImplementation(() => {});
-    mockMkdirSync.mockImplementation(() => undefined as any);
-
+    existsSync.mockReturnValue(true);
+    readFileSync.mockReturnValue('{}');
+    writeFileSync.mockImplementation(() => undefined);
     configurator = new HooksConfigurator();
   });
 
-  afterEach(() => {
-    vi.clearAllMocks();
+  it('removes legacy remote-cli security hooks and preserves user hooks', async () => {
+    readFileSync.mockReturnValue(JSON.stringify({
+      model: 'sonnet',
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: 'Read|Write|Edit|Glob|Grep|NotebookEdit|Bash',
+            hooks: [{ type: 'command', command: 'node "/package/dist/security/security-guard.js"' }],
+          },
+          {
+            matcher: 'Bash',
+            hooks: [{ type: 'command', command: 'my-custom-hook.js' }],
+          },
+        ],
+        PostToolUse: [
+          {
+            matcher: 'Write',
+            hooks: [{ type: 'command', command: 'post-hook.js' }],
+          },
+        ],
+      },
+    }));
+
+    await configurator.unconfigure();
+
+    const settings = JSON.parse(writeFileSync.mock.calls[0][1] as string);
+    expect(settings.model).toBe('sonnet');
+    expect(settings.hooks.PreToolUse).toHaveLength(1);
+    expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe('my-custom-hook.js');
+    expect(settings.hooks.PostToolUse[0].hooks[0].command).toBe('post-hook.js');
   });
 
-  describe('configure', () => {
-    it('should create hooks configuration in Claude settings', async () => {
-      mockExistsSync.mockReturnValue(true);
-      mockReadFileSync.mockReturnValue('{}');
+  it('removes the empty hooks object when the legacy hook was the only hook', async () => {
+    readFileSync.mockReturnValue(JSON.stringify({
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: 'Bash',
+            hooks: [{ type: 'command', command: 'node "/old/security-guard.ts"' }],
+          },
+        ],
+      },
+    }));
 
-      await configurator.configure();
+    await configurator.unconfigure();
 
-      expect(mockWriteFileSync).toHaveBeenCalled();
-      const writeCall = mockWriteFileSync.mock.calls[0];
-      const settingsPath = writeCall[0] as string;
-      const content = JSON.parse(writeCall[1] as string);
-
-      expect(settingsPath).toContain('.claude');
-      expect(settingsPath).toContain('settings.json');
-      expect(content.hooks).toBeDefined();
-      expect(content.hooks.PreToolUse).toBeDefined();
-      expect(Array.isArray(content.hooks.PreToolUse)).toBe(true);
-    });
-
-    it('should add security guard hook to PreToolUse', async () => {
-      mockExistsSync.mockReturnValue(true);
-      mockReadFileSync.mockReturnValue('{}');
-
-      await configurator.configure();
-
-      const writeCall = mockWriteFileSync.mock.calls[0];
-      const content = JSON.parse(writeCall[1] as string);
-      const hooks = content.hooks.PreToolUse;
-
-      expect(hooks.length).toBeGreaterThan(0);
-      // New format: matcher is a string
-      const securityHook = hooks.find((h: any) =>
-        h.hooks?.some((inner: any) => inner.command?.includes('security-guard'))
-      );
-      expect(securityHook).toBeDefined();
-      expect(typeof securityHook.matcher).toBe('string');
-      // The matcher should contain the tool names joined by pipes
-      expect(securityHook.matcher).toContain('Read');
-      expect(securityHook.matcher).toContain('Write');
-    });
-
-    it('should preserve existing hooks in settings', async () => {
-      const existingSettings = {
-        hooks: {
-          PreToolUse: [
-            {
-              matcher: 'Bash',
-              hooks: [{ type: 'command', command: 'echo "existing hook"' }]
-            }
-          ],
-          PostToolUse: [
-            {
-              matcher: 'Write',
-              hooks: [{ type: 'command', command: 'echo "post hook"' }]
-            }
-          ]
-        },
-        someOtherSetting: 'value'
-      };
-      mockExistsSync.mockReturnValue(true);
-      mockReadFileSync.mockReturnValue(JSON.stringify(existingSettings));
-
-      await configurator.configure();
-
-      const writeCall = mockWriteFileSync.mock.calls[0];
-      const content = JSON.parse(writeCall[1] as string);
-
-      // Should preserve existing PreToolUse hook + add security hook
-      expect(content.hooks.PreToolUse.length).toBeGreaterThanOrEqual(2);
-      // Should preserve PostToolUse
-      expect(content.hooks.PostToolUse).toBeDefined();
-      // Should preserve other settings
-      expect(content.someOtherSetting).toBe('value');
-    });
-
-    it('should not add duplicate hook if already configured', async () => {
-      const existingSettings = {
-        hooks: {
-          PreToolUse: [
-            {
-              matcher: { tools: ['Read'] },
-              hooks: [{ type: 'command', command: 'node "/path/to/security-guard.js"' }]
-            }
-          ]
-        }
-      };
-      mockExistsSync.mockReturnValue(true);
-      mockReadFileSync.mockReturnValue(JSON.stringify(existingSettings));
-
-      await configurator.configure();
-
-      const writeCall = mockWriteFileSync.mock.calls[0];
-      const content = JSON.parse(writeCall[1] as string);
-      const securityHooks = content.hooks.PreToolUse.filter((h: any) =>
-        h.hooks?.some((inner: any) => inner.command?.includes('security-guard'))
-      );
-
-      expect(securityHooks.length).toBe(1);
-    });
-
-    it('should replace an existing TypeScript hook command with compiled JavaScript', async () => {
-      const existingSettings = {
-        hooks: {
-          PreToolUse: [
-            {
-              matcher: 'Read|Write|Edit|Glob|Grep|NotebookEdit|Bash',
-              hooks: [{ type: 'command', command: 'node "/old/path/security-guard.ts"' }]
-            }
-          ]
-        }
-      };
-      mockExistsSync.mockReturnValue(true);
-      mockReadFileSync.mockReturnValue(JSON.stringify(existingSettings));
-
-      await configurator.configure();
-
-      const content = JSON.parse(mockWriteFileSync.mock.calls[0][1] as string);
-      const command = content.hooks.PreToolUse[0].hooks[0].command;
-      expect(command).toContain('security-guard.js');
-      expect(command).not.toContain('security-guard.ts');
-    });
-
-    it('should create .claude directory if it does not exist', async () => {
-      mockExistsSync.mockImplementation((p: any) => {
-        const pathStr = String(p);
-        if (pathStr.includes('security-guard')) return true;
-        return false; // settings.json doesn't exist
-      });
-      mockReadFileSync.mockImplementation((p: any) => {
-        const pathStr = String(p);
-        if (pathStr.includes('settings.json')) {
-          throw new Error('ENOENT');
-        }
-        return '{}';
-      });
-
-      await configurator.configure();
-
-      expect(mockMkdirSync).toHaveBeenCalledWith(
-        expect.stringContaining('.claude'),
-        expect.objectContaining({ recursive: true })
-      );
-    });
-
-    it('should throw error if security guard script does not exist', async () => {
-      mockExistsSync.mockImplementation((p: any) => {
-        const pathStr = String(p);
-        if (pathStr.includes('security-guard')) return false;
-        return true;
-      });
-
-      await expect(configurator.configure()).rejects.toThrow('Security guard script not found');
-    });
-
-    it('should specify file operation tools in hook configuration', async () => {
-      mockExistsSync.mockReturnValue(true);
-      mockReadFileSync.mockReturnValue('{}');
-
-      await configurator.configure();
-
-      const writeCall = mockWriteFileSync.mock.calls[0];
-      const content = JSON.parse(writeCall[1] as string);
-      // New format: matcher is a string
-      const securityHook = content.hooks.PreToolUse.find((h: any) =>
-        h.hooks?.some((inner: any) => inner.command?.includes('security-guard'))
-      );
-
-      expect(securityHook.matcher).toBeDefined();
-      expect(typeof securityHook.matcher).toBe('string');
-      expect(securityHook.matcher).toContain('Read');
-      expect(securityHook.matcher).toContain('Write');
-      expect(securityHook.matcher).toContain('Edit');
-    });
-
-    it('should include Bash in the hook matcher so bash command validation is active', async () => {
-      mockExistsSync.mockReturnValue(true);
-      mockReadFileSync.mockReturnValue('{}');
-
-      await configurator.configure();
-
-      const writeCall = mockWriteFileSync.mock.calls[0];
-      const content = JSON.parse(writeCall[1] as string);
-      const securityHook = content.hooks.PreToolUse.find((h: any) =>
-        h.hooks?.some((inner: any) => inner.command?.includes('security-guard'))
-      );
-
-      // The security guard implements validateBashCommand, but it only runs if
-      // the PreToolUse matcher includes Bash — otherwise Bash never triggers the hook.
-      expect(securityHook.matcher.split('|')).toContain('Bash');
-    });
-
-    it('should upgrade an existing security guard hook whose matcher lacks Bash', async () => {
-      // Simulates an installation configured by an older version that did not
-      // include Bash in the matcher — the hook exists, so configure() would
-      // previously skip it entirely, leaving Bash unguarded forever.
-      const existingSettings = {
-        hooks: {
-          PreToolUse: [
-            {
-              matcher: 'Read|Write|Edit|Glob|Grep|NotebookEdit',
-              hooks: [{ type: 'command', command: 'node "/path/to/security-guard.js"' }]
-            }
-          ]
-        }
-      };
-      mockExistsSync.mockReturnValue(true);
-      mockReadFileSync.mockReturnValue(JSON.stringify(existingSettings));
-
-      await configurator.configure();
-
-      const writeCall = mockWriteFileSync.mock.calls[0];
-      const content = JSON.parse(writeCall[1] as string);
-      const securityHooks = content.hooks.PreToolUse.filter((h: any) =>
-        h.hooks?.some((inner: any) => inner.command?.includes('security-guard'))
-      );
-
-      expect(securityHooks.length).toBe(1);
-      expect(securityHooks[0].matcher.split('|')).toContain('Bash');
-      expect(securityHooks[0].matcher).toContain('Read');
-    });
+    const settings = JSON.parse(writeFileSync.mock.calls[0][1] as string);
+    expect(settings.hooks).toBeUndefined();
   });
 
-  describe('getSecurityGuardPath', () => {
-    it('should use compiled dist output when running from source', () => {
-      mockExistsSync.mockImplementation((target: any) =>
-        String(target).endsWith('/dist/security/security-guard.js')
-      );
+  it('does not rewrite settings when no legacy hook is present', async () => {
+    readFileSync.mockReturnValue(JSON.stringify({
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: 'Bash',
+            hooks: [{ type: 'command', command: 'my-custom-hook.js' }],
+          },
+        ],
+      },
+    }));
 
-      expect(configurator.getSecurityGuardPath()).toMatch(/\/dist\/security\/security-guard\.js$/);
-    });
+    await configurator.unconfigure();
+
+    expect(writeFileSync).not.toHaveBeenCalled();
   });
 
-  describe('unconfigure', () => {
-    it('should remove security guard hook from settings', async () => {
-      const existingSettings = {
-        hooks: {
-          PreToolUse: [
-            {
-              matcher: 'Read',
-              hooks: [{ type: 'command', command: 'node "/path/to/security-guard.js"' }]
-            },
-            {
-              matcher: 'Bash',
-              hooks: [{ type: 'command', command: 'echo "other hook"' }]
-            }
-          ]
-        }
-      };
-      mockExistsSync.mockReturnValue(true);
-      mockReadFileSync.mockReturnValue(JSON.stringify(existingSettings));
+  it('does nothing when Claude settings do not exist', async () => {
+    existsSync.mockReturnValue(false);
 
-      await configurator.unconfigure();
+    await configurator.unconfigure();
 
-      const writeCall = mockWriteFileSync.mock.calls[0];
-      const content = JSON.parse(writeCall[1] as string);
-
-      expect(content.hooks.PreToolUse.length).toBe(1);
-      expect(content.hooks.PreToolUse[0].hooks[0].command).toBe('echo "other hook"');
-    });
-
-    it('should do nothing if settings file does not exist', async () => {
-      mockExistsSync.mockReturnValue(false);
-
-      await configurator.unconfigure();
-
-      expect(mockWriteFileSync).not.toHaveBeenCalled();
-    });
-
-    it('should preserve other hooks when unconfiguring', async () => {
-      const existingSettings = {
-        hooks: {
-          PreToolUse: [
-            {
-              matcher: 'Read',
-              hooks: [{ type: 'command', command: 'security-guard.js' }]
-            },
-            {
-              matcher: 'Bash',
-              hooks: [{ type: 'command', command: 'my-custom-hook.js' }]
-            }
-          ],
-          PostToolUse: [
-            {
-              matcher: 'Write',
-              hooks: [{ type: 'command', command: 'post-hook.js' }]
-            }
-          ]
-        }
-      };
-      mockExistsSync.mockReturnValue(true);
-      mockReadFileSync.mockReturnValue(JSON.stringify(existingSettings));
-
-      await configurator.unconfigure();
-
-      const writeCall = mockWriteFileSync.mock.calls[0];
-      const content = JSON.parse(writeCall[1] as string);
-
-      expect(content.hooks.PreToolUse).toHaveLength(1);
-      expect(content.hooks.PreToolUse[0].hooks[0].command).toBe('my-custom-hook.js');
-      expect(content.hooks.PostToolUse).toHaveLength(1);
-    });
+    expect(readFileSync).not.toHaveBeenCalled();
+    expect(writeFileSync).not.toHaveBeenCalled();
   });
 
-  describe('isConfigured', () => {
-    it('should return true if security guard hook is present', async () => {
-      const existingSettings = {
-        hooks: {
-          PreToolUse: [
-            {
-              matcher: { tools: ['Read'] },
-              hooks: [{ type: 'command', command: 'node "/path/to/security-guard.js"' }]
-            }
-          ]
-        }
-      };
-      mockExistsSync.mockReturnValue(true);
-      mockReadFileSync.mockReturnValue(JSON.stringify(existingSettings));
+  it('does nothing when Claude settings are invalid JSON', async () => {
+    readFileSync.mockReturnValue('{invalid');
 
-      const result = await configurator.isConfigured();
+    await configurator.unconfigure();
 
-      expect(result).toBe(true);
-    });
-
-    it('should return false if security guard hook is not present', async () => {
-      const existingSettings = {
-        hooks: {
-          PreToolUse: [
-            {
-              // Invalid format still used in test case to verify behavior with legacy format
-              matcher: 'Bash',
-              hooks: [{ type: 'command', command: 'other-hook.js' }]
-            }
-          ]
-        }
-      };
-      mockExistsSync.mockReturnValue(true);
-      mockReadFileSync.mockReturnValue(JSON.stringify(existingSettings));
-
-      const result = await configurator.isConfigured();
-
-      expect(result).toBe(false);
-    });
-
-    it('should return false if settings file does not exist', async () => {
-      mockExistsSync.mockReturnValue(false);
-
-      const result = await configurator.isConfigured();
-
-      expect(result).toBe(false);
-    });
-
-    it('should return false if hooks section is empty', async () => {
-      mockExistsSync.mockReturnValue(true);
-      mockReadFileSync.mockReturnValue('{}');
-
-      const result = await configurator.isConfigured();
-
-      expect(result).toBe(false);
-    });
+    expect(writeFileSync).not.toHaveBeenCalled();
   });
 
-  describe('getSecurityGuardPath', () => {
-    it('should return the path to security-guard script', () => {
-      const guardPath = configurator.getSecurityGuardPath();
+  it('reports whether a legacy remote-cli hook is configured', async () => {
+    readFileSync.mockReturnValue(JSON.stringify({
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: 'Bash',
+            hooks: [{ type: 'command', command: 'node "/package/security-guard.js"' }],
+          },
+        ],
+      },
+    }));
 
-      expect(guardPath).toContain('security-guard');
-      expect(path.isAbsolute(guardPath)).toBe(true);
-    });
+    await expect(configurator.isConfigured()).resolves.toBe(true);
+
+    readFileSync.mockReturnValue(JSON.stringify({ hooks: { PreToolUse: [] } }));
+    await expect(configurator.isConfigured()).resolves.toBe(false);
   });
 });
