@@ -403,7 +403,7 @@ AgyExecutor uses a **persistent stream-json process** — a single long-lived ag
 - **Resume**: the `conversation_id` is persisted per thread (`~/.remote-cli/agy-sessions/<threadId>.json`) and passed via `--conversation <id>` when respawning (process crash, `setWorkingDirectory`, abort).
 - **Abort**: the protocol has no cancel request (`control_request` is unsupported), so abort kills the process; the next command resumes the conversation.
 - AGY tool names map to Claude-style names for the router's tool cards (`run_command`→Bash, `view_file`→Read, etc.); unknown tools pass through unchanged.
-- `/model` is supported: `setModel()` stores the model and recycles the agy process (immediately when idle, deferred until the running command finishes when busy); the conversation id survives, so context is preserved. MessageHandler persists the choice on the thread (`thread.model`), and the factory gives the per-thread model precedence over `executor.agy.model`.
+- `/model` is supported: `setModel()` stores the model and recycles the agy process (immediately when idle, deferred until the running command finishes when busy); the conversation id survives, so context is preserved. MessageHandler persists the choice per backend (`thread.models.agy`), and the factory gives the per-thread model precedence over `executor.agy.model`. Bare `/model` lists available models via `agy models` (verified live: prints `slug<TAB>Display Name` lines — note `agy -p "/model"` only lists one model, use `agy models` for the full list).
 
 Known gaps vs Claude backend: no `task_notification`-style background task events (stream-json emits `init`/`step_update`/`result` only), no native hooks (the PreToolUse security guard is Claude-specific; AGY relies on DirectoryGuard + `--dangerously-skip-permissions`).
 
@@ -462,7 +462,7 @@ CodexExecutor is **one-shot per command** (unlike AgyExecutor's persistent proce
 - **Resume**: the `thread_id` is persisted per thread (`~/.remote-cli/codex-sessions/<threadId>.json`) and the next command spawns `codex exec resume --skip-git-repo-check --json ... <thread_id> -- "<prompt>"`.
 - **Caveats**: stdin must be ended immediately after spawn (codex reads piped stdin to EOF); the prompt is passed after `--` so dash-leading prompts are not parsed as flags; `codex exec resume` rejects the `--sandbox` flag (usage error in 0.153.4) — only `--dangerously-bypass-approvals-and-sandbox` is safe to pass on resume.
 - **Abort**: exec mode has no cancel request, so abort kills the process; the thread id survives and the next command resumes.
-- `/model` is supported: `setModel()` stores the model and the next one-shot spawn picks it up (the running command is undisturbed). Per-thread model takes precedence over `executor.codex.model` in the factory, same as AGY.
+- `/model` is supported: `setModel()` stores the model and the next one-shot spawn picks it up (the running command is undisturbed). Per-thread model (`thread.models.codex`) takes precedence over `executor.codex.model` in the factory, same as AGY. Bare `/model` cannot list models — `codex models` is a TUI (verified live: "stdin is not a terminal"); the handler shows the current selection plus a terminal hint. Unknown model names are only a non-fatal warning in codex (falls back to default metadata), unlike agy which hard-fails.
 
 Known gaps vs Claude backend: same as AGY (no task_notification events, no native hooks). Image attachments are dropped (exec mode is driven with text prompts only).
 
