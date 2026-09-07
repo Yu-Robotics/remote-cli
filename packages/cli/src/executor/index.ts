@@ -102,6 +102,7 @@ export function createExecutor(
         // legacy fallback: the user may have switched type to 'agy' while
         // their model still lives under the old executor.gemini key.
         model: model ?? executorConfig.agy?.model ?? executorConfig.gemini?.model,
+        effort,
         autoApprove: executorConfig.agy?.autoApprove ?? executorConfig.gemini?.autoApprove ?? true,
         initialWorkingDirectory,
         agyCommand: executorConfig.agy?.command,
@@ -114,6 +115,7 @@ export function createExecutor(
       const legacy = executorConfig.gemini;
       return new AgyExecutor(directoryGuard, {
         model: model ?? executorConfig.agy?.model ?? legacy?.model,
+        effort,
         autoApprove: executorConfig.agy?.autoApprove ?? legacy?.autoApprove ?? true,
         initialWorkingDirectory,
         agyCommand: executorConfig.agy?.command,

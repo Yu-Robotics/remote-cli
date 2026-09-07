@@ -19,7 +19,8 @@ function resolveThreadModel(thread: Thread, config: ExecutorConfig): string | un
 }
 
 function resolveThreadEffort(thread: Thread, config: ExecutorConfig): string | undefined {
-  return backendKeyOf(config.type as string) === 'codex' ? thread.efforts?.codex : undefined;
+  const key = backendKeyOf(config.type as string);
+  return key === 'codex' || key === 'agy' ? thread.efforts?.[key] : undefined;
 }
 
 /**

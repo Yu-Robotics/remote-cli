@@ -638,12 +638,66 @@ describe('MessageHandler', () => {
       }));
     });
 
-    it.each(['claude-persistent', 'agy'])('reports effort as not supported yet on %s', async (type) => {
+    it('sets and persists AGY reasoning effort', async () => {
       ctx.mockConfig.get.mockImplementation((key: string) =>
-        key === 'executor' ? { type } : undefined
+        key === 'executor' ? { type: 'agy' } : undefined
+      );
+      ctx.mockExecutor.setEffort = vi.fn().mockResolvedValue({ success: true, output: 'Reasoning effort set to medium.' });
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-agy-effort', content: '/effort medium', timestamp: Date.now() });
+
+      expect(ctx.mockExecutor.setEffort).toHaveBeenCalledWith('medium');
+      expect(ctx.mockThreadManager.updateThread).toHaveBeenCalledWith(
+        'default-thread-id',
+        { efforts: { agy: 'medium' } }
+      );
+    });
+
+    it('lists AGY effort levels without invoking the executor', async () => {
+      ctx.mockConfig.get.mockImplementation((key: string) =>
+        key === 'executor' ? { type: 'agy' } : undefined
+      );
+      ctx.mockExecutor.setEffort = vi.fn();
+      ctx.mockThreadManager.getThread.mockReturnValue({
+        id: 'default-thread-id', name: 'default', workingDirectory: '/home/user/test-project',
+        sessionId: null, createdAt: 0, lastActiveAt: 0,
+        efforts: { agy: 'low' },
+      });
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-agy-effort-list', content: '/effort', timestamp: Date.now() });
+
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+        success: true,
+        output: expect.stringContaining('Supported levels: low, medium, high'),
+      }));
+      expect(ctx.mockExecutor.setEffort).not.toHaveBeenCalled();
+    });
+
+    it('removes only the persisted AGY override after auto succeeds', async () => {
+      ctx.mockConfig.get.mockImplementation((key: string) =>
+        key === 'executor' ? { type: 'agy' } : undefined
+      );
+      ctx.mockThreadManager.getThread.mockReturnValue({
+        id: 'default-thread-id', name: 'default', workingDirectory: '/home/user/test-project',
+        sessionId: null, createdAt: 0, lastActiveAt: 0,
+        efforts: { agy: 'high', codex: 'medium' },
+      });
+      ctx.mockExecutor.setEffort = vi.fn().mockResolvedValue({ success: true, output: 'Restored.' });
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-agy-effort-auto', content: '/effort auto', timestamp: Date.now() });
+
+      expect(ctx.mockThreadManager.updateThread).toHaveBeenCalledWith(
+        'default-thread-id',
+        { efforts: { codex: 'medium' } }
+      );
+    });
+
+    it('reports effort as not supported yet on Claude Code', async () => {
+      ctx.mockConfig.get.mockImplementation((key: string) =>
+        key === 'executor' ? { type: 'claude-persistent' } : undefined
       );
 
-      await ctx.handler.handleMessage({ type: 'command', messageId: `msg-effort-${type}`, content: '/effort high', timestamp: Date.now() });
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-effort-claude', content: '/effort high', timestamp: Date.now() });
 
       expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
         success: false,

@@ -419,10 +419,10 @@ remote-cli stop
 remote-cli 自身不处理的斜杠命令会转发给当前 AI 后端，各后端支持程度不同：
 
 - **Claude Code**：完整透传（`claude <cmd> --print`）——所有 commands/skills 指令可用，例如 `/commit`、`/review`、`/test`
-- **AGY CLI (Antigravity)**：仅透传 agy 本地应答的只读信息类命令（`agy -p "<cmd>"`）：`/skills`、`/usage`、`/config`、`/changelog`、`/agents`、`/permissions`、`/hooks`、`/credits`、`/effort`。其他命令（包括 `/compact`——agy 在非交互模式下不会拦截它）会被拒绝并提示原因
+- **AGY CLI (Antigravity)**：仅透传 agy 本地应答的只读信息类命令（`agy -p "<cmd>"`）：`/skills`、`/usage`、`/config`、`/changelog`、`/agents`、`/permissions`、`/hooks`、`/credits`。其他命令（包括 `/compact`——agy 在非交互模式下不会拦截它）会被拒绝并提示原因
 - **Codex CLI (OpenAI)**：不透传——remote-cli 使用 app-server API，而不是交互式 TUI 的斜杠命令层，因此后端专属斜杠命令会被拒绝
 
-内建命令（`/help`、`/status`、`/clear`、`/compact`、`/model`、`/cd`、`/thread`、`/backend`、`/abort`）在所有后端上行为一致。
+内建命令（`/help`、`/status`、`/clear`、`/compact`、`/model`、`/cd`、`/thread`、`/backend`、`/abort`）可用于所有后端。`/effort` 可按线程设置 Codex 和 AGY 的思考等级；Claude Code 暂未实现。
 
 ### 示例工作流程
 

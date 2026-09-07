@@ -328,7 +328,7 @@ export class MessageHandler {
 - /compact - Compress conversation history to reduce context size
 - /cd <directory> - Change working directory for this thread
 - /model [name] - Show available models, or switch the AI model for this thread (persists across sessions)
-- /effort [auto|level] - Show or set Codex reasoning effort for this thread
+- /effort [auto|level] - Show or set reasoning effort for this thread
 - /backend - List available AI backends and switch between them
 - /thread list - List all threads with their status
 - /thread new [name] - Create a new thread
@@ -420,10 +420,10 @@ You can also use natural language commands to control Claude Code CLI.`,
     if (trimmed === '/effort' || trimmed.startsWith('/effort ')) {
       const executorConfig = (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
       const key = backendKeyOf(executorConfig.type as string);
-      if (key !== 'codex') {
+      if (key !== 'codex' && key !== 'agy') {
         this.sendResponse(messageId, threadId, {
           success: false,
-          error: '/effort is not supported yet for Claude Code or AGY.',
+          error: '/effort is not supported yet for Claude Code.',
         });
         return true;
       }
@@ -431,6 +431,17 @@ You can also use natural language commands to control Claude Code CLI.`,
       const parts = trimmed.split(/\s+/);
       if (parts.length < 2) {
         const thread = this.threadManager.getThread(threadId);
+        if (key === 'agy') {
+          this.sendResponse(messageId, threadId, {
+            success: true,
+            output: [
+              `Current reasoning effort: ${thread?.efforts?.agy ?? 'auto'}`,
+              'Supported levels: low, medium, high',
+              'Set with: /effort <auto|low|medium|high>',
+            ].join('\n'),
+          });
+          return true;
+        }
         const configuredModel = thread?.models?.codex ?? executorConfig.codex?.model;
         const lines = [`Current reasoning effort: ${thread?.efforts?.codex ?? 'auto'}`];
         if ('listModels' in executor && typeof executor.listModels === 'function') {
@@ -456,7 +467,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       if (!('setEffort' in executor && typeof executor.setEffort === 'function')) {
         this.sendResponse(messageId, threadId, {
           success: false,
-          error: '/effort is not supported by this Codex executor version.',
+          error: `/effort is not supported by this ${key === 'agy' ? 'AGY' : 'Codex'} executor version.`,
         });
         return true;
       }
@@ -466,8 +477,8 @@ You can also use natural language commands to control Claude Code CLI.`,
       if (result.success) {
         const current = this.threadManager.getThread(threadId);
         const efforts = { ...current?.efforts };
-        if (effortArg === 'auto') delete efforts.codex;
-        else efforts.codex = effortArg;
+        if (effortArg === 'auto') delete efforts[key];
+        else efforts[key] = effortArg;
         await this.threadManager.updateThread(threadId, {
           efforts: Object.keys(efforts).length > 0 ? efforts : undefined,
         });

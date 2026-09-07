@@ -422,10 +422,10 @@ Control remote servers or Docker through `remote-cli` proxies.
 Slash commands that remote-cli does not handle itself are forwarded to the active AI backend, with per-backend support:
 
 - **Claude Code**: full passthrough via `claude <cmd> --print` — all commands/skills work, e.g. `/commit`, `/review`, `/test`
-- **AGY CLI (Antigravity)**: only the read-only informational commands that agy answers locally are forwarded (`agy -p "<cmd>"`): `/skills`, `/usage`, `/config`, `/changelog`, `/agents`, `/permissions`, `/hooks`, `/credits`, `/effort`. Other commands (including `/compact`, which agy does not intercept outside its TUI) are rejected with a clear message
+- **AGY CLI (Antigravity)**: only the read-only informational commands that agy answers locally are forwarded (`agy -p "<cmd>"`): `/skills`, `/usage`, `/config`, `/changelog`, `/agents`, `/permissions`, `/hooks`, `/credits`. Other commands (including `/compact`, which agy does not intercept outside its TUI) are rejected with a clear message
 - **Codex CLI (OpenAI)**: no passthrough — remote-cli uses the app-server API rather than the interactive TUI slash-command layer, so backend-specific slash commands are rejected
 
-The built-in commands (`/help`, `/status`, `/clear`, `/compact`, `/model`, `/cd`, `/thread`, `/backend`, `/abort`) work identically on every backend.
+The built-in commands (`/help`, `/status`, `/clear`, `/compact`, `/model`, `/cd`, `/thread`, `/backend`, `/abort`) work across all backends. `/effort` controls the per-thread reasoning effort for Codex and AGY; Claude Code support is not implemented yet.
 
 ### Example Workflow
 
