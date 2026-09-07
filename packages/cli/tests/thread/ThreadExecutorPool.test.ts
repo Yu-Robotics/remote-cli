@@ -440,7 +440,7 @@ describe('ThreadExecutorPool', () => {
       );
     });
 
-    it('passes thread.efforts.codex only to the codex factory', async () => {
+    it('passes thread.efforts.codex to the codex factory', async () => {
       const codexThread = await manager.createThread('codex-effort', tmpDir);
       await manager.updateThread(codexThread.id, { efforts: { codex: 'high' } });
 
@@ -453,6 +453,22 @@ describe('ThreadExecutorPool', () => {
         codexThread.id,
         undefined,
         'high'
+      );
+    });
+
+    it('passes thread.efforts.agy to the AGY factory', async () => {
+      const agyThread = await manager.createThread('agy-effort', tmpDir);
+      await manager.updateThread(agyThread.id, { efforts: { agy: 'medium' } });
+
+      poolFor('agy').getExecutor(agyThread.id);
+
+      expect(mockExecutorFactory).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ type: 'agy' }),
+        tmpDir,
+        agyThread.id,
+        undefined,
+        'medium'
       );
     });
   });
