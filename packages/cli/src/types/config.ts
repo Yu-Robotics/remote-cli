@@ -78,6 +78,21 @@ export interface ExecutorConfig {
 }
 
 /**
+ * Canonical backend keys for per-backend thread settings (e.g. Thread.models).
+ */
+export type BackendKey = 'claude' | 'agy' | 'codex';
+
+/**
+ * Map an executor config type to its canonical backend key.
+ * 'auto'/'claude-*' → 'claude'; legacy 'gemini' slot → 'agy'.
+ */
+export function backendKeyOf(type: ExecutorConfig['type'] | string): BackendKey {
+  if (type === 'agy' || (type as string) === 'gemini') return 'agy';
+  if (type === 'codex') return 'codex';
+  return 'claude';
+}
+
+/**
  * Complete configuration
  */
 export interface Config {

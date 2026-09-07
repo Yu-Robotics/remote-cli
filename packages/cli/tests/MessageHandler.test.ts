@@ -394,9 +394,52 @@ describe('MessageHandler', () => {
       await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-model', content: '/model opus', timestamp: Date.now() });
 
       expect(ctx.mockExecutor.setModel).toHaveBeenCalledWith('opus', expect.any(Function));
-      expect(ctx.mockThreadManager.updateThread).toHaveBeenCalledWith('default-thread-id', { model: 'opus' });
+      // Claude backend: persist under models.claude and keep the legacy
+      // `model` field in sync.
+      expect(ctx.mockThreadManager.updateThread).toHaveBeenCalledWith(
+        'default-thread-id',
+        { model: 'opus', models: { claude: 'opus' } }
+      );
       expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
         expect.objectContaining({ type: 'response', messageId: 'msg-model', success: true })
+      );
+    });
+
+    it('should persist the model under the agy key when the AGY backend is active', async () => {
+      ctx.mockConfig.get.mockImplementation((key: string) =>
+        key === 'executor' ? { type: 'agy' } : undefined
+      );
+      ctx.mockExecutor.setModel = vi.fn().mockResolvedValue({ success: true, output: 'Model set.' });
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-model-agy', content: '/model gemini-3.1-pro-high', timestamp: Date.now() });
+
+      expect(ctx.mockThreadManager.updateThread).toHaveBeenCalledWith(
+        'default-thread-id',
+        { models: { agy: 'gemini-3.1-pro-high' } }
+      );
+      // Must NOT touch the legacy (claude-only) model field
+      expect(ctx.mockThreadManager.updateThread).not.toHaveBeenCalledWith(
+        'default-thread-id',
+        expect.objectContaining({ model: expect.anything() })
+      );
+    });
+
+    it('should merge with existing per-backend models', async () => {
+      ctx.mockConfig.get.mockImplementation((key: string) =>
+        key === 'executor' ? { type: 'codex' } : undefined
+      );
+      ctx.mockThreadManager.getThread.mockReturnValue({
+        id: 'default-thread-id', name: 'default', workingDirectory: '/home/user/test-project',
+        sessionId: null, createdAt: 0, lastActiveAt: 0,
+        models: { agy: 'gemini-3.8-flash-low' },
+      });
+      ctx.mockExecutor.setModel = vi.fn().mockResolvedValue({ success: true, output: 'Model set.' });
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-model-codex', content: '/model gpt-5.2-codex', timestamp: Date.now() });
+
+      expect(ctx.mockThreadManager.updateThread).toHaveBeenCalledWith(
+        'default-thread-id',
+        { models: { agy: 'gemini-3.8-flash-low', codex: 'gpt-5.2-codex' } }
       );
     });
 

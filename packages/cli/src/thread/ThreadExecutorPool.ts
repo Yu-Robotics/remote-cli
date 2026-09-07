@@ -1,9 +1,22 @@
 import { ThreadManager } from './ThreadManager';
 import { ThreadSummary } from './types';
+import type { Thread } from './types';
 import type { IExecutor } from '../executor/IExecutor';
 import type { DirectoryGuard } from '../security/DirectoryGuard';
 import type { ExecutorConfig } from '../types/config';
+import { backendKeyOf } from '../types/config';
 import { createExecutor } from '../executor';
+
+/**
+ * Resolve the model a thread should use on the given backend.
+ * Per-backend `thread.models[key]` wins; the legacy `thread.model` field is
+ * honored for the Claude backend only (model names are backend-specific —
+ * a Claude name like "opus" is rejected by agy/codex).
+ */
+function resolveThreadModel(thread: Thread, config: ExecutorConfig): string | undefined {
+  const key = backendKeyOf(config.type as string);
+  return thread.models?.[key] ?? (key === 'claude' ? thread.model || undefined : undefined);
+}
 
 /**
  * Thread runtime status (not persisted — computed from locking state).
@@ -62,7 +75,7 @@ export class ThreadExecutorPool {
         this.executorConfig,
         thread.workingDirectory || undefined,
         threadId,
-        thread.model || undefined
+        resolveThreadModel(thread, this.executorConfig)
       );
       this.executors.set(threadId, executor);
     }
