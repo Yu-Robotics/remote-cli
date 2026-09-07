@@ -218,6 +218,14 @@ Integration tests validate:
 - Full user journey (init, start, status, stop)
 - Config persistence across operations
 - Error handling (network failures, missing configs)
+
+## CLAUDE.md and AGENTS.md Link Requirement
+
+**CRITICAL: When creating a new `CLAUDE.md` at any directory level, you MUST also create an `AGENTS.md` symbolic link next to it that points to that `CLAUDE.md`.**
+
+- The `AGENTS.md` link must live in the same directory as the new `CLAUDE.md`
+- The link target should be the sibling `CLAUDE.md` file (for example: `AGENTS.md -> CLAUDE.md`)
+- Do this for every new `CLAUDE.md`, including nested package or subdirectory files
 - Binding flow simulation
 
 ## File Structure Conventions
