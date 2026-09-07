@@ -89,7 +89,8 @@ export function createExecutor(
   executorConfig: ExecutorConfig = { type: 'auto' },
   initialWorkingDirectory?: string,
   threadId?: string,
-  model?: string
+  model?: string,
+  effort?: string
 ): IExecutor {
   // Cast to string so the legacy 'gemini' case compiles even though the
   // ExecutorConfig union no longer includes it.
@@ -125,6 +126,7 @@ export function createExecutor(
         console.log('[ExecutorFactory] Using Codex CLI executor (exec fallback)');
         return new CodexExecutor(directoryGuard, {
           model: model ?? executorConfig.codex?.model,
+          effort,
           autoApprove: executorConfig.codex?.autoApprove ?? true,
           initialWorkingDirectory,
           codexCommand: executorConfig.codex?.command,
@@ -135,6 +137,7 @@ export function createExecutor(
       return new CodexAppServerExecutor(directoryGuard, {
         // Per-thread model (set via /model, persisted on the thread) wins
         model: model ?? executorConfig.codex?.model,
+        effort,
         autoApprove: executorConfig.codex?.autoApprove ?? true,
         initialWorkingDirectory,
         codexCommand: executorConfig.codex?.command,

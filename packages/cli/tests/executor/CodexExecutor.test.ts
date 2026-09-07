@@ -122,7 +122,13 @@ describe('CodexExecutor', () => {
     mockFs.existsSync.mockReturnValue(false);
     mockFs.readFileSync.mockReturnValue('{}');
     modelCatalogRequest = vi.fn().mockResolvedValue({
-      data: [{ id: 'gpt-5.2-codex', displayName: 'GPT-5.2-Codex' }],
+      data: [{
+        id: 'gpt-5.2-codex',
+        displayName: 'GPT-5.2-Codex',
+        isDefault: true,
+        defaultReasoningEffort: 'medium',
+        supportedReasoningEfforts: [{ reasoningEffort: 'low' }, { reasoningEffort: 'medium' }, { reasoningEffort: 'high' }, { reasoningEffort: 'xhigh' }],
+      }],
       nextCursor: null,
     });
     modelCatalogStop = vi.fn().mockResolvedValue(undefined);
@@ -514,6 +520,43 @@ describe('CodexExecutor', () => {
     const command = executor.execute('use default');
     await waitForSpawn();
     expect(mockSpawn.mock.calls[0][1]).not.toContain('-m');
+    emitThreadStarted();
+    emitTurnStarted();
+    emitSuccessAndExit();
+    await command;
+  });
+
+  it('passes a validated reasoning effort to new and resumed exec commands', async () => {
+    await expect(executor.setEffort('high')).resolves.toMatchObject({ success: true });
+
+    const first = executor.execute('new thread');
+    await waitForSpawn();
+    expect(mockSpawn.mock.calls[0][1]).toEqual(expect.arrayContaining([
+      '-c', 'model_reasoning_effort="high"',
+    ]));
+    emitThreadStarted();
+    emitTurnStarted();
+    emitSuccessAndExit();
+    await first;
+
+    const resumed = executor.execute('resume thread');
+    await waitForSpawn(2);
+    expect(mockSpawn.mock.calls[1][1]).toEqual(expect.arrayContaining([
+      '-c', 'model_reasoning_effort="high"',
+    ]));
+    emitTurnStarted();
+    emitSuccessAndExit();
+    await resumed;
+  });
+
+  it('rejects unsupported effort and auto removes the exec override', async () => {
+    await expect(executor.setEffort('max')).resolves.toMatchObject({ success: false });
+    await executor.setEffort('high');
+    await expect(executor.setEffort('auto')).resolves.toMatchObject({ success: true });
+
+    const command = executor.execute('default effort');
+    await waitForSpawn();
+    expect(mockSpawn.mock.calls[0][1]).not.toContain('model_reasoning_effort="high"');
     emitThreadStarted();
     emitTurnStarted();
     emitSuccessAndExit();

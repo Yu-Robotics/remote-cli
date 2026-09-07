@@ -586,6 +586,72 @@ describe('MessageHandler', () => {
     }, 20000);
   });
 
+  describe('effort command', () => {
+    it('sets and persists Codex reasoning effort', async () => {
+      ctx.mockConfig.get.mockImplementation((key: string) =>
+        key === 'executor' ? { type: 'codex' } : undefined
+      );
+      ctx.mockExecutor.setEffort = vi.fn().mockResolvedValue({ success: true, output: 'Reasoning effort set to high.' });
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-effort', content: '/effort high', timestamp: Date.now() });
+
+      expect(ctx.mockExecutor.setEffort).toHaveBeenCalledWith('high');
+      expect(ctx.mockThreadManager.updateThread).toHaveBeenCalledWith(
+        'default-thread-id',
+        { efforts: { codex: 'high' } }
+      );
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({ success: true, output: 'Reasoning effort set to high.' })
+      );
+    });
+
+    it('removes the persisted Codex override after auto succeeds', async () => {
+      ctx.mockConfig.get.mockImplementation((key: string) =>
+        key === 'executor' ? { type: 'codex' } : undefined
+      );
+      ctx.mockThreadManager.getThread.mockReturnValue({
+        id: 'default-thread-id', name: 'default', workingDirectory: '/home/user/test-project',
+        sessionId: null, createdAt: 0, lastActiveAt: 0,
+        efforts: { codex: 'high' },
+      });
+      ctx.mockExecutor.setEffort = vi.fn().mockResolvedValue({ success: true, output: 'Restored.' });
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-effort-auto', content: '/effort auto', timestamp: Date.now() });
+
+      expect(ctx.mockThreadManager.updateThread).toHaveBeenCalledWith(
+        'default-thread-id',
+        { efforts: undefined }
+      );
+    });
+
+    it('lists Codex effort metadata for the active model', async () => {
+      ctx.mockConfig.get.mockImplementation((key: string) =>
+        key === 'executor' ? { type: 'codex', codex: { model: 'gpt-a' } } : undefined
+      );
+      ctx.mockExecutor.listModels = vi.fn().mockResolvedValue([{ id: 'gpt-a', displayName: 'GPT A', isDefault: true, defaultReasoningEffort: 'medium', supportedReasoningEfforts: ['low', 'medium', 'high'] }]);
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-effort-list', content: '/effort', timestamp: Date.now() });
+
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+        success: true,
+        output: expect.stringContaining('Model default: medium'),
+      }));
+    });
+
+    it.each(['claude-persistent', 'agy'])('reports effort as not supported yet on %s', async (type) => {
+      ctx.mockConfig.get.mockImplementation((key: string) =>
+        key === 'executor' ? { type } : undefined
+      );
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: `msg-effort-${type}`, content: '/effort high', timestamp: Date.now() });
+
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+        success: false,
+        error: expect.stringContaining('not supported yet'),
+      }));
+    });
+  });
+
   describe('streaming output', () => {
     it('should send streaming chunks', async () => {
       ctx.mockExecutor.execute.mockImplementation(async (_prompt: string, options: any) => {
@@ -1273,7 +1339,7 @@ describe('MessageHandler', () => {
 
     // '/help' and '/model' are handled by remote-cli built-ins and never
     // reach the passthrough, so they are not exercised here.
-    it.each(['/skills', '/usage', '/config', '/changelog', '/agents', '/permissions', '/hooks', '/credits', '/effort'])(
+    it.each(['/skills', '/usage', '/config', '/changelog', '/agents', '/permissions', '/hooks', '/credits'])(
       'should pass through %s on the AGY backend',
       async (cmd) => {
         useBackend({ type: 'agy' });

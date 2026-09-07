@@ -19,6 +19,7 @@ export interface CodexAppServerTransport {
 
 export interface CodexAppServerExecutorOptions {
   model?: string;
+  effort?: string;
   autoApprove?: boolean;
   initialWorkingDirectory?: string;
   codexCommand?: string;
@@ -64,6 +65,7 @@ export class CodexAppServerExecutor implements IExecutor {
   private readonly directoryGuard: DirectoryGuard;
   private currentWorkingDirectory: string;
   private model?: string;
+  private effort?: string;
   private readonly autoApprove: boolean;
   private readonly remoteThreadId?: string;
   private readonly sessionFilePath: string;
@@ -83,6 +85,7 @@ export class CodexAppServerExecutor implements IExecutor {
   constructor(directoryGuard: DirectoryGuard, options: CodexAppServerExecutorOptions = {}) {
     this.directoryGuard = directoryGuard;
     this.model = options.model;
+    this.effort = options.effort;
     this.autoApprove = options.autoApprove ?? true;
     this.remoteThreadId = options.threadId;
     this.inactivityTimeoutMs = options.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS;
@@ -155,6 +158,7 @@ export class CodexAppServerExecutor implements IExecutor {
           input,
           cwd: this.currentWorkingDirectory,
           ...(this.model ? { model: this.model } : {}),
+          ...(this.effort ? { effort: this.effort } : {}),
           ...(this.autoApprove ? {
             approvalPolicy: 'never',
             sandboxPolicy: { type: 'dangerFullAccess' },
@@ -307,6 +311,9 @@ export class CodexAppServerExecutor implements IExecutor {
           supportedReasoningEfforts: Array.isArray(model.supportedReasoningEfforts)
             ? model.supportedReasoningEfforts.map((entry: any) => entry?.reasoningEffort).filter(Boolean)
             : undefined,
+          defaultReasoningEffort: typeof model.defaultReasoningEffort === 'string'
+            ? model.defaultReasoningEffort
+            : undefined,
           inputModalities: Array.isArray(model.inputModalities) ? model.inputModalities : undefined,
         });
       }
@@ -330,6 +337,58 @@ export class CodexAppServerExecutor implements IExecutor {
 
   clearModel(): void {
     this.model = undefined;
+  }
+
+  async setEffort(effort: string): Promise<ExecuteResult> {
+    if (this.activeTurn || this.compactWaiter) {
+      return { success: false, error: 'Cannot change reasoning effort while the Codex thread is busy' };
+    }
+
+    try {
+      const normalized = effort.trim().toLowerCase();
+      const models = await this.listModels();
+      const activeModel = models.find((entry) => entry.id === this.model)
+        ?? models.find((entry) => entry.isDefault)
+        ?? models[0];
+      if (!activeModel) {
+        return { success: false, error: 'Codex returned no models for reasoning effort validation.' };
+      }
+
+      if (normalized === 'auto') {
+        const defaultEffort = activeModel.defaultReasoningEffort;
+        if (!defaultEffort) {
+          return { success: false, error: `Codex did not report a default reasoning effort for ${activeModel.id}.` };
+        }
+        if (this.codexThreadId) {
+          await this.ensureThread();
+          await this.client.request('thread/settings/update', {
+            threadId: this.codexThreadId,
+            effort: defaultEffort,
+          });
+        }
+        this.effort = undefined;
+        return { success: true, output: `Reasoning effort restored to ${defaultEffort}, the default for ${activeModel.id}.` };
+      }
+
+      const supported = activeModel.supportedReasoningEfforts ?? [];
+      if (!supported.includes(normalized)) {
+        return {
+          success: false,
+          error: `Unsupported reasoning effort for ${activeModel.id}: ${effort}. Supported values: ${supported.join(', ') || 'unavailable'}.`,
+        };
+      }
+      if (this.codexThreadId) {
+        await this.ensureThread();
+        await this.client.request('thread/settings/update', {
+          threadId: this.codexThreadId,
+          effort: normalized,
+        });
+      }
+      this.effort = normalized;
+      return { success: true, output: `Reasoning effort set to ${normalized}.` };
+    } catch (error) {
+      return { success: false, error: this.errorMessage(error) };
+    }
   }
 
   async compactWhenFull(_onStream?: (chunk: string) => void): Promise<ExecuteResult> {

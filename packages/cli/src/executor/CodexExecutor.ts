@@ -16,6 +16,8 @@ export interface CodexModelCatalogTransport {
 export interface CodexExecutorOptions {
   /** Model passed as -m. Leave unset to use codex's default. */
   model?: string;
+  /** Per-thread reasoning effort override. Leave unset to use Codex defaults. */
+  effort?: string;
   /**
    * Bypass all approvals and the sandbox via
    * --dangerously-bypass-approvals-and-sandbox. Default: true.
@@ -91,6 +93,7 @@ export class CodexExecutor implements IExecutor {
 
   /** Model for the next spawn. Mutable: setModel() updates it in place. */
   private model?: string;
+  private effort?: string;
   private readonly autoApprove: boolean;
   private readonly codexCommand: string;
   private readonly threadId?: string;
@@ -118,6 +121,7 @@ export class CodexExecutor implements IExecutor {
   constructor(directoryGuard: DirectoryGuard, options: CodexExecutorOptions = {}) {
     this.directoryGuard = directoryGuard;
     this.model = options.model;
+    this.effort = options.effort;
     this.autoApprove = options.autoApprove ?? true;
     this.codexCommand = options.codexCommand ?? 'codex';
     this.threadId = options.threadId;
@@ -245,6 +249,9 @@ export class CodexExecutor implements IExecutor {
             supportedReasoningEfforts: Array.isArray(model.supportedReasoningEfforts)
               ? model.supportedReasoningEfforts.map((entry: any) => entry?.reasoningEffort).filter(Boolean)
               : undefined,
+            defaultReasoningEffort: typeof model.defaultReasoningEffort === 'string'
+              ? model.defaultReasoningEffort
+              : undefined,
             inputModalities: Array.isArray(model.inputModalities) ? model.inputModalities : undefined,
           });
         }
@@ -278,6 +285,32 @@ export class CodexExecutor implements IExecutor {
 
   clearModel(): void {
     this.model = undefined;
+  }
+
+  async setEffort(effort: string): Promise<ExecuteResult> {
+    const normalized = effort.trim().toLowerCase();
+    if (normalized === 'auto') {
+      this.effort = undefined;
+      return { success: true, output: 'Reasoning effort restored to the Codex default.' };
+    }
+
+    try {
+      const models = await this.listModels();
+      const activeModel = models.find((entry) => entry.id === this.model)
+        ?? models.find((entry) => entry.isDefault)
+        ?? models[0];
+      const supported = activeModel?.supportedReasoningEfforts ?? [];
+      if (!supported.includes(normalized)) {
+        return {
+          success: false,
+          error: `Unsupported reasoning effort for ${activeModel?.id ?? 'the active Codex model'}: ${effort}. Supported values: ${supported.join(', ') || 'unavailable'}.`,
+        };
+      }
+      this.effort = normalized;
+      return { success: true, output: `Reasoning effort set to ${normalized}. Takes effect on the next command.` };
+    } catch (error) {
+      return { success: false, error: `Could not validate Codex reasoning effort: ${error instanceof Error ? error.message : String(error)}` };
+    }
   }
 
   /**
@@ -523,6 +556,9 @@ export class CodexExecutor implements IExecutor {
       if (this.model) {
         args.push('-m', this.model);
       }
+      if (this.effort) {
+        args.push('-c', `model_reasoning_effort="${this.effort}"`);
+      }
       // `--` guards prompts that start with a dash from clap's flag parser
       args.push(this.codexThreadId, '--', prompt);
       return args;
@@ -534,6 +570,9 @@ export class CodexExecutor implements IExecutor {
     }
     if (this.model) {
       args.push('-m', this.model);
+    }
+    if (this.effort) {
+      args.push('-c', `model_reasoning_effort="${this.effort}"`);
     }
     args.push('--', prompt);
     return args;
