@@ -931,6 +931,80 @@ describe('AgyExecutor', () => {
     emitResult({ conversation_id: 'conv-keep' });
     await p2;
   });
+
+  // ── setEffort ───────────────────────────────────────────────────────────
+
+  it('setEffort recycles an idle process and passes --effort while preserving the conversation', async () => {
+    const first = executor.execute('hi');
+    await waitForSpawn();
+    emitInit('conv-effort');
+    emitResult({ conversation_id: 'conv-effort' });
+    await first;
+
+    const result = await executor.setEffort('medium');
+    expect(result.success).toBe(true);
+    expect(proc.kill).toHaveBeenCalled();
+
+    const second = executor.execute('after effort switch');
+    await waitForSpawn();
+    const args = mockSpawn.mock.calls[1][1];
+    expect(args[args.indexOf('--effort') + 1]).toBe('medium');
+    expect(args[args.indexOf('--conversation') + 1]).toBe('conv-effort');
+
+    emitInit('conv-effort');
+    emitResult({ conversation_id: 'conv-effort' });
+    await second;
+  });
+
+  it('setEffort while a command is running defers the process recycle', async () => {
+    const first = executor.execute('running');
+    await waitForSpawn();
+    emitInit('conv-effort');
+
+    const result = await executor.setEffort('low');
+    expect(result.success).toBe(true);
+    expect(proc.kill).not.toHaveBeenCalled();
+
+    emitResult({ conversation_id: 'conv-effort' });
+    await first;
+    expect(proc.kill).toHaveBeenCalled();
+
+    const second = executor.execute('next');
+    await waitForSpawn();
+    const args = mockSpawn.mock.calls[1][1];
+    expect(args[args.indexOf('--effort') + 1]).toBe('low');
+
+    emitInit('conv-effort');
+    emitResult({ conversation_id: 'conv-effort' });
+    await second;
+  });
+
+  it('setEffort rejects unsupported values without recycling the process', async () => {
+    const command = executor.execute('running');
+    await waitForSpawn();
+
+    const result = await executor.setEffort('xhigh');
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('auto, low, medium, high');
+    expect(proc.kill).not.toHaveBeenCalled();
+
+    emitInit();
+    emitResult();
+    await command;
+  });
+
+  it('setEffort auto removes --effort on the next process', async () => {
+    await executor.setEffort('high');
+    await executor.setEffort('auto');
+
+    const command = executor.execute('default effort');
+    await waitForSpawn();
+    expect(mockSpawn.mock.calls[0][1]).not.toContain('--effort');
+
+    emitInit();
+    emitResult();
+    await command;
+  });
 });
 
 describe('createExecutor factory - agy backend', () => {
@@ -1033,6 +1107,31 @@ describe('createExecutor factory - agy backend', () => {
     proc.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'init', conversation_id: 'c3', init: {} }) + '\n'));
     proc.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'result', result: { conversation_id: 'c3', status: 'SUCCESS', response: '', duration_seconds: 0, num_turns: 1, usage: {} } }) + '\n'));
     await p;
+    await executor.destroy();
+  });
+
+  it('passes the per-thread reasoning effort to AGY', async () => {
+    const guard = new DirectoryGuard(['~/test-project']);
+    const executor = createExecutor(
+      guard,
+      { type: 'agy' },
+      '~/test-project',
+      'thread-x',
+      undefined,
+      'high'
+    ) as AgyExecutor;
+
+    const command = executor.execute('hi');
+    for (let i = 0; i < 100 && mockSpawn.mock.calls.length === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const args = mockSpawn.mock.calls[0][1];
+    expect(args[args.indexOf('--effort') + 1]).toBe('high');
+
+    const proc = mockSpawn.mock.results[0].value;
+    proc.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'init', conversation_id: 'c4', init: {} }) + '\n'));
+    proc.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'result', result: { conversation_id: 'c4', status: 'SUCCESS', response: '', duration_seconds: 0, num_turns: 1, usage: {} } }) + '\n'));
+    await command;
     await executor.destroy();
   });
 });

@@ -10,6 +10,8 @@ import { COMPACT_HANDOFF_PROMPT, seedPromptWithHandoff } from './compactHandoff'
 export interface AgyExecutorOptions {
   /** Model slug passed as --model. Leave unset to use agy's default. */
   model?: string;
+  /** Reasoning effort passed as --effort. Leave unset to use agy's default. */
+  effort?: string;
   /** Auto-approve all tool permissions via --dangerously-skip-permissions. Default: true. */
   autoApprove?: boolean;
   initialWorkingDirectory?: string;
@@ -31,6 +33,7 @@ export interface AgyExecutorOptions {
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000;
 /** Default grace period (ms) before SIGTERM escalates to SIGKILL. */
 const DEFAULT_KILL_ESCALATION_MS = 3_000;
+const SUPPORTED_EFFORTS = ['low', 'medium', 'high'] as const;
 
 /**
  * Map an AGY tool call to a Claude-compatible { name, input } shape so the
@@ -109,6 +112,8 @@ export class AgyExecutor implements IExecutor {
 
   /** Model for the next spawn. Mutable: setModel() updates it in place. */
   private model?: string;
+  /** Reasoning effort for the next spawn. Mutable: setEffort() updates it in place. */
+  private effort?: string;
   private readonly autoApprove: boolean;
   private readonly agyCommand: string;
   private readonly threadId?: string;
@@ -128,14 +133,15 @@ export class AgyExecutor implements IExecutor {
   private readonly inactivityTimeoutMs: number;
   private readonly killEscalationMs: number;
   private attachmentWarningShown = false;
-  /** Model switch requested while a command was running — respawn when it finishes. */
-  private pendingModelChange = false;
+  /** Model or effort switch requested while a command was running — respawn when it finishes. */
+  private pendingSettingsChange = false;
   /** Handoff summary from compactWhenFull, wrapped into the next prompt (consumed once). */
   private pendingContextSeed: string | null = null;
 
   constructor(directoryGuard: DirectoryGuard, options: AgyExecutorOptions = {}) {
     this.directoryGuard = directoryGuard;
     this.model = options.model;
+    this.effort = options.effort;
     this.autoApprove = options.autoApprove ?? true;
     this.agyCommand = options.agyCommand ?? 'agy';
     this.threadId = options.threadId;
@@ -258,13 +264,41 @@ export class AgyExecutor implements IExecutor {
       this.killProcess();
     } else if (this.proc) {
       console.log(`[AgyExecutor] Model set to ${model} — will respawn after the current command`);
-      this.pendingModelChange = true;
+      this.pendingSettingsChange = true;
     } else {
       console.log(`[AgyExecutor] Model set to ${model} (applies from the next command)`);
     }
     return {
       success: true,
       output: `Model set to ${model}. Takes effect on the next command (the agy process restarts; conversation context is preserved).`,
+    };
+  }
+
+  async setEffort(effort: string): Promise<ExecuteResult> {
+    const normalized = effort.trim().toLowerCase();
+    if (normalized !== 'auto' && !SUPPORTED_EFFORTS.includes(normalized as typeof SUPPORTED_EFFORTS[number])) {
+      return {
+        success: false,
+        error: `Unsupported AGY reasoning effort: ${effort}. Supported values: auto, ${SUPPORTED_EFFORTS.join(', ')}.`,
+      };
+    }
+
+    this.effort = normalized === 'auto' ? undefined : normalized;
+    if (this.proc && !this.activeCommand) {
+      console.log(`[AgyExecutor] Reasoning effort set to ${normalized} — recycling idle process (conversation preserved)`);
+      this.killProcess();
+    } else if (this.proc) {
+      console.log(`[AgyExecutor] Reasoning effort set to ${normalized} — will respawn after the current command`);
+      this.pendingSettingsChange = true;
+    } else {
+      console.log(`[AgyExecutor] Reasoning effort set to ${normalized} (applies from the next command)`);
+    }
+
+    return {
+      success: true,
+      output: normalized === 'auto'
+        ? 'Reasoning effort restored to the AGY default. Takes effect on the next command.'
+        : `Reasoning effort set to ${normalized}. Takes effect on the next command.`,
     };
   }
 
@@ -402,10 +436,10 @@ export class AgyExecutor implements IExecutor {
     }
     active.resolve(result);
 
-    // A model switch requested mid-command takes effect now that the
-    // command has finished — recycle the process (conversation preserved).
-    if (this.pendingModelChange) {
-      this.pendingModelChange = false;
+    // A model or effort switch requested mid-command takes effect now that
+    // the command has finished — recycle the process (conversation preserved).
+    if (this.pendingSettingsChange) {
+      this.pendingSettingsChange = false;
       if (this.proc) this.killProcess();
     }
   }
@@ -495,6 +529,9 @@ export class AgyExecutor implements IExecutor {
     }
     if (this.model) {
       args.push('--model', this.model);
+    }
+    if (this.effort) {
+      args.push('--effort', this.effort);
     }
     if (this.conversationId) {
       args.push('--conversation', this.conversationId);
