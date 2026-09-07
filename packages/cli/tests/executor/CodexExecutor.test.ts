@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { CodexExecutor } from '../../src/executor/CodexExecutor';
+import { CodexAppServerExecutor } from '../../src/executor/CodexAppServerExecutor';
 import { createExecutor } from '../../src/executor';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 import { EventEmitter } from 'events';
@@ -56,6 +57,8 @@ describe('CodexExecutor', () => {
   let directoryGuard: DirectoryGuard;
   const mockSpawn = spawn as any;
   const mockFs = fs as any;
+  let modelCatalogRequest: ReturnType<typeof vi.fn>;
+  let modelCatalogStop: ReturnType<typeof vi.fn>;
 
   // The most recently spawned mock process (each command spawns a new one)
   let proc: any;
@@ -118,6 +121,11 @@ describe('CodexExecutor', () => {
 
     mockFs.existsSync.mockReturnValue(false);
     mockFs.readFileSync.mockReturnValue('{}');
+    modelCatalogRequest = vi.fn().mockResolvedValue({
+      data: [{ id: 'gpt-5.2-codex', displayName: 'GPT-5.2-Codex' }],
+      nextCursor: null,
+    });
+    modelCatalogStop = vi.fn().mockResolvedValue(undefined);
 
     spawnedProcesses = [];
     mockSpawn.mockImplementation(() => {
@@ -130,6 +138,10 @@ describe('CodexExecutor', () => {
     executor = new CodexExecutor(directoryGuard, {
       initialWorkingDirectory: '~/test-project',
       threadId: 'thread-1',
+      modelCatalogClientFactory: () => ({
+        request: modelCatalogRequest,
+        stop: modelCatalogStop,
+      }),
     });
   });
 
@@ -478,6 +490,34 @@ describe('CodexExecutor', () => {
     emitSuccessAndExit();
     const result = await p;
     expect(result.success).toBe(true);
+  });
+
+  it('rejects a model that is unavailable to the authenticated account', async () => {
+    const result = await executor.setModel('unsupported-model');
+
+    expect(result).toEqual({
+      success: false,
+      error: 'Unknown Codex model: unsupported-model. Use /model to list available models.',
+    });
+    expect(modelCatalogRequest).toHaveBeenCalledWith('model/list', {
+      cursor: null,
+      limit: 100,
+      includeHidden: false,
+    });
+    expect(modelCatalogStop).toHaveBeenCalledOnce();
+  });
+
+  it('clears a selected model so later commands use the backend default', async () => {
+    await executor.setModel('gpt-5.2-codex');
+    executor.clearModel();
+
+    const command = executor.execute('use default');
+    await waitForSpawn();
+    expect(mockSpawn.mock.calls[0][1]).not.toContain('-m');
+    emitThreadStarted();
+    emitTurnStarted();
+    emitSuccessAndExit();
+    await command;
   });
 
 
@@ -1200,18 +1240,18 @@ describe('createExecutor factory - codex backend', () => {
     return p;
   };
 
-  it('creates a CodexExecutor for type "codex"', async () => {
+  it('creates a CodexAppServerExecutor for type "codex" by default', async () => {
     const guard = new DirectoryGuard(['~/test-project']);
     const executor = createExecutor(guard, { type: 'codex' } as any, '~/test-project', 'thread-x');
-    expect(executor).toBeInstanceOf(CodexExecutor);
+    expect(executor).toBeInstanceOf(CodexAppServerExecutor);
     await executor.destroy();
   });
 
-  it('passes executor.codex.model through as -m', async () => {
+  it('keeps CodexExecutor as an explicit exec fallback', async () => {
     const guard = new DirectoryGuard(['~/test-project']);
     const executor = createExecutor(
       guard,
-      { type: 'codex', codex: { model: 'gpt-5.2-codex' } } as any,
+      { type: 'codex', codex: { transport: 'exec', model: 'gpt-5.2-codex' } } as any,
       '~/test-project',
       'thread-x'
     ) as CodexExecutor;
@@ -1237,7 +1277,7 @@ describe('createExecutor factory - codex backend', () => {
     const guard = new DirectoryGuard(['~/test-project']);
     const executor = createExecutor(
       guard,
-      { type: 'codex', codex: { model: 'config-model' } } as any,
+      { type: 'codex', codex: { transport: 'exec', model: 'config-model' } } as any,
       '~/test-project',
       'thread-x',
       'thread-model'

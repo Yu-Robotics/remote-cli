@@ -4,8 +4,14 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { DirectoryGuard } from '../security/DirectoryGuard';
-import { IExecutor, ExecuteOptions, ExecuteResult } from './IExecutor';
+import { IExecutor, ExecuteOptions, ExecuteResult, ExecutorModelInfo } from './IExecutor';
 import { COMPACT_HANDOFF_PROMPT, seedPromptWithHandoff } from './compactHandoff';
+import { CodexAppServerClient } from './CodexAppServerClient';
+
+export interface CodexModelCatalogTransport {
+  request(method: string, params?: any): Promise<any>;
+  stop(): Promise<void>;
+}
 
 export interface CodexExecutorOptions {
   /** Model passed as -m. Leave unset to use codex's default. */
@@ -28,6 +34,8 @@ export interface CodexExecutorOptions {
   inactivityTimeoutMs?: number;
   /** Grace period before SIGTERM escalates to SIGKILL. Default: 3000ms. */
   killEscalationMs?: number;
+  /** Injectable app-server client used to validate models for exec mode. */
+  modelCatalogClientFactory?: (cwd: string) => CodexModelCatalogTransport;
 }
 
 /** Default inactivity timeout (ms) — a silent codex process fails the command. */
@@ -102,6 +110,7 @@ export class CodexExecutor implements IExecutor {
   private inactivityTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly inactivityTimeoutMs: number;
   private readonly killEscalationMs: number;
+  private readonly modelCatalogClientFactory: (cwd: string) => CodexModelCatalogTransport;
   private attachmentWarningShown = false;
   /** Handoff summary from compactWhenFull, wrapped into the next prompt (consumed once). */
   private pendingContextSeed: string | null = null;
@@ -114,6 +123,8 @@ export class CodexExecutor implements IExecutor {
     this.threadId = options.threadId;
     this.inactivityTimeoutMs = options.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS;
     this.killEscalationMs = options.killEscalationMs ?? DEFAULT_KILL_ESCALATION_MS;
+    this.modelCatalogClientFactory = options.modelCatalogClientFactory
+      ?? ((cwd) => new CodexAppServerClient({ command: this.codexCommand, cwd }));
 
     if (options.initialWorkingDirectory) {
       try {
@@ -213,13 +224,60 @@ export class CodexExecutor implements IExecutor {
    * the next spawn picks the new model up. MessageHandler persists the choice
    * on the thread; ThreadExecutorPool passes it back via the factory.
    */
+  async listModels(): Promise<ExecutorModelInfo[]> {
+    const client = this.modelCatalogClientFactory(this.currentWorkingDirectory);
+    const models: ExecutorModelInfo[] = [];
+    let cursor: string | null = null;
+    try {
+      do {
+        const response = await client.request('model/list', {
+          cursor,
+          limit: 100,
+          includeHidden: false,
+        });
+        for (const model of Array.isArray(response?.data) ? response.data : []) {
+          if (typeof model?.id !== 'string') continue;
+          models.push({
+            id: model.id,
+            displayName: model.displayName ?? model.id,
+            description: model.description,
+            isDefault: model.isDefault === true,
+            supportedReasoningEfforts: Array.isArray(model.supportedReasoningEfforts)
+              ? model.supportedReasoningEfforts.map((entry: any) => entry?.reasoningEffort).filter(Boolean)
+              : undefined,
+            inputModalities: Array.isArray(model.inputModalities) ? model.inputModalities : undefined,
+          });
+        }
+        cursor = typeof response?.nextCursor === 'string' ? response.nextCursor : null;
+      } while (cursor);
+      return models;
+    } finally {
+      await client.stop();
+    }
+  }
+
   async setModel(model: string, _onStream?: (chunk: string) => void): Promise<ExecuteResult> {
-    this.model = model;
-    console.log(`[CodexExecutor] Model set to ${model} (applies from the next command)`);
-    return {
-      success: true,
-      output: `Model set to ${model}. Takes effect on the next command.`,
-    };
+    try {
+      const models = await this.listModels();
+      if (!models.some((entry) => entry.id === model)) {
+        return { success: false, error: `Unknown Codex model: ${model}. Use /model to list available models.` };
+      }
+      this.model = model;
+      console.log(`[CodexExecutor] Model set to ${model} (applies from the next command)`);
+      return {
+        success: true,
+        output: `Model set to ${model}. Takes effect on the next command.`,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: `Could not validate Codex model: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  }
+
+  clearModel(): void {
+    this.model = undefined;
   }
 
   /**

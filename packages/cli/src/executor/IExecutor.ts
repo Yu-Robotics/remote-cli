@@ -18,6 +18,15 @@ export interface ExecuteResult {
   sessionAbbr?: string;
 }
 
+export interface ExecutorModelInfo {
+  id: string;
+  displayName: string;
+  description?: string;
+  isDefault?: boolean;
+  supportedReasoningEfforts?: string[];
+  inputModalities?: string[];
+}
+
 /**
  * Shared executor interface for all AI CLI backends (Claude, AGY, etc.)
  * Uses structural typing — existing Claude executors satisfy this without modification.
@@ -36,8 +45,12 @@ export interface IExecutor {
   sendInput?(input: string): boolean;
   compact?(onStream?: (chunk: string) => void): Promise<ExecuteResult>;
   compactWhenFull?(onStream?: (chunk: string) => void): Promise<ExecuteResult>;
-  /** Switch the active model for this executor (Claude-backed executors only). */
+  /** Switch the active model for this executor. */
   setModel?(model: string, onStream?: (chunk: string) => void): Promise<ExecuteResult>;
+  /** Clear a model override so the backend default is used. */
+  clearModel?(): Promise<void> | void;
+  /** List models available to the authenticated backend account. */
+  listModels?(): Promise<ExecutorModelInfo[]>;
   isProcessRunning?(): boolean;
   getSessionId?(): string | null;
 
