@@ -3,6 +3,8 @@
  * Each thread has its own independent executor process.
  */
 
+import type { BackendKey } from '../types/config';
+
 export const MAX_THREADS = 10;
 export const DEFAULT_THREAD_NAME = 'default';
 export const THREAD_NAME_REGEX = /^[a-zA-Z0-9][a-zA-Z0-9-]{0,28}[a-zA-Z0-9]$|^[a-zA-Z0-9]$/;
@@ -14,8 +16,17 @@ export interface Thread {
   workingDirectory: string;
   createdAt: number;
   lastActiveAt: number;
-  /** Last model explicitly selected via /model for this thread (Claude executor only). Undefined = use backend default. */
+  /**
+   * @deprecated Legacy model field — honored for the Claude backend only.
+   * Model names are backend-specific (Claude's "opus" is rejected by agy),
+   * so per-backend selections live in `models`.
+   */
   model?: string;
+  /**
+   * Per-backend model selections via /model, keyed by backend.
+   * Takes precedence over the legacy `model` field.
+   */
+  models?: Partial<Record<BackendKey, string>>;
 }
 
 export interface ThreadStore {
