@@ -457,14 +457,6 @@ describe('MessageHandler', () => {
       );
     });
 
-    it('should return error when /model is called without a model name', async () => {
-      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-model-noarg', content: '/model', timestamp: Date.now() });
-
-      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
-        expect.objectContaining({ success: false, error: expect.stringContaining('Usage') })
-      );
-    });
-
     it('should return error when executor does not support setModel', async () => {
       await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-model-unsupported', content: '/model opus', timestamp: Date.now() });
 
@@ -472,6 +464,121 @@ describe('MessageHandler', () => {
         expect.objectContaining({ success: false, error: expect.stringContaining('not supported') })
       );
     });
+  });
+
+  describe('bare /model (list models for the active backend)', () => {
+    function useBackend(executorConfig: any, threadOverrides: any = {}) {
+      ctx.mockConfig.get.mockImplementation((key: string) =>
+        key === 'executor' ? executorConfig : undefined
+      );
+      const thread = {
+        id: 'default-thread-id', name: 'default', workingDirectory: '/home/user/test-project',
+        sessionId: null, createdAt: 0, lastActiveAt: 0, ...threadOverrides,
+      };
+      ctx.mockThreadManager.getThread.mockImplementation((id: string) => id === thread.id ? thread : undefined);
+      ctx.mockThreadManager.getDefaultThread.mockReturnValue(thread);
+      return thread;
+    }
+
+    async function runBareModel() {
+      const child = fakeChild();
+      mockSpawn.mockReturnValue(child);
+      const p = ctx.handler.handleMessage({
+        type: 'command', messageId: 'msg-model-list', content: '/model', timestamp: Date.now(),
+      } as any);
+      await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalled());
+      return { child, done: p };
+    }
+
+    it('claude: lists models via claude --print /model and shows the current selection', async () => {
+      useBackend(undefined, { models: { claude: 'opus' } });
+      const { child, done } = await runBareModel();
+
+      expect(mockSpawn).toHaveBeenCalledWith('claude', ['/model', '--print'], expect.anything());
+
+      child.stdout.emit('data', Buffer.from('Current model: sonnet\nUsage: /model <name>. Available: sonnet, opus, haiku'));
+      child.emit('exit', 0);
+      await done;
+
+      const call = ctx.mockWsClient.send.mock.calls.find((c: any[]) => c[0].messageId === 'msg-model-list' && c[0].type === 'response');
+      expect(call[0].success).toBe(true);
+      expect(call[0].output).toContain('opus');                       // current thread selection
+      expect(call[0].output).toContain('sonnet, opus, haiku');        // available list
+    });
+
+    it('agy: lists models via agy models and shows the per-backend selection', async () => {
+      useBackend({ type: 'agy' }, { models: { agy: 'gemini-3.1-pro-high' } });
+      const { child, done } = await runBareModel();
+
+      expect(mockSpawn).toHaveBeenCalledWith('agy', ['models'], expect.anything());
+
+      child.stdout.emit('data', Buffer.from('gemini-3.8-flash-high\tGemini 3.8 Flash (High)\ngemini-3.1-pro-high\tGemini 3.1 Pro (High)'));
+      child.emit('exit', 0);
+      await done;
+
+      const call = ctx.mockWsClient.send.mock.calls.find((c: any[]) => c[0].messageId === 'msg-model-list' && c[0].type === 'response');
+      expect(call[0].success).toBe(true);
+      expect(call[0].output).toContain('gemini-3.1-pro-high');
+      expect(call[0].output).toContain('gemini-3.8-flash-high');
+    });
+
+    it('agy: honors executor.agy.command override for the listing', async () => {
+      useBackend({ type: 'agy', agy: { command: '/opt/agy-x' } });
+      const { child, done } = await runBareModel();
+
+      expect(mockSpawn).toHaveBeenCalledWith('/opt/agy-x', ['models'], expect.anything());
+      child.emit('exit', 0);
+      await done;
+    });
+
+    it('codex: shows current selection with a terminal hint, without spawning anything', async () => {
+      useBackend({ type: 'codex' }, { models: { codex: 'gpt-5.2-codex' } });
+
+      await ctx.handler.handleMessage({
+        type: 'command', messageId: 'msg-model-list', content: '/model', timestamp: Date.now(),
+      } as any);
+
+      expect(mockSpawn).not.toHaveBeenCalled();
+      const call = ctx.mockWsClient.send.mock.calls.find((c: any[]) => c[0].messageId === 'msg-model-list' && c[0].type === 'response');
+      expect(call[0].success).toBe(true);
+      expect(call[0].output).toContain('gpt-5.2-codex');
+      expect(call[0].output).toContain('codex models');
+    });
+
+    it('shows "backend default" when no model has been selected', async () => {
+      useBackend({ type: 'agy' });
+      const { child, done } = await runBareModel();
+
+      child.stdout.emit('data', Buffer.from('gemini-3.8-flash-high\tGemini 3.8 Flash (High)'));
+      child.emit('exit', 0);
+      await done;
+
+      const call = ctx.mockWsClient.send.mock.calls.find((c: any[]) => c[0].messageId === 'msg-model-list' && c[0].type === 'response');
+      expect(call[0].output).toMatch(/default/i);
+    });
+
+    it('degrades gracefully when the listing command fails', async () => {
+      useBackend({ type: 'agy' }, { models: { agy: 'gemini-3.1-pro-high' } });
+      const { child, done } = await runBareModel();
+
+      child.stderr.emit('data', Buffer.from('network error'));
+      child.emit('exit', 1);
+      await done;
+
+      const call = ctx.mockWsClient.send.mock.calls.find((c: any[]) => c[0].messageId === 'msg-model-list' && c[0].type === 'response');
+      expect(call[0].success).toBe(true);
+      expect(call[0].output).toContain('gemini-3.1-pro-high');   // current still shown
+    });
+
+    it('degrades gracefully when the listing command hangs', async () => {
+      useBackend({ type: 'agy' });
+      const { done } = await runBareModel();
+      // Never emit exit — the listing helper must time out on its own
+      await done;
+
+      const call = ctx.mockWsClient.send.mock.calls.find((c: any[]) => c[0].messageId === 'msg-model-list' && c[0].type === 'response');
+      expect(call[0].success).toBe(true);
+    }, 20000);
   });
 
   describe('streaming output', () => {
