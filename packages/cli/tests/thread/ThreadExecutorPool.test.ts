@@ -365,4 +365,70 @@ describe('ThreadExecutorPool', () => {
       );
     });
   });
+
+  describe('per-backend model resolution', () => {
+    function poolFor(type: ExecutorConfig['type']) {
+      return new ThreadExecutorPool(manager, directoryGuard, { type }, mockExecutorFactory);
+    }
+
+    it('does NOT leak the legacy claude thread.model into the agy backend', async () => {
+      const t = await manager.createThread('cross-agy', tmpDir);
+      await manager.updateThread(t.id, { model: 'opus' });
+
+      poolFor('agy').getExecutor(t.id);
+
+      expect(mockExecutorFactory).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ type: 'agy' }),
+        tmpDir,
+        t.id,
+        undefined
+      );
+    });
+
+    it('passes thread.models.agy to the factory on the agy backend', async () => {
+      const t = await manager.createThread('agy-model', tmpDir);
+      await manager.updateThread(t.id, { model: 'opus', models: { agy: 'gemini-3.1-pro-high' } });
+
+      poolFor('agy').getExecutor(t.id);
+
+      expect(mockExecutorFactory).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ type: 'agy' }),
+        tmpDir,
+        t.id,
+        'gemini-3.1-pro-high'
+      );
+    });
+
+    it('passes thread.models.codex to the factory on the codex backend', async () => {
+      const t = await manager.createThread('codex-model', tmpDir);
+      await manager.updateThread(t.id, { models: { codex: 'gpt-5.2-codex' } });
+
+      poolFor('codex').getExecutor(t.id);
+
+      expect(mockExecutorFactory).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ type: 'codex' }),
+        tmpDir,
+        t.id,
+        'gpt-5.2-codex'
+      );
+    });
+
+    it('prefers models.claude over the legacy model field', async () => {
+      const t = await manager.createThread('claude-model', tmpDir);
+      await manager.updateThread(t.id, { model: 'opus', models: { claude: 'sonnet' } });
+
+      pool.getExecutor(t.id);
+
+      expect(mockExecutorFactory).toHaveBeenCalledWith(
+        expect.anything(),
+        executorConfig,
+        tmpDir,
+        t.id,
+        'sonnet'
+      );
+    });
+  });
 });

@@ -13,6 +13,7 @@ import { MachineCommands } from '../machines/MachineCommands';
 import type { PendingReplace } from '../machines/types';
 import { spawn, execFile } from 'child_process';
 import type { ExecutorConfig } from '../types/config';
+import { backendKeyOf } from '../types/config';
 
 /**
  * Detected backend information
@@ -433,8 +434,18 @@ You can also use natural language commands to control Claude Code CLI.`,
         this.sendStreamChunk(messageId, threadId, chunk);
       });
       if (result.success) {
-        // Persist the thread's model selection (restored on next process start via ThreadExecutorPool)
-        await this.threadManager.updateThread(threadId, { model: modelArg });
+        // Persist per-backend: model names are backend-specific (Claude's
+        // "opus" is rejected by agy), so selections live under
+        // thread.models[backendKey]. The legacy `model` field is kept in
+        // sync for the Claude backend only.
+        const executorConfig = (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
+        const key = backendKeyOf(executorConfig.type as string);
+        const current = this.threadManager.getThread(threadId);
+        const models = { ...current?.models, [key]: modelArg };
+        await this.threadManager.updateThread(
+          threadId,
+          key === 'claude' ? { models, model: modelArg } : { models }
+        );
       }
       this.sendResponse(messageId, threadId, result.success
         ? { success: true, output: result.output || `✅ Model set to ${modelArg}` }
