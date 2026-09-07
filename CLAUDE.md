@@ -470,6 +470,16 @@ Known gaps vs Claude backend: same as AGY (no task_notification events, no nativ
 
 **Compact**: codex has compaction in its interactive TUI plus core-level auto-compaction (`model_auto_compact_token_limit`, `compact_prompt`, PreCompact/PostCompact hooks — all present in the 0.153.4 binary), but in exec mode `/compact` reaches the model as plain text (verified live). `compactWhenFull()` therefore does the same **summarize-then-reset** as AGY (see `executor/compactHandoff.ts`), with the same failure fallback and `/clear` semantics.
 
+---
+
+## Backend Switching and Session Persistence
+
+Each backend keeps its own per-thread session pointer (claude session file, `~/.remote-cli/agy-sessions/<threadId>.json`, `~/.remote-cli/codex-sessions/<threadId>.json`). `ThreadExecutorPool.destroyThread(threadId, { deleteData })` controls whether that pointer is wiped:
+
+- `/thread delete` → `deleteData: true` (default) — session data deleted.
+- `/backend` switch (`switchBackend` → `destroyAll({ deleteData: false })`) — executor processes are torn down but session files are PRESERVED, so switching back to a backend resumes each thread's previous conversation on it.
+
+Resume-failure behavior with a stale id (verified live): agy warns `conversation "<id>" not found` and transparently starts a fresh conversation; codex exits with `no rollout found for thread id` (user recovers with `/clear`).
 
 ---
 
