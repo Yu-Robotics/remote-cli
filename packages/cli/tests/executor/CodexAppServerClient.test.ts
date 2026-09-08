@@ -46,7 +46,10 @@ describe('CodexAppServerClient', () => {
 
     expect(mockSpawn).toHaveBeenCalledWith('/opt/codex', ['app-server', '--stdio'], expect.objectContaining({ cwd: '/workspace' }));
     const messages = process.stdin.writes.map((line: string) => JSON.parse(line));
-    expect(messages[0]).toMatchObject({ method: 'initialize', params: { clientInfo: { name: 'remote_cli' }, capabilities: null } });
+    expect(messages[0]).toMatchObject({
+      method: 'initialize',
+      params: { clientInfo: { name: 'remote_cli' }, capabilities: { experimentalApi: true } },
+    });
     expect(messages[1]).toEqual({ method: 'initialized' });
     await client.stop();
   });

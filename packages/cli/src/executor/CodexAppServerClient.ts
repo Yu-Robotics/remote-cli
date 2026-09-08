@@ -136,7 +136,7 @@ export class CodexAppServerClient {
           title: 'Remote CLI',
           version: this.getClientVersion(),
         },
-        capabilities: null,
+        capabilities: { experimentalApi: true },
       });
       this.notify('initialized');
     } catch (error) {
