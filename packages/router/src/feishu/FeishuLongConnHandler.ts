@@ -1346,12 +1346,11 @@ Examples:
       }
       finalElements.push(...elements, { tag: 'markdown', content: noteContent });
 
-      // Capture base elements (without thread switch buttons) for later refresh
-      const baseElements = [...finalElements];
-
       // Append thread switch buttons when at least one thread exists
+      let threadSwitchElements: any[] = [];
       if (threads && threads.length >= 1) {
-        finalElements.push(...this.createThreadSwitchElements(threads, activeThreadId));
+        threadSwitchElements = this.createThreadSwitchElements(threads, activeThreadId);
+        finalElements.push(...threadSwitchElements);
       }
 
       // Reuse streaming update logic: only create cards, never delete.
@@ -1364,14 +1363,18 @@ Examples:
       // Store thread switch card state for later refresh (before cleanup)
       if (threads && threads.length >= 1) {
         const chain = this.messageChains.get(messageId);
-        const lastCardId = chain ? chain[chain.length - 1] : messageId;
-        // baseElements must match finalElements (header + content + note) for accurate refresh
-        this.threadSwitchCardState.set(lastCardId, {
-          baseElements,
-          threads,
-          activeThreadId,
-          createdAt: Date.now(),
-        });
+        const chunks = this.splitElementsIntoChunks(finalElements);
+        const lastChunkIndex = chunks.length - 1;
+        const lastCardId = chain?.[lastChunkIndex];
+
+        if (lastCardId) {
+          this.threadSwitchCardState.set(lastCardId, {
+            baseElements: chunks[lastChunkIndex].filter((element) => !threadSwitchElements.includes(element)),
+            threads,
+            activeThreadId,
+            createdAt: Date.now(),
+          });
+        }
       }
 
       // Clean up tracking state
