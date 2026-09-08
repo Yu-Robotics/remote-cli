@@ -93,6 +93,12 @@ describe('CLI package publish configuration', () => {
     });
   });
 
+  describe('dependency compatibility', () => {
+    it('should use the Zod major version required by Claude Agent SDK', () => {
+      expect(pkg.dependencies.zod).toMatch(/^\^4\./);
+    });
+  });
+
   describe('required files exist', () => {
     it('should have LICENSE file', () => {
       expect(existsSync(path.join(PKG_ROOT, 'LICENSE'))).toBe(true);
