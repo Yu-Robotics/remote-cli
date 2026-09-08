@@ -1391,15 +1391,15 @@ You can also use natural language commands to control Claude Code CLI.`,
   }
 
   private async detectBackends(): Promise<BackendInfo[]> {
-    const [claudeInstalled, agyInstalled, codexInstalled] = await Promise.all([
+    const [claudeInstalled, codexInstalled, agyInstalled] = await Promise.all([
       this.checkCommand('claude', ['--version']),
-      this.checkCommand('agy', ['--version']),
       this.checkCommand('codex', ['--version']),
+      this.checkCommand('agy', ['--version']),
     ]);
     return [
       { id: 'auto', label: 'Claude Code', installed: claudeInstalled },
-      { id: 'agy',  label: 'AGY CLI (Antigravity)', installed: agyInstalled },
       { id: 'codex', label: 'Codex CLI (OpenAI)', installed: codexInstalled },
+      { id: 'agy',  label: 'AGY CLI (Antigravity)', installed: agyInstalled },
     ];
   }
 
