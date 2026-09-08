@@ -798,6 +798,44 @@ describe('FeishuLongConnHandler', () => {
       // Note: The completion note adds one more element, so it should still trigger chunking
       expect(mockClient.im.message.create).toHaveBeenCalled();
     });
+
+    it('refreshes only the final chunk after a multi-card response', async () => {
+      const messageId = 'msg_finalize';
+      const continuationMessageId = 'msg_continuation_final';
+      const openId = 'test_open_id';
+      const elements = Array.from({ length: 250 }, (_, index) => ({
+        tag: 'markdown',
+        content: `Element ${index}`,
+      }));
+      const threads = [
+        { id: 'thread-1', name: 'Thread 1' },
+        { id: 'thread-2', name: 'Thread 2' },
+      ];
+
+      mockClient.im.message.patch.mockResolvedValue({ data: {} });
+      mockClient.im.message.create.mockResolvedValue({
+        data: { message_id: continuationMessageId },
+      });
+
+      await handler.finalizeStreamingMessage(messageId, elements, undefined, openId, undefined, undefined, threads, 'thread-1');
+      mockClient.im.message.patch.mockClear();
+
+      await (handler as any).refreshThreadSwitchButtons(continuationMessageId, 'thread-2');
+
+      expect(mockClient.im.message.patch).toHaveBeenCalledWith(expect.objectContaining({
+        path: { message_id: continuationMessageId },
+      }));
+
+      const request = mockClient.im.message.patch.mock.calls[0][0];
+      const refreshedElements = JSON.parse(request.data.content).body.elements;
+      const taggedNodeCount = refreshedElements.reduce(
+        (total: number, element: any) => total + (handler as any).countTaggedNodes(element),
+        0,
+      );
+      expect(taggedNodeCount).toBeLessThanOrEqual(150);
+      expect(JSON.stringify(refreshedElements)).not.toContain('Element 0');
+      expect(JSON.stringify(refreshedElements)).toContain('Element 249');
+    });
   });
 
   describe('Recursive tagged node counting', () => {
