@@ -277,6 +277,41 @@ describe('RouterServer', () => {
     expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenCalledTimes(2);
   });
 
+  it('should coalesce token deltas while a Feishu update is in flight', async () => {
+    await server.start();
+    const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
+    onStartStreaming('m1', 'u1', 'f1', 'd1');
+
+    let resolveFirstUpdate: (() => void) | undefined;
+    mockFeishuHandler.updateStreamingMessage
+      .mockImplementationOnce(() => new Promise<void>((resolve) => { resolveFirstUpdate = resolve; }))
+      .mockResolvedValue(undefined);
+
+    const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
+    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
+    onConnection(mockWs, { socket: { remoteAddress: '1' } });
+    const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
+
+    const firstUpdate = onMessage(Buffer.from(JSON.stringify({
+      type: 'stream', streamType: 'text', messageId: 'm1', openId: 'u1', chunk: 'a'
+    })));
+    expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenCalledTimes(1);
+
+    const deltaUpdates = Array.from({ length: 30 }, (_, index) => onMessage(Buffer.from(JSON.stringify({
+      type: 'stream', streamType: 'text', messageId: 'm1', openId: 'u1', chunk: String(index % 10)
+    }))));
+    await Promise.all(deltaUpdates);
+
+    expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenCalledTimes(1);
+    resolveFirstUpdate?.();
+    await firstUpdate;
+
+    expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenCalledTimes(2);
+    expect(mockFeishuHandler.updateStreamingMessage.mock.calls[1][1]).toEqual([
+      expect.objectContaining({ content: 'a012345678901234567890123456789' })
+    ]);
+  });
+
   it('should handle finalize streaming message with error', async () => {
     await server.start();
     const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
@@ -739,9 +774,9 @@ describe('RouterServer', () => {
     })));
     expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenCalledTimes(1);
 
-    // Send 9 more chars (total 10) - should update based on length (contentLength % 10 === 0)
+    // Send 10 more chars - should update after 10 new characters
     await onMessage(Buffer.from(JSON.stringify({
-      type: 'stream', streamType: 'text', messageId: 'm1', openId: 'u1', chunk: '123456789'
+      type: 'stream', streamType: 'text', messageId: 'm1', openId: 'u1', chunk: '1234567890'
     })));
     expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenCalledTimes(2);
   });

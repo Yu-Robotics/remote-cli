@@ -11,6 +11,24 @@ import { BindingManager } from './binding/BindingManager';
 import { MessageType, ToolUseInfo, ToolResultInfo, TaskNotificationInfo, PROTOCOL_VERSION, MIN_SUPPORTED_CLI_VERSION, ROUTER_VERSION, ThreadSummary } from './types';
 import { FeishuCardElement, createToolUseElement, createToolResultElement, createMarkdownElement, createRedactedThinkingElement, createPlanModeElement, createTaskNotificationElement } from './utils/ToolFormatter';
 
+interface StreamingMessageState {
+  openId: string;
+  feishuMessageId: string | null;
+  elements: FeishuCardElement[];
+  currentTextContent: string;
+  hasUpdated: boolean;
+  createdAt: number;
+  deviceId: string;
+  threadId?: string;
+  threadName?: string;
+  threads?: ThreadSummary[];
+  pendingNewThread?: boolean;
+  updateInFlight?: Promise<void>;
+  updatePending: boolean;
+  finalizing: boolean;
+  lastRenderedTextLength: number;
+}
+
 /**
  * Router Server
  * Handles Feishu WebSocket long connection, local WebSocket connections, and message routing
@@ -25,20 +43,8 @@ export class RouterServer {
   private connectionHub: ConnectionHub;
   private bindingManager: BindingManager;
   private cleanupInterval: NodeJS.Timeout | null = null;
-  // Track streaming messages: messageId -> { openId, feishuMessageId, elements, currentTextContent, hasUpdated, createdAt, deviceId, threadId, threadName, threads, pendingNewThread }
-  private streamingMessages: Map<string, {
-    openId: string;
-    feishuMessageId: string | null;
-    elements: FeishuCardElement[];
-    currentTextContent: string;
-    hasUpdated: boolean;
-    createdAt: number;
-    deviceId: string;
-    threadId?: string;   // Which thread produced this stream (optional — new CLIs only)
-    threadName?: string; // Human-friendly thread name, resolved from CLI response threads[]
-    threads?: ThreadSummary[]; // Full thread list for rendering switch buttons
-    pendingNewThread?: boolean; // True when this command was triggered by the "+ New" card button
-  }> = new Map();
+  // Track streaming messages and coalesced Feishu card update state.
+  private streamingMessages = new Map<string, StreamingMessageState>();
   private readonly STREAMING_SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes timeout
   // TTL for cardThreadMap entries: 7 days (allows users to reply to old cards)
   private readonly CARD_THREAD_MAP_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -80,6 +86,9 @@ export class RouterServer {
         deviceId,
         threadId,
         pendingNewThread,
+        updatePending: false,
+        finalizing: false,
+        lastRenderedTextLength: 0,
       });
       // Populate cardThreadMap for parent_id-based routing
       if (feishuMessageId && threadId) {
@@ -558,6 +567,7 @@ export class RouterServer {
       console.log(`[RouterServer] No streaming session found for ${messageId}, ignoring chunk`);
       return;
     }
+    if (streamData.finalizing || !chunk) return;
 
     // Accumulate text content
     streamData.currentTextContent += chunk;
@@ -568,6 +578,7 @@ export class RouterServer {
     const lastUpdate = this.lastStreamUpdateTime.get(messageId) || 0;
     const timeSinceLastUpdate = now - lastUpdate;
     const contentLength = streamData.currentTextContent.length;
+    const pendingLength = contentLength - streamData.lastRenderedTextLength;
 
     // Update if:
     // 1. We have a feishuMessageId
@@ -577,25 +588,64 @@ export class RouterServer {
     //    c. Enough time has passed since last update
     const shouldUpdate = streamData.feishuMessageId && (
       !streamData.hasUpdated || // First content - always show immediately
-      (contentLength % this.STREAM_UPDATE_MIN_LENGTH === 0) || // Every N characters
+      (pendingLength >= this.STREAM_UPDATE_MIN_LENGTH) || // Enough new content
       (timeSinceLastUpdate >= this.STREAM_UPDATE_INTERVAL_MS) // Time-based
     );
 
     if (shouldUpdate && streamData.feishuMessageId) {
-      // Build current element list: existing elements + current text (if any)
+      await this.updateStreamingText(messageId, openId, streamData);
+    }
+  }
+
+  /**
+   * Keep at most one Feishu patch in flight per stream. Token-level backends
+   * can emit many tiny deltas while a patch is pending; retain only the newest
+   * accumulated state instead of queueing every intermediate card snapshot.
+   */
+  private async updateStreamingText(
+    messageId: string,
+    openId: string,
+    streamData: StreamingMessageState
+  ): Promise<void> {
+    if (streamData.updateInFlight) {
+      streamData.updatePending = true;
+      return;
+    }
+
+    const worker = this.runStreamingTextUpdates(messageId, openId, streamData);
+    streamData.updateInFlight = worker;
+    try {
+      await worker;
+    } finally {
+      if (streamData.updateInFlight === worker) streamData.updateInFlight = undefined;
+    }
+  }
+
+  private async runStreamingTextUpdates(
+    messageId: string,
+    openId: string,
+    streamData: StreamingMessageState
+  ): Promise<void> {
+    do {
+      streamData.updatePending = false;
+      if (streamData.finalizing || this.streamingMessages.get(messageId) !== streamData || !streamData.feishuMessageId) {
+        return;
+      }
+
       const elements = [...streamData.elements];
       if (streamData.currentTextContent.trim()) {
         elements.push(createMarkdownElement(streamData.currentTextContent));
       }
 
+      streamData.lastRenderedTextLength = streamData.currentTextContent.length;
+      streamData.hasUpdated = true;
+      this.lastStreamUpdateTime.set(messageId, Date.now());
       await this.feishuLongConnHandler.updateStreamingMessage(
         streamData.feishuMessageId,
         elements,
         openId
       );
-      this.lastStreamUpdateTime.set(messageId, now);
-      streamData.hasUpdated = true;
-    }
+    } while (streamData.updatePending);
   }
 
   /**
@@ -614,7 +664,9 @@ export class RouterServer {
     if (streamData.currentTextContent.trim()) {
       streamData.elements.push(createMarkdownElement(streamData.currentTextContent));
       streamData.currentTextContent = '';
+      streamData.lastRenderedTextLength = 0;
     }
+    streamData.updatePending = false;
 
     // Add tool use elements (divider + markdown)
     const toolUseElements = createToolUseElement(toolUse);
@@ -648,7 +700,9 @@ export class RouterServer {
     if (streamData.currentTextContent.trim()) {
       streamData.elements.push(createMarkdownElement(streamData.currentTextContent));
       streamData.currentTextContent = '';
+      streamData.lastRenderedTextLength = 0;
     }
+    streamData.updatePending = false;
 
     // Add tool result elements (markdown + status div)
     const toolResultElements = createToolResultElement(toolResult);
@@ -683,7 +737,9 @@ export class RouterServer {
     if (streamData.currentTextContent.trim()) {
       streamData.elements.push(createMarkdownElement(streamData.currentTextContent));
       streamData.currentTextContent = '';
+      streamData.lastRenderedTextLength = 0;
     }
+    streamData.updatePending = false;
 
     // Add redacted thinking notification elements
     const redactedThinkingElements = createRedactedThinkingElement();
@@ -718,6 +774,8 @@ export class RouterServer {
     // Flush current text content (the plan text was already streamed inline,
     // so we reset the text buffer to avoid duplication in the card)
     streamData.currentTextContent = '';
+    streamData.lastRenderedTextLength = 0;
+    streamData.updatePending = false;
 
     // Add plan mode elements (collapsible panel showing the plan)
     const planModeElements = createPlanModeElement(planContent);
@@ -771,6 +829,10 @@ export class RouterServer {
   private async finalizeStreamingMessage(messageId: string, success: boolean, output?: string, error?: string, sessionAbbr?: string, cwd?: string): Promise<void> {
     const streamData = this.streamingMessages.get(messageId);
     if (!streamData) return;
+
+    streamData.finalizing = true;
+    streamData.updatePending = false;
+    await streamData.updateInFlight;
 
     const { feishuMessageId, openId } = streamData;
 
