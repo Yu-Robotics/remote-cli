@@ -223,6 +223,18 @@ describe('/backend command', () => {
       expect(res.output).toContain('Codex CLI');
     });
 
+    it('lists Codex before AGY when all backends are installed', async () => {
+      mockInstalled('claude', 'agy', 'codex');
+
+      await send('/backend');
+
+      const lines = sentResponse().output.split('\n');
+      const codexIndex = lines.findIndex((line: string) => line.includes('Codex CLI'));
+      const agyIndex = lines.findIndex((line: string) => line.includes('AGY CLI'));
+      expect(codexIndex).toBeGreaterThan(-1);
+      expect(codexIndex).toBeLessThan(agyIndex);
+    });
+
     it('marks Codex as active when executor.type is codex', async () => {
       mockInstalled('claude', 'agy', 'codex');
       mockConfig.get.mockReturnValue({ type: 'codex' });
@@ -328,10 +340,10 @@ describe('/backend command', () => {
       expect(res.error).toContain('"agy" not found');
     });
 
-    it('switches to Codex by 1-based index (third slot)', async () => {
+    it('switches to Codex by 1-based index (second slot)', async () => {
       mockInstalled('claude', 'agy', 'codex');
 
-      await send('/backend 3'); // index 3 = Codex
+      await send('/backend 2'); // index 2 = Codex
 
       const res = sentResponse();
       expect(res.success).toBe(true);
