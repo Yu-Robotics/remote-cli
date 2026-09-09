@@ -1635,6 +1635,10 @@ describe('FeishuLongConnHandler', () => {
       const replySpy = vi.spyOn(handler as any, 'replyToMessage').mockResolvedValue(undefined);
       await (handler as any).handleHelpCommand('ou_123', 'msg_1');
       expect(replySpy).toHaveBeenCalledWith('msg_1', expect.stringContaining('Feishu Remote Control Help'));
+      const helpMessage = replySpy.mock.calls.at(-1)?.[1] as string;
+      expect(helpMessage).toContain('/backend <index> - Switch all threads');
+      expect(helpMessage).toContain('/backend <index> @ - Switch only the current thread');
+      expect(helpMessage).toContain('/backend default @ - Clear the current thread override');
     });
   });
 
