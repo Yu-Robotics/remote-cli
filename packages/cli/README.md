@@ -76,7 +76,9 @@ Help me fix TypeScript errors in ~/projects/my-app
 | Command | Description |
 |---------|-------------|
 | `/help` | Show help information |
-| `/status` | View status and all threads |
+| `/status` | Show backend, model, effort, queue, and thread status |
+| `/context` | Show current session context and queue diagnostics |
+| `/skills` | List available skills for the active backend |
 | `/abort` | Abort executing task in current thread |
 | `/queue` | Inspect or manage confirmed messages waiting in thread queues |
 | `/clear` | Clear context for this thread |
@@ -105,7 +107,7 @@ Help me fix TypeScript errors in ~/projects/my-app
 
 ### AI CLI Commands Passthrough
 
-All commands/skills supported by local Claude Code or Gemini CLI are passed through directly, for example:
+All commands/skills supported by local Claude Code or Gemini CLI are passed through directly where the backend protocol supports them. The built-in `/status`, `/context`, and `/skills` commands provide a consistent remote view across backends.
 - `/commit` - Commit code changes
 - `/review` - Code review
 - `/test` - Run tests
