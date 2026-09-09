@@ -12,6 +12,9 @@ import { processFileReadContent } from '../utils/FileReadDetector';
 import { MachineCommands } from '../machines/MachineCommands';
 import type { PendingReplace } from '../machines/types';
 import { spawn, execFile } from 'child_process';
+import { readdir, readFile } from 'fs/promises';
+import { homedir } from 'os';
+import { join } from 'path';
 import type { ExecutorConfig } from '../types/config';
 import { backendKeyOf } from '../types/config';
 import { v4 as uuidv4 } from 'uuid';
@@ -383,13 +386,25 @@ export class MessageHandler {
       const cwd = executor.getCurrentWorkingDirectory();
       const allowedDirs = this.directoryGuard.getAllowedDirectories();
       const threads = this.threadPool.getSummaries();
+      const thread = this.threadManager.getThread(threadId);
+      const backend = this.threadPool.getBackendKey(threadId);
+      const model = thread?.models?.[backend] ?? (backend === 'claude' ? thread?.model : undefined);
+      const effort = thread?.efforts?.[backend] ?? 'auto';
       const threadList = threads
-        .map(t => `  • ${t.name}${t.status === 'running' ? ' 🔄' : t.status === 'error' ? ' ❌' : ' ✅'} (${t.status})`)
+        .map(t => {
+          const queued = this.threadQueues.get(t.id)?.length ?? 0;
+          const queueSuffix = queued > 0 ? `, queue: ${queued}` : '';
+          return `  • ${t.name}${t.status === 'running' ? ' 🔄' : t.status === 'error' ? ' ❌' : ' ✅'} (${t.status}, backend: ${t.backend ?? 'claude'}${queueSuffix})`;
+        })
         .join('\n');
 
       this.sendResponse(messageId, threadId, {
         success: true,
         output: `📊 Status:
+- Thread: ${thread?.name ?? threadId}
+- Backend: ${backend}
+- Model: ${model ?? 'backend default'}
+- Reasoning effort: ${effort}
 - Working Directory: ${cwd}
 - Allowed Directories: ${allowedDirs.join(', ')}
 - Connection: Active
@@ -398,12 +413,56 @@ export class MessageHandler {
       return true;
     }
 
+    if (trimmed === '/context') {
+      const thread = this.threadManager.getThread(threadId);
+      const backend = this.threadPool.getBackendKey(threadId);
+      const model = thread?.models?.[backend] ?? (backend === 'claude' ? thread?.model : undefined);
+      const effort = thread?.efforts?.[backend] ?? 'auto';
+      const sessionId = typeof executor.getSessionId === 'function' ? executor.getSessionId() : null;
+      const queued = this.threadQueues.get(threadId)?.length ?? 0;
+      const pending = Array.from(this.pendingQueueConfirmations.values())
+        .filter((confirmation) => confirmation.info.threadId === threadId).length;
+      this.sendResponse(messageId, threadId, {
+        success: true,
+        output: `🧠 Context:
+- Thread: ${thread?.name ?? threadId}
+- Backend: ${backend}
+- Model: ${model ?? 'backend default'}
+- Reasoning effort: ${effort}
+- Working Directory: ${executor.getCurrentWorkingDirectory()}
+- Session: ${sessionId ?? 'not started'}
+- Queue: ${queued} confirmed, ${pending} awaiting confirmation
+- Token usage: exact usage is not exposed by the active remote transport
+
+Use /compact to reduce conversation context or /clear to start a fresh context.`,
+      });
+      return true;
+    }
+
+    if (trimmed === '/skills') {
+      const backend = this.threadPool.getBackendKey(threadId);
+      if (backend === 'claude' || backend === 'agy') {
+        await this.executeSlashCommand(messageId, threadId, trimmed, executor);
+      } else {
+        const skills = await this.listLocalSkills(executor.getCurrentWorkingDirectory(), backend);
+        this.sendResponse(messageId, threadId, {
+          success: true,
+          output: skills.length > 0
+            ? `🧩 Available skills (local discovery):\n${skills.map((skill) => `- ${skill}`).join('\n')}`
+            : '🧩 No local skills were discovered for the Codex backend.\n\nExpected locations include .agents/skills and ~/.codex/skills.',
+        });
+      }
+      return true;
+    }
+
     if (trimmed === '/help') {
       this.sendResponse(messageId, threadId, {
         success: true,
         output: `📖 Available commands:
 - /help - Show this help message
-- /status - Show current status and threads
+- /status - Show backend, model, effort, queue, and thread status
+- /context - Show current session context and queue diagnostics
+- /skills - List available skills for the active backend
 - /abort - Abort the currently executing command in this thread
 - /queue [clear|continue|confirm <id>|cancel <id>] - Inspect or manage this thread's command queue
 - /clear - Clear conversation context for this thread
@@ -1278,6 +1337,38 @@ You can also use natural language commands to control Claude Code CLI.`,
     '/help', '/model', '/skills', '/usage', '/config', '/changelog',
     '/agents', '/permissions', '/hooks', '/credits',
   ]);
+
+  private async listLocalSkills(cwd: string, backend: 'claude' | 'agy' | 'codex'): Promise<string[]> {
+    const roots = backend === 'codex'
+      ? [join(cwd, '.agents', 'skills'), join(homedir(), '.codex', 'skills'), join(homedir(), '.codex', 'skills', '.system')]
+      : [join(cwd, '.claude', 'skills'), join(homedir(), '.claude', 'skills')];
+    const skills: string[] = [];
+    const seen = new Set<string>();
+
+    for (const root of roots) {
+      let entries;
+      try {
+        entries = await readdir(root, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+
+      for (const entry of entries) {
+        if (!entry.isDirectory() || seen.has(entry.name)) continue;
+        const skillPath = join(root, entry.name, 'SKILL.md');
+        try {
+          const content = await readFile(skillPath, 'utf8');
+          const description = content.match(/^description:\s*(.+)$/mi)?.[1]?.trim();
+          skills.push(description ? `${entry.name} — ${description}` : entry.name);
+          seen.add(entry.name);
+        } catch {
+          continue;
+        }
+      }
+    }
+
+    return skills.sort((left, right) => left.localeCompare(right));
+  }
 
   /**
    * Which backend slash commands should be forwarded to for a thread.

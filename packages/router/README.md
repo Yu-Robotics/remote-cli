@@ -62,6 +62,8 @@ pm2 start remote-cli-router --name router -- start
 | `remote-cli-router stop` | Stop the server |
 | `remote-cli-router status` | Check server status |
 
+The Feishu command reference includes the cross-backend `/status`, `/context`, and `/skills` commands, plus per-thread queue controls. See the root [README](../../README.md) for the complete command and backend behavior reference.
+
 ## Architecture
 
 ```

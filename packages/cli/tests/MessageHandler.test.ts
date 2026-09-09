@@ -323,6 +323,41 @@ describe('MessageHandler', () => {
           output: expect.stringContaining('test-project'),
         })
       );
+      const statusResponse = vi.mocked(ctx.mockWsClient.send).mock.calls.at(-1)?.[0];
+      expect(statusResponse.output).toContain('Backend: claude');
+      expect(statusResponse.output).toContain('Reasoning effort: auto');
+      expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
+    });
+
+    it('should show context diagnostics without invoking the executor', async () => {
+      ctx.mockExecutor.getSessionId = vi.fn(() => 'session-123');
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-context', content: '/context', timestamp: Date.now() });
+
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'response',
+          messageId: 'msg-context',
+          success: true,
+          output: expect.stringContaining('Session: session-123'),
+        })
+      );
+      expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
+    });
+
+    it('should list local Codex skills without invoking the executor', async () => {
+      ctx.mockConfig.get.mockReturnValue({ type: 'codex' });
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-skills', content: '/skills', timestamp: Date.now() });
+
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'response',
+          messageId: 'msg-skills',
+          success: true,
+          output: expect.stringContaining('🧩'),
+        })
+      );
       expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
     });
   });
@@ -343,6 +378,8 @@ describe('MessageHandler', () => {
       expect(helpResponse.output).toContain('/backend <index> - Switch all threads');
       expect(helpResponse.output).toContain('/backend <index> @ - Switch only the current thread');
       expect(helpResponse.output).toContain('/backend default @ - Clear the current thread override');
+      expect(helpResponse.output).toContain('/context - Show current session context');
+      expect(helpResponse.output).toContain('/skills - List available skills');
       expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
     });
   });
