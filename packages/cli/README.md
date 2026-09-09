@@ -78,6 +78,7 @@ Help me fix TypeScript errors in ~/projects/my-app
 | `/help` | Show help information |
 | `/status` | View status and all threads |
 | `/abort` | Abort executing task in current thread |
+| `/queue` | Inspect or manage confirmed messages waiting in thread queues |
 | `/clear` | Clear context for this thread |
 | `/compact` | Compress history to save tokens |
 | `/cd <dir>` | Change working directory for this thread |

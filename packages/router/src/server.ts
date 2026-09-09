@@ -8,7 +8,7 @@ import { JsonStore } from './storage/JsonStore';
 import { FeishuLongConnHandler } from './feishu/FeishuLongConnHandler';
 import { ConnectionHub } from './websocket/ConnectionHub';
 import { BindingManager } from './binding/BindingManager';
-import { MessageType, ToolUseInfo, ToolResultInfo, TaskNotificationInfo, PROTOCOL_VERSION, MIN_SUPPORTED_CLI_VERSION, ROUTER_VERSION, ThreadSummary } from './types';
+import { MessageType, ToolUseInfo, ToolResultInfo, TaskNotificationInfo, PROTOCOL_VERSION, MIN_SUPPORTED_CLI_VERSION, ROUTER_VERSION, ThreadSummary, QueueConfirmationInfo } from './types';
 import { FeishuCardElement, createToolUseElement, createToolResultElement, createMarkdownElement, createRedactedThinkingElement, createPlanModeElement, createTaskNotificationElement } from './utils/ToolFormatter';
 
 interface StreamingMessageState {
@@ -124,6 +124,10 @@ export class RouterServer {
     this.feishuLongConnHandler.onCardNewThread = async (openId: string) => {
       console.log(`[RouterServer] Creating new thread for ${openId} via card button`);
       await this.feishuLongConnHandler.sendCommandFromCardAction(openId, '/thread new', true);
+    };
+
+    this.feishuLongConnHandler.onQueueAction = async (openId, action, queueId, threadId) => {
+      await this.feishuLongConnHandler.sendQueueActionFromCardAction(openId, action, queueId, threadId);
     };
 
     // Register callback for device switch — clear thread state tied to the old device
@@ -358,6 +362,7 @@ export class RouterServer {
               const cwd = message.cwd || message.data?.cwd;
               const responseThreadId = message.threadId || message.data?.threadId;
               const responseThreads: ThreadSummary[] | undefined = message.threads || message.data?.threads;
+              const queueConfirmation: QueueConfirmationInfo | undefined = message.queueConfirmation || message.data?.queueConfirmation;
 
               // If CLI reported a threadId and there is a streaming session for this message,
               // ensure the cardThreadMap is up to date (in case the CLI-reported threadId differs).
@@ -397,7 +402,8 @@ export class RouterServer {
                     message.output || message.data?.output,
                     message.error || message.data?.error,
                     sessionAbbr,
-                    cwd
+                    cwd,
+                    queueConfirmation,
                   );
                 } else {
                   // No streaming session found - session should have been created when command was sent
@@ -826,7 +832,7 @@ export class RouterServer {
   /**
    * Finalize streaming message
    */
-  private async finalizeStreamingMessage(messageId: string, success: boolean, output?: string, error?: string, sessionAbbr?: string, cwd?: string): Promise<void> {
+  private async finalizeStreamingMessage(messageId: string, success: boolean, output?: string, error?: string, sessionAbbr?: string, cwd?: string, queueConfirmation?: QueueConfirmationInfo): Promise<void> {
     const streamData = this.streamingMessages.get(messageId);
     if (!streamData) return;
 
@@ -857,12 +863,15 @@ export class RouterServer {
           cwd,
           streamData.threadName,
           streamData.threads,
-          streamData.threadId
+          streamData.threadId,
+          queueConfirmation
         );
       } else {
         // Add error message to elements
-        const errorMsg = error || 'Command failed';
-        streamData.elements.push(createMarkdownElement(`\n\n❌ **Error:** ${errorMsg}`));
+        if (!queueConfirmation) {
+          const errorMsg = error || 'Command failed';
+          streamData.elements.push(createMarkdownElement(`\n\n❌ **Error:** ${errorMsg}`));
+        }
         await this.feishuLongConnHandler.finalizeStreamingMessage(
           feishuMessageId,
           streamData.elements,
@@ -871,7 +880,8 @@ export class RouterServer {
           undefined,
           undefined,
           streamData.threads,
-          streamData.threadId
+          streamData.threadId,
+          queueConfirmation
         );
       }
     }

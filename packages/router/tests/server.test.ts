@@ -338,6 +338,7 @@ describe('RouterServer', () => {
       undefined,
       undefined,
       undefined,
+      undefined,
       undefined
     );
   });
