@@ -378,6 +378,7 @@ remote-cli stop
 | `/help` | 显示帮助信息 |
 | `/status` | 查看当前设备、目录及所有线程状态 |
 | `/abort` | 中止当前线程正在运行的 AI 任务 |
+| `/queue` | 查看或管理线程中已确认的排队消息 |
 | `/clear` | 清除当前线程的对话上下文 |
 | `/compact` | 压缩对话历史以节省 Token |
 | `/model [name]` | 列出当前 backend 的模型，或设置当前线程的模型 |
@@ -412,6 +413,12 @@ Backend 选择同时支持全局模式和按线程模式：
 | `/backend default @` | 清除当前线程的覆盖设置，恢复跟随全局后端 |
 
 Backend index 使用 `/backend` 显示的顺序（安装后通常为 Claude Code、Codex CLI、AGY CLI）。按线程选择会持久化到 `threads.json`。不同线程可以使用不同后端并行执行。受影响的线程正在执行时不会执行后端切换；任意线程正在执行时也不会执行全局切换。切换后端会保留各后端的会话数据，因此切回某个后端时可以恢复其之前的会话。
+
+### 命令队列
+
+每个 thread 同时只执行一条命令，因为 Claude Code、AGY 和 Codex 的会话都按顺序处理。如果在线程忙碌时发送普通消息，remote-cli 会先发送飞书确认卡片，不会直接入队。只有点击 **Add to queue** 后消息才会入队；点击 **Cancel** 或确认超时都会丢弃消息。
+
+`/queue` 会列出正在执行和等待中的队列。`/queue clear` 清除当前 thread 中已确认和等待确认的消息。`/abort` 会中止当前任务并清空该 thread 的队列。thread 忙碌时不允许切换 backend 或修改执行上下文；成功切换 backend 后会清除受影响的队列。如果排队任务失败，该 thread 的队列会暂停；可以使用 `/queue continue` 继续，或使用 `/abort` 丢弃剩余消息。队列只保存在内存中，服务重启后会丢失。
 
 ### 模型与思考等级
 

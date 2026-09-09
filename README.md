@@ -381,6 +381,7 @@ Once connected, use these commands in Feishu:
 | `/help` | Show help information |
 | `/status` | View current status, directories, and all threads |
 | `/abort` | Abort the currently executing task in this thread |
+| `/queue` | Inspect or manage confirmed messages waiting in thread queues |
 | `/clear` | Clear conversation context for this thread |
 | `/compact` | Compress conversation history to save tokens |
 | `/model [name]` | List models for the active backend or set this thread's model |
@@ -415,6 +416,12 @@ Backend selection supports both global and per-thread modes:
 | `/backend default @` | Clear the current thread's override and follow the global backend |
 
 The backend index follows the order shown by `/backend` (Claude Code, Codex CLI, then AGY CLI when installed). Per-thread backend choices are persisted in `threads.json`. Different threads can use different backends and execute concurrently. A backend switch is rejected while the affected thread is running; a global switch is rejected while any thread is running. Backend session data is preserved when switching, so returning to a backend can resume its previous session.
+
+### Command Queues
+
+Each thread executes one command at a time because Claude Code, AGY, and Codex sessions are sequential. If a normal message is sent while its thread is busy, remote-cli shows a Feishu confirmation card instead of queueing it immediately. The message is queued only after clicking **Add to queue**; clicking **Cancel** or waiting for the confirmation to expire discards it.
+
+`/queue` lists active and pending queues. `/queue clear` removes confirmed and awaiting-confirmation messages for the current thread. `/abort` stops the current task and clears that thread's queue. Backend or execution-context changes are rejected while a thread is busy, and a successful backend switch clears affected queues. If a queued task fails, its thread queue pauses; use `/queue continue` to resume or `/abort` to discard the remaining messages. Queues are in-memory and are discarded on service restart.
 
 ### Models and Reasoning Effort
 

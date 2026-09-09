@@ -749,8 +749,8 @@ describe('MessageHandler', () => {
     });
   });
 
-  describe('concurrent execution prevention (per thread)', () => {
-    it('should prevent concurrent command execution on the same thread', async () => {
+  describe('per-thread queue confirmation', () => {
+    it('should ask before queueing a command on a busy thread', async () => {
       ctx.mockExecutor.execute.mockImplementation(
         () => new Promise((resolve) => setTimeout(() => resolve({ success: true, output: 'ok' }), 100))
       );
@@ -766,12 +766,50 @@ describe('MessageHandler', () => {
       await Promise.all([promise1, promise2]);
 
       const calls = ctx.mockWsClient.send.mock.calls;
-      const busyResponse = calls.find((call: any) =>
+      const queueResponse = calls.find((call: any) =>
         call[0].messageId === 'msg-2' &&
         call[0].success === false &&
-        call[0].error?.includes('busy')
+        call[0].queueConfirmation?.threadId === 'default-thread-id'
       );
-      expect(busyResponse).toBeDefined();
+      expect(queueResponse).toBeDefined();
+      expect(queueResponse[0].queueConfirmation.preview).toBe('command 2');
+    });
+
+    it('should execute a message only after queue confirmation', async () => {
+      ctx.mockThreadPool.isThreadBusy = vi.fn().mockReturnValue(true);
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-queued', content: 'queued command', timestamp: Date.now() });
+
+      const confirmation = ctx.mockWsClient.send.mock.calls
+        .map((call: any) => call[0])
+        .find((message: any) => message.messageId === 'msg-queued')?.queueConfirmation;
+      expect(confirmation).toBeDefined();
+      expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
+
+      ctx.mockThreadPool.isThreadBusy = vi.fn().mockReturnValue(false);
+      await ctx.handler.handleMessage({
+        type: 'command',
+        messageId: 'msg-confirm',
+        content: `/queue confirm ${confirmation.id}`,
+        timestamp: Date.now(),
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(ctx.mockExecutor.execute).toHaveBeenCalledWith('queued command', expect.anything());
+    });
+
+    it('should clear queued and pending messages when aborting', async () => {
+      ctx.mockThreadPool.isThreadBusy = vi.fn().mockReturnValue(true);
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-pending', content: 'pending command', timestamp: Date.now() });
+      ctx.mockThreadPool.isThreadBusy = vi.fn().mockReturnValue(false);
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-confirm', content: '/queue confirm invalid', timestamp: Date.now() });
+
+      ctx.mockThreadPool.isThreadBusy = vi.fn().mockReturnValue(false);
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-abort', content: '/abort', timestamp: Date.now() });
+      const abortResponse = ctx.mockWsClient.send.mock.calls
+        .map((call: any) => call[0])
+        .find((message: any) => message.messageId === 'msg-abort');
+      expect(abortResponse.output).toContain('No command was executing');
+      expect(abortResponse.output).toContain('Cleared 1 queued message');
     });
   });
 
