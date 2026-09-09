@@ -341,9 +341,12 @@ export class MessageHandler {
 - /clear - Clear conversation context for this thread
 - /compact - Compress conversation history to reduce context size
 - /cd <directory> - Change working directory for this thread
-- /model [name] - Show available models, or switch the AI model for this thread (persists across sessions)
-- /effort [auto|level] - Show or set reasoning effort for this thread
-- /backend - List backends; use /backend <index> for all threads or /backend <index> @ for this thread
+- /model [name] - Show models for the active backend, or set this thread's model
+- /effort [auto|low|medium|high] - Show or set effort for Codex/AGY (Claude Code is unsupported)
+- /backend - List backends and show the current thread's effective backend
+- /backend <index> - Switch all threads and clear per-thread backend overrides
+- /backend <index> @ - Switch only the current thread
+- /backend default @ - Clear the current thread override and follow the global backend
 - /thread list - List all threads with their status
 - /thread new [name] - Create a new thread
 - /thread delete <name> - Delete a thread (only when idle)

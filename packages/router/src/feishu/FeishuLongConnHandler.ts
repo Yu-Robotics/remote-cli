@@ -710,11 +710,16 @@ Device management commands:
 /status - View all device statuses
 /help - Show help information
 
-Claude Code commands (sent to active device):
+Backend and session commands (sent to active device):
 /cd <directory> - Change working directory
 /clear - Clear conversation context and start fresh session
 /abort - Abort the currently executing command
-/backend - List backends; use /backend <index> for all threads or /backend <index> @ for this thread
+/model [name] - Show models or set this thread's model
+/effort [auto|low|medium|high] - Show or set Codex/AGY reasoning effort
+/backend - List backends and show the current thread's effective backend
+/backend <index> - Switch all threads and clear per-thread backend overrides
+/backend <index> @ - Switch only the current thread
+/backend default @ - Clear the current thread override and follow the global backend
 
 Regular messages will be sent to your active device for execution.
 
