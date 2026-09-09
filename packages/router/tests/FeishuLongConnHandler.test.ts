@@ -397,6 +397,43 @@ describe('FeishuLongConnHandler', () => {
     });
   });
 
+  describe('queue confirmation cards', () => {
+    it('should use Card 2.0 column_set buttons instead of the unsupported action container', () => {
+      const elements = (handler as any).createQueueConfirmationElements({
+        id: 'queue-1',
+        threadId: 'thread-1',
+        threadName: 'thread-1',
+        backend: 'codex',
+        cwd: '/tmp/project',
+        pendingCount: 0,
+        preview: 'queued command',
+        expiresAt: Date.now() + 60_000,
+      });
+
+      const buttonLayout = elements.find((element: any) => element.tag === 'column_set');
+      expect(buttonLayout).toMatchObject({
+        tag: 'column_set',
+        columns: [
+          {
+            tag: 'column',
+            elements: [{
+              tag: 'button',
+              behaviors: [{ type: 'callback', value: { action: 'queue_confirm', queueId: 'queue-1', threadId: 'thread-1' } }],
+            }],
+          },
+          {
+            tag: 'column',
+            elements: [{
+              tag: 'button',
+              behaviors: [{ type: 'callback', value: { action: 'queue_cancel', queueId: 'queue-1', threadId: 'thread-1' } }],
+            }],
+          },
+        ],
+      });
+      expect(elements.some((element: any) => element.tag === 'action')).toBe(false);
+    });
+  });
+
   describe('concurrent update serialization', () => {
     // Helper: generate elements that exceed the 150-node limit
     const makeElements = (count: number) => {

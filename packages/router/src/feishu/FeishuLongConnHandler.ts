@@ -1456,19 +1456,32 @@ Examples:
       { tag: 'hr' },
       { tag: 'markdown', content: `⏳ **Thread is busy**\n\n**Thread:** ${info.threadName}  ·  **Backend:** ${info.backend}\n**Working directory:** \`${info.cwd}\`\n**Queued messages:** ${info.pendingCount}\n**Message:** ${info.preview}\n\nConfirmation expires at ${expiresAt}.` },
       {
-        tag: 'action',
-        actions: [
+        tag: 'column_set',
+        flex_mode: 'stretch',
+        columns: [
           {
-            tag: 'button',
-            text: { tag: 'plain_text', content: '✅ Add to queue' },
-            type: 'primary',
-            behaviors: [{ type: 'callback', value: { action: 'queue_confirm', queueId: info.id, threadId: info.threadId } }],
+            tag: 'column',
+            width: 'auto',
+            elements: [
+              {
+                tag: 'button',
+                text: { tag: 'plain_text', content: '✅ Add to queue' },
+                type: 'primary',
+                behaviors: [{ type: 'callback', value: { action: 'queue_confirm', queueId: info.id, threadId: info.threadId } }],
+              },
+            ],
           },
           {
-            tag: 'button',
-            text: { tag: 'plain_text', content: '❌ Cancel' },
-            type: 'default',
-            behaviors: [{ type: 'callback', value: { action: 'queue_cancel', queueId: info.id, threadId: info.threadId } }],
+            tag: 'column',
+            width: 'auto',
+            elements: [
+              {
+                tag: 'button',
+                text: { tag: 'plain_text', content: '❌ Cancel' },
+                type: 'default',
+                behaviors: [{ type: 'callback', value: { action: 'queue_cancel', queueId: info.id, threadId: info.threadId } }],
+              },
+            ],
           },
         ],
       },
