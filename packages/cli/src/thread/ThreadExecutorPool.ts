@@ -3,7 +3,7 @@ import { ThreadSummary } from './types';
 import type { Thread } from './types';
 import type { IExecutor } from '../executor/IExecutor';
 import type { DirectoryGuard } from '../security/DirectoryGuard';
-import type { ExecutorConfig } from '../types/config';
+import type { BackendKey, ExecutorConfig } from '../types/config';
 import { backendKeyOf } from '../types/config';
 import { createExecutor } from '../executor';
 
@@ -21,6 +21,10 @@ function resolveThreadModel(thread: Thread, config: ExecutorConfig): string | un
 function resolveThreadEffort(thread: Thread, config: ExecutorConfig): string | undefined {
   const key = backendKeyOf(config.type as string);
   return key === 'codex' || key === 'agy' ? thread.efforts?.[key] : undefined;
+}
+
+function isClaudeType(type: string): boolean {
+  return type === 'auto' || type === 'claude-persistent' || type === 'claude-spawn';
 }
 
 /**
@@ -78,15 +82,31 @@ export class ThreadExecutorPool {
     if (!executor) {
       executor = this.factory(
         this.directoryGuard,
-        this.executorConfig,
+        this.getEffectiveConfig(thread),
         thread.workingDirectory || undefined,
         threadId,
-        resolveThreadModel(thread, this.executorConfig),
-        resolveThreadEffort(thread, this.executorConfig)
+        resolveThreadModel(thread, this.getEffectiveConfig(thread)),
+        resolveThreadEffort(thread, this.getEffectiveConfig(thread))
       );
       this.executors.set(threadId, executor);
     }
     return executor;
+  }
+
+  /** Return the backend actually used by a thread. */
+  getBackendKey(threadId: string): BackendKey {
+    const thread = this.threadManager.getThread(threadId);
+    if (!thread) throw new Error(`Thread not found: ${threadId}`);
+    return thread.backend ?? backendKeyOf(this.executorConfig.type as string);
+  }
+
+  /** Return a thread's effective executor configuration. */
+  getEffectiveConfig(thread: Thread): ExecutorConfig {
+    if (!thread.backend) return this.executorConfig;
+    if (thread.backend === 'claude') {
+      return { ...this.executorConfig, type: isClaudeType(this.executorConfig.type) ? this.executorConfig.type : 'auto' };
+    }
+    return { ...this.executorConfig, type: thread.backend };
   }
 
   // ── Per-thread locking ──────────────────────────────────────────────────
@@ -119,13 +139,14 @@ export class ThreadExecutorPool {
   // ── Thread summaries ────────────────────────────────────────────────────
 
   /**
-   * Get runtime summaries for all threads (id, name, status).
+   * Get runtime summaries for all threads (id, name, status, backend).
    */
   getSummaries(): ThreadSummary[] {
     return this.threadManager.listThreads().map(t => ({
       id: t.id,
       name: t.name,
       status: this.getStatus(t.id),
+      backend: this.getBackendKey(t.id),
     }));
   }
 
@@ -177,5 +198,21 @@ export class ThreadExecutorPool {
   async switchBackend(newConfig: ExecutorConfig): Promise<void> {
     await this.destroyAll({ deleteData: false });
     this.executorConfig = newConfig;
+  }
+
+  /** Switch one thread without affecting any other executor. */
+  async switchThreadBackend(threadId: string, backend: BackendKey): Promise<void> {
+    if (this.isThreadBusy(threadId)) {
+      throw new Error('Cannot switch backend while this thread is running. Send /abort first.');
+    }
+    const thread = this.threadManager.getThread(threadId);
+    if (!thread) throw new Error(`Thread not found: ${threadId}`);
+    if (thread.backend === backend) return;
+    if (this.getBackendKey(threadId) === backend) {
+      await this.threadManager.updateThread(threadId, { backend });
+      return;
+    }
+    await this.destroyThread(threadId, { deleteData: false });
+    await this.threadManager.updateThread(threadId, { backend });
   }
 }

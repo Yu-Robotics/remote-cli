@@ -62,6 +62,7 @@ describe('Integration: Message Flow', () => {
       setThreadError: vi.fn(),
       getStatus: vi.fn().mockReturnValue('idle'),
       getSummaries: vi.fn().mockReturnValue([{ id: defaultThread.id, name: 'default', status: 'idle' }]),
+      getBackendKey: vi.fn().mockReturnValue('claude'),
       destroyThread: vi.fn().mockResolvedValue(undefined),
       destroyAll: vi.fn().mockResolvedValue(undefined),
       switchBackend: vi.fn().mockResolvedValue(undefined),

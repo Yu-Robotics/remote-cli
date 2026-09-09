@@ -75,6 +75,7 @@ describe('/backend command', () => {
       createThread: vi.fn(),
       deleteThread: vi.fn(),
       updateThread: vi.fn().mockImplementation(async (_id: string, updates: any) => ({ ...defaultThread, ...updates })),
+      clearBackendOverrides: vi.fn().mockResolvedValue(undefined),
       getSessionFilePath: vi.fn().mockReturnValue('/tmp/session.jsonl'),
     } as unknown as ThreadManager;
 
@@ -85,9 +86,12 @@ describe('/backend command', () => {
       setThreadError: vi.fn(),
       getStatus: vi.fn().mockReturnValue('idle'),
       getSummaries: vi.fn().mockReturnValue([{ id: defaultThread.id, name: 'default', status: 'idle' }]),
+      getBackendKey: vi.fn().mockReturnValue('claude'),
       destroyThread: vi.fn().mockResolvedValue(undefined),
       destroyAll: vi.fn().mockResolvedValue(undefined),
       switchBackend: vi.fn().mockResolvedValue(undefined),
+      switchThreadBackend: vi.fn().mockResolvedValue(undefined),
+      clearBackendOverrides: vi.fn().mockResolvedValue(undefined),
     } as unknown as ThreadExecutorPool;
 
     const guard = new DirectoryGuard(['~/project']);
@@ -253,6 +257,40 @@ describe('/backend command', () => {
   // ── switch mode ───────────────────────────────────────────────────────────────
 
   describe('switch mode (/backend <target>)', () => {
+    it('switches only the current thread when suffixed with @', async () => {
+      mockInstalled('claude', 'codex');
+
+      await send('/backend 2 @');
+
+      const res = sentResponse();
+      expect(res.success).toBe(true);
+      expect(res.output).toContain('This thread switched to');
+      expect(mockThreadPool.switchThreadBackend).toHaveBeenCalledWith('default-id', 'codex');
+      expect(mockConfig.set).not.toHaveBeenCalled();
+    });
+
+    it('resets the current thread to the global backend with default @', async () => {
+      mockInstalled('claude', 'codex');
+
+      await send('/backend default @');
+
+      const res = sentResponse();
+      expect(res.success).toBe(true);
+      expect(res.output).toContain('reset to the global backend');
+      expect(mockThreadManager.updateThread).toHaveBeenCalledWith('default-id', { backend: undefined });
+    });
+
+    it('global switching clears all per-thread backend overrides', async () => {
+      mockInstalled('claude', 'codex');
+
+      await send('/backend 2');
+
+      const res = sentResponse();
+      expect(res.success).toBe(true);
+      expect(mockThreadPool.switchBackend).toHaveBeenCalledWith(expect.objectContaining({ type: 'codex' }));
+      expect(mockThreadManager.clearBackendOverrides).toHaveBeenCalled();
+    });
+
     it('switches to AGY by 1-based index and swaps all thread executors', async () => {
       mockInstalled('claude', 'agy');
 

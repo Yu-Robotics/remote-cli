@@ -772,6 +772,14 @@ describe('FeishuLongConnHandler', () => {
   });
 
   describe('finalizeStreamingMessage with chunking', () => {
+    it('shows the selected backend in thread switch buttons', () => {
+      const elements = (handler as any).createThreadSwitchElements([
+        { id: 'thread-1', name: 'Thread 1', status: 'idle', backend: 'codex' },
+      ], 'thread-1');
+
+      expect(elements[1].columns[0].elements[0].text.content).toBe('★ Thread 1 · Codex');
+    });
+
     it('should create continuation cards when finalized elements exceed limit', async () => {
       const messageId = 'msg_finalize';
       const openId = 'test_open_id';

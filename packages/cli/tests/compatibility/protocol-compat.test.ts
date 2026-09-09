@@ -177,6 +177,7 @@ describe('CLI handles PROTOCOL_VERSION_INCOMPATIBLE error from Router', () => {
       setThreadBusy: vi.fn(),
       setThreadError: vi.fn(),
       getSummaries: vi.fn().mockReturnValue([]),
+      getBackendKey: vi.fn().mockReturnValue('claude'),
       destroyAll: vi.fn().mockResolvedValue(undefined),
       switchBackend: vi.fn().mockResolvedValue(undefined),
     } as any;

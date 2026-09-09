@@ -134,6 +134,20 @@ export class MessageHandler {
     const resolvedThreadId = thread.id;
     const executor = this.threadPool.getExecutor(resolvedThreadId);
 
+    // Backend switching has its own lifecycle handling and must run before the
+    // normal command busy flag is acquired.
+    if (content?.trim() === '/backend' || content?.trim().startsWith('/backend ')) {
+      if (this.threadPool.isThreadBusy(resolvedThreadId)) {
+        this.sendResponse(messageId, resolvedThreadId, {
+          success: false,
+          error: `Thread "${thread.name}" is busy. Send /abort to cancel the running task before switching backend.`,
+        });
+        return;
+      }
+      await this.handleBackendCommand(messageId, resolvedThreadId, content.trim());
+      return;
+    }
+
     // Handle /abort for this specific thread (bypasses busy check)
     if (content?.trim() === '/abort') {
       await this.handleAbortCommand(messageId, resolvedThreadId, executor);
@@ -329,7 +343,7 @@ export class MessageHandler {
 - /cd <directory> - Change working directory for this thread
 - /model [name] - Show available models, or switch the AI model for this thread (persists across sessions)
 - /effort [auto|level] - Show or set reasoning effort for this thread
-- /backend - List available AI backends and switch between them
+- /backend - List backends; use /backend <index> for all threads or /backend <index> @ for this thread
 - /thread list - List all threads with their status
 - /thread new [name] - Create a new thread
 - /thread delete <name> - Delete a thread (only when idle)
@@ -419,7 +433,7 @@ You can also use natural language commands to control Claude Code CLI.`,
 
     if (trimmed === '/effort' || trimmed.startsWith('/effort ')) {
       const executorConfig = (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
-      const key = backendKeyOf(executorConfig.type as string);
+      const key = this.threadPool.getBackendKey(threadId);
       if (key !== 'codex' && key !== 'agy') {
         this.sendResponse(messageId, threadId, {
           success: false,
@@ -513,7 +527,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         // thread.models[backendKey]. The legacy `model` field is kept in
         // sync for the Claude backend only.
         const executorConfig = (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
-        const key = backendKeyOf(executorConfig.type as string);
+        const key = this.threadPool.getBackendKey(threadId);
         const current = this.threadManager.getThread(threadId);
         const models = { ...current?.models, [key]: modelArg };
         await this.threadManager.updateThread(
@@ -547,7 +561,7 @@ You can also use natural language commands to control Claude Code CLI.`,
    */
   private async handleModelList(messageId: string, threadId: string): Promise<void> {
     const executorConfig = (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
-    const key = backendKeyOf(executorConfig.type as string);
+    const key = this.threadPool.getBackendKey(threadId);
     const thread = this.threadManager.getThread(threadId);
     const current = thread?.models?.[key] ?? (key === 'claude' ? thread?.model : undefined);
 
@@ -646,7 +660,8 @@ You can also use natural language commands to control Claude Code CLI.`,
       const lines = summaries.map(t => {
         const icon = t.status === 'running' ? '🔄' : t.status === 'error' ? '❌' : '✅';
         const current = t.id === callerThreadId ? ' ← (this thread)' : '';
-        return `${icon} ${t.name}${current}`;
+        const backend = t.backend ? ` [${t.backend}]` : '';
+        return `${icon} ${t.name}${backend}${current}`;
       });
       this.sendResponse(messageId, callerThreadId, {
         success: true,
@@ -663,7 +678,8 @@ You can also use natural language commands to control Claude Code CLI.`,
       try {
         const newThread = await this.threadManager.createThread(
           name || this.generateThreadName(),
-          cwd
+          cwd,
+          this.threadPool.getBackendKey(callerThread.id)
         );
         // Use newThread.id so the router maps this card to the new thread,
         // enabling the user to reply to this card to target the new thread.
@@ -1021,15 +1037,11 @@ You can also use natural language commands to control Claude Code CLI.`,
   ]);
 
   /**
-   * Which backend slash commands should be forwarded to, based on config.
+   * Which backend slash commands should be forwarded to for a thread.
    * 'auto'/claude-* always resolve to Claude; legacy 'gemini' means AGY.
    */
-  private resolveSlashBackend(): 'claude' | 'agy' | 'codex' {
-    const cfg = (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
-    const t = cfg.type as string;
-    if (t === 'agy' || t === 'gemini') return 'agy';
-    if (t === 'codex') return 'codex';
-    return 'claude';
+  private resolveSlashBackend(threadId: string): 'claude' | 'agy' | 'codex' {
+    return this.threadPool.getBackendKey(threadId);
   }
 
   /**
@@ -1049,7 +1061,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     command: string,
     executor: IExecutor
   ): Promise<void> {
-    const backend = this.resolveSlashBackend();
+    const backend = this.resolveSlashBackend(threadId);
 
     if (backend === 'codex') {
       this.sendResponse(messageId, threadId, {
@@ -1225,7 +1237,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     if (!error || !this.isUnavailableCodexModelError(error)) return false;
 
     const executorConfig = (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
-    if (backendKeyOf(executorConfig.type as string) !== 'codex') return false;
+    if (this.threadPool.getBackendKey(threadId) !== 'codex') return false;
 
     const thread = this.threadManager.getThread(threadId);
     if (!thread?.models?.codex) return false;
@@ -1410,6 +1422,7 @@ You can also use natural language commands to control Claude Code CLI.`,
   ): Promise<void> {
     const parts = trimmed.split(/\s+/);
     const arg = parts[1];
+    const isThreadOverride = parts[2] === '@';
 
     const currentConfig = (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
     const currentType = currentConfig.type;
@@ -1433,9 +1446,30 @@ You can also use natural language commands to control Claude Code CLI.`,
         const active = b.id === currentType || isClaudeActive || isAgyActive ? ' ★ (active)' : '';
         return `${i + 1}. ${b.label}${active}`;
       });
+      const currentBackend = this.threadPool.getBackendKey(threadId);
+      lines.push(`\nCurrent thread backend: ${currentBackend}${this.threadManager.getThread(threadId)?.backend ? ' (override)' : ' (global)'}`);
       this.sendResponse(messageId, threadId, {
         success: true,
-        output: `🤖 Available AI backends:\n${lines.join('\n')}\n\nSwitch with: /backend <index> or /backend <name>`,
+        output: `🤖 Available AI backends:\n${lines.join('\n')}\n\nSwitch all threads with: /backend <index>\nSwitch this thread with: /backend <index> @\nReset this thread: /backend default @`,
+        threads: this.threadPool.getSummaries(),
+      });
+      return;
+    }
+
+    if (arg === 'default' && isThreadOverride) {
+      if (this.threadPool.isThreadBusy(threadId)) {
+        this.sendResponse(messageId, threadId, {
+          success: false,
+          error: 'Cannot reset backend while this thread is running. Send /abort first.',
+        });
+        return;
+      }
+      await this.threadPool.destroyThread(threadId, { deleteData: false });
+      await this.threadManager.updateThread(threadId, { backend: undefined });
+      this.sendResponse(messageId, threadId, {
+        success: true,
+        output: `✅ Thread backend reset to the global backend (${backendKeyOf(currentType as string)}).`,
+        threads: this.threadPool.getSummaries(),
       });
       return;
     }
@@ -1459,12 +1493,39 @@ You can also use natural language commands to control Claude Code CLI.`,
     }
 
     const newConfig: ExecutorConfig = { ...currentConfig, type: target.id };
+    if (isThreadOverride) {
+      try {
+        await this.threadPool.switchThreadBackend(threadId, backendKeyOf(target.id));
+        this.sendResponse(messageId, threadId, {
+          success: true,
+          output: `✅ This thread switched to: ${target.label}\n\nUse /backend ${installed.indexOf(target) + 1} to switch all threads, or /backend default @ to follow the global backend again.`,
+          threads: this.threadPool.getSummaries(),
+        });
+      } catch (error) {
+        this.sendResponse(messageId, threadId, {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to switch thread backend',
+        });
+      }
+      return;
+    }
+
+    if (this.threadPool.getSummaries().some((thread) => thread.status === 'running')) {
+      this.sendResponse(messageId, threadId, {
+        success: false,
+        error: 'Cannot switch all backends while a thread is running. Send /abort first.',
+      });
+      return;
+    }
+
     await this.config.set('executor', newConfig);
     await this.threadPool.switchBackend(newConfig);
+    await this.threadManager.clearBackendOverrides();
 
     this.sendResponse(messageId, threadId, {
       success: true,
       output: `✅ Backend switched to: ${target.label}\n\nAll threads will use the new backend for future commands. Conversations on the previous backend are preserved — switch back to resume them.`,
+      threads: this.threadPool.getSummaries(),
     });
   }
 

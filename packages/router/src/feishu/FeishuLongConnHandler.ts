@@ -714,7 +714,7 @@ Claude Code commands (sent to active device):
 /cd <directory> - Change working directory
 /clear - Clear conversation context and start fresh session
 /abort - Abort the currently executing command
-/backend - List available AI backends and switch between them
+/backend - List backends; use /backend <index> for all threads or /backend <index> @ for this thread
 
 Regular messages will be sent to your active device for execution.
 
@@ -1399,7 +1399,9 @@ Examples:
       elements: [
         {
           tag: 'button',
-          text: { tag: 'plain_text', content: t.id === activeThreadId ? `★ ${t.name}` : t.name },
+          text: { tag: 'plain_text', content: t.id === activeThreadId
+            ? `★ ${t.name}${t.backend ? ` · ${this.backendLabel(t.backend)}` : ''}`
+            : `${t.name}${t.backend ? ` · ${this.backendLabel(t.backend)}` : ''}` },
           type: t.id === activeThreadId ? 'primary' : 'default',
           disabled: t.id === activeThreadId,
           behaviors: [{ type: 'callback', value: { action: 'switch_thread', threadId: t.id, threadName: t.name } }],
@@ -1431,6 +1433,10 @@ Examples:
         columns: [...threadColumns, newThreadColumn],
       },
     ];
+  }
+
+  private backendLabel(backend: NonNullable<ThreadSummary['backend']>): string {
+    return backend === 'claude' ? 'Claude' : backend === 'codex' ? 'Codex' : 'AGY';
   }
 
   /**
