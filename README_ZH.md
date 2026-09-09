@@ -380,8 +380,10 @@ remote-cli stop
 | `/abort` | 中止当前线程正在运行的 AI 任务 |
 | `/clear` | 清除当前线程的对话上下文 |
 | `/compact` | 压缩对话历史以节省 Token |
+| `/model [name]` | 列出当前 backend 的模型，或设置当前线程的模型 |
+| `/effort [auto|low|medium|high]` | 查看或设置 Codex/AGY 的线程思考等级 |
 | `/cd <dir>` | 切换当前线程的工作目录 |
-| `/backend` | 列出可用 AI 后端并进行切换 |
+| `/backend` | 列出后端并显示当前线程实际使用的后端 |
 | `/bind <码>` | 绑定新设备 |
 | `/unbind` | 解绑所有设备 |
 | `/device` | 列出及切换绑定的设备 |
@@ -397,6 +399,32 @@ remote-cli stop
 | `/thread delete <名>`| 删除指定的空闲线程 |
 
 *提示：直接回复某个线程发出的卡片消息，即可在该线程中继续对话。*
+
+### Backend 切换
+
+Backend 选择同时支持全局模式和按线程模式：
+
+| 命令 | 说明 |
+|---------|-------------|
+| `/backend` | 列出已安装的后端，并显示当前线程实际使用的后端 |
+| `/backend <index>` | 将所有线程切换到指定后端，并清除各线程的独立覆盖设置 |
+| `/backend <index> @` | 只将当前线程切换到指定后端 |
+| `/backend default @` | 清除当前线程的覆盖设置，恢复跟随全局后端 |
+
+Backend index 使用 `/backend` 显示的顺序（安装后通常为 Claude Code、Codex CLI、AGY CLI）。按线程选择会持久化到 `threads.json`。不同线程可以使用不同后端并行执行。受影响的线程正在执行时不会执行后端切换；任意线程正在执行时也不会执行全局切换。切换后端会保留各后端的会话数据，因此切回某个后端时可以恢复其之前的会话。
+
+### 模型与思考等级
+
+`/model` 和 `/effort` 作用于当前线程，并且会按 backend 分别保存：
+
+| 命令 | 说明 |
+|---------|-------------|
+| `/model` | 显示当前 backend、已选模型和可用模型 |
+| `/model <name>` | 为当前线程和当前 backend 设置模型 |
+| `/effort` | 显示当前思考等级以及 backend 支持的等级 |
+| `/effort <auto|low|medium|high>` | 设置思考等级，使用 `auto` 清除线程覆盖值 |
+
+模型列表由各 backend 分别提供：Claude Code 使用 `claude --print /model`，AGY 使用 `agy models`，Codex app-server 使用当前账号可用的模型目录。Codex 的 `exec` 回退模式无法列出模型。当前只有 Codex 和 AGY 支持 reasoning effort；Claude Code 会返回暂不支持。`auto` 会清除当前线程的覆盖值，恢复当前模型或 backend 的默认思考等级。
 
 ### 远程机器管理（Machine）
 
@@ -557,7 +585,7 @@ MIT 许可证 - 详见 [LICENSE](LICENSE) 文件。
 }
 ```
 
-- `executor.type`: 可选值 `auto` (Claude), `claude-persistent`, `claude-spawn`, `agy`, `codex`。
+- `executor.type`: 全局默认后端。可选值 `auto` (Claude), `claude-persistent`, `claude-spawn`, `agy`, `codex`。按线程的覆盖设置通过 `/backend <index> @` 管理。
 - `executor.agy`: 
     - `model`: 模型 slug，取自 `agy models` 列表（如 `gemini-3.8-flash-low`）。不填则用 agy 默认模型。无效 slug 会被 agy 拒绝并返回明确错误。
     - `autoApprove`: 是否通过 `--dangerously-skip-permissions` 自动同意工具权限（默认 true）。

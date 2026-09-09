@@ -383,8 +383,10 @@ Once connected, use these commands in Feishu:
 | `/abort` | Abort the currently executing task in this thread |
 | `/clear` | Clear conversation context for this thread |
 | `/compact` | Compress conversation history to save tokens |
+| `/model [name]` | List models for the active backend or set this thread's model |
+| `/effort [auto|low|medium|high]` | Show or set per-thread reasoning effort for Codex/AGY |
 | `/cd <dir>` | Change working directory for this thread |
-| `/backend` | List and switch between available AI backends |
+| `/backend` | List backends and show the current thread's effective backend |
 | `/bind <码>` | Bind a new device |
 | `/unbind` | Unbind all devices |
 | `/device` | List and switch between bound devices |
@@ -400,6 +402,32 @@ Start multiple independent sessions simultaneously.
 | `/thread delete <name>`| Delete an idle thread |
 
 *Tip: Reply directly to a card message from a specific thread to continue the conversation in that thread.*
+
+### Backend Switching
+
+Backend selection supports both global and per-thread modes:
+
+| Command | Description |
+|---------|-------------|
+| `/backend` | List installed backends and show the current thread's effective backend |
+| `/backend <index>` | Switch all threads to the selected backend and clear per-thread overrides |
+| `/backend <index> @` | Switch only the current thread to the selected backend |
+| `/backend default @` | Clear the current thread's override and follow the global backend |
+
+The backend index follows the order shown by `/backend` (Claude Code, Codex CLI, then AGY CLI when installed). Per-thread backend choices are persisted in `threads.json`. Different threads can use different backends and execute concurrently. A backend switch is rejected while the affected thread is running; a global switch is rejected while any thread is running. Backend session data is preserved when switching, so returning to a backend can resume its previous session.
+
+### Models and Reasoning Effort
+
+`/model` and `/effort` apply to the current thread and are stored separately for each backend:
+
+| Command | Description |
+|---------|-------------|
+| `/model` | Show the current backend, selected model, and available models |
+| `/model <name>` | Set the model for the current thread and backend |
+| `/effort` | Show the current reasoning effort and backend-supported levels |
+| `/effort <auto|low|medium|high>` | Set or clear (`auto`) the current thread's effort override |
+
+Model listing is backend-specific: Claude Code uses `claude --print /model`, AGY uses `agy models`, and Codex app-server uses its authenticated model catalog. The Codex `exec` fallback cannot list models. Reasoning effort is currently supported by Codex and AGY; Claude Code returns an unsupported message. `auto` removes the per-thread override and restores the selected model's or backend's default effort.
 
 ### Remote Machine Management
 
@@ -560,7 +588,7 @@ MIT License - see [LICENSE](LICENSE) file for details.
 }
 ```
 
-- `executor.type`: Options are `auto` (Claude), `claude-persistent`, `claude-spawn`, `agy`, `codex`.
+- `executor.type`: Global default backend. Options are `auto` (Claude), `claude-persistent`, `claude-spawn`, `agy`, `codex`. Per-thread overrides are managed with `/backend <index> @`.
 - `executor.agy`: 
     - `model`: Model slug from `agy models` (e.g. `gemini-3.8-flash-low`). Unset = agy default. Invalid slugs are rejected by agy with a clear error.
     - `autoApprove`: Automatically approve tool permissions via `--dangerously-skip-permissions` (default true).

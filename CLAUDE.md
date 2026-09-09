@@ -38,6 +38,8 @@ This project maintains two README files:
 
 **Example:** If you add a new feature to Features section in README.md, you MUST also add it to README_ZH.md in the same position.
 
+**Customer-facing change rule:** Any change that affects user-visible behavior, commands, configuration, backend usage, help text, setup steps, or operational workflows MUST include a review of `README.md` and `README_ZH.md`. Update both files when the change requires documentation, even if the initial code change does not touch a README file. Keep the two files structurally aligned and verify them before committing.
+
 ## Version Bump Requirement
 
 **CRITICAL: When bumping version numbers, you MUST update ALL package.json files to maintain consistency.**
@@ -378,8 +380,13 @@ AGY CLI is auto-detected if already installed on the local machine (`agy --versi
 2. Switch backend via Feishu chat (no manual config needed):
    ```
    /backend
-   /backend 2
+   /backend <index>
+   /backend <index> @
    ```
+
+   Use the index shown by `/backend`. The command without `@` switches all
+   threads and clears per-thread overrides; adding `@` switches only the
+   current thread. Use `/backend default @` to follow the global backend again.
 
 3. Restart the service to apply:
    ```bash
@@ -426,7 +433,7 @@ Known gaps vs Claude backend: no `task_notification`-style background task event
 
 ## Codex CLI (OpenAI) Support
 
-The CLI supports OpenAI's Codex CLI (binary `codex`) as an alternative AI backend via **`codex exec` mode** (one-shot JSONL, not the app-server).
+The CLI supports OpenAI's Codex CLI (binary `codex`) as an alternative AI backend via the persistent **`codex app-server`** transport. The legacy `codex exec` transport remains available as an explicit fallback.
 
 ### Setup
 
@@ -441,8 +448,13 @@ Codex CLI is auto-detected if already installed on the local machine (`codex --v
 2. Switch backend via Feishu chat (no manual config needed):
    ```
    /backend
-   /backend 3
+   /backend <index>
+   /backend <index> @
    ```
+
+   Use the index shown by `/backend`. The command without `@` switches all
+   threads and clears per-thread overrides; adding `@` switches only the
+   current thread. Use `/backend default @` to follow the global backend again.
 
 3. Restart the service to apply:
    ```bash
@@ -463,23 +475,20 @@ Codex CLI is auto-detected if already installed on the local machine (`codex --v
 
 ```
 packages/cli/src/executor/
-  CodexExecutor.ts          # codex exec executor (implements IExecutor)
+  CodexAppServerExecutor.ts # persistent app-server executor (implements IExecutor)
+  CodexExecutor.ts          # legacy exec fallback executor (implements IExecutor)
 ```
 
-CodexExecutor is **one-shot per command** (unlike AgyExecutor's persistent process): each `execute()` spawns `codex exec --json --skip-git-repo-check [--dangerously-bypass-approvals-and-sandbox] [-m model] -- "<prompt>"` and resolves on process `close` (see below). Wire format (verified against codex-cli 0.153.4):
+CodexAppServerExecutor keeps one app-server process per active thread. It uses app-server requests for turns, model catalog lookup, reasoning effort updates, compaction, and turn interruption. The persisted Codex thread id is resumed after process recreation, working-directory changes, backend switches, and service restarts.
 
-- **Out** (stdout NDJSON): `thread.started` (`thread_id` → captured + persisted), `turn.started`, `item.started`/`item.completed` (`agent_message{text}` → `onStream`; `command_execution` → Bash tool card; `file_change{changes:[{path,kind}]}` → Edit tool card; `web_search` → WebSearch card; unknown tool-ish items like `mcp_tool_call` → generic pass-through card, same policy as AGY; `reasoning` summaries → streamed as thinking text via `onStream`, kept out of the final output; item type `error` is NON-fatal, e.g. model-metadata fallback warnings), `turn.completed`/`turn.failed`/`error` (terminal — recorded, then the command resolves on process exit).
-- **Resolution timing**: commands resolve on process **`close`**, not `exit` — Node does not guarantee stdio is flushed at `exit`, and the final `turn.completed` line may still be in the pipe. The close handler also flushes the StringDecoder and parses any trailing unterminated NDJSON line before judging the outcome.
-- **Resume**: the `thread_id` is persisted per thread (`~/.remote-cli/codex-sessions/<threadId>.json`) and the next command spawns `codex exec resume --skip-git-repo-check --json ... <thread_id> -- "<prompt>"`.
-- **Caveats**: stdin must be ended immediately after spawn (codex reads piped stdin to EOF); the prompt is passed after `--` so dash-leading prompts are not parsed as flags; `codex exec resume` rejects the `--sandbox` flag (usage error in 0.153.4) — only `--dangerously-bypass-approvals-and-sandbox` is safe to pass on resume.
-- **Abort**: exec mode has no cancel request, so abort kills the process; the thread id survives and the next command resumes.
-- `/model` is supported: `setModel()` stores the model and the next one-shot spawn picks it up (the running command is undisturbed). Per-thread model (`thread.models.codex`) takes precedence over `executor.codex.model` in the factory, same as AGY. Bare `/model` cannot list models — `codex models` is a TUI (verified live: "stdin is not a terminal"); the handler shows the current selection plus a terminal hint. Unknown model names are only a non-fatal warning in codex (falls back to default metadata), unlike agy which hard-fails.
+- `/model` stores the selection under `thread.models.codex`; bare `/model` queries the app-server model catalog. `/effort` stores the per-thread override under `thread.efforts.codex`; `auto` clears it and restores the selected model's default reasoning effort.
+- The legacy `exec` fallback is one-shot per command and uses JSONL output. It preserves a thread id for resume, but model listing is unavailable and native app-server controls are not available.
 
-Known gaps vs Claude backend: same as AGY (no task_notification events, no native hooks). Image attachments are dropped (exec mode is driven with text prompts only).
+Known gaps vs Claude backend: no native Claude hook events. The app-server path supports Codex image inputs.
 
-**Slash passthrough (Codex)**: none — `codex exec` has no slash-command protocol (every slash command reaches the model as plain text), so `executeSlashCommand` rejects all backend-specific slash commands on the Codex backend with an explanatory message. remote-cli's built-in commands (`/clear`, `/compact`, `/model`, ...) are unaffected.
+**Slash passthrough (Codex)**: none — app-server has no interactive TUI slash-command protocol, so backend-specific slash commands are rejected. remote-cli's built-in commands (`/clear`, `/compact`, `/model`, `/effort`, ...) are handled locally.
 
-**Compact**: codex has compaction in its interactive TUI plus core-level auto-compaction (`model_auto_compact_token_limit`, `compact_prompt`, PreCompact/PostCompact hooks — all present in the 0.153.4 binary), but in exec mode `/compact` reaches the model as plain text (verified live). `compactWhenFull()` therefore does the same **summarize-then-reset** as AGY (see `executor/compactHandoff.ts`), with the same failure fallback and `/clear` semantics.
+**Compact**: `/compact` uses app-server thread compaction. The legacy exec fallback uses the shared summarize-then-reset handoff because exec mode has no interactive slash-command protocol.
 
 ---
 

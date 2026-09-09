@@ -339,6 +339,10 @@ describe('MessageHandler', () => {
           output: expect.stringContaining('Available commands'),
         })
       );
+      const helpResponse = vi.mocked(ctx.mockWsClient.send).mock.calls.at(-1)?.[0];
+      expect(helpResponse.output).toContain('/backend <index> - Switch all threads');
+      expect(helpResponse.output).toContain('/backend <index> @ - Switch only the current thread');
+      expect(helpResponse.output).toContain('/backend default @ - Clear the current thread override');
       expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
     });
   });

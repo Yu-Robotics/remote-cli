@@ -81,7 +81,12 @@ Help me fix TypeScript errors in ~/projects/my-app
 | `/clear` | Clear context for this thread |
 | `/compact` | Compress history to save tokens |
 | `/cd <dir>` | Change working directory for this thread |
-| `/backend` | List and switch AI backends |
+| `/model [name]` | List models for the active backend or set this thread's model |
+| `/effort [auto|low|medium|high]` | Show or set Codex/AGY reasoning effort |
+| `/backend` | List backends and show the current thread's effective backend |
+| `/backend <index>` | Switch all threads and clear per-thread backend overrides |
+| `/backend <index> @` | Switch only the current thread |
+| `/backend default @` | Clear the current thread override and follow the global backend |
 | `/bind <码>` | Bind a new device |
 | `/unbind` | Unbind all devices |
 | `/device` | List and switch between bound devices |
