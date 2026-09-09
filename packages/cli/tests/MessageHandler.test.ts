@@ -77,6 +77,11 @@ function buildHandler(mockExecutorOverrides: Record<string, any> = {}) {
     setThreadError: vi.fn(),
     getStatus: vi.fn().mockReturnValue('idle'),
     getSummaries: vi.fn().mockReturnValue([{ id: defaultThread.id, name: 'default', status: 'idle' }]),
+    getBackendKey: vi.fn().mockImplementation(() => {
+      const config = mockConfig.get('executor');
+      const type = config?.type as string | undefined;
+      return type === 'agy' || type === 'gemini' ? 'agy' : type === 'codex' ? 'codex' : 'claude';
+    }),
     destroyThread: vi.fn().mockResolvedValue(undefined),
     destroyAll: vi.fn().mockResolvedValue(undefined),
     switchBackend: vi.fn().mockResolvedValue(undefined),
@@ -1019,7 +1024,7 @@ describe('MessageHandler', () => {
     it('should create thread on /thread new', async () => {
       await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-tn', content: '/thread new my-feat', timestamp: Date.now() });
 
-      expect(ctx.mockThreadManager.createThread).toHaveBeenCalledWith('my-feat', expect.any(String));
+      expect(ctx.mockThreadManager.createThread).toHaveBeenCalledWith('my-feat', expect.any(String), 'claude');
       expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
         expect.objectContaining({ success: true })
       );
@@ -1090,7 +1095,7 @@ describe('MessageHandler', () => {
 
       await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-tn-auto', content: '/thread new', timestamp: Date.now() });
 
-      expect(ctx.mockThreadManager.createThread).toHaveBeenCalledWith('thread-2', expect.any(String));
+      expect(ctx.mockThreadManager.createThread).toHaveBeenCalledWith('thread-2', expect.any(String), 'claude');
     });
 
     it('should use timestamp fallback when all auto thread names are taken', async () => {

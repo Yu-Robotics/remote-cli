@@ -16,6 +16,8 @@ export interface Thread {
   workingDirectory: string;
   createdAt: number;
   lastActiveAt: number;
+  /** Optional backend override. Unset means use the global executor backend. */
+  backend?: BackendKey;
   /**
    * @deprecated Legacy model field — honored for the Claude backend only.
    * Model names are backend-specific (Claude's "opus" is rejected by agy),
@@ -43,4 +45,5 @@ export interface ThreadSummary {
   id: string;
   name: string;
   status: 'idle' | 'running' | 'error';
+  backend?: BackendKey;
 }
