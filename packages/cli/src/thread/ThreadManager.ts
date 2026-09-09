@@ -8,6 +8,7 @@ import {
   MAX_THREADS,
   THREAD_NAME_REGEX,
 } from './types';
+import type { BackendKey } from '../types/config';
 
 /**
  * Manages thread lifecycle: create, list, update, delete.
@@ -90,7 +91,7 @@ export class ThreadManager {
    * Create a new thread.
    * Throws if name already exists, name is invalid, or MAX_THREADS reached.
    */
-  async createThread(name: string, workingDirectory: string): Promise<Thread> {
+  async createThread(name: string, workingDirectory: string, backend?: BackendKey): Promise<Thread> {
     if (!name || !THREAD_NAME_REGEX.test(name)) {
       throw new Error(`Invalid thread name: "${name}". Use alphanumeric characters and hyphens only (no leading/trailing hyphens).`);
     }
@@ -111,6 +112,7 @@ export class ThreadManager {
       workingDirectory,
       createdAt: Date.now(),
       lastActiveAt: Date.now(),
+      ...(backend ? { backend } : {}),
     };
 
     this.store.threads[thread.id] = thread;
@@ -147,7 +149,7 @@ export class ThreadManager {
    */
   async updateThread(
     id: string,
-    updates: Partial<Pick<Thread, 'sessionId' | 'workingDirectory' | 'lastActiveAt' | 'model' | 'models' | 'efforts'>>
+    updates: Partial<Pick<Thread, 'sessionId' | 'workingDirectory' | 'lastActiveAt' | 'model' | 'models' | 'efforts' | 'backend'>>
   ): Promise<Thread> {
     const thread = this.store.threads[id];
     if (!thread) throw new Error(`Thread not found: ${id}`);
@@ -156,6 +158,18 @@ export class ThreadManager {
     this.store.threads[id] = updated;
     await this.persist();
     return updated;
+  }
+
+  /** Clear explicit backend overrides so all threads follow the global backend. */
+  async clearBackendOverrides(): Promise<void> {
+    let changed = false;
+    for (const thread of Object.values(this.store.threads)) {
+      if (thread.backend !== undefined) {
+        delete thread.backend;
+        changed = true;
+      }
+    }
+    if (changed) await this.persist();
   }
 
   /**

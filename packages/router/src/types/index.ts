@@ -137,6 +137,7 @@ export interface ThreadSummary {
   id: string;
   name: string;
   status: 'idle' | 'running' | 'error';
+  backend?: 'claude' | 'agy' | 'codex';
 }
 
 // Content block types for structured messages

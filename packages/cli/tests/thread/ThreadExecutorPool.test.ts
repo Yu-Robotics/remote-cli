@@ -113,6 +113,7 @@ describe('ThreadExecutorPool', () => {
       const summaries = pool.getSummaries();
       expect(summaries).toHaveLength(1);
       expect(summaries[0].status).toBe('idle');
+      expect(summaries[0].backend).toBe('claude');
     });
 
     it('reflects running status when thread is busy', async () => {
@@ -227,6 +228,44 @@ describe('ThreadExecutorPool', () => {
         undefined,
         undefined
       );
+    });
+
+    it('switches one thread without affecting another thread executor', async () => {
+      const otherThread = await manager.createThread('other-backend', tmpDir);
+      const defaultExecutor = pool.getExecutor(manager.getDefaultThread().id);
+      const otherExecutor = pool.getExecutor(otherThread.id);
+
+      await pool.switchThreadBackend(otherThread.id, 'codex');
+      const recreated = pool.getExecutor(otherThread.id);
+
+      expect(defaultExecutor.destroy).not.toHaveBeenCalled();
+      expect(otherExecutor.destroy).toHaveBeenCalled();
+      expect(recreated).not.toBe(otherExecutor);
+      expect(mockExecutorFactory).toHaveBeenLastCalledWith(
+        expect.anything(),
+        expect.objectContaining({ type: 'codex' }),
+        tmpDir,
+        otherThread.id,
+        undefined,
+        undefined
+      );
+      expect(manager.getThread(otherThread.id)?.backend).toBe('codex');
+    });
+
+    it('rejects a per-thread backend switch while the thread is busy', async () => {
+      const thread = manager.getDefaultThread();
+      pool.setThreadBusy(thread.id, true);
+
+      await expect(pool.switchThreadBackend(thread.id, 'agy')).rejects.toThrow(/running/);
+    });
+
+    it('pins a thread even when its selected backend matches the global backend', async () => {
+      const thread = manager.getDefaultThread();
+
+      await pool.switchThreadBackend(thread.id, 'claude');
+
+      expect(manager.getThread(thread.id)?.backend).toBe('claude');
+      expect(mockExecutorFactory).not.toHaveBeenCalled();
     });
 
     it('destroyThread (thread delete) still deletes session data by default', async () => {

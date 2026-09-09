@@ -162,6 +162,17 @@ describe('ThreadManager', () => {
       expect(updated.model).toBe('opus');
     });
 
+    it('persists and clears a per-thread backend override', async () => {
+      const thread = await manager.createThread('backend-update', tmpDir, 'codex');
+      expect(manager.getThread(thread.id)?.backend).toBe('codex');
+
+      await manager.clearBackendOverrides();
+
+      expect(manager.getThread(thread.id)?.backend).toBeUndefined();
+      const reloaded = await ThreadManager.initialize(tmpDir);
+      expect(reloaded.getThread(thread.id)?.backend).toBeUndefined();
+    });
+
     it('updates lastActiveAt', async () => {
       const t = await manager.createThread('ts-update', tmpDir);
       const before = t.lastActiveAt;
