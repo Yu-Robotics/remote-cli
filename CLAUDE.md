@@ -44,6 +44,10 @@ This project maintains two README files:
 
 **CRITICAL: When bumping version numbers, you MUST update ALL package.json files to maintain consistency.**
 
+**CRITICAL: After completing any source-code change that affects actual runtime behavior, you MUST proactively bump the project version before handing off the change. This does not apply to comment-only changes or test-only changes.**
+
+Behavior changes include new commands, changed command semantics, backend behavior, protocol handling, user-visible output, configuration behavior, and operational workflows. The version bump must be included in the same change set and kept synchronized across all package manifests and the lockfile when applicable.
+
 This project maintains version numbers in three locations:
 - `package.json` - Root package version
 - `packages/cli/package.json` - CLI package (`@yu_robotics/remote-cli`)

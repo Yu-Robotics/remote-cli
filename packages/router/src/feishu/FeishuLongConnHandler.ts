@@ -715,6 +715,9 @@ Device management commands:
 Backend and session commands (sent to active device):
 /cd <directory> - Change working directory
 /clear - Clear conversation context and start fresh session
+/status - Show backend, model, effort, queue, and thread status
+/context - Show current session context and queue diagnostics
+/skills - List available skills for the active backend
 /abort - Abort the currently executing command
 /queue - Inspect or manage confirmed messages for busy threads
 /model [name] - Show models or set this thread's model

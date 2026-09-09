@@ -379,7 +379,9 @@ Once connected, use these commands in Feishu:
 | Command | Description |
 |---------|-------------|
 | `/help` | Show help information |
-| `/status` | View current status, directories, and all threads |
+| `/status` | Show backend, model, effort, queue, and thread status |
+| `/context` | Show current session context and queue diagnostics |
+| `/skills` | List available skills for the active backend |
 | `/abort` | Abort the currently executing task in this thread |
 | `/queue` | Inspect or manage confirmed messages waiting in thread queues |
 | `/clear` | Clear conversation context for this thread |
@@ -460,7 +462,8 @@ Slash commands that remote-cli does not handle itself are forwarded to the activ
 - **AGY CLI (Antigravity)**: only the read-only informational commands that agy answers locally are forwarded (`agy -p "<cmd>"`): `/skills`, `/usage`, `/config`, `/changelog`, `/agents`, `/permissions`, `/hooks`, `/credits`. Other commands (including `/compact`, which agy does not intercept outside its TUI) are rejected with a clear message
 - **Codex CLI (OpenAI)**: no passthrough — remote-cli uses the app-server API rather than the interactive TUI slash-command layer, so backend-specific slash commands are rejected
 
-The built-in commands (`/help`, `/status`, `/clear`, `/compact`, `/model`, `/cd`, `/thread`, `/backend`, `/abort`) work across all backends. `/effort` controls the per-thread reasoning effort for Codex and AGY; Claude Code support is not implemented yet.
+The built-in commands (`/help`, `/status`, `/context`, `/skills`, `/clear`, `/compact`, `/model`, `/cd`, `/thread`, `/backend`, `/abort`) work across all backends. `/effort` controls the per-thread reasoning effort for Codex and AGY; Claude Code support is not implemented yet.
+`/context` works across all backends and reports the active session, model, working directory, and queue state; exact token usage depends on transport support. `/skills` uses the native informational command for Claude and AGY, while Codex discovers local `SKILL.md` files under `.agents/skills` and `~/.codex/skills`.
 
 ### Example Workflow
 

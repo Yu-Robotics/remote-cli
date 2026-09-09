@@ -376,7 +376,9 @@ remote-cli stop
 | 命令 | 说明 |
 |---------|-------------|
 | `/help` | 显示帮助信息 |
-| `/status` | 查看当前设备、目录及所有线程状态 |
+| `/status` | 显示 backend、模型、思考等级、队列和线程状态 |
+| `/context` | 显示当前会话上下文和队列诊断信息 |
+| `/skills` | 列出当前 backend 可用的 skills |
 | `/abort` | 中止当前线程正在运行的 AI 任务 |
 | `/queue` | 查看或管理线程中已确认的排队消息 |
 | `/clear` | 清除当前线程的对话上下文 |
@@ -457,7 +459,8 @@ remote-cli 自身不处理的斜杠命令会转发给当前 AI 后端，各后�
 - **AGY CLI (Antigravity)**：仅透传 agy 本地应答的只读信息类命令（`agy -p "<cmd>"`）：`/skills`、`/usage`、`/config`、`/changelog`、`/agents`、`/permissions`、`/hooks`、`/credits`。其他命令（包括 `/compact`——agy 在非交互模式下不会拦截它）会被拒绝并提示原因
 - **Codex CLI (OpenAI)**：不透传——remote-cli 使用 app-server API，而不是交互式 TUI 的斜杠命令层，因此后端专属斜杠命令会被拒绝
 
-内建命令（`/help`、`/status`、`/clear`、`/compact`、`/model`、`/cd`、`/thread`、`/backend`、`/abort`）可用于所有后端。`/effort` 可按线程设置 Codex 和 AGY 的思考等级；Claude Code 暂未实现。
+内建命令（`/help`、`/status`、`/context`、`/skills`、`/clear`、`/compact`、`/model`、`/cd`、`/thread`、`/backend`、`/abort`）可用于所有后端。`/effort` 可按线程设置 Codex 和 AGY 的思考等级；Claude Code 暂未实现。
+`/context` 可用于所有后端，会显示当前会话、模型、工作目录和队列状态；精确 Token 使用量取决于底层传输是否提供。`/skills` 在 Claude 和 AGY 上使用原生信息命令，Codex 则扫描 `.agents/skills` 和 `~/.codex/skills` 下的本地 `SKILL.md` 文件。
 
 ### 示例工作流程
 
