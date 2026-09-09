@@ -2,7 +2,7 @@ import * as lark from '@larksuiteoapi/node-sdk';
 import { v4 as uuidv4 } from 'uuid';
 import { BindingManager } from '../binding/BindingManager';
 import { ConnectionHub } from '../websocket/ConnectionHub';
-import { MAX_THREADS, MessageType, ThreadSummary, Attachment } from '../types';
+import { MAX_THREADS, MessageType, ThreadSummary, Attachment, QueueConfirmationInfo } from '../types';
 import { JsonStore } from '../storage/JsonStore';
 import * as fs from 'fs';
 
@@ -108,6 +108,8 @@ export class FeishuLongConnHandler {
    * RouterServer sets this directly after construction.
    */
   onCardNewThread?: (openId: string) => Promise<void>;
+  /** Callback invoked when a user confirms or cancels a queued command. */
+  onQueueAction?: (openId: string, action: 'confirm' | 'cancel', queueId: string, threadId: string) => Promise<void>;
 
   /**
    * Callback invoked after a user switches to a different device.
@@ -714,6 +716,7 @@ Backend and session commands (sent to active device):
 /cd <directory> - Change working directory
 /clear - Clear conversation context and start fresh session
 /abort - Abort the currently executing command
+/queue - Inspect or manage confirmed messages for busy threads
 /model [name] - Show models or set this thread's model
 /effort [auto|low|medium|high] - Show or set Codex/AGY reasoning effort
 /backend - List backends and show the current thread's effective backend
@@ -1322,11 +1325,11 @@ Examples:
    * @param sessionAbbr Optional session abbreviation
    * @param openId User's open_id for creating continuation messages
    */
-  async finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string, threads?: ThreadSummary[], activeThreadId?: string): Promise<boolean> {
-    return this.withMessageLock(messageId, () => this._finalizeStreamingMessage(messageId, elements, sessionAbbr, openId, cwd, threadName, threads, activeThreadId));
+  async finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string, threads?: ThreadSummary[], activeThreadId?: string, queueConfirmation?: QueueConfirmationInfo): Promise<boolean> {
+    return this.withMessageLock(messageId, () => this._finalizeStreamingMessage(messageId, elements, sessionAbbr, openId, cwd, threadName, threads, activeThreadId, queueConfirmation));
   }
 
-  private async _finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string, threads?: ThreadSummary[], activeThreadId?: string): Promise<boolean> {
+  private async _finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string, threads?: ThreadSummary[], activeThreadId?: string, queueConfirmation?: QueueConfirmationInfo): Promise<boolean> {
     try {
       // Build header element (thread name + working directory) at the top
       const headerParts: string[] = [];
@@ -1339,7 +1342,7 @@ Examples:
       }
 
       // Build completion note
-      let noteContent = '✅ Completed';
+      let noteContent = queueConfirmation ? '⏳ Awaiting queue confirmation' : '✅ Completed';
       if (sessionAbbr) {
         noteContent += ` · Session: ${sessionAbbr}`;
       }
@@ -1350,6 +1353,10 @@ Examples:
         finalElements.push({ tag: 'hr' });
       }
       finalElements.push(...elements, { tag: 'markdown', content: noteContent });
+
+      if (queueConfirmation) {
+        finalElements.push(...this.createQueueConfirmationElements(queueConfirmation));
+      }
 
       // Append thread switch buttons when at least one thread exists
       let threadSwitchElements: any[] = [];
@@ -1440,6 +1447,31 @@ Examples:
     ];
   }
 
+  private createQueueConfirmationElements(info: QueueConfirmationInfo): any[] {
+    const expiresAt = new Date(info.expiresAt).toLocaleTimeString();
+    return [
+      { tag: 'hr' },
+      { tag: 'markdown', content: `⏳ **Thread is busy**\n\n**Thread:** ${info.threadName}  ·  **Backend:** ${info.backend}\n**Working directory:** \`${info.cwd}\`\n**Queued messages:** ${info.pendingCount}\n**Message:** ${info.preview}\n\nConfirmation expires at ${expiresAt}.` },
+      {
+        tag: 'action',
+        actions: [
+          {
+            tag: 'button',
+            text: { tag: 'plain_text', content: '✅ Add to queue' },
+            type: 'primary',
+            behaviors: [{ type: 'callback', value: { action: 'queue_confirm', queueId: info.id, threadId: info.threadId } }],
+          },
+          {
+            tag: 'button',
+            text: { tag: 'plain_text', content: '❌ Cancel' },
+            type: 'default',
+            behaviors: [{ type: 'callback', value: { action: 'queue_cancel', queueId: info.id, threadId: info.threadId } }],
+          },
+        ],
+      },
+    ];
+  }
+
   private backendLabel(backend: NonNullable<ThreadSummary['backend']>): string {
     return backend === 'claude' ? 'Claude' : backend === 'codex' ? 'Codex' : 'AGY';
   }
@@ -1476,7 +1508,7 @@ Examples:
     const actionValue = data?.action?.value;
     if (!openId || !actionValue) return;
 
-    let parsed: { action: string; threadId?: string; threadName?: string };
+    let parsed: { action: string; threadId?: string; threadName?: string; queueId?: string };
     try {
       parsed = typeof actionValue === 'string' ? JSON.parse(actionValue) : actionValue;
     } catch {
@@ -1506,6 +1538,21 @@ Examples:
         console.error('[FeishuLongConnHandler] Card action new_thread failed:', error);
       }
     }
+
+    if ((parsed.action === 'queue_confirm' || parsed.action === 'queue_cancel') && parsed.queueId && parsed.threadId) {
+      try {
+        await this.onQueueAction?.(
+          openId,
+          parsed.action === 'queue_confirm' ? 'confirm' : 'cancel',
+          parsed.queueId,
+          parsed.threadId,
+        );
+        return { toast: { type: 'success', content: parsed.action === 'queue_confirm' ? 'Queue confirmation sent' : 'Queue request cancelled' } };
+      } catch (error) {
+        console.error('[FeishuLongConnHandler] Queue action failed:', error);
+        return { toast: { type: 'error', content: 'Queue action failed' } };
+      }
+    }
   }
 
   /**
@@ -1517,6 +1564,34 @@ Examples:
     // so error replies fall back to sendMessage (plain text, not threaded).
     const syntheticMessageId = uuidv4();
     await this.handleRegularCommand(openId, syntheticMessageId, content, undefined, pendingNewThread);
+  }
+
+  /** Send a queue decision directly to the CLI and prepare a streaming card for confirmed work. */
+  async sendQueueActionFromCardAction(openId: string, action: 'confirm' | 'cancel', queueId: string, threadId: string): Promise<void> {
+    const binding = await this.bindingManager.getUserBinding(openId);
+    const activeDevice = binding ? await this.bindingManager.getActiveDevice(openId) : null;
+    if (!activeDevice || !this.connectionHub?.isDeviceOnline(activeDevice.deviceId)) {
+      throw new Error('No active online device found');
+    }
+
+    let executionMessageId: string | undefined;
+    if (action === 'confirm') {
+      executionMessageId = uuidv4();
+      const feishuMessageId = await this.sendStreamingStart(openId, '🤔 Queued message confirmed. Waiting for the current task to finish...');
+      this.onStartStreaming?.(executionMessageId, openId, feishuMessageId, activeDevice.deviceId, threadId, false);
+    }
+
+    const controlMessageId = uuidv4();
+    const suffix = executionMessageId ? ` ${executionMessageId}` : '';
+    const success = await this.connectionHub.sendToDevice(activeDevice.deviceId, {
+      type: MessageType.COMMAND,
+      messageId: controlMessageId,
+      timestamp: Date.now(),
+      content: `/queue ${action} ${queueId}${suffix}`,
+      openId,
+      threadId,
+    });
+    if (!success) throw new Error('Failed to send queue action to device');
   }
 
   /**

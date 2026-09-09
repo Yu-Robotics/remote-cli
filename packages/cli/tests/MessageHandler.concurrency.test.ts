@@ -40,6 +40,7 @@ describe('MessageHandler Concurrency', () => {
       setThreadBusy: vi.fn().mockImplementation((id, busy) => { isBusy = busy; }),
       setThreadError: vi.fn(),
       getSummaries: vi.fn().mockReturnValue([]),
+      getBackendKey: vi.fn().mockReturnValue('claude'),
       destroyAll: vi.fn().mockResolvedValue(undefined),
     };
 
@@ -101,14 +102,15 @@ describe('MessageHandler Concurrency', () => {
     // First command should have started execution
     expect(mockExecutor.execute).toHaveBeenCalledTimes(1);
 
-    // Second and third commands should be rejected because thread is busy
+    // Control commands are rejected, while normal messages require queue confirmation.
     expect(mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ error: expect.stringContaining('is busy') }));
+    expect(mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'msg-3', queueConfirmation: expect.any(Object) }));
     
-    // send should be called twice with the busy message
+    // Only the slash command is rejected directly.
     const busyCalls = mockWsClient.send.mock.calls.filter((c: any) => 
       c[0].error && c[0].error.includes('is busy')
     );
-    expect(busyCalls.length).toBe(2);
+    expect(busyCalls.length).toBe(1);
     
     // resetContext shouldn't be called because the /clear command was blocked
     expect(mockExecutor.resetContext).not.toHaveBeenCalled();

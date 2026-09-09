@@ -1855,6 +1855,19 @@ describe('FeishuLongConnHandler', () => {
       expect(result).toEqual({ toast: expect.objectContaining({ content: 'Creating new thread...' }) });
     });
 
+    it('should route queue confirmation actions to the CLI callback', async () => {
+      const onQueueAction = vi.fn().mockResolvedValue(undefined);
+      handler.onQueueAction = onQueueAction;
+
+      const result = await handler.handleCardAction({
+        operator: { open_id: 'ou_123' },
+        action: { value: { action: 'queue_confirm', queueId: 'q-1', threadId: 't1' } },
+      });
+
+      expect(onQueueAction).toHaveBeenCalledWith('ou_123', 'confirm', 'q-1', 't1');
+      expect(result).toEqual({ toast: expect.objectContaining({ content: 'Queue confirmation sent' }) });
+    });
+
     it('should handle new_thread with error', async () => {
       const onCardNewThread = vi.fn().mockRejectedValue(new Error('New failed'));
       handler.onCardNewThread = onCardNewThread;

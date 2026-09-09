@@ -66,6 +66,18 @@ export interface ImageBlock extends ContentBlock {
  */
 export type Attachment = ImageBlock;
 
+/** Confirmation payload for a message waiting to be added to a busy thread queue. */
+export interface QueueConfirmationInfo {
+  id: string;
+  threadId: string;
+  threadName: string;
+  backend: string;
+  cwd: string;
+  preview: string;
+  pendingCount: number;
+  expiresAt: number;
+}
+
 /**
  * Tool use content block
  */
@@ -192,6 +204,8 @@ export interface OutgoingMessage {
   threadName?: string;
   /** Runtime thread summaries (for card display) */
   threads?: ThreadSummary[];
+  /** Queue confirmation requested for a busy thread. */
+  queueConfirmation?: QueueConfirmationInfo;
   /** Current working directory (for response messages) */
   cwd?: string;
   /** Session abbreviation */

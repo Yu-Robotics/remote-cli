@@ -1,6 +1,6 @@
 import { WebSocketClient } from './WebSocketClient';
 import { DirectoryGuard } from '../security/DirectoryGuard';
-import { IncomingMessage, OutgoingMessage, StructuredContent, ToolUseInfo, ToolResultInfo, Attachment } from '../types';
+import { IncomingMessage, OutgoingMessage, StructuredContent, ToolUseInfo, ToolResultInfo, Attachment, QueueConfirmationInfo } from '../types';
 import { ThreadExecutorPool } from '../thread/ThreadExecutorPool';
 import { ThreadManager } from '../thread/ThreadManager';
 import { DEFAULT_THREAD_NAME } from '../thread/types';
@@ -14,6 +14,7 @@ import type { PendingReplace } from '../machines/types';
 import { spawn, execFile } from 'child_process';
 import type { ExecutorConfig } from '../types/config';
 import { backendKeyOf } from '../types/config';
+import { v4 as uuidv4 } from 'uuid';
 
 /**
  * Detected backend information
@@ -23,6 +24,23 @@ interface BackendInfo {
   label: string;
   installed: boolean;
 }
+
+interface QueuedCommand {
+  messageId: string;
+  threadId: string;
+  content: string;
+  attachments?: Attachment[];
+  openId?: string;
+  enqueuedAt: number;
+}
+
+interface PendingQueueConfirmation {
+  info: QueueConfirmationInfo;
+  command: QueuedCommand;
+}
+
+const QUEUE_CONFIRMATION_TTL_MS = 5 * 60 * 1000;
+const MAX_THREAD_QUEUE_LENGTH = 10;
 
 /**
  * Legacy message type for backward compatibility
@@ -50,6 +68,10 @@ export class MessageHandler {
   private notificationAdapter: FeishuNotificationAdapter;
   private machineCommands: MachineCommands;
   private pendingReplaces: Map<string, PendingReplace> = new Map();
+  private readonly threadQueues = new Map<string, QueuedCommand[]>();
+  private readonly pendingQueueConfirmations = new Map<string, PendingQueueConfirmation>();
+  private readonly pausedQueues = new Set<string>();
+  private readonly messageOpenIds = new Map<string, string | undefined>();
 
   constructor(
     wsClient: WebSocketClient,
@@ -116,6 +138,7 @@ export class MessageHandler {
     const { messageId, content, attachments, workingDirectory, openId, isSlashCommand, threadId } = message;
 
     this.currentOpenId = openId;
+    this.messageOpenIds.set(message.messageId, openId);
     this.notificationAdapter.setCurrentOpenId(openId);
 
     // Resolve target thread — fall back to default if not specified
@@ -133,6 +156,11 @@ export class MessageHandler {
 
     const resolvedThreadId = thread.id;
     const executor = this.threadPool.getExecutor(resolvedThreadId);
+
+    if (content?.trim() === '/queue' || content?.trim().startsWith('/queue ')) {
+      await this.handleQueueCommand(messageId, resolvedThreadId, content.trim());
+      return;
+    }
 
     // Backend switching has its own lifecycle handling and must run before the
     // normal command busy flag is acquired.
@@ -184,9 +212,43 @@ export class MessageHandler {
         await this.executePendingReplace(messageId, resolvedThreadId, pendingKey, content);
         return;
       }
+      if (isSlashCommand || content?.trim().startsWith('/')) {
+        this.sendResponse(messageId, resolvedThreadId, {
+          success: false,
+          error: `Thread "${thread.name}" is busy. Send /abort to cancel the running task, or use /queue to inspect queued messages.`,
+        });
+      } else {
+        if ((this.threadQueues.get(resolvedThreadId)?.length ?? 0) >= MAX_THREAD_QUEUE_LENGTH) {
+          this.sendResponse(messageId, resolvedThreadId, {
+            success: false,
+            error: `Thread queue is full (${MAX_THREAD_QUEUE_LENGTH} messages). Use /abort to clear it.`,
+          });
+          return;
+        }
+        const queueConfirmation = this.createQueueConfirmation(
+          resolvedThreadId,
+          thread.name,
+          content!,
+          attachments,
+          openId,
+          messageId,
+          executor,
+        );
+        this.sendResponse(messageId, resolvedThreadId, {
+          success: false,
+          output: `⏳ Thread "${thread.name}" is busy. Confirm whether to add this message to its queue.`,
+          queueConfirmation,
+        });
+      }
+      return;
+    }
+
+    const queueSensitiveCommand = /^\/(?:clear|compact|cd|model|effort)(?:\s|$)/.test(content?.trim() ?? '')
+      || /^\/thread\s+delete(?:\s|$)/.test(content?.trim() ?? '');
+    if (queueSensitiveCommand && this.hasThreadQueueState(resolvedThreadId)) {
       this.sendResponse(messageId, resolvedThreadId, {
         success: false,
-        error: `Thread "${thread.name}" is busy. Send /abort to cancel the running task, or use another thread.`,
+        error: 'This thread has queued messages. Send /abort to clear the current task and queue before changing its execution context.',
       });
       return;
     }
@@ -234,7 +296,10 @@ export class MessageHandler {
 
       const expandedContent = this.expandCommandShortcuts(content!);
       const processedContent = processFileReadContent(expandedContent);
-      await this.executeCommand(messageId, resolvedThreadId, processedContent, executor, attachments);
+      const success = await this.executeCommand(messageId, resolvedThreadId, processedContent, executor, attachments);
+      if (!success && this.threadQueues.has(resolvedThreadId)) {
+        this.pausedQueues.add(resolvedThreadId);
+      }
     } catch (error) {
       this.threadPool.setThreadError(resolvedThreadId, true);
       this.sendResponse(messageId, resolvedThreadId, {
@@ -243,6 +308,7 @@ export class MessageHandler {
       });
     } finally {
       this.threadPool.setThreadBusy(resolvedThreadId, false);
+      if (!this.pausedQueues.has(resolvedThreadId)) void this.startNextQueuedCommand(resolvedThreadId);
     }
   }
 
@@ -255,20 +321,21 @@ export class MessageHandler {
     executor: IExecutor
   ): Promise<void> {
     const wasExecuting = this.threadPool.isThreadBusy(threadId);
+    const clearedCount = this.clearThreadQueue(threadId);
     const aborted = await executor.abort();
 
     if (aborted) {
       this.threadPool.setThreadBusy(threadId, false);
       this.sendResponse(messageId, threadId, {
         success: true,
-        output: wasExecuting
-          ? '✅ Current command has been aborted'
-          : '⚠️ No command was executing, but executor has been reset',
+        output: `${wasExecuting ? '✅ Current command has been aborted' : '⚠️ No command was executing, but executor has been reset'}${clearedCount ? `\n🗑️ Cleared ${clearedCount} queued message${clearedCount === 1 ? '' : 's'}.` : ''}`,
       });
     } else {
       this.sendResponse(messageId, threadId, {
         success: true,
-        output: 'ℹ️ No command is currently executing',
+        output: clearedCount
+          ? `ℹ️ No command is currently executing\n🗑️ Cleared ${clearedCount} queued message${clearedCount === 1 ? '' : 's'}.`
+          : 'ℹ️ No command is currently executing',
       });
     }
   }
@@ -338,6 +405,7 @@ export class MessageHandler {
 - /help - Show this help message
 - /status - Show current status and threads
 - /abort - Abort the currently executing command in this thread
+- /queue [clear|continue|confirm <id>|cancel <id>] - Inspect or manage this thread's command queue
 - /clear - Clear conversation context for this thread
 - /compact - Compress conversation history to reduce context size
 - /cd <directory> - Change working directory for this thread
@@ -552,6 +620,178 @@ You can also use natural language commands to control Claude Code CLI.`,
     }
 
     return false;
+  }
+
+  private createQueueConfirmation(
+    threadId: string,
+    threadName: string,
+    content: string,
+    attachments: Attachment[] | undefined,
+    openId: string | undefined,
+    messageId: string,
+    executor: IExecutor,
+  ): QueueConfirmationInfo {
+    this.removeExpiredQueueConfirmations();
+    const id = uuidv4();
+    const info: QueueConfirmationInfo = {
+      id,
+      threadId,
+      threadName,
+      backend: this.threadPool.getBackendKey(threadId),
+      cwd: executor.getCurrentWorkingDirectory(),
+      preview: content.replace(/\s+/g, ' ').trim().slice(0, 240),
+      pendingCount: this.threadQueues.get(threadId)?.length ?? 0,
+      expiresAt: Date.now() + QUEUE_CONFIRMATION_TTL_MS,
+    };
+    this.pendingQueueConfirmations.set(id, {
+      info,
+      command: { messageId, threadId, content, attachments, openId, enqueuedAt: Date.now() },
+    });
+    setTimeout(() => {
+      const pending = this.pendingQueueConfirmations.get(id);
+      if (pending && pending.info.expiresAt <= Date.now()) this.pendingQueueConfirmations.delete(id);
+    }, QUEUE_CONFIRMATION_TTL_MS).unref?.();
+    return info;
+  }
+
+  private removeExpiredQueueConfirmations(): void {
+    const now = Date.now();
+    for (const [id, pending] of this.pendingQueueConfirmations) {
+      if (pending.info.expiresAt <= now) this.pendingQueueConfirmations.delete(id);
+    }
+  }
+
+  private clearThreadQueue(threadId: string): number {
+    let cleared = this.threadQueues.get(threadId)?.length ?? 0;
+    this.threadQueues.delete(threadId);
+    for (const [id, pending] of this.pendingQueueConfirmations) {
+      if (pending.info.threadId === threadId) {
+        this.pendingQueueConfirmations.delete(id);
+        cleared += 1;
+      }
+    }
+    this.pausedQueues.delete(threadId);
+    return cleared;
+  }
+
+  private clearAllQueues(): number {
+    const threadIds = new Set([
+      ...this.threadQueues.keys(),
+      ...this.pausedQueues,
+      ...Array.from(this.pendingQueueConfirmations.values()).map((pending) => pending.info.threadId),
+    ]);
+    return Array.from(threadIds).reduce((total, threadId) => total + this.clearThreadQueue(threadId), 0);
+  }
+
+  private async handleQueueCommand(messageId: string, threadId: string, trimmed: string): Promise<void> {
+    this.removeExpiredQueueConfirmations();
+    const parts = trimmed.split(/\s+/);
+    const action = parts[1]?.toLowerCase();
+    const id = parts[2];
+
+    if (action === 'confirm' && id) {
+      const pending = this.pendingQueueConfirmations.get(id);
+      const currentCwd = this.threadPool.getExecutor(threadId).getCurrentWorkingDirectory();
+      if (!pending || pending.info.threadId !== threadId || pending.info.expiresAt <= Date.now()
+        || pending.info.backend !== this.threadPool.getBackendKey(threadId) || pending.info.cwd !== currentCwd
+        || (pending.command.openId && pending.command.openId !== this.getMessageOpenId(messageId))) {
+        this.pendingQueueConfirmations.delete(id);
+        this.sendResponse(messageId, threadId, { success: false, error: 'Queue confirmation is no longer valid. The message was not queued.' });
+        return;
+      }
+      this.pendingQueueConfirmations.delete(id);
+      const queue = this.threadQueues.get(threadId) ?? [];
+      if (queue.length >= MAX_THREAD_QUEUE_LENGTH) {
+        this.sendResponse(messageId, threadId, { success: false, error: `This thread queue is full (${MAX_THREAD_QUEUE_LENGTH} messages).` });
+        return;
+      }
+      queue.push({ ...pending.command, messageId: parts[3] || pending.command.messageId });
+      this.threadQueues.set(threadId, queue);
+      this.sendResponse(messageId, threadId, {
+        success: true,
+        output: `✅ Added to queue for ${pending.info.threadName}.\nQueue position: ${queue.length}\nPending messages for this thread: ${queue.length}`,
+      });
+      void this.startNextQueuedCommand(threadId);
+      return;
+    }
+
+    if (action === 'cancel' && id) {
+      const pending = this.pendingQueueConfirmations.get(id);
+      if (pending?.info.threadId === threadId) {
+        this.pendingQueueConfirmations.delete(id);
+        this.sendResponse(messageId, threadId, { success: true, output: '❌ Message was not queued.' });
+      } else {
+        this.sendResponse(messageId, threadId, { success: false, error: 'Queue confirmation is no longer valid.' });
+      }
+      return;
+    }
+
+    if (action === 'clear') {
+      const cleared = this.clearThreadQueue(threadId);
+      this.sendResponse(messageId, threadId, {
+        success: true,
+        output: cleared ? `🗑️ Cleared ${cleared} queued message${cleared === 1 ? '' : 's'}.` : 'ℹ️ This thread queue is empty.',
+      });
+      return;
+    }
+
+    if (action === 'continue') {
+      this.pausedQueues.delete(threadId);
+      this.sendResponse(messageId, threadId, { success: true, output: '▶️ Queue resumed.' });
+      void this.startNextQueuedCommand(threadId);
+      return;
+    }
+
+    const lines = ['📋 Thread queues:'];
+    for (const summary of this.threadPool.getSummaries()) {
+      const queued = this.threadQueues.get(summary.id) ?? [];
+      const pending = Array.from(this.pendingQueueConfirmations.values()).filter((item) => item.info.threadId === summary.id);
+      if (summary.status !== 'running' && queued.length === 0 && pending.length === 0 && !this.pausedQueues.has(summary.id)) continue;
+      lines.push(`\n${summary.name} (${summary.backend ?? 'global'}) — ${summary.status}`);
+      lines.push(`  Confirmed: ${queued.length}; awaiting confirmation: ${pending.length}`);
+      queued.forEach((command, index) => lines.push(`  ${index + 1}. ${command.content.replace(/\s+/g, ' ').slice(0, 160)}`));
+      if (this.pausedQueues.has(summary.id)) lines.push('  ⏸️ Paused after a failed task. Use /queue continue or /abort.');
+    }
+    if (lines.length === 1) lines.push('No active or pending thread queues.');
+    this.sendResponse(messageId, threadId, { success: true, output: lines.join('\n') });
+  }
+
+  private async startNextQueuedCommand(threadId: string): Promise<void> {
+    if (this.threadPool.isThreadBusy(threadId) || this.pausedQueues.has(threadId)) return;
+    const queue = this.threadQueues.get(threadId);
+    const command = queue?.shift();
+    if (!command) {
+      this.threadQueues.delete(threadId);
+      return;
+    }
+    if (queue?.length === 0) this.threadQueues.delete(threadId);
+
+    const thread = this.threadManager.getThread(threadId);
+    if (!thread) return;
+    this.currentOpenId = command.openId;
+    this.messageOpenIds.set(command.messageId, command.openId);
+    this.notificationAdapter.setCurrentOpenId(command.openId);
+    this.threadPool.setThreadBusy(threadId, true);
+    try {
+      const executor = this.threadPool.getExecutor(threadId);
+      await this.threadManager.updateThread(threadId, { lastActiveAt: Date.now() });
+      const processedContent = processFileReadContent(this.expandCommandShortcuts(command.content));
+      const success = await this.executeCommand(command.messageId, threadId, processedContent, executor, command.attachments);
+      if (!success) {
+        this.pausedQueues.add(threadId);
+      }
+    } catch (error) {
+      this.pausedQueues.add(threadId);
+      this.sendResponse(command.messageId, threadId, { success: false, error: error instanceof Error ? error.message : 'Queued command failed' });
+    } finally {
+      this.threadPool.setThreadBusy(threadId, false);
+      if (!this.pausedQueues.has(threadId)) void this.startNextQueuedCommand(threadId);
+    }
+  }
+
+  private hasThreadQueueState(threadId: string): boolean {
+    if ((this.threadQueues.get(threadId)?.length ?? 0) > 0) return true;
+    return Array.from(this.pendingQueueConfirmations.values()).some((pending) => pending.info.threadId === threadId);
   }
 
   /**
@@ -1170,7 +1410,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     content: string,
     executor: IExecutor,
     attachments?: Attachment[]
-  ): Promise<void> {
+  ): Promise<boolean> {
     try {
       const executeOptions = {
         onStream: (chunk: string) => this.sendStreamChunk(messageId, threadId, chunk),
@@ -1202,7 +1442,7 @@ You can also use natural language commands to control Claude Code CLI.`,
               success: false,
               error: `❌ Auto-compact failed: ${compactResult.error}\n\nUse /compact to try again, or /clear to start fresh.`,
             });
-            return;
+            return false;
           }
           this.sendStreamChunk(messageId, threadId, '✅ Compaction done. Retrying your request...\n');
           const retryResult = await executor.execute(content, {
@@ -1214,21 +1454,23 @@ You can also use natural language commands to control Claude Code CLI.`,
             attachments,
           });
           this.sendResponse(messageId, threadId, { success: retryResult.success, error: retryResult.error, threads: this.threadPool.getSummaries() });
-          return;
+          return retryResult.success;
         }
         this.sendResponse(messageId, threadId, {
           success: false,
           error: '❌ Conversation history too long.\n\nUse /compact to compress it, or /clear to start fresh.',
         });
-        return;
+        return false;
       }
 
       this.sendResponse(messageId, threadId, { success: result.success, error: result.error, threads: this.threadPool.getSummaries() });
+      return result.success;
     } catch (error) {
       this.sendResponse(messageId, threadId, {
         success: false,
         error: error instanceof Error ? error.message : 'Execution error',
       });
+      return false;
     }
   }
 
@@ -1259,6 +1501,10 @@ You can also use natural language commands to control Claude Code CLI.`,
 
   // ── Outgoing message helpers ──────────────────────────────────────────────
 
+  private getMessageOpenId(messageId: string): string | undefined {
+    return this.messageOpenIds.get(messageId) ?? this.currentOpenId;
+  }
+
   private sendStreamChunk(messageId: string, threadId: string | undefined, chunk: string): void {
     try {
       this.wsClient.send({
@@ -1266,7 +1512,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         messageId,
         chunk,
         streamType: 'text',
-        openId: this.currentOpenId,
+        openId: this.getMessageOpenId(messageId),
         threadId,
         timestamp: Date.now(),
       });
@@ -1282,7 +1528,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         messageId,
         streamType: 'tool_use',
         toolUse,
-        openId: this.currentOpenId,
+        openId: this.getMessageOpenId(messageId),
         threadId,
         timestamp: Date.now(),
       });
@@ -1298,7 +1544,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         messageId,
         streamType: 'tool_result',
         toolResult,
-        openId: this.currentOpenId,
+        openId: this.getMessageOpenId(messageId),
         threadId,
         timestamp: Date.now(),
       });
@@ -1313,7 +1559,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         type: 'stream',
         messageId,
         streamType: 'redacted_thinking',
-        openId: this.currentOpenId,
+        openId: this.getMessageOpenId(messageId),
         threadId,
         timestamp: Date.now(),
       });
@@ -1329,7 +1575,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         messageId,
         streamType: 'plan_mode',
         planContent,
-        openId: this.currentOpenId,
+        openId: this.getMessageOpenId(messageId),
         threadId,
         timestamp: Date.now(),
       });
@@ -1348,7 +1594,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         type: 'structured',
         messageId,
         structuredContent,
-        openId: this.currentOpenId,
+        openId: this.getMessageOpenId(messageId),
         threadId,
         timestamp: Date.now(),
       } as OutgoingMessage);
@@ -1366,6 +1612,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       error?: string;
       sessionAbbr?: string;
       threads?: import('../thread/types').ThreadSummary[];
+      queueConfirmation?: QueueConfirmationInfo;
     }
   ): void {
     try {
@@ -1386,12 +1633,14 @@ You can also use natural language commands to control Claude Code CLI.`,
         output: result.output,
         error: result.error,
         sessionAbbr: result.sessionAbbr,
-        openId: this.currentOpenId,
+        openId: this.getMessageOpenId(messageId),
         threadId,
         threads: result.threads,
+        queueConfirmation: result.queueConfirmation,
         cwd,
         timestamp: Date.now(),
       });
+      this.messageOpenIds.delete(messageId);
     } catch (error) {
       console.error('Failed to send response:', error);
     }
@@ -1469,9 +1718,10 @@ You can also use natural language commands to control Claude Code CLI.`,
       }
       await this.threadPool.destroyThread(threadId, { deleteData: false });
       await this.threadManager.updateThread(threadId, { backend: undefined });
+      const clearedCount = this.clearThreadQueue(threadId);
       this.sendResponse(messageId, threadId, {
         success: true,
-        output: `✅ Thread backend reset to the global backend (${backendKeyOf(currentType as string)}).`,
+        output: `✅ Thread backend reset to the global backend (${backendKeyOf(currentType as string)}).${clearedCount ? `\n🗑️ Cleared ${clearedCount} queued message${clearedCount === 1 ? '' : 's'}.` : ''}`,
         threads: this.threadPool.getSummaries(),
       });
       return;
@@ -1499,9 +1749,10 @@ You can also use natural language commands to control Claude Code CLI.`,
     if (isThreadOverride) {
       try {
         await this.threadPool.switchThreadBackend(threadId, backendKeyOf(target.id));
+        const clearedCount = this.clearThreadQueue(threadId);
         this.sendResponse(messageId, threadId, {
           success: true,
-          output: `✅ This thread switched to: ${target.label}\n\nUse /backend ${installed.indexOf(target) + 1} to switch all threads, or /backend default @ to follow the global backend again.`,
+          output: `✅ This thread switched to: ${target.label}${clearedCount ? `\n🗑️ Cleared ${clearedCount} queued message${clearedCount === 1 ? '' : 's'}.` : ''}\n\nUse /backend ${installed.indexOf(target) + 1} to switch all threads, or /backend default @ to follow the global backend again.`,
           threads: this.threadPool.getSummaries(),
         });
       } catch (error) {
@@ -1524,10 +1775,11 @@ You can also use natural language commands to control Claude Code CLI.`,
     await this.config.set('executor', newConfig);
     await this.threadPool.switchBackend(newConfig);
     await this.threadManager.clearBackendOverrides();
+    const clearedCount = this.clearAllQueues();
 
     this.sendResponse(messageId, threadId, {
       success: true,
-      output: `✅ Backend switched to: ${target.label}\n\nAll threads will use the new backend for future commands. Conversations on the previous backend are preserved — switch back to resume them.`,
+      output: `✅ Backend switched to: ${target.label}${clearedCount ? `\n🗑️ Cleared ${clearedCount} queued message${clearedCount === 1 ? '' : 's'}.` : ''}\n\nAll threads will use the new backend for future commands. Conversations on the previous backend are preserved — switch back to resume them.`,
       threads: this.threadPool.getSummaries(),
     });
   }

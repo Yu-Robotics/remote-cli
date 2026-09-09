@@ -122,6 +122,7 @@ export interface ResponseMessage extends WSMessage {
     output?: string;
     error?: string;
     cwd?: string;
+    queueConfirmation?: QueueConfirmationInfo;
   };
 }
 
@@ -165,6 +166,18 @@ export interface ImageBlock extends ContentBlock {
  * Attachment for incoming messages
  */
 export type Attachment = ImageBlock;
+
+/** Confirmation payload for a message waiting to be added to a busy thread queue. */
+export interface QueueConfirmationInfo {
+  id: string;
+  threadId: string;
+  threadName: string;
+  backend: string;
+  cwd: string;
+  preview: string;
+  pendingCount: number;
+  expiresAt: number;
+}
 
 // Tool use information
 export interface ToolUseInfo {

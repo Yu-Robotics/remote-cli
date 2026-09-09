@@ -232,7 +232,7 @@ describe('Integration: Message Flow', () => {
       await handler.handleMessage(message2);
 
       expect(wsClient.send).toHaveBeenCalledWith(
-        expect.objectContaining({ type: 'response', messageId: 'msg_009', success: false, error: expect.stringContaining('busy') })
+        expect.objectContaining({ type: 'response', messageId: 'msg_009', success: false, queueConfirmation: expect.any(Object) })
       );
 
       await promise1;
