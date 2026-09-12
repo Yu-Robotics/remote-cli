@@ -46,6 +46,9 @@ export class FeishuLongConnHandler {
   private lastProcessedLengths: Map<string, number> = new Map();
   // Per-message serialization locks to prevent concurrent updates from creating duplicates
   private messageLocks: Map<string, Promise<any>> = new Map();
+  // Prevent repeated clicks on the same queue confirmation card from sending duplicate commands.
+  private queueActionStates = new Map<string, { action: 'confirm' | 'cancel'; processedAt: number }>();
+  private readonly QUEUE_ACTION_STATE_TTL_MS = 24 * 60 * 60 * 1000;
   // Pattern to match tool use separator lines
   private readonly TOOL_USE_PATTERN = /─+ TOOL USE ─+/;
   private readonly TOOL_SEPARATOR_PATTERN = /─{20,}/;
@@ -109,7 +112,7 @@ export class FeishuLongConnHandler {
    */
   onCardNewThread?: (openId: string) => Promise<void>;
   /** Callback invoked when a user confirms or cancels a queued command. */
-  onQueueAction?: (openId: string, action: 'confirm' | 'cancel', queueId: string, threadId: string) => Promise<void>;
+  onQueueAction?: (openId: string, action: 'confirm' | 'cancel', queueId: string, threadId: string, cardMessageId?: string) => Promise<'sent' | 'already_processed'>;
 
   /**
    * Callback invoked after a user switches to a different device.
@@ -1557,12 +1560,16 @@ Examples:
 
     if ((parsed.action === 'queue_confirm' || parsed.action === 'queue_cancel') && parsed.queueId && parsed.threadId) {
       try {
-        await this.onQueueAction?.(
+        const queueActionResult = await this.onQueueAction?.(
           openId,
           parsed.action === 'queue_confirm' ? 'confirm' : 'cancel',
           parsed.queueId,
           parsed.threadId,
+          data?.context?.open_message_id,
         );
+        if (queueActionResult === 'already_processed') {
+          return { toast: { type: 'info', content: 'This queue request was already processed' } };
+        }
         return { toast: { type: 'success', content: parsed.action === 'queue_confirm' ? 'Queue confirmation sent' : 'Queue request cancelled' } };
       } catch (error) {
         console.error('[FeishuLongConnHandler] Queue action failed:', error);
@@ -1583,10 +1590,18 @@ Examples:
   }
 
   /** Send a queue decision directly to the CLI and prepare a streaming card for confirmed work. */
-  async sendQueueActionFromCardAction(openId: string, action: 'confirm' | 'cancel', queueId: string, threadId: string): Promise<void> {
+  async sendQueueActionFromCardAction(openId: string, action: 'confirm' | 'cancel', queueId: string, threadId: string, cardMessageId?: string): Promise<'sent' | 'already_processed'> {
+    this.removeExpiredQueueActionStates();
+    const previousAction = this.queueActionStates.get(queueId);
+    if (previousAction) {
+      return 'already_processed';
+    }
+
+    this.queueActionStates.set(queueId, { action, processedAt: Date.now() });
     const binding = await this.bindingManager.getUserBinding(openId);
     const activeDevice = binding ? await this.bindingManager.getActiveDevice(openId) : null;
     if (!activeDevice || !this.connectionHub?.isDeviceOnline(activeDevice.deviceId)) {
+      this.queueActionStates.delete(queueId);
       throw new Error('No active online device found');
     }
 
@@ -1607,7 +1622,46 @@ Examples:
       openId,
       threadId,
     });
-    if (!success) throw new Error('Failed to send queue action to device');
+    if (!success) {
+      this.queueActionStates.delete(queueId);
+      throw new Error('Failed to send queue action to device');
+    }
+
+    if (cardMessageId) {
+      await this.updateQueueConfirmationCard(cardMessageId, action);
+    }
+    return 'sent';
+  }
+
+  private removeExpiredQueueActionStates(): void {
+    const expiry = Date.now() - this.QUEUE_ACTION_STATE_TTL_MS;
+    for (const [queueId, state] of this.queueActionStates) {
+      if (state.processedAt <= expiry) {
+        this.queueActionStates.delete(queueId);
+      }
+    }
+  }
+
+  private async updateQueueConfirmationCard(cardMessageId: string, action: 'confirm' | 'cancel'): Promise<void> {
+    const content = action === 'confirm'
+      ? '✅ **Added to queue**\n\nThis message has been accepted and will run after the current task finishes.'
+      : '❌ **Queue request cancelled**\n\nThis message was not added to the thread queue.';
+
+    try {
+      await this.withMessageLock(cardMessageId, async () => {
+        await this.client.im.message.patch({
+          path: { message_id: cardMessageId },
+          data: {
+            content: JSON.stringify({
+              schema: '2.0',
+              body: { elements: [{ tag: 'markdown', content }] },
+            }),
+          },
+        });
+      });
+    } catch (error: any) {
+      console.error('[FeishuLongConnHandler] Failed to update queue confirmation card:', error?.message || error);
+    }
   }
 
   /**
