@@ -126,8 +126,8 @@ export class RouterServer {
       await this.feishuLongConnHandler.sendCommandFromCardAction(openId, '/thread new', true);
     };
 
-    this.feishuLongConnHandler.onQueueAction = async (openId, action, queueId, threadId) => {
-      await this.feishuLongConnHandler.sendQueueActionFromCardAction(openId, action, queueId, threadId);
+    this.feishuLongConnHandler.onQueueAction = async (openId, action, queueId, threadId, cardMessageId) => {
+      return this.feishuLongConnHandler.sendQueueActionFromCardAction(openId, action, queueId, threadId, cardMessageId);
     };
 
     // Register callback for device switch — clear thread state tied to the old device

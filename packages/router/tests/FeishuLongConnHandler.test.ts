@@ -1899,10 +1899,56 @@ describe('FeishuLongConnHandler', () => {
       const result = await handler.handleCardAction({
         operator: { open_id: 'ou_123' },
         action: { value: { action: 'queue_confirm', queueId: 'q-1', threadId: 't1' } },
+        context: { open_message_id: 'card-1' },
       });
 
-      expect(onQueueAction).toHaveBeenCalledWith('ou_123', 'confirm', 'q-1', 't1');
+      expect(onQueueAction).toHaveBeenCalledWith('ou_123', 'confirm', 'q-1', 't1', 'card-1');
       expect(result).toEqual({ toast: expect.objectContaining({ content: 'Queue confirmation sent' }) });
+    });
+
+    it('should report repeated queue confirmation clicks as already processed', async () => {
+      const onQueueAction = vi.fn()
+        .mockResolvedValueOnce('sent')
+        .mockResolvedValueOnce('already_processed');
+      handler.onQueueAction = onQueueAction;
+
+      const data = {
+        operator: { open_id: 'ou_123' },
+        action: { value: { action: 'queue_confirm', queueId: 'q-1', threadId: 't1' } },
+        context: { open_message_id: 'card-1' },
+      };
+
+      const firstResult = await handler.handleCardAction(data);
+      const secondResult = await handler.handleCardAction(data);
+
+      expect(onQueueAction).toHaveBeenCalledTimes(2);
+      expect(firstResult).toEqual({ toast: expect.objectContaining({ content: 'Queue confirmation sent' }) });
+      expect(secondResult).toEqual({ toast: expect.objectContaining({ content: 'This queue request was already processed' }) });
+    });
+
+    it('should send a queue action once and update the original card', async () => {
+      mockBindingManager.getUserBinding.mockResolvedValue({});
+      mockBindingManager.getActiveDevice.mockResolvedValue({ deviceId: 'device-1' });
+      mockConnectionHub.isDeviceOnline.mockReturnValue(true);
+      mockConnectionHub.sendToDevice.mockResolvedValue(true);
+      mockClient.im.message.create.mockResolvedValue({ data: { message_id: 'queued-card' } });
+      mockClient.im.message.patch.mockResolvedValue({});
+
+      const firstResult = await handler.sendQueueActionFromCardAction('ou_123', 'confirm', 'q-1', 't1', 'card-1');
+      const secondResult = await handler.sendQueueActionFromCardAction('ou_123', 'confirm', 'q-1', 't1', 'card-1');
+
+      expect(firstResult).toBe('sent');
+      expect(secondResult).toBe('already_processed');
+      expect(mockConnectionHub.sendToDevice).toHaveBeenCalledTimes(1);
+      expect(mockClient.im.message.patch).toHaveBeenCalledWith({
+        path: { message_id: 'card-1' },
+        data: {
+          content: JSON.stringify({
+            schema: '2.0',
+            body: { elements: [{ tag: 'markdown', content: '✅ **Added to queue**\n\nThis message has been accepted and will run after the current task finishes.' }] },
+          }),
+        },
+      });
     });
 
     it('should handle new_thread with error', async () => {
