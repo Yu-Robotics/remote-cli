@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 No unreleased changes.
 
+## [1.6.18] - 2026-09-13
+
+### Fixed
+- Updated the Docker health check to follow the configured `ROUTER_PORT` instead of always probing port `3000`.
+
 ## [1.6.17] - 2026-09-13
 
 ### Fixed
