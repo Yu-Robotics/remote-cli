@@ -80,7 +80,7 @@ docker compose run --rm router config setup
 docker compose up -d
 ```
 
-The interactive setup writes configuration and bindings to the mounted `./data` directory. No App ID or App Secret is required in environment variables. Use `docker compose logs -f router` for logs and `docker compose down` to stop the service.
+The interactive setup writes configuration and bindings to the mounted `./router-data` directory. No App ID or App Secret is required in environment variables. Use `docker compose logs -f router` for logs and `docker compose down` to stop the service.
 
 ## Differences from Redis-based Approach
 

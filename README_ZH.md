@@ -223,14 +223,14 @@ pm2 start remote-cli-router --name router -- start
 # 在仓库根目录执行
 docker compose build
 
-# 交互式配置飞书凭证，并保存到 ./data
+# 交互式配置飞书凭证，并保存到 ./router-data
 docker compose run --rm router config setup
 
 # 后台启动 Router
 docker compose up -d
 ```
 
-配置和绑定关系会保存到 `./data`，因此重建容器后仍然保留。查看 Router 日志：`docker compose logs -f router`；停止服务：`docker compose down`。端口 `3000` 只应开放给可信内网，公网部署时应放在 HTTPS 反向代理之后。
+配置和绑定关系会保存到 `./router-data`，因此重建容器后仍然保留。查看 Router 日志：`docker compose logs -f router`；停止服务：`docker compose down`。端口 `3000` 只应开放给可信内网，公网部署时应放在 HTTPS 反向代理之后。
 
 ### Nginx 配置（生产环境）
 
@@ -571,7 +571,7 @@ Codex 和 AGY 提供原生 effort 控制。Claude Code 自身支持 thinking 和
 飞书 <-> Router（Docker Compose）<-> 各开发者本地 CLI 客户端
 ```
 
-Router 的飞书配置和设备绑定关系保存在持久化的 `./data` 目录中。客户端则在本机保留项目文件、backend 会话，以及 Claude Code/AGY/Codex 的安装和登录状态。除非你明确挂载所有项目目录和 backend 凭证，否则不要把客户端放进 Docker。
+Router 的飞书配置和设备绑定关系保存在持久化的 `./router-data` 目录中。客户端则在本机保留项目文件、backend 会话，以及 Claude Code/AGY/Codex 的安装和登录状态。除非你明确挂载所有项目目录和 backend 凭证，否则不要把客户端放进 Docker。
 
 更新 Compose 部署且不丢失绑定关系：
 
@@ -582,7 +582,7 @@ docker compose up -d
 docker compose logs --tail=100 router
 ```
 
-日常更新不要使用 `docker compose down -v`。升级前建议备份 `./data`，并且只向可信内网开放 Router 端口。
+日常更新不要使用 `docker compose down -v`。升级前建议备份 `./router-data`，并且只向可信内网开放 Router 端口。
 
 ### 保留或主动重置 backend 会话
 

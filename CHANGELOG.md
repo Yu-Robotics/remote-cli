@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 No unreleased changes.
 
+## [1.6.16] - 2026-09-13
+
+### Changed
+- Renamed the Router container data home from `/data` to `/router-data` to make the container path distinct from host data directories.
+- Changed the host-side bind mount from `./data` to `./router-data` for a clearer deployment layout.
+- Existing deployments should move their `data` directory to `router-data` before restarting.
+
 ## [1.6.15] - 2026-09-13
 
 ### Fixed

@@ -226,14 +226,14 @@ Docker is recommended for the shared Router server because it keeps Node.js and 
 # From the repository root
 docker compose build
 
-# Configure Feishu credentials interactively and persist them in ./data
+# Configure Feishu credentials interactively and persist them in ./router-data
 docker compose run --rm router config setup
 
 # Start the Router in the background
 docker compose up -d
 ```
 
-The setup wizard stores configuration and bindings in `./data`, so they survive container recreation. Router logs are available with `docker compose logs -f router`; stop it with `docker compose down`. Open TCP port `3000` only to the trusted internal network, or place the Router behind an HTTPS reverse proxy for public access.
+The setup wizard stores configuration and bindings in `./router-data`, so they survive container recreation. Router logs are available with `docker compose logs -f router`; stop it with `docker compose down`. Open TCP port `3000` only to the trusted internal network, or place the Router behind an HTTPS reverse proxy for public access.
 
 ### Nginx Configuration (Production)
 
@@ -574,7 +574,7 @@ The recommended team topology is one Router on an internal server and one client
 Feishu <-> Router (Docker Compose) <-> local CLI clients
 ```
 
-The Router stores Feishu configuration and device bindings in its persistent `./data` directory. Clients keep project files, backend sessions, and Claude Code/AGY/Codex installations locally. Do not put the client in Docker unless you deliberately mount every project directory and backend credential it needs.
+The Router stores Feishu configuration and device bindings in its persistent `./router-data` directory. Clients keep project files, backend sessions, and Claude Code/AGY/Codex installations locally. Do not put the client in Docker unless you deliberately mount every project directory and backend credential it needs.
 
 Update a Compose deployment without losing bindings:
 
@@ -585,7 +585,7 @@ docker compose up -d
 docker compose logs --tail=100 router
 ```
 
-Do not use `docker compose down -v` for routine updates. Back up `./data` before upgrades and restrict the exposed Router port to the trusted network.
+Do not use `docker compose down -v` for routine updates. Back up `./router-data` before upgrades and restrict the exposed Router port to the trusted network.
 
 ### Preserve or intentionally reset backend sessions
 

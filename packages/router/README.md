@@ -62,7 +62,7 @@ docker compose run --rm router config setup
 docker compose up -d
 ```
 
-The `./data` bind mount stores `config.json`, `bindings.json`, and the PID file under the container's `/data` home directory. Use `docker compose logs -f router` to inspect logs and `docker compose down` to stop the service. Run local clients directly on their host machines rather than in Docker so they can access project files and local AI CLI binaries.
+The `./router-data` bind mount stores Router data under the container's `/router-data` home directory (`/router-data/.remote-cli-router/`). Use `docker compose logs -f router` to inspect logs and `docker compose down` to stop the service. Run local clients directly on their host machines rather than in Docker so they can access project files and local AI CLI binaries.
 
 ## Commands
 
@@ -129,7 +129,7 @@ When a client thread is busy, the Router sends a confirmation card before accept
 
 ## Expert Usage
 
-The recommended production layout is Docker Compose on an internal server with persistent `./data` storage:
+The recommended production layout is Docker Compose on an internal server with persistent `./router-data` storage:
 
 ```bash
 git pull --ff-only
@@ -138,7 +138,7 @@ docker compose up -d
 docker compose logs --tail=100 router
 ```
 
-Back up `./data` before upgrades and do not use `docker compose down -v` for routine updates. Restrict the Router port to the trusted network. When diagnosing routing issues, inspect `/health` and the Router logs before restarting clients.
+Back up `./router-data` before upgrades and do not use `docker compose down -v` for routine updates. Restrict the Router port to the trusted network. When diagnosing routing issues, inspect `/health` and the Router logs before restarting clients.
 
 ## Documentation
 

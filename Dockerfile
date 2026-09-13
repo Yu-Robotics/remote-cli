@@ -15,7 +15,7 @@ FROM node:22-bookworm-slim AS runtime
 
 WORKDIR /app
 ENV NODE_ENV=production
-ENV HOME=/data
+ENV HOME=/router-data
 
 COPY package.json package-lock.json ./
 COPY packages/cli/package.json packages/cli/package.json
@@ -25,7 +25,7 @@ RUN npm ci --omit=dev --workspace @yu_robotics/remote-cli-router --include-works
 COPY --from=build /app/packages/router/dist packages/router/dist
 COPY --from=build /app/packages/router/bin packages/router/bin
 
-RUN mkdir -p /data && chown -R node:node /app /data
+RUN mkdir -p /router-data && chown -R node:node /app /router-data
 USER node
 
 EXPOSE 3000
