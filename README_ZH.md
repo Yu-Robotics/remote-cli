@@ -510,6 +510,92 @@ remote-cli 自身不处理的斜杠命令会转发给当前 AI 后端，各后�
    /commit
    ```
 
+## 进阶用法
+
+### 用 thread 隔离不同工作目标
+
+建议为不同项目、故障或目标分别创建 thread，避免把无关任务混在同一个上下文中：
+
+```text
+/thread new api-debug
+/cd ~/workspace/api
+/thread new docs
+/cd ~/workspace/docs
+```
+
+直接回复某张已经完成的飞书卡片，消息会继续路由到该卡片所属的 thread。`/thread list` 可以查看所有 thread 的状态，`/status` 可以快速查看当前 backend、模型、工作目录和队列。
+
+### 组合使用全局和按线程 backend
+
+当所有 thread 都要切换时使用 `/backend <index>`；只有当前 thread 需要特殊 backend 时使用 `/backend <index> @`：
+
+```text
+/backend
+/backend 2 @
+/backend default @
+```
+
+不带 `@` 的形式会修改全局 backend，并清除各 thread 的独立覆盖。带 `@` 的形式只创建或修改当前 thread 的覆盖。例如，一个 thread 可以使用 Codex 修改仓库，另一个 thread 同时使用 Claude Code 做审查。不同 thread 可以并行执行，但单个 thread 内部仍然按顺序执行。
+
+### 把队列当作显式交接机制
+
+thread 忙碌时，普通消息会先生成确认卡片，不会静默进入队列。只有确认消息确实属于这个 thread 时，才点击加入队列。确认后卡片会变成“已加入”或“已取消”状态，重复点击会被忽略。使用 `/queue` 查看待确认和已确认消息，使用 `/queue clear` 清除它们，使用 `/abort` 中止当前任务并清空该 thread 的队列。
+
+为了避免上下文混乱，建议等当前任务和队列都处理完后，再发送 `/model`、`/effort`、`/cd`、`/compact` 或 `/clear` 等会改变执行上下文的命令。这些命令不会排在普通消息后面执行。
+
+### 有意识地选择模型和思考等级
+
+在比较不同 backend 时，可以将模型和思考等级限制在当前 thread：
+
+```text
+/model
+/model <name>
+/effort
+/effort medium
+/effort auto
+```
+
+Codex 和 AGY 提供原生 effort 控制。Claude Code 自身支持 thinking 和 effort，但 remote-cli 内建的 `/effort` 目前会提示 Claude 暂不支持。不同 backend 的模型列表和 effort 等级可能不同，切换后可以用 `/status` 或 `/context` 确认实际状态。
+
+## 资深用法
+
+### 为团队维护一个共享 Router
+
+推荐的团队拓扑是一台内网服务器运行 Router，每位开发者在自己的机器上运行一个客户端：
+
+```text
+飞书 <-> Router（Docker Compose）<-> 各开发者本地 CLI 客户端
+```
+
+Router 的飞书配置和设备绑定关系保存在持久化的 `./data` 目录中。客户端则在本机保留项目文件、backend 会话，以及 Claude Code/AGY/Codex 的安装和登录状态。除非你明确挂载所有项目目录和 backend 凭证，否则不要把客户端放进 Docker。
+
+更新 Compose 部署且不丢失绑定关系：
+
+```bash
+git pull --ff-only
+docker compose build --pull
+docker compose up -d
+docker compose logs --tail=100 router
+```
+
+日常更新不要使用 `docker compose down -v`。升级前建议备份 `./data`，并且只向可信内网开放 Router 端口。
+
+### 保留或主动重置 backend 会话
+
+每个 thread 都分别保存 Claude、AGY 和 Codex 的会话状态。切换 backend 不会删除之前 backend 的会话，因此可以切回并继续之前的上下文。需要全新上下文时使用 `/clear`；希望某个 thread 重新跟随全局 backend 时使用 `/backend default @`。
+
+### 系统化排查远程任务
+
+任务看起来卡住时，建议按以下顺序排查：
+
+1. 使用 `/status` 确认当前 thread、backend、工作目录和运行状态。
+2. 使用 `/context` 查看会话和队列详情。
+3. 使用 `/queue` 区分已经确认的消息和仍在等待卡片确认的消息。
+4. 只有确定要中止当前任务并丢弃该 thread 队列时，才使用 `/abort`。
+5. 在 Router 服务器上查看 `docker compose logs -f router` 或对应的服务管理器日志。
+
+这样可以区分 backend 执行问题、Router 路由问题、旧卡片状态问题，以及消息根本没有确认入队的情况。
+
 ## 安全机制
 
 ### 工作目录选择
@@ -692,3 +778,7 @@ npm run router:dev
 
 - 问题反馈：请通过项目的 Issue 页面提交
 - 讨论交流：请通过项目的 Discussion 页面参与
+
+## 更新日志
+
+详细版本记录和用户可见变更请查看 [CHANGELOG.md](CHANGELOG.md)。

@@ -115,6 +115,27 @@ All commands/skills supported by local Claude Code or Gemini CLI are passed thro
 - `/test` - Run tests
 - And all other built-in AI engine commands
 
+## Advanced Usage
+
+Use one thread per project or task so each thread keeps its own working directory, backend session, model, and queue. Use `/backend <index>` for a global switch, or `/backend <index> @` to override only the current thread. `/backend default @` removes that override.
+
+When a thread is busy, ordinary messages require confirmation before they enter its queue. Use `/queue` to inspect pending work, `/queue clear` to discard queued messages, and `/abort` to stop the active task and clear that thread's queue. Context-changing commands such as `/model`, `/effort`, `/cd`, `/compact`, and `/clear` are handled separately rather than queued as ordinary messages.
+
+## Expert Usage
+
+For a shared deployment, run the Router with Docker Compose on an internal server and run one CLI client on each developer machine. Keep project directories and Claude Code, AGY, or Codex credentials on the client machine; the Router persists its configuration and bindings in `./data`.
+
+To update a Router deployment without losing bindings:
+
+```bash
+git pull --ff-only
+docker compose build --pull
+docker compose up -d
+docker compose logs --tail=100 router
+```
+
+When diagnosing a task, check `/status`, then `/context`, then `/queue`. Use `/abort` only when you intend to discard the active task and queued messages.
+
 ## Security
 
 - **Directory whitelisting**: Only explicitly allowed directories are accessible
@@ -129,3 +150,7 @@ For full documentation including router server deployment, see the [project READ
 ## License
 
 MIT
+
+## Changelog
+
+See the project [CHANGELOG.md](../../CHANGELOG.md) for release notes and user-visible changes.

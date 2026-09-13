@@ -513,6 +513,92 @@ The built-in commands (`/help`, `/status`, `/context`, `/skills`, `/clear`, `/co
    /commit
    ```
 
+## Advanced Usage
+
+### Use threads as independent workspaces
+
+Create one thread per project, incident, or goal instead of mixing unrelated work in one conversation:
+
+```text
+/thread new api-debug
+/cd ~/workspace/api
+/thread new docs
+/cd ~/workspace/docs
+```
+
+Replying to a completed Feishu card routes the message back to that card's thread. `/thread list` shows the current state of every thread, while `/status` gives a compact overview of active backends, models, working directories, and queues.
+
+### Combine global and per-thread backends
+
+Use `/backend <index>` when the whole workspace should move together. Use `/backend <index> @` when only the current thread needs a different backend:
+
+```text
+/backend
+/backend 2 @
+/backend default @
+```
+
+The first form changes the global backend and clears per-thread overrides. The `@` form creates or changes only the current thread's override. This is useful when one thread uses Codex for repository changes while another stays on Claude Code for review. Different threads can run at the same time, but a thread itself remains sequential.
+
+### Use the queue as an explicit handoff
+
+When a thread is busy, a normal message first creates a confirmation card instead of entering the queue silently. Confirm only when you know the message belongs to that thread. The card changes to an accepted or cancelled state after the decision, and repeated clicks are ignored. Use `/queue` to inspect pending confirmations and confirmed messages, `/queue clear` to discard them, and `/abort` to stop the active task and clear the thread queue.
+
+For a safer workflow, send context-changing commands such as `/model`, `/effort`, `/cd`, `/compact`, or `/clear` only after the current task and queue have finished. These commands are intentionally not queued behind ordinary messages.
+
+### Select model and reasoning effort deliberately
+
+Keep model and effort choices local to the thread when comparing backends:
+
+```text
+/model
+/model <name>
+/effort
+/effort medium
+/effort auto
+```
+
+Codex and AGY expose native effort controls. Claude Code has native thinking and effort controls in its own CLI, but remote-cli's built-in `/effort` currently reports Claude as unsupported. Model catalogs and accepted effort levels vary by backend, so verify the result with `/status` or `/context` after switching.
+
+## Expert Usage
+
+### Operate one shared Router for a team
+
+The recommended team topology is one Router on an internal server and one client process on each developer machine:
+
+```text
+Feishu <-> Router (Docker Compose) <-> local CLI clients
+```
+
+The Router stores Feishu configuration and device bindings in its persistent `./data` directory. Clients keep project files, backend sessions, and Claude Code/AGY/Codex installations locally. Do not put the client in Docker unless you deliberately mount every project directory and backend credential it needs.
+
+Update a Compose deployment without losing bindings:
+
+```bash
+git pull --ff-only
+docker compose build --pull
+docker compose up -d
+docker compose logs --tail=100 router
+```
+
+Do not use `docker compose down -v` for routine updates. Back up `./data` before upgrades and restrict the exposed Router port to the trusted network.
+
+### Preserve or intentionally reset backend sessions
+
+Each thread maintains separate session state for Claude, AGY, and Codex. Switching backends does not delete the previous backend's session, so a thread can return to its earlier conversation. Use `/clear` when you intentionally want a fresh context; use `/backend default @` when a thread should follow future global backend changes.
+
+### Diagnose a remote task systematically
+
+When a task appears stuck, inspect in this order:
+
+1. Run `/status` to verify the active thread, backend, working directory, and running state.
+2. Run `/context` to inspect session and queue details.
+3. Run `/queue` to distinguish confirmed messages from requests still waiting for card confirmation.
+4. Use `/abort` only when you intend to stop the current task and discard that thread's queue.
+5. On the Router host, inspect `docker compose logs -f router` or the service manager logs.
+
+This separates a backend execution problem from a routing problem, a stale card, or a message that was never confirmed into the queue.
+
 ## Security
 
 ### Working Directory Selection
@@ -696,3 +782,7 @@ npm run router:dev
 
 - Issues: Please submit via the project's Issue page
 - Discussions: Please participate via the project's Discussion page
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for release notes and user-visible changes.
