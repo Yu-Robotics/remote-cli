@@ -51,6 +51,18 @@ remote-cli-router start
 pm2 start remote-cli-router --name router -- start
 ```
 
+### Docker Compose (Recommended for Shared Routers)
+
+From the repository root, build the Router image and run the interactive setup once:
+
+```bash
+docker compose build
+docker compose run --rm router config setup
+docker compose up -d
+```
+
+The `./data` bind mount stores `config.json`, `bindings.json`, and the PID file under the container's `/data` home directory. Use `docker compose logs -f router` to inspect logs and `docker compose down` to stop the service. Run local clients directly on their host machines rather than in Docker so they can access project files and local AI CLI binaries.
+
 ## Commands
 
 | Command | Description |

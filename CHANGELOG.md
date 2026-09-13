@@ -7,9 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+No unreleased changes.
+
+## [1.6.14] - 2026-09-13
+
 ### Added
-- Comprehensive test coverage for MessageHandler and ThreadExecutorPool
-- Improved Gemini quota fallback detection logic
+- Docker and Docker Compose deployment for the shared Router server.
+- Interactive container setup that persists Feishu credentials and device bindings in `./data`.
+- Docker health checks and documented container log management.
+
+### Changed
+- Recommended running the Router in Docker while keeping local clients on their host machines so they can access local project files and AI CLI binaries.
+
+## [1.6.12] - 2026-09-12
+
+### Added
+- Queue confirmation cards now update after a queue request is processed.
+- Repeated clicks on the same queue confirmation are detected and do not resend the command.
+
+## [1.6.11] - 2026-09-10
+
+### Fixed
+- Replaced the unsupported Card 2.0 `action` container in queue confirmation cards with supported button layouts.
+- Queue confirmation cards no longer remain stuck in the Processing state because of invalid card payloads.
+
+## [1.6.10] - 2026-09-09
+
+### Added
+- Added `/status`, `/context`, and `/skills` commands across supported backends.
+- Added queue diagnostics to status and context output.
+
+## [1.6.9] - 2026-09-09
+
+### Added
+- Added per-thread backend overrides using `/backend <index> @`.
+- Added `/backend default @` to return a thread to the global backend.
+- Threads using different backends can execute concurrently.
+
+## [1.6.8] - 2026-09-08
+
+### Fixed
+- Enabled the experimental Codex app-server APIs required for native model, reasoning effort, compaction, and interruption controls.
+
+## [1.6.7] - 2026-09-08
+
+### Added
+- Added Codex reasoning effort controls and prioritized Codex in the backend list.
+- Added AGY reasoning effort support.
+
+### Fixed
+- Coalesced streaming card updates and improved final thread-switch card refresh behavior.
+
+## [1.6.1] - 2026-09-07
+
+### Added
+- Added the persistent Codex app-server backend with session resume and streaming support.
+- Added backend-aware model selection and per-thread reasoning effort storage.
+
+### Fixed
+- Removed the global Claude Code security hook that caused repeated PreToolUse errors.
 
 ## [1.1.39] - 2026-03-20
 
@@ -81,7 +137,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Claude Code integration via Agent SDK
 - Comprehensive test suite (80%+ coverage)
 
-[Unreleased]: https://github.com/xiaoyu/remote-cli/compare/v1.1.39...HEAD
+[Unreleased]: https://github.com/xiaoyu/remote-cli/compare/v1.6.14...HEAD
+[1.6.14]: https://github.com/xiaoyu/remote-cli/compare/v1.6.12...v1.6.14
+[1.6.12]: https://github.com/xiaoyu/remote-cli/compare/v1.6.11...v1.6.12
+[1.6.11]: https://github.com/xiaoyu/remote-cli/compare/v1.6.10...v1.6.11
+[1.6.10]: https://github.com/xiaoyu/remote-cli/compare/v1.6.9...v1.6.10
+[1.6.9]: https://github.com/xiaoyu/remote-cli/compare/v1.6.8...v1.6.9
+[1.6.8]: https://github.com/xiaoyu/remote-cli/compare/v1.6.7...v1.6.8
+[1.6.7]: https://github.com/xiaoyu/remote-cli/compare/v1.6.1...v1.6.7
+[1.6.1]: https://github.com/xiaoyu/remote-cli/compare/v1.1.39...v1.6.1
 [1.1.39]: https://github.com/xiaoyu/remote-cli/compare/v1.0.3...v1.1.39
 [1.0.3]: https://github.com/xiaoyu/remote-cli/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/xiaoyu/remote-cli/compare/v1.0.1...v1.0.2
