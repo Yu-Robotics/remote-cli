@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 No unreleased changes.
 
+## [1.6.15] - 2026-09-13
+
+### Fixed
+- Fixed Feishu image downloads by using the SDK resource `writeFile` API before forwarding images to supported backends.
+- Added a Router regression test for the Feishu image resource download path.
+
 ## [1.6.14] - 2026-09-13
 
 ### Added
