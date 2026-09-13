@@ -18,6 +18,8 @@ Remote control your [Claude Code](https://claude.ai/code) CLI from anywhere usin
 - **Claude Code CLI** installed and configured
 - Access to a Feishu (Lark) bot connected to a [remote-cli-router](https://www.npmjs.com/package/@yu_robotics/remote-cli-router) server
 
+The client is normally installed and run directly on the developer's machine rather than in Docker, so it can access local project directories and the installed AI CLI binaries. Docker is recommended for the shared Router server instead.
+
 ## Installation
 
 ```bash

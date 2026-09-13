@@ -133,6 +133,18 @@ pm2 startup
 pm2 save
 ```
 
+### Docker Compose (recommended for a shared Router)
+
+From the repository root:
+
+```bash
+docker compose build
+docker compose run --rm router config setup
+docker compose up -d
+```
+
+The setup wizard stores Router configuration and user-device bindings in `./data`. View logs with `docker compose logs -f router` and stop the service with `docker compose down`. Keep local clients outside Docker so they retain access to local project directories and AI CLI installations.
+
 ## Architecture
 
 The router server consists of:

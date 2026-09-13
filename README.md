@@ -218,6 +218,23 @@ remote-cli-router start
 pm2 start remote-cli-router --name router -- start
 ```
 
+### Docker Compose Deployment (Recommended for Shared Routers)
+
+Docker is recommended for the shared Router server because it keeps Node.js and Router dependencies isolated. The local client should not normally run in Docker: it needs direct access to local project files and the installed Claude Code, AGY, or Codex CLI binaries.
+
+```bash
+# From the repository root
+docker compose build
+
+# Configure Feishu credentials interactively and persist them in ./data
+docker compose run --rm router config setup
+
+# Start the Router in the background
+docker compose up -d
+```
+
+The setup wizard stores configuration and bindings in `./data`, so they survive container recreation. Router logs are available with `docker compose logs -f router`; stop it with `docker compose down`. Open TCP port `3000` only to the trusted internal network, or place the Router behind an HTTPS reverse proxy for public access.
+
 ### Nginx Configuration (Production)
 
 If using a domain with HTTPS, configure Nginx as a reverse proxy:
