@@ -143,7 +143,7 @@ docker compose run --rm router config setup
 docker compose up -d
 ```
 
-The setup wizard stores Router configuration and user-device bindings in `./data`. View logs with `docker compose logs -f router` and stop the service with `docker compose down`. Keep local clients outside Docker so they retain access to local project directories and AI CLI installations.
+The setup wizard stores Router configuration and user-device bindings in `./router-data`. View logs with `docker compose logs -f router` and stop the service with `docker compose down`. Keep local clients outside Docker so they retain access to local project directories and AI CLI installations.
 
 ## Architecture
 
