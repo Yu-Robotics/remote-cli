@@ -226,6 +226,10 @@ Docker is recommended for the shared Router server because it keeps Node.js and 
 # From the repository root
 docker compose build
 
+# Optional: choose a host/container port before setup
+cp .env.example .env
+# Edit .env and set ROUTER_PORT if 3000 is already in use
+
 # Configure Feishu credentials interactively and persist them in ./router-data
 docker compose run --rm router config setup
 
@@ -233,7 +237,7 @@ docker compose run --rm router config setup
 docker compose up -d
 ```
 
-The setup wizard stores configuration and bindings in `./router-data`, so they survive container recreation. Router logs are available with `docker compose logs -f router`; stop it with `docker compose down`. Open TCP port `3000` only to the trusted internal network, or place the Router behind an HTTPS reverse proxy for public access.
+The setup wizard stores configuration and bindings in `./router-data`, so they survive container recreation. `ROUTER_PORT` controls both the host port and the Router's container port, and must match the port entered during setup. Router logs are available with `docker compose logs -f router`; stop it with `docker compose down`. Open the configured port only to the trusted internal network, or place the Router behind an HTTPS reverse proxy for public access.
 
 ### Nginx Configuration (Production)
 

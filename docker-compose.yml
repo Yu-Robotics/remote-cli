@@ -7,6 +7,6 @@ services:
     container_name: remote-cli-router
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "${ROUTER_PORT:-3000}:${ROUTER_PORT:-3000}"
     volumes:
       - ./router-data:/router-data

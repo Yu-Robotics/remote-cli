@@ -223,6 +223,10 @@ pm2 start remote-cli-router --name router -- start
 # 在仓库根目录执行
 docker compose build
 
+# 可选：在配置前选择宿主机和容器使用的端口
+cp .env.example .env
+# 如果 3000 已被占用，请编辑 .env 设置 ROUTER_PORT
+
 # 交互式配置飞书凭证，并保存到 ./router-data
 docker compose run --rm router config setup
 
@@ -230,7 +234,7 @@ docker compose run --rm router config setup
 docker compose up -d
 ```
 
-配置和绑定关系会保存到 `./router-data`，因此重建容器后仍然保留。查看 Router 日志：`docker compose logs -f router`；停止服务：`docker compose down`。端口 `3000` 只应开放给可信内网，公网部署时应放在 HTTPS 反向代理之后。
+配置和绑定关系会保存到 `./router-data`，因此重建容器后仍然保留。`ROUTER_PORT` 同时控制宿主机端口和 Router 容器端口，必须与配置向导中填写的端口一致。查看 Router 日志：`docker compose logs -f router`；停止服务：`docker compose down`。只应向可信内网开放配置的端口，公网部署时应放在 HTTPS 反向代理之后。
 
 ### Nginx 配置（生产环境）
 
