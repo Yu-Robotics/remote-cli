@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 No unreleased changes.
 
+## [1.6.17] - 2026-09-13
+
+### Fixed
+- Made the Docker Compose Router port configurable through `ROUTER_PORT`.
+- Kept the host port and container port synchronized so changing the setup port no longer leaves Compose bound to port `3000`.
+
 ## [1.6.16] - 2026-09-13
 
 ### Changed
