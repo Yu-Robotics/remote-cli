@@ -276,6 +276,18 @@ export function createMarkdownElement(content: string): FeishuCardElement {
 }
 
 /**
+ * Create a Feishu Card 2.0 image element from an uploaded image key.
+ */
+export function createImageElement(imageKey: string): FeishuCardElement {
+  return {
+    tag: 'img',
+    img_key: imageKey,
+    mode: 'fit_horizontal',
+    alt: { tag: 'plain_text', content: 'Generated image' },
+  };
+}
+
+/**
  * Create a Feishu Card 2.0 tool use element with collapsible panel
  */
 export function createToolUseElement(toolInfo: ToolUseInfo): FeishuCardElement[] {

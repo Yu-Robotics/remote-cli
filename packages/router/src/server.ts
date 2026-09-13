@@ -8,8 +8,8 @@ import { JsonStore } from './storage/JsonStore';
 import { FeishuLongConnHandler } from './feishu/FeishuLongConnHandler';
 import { ConnectionHub } from './websocket/ConnectionHub';
 import { BindingManager } from './binding/BindingManager';
-import { MessageType, ToolUseInfo, ToolResultInfo, TaskNotificationInfo, PROTOCOL_VERSION, MIN_SUPPORTED_CLI_VERSION, ROUTER_VERSION, ThreadSummary, QueueConfirmationInfo } from './types';
-import { FeishuCardElement, createToolUseElement, createToolResultElement, createMarkdownElement, createRedactedThinkingElement, createPlanModeElement, createTaskNotificationElement } from './utils/ToolFormatter';
+import { MessageType, ToolUseInfo, ToolResultInfo, TaskNotificationInfo, PROTOCOL_VERSION, MIN_SUPPORTED_CLI_VERSION, ROUTER_VERSION, ThreadSummary, QueueConfirmationInfo, ImageBlock } from './types';
+import { FeishuCardElement, createToolUseElement, createToolResultElement, createMarkdownElement, createRedactedThinkingElement, createPlanModeElement, createTaskNotificationElement, createImageElement } from './utils/ToolFormatter';
 
 interface StreamingMessageState {
   openId: string;
@@ -454,6 +454,11 @@ export class RouterServer {
                       await this.handlePlanMode(message.messageId, message.openId, message.planContent);
                     }
                     break;
+                  case 'image':
+                    if (message.image) {
+                      await this.handleImage(message.messageId, message.openId, message.image);
+                    }
+                    break;
                 }
               }
               break;
@@ -789,6 +794,37 @@ export class RouterServer {
     streamData.createdAt = Date.now();
 
     // Immediately update card to show the plan section
+    if (streamData.feishuMessageId) {
+      await this.feishuLongConnHandler.updateStreamingMessage(
+        streamData.feishuMessageId,
+        streamData.elements,
+        openId
+      );
+      streamData.hasUpdated = true;
+    }
+  }
+
+  private async handleImage(messageId: string, openId: string, image: ImageBlock): Promise<void> {
+    console.log(`[RouterServer] Received generated image for ${messageId}`);
+    const streamData = this.streamingMessages.get(messageId);
+    if (!streamData || streamData.finalizing) return;
+    if (!image || image.type !== 'image' || typeof image.data !== 'string' || typeof image.mimeType !== 'string') return;
+
+    const imageKey = await this.feishuLongConnHandler.uploadImage(image.data, image.mimeType);
+    if (!imageKey) {
+      streamData.elements.push(createMarkdownElement('⚠️ Generated image could not be uploaded to Feishu.'));
+      return;
+    }
+
+    if (streamData.currentTextContent.trim()) {
+      streamData.elements.push(createMarkdownElement(streamData.currentTextContent));
+      streamData.currentTextContent = '';
+      streamData.lastRenderedTextLength = 0;
+    }
+    streamData.updatePending = false;
+    streamData.elements.push(createImageElement(imageKey));
+    streamData.createdAt = Date.now();
+
     if (streamData.feishuMessageId) {
       await this.feishuLongConnHandler.updateStreamingMessage(
         streamData.feishuMessageId,

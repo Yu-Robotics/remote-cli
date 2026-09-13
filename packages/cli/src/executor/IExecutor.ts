@@ -1,4 +1,4 @@
-import { ToolUseInfo, ToolResultInfo, Attachment } from '../types';
+import { ToolUseInfo, ToolResultInfo, Attachment, ImageBlock } from '../types';
 
 export interface ExecuteOptions {
   onStream?: (chunk: string) => void;
@@ -6,6 +6,7 @@ export interface ExecuteOptions {
   onToolResult?: (toolResult: ToolResultInfo) => void;
   onRedactedThinking?: () => void;
   onPlanMode?: (planContent: string) => void;
+  onImage?: (image: ImageBlock) => void;
   timeout?: number;
   /** Optional attachments (e.g. images) */
   attachments?: Attachment[];

@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { DirectoryGuard } from '../security/DirectoryGuard';
-import type { Attachment } from '../types';
+import type { Attachment, ImageBlock } from '../types';
 import type { ExecuteOptions, ExecuteResult, ExecutorModelInfo, IExecutor } from './IExecutor';
 import { AppServerMessage, CodexAppServerClient } from './CodexAppServerClient';
 
@@ -629,6 +629,9 @@ export class CodexAppServerExecutor implements IExecutor {
       case 'plan':
         if (typeof item.text === 'string' && item.text) active.options.onPlanMode?.(item.text);
         break;
+      case 'imageGeneration':
+        this.handleGeneratedImage(active, item);
+        break;
       default:
         break;
     }
@@ -663,6 +666,26 @@ export class CodexAppServerExecutor implements IExecutor {
     if (active.emittedTools.has(id)) return;
     active.emittedTools.add(id);
     active.options.onToolUse?.({ id, name, input });
+  }
+
+  private handleGeneratedImage(active: ActiveTurn, item: any): void {
+    if (item.status !== 'completed' || typeof item.result !== 'string' || !item.result) return;
+
+    let data = item.result;
+    let mimeType = typeof item.mimeType === 'string' ? item.mimeType : 'image/png';
+    const dataUrlMatch = data.match(/^data:(image\/[a-z0-9.+-]+);base64,(.+)$/i);
+    if (dataUrlMatch) {
+      mimeType = dataUrlMatch[1];
+      data = dataUrlMatch[2];
+    }
+
+    if (!/^[a-z0-9+/]+={0,2}$/i.test(data) || data.length % 4 !== 0) {
+      console.warn('[CodexAppServer] Ignoring imageGeneration result with unsupported format');
+      return;
+    }
+
+    const image: ImageBlock = { type: 'image', data, mimeType };
+    active.options.onImage?.(image);
   }
 
   private completeActive(result: ExecuteResult): void {

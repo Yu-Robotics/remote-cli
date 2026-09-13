@@ -300,6 +300,22 @@ describe('CodexAppServerExecutor', () => {
     expect(onToolResult).toHaveBeenCalledTimes(4);
   });
 
+  it('forwards completed imageGeneration items as image callbacks', async () => {
+    const onImage = vi.fn();
+    const running = executor.execute('generate an image', { onImage });
+    await vi.waitFor(() => expect(transport.requests.some((request) => request.method === 'turn/start')).toBe(true));
+
+    transport.emit({ method: 'item/completed', params: {
+      threadId: 'codex-thread-1',
+      turnId: 'turn-1',
+      item: { type: 'imageGeneration', id: 'image-1', status: 'completed', result: 'aGVsbG8=', mimeType: 'image/png' },
+    } });
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+
+    await running;
+    expect(onImage).toHaveBeenCalledWith({ type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' });
+  });
+
   it('exposes a safe retry signal for structured context errors before side effects', async () => {
     const running = executor.execute('large prompt', {});
     await vi.waitFor(() => expect(transport.requests.some((request) => request.method === 'turn/start')).toBe(true));
