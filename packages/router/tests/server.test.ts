@@ -30,6 +30,7 @@ vi.mock('../src/utils/ToolFormatter', () => ({
   createMarkdownElement: vi.fn((text) => ({ tag: 'markdown', content: text })),
   createRedactedThinkingElement: vi.fn(() => []),
   createPlanModeElement: vi.fn(() => []),
+  createImageElement: vi.fn((imageKey) => ({ tag: 'img', img_key: imageKey })),
 }));
 
 describe('RouterServer', () => {
@@ -95,6 +96,7 @@ describe('RouterServer', () => {
       handleCardAction: vi.fn().mockResolvedValue({ success: true }),
       sendMessage: vi.fn().mockResolvedValue(undefined),
       updateStreamingMessage: vi.fn().mockResolvedValue(undefined),
+      uploadImage: vi.fn().mockResolvedValue('img_generated_123'),
       finalizeStreamingMessage: vi.fn().mockResolvedValue(undefined),
       sendCommandFromCardAction: vi.fn().mockResolvedValue(undefined),
     };
@@ -664,6 +666,28 @@ describe('RouterServer', () => {
       planContent: 'my plan'
     })));
     
+    expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenCalled();
+  });
+
+  it('should upload and render WebSocket stream images', async () => {
+    await server.start();
+    const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
+    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
+    onConnection(mockWs, { socket: { remoteAddress: '1' } });
+
+    const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
+    onStartStreaming('m1', 'u1', 'f1', 'd1');
+
+    const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
+    await onMessage(Buffer.from(JSON.stringify({
+      type: 'stream',
+      streamType: 'image',
+      messageId: 'm1',
+      openId: 'u1',
+      image: { type: 'image', data: Buffer.from('image-data').toString('base64'), mimeType: 'image/png' },
+    })));
+
+    expect(mockFeishuHandler.uploadImage).toHaveBeenCalledWith(Buffer.from('image-data').toString('base64'), 'image/png');
     expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenCalled();
   });
 

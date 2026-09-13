@@ -50,6 +50,9 @@ describe('FeishuLongConnHandler', () => {
         },
         messageResource: {
           get: vi.fn()
+        },
+        image: {
+          create: vi.fn()
         }
       }
     };
@@ -1229,6 +1232,17 @@ describe('FeishuLongConnHandler', () => {
   });
 
   describe('handleMessageEvent', () => {
+    it('uploads generated images for card rendering', async () => {
+      mockClient.im.image.create.mockResolvedValue({ image_key: 'img_generated_123' });
+
+      await expect(handler.uploadImage(Buffer.from('image-data').toString('base64'), 'image/png'))
+        .resolves.toBe('img_generated_123');
+
+      expect(mockClient.im.image.create).toHaveBeenCalledWith({
+        data: { image_type: 'message', image: Buffer.from('image-data') },
+      });
+    });
+
     it('downloads image resources through the SDK writeFile API', async () => {
       const imageData = Buffer.from('test-image-data');
       const writeFile = vi.fn().mockImplementation((filePath: string) => fs.writeFile(filePath, imageData));

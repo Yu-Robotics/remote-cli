@@ -1243,6 +1243,31 @@ Examples:
   }
 
   /**
+   * Upload a generated image for use in a Feishu card.
+   */
+  async uploadImage(data: string, mimeType: string): Promise<string | null> {
+    try {
+      const image = Buffer.from(data, 'base64');
+      if (image.length === 0 || image.length > 10 * 1024 * 1024) {
+        console.error('[FeishuHandler] Generated image exceeds the 10MB upload limit');
+        return null;
+      }
+      const supportedTypes = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/tiff', 'image/bmp', 'image/x-icon']);
+      if (!supportedTypes.has(mimeType.toLowerCase())) {
+        console.error(`[FeishuHandler] Unsupported generated image type: ${mimeType}`);
+        return null;
+      }
+      const result = await this.client.im.image.create({
+        data: { image_type: 'message', image },
+      });
+      return result?.image_key || null;
+    } catch (error: any) {
+      console.error('[FeishuHandler] Failed to upload generated image:', error?.message || error);
+      return null;
+    }
+  }
+
+  /**
    * Update streaming message content
    * Automatically creates new messages if content exceeds Feishu's size limit
    *

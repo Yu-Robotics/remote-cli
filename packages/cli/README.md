@@ -8,7 +8,7 @@ Remote control your [Claude Code](https://claude.ai/code) CLI from anywhere usin
 - **Secure**: Directory whitelisting, command filtering, and device authentication
 - **Mobile-Optimized**: Simplified commands and rich text formatting for Feishu
 - **Multi-Backend Support**: Supports Claude Code and Gemini CLI
-- **Image Input**: Forward Feishu images to Claude Persistent and Codex App Server backends
+- **Image Input and Output**: Forward Feishu images to Claude Persistent and Codex App Server backends, and forward Codex App Server generated images back through Router
 - **Multi-session (Threads)**: Create independent chat threads to parallelize tasks
 - **Remote Machine Management**: Control remote servers or Docker via SSH
 - **Persistent Process**: Long-running AI process with bidirectional streaming
