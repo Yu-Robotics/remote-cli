@@ -5,6 +5,8 @@ import { ConnectionHub } from '../websocket/ConnectionHub';
 import { MAX_THREADS, MessageType, ThreadSummary, Attachment, QueueConfirmationInfo } from '../types';
 import { JsonStore } from '../storage/JsonStore';
 import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 
 /**
  * Feishu Long Connection Handler configuration
@@ -832,10 +834,11 @@ Examples:
    * Download image from Feishu and return as base64 string
    */
   private async downloadFeishuImage(messageId: string, imageKey: string): Promise<string | null> {
+    let temporaryDirectory: string | undefined;
     try {
       console.log(`[FeishuHandler] Downloading image resource: messageId=${messageId}, imageKey=${imageKey}`);
-      
-      const response = await this.client.im.messageResource.get({
+
+      const resource = await this.client.im.messageResource.get({
         path: {
           message_id: messageId,
           file_key: imageKey,
@@ -845,16 +848,22 @@ Examples:
         }
       });
 
-      if (!response) {
+      if (!resource) {
         throw new Error('Empty response from Feishu SDK');
       }
 
-      // Feishu SDK returns a readable stream for resources
-      const buffer = await this.streamToBuffer(response as any);
+      temporaryDirectory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'remote-cli-feishu-image-'));
+      const temporaryPath = path.join(temporaryDirectory, 'attachment');
+      await resource.writeFile(temporaryPath);
+      const buffer = await fs.promises.readFile(temporaryPath);
       return buffer.toString('base64');
     } catch (error: any) {
       console.error('[FeishuHandler] Failed to download Feishu image:', error?.message || error);
       return null;
+    } finally {
+      if (temporaryDirectory) {
+        await fs.promises.rm(temporaryDirectory, { recursive: true, force: true }).catch(() => undefined);
+      }
     }
   }
 
