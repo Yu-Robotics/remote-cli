@@ -3,6 +3,7 @@ import { FeishuLongConnHandler } from '../src/feishu/FeishuLongConnHandler';
 import { BindingManager } from '../src/binding/BindingManager';
 import { ConnectionHub } from '../src/websocket/ConnectionHub';
 import * as lark from '@larksuiteoapi/node-sdk';
+import * as fs from 'fs/promises';
 
 // Mock dependencies
 vi.mock('../src/binding/BindingManager');
@@ -1228,6 +1229,22 @@ describe('FeishuLongConnHandler', () => {
   });
 
   describe('handleMessageEvent', () => {
+    it('downloads image resources through the SDK writeFile API', async () => {
+      const imageData = Buffer.from('test-image-data');
+      const writeFile = vi.fn().mockImplementation((filePath: string) => fs.writeFile(filePath, imageData));
+      mockClient.im.messageResource.get.mockResolvedValue({ writeFile });
+
+      const encoded = await (handler as any).downloadFeishuImage('msg_image_123', 'img_key_123');
+
+      expect(encoded).toBe(imageData.toString('base64'));
+      expect(writeFile).toHaveBeenCalledOnce();
+      expect(mockClient.im.messageResource.get).toHaveBeenCalledWith({
+        path: { message_id: 'msg_image_123', file_key: 'img_key_123' },
+        params: { type: 'image' },
+      });
+      await expect(fs.access(writeFile.mock.calls[0][0])).rejects.toThrow();
+    });
+
     it('should ignore non-text/post messages', async () => {
       const logSpy = vi.spyOn(console, 'log');
       const data = {

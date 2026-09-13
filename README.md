@@ -442,6 +442,10 @@ Each thread executes one command at a time because Claude Code, AGY, and Codex s
 
 `/queue` lists active and pending queues. `/queue clear` removes confirmed and awaiting-confirmation messages for the current thread. `/abort` stops the current task and clears that thread's queue. Backend or execution-context changes are rejected while a thread is busy, and a successful backend switch clears affected queues. If a queued task fails, its thread queue pauses; use `/queue continue` to resume or `/abort` to discard the remaining messages. Queues are in-memory and are discarded on service restart.
 
+### Image Input
+
+You can send a standalone image message to the Feishu bot. remote-cli downloads the image resource and forwards it to the active Claude Persistent or Codex App Server backend. AGY and the legacy Codex exec transport currently accept text only and will not process image attachments. Ordinary file attachments and images embedded in rich-text posts are not supported yet.
+
 ### Models and Reasoning Effort
 
 `/model` and `/effort` apply to the current thread and are stored separately for each backend:

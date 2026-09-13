@@ -439,6 +439,10 @@ Backend index 使用 `/backend` 显示的顺序（安装后通常为 Claude Code
 
 `/queue` 会列出正在执行和等待中的队列。`/queue clear` 清除当前 thread 中已确认和等待确认的消息。`/abort` 会中止当前任务并清空该 thread 的队列。thread 忙碌时不允许切换 backend 或修改执行上下文；成功切换 backend 后会清除受影响的队列。如果排队任务失败，该 thread 的队列会暂停；可以使用 `/queue continue` 继续，或使用 `/abort` 丢弃剩余消息。队列只保存在内存中，服务重启后会丢失。
 
+### 图片输入
+
+可以直接向飞书机器人发送单独的图片消息。remote-cli 会下载图片资源，并转发给当前的 Claude Persistent 或 Codex App Server 后端。AGY 和旧版 Codex exec transport 当前只接受文本，不会处理图片附件。普通文件附件以及富文本消息中嵌入的图片暂不支持。
+
 ### 模型与思考等级
 
 `/model` 和 `/effort` 作用于当前线程，并且会按 backend 分别保存：
