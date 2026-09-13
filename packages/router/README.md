@@ -120,6 +120,25 @@ curl https://your-domain.com/health
 # {"status":"ok","timestamp":1234567890,"connections":0}
 ```
 
+## Advanced Usage
+
+Use one Router for multiple trusted clients. Each client connects from the developer's machine, while the Router owns Feishu configuration, device bindings, routing, and thread switch state. A thread can override its backend with `/backend <index> @`; `/backend <index>` changes the global backend and clears per-thread overrides.
+
+When a client thread is busy, the Router sends a confirmation card before accepting another message into its queue. `/queue` shows queue state, `/queue clear` discards queued messages, and `/abort` stops the active task and clears that thread's queue.
+
+## Expert Usage
+
+The recommended production layout is Docker Compose on an internal server with persistent `./data` storage:
+
+```bash
+git pull --ff-only
+docker compose build --pull
+docker compose up -d
+docker compose logs --tail=100 router
+```
+
+Back up `./data` before upgrades and do not use `docker compose down -v` for routine updates. Restrict the Router port to the trusted network. When diagnosing routing issues, inspect `/health` and the Router logs before restarting clients.
+
 ## Documentation
 
 For full documentation, see the [project README](https://github.com/xiaoyu/remote-cli#readme).
@@ -127,3 +146,7 @@ For full documentation, see the [project README](https://github.com/xiaoyu/remot
 ## License
 
 MIT
+
+## Changelog
+
+See the project [CHANGELOG.md](../../CHANGELOG.md) for release notes and user-visible changes.
