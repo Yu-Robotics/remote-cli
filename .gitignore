@@ -4,6 +4,7 @@ dist/
 .DS_Store
 .env
 .env.local
+router-data/
 *.tsbuildinfo
 coverage/
 .vitest/
