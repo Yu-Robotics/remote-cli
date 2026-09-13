@@ -1,0 +1,12 @@
+services:
+  router:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: remote-cli-router:local
+    container_name: remote-cli-router
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/data
