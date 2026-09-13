@@ -447,6 +447,8 @@ Backend index 使用 `/backend` 显示的顺序（安装后通常为 Claude Code
 
 可以直接向飞书机器人发送单独的图片消息。remote-cli 会下载图片资源，并转发给当前的 Claude Persistent 或 Codex App Server 后端。AGY 和旧版 Codex exec transport 当前只接受文本，不会处理图片附件。普通文件附件以及富文本消息中嵌入的图片暂不支持。
 
+Codex App Server 生成的图片也会转发回飞书。Codex 通过 app-server 协议返回生成图片，CLI 将图片发送给 Router，Router 上传到飞书，并在原有的 Card 2.0 响应中显示。该功能需要 CLI 和 Router 都升级到支持图片转发的版本。只升级 Router 是兼容的，但旧 CLI 不会生成或发送图片事件；只升级 CLI 也不会破坏兼容性，但旧 Router 会忽略可选的图片流消息，仍然显示文本响应。
+
 ### 模型与思考等级
 
 `/model` 和 `/effort` 作用于当前线程，并且会按 backend 分别保存：

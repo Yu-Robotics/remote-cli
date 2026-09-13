@@ -1,6 +1,6 @@
 import { WebSocketClient } from './WebSocketClient';
 import { DirectoryGuard } from '../security/DirectoryGuard';
-import { IncomingMessage, OutgoingMessage, StructuredContent, ToolUseInfo, ToolResultInfo, Attachment, QueueConfirmationInfo } from '../types';
+import { IncomingMessage, OutgoingMessage, StructuredContent, ToolUseInfo, ToolResultInfo, Attachment, ImageBlock, QueueConfirmationInfo } from '../types';
 import { ThreadExecutorPool } from '../thread/ThreadExecutorPool';
 import { ThreadManager } from '../thread/ThreadManager';
 import { DEFAULT_THREAD_NAME } from '../thread/types';
@@ -1509,6 +1509,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         onToolResult: (toolResult: ToolResultInfo) => this.sendToolResult(messageId, threadId, toolResult),
         onRedactedThinking: () => this.sendRedactedThinking(messageId, threadId),
         onPlanMode: (planContent: string) => this.sendPlanMode(messageId, threadId, planContent),
+        onImage: (image: ImageBlock) => this.sendImage(messageId, threadId, image),
         attachments,
       };
       let result = await executor.execute(content, executeOptions);
@@ -1542,6 +1543,7 @@ You can also use natural language commands to control Claude Code CLI.`,
             onToolResult: (toolResult: ToolResultInfo) => this.sendToolResult(messageId, threadId, toolResult),
             onRedactedThinking: () => this.sendRedactedThinking(messageId, threadId),
             onPlanMode: (planContent: string) => this.sendPlanMode(messageId, threadId, planContent),
+            onImage: (image: ImageBlock) => this.sendImage(messageId, threadId, image),
             attachments,
           });
           this.sendResponse(messageId, threadId, { success: retryResult.success, error: retryResult.error, threads: this.threadPool.getSummaries() });
@@ -1672,6 +1674,22 @@ You can also use natural language commands to control Claude Code CLI.`,
       });
     } catch (error) {
       console.error('Failed to send plan mode:', error);
+    }
+  }
+
+  private sendImage(messageId: string, threadId: string | undefined, image: ImageBlock): void {
+    try {
+      this.wsClient.send({
+        type: 'stream',
+        messageId,
+        streamType: 'image',
+        image,
+        openId: this.getMessageOpenId(messageId),
+        threadId,
+        timestamp: Date.now(),
+      });
+    } catch (error) {
+      console.error('Failed to send generated image:', error);
     }
   }
 

@@ -149,7 +149,7 @@ export interface IncomingMessage {
 /**
  * Stream message types
  */
-export type StreamType = 'text' | 'tool_use' | 'tool_result' | 'redacted_thinking' | 'plan_mode';
+export type StreamType = 'text' | 'tool_use' | 'tool_result' | 'redacted_thinking' | 'plan_mode' | 'image';
 
 /**
  * Background task notification payload (Claude Code 2.x)
@@ -196,6 +196,8 @@ export interface OutgoingMessage {
   toolResult?: ToolResultInfo;
   /** Plan content (when streamType === 'plan_mode') */
   planContent?: string;
+  /** Generated image content (when streamType === 'image') */
+  image?: ImageBlock;
   /** Background task notification (when type === 'task_notification') */
   taskNotification?: TaskNotificationInfo;
   /** Thread ID that produced this output (optional — for multi-thread routing) */

@@ -450,6 +450,8 @@ Each thread executes one command at a time because Claude Code, AGY, and Codex s
 
 You can send a standalone image message to the Feishu bot. remote-cli downloads the image resource and forwards it to the active Claude Persistent or Codex App Server backend. AGY and the legacy Codex exec transport currently accept text only and will not process image attachments. Ordinary file attachments and images embedded in rich-text posts are not supported yet.
 
+Codex App Server generated images are also forwarded back to Feishu. Codex emits the generated image through its app-server protocol; the CLI sends it to Router, Router uploads it to Feishu, and the image is rendered in the existing Card 2.0 response. This requires both CLI and Router versions with image forwarding support. Upgrading only Router is backward-compatible, but an older CLI will not generate or send image events; upgrading only CLI is also safe, but an older Router will ignore the optional image stream and still show the text response.
+
 ### Models and Reasoning Effort
 
 `/model` and `/effort` apply to the current thread and are stored separately for each backend:
@@ -756,6 +758,7 @@ working-directory changes, backend switches, and service restarts by resuming
 the persisted Codex thread id. `/model` queries app-server's model catalog,
 `/compact` uses native thread compaction, `/abort` interrupts the active turn,
 and image messages are sent as Codex image inputs.
+Generated Codex images are returned to Feishu when both the CLI and Router support image forwarding.
 
 To temporarily use the legacy one-shot transport for troubleshooting:
 

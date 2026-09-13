@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 No unreleased changes.
 
+## [1.6.19] - 2026-09-13
+
+### Added
+- Added Codex app-server generated image forwarding from the CLI to Router.
+- Added Feishu Card 2.0 image rendering for generated images.
+- Added regression coverage for Codex image events, Feishu uploads, and Router forwarding.
+
 ## [1.6.18] - 2026-09-13
 
 ### Fixed
