@@ -18,6 +18,8 @@ import ora, { type Ora } from 'ora';
 export interface StartCommandOptions {
   /** Run as daemon */
   daemon?: boolean;
+  /** Do not prompt for interactive startup confirmations */
+  nonInteractive?: boolean;
 }
 
 /**
@@ -87,7 +89,7 @@ export function promptYesNo(question: string): Promise<boolean> {
  * the local CLI, prompt the user whether to continue or abort.
  * Returns false if the user chooses to abort.
  */
-export async function checkServerVersion(serverUrl: string, spinner?: Ora): Promise<boolean> {
+export async function checkServerVersion(serverUrl: string, spinner?: Ora, nonInteractive = false): Promise<boolean> {
   try {
     const response = await axios.get<{ success: boolean; version: string }>(
       `${serverUrl}/api/version`,
@@ -108,6 +110,10 @@ export async function checkServerVersion(serverUrl: string, spinner?: Ora): Prom
       console.log(`   The router has been upgraded. It is recommended to upgrade your CLI:`);
       console.log(`   npm install -g @yu_robotics/remote-cli`);
       console.log('');
+      if (nonInteractive) {
+        console.log('   Continuing without prompting because startup is non-interactive.');
+        return true;
+      }
       const proceed = await promptYesNo('Continue with the current version? (y/n): ');
       if (!proceed) {
         console.log('Aborted. Please upgrade and try again.');
@@ -175,7 +181,7 @@ export async function startCommand(
 
     // Check for newer router version — blocking prompt if outdated
     spinner.text = 'Checking server version...';
-    const shouldContinue = await checkServerVersion(serverUrl, spinner);
+    const shouldContinue = await checkServerVersion(serverUrl, spinner, options.nonInteractive);
     if (!shouldContinue) {
       spinner.fail('Startup aborted by user');
       return { success: false, error: 'Startup aborted: please upgrade remote-cli to the latest version.' };
