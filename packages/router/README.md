@@ -9,6 +9,7 @@ The router server acts as a bridge between Feishu messaging and developer machin
 - **User-device binding** via Feishu bot commands
 - **Message routing** between Feishu and connected CLI clients
 - **Image message forwarding** to supported local backends and generated Codex images back to Feishu Card 2.0
+- **Client service management** is handled by the local CLI; the Router remains a separate long-running server process
 - **WebSocket connections** from local clients
 - **Feishu long connection** for receiving and sending messages
 
