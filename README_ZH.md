@@ -135,6 +135,9 @@ remote-cli config add-dir ~/projects
 # 启动服务
 remote-cli start
 
+# 在 macOS 或 Linux 上安装自动启动
+remote-cli service install
+
 # 现在将绑定码发送给飞书机器人
 # 然后就可以用手机开始编程了！
 ```
@@ -147,6 +150,18 @@ remote-cli start
 - **npm** 或 **yarn** 包管理器
 - **Claude Code CLI**、**AGY CLI**（Antigravity）或 **Codex CLI**（OpenAI）——至少安装并配置其中一个
 - 可访问的**飞书机器人**（团队应部署一个路由服务器）
+
+### 客户端自动启动
+
+初始化完成后，可以安装 macOS 或 Linux 的用户级自动启动服务：
+
+```bash
+remote-cli service install
+remote-cli service status
+remote-cli service uninstall
+```
+
+安装器会自动记录当前 Node.js 可执行文件、CLI 入口、`HOME`、`PATH` 和日志路径。macOS 使用 `LaunchAgent`，Linux 使用 `systemd --user`。服务以当前用户运行，不使用 root，因此 backend 登录信息和项目目录权限应与手动启动一致。Linux 默认在用户登录后启动；如果希望服务器重启后、登录前也启动，可以明确执行 `loginctl enable-linger "$USER"`。
 
 ## 路由服务器部署
 

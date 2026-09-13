@@ -138,6 +138,9 @@ remote-cli config add-dir ~/projects
 # Start the service
 remote-cli start
 
+# Install automatic startup for macOS or Linux
+remote-cli service install
+
 # Now send the binding code to your Feishu bot
 # And start coding from your phone!
 ```
@@ -150,6 +153,18 @@ Before you begin, ensure you have:
 - **npm** or **yarn** package manager
 - **Claude Code CLI**, **AGY CLI** (Antigravity), or **Codex CLI** (OpenAI) — at least one installed and configured
 - Access to a **Feishu (Lark) bot** (your team should deploy a router server)
+
+### Automatic Client Startup
+
+After initialization, install a user-level startup service on macOS or Linux:
+
+```bash
+remote-cli service install
+remote-cli service status
+remote-cli service uninstall
+```
+
+The installer captures the current Node.js executable, CLI entry point, `HOME`, `PATH`, and log paths. macOS uses a `LaunchAgent`; Linux uses a `systemd --user` service. The service runs as the current user, not root, so backend credentials and project access remain consistent with manual startup. On Linux, it starts after user login by default. To start it before login after reboot, enable user lingering explicitly with `loginctl enable-linger "$USER"`.
 
 ## Router Server Deployment
 

@@ -182,6 +182,15 @@ describe('start command', () => {
       expect(result.success).toBe(true);
       expect(result.daemonMode).toBe(false);
     });
+
+    it('should skip version prompts in non-interactive mode', async () => {
+      mockReadlineAnswer = 'n';
+      vi.mocked(axios.get).mockResolvedValue({ data: { success: true, version: '99.0.0' } });
+
+      const result = await startCommand({ daemon: true, nonInteractive: true });
+
+      expect(result.success).toBe(true);
+    });
   });
 
   describe('connection handling', () => {
