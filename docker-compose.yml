@@ -6,6 +6,8 @@ services:
     image: remote-cli-router:local
     container_name: remote-cli-router
     restart: unless-stopped
+    environment:
+      ROUTER_PORT: "${ROUTER_PORT:-3000}"
     ports:
       - "${ROUTER_PORT:-3000}:${ROUTER_PORT:-3000}"
     volumes:
