@@ -6,6 +6,7 @@ import { startCommand } from './commands/start';
 import { stopCommand } from './commands/stop';
 import { statusCommand } from './commands/status';
 import { configCommand, ConfigAction } from './commands/config';
+import { serviceCommand, ServiceAction } from './commands/service';
 import chalk from 'chalk';
 import path from 'path';
 import fs from 'fs';
@@ -69,10 +70,12 @@ program
   .command('start')
   .description('Start the remote CLI service')
   .option('-d, --daemon', 'Run as background daemon')
+  .option('--non-interactive', 'Do not prompt during automated startup')
   .action(async (options) => {
     try {
       const result = await startCommand({
         daemon: options.daemon,
+        nonInteractive: options.nonInteractive,
       });
 
       if (result.success) {
@@ -195,6 +198,46 @@ program
       process.exit(1);
     }
   });
+
+/**
+ * User-level service management command
+ */
+const service = program
+  .command('service')
+  .description('Manage automatic startup for the remote CLI client');
+
+for (const action of ['install', 'uninstall', 'status'] as ServiceAction[]) {
+  service
+    .command(action)
+    .description(`${action} the user-level remote CLI service`)
+    .option('--json', 'Output as JSON')
+    .action(async (options) => {
+      try {
+        const result = await serviceCommand({ action });
+        if (!result.success || !result.status) {
+          console.error(chalk.red('❌ Service command failed:'), result.error);
+          process.exit(1);
+        }
+        if (options.json) {
+          console.log(JSON.stringify(result.status, null, 2));
+          return;
+        }
+        const status = result.status;
+        console.log(chalk.blue('⚙️  Remote CLI User Service\n'));
+        console.log(chalk.gray('Platform:'), status.platform);
+        console.log(chalk.gray('Service:'), status.serviceName);
+        console.log(chalk.gray('Installed:'), status.installed ? chalk.green('yes') : chalk.yellow('no'));
+        console.log(chalk.gray('Running:'), status.running ? chalk.green('yes') : chalk.red('no'));
+        console.log(chalk.gray('Enabled:'), status.enabled ? chalk.green('yes') : chalk.yellow('no'));
+        console.log(chalk.gray('Path:'), status.servicePath);
+        if (status.pid) console.log(chalk.gray('PID:'), status.pid);
+        if (status.detail) console.log(chalk.gray('Detail:'), status.detail);
+      } catch (error) {
+        console.error(chalk.red('❌ Error:'), error);
+        process.exit(1);
+      }
+    });
+}
 
 /**
  * Config command

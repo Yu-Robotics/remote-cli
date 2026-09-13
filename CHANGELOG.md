@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 No unreleased changes.
 
+## [1.6.20] - 2026-09-13
+
+### Added
+- Added `remote-cli service install`, `service uninstall`, and `service status` for macOS LaunchAgents and Linux systemd user services.
+- Service installation captures the current Node.js path, CLI entry point, HOME, PATH, and log paths so automatic startup uses the same user context.
+- Automated service startup uses non-interactive version checks and restarts on failure.
+
 ## [1.6.19] - 2026-09-13
 
 ### Added

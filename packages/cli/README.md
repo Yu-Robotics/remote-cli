@@ -69,6 +69,9 @@ Help me fix TypeScript errors in ~/projects/my-app
 | `remote-cli start` | Start the background service |
 | `remote-cli stop` | Stop the service |
 | `remote-cli status` | Check service status |
+| `remote-cli service install` | Install automatic startup for macOS or Linux |
+| `remote-cli service uninstall` | Remove automatic startup |
+| `remote-cli service status` | Check the user-level startup service |
 | `remote-cli config show` | View configuration |
 | `remote-cli config add-dir <path>` | Add allowed directory |
 
