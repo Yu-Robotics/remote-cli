@@ -124,7 +124,7 @@ When a thread is busy, ordinary messages require confirmation before they enter 
 
 ## Expert Usage
 
-For a shared deployment, run the Router with Docker Compose on an internal server and run one CLI client on each developer machine. Keep project directories and Claude Code, AGY, or Codex credentials on the client machine; the Router persists its configuration and bindings in `./data`.
+For a shared deployment, run the Router with Docker Compose on an internal server and run one CLI client on each developer machine. Keep project directories and Claude Code, AGY, or Codex credentials on the client machine; the Router persists its configuration and bindings in `./router-data`.
 
 To update a Router deployment without losing bindings:
 
