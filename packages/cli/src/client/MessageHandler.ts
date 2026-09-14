@@ -42,6 +42,12 @@ interface PendingQueueConfirmation {
   command: QueuedCommand;
 }
 
+interface ActiveThreadOperation {
+  token: symbol;
+  done: Promise<void>;
+  resolveDone: () => void;
+}
+
 const QUEUE_CONFIRMATION_TTL_MS = 5 * 60 * 1000;
 const MAX_THREAD_QUEUE_LENGTH = 10;
 
@@ -75,6 +81,8 @@ export class MessageHandler {
   private readonly pendingQueueConfirmations = new Map<string, PendingQueueConfirmation>();
   private readonly pausedQueues = new Set<string>();
   private readonly messageOpenIds = new Map<string, string | undefined>();
+  private readonly activeThreadOperations = new Map<string, ActiveThreadOperation>();
+  private readonly abortOperations = new Map<string, Promise<void>>();
 
   constructor(
     wsClient: WebSocketClient,
@@ -160,6 +168,25 @@ export class MessageHandler {
     const resolvedThreadId = thread.id;
     const executor = this.threadPool.getExecutor(resolvedThreadId);
 
+    // Handle /abort for this specific thread (bypasses busy check)
+    if (content?.trim() === '/abort') {
+      await this.handleAbortCommand(messageId, resolvedThreadId, executor);
+      return;
+    }
+
+    const abortOperation = this.abortOperations.get(resolvedThreadId);
+    if (abortOperation) {
+      this.sendStreamChunk(messageId, resolvedThreadId, '⏳ Waiting for the current abort to finish...\n');
+      await abortOperation;
+      if (this.isDestroyed) {
+        this.sendResponse(messageId, resolvedThreadId, {
+          success: false,
+          error: 'Message handler stopped while waiting for abort cleanup.',
+        });
+        return;
+      }
+    }
+
     if (content?.trim() === '/queue' || content?.trim().startsWith('/queue ')) {
       await this.handleQueueCommand(messageId, resolvedThreadId, content.trim());
       return;
@@ -176,12 +203,6 @@ export class MessageHandler {
         return;
       }
       await this.handleBackendCommand(messageId, resolvedThreadId, content.trim());
-      return;
-    }
-
-    // Handle /abort for this specific thread (bypasses busy check)
-    if (content?.trim() === '/abort') {
-      await this.handleAbortCommand(messageId, resolvedThreadId, executor);
       return;
     }
 
@@ -255,7 +276,7 @@ export class MessageHandler {
       });
       return;
     }
-    this.threadPool.setThreadBusy(resolvedThreadId, true);
+    const operationToken = this.beginThreadOperation(resolvedThreadId);
 
     try {
       // Validate and set working directory if provided
@@ -310,8 +331,9 @@ export class MessageHandler {
         error: error instanceof Error ? error.message : 'Unknown error',
       });
     } finally {
-      this.threadPool.setThreadBusy(resolvedThreadId, false);
-      if (!this.pausedQueues.has(resolvedThreadId)) void this.startNextQueuedCommand(resolvedThreadId);
+      if (this.finishThreadOperation(resolvedThreadId, operationToken) && !this.pausedQueues.has(resolvedThreadId)) {
+        void this.startNextQueuedCommand(resolvedThreadId);
+      }
     }
   }
 
@@ -323,12 +345,41 @@ export class MessageHandler {
     threadId: string,
     executor: IExecutor
   ): Promise<void> {
+    const existingAbort = this.abortOperations.get(threadId);
+    if (existingAbort) {
+      await existingAbort;
+      this.sendResponse(messageId, threadId, {
+        success: true,
+        output: 'ℹ️ The abort operation has already completed.',
+      });
+      return;
+    }
+
     const wasExecuting = this.threadPool.isThreadBusy(threadId);
     const clearedCount = this.clearThreadQueue(threadId);
-    const aborted = await executor.abort();
+    const activeOperation = this.activeThreadOperations.get(threadId);
+    let aborted = false;
+    const operation = (async () => {
+      aborted = await executor.abort();
+      if (activeOperation) await activeOperation.done;
+    })();
+    const barrier = operation.then(() => undefined, () => undefined);
+    this.abortOperations.set(threadId, barrier);
+
+    try {
+      await operation;
+    } catch (error) {
+      this.sendResponse(messageId, threadId, {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to abort command',
+      });
+      return;
+    } finally {
+      if (this.abortOperations.get(threadId) === barrier) this.abortOperations.delete(threadId);
+    }
 
     if (aborted) {
-      this.threadPool.setThreadBusy(threadId, false);
+      if (!activeOperation) this.threadPool.setThreadBusy(threadId, false);
       this.sendResponse(messageId, threadId, {
         success: true,
         output: `${wasExecuting ? '✅ Current command has been aborted' : '⚠️ No command was executing, but executor has been reset'}${clearedCount ? `\n🗑️ Cleared ${clearedCount} queued message${clearedCount === 1 ? '' : 's'}.` : ''}`,
@@ -816,7 +867,7 @@ You can also use natural language commands to control Claude Code CLI.`,
   }
 
   private async startNextQueuedCommand(threadId: string): Promise<void> {
-    if (this.threadPool.isThreadBusy(threadId) || this.pausedQueues.has(threadId)) return;
+    if (this.threadPool.isThreadBusy(threadId) || this.pausedQueues.has(threadId) || this.abortOperations.has(threadId)) return;
     const queue = this.threadQueues.get(threadId);
     const command = queue?.shift();
     if (!command) {
@@ -830,7 +881,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     this.currentOpenId = command.openId;
     this.messageOpenIds.set(command.messageId, command.openId);
     this.notificationAdapter.setCurrentOpenId(command.openId);
-    this.threadPool.setThreadBusy(threadId, true);
+    const operationToken = this.beginThreadOperation(threadId);
     try {
       const executor = this.threadPool.getExecutor(threadId);
       await this.threadManager.updateThread(threadId, { lastActiveAt: Date.now() });
@@ -843,9 +894,28 @@ You can also use natural language commands to control Claude Code CLI.`,
       this.pausedQueues.add(threadId);
       this.sendResponse(command.messageId, threadId, { success: false, error: error instanceof Error ? error.message : 'Queued command failed' });
     } finally {
-      this.threadPool.setThreadBusy(threadId, false);
-      if (!this.pausedQueues.has(threadId)) void this.startNextQueuedCommand(threadId);
+      if (this.finishThreadOperation(threadId, operationToken) && !this.pausedQueues.has(threadId)) {
+        void this.startNextQueuedCommand(threadId);
+      }
     }
+  }
+
+  private beginThreadOperation(threadId: string): symbol {
+    const token = Symbol(threadId);
+    let resolveDone!: () => void;
+    const done = new Promise<void>((resolve) => { resolveDone = resolve; });
+    this.activeThreadOperations.set(threadId, { token, done, resolveDone });
+    this.threadPool.setThreadBusy(threadId, true);
+    return token;
+  }
+
+  private finishThreadOperation(threadId: string, token: symbol): boolean {
+    const active = this.activeThreadOperations.get(threadId);
+    if (!active || active.token !== token) return false;
+    this.activeThreadOperations.delete(threadId);
+    this.threadPool.setThreadBusy(threadId, false);
+    active.resolveDone();
+    return true;
   }
 
   private hasThreadQueueState(threadId: string): boolean {
