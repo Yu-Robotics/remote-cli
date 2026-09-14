@@ -466,7 +466,7 @@ The backend index follows the order shown by `/backend` (Claude Code, Codex CLI,
 
 Each thread executes one command at a time because Claude Code, AGY, and Codex sessions are sequential. If a normal message is sent while its thread is busy, remote-cli shows a Feishu confirmation card instead of queueing it immediately. The message is queued only after clicking **Add to queue**; clicking **Cancel** or waiting for the confirmation to expire discards it.
 
-`/queue` lists active and pending queues. `/queue clear` removes confirmed and awaiting-confirmation messages for the current thread. `/abort` stops the current task and clears that thread's queue. Backend or execution-context changes are rejected while a thread is busy, and a successful backend switch clears affected queues. If a queued task fails, its thread queue pauses; use `/queue continue` to resume or `/abort` to discard the remaining messages. Queues are in-memory and are discarded on service restart.
+`/queue` lists active and pending queues. `/queue clear` removes confirmed and awaiting-confirmation messages for the current thread. `/abort` stops the current task and clears that thread's queue. A message sent while abort cleanup is still running waits for cleanup and then starts normally, so it is not discarded with the old task. Backend or execution-context changes are rejected while a thread is busy, and a successful backend switch clears affected queues. If a queued task fails, its thread queue pauses; use `/queue continue` to resume or `/abort` to discard the remaining messages. Queues are in-memory and are discarded on service restart.
 
 ### Image Input
 
