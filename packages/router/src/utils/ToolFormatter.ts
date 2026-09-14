@@ -121,6 +121,73 @@ function extractEditContext(input: Record<string, unknown>): string {
   return context;
 }
 
+const DIFF_MAX_LINES = 160;
+const DIFF_MAX_CHARS = 12000;
+
+function createEditDiff(input: Record<string, unknown>): string | null {
+  const oldString = typeof input.old_string === 'string' ? input.old_string : undefined;
+  const newString = typeof input.new_string === 'string' ? input.new_string : undefined;
+  const providedDiff = typeof input.diff === 'string' ? input.diff : undefined;
+
+  if (providedDiff) return formatDiffBlock(providedDiff);
+  if (oldString === undefined || newString === undefined) return null;
+
+  const filePath = typeof input.file_path === 'string' ? input.file_path : 'file';
+  const oldLines = oldString.split('\n');
+  const newLines = newString.split('\n');
+  const prefixLength = commonPrefixLength(oldLines, newLines);
+  const suffixLength = commonSuffixLength(oldLines, newLines, prefixLength);
+  const oldChanged = oldLines.slice(prefixLength, oldLines.length - suffixLength);
+  const newChanged = newLines.slice(prefixLength, newLines.length - suffixLength);
+  const contextBefore = oldLines.slice(Math.max(0, prefixLength - 2), prefixLength);
+  const contextAfter = oldLines.slice(oldLines.length - suffixLength, oldLines.length - suffixLength + 2);
+  const diffLines = [
+    `--- ${filePath}`,
+    `+++ ${filePath}`,
+    `@@ -${prefixLength + 1},${oldChanged.length} +${prefixLength + 1},${newChanged.length} @@`,
+    ...contextBefore.map((line) => ` ${line}`),
+    ...oldChanged.map((line) => `-${line}`),
+    ...newChanged.map((line) => `+${line}`),
+    ...contextAfter.map((line) => ` ${line}`),
+  ];
+
+  return formatDiffBlock(diffLines.join('\n'));
+}
+
+function commonPrefixLength(oldLines: string[], newLines: string[]): number {
+  let length = 0;
+  while (length < oldLines.length && length < newLines.length && oldLines[length] === newLines[length]) length++;
+  return length;
+}
+
+function commonSuffixLength(oldLines: string[], newLines: string[], prefixLength: number): number {
+  let length = 0;
+  while (
+    length < oldLines.length - prefixLength &&
+    length < newLines.length - prefixLength &&
+    oldLines[oldLines.length - length - 1] === newLines[newLines.length - length - 1]
+  ) length++;
+  return length;
+}
+
+function formatDiffBlock(diff: string): string {
+  const lines = diff.split(/\r?\n/);
+  let truncated = lines.length > DIFF_MAX_LINES;
+  let content = lines.slice(0, DIFF_MAX_LINES).join('\n');
+  if (content.length > DIFF_MAX_CHARS) {
+    content = content.slice(0, DIFF_MAX_CHARS);
+    const lastNewline = content.lastIndexOf('\n');
+    content = lastNewline > 0 ? content.slice(0, lastNewline) : content;
+    truncated = true;
+  }
+  if (truncated) content += '\n... diff truncated; inspect the file for the complete change ...';
+  return `\`\`\`diff\n${content}\n\`\`\``;
+}
+
+function looksLikeDiff(content: string): boolean {
+  return /^(?:diff --git |--- .*\n\+\+\+ |@@ .* @@)/m.test(content) && /^(?:\+\+\+|---|@@|[+-][^+-])/m.test(content);
+}
+
 function extractGrepContext(input: Record<string, unknown>): string {
   const pattern = input.pattern as string;
   const path = input.path as string | undefined;
@@ -323,6 +390,10 @@ export function createToolUseElement(toolInfo: ToolUseInfo): FeishuCardElement[]
     padding: '4px 8px',
     elements: [
       createMarkdownElement(context),
+      ...(name === 'Edit' ? (() => {
+        const diff = createEditDiff(input);
+        return diff ? [createMarkdownElement(diff)] : [];
+      })() : []),
     ],
   };
 
@@ -336,7 +407,7 @@ export function createToolUseElement(toolInfo: ToolUseInfo): FeishuCardElement[]
  * Create a Feishu Card 2.0 tool result element with collapsible panel
  */
 export function createToolResultElement(resultInfo: ToolResultInfo): FeishuCardElement[] {
-  const { tool_use_id, content, is_error } = resultInfo;
+  const { tool_use_id, content, is_error, diff } = resultInfo;
 
   // Determine status
   const statusColor = is_error ? 'red' : 'green';
@@ -354,8 +425,10 @@ export function createToolResultElement(resultInfo: ToolResultInfo): FeishuCardE
 
   if (content && !is_error) {
     // For successful results, show the content in a code block
-    const truncated = truncate(content, 500);
-    panelElements.push(createMarkdownElement(`\`\`\`\n${truncated}\n\`\`\``));
+    const formatted = diff || looksLikeDiff(content)
+      ? formatDiffBlock(diff || content)
+      : `\`\`\`\n${truncate(content, 500)}\n\`\`\``;
+    panelElements.push(createMarkdownElement(formatted));
   } else if (content && is_error) {
     // For errors, show the error message
     const truncated = truncate(content, 500);

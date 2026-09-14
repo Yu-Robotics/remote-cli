@@ -7,6 +7,7 @@ Remote control your [Claude Code](https://claude.ai/code) CLI from anywhere usin
 - **Remote Control**: Control your local development environment from anywhere via mobile
 - **Secure**: Directory whitelisting, command filtering, and device authentication
 - **Mobile-Optimized**: Simplified commands and rich text formatting for Feishu
+- **Readable Code Changes**: Edit operations show collapsible, line-aware diff previews inside the existing progress card
 - **Multi-Backend Support**: Supports Claude Code and Gemini CLI
 - **Image Input and Output**: Forward Feishu images to Claude Persistent and Codex App Server backends, and forward Codex App Server generated images back through Router
 - **Multi-session (Threads)**: Create independent chat threads to parallelize tasks

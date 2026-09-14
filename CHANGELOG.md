@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 No unreleased changes.
 
+## [1.6.21] - 2026-09-14
+
+### Improved
+- Improved code-change rendering in Feishu cards with inline diff previews for edit operations.
+- Diff output uses line-aware truncation and a larger display budget instead of the generic short command-output limit.
+- Preserved the existing progress card layout while keeping code changes inside collapsible sections.
+
 ## [1.6.20] - 2026-09-13
 
 ### Added
@@ -176,6 +183,7 @@ No unreleased changes.
 - Comprehensive test suite (80%+ coverage)
 
 [Unreleased]: https://github.com/xiaoyu/remote-cli/compare/v1.6.14...HEAD
+[1.6.21]: https://github.com/xiaoyu/remote-cli/compare/v1.6.20...v1.6.21
 [1.6.14]: https://github.com/xiaoyu/remote-cli/compare/v1.6.12...v1.6.14
 [1.6.12]: https://github.com/xiaoyu/remote-cli/compare/v1.6.11...v1.6.12
 [1.6.11]: https://github.com/xiaoyu/remote-cli/compare/v1.6.10...v1.6.11
