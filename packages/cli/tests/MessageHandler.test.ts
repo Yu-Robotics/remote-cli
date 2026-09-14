@@ -176,6 +176,54 @@ describe('MessageHandler', () => {
     });
   });
 
+  describe('automatic update readiness', () => {
+    it('locks new commands after becoming idle for an update', async () => {
+      expect(ctx.handler.tryBeginAutomaticUpdate()).toBe(true);
+
+      await ctx.handler.handleMessage({
+        type: 'command',
+        messageId: 'msg-during-update',
+        content: 'new work',
+        timestamp: Date.now(),
+      } as any);
+
+      expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+        messageId: 'msg-during-update',
+        error: expect.stringContaining('automatic update'),
+      }));
+    });
+
+    it('does not start an update while a thread is running', () => {
+      vi.mocked(ctx.mockThreadPool.getSummaries).mockReturnValue([
+        { id: 'default-thread-id', name: 'default', status: 'running' },
+      ] as any);
+
+      expect(ctx.handler.tryBeginAutomaticUpdate()).toBe(false);
+    });
+
+    it('does not start an update while a confirmed command is queued', () => {
+      (ctx.handler as any).threadQueues.set('default-thread-id', [{ content: 'queued work' }]);
+
+      expect(ctx.handler.tryBeginAutomaticUpdate()).toBe(false);
+    });
+
+    it('releases the update lock after a failed installation', async () => {
+      expect(ctx.handler.tryBeginAutomaticUpdate()).toBe(true);
+      ctx.handler.endAutomaticUpdate();
+      ctx.mockExecutor.execute.mockResolvedValue({ success: true, output: 'done' });
+
+      await ctx.handler.handleMessage({
+        type: 'command',
+        messageId: 'msg-after-update-failure',
+        content: 'continue work',
+        timestamp: Date.now(),
+      } as any);
+
+      expect(ctx.mockExecutor.execute).toHaveBeenCalledOnce();
+    });
+  });
+
   describe('message handling', () => {
     it('should handle command messages', async () => {
       ctx.mockExecutor.execute.mockResolvedValue({

@@ -5,12 +5,20 @@ import { WebSocketClient } from '../../src/client/WebSocketClient';
 import { CLI_VERSION } from '../../src/types';
 import axios from 'axios';
 
+const automaticUpdaterMocks = vi.hoisted(() => ({
+  handleRouterVersion: vi.fn(),
+  handleProtocolMismatch: vi.fn(),
+}));
+
 // ---------------------------------------------------------------------------
 // Module-level mocks
 // ---------------------------------------------------------------------------
 
 vi.mock('../../src/config/ConfigManager');
 vi.mock('../../src/client/WebSocketClient');
+vi.mock('../../src/update/AutomaticUpdater', () => ({
+  AutomaticUpdater: vi.fn().mockImplementation(() => automaticUpdaterMocks),
+}));
 vi.mock('axios');
 vi.mock('../../src/thread/ThreadManager', () => ({
   ThreadManager: {
@@ -213,6 +221,24 @@ describe('start command', () => {
       expect(mockWsClient.on).toHaveBeenCalledWith('connected', expect.any(Function));
       expect(mockWsClient.on).toHaveBeenCalledWith('disconnected', expect.any(Function));
       expect(mockWsClient.on).toHaveBeenCalledWith('error', expect.any(Function));
+    });
+
+    it('passes reconnected Router versions to the automatic updater in non-interactive mode', async () => {
+      await startCommand({ nonInteractive: true });
+      const messageHandler = mockWsClient.on.mock.calls.find(([event]: [string]) => event === 'message')?.[1];
+
+      await messageHandler({ type: 'binding_confirm', data: { routerVersion: '1.6.26' } });
+
+      expect(automaticUpdaterMocks.handleRouterVersion).toHaveBeenCalledWith('1.6.26');
+    });
+
+    it('resolves the Router package version after a protocol rejection', async () => {
+      await startCommand({ nonInteractive: true });
+      const messageHandler = mockWsClient.on.mock.calls.find(([event]: [string]) => event === 'message')?.[1];
+
+      await messageHandler({ type: 'error', data: { code: 'PROTOCOL_VERSION_INCOMPATIBLE' } });
+
+      expect(automaticUpdaterMocks.handleProtocolMismatch).toHaveBeenCalledWith('https://test-server.com');
     });
   });
 

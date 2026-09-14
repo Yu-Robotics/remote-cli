@@ -11,6 +11,10 @@ import axios from 'axios';
 import * as readline from 'readline';
 import { execFile } from 'child_process';
 import ora, { type Ora } from 'ora';
+import { AutomaticUpdater } from '../update/AutomaticUpdater';
+import { isNewerVersion } from '../utils/version';
+
+export { isNewerVersion } from '../utils/version';
 
 /**
  * Start command options
@@ -29,18 +33,6 @@ export interface StartCommandResult {
   success: boolean;
   daemonMode?: boolean;
   error?: string;
-}
-
-/**
- * Compare two semver strings. Returns true if remote is strictly newer than local.
- */
-export function isNewerVersion(remote: string, local: string): boolean {
-  const parse = (v: string) => v.split('.').map(Number);
-  const [rMaj, rMin, rPatch] = parse(remote);
-  const [lMaj, lMin, lPatch] = parse(local);
-  if (rMaj !== lMaj) return rMaj > lMaj;
-  if (rMin !== lMin) return rMin > lMin;
-  return rPatch > lPatch;
 }
 
 /**
@@ -245,6 +237,14 @@ export async function startCommand(
     const wsClient = new WebSocketClient(wsUrl, deviceId);
 
     const messageHandler = new MessageHandler(wsClient, threadPool, threadManager, directoryGuard, config);
+    const automaticUpdater = options.nonInteractive
+      ? new AutomaticUpdater(CLI_VERSION, messageHandler, {
+          beforeRestart: async () => {
+            wsClient.disconnect();
+            await messageHandler.destroy();
+          },
+        })
+      : undefined;
 
     // Setup event handlers
     wsClient.on('connected', () => {
@@ -260,6 +260,12 @@ export async function startCommand(
     });
 
     wsClient.on('message', async (message) => {
+      if (automaticUpdater && message.type === 'binding_confirm' && message.data?.routerVersion) {
+        void automaticUpdater.handleRouterVersion(message.data.routerVersion);
+      }
+      if (automaticUpdater && message.type === 'error' && message.data?.code === 'PROTOCOL_VERSION_INCOMPATIBLE') {
+        void automaticUpdater.handleProtocolMismatch(serverUrl);
+      }
       await messageHandler.handleMessage(message);
     });
 

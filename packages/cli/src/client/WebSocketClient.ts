@@ -94,7 +94,7 @@ export class WebSocketClient {
               message.data?.code === 'PROTOCOL_VERSION_INCOMPATIBLE'
             ) {
               console.error(`\n[remote-cli] ${message.data.message}`);
-              console.error('[remote-cli] Disconnecting — please upgrade and restart.\n');
+              console.error('[remote-cli] Disconnecting until a compatible CLI version is installed.\n');
               this.manualDisconnect = true;
             }
 
