@@ -1,9 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { stopCommand } from '../../src/commands/stop';
 import { ConfigManager } from '../../src/config/ConfigManager';
+import { createServiceManager } from '../../src/service/ServiceManager';
 
 // Mock dependencies
 vi.mock('../../src/config/ConfigManager');
+vi.mock('../../src/service/ServiceManager', () => ({
+  createServiceManager: vi.fn(),
+}));
 vi.mock('ora', () => ({
   default: vi.fn(() => ({
     start: vi.fn().mockReturnThis(),
@@ -34,6 +38,13 @@ describe('stop command', () => {
       set: vi.fn(),
     };
     vi.spyOn(ConfigManager, 'initialize').mockResolvedValue(mockConfig);
+    vi.mocked(createServiceManager).mockReturnValue({
+      install: vi.fn(),
+      uninstall: vi.fn(),
+      start: vi.fn(),
+      stop: vi.fn(),
+      status: vi.fn().mockResolvedValue({ installed: false, running: false }),
+    } as any);
   });
 
   afterEach(() => {
@@ -45,6 +56,24 @@ describe('stop command', () => {
       const result = await stopCommand();
 
       expect(result.success).toBe(true);
+      expect(mockConfig.set).toHaveBeenCalledWith('service.running', false);
+    });
+
+    it('should stop an installed user service even when config state is stale', async () => {
+      mockConfig.getAll.mockReturnValue({ service: { running: false } });
+      const stop = vi.fn().mockResolvedValue({ installed: true, running: false });
+      vi.mocked(createServiceManager).mockReturnValue({
+        install: vi.fn(),
+        uninstall: vi.fn(),
+        start: vi.fn(),
+        stop,
+        status: vi.fn().mockResolvedValue({ installed: true, running: true }),
+      } as any);
+
+      const result = await stopCommand();
+
+      expect(result.success).toBe(true);
+      expect(stop).toHaveBeenCalledOnce();
       expect(mockConfig.set).toHaveBeenCalledWith('service.running', false);
     });
 

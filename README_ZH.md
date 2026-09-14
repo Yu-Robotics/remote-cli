@@ -158,11 +158,13 @@ remote-cli service install
 
 ```bash
 remote-cli service install
+remote-cli service stop
+remote-cli service start
 remote-cli service status
 remote-cli service uninstall
 ```
 
-安装器会自动记录当前 Node.js 可执行文件、CLI 入口、`HOME`、`PATH` 和日志路径。macOS 使用 `LaunchAgent`，Linux 使用 `systemd --user`。服务以当前用户运行，不使用 root，因此 backend 登录信息和项目目录权限应与手动启动一致。Linux 默认在用户登录后启动；如果希望服务器重启后、登录前也启动，可以明确执行 `loginctl enable-linger "$USER"`。
+安装器会自动记录当前 Node.js 可执行文件、CLI 入口、`HOME`、`PATH` 和日志路径。macOS 使用 `LaunchAgent`，Linux 使用 `systemd --user`。`remote-cli stop` 也会停止正在运行的托管服务；`remote-cli service stop` 和 `remote-cli service start` 可以在不移除自动启动配置的情况下暂停和恢复服务。服务以当前用户运行，不使用 root，因此 backend 登录信息和项目目录权限应与手动启动一致。Linux 默认在用户登录后启动；如果希望服务器重启后、登录前也启动，可以明确执行 `loginctl enable-linger "$USER"`。
 
 ## 路由服务器部署
 
@@ -241,7 +243,11 @@ docker compose build
 
 # 可选：在配置前选择宿主机和容器使用的端口
 cp .env.example .env
-# 如果 3000 已被占用，请编辑 .env 设置 ROUTER_PORT
+# 如果 3000 已被占用，请编辑 .env 设置 ROUTER_PORT。
+# Linux 还需要把 ROUTER_UID 和 ROUTER_GID 设置为 id -u 与 id -g 的结果。
+
+# 由当前用户创建 bind mount 目录
+mkdir -p router-data
 
 # 交互式配置飞书凭证，并保存到 ./router-data
 docker compose run --rm router config setup
@@ -250,7 +256,7 @@ docker compose run --rm router config setup
 docker compose up -d
 ```
 
-配置和绑定关系会保存到 `./router-data`，因此重建容器后仍然保留。`ROUTER_PORT` 同时控制宿主机端口和 Router 容器端口，必须与配置向导中填写的端口一致。查看 Router 日志：`docker compose logs -f router`；停止服务：`docker compose down`。只应向可信内网开放配置的端口，公网部署时应放在 HTTPS 反向代理之后。
+配置和绑定关系会保存到 `./router-data`，因此重建容器后仍然保留。Compose 使用 `ROUTER_UID` 和 `ROUTER_GID` 运行容器；它们必须与 `./router-data` 的所有者一致，才能避免 bind mount 权限错误。`ROUTER_PORT` 同时控制宿主机端口和 Router 容器端口，必须与配置向导中填写的端口一致。查看 Router 日志：`docker compose logs -f router`；停止服务：`docker compose down`。只应向可信内网开放配置的端口，公网部署时应放在 HTTPS 反向代理之后。
 
 ### Nginx 配置（生产环境）
 

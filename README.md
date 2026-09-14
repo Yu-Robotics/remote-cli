@@ -161,11 +161,13 @@ After initialization, install a user-level startup service on macOS or Linux:
 
 ```bash
 remote-cli service install
+remote-cli service stop
+remote-cli service start
 remote-cli service status
 remote-cli service uninstall
 ```
 
-The installer captures the current Node.js executable, CLI entry point, `HOME`, `PATH`, and log paths. macOS uses a `LaunchAgent`; Linux uses a `systemd --user` service. The service runs as the current user, not root, so backend credentials and project access remain consistent with manual startup. On Linux, it starts after user login by default. To start it before login after reboot, enable user lingering explicitly with `loginctl enable-linger "$USER"`.
+The installer captures the current Node.js executable, CLI entry point, `HOME`, `PATH`, and log paths. macOS uses a `LaunchAgent`; Linux uses a `systemd --user` service. `remote-cli stop` also stops an active managed service, while `remote-cli service stop` and `remote-cli service start` pause and resume it without removing automatic startup. The service runs as the current user, not root, so backend credentials and project access remain consistent with manual startup. On Linux, it starts after user login by default. To start it before login after reboot, enable user lingering explicitly with `loginctl enable-linger "$USER"`.
 
 ## Router Server Deployment
 
@@ -244,7 +246,11 @@ docker compose build
 
 # Optional: choose a host/container port before setup
 cp .env.example .env
-# Edit .env and set ROUTER_PORT if 3000 is already in use
+# Edit ROUTER_PORT if 3000 is already in use. On Linux, also set
+# ROUTER_UID=$(id -u) and ROUTER_GID=$(id -g) in .env.
+
+# Create the bind-mounted directory as the current user
+mkdir -p router-data
 
 # Configure Feishu credentials interactively and persist them in ./router-data
 docker compose run --rm router config setup
@@ -253,7 +259,7 @@ docker compose run --rm router config setup
 docker compose up -d
 ```
 
-The setup wizard stores configuration and bindings in `./router-data`, so they survive container recreation. `ROUTER_PORT` controls both the host port and the Router's container port, and must match the port entered during setup. Router logs are available with `docker compose logs -f router`; stop it with `docker compose down`. Open the configured port only to the trusted internal network, or place the Router behind an HTTPS reverse proxy for public access.
+The setup wizard stores configuration and bindings in `./router-data`, so they survive container recreation. Compose runs the container with `ROUTER_UID` and `ROUTER_GID`; these values must match the owner of `./router-data` to avoid bind-mount permission errors. `ROUTER_PORT` controls both the host port and the Router's container port, and must match the port entered during setup. Router logs are available with `docker compose logs -f router`; stop it with `docker compose down`. Open the configured port only to the trusted internal network, or place the Router behind an HTTPS reverse proxy for public access.
 
 ### Nginx Configuration (Production)
 

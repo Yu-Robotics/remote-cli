@@ -135,6 +135,16 @@ function createEditDiff(input: Record<string, unknown>): string | null {
   const filePath = typeof input.file_path === 'string' ? input.file_path : 'file';
   const oldLines = oldString.split('\n');
   const newLines = newString.split('\n');
+  const lineDiff = createLineDiff(oldLines, newLines);
+  if (lineDiff) {
+    return formatDiffBlock([
+      `--- ${filePath}`,
+      `+++ ${filePath}`,
+      `@@ -1,${oldLines.length} +1,${newLines.length} @@`,
+      ...lineDiff,
+    ].join('\n'));
+  }
+
   const prefixLength = commonPrefixLength(oldLines, newLines);
   const suffixLength = commonSuffixLength(oldLines, newLines, prefixLength);
   const oldChanged = oldLines.slice(prefixLength, oldLines.length - suffixLength);
@@ -152,6 +162,48 @@ function createEditDiff(input: Record<string, unknown>): string | null {
   ];
 
   return formatDiffBlock(diffLines.join('\n'));
+}
+
+function createWriteDiff(input: Record<string, unknown>): string | null {
+  if (typeof input.content !== 'string') return null;
+  const filePath = typeof input.file_path === 'string' ? input.file_path : 'file';
+  const lines = input.content.split('\n');
+  return formatDiffBlock([
+    '--- /dev/null',
+    `+++ ${filePath}`,
+    `@@ -0,0 +1,${lines.length} @@`,
+    ...lines.map((line) => `+${line}`),
+  ].join('\n'));
+}
+
+function createLineDiff(oldLines: string[], newLines: string[]): string[] | null {
+  const maxMatrixCells = 160000;
+  if (oldLines.length * newLines.length > maxMatrixCells) return null;
+
+  const lengths = Array.from({ length: oldLines.length + 1 }, () => new Uint32Array(newLines.length + 1));
+  for (let oldIndex = oldLines.length - 1; oldIndex >= 0; oldIndex--) {
+    for (let newIndex = newLines.length - 1; newIndex >= 0; newIndex--) {
+      lengths[oldIndex][newIndex] = oldLines[oldIndex] === newLines[newIndex]
+        ? lengths[oldIndex + 1][newIndex + 1] + 1
+        : Math.max(lengths[oldIndex + 1][newIndex], lengths[oldIndex][newIndex + 1]);
+    }
+  }
+
+  const result: string[] = [];
+  let oldIndex = 0;
+  let newIndex = 0;
+  while (oldIndex < oldLines.length || newIndex < newLines.length) {
+    if (oldIndex < oldLines.length && newIndex < newLines.length && oldLines[oldIndex] === newLines[newIndex]) {
+      result.push(` ${oldLines[oldIndex]}`);
+      oldIndex++;
+      newIndex++;
+    } else if (oldIndex < oldLines.length && (newIndex === newLines.length || lengths[oldIndex + 1][newIndex] >= lengths[oldIndex][newIndex + 1])) {
+      result.push(`-${oldLines[oldIndex++]}`);
+    } else {
+      result.push(`+${newLines[newIndex++]}`);
+    }
+  }
+  return result;
 }
 
 function commonPrefixLength(oldLines: string[], newLines: string[]): number {
@@ -181,7 +233,9 @@ function formatDiffBlock(diff: string): string {
     truncated = true;
   }
   if (truncated) content += '\n... diff truncated; inspect the file for the complete change ...';
-  return `\`\`\`diff\n${content}\n\`\`\``;
+  const longestBacktickRun = Math.max(0, ...Array.from(content.matchAll(/`+/g), (match) => match[0].length));
+  const fence = '`'.repeat(Math.max(3, longestBacktickRun + 1));
+  return `${fence}diff\n${content}\n${fence}`;
 }
 
 function looksLikeDiff(content: string): boolean {
@@ -390,8 +444,8 @@ export function createToolUseElement(toolInfo: ToolUseInfo): FeishuCardElement[]
     padding: '4px 8px',
     elements: [
       createMarkdownElement(context),
-      ...(name === 'Edit' ? (() => {
-        const diff = createEditDiff(input);
+      ...(['Edit', 'Write'].includes(name) ? (() => {
+        const diff = name === 'Edit' ? createEditDiff(input) : createWriteDiff(input);
         return diff ? [createMarkdownElement(diff)] : [];
       })() : []),
     ],
