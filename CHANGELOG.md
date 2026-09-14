@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 No unreleased changes.
 
+## [1.6.25] - 2026-09-14
+
+### Fixed
+- Forwarded images embedded in Feishu rich-text posts together with their accompanying text to Claude Persistent and Codex App Server backends.
+- Preserved available images when another image in the same rich-text message cannot be downloaded.
+
 ## [1.6.24] - 2026-09-14
 
 ### Fixed

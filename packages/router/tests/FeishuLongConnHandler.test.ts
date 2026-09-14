@@ -1224,6 +1224,16 @@ describe('FeishuLongConnHandler', () => {
       expect(parse('post', content)).toBe('spaced');
     });
 
+    it('keeps text parsing unchanged when a post contains an image', () => {
+      const content = {
+        content: [[
+          { tag: 'text', text: 'inspect this' },
+          { tag: 'img', image_key: 'img_mixed_123' },
+        ]],
+      };
+      expect(parse('post', content)).toBe('inspect this');
+    });
+
     it('returns empty string for malformed JSON', () => {
       expect(
         (handler as any).parseMessageContent({ message_type: 'text', content: 'not-json' })
@@ -1257,6 +1267,71 @@ describe('FeishuLongConnHandler', () => {
         params: { type: 'image' },
       });
       await expect(fs.access(writeFile.mock.calls[0][0])).rejects.toThrow();
+    });
+
+    it('forwards text and embedded post images in the same command', async () => {
+      vi.spyOn(handler as any, 'downloadFeishuImage').mockResolvedValue('encoded-image');
+      const handleRegularCommandSpy = vi.spyOn(handler as any, 'handleRegularCommand').mockResolvedValue(undefined);
+      const data = {
+        message: {
+          message_type: 'post',
+          content: JSON.stringify({
+            content: [[
+              { tag: 'text', text: 'Explain this diagram' },
+              { tag: 'img', image_key: 'img_mixed_123' },
+            ]],
+          }),
+          message_id: 'msg_post_123',
+        },
+        sender: { sender_id: { open_id: 'ou_123' } },
+      };
+
+      await (handler as any).handleMessageEvent(data);
+
+      expect((handler as any).downloadFeishuImage).toHaveBeenCalledWith('msg_post_123', 'img_mixed_123');
+      expect(handleRegularCommandSpy).toHaveBeenCalledWith(
+        'ou_123',
+        'msg_post_123',
+        'Explain this diagram',
+        undefined,
+        false,
+        undefined,
+        [{ type: 'image', data: 'encoded-image', mimeType: 'image/png' }]
+      );
+    });
+
+    it('forwards available images from wrapped posts when one download fails', async () => {
+      vi.spyOn(handler as any, 'downloadFeishuImage')
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce('second-image');
+      const handleRegularCommandSpy = vi.spyOn(handler as any, 'handleRegularCommand').mockResolvedValue(undefined);
+      const data = {
+        message: {
+          message_type: 'post',
+          content: JSON.stringify({
+            zh_cn: {
+              content: [
+                [{ tag: 'img', image_key: 'img_failed' }],
+                [{ tag: 'img', image_key: 'img_available' }],
+              ],
+            },
+          }),
+          message_id: 'msg_post_images',
+        },
+        sender: { sender_id: { open_id: 'ou_123' } },
+      };
+
+      await (handler as any).handleMessageEvent(data);
+
+      expect(handleRegularCommandSpy).toHaveBeenCalledWith(
+        'ou_123',
+        'msg_post_images',
+        'Describe this image',
+        undefined,
+        false,
+        undefined,
+        [{ type: 'image', data: 'second-image', mimeType: 'image/png' }]
+      );
     });
 
     it('should ignore non-text/post messages', async () => {

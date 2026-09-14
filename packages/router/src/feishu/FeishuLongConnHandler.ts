@@ -172,6 +172,20 @@ export class FeishuLongConnHandler {
             content = 'Describe this image'; // Default prompt for standalone images
           }
         }
+      } else if (message.message_type === 'post') {
+        const parsedPost = this.parsePostContent(message);
+        content = parsedPost.content;
+        const downloadedImages = await Promise.all(
+          parsedPost.imageKeys.map((imageKey) => this.downloadFeishuImage(messageId, imageKey))
+        );
+        attachments = downloadedImages
+          .filter((data): data is string => data !== null)
+          .map((data) => ({ type: 'image' as const, data, mimeType: 'image/png' }));
+        if (attachments.length === 0) {
+          attachments = undefined;
+        } else if (!content) {
+          content = 'Describe this image';
+        }
       } else {
         content = this.parseMessageContent(message);
       }
@@ -210,38 +224,51 @@ export class FeishuLongConnHandler {
    * Post message content has two possible structures:
    *   Direct (message events): {"title":"","content":[[{tag,text,style}],...]}
    *   Wrapped (legacy/API):    {"zh_cn":{"title":"","content":[[...]]}}
-   * Each inner array is a paragraph; only tag="text" nodes are extracted.
+   * Each inner array is a paragraph.
    */
   private parseMessageContent(message: any): string {
     try {
-      const content = JSON.parse(message.content);
-
       if (message.message_type === 'post') {
-        let paragraphs: any[][];
-        if (Array.isArray(content.content)) {
-          // Direct format
-          paragraphs = content.content;
-        } else {
-          // Wrapped format: pick first language block available
-          const langBlock = content.zh_cn ?? content.en_us ?? Object.values(content)[0] as any;
-          paragraphs = langBlock?.content ?? [];
-        }
-        return paragraphs
-          .map((nodes: any[]) =>
-            nodes
-              .filter((n: any) => n.tag === 'text')
-              .map((n: any) => n.text ?? '')
-              .join('')
-          )
-          .filter((line: string) => line.trim() !== '')
-          .join('\n')
-          .trim();
+        return this.parsePostContent(message).content;
       }
 
       // Default: plain text message
+      const content = JSON.parse(message.content);
       return (content.text || '').trim();
     } catch {
       return '';
+    }
+  }
+
+  private parsePostContent(message: any): { content: string; imageKeys: string[] } {
+    try {
+      const rawContent = JSON.parse(message.content);
+      let paragraphs: any[][];
+      if (Array.isArray(rawContent.content)) {
+        paragraphs = rawContent.content;
+      } else {
+        const languageBlock = rawContent.zh_cn ?? rawContent.en_us ?? Object.values(rawContent)[0] as any;
+        paragraphs = languageBlock?.content ?? [];
+      }
+
+      const content = paragraphs
+        .map((nodes: any[]) =>
+          nodes
+            .filter((node: any) => node.tag === 'text')
+            .map((node: any) => node.text ?? '')
+            .join('')
+        )
+        .filter((line: string) => line.trim() !== '')
+        .join('\n')
+        .trim();
+      const imageKeys = paragraphs
+        .flatMap((nodes: any[]) => nodes)
+        .filter((node: any) => node.tag === 'img' && typeof node.image_key === 'string' && node.image_key.length > 0)
+        .map((node: any) => node.image_key);
+
+      return { content, imageKeys };
+    } catch {
+      return { content: '', imageKeys: [] };
     }
   }
 
