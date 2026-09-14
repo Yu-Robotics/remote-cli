@@ -213,6 +213,52 @@ describe('ToolFormatter', () => {
       expect(elements[0].elements[0].content).toContain('...');
     });
 
+    it('should render diff results as an expanded-length diff code block', () => {
+      const diff = ['--- a/src/app.ts', '+++ b/src/app.ts', '@@ -1,2 +1,2 @@', '-const oldValue = 1;', '+const newValue = 2;'].join('\n');
+      const elements = createToolResultElement({
+        tool_use_id: 'tool_diff',
+        content: 'file_change (update): completed',
+        diff,
+        is_error: false,
+      });
+
+      expect(elements[0].elements[0].content).toContain('```diff');
+      expect(elements[0].elements[0].content).toContain('-const oldValue = 1;');
+      expect(elements[0].elements[0].content).not.toContain('file_change');
+    });
+
+    it('should render an Edit preview inside the existing tool card', () => {
+      const elements = createToolUseElement({
+        name: 'Edit',
+        id: 'edit_1',
+        input: {
+          file_path: '/Users/test/src/app.ts',
+          old_string: 'const oldValue = 1;\nreturn oldValue;',
+          new_string: 'const newValue = 2;\nreturn newValue;',
+        },
+      });
+
+      expect(elements[1].elements).toHaveLength(2);
+      expect(elements[1].elements[1].content).toContain('```diff');
+      expect(elements[1].elements[1].content).toContain('-const oldValue = 1;');
+      expect(elements[1].elements[1].content).toContain('+const newValue = 2;');
+    });
+
+    it('truncates long diffs on complete lines with an explicit notice', () => {
+      const diff = Array.from({ length: 200 }, (_, index) => `+line-${index}`).join('\n');
+      const elements = createToolResultElement({
+        tool_use_id: 'tool_long_diff',
+        content: 'file change',
+        diff,
+        is_error: false,
+      });
+
+      const rendered = elements[0].elements[0].content as string;
+      expect(rendered).toContain('diff truncated');
+      expect(rendered).toContain('+line-159');
+      expect(rendered).not.toContain('+line-160');
+    });
+
     it('should handle empty content', () => {
       const toolResult: ToolResultInfo = {
         tool_use_id: 'tool_xyz',

@@ -737,11 +737,16 @@ export class CodexExecutor implements IExecutor {
         const changes = Array.isArray(item.changes) ? item.changes : [];
         const firstPath = changes[0]?.path ?? '';
         const kinds = changes.map((c: any) => c?.kind).filter(Boolean).join(', ');
+        const diffs = changes
+          .map((change: any) => typeof change?.diff === 'string' ? change.diff : '')
+          .filter(Boolean)
+          .join('\n');
         const status = typeof item.status === 'string' ? item.status : '';
-        options.onToolUse?.({ id: itemId, name: 'Edit', input: { file_path: firstPath } });
+        options.onToolUse?.({ id: itemId, name: 'Edit', input: { file_path: firstPath, ...(diffs ? { diff: diffs } : {}) } });
         options.onToolResult?.({
           tool_use_id: itemId,
           content: `file_change (${kinds || 'unknown'}): ${status}`,
+          ...(diffs ? { diff: diffs } : {}),
           is_error: !codexItemSucceeded(item.status, null),
         });
         return;

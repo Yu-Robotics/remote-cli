@@ -30,6 +30,8 @@ export interface ToolResultInfo {
   tool_use_id: string;
   content: string;
   is_error: boolean;
+  /** Optional unified diff for file-change results. */
+  diff?: string;
 }
 
 /**

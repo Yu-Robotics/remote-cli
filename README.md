@@ -13,6 +13,7 @@ Remote control your Claude Code, AGY CLI (Antigravity), or Codex CLI (OpenAI) fr
 - 🌍 **Remote Control**: Control your local development environment from anywhere via mobile phone
 - 🔒 **Controlled Access**: Working-directory selection controls and device authentication
 - 📱 **Mobile-Optimized**: Simplified commands and rich text formatting for Feishu
+- 📝 **Readable Code Changes**: Edit operations show collapsible, line-aware diff previews inside the existing progress card
 - 🤖 **Multi-backend Support**: Supports Claude Code (default), AGY CLI (Antigravity), and Codex CLI (OpenAI), switchable at any time
 - 🧵 **Multi-session Management**: Create multiple independent chat threads to handle different tasks in parallel. Support switching and creating threads via Feishu card buttons.
 - 🖥️ **Remote Machine Management**: Control remote servers or Docker containers via SSH directly through Feishu. Support `/search`, `/view`, `/replace` and other remote file operations.
