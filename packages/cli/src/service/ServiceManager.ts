@@ -52,7 +52,28 @@ async function ignoreCommandFailure(runner: ServiceCommandRunner, command: strin
 }
 
 function quoteSystemdArgument(value: string): string {
-  return `"${value.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
+  return `"${value.replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll('%', '%%').replaceAll('$', '$$')}"`;
+}
+
+function escapeSystemdPath(value: string): string {
+  return value
+    .replaceAll('\\', '\\x5c')
+    .replaceAll(' ', '\\x20')
+    .replaceAll('\t', '\\x09')
+    .replaceAll('\n', '\\x0a')
+    .replaceAll('\r', '\\x0d')
+    .replaceAll('%', '%%');
+}
+
+function quoteSystemdEnvironment(name: string, value: string): string {
+  const assignment = `${name}=${value}`
+    .replaceAll('\\', '\\\\')
+    .replaceAll('"', '\\"')
+    .replaceAll('\n', '\\n')
+    .replaceAll('\r', '\\r')
+    .replaceAll('\t', '\\t')
+    .replaceAll('%', '%%');
+  return `"${assignment}"`;
 }
 
 function xmlEscape(value: string): string {
@@ -122,11 +143,11 @@ export class LinuxServiceManager extends BaseServiceManager {
       '',
       '[Service]',
       `ExecStart=${quoteSystemdArgument(this.context.nodePath)} ${quoteSystemdArgument(this.context.cliEntryPath)} start --non-interactive`,
-      `WorkingDirectory=${quoteSystemdArgument(this.context.homeDir)}`,
-      `Environment=HOME=${quoteSystemdArgument(this.context.homeDir)}`,
-      `Environment=PATH=${quoteSystemdArgument(this.context.pathValue)}`,
-      `StandardOutput=append:${quoteSystemdArgument(path.join(this.context.logDirectory, 'service.log'))}`,
-      `StandardError=append:${quoteSystemdArgument(path.join(this.context.logDirectory, 'service.error.log'))}`,
+      `WorkingDirectory=${escapeSystemdPath(this.context.homeDir)}`,
+      `Environment=${quoteSystemdEnvironment('HOME', this.context.homeDir)}`,
+      `Environment=${quoteSystemdEnvironment('PATH', this.context.pathValue)}`,
+      `StandardOutput=append:${escapeSystemdPath(path.join(this.context.logDirectory, 'service.log'))}`,
+      `StandardError=append:${escapeSystemdPath(path.join(this.context.logDirectory, 'service.error.log'))}`,
       'Restart=always',
       'RestartSec=5',
       '',

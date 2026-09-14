@@ -39,9 +39,32 @@ describe('ServiceManager', () => {
 
     expect(status).toMatchObject({ platform: 'linux', installed: true, running: true, enabled: true, pid: 321 });
     expect(unit).toContain('ExecStart="/opt/node/bin/node" "/opt/remote cli/bin/remote-cli.js" start --non-interactive');
-    expect(unit).toContain('Environment=HOME="');
-    expect(unit).toContain(`StandardOutput=append:"${path.join(homeDir, '.remote-cli', 'logs', 'service.log')}"`);
+    expect(unit).toContain(`WorkingDirectory=${homeDir}`);
+    expect(unit).toContain(`Environment="HOME=${homeDir}"`);
+    expect(unit).toContain(`StandardOutput=append:${path.join(homeDir, '.remote-cli', 'logs', 'service.log')}`);
     expect(calls).toContainEqual(['systemctl', '--user', 'enable', '--now', 'remote-cli']);
+  });
+
+  it('escapes Linux unit paths without using shell-style path quotes', async () => {
+    const temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'remote-cli-service-linux-'));
+    homeDir = path.join(temporaryRoot, 'home with spaces');
+    await fs.mkdir(homeDir);
+    const context = createContext();
+    context.pathValue = '/opt/node bin:/usr/bin';
+    const runner: ServiceCommandRunner = vi.fn(async (_command, args) => {
+      if (args.includes('show')) return { stdout: 'ActiveState=active\nUnitFileState=enabled\nMainPID=321\n', stderr: '' };
+      return { stdout: '', stderr: '' };
+    });
+    const manager = new LinuxServiceManager(context, runner);
+
+    await manager.install();
+    const unit = await fs.readFile(path.join(homeDir, '.config', 'systemd', 'user', 'remote-cli.service'), 'utf8');
+
+    expect(unit).toContain(`WorkingDirectory=${homeDir.replaceAll(' ', '\\x20')}`);
+    expect(unit).not.toContain(`WorkingDirectory="${homeDir}"`);
+    expect(unit).toContain(`Environment="HOME=${homeDir}"`);
+    expect(unit).toContain('Environment="PATH=/opt/node bin:/usr/bin"');
+    expect(unit).toContain(`StandardOutput=append:${path.join(homeDir, '.remote-cli', 'logs', 'service.log').replaceAll(' ', '\\x20')}`);
   });
 
   it('uninstalls a Linux service without removing user data', async () => {
