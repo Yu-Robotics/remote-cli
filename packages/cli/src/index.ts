@@ -206,7 +206,7 @@ const service = program
   .command('service')
   .description('Manage automatic startup for the remote CLI client');
 
-for (const action of ['install', 'uninstall', 'status'] as ServiceAction[]) {
+for (const action of ['install', 'uninstall', 'start', 'stop', 'status'] as ServiceAction[]) {
   service
     .command(action)
     .description(`${action} the user-level remote CLI service`)

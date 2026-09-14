@@ -1,7 +1,7 @@
 import { ConfigManager } from '../config/ConfigManager';
 import { createServiceManager, ServiceStatus } from '../service/ServiceManager';
 
-export type ServiceAction = 'install' | 'uninstall' | 'status';
+export type ServiceAction = 'install' | 'uninstall' | 'start' | 'stop' | 'status';
 
 export interface ServiceCommandOptions {
   action: ServiceAction;
@@ -21,12 +21,8 @@ export async function serviceCommand(options: ServiceCommandOptions): Promise<Se
     }
 
     const manager = createServiceManager();
-    const status = options.action === 'install'
-      ? await manager.install()
-      : options.action === 'uninstall'
-        ? await manager.uninstall()
-        : await manager.status();
-    if (options.action === 'uninstall') {
+    const status = await manager[options.action]();
+    if (options.action === 'uninstall' || options.action === 'stop') {
       await config.set('service.running', false);
       await config.set('service.stoppedAt', Date.now());
     }

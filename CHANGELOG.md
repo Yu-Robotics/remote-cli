@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 No unreleased changes.
 
+## [1.6.22] - 2026-09-14
+
+### Added
+- Added `remote-cli service start` and `remote-cli service stop` to control an installed user service without removing automatic startup.
+- Added new-file previews for `Write` tool calls in Feishu progress cards.
+
+### Fixed
+- Made `remote-cli stop` stop an active systemd user service or macOS LaunchAgent instead of only updating local configuration.
+- Fixed macOS service status reporting for loaded services that have exited.
+- Improved edit previews for multiple separate changes and Markdown content containing code fences.
+- Made the Docker Router run with configurable host UID/GID values to prevent bind-mount permission errors.
+
 ## [1.6.21] - 2026-09-14
 
 ### Improved

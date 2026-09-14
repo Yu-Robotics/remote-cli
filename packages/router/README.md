@@ -61,11 +61,12 @@ From the repository root, build the Router image and run the interactive setup o
 ```bash
 docker compose build
 # Optional: copy .env.example to .env and set ROUTER_PORT first
+mkdir -p router-data
 docker compose run --rm router config setup
 docker compose up -d
 ```
 
-The `./router-data` bind mount stores Router data under the container's `/router-data` home directory (`/router-data/.remote-cli-router/`). Set `ROUTER_PORT` in `.env` before setup if port `3000` is unavailable; it must match the server port entered in the setup wizard. Use `docker compose logs -f router` to inspect logs and `docker compose down` to stop the service. Run local clients directly on their host machines rather than in Docker so they can access project files and local AI CLI binaries.
+The `./router-data` bind mount stores Router data under the container's `/router-data` home directory (`/router-data/.remote-cli-router/`). On Linux, set `ROUTER_UID` and `ROUTER_GID` in `.env` to the output of `id -u` and `id -g`; they must match the directory owner. Set `ROUTER_PORT` before setup if port `3000` is unavailable; it must match the server port entered in the setup wizard. Use `docker compose logs -f router` to inspect logs and `docker compose down` to stop the service. Run local clients directly on their host machines rather than in Docker so they can access project files and local AI CLI binaries.
 
 ## Commands
 
