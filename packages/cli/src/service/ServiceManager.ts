@@ -79,6 +79,8 @@ export function getServiceContext(overrides: Partial<ServiceContext> = {}): Serv
 export interface ServiceManager {
   install(): Promise<ServiceStatus>;
   uninstall(): Promise<ServiceStatus>;
+  start(): Promise<ServiceStatus>;
+  stop(): Promise<ServiceStatus>;
   status(): Promise<ServiceStatus>;
 }
 
@@ -93,6 +95,8 @@ abstract class BaseServiceManager implements ServiceManager {
 
   abstract install(): Promise<ServiceStatus>;
   abstract uninstall(): Promise<ServiceStatus>;
+  abstract start(): Promise<ServiceStatus>;
+  abstract stop(): Promise<ServiceStatus>;
   abstract status(): Promise<ServiceStatus>;
 
   protected async prepareDirectories(): Promise<void> {
@@ -140,6 +144,18 @@ export class LinuxServiceManager extends BaseServiceManager {
     await ignoreCommandFailure(this.runner, 'systemctl', ['--user', 'disable', '--now', SERVICE_NAME]);
     await fs.rm(this.unitPath, { force: true });
     await ignoreCommandFailure(this.runner, 'systemctl', ['--user', 'daemon-reload']);
+    return this.status();
+  }
+
+  async start(): Promise<ServiceStatus> {
+    if (!await fileExists(this.unitPath)) throw new Error('The user service is not installed. Run "remote-cli service install" first.');
+    await this.runner('systemctl', ['--user', 'start', SERVICE_NAME]);
+    return this.status();
+  }
+
+  async stop(): Promise<ServiceStatus> {
+    if (!await fileExists(this.unitPath)) throw new Error('The user service is not installed.');
+    await this.runner('systemctl', ['--user', 'stop', SERVICE_NAME]);
     return this.status();
   }
 
@@ -195,6 +211,19 @@ export class MacServiceManager extends BaseServiceManager {
     return this.status();
   }
 
+  async start(): Promise<ServiceStatus> {
+    if (!await fileExists(this.plistPath)) throw new Error('The user service is not installed. Run "remote-cli service install" first.');
+    await ignoreCommandFailure(this.runner, 'launchctl', ['bootout', this.domain, this.plistPath]);
+    await this.runner('launchctl', ['bootstrap', this.domain, this.plistPath]);
+    return this.status();
+  }
+
+  async stop(): Promise<ServiceStatus> {
+    if (!await fileExists(this.plistPath)) throw new Error('The user service is not installed.');
+    await ignoreCommandFailure(this.runner, 'launchctl', ['bootout', this.domain, this.plistPath]);
+    return this.status();
+  }
+
   async status(): Promise<ServiceStatus> {
     const installed = await fileExists(this.plistPath);
     if (!installed) return this.createStatus(false, false, false);
@@ -202,7 +231,11 @@ export class MacServiceManager extends BaseServiceManager {
     try {
       const result = await this.runner('launchctl', ['print', `${this.domain}/${MAC_SERVICE_LABEL}`]);
       const pidMatch = result.stdout.match(/\bpid\s*=\s*(\d+)/);
-      return this.createStatus(true, true, true, pidMatch ? Number(pidMatch[1]) : undefined);
+      const stateMatch = result.stdout.match(/\bstate\s*=\s*([^\n]+)/);
+      const state = stateMatch?.[1].trim();
+      const pid = pidMatch ? Number(pidMatch[1]) : undefined;
+      const running = state === 'running' || (state === undefined && pid !== undefined && pid > 0);
+      return this.createStatus(true, running, true, running ? pid : undefined, state);
     } catch (error) {
       return this.createStatus(true, false, false, undefined, error instanceof Error ? error.message : 'Service status unavailable');
     }

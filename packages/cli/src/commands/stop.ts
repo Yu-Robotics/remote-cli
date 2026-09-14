@@ -1,4 +1,5 @@
 import { ConfigManager } from '../config/ConfigManager';
+import { createServiceManager } from '../service/ServiceManager';
 import ora from 'ora';
 
 /**
@@ -35,6 +36,19 @@ export async function stopCommand(
     // Get service state
     const allConfig = config.getAll();
     const service = allConfig.service;
+
+    if (process.platform === 'linux' || process.platform === 'darwin') {
+      const manager = createServiceManager();
+      const managedStatus = await manager.status();
+      if (managedStatus.installed && managedStatus.running) {
+        if (options.graceful) spinner.text = 'Waiting for the managed service to stop...';
+        await manager.stop();
+        await config.set('service.running', false);
+        await config.set('service.stoppedAt', Date.now());
+        spinner.succeed('Remote CLI service stopped');
+        return { success: true, graceful: options.graceful, force: options.force };
+      }
+    }
 
     // Check if service is running
     if (!service || !service.running) {

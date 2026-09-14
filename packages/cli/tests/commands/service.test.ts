@@ -31,9 +31,29 @@ describe('serviceCommand', () => {
     vi.mocked(createServiceManager).mockReturnValue({
       install: vi.fn(),
       uninstall: vi.fn(),
+      start: vi.fn(),
+      stop: vi.fn(),
       status: vi.fn().mockResolvedValue(status),
     });
 
     await expect(serviceCommand({ action: 'status' })).resolves.toEqual({ success: true, status });
+  });
+
+  it.each(['start', 'stop'] as const)('delegates %s to the platform service manager', async (action) => {
+    const set = vi.fn();
+    vi.mocked(ConfigManager.initialize).mockResolvedValue({ has: () => true, set } as any);
+    const status = { platform: 'linux', supported: true, installed: true, running: action === 'start', enabled: true, servicePath: '/tmp/service', serviceName: 'remote-cli' };
+    const method = vi.fn().mockResolvedValue(status);
+    vi.mocked(createServiceManager).mockReturnValue({
+      install: vi.fn(),
+      uninstall: vi.fn(),
+      start: action === 'start' ? method : vi.fn(),
+      stop: action === 'stop' ? method : vi.fn(),
+      status: vi.fn(),
+    });
+
+    await expect(serviceCommand({ action })).resolves.toEqual({ success: true, status });
+    expect(method).toHaveBeenCalledOnce();
+    if (action === 'stop') expect(set).toHaveBeenCalledWith('service.running', false);
   });
 });

@@ -244,6 +244,52 @@ describe('ToolFormatter', () => {
       expect(elements[1].elements[1].content).toContain('+const newValue = 2;');
     });
 
+    it('should preserve unchanged lines between separate edits', () => {
+      const elements = createToolUseElement({
+        name: 'Edit',
+        id: 'edit_multiple',
+        input: {
+          file_path: '/Users/test/src/app.ts',
+          old_string: 'const first = 1;\nconst unchanged = true;\nconst last = 3;',
+          new_string: 'const first = 2;\nconst unchanged = true;\nconst last = 4;',
+        },
+      });
+
+      const rendered = elements[1].elements[1].content as string;
+      expect(rendered).toContain(' const unchanged = true;');
+      expect(rendered).not.toContain('-const unchanged = true;');
+      expect(rendered).not.toContain('+const unchanged = true;');
+      expect(rendered.indexOf('-const first = 1;')).toBeLessThan(rendered.indexOf('+const first = 2;'));
+    });
+
+    it('should render a new file preview for Write', () => {
+      const elements = createToolUseElement({
+        name: 'Write',
+        id: 'write_1',
+        input: {
+          file_path: '/Users/test/src/new.ts',
+          content: 'export const value = 1;\n',
+        },
+      });
+
+      expect(elements[1].elements).toHaveLength(2);
+      expect(elements[1].elements[1].content).toContain('--- /dev/null');
+      expect(elements[1].elements[1].content).toContain('+export const value = 1;');
+    });
+
+    it('should use a longer fence when diff content contains triple backticks', () => {
+      const elements = createToolResultElement({
+        tool_use_id: 'tool_fence',
+        content: 'file change',
+        diff: '--- a/doc.md\n+++ b/doc.md\n@@ -1 +1 @@\n-```old\n+```new',
+        is_error: false,
+      });
+
+      const rendered = elements[0].elements[0].content as string;
+      expect(rendered.startsWith('````diff\n')).toBe(true);
+      expect(rendered.endsWith('\n````')).toBe(true);
+    });
+
     it('truncates long diffs on complete lines with an explicit notice', () => {
       const diff = Array.from({ length: 200 }, (_, index) => `+line-${index}`).join('\n');
       const elements = createToolResultElement({

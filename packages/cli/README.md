@@ -71,6 +71,8 @@ Help me fix TypeScript errors in ~/projects/my-app
 | `remote-cli stop` | Stop the service |
 | `remote-cli status` | Check service status |
 | `remote-cli service install` | Install automatic startup for macOS or Linux |
+| `remote-cli service start` | Start an installed user-level service |
+| `remote-cli service stop` | Stop it without removing automatic startup |
 | `remote-cli service uninstall` | Remove automatic startup |
 | `remote-cli service status` | Check the user-level startup service |
 | `remote-cli config show` | View configuration |
@@ -128,7 +130,7 @@ When a thread is busy, ordinary messages require confirmation before they enter 
 
 ## Expert Usage
 
-For a shared deployment, run the Router with Docker Compose on an internal server and run one CLI client on each developer machine. Keep project directories and Claude Code, AGY, or Codex credentials on the client machine; the Router persists its configuration and bindings in `./router-data`.
+For a shared deployment, run the Router with Docker Compose on an internal server and run one CLI client on each developer machine. Keep project directories and Claude Code, AGY, or Codex credentials on the client machine; the Router persists its configuration and bindings in `./router-data`. On Linux, create that directory as the deployment user and set `ROUTER_UID` and `ROUTER_GID` in `.env` to `id -u` and `id -g` so the container can write to the bind mount.
 
 To update a Router deployment without losing bindings:
 

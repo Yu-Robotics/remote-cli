@@ -57,6 +57,30 @@ describe('ServiceManager', () => {
     await expect(fs.access(path.join(homeDir, '.remote-cli', 'config.json'))).resolves.toBeUndefined();
   });
 
+  it('starts and stops an installed Linux service without changing enablement', async () => {
+    homeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'remote-cli-service-linux-'));
+    let active = false;
+    const calls: string[][] = [];
+    const runner: ServiceCommandRunner = vi.fn(async (command, args) => {
+      calls.push([command, ...args]);
+      if (args.includes('start')) active = true;
+      if (args.includes('stop')) active = false;
+      if (args.includes('show')) {
+        return { stdout: `ActiveState=${active ? 'active' : 'inactive'}\nUnitFileState=enabled\nMainPID=${active ? '321' : '0'}\n`, stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    });
+    const manager = new LinuxServiceManager(createContext(), runner);
+
+    await manager.install();
+    await manager.stop();
+    const status = await manager.start();
+
+    expect(calls).toContainEqual(['systemctl', '--user', 'stop', 'remote-cli']);
+    expect(calls).toContainEqual(['systemctl', '--user', 'start', 'remote-cli']);
+    expect(status).toMatchObject({ running: true, enabled: true, pid: 321 });
+  });
+
   it('installs and reads a macOS LaunchAgent status', async () => {
     homeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'remote-cli-service-mac-'));
     const runner: ServiceCommandRunner = vi.fn(async (_command, args) => {
@@ -72,5 +96,20 @@ describe('ServiceManager', () => {
     expect(status).toMatchObject({ platform: 'darwin', installed: true, running: true, enabled: true, pid: 654 });
     expect(plist).toContain('<string>/opt/remote cli/bin/remote-cli.js</string>');
     expect(plist).toContain('<key>RunAtLoad</key>');
+  });
+
+  it('does not report a loaded but exited macOS service as running', async () => {
+    homeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'remote-cli-service-mac-'));
+    const runner: ServiceCommandRunner = vi.fn(async (_command, args) => {
+      if (args[0] === 'print') return { stdout: 'state = exited\nlast exit code = 1\n', stderr: '' };
+      return { stdout: '', stderr: '' };
+    });
+    const manager = new MacServiceManager(createContext(), runner, 501);
+
+    await manager.install();
+    const status = await manager.status();
+
+    expect(status).toMatchObject({ installed: true, running: false, enabled: true, detail: 'exited' });
+    expect(status.pid).toBeUndefined();
   });
 });
