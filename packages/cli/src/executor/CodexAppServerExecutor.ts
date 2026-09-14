@@ -604,11 +604,16 @@ export class CodexAppServerExecutor implements IExecutor {
         });
         break;
       case 'fileChange': {
-        this.emitToolUse(active, id, 'Edit', { file_path: item.changes?.[0]?.path ?? '' });
         const changes = Array.isArray(item.changes) ? item.changes : [];
+        const diffs = changes
+          .map((change: any) => typeof change?.diff === 'string' ? change.diff : '')
+          .filter(Boolean)
+          .join('\n');
+        this.emitToolUse(active, id, 'Edit', { file_path: changes[0]?.path ?? '', ...(diffs ? { diff: diffs } : {}) });
         active.options.onToolResult?.({
           tool_use_id: id,
           content: changes.map((change: any) => `${change.kind ?? 'update'}: ${change.path ?? ''}`).join('\n'),
+          ...(diffs ? { diff: diffs } : {}),
           is_error: item.status !== 'completed',
         });
         break;
