@@ -166,6 +166,8 @@ remote-cli service uninstall
 
 安装器会自动记录当前 Node.js 可执行文件、CLI 入口、`HOME`、`PATH` 和日志路径。macOS 使用 `LaunchAgent`，Linux 使用 `systemd --user`。`remote-cli stop` 也会停止正在运行的托管服务；`remote-cli service stop` 和 `remote-cli service start` 可以在不移除自动启动配置的情况下暂停和恢复服务。服务以当前用户运行，不使用 root，因此 backend 登录信息和项目目录权限应与手动启动一致。Linux 默认在用户登录后启动；如果希望服务器重启后、登录前也启动，可以明确执行 `loginctl enable-linger "$USER"`。
 
+non-interactive 客户端在重新连接到较新版本的 Router 时会自动追平版本。客户端会等待所有 thread 和已确认队列进入空闲状态，从 npm 安装与 Router 完全一致的版本，然后退出并由进程管理器重新启动。短暂安装期间收到的新命令会被拒绝，并提示稍后重试。交互式启动不会自动升级。`--non-interactive` 设计用于由 systemd 或 macOS LaunchAgent 管理的客户端；手动使用该参数也会启用自动升级行为。如果 npm 安装或版本校验失败，现有进程会继续运行并稍后重试。
+
 Linux 用户从 1.6.23 或更早版本升级后，需要再次执行 `remote-cli service install`，以使用正确的路径转义重新生成 systemd unit。
 
 ## 路由服务器部署
