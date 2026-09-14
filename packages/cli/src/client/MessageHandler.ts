@@ -83,6 +83,7 @@ export class MessageHandler {
   private readonly messageOpenIds = new Map<string, string | undefined>();
   private readonly activeThreadOperations = new Map<string, ActiveThreadOperation>();
   private readonly abortOperations = new Map<string, Promise<void>>();
+  private automaticUpdateInProgress = false;
 
   constructor(
     wsClient: WebSocketClient,
@@ -142,6 +143,29 @@ export class MessageHandler {
     }
   }
 
+  tryBeginAutomaticUpdate(): boolean {
+    this.removeExpiredQueueConfirmations();
+    const hasQueuedCommands = Array.from(this.threadQueues.values()).some((queue) => queue.length > 0);
+    const hasRunningThread = this.threadPool.getSummaries().some((thread) => thread.status === 'running');
+    if (
+      this.automaticUpdateInProgress
+      || hasRunningThread
+      || hasQueuedCommands
+      || this.pendingQueueConfirmations.size > 0
+      || this.pendingReplaces.size > 0
+      || this.activeThreadOperations.size > 0
+      || this.abortOperations.size > 0
+    ) {
+      return false;
+    }
+    this.automaticUpdateInProgress = true;
+    return true;
+  }
+
+  endAutomaticUpdate(): void {
+    this.automaticUpdateInProgress = false;
+  }
+
   /**
    * Handle command message — route to the correct thread executor.
    */
@@ -166,6 +190,15 @@ export class MessageHandler {
     }
 
     const resolvedThreadId = thread.id;
+
+    if (this.automaticUpdateInProgress) {
+      this.sendResponse(messageId, resolvedThreadId, {
+        success: false,
+        error: 'The client is installing an automatic update. Please retry after it reconnects.',
+      });
+      return;
+    }
+
     const executor = this.threadPool.getExecutor(resolvedThreadId);
 
     // Handle /abort for this specific thread (bypasses busy check)

@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 No unreleased changes.
 
+## [1.6.26] - 2026-09-14
+
+### Added
+- Added automatic CLI version catch-up for installed Linux systemd services and macOS LaunchAgents after reconnecting to a newer Router.
+- Added idle draining so automatic updates never interrupt active thread work; automatic updates apply whenever the client runs with `--non-interactive`.
+
+### Changed
+- Protocol incompatibility responses now trigger exact Router-version resolution and managed automatic update attempts instead of requiring unconditional manual recovery.
+
 ## [1.6.25] - 2026-09-14
 
 ### Fixed

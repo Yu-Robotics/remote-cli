@@ -13,6 +13,7 @@ Remote control your [Claude Code](https://claude.ai/code) CLI from anywhere usin
 - **Multi-session (Threads)**: Create independent chat threads to parallelize tasks
 - **Remote Machine Management**: Control remote servers or Docker via SSH
 - **Persistent Process**: Long-running AI process with bidirectional streaming
+- **Non-Interactive Auto-Update**: Reconnect to a newer Router, wait for idle work, install its exact version, and exit for the process supervisor to restart
 
 ## Prerequisites
 
