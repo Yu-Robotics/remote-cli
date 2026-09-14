@@ -169,6 +169,8 @@ remote-cli service uninstall
 
 The installer captures the current Node.js executable, CLI entry point, `HOME`, `PATH`, and log paths. macOS uses a `LaunchAgent`; Linux uses a `systemd --user` service. `remote-cli stop` also stops an active managed service, while `remote-cli service stop` and `remote-cli service start` pause and resume it without removing automatic startup. The service runs as the current user, not root, so backend credentials and project access remain consistent with manual startup. On Linux, it starts after user login by default. To start it before login after reboot, enable user lingering explicitly with `loginctl enable-linger "$USER"`.
 
+After upgrading from version 1.6.23 or earlier on Linux, run `remote-cli service install` again to regenerate the systemd unit with corrected path escaping.
+
 ## Router Server Deployment
 
 > **Note**: Most users don't need to deploy the router server. Your team administrator should deploy one router server for the entire team to share.

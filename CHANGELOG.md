@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 No unreleased changes.
 
+## [1.6.24] - 2026-09-14
+
+### Fixed
+- Fixed Linux systemd user units that quoted `WorkingDirectory` and output paths with shell-style syntax, causing systemd to reject otherwise valid absolute paths.
+- Correctly quoted complete `Environment` assignments and escaped paths containing spaces or systemd specifier characters.
+
 ## [1.6.23] - 2026-09-14
 
 ### Fixed
