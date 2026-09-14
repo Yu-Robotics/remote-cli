@@ -78,6 +78,8 @@ Help me fix TypeScript errors in ~/projects/my-app
 | `remote-cli config show` | View configuration |
 | `remote-cli config add-dir <path>` | Add allowed directory |
 
+Linux users upgrading from version 1.6.23 or earlier should run `remote-cli service install` again to regenerate the systemd unit with corrected path escaping.
+
 ## Feishu Bot Commands
 
 ### Core Management
