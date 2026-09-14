@@ -133,4 +133,106 @@ describe('MessageHandler Concurrency', () => {
     // Should respond with aborted message
     expect(mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ output: expect.stringContaining('aborted') }));
   });
+
+  it('should wait for abort cleanup before starting a new command', async () => {
+    let rejectFirst!: (error: Error) => void;
+    let resolveSecond!: (result: any) => void;
+    let finishAbort!: () => void;
+    const abortCleanup = new Promise<void>((resolve) => { finishAbort = resolve; });
+
+    mockExecutor.execute
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectFirst = reject; }))
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveSecond = resolve; }));
+    mockExecutor.abort.mockImplementation(async () => {
+      rejectFirst(new Error('Command aborted by user'));
+      await abortCleanup;
+      return true;
+    });
+
+    const first = handler.handleMessage({
+      type: 'command',
+      messageId: 'msg-first',
+      content: 'Long task',
+      timestamp: Date.now(),
+    } as any);
+    await vi.waitFor(() => expect(mockExecutor.execute).toHaveBeenCalledTimes(1));
+
+    const abort = handler.handleMessage({
+      type: 'command',
+      messageId: 'msg-abort',
+      content: '/abort',
+      timestamp: Date.now(),
+    } as any);
+    await first;
+
+    const next = handler.handleMessage({
+      type: 'command',
+      messageId: 'msg-next',
+      content: 'Run after abort',
+      timestamp: Date.now(),
+    } as any);
+    await Promise.resolve();
+
+    expect(mockExecutor.execute).toHaveBeenCalledTimes(1);
+    expect(mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'stream',
+      messageId: 'msg-next',
+      chunk: expect.stringContaining('Waiting for the current abort'),
+    }));
+
+    finishAbort();
+    await abort;
+    await vi.waitFor(() => expect(mockExecutor.execute).toHaveBeenCalledTimes(2));
+    expect(mockThreadPool.isThreadBusy('thread-1')).toBe(true);
+
+    resolveSecond({ success: true, output: 'done' });
+    await next;
+    expect(mockThreadPool.isThreadBusy('thread-1')).toBe(false);
+    expect(mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'response',
+      messageId: 'msg-next',
+      success: true,
+    }));
+  });
+
+  it('should wait for the interrupted command to settle when abort returns first', async () => {
+    let resolveFirst!: (result: any) => void;
+    mockExecutor.execute
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }))
+      .mockResolvedValueOnce({ success: true, output: 'next done' });
+    mockExecutor.abort.mockResolvedValue(true);
+
+    const first = handler.handleMessage({
+      type: 'command',
+      messageId: 'msg-first',
+      content: 'Long task',
+      timestamp: Date.now(),
+    } as any);
+    await vi.waitFor(() => expect(mockExecutor.execute).toHaveBeenCalledTimes(1));
+
+    const abort = handler.handleMessage({
+      type: 'command',
+      messageId: 'msg-abort',
+      content: '/abort',
+      timestamp: Date.now(),
+    } as any);
+    const next = handler.handleMessage({
+      type: 'command',
+      messageId: 'msg-next',
+      content: 'Run after abort',
+      timestamp: Date.now(),
+    } as any);
+    await Promise.resolve();
+
+    expect(mockExecutor.execute).toHaveBeenCalledTimes(1);
+    resolveFirst({ success: false, error: 'Aborted by user' });
+    await Promise.all([first, abort, next]);
+
+    expect(mockExecutor.execute).toHaveBeenCalledTimes(2);
+    expect(mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'response',
+      messageId: 'msg-next',
+      success: true,
+    }));
+  });
 });

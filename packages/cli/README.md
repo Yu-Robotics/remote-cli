@@ -126,7 +126,7 @@ All commands/skills supported by local Claude Code or Gemini CLI are passed thro
 
 Use one thread per project or task so each thread keeps its own working directory, backend session, model, and queue. Use `/backend <index>` for a global switch, or `/backend <index> @` to override only the current thread. `/backend default @` removes that override.
 
-When a thread is busy, ordinary messages require confirmation before they enter its queue. Use `/queue` to inspect pending work, `/queue clear` to discard queued messages, and `/abort` to stop the active task and clear that thread's queue. Context-changing commands such as `/model`, `/effort`, `/cd`, `/compact`, and `/clear` are handled separately rather than queued as ordinary messages.
+When a thread is busy, ordinary messages require confirmation before they enter its queue. Use `/queue` to inspect pending work, `/queue clear` to discard queued messages, and `/abort` to stop the active task and clear that thread's queue. A message received during abort cleanup waits and starts after the backend is safe to reuse. Context-changing commands such as `/model`, `/effort`, `/cd`, `/compact`, and `/clear` are handled separately rather than queued as ordinary messages.
 
 ## Expert Usage
 

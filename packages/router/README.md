@@ -129,7 +129,7 @@ curl https://your-domain.com/health
 
 Use one Router for multiple trusted clients. Each client connects from the developer's machine, while the Router owns Feishu configuration, device bindings, routing, and thread switch state. A thread can override its backend with `/backend <index> @`; `/backend <index>` changes the global backend and clears per-thread overrides.
 
-When a client thread is busy, the Router sends a confirmation card before accepting another message into its queue. `/queue` shows queue state, `/queue clear` discards queued messages, and `/abort` stops the active task and clears that thread's queue.
+When a client thread is busy, the Router sends a confirmation card before accepting another message into its queue. `/queue` shows queue state, `/queue clear` discards queued messages, and `/abort` stops the active task and clears that thread's queue. Messages received while abort cleanup is in progress wait for the client backend to become safe before execution starts.
 
 ## Expert Usage
 

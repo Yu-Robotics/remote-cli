@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 No unreleased changes.
 
+## [1.6.23] - 2026-09-14
+
+### Fixed
+- Fixed a race where a message sent while `/abort` was still closing a backend process could remain in the Processing state indefinitely.
+- Serialized per-thread abort cleanup with subsequent messages and prevented an older command from clearing a newer command's busy state.
+
 ## [1.6.22] - 2026-09-14
 
 ### Added
