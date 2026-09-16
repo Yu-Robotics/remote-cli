@@ -225,18 +225,32 @@ describe('/backend command', () => {
       expect(openCodeLine).toContain('★ (active)');
     });
 
+    it('shows and marks Kimi Code active when kimi is installed', async () => {
+      mockInstalled('claude', 'kimi');
+      mockConfig.get.mockReturnValue({ type: 'kimi' });
+      mockThreadPool.getBackendKey.mockReturnValue('kimi');
+
+      await send('/backend');
+
+      const kimiLine = sentResponse().output.split('\n').find((line: string) => line.includes('Kimi Code CLI'));
+      expect(kimiLine).toContain('★ (active)');
+    });
+
     it('lists Codex before AGY when all backends are installed', async () => {
-      mockInstalled('claude', 'agy', 'codex', 'opencode');
+      mockInstalled('claude', 'agy', 'codex', 'opencode', 'kimi');
 
       await send('/backend');
 
       const lines = sentResponse().output.split('\n');
       const codexIndex = lines.findIndex((line: string) => line.includes('Codex CLI'));
       const openCodeIndex = lines.findIndex((line: string) => line.includes('OpenCode CLI'));
+      const kimiIndex = lines.findIndex((line: string) => line.includes('Kimi Code CLI'));
       const agyIndex = lines.findIndex((line: string) => line.includes('AGY CLI'));
       expect(codexIndex).toBeGreaterThan(-1);
       expect(openCodeIndex).toBeGreaterThan(codexIndex);
       expect(openCodeIndex).toBeLessThan(agyIndex);
+      expect(kimiIndex).toBeGreaterThan(openCodeIndex);
+      expect(kimiIndex).toBeLessThan(agyIndex);
       expect(codexIndex).toBeLessThan(agyIndex);
     });
 

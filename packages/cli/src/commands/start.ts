@@ -44,11 +44,13 @@ async function checkBackendAvailability(type: string, spinner: Ora): Promise<voi
   const isAgy = type === 'agy';
   const isCodex = type === 'codex';
   const isOpenCode = type === 'opencode';
-  const cmd = isAgy ? 'agy' : isCodex ? 'codex' : isOpenCode ? 'opencode' : 'claude';
+  const isKimi = type === 'kimi';
+  const cmd = isAgy ? 'agy' : isCodex ? 'codex' : isOpenCode ? 'opencode' : isKimi ? 'kimi' : 'claude';
   const args = ['--version'];
   const label = isAgy ? 'AGY CLI (Antigravity)'
     : isCodex ? 'Codex CLI (OpenAI)'
       : isOpenCode ? 'OpenCode CLI'
+        : isKimi ? 'Kimi Code CLI'
         : 'Claude Code';
 
   const available = await new Promise<boolean>((resolve) => {
