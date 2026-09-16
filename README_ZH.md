@@ -1,10 +1,10 @@
-# Remote CLI - 通过飞书远程控制 Claude Code / AGY CLI / Codex CLI
+# Remote CLI - 通过飞书远程控制 Claude Code / AGY CLI / Codex CLI / OpenCode CLI
 
 [![npm version](https://img.shields.io/npm/v/@yu_robotics/remote-cli.svg)](https://www.npmjs.com/package/@yu_robotics/remote-cli)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js Version](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](https://nodejs.org/)
 
-通过飞书（Lark）消息从手机上远程控制你的 Claude Code、AGY CLI（Antigravity）或 Codex CLI（OpenAI）。即使不在电脑前，也能继续编程。
+通过飞书（Lark）消息从手机上远程控制你的 Claude Code、AGY CLI（Antigravity）、Codex CLI（OpenAI）或 OpenCode CLI。即使不在电脑前，也能继续编程。
 
 [English Documentation](README.md)
 
@@ -14,7 +14,7 @@
 - 🔒 **访问控制**：工作目录选择限制与设备认证
 - 📱 **移动优化**：为飞书定制的简化命令和富文本格式
 - 📝 **代码变更易读**：编辑操作会在原有进度卡片中显示可折叠、按行处理的 diff 预览
-- 🤖 **多后端支持**：支持 Claude Code（默认）、AGY CLI（Antigravity）和 Codex CLI（OpenAI），可随时切换
+- 🤖 **多后端支持**：支持 Claude Code（默认）、AGY CLI（Antigravity）、Codex CLI（OpenAI）和 OpenCode CLI，可随时切换
 - 🧵 **多会话管理**：支持创建多个独立的会话线程（Threads），并行处理不同任务。支持通过飞书卡片按钮快速切换和创建新线程。
 - 🖥️ **远程机器管理**：支持通过 SSH 直接在飞书中控制远程服务器或 Docker 容器。支持 `/search`、`/view`、`/replace` 等远程文件操作。
 - ⚡ **持久进程**：通过 stdio 双向流保持 AI 进程长期运行，极大提升响应速度
@@ -51,7 +51,7 @@ Bot： 📂 已切换到 ~/projects/.openclaw
       ✅ 配置已修复，openclaw 可以正常启动了
 ```
 
-整个过程你只需要在手机上发一条消息，Claude Code、AGY CLI 或 Codex CLI 在你的电脑上自主完成排查、修复、验证全流程。
+整个过程你只需要在手机上发一条消息，Claude Code、AGY CLI、Codex CLI 或 OpenCode CLI 在你的电脑上自主完成排查、修复、验证全流程。
 
 **这个场景推广到更多工具**：
 - 任何会自动修改配置的 CLI 工具损坏后的应急修复
@@ -101,7 +101,7 @@ Bot： 📂 已切换到 ~/projects/.openclaw
 └─────────────────┘         │  │  - 安全目录守卫           │ │
         │                   │  └──────────┬──────────────┘ │
         │                   │             ▼                 │
-        │                   │  Claude Code / AGY / Codex CLI  │
+        │                   │  Claude Code / AGY / Codex / OpenCode CLI  │
         ▼                   │  (本地 AI 后端)               │
 ┌─────────────────┐         └──────────────────────────────┘
 │   路由服务器     │
@@ -149,7 +149,7 @@ remote-cli service install
 
 - **Node.js** >= 18.0.0
 - **npm** 或 **yarn** 包管理器
-- **Claude Code CLI**、**AGY CLI**（Antigravity）或 **Codex CLI**（OpenAI）——至少安装并配置其中一个
+- **Claude Code CLI**、**AGY CLI**（Antigravity）、**Codex CLI**（OpenAI）或 **OpenCode CLI**——至少安装并配置其中一个
 - 可访问的**飞书机器人**（团队应部署一个路由服务器）
 
 ### 客户端自动启动
@@ -239,7 +239,7 @@ pm2 start remote-cli-router --name router -- start
 
 ### 使用 Docker Compose 部署（共享 Router 推荐）
 
-共享 Router 服务器推荐使用 Docker，这样可以隔离 Node.js 和 Router 依赖。普通客户端不建议使用 Docker，因为客户端需要直接访问本机项目文件，以及本机安装的 Claude Code、AGY 或 Codex CLI。
+共享 Router 服务器推荐使用 Docker，这样可以隔离 Node.js 和 Router 依赖。普通客户端不建议使用 Docker，因为客户端需要直接访问本机项目文件，以及本机安装的 Claude Code、AGY、Codex 或 OpenCode CLI。
 
 ```bash
 # 在仓库根目录执行
@@ -431,7 +431,7 @@ remote-cli stop
 | `/clear` | 清除当前线程的对话上下文 |
 | `/compact` | 压缩对话历史以节省 Token |
 | `/model [name]` | 列出当前 backend 的模型，或设置当前线程的模型 |
-| `/effort [auto|low|medium|high]` | 查看或设置 Codex/AGY 的线程思考等级 |
+| `/effort [auto|level]` | 查看或设置 Codex/AGY/OpenCode 的线程思考等级 |
 | `/cd <dir>` | 切换当前线程的工作目录 |
 | `/backend` | 列出后端并显示当前线程实际使用的后端 |
 | `/bind <码>` | 绑定新设备 |
@@ -461,17 +461,17 @@ Backend 选择同时支持全局模式和按线程模式：
 | `/backend <index> @` | 只将当前线程切换到指定后端 |
 | `/backend default @` | 清除当前线程的覆盖设置，恢复跟随全局后端 |
 
-Backend index 使用 `/backend` 显示的顺序（安装后通常为 Claude Code、Codex CLI、AGY CLI）。按线程选择会持久化到 `threads.json`。不同线程可以使用不同后端并行执行。受影响的线程正在执行时不会执行后端切换；任意线程正在执行时也不会执行全局切换。切换后端会保留各后端的会话数据，因此切回某个后端时可以恢复其之前的会话。
+Backend index 使用 `/backend` 显示的顺序（安装后通常为 Claude Code、Codex CLI、OpenCode CLI、AGY CLI）。按线程选择会持久化到 `threads.json`。不同线程可以使用不同后端并行执行。受影响的线程正在执行时不会执行后端切换；任意线程正在执行时也不会执行全局切换。切换后端会保留各后端的会话数据，因此切回某个后端时可以恢复其之前的会话。
 
 ### 命令队列
 
-每个 thread 同时只执行一条命令，因为 Claude Code、AGY 和 Codex 的会话都按顺序处理。如果在线程忙碌时发送普通消息，remote-cli 会先发送飞书确认卡片，不会直接入队。只有点击 **Add to queue** 后消息才会入队；点击 **Cancel** 或确认超时都会丢弃消息。
+每个 thread 同时只执行一条命令，因为 Claude Code、AGY、Codex 和 OpenCode 的会话都按顺序处理。如果在线程忙碌时发送普通消息，remote-cli 会先发送飞书确认卡片，不会直接入队。只有点击 **Add to queue** 后消息才会入队；点击 **Cancel** 或确认超时都会丢弃消息。
 
 `/queue` 会列出正在执行和等待中的队列。`/queue clear` 清除当前 thread 中已确认和等待确认的消息。`/abort` 会中止当前任务并清空该 thread 的队列。在 abort 清理尚未结束时发送的新消息会等待清理完成，然后正常开始执行，不会跟随旧任务一起被丢弃。thread 忙碌时不允许切换 backend 或修改执行上下文；成功切换 backend 后会清除受影响的队列。如果排队任务失败，该 thread 的队列会暂停；可以使用 `/queue continue` 继续，或使用 `/abort` 丢弃剩余消息。队列只保存在内存中，服务重启后会丢失。
 
 ### 图片输入
 
-可以直接向飞书机器人发送单独的图片，也可以发送同时包含文字和图片的富文本消息。remote-cli 会下载图片资源，并将文字与图片一起转发给当前的 Claude Persistent 或 Codex App Server 后端。AGY 和旧版 Codex exec transport 当前只接受文本，不会处理图片附件。普通文件附件暂不支持。
+可以直接向飞书机器人发送单独的图片，也可以发送同时包含文字和图片的富文本消息。remote-cli 会下载图片资源，并将文字与图片一起转发给当前的 Claude Persistent、Codex App Server 或 OpenCode ACP 后端。AGY 和旧版 Codex exec transport 当前只接受文本，不会处理图片附件。普通文件附件暂不支持。
 
 Codex App Server 生成的图片也会转发回飞书。Codex 通过 app-server 协议返回生成图片，CLI 将图片发送给 Router，Router 上传到飞书，并在原有的 Card 2.0 响应中显示。该功能需要 CLI 和 Router 都升级到支持图片转发的版本。只升级 Router 是兼容的，但旧 CLI 不会生成或发送图片事件；只升级 CLI 也不会破坏兼容性，但旧 Router 会忽略可选的图片流消息，仍然显示文本响应。
 
@@ -484,9 +484,9 @@ Codex App Server 生成的图片也会转发回飞书。Codex 通过 app-server 
 | `/model` | 显示当前 backend、已选模型和可用模型 |
 | `/model <name>` | 为当前线程和当前 backend 设置模型 |
 | `/effort` | 显示当前思考等级以及 backend 支持的等级 |
-| `/effort <auto|low|medium|high>` | 设置思考等级，使用 `auto` 清除线程覆盖值 |
+| `/effort <auto|level>` | 设置思考等级，使用 `auto` 清除线程覆盖值 |
 
-模型列表由各 backend 分别提供：Claude Code 使用 `claude --print /model`，AGY 使用 `agy models`，Codex app-server 使用当前账号可用的模型目录。Codex 的 `exec` 回退模式无法列出模型。当前只有 Codex 和 AGY 支持 reasoning effort；Claude Code 会返回暂不支持。`auto` 会清除当前线程的覆盖值，恢复当前模型或 backend 的默认思考等级。
+模型列表由各 backend 分别提供：Claude Code 使用 `claude --print /model`，AGY 使用 `agy models`，Codex app-server 使用当前账号可用的模型目录，OpenCode 使用 ACP 会话配置选项。Codex 的 `exec` 回退模式无法列出模型。当前 Codex、AGY 和 OpenCode 支持 reasoning effort；Claude Code 会返回暂不支持。`auto` 会清除当前线程的覆盖值，恢复当前模型或 backend 的默认思考等级。
 
 ### 远程机器管理（Machine）
 
@@ -511,9 +511,10 @@ remote-cli 自身不处理的斜杠命令会转发给当前 AI 后端，各后�
 - **Claude Code**：完整透传（`claude <cmd> --print`）——所有 commands/skills 指令可用，例如 `/commit`、`/review`、`/test`
 - **AGY CLI (Antigravity)**：仅透传 agy 本地应答的只读信息类命令（`agy -p "<cmd>"`）：`/skills`、`/usage`、`/config`、`/changelog`、`/agents`、`/permissions`、`/hooks`、`/credits`。其他命令（包括 `/compact`——agy 在非交互模式下不会拦截它）会被拒绝并提示原因
 - **Codex CLI (OpenAI)**：不透传——remote-cli 使用 app-server API，而不是交互式 TUI 的斜杠命令层，因此后端专属斜杠命令会被拒绝
+- **OpenCode CLI**：斜杠命令通过持久化 ACP 会话发送；`/model`、`/effort`、`/compact` 和 `/abort` 等通用命令仍由 remote-cli 自身处理
 
-内建命令（`/help`、`/status`、`/context`、`/skills`、`/clear`、`/compact`、`/model`、`/cd`、`/thread`、`/backend`、`/abort`）可用于所有后端。`/effort` 可按线程设置 Codex 和 AGY 的思考等级；Claude Code 暂未实现。
-`/context` 可用于所有后端，会显示当前会话、模型、工作目录和队列状态；精确 Token 使用量取决于底层传输是否提供。`/skills` 在 Claude 和 AGY 上使用原生信息命令，Codex 则扫描 `.agents/skills` 和 `~/.codex/skills` 下的本地 `SKILL.md` 文件。
+内建命令（`/help`、`/status`、`/context`、`/skills`、`/clear`、`/compact`、`/model`、`/cd`、`/thread`、`/backend`、`/abort`）可用于所有后端。`/effort` 可按线程设置 Codex、AGY 和 OpenCode 的思考等级；Claude Code 暂未实现。
+`/context` 可用于所有后端，会显示当前会话、模型、工作目录和队列状态；精确 Token 使用量取决于底层传输是否提供。`/skills` 在 Claude、AGY 和 OpenCode 上使用原生信息命令，Codex 则扫描 `.agents/skills` 和 `~/.codex/skills` 下的本地 `SKILL.md` 文件。
 
 ### 示例工作流程
 
@@ -591,7 +592,7 @@ thread 忙碌时，普通消息会先生成确认卡片，不会静默进入队�
 /effort auto
 ```
 
-Codex 和 AGY 提供原生 effort 控制。Claude Code 自身支持 thinking 和 effort，但 remote-cli 内建的 `/effort` 目前会提示 Claude 暂不支持。不同 backend 的模型列表和 effort 等级可能不同，切换后可以用 `/status` 或 `/context` 确认实际状态。
+Codex、AGY 和 OpenCode 提供原生 effort 控制。Claude Code 自身支持 thinking 和 effort，但 remote-cli 内建的 `/effort` 目前会提示 Claude 暂不支持。不同 backend 的模型列表和 effort 等级可能不同，切换后可以用 `/status` 或 `/context` 确认实际状态。
 
 ## 资深用法
 
@@ -603,7 +604,7 @@ Codex 和 AGY 提供原生 effort 控制。Claude Code 自身支持 thinking 和
 飞书 <-> Router（Docker Compose）<-> 各开发者本地 CLI 客户端
 ```
 
-Router 的飞书配置和设备绑定关系保存在持久化的 `./router-data` 目录中。客户端则在本机保留项目文件、backend 会话，以及 Claude Code/AGY/Codex 的安装和登录状态。除非你明确挂载所有项目目录和 backend 凭证，否则不要把客户端放进 Docker。
+Router 的飞书配置和设备绑定关系保存在持久化的 `./router-data` 目录中。客户端则在本机保留项目文件、backend 会话，以及 Claude Code/AGY/Codex/OpenCode 的安装和登录状态。除非你明确挂载所有项目目录和 backend 凭证，否则不要把客户端放进 Docker。
 
 更新 Compose 部署且不丢失绑定关系：
 
@@ -618,7 +619,7 @@ docker compose logs --tail=100 router
 
 ### 保留或主动重置 backend 会话
 
-每个 thread 都分别保存 Claude、AGY 和 Codex 的会话状态。切换 backend 不会删除之前 backend 的会话，因此可以切回并继续之前的上下文。需要全新上下文时使用 `/clear`；希望某个 thread 重新跟随全局 backend 时使用 `/backend default @`。
+每个 thread 都分别保存 Claude、AGY、Codex 和 OpenCode 的会话状态。切换 backend 不会删除之前 backend 的会话，因此可以切回并继续之前的上下文。需要全新上下文时使用 `/clear`；希望某个 thread 重新跟随全局 backend 时使用 `/backend default @`。
 
 ### 系统化排查远程任务
 
@@ -734,11 +735,15 @@ MIT 许可证 - 详见 [LICENSE](LICENSE) 文件。
 }
 ```
 
-- `executor.type`: 全局默认后端。可选值 `auto` (Claude), `claude-persistent`, `claude-spawn`, `agy`, `codex`。按线程的覆盖设置通过 `/backend <index> @` 管理。
+- `executor.type`: 全局默认后端。可选值 `auto` (Claude), `claude-persistent`, `claude-spawn`, `agy`, `codex`, `opencode`。按线程的覆盖设置通过 `/backend <index> @` 管理。
 - `executor.agy`: 
     - `model`: 模型 slug，取自 `agy models` 列表（如 `gemini-3.8-flash-low`）。不填则用 agy 默认模型。无效 slug 会被 agy 拒绝并返回明确错误。
     - `autoApprove`: 是否通过 `--dangerously-skip-permissions` 自动同意工具权限（默认 true）。
     - `command`: agy 二进制命令（默认 `agy`）。
+- `executor.opencode`:
+    - `model`: `/model` 显示的 provider/model 标识。不填则使用 OpenCode 会话默认值。
+    - `autoApprove`: 是否自动选择 ACP 工具权限请求中的第一个允许选项（默认 true）；设为 false 时拒绝请求。
+    - `command`: OpenCode 二进制命令（默认 `opencode`）。
 - `executor.codex`:
     - `model`: Codex turn 使用的模型。不填则使用 codex 默认模型。可以在飞书中使用 `/model` 查询当前账号可用的模型。
     - `autoApprove`: 使用 `approvalPolicy: never` 和完全访问权限（默认 true）。设为 false 时，app-server 的审批请求会通过现有移动端输入流程转发。
@@ -758,6 +763,22 @@ remote-cli config set executor.type agy
 # 3. 可选：指定模型（用 agy models 查看有效 slug 列表）
 remote-cli config set executor.agy.model gemini-3.8-flash-low
 ```
+
+#### 使用 OpenCode CLI
+
+```bash
+# 1. 安装并认证
+npm install --global @opencode/cli
+opencode auth login
+
+# 2. 切换后端（也可以在飞书中使用 /backend 命令）
+remote-cli config set executor.type opencode
+
+# 3. 可选：从 /model 返回的列表中指定 provider/model
+remote-cli config set executor.opencode.model opencode/nemotron-3.5-lightning-free
+```
+
+OpenCode 后端为每个活跃 thread 运行一个持久化的 `opencode acp` 进程，并在消息、后端切换和服务重启后恢复 ACP session id。`/model` 和 `/effort` 使用 ACP 会话选项，`/compact` 使用 OpenCode 原生命令，`/abort` 发送 ACP 取消请求，图片消息作为 ACP 图片内容发送。`autoApprove: true` 时会选择第一个允许选项；设为 `false` 时会拒绝工具权限请求。
 
 #### 使用 Codex CLI（OpenAI）
 

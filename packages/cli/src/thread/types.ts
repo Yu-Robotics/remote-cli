@@ -29,7 +29,7 @@ export interface Thread {
    * Takes precedence over the legacy `model` field.
    */
   models?: Partial<Record<BackendKey, string>>;
-  /** Per-backend reasoning effort overrides. Currently used by Codex and AGY. */
+  /** Per-backend reasoning effort overrides. Currently used by Codex, AGY, and OpenCode. */
   efforts?: Partial<Record<BackendKey, string>>;
 }
 

@@ -1,10 +1,10 @@
-# Remote CLI - Control Claude Code / AGY CLI / Codex CLI from Mobile via Feishu
+# Remote CLI - Control Claude Code / AGY CLI / Codex CLI / OpenCode CLI from Mobile via Feishu
 
 [![npm version](https://img.shields.io/npm/v/@yu_robotics/remote-cli.svg)](https://www.npmjs.com/package/@yu_robotics/remote-cli)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js Version](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](https://nodejs.org/)
 
-Remote control your Claude Code, AGY CLI (Antigravity), or Codex CLI (OpenAI) from anywhere using your mobile phone through Feishu (Lark) messaging. Continue coding when away from your computer with a mobile-friendly interface.
+Remote control your Claude Code, AGY CLI (Antigravity), Codex CLI (OpenAI), or OpenCode CLI from anywhere using your mobile phone through Feishu (Lark) messaging. Continue coding when away from your computer with a mobile-friendly interface.
 
 [中文文档](README_ZH.md)
 
@@ -14,7 +14,7 @@ Remote control your Claude Code, AGY CLI (Antigravity), or Codex CLI (OpenAI) fr
 - 🔒 **Controlled Access**: Working-directory selection controls and device authentication
 - 📱 **Mobile-Optimized**: Simplified commands and rich text formatting for Feishu
 - 📝 **Readable Code Changes**: Edit operations show collapsible, line-aware diff previews inside the existing progress card
-- 🤖 **Multi-backend Support**: Supports Claude Code (default), AGY CLI (Antigravity), and Codex CLI (OpenAI), switchable at any time
+- 🤖 **Multi-backend Support**: Supports Claude Code (default), AGY CLI (Antigravity), Codex CLI (OpenAI), and OpenCode CLI, switchable at any time
 - 🧵 **Multi-session Management**: Create multiple independent chat threads to handle different tasks in parallel. Support switching and creating threads via Feishu card buttons.
 - 🖥️ **Remote Machine Management**: Control remote servers or Docker containers via SSH directly through Feishu. Support `/search`, `/view`, `/replace` and other remote file operations.
 - ⚡ **Persistent Process**: Long-running AI process with bidirectional streaming via stdio for faster response times
@@ -52,7 +52,7 @@ Bot:  📂 Switched to ~/projects/.openclaw
       ✅ Config fixed — openclaw can start normally now
 ```
 
-You only need to send one message from your phone. Claude Code, AGY CLI, or Codex CLI handles the investigation, fix, and validation autonomously on your computer.
+You only need to send one message from your phone. Claude Code, AGY CLI, Codex CLI, or OpenCode CLI handles the investigation, fix, and validation autonomously on your computer.
 
 **This pattern applies broadly**:
 - Emergency recovery when any CLI tool corrupts its own config
@@ -99,12 +99,12 @@ You only need to send one message from your phone. Claude Code, AGY CLI, or Code
 │  Phone          │         │  │  remote-cli (local)     │ │
 │  Private Chat   │         │  │  - WebSocket Client     │ │
 │  with Bot       │         │  │  - AI CLI Executor      │ │
-└─────────────────┘         │  │    (Claude/AGY/Codex)   │ │
+└─────────────────┘         │  │    (Claude/AGY/Codex/OpenCode)   │ │
         │                   │  │  - Security Directory   │ │
         │                   │  │    Guard                │ │
         │                   │  └──────────┬──────────────┘ │
         │                   │             ▼                 │
-        │                   │  Claude Code / AGY / Codex CLI  │
+        │                   │  Claude Code / AGY / Codex / OpenCode CLI  │
         ▼                   │  (Local AI Backend)           │
 ┌─────────────────┐         └──────────────────────────────┘
 │  Router Server  │
@@ -152,7 +152,7 @@ Before you begin, ensure you have:
 
 - **Node.js** >= 18.0.0
 - **npm** or **yarn** package manager
-- **Claude Code CLI**, **AGY CLI** (Antigravity), or **Codex CLI** (OpenAI) — at least one installed and configured
+- **Claude Code CLI**, **AGY CLI** (Antigravity), **Codex CLI** (OpenAI), or **OpenCode CLI** — at least one installed and configured
 - Access to a **Feishu (Lark) bot** (your team should deploy a router server)
 
 ### Automatic Client Startup
@@ -242,7 +242,7 @@ pm2 start remote-cli-router --name router -- start
 
 ### Docker Compose Deployment (Recommended for Shared Routers)
 
-Docker is recommended for the shared Router server because it keeps Node.js and Router dependencies isolated. The local client should not normally run in Docker: it needs direct access to local project files and the installed Claude Code, AGY, or Codex CLI binaries.
+Docker is recommended for the shared Router server because it keeps Node.js and Router dependencies isolated. The local client should not normally run in Docker: it needs direct access to local project files and the installed Claude Code, AGY, Codex, or OpenCode CLI binaries.
 
 ```bash
 # From the repository root
@@ -434,7 +434,7 @@ Once connected, use these commands in Feishu:
 | `/clear` | Clear conversation context for this thread |
 | `/compact` | Compress conversation history to save tokens |
 | `/model [name]` | List models for the active backend or set this thread's model |
-| `/effort [auto|low|medium|high]` | Show or set per-thread reasoning effort for Codex/AGY |
+| `/effort [auto|level]` | Show or set per-thread reasoning effort for Codex/AGY/OpenCode |
 | `/cd <dir>` | Change working directory for this thread |
 | `/backend` | List backends and show the current thread's effective backend |
 | `/bind <码>` | Bind a new device |
@@ -464,17 +464,17 @@ Backend selection supports both global and per-thread modes:
 | `/backend <index> @` | Switch only the current thread to the selected backend |
 | `/backend default @` | Clear the current thread's override and follow the global backend |
 
-The backend index follows the order shown by `/backend` (Claude Code, Codex CLI, then AGY CLI when installed). Per-thread backend choices are persisted in `threads.json`. Different threads can use different backends and execute concurrently. A backend switch is rejected while the affected thread is running; a global switch is rejected while any thread is running. Backend session data is preserved when switching, so returning to a backend can resume its previous session.
+The backend index follows the order shown by `/backend` (Claude Code, Codex CLI, OpenCode CLI, then AGY CLI when installed). Per-thread backend choices are persisted in `threads.json`. Different threads can use different backends and execute concurrently. A backend switch is rejected while the affected thread is running; a global switch is rejected while any thread is running. Backend session data is preserved when switching, so returning to a backend can resume its previous session.
 
 ### Command Queues
 
-Each thread executes one command at a time because Claude Code, AGY, and Codex sessions are sequential. If a normal message is sent while its thread is busy, remote-cli shows a Feishu confirmation card instead of queueing it immediately. The message is queued only after clicking **Add to queue**; clicking **Cancel** or waiting for the confirmation to expire discards it.
+Each thread executes one command at a time because Claude Code, AGY, Codex, and OpenCode sessions are sequential. If a normal message is sent while its thread is busy, remote-cli shows a Feishu confirmation card instead of queueing it immediately. The message is queued only after clicking **Add to queue**; clicking **Cancel** or waiting for the confirmation to expire discards it.
 
 `/queue` lists active and pending queues. `/queue clear` removes confirmed and awaiting-confirmation messages for the current thread. `/abort` stops the current task and clears that thread's queue. A message sent while abort cleanup is still running waits for cleanup and then starts normally, so it is not discarded with the old task. Backend or execution-context changes are rejected while a thread is busy, and a successful backend switch clears affected queues. If a queued task fails, its thread queue pauses; use `/queue continue` to resume or `/abort` to discard the remaining messages. Queues are in-memory and are discarded on service restart.
 
 ### Image Input
 
-You can send a standalone image or a rich-text message containing both text and images to the Feishu bot. remote-cli downloads the image resources and forwards the text and images together to the active Claude Persistent or Codex App Server backend. AGY and the legacy Codex exec transport currently accept text only and will not process image attachments. Ordinary file attachments are not supported yet.
+You can send a standalone image or a rich-text message containing both text and images to the Feishu bot. remote-cli downloads the image resources and forwards the text and images together to the active Claude Persistent, Codex App Server, or OpenCode ACP backend. AGY and the legacy Codex exec transport currently accept text only and will not process image attachments. Ordinary file attachments are not supported yet.
 
 Codex App Server generated images are also forwarded back to Feishu. Codex emits the generated image through its app-server protocol; the CLI sends it to Router, Router uploads it to Feishu, and the image is rendered in the existing Card 2.0 response. This requires both CLI and Router versions with image forwarding support. Upgrading only Router is backward-compatible, but an older CLI will not generate or send image events; upgrading only CLI is also safe, but an older Router will ignore the optional image stream and still show the text response.
 
@@ -487,9 +487,9 @@ Codex App Server generated images are also forwarded back to Feishu. Codex emits
 | `/model` | Show the current backend, selected model, and available models |
 | `/model <name>` | Set the model for the current thread and backend |
 | `/effort` | Show the current reasoning effort and backend-supported levels |
-| `/effort <auto|low|medium|high>` | Set or clear (`auto`) the current thread's effort override |
+| `/effort <auto|level>` | Set or clear (`auto`) the current thread's effort override |
 
-Model listing is backend-specific: Claude Code uses `claude --print /model`, AGY uses `agy models`, and Codex app-server uses its authenticated model catalog. The Codex `exec` fallback cannot list models. Reasoning effort is currently supported by Codex and AGY; Claude Code returns an unsupported message. `auto` removes the per-thread override and restores the selected model's or backend's default effort.
+Model listing is backend-specific: Claude Code uses `claude --print /model`, AGY uses `agy models`, Codex app-server uses its authenticated model catalog, and OpenCode uses ACP session configuration options. The Codex `exec` fallback cannot list models. Reasoning effort is currently supported by Codex, AGY, and OpenCode; Claude Code returns an unsupported message. `auto` removes the per-thread override and restores the selected model's or backend's default effort.
 
 ### Remote Machine Management
 
@@ -514,9 +514,10 @@ Slash commands that remote-cli does not handle itself are forwarded to the activ
 - **Claude Code**: full passthrough via `claude <cmd> --print` — all commands/skills work, e.g. `/commit`, `/review`, `/test`
 - **AGY CLI (Antigravity)**: only the read-only informational commands that agy answers locally are forwarded (`agy -p "<cmd>"`): `/skills`, `/usage`, `/config`, `/changelog`, `/agents`, `/permissions`, `/hooks`, `/credits`. Other commands (including `/compact`, which agy does not intercept outside its TUI) are rejected with a clear message
 - **Codex CLI (OpenAI)**: no passthrough — remote-cli uses the app-server API rather than the interactive TUI slash-command layer, so backend-specific slash commands are rejected
+- **OpenCode CLI**: slash commands are sent through the persistent ACP session; remote-cli still handles shared commands such as `/model`, `/effort`, `/compact`, and `/abort` itself
 
-The built-in commands (`/help`, `/status`, `/context`, `/skills`, `/clear`, `/compact`, `/model`, `/cd`, `/thread`, `/backend`, `/abort`) work across all backends. `/effort` controls the per-thread reasoning effort for Codex and AGY; Claude Code support is not implemented yet.
-`/context` works across all backends and reports the active session, model, working directory, and queue state; exact token usage depends on transport support. `/skills` uses the native informational command for Claude and AGY, while Codex discovers local `SKILL.md` files under `.agents/skills` and `~/.codex/skills`.
+The built-in commands (`/help`, `/status`, `/context`, `/skills`, `/clear`, `/compact`, `/model`, `/cd`, `/thread`, `/backend`, `/abort`) work across all backends. `/effort` controls the per-thread reasoning effort for Codex, AGY, and OpenCode; Claude Code support is not implemented yet.
+`/context` works across all backends and reports the active session, model, working directory, and queue state; exact token usage depends on transport support. `/skills` uses the native informational command for Claude, AGY, and OpenCode, while Codex discovers local `SKILL.md` files under `.agents/skills` and `~/.codex/skills`.
 
 ### Example Workflow
 
@@ -594,7 +595,7 @@ Keep model and effort choices local to the thread when comparing backends:
 /effort auto
 ```
 
-Codex and AGY expose native effort controls. Claude Code has native thinking and effort controls in its own CLI, but remote-cli's built-in `/effort` currently reports Claude as unsupported. Model catalogs and accepted effort levels vary by backend, so verify the result with `/status` or `/context` after switching.
+Codex, AGY, and OpenCode expose native effort controls. Claude Code has native thinking and effort controls in its own CLI, but remote-cli's built-in `/effort` currently reports Claude as unsupported. Model catalogs and accepted effort levels vary by backend, so verify the result with `/status` or `/context` after switching.
 
 ## Expert Usage
 
@@ -606,7 +607,7 @@ The recommended team topology is one Router on an internal server and one client
 Feishu <-> Router (Docker Compose) <-> local CLI clients
 ```
 
-The Router stores Feishu configuration and device bindings in its persistent `./router-data` directory. Clients keep project files, backend sessions, and Claude Code/AGY/Codex installations locally. Do not put the client in Docker unless you deliberately mount every project directory and backend credential it needs.
+The Router stores Feishu configuration and device bindings in its persistent `./router-data` directory. Clients keep project files, backend sessions, and Claude Code/AGY/Codex/OpenCode installations locally. Do not put the client in Docker unless you deliberately mount every project directory and backend credential it needs.
 
 Update a Compose deployment without losing bindings:
 
@@ -621,7 +622,7 @@ Do not use `docker compose down -v` for routine updates. Back up `./router-data`
 
 ### Preserve or intentionally reset backend sessions
 
-Each thread maintains separate session state for Claude, AGY, and Codex. Switching backends does not delete the previous backend's session, so a thread can return to its earlier conversation. Use `/clear` when you intentionally want a fresh context; use `/backend default @` when a thread should follow future global backend changes.
+Each thread maintains separate session state for Claude, AGY, Codex, and OpenCode. Switching backends does not delete the previous backend's session, so a thread can return to its earlier conversation. Use `/clear` when you intentionally want a fresh context; use `/backend default @` when a thread should follow future global backend changes.
 
 ### Diagnose a remote task systematically
 
@@ -737,11 +738,15 @@ MIT License - see [LICENSE](LICENSE) file for details.
 }
 ```
 
-- `executor.type`: Global default backend. Options are `auto` (Claude), `claude-persistent`, `claude-spawn`, `agy`, `codex`. Per-thread overrides are managed with `/backend <index> @`.
+- `executor.type`: Global default backend. Options are `auto` (Claude), `claude-persistent`, `claude-spawn`, `agy`, `codex`, `opencode`. Per-thread overrides are managed with `/backend <index> @`.
 - `executor.agy`: 
     - `model`: Model slug from `agy models` (e.g. `gemini-3.8-flash-low`). Unset = agy default. Invalid slugs are rejected by agy with a clear error.
     - `autoApprove`: Automatically approve tool permissions via `--dangerously-skip-permissions` (default true).
     - `command`: agy binary to invoke (default `agy`).
+- `executor.opencode`:
+    - `model`: Provider/model identifier exposed by `/model`. Unset = OpenCode session default.
+    - `autoApprove`: Automatically choose the first allow option for ACP tool permission requests (default true); false rejects them.
+    - `command`: OpenCode binary to invoke (default `opencode`).
 - `executor.codex`:
     - `model`: Model selected for Codex turns. Unset = codex default. Use `/model` in Feishu to query the authenticated account's available models.
     - `autoApprove`: Use `approvalPolicy: never` with full access (default true). When false, app-server approval requests are relayed through the existing mobile input flow.
@@ -761,6 +766,22 @@ remote-cli config set executor.type agy
 # 3. Optionally pin a model (list valid slugs with: agy models)
 remote-cli config set executor.agy.model gemini-3.8-flash-low
 ```
+
+#### Using OpenCode CLI
+
+```bash
+# 1. Install and authenticate
+npm install --global @opencode/cli
+opencode auth login
+
+# 2. Switch backend (Can also use /backend in Feishu)
+remote-cli config set executor.type opencode
+
+# 3. Optionally pin a provider/model from /model
+remote-cli config set executor.opencode.model opencode/nemotron-3.5-lightning-free
+```
+
+The OpenCode backend runs one persistent `opencode acp` process per active thread. It preserves the ACP session id across messages, backend switches, and service restarts. `/model` and `/effort` use ACP session options, `/compact` uses OpenCode's native command, `/abort` sends ACP cancellation, and image messages are sent as native ACP image content. With `autoApprove: true`, tool permission requests select the first allow option; with `false`, they are rejected.
 
 #### Using Codex CLI (OpenAI)
 

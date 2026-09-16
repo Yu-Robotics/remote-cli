@@ -4,6 +4,7 @@ import { ClaudePersistentExecutor } from './ClaudePersistentExecutor';
 import { AgyExecutor } from './AgyExecutor';
 import { CodexExecutor } from './CodexExecutor';
 import { CodexAppServerExecutor } from './CodexAppServerExecutor';
+import { OpenCodeExecutor } from './OpenCodeExecutor';
 import type { IExecutor } from './IExecutor';
 import type { ExecutorConfig } from '../types/config';
 
@@ -14,6 +15,7 @@ export { ClaudePersistentExecutor } from './ClaudePersistentExecutor';
 export { AgyExecutor } from './AgyExecutor';
 export { CodexExecutor } from './CodexExecutor';
 export { CodexAppServerExecutor } from './CodexAppServerExecutor';
+export { OpenCodeExecutor } from './OpenCodeExecutor';
 export type { ExecutorModelInfo, IExecutor } from './IExecutor';
 
 /**
@@ -72,7 +74,8 @@ export function createClaudeExecutor(
 /**
  * Create an executor based on the executor config.
  * Supports Claude (persistent / spawn / auto), AGY (Antigravity CLI,
- * stream-json protocol), and Codex (app-server by default, with exec fallback).
+ * stream-json protocol), Codex (app-server by default, with exec fallback),
+ * and OpenCode (ACP).
  *
  * @param directoryGuard Directory guard instance
  * @param executorConfig Executor config from remote-cli config (defaults to auto)
@@ -120,6 +123,17 @@ export function createExecutor(
         autoApprove: executorConfig.codex?.autoApprove ?? true,
         initialWorkingDirectory,
         codexCommand: executorConfig.codex?.command,
+        threadId,
+      });
+
+    case 'opencode':
+      console.log('[ExecutorFactory] Using OpenCode ACP executor');
+      return new OpenCodeExecutor(directoryGuard, {
+        model: model ?? executorConfig.opencode?.model,
+        effort,
+        autoApprove: executorConfig.opencode?.autoApprove ?? true,
+        initialWorkingDirectory,
+        openCodeCommand: executorConfig.opencode?.command,
         threadId,
       });
 
