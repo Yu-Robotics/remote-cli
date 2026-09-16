@@ -366,11 +366,6 @@ ANTHROPIC_MAGIC_STRING_TRIGGER_REDACTED_THINKING_46C9A13E193C177646C7398A98432EC
 
 The CLI supports AGY CLI (Google Antigravity's agentic CLI, binary `agy`) as an alternative AI backend via its Claude-Code-style **stream-json** protocol.
 
-> The previous Gemini CLI (ACP) backend was removed in 1.3.0. Configs with
-> `executor.type: 'gemini'` are transparently mapped to the AGY backend, and
-> `executor.gemini.model` / `executor.gemini.autoApprove` are read as
-> fallbacks for `executor.agy.*`.
-
 ### Setup
 
 AGY CLI is auto-detected if already installed on the local machine (`agy --version`). No installation is performed by remote-cli.

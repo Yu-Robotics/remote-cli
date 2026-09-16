@@ -41,8 +41,7 @@ export interface StartCommandResult {
  * knows why commands will fail before the first Feishu message arrives.
  */
 async function checkBackendAvailability(type: string, spinner: Ora): Promise<void> {
-  // Legacy 'gemini' configs now mean the AGY backend (Gemini/ACP was removed).
-  const isAgy = type === 'agy' || type === 'gemini';
+  const isAgy = type === 'agy';
   const isCodex = type === 'codex';
   const cmd = isAgy ? 'agy' : isCodex ? 'codex' : 'claude';
   const args = ['--version'];

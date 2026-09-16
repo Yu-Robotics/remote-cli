@@ -1032,60 +1032,6 @@ describe('createExecutor factory - agy backend', () => {
     await executor.destroy();
   });
 
-  it('maps legacy type "gemini" to the AGY backend (index slot migration)', async () => {
-    const guard = new DirectoryGuard(['~/test-project']);
-    const executor = createExecutor(guard, { type: 'gemini' } as any, '~/test-project', 'thread-x');
-    expect(executor).toBeInstanceOf(AgyExecutor);
-    await executor.destroy();
-  });
-
-  it('reads legacy executor.gemini.model as a fallback for agy.model', async () => {
-    const guard = new DirectoryGuard(['~/test-project']);
-    const executor = createExecutor(
-      guard,
-      { type: 'gemini', gemini: { model: 'legacy-model' } } as any,
-      '~/test-project',
-      'thread-x'
-    ) as AgyExecutor;
-
-    const p = executor.execute('hi');
-    for (let i = 0; i < 100 && mockSpawn.mock.calls.length === 0; i++) {
-      await new Promise((r) => setTimeout(r, 10));
-    }
-    const args = mockSpawn.mock.calls[0][1];
-    expect(args[args.indexOf('--model') + 1]).toBe('legacy-model');
-
-    // Cleanup: finish the command and destroy
-    const proc = mockSpawn.mock.results[0].value;
-    proc.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'init', conversation_id: 'c1', init: {} }) + '\n'));
-    proc.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'result', result: { conversation_id: 'c1', status: 'SUCCESS', response: '', duration_seconds: 0, num_turns: 1, usage: {} } }) + '\n'));
-    await p;
-    await executor.destroy();
-  });
-
-  it('agy case also falls back to legacy gemini.model (config switched type before migrating fields)', async () => {
-    const guard = new DirectoryGuard(['~/test-project']);
-    const executor = createExecutor(
-      guard,
-      { type: 'agy', gemini: { model: 'legacy-model-2' } } as any,
-      '~/test-project',
-      'thread-x'
-    ) as AgyExecutor;
-
-    const p = executor.execute('hi');
-    for (let i = 0; i < 100 && mockSpawn.mock.calls.length === 0; i++) {
-      await new Promise((r) => setTimeout(r, 10));
-    }
-    const args = mockSpawn.mock.calls[0][1];
-    expect(args[args.indexOf('--model') + 1]).toBe('legacy-model-2');
-
-    const proc = mockSpawn.mock.results[0].value;
-    proc.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'init', conversation_id: 'c2', init: {} }) + '\n'));
-    proc.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'result', result: { conversation_id: 'c2', status: 'SUCCESS', response: '', duration_seconds: 0, num_turns: 1, usage: {} } }) + '\n'));
-    await p;
-    await executor.destroy();
-  });
-
   it('per-thread model (from /model) takes precedence over executor.agy.model', async () => {
     const guard = new DirectoryGuard(['~/test-project']);
     const executor = createExecutor(
