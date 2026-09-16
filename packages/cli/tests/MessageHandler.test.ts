@@ -80,7 +80,7 @@ function buildHandler(mockExecutorOverrides: Record<string, any> = {}) {
     getBackendKey: vi.fn().mockImplementation(() => {
       const config = mockConfig.get('executor');
       const type = config?.type as string | undefined;
-      return type === 'agy' || type === 'gemini' ? 'agy' : type === 'codex' ? 'codex' : 'claude';
+      return type === 'agy' ? 'agy' : type === 'codex' ? 'codex' : 'claude';
     }),
     destroyThread: vi.fn().mockResolvedValue(undefined),
     destroyAll: vi.fn().mockResolvedValue(undefined),
@@ -1497,19 +1497,6 @@ describe('MessageHandler', () => {
 
       expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
         expect.objectContaining({ success: true, output: 'Weekly Limit Remaining 87%' })
-      );
-    });
-
-    it('should treat the legacy "gemini" backend slot as AGY', async () => {
-      useBackend({ type: 'gemini' });
-      const { child, done } = await runSlash('/skills');
-
-      expect(mockSpawn).toHaveBeenCalledWith('agy', ['-p', '/skills'], expect.anything());
-
-      child.emit('exit', 0);
-      await done;
-      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
-        expect.objectContaining({ success: true })
       );
     });
 

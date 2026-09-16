@@ -745,8 +745,6 @@ MIT 许可证 - 详见 [LICENSE](LICENSE) 文件。
     - `command`: codex 二进制命令（默认 `codex`）。
     - `transport`: `app-server`（默认）或 `exec`（紧急兼容回退）。
 
-> **迁移说明**：1.3.0 之前的配置可能仍写着 `"type": "gemini"`。该槽位现在映射到 AGY 后端（Gemini CLI/ACP 集成已移除），`executor.gemini.model` / `executor.gemini.autoApprove` 会作为 `executor.agy.*` 的回退值读取。无需修改配置。
-
 #### 使用 AGY CLI（Antigravity）
 
 ```bash

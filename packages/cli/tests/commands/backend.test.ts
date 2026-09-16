@@ -203,20 +203,6 @@ describe('/backend command', () => {
       expect(claudeLine).not.toContain('★ (active)');
     });
 
-    it('marks AGY as active for legacy configs with executor.type gemini (index slot migration)', async () => {
-      mockInstalled('claude', 'agy');
-      // Configs written before the Gemini→AGY migration still say 'gemini';
-      // that slot now means AGY.
-      mockConfig.get.mockReturnValue({ type: 'gemini' });
-
-      await send('/backend');
-
-      const res = sentResponse();
-      const lines = res.output.split('\n');
-      const agyLine = lines.find((l: string) => l.includes('AGY CLI'));
-      expect(agyLine).toContain('★ (active)');
-    });
-
     it('shows Codex CLI when codex is installed', async () => {
       mockInstalled('claude', 'agy', 'codex');
 

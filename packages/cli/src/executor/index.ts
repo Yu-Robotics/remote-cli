@@ -74,11 +74,6 @@ export function createClaudeExecutor(
  * Supports Claude (persistent / spawn / auto), AGY (Antigravity CLI,
  * stream-json protocol), and Codex (app-server by default, with exec fallback).
  *
- * Legacy note: configs written before the Gemini→AGY migration may still
- * say `type: 'gemini'`. That slot now maps to the AGY backend (the Gemini
- * CLI/ACP stack was removed), with `executor.gemini.*` read as a fallback
- * for `executor.agy.*` where applicable.
- *
  * @param directoryGuard Directory guard instance
  * @param executorConfig Executor config from remote-cli config (defaults to auto)
  * @param initialWorkingDirectory Optional initial working directory
@@ -92,36 +87,18 @@ export function createExecutor(
   model?: string,
   effort?: string
 ): IExecutor {
-  // Cast to string so the legacy 'gemini' case compiles even though the
-  // ExecutorConfig union no longer includes it.
-  switch (executorConfig.type as string) {
+  switch (executorConfig.type) {
     case 'agy':
       console.log('[ExecutorFactory] Using AGY CLI executor (stream-json)');
       return new AgyExecutor(directoryGuard, {
-        // Per-thread model (set via /model, persisted on the thread) wins;
-        // legacy fallback: the user may have switched type to 'agy' while
-        // their model still lives under the old executor.gemini key.
-        model: model ?? executorConfig.agy?.model ?? executorConfig.gemini?.model,
+        // Per-thread model (set via /model, persisted on the thread) wins.
+        model: model ?? executorConfig.agy?.model,
         effort,
-        autoApprove: executorConfig.agy?.autoApprove ?? executorConfig.gemini?.autoApprove ?? true,
+        autoApprove: executorConfig.agy?.autoApprove ?? true,
         initialWorkingDirectory,
         agyCommand: executorConfig.agy?.command,
         threadId,
       });
-
-    case 'gemini': {
-      // Legacy alias: the Gemini backend slot was replaced by AGY.
-      console.log('[ExecutorFactory] Legacy "gemini" backend migrated to AGY CLI executor');
-      const legacy = executorConfig.gemini;
-      return new AgyExecutor(directoryGuard, {
-        model: model ?? executorConfig.agy?.model ?? legacy?.model,
-        effort,
-        autoApprove: executorConfig.agy?.autoApprove ?? legacy?.autoApprove ?? true,
-        initialWorkingDirectory,
-        agyCommand: executorConfig.agy?.command,
-        threadId,
-      });
-    }
 
     case 'codex':
       if (executorConfig.codex?.transport === 'exec') {

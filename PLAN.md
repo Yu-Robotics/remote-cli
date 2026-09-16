@@ -555,18 +555,15 @@ remote-cli/
 18. **Implement Remote Machine Management** ✅
     - 通过 SSH 控制远程服务器和 Docker 容器
 
-19. **Implement Gemini CLI Backend** ✅
-    - 通过 ACP 协议支持 Gemini CLI 引擎
-
-20. **Implement Redacted Thinking Handling** ✅
+19. **Implement Redacted Thinking Handling** ✅
     - 支持 Claude 3.7 Sonnet 的安全过滤推理块
 
 ### Phase 5: Testing and Documentation ✅
 
-21. **Integration Testing** ✅
+20. **Integration Testing** ✅
     - Unit tests and integration tests for both packages (Coverage 80%+)
 
-22. **Write Documentation** ✅
+21. **Write Documentation** ✅
     - READMEs, PLAN.md, CLAUDE.md 已更新
 
 23. **Deploy Router Server** (已完成，提供 PM2 部署指南) ✅

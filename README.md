@@ -748,8 +748,6 @@ MIT License - see [LICENSE](LICENSE) file for details.
     - `command`: codex binary to invoke (default `codex`).
     - `transport`: `app-server` (default) or `exec` (emergency compatibility fallback).
 
-> **Migration note**: configs written before 1.3.0 may still say `"type": "gemini"`. That slot now maps to the AGY backend (the Gemini CLI/ACP integration was removed), and `executor.gemini.model` / `executor.gemini.autoApprove` are read as fallbacks for `executor.agy.*`. No config change is required.
-
 #### Using AGY CLI (Antigravity)
 
 ```bash
