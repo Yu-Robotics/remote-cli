@@ -4,7 +4,7 @@ import * as path from 'path';
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import type { ExecuteOptions, ExecuteResult, ExecutorModelInfo, IExecutor } from './IExecutor';
 import { AcpClient, type AcpEventCallbacks, type AcpToolCallUpdate, type AcpTransport } from './acp/AcpClient';
-import type { AcpConfigOption, AcpContentBlock, AcpSessionResult } from './acp/AcpTypes';
+import type { AcpConfigOption, AcpContentBlock, AcpPermissionOption, AcpSessionResult } from './acp/AcpTypes';
 
 const CANCEL_GRACE_MS = 3_000;
 
@@ -14,6 +14,15 @@ export interface OpenCodeExecutorOptions {
   autoApprove?: boolean;
   initialWorkingDirectory?: string;
   openCodeCommand?: string;
+  /** Generic ACP command override used by ACP-backed subclasses. */
+  acpCommand?: string;
+  acpArgs?: string[];
+  backendLabel?: string;
+  sessionNamespace?: string;
+  effortConfigId?: string;
+  effortAutoValue?: string;
+  installCommand?: string;
+  authCommand?: string;
   threadId?: string;
   /** Override session pointer storage for isolated tests. */
   sessionBaseDir?: string;
@@ -35,6 +44,13 @@ interface ActiveCallbacks {
   onImage?: ExecuteOptions['onImage'];
 }
 
+interface PendingPermission {
+  title: string;
+  options: AcpPermissionOption[];
+  isQuestion: boolean;
+  resolve: (index: number) => void;
+}
+
 function mapAcpToolCall(tool: AcpToolCallUpdate): { name: string; input: Record<string, unknown> } {
   if (tool.rawInput && typeof tool.rawInput === 'object' && !Array.isArray(tool.rawInput)) {
     return { name: mapAcpToolName(tool.kind, tool.title), input: tool.rawInput as Record<string, unknown> };
@@ -54,18 +70,42 @@ function mapAcpToolName(kind?: string, title?: string): string {
   return kind || title || 'Tool';
 }
 
-function contentText(content?: AcpContentBlock[]): string {
-  return (content ?? []).map((block) => {
-    if (block.type === 'text') return String(block.text ?? '');
-    if ('resource' in block) return JSON.stringify(block.resource);
-    return '';
-  }).filter(Boolean).join('\n');
+function acpToolResult(tool: AcpToolCallUpdate): { content: string; diff?: string } {
+  const text: string[] = [];
+  const diffs: string[] = [];
+  for (const block of tool.content ?? []) {
+    if (block.type === 'text') text.push(String(block.text ?? ''));
+    else if (block.type === 'content' && block.content && typeof block.content === 'object') {
+      const nested = block.content as Record<string, unknown>;
+      if (nested.type === 'text') text.push(String(nested.text ?? ''));
+      else text.push(JSON.stringify(nested));
+    } else if (block.type === 'diff') {
+      const filePath = String(block.path ?? 'file');
+      const oldText = String(block.oldText ?? '');
+      const newText = String(block.newText ?? '');
+      diffs.push([
+        `--- a/${filePath}`,
+        `+++ b/${filePath}`,
+        ...oldText.split('\n').map((line) => `-${line}`),
+        ...newText.split('\n').map((line) => `+${line}`),
+      ].join('\n'));
+    } else if ('resource' in block) text.push(JSON.stringify(block.resource));
+  }
+  if (text.length === 0 && tool.rawOutput !== undefined) {
+    text.push(typeof tool.rawOutput === 'string' ? tool.rawOutput : JSON.stringify(tool.rawOutput));
+  }
+  return { content: text.filter(Boolean).join('\n'), ...(diffs.length ? { diff: diffs.join('\n') } : {}) };
 }
 
 export class OpenCodeExecutor implements IExecutor {
   private readonly directoryGuard: DirectoryGuard;
   private readonly autoApprove: boolean;
   private readonly threadId?: string;
+  private readonly backendLabel: string;
+  private readonly effortConfigId: string;
+  private readonly effortAutoValue: string;
+  private readonly installCommand: string;
+  private readonly authCommand: string;
   private readonly sessionFilePath: string;
   private readonly clientFactory: (callbacks: AcpEventCallbacks, cwd: string) => AcpTransport;
   private currentWorkingDirectory: string;
@@ -79,6 +119,8 @@ export class OpenCodeExecutor implements IExecutor {
   private isProcessing = false;
   private isDestroyed = false;
   private abortTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingPermission: PendingPermission | null = null;
+  private activeToolCalls = new Map<string, AcpToolCallUpdate>();
 
   constructor(directoryGuard: DirectoryGuard, options: OpenCodeExecutorOptions = {}) {
     this.directoryGuard = directoryGuard;
@@ -86,20 +128,27 @@ export class OpenCodeExecutor implements IExecutor {
     this.effort = options.effort;
     this.autoApprove = options.autoApprove ?? true;
     this.threadId = options.threadId;
-    const command = options.openCodeCommand ?? 'opencode';
+    this.backendLabel = options.backendLabel ?? 'OpenCode';
+    this.effortConfigId = options.effortConfigId ?? 'effort';
+    this.effortAutoValue = options.effortAutoValue ?? 'default';
+    this.installCommand = options.installCommand ?? 'npm install --global @opencode/cli';
+    this.authCommand = options.authCommand ?? 'opencode auth login';
+    const command = options.acpCommand ?? options.openCodeCommand ?? 'opencode';
+    const args = options.acpArgs ?? ['acp'];
     this.clientFactory = options.clientFactory
-      ?? ((callbacks, cwd) => new AcpClient(command, ['acp'], cwd, callbacks));
+      ?? ((callbacks, cwd) => new AcpClient(command, args, cwd, callbacks));
 
     try {
       this.currentWorkingDirectory = options.initialWorkingDirectory
         ? this.directoryGuard.resolveWorkingDirectory(options.initialWorkingDirectory)
         : process.cwd();
     } catch (error) {
-      console.warn('[OpenCodeExecutor] Failed to use initial working directory', error);
+      console.warn(`[${this.backendLabel}Executor] Failed to use initial working directory`, error);
       this.currentWorkingDirectory = process.cwd();
     }
 
-    const sessionsDir = options.sessionBaseDir ?? path.join(os.homedir(), '.remote-cli', 'opencode-sessions');
+    const sessionsDir = options.sessionBaseDir
+      ?? path.join(os.homedir(), '.remote-cli', options.sessionNamespace ?? 'opencode-sessions');
     fs.mkdirSync(sessionsDir, { recursive: true });
     this.sessionFilePath = path.join(sessionsDir, `${this.threadId ?? 'default'}.json`);
     this.loadSessionPointer();
@@ -126,12 +175,14 @@ export class OpenCodeExecutor implements IExecutor {
   }
 
   resetContext(): void {
+    this.cancelPendingPermission();
     this.destroyClient();
     this.clearSessionPointer();
   }
 
   async abort(): Promise<boolean> {
     if (!this.client || !this.sessionId || !this.isProcessing) return false;
+    this.cancelPendingPermission();
     this.client.sendCancel(this.sessionId);
     this.clearAbortTimer();
     const client = this.client;
@@ -147,7 +198,51 @@ export class OpenCodeExecutor implements IExecutor {
     this.isDestroyed = true;
     const queued = this.commandQueue.splice(0);
     for (const command of queued) command.reject(new Error('Executor has been destroyed'));
+    this.cancelPendingPermission();
     this.destroyClient();
+  }
+
+  isWaitingInput(): boolean {
+    return this.pendingPermission !== null;
+  }
+
+  sendInput(input: string): boolean {
+    const pending = this.pendingPermission;
+    if (!pending) return false;
+    const normalized = input.trim().toLowerCase();
+    if (pending.isQuestion) {
+      const cancelIndex = pending.options.findIndex((option) => option.kind.startsWith('reject'));
+      if (normalized === 'cancel' || normalized === 'skip') {
+        this.pendingPermission = null;
+        pending.resolve(cancelIndex);
+        return true;
+      }
+      const numeric = Number.parseInt(normalized, 10);
+      const index = Number.isInteger(numeric) && numeric > 0
+        ? pending.options.findIndex((option, optionIndex) => optionIndex === numeric - 1 && option.kind.startsWith('allow'))
+        : pending.options.findIndex((option) => option.kind.startsWith('allow')
+          && (option.name?.trim().toLowerCase() === normalized || option.optionId.toLowerCase() === normalized));
+      if (index < 0) return false;
+      this.pendingPermission = null;
+      pending.resolve(index);
+      return true;
+    }
+    const kind = normalized === 'always' ? 'allow_always'
+      : normalized === 'yes' || normalized === 'y' || normalized === 'accept' ? 'allow_once'
+        : normalized === 'no' || normalized === 'n' || normalized === 'decline' ? 'reject_once'
+          : normalized === 'cancel' ? null
+            : undefined;
+    if (kind === undefined) return false;
+    this.pendingPermission = null;
+    if (kind === null) {
+      pending.resolve(-1);
+      return true;
+    }
+    let index = pending.options.findIndex((option) => option.kind === kind);
+    if (index < 0 && kind === 'allow_once') index = pending.options.findIndex((option) => option.kind.startsWith('allow'));
+    if (index < 0 && kind === 'reject_once') index = pending.options.findIndex((option) => option.kind.startsWith('reject'));
+    pending.resolve(index);
+    return true;
   }
 
   isProcessRunning(): boolean {
@@ -161,7 +256,7 @@ export class OpenCodeExecutor implements IExecutor {
   async listModels(): Promise<ExecutorModelInfo[]> {
     await this.ensureSession();
     const modelOption = this.findConfigOption('model');
-    const effortOption = this.findConfigOption('effort');
+    const effortOption = this.findConfigOption(this.effortConfigId);
     return (modelOption?.options ?? []).map((entry) => ({
       id: entry.value,
       displayName: entry.name,
@@ -179,7 +274,7 @@ export class OpenCodeExecutor implements IExecutor {
     const { client, sessionId } = await this.ensureSession();
     const option = this.findConfigOption('model');
     if (option?.options?.length && !option.options.some((entry) => entry.value === model)) {
-      return { success: false, error: `Unknown OpenCode model: ${model}. Use /model to list available models.` };
+      return { success: false, error: `Unknown ${this.backendLabel} model: ${model}. Use /model to list available models.` };
     }
     try {
       this.updateConfigOptions(await client.setConfigOption(sessionId, 'model', model));
@@ -192,14 +287,14 @@ export class OpenCodeExecutor implements IExecutor {
 
   async setEffort(effort: string): Promise<ExecuteResult> {
     const { client, sessionId } = await this.ensureSession();
-    const value = effort === 'auto' ? 'default' : effort;
-    const option = this.findConfigOption('effort');
-    if (!option) return { success: false, error: 'The selected OpenCode model does not expose reasoning effort controls.' };
-    if (option.options?.length && !option.options.some((entry) => entry.value === value)) {
-      return { success: false, error: `Unsupported OpenCode reasoning effort: ${effort}.` };
+    const value = effort === 'auto' ? this.effortAutoValue : effort;
+    const option = this.findConfigOption(this.effortConfigId);
+    if (!option) return { success: false, error: `The selected ${this.backendLabel} model does not expose reasoning effort controls.` };
+    if (effort !== 'auto' && option.options?.length && !option.options.some((entry) => entry.value === value)) {
+      return { success: false, error: `Unsupported ${this.backendLabel} reasoning effort: ${effort}.` };
     }
     try {
-      this.updateConfigOptions(await client.setConfigOption(sessionId, 'effort', value));
+      this.updateConfigOptions(await client.setConfigOption(sessionId, this.effortConfigId, value));
       this.effort = effort === 'auto' ? undefined : effort;
       return { success: true, output: `Reasoning effort set to ${effort}.` };
     } catch (error) {
@@ -219,7 +314,7 @@ export class OpenCodeExecutor implements IExecutor {
         await client.deleteSession(stored);
       }
     } catch (error) {
-      console.warn('[OpenCodeExecutor] Failed to delete OpenCode session', error);
+      console.warn(`[${this.backendLabel}Executor] Failed to delete session`, error);
     } finally {
       this.destroyClient();
       this.clearSessionPointer();
@@ -240,6 +335,7 @@ export class OpenCodeExecutor implements IExecutor {
       command.resolve({ success: false, error: this.friendlyError(error) });
     } finally {
       this.activeCallbacks = {};
+      this.activeToolCalls.clear();
       this.clearAbortTimer();
       this.isProcessing = false;
       void this.processQueue();
@@ -274,7 +370,7 @@ export class OpenCodeExecutor implements IExecutor {
     return {
       success,
       output,
-      error: success ? undefined : `OpenCode stopped with reason: ${result.stopReason}`,
+      error: success ? undefined : `${this.backendLabel} stopped with reason: ${result.stopReason}`,
       sessionAbbr: sessionId.slice(0, 8),
     };
   }
@@ -289,13 +385,13 @@ export class OpenCodeExecutor implements IExecutor {
         try {
           result = await client.loadSession(this.sessionId, this.currentWorkingDirectory);
         } catch (error) {
-          console.warn('[OpenCodeExecutor] Stored session could not be loaded; starting fresh', error);
+          console.warn(`[${this.backendLabel}Executor] Stored session could not be loaded; starting fresh`, error);
           this.clearSessionPointer();
         }
       }
       if (!this.sessionId) {
         result = await client.newSession(this.currentWorkingDirectory);
-        if (!result.sessionId) throw new Error('OpenCode did not return a session ID');
+        if (!result.sessionId) throw new Error(`${this.backendLabel} did not return a session ID`);
         this.sessionId = result.sessionId;
         this.saveSessionPointer();
       }
@@ -314,25 +410,39 @@ export class OpenCodeExecutor implements IExecutor {
       onTextChunk: (content) => this.handleContent(content, false),
       onThoughtChunk: (content) => this.handleContent(content, true),
       onToolCall: (tool) => {
-        const mapped = mapAcpToolCall(tool);
+        const previous = this.activeToolCalls.get(tool.toolCallId);
+        const merged = { ...previous, ...tool };
+        this.activeToolCalls.set(tool.toolCallId, merged);
+        const mapped = mapAcpToolCall(merged);
         this.activeCallbacks.onToolUse?.({ id: tool.toolCallId, ...mapped });
       },
-      onToolResult: (tool) => this.activeCallbacks.onToolResult?.({
-        tool_use_id: tool.toolCallId,
-        content: contentText(tool.content),
-        is_error: tool.status === 'failed',
-      }),
+      onToolResult: (tool) => {
+        const merged = { ...this.activeToolCalls.get(tool.toolCallId), ...tool };
+        this.activeToolCalls.delete(tool.toolCallId);
+        this.activeCallbacks.onToolResult?.({
+          tool_use_id: tool.toolCallId,
+          ...acpToolResult(merged),
+          is_error: tool.status === 'failed',
+        });
+      },
       onPlan: (entries) => this.activeCallbacks.onPlanMode?.(
         entries.map((entry) => `[${entry.status ?? 'pending'}] ${entry.content}`).join('\n')
       ),
       onConfigOptions: (options) => { this.configOptions = options; },
-      onPermissionRequest: async (_title, options) => {
-        if (this.autoApprove) {
+      onPermissionRequest: async (title, options) => {
+        const isQuestion = options.some((option) => /^q\d+_opt_\d+$/.test(option.optionId));
+        if (this.autoApprove && !isQuestion) {
           const allowed = options.findIndex((option) => option.kind === 'allow_once');
           return allowed >= 0 ? allowed : 0;
         }
-        const rejected = options.findIndex((option) => option.kind === 'reject_once');
-        return rejected >= 0 ? rejected : options.findIndex((option) => option.kind.startsWith('reject'));
+        this.cancelPendingPermission();
+        const prompt = isQuestion
+          ? [`\n${title}`, ...options.filter((option) => option.kind.startsWith('allow')).map((option, index) => `${index + 1}. ${option.name ?? option.optionId}`), 'Reply with an option number, option name, skip, or cancel.\n'].join('\n')
+          : `\nApproval required for ${title}. Reply yes, always, no, or cancel.\n`;
+        this.activeCallbacks.onStream?.(prompt);
+        return new Promise<number>((resolve) => {
+          this.pendingPermission = { title, options, isQuestion, resolve };
+        });
       },
     };
     return this.clientFactory(callbacks, this.currentWorkingDirectory);
@@ -348,7 +458,7 @@ export class OpenCodeExecutor implements IExecutor {
 
   private async applyConfiguredOptions(client: AcpTransport, sessionId: string): Promise<void> {
     if (this.model) this.updateConfigOptions(await client.setConfigOption(sessionId, 'model', this.model));
-    if (this.effort) this.updateConfigOptions(await client.setConfigOption(sessionId, 'effort', this.effort));
+    if (this.effort) this.updateConfigOptions(await client.setConfigOption(sessionId, this.effortConfigId, this.effort));
   }
 
   private updateConfigOptions(result?: AcpSessionResult): void {
@@ -380,6 +490,7 @@ export class OpenCodeExecutor implements IExecutor {
 
   private destroyClient(): void {
     this.clearAbortTimer();
+    this.cancelPendingPermission();
     this.client?.destroy();
     this.client = null;
   }
@@ -389,13 +500,19 @@ export class OpenCodeExecutor implements IExecutor {
     this.abortTimer = null;
   }
 
+  private cancelPendingPermission(): void {
+    const pending = this.pendingPermission;
+    this.pendingPermission = null;
+    pending?.resolve(-1);
+  }
+
   private friendlyError(error: unknown): string {
     const message = error instanceof Error ? error.message : String(error);
     if (/ENOENT|not found/i.test(message)) {
-      return 'OpenCode CLI is not installed or not found on PATH. Install it with `npm install --global @opencode/cli`, or use /backend to switch backends.';
+      return `${this.backendLabel} CLI is not installed or not found on PATH. Install it with \`${this.installCommand}\`, or use /backend to switch backends.`;
     }
-    if (/provider\.auth|not available in your country/i.test(message)) {
-      return `OpenCode model authentication failed: ${message}. Use /model to choose an available model or run \`opencode auth login\`.`;
+    if (/provider\.auth|authentication required|no provider configured|not available in your country/i.test(message)) {
+      return `${this.backendLabel} authentication failed: ${message}. Use /model to choose an available model or run \`${this.authCommand}\`.`;
     }
     return message;
   }

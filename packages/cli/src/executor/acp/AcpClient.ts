@@ -20,7 +20,8 @@ export interface AcpToolCallUpdate {
   kind?: string;
   status?: string;
   rawInput?: unknown;
-  content?: AcpContentBlock[];
+  content?: Array<Record<string, unknown>>;
+  rawOutput?: unknown;
 }
 
 export interface AcpEventCallbacks {
@@ -212,9 +213,12 @@ export class AcpClient implements AcpTransport {
     } else if (type === 'tool_call_update') {
       const tool = update as unknown as AcpToolCallUpdate;
       if (tool.status === 'completed' || tool.status === 'failed') this.callbacks.onToolResult?.(tool);
+      else if (tool.rawInput !== undefined || tool.title !== undefined || tool.kind !== undefined) {
+        this.callbacks.onToolCall?.(tool);
+      }
     } else if (type === 'plan') {
       this.callbacks.onPlan?.((update.entries ?? []) as Array<{ content: string; status?: string; priority?: string }>);
-    } else if (type === 'config_options_update') {
+    } else if (type === 'config_options_update' || type === 'config_option_update') {
       this.callbacks.onConfigOptions?.((update.configOptions ?? []) as AcpConfigOption[]);
     } else if (type === 'usage_update') {
       this.callbacks.onUsage?.(update);

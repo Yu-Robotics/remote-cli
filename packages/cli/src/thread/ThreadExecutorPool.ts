@@ -20,7 +20,7 @@ function resolveThreadModel(thread: Thread, config: ExecutorConfig): string | un
 
 function resolveThreadEffort(thread: Thread, config: ExecutorConfig): string | undefined {
   const key = backendKeyOf(config.type as string);
-  return key === 'codex' || key === 'agy' || key === 'opencode' ? thread.efforts?.[key] : undefined;
+  return key === 'codex' || key === 'agy' || key === 'opencode' || key === 'kimi' ? thread.efforts?.[key] : undefined;
 }
 
 function isClaudeType(type: string): boolean {

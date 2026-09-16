@@ -65,20 +65,31 @@ export interface OpenCodeExecutorConfig {
   command?: string;
 }
 
+/** Kimi Code CLI executor configuration. */
+export interface KimiExecutorConfig {
+  /** Model alias exposed by the Kimi Code ACP session. */
+  model?: string;
+  /** Automatically approve tool permission requests. Default: true. */
+  autoApprove?: boolean;
+  /** Override the Kimi Code binary command. Default: kimi. */
+  command?: string;
+}
+
 /**
  * Executor configuration — controls which AI CLI backend is used
  */
 export interface ExecutorConfig {
-  type: 'auto' | 'claude-persistent' | 'claude-spawn' | 'agy' | 'codex' | 'opencode';
+  type: 'auto' | 'claude-persistent' | 'claude-spawn' | 'agy' | 'codex' | 'opencode' | 'kimi';
   agy?: AgyExecutorConfig;
   codex?: CodexExecutorConfig;
   opencode?: OpenCodeExecutorConfig;
+  kimi?: KimiExecutorConfig;
 }
 
 /**
  * Canonical backend keys for per-backend thread settings (e.g. Thread.models).
  */
-export type BackendKey = 'claude' | 'agy' | 'codex' | 'opencode';
+export type BackendKey = 'claude' | 'agy' | 'codex' | 'opencode' | 'kimi';
 
 /**
  * Map an executor config type to its canonical backend key.
@@ -88,6 +99,7 @@ export function backendKeyOf(type: ExecutorConfig['type'] | string): BackendKey 
   if (type === 'agy') return 'agy';
   if (type === 'codex') return 'codex';
   if (type === 'opencode') return 'opencode';
+  if (type === 'kimi') return 'kimi';
   return 'claude';
 }
 
