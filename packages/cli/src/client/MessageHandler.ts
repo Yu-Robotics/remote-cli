@@ -1475,7 +1475,6 @@ You can also use natural language commands to control Claude Code CLI.`,
 
   /**
    * Which backend slash commands should be forwarded to for a thread.
-   * 'auto'/claude-* always resolve to Claude; legacy 'gemini' means AGY.
    */
   private resolveSlashBackend(threadId: string): 'claude' | 'agy' | 'codex' {
     return this.threadPool.getBackendKey(threadId);
@@ -1904,9 +1903,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       const lines = installed.map((b, i) => {
         const isClaudeActive = b.id === 'auto' &&
           (currentType === 'auto' || currentType === 'claude-persistent' || currentType === 'claude-spawn');
-        // Legacy configs may still say 'gemini' — that slot now means AGY.
-        const isAgyActive = b.id === 'agy' &&
-          (currentType === 'agy' || (currentType as string) === 'gemini');
+        const isAgyActive = b.id === 'agy' && currentType === 'agy';
         const active = b.id === currentType || isClaudeActive || isAgyActive ? ' ★ (active)' : '';
         return `${i + 1}. ${b.label}${active}`;
       });

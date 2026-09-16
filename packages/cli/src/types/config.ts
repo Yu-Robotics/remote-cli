@@ -56,27 +56,12 @@ export interface CodexExecutorConfig {
 }
 
 /**
- * Legacy Gemini CLI configuration.
- * @deprecated The Gemini/ACP backend was removed; the 'gemini' backend slot
- * now maps to AGY. These fields are read only as fallbacks for `agy.*`
- * during config migration.
- */
-export interface GeminiExecutorConfig {
-  model?: string;
-  autoApprove?: boolean;
-  command?: string;
-  version?: string;
-}
-
-/**
  * Executor configuration — controls which AI CLI backend is used
  */
 export interface ExecutorConfig {
   type: 'auto' | 'claude-persistent' | 'claude-spawn' | 'agy' | 'codex';
   agy?: AgyExecutorConfig;
   codex?: CodexExecutorConfig;
-  /** @deprecated Legacy Gemini config — read as fallback for agy.* during migration. */
-  gemini?: GeminiExecutorConfig;
 }
 
 /**
@@ -86,10 +71,10 @@ export type BackendKey = 'claude' | 'agy' | 'codex';
 
 /**
  * Map an executor config type to its canonical backend key.
- * 'auto'/'claude-*' → 'claude'; legacy 'gemini' slot → 'agy'.
+ * 'auto'/'claude-*' map to 'claude'.
  */
 export function backendKeyOf(type: ExecutorConfig['type'] | string): BackendKey {
-  if (type === 'agy' || (type as string) === 'gemini') return 'agy';
+  if (type === 'agy') return 'agy';
   if (type === 'codex') return 'codex';
   return 'claude';
 }

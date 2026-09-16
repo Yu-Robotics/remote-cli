@@ -8,7 +8,7 @@ Remote control your [Claude Code](https://claude.ai/code) CLI from anywhere usin
 - **Secure**: Directory whitelisting, command filtering, and device authentication
 - **Mobile-Optimized**: Simplified commands and rich text formatting for Feishu
 - **Readable Code Changes**: Edit operations show collapsible, line-aware diff previews inside the existing progress card
-- **Multi-Backend Support**: Supports Claude Code and Gemini CLI
+- **Multi-Backend Support**: Supports Claude Code, AGY CLI (Antigravity), and Codex CLI (OpenAI)
 - **Image Input and Output**: Forward standalone images and mixed text-image Feishu posts to Claude Persistent and Codex App Server backends, and forward Codex App Server generated images back through Router
 - **Multi-session (Threads)**: Create independent chat threads to parallelize tasks
 - **Remote Machine Management**: Control remote servers or Docker via SSH
@@ -18,7 +18,7 @@ Remote control your [Claude Code](https://claude.ai/code) CLI from anywhere usin
 ## Prerequisites
 
 - **Node.js** >= 18.0.0
-- **Claude Code CLI** installed and configured
+- **Claude Code CLI**, **AGY CLI**, or **Codex CLI** installed and configured
 - Access to a Feishu (Lark) bot connected to a [remote-cli-router](https://www.npmjs.com/package/@yu_robotics/remote-cli-router) server
 
 The client is normally installed and run directly on the developer's machine rather than in Docker, so it can access local project directories and the installed AI CLI binaries. Docker is recommended for the shared Router server instead.
@@ -119,7 +119,7 @@ Linux users upgrading from version 1.6.23 or earlier should run `remote-cli serv
 
 ### AI CLI Commands Passthrough
 
-All commands/skills supported by local Claude Code or Gemini CLI are passed through directly where the backend protocol supports them. The built-in `/status`, `/context`, and `/skills` commands provide a consistent remote view across backends.
+Backend-specific commands are forwarded only where the active backend supports them. The built-in `/status`, `/context`, and `/skills` commands provide a consistent remote view across backends.
 - `/commit` - Commit code changes
 - `/review` - Code review
 - `/test` - Run tests
