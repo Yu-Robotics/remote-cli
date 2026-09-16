@@ -110,6 +110,18 @@ describe('AcpClient', () => {
     expect(callbacks.onConfigOptions).toHaveBeenCalled();
   });
 
+  it('routes singular ACP config option update notifications', async () => {
+    fake.process.push({
+      jsonrpc: '2.0', method: 'session/update',
+      params: {
+        sessionId: 'ses-1',
+        update: { sessionUpdate: 'config_option_update', configOptions: [{ id: 'thinking', name: 'Thinking', type: 'select' }] },
+      },
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(callbacks.onConfigOptions).toHaveBeenCalledWith([{ id: 'thinking', name: 'Thinking', type: 'select' }]);
+  });
+
   it('answers permission requests with the selected option', async () => {
     fake.process.push({
       jsonrpc: '2.0', id: 42, method: 'session/request_permission',
@@ -130,4 +142,3 @@ describe('AcpClient', () => {
     await expect(pending).rejects.toThrow('ACP error -32602: invalid model');
   });
 });
-

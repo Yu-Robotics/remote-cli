@@ -465,7 +465,7 @@ Codex CLI is auto-detected if already installed on the local machine (`codex --v
 
 | Field | Values | Default | Description |
 |-------|--------|---------|-------------|
-| `executor.type` | `auto`, `claude-persistent`, `claude-spawn`, `agy`, `codex`, `opencode` | `auto` | Which AI CLI backend to use (managed via `/backend` command) |
+| `executor.type` | `auto`, `claude-persistent`, `claude-spawn`, `agy`, `codex`, `opencode`, `kimi` | `auto` | Which AI CLI backend to use (managed via `/backend` command) |
 | `executor.codex.model` | model name (e.g. `gpt-5.2-codex`) | *(unset)* | Model passed as `-m`. Unset = codex default. |
 | `executor.codex.autoApprove` | `true`/`false` | `true` | Bypass approvals and the sandbox via `--dangerously-bypass-approvals-and-sandbox` |
 | `executor.codex.command` | binary command | `codex` | Override codex binary |
@@ -498,7 +498,7 @@ The CLI supports OpenCode through a persistent `opencode acp` child process. `Ac
 - Session pointers are stored per thread under `~/.remote-cli/opencode-sessions/` and loaded after process recreation or backend switches.
 - `/model` and `/effort` read and update ACP session configuration options.
 - `/compact` is sent through the ACP prompt protocol, `/abort` sends `session/cancel`, and image inputs use ACP image content blocks.
-- Tool permission requests choose an allow option when `executor.opencode.autoApprove` is true and are rejected when it is false.
+- Tool permission requests choose an allow option when `executor.opencode.autoApprove` is true and are relayed through the mobile input flow when it is false. Ask-user choices are always relayed and accept an option name or number.
 - OpenCode-specific slash commands, including `/skills`, are sent through ACP.
 
 Architecture:
@@ -510,9 +510,27 @@ packages/cli/src/executor/
   acp/AcpTypes.ts           # ACP transport types
 ```
 
+## Kimi Code CLI Support
+
+The CLI supports Kimi Code through its official persistent `kimi acp` server. `KimiExecutor` configures the shared ACP execution path for Kimi-specific session storage and the `thinking` configuration option.
+
+- Install with `npm install --global @moonshot-ai/kimi-code` and authenticate with `kimi login`.
+- Session pointers are stored per thread under `~/.remote-cli/kimi-sessions/`.
+- `/model` uses the ACP model option; `/effort` maps to Kimi's `thinking` option, where `auto` sends `on` so Kimi chooses the model's default effort.
+- Image inputs, slash commands, tool events, permission requests, ask-user choices, and cancellation use ACP.
+
+Architecture:
+
+```
+packages/cli/src/executor/
+  KimiExecutor.ts           # Kimi-specific ACP configuration
+  OpenCodeExecutor.ts       # Shared persistent ACP executor implementation
+  acp/AcpClient.ts          # ACP process and JSON-RPC transport
+```
+
 ## Backend Switching and Session Persistence
 
-Each backend keeps its own per-thread session pointer (claude session file, `~/.remote-cli/agy-sessions/<threadId>.json`, `~/.remote-cli/codex-sessions/<threadId>.json`, `~/.remote-cli/opencode-sessions/<threadId>.json`). `ThreadExecutorPool.destroyThread(threadId, { deleteData })` controls whether that pointer is wiped:
+Each backend keeps its own per-thread session pointer (claude session file, `~/.remote-cli/agy-sessions/<threadId>.json`, `~/.remote-cli/codex-sessions/<threadId>.json`, `~/.remote-cli/opencode-sessions/<threadId>.json`, `~/.remote-cli/kimi-sessions/<threadId>.json`). `ThreadExecutorPool.destroyThread(threadId, { deleteData })` controls whether that pointer is wiped:
 
 - `/thread delete` → `deleteData: true` (default) — session data deleted.
 - `/backend` switch (`switchBackend` → `destroyAll({ deleteData: false })`) — executor processes are torn down but session files are PRESERVED, so switching back to a backend resumes each thread's previous conversation on it.

@@ -121,6 +121,23 @@ describe('OpenCodeExecutor', () => {
     expect(onToolResult).toHaveBeenCalledWith({ tool_use_id: 'tool-1', content: '/tmp', is_error: false });
   });
 
+  it('preserves ACP file diffs in tool results', async () => {
+    const onToolResult = vi.fn();
+    transport.prompt.mockImplementationOnce(async () => {
+      callbacks.onToolResult?.({
+        toolCallId: 'tool-edit',
+        status: 'completed',
+        content: [{ type: 'diff', path: 'src/app.ts', oldText: 'const a = 1;', newText: 'const a = 2;' }],
+      });
+      return { stopReason: 'end_turn' };
+    });
+    await executor.execute('edit', { onToolResult });
+    expect(onToolResult).toHaveBeenCalledWith(expect.objectContaining({
+      tool_use_id: 'tool-edit',
+      diff: expect.stringContaining('+++ b/src/app.ts'),
+    }));
+  });
+
   it('lists models from ACP session config options', async () => {
     const models = await executor.listModels();
     expect(models.map((model) => model.id)).toEqual(['opencode/free-a', 'opencode/free-b']);
@@ -181,5 +198,51 @@ describe('OpenCodeExecutor', () => {
     expect(transport.destroy).toHaveBeenCalled();
     expect(replacement.loadSession).toHaveBeenCalledWith('ses-new', project);
     await recovering.destroy();
+  });
+
+  it('relays ACP permission requests through executor input when auto-approve is disabled', async () => {
+    const interactive = new OpenCodeExecutor(new DirectoryGuard([home]), {
+      initialWorkingDirectory: project,
+      threadId: 'thread-permission',
+      autoApprove: false,
+      sessionBaseDir: path.join(home, '.remote-cli', 'opencode-sessions'),
+      clientFactory: (next) => {
+        callbacks = next;
+        return transport;
+      },
+    });
+    let selected = -1;
+    transport.prompt.mockImplementationOnce(async () => {
+      selected = await callbacks.onPermissionRequest!('Run tests', [
+        { kind: 'allow_once', optionId: 'yes' },
+        { kind: 'reject_once', optionId: 'no' },
+      ]);
+      return { stopReason: 'end_turn' };
+    });
+
+    const running = interactive.execute('test', {});
+    await vi.waitFor(() => expect(interactive.isWaitingInput()).toBe(true));
+    expect(interactive.sendInput('yes')).toBe(true);
+    await expect(running).resolves.toMatchObject({ success: true });
+    expect(selected).toBe(0);
+    await interactive.destroy();
+  });
+
+  it('relays ACP ask-user choices even when tool auto-approval is enabled', async () => {
+    let selected = -1;
+    transport.prompt.mockImplementationOnce(async () => {
+      selected = await callbacks.onPermissionRequest!('Choose a strategy', [
+        { kind: 'allow_once', optionId: 'q0_opt_0', name: 'Fast' },
+        { kind: 'allow_once', optionId: 'q0_opt_1', name: 'Safe' },
+        { kind: 'reject_once', optionId: 'q0_skip', name: 'Skip' },
+      ]);
+      return { stopReason: 'end_turn' };
+    });
+
+    const running = executor.execute('choose', {});
+    await vi.waitFor(() => expect(executor.isWaitingInput()).toBe(true));
+    expect(executor.sendInput('2')).toBe(true);
+    await expect(running).resolves.toMatchObject({ success: true });
+    expect(selected).toBe(1);
   });
 });

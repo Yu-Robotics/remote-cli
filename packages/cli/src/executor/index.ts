@@ -5,6 +5,7 @@ import { AgyExecutor } from './AgyExecutor';
 import { CodexExecutor } from './CodexExecutor';
 import { CodexAppServerExecutor } from './CodexAppServerExecutor';
 import { OpenCodeExecutor } from './OpenCodeExecutor';
+import { KimiExecutor } from './KimiExecutor';
 import type { IExecutor } from './IExecutor';
 import type { ExecutorConfig } from '../types/config';
 
@@ -16,6 +17,7 @@ export { AgyExecutor } from './AgyExecutor';
 export { CodexExecutor } from './CodexExecutor';
 export { CodexAppServerExecutor } from './CodexAppServerExecutor';
 export { OpenCodeExecutor } from './OpenCodeExecutor';
+export { KimiExecutor } from './KimiExecutor';
 export type { ExecutorModelInfo, IExecutor } from './IExecutor';
 
 /**
@@ -134,6 +136,17 @@ export function createExecutor(
         autoApprove: executorConfig.opencode?.autoApprove ?? true,
         initialWorkingDirectory,
         openCodeCommand: executorConfig.opencode?.command,
+        threadId,
+      });
+
+    case 'kimi':
+      console.log('[ExecutorFactory] Using Kimi Code ACP executor');
+      return new KimiExecutor(directoryGuard, {
+        model: model ?? executorConfig.kimi?.model,
+        effort,
+        autoApprove: executorConfig.kimi?.autoApprove ?? true,
+        initialWorkingDirectory,
+        kimiCommand: executorConfig.kimi?.command,
         threadId,
       });
 
