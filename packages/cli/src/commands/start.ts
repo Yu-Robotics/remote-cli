@@ -43,9 +43,13 @@ export interface StartCommandResult {
 async function checkBackendAvailability(type: string, spinner: Ora): Promise<void> {
   const isAgy = type === 'agy';
   const isCodex = type === 'codex';
-  const cmd = isAgy ? 'agy' : isCodex ? 'codex' : 'claude';
+  const isOpenCode = type === 'opencode';
+  const cmd = isAgy ? 'agy' : isCodex ? 'codex' : isOpenCode ? 'opencode' : 'claude';
   const args = ['--version'];
-  const label = isAgy ? 'AGY CLI (Antigravity)' : isCodex ? 'Codex CLI (OpenAI)' : 'Claude Code';
+  const label = isAgy ? 'AGY CLI (Antigravity)'
+    : isCodex ? 'Codex CLI (OpenAI)'
+      : isOpenCode ? 'OpenCode CLI'
+        : 'Claude Code';
 
   const available = await new Promise<boolean>((resolve) => {
     execFile(cmd, args, { timeout: 5000 }, (err) => resolve(!err));

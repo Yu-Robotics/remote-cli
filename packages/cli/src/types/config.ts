@@ -55,19 +55,30 @@ export interface CodexExecutorConfig {
   transport?: 'app-server' | 'exec';
 }
 
+/** OpenCode CLI executor configuration. */
+export interface OpenCodeExecutorConfig {
+  /** Model in provider/model form. Unset uses the OpenCode session default. */
+  model?: string;
+  /** Automatically approve tool permission requests. Default: true. */
+  autoApprove?: boolean;
+  /** Override the OpenCode binary command. Default: opencode. */
+  command?: string;
+}
+
 /**
  * Executor configuration — controls which AI CLI backend is used
  */
 export interface ExecutorConfig {
-  type: 'auto' | 'claude-persistent' | 'claude-spawn' | 'agy' | 'codex';
+  type: 'auto' | 'claude-persistent' | 'claude-spawn' | 'agy' | 'codex' | 'opencode';
   agy?: AgyExecutorConfig;
   codex?: CodexExecutorConfig;
+  opencode?: OpenCodeExecutorConfig;
 }
 
 /**
  * Canonical backend keys for per-backend thread settings (e.g. Thread.models).
  */
-export type BackendKey = 'claude' | 'agy' | 'codex';
+export type BackendKey = 'claude' | 'agy' | 'codex' | 'opencode';
 
 /**
  * Map an executor config type to its canonical backend key.
@@ -76,6 +87,7 @@ export type BackendKey = 'claude' | 'agy' | 'codex';
 export function backendKeyOf(type: ExecutorConfig['type'] | string): BackendKey {
   if (type === 'agy') return 'agy';
   if (type === 'codex') return 'codex';
+  if (type === 'opencode') return 'opencode';
   return 'claude';
 }
 
