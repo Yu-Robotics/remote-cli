@@ -213,15 +213,30 @@ describe('/backend command', () => {
       expect(res.output).toContain('Codex CLI');
     });
 
+    it('shows and marks OpenCode active when opencode is installed', async () => {
+      mockInstalled('claude', 'opencode');
+      mockConfig.get.mockReturnValue({ type: 'opencode' });
+      mockThreadPool.getBackendKey.mockReturnValue('opencode');
+
+      await send('/backend');
+
+      const res = sentResponse();
+      const openCodeLine = res.output.split('\n').find((line: string) => line.includes('OpenCode CLI'));
+      expect(openCodeLine).toContain('★ (active)');
+    });
+
     it('lists Codex before AGY when all backends are installed', async () => {
-      mockInstalled('claude', 'agy', 'codex');
+      mockInstalled('claude', 'agy', 'codex', 'opencode');
 
       await send('/backend');
 
       const lines = sentResponse().output.split('\n');
       const codexIndex = lines.findIndex((line: string) => line.includes('Codex CLI'));
+      const openCodeIndex = lines.findIndex((line: string) => line.includes('OpenCode CLI'));
       const agyIndex = lines.findIndex((line: string) => line.includes('AGY CLI'));
       expect(codexIndex).toBeGreaterThan(-1);
+      expect(openCodeIndex).toBeGreaterThan(codexIndex);
+      expect(openCodeIndex).toBeLessThan(agyIndex);
       expect(codexIndex).toBeLessThan(agyIndex);
     });
 

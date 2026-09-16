@@ -23,7 +23,7 @@ import { v4 as uuidv4 } from 'uuid';
  * Detected backend information
  */
 interface BackendInfo {
-  id: 'auto' | 'agy' | 'codex';
+  id: 'auto' | 'agy' | 'codex' | 'opencode';
   label: string;
   installed: boolean;
 }
@@ -525,7 +525,7 @@ Use /compact to reduce conversation context or /clear to start a fresh context.`
 
     if (trimmed === '/skills') {
       const backend = this.threadPool.getBackendKey(threadId);
-      if (backend === 'claude' || backend === 'agy') {
+      if (backend === 'claude' || backend === 'agy' || backend === 'opencode') {
         await this.executeSlashCommand(messageId, threadId, trimmed, executor);
       } else {
         const skills = await this.listLocalSkills(executor.getCurrentWorkingDirectory(), backend);
@@ -553,7 +553,7 @@ Use /compact to reduce conversation context or /clear to start a fresh context.`
 - /compact - Compress conversation history to reduce context size
 - /cd <directory> - Change working directory for this thread
 - /model [name] - Show models for the active backend, or set this thread's model
-- /effort [auto|low|medium|high] - Show or set effort for Codex/AGY (Claude Code is unsupported)
+- /effort [auto|level] - Show or set effort for Codex/AGY/OpenCode (Claude Code is unsupported)
 - /backend - List backends and show the current thread's effective backend
 - /backend <index> - Switch all threads and clear per-thread backend overrides
 - /backend <index> @ - Switch only the current thread
@@ -648,7 +648,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     if (trimmed === '/effort' || trimmed.startsWith('/effort ')) {
       const executorConfig = (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
       const key = this.threadPool.getBackendKey(threadId);
-      if (key !== 'codex' && key !== 'agy') {
+      if (key !== 'codex' && key !== 'agy' && key !== 'opencode') {
         this.sendResponse(messageId, threadId, {
           success: false,
           error: '/effort is not supported yet for Claude Code.',
@@ -665,13 +665,15 @@ You can also use natural language commands to control Claude Code CLI.`,
             output: [
               `Current reasoning effort: ${thread?.efforts?.agy ?? 'auto'}`,
               'Supported levels: low, medium, high',
-              'Set with: /effort <auto|low|medium|high>',
+              'Set with: /effort <auto|level>',
             ].join('\n'),
           });
           return true;
         }
-        const configuredModel = thread?.models?.codex ?? executorConfig.codex?.model;
-        const lines = [`Current reasoning effort: ${thread?.efforts?.codex ?? 'auto'}`];
+        const configuredModel = key === 'codex'
+          ? thread?.models?.codex ?? executorConfig.codex?.model
+          : thread?.models?.opencode ?? executorConfig.opencode?.model;
+        const lines = [`Current reasoning effort: ${thread?.efforts?.[key] ?? 'auto'}`];
         if ('listModels' in executor && typeof executor.listModels === 'function') {
           try {
             const models = await executor.listModels();
@@ -684,7 +686,8 @@ You can also use natural language commands to control Claude Code CLI.`,
               lines.push(`Supported levels: ${activeModel.supportedReasoningEfforts?.join(', ') || 'unavailable'}`);
             }
           } catch (error) {
-            lines.push(`Could not fetch Codex effort metadata: ${error instanceof Error ? error.message : String(error)}`);
+            const label = key === 'opencode' ? 'OpenCode' : 'Codex';
+            lines.push(`Could not fetch ${label} effort metadata: ${error instanceof Error ? error.message : String(error)}`);
           }
         }
         lines.push('Set with: /effort <auto|level>');
@@ -695,7 +698,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       if (!('setEffort' in executor && typeof executor.setEffort === 'function')) {
         this.sendResponse(messageId, threadId, {
           success: false,
-          error: `/effort is not supported by this ${key === 'agy' ? 'AGY' : 'Codex'} executor version.`,
+          error: `/effort is not supported by this ${key === 'agy' ? 'AGY' : key === 'opencode' ? 'OpenCode' : 'Codex'} executor version.`,
         });
         return true;
       }
@@ -962,6 +965,7 @@ You can also use natural language commands to control Claude Code CLI.`,
    * - claude: `claude --print /model` prints current + available aliases
    * - agy: `agy models` prints "slug<TAB>Display Name" lines
    * - codex app-server: `model/list` returns the authenticated catalog
+   * - opencode ACP: session config options expose enabled models
    * - codex exec fallback: listing is unavailable
    */
   private async handleModelList(messageId: string, threadId: string): Promise<void> {
@@ -970,13 +974,16 @@ You can also use natural language commands to control Claude Code CLI.`,
     const thread = this.threadManager.getThread(threadId);
     const current = thread?.models?.[key] ?? (key === 'claude' ? thread?.model : undefined);
 
-    const backendLabel = key === 'claude' ? 'Claude Code' : key === 'agy' ? 'AGY CLI' : 'Codex CLI';
+    const backendLabel = key === 'claude' ? 'Claude Code'
+      : key === 'agy' ? 'AGY CLI'
+        : key === 'opencode' ? 'OpenCode CLI'
+          : 'Codex CLI';
     const lines: string[] = [
       `🎯 Backend: ${backendLabel}`,
       `Current model: ${current ?? 'backend default'}`,
     ];
 
-    if (key === 'codex') {
+    if (key === 'codex' || key === 'opencode') {
       const executor = this.threadPool.getExecutor(threadId);
       if ('listModels' in executor && typeof executor.listModels === 'function') {
         try {
@@ -988,13 +995,13 @@ You can also use natural language commands to control Claude Code CLI.`,
               lines.push(`- ${model.id}${marker}${model.displayName !== model.id ? ` — ${model.displayName}` : ''}`);
             }
           } else {
-            lines.push('', '⚠️ Codex returned an empty model list.');
+            lines.push('', `⚠️ ${backendLabel} returned an empty model list.`);
           }
         } catch (error) {
-          lines.push('', `⚠️ Could not fetch the model list from Codex: ${error instanceof Error ? error.message : String(error)}`);
+          lines.push('', `⚠️ Could not fetch the model list from ${backendLabel}: ${error instanceof Error ? error.message : String(error)}`);
         }
       } else {
-        lines.push('', 'Model listing is unavailable in the Codex exec fallback transport.');
+        lines.push('', `Model listing is unavailable in this ${backendLabel} transport.`);
       }
     } else {
       const bin = key === 'agy' ? (executorConfig.agy?.command ?? 'agy') : 'claude';
@@ -1476,7 +1483,7 @@ You can also use natural language commands to control Claude Code CLI.`,
   /**
    * Which backend slash commands should be forwarded to for a thread.
    */
-  private resolveSlashBackend(threadId: string): 'claude' | 'agy' | 'codex' {
+  private resolveSlashBackend(threadId: string): 'claude' | 'agy' | 'codex' | 'opencode' {
     return this.threadPool.getBackendKey(threadId);
   }
 
@@ -1498,6 +1505,20 @@ You can also use natural language commands to control Claude Code CLI.`,
     executor: IExecutor
   ): Promise<void> {
     const backend = this.resolveSlashBackend(threadId);
+
+    if (backend === 'opencode') {
+      const result = await executor.execute(command, {
+        onStream: (chunk) => this.sendStreamChunk(messageId, threadId, chunk),
+        onToolUse: (toolUse) => this.sendToolUse(messageId, threadId, toolUse),
+        onToolResult: (toolResult) => this.sendToolResult(messageId, threadId, toolResult),
+        onPlanMode: (plan) => this.sendPlanMode(messageId, threadId, plan),
+        onImage: (image) => this.sendImage(messageId, threadId, image),
+      });
+      this.sendResponse(messageId, threadId, result.success
+        ? { success: true, output: result.output || '✅ Command executed successfully' }
+        : { success: false, error: result.error || 'OpenCode command failed' });
+      return;
+    }
 
     if (backend === 'codex') {
       this.sendResponse(messageId, threadId, {
@@ -1866,14 +1887,16 @@ You can also use natural language commands to control Claude Code CLI.`,
   }
 
   private async detectBackends(): Promise<BackendInfo[]> {
-    const [claudeInstalled, codexInstalled, agyInstalled] = await Promise.all([
+    const [claudeInstalled, codexInstalled, openCodeInstalled, agyInstalled] = await Promise.all([
       this.checkCommand('claude', ['--version']),
       this.checkCommand('codex', ['--version']),
+      this.checkCommand('opencode', ['--version']),
       this.checkCommand('agy', ['--version']),
     ]);
     return [
       { id: 'auto', label: 'Claude Code', installed: claudeInstalled },
       { id: 'codex', label: 'Codex CLI (OpenAI)', installed: codexInstalled },
+      { id: 'opencode', label: 'OpenCode CLI', installed: openCodeInstalled },
       { id: 'agy',  label: 'AGY CLI (Antigravity)', installed: agyInstalled },
     ];
   }

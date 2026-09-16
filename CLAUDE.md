@@ -465,7 +465,7 @@ Codex CLI is auto-detected if already installed on the local machine (`codex --v
 
 | Field | Values | Default | Description |
 |-------|--------|---------|-------------|
-| `executor.type` | `auto`, `claude-persistent`, `claude-spawn`, `agy`, `codex` | `auto` | Which AI CLI backend to use (managed via `/backend` command) |
+| `executor.type` | `auto`, `claude-persistent`, `claude-spawn`, `agy`, `codex`, `opencode` | `auto` | Which AI CLI backend to use (managed via `/backend` command) |
 | `executor.codex.model` | model name (e.g. `gpt-5.2-codex`) | *(unset)* | Model passed as `-m`. Unset = codex default. |
 | `executor.codex.autoApprove` | `true`/`false` | `true` | Bypass approvals and the sandbox via `--dangerously-bypass-approvals-and-sandbox` |
 | `executor.codex.command` | binary command | `codex` | Override codex binary |
@@ -491,9 +491,28 @@ Known gaps vs Claude backend: no native Claude hook events. The app-server path 
 
 ---
 
+## OpenCode CLI Support
+
+The CLI supports OpenCode through a persistent `opencode acp` child process. `AcpClient` implements the ACP JSON-RPC transport without an extra runtime dependency, and `OpenCodeExecutor` maps ACP session updates onto `IExecutor` callbacks.
+
+- Session pointers are stored per thread under `~/.remote-cli/opencode-sessions/` and loaded after process recreation or backend switches.
+- `/model` and `/effort` read and update ACP session configuration options.
+- `/compact` is sent through the ACP prompt protocol, `/abort` sends `session/cancel`, and image inputs use ACP image content blocks.
+- Tool permission requests choose an allow option when `executor.opencode.autoApprove` is true and are rejected when it is false.
+- OpenCode-specific slash commands, including `/skills`, are sent through ACP.
+
+Architecture:
+
+```
+packages/cli/src/executor/
+  OpenCodeExecutor.ts       # IExecutor implementation and session persistence
+  acp/AcpClient.ts          # OpenCode ACP process and JSON-RPC transport
+  acp/AcpTypes.ts           # ACP transport types
+```
+
 ## Backend Switching and Session Persistence
 
-Each backend keeps its own per-thread session pointer (claude session file, `~/.remote-cli/agy-sessions/<threadId>.json`, `~/.remote-cli/codex-sessions/<threadId>.json`). `ThreadExecutorPool.destroyThread(threadId, { deleteData })` controls whether that pointer is wiped:
+Each backend keeps its own per-thread session pointer (claude session file, `~/.remote-cli/agy-sessions/<threadId>.json`, `~/.remote-cli/codex-sessions/<threadId>.json`, `~/.remote-cli/opencode-sessions/<threadId>.json`). `ThreadExecutorPool.destroyThread(threadId, { deleteData })` controls whether that pointer is wiped:
 
 - `/thread delete` → `deleteData: true` (default) — session data deleted.
 - `/backend` switch (`switchBackend` → `destroyAll({ deleteData: false })`) — executor processes are torn down but session files are PRESERVED, so switching back to a backend resumes each thread's previous conversation on it.
