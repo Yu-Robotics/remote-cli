@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added a Kimi Code backend using the official persistent `kimi acp` server, with resumable sessions, model and thinking controls, image input, slash commands, cancellation, and permission handling.
 - Added an OpenCode backend using a persistent `opencode acp` process, with resumable per-thread sessions, native model and effort controls, image input, slash commands, compaction, cancellation, tool updates, and permission handling.
 
+### Fixed
+- Continued with the first confirmed queued message when the active task ends with a backend error, including temporary model-capacity failures.
+
 ## [1.6.26] - 2026-09-14
 
 ### Added

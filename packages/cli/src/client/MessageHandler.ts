@@ -353,10 +353,7 @@ export class MessageHandler {
 
       const expandedContent = this.expandCommandShortcuts(content!);
       const processedContent = processFileReadContent(expandedContent);
-      const success = await this.executeCommand(messageId, resolvedThreadId, processedContent, executor, attachments);
-      if (!success && this.threadQueues.has(resolvedThreadId)) {
-        this.pausedQueues.add(resolvedThreadId);
-      }
+      await this.executeCommand(messageId, resolvedThreadId, processedContent, executor, attachments);
     } catch (error) {
       this.threadPool.setThreadError(resolvedThreadId, true);
       this.sendResponse(messageId, resolvedThreadId, {
