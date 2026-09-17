@@ -882,6 +882,55 @@ describe('MessageHandler', () => {
       expect(ctx.mockExecutor.execute).toHaveBeenCalledWith('queued command', expect.anything());
     });
 
+    it('should start queued work after the active task ends with a capacity error', async () => {
+      (ctx.handler as any).threadQueues.set('default-thread-id', [{
+        messageId: 'msg-queued-after-capacity',
+        threadId: 'default-thread-id',
+        content: 'queued command',
+        enqueuedAt: Date.now(),
+      }]);
+      ctx.mockExecutor.execute
+        .mockResolvedValueOnce({ success: false, error: 'Selected model is at capacity. Please try a different model.' })
+        .mockResolvedValueOnce({ success: true, output: 'queued work completed' });
+
+      await ctx.handler.handleMessage({
+        type: 'command',
+        messageId: 'msg-capacity',
+        content: 'active command',
+        timestamp: Date.now(),
+      });
+
+      await vi.waitFor(() => expect(ctx.mockExecutor.execute).toHaveBeenCalledTimes(2));
+      expect(ctx.mockExecutor.execute).toHaveBeenNthCalledWith(2, 'queued command', expect.anything());
+      expect((ctx.handler as any).pausedQueues.has('default-thread-id')).toBe(false);
+    });
+
+    it('should pause remaining work when a task taken from the queue fails', async () => {
+      (ctx.handler as any).threadQueues.set('default-thread-id', [
+        {
+          messageId: 'msg-failing-queued',
+          threadId: 'default-thread-id',
+          content: 'failing queued command',
+          enqueuedAt: Date.now(),
+        },
+        {
+          messageId: 'msg-still-queued',
+          threadId: 'default-thread-id',
+          content: 'remaining queued command',
+          enqueuedAt: Date.now(),
+        },
+      ]);
+      ctx.mockExecutor.execute.mockResolvedValueOnce({ success: false, error: 'Task failed' });
+
+      await (ctx.handler as any).startNextQueuedCommand('default-thread-id');
+
+      expect(ctx.mockExecutor.execute).toHaveBeenCalledOnce();
+      expect((ctx.handler as any).pausedQueues.has('default-thread-id')).toBe(true);
+      expect((ctx.handler as any).threadQueues.get('default-thread-id')).toEqual([
+        expect.objectContaining({ content: 'remaining queued command' }),
+      ]);
+    });
+
     it('should clear queued and pending messages when aborting', async () => {
       ctx.mockThreadPool.isThreadBusy = vi.fn().mockReturnValue(true);
       await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-pending', content: 'pending command', timestamp: Date.now() });
