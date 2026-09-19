@@ -243,7 +243,7 @@ packages/cli/src/
   commands/      # CLI command implementations (init, start, stop, status, config)
   client/        # WebSocket client and message handling
   config/        # Configuration management
-  executor/      # AI CLI integration (ClaudeExecutor, ClaudePersistentExecutor, AgyExecutor, CodexExecutor, IExecutor)
+  executor/      # AI CLI integration (ClaudePersistentExecutor, AgyExecutor, CodexAppServerExecutor, IExecutor)
   hooks/         # Claude Code hooks and Feishu notification adapter
   security/      # Directory guard and legacy Claude hook cleanup
   types/         # TypeScript type definitions
@@ -397,7 +397,7 @@ AGY CLI is auto-detected if already installed on the local machine (`agy --versi
 
 | Field | Values | Default | Description |
 |-------|--------|---------|-------------|
-| `executor.type` | `auto`, `claude-persistent`, `claude-spawn`, `agy` | `auto` | Which AI CLI backend to use (managed via `/backend` command) |
+| `executor.type` | `auto`, `claude-persistent`, `agy` | `auto` | Which AI CLI backend to use (managed via `/backend` command) |
 | `executor.agy.model` | model slug from `agy models` (e.g. `gemini-3.8-flash-low`) | *(unset)* | Model to use. Must be a slug from `agy models`; invalid slugs are rejected by agy with a clear error. Unset = agy default. |
 | `executor.agy.autoApprove` | `true`/`false` | `true` | Auto-approve tool permissions via `--dangerously-skip-permissions` |
 | `executor.agy.command` | binary command | `agy` | Override agy binary |
@@ -432,7 +432,7 @@ Known gaps vs Claude backend: no `task_notification`-style background task event
 
 ## Codex CLI (OpenAI) Support
 
-The CLI supports OpenAI's Codex CLI (binary `codex`) as an alternative AI backend via the persistent **`codex app-server`** transport. The legacy `codex exec` transport remains available as an explicit fallback.
+The CLI supports OpenAI's Codex CLI (binary `codex`) as an alternative AI backend via the persistent **`codex app-server`** transport.
 
 ### Setup
 
@@ -465,7 +465,7 @@ Codex CLI is auto-detected if already installed on the local machine (`codex --v
 
 | Field | Values | Default | Description |
 |-------|--------|---------|-------------|
-| `executor.type` | `auto`, `claude-persistent`, `claude-spawn`, `agy`, `codex`, `opencode`, `kimi` | `auto` | Which AI CLI backend to use (managed via `/backend` command) |
+| `executor.type` | `auto`, `claude-persistent`, `agy`, `codex`, `opencode`, `kimi` | `auto` | Which AI CLI backend to use (managed via `/backend` command) |
 | `executor.codex.model` | model name (e.g. `gpt-5.2-codex`) | *(unset)* | Model passed as `-m`. Unset = codex default. |
 | `executor.codex.autoApprove` | `true`/`false` | `true` | Bypass approvals and the sandbox via `--dangerously-bypass-approvals-and-sandbox` |
 | `executor.codex.command` | binary command | `codex` | Override codex binary |
@@ -475,19 +475,19 @@ Codex CLI is auto-detected if already installed on the local machine (`codex --v
 ```
 packages/cli/src/executor/
   CodexAppServerExecutor.ts # persistent app-server executor (implements IExecutor)
-  CodexExecutor.ts          # legacy exec fallback executor (implements IExecutor)
 ```
 
 CodexAppServerExecutor keeps one app-server process per active thread. It uses app-server requests for turns, model catalog lookup, reasoning effort updates, compaction, and turn interruption. The persisted Codex thread id is resumed after process recreation, working-directory changes, backend switches, and service restarts.
 
 - `/model` stores the selection under `thread.models.codex`; bare `/model` queries the app-server model catalog. `/effort` stores the per-thread override under `thread.efforts.codex`; `auto` clears it and restores the selected model's default reasoning effort.
-- The legacy `exec` fallback is one-shot per command and uses JSONL output. It preserves a thread id for resume, but model listing is unavailable and native app-server controls are not available.
+- Startup verifies that the installed Codex CLI exposes `codex app-server --help` and prints an upgrade command when it does not.
+- Configurations from remote-cli 1.6.30 or earlier are migrated on load: `claude-spawn` becomes `claude-persistent`, and `executor.codex.transport` is removed.
 
 Known gaps vs Claude backend: no native Claude hook events. The app-server path supports Codex image inputs.
 
 **Slash passthrough (Codex)**: none — app-server has no interactive TUI slash-command protocol, so backend-specific slash commands are rejected. remote-cli's built-in commands (`/clear`, `/compact`, `/model`, `/effort`, ...) are handled locally.
 
-**Compact**: `/compact` uses app-server thread compaction. The legacy exec fallback uses the shared summarize-then-reset handoff because exec mode has no interactive slash-command protocol.
+**Compact**: `/compact` uses app-server thread compaction.
 
 ---
 

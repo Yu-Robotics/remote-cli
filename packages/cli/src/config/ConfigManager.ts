@@ -36,11 +36,12 @@ export class ConfigManager {
 
     // Read or create config file
     let config: Config;
+    let migration: ReturnType<typeof ConfigManager.migrateDeprecatedExecutorConfig> | undefined;
     try {
       const content = await fs.readFile(configFile, 'utf-8');
-      config = JSON.parse(content);
+      migration = ConfigManager.migrateDeprecatedExecutorConfig(JSON.parse(content));
       // Merge with defaults for any missing fields
-      config = ConfigManager.mergeWithDefaults(config);
+      config = ConfigManager.mergeWithDefaults(migration.config);
       // Validate config structure
       if (!ConfigManager.isValidConfig(config)) {
         throw new Error('Invalid config structure');
@@ -51,7 +52,44 @@ export class ConfigManager {
       await fs.writeFile(configFile, JSON.stringify(config, null, 2), 'utf-8');
     }
 
+    if (migration?.changed) {
+      try {
+        await fs.writeFile(configFile, JSON.stringify(config, null, 2), 'utf-8');
+        for (const warning of migration.warnings) console.warn(warning);
+      } catch (error) {
+        console.warn('[Config] Failed to persist executor configuration migration:', error instanceof Error ? error.message : error);
+      }
+    }
+
     return new ConfigManager(config, configDir, configFile);
+  }
+
+  /** Migrate executor settings whose implementations have been removed. */
+  private static migrateDeprecatedExecutorConfig(config: any): {
+    config: any;
+    changed: boolean;
+    warnings: string[];
+  } {
+    const warnings: string[] = [];
+    let changed = false;
+    const executor = config?.executor;
+    if (!executor || typeof executor !== 'object') return { config, changed, warnings };
+
+    if (executor.type === 'claude-spawn') {
+      executor.type = 'claude-persistent';
+      changed = true;
+      warnings.push('[Config] Migrated deprecated executor type "claude-spawn" to "claude-persistent".');
+    }
+
+    if (executor.codex && typeof executor.codex === 'object' && 'transport' in executor.codex) {
+      if (executor.codex.transport === 'exec') {
+        warnings.push('[Config] Codex exec transport was removed; migrated to app-server.');
+      }
+      delete executor.codex.transport;
+      changed = true;
+    }
+
+    return { config, changed, warnings };
   }
 
   /**

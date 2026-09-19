@@ -1,6 +1,6 @@
 {
   "name": "@yu_robotics/remote-cli",
-  "version": "1.6.30",
+  "version": "1.6.31",
   "description": "Remote control Claude Code CLI via mobile",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -14,7 +14,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc",
     "dev": "tsx watch src/index.ts",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",

@@ -73,6 +73,77 @@ describe('ConfigManager', () => {
       expect(config.server.url).toBe(existingConfig.server.url);
     });
 
+    it('should persistently migrate removed executor modes', async () => {
+      const existingConfig = {
+        security: {
+          allowedDirectories: ['~/projects'],
+          deniedCommands: [],
+          maxConcurrentTasks: 1
+        },
+        server: {
+          url: 'wss://localhost:3000',
+          reconnectInterval: 5000,
+          heartbeatInterval: 30000
+        },
+        executor: {
+          type: 'claude-spawn',
+          codex: { model: 'gpt-5.2-codex', transport: 'exec' }
+        }
+      };
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      (fs.access as any) = vi.fn().mockResolvedValue(undefined);
+      (fs.readFile as any) = vi.fn().mockResolvedValue(JSON.stringify(existingConfig));
+      (fs.writeFile as any) = vi.fn().mockResolvedValue(undefined);
+
+      configManager = await ConfigManager.initialize();
+
+      expect(configManager.getConfig().executor).toEqual({
+        type: 'claude-persistent',
+        codex: { model: 'gpt-5.2-codex' }
+      });
+      const persisted = JSON.parse((fs.writeFile as any).mock.calls[0][1]);
+      expect(persisted.executor).toEqual({
+        type: 'claude-persistent',
+        codex: { model: 'gpt-5.2-codex' }
+      });
+      expect(warn).toHaveBeenCalledWith(
+        '[Config] Migrated deprecated executor type "claude-spawn" to "claude-persistent".'
+      );
+      expect(warn).toHaveBeenCalledWith(
+        '[Config] Codex exec transport was removed; migrated to app-server.'
+      );
+      warn.mockRestore();
+    });
+
+    it('should keep the migrated config in memory if persistence fails', async () => {
+      const existingConfig = {
+        security: {
+          allowedDirectories: ['~/projects'],
+          deniedCommands: [],
+          maxConcurrentTasks: 1
+        },
+        server: {
+          url: 'wss://localhost:3000',
+          reconnectInterval: 5000,
+          heartbeatInterval: 30000
+        },
+        executor: { type: 'claude-spawn' }
+      };
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      (fs.access as any) = vi.fn().mockResolvedValue(undefined);
+      (fs.readFile as any) = vi.fn().mockResolvedValue(JSON.stringify(existingConfig));
+      (fs.writeFile as any) = vi.fn().mockRejectedValue(new Error('read only'));
+
+      configManager = await ConfigManager.initialize();
+
+      expect(configManager.getConfig().executor?.type).toBe('claude-persistent');
+      expect(warn).toHaveBeenCalledWith(
+        '[Config] Failed to persist executor configuration migration:',
+        'read only'
+      );
+      warn.mockRestore();
+    });
+
     it('should handle malformed config file gracefully', async () => {
       (fs.access as any) = vi.fn().mockResolvedValue(undefined);
       (fs.readFile as any) = vi.fn().mockResolvedValue('invalid json');

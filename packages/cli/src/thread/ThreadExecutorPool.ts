@@ -24,7 +24,7 @@ function resolveThreadEffort(thread: Thread, config: ExecutorConfig): string | u
 }
 
 function isClaudeType(type: string): boolean {
-  return type === 'auto' || type === 'claude-persistent' || type === 'claude-spawn';
+  return type === 'auto' || type === 'claude-persistent';
 }
 
 /**
