@@ -40,22 +40,22 @@ export interface StartCommandResult {
  * Prints a clear warning (non-fatal) if not found so the local operator
  * knows why commands will fail before the first Feishu message arrives.
  */
-async function checkBackendAvailability(type: string, spinner: Ora): Promise<void> {
+export async function checkBackendAvailability(type: string, spinner: Ora): Promise<void> {
   const isAgy = type === 'agy';
   const isCodex = type === 'codex';
   const isOpenCode = type === 'opencode';
   const isKimi = type === 'kimi';
   const cmd = isAgy ? 'agy' : isCodex ? 'codex' : isOpenCode ? 'opencode' : isKimi ? 'kimi' : 'claude';
-  const args = ['--version'];
   const label = isAgy ? 'AGY CLI (Antigravity)'
     : isCodex ? 'Codex CLI (OpenAI)'
       : isOpenCode ? 'OpenCode CLI'
         : isKimi ? 'Kimi Code CLI'
         : 'Claude Code';
 
-  const available = await new Promise<boolean>((resolve) => {
+  const canRun = (args: string[]) => new Promise<boolean>((resolve) => {
     execFile(cmd, args, { timeout: 5000 }, (err) => resolve(!err));
   });
+  const available = await canRun(['--version']);
 
   if (!available) {
     spinner.warn(`${label} not found on PATH`);
@@ -63,6 +63,17 @@ async function checkBackendAvailability(type: string, spinner: Ora): Promise<voi
     console.log(`⚠️  The selected backend "${type}" (${label}) is not installed.`);
     console.log('Users will receive an error message via Feishu when they send commands.');
     console.log('You can switch backends with the /backend command in Feishu chat.');
+    console.log('');
+    spinner.start('Continuing...');
+    return;
+  }
+
+  if (isCodex && !await canRun(['app-server', '--help'])) {
+    spinner.warn(`${label} does not support app-server`);
+    console.log('');
+    console.log('⚠️  The installed Codex CLI is too old for the selected backend.');
+    console.log('Update Codex CLI: npm install -g @openai/codex@latest');
+    console.log('Users will receive an error message via Feishu until Codex CLI is updated.');
     console.log('');
     spinner.start('Continuing...');
   }

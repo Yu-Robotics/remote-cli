@@ -310,8 +310,7 @@ remote-cli/
 │   │   │   │   └── MessageHandler.ts     # Message handler
 │   │   │   ├── executor/
 │   │   │   │   ├── index.ts              # Executor factory
-│   │   │   │   ├── ClaudeExecutor.ts     # Spawn mode executor
-│   │   │   │   └── ClaudePersistentExecutor.ts  # Persistent mode executor
+│   │   │   │   └── ClaudePersistentExecutor.ts  # Persistent Claude executor
 │   │   │   ├── hooks/
 │   │   │   │   ├── index.ts              # Hook exports
 │   │   │   │   ├── ClaudeCodeHooks.ts    # Claude Code event hooks
@@ -374,17 +373,12 @@ remote-cli/
    - Keep-alive heartbeat, auto-reconnect
    - Message send/receive
 
-2. **`packages/cli/src/executor/ClaudeExecutor.ts`** (spawn mode)
-   - Spawn new Claude CLI process per command
-   - Uses `--print` mode with `--resume`
-   - Fallback when running inside Claude Code
-
-3. **`packages/cli/src/executor/ClaudePersistentExecutor.ts`** (persistent mode, default)
+2. **`packages/cli/src/executor/ClaudePersistentExecutor.ts`**
    - Maintain long-running Claude process with stream-json I/O
    - Bidirectional JSON streaming via stdin/stdout
    - Faster response times, no process spawn overhead
 
-4. **`packages/cli/src/security/DirectoryGuard.ts`**
+3. **`packages/cli/src/security/DirectoryGuard.ts`**
    - Path normalization and validation
    - Whitelist checking
    - Prevent path traversal attacks
@@ -516,8 +510,7 @@ remote-cli/
    - Path validation, whitelist checking
 
 9. **Implement Claude Executor** ✅
-   - `packages/cli/src/executor/ClaudeExecutor.ts` (spawn mode)
-   - `packages/cli/src/executor/ClaudePersistentExecutor.ts` (persistent mode)
+   - `packages/cli/src/executor/ClaudePersistentExecutor.ts`
    - Integrate Agent SDK, stream output
 
 10. **Implement Message Handler** ✅

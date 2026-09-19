@@ -51,8 +51,6 @@ export interface CodexExecutorConfig {
   autoApprove?: boolean;
   /** Override codex binary command (default: 'codex') */
   command?: string;
-  /** Codex transport. App-server is the default; exec is an emergency fallback. */
-  transport?: 'app-server' | 'exec';
 }
 
 /** OpenCode CLI executor configuration. */
@@ -79,7 +77,7 @@ export interface KimiExecutorConfig {
  * Executor configuration — controls which AI CLI backend is used
  */
 export interface ExecutorConfig {
-  type: 'auto' | 'claude-persistent' | 'claude-spawn' | 'agy' | 'codex' | 'opencode' | 'kimi';
+  type: 'auto' | 'claude-persistent' | 'agy' | 'codex' | 'opencode' | 'kimi';
   agy?: AgyExecutorConfig;
   codex?: CodexExecutorConfig;
   opencode?: OpenCodeExecutorConfig;
@@ -119,7 +117,7 @@ export interface Config {
     stoppedAt?: number;
     pid?: number;
   };
-  /** Executor backend selection. Defaults to 'auto' (Claude persistent or spawn). */
+  /** Executor backend selection. Defaults to 'auto' (Claude persistent). */
   executor?: ExecutorConfig;
   /** Remote machine configurations */
   machines?: Record<string, any>;

@@ -179,16 +179,6 @@ describe('/backend command', () => {
       expect(res.output).toContain('★ (active)');
     });
 
-    it('marks Claude Code as active when executor.type is claude-spawn', async () => {
-      mockInstalled('claude');
-      mockConfig.get.mockReturnValue({ type: 'claude-spawn' });
-
-      await send('/backend');
-
-      const res = sentResponse();
-      expect(res.output).toContain('★ (active)');
-    });
-
     it('marks AGY as active when executor.type is agy', async () => {
       mockInstalled('claude', 'agy');
       mockConfig.get.mockReturnValue({ type: 'agy' });

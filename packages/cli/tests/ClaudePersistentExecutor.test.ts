@@ -274,6 +274,7 @@ describe('ClaudePersistentExecutor', () => {
       expect(lastCall).toBeDefined();
       expect(lastCall[0]).toBe('claude');
       expect(lastCall[1]).not.toContain('--resume');
+      expect(lastCall[2].env).toMatchObject({ CLAUDECODE: '', CLAUDE_CODE: '' });
 
       // Simulate successful process initialization
       freshMockProcess.stdout.emit('data', Buffer.from(JSON.stringify({

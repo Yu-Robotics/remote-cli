@@ -336,7 +336,7 @@ describe('ThreadExecutorPool', () => {
       const defaultThread = manager.getDefaultThread();
       const oldExecutor = pool.getExecutor(defaultThread.id);
 
-      const newConfig: ExecutorConfig = { type: 'claude-spawn' };
+      const newConfig: ExecutorConfig = { type: 'codex' };
       await pool.switchBackend(newConfig);
 
       expect(oldExecutor.destroy).toHaveBeenCalled();

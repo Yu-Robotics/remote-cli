@@ -474,7 +474,7 @@ Each thread executes one command at a time because Claude Code, AGY, Codex, Open
 
 ### Image Input
 
-You can send a standalone image or a rich-text message containing both text and images to the Feishu bot. remote-cli downloads the image resources and forwards the text and images together to the active Claude Persistent, Codex App Server, OpenCode ACP, or Kimi Code ACP backend. AGY and the legacy Codex exec transport currently accept text only and will not process image attachments. Ordinary file attachments are not supported yet.
+You can send a standalone image or a rich-text message containing both text and images to the Feishu bot. remote-cli downloads the image resources and forwards the text and images together to the active Claude Persistent, Codex App Server, OpenCode ACP, or Kimi Code ACP backend. AGY currently accepts text only and will not process image attachments. Ordinary file attachments are not supported yet.
 
 Codex App Server generated images are also forwarded back to Feishu. Codex emits the generated image through its app-server protocol; the CLI sends it to Router, Router uploads it to Feishu, and the image is rendered in the existing Card 2.0 response. This requires both CLI and Router versions with image forwarding support. Upgrading only Router is backward-compatible, but an older CLI will not generate or send image events; upgrading only CLI is also safe, but an older Router will ignore the optional image stream and still show the text response.
 
@@ -489,7 +489,7 @@ Codex App Server generated images are also forwarded back to Feishu. Codex emits
 | `/effort` | Show the current reasoning effort and backend-supported levels |
 | `/effort <auto|level>` | Set or clear (`auto`) the current thread's effort override |
 
-Model listing is backend-specific: Claude Code uses `claude --print /model`, AGY uses `agy models`, Codex app-server uses its authenticated model catalog, and OpenCode and Kimi Code use ACP session configuration options. The Codex `exec` fallback cannot list models. Reasoning effort is currently supported by Codex, AGY, OpenCode, and Kimi Code; Claude Code returns an unsupported message. `auto` removes the per-thread override and restores the selected model's or backend's default effort.
+Model listing is backend-specific: Claude Code uses `claude --print /model`, AGY uses `agy models`, Codex app-server uses its authenticated model catalog, and OpenCode and Kimi Code use ACP session configuration options. Reasoning effort is currently supported by Codex, AGY, OpenCode, and Kimi Code; Claude Code returns an unsupported message. `auto` removes the per-thread override and restores the selected model's or backend's default effort.
 
 ### Remote Machine Management
 
@@ -738,7 +738,7 @@ MIT License - see [LICENSE](LICENSE) file for details.
 }
 ```
 
-- `executor.type`: Global default backend. Options are `auto` (Claude), `claude-persistent`, `claude-spawn`, `agy`, `codex`, `opencode`, `kimi`. Per-thread overrides are managed with `/backend <index> @`.
+- `executor.type`: Global default backend. Options are `auto` (Claude Persistent), `claude-persistent`, `agy`, `codex`, `opencode`, `kimi`. Per-thread overrides are managed with `/backend <index> @`.
 - `executor.agy`: 
     - `model`: Model slug from `agy models` (e.g. `gemini-3.8-flash-low`). Unset = agy default. Invalid slugs are rejected by agy with a clear error.
     - `autoApprove`: Automatically approve tool permissions via `--dangerously-skip-permissions` (default true).
@@ -755,7 +755,8 @@ MIT License - see [LICENSE](LICENSE) file for details.
     - `model`: Model selected for Codex turns. Unset = codex default. Use `/model` in Feishu to query the authenticated account's available models.
     - `autoApprove`: Use `approvalPolicy: never` with full access (default true). When false, app-server approval requests are relayed through the existing mobile input flow.
     - `command`: codex binary to invoke (default `codex`).
-    - `transport`: `app-server` (default) or `exec` (emergency compatibility fallback).
+
+When loading configuration from remote-cli 1.6.30 or earlier, `executor.type: claude-spawn` is automatically migrated to `claude-persistent`, and the removed `executor.codex.transport` field is discarded. Codex always uses app-server.
 
 #### Using AGY CLI (Antigravity)
 
@@ -825,11 +826,8 @@ the persisted Codex thread id. `/model` queries app-server's model catalog,
 and image messages are sent as Codex image inputs.
 Generated Codex images are returned to Feishu when both the CLI and Router support image forwarding.
 
-To temporarily use the legacy one-shot transport for troubleshooting:
-
-```bash
-remote-cli config set executor.codex.transport exec
-```
+Codex app-server is the only supported Codex transport. Legacy `codex exec` configuration is migrated automatically during startup.
+Startup also checks that the installed Codex CLI exposes `codex app-server --help` and prints an upgrade command when the installed Codex CLI is too old.
 
 ### Development
 

@@ -963,9 +963,8 @@ You can also use natural language commands to control Claude Code CLI.`,
    * the available models. Listing source per backend (all verified live):
    * - claude: `claude --print /model` prints current + available aliases
    * - agy: `agy models` prints "slug<TAB>Display Name" lines
-   * - codex app-server: `model/list` returns the authenticated catalog
+   * - codex: app-server `model/list` returns the authenticated catalog
    * - opencode ACP: session config options expose enabled models
-   * - codex exec fallback: listing is unavailable
    */
   private async handleModelList(messageId: string, threadId: string): Promise<void> {
     const executorConfig = (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
@@ -1926,8 +1925,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         return;
       }
       const lines = installed.map((b, i) => {
-        const isClaudeActive = b.id === 'auto' &&
-          (currentType === 'auto' || currentType === 'claude-persistent' || currentType === 'claude-spawn');
+        const isClaudeActive = b.id === 'auto' && backendKeyOf(currentType) === 'claude';
         const isAgyActive = b.id === 'agy' && currentType === 'agy';
         const active = b.id === currentType || isClaudeActive || isAgyActive ? ' ★ (active)' : '';
         return `${i + 1}. ${b.label}${active}`;

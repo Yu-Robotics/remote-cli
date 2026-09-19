@@ -1,41 +1,23 @@
 import { DirectoryGuard } from '../security/DirectoryGuard';
-import { ClaudeExecutor } from './ClaudeExecutor';
 import { ClaudePersistentExecutor } from './ClaudePersistentExecutor';
 import { AgyExecutor } from './AgyExecutor';
-import { CodexExecutor } from './CodexExecutor';
 import { CodexAppServerExecutor } from './CodexAppServerExecutor';
 import { OpenCodeExecutor } from './OpenCodeExecutor';
 import { KimiExecutor } from './KimiExecutor';
 import type { IExecutor } from './IExecutor';
 import type { ExecutorConfig } from '../types/config';
 
-export type { ClaudeExecuteOptions, ClaudeExecuteResult } from './ClaudeExecutor';
 export type { PersistentClaudeOptions, PersistentClaudeResult } from './ClaudePersistentExecutor';
-export { ClaudeExecutor } from './ClaudeExecutor';
+export type {
+  PersistentClaudeOptions as ClaudeExecuteOptions,
+  PersistentClaudeResult as ClaudeExecuteResult,
+} from './ClaudePersistentExecutor';
 export { ClaudePersistentExecutor } from './ClaudePersistentExecutor';
 export { AgyExecutor } from './AgyExecutor';
-export { CodexExecutor } from './CodexExecutor';
 export { CodexAppServerExecutor } from './CodexAppServerExecutor';
 export { OpenCodeExecutor } from './OpenCodeExecutor';
 export { KimiExecutor } from './KimiExecutor';
 export type { ExecutorModelInfo, IExecutor } from './IExecutor';
-
-/**
- * Check if we're running inside a Claude Code session
- */
-function isRunningInsideClaudeCode(): boolean {
-  // Check for CLAUDECODE environment variable
-  if (process.env.CLAUDECODE) {
-    return true;
-  }
-
-  // Check for other indicators
-  if (process.env.CLAUDE_CODE) {
-    return true;
-  }
-
-  return false;
-}
 
 /**
  * Executor type
@@ -46,7 +28,7 @@ export type ExecutorType = 'persistent' | 'spawn' | 'auto';
  * Create an appropriate Claude executor (legacy API — preserved for backward compatibility)
  *
  * @param directoryGuard Directory guard instance
- * @param type Executor type: 'persistent' (long-running process), 'spawn' (one-shot process), or 'auto' (choose based on environment)
+ * @param type Executor type. The legacy 'spawn' value is mapped to persistent mode.
  * @param initialWorkingDirectory Optional initial working directory for persistent executor
  * @returns Executor instance
  */
@@ -54,29 +36,18 @@ export function createClaudeExecutor(
   directoryGuard: DirectoryGuard,
   type: ExecutorType = 'auto',
   initialWorkingDirectory?: string
-): ClaudeExecutor | ClaudePersistentExecutor {
-  if (type === 'auto') {
-    // Auto-detect: use spawn mode if running inside Claude Code to avoid nested session error
-    if (isRunningInsideClaudeCode()) {
-      console.log('[ExecutorFactory] Detected nested Claude Code session, using spawn mode');
-      return new ClaudeExecutor(directoryGuard);
-    }
-    // Otherwise use persistent mode
-    console.log('[ExecutorFactory] Using persistent mode for better performance');
-    return new ClaudePersistentExecutor(directoryGuard, initialWorkingDirectory);
+): ClaudePersistentExecutor {
+  if (type === 'spawn') {
+    console.warn('[ExecutorFactory] Claude spawn mode was removed; using persistent mode.');
   }
-
-  if (type === 'persistent') {
-    return new ClaudePersistentExecutor(directoryGuard, initialWorkingDirectory);
-  }
-
-  return new ClaudeExecutor(directoryGuard);
+  console.log('[ExecutorFactory] Using persistent Claude executor');
+  return new ClaudePersistentExecutor(directoryGuard, initialWorkingDirectory);
 }
 
 /**
  * Create an executor based on the executor config.
- * Supports Claude (persistent / spawn / auto), AGY (Antigravity CLI,
- * stream-json protocol), Codex (app-server by default, with exec fallback),
+ * Supports Claude (persistent), AGY (Antigravity CLI,
+ * stream-json protocol), Codex (app-server),
  * and OpenCode (ACP).
  *
  * @param directoryGuard Directory guard instance
@@ -92,7 +63,8 @@ export function createExecutor(
   model?: string,
   effort?: string
 ): IExecutor {
-  switch (executorConfig.type) {
+  const executorType = executorConfig.type as string;
+  switch (executorType) {
     case 'agy':
       console.log('[ExecutorFactory] Using AGY CLI executor (stream-json)');
       return new AgyExecutor(directoryGuard, {
@@ -106,16 +78,8 @@ export function createExecutor(
       });
 
     case 'codex':
-      if (executorConfig.codex?.transport === 'exec') {
-        console.log('[ExecutorFactory] Using Codex CLI executor (exec fallback)');
-        return new CodexExecutor(directoryGuard, {
-          model: model ?? executorConfig.codex?.model,
-          effort,
-          autoApprove: executorConfig.codex?.autoApprove ?? true,
-          initialWorkingDirectory,
-          codexCommand: executorConfig.codex?.command,
-          threadId,
-        });
+      if ((executorConfig.codex as Record<string, unknown> | undefined)?.transport === 'exec') {
+        console.warn('[ExecutorFactory] Codex exec transport was removed; using app-server.');
       }
       console.log('[ExecutorFactory] Using Codex app-server executor');
       return new CodexAppServerExecutor(directoryGuard, {
@@ -155,15 +119,11 @@ export function createExecutor(
       return new ClaudePersistentExecutor(directoryGuard, initialWorkingDirectory, threadId, model);
 
     case 'claude-spawn':
-      console.log('[ExecutorFactory] Using Claude spawn executor');
-      return new ClaudeExecutor(directoryGuard);
+      console.warn('[ExecutorFactory] Claude spawn mode was removed; using persistent mode.');
+      return new ClaudePersistentExecutor(directoryGuard, initialWorkingDirectory, threadId, model);
 
     case 'auto':
     default:
-      if (isRunningInsideClaudeCode()) {
-        console.log('[ExecutorFactory] Detected nested Claude Code session, using spawn mode');
-        return new ClaudeExecutor(directoryGuard);
-      }
       console.log('[ExecutorFactory] Using Claude persistent executor (auto)');
       return new ClaudePersistentExecutor(directoryGuard, initialWorkingDirectory, threadId, model);
   }

@@ -471,7 +471,7 @@ Backend index 使用 `/backend` 显示的顺序（安装后通常为 Claude Code
 
 ### 图片输入
 
-可以直接向飞书机器人发送单独的图片，也可以发送同时包含文字和图片的富文本消息。remote-cli 会下载图片资源，并将文字与图片一起转发给当前的 Claude Persistent、Codex App Server、OpenCode ACP 或 Kimi Code ACP 后端。AGY 和旧版 Codex exec transport 当前只接受文本，不会处理图片附件。普通文件附件暂不支持。
+可以直接向飞书机器人发送单独的图片，也可以发送同时包含文字和图片的富文本消息。remote-cli 会下载图片资源，并将文字与图片一起转发给当前的 Claude Persistent、Codex App Server、OpenCode ACP 或 Kimi Code ACP 后端。AGY 当前只接受文本，不会处理图片附件。普通文件附件暂不支持。
 
 Codex App Server 生成的图片也会转发回飞书。Codex 通过 app-server 协议返回生成图片，CLI 将图片发送给 Router，Router 上传到飞书，并在原有的 Card 2.0 响应中显示。该功能需要 CLI 和 Router 都升级到支持图片转发的版本。只升级 Router 是兼容的，但旧 CLI 不会生成或发送图片事件；只升级 CLI 也不会破坏兼容性，但旧 Router 会忽略可选的图片流消息，仍然显示文本响应。
 
@@ -486,7 +486,7 @@ Codex App Server 生成的图片也会转发回飞书。Codex 通过 app-server 
 | `/effort` | 显示当前思考等级以及 backend 支持的等级 |
 | `/effort <auto|level>` | 设置思考等级，使用 `auto` 清除线程覆盖值 |
 
-模型列表由各 backend 分别提供：Claude Code 使用 `claude --print /model`，AGY 使用 `agy models`，Codex app-server 使用当前账号可用的模型目录，OpenCode 和 Kimi Code 使用 ACP 会话配置选项。Codex 的 `exec` 回退模式无法列出模型。当前 Codex、AGY、OpenCode 和 Kimi Code 支持 reasoning effort；Claude Code 会返回暂不支持。`auto` 会清除当前线程的覆盖值，恢复当前模型或 backend 的默认思考等级。
+模型列表由各 backend 分别提供：Claude Code 使用 `claude --print /model`，AGY 使用 `agy models`，Codex app-server 使用当前账号可用的模型目录，OpenCode 和 Kimi Code 使用 ACP 会话配置选项。当前 Codex、AGY、OpenCode 和 Kimi Code 支持 reasoning effort；Claude Code 会返回暂不支持。`auto` 会清除当前线程的覆盖值，恢复当前模型或 backend 的默认思考等级。
 
 ### 远程机器管理（Machine）
 
@@ -735,7 +735,7 @@ MIT 许可证 - 详见 [LICENSE](LICENSE) 文件。
 }
 ```
 
-- `executor.type`: 全局默认后端。可选值 `auto` (Claude), `claude-persistent`, `claude-spawn`, `agy`, `codex`, `opencode`, `kimi`。按线程的覆盖设置通过 `/backend <index> @` 管理。
+- `executor.type`: 全局默认后端。可选值 `auto`（Claude Persistent）、`claude-persistent`、`agy`、`codex`、`opencode`、`kimi`。按线程的覆盖设置通过 `/backend <index> @` 管理。
 - `executor.agy`: 
     - `model`: 模型 slug，取自 `agy models` 列表（如 `gemini-3.8-flash-low`）。不填则用 agy 默认模型。无效 slug 会被 agy 拒绝并返回明确错误。
     - `autoApprove`: 是否通过 `--dangerously-skip-permissions` 自动同意工具权限（默认 true）。
@@ -752,7 +752,8 @@ MIT 许可证 - 详见 [LICENSE](LICENSE) 文件。
     - `model`: Codex turn 使用的模型。不填则使用 codex 默认模型。可以在飞书中使用 `/model` 查询当前账号可用的模型。
     - `autoApprove`: 使用 `approvalPolicy: never` 和完全访问权限（默认 true）。设为 false 时，app-server 的审批请求会通过现有移动端输入流程转发。
     - `command`: codex 二进制命令（默认 `codex`）。
-    - `transport`: `app-server`（默认）或 `exec`（紧急兼容回退）。
+
+加载 remote-cli 1.6.30 或更早版本的配置时，`executor.type: claude-spawn` 会自动迁移为 `claude-persistent`，已移除的 `executor.codex.transport` 字段会被丢弃。Codex 始终使用 app-server。
 
 #### 使用 AGY CLI（Antigravity）
 
@@ -820,11 +821,8 @@ Codex 后端为每个活跃的 remote-cli thread 运行一个持久化的
 模型目录，`/compact` 使用原生 thread 压缩，`/abort` 中断当前 turn，图片消息也会
 作为 Codex 图片输入发送。
 
-如需临时使用旧版一次性 transport 排查问题：
-
-```bash
-remote-cli config set executor.codex.transport exec
-```
+Codex app-server 是唯一支持的 Codex transport。启动时会自动迁移旧的 `codex exec` 配置。
+启动时还会通过 `codex app-server --help` 检查已安装 Codex CLI 的能力；如果版本过旧，会显示升级命令。
 
 ### 开发
 
