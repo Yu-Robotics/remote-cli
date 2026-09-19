@@ -962,7 +962,7 @@ describe('MessageHandler', () => {
     it('clears a persisted unavailable Codex model and retries with the default', async () => {
       const unavailableModelError = '{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The \'gpt-5.2-codex\' model is not supported when using Codex with a ChatGPT account."}}';
       ctx.mockConfig.get.mockImplementation((key: string) =>
-        key === 'executor' ? { type: 'codex', codex: { transport: 'exec' } } : undefined
+        key === 'executor' ? { type: 'codex' } : undefined
       );
       ctx.mockThreadManager.getThread.mockReturnValue({
         id: 'default-thread-id',

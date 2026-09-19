@@ -20,7 +20,6 @@ import os from 'os';
 
 vi.mock('../../src/config/ConfigManager');
 vi.mock('../../src/security/DirectoryGuard');
-vi.mock('../../src/executor/ClaudeExecutor');
 vi.mock('../../src/hooks/FeishuNotificationAdapter');
 
 // ---------------------------------------------------------------------------

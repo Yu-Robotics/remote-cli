@@ -1,8 +1,10 @@
-# Codex App Server Migration Plan
+# Codex App Server Migration Record
+
+> **Status: COMPLETE** — app-server became the default transport before 1.6.31. The legacy `codex exec` implementation was removed in 1.6.31 after its compatibility window.
 
 ## Goal
 
-Replace the default Codex `exec` transport with `codex app-server` in one release while preserving the current remote-cli user experience. Keep the existing `exec` implementation as an explicit emergency fallback for at least one release. Claude Code and AGY behavior must remain unchanged.
+Use `codex app-server` as the only Codex transport while preserving the remote-cli user experience. Configurations that still contain `executor.codex.transport` are migrated automatically when loaded.
 
 ## Compatibility Contract
 
@@ -35,8 +37,7 @@ New components:
 
 - `CodexAppServerClient`: stdio JSON-RPC transport, initialization, request correlation, server-request handling, timeouts, and child-process lifecycle.
 - `CodexAppServerExecutor`: `IExecutor` implementation for thread, turn, model, compaction, interruption, attachments, and event mapping.
-- `CodexExecutor`: the current one-shot implementation, retained as an explicit fallback.
-- `createExecutor`: selects `CodexAppServerExecutor` by default and `CodexExecutor` only when `transport: exec` is configured.
+- `createExecutor`: selects `CodexAppServerExecutor` for every Codex thread.
 
 The CLI-router wire format remains unchanged. An optional `IExecutor.listModels()` method is additive and only used when a backend implements it.
 
@@ -44,10 +45,7 @@ The CLI-router wire format remains unchanged. An optional `IExecutor.listModels(
 
 Continue reading and writing `~/.remote-cli/codex-sessions/<remoteThreadId>.json` with the existing `{ id, savedAt }` shape. Existing IDs are passed to `thread/resume`. Resume failures must not overwrite the stored ID or silently start a fresh conversation; the user receives a `/clear` recovery hint.
 
-Before release, verify both directions against a supported Codex CLI version:
-
-1. A thread created by `codex exec` resumes through app-server.
-2. A thread created by app-server resumes through `codex exec resume`.
+Existing thread IDs created by the former exec transport are resumed through app-server. Resume compatibility was verified before the legacy transport was removed.
 
 Session files should be written atomically. Normal service shutdown and backend switching must preserve them.
 
@@ -67,7 +65,7 @@ Session files should be written atomically. Normal service shutdown and backend 
 4. Implement model discovery and switching, native compaction, interruption, and images.
 5. Implement approval and user-input handling.
 6. Validate session interoperability with the retained exec transport.
-7. Make app-server the default Codex transport and expose `executor.codex.transport: exec` for rollback.
+7. Make app-server the default Codex transport, retain exec for one compatibility window, then remove it.
 8. Run all CLI/router tests, coverage, protocol snapshots, and builds.
 9. Update both README files with equivalent structure and content.
 
@@ -79,5 +77,5 @@ Session files should be written atomically. Normal service shutdown and backend 
 - CLI-router protocol snapshots remain unchanged.
 - No active or queued command can remain unresolved after abort, timeout, crash, destroy, or malformed protocol input.
 - Normal shutdown and backend switching preserve session data.
-- The explicit exec fallback can resume an app-server-created thread.
+- Legacy configuration is migrated to app-server without losing the stored thread ID.
 - New and changed code meets the repository coverage requirement.

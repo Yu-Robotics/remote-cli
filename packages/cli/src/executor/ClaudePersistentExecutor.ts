@@ -414,6 +414,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
           FORCE_COLOR: '0',
           // Prevent nested session error
           CLAUDECODE: '',
+          CLAUDE_CODE: '',
         },
       });
 
@@ -1547,7 +1548,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
         {
           cwd: this.currentWorkingDirectory,
           stdio: ['ignore', 'pipe', 'pipe'],
-          env: { ...process.env, FORCE_COLOR: '0', CLAUDECODE: '' },
+          env: { ...process.env, FORCE_COLOR: '0', CLAUDECODE: '', CLAUDE_CODE: '' },
         }
       );
 

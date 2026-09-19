@@ -22,7 +22,7 @@ User's Phone ← Feishu ← Router Server ← WebSocket ← Local CLI ← Result
 1. **CLI Side** (`packages/cli/`):
    - WebSocket Client: Text-based JSON message protocol
    - Security: DirectoryGuard enforces whitelist for file operations
-   - Executor: ClaudeExecutor interfaces with Claude Code
+   - Executor: ClaudePersistentExecutor interfaces with Claude Code
 
 2. **Router Side** (`packages/router/`):
    - ConnectionHub: Manages WebSocket connections to CLI clients
@@ -507,7 +507,7 @@ describe('File Transfer Integration', () => {
 **Files to modify**:
 - `packages/cli/src/handlers/FileTransferHandler.ts` - Add downloadFile()
 - `packages/router/src/handlers/FileReceiver.ts` - NEW FILE
-- `packages/cli/src/executor/ClaudeExecutor.ts` - Detect file generation requests
+- `packages/cli/src/executor/ClaudePersistentExecutor.ts` - Detect file generation requests
 
 **Success criteria**: Can request file via text and receive it in Feishu chat
 

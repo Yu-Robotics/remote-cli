@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { startCommand, checkServerVersion, isNewerVersion } from '../../src/commands/start';
+import { startCommand, checkBackendAvailability, checkServerVersion, isNewerVersion } from '../../src/commands/start';
 import { ConfigManager } from '../../src/config/ConfigManager';
 import { WebSocketClient } from '../../src/client/WebSocketClient';
 import { CLI_VERSION } from '../../src/types';
 import axios from 'axios';
+import { execFile } from 'child_process';
 
 const automaticUpdaterMocks = vi.hoisted(() => ({
   handleRouterVersion: vi.fn(),
@@ -16,6 +17,7 @@ const automaticUpdaterMocks = vi.hoisted(() => ({
 
 vi.mock('../../src/config/ConfigManager');
 vi.mock('../../src/client/WebSocketClient');
+vi.mock('child_process', () => ({ execFile: vi.fn() }));
 vi.mock('../../src/update/AutomaticUpdater', () => ({
   AutomaticUpdater: vi.fn().mockImplementation(() => automaticUpdaterMocks),
 }));
@@ -104,6 +106,9 @@ describe('start command', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     mockReadlineAnswer = 'y';
+    vi.mocked(execFile).mockImplementation(((_command: string, _args: string[], _options: object, callback: Function) => {
+      callback(null, '', '');
+    }) as any);
 
     mockConfig = {
       get: vi.fn(),
@@ -169,6 +174,34 @@ describe('start command', () => {
       expect(result.success).toBe(false);
       expect(result.error).toContain('not initialized');
       expect(mockWsClient.connect).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('backend availability', () => {
+    const spinner = {
+      warn: vi.fn().mockReturnThis(),
+      start: vi.fn().mockReturnThis(),
+    } as any;
+
+    it('checks Codex app-server support after finding the binary', async () => {
+      await checkBackendAvailability('codex', spinner);
+
+      expect(execFile).toHaveBeenNthCalledWith(1, 'codex', ['--version'], { timeout: 5000 }, expect.any(Function));
+      expect(execFile).toHaveBeenNthCalledWith(2, 'codex', ['app-server', '--help'], { timeout: 5000 }, expect.any(Function));
+      expect(spinner.warn).not.toHaveBeenCalled();
+    });
+
+    it('warns when the installed Codex CLI lacks app-server', async () => {
+      const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+      vi.mocked(execFile)
+        .mockImplementationOnce(((_command: string, _args: string[], _options: object, callback: Function) => callback(null, '', '')) as any)
+        .mockImplementationOnce(((_command: string, _args: string[], _options: object, callback: Function) => callback(new Error('unknown command'))) as any);
+
+      await checkBackendAvailability('codex', spinner);
+
+      expect(spinner.warn).toHaveBeenCalledWith('Codex CLI (OpenAI) does not support app-server');
+      expect(console.log).toHaveBeenCalledWith('Update Codex CLI: npm install -g @openai/codex@latest');
+      log.mockRestore();
     });
   });
 
