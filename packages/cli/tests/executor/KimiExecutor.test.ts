@@ -7,8 +7,8 @@ import { KimiExecutor } from '../../src/executor/KimiExecutor';
 import type { AcpEventCallbacks, AcpTransport } from '../../src/executor/acp/AcpClient';
 import type { AcpConfigOption, AcpContentBlock, AcpSessionResult } from '../../src/executor/acp/AcpTypes';
 
+const originalHome = process.env.HOME;
 const originalHomedir = os.homedir();
-vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || originalHomedir);
 
 const configOptions: AcpConfigOption[] = [
   {
@@ -40,7 +40,7 @@ describe('KimiExecutor', () => {
   let executor: KimiExecutor;
 
   beforeEach(async () => {
-    home = await fs.mkdtemp(path.join(os.tmpdir(), 'kimi-executor-test-'));
+    home = await fs.mkdtemp(path.join(originalHomedir, '.kimi-executor-test-'));
     project = path.join(home, 'project');
     await fs.mkdir(project);
     process.env.HOME = home;
@@ -60,7 +60,8 @@ describe('KimiExecutor', () => {
   afterEach(async () => {
     await executor.destroy();
     await fs.rm(home, { recursive: true, force: true });
-    delete process.env.HOME;
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
   });
 
   it('runs Kimi turns over ACP and persists the session pointer', async () => {
@@ -70,6 +71,7 @@ describe('KimiExecutor', () => {
     });
     const result = await executor.execute('hello', {});
     expect(result).toMatchObject({ success: true, output: 'Kimi response' });
+    expect(transport.newSession).toHaveBeenCalledWith(project);
     const stored = JSON.parse(await fs.readFile(path.join(home, '.remote-cli', 'kimi-sessions', 'thread-kimi.json'), 'utf8'));
     expect(stored.id).toBe('session-kimi');
   });

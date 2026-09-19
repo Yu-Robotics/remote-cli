@@ -7,8 +7,8 @@ import { OpenCodeExecutor } from '../../src/executor/OpenCodeExecutor';
 import type { AcpEventCallbacks, AcpTransport } from '../../src/executor/acp/AcpClient';
 import type { AcpConfigOption, AcpContentBlock, AcpSessionResult } from '../../src/executor/acp/AcpTypes';
 
+const originalHome = process.env.HOME;
 const originalHomedir = os.homedir();
-vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || originalHomedir);
 
 const options: AcpConfigOption[] = [
   {
@@ -42,7 +42,7 @@ describe('OpenCodeExecutor', () => {
   let executor: OpenCodeExecutor;
 
   beforeEach(async () => {
-    home = await fs.mkdtemp(path.join(os.tmpdir(), 'opencode-executor-test-'));
+    home = await fs.mkdtemp(path.join(originalHomedir, '.opencode-executor-test-'));
     project = path.join(home, 'project');
     await fs.mkdir(project);
     process.env.HOME = home;
@@ -62,7 +62,8 @@ describe('OpenCodeExecutor', () => {
   afterEach(async () => {
     await executor.destroy();
     await fs.rm(home, { recursive: true, force: true });
-    delete process.env.HOME;
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
   });
 
   it('creates a session, streams text, and persists the session pointer', async () => {
