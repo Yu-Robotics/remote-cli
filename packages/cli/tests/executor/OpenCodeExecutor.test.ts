@@ -3,6 +3,7 @@ import { promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
+import { AcpExecutor } from '../../src/executor/AcpExecutor';
 import { OpenCodeExecutor } from '../../src/executor/OpenCodeExecutor';
 import type { AcpEventCallbacks, AcpTransport } from '../../src/executor/acp/AcpClient';
 import type { AcpConfigOption, AcpContentBlock, AcpSessionResult } from '../../src/executor/acp/AcpTypes';
@@ -64,6 +65,10 @@ describe('OpenCodeExecutor', () => {
     await fs.rm(home, { recursive: true, force: true });
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
+  });
+
+  it('uses the shared ACP executor implementation', () => {
+    expect(executor).toBeInstanceOf(AcpExecutor);
   });
 
   it('creates a session, streams text, and persists the session pointer', async () => {
