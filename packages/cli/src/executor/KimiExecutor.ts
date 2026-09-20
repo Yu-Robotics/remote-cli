@@ -1,5 +1,5 @@
 import { DirectoryGuard } from '../security/DirectoryGuard';
-import { OpenCodeExecutor } from './OpenCodeExecutor';
+import { AcpExecutor } from './AcpExecutor';
 import type { AcpEventCallbacks, AcpTransport } from './acp/AcpClient';
 
 export interface KimiExecutorOptions {
@@ -14,7 +14,7 @@ export interface KimiExecutorOptions {
 }
 
 /** Kimi Code executor backed by the official persistent ACP server. */
-export class KimiExecutor extends OpenCodeExecutor {
+export class KimiExecutor extends AcpExecutor {
   constructor(directoryGuard: DirectoryGuard, options: KimiExecutorOptions = {}) {
     super(directoryGuard, {
       model: options.model,
