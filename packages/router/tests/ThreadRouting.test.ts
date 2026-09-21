@@ -248,14 +248,16 @@ describe('RouterServer: Thread Routing', () => {
           },
         ],
       };
-      return [
-        { tag: 'hr' },
-        {
+      const columns = [...threadColumns, newThreadColumn];
+      const rows = [];
+      for (let index = 0; index < columns.length; index += 3) {
+        rows.push({
           tag: 'column_set',
           flex_mode: 'stretch',
-          columns: [...threadColumns, newThreadColumn],
-        },
-      ];
+          columns: columns.slice(index, index + 3),
+        });
+      }
+      return [{ tag: 'hr' }, ...rows];
     };
 
     it('renders one button per thread plus a "+ New" button', () => {
@@ -266,9 +268,9 @@ describe('RouterServer: Thread Routing', () => {
       ];
 
       const elements = createThreadSwitchElements(threads, 'id-1');
-      const columnSet = elements[1];
-      // 3 thread switch buttons + 1 "+ New" button = 4 columns
-      expect(columnSet.columns).toHaveLength(4);
+      const rows = elements.slice(1);
+      expect(rows.map((row) => row.columns.length)).toEqual([3, 1]);
+      expect(rows.flatMap((row) => row.columns)).toHaveLength(4);
     });
 
     it('active thread button has primary type and is disabled with star prefix', () => {
