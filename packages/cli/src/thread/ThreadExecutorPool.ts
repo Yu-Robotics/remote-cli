@@ -1,6 +1,7 @@
 import { ThreadManager } from './ThreadManager';
 import { ThreadSummary } from './types';
 import type { Thread } from './types';
+import path from 'path';
 import type { IExecutor } from '../executor/IExecutor';
 import type { DirectoryGuard } from '../security/DirectoryGuard';
 import type { BackendKey, ExecutorConfig } from '../types/config';
@@ -139,7 +140,7 @@ export class ThreadExecutorPool {
   // ── Thread summaries ────────────────────────────────────────────────────
 
   /**
-   * Get runtime summaries for all threads (id, name, status, backend).
+   * Get runtime summaries for all threads (id, name, status, backend, workspace).
    */
   getSummaries(): ThreadSummary[] {
     return this.threadManager.listThreads().map(t => ({
@@ -147,6 +148,9 @@ export class ThreadExecutorPool {
       name: t.name,
       status: this.getStatus(t.id),
       backend: this.getBackendKey(t.id),
+      workspaceName: t.workingDirectory
+        ? path.basename(path.normalize(t.workingDirectory)) || path.parse(path.normalize(t.workingDirectory)).root
+        : undefined,
     }));
   }
 

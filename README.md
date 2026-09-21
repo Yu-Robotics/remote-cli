@@ -564,7 +564,7 @@ Create one thread per project, incident, or goal instead of mixing unrelated wor
 /cd ~/workspace/docs
 ```
 
-Replying to a completed Feishu card routes the message back to that card's thread. `/thread list` shows the current state of every thread, while `/status` gives a compact overview of active backends, models, working directories, and queues.
+Replying to a completed Feishu card routes the message back to that card's thread. Thread buttons show the last component of each thread's working directory alongside its backend, making parallel workspaces easier to distinguish. `/thread list` shows the current state of every thread, while `/status` gives a compact overview of active backends, models, working directories, and queues.
 
 ### Combine global and per-thread backends
 
