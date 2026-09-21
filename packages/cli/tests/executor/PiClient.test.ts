@@ -12,6 +12,7 @@ describe('Pi RPC helpers', () => {
   it('builds RPC args with session, model, and thinking', () => {
     expect(buildPiRpcArgs({
       command: '/opt/pi',
+      approveProject: true,
       sessionDir: '/tmp/pi-store',
       sessionId: 'thread-1',
       sessionName: 'remote-cli-thread-1',
@@ -22,6 +23,7 @@ describe('Pi RPC helpers', () => {
       command: '/opt/pi',
       args: [
         '--mode', 'rpc',
+        '--approve',
         '--session-dir', '/tmp/pi-store',
         '--session-id', 'thread-1',
         '--name', 'remote-cli-thread-1',
@@ -34,6 +36,7 @@ describe('Pi RPC helpers', () => {
 
   it('prefers a concrete session file and omits provider when the model already includes one', () => {
     expect(buildPiRpcArgs({
+      approveProject: false,
       sessionFile: '/tmp/session.jsonl',
       sessionDir: '/tmp/pi-store',
       sessionId: 'ignored',
@@ -43,6 +46,7 @@ describe('Pi RPC helpers', () => {
       command: 'pi',
       args: [
         '--mode', 'rpc',
+        '--no-approve',
         '--session', '/tmp/session.jsonl',
         '--model', 'anthropic/claude-sonnet-4',
       ],
