@@ -510,5 +510,24 @@ describe('ThreadExecutorPool', () => {
         'medium'
       );
     });
+
+    it('passes ZCode model and effort overrides to the factory', async () => {
+      const zcodeThread = await manager.createThread('zcode-settings', tmpDir);
+      await manager.updateThread(zcodeThread.id, {
+        models: { zcode: 'GLM-5.3' },
+        efforts: { zcode: 'max' },
+      });
+
+      poolFor('zcode').getExecutor(zcodeThread.id);
+
+      expect(mockExecutorFactory).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ type: 'zcode' }),
+        tmpDir,
+        zcodeThread.id,
+        'GLM-5.3',
+        'max'
+      );
+    });
   });
 });

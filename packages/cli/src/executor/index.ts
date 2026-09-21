@@ -4,6 +4,7 @@ import { AgyExecutor } from './AgyExecutor';
 import { CodexAppServerExecutor } from './CodexAppServerExecutor';
 import { OpenCodeExecutor } from './OpenCodeExecutor';
 import { KimiExecutor } from './KimiExecutor';
+import { ZCodeExecutor } from './ZCodeExecutor';
 import type { IExecutor } from './IExecutor';
 import type { ExecutorConfig } from '../types/config';
 
@@ -17,6 +18,7 @@ export { AgyExecutor } from './AgyExecutor';
 export { CodexAppServerExecutor } from './CodexAppServerExecutor';
 export { OpenCodeExecutor } from './OpenCodeExecutor';
 export { KimiExecutor } from './KimiExecutor';
+export { ZCodeExecutor } from './ZCodeExecutor';
 export type { ExecutorModelInfo, IExecutor } from './IExecutor';
 
 /**
@@ -46,9 +48,8 @@ export function createClaudeExecutor(
 
 /**
  * Create an executor based on the executor config.
- * Supports Claude (persistent), AGY (Antigravity CLI,
- * stream-json protocol), Codex (app-server),
- * and OpenCode (ACP).
+ * Supports Claude (persistent), AGY (stream-json), Codex (app-server),
+ * OpenCode and Kimi Code (ACP), and official ZCode (app-server).
  *
  * @param directoryGuard Directory guard instance
  * @param executorConfig Executor config from remote-cli config (defaults to auto)
@@ -111,6 +112,17 @@ export function createExecutor(
         autoApprove: executorConfig.kimi?.autoApprove ?? true,
         initialWorkingDirectory,
         kimiCommand: executorConfig.kimi?.command,
+        threadId,
+      });
+
+    case 'zcode':
+      console.log('[ExecutorFactory] Using official ZCode app-server executor');
+      return new ZCodeExecutor(directoryGuard, {
+        model: model ?? executorConfig.zcode?.model,
+        effort,
+        autoApprove: executorConfig.zcode?.autoApprove ?? true,
+        initialWorkingDirectory,
+        zcodeCommand: executorConfig.zcode?.command,
         threadId,
       });
 

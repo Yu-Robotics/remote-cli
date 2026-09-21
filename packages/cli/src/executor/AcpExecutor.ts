@@ -302,6 +302,21 @@ export abstract class AcpExecutor implements IExecutor {
   }
 
   async compactWhenFull(onStream?: (chunk: string) => void): Promise<ExecuteResult> {
+    const { client, sessionId } = await this.ensureSession();
+    if (client.compactSession) {
+      try {
+        const result = await client.compactSession(sessionId);
+        const success = !['refusal', 'cancelled', 'error'].includes(result.stopReason);
+        return {
+          success,
+          output: success ? 'Conversation compacted.' : undefined,
+          error: success ? undefined : `${this.backendLabel} stopped with reason: ${result.stopReason}`,
+          sessionAbbr: sessionId.slice(0, 8),
+        };
+      } catch (error) {
+        return { success: false, error: this.friendlyError(error) };
+      }
+    }
     return this.execute('/compact', { onStream });
   }
 
@@ -429,10 +444,11 @@ export abstract class AcpExecutor implements IExecutor {
       ),
       onConfigOptions: (options) => { this.configOptions = options; },
       onPermissionRequest: async (title, options) => {
-        const isQuestion = options.some((option) => /^q\d+_opt_\d+$/.test(option.optionId));
+        const isQuestion = options.some((option) => /^q\d+_/.test(option.optionId));
         if (this.autoApprove && !isQuestion) {
-          const allowed = options.findIndex((option) => option.kind === 'allow_once');
-          return allowed >= 0 ? allowed : 0;
+          let allowed = options.findIndex((option) => option.kind === 'allow_once');
+          if (allowed < 0) allowed = options.findIndex((option) => option.kind.startsWith('allow'));
+          return allowed;
         }
         this.cancelPendingPermission();
         const prompt = isQuestion

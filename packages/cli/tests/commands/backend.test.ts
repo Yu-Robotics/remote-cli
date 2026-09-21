@@ -5,6 +5,14 @@ import { ThreadExecutorPool } from '../../src/thread/ThreadExecutorPool';
 import { ThreadManager } from '../../src/thread/ThreadManager';
 import os from 'os';
 
+const { mockZCodeAvailable } = vi.hoisted(() => ({
+  mockZCodeAvailable: vi.fn(),
+}));
+
+vi.mock('../../src/executor/zcode/ZCodeCommand', () => ({
+  isZCodeAvailable: mockZCodeAvailable,
+}));
+
 // Mock os.homedir() to respect process.env.HOME for isolated tests
 const originalHomedir = os.homedir();
 vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || originalHomedir);
@@ -44,6 +52,7 @@ describe('/backend command', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockZCodeAvailable.mockReturnValue(false);
 
     mockWsClient = {
       send: vi.fn(),
@@ -226,6 +235,18 @@ describe('/backend command', () => {
       expect(kimiLine).toContain('★ (active)');
     });
 
+    it('shows and marks ZCode active when an official installation is available', async () => {
+      mockInstalled('claude');
+      mockZCodeAvailable.mockReturnValue(true);
+      mockConfig.get.mockReturnValue({ type: 'zcode' });
+      mockThreadPool.getBackendKey.mockReturnValue('zcode');
+
+      await send('/backend');
+
+      const zcodeLine = sentResponse().output.split('\n').find((line: string) => line.includes('ZCode'));
+      expect(zcodeLine).toContain('★ (active)');
+    });
+
     it('lists Codex before AGY when all backends are installed', async () => {
       mockInstalled('claude', 'agy', 'codex', 'opencode', 'kimi');
 
@@ -404,6 +425,22 @@ describe('/backend command', () => {
       expect(res.success).toBe(true);
       expect(res.output).toContain('Codex CLI');
       expect(mockConfig.set).toHaveBeenCalledWith('executor', expect.objectContaining({ type: 'codex' }));
+    });
+
+    it('switches to ZCode by name and preserves its sub-config', async () => {
+      mockZCodeAvailable.mockReturnValue(true);
+      mockConfig.get.mockReturnValue({ type: 'auto', zcode: { model: 'GLM-5.3' } });
+
+      await send('/backend zcode');
+
+      const res = sentResponse();
+      expect(res.success).toBe(true);
+      expect(res.output).toContain('ZCode');
+      expect(mockConfig.set).toHaveBeenCalledWith('executor', {
+        type: 'zcode',
+        zcode: { model: 'GLM-5.3' },
+      });
+      expect(mockThreadPool.switchBackend).toHaveBeenCalledWith(expect.objectContaining({ type: 'zcode' }));
     });
 
     it('preserves existing codex sub-config when switching', async () => {

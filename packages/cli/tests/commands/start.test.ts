@@ -10,6 +10,9 @@ const automaticUpdaterMocks = vi.hoisted(() => ({
   handleRouterVersion: vi.fn(),
   handleProtocolMismatch: vi.fn(),
 }));
+const zCodeCommandMocks = vi.hoisted(() => ({
+  isZCodeAvailable: vi.fn(),
+}));
 
 // ---------------------------------------------------------------------------
 // Module-level mocks
@@ -21,6 +24,7 @@ vi.mock('child_process', () => ({ execFile: vi.fn() }));
 vi.mock('../../src/update/AutomaticUpdater', () => ({
   AutomaticUpdater: vi.fn().mockImplementation(() => automaticUpdaterMocks),
 }));
+vi.mock('../../src/executor/zcode/ZCodeCommand', () => zCodeCommandMocks);
 vi.mock('axios');
 vi.mock('../../src/thread/ThreadManager', () => ({
   ThreadManager: {
@@ -105,6 +109,7 @@ describe('start command', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    zCodeCommandMocks.isZCodeAvailable.mockReturnValue(false);
     mockReadlineAnswer = 'y';
     vi.mocked(execFile).mockImplementation(((_command: string, _args: string[], _options: object, callback: Function) => {
       callback(null, '', '');
@@ -202,6 +207,16 @@ describe('start command', () => {
       expect(spinner.warn).toHaveBeenCalledWith('Codex CLI (OpenAI) does not support app-server');
       expect(console.log).toHaveBeenCalledWith('Update Codex CLI: npm install -g @openai/codex@latest');
       log.mockRestore();
+    });
+
+    it('uses official ZCode discovery for the ZCode backend', async () => {
+      zCodeCommandMocks.isZCodeAvailable.mockReturnValue(true);
+
+      await checkBackendAvailability('zcode', spinner, { type: 'zcode', zcode: { command: '/opt/zcode' } });
+
+      expect(zCodeCommandMocks.isZCodeAvailable).toHaveBeenCalledWith('/opt/zcode');
+      expect(execFile).not.toHaveBeenCalled();
+      expect(spinner.warn).not.toHaveBeenCalled();
     });
   });
 
