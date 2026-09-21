@@ -158,6 +158,7 @@ describe('PiExecutor', () => {
     });
 
     expect(result).toMatchObject({ success: true, output: 'done', sessionAbbr: 'sess-pi-' });
+    expect(transport.launch.approveProject).toBe(true);
     expect(chunks).toEqual(['done']);
     expect(transport.request).toHaveBeenCalledWith(expect.objectContaining({
       type: 'prompt',
@@ -403,7 +404,7 @@ describe('PiExecutor', () => {
     expect(transport.request).toHaveBeenCalledWith({ type: 'abort' });
   });
 
-  it('recycles the process on working-directory change and keeps the session pointer', async () => {
+  it('starts a fresh Pi session after a working-directory change', async () => {
     const other = path.join(home, 'other');
     await fs.mkdir(other);
     await executor.execute('inspect', {});
@@ -413,7 +414,14 @@ describe('PiExecutor', () => {
     await executor.setWorkingDirectory(other);
     expect(transport.running).toBe(false);
     expect(executor.getCurrentWorkingDirectory()).toBe(other);
-    expect(executor.getSessionId()).toBe('sess-pi-1');
+    expect(executor.getSessionId()).toBeNull();
+    expect(transport.launch).toMatchObject({
+      cwd: other,
+      sessionId: 'thread-pi',
+    });
+    expect(transport.launch.sessionFile).toBeUndefined();
+    await expect(fs.access(path.join(home, '.remote-cli', 'pi-sessions', 'thread-pi.json')))
+      .rejects.toMatchObject({ code: 'ENOENT' });
 
     await executor.execute('inspect', {});
     expect(transport.starts).toBe(2);
@@ -466,6 +474,21 @@ describe('PiExecutor', () => {
     expect(transport.request).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'prompt' }));
   });
 
+  it('forwards only slash commands advertised by Pi RPC', async () => {
+    await expect(executor.execute('/skill:review', {})).resolves.toMatchObject({ success: true, output: 'done' });
+    expect(transport.request).toHaveBeenCalledWith({ type: 'get_commands' });
+    expect(transport.request).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'prompt',
+      message: '/skill:review',
+    }));
+
+    transport.request.mockClear();
+    const unsupported = await executor.execute('/settings', {});
+    expect(unsupported.success).toBe(false);
+    expect(unsupported.error).toContain('does not expose /settings');
+    expect(transport.request).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'prompt' }));
+  });
+
   it('relays select prompts through the mobile input flow when auto-approval is off', async () => {
     await executor.destroy();
     executor = new PiExecutor(new DirectoryGuard([home]), {
@@ -509,12 +532,52 @@ describe('PiExecutor', () => {
 
     const running = executor.execute('choose', {});
     await vi.waitFor(() => expect(executor.isWaitingInput()).toBe(true));
+    expect(transport.launch.approveProject).toBe(false);
+    expect(executor.sendInput('   ')).toBe(false);
+    expect(executor.isWaitingInput()).toBe(true);
     expect(executor.sendInput('2')).toBe(true);
     await expect(running).resolves.toMatchObject({ success: true, output: 'ok' });
     expect(transport.send).toHaveBeenCalledWith({
       type: 'extension_ui_response',
       id: 'ui-1',
       value: 'Block',
+    });
+  });
+
+  it('relays extension confirmations even when project trust is enabled', async () => {
+    transport.request.mockImplementation(async (command: Record<string, unknown>) => {
+      if (command.type === 'prompt') {
+        transport.emit({
+          type: 'extension_ui_request',
+          id: 'ui-confirm',
+          method: 'confirm',
+          title: 'Clear the session?',
+        });
+        await vi.waitFor(() => expect(transport.send).toHaveBeenCalledWith({
+          type: 'extension_ui_response',
+          id: 'ui-confirm',
+          cancelled: true,
+        }));
+        transport.emit({ type: 'agent_start' });
+        transport.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'kept' } });
+        transport.emit({ type: 'agent_settled' });
+        return { type: 'response', command: 'prompt', success: true };
+      }
+      if (command.type === 'get_state') {
+        return { type: 'response', command: 'get_state', success: true, data: { sessionId: 'sess-pi-1' } };
+      }
+      return { type: 'response', command: String(command.type), success: true };
+    });
+
+    const running = executor.execute('confirm', {});
+    await vi.waitFor(() => expect(executor.isWaitingInput()).toBe(true));
+    expect(executor.sendInput('no')).toBe(true);
+
+    await expect(running).resolves.toMatchObject({ success: true, output: 'kept' });
+    expect(transport.send).toHaveBeenCalledWith({
+      type: 'extension_ui_response',
+      id: 'ui-confirm',
+      cancelled: true,
     });
   });
 });

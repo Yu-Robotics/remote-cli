@@ -201,6 +201,10 @@ export class PiExecutor implements IExecutor {
     if (trimmed === '/skills' || trimmed === '/skill') {
       return this.listSkills();
     }
+    if (trimmed.startsWith('/')) {
+      const validationError = await this.validateSlashCommand(trimmed);
+      if (validationError) return { success: false, error: validationError };
+    }
 
     try {
       await this.ensureClient();
@@ -283,11 +287,17 @@ export class PiExecutor implements IExecutor {
   }
 
   async setWorkingDirectory(targetPath: string): Promise<void> {
-    this.currentWorkingDirectory = this.directoryGuard.resolveWorkingDirectory(
+    const resolved = this.directoryGuard.resolveWorkingDirectory(
       targetPath,
       this.currentWorkingDirectory
     );
-    this.client.updateLaunch?.({ cwd: this.currentWorkingDirectory });
+    if (resolved === this.currentWorkingDirectory) return;
+
+    this.currentWorkingDirectory = resolved;
+    // A Pi session owns the cwd recorded in its session header. Reopening the
+    // previous session file would silently keep tools in the old directory.
+    this.clearPointer();
+    this.client.updateLaunch?.(this.buildLaunch());
     await this.recycleClient();
   }
 
@@ -342,9 +352,9 @@ export class PiExecutor implements IExecutor {
   sendInput(input: string): boolean {
     if (!this.pendingUi) return false;
     const pending = this.pendingUi;
-    this.pendingUi = null;
     const trimmed = input.trim();
     if (!trimmed) return false;
+    this.pendingUi = null;
 
     if (pending.method === 'confirm') {
       if (/^(n|no|cancel|false)$/i.test(trimmed)) {
@@ -537,12 +547,26 @@ export class PiExecutor implements IExecutor {
       const commands = Array.isArray(response.data?.commands) ? response.data.commands : [];
       const skills = commands.filter((command: any) => command?.source === 'skill');
       if (skills.length === 0) {
-        return { success: true, output: '🧩 No Pi skills were discovered.\n\nSkills live under ~/.pi/agent/skills and ./.pi/agent/skills. Invoke them as /skill:name.' };
+        return { success: true, output: '🧩 No Pi skills were discovered.\n\nSkills live under ~/.pi/agent/skills, ~/.agents/skills, .pi/skills, and .agents/skills. Invoke them as /skill:name.' };
       }
       const lines = skills.map((skill: any) => `- /${skill.name}${skill.description ? ` — ${skill.description}` : ''}`);
       return { success: true, output: `🧩 Available Pi skills:\n${lines.join('\n')}\n\nInvoke with /skill:name` };
     } catch (error) {
       return { success: false, error: this.friendlyError(error) };
+    }
+  }
+
+  private async validateSlashCommand(prompt: string): Promise<string | undefined> {
+    try {
+      await this.ensureClient();
+      const response = await this.client.request({ type: 'get_commands' });
+      if (!response.success) return response.error || 'Failed to query Pi commands';
+      const commandName = prompt.slice(1).split(/\s+/, 1)[0];
+      const commands = Array.isArray(response.data?.commands) ? response.data.commands : [];
+      if (commands.some((command: any) => command?.name === commandName)) return undefined;
+      return `Pi RPC does not expose /${commandName}. Only extension commands, prompt templates, and skills returned by /skills can be forwarded.`;
+    } catch (error) {
+      return this.friendlyError(error);
     }
   }
 
@@ -582,6 +606,7 @@ export class PiExecutor implements IExecutor {
     return {
       command: this.piCommand,
       cwd: this.currentWorkingDirectory,
+      approveProject: this.autoApprove,
       sessionDir: this.sessionStoreDir,
       sessionId: this.sessionId ?? this.threadId,
       sessionFile: pointerFile,
@@ -721,20 +746,23 @@ export class PiExecutor implements IExecutor {
     const options = Array.isArray(event.options) ? event.options.map((option: unknown) => String(option)) : [];
     const title = String(event.title || event.message || 'Pi needs input');
 
-    if (this.autoApprove && (method === 'select' || method === 'confirm')) {
-      if (method === 'confirm') {
-        this.client.send({ type: 'extension_ui_response', id, confirmed: true });
-        return;
-      }
-      const allowed = options.find((option) => /allow|yes|continue|approve/i.test(option)) ?? options[0];
-      this.client.send({ type: 'extension_ui_response', id, value: allowed, cancelled: allowed === undefined });
+    // Pi extension dialogs are application-defined. A confirm request may be
+    // destructive (for example, clearing a session), so project trust must not
+    // be treated as permission to accept arbitrary extension UI requests.
+    if (!this.activeTurn) {
+      this.client.send({ type: 'extension_ui_response', id, cancelled: true });
       return;
     }
 
     this.cancelPendingUi(true);
-    const lines = method === 'confirm'
-      ? [`\n${title}`, 'Reply yes or no.\n']
-      : [`\n${title}`, ...options.map((option, index) => `${index + 1}. ${option}`), 'Reply with an option number, option name, skip, or cancel.\n'];
+    let lines: string[];
+    if (method === 'confirm') {
+      lines = [`\n${title}`, 'Reply yes or no.\n'];
+    } else if (method === 'select') {
+      lines = [`\n${title}`, ...options.map((option, index) => `${index + 1}. ${option}`), 'Reply with an option number, option name, skip, or cancel.\n'];
+    } else {
+      lines = [`\n${title}`, 'Reply with a value, or send skip or cancel.\n'];
+    }
     this.activeTurn?.options.onStream?.(lines.join('\n'));
     this.pendingUi = { id, method, title, options };
   }
