@@ -46,4 +46,6 @@ export interface ThreadSummary {
   name: string;
   status: 'idle' | 'running' | 'error';
   backend?: BackendKey;
+  /** Last path component of the thread's current working directory. */
+  workspaceName?: string;
 }

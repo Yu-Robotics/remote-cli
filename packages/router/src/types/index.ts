@@ -139,6 +139,8 @@ export interface ThreadSummary {
   name: string;
   status: 'idle' | 'running' | 'error';
   backend?: 'claude' | 'agy' | 'codex';
+  /** Last path component of the thread's current working directory. */
+  workspaceName?: string;
 }
 
 // Content block types for structured messages

@@ -194,7 +194,7 @@ describe('Wire format snapshots', () => {
         threadId: 'thread-uuid-abc',
         threads: [
           { id: 'thread-uuid-abc', name: 'default', status: 'idle' },
-          { id: 'thread-uuid-def', name: 'thread-2', status: 'idle' },
+          { id: 'thread-uuid-def', name: 'thread-2', status: 'idle', workspaceName: 'remote-cli' },
         ],
       };
 
@@ -204,6 +204,8 @@ describe('Wire format snapshots', () => {
       expect(msg.threads[0]).toHaveProperty('id');
       expect(msg.threads[0]).toHaveProperty('name');
       expect(msg.threads[0]).toHaveProperty('status');
+      expect(msg.threads[0]).not.toHaveProperty('workspaceName');
+      expect(msg.threads[1]).toHaveProperty('workspaceName', 'remote-cli');
       expect(['idle', 'running', 'error']).toContain(msg.threads[0].status);
     });
 
