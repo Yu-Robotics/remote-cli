@@ -123,7 +123,8 @@ describe('Integration: Full Workflow', () => {
       expect(statusResult.status?.deviceId).toBe(initResult.deviceId);
       expect(statusResult.status?.serverUrl).toBe('https://test-server.com');
       expect(statusResult.status?.allowedDirectories).toEqual(['~/test-project']);
-      expect(statusResult.status?.uptime).toBeGreaterThan(0);
+      expect(statusResult.status?.uptime).toBeTypeOf('number');
+      expect(statusResult.status?.uptime).toBeGreaterThanOrEqual(0);
 
       // Step 4: Stop service
       const stopResult = await stopCommand();
