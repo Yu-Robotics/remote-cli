@@ -846,6 +846,44 @@ describe('FeishuLongConnHandler', () => {
       ]);
     });
 
+    it('restores numeric order when an automatic thread name is reused', () => {
+      const elements = (handler as any).createThreadSwitchElements([
+        { id: 'default-id', name: 'default', status: 'idle' },
+        { id: 'thread-3-id', name: 'thread-3', status: 'idle' },
+        { id: 'thread-2-new-id', name: 'thread-2', status: 'idle' },
+      ], 'thread-2-new-id');
+
+      const buttons = elements
+        .filter((element: any) => element.tag === 'column_set')
+        .flatMap((row: any) => row.columns)
+        .map((column: any) => column.elements[0]);
+
+      expect(buttons.map((button: any) => button.text.content)).toEqual([
+        'default',
+        '★ thread-2',
+        'thread-3',
+        '+ New',
+      ]);
+      expect(buttons[1].behaviors[0].value.threadId).toBe('thread-2-new-id');
+    });
+
+    it('sorts automatic names naturally without moving user-named thread positions', () => {
+      const elements = (handler as any).createThreadSwitchElements([
+        { id: 'default-id', name: 'default', status: 'idle' },
+        { id: 'custom-a-id', name: 'feature', status: 'idle' },
+        { id: 'thread-10-id', name: 'thread-10', status: 'idle' },
+        { id: 'custom-b-id', name: 'review', status: 'idle' },
+        { id: 'thread-2-id', name: 'thread-2', status: 'idle' },
+      ]);
+
+      const labels = elements
+        .filter((element: any) => element.tag === 'column_set')
+        .flatMap((row: any) => row.columns)
+        .map((column: any) => column.elements[0].text.content);
+
+      expect(labels).toEqual(['default', 'feature', 'thread-2', 'review', 'thread-10', '+ New']);
+    });
+
     it('should create continuation cards when finalized elements exceed limit', async () => {
       const messageId = 'msg_finalize';
       const openId = 'test_open_id';
