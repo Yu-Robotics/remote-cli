@@ -1474,7 +1474,8 @@ Examples:
    * split across rows so desktop clients do not compress every button into one line.
    */
   private createThreadSwitchElements(threads: ThreadSummary[], activeThreadId?: string): any[] {
-    const threadColumns = threads.map((t) => ({
+    const orderedThreads = this.orderThreadsForDisplay(threads);
+    const threadColumns = orderedThreads.map((t) => ({
       tag: 'column',
       width: 'auto',
       elements: [
@@ -1517,6 +1518,25 @@ Examples:
     }
 
     return [{ tag: 'hr' }, ...rows];
+  }
+
+  /**
+   * Sort automatically named threads by their numeric suffix while preserving
+   * the positions and creation order of default and user-named threads.
+   */
+  private orderThreadsForDisplay(threads: ThreadSummary[]): ThreadSummary[] {
+    const numberedThreads = threads
+      .map(thread => {
+        const match = /^thread-(\d+)$/.exec(thread.name);
+        return match ? { thread, sequence: Number(match[1]) } : undefined;
+      })
+      .filter((entry): entry is { thread: ThreadSummary; sequence: number } => entry !== undefined)
+      .sort((a, b) => a.sequence - b.sequence);
+
+    let numberedIndex = 0;
+    return threads.map(thread => /^thread-\d+$/.test(thread.name)
+      ? numberedThreads[numberedIndex++].thread
+      : thread);
   }
 
   private createQueueConfirmationElements(info: QueueConfirmationInfo): any[] {

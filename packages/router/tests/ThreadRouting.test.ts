@@ -223,7 +223,18 @@ describe('RouterServer: Thread Routing', () => {
   describe('createThreadSwitchElements', () => {
     // Replicate the logic from FeishuLongConnHandler.createThreadSwitchElements
     const createThreadSwitchElements = (threads: ThreadSummary[], activeThreadId?: string): any[] => {
-      const threadColumns = threads.map((t) => ({
+      const numberedThreads = threads
+        .map(thread => {
+          const match = /^thread-(\d+)$/.exec(thread.name);
+          return match ? { thread, sequence: Number(match[1]) } : undefined;
+        })
+        .filter((entry): entry is { thread: ThreadSummary; sequence: number } => entry !== undefined)
+        .sort((a, b) => a.sequence - b.sequence);
+      let numberedIndex = 0;
+      const orderedThreads = threads.map(thread => /^thread-\d+$/.test(thread.name)
+        ? numberedThreads[numberedIndex++].thread
+        : thread);
+      const threadColumns = orderedThreads.map((t) => ({
         tag: 'column',
         width: 'auto',
         elements: [
@@ -377,6 +388,19 @@ describe('RouterServer: Thread Routing', () => {
       expect(firstValue.action).toBe('switch_thread');
       expect(secondValue.action).toBe('switch_thread');
       expect(lastValue.action).toBe('new_thread');
+    });
+
+    it('sorts reused automatic thread names by their numeric suffix', () => {
+      const elements = createThreadSwitchElements([
+        { id: 'default-id', name: 'default', status: 'idle' },
+        { id: 'thread-3-id', name: 'thread-3', status: 'idle' },
+        { id: 'thread-2-new-id', name: 'thread-2', status: 'idle' },
+      ]);
+      const labels = elements.slice(1)
+        .flatMap(row => row.columns)
+        .map(column => column.elements[0].text.content);
+
+      expect(labels).toEqual(['default', 'thread-2', 'thread-3', '+ New']);
     });
   });
 
