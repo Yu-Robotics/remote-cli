@@ -329,6 +329,15 @@ describe('ThreadExecutorPool', () => {
       expect(lazySummary).toBeDefined();
       expect(lazySummary!.status).toBe('idle');
     });
+
+    it('includes the last working-directory component as the workspace name', async () => {
+      const workspace = path.join(tmpDir, 'project-alpha');
+      const thread = await manager.createThread('workspace-summary', workspace);
+
+      const summary = pool.getSummaries().find(item => item.id === thread.id);
+
+      expect(summary?.workspaceName).toBe('project-alpha');
+    });
   });
 
   describe('backend switch', () => {

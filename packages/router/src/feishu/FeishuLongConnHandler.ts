@@ -1481,9 +1481,7 @@ Examples:
       elements: [
         {
           tag: 'button',
-          text: { tag: 'plain_text', content: t.id === activeThreadId
-            ? `★ ${t.name}${t.backend ? ` · ${this.backendLabel(t.backend)}` : ''}`
-            : `${t.name}${t.backend ? ` · ${this.backendLabel(t.backend)}` : ''}` },
+          text: { tag: 'plain_text', content: this.threadButtonLabel(t, t.id === activeThreadId) },
           type: t.id === activeThreadId ? 'primary' : 'default',
           disabled: t.id === activeThreadId,
           behaviors: [{ type: 'callback', value: { action: 'switch_thread', threadId: t.id, threadName: t.name } }],
@@ -1518,6 +1516,14 @@ Examples:
     }
 
     return [{ tag: 'hr' }, ...rows];
+  }
+
+  private threadButtonLabel(thread: ThreadSummary, active: boolean): string {
+    const details = [
+      thread.workspaceName,
+      thread.backend ? this.backendLabel(thread.backend) : undefined,
+    ].filter((detail): detail is string => Boolean(detail));
+    return `${active ? '★ ' : ''}${thread.name}${details.length > 0 ? ` · ${details.join(' · ')}` : ''}`;
   }
 
   /**

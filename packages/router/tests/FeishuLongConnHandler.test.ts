@@ -821,6 +821,29 @@ describe('FeishuLongConnHandler', () => {
       expect(elements[1].columns[0].elements[0].text.content).toBe('★ Thread 1 · Codex');
     });
 
+    it('shows the workspace name in thread switch buttons', () => {
+      const elements = (handler as any).createThreadSwitchElements([
+        {
+          id: 'thread-1',
+          name: 'Thread 1',
+          status: 'idle',
+          backend: 'codex',
+          workspaceName: 'remote-cli',
+        },
+      ], 'thread-1');
+
+      expect(elements[1].columns[0].elements[0].text.content)
+        .toBe('★ Thread 1 · remote-cli · Codex');
+    });
+
+    it('keeps legacy thread labels when the workspace name is absent', () => {
+      const elements = (handler as any).createThreadSwitchElements([
+        { id: 'thread-1', name: 'Thread 1', status: 'idle' },
+      ]);
+
+      expect(elements[1].columns[0].elements[0].text.content).toBe('Thread 1');
+    });
+
     it('splits thread switch buttons into rows of at most three columns', () => {
       const threads = Array.from({ length: 7 }, (_, index) => ({
         id: `thread-${index + 1}`,
