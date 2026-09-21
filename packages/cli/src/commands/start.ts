@@ -13,6 +13,7 @@ import { execFile } from 'child_process';
 import ora, { type Ora } from 'ora';
 import { AutomaticUpdater } from '../update/AutomaticUpdater';
 import { isNewerVersion } from '../utils/version';
+import { isZCodeAvailable } from '../executor/zcode/ZCodeCommand';
 
 export { isNewerVersion } from '../utils/version';
 
@@ -40,22 +41,26 @@ export interface StartCommandResult {
  * Prints a clear warning (non-fatal) if not found so the local operator
  * knows why commands will fail before the first Feishu message arrives.
  */
-export async function checkBackendAvailability(type: string, spinner: Ora): Promise<void> {
+export async function checkBackendAvailability(type: string, spinner: Ora, executorConfig?: ExecutorConfig): Promise<void> {
   const isAgy = type === 'agy';
   const isCodex = type === 'codex';
   const isOpenCode = type === 'opencode';
   const isKimi = type === 'kimi';
+  const isZCode = type === 'zcode';
   const cmd = isAgy ? 'agy' : isCodex ? 'codex' : isOpenCode ? 'opencode' : isKimi ? 'kimi' : 'claude';
   const label = isAgy ? 'AGY CLI (Antigravity)'
     : isCodex ? 'Codex CLI (OpenAI)'
       : isOpenCode ? 'OpenCode CLI'
         : isKimi ? 'Kimi Code CLI'
+        : isZCode ? 'ZCode'
         : 'Claude Code';
 
   const canRun = (args: string[]) => new Promise<boolean>((resolve) => {
     execFile(cmd, args, { timeout: 5000 }, (err) => resolve(!err));
   });
-  const available = await canRun(['--version']);
+  const available = isZCode
+    ? isZCodeAvailable(executorConfig?.zcode?.command)
+    : await canRun(['--version']);
 
   if (!available) {
     spinner.warn(`${label} not found on PATH`);
@@ -220,7 +225,7 @@ export async function startCommand(
     const threadPool = new ThreadExecutorPool(threadManager, directoryGuard, executorConfig);
 
     // Warn if the selected backend CLI is not installed
-    await checkBackendAvailability(executorConfig.type ?? 'auto', spinner);
+    await checkBackendAvailability(executorConfig.type ?? 'auto', spinner, executorConfig);
 
     // Check if any thread has a working directory configured.
     // Each thread restores its own workingDirectory lazily via ThreadExecutorPool.getExecutor(),

@@ -80,7 +80,7 @@ function buildHandler(mockExecutorOverrides: Record<string, any> = {}) {
     getBackendKey: vi.fn().mockImplementation(() => {
       const config = mockConfig.get('executor');
       const type = config?.type as string | undefined;
-      return type === 'agy' ? 'agy' : type === 'codex' ? 'codex' : type === 'opencode' ? 'opencode' : type === 'kimi' ? 'kimi' : 'claude';
+      return type === 'agy' ? 'agy' : type === 'codex' ? 'codex' : type === 'opencode' ? 'opencode' : type === 'kimi' ? 'kimi' : type === 'zcode' ? 'zcode' : 'claude';
     }),
     destroyThread: vi.fn().mockResolvedValue(undefined),
     destroyAll: vi.fn().mockResolvedValue(undefined),
@@ -1629,6 +1629,24 @@ describe('MessageHandler', () => {
           success: false,
           error: expect.stringContaining('Codex'),
         })
+      );
+    });
+
+    it('should map the cross-backend /skills command to ZCode /skill', async () => {
+      useBackend({ type: 'zcode' });
+      ctx.mockExecutor.execute.mockResolvedValue({ success: true, output: 'skill list' });
+
+      await ctx.handler.handleMessage({
+        type: 'command',
+        messageId: 'msg-slash-zcode-skills',
+        content: '/skills',
+        isSlashCommand: true,
+        timestamp: Date.now(),
+      } as any);
+
+      expect(ctx.mockExecutor.execute).toHaveBeenCalledWith('/skill', expect.anything());
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({ success: true, output: 'skill list' })
       );
     });
 

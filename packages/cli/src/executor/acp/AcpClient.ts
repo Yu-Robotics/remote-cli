@@ -46,6 +46,7 @@ export interface AcpTransport {
   loadSession(sessionId: string, cwd: string): Promise<AcpSessionResult>;
   prompt(sessionId: string, blocks: AcpContentBlock[]): Promise<{ stopReason: string }>;
   setConfigOption(sessionId: string, configId: string, value: string): Promise<AcpSessionResult>;
+  compactSession?(sessionId: string): Promise<{ stopReason: string }>;
   deleteSession(sessionId: string): Promise<void>;
   sendCancel(sessionId: string): void;
   destroy(): void;

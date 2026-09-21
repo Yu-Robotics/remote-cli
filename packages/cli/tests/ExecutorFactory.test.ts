@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createClaudeExecutor, createExecutor, ExecutorType } from '../src/executor';
 import { ClaudePersistentExecutor } from '../src/executor/ClaudePersistentExecutor';
 import { CodexAppServerExecutor } from '../src/executor/CodexAppServerExecutor';
+import { ZCodeExecutor } from '../src/executor/ZCodeExecutor';
 import { DirectoryGuard } from '../src/security/DirectoryGuard';
 
 vi.mock('fs', async () => {
@@ -76,6 +77,18 @@ describe('executor/index', () => {
       expect(console.warn).toHaveBeenCalledWith(
         '[ExecutorFactory] Codex exec transport was removed; using app-server.'
       );
+      await executor.destroy();
+    });
+
+    it('creates the official ZCode app-server executor', async () => {
+      const executor = createExecutor(
+        directoryGuard,
+        { type: 'zcode', zcode: { model: 'GLM-5.3', autoApprove: false } },
+        '/home/test/workspace',
+        'thread-zcode'
+      );
+
+      expect(executor).toBeInstanceOf(ZCodeExecutor);
       await executor.destroy();
     });
   });

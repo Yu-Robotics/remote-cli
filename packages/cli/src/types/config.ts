@@ -73,21 +73,32 @@ export interface KimiExecutorConfig {
   command?: string;
 }
 
+/** Official ZCode executor configuration. */
+export interface ZCodeExecutorConfig {
+  /** Model ID exposed by the ZCode app-server. Unset uses the session default. */
+  model?: string;
+  /** Run in yolo mode and automatically approve tool requests. Default: true. */
+  autoApprove?: boolean;
+  /** Override the ZCode CLI or bundled zcode.cjs path. */
+  command?: string;
+}
+
 /**
  * Executor configuration — controls which AI CLI backend is used
  */
 export interface ExecutorConfig {
-  type: 'auto' | 'claude-persistent' | 'agy' | 'codex' | 'opencode' | 'kimi';
+  type: 'auto' | 'claude-persistent' | 'agy' | 'codex' | 'opencode' | 'kimi' | 'zcode';
   agy?: AgyExecutorConfig;
   codex?: CodexExecutorConfig;
   opencode?: OpenCodeExecutorConfig;
   kimi?: KimiExecutorConfig;
+  zcode?: ZCodeExecutorConfig;
 }
 
 /**
  * Canonical backend keys for per-backend thread settings (e.g. Thread.models).
  */
-export type BackendKey = 'claude' | 'agy' | 'codex' | 'opencode' | 'kimi';
+export type BackendKey = 'claude' | 'agy' | 'codex' | 'opencode' | 'kimi' | 'zcode';
 
 /**
  * Map an executor config type to its canonical backend key.
@@ -98,6 +109,7 @@ export function backendKeyOf(type: ExecutorConfig['type'] | string): BackendKey 
   if (type === 'codex') return 'codex';
   if (type === 'opencode') return 'opencode';
   if (type === 'kimi') return 'kimi';
+  if (type === 'zcode') return 'zcode';
   return 'claude';
 }
 
