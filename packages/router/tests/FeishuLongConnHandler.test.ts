@@ -821,6 +821,22 @@ describe('FeishuLongConnHandler', () => {
       expect(elements[1].columns[0].elements[0].text.content).toBe('★ Thread 1 · Codex');
     });
 
+    it.each([
+      ['claude', 'Claude'],
+      ['agy', 'AGY'],
+      ['codex', 'Codex'],
+      ['opencode', 'OpenCode'],
+      ['kimi', 'Kimi'],
+      ['zcode', 'ZCode'],
+      ['pi', 'Pi'],
+    ])('shows the %s backend label in thread switch buttons', (backend, label) => {
+      const elements = (handler as any).createThreadSwitchElements([
+        { id: 'thread-1', name: 'Thread 1', status: 'idle', backend },
+      ], 'thread-1');
+
+      expect(elements[1].columns[0].elements[0].text.content).toBe(`★ Thread 1 · ${label}`);
+    });
+
     it('shows the workspace name in thread switch buttons', () => {
       const elements = (handler as any).createThreadSwitchElements([
         {

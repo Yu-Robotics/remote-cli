@@ -513,7 +513,7 @@ remote-cli 自身不处理的斜杠命令会转发给当前 AI 后端，各后�
 - **Codex CLI (OpenAI)**：不透传——remote-cli 使用 app-server API，而不是交互式 TUI 的斜杠命令层，因此后端专属斜杠命令会被拒绝
 - **OpenCode CLI** 和 **Kimi Code CLI**：斜杠命令通过各自的持久化 ACP 会话发送；`/model`、`/effort`、`/compact` 和 `/abort` 等通用命令仍由 remote-cli 自身处理
 - **ZCode**：斜杠命令使用持久化的官方 app-server 会话；remote-cli 会把 `/skills` 映射为 ZCode 的 `/skill`，并直接处理 `/model`、`/effort`、`/compact` 和 `/abort`
-- **Pi**：斜杠命令和 `/skill:name` 技能通过持久化的 `pi --mode rpc` 会话发送；`/skills` 通过 `get_commands` 列出 Pi 技能。`/model`、`/effort`、`/compact` 和 `/abort` 仍由 remote-cli 自身处理
+- **Pi**：RPC `get_commands` 返回的扩展命令、提示模板和 `/skill:name` 技能通过持久化的 `pi --mode rpc` 会话发送；`/skills` 用于列出 Pi 技能。仅限 TUI 的内建命令会被拒绝。`/model`、`/effort`、`/compact` 和 `/abort` 仍由 remote-cli 自身处理
 
 内建命令（`/help`、`/status`、`/context`、`/skills`、`/clear`、`/compact`、`/model`、`/cd`、`/thread`、`/backend`、`/abort`）可用于所有后端。`/effort` 可按线程设置 Codex、AGY、OpenCode、Kimi Code、ZCode 和 Pi 的思考等级；Claude Code 暂未实现。
 `/context` 可用于所有后端，会显示当前会话、模型、工作目录和队列状态；精确 Token 使用量取决于底层传输是否提供。`/skills` 在 Claude、AGY、OpenCode 和 Kimi Code 上使用原生信息命令，在 ZCode 上映射为原生 `/skill` 命令，在 Pi 上通过 RPC 列出技能；Codex 则扫描 `.agents/skills` 和 `~/.codex/skills` 下的本地 `SKILL.md` 文件。
@@ -757,7 +757,7 @@ MIT 许可证 - 详见 [LICENSE](LICENSE) 文件。
 - `executor.pi`:
     - `model`: `/model` 返回的 `provider/id` 或裸模型 ID。不填则使用 Pi 会话默认模型。
     - `provider`: 当 `model` 是裸 ID 时的可选 provider（例如 `google`）。
-    - `autoApprove`: 自动批准 Pi 扩展 UI 的 select/confirm 提示（默认 true）。input 和 editor 提示始终通过移动端输入流程转发。
+    - `autoApprove`: 向 Pi 传递 `--approve`，让非交互 RPC 进程信任项目本地资源（默认 true）。设为 false 时传递 `--no-approve`。Pi 扩展 UI 对话框始终通过移动端输入流程转发。
     - `command`: Pi 可执行文件（默认 `pi`）。
 - `executor.codex`:
     - `model`: Codex turn 使用的模型。不填则使用 codex 默认模型。可以在飞书中使用 `/model` 查询当前账号可用的模型。
@@ -844,7 +844,7 @@ remote-cli config set executor.type pi
 remote-cli config set executor.pi.model google/gemini-3-flash
 ```
 
-Pi 后端为每个活跃 thread 运行一个持久化的 `pi --mode rpc` 进程。会话文件保存在 `~/.remote-cli/pi-sessions/`，避免占用交互式 `~/.pi` 会话。`/model` 使用 RPC 的 `get_available_models` / `set_model`，`/effort` 映射到 Pi 的 thinking 等级（`off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`），`/compact` 使用原生 RPC 压缩，`/abort` 发送 RPC `abort`，图片消息作为 Pi 图片内容发送。`autoApprove: true` 时会自动接受扩展 UI 的 select/confirm 提示；input 和 editor 提示始终转发。切换到该后端前需先用交互式 `pi` 完成登录。
+当前 Pi 包要求 Node.js 22.19.0 或更高版本。Pi 后端为每个活跃 thread 运行一个持久化的 `pi --mode rpc` 进程。会话文件保存在 `~/.remote-cli/pi-sessions/`，避免占用交互式 `~/.pi` 会话。`/model` 使用 RPC 的 `get_available_models` / `set_model`，`/effort` 映射到 Pi 的 thinking 等级（`off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`），`/compact` 使用原生 RPC 压缩，`/abort` 发送 RPC `abort`，图片消息作为 Pi 图片内容发送。由于 Pi 会把工作目录写入会话头，切换工作目录时会启动新的 Pi 会话。`autoApprove: true` 通过官方 `--approve` 参数信任项目本地资源；扩展 UI 对话框仍会转发给用户。切换到该后端前需先用交互式 `pi` 完成登录。
 
 #### 使用 Codex CLI（OpenAI）
 

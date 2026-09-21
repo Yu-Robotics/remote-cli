@@ -516,7 +516,7 @@ Slash commands that remote-cli does not handle itself are forwarded to the activ
 - **Codex CLI (OpenAI)**: no passthrough — remote-cli uses the app-server API rather than the interactive TUI slash-command layer, so backend-specific slash commands are rejected
 - **OpenCode CLI** and **Kimi Code CLI**: slash commands are sent through their persistent ACP sessions; remote-cli still handles shared commands such as `/model`, `/effort`, `/compact`, and `/abort` itself
 - **ZCode**: slash commands use the persistent official app-server session; remote-cli maps `/skills` to ZCode's `/skill` and handles `/model`, `/effort`, `/compact`, and `/abort` directly
-- **Pi**: slash commands and `/skill:name` skills are sent through the persistent `pi --mode rpc` session; `/skills` lists Pi skills via `get_commands`. remote-cli still handles `/model`, `/effort`, `/compact`, and `/abort` itself
+- **Pi**: extension commands, prompt templates, and `/skill:name` skills advertised by RPC `get_commands` are sent through the persistent `pi --mode rpc` session; `/skills` lists Pi skills. Built-in TUI-only commands are rejected. remote-cli still handles `/model`, `/effort`, `/compact`, and `/abort` itself
 
 The built-in commands (`/help`, `/status`, `/context`, `/skills`, `/clear`, `/compact`, `/model`, `/cd`, `/thread`, `/backend`, `/abort`) work across all backends. `/effort` controls the per-thread reasoning effort for Codex, AGY, OpenCode, Kimi Code, ZCode, and Pi; Claude Code support is not implemented yet.
 `/context` works across all backends and reports the active session, model, working directory, and queue state; exact token usage depends on transport support. `/skills` uses the native informational command for Claude, AGY, OpenCode, and Kimi Code, maps to ZCode's native `/skill` command, lists Pi skills via RPC, and discovers local `SKILL.md` files for Codex under `.agents/skills` and `~/.codex/skills`.
@@ -760,7 +760,7 @@ MIT License - see [LICENSE](LICENSE) file for details.
 - `executor.pi`:
     - `model`: Model as `provider/id` or a bare id from `/model`. Unset = Pi session default.
     - `provider`: Optional provider when `model` is a bare id (for example `google`).
-    - `autoApprove`: Automatically approve Pi extension UI select/confirm prompts (default true). Input and editor prompts are always relayed through the mobile input flow.
+    - `autoApprove`: Pass `--approve` to Pi so non-interactive RPC runs trust project-local resources (default true). When false, remote-cli passes `--no-approve`. Pi extension UI dialogs are always relayed through the mobile input flow.
     - `command`: Pi binary to invoke (default `pi`).
 - `executor.codex`:
     - `model`: Model selected for Codex turns. Unset = codex default. Use `/model` in Feishu to query the authenticated account's available models.
@@ -847,7 +847,7 @@ remote-cli config set executor.type pi
 remote-cli config set executor.pi.model google/gemini-3-flash
 ```
 
-The Pi backend runs one persistent `pi --mode rpc` process per active thread. Session files are stored under `~/.remote-cli/pi-sessions/` so Feishu threads do not reuse interactive `~/.pi` sessions. `/model` uses RPC `get_available_models` / `set_model`, `/effort` maps to Pi thinking levels (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`), `/compact` uses native RPC compaction, `/abort` sends RPC `abort`, and image messages are sent as Pi image content. With `autoApprove: true`, extension UI select/confirm prompts are accepted automatically; input and editor prompts are always relayed. Authenticate with interactive `pi` before selecting the backend.
+The current Pi package requires Node.js 22.19.0 or newer. The Pi backend runs one persistent `pi --mode rpc` process per active thread. Session files are stored under `~/.remote-cli/pi-sessions/` so Feishu threads do not reuse interactive `~/.pi` sessions. `/model` uses RPC `get_available_models` / `set_model`, `/effort` maps to Pi thinking levels (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`), `/compact` uses native RPC compaction, `/abort` sends RPC `abort`, and image messages are sent as Pi image content. Changing the working directory starts a fresh Pi session because Pi stores the working directory in the session header. `autoApprove: true` trusts project-local Pi resources through the official `--approve` flag; extension UI dialogs are still relayed to the user. Authenticate with interactive `pi` before selecting the backend.
 
 #### Using Codex CLI (OpenAI)
 

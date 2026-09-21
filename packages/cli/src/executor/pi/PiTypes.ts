@@ -4,6 +4,8 @@ export type PiThinkingLevel = (typeof PI_THINKING_LEVELS)[number];
 export interface PiLaunchOptions {
   command?: string;
   cwd?: string;
+  /** Whether Pi should trust project-local resources for this non-interactive run. */
+  approveProject?: boolean;
   sessionDir?: string;
   sessionId?: string;
   sessionFile?: string;
@@ -61,6 +63,8 @@ export function formatPiModelRef(model: Pick<PiModel, 'id' | 'provider'>): strin
 export function buildPiRpcArgs(options: PiLaunchOptions): { command: string; args: string[] } {
   const command = options.command ?? 'pi';
   const args = ['--mode', 'rpc'];
+  if (options.approveProject === true) args.push('--approve');
+  else if (options.approveProject === false) args.push('--no-approve');
   if (options.sessionFile) {
     args.push('--session', options.sessionFile);
   } else {

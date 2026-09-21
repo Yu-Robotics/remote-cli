@@ -532,12 +532,13 @@ packages/cli/src/executor/
 
 The CLI supports Pi (`@earendil-works/pi-coding-agent`, binary `pi`) through its persistent `--mode rpc` JSONL transport.
 
-- Install with `npm install -g --ignore-scripts @earendil-works/pi-coding-agent` and authenticate with interactive `pi`.
+- Pi currently requires Node.js 22.19.0 or newer. Install with `npm install -g --ignore-scripts @earendil-works/pi-coding-agent` and authenticate with interactive `pi`.
 - Session pointers are stored per thread under `~/.remote-cli/pi-sessions/`; RPC session files live in `~/.remote-cli/pi-sessions/store/` so Feishu threads do not reuse interactive `~/.pi` sessions.
 - `/model` uses RPC `get_available_models` / `set_model` (`provider/id`). `/effort` maps to Pi thinking levels (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`); `auto` clears the override.
 - `/compact` uses RPC `compact`, `/abort` sends `abort`, and image inputs use Pi image content blocks.
-- `/skills` lists Pi skills via `get_commands`. Other Pi slash commands and `/skill:name` skills are sent as RPC prompts.
-- Extension UI `select`/`confirm` prompts are auto-approved when `executor.pi.autoApprove` is true; input and editor prompts are always relayed through the mobile input flow.
+- `/skills` lists Pi skills via `get_commands`. Extension commands, prompt templates, and `/skill:name` skills advertised by that RPC call are sent as RPC prompts; TUI-only built-ins are rejected.
+- `executor.pi.autoApprove` controls Pi's official project trust flags: true passes `--approve`, while false passes `--no-approve`. Extension UI dialogs are always relayed through the mobile input flow because their meaning is extension-defined.
+- Changing the working directory starts a fresh Pi session because the session header owns its original working directory.
 
 Architecture:
 

@@ -1584,7 +1584,15 @@ Examples:
   }
 
   private backendLabel(backend: NonNullable<ThreadSummary['backend']>): string {
-    return backend === 'claude' ? 'Claude' : backend === 'codex' ? 'Codex' : 'AGY';
+    switch (backend) {
+      case 'claude': return 'Claude';
+      case 'agy': return 'AGY';
+      case 'codex': return 'Codex';
+      case 'opencode': return 'OpenCode';
+      case 'kimi': return 'Kimi';
+      case 'zcode': return 'ZCode';
+      case 'pi': return 'Pi';
+    }
   }
 
   /**

@@ -89,7 +89,7 @@ export interface PiExecutorConfig {
   model?: string;
   /** Optional provider when `model` is a bare id (for example `google`). */
   provider?: string;
-  /** Automatically approve Pi extension UI select/confirm prompts. Default: true. */
+  /** Trust project-local Pi resources for non-interactive RPC runs. Default: true. */
   autoApprove?: boolean;
   /** Override the Pi binary command. Default: pi. */
   command?: string;
