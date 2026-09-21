@@ -80,7 +80,7 @@ function buildHandler(mockExecutorOverrides: Record<string, any> = {}) {
     getBackendKey: vi.fn().mockImplementation(() => {
       const config = mockConfig.get('executor');
       const type = config?.type as string | undefined;
-      return type === 'agy' ? 'agy' : type === 'codex' ? 'codex' : type === 'opencode' ? 'opencode' : type === 'kimi' ? 'kimi' : type === 'zcode' ? 'zcode' : 'claude';
+      return type === 'agy' ? 'agy' : type === 'codex' ? 'codex' : type === 'opencode' ? 'opencode' : type === 'kimi' ? 'kimi' : type === 'zcode' ? 'zcode' : type === 'pi' ? 'pi' : 'claude';
     }),
     destroyThread: vi.fn().mockResolvedValue(undefined),
     destroyAll: vi.fn().mockResolvedValue(undefined),

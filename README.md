@@ -1,10 +1,10 @@
-# Remote CLI - Control Claude Code / AGY CLI / Codex CLI / OpenCode CLI / Kimi Code CLI / ZCode from Mobile via Feishu
+# Remote CLI - Control Claude Code / AGY CLI / Codex CLI / OpenCode CLI / Kimi Code CLI / ZCode / Pi from Mobile via Feishu
 
 [![npm version](https://img.shields.io/npm/v/@yu_robotics/remote-cli.svg)](https://www.npmjs.com/package/@yu_robotics/remote-cli)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js Version](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](https://nodejs.org/)
 
-Remote control your Claude Code, AGY CLI (Antigravity), Codex CLI (OpenAI), OpenCode CLI, Kimi Code CLI, or ZCode from anywhere using your mobile phone through Feishu (Lark) messaging. Continue coding when away from your computer with a mobile-friendly interface.
+Remote control your Claude Code, AGY CLI (Antigravity), Codex CLI (OpenAI), OpenCode CLI, Kimi Code CLI, ZCode, or Pi from anywhere using your mobile phone through Feishu (Lark) messaging. Continue coding when away from your computer with a mobile-friendly interface.
 
 [中文文档](README_ZH.md)
 
@@ -14,7 +14,7 @@ Remote control your Claude Code, AGY CLI (Antigravity), Codex CLI (OpenAI), Open
 - 🔒 **Controlled Access**: Working-directory selection controls and device authentication
 - 📱 **Mobile-Optimized**: Simplified commands and rich text formatting for Feishu
 - 📝 **Readable Code Changes**: Edit operations show collapsible, line-aware diff previews inside the existing progress card
-- 🤖 **Multi-backend Support**: Supports Claude Code (default), AGY CLI (Antigravity), Codex CLI (OpenAI), OpenCode CLI, Kimi Code CLI, and ZCode, switchable at any time
+- 🤖 **Multi-backend Support**: Supports Claude Code (default), AGY CLI (Antigravity), Codex CLI (OpenAI), OpenCode CLI, Kimi Code CLI, ZCode, and Pi, switchable at any time
 - 🧵 **Multi-session Management**: Create multiple independent chat threads to handle different tasks in parallel. Support switching and creating threads via Feishu card buttons.
 - 🖥️ **Remote Machine Management**: Control remote servers or Docker containers via SSH directly through Feishu. Support `/search`, `/view`, `/replace` and other remote file operations.
 - ⚡ **Persistent Process**: Long-running AI process with bidirectional streaming via stdio for faster response times
@@ -52,7 +52,7 @@ Bot:  📂 Switched to ~/projects/.openclaw
       ✅ Config fixed — openclaw can start normally now
 ```
 
-You only need to send one message from your phone. Claude Code, AGY CLI, Codex CLI, OpenCode CLI, Kimi Code CLI, or ZCode handles the investigation, fix, and validation autonomously on your computer.
+You only need to send one message from your phone. Claude Code, AGY CLI, Codex CLI, OpenCode CLI, Kimi Code CLI, ZCode, or Pi handles the investigation, fix, and validation autonomously on your computer.
 
 **This pattern applies broadly**:
 - Emergency recovery when any CLI tool corrupts its own config
@@ -99,12 +99,12 @@ You only need to send one message from your phone. Claude Code, AGY CLI, Codex C
 │  Phone          │         │  │  remote-cli (local)     │ │
 │  Private Chat   │         │  │  - WebSocket Client     │ │
 │  with Bot       │         │  │  - AI CLI Executor      │ │
-└─────────────────┘         │  │    (Claude/AGY/Codex/OpenCode/Kimi/ZCode)   │ │
+└─────────────────┘         │  │    (Claude/AGY/Codex/OpenCode/Kimi/ZCode/Pi)   │ │
         │                   │  │  - Security Directory   │ │
         │                   │  │    Guard                │ │
         │                   │  └──────────┬──────────────┘ │
         │                   │             ▼                 │
-        │                   │  Claude Code / AGY / Codex / OpenCode / Kimi / ZCode  │
+        │                   │  Claude Code / AGY / Codex / OpenCode / Kimi / ZCode / Pi  │
         ▼                   │  (Local AI Backend)           │
 ┌─────────────────┐         └──────────────────────────────┘
 │  Router Server  │
@@ -152,7 +152,7 @@ Before you begin, ensure you have:
 
 - **Node.js** >= 18.0.0
 - **npm** or **yarn** package manager
-- **Claude Code CLI**, **AGY CLI** (Antigravity), **Codex CLI** (OpenAI), **OpenCode CLI**, **Kimi Code CLI**, or **ZCode** — at least one installed and configured
+- **Claude Code CLI**, **AGY CLI** (Antigravity), **Codex CLI** (OpenAI), **OpenCode CLI**, **Kimi Code CLI**, **ZCode**, or **Pi** — at least one installed and configured
 - Access to a **Feishu (Lark) bot** (your team should deploy a router server)
 
 ### Automatic Client Startup
@@ -242,7 +242,7 @@ pm2 start remote-cli-router --name router -- start
 
 ### Docker Compose Deployment (Recommended for Shared Routers)
 
-Docker is recommended for the shared Router server because it keeps Node.js and Router dependencies isolated. The local client should not normally run in Docker: it needs direct access to local project files and the installed Claude Code, AGY, Codex, OpenCode, Kimi Code CLI, or ZCode binaries.
+Docker is recommended for the shared Router server because it keeps Node.js and Router dependencies isolated. The local client should not normally run in Docker: it needs direct access to local project files and the installed Claude Code, AGY, Codex, OpenCode, Kimi Code CLI, ZCode, or Pi binaries.
 
 ```bash
 # From the repository root
@@ -434,7 +434,7 @@ Once connected, use these commands in Feishu:
 | `/clear` | Clear conversation context for this thread |
 | `/compact` | Compress conversation history to save tokens |
 | `/model [name]` | List models for the active backend or set this thread's model |
-| `/effort [auto|level]` | Show or set per-thread reasoning effort for Codex/AGY/OpenCode/Kimi/ZCode |
+| `/effort [auto|level]` | Show or set per-thread reasoning effort for Codex/AGY/OpenCode/Kimi/ZCode/Pi |
 | `/cd <dir>` | Change working directory for this thread |
 | `/backend` | List backends and show the current thread's effective backend |
 | `/bind <码>` | Bind a new device |
@@ -464,17 +464,17 @@ Backend selection supports both global and per-thread modes:
 | `/backend <index> @` | Switch only the current thread to the selected backend |
 | `/backend default @` | Clear the current thread's override and follow the global backend |
 
-The backend index follows the order shown by `/backend` (Claude Code, Codex CLI, OpenCode CLI, Kimi Code CLI, ZCode, then AGY CLI when installed). Per-thread backend choices are persisted in `threads.json`. Different threads can use different backends and execute concurrently. A backend switch is rejected while the affected thread is running; a global switch is rejected while any thread is running. Backend session data is preserved when switching, so returning to a backend can resume its previous session.
+The backend index follows the order shown by `/backend` (Claude Code, Codex CLI, OpenCode CLI, Kimi Code CLI, ZCode, Pi, then AGY CLI when installed). Per-thread backend choices are persisted in `threads.json`. Different threads can use different backends and execute concurrently. A backend switch is rejected while the affected thread is running; a global switch is rejected while any thread is running. Backend session data is preserved when switching, so returning to a backend can resume its previous session.
 
 ### Command Queues
 
-Each thread executes one command at a time because Claude Code, AGY, Codex, OpenCode, Kimi Code, and ZCode sessions are sequential. If a normal message is sent while its thread is busy, remote-cli shows a Feishu confirmation card instead of queueing it immediately. The message is queued only after clicking **Add to queue**; clicking **Cancel** or waiting for the confirmation to expire discards it.
+Each thread executes one command at a time because Claude Code, AGY, Codex, OpenCode, Kimi Code, ZCode, and Pi sessions are sequential. If a normal message is sent while its thread is busy, remote-cli shows a Feishu confirmation card instead of queueing it immediately. The message is queued only after clicking **Add to queue**; clicking **Cancel** or waiting for the confirmation to expire discards it.
 
 `/queue` lists active and pending queues. `/queue clear` removes confirmed and awaiting-confirmation messages for the current thread. `/abort` stops the current task and clears that thread's queue. A message sent while abort cleanup is still running waits for cleanup and then starts normally, so it is not discarded with the old task. Backend or execution-context changes are rejected while a thread is busy, and a successful backend switch clears affected queues. When the active task finishes, the first confirmed queued message starts even if the active task ended with a backend error such as model capacity. If a task that was taken from the queue fails, the remaining queue pauses; use `/queue continue` to resume or `/abort` to discard the remaining messages. Queues are in-memory and are discarded on service restart.
 
 ### Image Input
 
-You can send a standalone image or a rich-text message containing both text and images to the Feishu bot. remote-cli downloads the image resources and forwards the text and images together to the active Claude Persistent, Codex App Server, OpenCode ACP, Kimi Code ACP, or ZCode app-server backend. AGY currently accepts text only and will not process image attachments. Ordinary file attachments are not supported yet.
+You can send a standalone image or a rich-text message containing both text and images to the Feishu bot. remote-cli downloads the image resources and forwards the text and images together to the active Claude Persistent, Codex App Server, OpenCode ACP, Kimi Code ACP, ZCode app-server, or Pi RPC backend. AGY currently accepts text only and will not process image attachments. Ordinary file attachments are not supported yet.
 
 Codex App Server generated images are also forwarded back to Feishu. Codex emits the generated image through its app-server protocol; the CLI sends it to Router, Router uploads it to Feishu, and the image is rendered in the existing Card 2.0 response. This requires both CLI and Router versions with image forwarding support. Upgrading only Router is backward-compatible, but an older CLI will not generate or send image events; upgrading only CLI is also safe, but an older Router will ignore the optional image stream and still show the text response.
 
@@ -489,7 +489,7 @@ Codex App Server generated images are also forwarded back to Feishu. Codex emits
 | `/effort` | Show the current reasoning effort and backend-supported levels |
 | `/effort <auto|level>` | Set or clear (`auto`) the current thread's effort override |
 
-Model listing is backend-specific: Claude Code uses `claude --print /model`, AGY uses `agy models`, Codex app-server uses its authenticated model catalog, OpenCode and Kimi Code use ACP session configuration options, and ZCode uses its official app-server catalog. Reasoning effort is currently supported by Codex, AGY, OpenCode, Kimi Code, and ZCode; Claude Code returns an unsupported message. `auto` removes the per-thread override and restores the selected model's or backend's default effort.
+Model listing is backend-specific: Claude Code uses `claude --print /model`, AGY uses `agy models`, Codex app-server uses its authenticated model catalog, OpenCode and Kimi Code use ACP session configuration options, ZCode uses its official app-server catalog, and Pi uses RPC `get_available_models`. Reasoning effort is currently supported by Codex, AGY, OpenCode, Kimi Code, ZCode, and Pi; Claude Code returns an unsupported message. `auto` removes the per-thread override and restores the selected model's or backend's default effort.
 
 ### Remote Machine Management
 
@@ -516,9 +516,10 @@ Slash commands that remote-cli does not handle itself are forwarded to the activ
 - **Codex CLI (OpenAI)**: no passthrough — remote-cli uses the app-server API rather than the interactive TUI slash-command layer, so backend-specific slash commands are rejected
 - **OpenCode CLI** and **Kimi Code CLI**: slash commands are sent through their persistent ACP sessions; remote-cli still handles shared commands such as `/model`, `/effort`, `/compact`, and `/abort` itself
 - **ZCode**: slash commands use the persistent official app-server session; remote-cli maps `/skills` to ZCode's `/skill` and handles `/model`, `/effort`, `/compact`, and `/abort` directly
+- **Pi**: slash commands and `/skill:name` skills are sent through the persistent `pi --mode rpc` session; `/skills` lists Pi skills via `get_commands`. remote-cli still handles `/model`, `/effort`, `/compact`, and `/abort` itself
 
-The built-in commands (`/help`, `/status`, `/context`, `/skills`, `/clear`, `/compact`, `/model`, `/cd`, `/thread`, `/backend`, `/abort`) work across all backends. `/effort` controls the per-thread reasoning effort for Codex, AGY, OpenCode, Kimi Code, and ZCode; Claude Code support is not implemented yet.
-`/context` works across all backends and reports the active session, model, working directory, and queue state; exact token usage depends on transport support. `/skills` uses the native informational command for Claude, AGY, OpenCode, and Kimi Code, maps to ZCode's native `/skill` command, and discovers local `SKILL.md` files for Codex under `.agents/skills` and `~/.codex/skills`.
+The built-in commands (`/help`, `/status`, `/context`, `/skills`, `/clear`, `/compact`, `/model`, `/cd`, `/thread`, `/backend`, `/abort`) work across all backends. `/effort` controls the per-thread reasoning effort for Codex, AGY, OpenCode, Kimi Code, ZCode, and Pi; Claude Code support is not implemented yet.
+`/context` works across all backends and reports the active session, model, working directory, and queue state; exact token usage depends on transport support. `/skills` uses the native informational command for Claude, AGY, OpenCode, and Kimi Code, maps to ZCode's native `/skill` command, lists Pi skills via RPC, and discovers local `SKILL.md` files for Codex under `.agents/skills` and `~/.codex/skills`.
 
 ### Example Workflow
 
@@ -596,7 +597,7 @@ Keep model and effort choices local to the thread when comparing backends:
 /effort auto
 ```
 
-Codex, AGY, OpenCode, Kimi Code, and ZCode expose native effort controls. Claude Code has native thinking and effort controls in its own CLI, but remote-cli's built-in `/effort` currently reports Claude as unsupported. Model catalogs and accepted effort levels vary by backend, so verify the result with `/status` or `/context` after switching.
+Codex, AGY, OpenCode, Kimi Code, ZCode, and Pi expose native effort controls. Claude Code has native thinking and effort controls in its own CLI, but remote-cli's built-in `/effort` currently reports Claude as unsupported. Model catalogs and accepted effort levels vary by backend, so verify the result with `/status` or `/context` after switching.
 
 ## Expert Usage
 
@@ -608,7 +609,7 @@ The recommended team topology is one Router on an internal server and one client
 Feishu <-> Router (Docker Compose) <-> local CLI clients
 ```
 
-The Router stores Feishu configuration and device bindings in its persistent `./router-data` directory. Clients keep project files, backend sessions, and Claude Code/AGY/Codex/OpenCode/Kimi Code/ZCode installations locally. Do not put the client in Docker unless you deliberately mount every project directory and backend credential it needs.
+The Router stores Feishu configuration and device bindings in its persistent `./router-data` directory. Clients keep project files, backend sessions, and Claude Code/AGY/Codex/OpenCode/Kimi Code/ZCode/Pi installations locally. Do not put the client in Docker unless you deliberately mount every project directory and backend credential it needs.
 
 Update a Compose deployment without losing bindings:
 
@@ -623,7 +624,7 @@ Do not use `docker compose down -v` for routine updates. Back up `./router-data`
 
 ### Preserve or intentionally reset backend sessions
 
-Each thread maintains separate session state for Claude, AGY, Codex, OpenCode, Kimi Code, and ZCode. Switching backends does not delete the previous backend's session, so a thread can return to its earlier conversation. Use `/clear` when you intentionally want a fresh context; use `/backend default @` when a thread should follow future global backend changes.
+Each thread maintains separate session state for Claude, AGY, Codex, OpenCode, Kimi Code, ZCode, and Pi. Switching backends does not delete the previous backend's session, so a thread can return to its earlier conversation. Use `/clear` when you intentionally want a fresh context; use `/backend default @` when a thread should follow future global backend changes.
 
 ### Diagnose a remote task systematically
 
@@ -739,7 +740,7 @@ MIT License - see [LICENSE](LICENSE) file for details.
 }
 ```
 
-- `executor.type`: Global default backend. Options are `auto` (Claude Persistent), `claude-persistent`, `agy`, `codex`, `opencode`, `kimi`, `zcode`. Per-thread overrides are managed with `/backend <index> @`.
+- `executor.type`: Global default backend. Options are `auto` (Claude Persistent), `claude-persistent`, `agy`, `codex`, `opencode`, `kimi`, `zcode`, `pi`. Per-thread overrides are managed with `/backend <index> @`.
 - `executor.agy`: 
     - `model`: Model slug from `agy models` (e.g. `gemini-3.8-flash-low`). Unset = agy default. Invalid slugs are rejected by agy with a clear error.
     - `autoApprove`: Automatically approve tool permissions via `--dangerously-skip-permissions` (default true).
@@ -756,6 +757,11 @@ MIT License - see [LICENSE](LICENSE) file for details.
     - `model`: Model ID exposed by the authenticated ZCode catalog. Unset = ZCode session default.
     - `autoApprove`: Run ZCode sessions in `yolo` mode and automatically approve tool permissions (default true). When false, sessions use `build` mode and permission requests are relayed through the mobile input flow. Questions and plan approvals are always relayed.
     - `command`: Official `zcode` command or bundled `zcode.cjs` path. When unset, remote-cli checks `PATH` and standard ZCode desktop installation paths.
+- `executor.pi`:
+    - `model`: Model as `provider/id` or a bare id from `/model`. Unset = Pi session default.
+    - `provider`: Optional provider when `model` is a bare id (for example `google`).
+    - `autoApprove`: Automatically approve Pi extension UI select/confirm prompts (default true). Input and editor prompts are always relayed through the mobile input flow.
+    - `command`: Pi binary to invoke (default `pi`).
 - `executor.codex`:
     - `model`: Model selected for Codex turns. Unset = codex default. Use `/model` in Feishu to query the authenticated account's available models.
     - `autoApprove`: Use `approvalPolicy: never` with full access (default true). When false, app-server approval requests are relayed through the existing mobile input flow.
@@ -826,6 +832,22 @@ remote-cli config set executor.type zcode
 The ZCode backend talks directly to the official `zcode app-server --stdio` protocol; it does not install or run an ACP bridge. It auto-discovers `zcode` on `PATH` and the bundled `zcode.cjs` in standard desktop installation paths. Session pointers are stored under `~/.remote-cli/zcode-sessions/`. `/model`, `/effort`, `/compact`, `/abort`, image input, native slash commands, tool events, permission prompts, model questions, and plan approvals are supported. The cross-backend `/skills` command is translated to ZCode's native `/skill` command.
 
 When remote-cli launches a bundled `zcode.cjs` directly, use Node.js 22 or newer because the current official CLI uses `node:sqlite`. ZCode Start Plan authentication depends on a desktop-only captcha flow and is unavailable to a headless app-server client; use an authenticated GLM Coding Plan or API-key provider for remote-cli. The app-server protocol is shipped by ZCode but is not yet documented as a public compatibility contract, so a future ZCode upgrade may require an adapter update.
+
+#### Using Pi
+
+```bash
+# 1. Install and authenticate (first launch opens provider login)
+npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+pi  # complete provider login in the interactive TUI
+
+# 2. Switch backend (Can also use /backend in Feishu)
+remote-cli config set executor.type pi
+
+# 3. Optionally pin a provider/model from /model
+remote-cli config set executor.pi.model google/gemini-3-flash
+```
+
+The Pi backend runs one persistent `pi --mode rpc` process per active thread. Session files are stored under `~/.remote-cli/pi-sessions/` so Feishu threads do not reuse interactive `~/.pi` sessions. `/model` uses RPC `get_available_models` / `set_model`, `/effort` maps to Pi thinking levels (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`), `/compact` uses native RPC compaction, `/abort` sends RPC `abort`, and image messages are sent as Pi image content. With `autoApprove: true`, extension UI select/confirm prompts are accepted automatically; input and editor prompts are always relayed. Authenticate with interactive `pi` before selecting the backend.
 
 #### Using Codex CLI (OpenAI)
 

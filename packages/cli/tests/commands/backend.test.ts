@@ -235,6 +235,17 @@ describe('/backend command', () => {
       expect(kimiLine).toContain('★ (active)');
     });
 
+    it('shows and marks Pi active when pi is installed', async () => {
+      mockInstalled('claude', 'pi');
+      mockConfig.get.mockReturnValue({ type: 'pi' });
+      mockThreadPool.getBackendKey.mockReturnValue('pi');
+
+      await send('/backend');
+
+      const piLine = sentResponse().output.split('\n').find((line: string) => line.includes('Pi'));
+      expect(piLine).toContain('★ (active)');
+    });
+
     it('shows and marks ZCode active when an official installation is available', async () => {
       mockInstalled('claude');
       mockZCodeAvailable.mockReturnValue(true);
@@ -425,6 +436,22 @@ describe('/backend command', () => {
       expect(res.success).toBe(true);
       expect(res.output).toContain('Codex CLI');
       expect(mockConfig.set).toHaveBeenCalledWith('executor', expect.objectContaining({ type: 'codex' }));
+    });
+
+    it('switches to Pi by name and preserves its sub-config', async () => {
+      mockInstalled('pi');
+      mockConfig.get.mockReturnValue({ type: 'auto', pi: { model: 'google/gemini-3-flash' } });
+
+      await send('/backend pi');
+
+      const res = sentResponse();
+      expect(res.success).toBe(true);
+      expect(res.output).toContain('Pi');
+      expect(mockConfig.set).toHaveBeenCalledWith('executor', {
+        type: 'pi',
+        pi: { model: 'google/gemini-3-flash' },
+      });
+      expect(mockThreadPool.switchBackend).toHaveBeenCalledWith(expect.objectContaining({ type: 'pi' }));
     });
 
     it('switches to ZCode by name and preserves its sub-config', async () => {

@@ -5,6 +5,7 @@ import { CodexAppServerExecutor } from './CodexAppServerExecutor';
 import { OpenCodeExecutor } from './OpenCodeExecutor';
 import { KimiExecutor } from './KimiExecutor';
 import { ZCodeExecutor } from './ZCodeExecutor';
+import { PiExecutor } from './PiExecutor';
 import type { IExecutor } from './IExecutor';
 import type { ExecutorConfig } from '../types/config';
 
@@ -19,6 +20,7 @@ export { CodexAppServerExecutor } from './CodexAppServerExecutor';
 export { OpenCodeExecutor } from './OpenCodeExecutor';
 export { KimiExecutor } from './KimiExecutor';
 export { ZCodeExecutor } from './ZCodeExecutor';
+export { PiExecutor } from './PiExecutor';
 export type { ExecutorModelInfo, IExecutor } from './IExecutor';
 
 /**
@@ -49,7 +51,7 @@ export function createClaudeExecutor(
 /**
  * Create an executor based on the executor config.
  * Supports Claude (persistent), AGY (stream-json), Codex (app-server),
- * OpenCode and Kimi Code (ACP), and official ZCode (app-server).
+ * OpenCode and Kimi Code (ACP), official ZCode (app-server), and Pi (RPC).
  *
  * @param directoryGuard Directory guard instance
  * @param executorConfig Executor config from remote-cli config (defaults to auto)
@@ -123,6 +125,18 @@ export function createExecutor(
         autoApprove: executorConfig.zcode?.autoApprove ?? true,
         initialWorkingDirectory,
         zcodeCommand: executorConfig.zcode?.command,
+        threadId,
+      });
+
+    case 'pi':
+      console.log('[ExecutorFactory] Using Pi RPC executor');
+      return new PiExecutor(directoryGuard, {
+        model: model ?? executorConfig.pi?.model,
+        effort,
+        provider: executorConfig.pi?.provider,
+        autoApprove: executorConfig.pi?.autoApprove ?? true,
+        initialWorkingDirectory,
+        piCommand: executorConfig.pi?.command,
         threadId,
       });
 

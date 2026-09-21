@@ -24,9 +24,26 @@ import { isZCodeAvailable } from '../executor/zcode/ZCodeCommand';
  * Detected backend information
  */
 interface BackendInfo {
-  id: 'auto' | 'agy' | 'codex' | 'opencode' | 'kimi' | 'zcode';
+  id: 'auto' | 'agy' | 'codex' | 'opencode' | 'kimi' | 'zcode' | 'pi';
   label: string;
   installed: boolean;
+}
+
+const EFFORT_BACKENDS = new Set(['codex', 'agy', 'opencode', 'kimi', 'zcode', 'pi']);
+const NATIVE_MODEL_LIST_BACKENDS = new Set(['codex', 'opencode', 'kimi', 'zcode', 'pi']);
+const SLASH_SESSION_BACKENDS = new Set(['opencode', 'kimi', 'zcode', 'pi']);
+const NATIVE_SKILLS_BACKENDS = new Set(['claude', 'agy', 'opencode', 'kimi', 'zcode', 'pi']);
+
+function backendDisplayName(key: string): string {
+  switch (key) {
+    case 'agy': return 'AGY CLI';
+    case 'codex': return 'Codex CLI';
+    case 'opencode': return 'OpenCode CLI';
+    case 'kimi': return 'Kimi Code CLI';
+    case 'zcode': return 'ZCode';
+    case 'pi': return 'Pi';
+    default: return 'Claude Code';
+  }
 }
 
 interface QueuedCommand {
@@ -523,10 +540,10 @@ Use /compact to reduce conversation context or /clear to start a fresh context.`
 
     if (trimmed === '/skills') {
       const backend = this.threadPool.getBackendKey(threadId);
-      if (backend === 'claude' || backend === 'agy' || backend === 'opencode' || backend === 'kimi' || backend === 'zcode') {
+      if (NATIVE_SKILLS_BACKENDS.has(backend)) {
         await this.executeSlashCommand(messageId, threadId, trimmed, executor);
       } else {
-        const skills = await this.listLocalSkills(executor.getCurrentWorkingDirectory(), backend);
+        const skills = await this.listLocalSkills(executor.getCurrentWorkingDirectory(), 'codex');
         this.sendResponse(messageId, threadId, {
           success: true,
           output: skills.length > 0
@@ -551,7 +568,7 @@ Use /compact to reduce conversation context or /clear to start a fresh context.`
 - /compact - Compress conversation history to reduce context size
 - /cd <directory> - Change working directory for this thread
 - /model [name] - Show models for the active backend, or set this thread's model
-- /effort [auto|level] - Show or set effort for Codex/AGY/OpenCode/Kimi/ZCode (Claude Code is unsupported)
+- /effort [auto|level] - Show or set effort for Codex/AGY/OpenCode/Kimi/ZCode/Pi (Claude Code is unsupported)
 - /backend - List backends and show the current thread's effective backend
 - /backend <index> - Switch all threads and clear per-thread backend overrides
 - /backend <index> @ - Switch only the current thread
@@ -646,7 +663,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     if (trimmed === '/effort' || trimmed.startsWith('/effort ')) {
       const executorConfig = (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
       const key = this.threadPool.getBackendKey(threadId);
-      if (key !== 'codex' && key !== 'agy' && key !== 'opencode' && key !== 'kimi' && key !== 'zcode') {
+      if (!EFFORT_BACKENDS.has(key)) {
         this.sendResponse(messageId, threadId, {
           success: false,
           error: '/effort is not supported yet for Claude Code.',
@@ -674,7 +691,9 @@ You can also use natural language commands to control Claude Code CLI.`,
             ? thread?.models?.opencode ?? executorConfig.opencode?.model
             : key === 'kimi'
               ? thread?.models?.kimi ?? executorConfig.kimi?.model
-              : thread?.models?.zcode ?? executorConfig.zcode?.model;
+              : key === 'pi'
+                ? thread?.models?.pi ?? executorConfig.pi?.model
+                : thread?.models?.zcode ?? executorConfig.zcode?.model;
         const lines = [`Current reasoning effort: ${thread?.efforts?.[key] ?? 'auto'}`];
         if ('listModels' in executor && typeof executor.listModels === 'function') {
           try {
@@ -688,7 +707,7 @@ You can also use natural language commands to control Claude Code CLI.`,
               lines.push(`Supported levels: ${activeModel.supportedReasoningEfforts?.join(', ') || 'unavailable'}`);
             }
           } catch (error) {
-            const label = key === 'opencode' ? 'OpenCode' : key === 'kimi' ? 'Kimi Code' : key === 'zcode' ? 'ZCode' : 'Codex';
+            const label = backendDisplayName(key);
             lines.push(`Could not fetch ${label} effort metadata: ${error instanceof Error ? error.message : String(error)}`);
           }
         }
@@ -700,7 +719,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       if (!('setEffort' in executor && typeof executor.setEffort === 'function')) {
         this.sendResponse(messageId, threadId, {
           success: false,
-          error: `/effort is not supported by this ${key === 'agy' ? 'AGY' : key === 'opencode' ? 'OpenCode' : key === 'kimi' ? 'Kimi Code' : key === 'zcode' ? 'ZCode' : 'Codex'} executor version.`,
+          error: `/effort is not supported by this ${backendDisplayName(key)} executor version.`,
         });
         return true;
       }
@@ -969,6 +988,7 @@ You can also use natural language commands to control Claude Code CLI.`,
    * - codex: app-server `model/list` returns the authenticated catalog
    * - opencode/kimi ACP: session config options expose enabled models
    * - zcode: official app-server session settings expose enabled models
+   * - pi: RPC `get_available_models` returns the configured Pi catalog
    */
   private async handleModelList(messageId: string, threadId: string): Promise<void> {
     const executorConfig = (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
@@ -976,18 +996,13 @@ You can also use natural language commands to control Claude Code CLI.`,
     const thread = this.threadManager.getThread(threadId);
     const current = thread?.models?.[key] ?? (key === 'claude' ? thread?.model : undefined);
 
-    const backendLabel = key === 'claude' ? 'Claude Code'
-      : key === 'agy' ? 'AGY CLI'
-        : key === 'opencode' ? 'OpenCode CLI'
-          : key === 'kimi' ? 'Kimi Code CLI'
-            : key === 'zcode' ? 'ZCode'
-              : 'Codex CLI';
+    const backendLabel = backendDisplayName(key);
     const lines: string[] = [
       `🎯 Backend: ${backendLabel}`,
       `Current model: ${current ?? 'backend default'}`,
     ];
 
-    if (key === 'codex' || key === 'opencode' || key === 'kimi' || key === 'zcode') {
+    if (NATIVE_MODEL_LIST_BACKENDS.has(key)) {
       const executor = this.threadPool.getExecutor(threadId);
       if ('listModels' in executor && typeof executor.listModels === 'function') {
         try {
@@ -1487,7 +1502,7 @@ You can also use natural language commands to control Claude Code CLI.`,
   /**
    * Which backend slash commands should be forwarded to for a thread.
    */
-  private resolveSlashBackend(threadId: string): 'claude' | 'agy' | 'codex' | 'opencode' | 'kimi' | 'zcode' {
+  private resolveSlashBackend(threadId: string): 'claude' | 'agy' | 'codex' | 'opencode' | 'kimi' | 'zcode' | 'pi' {
     return this.threadPool.getBackendKey(threadId);
   }
 
@@ -1501,8 +1516,9 @@ You can also use natural language commands to control Claude Code CLI.`,
    *   plain text and the model only pretends to compact (verified live).
    * - Codex: no interactive-TUI slash passthrough. Remote CLI built-ins are
    *   implemented through app-server methods instead.
-   * - OpenCode/Kimi/ZCode: send native commands through the persistent
+   * - OpenCode/Kimi/ZCode/Pi: send native commands through the persistent
    *   backend session; ZCode maps the shared /skills name to /skill.
+   *   Pi lists skills via RPC `get_commands` when the command is /skills.
    */
   private async executeSlashCommand(
     messageId: string,
@@ -1512,7 +1528,7 @@ You can also use natural language commands to control Claude Code CLI.`,
   ): Promise<void> {
     const backend = this.resolveSlashBackend(threadId);
 
-    if (backend === 'opencode' || backend === 'kimi' || backend === 'zcode') {
+    if (SLASH_SESSION_BACKENDS.has(backend)) {
       // ZCode names its native skill-list command /skill, while remote-cli
       // exposes the cross-backend command as /skills.
       const backendCommand = backend === 'zcode' && command.trim() === '/skills' ? '/skill' : command;
@@ -1525,7 +1541,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       });
       this.sendResponse(messageId, threadId, result.success
         ? { success: true, output: result.output || '✅ Command executed successfully' }
-        : { success: false, error: result.error || `${backend === 'kimi' ? 'Kimi Code' : backend === 'zcode' ? 'ZCode' : 'OpenCode'} command failed` });
+        : { success: false, error: result.error || `${backendDisplayName(backend)} command failed` });
       return;
     }
 
@@ -1897,11 +1913,12 @@ You can also use natural language commands to control Claude Code CLI.`,
 
   private async detectBackends(): Promise<BackendInfo[]> {
     const executorConfig = (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
-    const [claudeInstalled, codexInstalled, openCodeInstalled, kimiInstalled, agyInstalled] = await Promise.all([
+    const [claudeInstalled, codexInstalled, openCodeInstalled, kimiInstalled, piInstalled, agyInstalled] = await Promise.all([
       this.checkCommand('claude', ['--version']),
       this.checkCommand('codex', ['--version']),
       this.checkCommand('opencode', ['--version']),
       this.checkCommand('kimi', ['--version']),
+      this.checkCommand(executorConfig.pi?.command ?? 'pi', ['--version']),
       this.checkCommand('agy', ['--version']),
     ]);
     return [
@@ -1910,6 +1927,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       { id: 'opencode', label: 'OpenCode CLI', installed: openCodeInstalled },
       { id: 'kimi', label: 'Kimi Code CLI', installed: kimiInstalled },
       { id: 'zcode', label: 'ZCode', installed: isZCodeAvailable(executorConfig.zcode?.command) },
+      { id: 'pi', label: 'Pi', installed: piInstalled },
       { id: 'agy',  label: 'AGY CLI (Antigravity)', installed: agyInstalled },
     ];
   }

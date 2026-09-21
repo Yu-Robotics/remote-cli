@@ -243,7 +243,7 @@ packages/cli/src/
   commands/      # CLI command implementations (init, start, stop, status, config)
   client/        # WebSocket client and message handling
   config/        # Configuration management
-  executor/      # AI CLI integration (ClaudePersistentExecutor, AgyExecutor, CodexAppServerExecutor, IExecutor)
+  executor/      # AI CLI integration (ClaudePersistentExecutor, AgyExecutor, CodexAppServerExecutor, PiExecutor, IExecutor)
   hooks/         # Claude Code hooks and Feishu notification adapter
   security/      # Directory guard and legacy Claude hook cleanup
   types/         # TypeScript type definitions
@@ -397,7 +397,7 @@ AGY CLI is auto-detected if already installed on the local machine (`agy --versi
 
 | Field | Values | Default | Description |
 |-------|--------|---------|-------------|
-| `executor.type` | `auto`, `claude-persistent`, `agy` | `auto` | Which AI CLI backend to use (managed via `/backend` command) |
+| `executor.type` | `auto`, `claude-persistent`, `agy`, `codex`, `opencode`, `kimi`, `zcode`, `pi` | `auto` | Which AI CLI backend to use (managed via `/backend` command) |
 | `executor.agy.model` | model slug from `agy models` (e.g. `gemini-3.8-flash-low`) | *(unset)* | Model to use. Must be a slug from `agy models`; invalid slugs are rejected by agy with a clear error. Unset = agy default. |
 | `executor.agy.autoApprove` | `true`/`false` | `true` | Auto-approve tool permissions via `--dangerously-skip-permissions` |
 | `executor.agy.command` | binary command | `agy` | Override agy binary |
@@ -465,7 +465,7 @@ Codex CLI is auto-detected if already installed on the local machine (`codex --v
 
 | Field | Values | Default | Description |
 |-------|--------|---------|-------------|
-| `executor.type` | `auto`, `claude-persistent`, `agy`, `codex`, `opencode`, `kimi` | `auto` | Which AI CLI backend to use (managed via `/backend` command) |
+| `executor.type` | `auto`, `claude-persistent`, `agy`, `codex`, `opencode`, `kimi`, `zcode`, `pi` | `auto` | Which AI CLI backend to use (managed via `/backend` command) |
 | `executor.codex.model` | model name (e.g. `gpt-5.2-codex`) | *(unset)* | Model passed as `-m`. Unset = codex default. |
 | `executor.codex.autoApprove` | `true`/`false` | `true` | Bypass approvals and the sandbox via `--dangerously-bypass-approvals-and-sandbox` |
 | `executor.codex.command` | binary command | `codex` | Override codex binary |
@@ -528,9 +528,29 @@ packages/cli/src/executor/
   acp/AcpClient.ts          # ACP process and JSON-RPC transport
 ```
 
+## Pi Agent Support
+
+The CLI supports Pi (`@earendil-works/pi-coding-agent`, binary `pi`) through its persistent `--mode rpc` JSONL transport.
+
+- Install with `npm install -g --ignore-scripts @earendil-works/pi-coding-agent` and authenticate with interactive `pi`.
+- Session pointers are stored per thread under `~/.remote-cli/pi-sessions/`; RPC session files live in `~/.remote-cli/pi-sessions/store/` so Feishu threads do not reuse interactive `~/.pi` sessions.
+- `/model` uses RPC `get_available_models` / `set_model` (`provider/id`). `/effort` maps to Pi thinking levels (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`); `auto` clears the override.
+- `/compact` uses RPC `compact`, `/abort` sends `abort`, and image inputs use Pi image content blocks.
+- `/skills` lists Pi skills via `get_commands`. Other Pi slash commands and `/skill:name` skills are sent as RPC prompts.
+- Extension UI `select`/`confirm` prompts are auto-approved when `executor.pi.autoApprove` is true; input and editor prompts are always relayed through the mobile input flow.
+
+Architecture:
+
+```
+packages/cli/src/executor/
+  PiExecutor.ts             # IExecutor implementation and session persistence
+  pi/PiClient.ts            # pi --mode rpc JSONL transport
+  pi/PiTypes.ts             # RPC helpers and launch args
+```
+
 ## Backend Switching and Session Persistence
 
-Each backend keeps its own per-thread session pointer (claude session file, `~/.remote-cli/agy-sessions/<threadId>.json`, `~/.remote-cli/codex-sessions/<threadId>.json`, `~/.remote-cli/opencode-sessions/<threadId>.json`, `~/.remote-cli/kimi-sessions/<threadId>.json`). `ThreadExecutorPool.destroyThread(threadId, { deleteData })` controls whether that pointer is wiped:
+Each backend keeps its own per-thread session pointer (claude session file, `~/.remote-cli/agy-sessions/<threadId>.json`, `~/.remote-cli/codex-sessions/<threadId>.json`, `~/.remote-cli/opencode-sessions/<threadId>.json`, `~/.remote-cli/kimi-sessions/<threadId>.json`, `~/.remote-cli/zcode-sessions/<threadId>.json`, `~/.remote-cli/pi-sessions/<threadId>.json`). `ThreadExecutorPool.destroyThread(threadId, { deleteData })` controls whether that pointer is wiped:
 
 - `/thread delete` → `deleteData: true` (default) — session data deleted.
 - `/backend` switch (`switchBackend` → `destroyAll({ deleteData: false })`) — executor processes are torn down but session files are PRESERVED, so switching back to a backend resumes each thread's previous conversation on it.
