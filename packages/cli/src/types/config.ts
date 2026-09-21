@@ -83,22 +83,35 @@ export interface ZCodeExecutorConfig {
   command?: string;
 }
 
+/** Pi coding agent executor configuration. */
+export interface PiExecutorConfig {
+  /** Model as `provider/id` or a bare model id. Unset uses the Pi session default. */
+  model?: string;
+  /** Optional provider when `model` is a bare id (for example `google`). */
+  provider?: string;
+  /** Automatically approve Pi extension UI select/confirm prompts. Default: true. */
+  autoApprove?: boolean;
+  /** Override the Pi binary command. Default: pi. */
+  command?: string;
+}
+
 /**
  * Executor configuration — controls which AI CLI backend is used
  */
 export interface ExecutorConfig {
-  type: 'auto' | 'claude-persistent' | 'agy' | 'codex' | 'opencode' | 'kimi' | 'zcode';
+  type: 'auto' | 'claude-persistent' | 'agy' | 'codex' | 'opencode' | 'kimi' | 'zcode' | 'pi';
   agy?: AgyExecutorConfig;
   codex?: CodexExecutorConfig;
   opencode?: OpenCodeExecutorConfig;
   kimi?: KimiExecutorConfig;
   zcode?: ZCodeExecutorConfig;
+  pi?: PiExecutorConfig;
 }
 
 /**
  * Canonical backend keys for per-backend thread settings (e.g. Thread.models).
  */
-export type BackendKey = 'claude' | 'agy' | 'codex' | 'opencode' | 'kimi' | 'zcode';
+export type BackendKey = 'claude' | 'agy' | 'codex' | 'opencode' | 'kimi' | 'zcode' | 'pi';
 
 /**
  * Map an executor config type to its canonical backend key.
@@ -110,6 +123,7 @@ export function backendKeyOf(type: ExecutorConfig['type'] | string): BackendKey 
   if (type === 'opencode') return 'opencode';
   if (type === 'kimi') return 'kimi';
   if (type === 'zcode') return 'zcode';
+  if (type === 'pi') return 'pi';
   return 'claude';
 }
 

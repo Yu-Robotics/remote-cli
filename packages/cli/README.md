@@ -1,6 +1,6 @@
 # @yu_robotics/remote-cli
 
-Remote control Claude Code, AGY CLI, Codex CLI, OpenCode CLI, or Kimi Code CLI from anywhere using your mobile phone through Feishu (Lark) messaging.
+Remote control Claude Code, AGY CLI, Codex CLI, OpenCode CLI, Kimi Code CLI, ZCode, or Pi from anywhere using your mobile phone through Feishu (Lark) messaging.
 
 ## Features
 
@@ -8,8 +8,8 @@ Remote control Claude Code, AGY CLI, Codex CLI, OpenCode CLI, or Kimi Code CLI f
 - **Secure**: Directory whitelisting, command filtering, and device authentication
 - **Mobile-Optimized**: Simplified commands and rich text formatting for Feishu
 - **Readable Code Changes**: Edit operations show collapsible, line-aware diff previews inside the existing progress card
-- **Multi-Backend Support**: Supports Claude Code, AGY CLI (Antigravity), Codex CLI (OpenAI), OpenCode CLI, and Kimi Code CLI
-- **Image Input and Output**: Forward standalone images and mixed text-image Feishu posts to Claude Persistent, Codex App Server, OpenCode ACP, and Kimi Code ACP backends, and forward Codex App Server generated images back through Router
+- **Multi-Backend Support**: Supports Claude Code, AGY CLI (Antigravity), Codex CLI (OpenAI), OpenCode CLI, Kimi Code CLI, ZCode, and Pi
+- **Image Input and Output**: Forward standalone images and mixed text-image Feishu posts to Claude Persistent, Codex App Server, OpenCode ACP, Kimi Code ACP, ZCode, and Pi backends, and forward Codex App Server generated images back through Router
 - **Multi-session (Threads)**: Create independent chat threads to parallelize tasks
 - **Remote Machine Management**: Control remote servers or Docker via SSH
 - **Persistent Process**: Long-running AI process with bidirectional streaming
@@ -18,7 +18,7 @@ Remote control Claude Code, AGY CLI, Codex CLI, OpenCode CLI, or Kimi Code CLI f
 ## Prerequisites
 
 - **Node.js** >= 18.0.0
-- **Claude Code CLI**, **AGY CLI**, **Codex CLI**, **OpenCode CLI**, or **Kimi Code CLI** installed and configured
+- **Claude Code CLI**, **AGY CLI**, **Codex CLI**, **OpenCode CLI**, **Kimi Code CLI**, **ZCode**, or **Pi** installed and configured
 - Access to a Feishu (Lark) bot connected to a [remote-cli-router](https://www.npmjs.com/package/@yu_robotics/remote-cli-router) server
 
 The client is normally installed and run directly on the developer's machine rather than in Docker, so it can access local project directories and the installed AI CLI binaries. Docker is recommended for the shared Router server instead.
@@ -133,7 +133,7 @@ When a thread is busy, ordinary messages require confirmation before they enter 
 
 ## Expert Usage
 
-For a shared deployment, run the Router with Docker Compose on an internal server and run one CLI client on each developer machine. Keep project directories and Claude Code, AGY, Codex, OpenCode, or Kimi Code credentials on the client machine; the Router persists its configuration and bindings in `./router-data`. On Linux, create that directory as the deployment user and set `ROUTER_UID` and `ROUTER_GID` in `.env` to `id -u` and `id -g` so the container can write to the bind mount.
+For a shared deployment, run the Router with Docker Compose on an internal server and run one CLI client on each developer machine. Keep project directories and Claude Code, AGY, Codex, OpenCode, Kimi Code, ZCode, or Pi credentials on the client machine; the Router persists its configuration and bindings in `./router-data`. On Linux, create that directory as the deployment user and set `ROUTER_UID` and `ROUTER_GID` in `.env` to `id -u` and `id -g` so the container can write to the bind mount.
 
 To update a Router deployment without losing bindings:
 

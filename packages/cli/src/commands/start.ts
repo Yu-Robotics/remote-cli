@@ -47,12 +47,19 @@ export async function checkBackendAvailability(type: string, spinner: Ora, execu
   const isOpenCode = type === 'opencode';
   const isKimi = type === 'kimi';
   const isZCode = type === 'zcode';
-  const cmd = isAgy ? 'agy' : isCodex ? 'codex' : isOpenCode ? 'opencode' : isKimi ? 'kimi' : 'claude';
+  const isPi = type === 'pi';
+  const cmd = isAgy ? (executorConfig?.agy?.command ?? 'agy')
+    : isCodex ? (executorConfig?.codex?.command ?? 'codex')
+      : isOpenCode ? (executorConfig?.opencode?.command ?? 'opencode')
+        : isKimi ? (executorConfig?.kimi?.command ?? 'kimi')
+          : isPi ? (executorConfig?.pi?.command ?? 'pi')
+            : 'claude';
   const label = isAgy ? 'AGY CLI (Antigravity)'
     : isCodex ? 'Codex CLI (OpenAI)'
       : isOpenCode ? 'OpenCode CLI'
         : isKimi ? 'Kimi Code CLI'
         : isZCode ? 'ZCode'
+        : isPi ? 'Pi'
         : 'Claude Code';
 
   const canRun = (args: string[]) => new Promise<boolean>((resolve) => {
