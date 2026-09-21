@@ -36,16 +36,18 @@ describe('ZCodeCommand', () => {
     process.env.ZCODE_HOME = zcodeHome;
 
     const launch = resolveZCodeLaunch(entry);
+    const resolvedEntry = await fs.realpath(entry);
+    const resolvedBuiltin = await fs.realpath(builtin);
 
     expect(launch.command).toBe(process.execPath);
     expect(launch.args).toEqual(expect.arrayContaining([
       '--no-network-family-autoselection',
       '--dns-result-order=ipv4first',
-      entry,
+      resolvedEntry,
       'app-server',
       '--stdio',
     ]));
-    expect(launch.env.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE).toBe(builtin);
+    expect(launch.env.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE).toBe(resolvedBuiltin);
     expect(launch.env.ZCODE_PERSONAL_PROVIDER_CONFIG_FILE).toBe(personal);
     expect(findZCodeEntry(entry)).toBe(entry);
     expect(isZCodeAvailable(entry)).toBe(true);
@@ -70,8 +72,9 @@ describe('ZCodeCommand', () => {
     await fs.symlink(entry, link);
 
     const launch = resolveZCodeLaunch(link);
+    const resolvedEntry = await fs.realpath(entry);
 
     expect(launch.command).toBe(process.execPath);
-    expect(launch.args).toContain(entry);
+    expect(launch.args).toContain(resolvedEntry);
   });
 });
