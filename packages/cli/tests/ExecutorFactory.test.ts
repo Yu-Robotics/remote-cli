@@ -3,6 +3,7 @@ import { createClaudeExecutor, createExecutor, ExecutorType } from '../src/execu
 import { ClaudePersistentExecutor } from '../src/executor/ClaudePersistentExecutor';
 import { CodexAppServerExecutor } from '../src/executor/CodexAppServerExecutor';
 import { ZCodeExecutor } from '../src/executor/ZCodeExecutor';
+import { PiExecutor } from '../src/executor/PiExecutor';
 import { DirectoryGuard } from '../src/security/DirectoryGuard';
 
 vi.mock('fs', async () => {
@@ -89,6 +90,18 @@ describe('executor/index', () => {
       );
 
       expect(executor).toBeInstanceOf(ZCodeExecutor);
+      await executor.destroy();
+    });
+
+    it('creates the Pi RPC executor', async () => {
+      const executor = createExecutor(
+        directoryGuard,
+        { type: 'pi', pi: { model: 'google/gemini-3-flash', autoApprove: false } },
+        '/home/test/workspace',
+        'thread-pi'
+      );
+
+      expect(executor).toBeInstanceOf(PiExecutor);
       await executor.destroy();
     });
   });

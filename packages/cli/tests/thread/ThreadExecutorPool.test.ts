@@ -520,6 +520,25 @@ describe('ThreadExecutorPool', () => {
       );
     });
 
+    it('passes Pi model and effort overrides to the factory', async () => {
+      const piThread = await manager.createThread('pi-settings', tmpDir);
+      await manager.updateThread(piThread.id, {
+        models: { pi: 'google/gemini-3-flash' },
+        efforts: { pi: 'high' },
+      });
+
+      poolFor('pi').getExecutor(piThread.id);
+
+      expect(mockExecutorFactory).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ type: 'pi' }),
+        tmpDir,
+        piThread.id,
+        'google/gemini-3-flash',
+        'high'
+      );
+    });
+
     it('passes ZCode model and effort overrides to the factory', async () => {
       const zcodeThread = await manager.createThread('zcode-settings', tmpDir);
       await manager.updateThread(zcodeThread.id, {

@@ -209,6 +209,13 @@ describe('start command', () => {
       log.mockRestore();
     });
 
+    it('checks the configured Pi binary', async () => {
+      await checkBackendAvailability('pi', spinner, { type: 'pi', pi: { command: '/opt/pi' } });
+
+      expect(execFile).toHaveBeenCalledWith('/opt/pi', ['--version'], { timeout: 5000 }, expect.any(Function));
+      expect(spinner.warn).not.toHaveBeenCalled();
+    });
+
     it('uses official ZCode discovery for the ZCode backend', async () => {
       zCodeCommandMocks.isZCodeAvailable.mockReturnValue(true);
 
