@@ -821,6 +821,31 @@ describe('FeishuLongConnHandler', () => {
       expect(elements[1].columns[0].elements[0].text.content).toBe('★ Thread 1 · Codex');
     });
 
+    it('splits thread switch buttons into rows of at most three columns', () => {
+      const threads = Array.from({ length: 7 }, (_, index) => ({
+        id: `thread-${index + 1}`,
+        name: `Thread ${index + 1}`,
+        status: 'idle' as const,
+      }));
+
+      const elements = (handler as any).createThreadSwitchElements(threads, 'thread-1');
+      const rows = elements.filter((element: any) => element.tag === 'column_set');
+
+      expect(rows.map((row: any) => row.columns.length)).toEqual([3, 3, 2]);
+      const labels = rows.flatMap((row: any) => row.columns)
+        .map((column: any) => column.elements[0].text.content);
+      expect(labels).toEqual([
+        '★ Thread 1',
+        'Thread 2',
+        'Thread 3',
+        'Thread 4',
+        'Thread 5',
+        'Thread 6',
+        'Thread 7',
+        '+ New',
+      ]);
+    });
+
     it('should create continuation cards when finalized elements exceed limit', async () => {
       const messageId = 'msg_finalize';
       const openId = 'test_open_id';

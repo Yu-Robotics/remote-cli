@@ -36,6 +36,7 @@ export class FeishuLongConnHandler {
   private readonly CARD_ELEMENT_LIMIT = 150; // Conservative: 150 tagged nodes per card (official: 200)
   private readonly CARD_DATA_SIZE_LIMIT = 3000000; // Max 3MB (3,000,000 chars) for data field
   private readonly CARD_SIZE_BUFFER = 100000; // Safety buffer: use 2.9MB instead of 3MB
+  private readonly THREAD_BUTTONS_PER_ROW = 3;
   // Track message chains: messageId -> [messageId1, messageId2, ...]
   private messageChains: Map<string, string[]> = new Map();
   // Store thread switch card state for re-patching after thread switch.
@@ -1469,7 +1470,8 @@ Examples:
 
   /**
    * Create Feishu Card 2.0 elements for thread switching buttons.
-   * Renders one button per thread (active is highlighted) plus a "+ New" button.
+   * Renders one button per thread (active is highlighted) plus a "+ New" button,
+   * split across rows so desktop clients do not compress every button into one line.
    */
   private createThreadSwitchElements(threads: ThreadSummary[], activeThreadId?: string): any[] {
     const threadColumns = threads.map((t) => ({
@@ -1504,14 +1506,17 @@ Examples:
       ],
     };
 
-    return [
-      { tag: 'hr' },
-      {
+    const columns = [...threadColumns, newThreadColumn];
+    const rows: any[] = [];
+    for (let index = 0; index < columns.length; index += this.THREAD_BUTTONS_PER_ROW) {
+      rows.push({
         tag: 'column_set',
         flex_mode: 'stretch',
-        columns: [...threadColumns, newThreadColumn],
-      },
-    ];
+        columns: columns.slice(index, index + this.THREAD_BUTTONS_PER_ROW),
+      });
+    }
+
+    return [{ tag: 'hr' }, ...rows];
   }
 
   private createQueueConfirmationElements(info: QueueConfirmationInfo): any[] {
