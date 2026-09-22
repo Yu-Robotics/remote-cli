@@ -429,6 +429,7 @@ remote-cli stop
 | `/abort` | 中止当前线程正在运行的 AI 任务 |
 | `/queue` | 查看或管理线程中已确认的排队消息 |
 | `/clear` | 清除当前线程的对话上下文 |
+| `/new` | `/clear` 的别名；在当前线程中开始全新对话 |
 | `/compact` | 压缩对话历史以节省 Token |
 | `/model [name]` | 列出当前 backend 的模型，或设置当前线程的模型 |
 | `/effort [auto|level]` | 查看或设置 Codex/AGY/OpenCode/Kimi/ZCode/Pi 的线程思考等级 |
@@ -515,7 +516,7 @@ remote-cli 自身不处理的斜杠命令会转发给当前 AI 后端，各后�
 - **ZCode**：斜杠命令使用持久化的官方 app-server 会话；remote-cli 会把 `/skills` 映射为 ZCode 的 `/skill`，并直接处理 `/model`、`/effort`、`/compact` 和 `/abort`
 - **Pi**：RPC `get_commands` 返回的扩展命令、提示模板和 `/skill:name` 技能通过持久化的 `pi --mode rpc` 会话发送；`/skills` 用于列出 Pi 技能。仅限 TUI 的内建命令会被拒绝。`/model`、`/effort`、`/compact` 和 `/abort` 仍由 remote-cli 自身处理
 
-内建命令（`/help`、`/status`、`/context`、`/skills`、`/clear`、`/compact`、`/model`、`/cd`、`/thread`、`/backend`、`/abort`）可用于所有后端。`/effort` 可按线程设置 Codex、AGY、OpenCode、Kimi Code、ZCode 和 Pi 的思考等级；Claude Code 暂未实现。
+内建命令（`/help`、`/status`、`/context`、`/skills`、`/clear`、`/new`、`/compact`、`/model`、`/cd`、`/thread`、`/backend`、`/abort`）可用于所有后端。`/new` 是 `/clear` 的完全别名：它会保留当前 remote-cli thread、工作目录、backend、模型和思考等级设置，同时启动一个全新的 backend 对话。`/effort` 可按线程设置 Codex、AGY、OpenCode、Kimi Code、ZCode 和 Pi 的思考等级；Claude Code 暂未实现。
 `/context` 可用于所有后端，会显示当前会话、模型、工作目录和队列状态；精确 Token 使用量取决于底层传输是否提供。`/skills` 在 Claude、AGY、OpenCode 和 Kimi Code 上使用原生信息命令，在 ZCode 上映射为原生 `/skill` 命令，在 Pi 上通过 RPC 列出技能；Codex 则扫描 `.agents/skills` 和 `~/.codex/skills` 下的本地 `SKILL.md` 文件。
 
 ### 示例工作流程
@@ -580,7 +581,7 @@ remote-cli 自身不处理的斜杠命令会转发给当前 AI 后端，各后�
 
 thread 忙碌时，普通消息会先生成确认卡片，不会静默进入队列。只有确认消息确实属于这个 thread 时，才点击加入队列。确认后卡片会变成“已加入”或“已取消”状态，重复点击会被忽略。使用 `/queue` 查看待确认和已确认消息，使用 `/queue clear` 清除它们，使用 `/abort` 中止当前任务并清空该 thread 的队列。
 
-为了避免上下文混乱，建议等当前任务和队列都处理完后，再发送 `/model`、`/effort`、`/cd`、`/compact` 或 `/clear` 等会改变执行上下文的命令。这些命令不会排在普通消息后面执行。
+为了避免上下文混乱，建议等当前任务和队列都处理完后，再发送 `/model`、`/effort`、`/cd`、`/compact`、`/clear` 或 `/new` 等会改变执行上下文的命令。这些命令不会排在普通消息后面执行。
 
 ### 有意识地选择模型和思考等级
 
@@ -621,7 +622,7 @@ docker compose logs --tail=100 router
 
 ### 保留或主动重置 backend 会话
 
-每个 thread 都分别保存 Claude、AGY、Codex、OpenCode、Kimi Code、ZCode 和 Pi 的会话状态。切换 backend 不会删除之前 backend 的会话，因此可以切回并继续之前的上下文。需要全新上下文时使用 `/clear`；希望某个 thread 重新跟随全局 backend 时使用 `/backend default @`。
+每个 thread 都分别保存 Claude、AGY、Codex、OpenCode、Kimi Code、ZCode 和 Pi 的会话状态。切换 backend 不会删除之前 backend 的会话，因此可以切回并继续之前的上下文。需要全新上下文时使用 `/clear` 或其别名 `/new`；希望某个 thread 重新跟随全局 backend 时使用 `/backend default @`。
 
 ### 系统化排查远程任务
 

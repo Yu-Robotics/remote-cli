@@ -318,7 +318,7 @@ export class MessageHandler {
       return;
     }
 
-    const queueSensitiveCommand = /^\/(?:clear|compact|cd|model|effort)(?:\s|$)/.test(content?.trim() ?? '')
+    const queueSensitiveCommand = /^\/(?:clear|new|compact|cd|model|effort)(?:\s|$)/.test(content?.trim() ?? '')
       || /^\/thread\s+delete(?:\s|$)/.test(content?.trim() ?? '');
     if (queueSensitiveCommand && this.hasThreadQueueState(resolvedThreadId)) {
       this.sendResponse(messageId, resolvedThreadId, {
@@ -564,7 +564,7 @@ Use /compact to reduce conversation context or /clear to start a fresh context.`
 - /skills - List available skills for the active backend
 - /abort - Abort the currently executing command in this thread
 - /queue [clear|continue|confirm <id>|cancel <id>] - Inspect or manage this thread's command queue
-- /clear - Clear conversation context for this thread
+- /clear, /new - Start a fresh conversation in this thread
 - /compact - Compress conversation history to reduce context size
 - /cd <directory> - Change working directory for this thread
 - /model [name] - Show models for the active backend, or set this thread's model
@@ -597,7 +597,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       return true;
     }
 
-    if (trimmed === '/clear') {
+    if (trimmed === '/clear' || trimmed === '/new') {
       executor.resetContext();
       this.sendResponse(messageId, threadId, {
         success: true,

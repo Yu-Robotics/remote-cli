@@ -428,15 +428,17 @@ describe('MessageHandler', () => {
       expect(helpResponse.output).toContain('/backend default @ - Clear the current thread override');
       expect(helpResponse.output).toContain('/context - Show current session context');
       expect(helpResponse.output).toContain('/skills - List available skills');
+      expect(helpResponse.output).toContain('/clear, /new - Start a fresh conversation');
       expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
     });
   });
 
   describe('clear command', () => {
-    it('should handle /clear command', async () => {
-      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-123', content: '/clear', timestamp: Date.now() });
+    it.each(['/clear', '/new'])('should reset context for %s', async (command) => {
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-123', content: command, timestamp: Date.now() });
 
-      expect(ctx.mockExecutor.resetContext).toHaveBeenCalled();
+      expect(ctx.mockExecutor.resetContext).toHaveBeenCalledOnce();
+      expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
       expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
         expect.objectContaining({
           type: 'response',
@@ -835,6 +837,29 @@ describe('MessageHandler', () => {
   });
 
   describe('per-thread queue confirmation', () => {
+    it('should block /new while the thread has queued work', async () => {
+      (ctx.handler as any).threadQueues.set('default-thread-id', [{
+        messageId: 'msg-queued',
+        threadId: 'default-thread-id',
+        content: 'queued command',
+        enqueuedAt: Date.now(),
+      }]);
+
+      await ctx.handler.handleMessage({
+        type: 'command',
+        messageId: 'msg-new',
+        content: '/new',
+        timestamp: Date.now(),
+      });
+
+      expect(ctx.mockExecutor.resetContext).not.toHaveBeenCalled();
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+        messageId: 'msg-new',
+        success: false,
+        error: expect.stringContaining('queued messages'),
+      }));
+    });
+
     it('should ask before queueing a command on a busy thread', async () => {
       ctx.mockExecutor.execute.mockImplementation(
         () => new Promise((resolve) => setTimeout(() => resolve({ success: true, output: 'ok' }), 100))

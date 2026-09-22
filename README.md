@@ -432,6 +432,7 @@ Once connected, use these commands in Feishu:
 | `/abort` | Abort the currently executing task in this thread |
 | `/queue` | Inspect or manage confirmed messages waiting in thread queues |
 | `/clear` | Clear conversation context for this thread |
+| `/new` | Alias for `/clear`; start a fresh conversation in this thread |
 | `/compact` | Compress conversation history to save tokens |
 | `/model [name]` | List models for the active backend or set this thread's model |
 | `/effort [auto|level]` | Show or set per-thread reasoning effort for Codex/AGY/OpenCode/Kimi/ZCode/Pi |
@@ -518,7 +519,7 @@ Slash commands that remote-cli does not handle itself are forwarded to the activ
 - **ZCode**: slash commands use the persistent official app-server session; remote-cli maps `/skills` to ZCode's `/skill` and handles `/model`, `/effort`, `/compact`, and `/abort` directly
 - **Pi**: extension commands, prompt templates, and `/skill:name` skills advertised by RPC `get_commands` are sent through the persistent `pi --mode rpc` session; `/skills` lists Pi skills. Built-in TUI-only commands are rejected. remote-cli still handles `/model`, `/effort`, `/compact`, and `/abort` itself
 
-The built-in commands (`/help`, `/status`, `/context`, `/skills`, `/clear`, `/compact`, `/model`, `/cd`, `/thread`, `/backend`, `/abort`) work across all backends. `/effort` controls the per-thread reasoning effort for Codex, AGY, OpenCode, Kimi Code, ZCode, and Pi; Claude Code support is not implemented yet.
+The built-in commands (`/help`, `/status`, `/context`, `/skills`, `/clear`, `/new`, `/compact`, `/model`, `/cd`, `/thread`, `/backend`, `/abort`) work across all backends. `/new` is an exact alias for `/clear`: it keeps the current remote-cli thread, working directory, backend, model, and effort settings while starting a fresh backend conversation. `/effort` controls the per-thread reasoning effort for Codex, AGY, OpenCode, Kimi Code, ZCode, and Pi; Claude Code support is not implemented yet.
 `/context` works across all backends and reports the active session, model, working directory, and queue state; exact token usage depends on transport support. `/skills` uses the native informational command for Claude, AGY, OpenCode, and Kimi Code, maps to ZCode's native `/skill` command, lists Pi skills via RPC, and discovers local `SKILL.md` files for Codex under `.agents/skills` and `~/.codex/skills`.
 
 ### Example Workflow
@@ -583,7 +584,7 @@ The first form changes the global backend and clears per-thread overrides. The `
 
 When a thread is busy, a normal message first creates a confirmation card instead of entering the queue silently. Confirm only when you know the message belongs to that thread. The card changes to an accepted or cancelled state after the decision, and repeated clicks are ignored. Use `/queue` to inspect pending confirmations and confirmed messages, `/queue clear` to discard them, and `/abort` to stop the active task and clear the thread queue.
 
-For a safer workflow, send context-changing commands such as `/model`, `/effort`, `/cd`, `/compact`, or `/clear` only after the current task and queue have finished. These commands are intentionally not queued behind ordinary messages.
+For a safer workflow, send context-changing commands such as `/model`, `/effort`, `/cd`, `/compact`, `/clear`, or `/new` only after the current task and queue have finished. These commands are intentionally not queued behind ordinary messages.
 
 ### Select model and reasoning effort deliberately
 
@@ -624,7 +625,7 @@ Do not use `docker compose down -v` for routine updates. Back up `./router-data`
 
 ### Preserve or intentionally reset backend sessions
 
-Each thread maintains separate session state for Claude, AGY, Codex, OpenCode, Kimi Code, ZCode, and Pi. Switching backends does not delete the previous backend's session, so a thread can return to its earlier conversation. Use `/clear` when you intentionally want a fresh context; use `/backend default @` when a thread should follow future global backend changes.
+Each thread maintains separate session state for Claude, AGY, Codex, OpenCode, Kimi Code, ZCode, and Pi. Switching backends does not delete the previous backend's session, so a thread can return to its earlier conversation. Use `/clear` or its `/new` alias when you intentionally want a fresh context; use `/backend default @` when a thread should follow future global backend changes.
 
 ### Diagnose a remote task systematically
 
