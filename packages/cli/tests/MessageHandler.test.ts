@@ -225,10 +225,10 @@ describe('MessageHandler', () => {
   });
 
   describe('message handling', () => {
-    it('should handle command messages', async () => {
-      ctx.mockExecutor.execute.mockResolvedValue({
-        success: true,
-        output: 'Command executed successfully',
+    it('routes a command without a thread id to default and emits stream and response messages', async () => {
+      ctx.mockExecutor.execute.mockImplementation(async (_prompt: string, options: any) => {
+        options.onStream('Command executed successfully');
+        return { success: true, output: 'Command executed successfully' };
       });
 
       const message = {
@@ -240,6 +240,7 @@ describe('MessageHandler', () => {
 
       await ctx.handler.handleMessage(message);
 
+      expect(ctx.mockThreadPool.getExecutor).toHaveBeenCalledWith('default-thread-id');
       expect(ctx.mockExecutor.execute).toHaveBeenCalledWith(
         expect.stringContaining('list files'),
         expect.any(Object)
@@ -249,8 +250,16 @@ describe('MessageHandler', () => {
           type: 'response',
           messageId: 'msg-123',
           success: true,
+          output: undefined,
+          threadId: 'default-thread-id',
+          cwd: '/home/user/test-project',
+          timestamp: expect.any(Number),
         })
       );
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'stream', messageId: 'msg-123', threadId: 'default-thread-id',
+        streamType: 'text', chunk: 'Command executed successfully', timestamp: expect.any(Number),
+      }));
     });
 
     it('should handle execution errors', async () => {
@@ -911,61 +920,65 @@ describe('MessageHandler', () => {
       expect(queueResponse[0].queueConfirmation.preview).toBe('command 2');
     });
 
-    it('should execute a message only after queue confirmation', async () => {
-      ctx.mockThreadPool.isThreadBusy = vi.fn().mockReturnValue(true);
-      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-queued', content: 'queued command', timestamp: Date.now() });
+    it('runs confirmed queued work after completion, announces it before output, and pauses on failure', async () => {
+      const backend = 'kimi';
+      ctx.mockThreadPool.getBackendKey.mockReturnValue(backend);
+      let busy = false;
+      ctx.mockThreadPool.isThreadBusy.mockImplementation(() => busy);
+      ctx.mockThreadPool.setThreadBusy.mockImplementation((_id: string, value: boolean) => { busy = value; });
+      let finishActive!: (result: { success: boolean }) => void;
+      ctx.mockExecutor.execute.mockImplementationOnce(() => new Promise(resolve => { finishActive = resolve; }));
+      const active = ctx.handler.handleMessage({
+        type: 'command', messageId: 'active-run', content: 'Active task', openId: 'owner', timestamp: Date.now(),
+      });
+      await new Promise(resolve => setImmediate(resolve));
 
-      const confirmation = ctx.mockWsClient.send.mock.calls
-        .map((call: any) => call[0])
-        .find((message: any) => message.messageId === 'msg-queued')?.queueConfirmation;
-      expect(confirmation).toBeDefined();
-      expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
+      const attachments = [{ type: 'image' as const, data: 'aW1hZ2U=', mimeType: 'image/png' }];
+      for (const command of [
+        { messageId: 'queued-run', content: 'Review  the image', attachments },
+        { messageId: 'next-run', content: 'Next task' },
+      ]) {
+        await ctx.handler.handleMessage({ type: 'command', openId: 'owner', timestamp: Date.now(), ...command });
+        const confirmation = ctx.mockWsClient.send.mock.calls.map((call: any[]) => call[0])
+          .find((message: any) => message.messageId === command.messageId)?.queueConfirmation;
+        expect(confirmation).toBeDefined();
+        await ctx.handler.handleMessage({
+          type: 'command', messageId: `confirm-${command.messageId}`, openId: 'owner',
+          content: `/queue confirm ${confirmation.id}`, timestamp: Date.now(),
+        });
+      }
+      expect(ctx.mockExecutor.execute).toHaveBeenCalledTimes(1);
       expect(ctx.mockWsClient.send).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'queue_started' }));
 
-      ctx.mockThreadPool.isThreadBusy = vi.fn().mockReturnValue(false);
-      await ctx.handler.handleMessage({
-        type: 'command',
-        messageId: 'msg-confirm',
-        content: `/queue confirm ${confirmation.id}`,
-        timestamp: Date.now(),
+      ctx.mockExecutor.execute.mockImplementationOnce(async (_content: string, options: any) => {
+        expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+          type: 'queue_started', messageId: 'queued-run', openId: 'owner', threadId: 'default-thread-id',
+          queueStarted: {
+            threadName: 'default', backend, cwd: '/home/user/test-project',
+            preview: 'Review the image', remainingCount: 1,
+          },
+        }));
+        options.onStream('First output');
+        return { success: false, error: 'Stop before the next queued task' };
       });
-      await new Promise((resolve) => setImmediate(resolve));
+      finishActive({ success: true });
+      await active;
+      await new Promise(resolve => setImmediate(resolve));
 
-      expect(ctx.mockExecutor.execute).toHaveBeenCalledWith('queued command', expect.anything());
+      expect(ctx.mockExecutor.execute).toHaveBeenCalledWith('Review  the image', expect.objectContaining({ attachments }));
+      expect(ctx.mockExecutor.execute).toHaveBeenCalledTimes(2);
+      const messages = ctx.mockWsClient.send.mock.calls.map((call: any[]) => call[0]);
+      expect(messages.findIndex((message: any) => message.type === 'queue_started'))
+        .toBeLessThan(messages.findIndex((message: any) => message.type === 'stream'));
+      expect(messages.filter((message: any) => message.type === 'queue_started')).toHaveLength(1);
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'queue-status', content: '/queue', timestamp: Date.now() });
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+        messageId: 'queue-status', output: expect.stringContaining('Next task'),
+      }));
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+        messageId: 'queue-status', output: expect.stringContaining('Paused after a failed task'),
+      }));
     });
-
-    it.each(['claude', 'agy', 'codex', 'opencode', 'kimi', 'zcode', 'pi'])(
-      'announces queued execution before output on %s', async (backend) => {
-        ctx.mockThreadPool.getBackendKey.mockReturnValue(backend);
-        const attachments = [{ type: 'image', data: 'aW1hZ2U=', mimeType: 'image/png' }];
-        (ctx.handler as any).threadQueues.set('default-thread-id', [
-          { messageId: 'queued-run', content: 'Review  the image', openId: 'owner', attachments, enqueuedAt: 1 },
-          { messageId: 'next-run', content: 'Next task', openId: 'owner', enqueuedAt: 2 },
-        ]);
-        ctx.mockExecutor.execute.mockImplementation(async (_content: string, options: any) => {
-          const started = ctx.mockWsClient.send.mock.calls.map((call: any[]) => call[0])
-            .find((message: any) => message.type === 'queue_started');
-          expect(started).toMatchObject({
-            messageId: 'queued-run', openId: 'owner', threadId: 'default-thread-id',
-            queueStarted: {
-              threadName: 'default', backend, cwd: '/home/user/test-project',
-              preview: 'Review the image', remainingCount: 1,
-            },
-          });
-          options.onStream('First output');
-          return { success: false, error: 'Stop before the next queued task' };
-        });
-
-        await (ctx.handler as any).startNextQueuedCommand('default-thread-id');
-
-        expect(ctx.mockExecutor.execute).toHaveBeenCalledWith('Review  the image', expect.objectContaining({ attachments }));
-        const messages = ctx.mockWsClient.send.mock.calls.map((call: any[]) => call[0]);
-        expect(messages.findIndex((message: any) => message.type === 'queue_started'))
-          .toBeLessThan(messages.findIndex((message: any) => message.type === 'stream'));
-        expect(messages.filter((message: any) => message.type === 'queue_started')).toHaveLength(1);
-        expect((ctx.handler as any).pausedQueues.has('default-thread-id')).toBe(true);
-      }
-    );
 
     it('should start queued work after the active task ends with a capacity error', async () => {
       (ctx.handler as any).threadQueues.set('default-thread-id', [{

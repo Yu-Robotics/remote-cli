@@ -1,295 +1,167 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { spawn, type ChildProcess } from 'child_process';
+import { EventEmitter } from 'events';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-
-// Mock os.homedir() to respect process.env.HOME for isolated tests
-const originalHomedir = os.homedir();
-vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || originalHomedir);
-
-// Mock child_process
-vi.mock('child_process', () => ({
-  spawn: vi.fn(),
-}));
-
-// Mock fs for session file operations
-vi.mock('fs', () => ({
-  default: {
-    existsSync: vi.fn(),
-    readFileSync: vi.fn(),
-    writeFileSync: vi.fn(),
-    unlinkSync: vi.fn(),
-    readdirSync: vi.fn(() => []),
-    statSync: vi.fn(),
-  },
-  existsSync: vi.fn(),
-  readFileSync: vi.fn(),
-  writeFileSync: vi.fn(),
-  unlinkSync: vi.fn(),
-  readdirSync: vi.fn(() => []),
-  statSync: vi.fn(),
-}));
-
-import { spawn } from 'child_process';
 import { ClaudePersistentExecutor } from '../../src/executor/ClaudePersistentExecutor';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 
-describe('Integration: Session Persistence Across Directory Changes', () => {
-  let directoryGuard: DirectoryGuard;
-  const mockSpawn = spawn as any;
-  const mockFs = fs as any;
-  let mockChildProcess: any;
-  let sessionFiles: Map<string, string>; // Map of file paths to session data
+vi.mock('child_process', () => ({ spawn: vi.fn() }));
 
-  // Simulate file system for session files
-  const setupMockFs = () => {
-    sessionFiles = new Map();
+function createChild() {
+  const child = Object.assign(new EventEmitter(), {
+    stdout: new EventEmitter(),
+    stderr: new EventEmitter(),
+    stdin: {
+      write: vi.fn(),
+      end: vi.fn(() => {
+        queueMicrotask(() => {
+          child.emit('exit', 0, null);
+          child.emit('close', 0, null);
+        });
+      }),
+    },
+  });
+  return child;
+}
 
-    mockFs.existsSync.mockImplementation((filePath: string) => {
-      // Working directories always exist
-      if (!filePath.endsWith('.claude-session')) {
-        return true;
-      }
-      // Session files only exist if we've created them
-      return sessionFiles.has(filePath);
-    });
-
-    mockFs.readFileSync.mockImplementation((filePath: string) => {
-      const data = sessionFiles.get(filePath);
-      if (!data) {
-        throw new Error(`ENOENT: no such file or directory, open '${filePath}'`);
-      }
-      return data;
-    });
-
-    mockFs.writeFileSync.mockImplementation((filePath: string, data: string) => {
-      sessionFiles.set(filePath, data);
-    });
-
-    mockFs.unlinkSync.mockImplementation((filePath: string) => {
-      sessionFiles.delete(filePath);
-    });
-  };
+describe('Integration: Claude session persistence', () => {
+  let home: string;
+  let project: string;
+  let guard: DirectoryGuard;
+  let children: ReturnType<typeof createChild>[];
+  let executors: ClaudePersistentExecutor[];
 
   beforeEach(() => {
+    vi.useFakeTimers();
     vi.clearAllMocks();
-    setupMockFs();
-
-    // Use process.cwd() for realistic test paths
-    const testRoot = path.join(process.cwd(), 'test-workspace');
-    const testSubdir = path.join(testRoot, 'remote-cli');
-
-    directoryGuard = new DirectoryGuard([
-      testRoot,
-      testSubdir,
-    ]);
-
-    // Mock spawn to return a mock child process
-    mockChildProcess = {
-      stdout: {
-        on: vi.fn(),
-      },
-      stderr: {
-        on: vi.fn(),
-      },
-      stdin: {
-        write: vi.fn(),
-        end: vi.fn(),
-      },
-      on: vi.fn((event, handler) => {
-        // Auto-trigger 'exit' after a short delay to simulate process lifecycle
-        if (event === 'exit') {
-          setTimeout(() => handler(0, null), 100);
-        }
-      }),
-      kill: vi.fn(),
-      pid: 12345,
-      killed: false,
-    };
-
-    mockSpawn.mockReturnValue(mockChildProcess);
-  });
-
-  afterEach(() => {
-    vi.clearAllMocks();
-  });
-
-  it('should store session file in working directory, not startup directory', () => {
-    // Scenario: Client starts in test-workspace/remote-cli
-    const testRoot = path.join(process.cwd(), 'test-workspace');
-    const workingDir = path.join(testRoot, 'remote-cli');
-    const executor = new ClaudePersistentExecutor(directoryGuard, workingDir);
-
-    // Verify session file path is in working directory
-    const expectedSessionPath = path.join(workingDir, '.claude-session');
-
-    // Simulate session creation by writing session file
-    const sessionId = 'test-session-123';
-    const sessionData = JSON.stringify({
-      id: sessionId,
-      savedAt: new Date().toISOString(),
+    home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'claude-session-test-')));
+    project = path.join(home, 'project');
+    fs.mkdirSync(project);
+    vi.spyOn(os, 'homedir').mockReturnValue(home);
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    guard = new DirectoryGuard([home]);
+    children = [];
+    executors = [];
+    vi.mocked(spawn).mockImplementation(() => {
+      const child = createChild();
+      children.push(child);
+      return child as unknown as ChildProcess;
     });
-    sessionFiles.set(expectedSessionPath, sessionData);
-
-    // Verify session file is in the correct location
-    expect(mockFs.readFileSync(expectedSessionPath)).toBe(sessionData);
   });
 
-  it('should not read session from startup directory after /cd', async () => {
-    // Scenario from bug report:
-    // 1. Start client in test-workspace
-    const testRoot = path.join(process.cwd(), 'test-workspace');
-    const startupDir = testRoot;
-    const executor1 = new ClaudePersistentExecutor(directoryGuard, startupDir);
-
-    // 2. Create a session in startup directory
-    const session1Id = 'old-session-in-workspace';
-    const session1Path = path.join(startupDir, '.claude-session');
-    sessionFiles.set(
-      session1Path,
-      JSON.stringify({ id: session1Id, savedAt: new Date().toISOString() })
-    );
-
-    // 3. User executes /cd remote-cli (changes working directory)
-    const newDir = path.join(testRoot, 'remote-cli');
-    await executor1.setWorkingDirectory(newDir);
-
-    // 4. New session is created in new directory
-    const session2Id = 'new-session-in-remote-cli';
-    const session2Path = path.join(newDir, '.claude-session');
-    sessionFiles.set(
-      session2Path,
-      JSON.stringify({ id: session2Id, savedAt: new Date().toISOString() })
-    );
-
-    // 5. Client restarts - should initialize with newDir, NOT startupDir
-    const executor2 = new ClaudePersistentExecutor(directoryGuard, newDir);
-
-    // 6. Verify executor uses the correct working directory
-    expect(executor2.getCurrentWorkingDirectory()).toBe(newDir);
-
-    // 7. Verify it would read from the correct session file
-    // (not the old one in startup directory)
-    const currentSessionPath = path.join(
-      executor2.getCurrentWorkingDirectory(),
-      '.claude-session'
-    );
-    expect(currentSessionPath).toBe(session2Path);
-    expect(currentSessionPath).not.toBe(session1Path);
+  afterEach(async () => {
+    await Promise.all(executors.map(executor => executor.destroy()));
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    fs.rmSync(home, { recursive: true, force: true });
   });
 
-  it('should isolate sessions between different working directories', () => {
-    const testRoot = path.join(process.cwd(), 'test-workspace');
-    const dir1 = testRoot;
-    const dir2 = path.join(testRoot, 'remote-cli');
+  function createExecutor(threadId?: string, cwd = project) {
+    const executor = new ClaudePersistentExecutor(guard, cwd, threadId);
+    executors.push(executor);
+    return executor;
+  }
 
-    // Create executor for dir1
-    const executor1 = new ClaudePersistentExecutor(directoryGuard, dir1);
-    const session1Path = path.join(dir1, '.claude-session');
-    sessionFiles.set(
-      session1Path,
-      JSON.stringify({ id: 'session-1', savedAt: new Date().toISOString() })
+  function sessionPath(threadId: string) {
+    return path.join(home, '.remote-cli', 'claude-sessions', threadId + '.json');
+  }
+
+  function emit(child: ReturnType<typeof createChild>, message: object) {
+    child.stdout.emit('data', Buffer.from(JSON.stringify(message) + '\n'));
+  }
+
+  async function executeTurn(executor: ClaudePersistentExecutor, sessionId: string) {
+    const result = executor.execute('Continue the task');
+    await vi.advanceTimersByTimeAsync(1000);
+    const child = children.at(-1)!;
+    expect(child.stdin.write).toHaveBeenCalledWith(expect.stringContaining('Continue the task'));
+    emit(child, { type: 'system', subtype: 'init', session_id: sessionId });
+    emit(child, { type: 'assistant', message: { content: [{ type: 'text', text: 'Done' }] } });
+    emit(child, { type: 'result', subtype: 'success' });
+    await expect(result).resolves.toMatchObject({ success: true, output: 'Done' });
+  }
+
+  it('persists an initialized session and resumes it after executor recreation', async () => {
+    const executor = createExecutor('thread-a');
+    await executeTurn(executor, 'session-a');
+    expect(JSON.parse(fs.readFileSync(sessionPath('thread-a'), 'utf8')).id).toBe('session-a');
+    await executor.destroy();
+
+    await executeTurn(createExecutor('thread-a'), 'session-a');
+    expect(spawn).toHaveBeenLastCalledWith(
+      'claude', expect.arrayContaining(['--resume', 'session-a']), expect.objectContaining({ cwd: project }),
     );
-
-    // Create executor for dir2
-    const executor2 = new ClaudePersistentExecutor(directoryGuard, dir2);
-    const session2Path = path.join(dir2, '.claude-session');
-    sessionFiles.set(
-      session2Path,
-      JSON.stringify({ id: 'session-2', savedAt: new Date().toISOString() })
-    );
-
-    // Verify they have different session file paths
-    expect(session1Path).not.toBe(session2Path);
-    expect(session1Path).toBe(path.join(dir1, '.claude-session'));
-    expect(session2Path).toBe(path.join(dir2, '.claude-session'));
-
-    // Verify both session files exist independently
-    expect(sessionFiles.has(session1Path)).toBe(true);
-    expect(sessionFiles.has(session2Path)).toBe(true);
   });
 
-  it('should handle missing working directory by falling back to process.cwd()', () => {
-    // Try to create executor with invalid directory
-    const invalidDir = '/invalid/path/not/in/allowed/dirs';
-    const executor = new ClaudePersistentExecutor(directoryGuard, invalidDir);
+  it('keeps two threads in the same workspace isolated across recreation', async () => {
+    const first = createExecutor('thread-a');
+    const second = createExecutor('thread-b');
+    await executeTurn(first, 'session-a');
+    await executeTurn(second, 'session-b');
+    expect(JSON.parse(fs.readFileSync(sessionPath('thread-a'), 'utf8')).id).toBe('session-a');
+    expect(JSON.parse(fs.readFileSync(sessionPath('thread-b'), 'utf8')).id).toBe('session-b');
+    await Promise.all([first.destroy(), second.destroy()]);
 
-    // Should fall back to process.cwd()
-    expect(executor.getCurrentWorkingDirectory()).toBe(process.cwd());
+    for (const [threadId, sessionId] of [['thread-a', 'session-a'], ['thread-b', 'session-b']]) {
+      await executeTurn(createExecutor(threadId), sessionId);
+      expect(vi.mocked(spawn).mock.calls.at(-1)![1]).toEqual(expect.arrayContaining(['--resume', sessionId]));
+    }
   });
 
-  it('should update session file location when working directory changes', async () => {
-    const testRoot = path.join(process.cwd(), 'test-workspace');
-    const dir1 = testRoot;
-    const dir2 = path.join(testRoot, 'remote-cli');
+  it('starts a fresh session after changing directory but keeps storage bound to the thread', async () => {
+    const executor = createExecutor('thread-a');
+    await executeTurn(executor, 'session-before');
+    const other = path.join(home, 'other');
+    fs.mkdirSync(other);
+    const changingDirectory = executor.setWorkingDirectory(other);
+    await vi.advanceTimersByTimeAsync(1000);
+    await changingDirectory;
+    expect(vi.mocked(spawn).mock.calls.at(-1)![1]).not.toContain('--resume');
 
-    const executor = new ClaudePersistentExecutor(directoryGuard, dir1);
-
-    // Create session in dir1
-    const session1Id = 'session-in-dir1';
-    const session1Path = path.join(dir1, '.claude-session');
-    sessionFiles.set(
-      session1Path,
-      JSON.stringify({ id: session1Id, savedAt: new Date().toISOString() })
+    await executeTurn(executor, 'session-after');
+    expect(JSON.parse(fs.readFileSync(sessionPath('thread-a'), 'utf8')).id).toBe('session-after');
+    expect(fs.existsSync(path.join(other, '.claude-session'))).toBe(false);
+    await executor.destroy();
+    await executeTurn(createExecutor('thread-a', other), 'session-after');
+    expect(spawn).toHaveBeenLastCalledWith(
+      'claude', expect.arrayContaining(['--resume', 'session-after']), expect.objectContaining({ cwd: other }),
     );
-
-    // Change working directory - should start fresh session, not inherit
-    await executor.setWorkingDirectory(dir2);
-
-    // Verify working directory changed
-    expect(executor.getCurrentWorkingDirectory()).toBe(dir2);
-
-    // Verify session was cleared (not inherited from dir1)
-    expect(executor.getSessionId()).toBeNull();
-
-    // New session would be created in dir2
-    const session2Path = path.join(dir2, '.claude-session');
-
-    // Verify session paths are different
-    expect(session1Path).not.toBe(session2Path);
   });
 
-  it('should start fresh session when switching directories back and forth', async () => {
-    // Scenario: Reproduce the loop crash bug
-    // 1. Start in workspace, /cd to remote-cli (works fine)
-    // 2. Then /cd back to workspace (should not crash)
+  it('resumes the legacy workspace session when no thread id is supplied', async () => {
+    fs.writeFileSync(path.join(project, '.claude-session'), JSON.stringify({ id: 'legacy-session' }));
+    await executeTurn(createExecutor(), 'legacy-session');
+    expect(vi.mocked(spawn).mock.calls.at(-1)![1]).toEqual(expect.arrayContaining(['--resume', 'legacy-session']));
+  });
 
-    const testRoot = path.join(process.cwd(), 'test-workspace');
-    const workspaceDir = testRoot;
-    const remoteCliDir = path.join(testRoot, 'remote-cli');
+  it('delivers redaction and plan events to the callbacks of the current execute call', async () => {
+    const executor = createExecutor('thread-a');
+    const previous = { onStream: vi.fn(), onRedactedThinking: vi.fn(), onPlanMode: vi.fn() };
+    const current = { onStream: vi.fn(), onRedactedThinking: vi.fn(), onPlanMode: vi.fn() };
 
-    const executor = new ClaudePersistentExecutor(directoryGuard, workspaceDir);
-
-    // Simulate working in workspace - create a session
-    const session1Id = 'workspace-session';
-    const session1Path = path.join(workspaceDir, '.claude-session');
-    sessionFiles.set(
-      session1Path,
-      JSON.stringify({ id: session1Id, savedAt: new Date().toISOString() })
-    );
-
-    // Step 1: /cd to remote-cli - should start fresh session
-    await executor.setWorkingDirectory(remoteCliDir);
-    expect(executor.getCurrentWorkingDirectory()).toBe(remoteCliDir);
-    expect(executor.getSessionId()).toBeNull(); // Fresh session
-
-    // Simulate creating a session in remote-cli
-    const session2Id = 'remote-cli-session';
-    const session2Path = path.join(remoteCliDir, '.claude-session');
-    sessionFiles.set(
-      session2Path,
-      JSON.stringify({ id: session2Id, savedAt: new Date().toISOString() })
-    );
-
-    // Step 2: /cd back to workspace - should start fresh session again
-    // This is the scenario that was causing crash
-    await executor.setWorkingDirectory(workspaceDir);
-    expect(executor.getCurrentWorkingDirectory()).toBe(workspaceDir);
-    expect(executor.getSessionId()).toBeNull(); // Fresh session, NOT session1Id
-
-    // Verify no crash - session ID is null, will create new session on next command
-    // Old bug: would try to use session1Id from old .claude-session file
-    expect(executor.getSessionId()).not.toBe(session1Id);
-    expect(executor.getSessionId()).not.toBe(session2Id);
+    for (const callbacks of [previous, current]) {
+      const result = executor.execute('Plan this task', callbacks);
+      await vi.advanceTimersByTimeAsync(1000);
+      const child = children.at(-1)!;
+      for (const block of [
+        { type: 'redacted_thinking', redacted_thinking: 'ENCRYPTED_REASONING' },
+        { type: 'tool_use', id: 'enter', name: 'EnterPlanMode', input: {} },
+        { type: 'text', text: 'Step 1: Read the file' },
+        { type: 'tool_use', id: 'exit', name: 'ExitPlanMode', input: {} },
+      ]) {
+        emit(child, { type: 'assistant', message: { content: [block] } });
+      }
+      emit(child, { type: 'result', subtype: 'success' });
+      await expect(result).resolves.toMatchObject({ success: true });
+      expect(callbacks.onRedactedThinking).toHaveBeenCalledTimes(1);
+      expect(callbacks.onPlanMode).toHaveBeenCalledTimes(1);
+      expect(callbacks.onPlanMode).toHaveBeenCalledWith('Step 1: Read the file');
+      expect(JSON.stringify(callbacks.onStream.mock.calls)).not.toContain('ENCRYPTED_REASONING');
+    }
+    expect(previous.onRedactedThinking).toHaveBeenCalledTimes(1);
+    expect(previous.onPlanMode).toHaveBeenCalledTimes(1);
   });
 });

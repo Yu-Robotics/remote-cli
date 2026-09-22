@@ -136,49 +136,6 @@ describe('ClaudePersistentExecutor - Redacted Thinking', () => {
     });
   });
 
-  describe('Callback Registration', () => {
-    it('should accept onRedactedThinking callback in execute options', () => {
-      // This tests that the interface accepts the callback
-      // We can't easily test full execution without mocking the Claude process
-      const options = {
-        onStream: mockOnStream,
-        onRedactedThinking: mockOnRedactedThinking,
-        timeout: 1000
-      };
-
-      // Type checking should pass
-      expect(options.onRedactedThinking).toBeDefined();
-      expect(typeof options.onRedactedThinking).toBe('function');
-    });
-
-    it('should register callback during processQueue', () => {
-      // Verify that processQueue correctly wires onRedactedThinking into the
-      // currentRedactedThinkingCallback slot by inspecting internal state
-      // directly — without spinning up a real Claude process.
-
-      // Manually simulate what processQueue does after dequeuing a command
-      (executor as any).commandQueue.push({
-        prompt: 'test',
-        options: { onRedactedThinking: mockOnRedactedThinking },
-        resolve: vi.fn(),
-        reject: vi.fn(),
-      });
-
-      const command = (executor as any).commandQueue.shift();
-
-      // Mirror the assignments that processQueue performs
-      (executor as any).isProcessing = true;
-      (executor as any).currentStreamCallback = command.options.onStream;
-      (executor as any).currentToolUseCallback = command.options.onToolUse;
-      (executor as any).currentToolResultCallback = command.options.onToolResult;
-      (executor as any).currentRedactedThinkingCallback = command.options.onRedactedThinking;
-      (executor as any).currentCommandResolve = command.resolve;
-      (executor as any).currentCommandReject = command.reject;
-
-      expect((executor as any).currentRedactedThinkingCallback).toBe(mockOnRedactedThinking);
-    });
-  });
-
   describe('State Reset', () => {
     it('should clear redacted thinking callback when resetting command', () => {
       (executor as any).currentRedactedThinkingCallback = mockOnRedactedThinking;
