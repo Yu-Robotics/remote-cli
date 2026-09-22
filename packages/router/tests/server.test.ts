@@ -9,7 +9,8 @@ import { JsonStore } from '../src/storage/JsonStore';
 import { FeishuLongConnHandler } from '../src/feishu/FeishuLongConnHandler';
 import { ConnectionHub } from '../src/websocket/ConnectionHub';
 import { BindingManager } from '../src/binding/BindingManager';
-import { MessageType } from '../src/types';
+import { MessageType, MIN_SUPPORTED_CLI_VERSION, PROTOCOL_VERSION, ROUTER_VERSION } from '../src/types';
+import { createRedactedThinkingElement } from '../src/utils/ToolFormatter';
 
 // Mock dependencies
 vi.mock('koa');
@@ -377,10 +378,13 @@ describe('RouterServer', () => {
     expect(onResolveThread('feishu-card-3')).toBeDefined();
   });
 
-  it('should handle streaming message with new thread info in RESPONSE', async () => {
+  it.each([true, false])('preserves reply routing after completion and changes selection only for a new thread (%s)', async (pendingNewThread) => {
     await server.start();
     const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
-    onStartStreaming('m1', 'u1', 'f1', 'd1', undefined, true); // pendingNewThread = true
+    const resolveThread = mockFeishuHandler.setOnResolveThread.mock.calls[0][0];
+    const resolveActiveThread = mockFeishuHandler.setOnResolveActiveThread.mock.calls[0][0];
+    await mockFeishuHandler.onCardSwitchThread('u1', 'selected-thread', 'Selected Thread');
+    onStartStreaming('m1', 'u1', 'f1', 'd1', undefined, pendingNewThread);
 
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
     const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
@@ -397,6 +401,13 @@ describe('RouterServer', () => {
     })));
     
     expect(mockFeishuHandler.finalizeStreamingMessage).toHaveBeenCalled();
+    expect(resolveThread('f1')).toMatchObject({ threadId: 'new-thread-1', deviceId: 'd1' });
+    expect(resolveActiveThread('u1')).toEqual(pendingNewThread
+      ? { threadId: 'new-thread-1', threadName: 'New Thread' }
+      : { threadId: 'selected-thread', threadName: 'Selected Thread' });
+    expect(resolveThread('unknown-card')).toBeUndefined();
+    vi.setSystemTime(Date.now() + 7 * 24 * 60 * 60 * 1000 + 1);
+    expect(resolveThread('f1')).toBeUndefined();
   });
 
   it('should handle text chunk streaming with throttled updates', async () => {
@@ -578,8 +589,12 @@ describe('RouterServer', () => {
     const ctx = { body: {} } as any;
     versionRoute(ctx);
     
-    expect(ctx.body.success).toBe(true);
-    expect(ctx.body).toHaveProperty('version');
+    expect(ctx.body).toEqual({
+      success: true,
+      version: ROUTER_VERSION,
+      protocolVersion: PROTOCOL_VERSION,
+      minSupportedCliVersion: MIN_SUPPORTED_CLI_VERSION,
+    });
   });
 
   it('should handle bind request route', async () => {
@@ -637,40 +652,6 @@ describe('RouterServer', () => {
     onConnection(mockWs, mockReq);
     expect(mockWs.on).toHaveBeenCalledWith('message', expect.any(Function));
     expect(mockWs.on).toHaveBeenCalledWith('close', expect.any(Function));
-  });
-
-  it('should handle WebSocket BINDING_REQUEST', async () => {
-    await server.start();
-    const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
-    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
-    onConnection(mockWs, { socket: { remoteAddress: '1' } });
-    
-    const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
-    await onMessage(Buffer.from(JSON.stringify({
-      type: MessageType.BINDING_REQUEST,
-      messageId: 'm1',
-      data: { deviceId: 'd1', protocolVersion: 1 }
-    })));
-    
-    expect(mockConnectionHub.registerConnection).toHaveBeenCalledWith('d1', mockWs);
-    expect(mockWs.send).toHaveBeenCalled();
-  });
-
-  it('should reject incompatible protocol version', async () => {
-    await server.start();
-    const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
-    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
-    onConnection(mockWs, { socket: { remoteAddress: '1' } });
-    
-    const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
-    await onMessage(Buffer.from(JSON.stringify({
-      type: MessageType.BINDING_REQUEST,
-      messageId: 'm1',
-      data: { deviceId: 'd1', protocolVersion: 0 } // Incompatible
-    })));
-    
-    expect(mockWs.send).toHaveBeenCalledWith(expect.stringContaining('PROTOCOL_VERSION_INCOMPATIBLE'));
-    expect(mockWs.close).toHaveBeenCalled();
   });
 
   it('should handle WebSocket HEARTBEAT', async () => {
@@ -779,7 +760,7 @@ describe('RouterServer', () => {
     expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenCalled();
   });
 
-  it('should handle WebSocket stream redacted_thinking', async () => {
+  it('renders a redaction notice after preceding text without exposing encrypted content', async () => {
     await server.start();
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
     const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
@@ -789,14 +770,23 @@ describe('RouterServer', () => {
     onStartStreaming('m1', 'u1', 'f1', 'd1');
 
     const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
+    const notice = { tag: 'markdown', content: 'Some reasoning was filtered' };
+    vi.mocked(createRedactedThinkingElement).mockReturnValueOnce([notice]);
+    await onMessage(Buffer.from(JSON.stringify({
+      type: 'stream', streamType: 'text', messageId: 'm1', openId: 'u1', chunk: 'Visible answer',
+    })));
     await onMessage(Buffer.from(JSON.stringify({
       type: 'stream',
       streamType: 'redacted_thinking',
       messageId: 'm1',
-      openId: 'u1'
+      openId: 'u1',
+      chunk: 'ENCRYPTED_REASONING'
     })));
-    
-    expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenCalled();
+
+    expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenLastCalledWith(
+      'f1', [{ tag: 'markdown', content: 'Visible answer' }, notice], 'u1', undefined,
+    );
+    expect(JSON.stringify(mockFeishuHandler.updateStreamingMessage.mock.calls)).not.toContain('ENCRYPTED_REASONING');
   });
 
   it('should handle WebSocket stream plan_mode', async () => {

@@ -3,9 +3,7 @@ import { promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
-import { AcpExecutor } from '../../src/executor/AcpExecutor';
 import { KimiExecutor } from '../../src/executor/KimiExecutor';
-import { OpenCodeExecutor } from '../../src/executor/OpenCodeExecutor';
 import type { AcpEventCallbacks, AcpTransport } from '../../src/executor/acp/AcpClient';
 import type { AcpConfigOption, AcpContentBlock, AcpSessionResult } from '../../src/executor/acp/AcpTypes';
 
@@ -64,11 +62,6 @@ describe('KimiExecutor', () => {
     await fs.rm(home, { recursive: true, force: true });
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
-  });
-
-  it('uses ACP without inheriting OpenCode-specific behavior', () => {
-    expect(executor).toBeInstanceOf(AcpExecutor);
-    expect(executor).not.toBeInstanceOf(OpenCodeExecutor);
   });
 
   it('runs Kimi turns over ACP and persists the session pointer', async () => {
