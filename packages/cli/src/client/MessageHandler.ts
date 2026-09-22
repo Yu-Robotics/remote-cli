@@ -981,6 +981,21 @@ You can also use natural language commands to control Claude Code CLI.`,
     try {
       const executor = this.threadPool.getExecutor(threadId);
       await this.threadManager.updateThread(threadId, { lastActiveAt: Date.now() });
+      this.wsClient.send({
+        type: 'queue_started',
+        messageId: command.messageId,
+        openId: command.openId,
+        threadId,
+        queueStarted: {
+          threadName: thread.name,
+          backend: this.threadPool.getBackendKey(threadId),
+          cwd: executor.getCurrentWorkingDirectory(),
+          preview: command.content.replace(/\s+/g, ' ').trim().slice(0, 240),
+          remainingCount: queue?.length ?? 0,
+        },
+        threads: this.threadPool.getSummaries(),
+        timestamp: Date.now(),
+      } satisfies OutgoingMessage);
       const processedContent = processFileReadContent(this.expandCommandShortcuts(command.content));
       const success = await this.executeCommand(command.messageId, threadId, processedContent, executor, command.attachments);
       if (!success) {

@@ -49,6 +49,7 @@ export class FeishuLongConnHandler {
   private lastProcessedLengths: Map<string, number> = new Map();
   // Per-message serialization locks to prevent concurrent updates from creating duplicates
   private messageLocks: Map<string, Promise<any>> = new Map();
+  private queueCardDecisions = new Map<string, Promise<void>>();
   // Prevent repeated clicks on the same queue confirmation card from sending duplicate commands.
   private queueActionStates = new Map<string, { action: 'confirm' | 'cancel'; processedAt: number }>();
   private readonly QUEUE_ACTION_STATE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -82,12 +83,12 @@ export class FeishuLongConnHandler {
    * pendingNewThread=true signals that this command will create a new thread,
    * so the server should update activeThreadMap when the response arrives.
    */
-  private onStartStreaming?: (messageId: string, openId: string, feishuMessageId: string | null, deviceId: string, threadId?: string, pendingNewThread?: boolean) => void;
+  private onStartStreaming?: (messageId: string, openId: string, feishuMessageId: string | null, deviceId: string, threadId?: string, pendingNewThread?: boolean, queueCardId?: string) => void;
 
   /**
    * Set streaming start callback
    */
-  setOnStartStreaming(callback: (messageId: string, openId: string, feishuMessageId: string | null, deviceId: string, threadId?: string, pendingNewThread?: boolean) => void): void {
+  setOnStartStreaming(callback: (messageId: string, openId: string, feishuMessageId: string | null, deviceId: string, threadId?: string, pendingNewThread?: boolean, queueCardId?: string) => void): void {
     this.onStartStreaming = callback;
   }
 
@@ -1704,7 +1705,7 @@ Examples:
     await this.handleRegularCommand(openId, syntheticMessageId, content, undefined, pendingNewThread);
   }
 
-  /** Send a queue decision directly to the CLI and prepare a streaming card for confirmed work. */
+  /** Register confirmed work; capable clients request a card when execution starts. */
   async sendQueueActionFromCardAction(openId: string, action: 'confirm' | 'cancel', queueId: string, threadId: string, cardMessageId?: string): Promise<'sent' | 'already_processed'> {
     this.removeExpiredQueueActionStates();
     const previousAction = this.queueActionStates.get(queueId);
@@ -1723,29 +1724,52 @@ Examples:
     let executionMessageId: string | undefined;
     if (action === 'confirm') {
       executionMessageId = uuidv4();
-      const feishuMessageId = await this.sendStreamingStart(openId, '🤔 Queued message confirmed. Waiting for the current task to finish...');
-      this.onStartStreaming?.(executionMessageId, openId, feishuMessageId, activeDevice.deviceId, threadId, false);
+      const feishuMessageId = this.connectionHub!.supportsQueueStarted(activeDevice.deviceId)
+        ? null
+        : await this.sendStreamingStart(openId, '🤔 Queued message confirmed. Waiting for the current task to finish...');
+      this.onStartStreaming?.(executionMessageId, openId, feishuMessageId, activeDevice.deviceId, threadId, false, cardMessageId);
     }
 
     const controlMessageId = uuidv4();
     const suffix = executionMessageId ? ` ${executionMessageId}` : '';
-    const success = await this.connectionHub.sendToDevice(activeDevice.deviceId, {
-      type: MessageType.COMMAND,
-      messageId: controlMessageId,
-      timestamp: Date.now(),
-      content: `/queue ${action} ${queueId}${suffix}`,
-      openId,
-      threadId,
-    });
-    if (!success) {
+    // An idle thread can start immediately. Its receipt must not be patched
+    // back to "waiting" after the start event has already arrived.
+    let finishDecision!: () => void;
+    const decision = new Promise<void>((resolve) => { finishDecision = resolve; });
+    if (cardMessageId) this.queueCardDecisions.set(cardMessageId, decision);
+    try {
+      const success = await this.connectionHub.sendToDevice(activeDevice.deviceId, {
+        type: MessageType.COMMAND,
+        messageId: controlMessageId,
+        timestamp: Date.now(),
+        content: `/queue ${action} ${queueId}${suffix}`,
+        openId,
+        threadId,
+      });
+      if (!success) throw new Error('Failed to send queue action to device');
+      if (cardMessageId) await this.updateQueueConfirmationCard(cardMessageId, action);
+      return 'sent';
+    } catch (error) {
       this.queueActionStates.delete(queueId);
-      throw new Error('Failed to send queue action to device');
+      throw error;
+    } finally {
+      finishDecision();
+      if (cardMessageId) this.queueCardDecisions.delete(cardMessageId);
     }
+  }
 
-    if (cardMessageId) {
-      await this.updateQueueConfirmationCard(cardMessageId, action);
-    }
-    return 'sent';
+  /** Leave a historical queue receipt after output moves to a new card. */
+  async markQueueCardStarted(cardMessageId: string): Promise<void> {
+    await this.queueCardDecisions.get(cardMessageId);
+    await this.withMessageLock(cardMessageId, () => this.client.im.message.patch({
+      path: { message_id: cardMessageId },
+      data: {
+        content: JSON.stringify({
+          schema: '2.0',
+          body: { elements: [{ tag: 'markdown', content: '▶️ **Queued task started**\n\nFollow progress in the new execution card at the bottom of the chat.' }] },
+        }),
+      },
+    }));
   }
 
   private removeExpiredQueueActionStates(): void {

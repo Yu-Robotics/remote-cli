@@ -95,6 +95,8 @@ describe('RouterServer', () => {
       setOnResolveActiveThread: vi.fn(),
       handleCardAction: vi.fn().mockResolvedValue({ success: true }),
       sendMessage: vi.fn().mockResolvedValue(undefined),
+      sendStreamingStart: vi.fn().mockResolvedValue('execution-card'),
+      markQueueCardStarted: vi.fn().mockResolvedValue(undefined),
       updateStreamingMessage: vi.fn().mockResolvedValue(undefined),
       uploadImage: vi.fn().mockResolvedValue('img_generated_123'),
       finalizeStreamingMessage: vi.fn().mockResolvedValue(undefined),
@@ -130,6 +132,155 @@ describe('RouterServer', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.useRealTimers();
+  });
+
+  describe('queued execution cards', () => {
+    const started = {
+      type: 'queue_started', messageId: 'queued-1', openId: 'user-1', threadId: 'thread-1',
+      queueStarted: {
+        threadName: 'thread-2', backend: 'kimi', cwd: '/workspace/project',
+        preview: 'Review the implementation', remainingCount: 2,
+      },
+      threads: [{ id: 'thread-1', name: 'thread-2', backend: 'kimi', status: 'running' }],
+    };
+
+    async function connect() {
+      await server.start();
+      const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
+      const ws = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
+      onConnection(ws, { socket: { remoteAddress: '1' } });
+      const onMessage = ws.on.mock.calls.find(call => call[0] === 'message')[1];
+      const send = (message: any) => onMessage(Buffer.from(JSON.stringify(message)));
+      await send({ type: 'binding_request', data: { deviceId: 'device-1', capabilities: { queueStarted: true } } });
+      expect(mockConnectionHub.registerConnection).toHaveBeenCalledWith('device-1', ws, { queueStarted: true });
+      return send;
+    }
+
+    it('creates a card only on start, preserves reply routing, and ignores duplicate starts', async () => {
+      const send = await connect();
+      const onStart = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
+      onStart('queued-1', 'user-1', null, 'device-1', 'thread-1', false, 'receipt-card');
+      expect(mockFeishuHandler.sendStreamingStart).not.toHaveBeenCalled();
+
+      await send(started);
+      await send(started);
+
+      expect(mockFeishuHandler.sendStreamingStart).toHaveBeenCalledOnce();
+      const intro = mockFeishuHandler.sendStreamingStart.mock.calls[0][1];
+      expect(intro).toContain('Review the implementation');
+      expect(intro).toContain('/workspace/project');
+      expect(intro).toContain('Remaining in queue:** 2');
+      expect(mockFeishuHandler.markQueueCardStarted).toHaveBeenCalledWith('receipt-card');
+      const resolveThread = mockFeishuHandler.setOnResolveThread.mock.calls[0][0];
+      expect(resolveThread('execution-card')).toMatchObject({ threadId: 'thread-1', deviceId: 'device-1' });
+      expect(mockFeishuHandler.setOnResolveActiveThread.mock.calls[0][0]('user-1')).toBeUndefined();
+      await send({ type: 'response', messageId: 'queued-1', openId: 'user-1', success: true });
+      await send(started);
+      expect(mockFeishuHandler.sendStreamingStart).toHaveBeenCalledOnce();
+      expect(mockFeishuHandler.finalizeStreamingMessage).toHaveBeenCalledWith(
+        'execution-card', expect.any(Array), undefined, 'user-1', '/workspace/project',
+        'thread-2', started.threads, 'thread-1', undefined,
+      );
+    });
+
+    it('holds early output and completion until card creation finishes without blocking another thread', async () => {
+      const send = await connect();
+      let release!: (cardId: string) => void;
+      mockFeishuHandler.sendStreamingStart.mockReturnValue(new Promise(resolve => { release = resolve; }));
+      const onStart = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
+      onStart('other-task', 'user-1', 'other-card', 'device-1', 'thread-other');
+      const starting = send(started);
+      const text = send({ type: 'stream', messageId: 'queued-1', openId: 'user-1', chunk: 'First output' });
+      const finished = send({ type: 'response', messageId: 'queued-1', openId: 'user-1', success: true });
+      await send({ type: 'stream', messageId: 'other-task', openId: 'user-1', chunk: 'Independent output' });
+      expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenCalledWith(
+        'other-card', expect.any(Array), 'user-1', undefined,
+      );
+      expect(mockFeishuHandler.finalizeStreamingMessage).not.toHaveBeenCalled();
+      release('execution-card');
+      await Promise.all([starting, text, finished]);
+      const elements = mockFeishuHandler.finalizeStreamingMessage.mock.calls[0][1];
+      expect(JSON.stringify(elements)).toContain('First output');
+      expect(JSON.stringify(elements)).toContain('Queued task started');
+    });
+
+    it('finishes an image upload before rendering the queued task result', async () => {
+      const send = await connect();
+      await send(started);
+      let uploaded!: (key: string) => void;
+      mockFeishuHandler.uploadImage.mockReturnValue(new Promise(resolve => { uploaded = resolve; }));
+      const image = send({
+        type: 'stream', streamType: 'image', messageId: 'queued-1', openId: 'user-1',
+        image: { type: 'image', data: 'aW1hZ2U=', mimeType: 'image/png' },
+      });
+      const finished = send({ type: 'response', messageId: 'queued-1', openId: 'user-1', success: true });
+      await Promise.resolve();
+      expect(mockFeishuHandler.finalizeStreamingMessage).not.toHaveBeenCalled();
+      uploaded('queued-image');
+      await Promise.all([image, finished]);
+      expect(mockFeishuHandler.finalizeStreamingMessage.mock.calls[0][1])
+        .toContainEqual({ tag: 'img', img_key: 'queued-image' });
+    });
+
+    it('announces tasks even when they fail before producing any stream', async () => {
+      const send = await connect();
+      let release!: (cardId: string) => void;
+      mockFeishuHandler.sendStreamingStart.mockReturnValue(new Promise(resolve => { release = resolve; }));
+      const starting = send(started);
+      const finished = send({ type: 'response', messageId: 'queued-1', openId: 'user-1', success: false, error: 'Capacity error' });
+      await Promise.resolve();
+      expect(mockFeishuHandler.finalizeStreamingMessage).not.toHaveBeenCalled();
+      release('execution-card');
+      await Promise.all([starting, finished]);
+      expect(JSON.stringify(mockFeishuHandler.finalizeStreamingMessage.mock.calls[0])).toContain('Capacity error');
+    });
+
+    it('falls back to the receipt if the new card cannot be created', async () => {
+      const send = await connect();
+      mockFeishuHandler.setOnStartStreaming.mock.calls[0][0](
+        'queued-1', 'user-1', null, 'device-1', 'thread-1', false, 'receipt-card',
+      );
+      mockFeishuHandler.sendStreamingStart.mockResolvedValue(null);
+      await send(started);
+      await send({ type: 'stream', messageId: 'queued-1', openId: 'user-1', chunk: 'Visible output' });
+      expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenCalledWith(
+        'receipt-card', expect.any(Array), 'user-1', 'thread-2',
+      );
+      expect(mockFeishuHandler.markQueueCardStarted).not.toHaveBeenCalled();
+    });
+
+    it('sends a text result if card creation fails and no receipt is available', async () => {
+      const send = await connect();
+      mockFeishuHandler.sendStreamingStart.mockRejectedValue(new Error('Card API failed'));
+      await send(started);
+      await send({ type: 'stream', messageId: 'queued-1', openId: 'user-1', chunk: 'Recovered text' });
+      await send({ type: 'response', messageId: 'queued-1', openId: 'user-1', success: false, error: 'Task failed' });
+      expect(mockFeishuHandler.sendMessage).toHaveBeenCalledWith('user-1', expect.stringContaining('Recovered text'));
+      expect(mockFeishuHandler.sendMessage).toHaveBeenCalledWith('user-1', expect.stringContaining('Task failed'));
+    });
+
+    it('reconstructs a missing streaming session and survives a failed receipt update', async () => {
+      const send = await connect();
+      await send(started);
+      expect(mockFeishuHandler.sendStreamingStart).toHaveBeenCalledOnce();
+      mockFeishuHandler.setOnStartStreaming.mock.calls[0][0](
+        'queued-2', 'user-1', 'waiting-card', 'device-1', 'thread-1', false, 'receipt-card',
+      );
+      mockFeishuHandler.markQueueCardStarted.mockRejectedValue(new Error('Card expired'));
+      await send({ ...started, messageId: 'queued-2' });
+      await send({ type: 'stream', messageId: 'queued-2', openId: 'user-1', chunk: 'Still visible' });
+      expect(JSON.stringify(mockFeishuHandler.updateStreamingMessage.mock.calls)).toContain('Still visible');
+    });
+
+    it('ignores malformed events and events that conflict with the registered session', async () => {
+      const send = await connect();
+      await send({ ...started, queueStarted: { ...started.queueStarted, remainingCount: -1 } });
+      mockFeishuHandler.setOnStartStreaming.mock.calls[0][0](
+        'queued-1', 'different-user', 'old-card', 'other-device', 'thread-1',
+      );
+      await send(started);
+      expect(mockFeishuHandler.sendStreamingStart).not.toHaveBeenCalled();
+    });
   });
 
   it('should initialize correctly', () => {

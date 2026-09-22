@@ -8,7 +8,7 @@ import { JsonStore } from './storage/JsonStore';
 import { FeishuLongConnHandler } from './feishu/FeishuLongConnHandler';
 import { ConnectionHub } from './websocket/ConnectionHub';
 import { BindingManager } from './binding/BindingManager';
-import { MessageType, ToolUseInfo, ToolResultInfo, TaskNotificationInfo, PROTOCOL_VERSION, MIN_SUPPORTED_CLI_VERSION, ROUTER_VERSION, ThreadSummary, QueueConfirmationInfo, ImageBlock } from './types';
+import { MessageType, ToolUseInfo, ToolResultInfo, TaskNotificationInfo, PROTOCOL_VERSION, MIN_SUPPORTED_CLI_VERSION, ROUTER_VERSION, ThreadSummary, QueueConfirmationInfo, QueueStartedInfo, ImageBlock } from './types';
 import { FeishuCardElement, createToolUseElement, createToolResultElement, createMarkdownElement, createRedactedThinkingElement, createPlanModeElement, createTaskNotificationElement, createImageElement } from './utils/ToolFormatter';
 
 interface StreamingMessageState {
@@ -23,6 +23,8 @@ interface StreamingMessageState {
   threadName?: string;
   threads?: ThreadSummary[];
   pendingNewThread?: boolean;
+  queueCardId?: string;
+  queueStarted?: QueueStartedInfo;
   updateInFlight?: Promise<void>;
   updatePending: boolean;
   finalizing: boolean;
@@ -45,6 +47,8 @@ export class RouterServer {
   private cleanupInterval: NodeJS.Timeout | null = null;
   // Track streaming messages and coalesced Feishu card update state.
   private streamingMessages = new Map<string, StreamingMessageState>();
+  private queueMessageOperations = new Map<string, Promise<void>>();
+  private startedQueueMessages = new Map<string, number>();
   private readonly STREAMING_SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes timeout
   // TTL for cardThreadMap entries: 7 days (allows users to reply to old cards)
   private readonly CARD_THREAD_MAP_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -74,7 +78,7 @@ export class RouterServer {
     this.feishuLongConnHandler.setConnectionHub(this.connectionHub);
 
     // Register callback for streaming message start
-    this.feishuLongConnHandler.setOnStartStreaming((messageId: string, openId: string, feishuMessageId: string | null, deviceId: string, threadId?: string, pendingNewThread?: boolean) => {
+    this.feishuLongConnHandler.setOnStartStreaming((messageId: string, openId: string, feishuMessageId: string | null, deviceId: string, threadId?: string, pendingNewThread?: boolean, queueCardId?: string) => {
       console.log(`[RouterServer] Registering streaming session: msgId=${messageId}, feishuMsgId=${feishuMessageId}, deviceId=${deviceId}, threadId=${threadId}, pendingNewThread=${pendingNewThread}`);
       this.streamingMessages.set(messageId, {
         openId,
@@ -86,6 +90,7 @@ export class RouterServer {
         deviceId,
         threadId,
         pendingNewThread,
+        queueCardId,
         updatePending: false,
         finalizing: false,
         lastRenderedTextLength: 0,
@@ -293,11 +298,32 @@ export class RouterServer {
 
       // Handle incoming messages
       ws.on('message', async (data: Buffer) => {
+        let finishQueueMessage: (() => void) | undefined;
         try {
           const message = JSON.parse(data.toString());
 
           // Update heartbeat on any message
           resetHeartbeat();
+
+          if (message.type === 'queue_started') {
+            await this.handleQueueStarted(message, deviceId);
+            return;
+          }
+          // Serialize queued output through card creation, asynchronous tool/image
+          // updates, and completion. Other threads retain independent streams.
+          if (this.startedQueueMessages.has(message.messageId)) {
+            const previous = this.queueMessageOperations.get(message.messageId);
+            const completed = new Promise<void>((resolve) => {
+              finishQueueMessage = () => {
+                resolve();
+                if (this.queueMessageOperations.get(message.messageId) === completed) {
+                  this.queueMessageOperations.delete(message.messageId);
+                }
+              };
+            });
+            this.queueMessageOperations.set(message.messageId, completed);
+            if (previous) await previous;
+          }
 
           switch (message.type) {
             case MessageType.BINDING_REQUEST:
@@ -323,7 +349,11 @@ export class RouterServer {
                   break;
                 }
 
-                this.connectionHub.registerConnection(deviceId, ws);
+                if (message.data.capabilities?.queueStarted === true) {
+                  this.connectionHub.registerConnection(deviceId, ws, { queueStarted: true });
+                } else {
+                  this.connectionHub.registerConnection(deviceId, ws);
+                }
                 console.log(`Device registered: ${deviceId} (protocol v${clientVersion})`);
 
                 // Send confirmation with version info for client-side version check
@@ -359,7 +389,7 @@ export class RouterServer {
               const responseOpenId = message.openId || message.data?.openId;
               const responseMessageId = message.messageId;
               const sessionAbbr = message.sessionAbbr || message.data?.sessionAbbr;
-              const cwd = message.cwd || message.data?.cwd;
+              const cwd = message.cwd || message.data?.cwd || this.streamingMessages.get(message.messageId)?.queueStarted?.cwd;
               const responseThreadId = message.threadId || message.data?.threadId;
               const responseThreads: ThreadSummary[] | undefined = message.threads || message.data?.threads;
               const queueConfirmation: QueueConfirmationInfo | undefined = message.queueConfirmation || message.data?.queueConfirmation;
@@ -498,6 +528,8 @@ export class RouterServer {
           }
         } catch (error) {
           console.error('Error processing message:', error);
+        } finally {
+          finishQueueMessage?.();
         }
       });
 
@@ -841,6 +873,81 @@ export class RouterServer {
     }
   }
 
+  /** Create a fresh card before accepting any output for a dequeued task. */
+  private async handleQueueStarted(message: any, deviceId: string | null): Promise<void> {
+    const info = message.queueStarted as QueueStartedInfo | undefined;
+    const { messageId, openId, threadId } = message;
+    if (!deviceId || typeof messageId !== 'string' || !messageId
+      || typeof openId !== 'string' || !openId || typeof threadId !== 'string' || !threadId
+      || !info || typeof info.threadName !== 'string' || typeof info.backend !== 'string'
+      || typeof info.cwd !== 'string' || typeof info.preview !== 'string'
+      || !Number.isInteger(info.remainingCount) || info.remainingCount < 0) return;
+    const previous = this.streamingMessages.get(messageId);
+    if (previous && (previous.deviceId !== deviceId || previous.openId !== openId
+      || (previous.threadId && previous.threadId !== threadId))) return;
+    const pending = this.queueMessageOperations.get(messageId);
+    if (pending) return pending;
+    if (this.startedQueueMessages.has(messageId)) return;
+
+    this.startedQueueMessages.set(messageId, Date.now());
+    const operation = Promise.resolve().then(async () => {
+      const intro = `▶️ **Queued task started**
+
+**Thread:** ${info.threadName} · **Backend:** ${info.backend}
+**Working directory:** \`${info.cwd}\`
+**Task:** ${info.preview}
+**Remaining in queue:** ${info.remainingCount}`;
+      let cardId: string | null = null;
+      try {
+        cardId = await this.feishuLongConnHandler.sendStreamingStart(openId, intro, info.threadName);
+      } catch (error) {
+        console.error('[RouterServer] Failed to create queued execution card:', error);
+      }
+      const fallbackCardId = previous?.feishuMessageId || previous?.queueCardId || null;
+      this.streamingMessages.set(messageId, {
+        openId,
+        deviceId,
+        threadId,
+        threadName: info.threadName,
+        feishuMessageId: cardId || fallbackCardId,
+        elements: [createMarkdownElement(intro)],
+        currentTextContent: '',
+        hasUpdated: false,
+        createdAt: Date.now(),
+        updatePending: false,
+        finalizing: false,
+        lastRenderedTextLength: 0,
+        queueStarted: info,
+        threads: Array.isArray(message.threads) ? message.threads : undefined,
+      });
+      if (cardId || fallbackCardId) {
+        this.cardThreadMap.set((cardId || fallbackCardId)!, {
+          threadId, deviceId, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS,
+        });
+      }
+      if (cardId) {
+        const oldCards = new Set([previous?.queueCardId, previous?.feishuMessageId]);
+        for (const oldCard of oldCards) {
+          if (!oldCard || oldCard === cardId) continue;
+          try {
+            await this.feishuLongConnHandler.markQueueCardStarted(oldCard);
+          } catch (error) {
+            // The new execution card remains usable if its old receipt expired.
+            console.error('[RouterServer] Failed to update queue receipt:', error);
+          }
+        }
+      }
+    });
+    this.queueMessageOperations.set(messageId, operation);
+    try {
+      await operation;
+    } finally {
+      if (this.queueMessageOperations.get(messageId) === operation) {
+        this.queueMessageOperations.delete(messageId);
+      }
+    }
+  }
+
   /**
    * Handle background task notification (Claude Code 2.x)
    *
@@ -926,6 +1033,17 @@ export class RouterServer {
           queueConfirmation
         );
       }
+    } else if (streamData.queueStarted) {
+      // If card creation failed after session recovery, retain a text result
+      // rather than silently losing the completed queued task's output.
+      const text = streamData.elements
+        .filter((element) => element.tag === 'markdown')
+        .map((element) => element.content)
+        .concat(streamData.currentTextContent, output || '')
+        .filter(Boolean)
+        .join('\n\n');
+      await this.feishuLongConnHandler.sendMessage(openId,
+        `${text}\n\n${success ? '✅ Completed' : `❌ Error: ${error || 'Command failed'}`}`);
     }
 
     // Clean up streaming session state (but NOT cardThreadMap — keep it alive
@@ -953,6 +1071,12 @@ export class RouterServer {
         this.streamingMessages.delete(messageId);
         this.lastStreamUpdateTime.delete(messageId);
         cleanedCount++;
+      }
+    }
+
+    for (const [messageId, startedAt] of this.startedQueueMessages) {
+      if (now - startedAt > this.CARD_THREAD_MAP_TTL_MS && !this.streamingMessages.has(messageId)) {
+        this.startedQueueMessages.delete(messageId);
       }
     }
 

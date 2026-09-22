@@ -80,6 +80,15 @@ export interface QueueConfirmationInfo {
   expiresAt: number;
 }
 
+/** Emitted immediately before a confirmed queued task starts executing. */
+export interface QueueStartedInfo {
+  threadName: string;
+  backend: string;
+  cwd: string;
+  preview: string;
+  remainingCount: number;
+}
+
 /**
  * Tool use content block
  */
@@ -175,7 +184,7 @@ export interface TaskNotificationInfo {
  * Outgoing message to router server
  */
 export interface OutgoingMessage {
-  type: 'result' | 'progress' | 'status' | 'pong' | 'structured' | 'stream' | 'response' | 'task_notification';
+  type: 'result' | 'progress' | 'status' | 'pong' | 'structured' | 'stream' | 'response' | 'task_notification' | 'queue_started';
   messageId: string;
   success?: boolean;
   /** Plain text output (for backward compatibility) */
@@ -210,6 +219,8 @@ export interface OutgoingMessage {
   threads?: ThreadSummary[];
   /** Queue confirmation requested for a busy thread. */
   queueConfirmation?: QueueConfirmationInfo;
+  /** Metadata for a fresh execution card when type is queue_started. */
+  queueStarted?: QueueStartedInfo;
   /** Current working directory (for response messages) */
   cwd?: string;
   /** Session abbreviation */
