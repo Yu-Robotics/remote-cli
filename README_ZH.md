@@ -563,7 +563,7 @@ remote-cli 自身不处理的斜杠命令会转发给当前 AI 后端，各后�
 /cd ~/workspace/docs
 ```
 
-直接回复某张已经完成的飞书卡片，消息会继续路由到该卡片所属的 thread。Thread 按钮会同时显示各 thread 工作目录的最后一级名称和所用 backend，便于区分并行 workspace。`/thread list` 可以查看所有 thread 的状态，`/status` 可以快速查看当前 backend、模型、工作目录和队列。
+直接回复某张已经完成的飞书卡片，消息会继续路由到该卡片所属的 thread。Thread 按钮会同时显示各 thread 工作目录的最后一级名称和所用 backend，便于区分并行 workspace。自动生成的 `thread-2` 等名称会在按钮上只显示序号，例如 `2`，自定义名称保持不变。长回复被拆分成多张卡片时，每张续卡都会重复显示 thread 和工作目录头部。`/thread list` 可以查看所有 thread 的状态，`/status` 可以快速查看当前 backend、模型、工作目录和队列。
 
 ### 组合使用全局和按线程 backend
 

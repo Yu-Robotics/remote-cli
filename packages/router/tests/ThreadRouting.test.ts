@@ -240,7 +240,10 @@ describe('RouterServer: Thread Routing', () => {
         elements: [
           {
             tag: 'button',
-            text: { tag: 'plain_text', content: t.id === activeThreadId ? `★ ${t.name}` : t.name },
+            text: {
+              tag: 'plain_text',
+              content: `${t.id === activeThreadId ? '★ ' : ''}${t.name.replace(/^thread-(\d+)$/, '$1')}`,
+            },
             type: t.id === activeThreadId ? 'primary' : 'default',
             disabled: t.id === activeThreadId,
             value: JSON.stringify({ action: 'switch_thread', threadId: t.id, threadName: t.name }),
@@ -400,7 +403,7 @@ describe('RouterServer: Thread Routing', () => {
         .flatMap(row => row.columns)
         .map(column => column.elements[0].text.content);
 
-      expect(labels).toEqual(['default', 'thread-2', 'thread-3', '+ New']);
+      expect(labels).toEqual(['default', '2', '3', '+ New']);
     });
   });
 

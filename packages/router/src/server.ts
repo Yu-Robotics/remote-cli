@@ -654,7 +654,8 @@ export class RouterServer {
       await this.feishuLongConnHandler.updateStreamingMessage(
         streamData.feishuMessageId,
         elements,
-        openId
+        openId,
+        streamData.threadName
       );
     } while (streamData.updatePending);
   }
@@ -689,7 +690,8 @@ export class RouterServer {
       await this.feishuLongConnHandler.updateStreamingMessage(
         streamData.feishuMessageId,
         streamData.elements,
-        openId
+        openId,
+        streamData.threadName
       );
       streamData.hasUpdated = true;
     }
@@ -725,7 +727,8 @@ export class RouterServer {
       await this.feishuLongConnHandler.updateStreamingMessage(
         streamData.feishuMessageId,
         streamData.elements,
-        openId
+        openId,
+        streamData.threadName
       );
       streamData.hasUpdated = true;
     }
@@ -762,7 +765,8 @@ export class RouterServer {
       await this.feishuLongConnHandler.updateStreamingMessage(
         streamData.feishuMessageId,
         streamData.elements,
-        openId
+        openId,
+        streamData.threadName
       );
       streamData.hasUpdated = true;
     }
@@ -798,7 +802,8 @@ export class RouterServer {
       await this.feishuLongConnHandler.updateStreamingMessage(
         streamData.feishuMessageId,
         streamData.elements,
-        openId
+        openId,
+        streamData.threadName
       );
       streamData.hasUpdated = true;
     }
@@ -829,7 +834,8 @@ export class RouterServer {
       await this.feishuLongConnHandler.updateStreamingMessage(
         streamData.feishuMessageId,
         streamData.elements,
-        openId
+        openId,
+        streamData.threadName
       );
       streamData.hasUpdated = true;
     }
@@ -913,8 +919,8 @@ export class RouterServer {
           streamData.elements,
           undefined,
           openId,
-          undefined,
-          undefined,
+          cwd,
+          streamData.threadName,
           streamData.threads,
           streamData.threadId,
           queueConfirmation
