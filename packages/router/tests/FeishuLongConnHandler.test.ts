@@ -725,6 +725,30 @@ describe('FeishuLongConnHandler', () => {
       expect(firstElementLast.tag).toBe('markdown');
       expect(firstElementLast.content).toContain('Continued from previous');
     });
+
+    it('should repeat the normal card header before each continuation indicator', () => {
+      const elements = Array.from({ length: 250 }, (_, i) => ({
+        tag: 'markdown',
+        content: `Element ${i}`,
+      }));
+      const headerElements = [
+        { tag: 'markdown', content: '🧵 **thread-2**  ·  📂 `/workspace/remote-cli`' },
+        { tag: 'hr' },
+      ];
+
+      const chunks = (handler as any).splitElementsIntoChunks(elements, headerElements);
+      const continuation = chunks[1];
+
+      expect(continuation.slice(0, 2)).toEqual(headerElements);
+      expect(continuation[2]).toEqual(expect.objectContaining({
+        tag: 'markdown',
+        content: expect.stringContaining('Continued from previous message'),
+      }));
+      expect(continuation.reduce(
+        (total: number, element: any) => total + (handler as any).countTaggedNodes(element),
+        0,
+      )).toBeLessThanOrEqual(150);
+    });
   });
 
   describe('createContinuationCard', () => {
@@ -784,7 +808,7 @@ describe('FeishuLongConnHandler', () => {
         data: { message_id: 'msg_continuation_1' },
       });
 
-      const result = await handler.updateStreamingMessage(messageId, elements, openId);
+      const result = await handler.updateStreamingMessage(messageId, elements, openId, 'thread-2');
 
       expect(result).toBe(true);
 
@@ -793,6 +817,14 @@ describe('FeishuLongConnHandler', () => {
 
       // Should create at least one continuation card
       expect(mockClient.im.message.create).toHaveBeenCalled();
+
+      const createRequest = mockClient.im.message.create.mock.calls[0][0];
+      const continuationElements = JSON.parse(createRequest.data.content).body.elements;
+      expect(continuationElements.slice(0, 3)).toEqual([
+        { tag: 'markdown', content: '🧵 **thread-2**' },
+        { tag: 'hr' },
+        expect.objectContaining({ content: expect.stringContaining('Continued from previous message') }),
+      ]);
     });
 
     it('should not create continuation cards for small element arrays', async () => {
@@ -899,11 +931,12 @@ describe('FeishuLongConnHandler', () => {
 
       expect(buttons.map((button: any) => button.text.content)).toEqual([
         'default',
-        '★ thread-2',
-        'thread-3',
+        '★ 2',
+        '3',
         '+ New',
       ]);
       expect(buttons[1].behaviors[0].value.threadId).toBe('thread-2-new-id');
+      expect(buttons[1].behaviors[0].value.threadName).toBe('thread-2');
     });
 
     it('sorts automatic names naturally without moving user-named thread positions', () => {
@@ -920,7 +953,7 @@ describe('FeishuLongConnHandler', () => {
         .flatMap((row: any) => row.columns)
         .map((column: any) => column.elements[0].text.content);
 
-      expect(labels).toEqual(['default', 'feature', 'thread-2', 'review', 'thread-10', '+ New']);
+      expect(labels).toEqual(['default', 'feature', '2', 'review', '10', '+ New']);
     });
 
     it('should create continuation cards when finalized elements exceed limit', async () => {
@@ -938,7 +971,14 @@ describe('FeishuLongConnHandler', () => {
         data: { message_id: 'msg_continuation_final' },
       });
 
-      const result = await handler.finalizeStreamingMessage(messageId, elements, 'abc123', openId);
+      const result = await handler.finalizeStreamingMessage(
+        messageId,
+        elements,
+        'abc123',
+        openId,
+        '/workspace/remote-cli',
+        'thread-2',
+      );
 
       expect(result).toBe(true);
 
@@ -948,6 +988,14 @@ describe('FeishuLongConnHandler', () => {
       // Should create continuation cards if needed
       // Note: The completion note adds one more element, so it should still trigger chunking
       expect(mockClient.im.message.create).toHaveBeenCalled();
+
+      const createRequest = mockClient.im.message.create.mock.calls[0][0];
+      const continuationElements = JSON.parse(createRequest.data.content).body.elements;
+      expect(continuationElements.slice(0, 3)).toEqual([
+        { tag: 'markdown', content: '🧵 **thread-2**  ·  📂 `/workspace/remote-cli`' },
+        { tag: 'hr' },
+        expect.objectContaining({ content: expect.stringContaining('Continued from previous message') }),
+      ]);
     });
 
     it('refreshes only the final chunk after a multi-card response', async () => {

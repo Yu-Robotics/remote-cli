@@ -1056,9 +1056,10 @@ Examples:
    * are counted, including nested components, text elements, and container children.
    *
    * @param elements Array of Feishu Card 2.0 elements
+   * @param continuationHeaderElements Header elements repeated at the top of continuation cards
    * @returns Array of element chunks, each satisfying Feishu's limits
    */
-  private splitElementsIntoChunks(elements: any[]): any[][] {
+  private splitElementsIntoChunks(elements: any[], continuationHeaderElements: any[] = []): any[][] {
     // If empty or very small, return as-is
     if (elements.length === 0) {
       return [elements];
@@ -1077,9 +1078,14 @@ Examples:
     let currentChunkSize = 0;
     let currentChunkTaggedNodes = 0;
 
-    // Reserve elements for continuation indicators (they add ~2 elements and ~200 bytes)
-    const continuationIndicatorSize = 200; // Approximate size of indicator element
-    const continuationIndicatorCount = 2; // Maximum 2 indicators per chunk (start + end)
+    // Reserve space for continuation indicators and the repeated card header.
+    const continuationHeaderSize = JSON.stringify(continuationHeaderElements).length;
+    const continuationHeaderTaggedNodes = continuationHeaderElements.reduce(
+      (total, element) => total + this.countTaggedNodes(element),
+      0,
+    );
+    const continuationIndicatorSize = 200 + continuationHeaderSize;
+    const continuationIndicatorCount = 2 + continuationHeaderTaggedNodes;
 
     for (let i = 0; i < elements.length; i++) {
       const element = elements[i];
@@ -1136,11 +1142,15 @@ Examples:
         }
 
         if (!isFirst) {
-          // Add "continued from previous message" indicator at the start
-          chunks[i].unshift({
-            tag: 'markdown',
-            content: '_⬅️ Continued from previous message..._\n\n',
-          });
+          // Repeat the normal card header before the continuation indicator so
+          // every card in a long response identifies its thread and workspace.
+          chunks[i].unshift(
+            ...continuationHeaderElements,
+            {
+              tag: 'markdown',
+              content: '_⬅️ Continued from previous message..._\n\n',
+            },
+          );
         }
       }
     }
@@ -1307,12 +1317,14 @@ Examples:
    * @param messageId The Feishu message ID
    * @param elements Array of Feishu Card 2.0 elements
    * @param openId User's open_id for creating continuation messages
+   * @param threadName Thread name shown in continuation card headers
    */
-  async updateStreamingMessage(messageId: string, elements: any[], openId?: string): Promise<boolean> {
-    return this.withMessageLock(messageId, () => this._updateStreamingMessage(messageId, elements, openId));
+  async updateStreamingMessage(messageId: string, elements: any[], openId?: string, threadName?: string): Promise<boolean> {
+    const continuationHeaderElements = this.createResponseHeaderElements(threadName);
+    return this.withMessageLock(messageId, () => this._updateStreamingMessage(messageId, elements, openId, continuationHeaderElements));
   }
 
-  private async _updateStreamingMessage(messageId: string, elements: any[], openId?: string): Promise<boolean> {
+  private async _updateStreamingMessage(messageId: string, elements: any[], openId?: string, continuationHeaderElements: any[] = []): Promise<boolean> {
     try {
       // Get or initialize message chain
       let chain = this.messageChains.get(messageId);
@@ -1322,7 +1334,7 @@ Examples:
       }
 
       // Split elements into chunks based on Feishu Card 2.0 limits
-      const chunks = this.splitElementsIntoChunks(elements);
+      const chunks = this.splitElementsIntoChunks(elements, continuationHeaderElements);
       console.log(`[FeishuHandler] Need ${chunks.length} card(s), currently have ${chain.length} card(s)`);
 
       // Update the first message with the first chunk
@@ -1399,27 +1411,14 @@ Examples:
 
   private async _finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string, threads?: ThreadSummary[], activeThreadId?: string, queueConfirmation?: QueueConfirmationInfo): Promise<boolean> {
     try {
-      // Build header element (thread name + working directory) at the top
-      const headerParts: string[] = [];
-      if (threadName) {
-        headerParts.push(`🧵 **${threadName}**`);
-      }
-      if (cwd) {
-        const formattedCwd = cwd.replace(process.env.HOME || '/Users', '~');
-        headerParts.push(`📂 \`${formattedCwd}\``);
-      }
-
       // Build completion note
       let noteContent = queueConfirmation ? '⏳ Awaiting queue confirmation' : '✅ Completed';
       if (sessionAbbr) {
         noteContent += ` · Session: ${sessionAbbr}`;
       }
 
-      const finalElements: any[] = [];
-      if (headerParts.length > 0) {
-        finalElements.push({ tag: 'markdown', content: headerParts.join('  ·  ') });
-        finalElements.push({ tag: 'hr' });
-      }
+      const headerElements = this.createResponseHeaderElements(threadName, cwd);
+      const finalElements: any[] = [...headerElements];
       finalElements.push(...elements, { tag: 'markdown', content: noteContent });
 
       if (queueConfirmation) {
@@ -1435,7 +1434,7 @@ Examples:
 
       // Reuse streaming update logic: only create cards, never delete.
       // Whatever layout was built during streaming stays as-is.
-      const updated = await this._updateStreamingMessage(messageId, finalElements, openId);
+      const updated = await this._updateStreamingMessage(messageId, finalElements, openId, headerElements);
       if (!updated) {
         return false;
       }
@@ -1443,7 +1442,7 @@ Examples:
       // Store thread switch card state for later refresh (before cleanup)
       if (threads && threads.length >= 1) {
         const chain = this.messageChains.get(messageId);
-        const chunks = this.splitElementsIntoChunks(finalElements);
+        const chunks = this.splitElementsIntoChunks(finalElements, headerElements);
         const lastChunkIndex = chunks.length - 1;
         const lastCardId = chain?.[lastChunkIndex];
 
@@ -1523,7 +1522,23 @@ Examples:
       thread.workspaceName,
       thread.backend ? this.backendLabel(thread.backend) : undefined,
     ].filter((detail): detail is string => Boolean(detail));
-    return `${active ? '★ ' : ''}${thread.name}${details.length > 0 ? ` · ${details.join(' · ')}` : ''}`;
+    const automaticName = /^thread-(\d+)$/.exec(thread.name);
+    const displayName = automaticName ? automaticName[1] : thread.name;
+    return `${active ? '★ ' : ''}${displayName}${details.length > 0 ? ` · ${details.join(' · ')}` : ''}`;
+  }
+
+  private createResponseHeaderElements(threadName?: string, cwd?: string): any[] {
+    const headerParts: string[] = [];
+    if (threadName) {
+      headerParts.push(`🧵 **${threadName}**`);
+    }
+    if (cwd) {
+      const formattedCwd = cwd.replace(process.env.HOME || '/Users', '~');
+      headerParts.push(`📂 \`${formattedCwd}\``);
+    }
+    return headerParts.length > 0
+      ? [{ tag: 'markdown', content: headerParts.join('  ·  ') }, { tag: 'hr' }]
+      : [];
   }
 
   /**
