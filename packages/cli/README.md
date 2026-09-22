@@ -94,6 +94,7 @@ Linux users upgrading from version 1.6.23 or earlier should run `remote-cli serv
 | `/abort` | Abort executing task in current thread |
 | `/queue` | Inspect or manage confirmed messages waiting in thread queues |
 | `/clear` | Clear context for this thread |
+| `/new` | Alias for `/clear`; start a fresh conversation in this thread |
 | `/compact` | Compress history to save tokens |
 | `/cd <dir>` | Change working directory for this thread |
 | `/model [name]` | List models for the active backend or set this thread's model |
@@ -129,7 +130,7 @@ Backend-specific commands are forwarded only where the active backend supports t
 
 Use one thread per project or task so each thread keeps its own working directory, backend session, model, and queue. Use `/backend <index>` for a global switch, or `/backend <index> @` to override only the current thread. `/backend default @` removes that override.
 
-When a thread is busy, ordinary messages require confirmation before they enter its queue. Use `/queue` to inspect pending work, `/queue clear` to discard queued messages, and `/abort` to stop the active task and clear that thread's queue. A message received during abort cleanup waits and starts after the backend is safe to reuse. A backend failure in the active task still advances to the first confirmed queued message; a failure in a task taken from the queue pauses the remaining queue. Context-changing commands such as `/model`, `/effort`, `/cd`, `/compact`, and `/clear` are handled separately rather than queued as ordinary messages.
+When a thread is busy, ordinary messages require confirmation before they enter its queue. Use `/queue` to inspect pending work, `/queue clear` to discard queued messages, and `/abort` to stop the active task and clear that thread's queue. A message received during abort cleanup waits and starts after the backend is safe to reuse. A backend failure in the active task still advances to the first confirmed queued message; a failure in a task taken from the queue pauses the remaining queue. Context-changing commands such as `/model`, `/effort`, `/cd`, `/compact`, `/clear`, and its `/new` alias are handled separately rather than queued as ordinary messages.
 
 ## Expert Usage
 

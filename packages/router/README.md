@@ -79,7 +79,7 @@ The `./router-data` bind mount stores Router data under the container's `/router
 | `remote-cli-router stop` | Stop the server |
 | `remote-cli-router status` | Check server status |
 
-The Feishu command reference includes the cross-backend `/status`, `/context`, and `/skills` commands, plus per-thread queue controls. See the root [README](../../README.md) for the complete command and backend behavior reference.
+The Feishu command reference includes the cross-backend `/status`, `/context`, and `/skills` commands, the `/clear` and `/new` fresh-conversation aliases, plus per-thread queue controls. See the root [README](../../README.md) for the complete command and backend behavior reference.
 
 ## Architecture
 
