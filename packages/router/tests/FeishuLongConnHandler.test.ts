@@ -846,12 +846,120 @@ describe('FeishuLongConnHandler', () => {
   });
 
   describe('finalizeStreamingMessage with chunking', () => {
+    const getButtons = (elements: any[]) => elements
+      .filter(element => element.tag === 'column_set')
+      .flatMap(row => row.columns)
+      .map(column => column.elements[0]);
+
+    it.each(['thread-2', 'release-review'])('separates the reply owner %s from the selected thread', async (replyName) => {
+      const threads = [
+        { id: 't2', name: replyName, workspaceName: 'project-b', status: 'idle' as const },
+        { id: 't3', name: 'thread-3', workspaceName: 'project-c', status: 'idle' as const },
+      ];
+      handler.setOnResolveActiveThread(() => ({ threadId: 't3', threadName: 'thread-3' }));
+      await handler.finalizeStreamingMessage('card-2', [], undefined, 'user', '/work/project-b', replyName, threads, 't2');
+
+      const elements = JSON.parse(mockClient.im.message.patch.mock.calls[0][0].data.content).body.elements;
+      expect(elements[0].content).toContain(replyName);
+      expect(elements).toContainEqual({
+        tag: 'markdown', text_size: 'notation', content: `Reply from: ${replyName} · project-b\nSwitch thread`,
+      });
+      const buttons = getButtons(elements);
+      expect(buttons[0]).toMatchObject({ type: 'default', disabled: false });
+      expect(buttons[1]).toMatchObject({
+        type: 'primary', disabled: false, text: { content: '✓ 3 · project-c' },
+      });
+      expect(buttons[0].text.content).toBe(`${replyName === 'thread-2' ? '2' : replyName} · project-b`);
+    });
+
+    it('highlights default for new messages even when replying to a different thread', async () => {
+      handler.setOnResolveActiveThread(() => undefined);
+      const threads = [
+        { id: 'td', name: 'default', status: 'idle' as const },
+        { id: 't2', name: 'thread-2', workspaceName: 'project-b', status: 'idle' as const },
+      ];
+      await handler.finalizeStreamingMessage('card-2', [], undefined, 'user', undefined, undefined, threads, 't2');
+      const elements = JSON.parse(mockClient.im.message.patch.mock.calls[0][0].data.content).body.elements;
+      expect(elements).toContainEqual(expect.objectContaining({ content: 'Reply from: thread-2 · project-b\nSwitch thread' }));
+      expect(getButtons(elements)[0]).toMatchObject({ type: 'primary', text: { content: '✓ default' } });
+      expect(getButtons(elements)[1].type).toBe('default');
+    });
+
+    it('does not claim a different selection when the active thread is absent from the summary', async () => {
+      handler.setOnResolveActiveThread(() => ({ threadId: 'missing', threadName: 'thread-3' }));
+      await handler.finalizeStreamingMessage('card', [], undefined, 'user', undefined, undefined, [
+        { id: 'td', name: 'default', status: 'idle' },
+      ], 'td');
+      const elements = JSON.parse(mockClient.im.message.patch.mock.calls[0][0].data.content).body.elements;
+      expect(getButtons(elements).every(button => button.type === 'default')).toBe(true);
+    });
+
+    it('keeps reply ownership fixed and updates only the clicked card', async () => {
+      let active = { threadId: 't2', threadName: 'thread-2' };
+      handler.setOnResolveActiveThread(() => active);
+      handler.onCardSwitchThread = vi.fn(async (_openId, threadId, threadName) => {
+        active = { threadId, threadName };
+      });
+      const threads = [
+        { id: 't2', name: 'thread-2', status: 'idle' as const },
+        { id: 't3', name: 'thread-3', status: 'idle' as const },
+      ];
+      await handler.finalizeStreamingMessage('older-card', [], undefined, 'user', '/work/project-b', 'thread-2', threads, 't2');
+      active = { threadId: 't3', threadName: 'thread-3' };
+      await handler.finalizeStreamingMessage('newer-card', [], undefined, 'user', '/work/project-c', 'thread-3', threads, 't3');
+      mockClient.im.message.patch.mockClear();
+
+      // The old card still highlights thread 2, but its button must allow selecting it again.
+      const toast = await handler.handleCardAction({
+        operator: { open_id: 'user' }, context: { open_message_id: 'older-card' },
+        action: { value: { action: 'switch_thread', threadId: 't2', threadName: 'thread-2' } },
+      });
+      expect(toast).toEqual({ toast: { type: 'success', content: 'Switched to: thread-2' } });
+      expect(active.threadId).toBe('t2');
+      expect(mockClient.im.message.patch).toHaveBeenCalledTimes(1);
+      expect(mockClient.im.message.patch.mock.calls[0][0].path.message_id).toBe('older-card');
+      const elements = JSON.parse(mockClient.im.message.patch.mock.calls[0][0].data.content).body.elements;
+      expect(elements).toContainEqual(expect.objectContaining({ content: 'Reply from: thread-2 · project-b\nSwitch thread' }));
+      expect(getButtons(elements)[0]).toMatchObject({ type: 'primary', disabled: false });
+
+      await handler.handleCardAction({
+        operator: { open_id: 'user' }, context: { open_message_id: 'older-card' },
+        action: { value: { action: 'switch_thread', threadId: 't3', threadName: 'thread-3' } },
+      });
+      const switched = JSON.parse(mockClient.im.message.patch.mock.calls[1][0].data.content).body.elements;
+      expect(switched).toContainEqual(expect.objectContaining({ content: 'Reply from: thread-2 · project-b\nSwitch thread' }));
+      expect(getButtons(switched)[1]).toMatchObject({ type: 'primary', disabled: false });
+    });
+
+    it('keeps a full thread panel together at a continuation boundary and after switching', async () => {
+      const threads = Array.from({ length: 10 }, (_, index) => ({
+        id: `t${index}`, name: `thread-${index + 1}`, status: 'idle' as const,
+      }));
+      const content = Array.from({ length: 135 }, () => ({ tag: 'markdown', content: 'Result' }));
+      mockClient.im.message.create.mockResolvedValue({ data: { message_id: 'last-card' } });
+      await handler.finalizeStreamingMessage('first-card', content, undefined, 'user', '/work/project', 'thread-1', threads, 't0');
+      const first = JSON.parse(mockClient.im.message.patch.mock.calls[0][0].data.content).body.elements;
+      expect(getButtons(first)).toHaveLength(0);
+      expect(first.some((element: any) => element.content?.startsWith('Reply from:'))).toBe(false);
+      const last = JSON.parse(mockClient.im.message.create.mock.calls[0][0].data.content).body.elements;
+      expect(last).toContainEqual(expect.objectContaining({ content: 'Reply from: thread-1 · project\nSwitch thread' }));
+      expect(getButtons(last)).toHaveLength(11);
+      expect(getButtons(last).at(-1)).toMatchObject({ disabled: true, text: { content: '+ New (max)' } });
+
+      mockClient.im.message.patch.mockClear();
+      await (handler as any).refreshThreadSwitchButtons('last-card', 't1');
+      const refreshed = JSON.parse(mockClient.im.message.patch.mock.calls[0][0].data.content).body.elements;
+      expect(refreshed.filter((element: any) => element.content?.startsWith('Reply from:'))).toHaveLength(1);
+      expect(getButtons(refreshed)).toHaveLength(11);
+      expect(refreshed.reduce((count: number, element: any) => count + (handler as any).countTaggedNodes(element), 0)).toBeLessThanOrEqual(150);
+    });
+
     it('shows the selected backend in thread switch buttons', () => {
       const elements = (handler as any).createThreadSwitchElements([
         { id: 'thread-1', name: 'Thread 1', status: 'idle', backend: 'codex' },
       ], 'thread-1');
 
-      expect(elements[1].columns[0].elements[0].text.content).toBe('★ Thread 1 · Codex');
+      expect(elements.find((element: any) => element.tag === 'column_set').columns[0].elements[0].text.content).toBe('✓ Thread 1 · Codex');
     });
 
     it.each([
@@ -867,7 +975,7 @@ describe('FeishuLongConnHandler', () => {
         { id: 'thread-1', name: 'Thread 1', status: 'idle', backend },
       ], 'thread-1');
 
-      expect(elements[1].columns[0].elements[0].text.content).toBe(`★ Thread 1 · ${label}`);
+      expect(elements.find((element: any) => element.tag === 'column_set').columns[0].elements[0].text.content).toBe(`✓ Thread 1 · ${label}`);
     });
 
     it('shows the workspace name in thread switch buttons', () => {
@@ -881,8 +989,8 @@ describe('FeishuLongConnHandler', () => {
         },
       ], 'thread-1');
 
-      expect(elements[1].columns[0].elements[0].text.content)
-        .toBe('★ Thread 1 · remote-cli · Codex');
+      expect(elements.find((element: any) => element.tag === 'column_set').columns[0].elements[0].text.content)
+        .toBe('✓ Thread 1 · remote-cli · Codex');
     });
 
     it('keeps legacy thread labels when the workspace name is absent', () => {
@@ -890,7 +998,7 @@ describe('FeishuLongConnHandler', () => {
         { id: 'thread-1', name: 'Thread 1', status: 'idle' },
       ]);
 
-      expect(elements[1].columns[0].elements[0].text.content).toBe('Thread 1');
+      expect(elements.find((element: any) => element.tag === 'column_set').columns[0].elements[0].text.content).toBe('Thread 1');
     });
 
     it('splits thread switch buttons into rows of at most three columns', () => {
@@ -907,7 +1015,7 @@ describe('FeishuLongConnHandler', () => {
       const labels = rows.flatMap((row: any) => row.columns)
         .map((column: any) => column.elements[0].text.content);
       expect(labels).toEqual([
-        '★ Thread 1',
+        '✓ Thread 1',
         'Thread 2',
         'Thread 3',
         'Thread 4',
@@ -932,7 +1040,7 @@ describe('FeishuLongConnHandler', () => {
 
       expect(buttons.map((button: any) => button.text.content)).toEqual([
         'default',
-        '★ 2',
+        '✓ 2',
         '3',
         '+ New',
       ]);
