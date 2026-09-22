@@ -517,7 +517,7 @@ remote-cli 自身不处理的斜杠命令会转发给当前 AI 后端，各后�
 - **Pi**：RPC `get_commands` 返回的扩展命令、提示模板和 `/skill:name` 技能通过持久化的 `pi --mode rpc` 会话发送；`/skills` 用于列出 Pi 技能。仅限 TUI 的内建命令会被拒绝。`/model`、`/effort`、`/compact` 和 `/abort` 仍由 remote-cli 自身处理
 
 内建命令（`/help`、`/status`、`/context`、`/skills`、`/clear`、`/new`、`/compact`、`/model`、`/cd`、`/thread`、`/backend`、`/abort`）可用于所有后端。`/new` 是 `/clear` 的完全别名：它会保留当前 remote-cli thread、工作目录、backend、模型和思考等级设置，同时启动一个全新的 backend 对话。`/effort` 可按线程设置 Codex、AGY、OpenCode、Kimi Code、ZCode 和 Pi 的思考等级；Claude Code 暂未实现。
-`/context` 可用于所有后端，会显示当前会话、模型、工作目录和队列状态；精确 Token 使用量取决于底层传输是否提供。`/skills` 在 Claude、AGY、OpenCode 和 Kimi Code 上使用原生信息命令，在 ZCode 上映射为原生 `/skill` 命令，在 Pi 上通过 RPC 列出技能；Codex 则扫描 `.agents/skills` 和 `~/.codex/skills` 下的本地 `SKILL.md` 文件。
+`/context` 可用于所有后端，会显示当前会话、模型、工作目录和队列状态。Pi 还会显示官方 RPC 返回的会话 Token 总计和当前上下文窗口用量；其他后端无法提供精确用量时，仍会显示传输层未提供该信息的提示。`/skills` 在 Claude、AGY、OpenCode 和 Kimi Code 上使用原生信息命令，在 ZCode 上映射为原生 `/skill` 命令，在 Pi 上通过 RPC 列出技能；Codex 则扫描 `.agents/skills` 和 `~/.codex/skills` 下的本地 `SKILL.md` 文件。
 
 ### 示例工作流程
 
@@ -845,7 +845,7 @@ remote-cli config set executor.type pi
 remote-cli config set executor.pi.model google/gemini-3-flash
 ```
 
-当前 Pi 包要求 Node.js 22.19.0 或更高版本。Pi 后端为每个活跃 thread 运行一个持久化的 `pi --mode rpc` 进程。会话文件保存在 `~/.remote-cli/pi-sessions/`，避免占用交互式 `~/.pi` 会话。`/model` 使用 RPC 的 `get_available_models` / `set_model`，`/effort` 映射到 Pi 的 thinking 等级（`off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`），`/compact` 使用原生 RPC 压缩，`/abort` 发送 RPC `abort`，图片消息作为 Pi 图片内容发送。由于 Pi 会把工作目录写入会话头，切换工作目录时会启动新的 Pi 会话。`autoApprove: true` 通过官方 `--approve` 参数信任项目本地资源；扩展 UI 对话框仍会转发给用户。切换到该后端前需先用交互式 `pi` 完成登录。
+当前 Pi 包要求 Node.js 22.19.0 或更高版本。Pi 后端为每个活跃 thread 运行一个持久化的 `pi --mode rpc` 进程。会话文件保存在 `~/.remote-cli/pi-sessions/`，避免占用交互式 `~/.pi` 会话。`/model` 使用 RPC 的 `get_available_models` / `set_model`，`/effort` 映射到 Pi 的 thinking 等级（`off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`），`/compact` 使用原生 RPC 压缩，`/abort` 发送 RPC `abort`，`/context` 使用 RPC `get_session_stats`，图片消息作为 Pi 图片内容发送。provider 自动重试时会显示进度，但不会把提示混入最终模型回答。由于 Pi 会把工作目录写入会话头，切换工作目录时会启动新的 Pi 会话。`autoApprove: true` 通过官方 `--approve` 参数信任项目本地资源；扩展 UI 对话框仍会转发给用户，并能显示兼容的结构化选择项中的标签与说明。切换到该后端前需先用交互式 `pi` 完成登录。
 
 #### 使用 Codex CLI（OpenAI）
 

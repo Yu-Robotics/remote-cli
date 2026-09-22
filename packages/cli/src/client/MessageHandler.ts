@@ -4,7 +4,7 @@ import { IncomingMessage, OutgoingMessage, StructuredContent, ToolUseInfo, ToolR
 import { ThreadExecutorPool } from '../thread/ThreadExecutorPool';
 import { ThreadManager } from '../thread/ThreadManager';
 import { DEFAULT_THREAD_NAME } from '../thread/types';
-import type { IExecutor } from '../executor/IExecutor';
+import type { ExecutorContextUsage, IExecutor } from '../executor/IExecutor';
 import { createExecutor } from '../executor';
 import { FeishuNotificationAdapter } from '../hooks';
 import { ConfigManager } from '../config/ConfigManager';
@@ -44,6 +44,41 @@ function backendDisplayName(key: string): string {
     case 'pi': return 'Pi';
     default: return 'Claude Code';
   }
+}
+
+function formatTokenCount(value: number): string {
+  return Math.round(value).toLocaleString('en-US');
+}
+
+function formatContextUsage(usage: ExecutorContextUsage | null): string {
+  if (!usage) return '- Token usage: exact usage is not exposed by the active remote transport';
+
+  const lines = ['- Token usage:'];
+  if (typeof usage.contextTokens === 'number') {
+    const window = typeof usage.contextWindow === 'number'
+      ? ` / ${formatTokenCount(usage.contextWindow)}`
+      : '';
+    const percent = typeof usage.contextPercent === 'number'
+      ? ` (${Number(usage.contextPercent.toFixed(1))}%)`
+      : '';
+    lines.push(`  - Current context: ${formatTokenCount(usage.contextTokens)}${window} tokens${percent}`);
+  } else if (usage.contextTokens === null) {
+    const window = typeof usage.contextWindow === 'number'
+      ? ` of ${formatTokenCount(usage.contextWindow)} tokens`
+      : '';
+    lines.push(`  - Current context: recalculating after compaction${window}`);
+  }
+
+  if (typeof usage.inputTokens === 'number') lines.push(`  - Session input: ${formatTokenCount(usage.inputTokens)} tokens`);
+  if (typeof usage.outputTokens === 'number') lines.push(`  - Session output: ${formatTokenCount(usage.outputTokens)} tokens`);
+  if (typeof usage.cacheReadTokens === 'number' || typeof usage.cacheWriteTokens === 'number') {
+    lines.push(`  - Session cache read/write: ${formatTokenCount(usage.cacheReadTokens ?? 0)} / ${formatTokenCount(usage.cacheWriteTokens ?? 0)} tokens`);
+  }
+  if (typeof usage.totalTokens === 'number') lines.push(`  - Session total: ${formatTokenCount(usage.totalTokens)} tokens`);
+
+  return lines.length > 1
+    ? lines.join('\n')
+    : '- Token usage: exact usage is not exposed by the active remote transport';
 }
 
 interface QueuedCommand {
@@ -518,9 +553,13 @@ export class MessageHandler {
       const model = thread?.models?.[backend] ?? (backend === 'claude' ? thread?.model : undefined);
       const effort = thread?.efforts?.[backend] ?? 'auto';
       const sessionId = typeof executor.getSessionId === 'function' ? executor.getSessionId() : null;
+      const contextUsage = typeof executor.getContextUsage === 'function'
+        ? await executor.getContextUsage()
+        : null;
       const queued = this.threadQueues.get(threadId)?.length ?? 0;
       const pending = Array.from(this.pendingQueueConfirmations.values())
         .filter((confirmation) => confirmation.info.threadId === threadId).length;
+      const usageLines = formatContextUsage(contextUsage);
       this.sendResponse(messageId, threadId, {
         success: true,
         output: `🧠 Context:
@@ -531,7 +570,7 @@ export class MessageHandler {
 - Working Directory: ${executor.getCurrentWorkingDirectory()}
 - Session: ${sessionId ?? 'not started'}
 - Queue: ${queued} confirmed, ${pending} awaiting confirmation
-- Token usage: exact usage is not exposed by the active remote transport
+${usageLines}
 
 Use /compact to reduce conversation context or /clear to start a fresh context.`,
       });
