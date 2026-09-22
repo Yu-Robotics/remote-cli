@@ -53,6 +53,17 @@ class FakePiTransport implements PiTransport {
     if (command.type === 'get_available_models') {
       return { type: 'response', command: 'get_available_models', success: true, data: { models } };
     }
+    if (command.type === 'get_session_stats') {
+      return {
+        type: 'response',
+        command: 'get_session_stats',
+        success: true,
+        data: {
+          tokens: { input: 50000, output: 10000, cacheRead: 40000, cacheWrite: 5000, total: 105000 },
+          contextUsage: { tokens: 60000, contextWindow: 200000, percent: 30 },
+        },
+      };
+    }
     if (command.type === 'set_model') {
       return { type: 'response', command: 'set_model', success: true, data: models[1] };
     }
@@ -224,6 +235,32 @@ describe('PiExecutor', () => {
     expect(transport.request).toHaveBeenCalledWith({ type: 'compact' }, expect.any(Number));
   });
 
+  it('returns Pi session and context usage from the official RPC statistics', async () => {
+    await expect(executor.getContextUsage()).resolves.toEqual({
+      inputTokens: 50000,
+      outputTokens: 10000,
+      cacheReadTokens: 40000,
+      cacheWriteTokens: 5000,
+      totalTokens: 105000,
+      contextTokens: 60000,
+      contextWindow: 200000,
+      contextPercent: 30,
+    });
+    expect(transport.request).toHaveBeenCalledWith({ type: 'get_session_stats' });
+  });
+
+  it('returns no usage when an older Pi RPC does not expose session statistics', async () => {
+    await executor.listModels();
+    transport.request.mockResolvedValueOnce({
+      type: 'response',
+      command: 'get_session_stats',
+      success: false,
+      error: 'Unknown command type: get_session_stats',
+    });
+
+    await expect(executor.getContextUsage()).resolves.toBeNull();
+  });
+
   it('resets context by dropping the session and recycling the process', async () => {
     const transports: FakePiTransport[] = [];
     await executor.destroy();
@@ -384,6 +421,78 @@ describe('PiExecutor', () => {
     expect(result.error).toMatch(/529/);
   });
 
+  it('streams Pi retry progress without adding it to the final model output', async () => {
+    transport.request.mockImplementation(async (command: Record<string, unknown>) => {
+      if (command.type === 'prompt') {
+        transport.emit({ type: 'agent_start' });
+        transport.emit({
+          type: 'auto_retry_start',
+          attempt: 1,
+          maxAttempts: 3,
+          delayMs: 2000,
+          errorMessage: '529 overloaded',
+        });
+        transport.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'recovered' } });
+        transport.emit({ type: 'auto_retry_end', success: true, attempt: 2 });
+        transport.emit({ type: 'agent_settled' });
+        return { type: 'response', command: 'prompt', success: true };
+      }
+      if (command.type === 'get_state') {
+        return { type: 'response', command: 'get_state', success: true, data: { sessionId: 'sess-pi-1' } };
+      }
+      return { type: 'response', command: String(command.type), success: true };
+    });
+    const chunks: string[] = [];
+
+    const result = await executor.execute('hello', { onStream: (chunk) => chunks.push(chunk) });
+
+    expect(result).toMatchObject({ success: true, output: 'recovered' });
+    expect(chunks.join('')).toContain('Pi retry 1/3 in 2s: 529 overloaded');
+    expect(result.output).not.toContain('Pi retry');
+  });
+
+  it('ignores message tool-call deltas and emits tools from execution events once', async () => {
+    transport.request.mockImplementation(async (command: Record<string, unknown>) => {
+      if (command.type === 'prompt') {
+        transport.emit({ type: 'agent_start' });
+        transport.emit({
+          type: 'message_update',
+          assistantMessageEvent: {
+            type: 'toolcall_end',
+            toolCall: { id: 'tool-current', name: 'bash', arguments: { command: 'pwd' } },
+          },
+        });
+        transport.emit({
+          type: 'tool_execution_start',
+          toolCallId: 'tool-current',
+          toolName: 'bash',
+          args: { command: 'pwd' },
+        });
+        transport.emit({
+          type: 'tool_execution_end',
+          toolCallId: 'tool-current',
+          result: { content: [{ type: 'text', text: '/tmp' }] },
+          isError: false,
+        });
+        transport.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'done' } });
+        transport.emit({ type: 'agent_settled' });
+        return { type: 'response', command: 'prompt', success: true };
+      }
+      if (command.type === 'get_state') {
+        return { type: 'response', command: 'get_state', success: true, data: { sessionId: 'sess-pi-1' } };
+      }
+      return { type: 'response', command: String(command.type), success: true };
+    });
+    const onToolUse = vi.fn();
+    const onToolResult = vi.fn();
+
+    await executor.execute('inspect', { onToolUse, onToolResult });
+
+    expect(onToolUse).toHaveBeenCalledTimes(1);
+    expect(onToolUse).toHaveBeenCalledWith({ id: 'tool-current', name: 'Bash', input: { command: 'pwd' } });
+    expect(onToolResult).toHaveBeenCalledTimes(1);
+  });
+
   it('aborts an in-flight turn without waiting for agent_settled', async () => {
     transport.request.mockImplementation(async (command: Record<string, unknown>) => {
       if (command.type === 'prompt') {
@@ -542,6 +651,45 @@ describe('PiExecutor', () => {
       id: 'ui-1',
       value: 'Block',
     });
+  });
+
+  it('renders nonstandard object select options without losing their values', async () => {
+    transport.request.mockImplementation(async (command: Record<string, unknown>) => {
+      if (command.type === 'prompt') {
+        transport.emit({
+          type: 'extension_ui_request',
+          id: 'ui-object',
+          method: 'select',
+          title: 'Choose a mode',
+          options: [
+            { label: 'Preview', value: 'preview', description: 'Read-only inspection' },
+            { label: 'Apply', value: 'apply', description: 'Modify files' },
+          ],
+        });
+        await vi.waitFor(() => expect(transport.send).toHaveBeenCalledWith({
+          type: 'extension_ui_response',
+          id: 'ui-object',
+          value: 'apply',
+        }));
+        transport.emit({ type: 'agent_start' });
+        transport.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'applied' } });
+        transport.emit({ type: 'agent_settled' });
+        return { type: 'response', command: 'prompt', success: true };
+      }
+      if (command.type === 'get_state') {
+        return { type: 'response', command: 'get_state', success: true, data: { sessionId: 'sess-pi-1' } };
+      }
+      return { type: 'response', command: String(command.type), success: true };
+    });
+    const chunks: string[] = [];
+
+    const running = executor.execute('choose', { onStream: (chunk) => chunks.push(chunk) });
+    await vi.waitFor(() => expect(executor.isWaitingInput()).toBe(true));
+    expect(chunks.join('')).toContain('2. Apply — Modify files');
+    expect(chunks.join('')).not.toContain('[object Object]');
+    expect(executor.sendInput('Apply')).toBe(true);
+
+    await expect(running).resolves.toMatchObject({ success: true, output: 'applied' });
   });
 
   it('relays extension confirmations even when project trust is enabled', async () => {

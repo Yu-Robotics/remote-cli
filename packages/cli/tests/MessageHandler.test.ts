@@ -390,6 +390,32 @@ describe('MessageHandler', () => {
           output: expect.stringContaining('Session: session-123'),
         })
       );
+      const response = vi.mocked(ctx.mockWsClient.send).mock.calls.at(-1)?.[0];
+      expect(response.output).toContain('Token usage: exact usage is not exposed');
+      expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
+    });
+
+    it('should show exact Pi context statistics when the backend exposes them', async () => {
+      ctx.mockConfig.get.mockReturnValue({ type: 'pi' });
+      ctx.mockExecutor.getContextUsage = vi.fn().mockResolvedValue({
+        inputTokens: 50000,
+        outputTokens: 10000,
+        cacheReadTokens: 40000,
+        cacheWriteTokens: 5000,
+        totalTokens: 105000,
+        contextTokens: 60000,
+        contextWindow: 200000,
+        contextPercent: 30,
+      });
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-pi-context', content: '/context', timestamp: Date.now() });
+
+      const response = vi.mocked(ctx.mockWsClient.send).mock.calls.at(-1)?.[0];
+      expect(response.output).toContain('Backend: pi');
+      expect(response.output).toContain('Current context: 60,000 / 200,000 tokens (30%)');
+      expect(response.output).toContain('Session cache read/write: 40,000 / 5,000 tokens');
+      expect(response.output).toContain('Session total: 105,000 tokens');
+      expect(ctx.mockExecutor.getContextUsage).toHaveBeenCalledOnce();
       expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
     });
 

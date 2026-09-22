@@ -3,7 +3,13 @@ import * as os from 'os';
 import * as path from 'path';
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import type { Attachment } from '../types';
-import type { ExecuteOptions, ExecuteResult, ExecutorModelInfo, IExecutor } from './IExecutor';
+import type {
+  ExecuteOptions,
+  ExecuteResult,
+  ExecutorContextUsage,
+  ExecutorModelInfo,
+  IExecutor,
+} from './IExecutor';
 import { PiClient } from './pi/PiClient';
 import {
   formatPiModelRef,
@@ -43,7 +49,13 @@ interface PendingUiRequest {
   id: string;
   method: string;
   title?: string;
-  options?: string[];
+  options?: PiUiOption[];
+}
+
+interface PiUiOption {
+  label: string;
+  value: string;
+  description?: string;
 }
 
 interface SessionPointer {
@@ -129,6 +141,41 @@ function toolResultText(result: any): string {
     }).join('');
   }
   return JSON.stringify(result);
+}
+
+function normalizeUiOption(option: unknown): PiUiOption {
+  if (typeof option === 'string') return { label: option, value: option };
+  if (option && typeof option === 'object') {
+    const record = option as Record<string, unknown>;
+    const label = [record.label, record.name, record.title, record.value]
+      .find((value) => typeof value === 'string' && value.trim()) as string | undefined;
+    const value = typeof record.value === 'string' && record.value.trim() ? record.value : label;
+    const description = typeof record.description === 'string' && record.description.trim()
+      ? record.description.trim()
+      : undefined;
+    if (label && value) return { label: label.trim(), value: value.trim(), description };
+  }
+  const text = String(option);
+  return { label: text, value: text };
+}
+
+function retryNotice(event: Record<string, any>): string {
+  const attempt = Number.isFinite(event.attempt) ? Number(event.attempt) : undefined;
+  const maxAttempts = Number.isFinite(event.maxAttempts) ? Number(event.maxAttempts) : undefined;
+  const delayMs = Number.isFinite(event.delayMs) ? Number(event.delayMs) : undefined;
+  const progress = attempt !== undefined
+    ? `${attempt}${maxAttempts !== undefined ? `/${maxAttempts}` : ''}`
+    : '';
+  const delay = delayMs !== undefined
+    ? ` in ${delayMs >= 1000 ? `${Number((delayMs / 1000).toFixed(1))}s` : `${delayMs}ms`}`
+    : '';
+  const rawError = typeof event.errorMessage === 'string' ? event.errorMessage.replace(/\s+/g, ' ').trim() : '';
+  const error = rawError.length > 240 ? `${rawError.slice(0, 237)}...` : rawError;
+  return `\n⏳ Pi retry${progress ? ` ${progress}` : ''}${delay}${error ? `: ${error}` : ''}\n`;
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
 /**
@@ -373,11 +420,14 @@ export class PiExecutor implements IExecutor {
     const options = pending.options ?? [];
     const index = Number.parseInt(trimmed, 10);
     if (!Number.isNaN(index) && index >= 1 && index <= options.length) {
-      this.client.send({ type: 'extension_ui_response', id: pending.id, value: options[index - 1] });
+      this.client.send({ type: 'extension_ui_response', id: pending.id, value: options[index - 1].value });
       return true;
     }
-    const match = options.find((option) => option.toLowerCase() === trimmed.toLowerCase());
-    this.client.send({ type: 'extension_ui_response', id: pending.id, value: match ?? trimmed });
+    const match = options.find((option) => (
+      option.label.toLowerCase() === trimmed.toLowerCase()
+      || option.value.toLowerCase() === trimmed.toLowerCase()
+    ));
+    this.client.send({ type: 'extension_ui_response', id: pending.id, value: match?.value ?? trimmed });
     return true;
   }
 
@@ -516,6 +566,30 @@ export class PiExecutor implements IExecutor {
 
   getSessionId(): string | null {
     return this.sessionId;
+  }
+
+  async getContextUsage(): Promise<ExecutorContextUsage | null> {
+    try {
+      await this.ensureClient();
+      const response = await this.client.request({ type: 'get_session_stats' });
+      if (!response.success || !response.data) return null;
+      const tokens = response.data.tokens;
+      const context = response.data.contextUsage;
+      const usage: ExecutorContextUsage = {
+        inputTokens: finiteNumber(tokens?.input),
+        outputTokens: finiteNumber(tokens?.output),
+        cacheReadTokens: finiteNumber(tokens?.cacheRead),
+        cacheWriteTokens: finiteNumber(tokens?.cacheWrite),
+        totalTokens: finiteNumber(tokens?.total),
+        contextTokens: context?.tokens === null ? null : finiteNumber(context?.tokens),
+        contextWindow: finiteNumber(context?.contextWindow),
+        contextPercent: context?.percent === null ? null : finiteNumber(context?.percent),
+      };
+      return Object.values(usage).some((value) => value !== undefined) ? usage : null;
+    } catch {
+      // Older Pi releases do not expose get_session_stats.
+      return null;
+    }
   }
 
   async deleteThreadData(threadId: string): Promise<void> {
@@ -716,8 +790,9 @@ export class PiExecutor implements IExecutor {
       return;
     }
 
-    if (event.type === 'auto_retry_start' && event.errorMessage) {
-      active.lastRetryError = String(event.errorMessage);
+    if (event.type === 'auto_retry_start') {
+      if (event.errorMessage) active.lastRetryError = String(event.errorMessage);
+      active.options.onStream?.(retryNotice(event));
       return;
     }
 
@@ -743,7 +818,7 @@ export class PiExecutor implements IExecutor {
       return;
     }
 
-    const options = Array.isArray(event.options) ? event.options.map((option: unknown) => String(option)) : [];
+    const options = Array.isArray(event.options) ? event.options.map(normalizeUiOption) : [];
     const title = String(event.title || event.message || 'Pi needs input');
 
     // Pi extension dialogs are application-defined. A confirm request may be
@@ -759,7 +834,11 @@ export class PiExecutor implements IExecutor {
     if (method === 'confirm') {
       lines = [`\n${title}`, 'Reply yes or no.\n'];
     } else if (method === 'select') {
-      lines = [`\n${title}`, ...options.map((option, index) => `${index + 1}. ${option}`), 'Reply with an option number, option name, skip, or cancel.\n'];
+      lines = [
+        `\n${title}`,
+        ...options.map((option, index) => `${index + 1}. ${option.label}${option.description ? ` — ${option.description}` : ''}`),
+        'Reply with an option number, option name, skip, or cancel.\n',
+      ];
     } else {
       lines = [`\n${title}`, 'Reply with a value, or send skip or cancel.\n'];
     }
