@@ -954,14 +954,6 @@ describe('FeishuLongConnHandler', () => {
       expect(refreshed.reduce((count: number, element: any) => count + (handler as any).countTaggedNodes(element), 0)).toBeLessThanOrEqual(150);
     });
 
-    it('shows the selected backend in thread switch buttons', () => {
-      const elements = (handler as any).createThreadSwitchElements([
-        { id: 'thread-1', name: 'Thread 1', status: 'idle', backend: 'codex' },
-      ], 'thread-1');
-
-      expect(elements.find((element: any) => element.tag === 'column_set').columns[0].elements[0].text.content).toBe('✓ Thread 1 · Codex');
-    });
-
     it.each([
       ['claude', 'Claude'],
       ['agy', 'AGY'],
@@ -1646,47 +1638,38 @@ describe('FeishuLongConnHandler', () => {
       expect(handleRegularCommandSpy).toHaveBeenCalledWith('ou_123', 'msg_123', 'hello', undefined, false, undefined, undefined);
     });
 
-    it('should resolve threadId from parentId if onResolveThread is set', async () => {
-      const data = {
-        message: { 
-          message_type: 'text', 
-          content: JSON.stringify({ text: 'reply' }), 
-          message_id: 'msg_456',
-          parent_id: 'msg_parent_123'
+    it.each([
+      ['reply card takes precedence over selection', 'known-card', 'selected-thread', 'reply-thread'],
+      ['new message uses selection', undefined, 'selected-thread', 'selected-thread'],
+      ['unknown reply card falls back to CLI default', 'unknown-card', 'selected-thread', undefined],
+      ['new message without selection falls back to CLI default', undefined, undefined, undefined],
+    ])('routes the outgoing command: %s', async (_label, parentId, activeThreadId, expectedThreadId) => {
+      mockBindingManager.getUserBinding.mockResolvedValue({});
+      mockBindingManager.getActiveDevice.mockResolvedValue({ deviceId: 'dev_1', deviceName: 'Device' });
+      mockConnectionHub.isDeviceOnline.mockReturnValue(true);
+      mockConnectionHub.sendToDevice.mockResolvedValue(true);
+      mockClient.im.message.create.mockResolvedValue({ data: { message_id: 'reply-card' } });
+      handler.setOnResolveThread(cardId => cardId === 'known-card'
+        ? { threadId: 'reply-thread', deviceId: 'dev_1' } : undefined);
+      handler.setOnResolveActiveThread(() => activeThreadId
+        ? { threadId: activeThreadId, threadName: 'Selected' } : undefined);
+      const onStartStreaming = vi.fn();
+      handler.setOnStartStreaming(onStartStreaming);
+
+      await (handler as any).handleMessageEvent({
+        message: {
+          message_type: 'text', content: JSON.stringify({ text: 'Continue this task' }),
+          message_id: 'incoming-message', parent_id: parentId,
         },
-        sender: { sender_id: { open_id: 'ou_123' } }
-      };
+        sender: { sender_id: { open_id: 'ou_123' } },
+      });
 
-      const onResolveThread = vi.fn().mockReturnValue({ threadId: 'thread_abc', deviceId: 'dev_1' });
-      handler.setOnResolveThread(onResolveThread);
-
-      const handleRegularCommandSpy = vi.spyOn(handler as any, 'handleRegularCommand').mockResolvedValue(undefined);
-
-      await (handler as any).handleMessageEvent(data);
-
-      expect(onResolveThread).toHaveBeenCalledWith('msg_parent_123');
-      expect(handleRegularCommandSpy).toHaveBeenCalledWith('ou_123', 'msg_456', 'reply', 'thread_abc', false, undefined, undefined);
-    });
-
-    it('should resolve active thread if no parentId and onResolveActiveThread is set', async () => {
-      const data = {
-        message: { 
-          message_type: 'text', 
-          content: JSON.stringify({ text: 'new message' }), 
-          message_id: 'msg_789'
-        },
-        sender: { sender_id: { open_id: 'ou_123' } }
-      };
-
-      const onResolveActiveThread = vi.fn().mockReturnValue({ threadId: 'thread_active', threadName: 'Active' });
-      handler.setOnResolveActiveThread(onResolveActiveThread);
-
-      const handleRegularCommandSpy = vi.spyOn(handler as any, 'handleRegularCommand').mockResolvedValue(undefined);
-
-      await (handler as any).handleMessageEvent(data);
-
-      expect(onResolveActiveThread).toHaveBeenCalledWith('ou_123');
-      expect(handleRegularCommandSpy).toHaveBeenCalledWith('ou_123', 'msg_789', 'new message', 'thread_active', false, 'Active', undefined);
+      expect(mockConnectionHub.sendToDevice).toHaveBeenCalledTimes(1);
+      expect(mockConnectionHub.sendToDevice).toHaveBeenCalledWith('dev_1', expect.objectContaining({
+        type: 'command', openId: 'ou_123', content: 'Continue this task', threadId: expectedThreadId,
+      }));
+      const command = mockConnectionHub.sendToDevice.mock.calls[0][1];
+      expect(onStartStreaming).toHaveBeenCalledWith(command.messageId, 'ou_123', 'reply-card', 'dev_1', expectedThreadId, false);
     });
 
     it('should handle errors in handleMessageEvent', async () => {

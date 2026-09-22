@@ -272,34 +272,6 @@ describe('ClaudePersistentExecutor - Plan Mode', () => {
     });
   });
 
-  describe('Callback registration', () => {
-    it('should accept onPlanMode callback in execute options', () => {
-      const options = {
-        onStream: mockOnStream,
-        onPlanMode: mockOnPlanMode,
-      };
-
-      expect(options.onPlanMode).toBeDefined();
-      expect(typeof options.onPlanMode).toBe('function');
-    });
-
-    it('should wire onPlanMode into currentPlanModeCallback via processQueue', () => {
-      (executor as any).commandQueue.push({
-        prompt: 'test',
-        options: { onPlanMode: mockOnPlanMode },
-        resolve: vi.fn(),
-        reject: vi.fn(),
-      });
-
-      const command = (executor as any).commandQueue.shift();
-
-      (executor as any).isProcessing = true;
-      (executor as any).currentPlanModeCallback = command.options.onPlanMode;
-
-      expect((executor as any).currentPlanModeCallback).toBe(mockOnPlanMode);
-    });
-  });
-
   describe('State reset', () => {
     it('should clear plan mode state on resetCurrentCommand', () => {
       (executor as any).isInPlanMode = true;

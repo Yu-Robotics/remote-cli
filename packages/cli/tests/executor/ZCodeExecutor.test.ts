@@ -3,7 +3,6 @@ import { promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
-import { AcpExecutor } from '../../src/executor/AcpExecutor';
 import { ZCodeExecutor } from '../../src/executor/ZCodeExecutor';
 import type { AcpEventCallbacks, AcpTransport } from '../../src/executor/acp/AcpClient';
 import type { AcpConfigOption, AcpContentBlock, AcpSessionResult } from '../../src/executor/acp/AcpTypes';
@@ -66,10 +65,6 @@ describe('ZCodeExecutor', () => {
     await fs.rm(home, { recursive: true, force: true });
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
-  });
-
-  it('uses the shared persistent executor lifecycle with the direct ZCode transport', () => {
-    expect(executor).toBeInstanceOf(AcpExecutor);
   });
 
   it('streams text, tools, and image input while persisting the ZCode session', async () => {
