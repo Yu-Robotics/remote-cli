@@ -41,7 +41,7 @@ export class FeishuLongConnHandler {
   private messageChains: Map<string, string[]> = new Map();
   // Store thread switch card state for re-patching after thread switch.
   // Entries are cleaned up after THREAD_SWITCH_STATE_TTL_MS (1 day).
-  private threadSwitchCardState = new Map<string, { baseElements: any[]; threads: ThreadSummary[]; activeThreadId?: string; createdAt: number }>();
+  private threadSwitchCardState = new Map<string, { baseElements: any[]; threads: ThreadSummary[]; activeThreadId?: string; replyLabel?: string; createdAt: number }>();
   private readonly THREAD_SWITCH_STATE_TTL_MS = 24 * 60 * 60 * 1000; // 1 day
   private threadSwitchStateCleanupTimer: NodeJS.Timeout | null = null;
   // Track the last processed text length for each message chain
@@ -1058,9 +1058,10 @@ Examples:
    *
    * @param elements Array of Feishu Card 2.0 elements
    * @param continuationHeaderElements Header elements repeated at the top of continuation cards
+   * @param trailingElements Final panel elements that must remain together
    * @returns Array of element chunks, each satisfying Feishu's limits
    */
-  private splitElementsIntoChunks(elements: any[], continuationHeaderElements: any[] = []): any[][] {
+  private splitElementsIntoChunks(elements: any[], continuationHeaderElements: any[] = [], trailingElements: any[] = []): any[][] {
     // If empty or very small, return as-is
     if (elements.length === 0) {
       return [elements];
@@ -1093,12 +1094,18 @@ Examples:
       const elementSize = JSON.stringify(element).length;
       const elementTaggedNodes = this.countTaggedNodes(element);
 
+      // Keep the switch panel caption and all button rows on the same card.
+      const groupSize = element === trailingElements[0]
+        ? trailingElements.reduce((sum, item) => sum + JSON.stringify(item).length, 0) : elementSize;
+      const groupTaggedNodes = element === trailingElements[0]
+        ? trailingElements.reduce((sum, item) => sum + this.countTaggedNodes(item), 0) : elementTaggedNodes;
+
       // Check if adding this element would exceed limits
       // Reserve space for continuation indicators
       const wouldExceedElementLimit =
-        currentChunkTaggedNodes + elementTaggedNodes > (this.CARD_ELEMENT_LIMIT - continuationIndicatorCount);
+        currentChunkTaggedNodes + groupTaggedNodes > (this.CARD_ELEMENT_LIMIT - continuationIndicatorCount);
       const wouldExceedSizeLimit =
-        currentChunkSize + elementSize + continuationIndicatorSize >
+        currentChunkSize + groupSize + continuationIndicatorSize >
         (this.CARD_DATA_SIZE_LIMIT - this.CARD_SIZE_BUFFER);
 
       if (currentChunk.length > 0 && (wouldExceedElementLimit || wouldExceedSizeLimit)) {
@@ -1325,7 +1332,7 @@ Examples:
     return this.withMessageLock(messageId, () => this._updateStreamingMessage(messageId, elements, openId, continuationHeaderElements));
   }
 
-  private async _updateStreamingMessage(messageId: string, elements: any[], openId?: string, continuationHeaderElements: any[] = []): Promise<boolean> {
+  private async _updateStreamingMessage(messageId: string, elements: any[], openId?: string, continuationHeaderElements: any[] = [], trailingElements: any[] = []): Promise<boolean> {
     try {
       // Get or initialize message chain
       let chain = this.messageChains.get(messageId);
@@ -1335,7 +1342,7 @@ Examples:
       }
 
       // Split elements into chunks based on Feishu Card 2.0 limits
-      const chunks = this.splitElementsIntoChunks(elements, continuationHeaderElements);
+      const chunks = this.splitElementsIntoChunks(elements, continuationHeaderElements, trailingElements);
       console.log(`[FeishuHandler] Need ${chunks.length} card(s), currently have ${chain.length} card(s)`);
 
       // Update the first message with the first chunk
@@ -1405,12 +1412,13 @@ Examples:
    * @param elements Array of Feishu Card 2.0 elements
    * @param sessionAbbr Optional session abbreviation
    * @param openId User's open_id for creating continuation messages
+   * @param replyThreadId Thread that produced the reply, independent of the selected thread
    */
-  async finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string, threads?: ThreadSummary[], activeThreadId?: string, queueConfirmation?: QueueConfirmationInfo): Promise<boolean> {
-    return this.withMessageLock(messageId, () => this._finalizeStreamingMessage(messageId, elements, sessionAbbr, openId, cwd, threadName, threads, activeThreadId, queueConfirmation));
+  async finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string, threads?: ThreadSummary[], replyThreadId?: string, queueConfirmation?: QueueConfirmationInfo): Promise<boolean> {
+    return this.withMessageLock(messageId, () => this._finalizeStreamingMessage(messageId, elements, sessionAbbr, openId, cwd, threadName, threads, replyThreadId, queueConfirmation));
   }
 
-  private async _finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string, threads?: ThreadSummary[], activeThreadId?: string, queueConfirmation?: QueueConfirmationInfo): Promise<boolean> {
+  private async _finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string, threads?: ThreadSummary[], replyThreadId?: string, queueConfirmation?: QueueConfirmationInfo): Promise<boolean> {
     try {
       // Build completion note
       let noteContent = queueConfirmation ? '⏳ Awaiting queue confirmation' : '✅ Completed';
@@ -1428,14 +1436,23 @@ Examples:
 
       // Append thread switch buttons when at least one thread exists
       let threadSwitchElements: any[] = [];
+      // The reply's owner and the destination of new messages are independent.
+      const activeThreadId = (openId ? this.onResolveActiveThread?.(openId)?.threadId : undefined)
+        ?? threads?.find(thread => thread.name === 'default')?.id;
+      const replyThread = threads?.find(thread => thread.id === replyThreadId);
+      const replyThreadName = threadName ?? replyThread?.name;
+      const replyWorkspace = cwd ? path.posix.basename(cwd.replace(/\\/g, '/')) || cwd : replyThread?.workspaceName;
+      const replyLabel = replyThreadName
+        ? [replyThreadName, replyWorkspace].filter(Boolean).join(' · ')
+        : undefined;
       if (threads && threads.length >= 1) {
-        threadSwitchElements = this.createThreadSwitchElements(threads, activeThreadId);
+        threadSwitchElements = this.createThreadSwitchElements(threads, activeThreadId, replyLabel);
         finalElements.push(...threadSwitchElements);
       }
 
       // Reuse streaming update logic: only create cards, never delete.
       // Whatever layout was built during streaming stays as-is.
-      const updated = await this._updateStreamingMessage(messageId, finalElements, openId, headerElements);
+      const updated = await this._updateStreamingMessage(messageId, finalElements, openId, headerElements, threadSwitchElements);
       if (!updated) {
         return false;
       }
@@ -1443,7 +1460,7 @@ Examples:
       // Store thread switch card state for later refresh (before cleanup)
       if (threads && threads.length >= 1) {
         const chain = this.messageChains.get(messageId);
-        const chunks = this.splitElementsIntoChunks(finalElements, headerElements);
+        const chunks = this.splitElementsIntoChunks(finalElements, headerElements, threadSwitchElements);
         const lastChunkIndex = chunks.length - 1;
         const lastCardId = chain?.[lastChunkIndex];
 
@@ -1452,6 +1469,7 @@ Examples:
             baseElements: chunks[lastChunkIndex].filter((element) => !threadSwitchElements.includes(element)),
             threads,
             activeThreadId,
+            replyLabel,
             createdAt: Date.now(),
           });
         }
@@ -1473,7 +1491,7 @@ Examples:
    * Renders one button per thread (active is highlighted) plus a "+ New" button,
    * split across rows so desktop clients do not compress every button into one line.
    */
-  private createThreadSwitchElements(threads: ThreadSummary[], activeThreadId?: string): any[] {
+  private createThreadSwitchElements(threads: ThreadSummary[], activeThreadId?: string, replyLabel?: string): any[] {
     const orderedThreads = this.orderThreadsForDisplay(threads);
     const threadColumns = orderedThreads.map((t) => ({
       tag: 'column',
@@ -1483,7 +1501,7 @@ Examples:
           tag: 'button',
           text: { tag: 'plain_text', content: this.threadButtonLabel(t, t.id === activeThreadId) },
           type: t.id === activeThreadId ? 'primary' : 'default',
-          disabled: t.id === activeThreadId,
+          disabled: false,
           behaviors: [{ type: 'callback', value: { action: 'switch_thread', threadId: t.id, threadName: t.name } }],
         },
       ],
@@ -1515,7 +1533,12 @@ Examples:
       });
     }
 
-    return [{ tag: 'hr' }, ...rows];
+    const caption = {
+      tag: 'markdown',
+      text_size: 'notation',
+      content: replyLabel ? `Reply from: ${replyLabel}\nSwitch thread` : 'Switch thread',
+    };
+    return [{ tag: 'hr' }, caption, ...rows];
   }
 
   private threadButtonLabel(thread: ThreadSummary, active: boolean): string {
@@ -1525,7 +1548,7 @@ Examples:
     ].filter((detail): detail is string => Boolean(detail));
     const automaticName = /^thread-(\d+)$/.exec(thread.name);
     const displayName = automaticName ? automaticName[1] : thread.name;
-    return `${active ? '★ ' : ''}${displayName}${details.length > 0 ? ` · ${details.join(' · ')}` : ''}`;
+    return `${active ? '✓ ' : ''}${displayName}${details.length > 0 ? ` · ${details.join(' · ')}` : ''}`;
   }
 
   private createResponseHeaderElements(threadName?: string, cwd?: string): any[] {
@@ -1623,7 +1646,7 @@ Examples:
     }
     const updatedElements = [
       ...state.baseElements,
-      ...this.createThreadSwitchElements(state.threads, newActiveThreadId),
+      ...this.createThreadSwitchElements(state.threads, newActiveThreadId, state.replyLabel),
     ];
     await this.client.im.message.patch({
       path: { message_id: cardMessageId },
