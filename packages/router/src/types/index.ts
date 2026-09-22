@@ -169,6 +169,15 @@ export interface ImageBlock extends ContentBlock {
  */
 export type Attachment = ImageBlock;
 
+/** Emitted immediately before a confirmed queued task starts executing. */
+export interface QueueStartedInfo {
+  threadName: string;
+  backend: string;
+  cwd: string;
+  preview: string;
+  remainingCount: number;
+}
+
 /** Confirmation payload for a message waiting to be added to a busy thread queue. */
 export interface QueueConfirmationInfo {
   id: string;

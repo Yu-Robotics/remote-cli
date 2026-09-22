@@ -468,6 +468,8 @@ Backend index 使用 `/backend` 显示的顺序（安装后通常为 Claude Code
 
 每个 thread 同时只执行一条命令，因为 Claude Code、AGY、Codex、OpenCode、Kimi Code、ZCode 和 Pi 的会话都按顺序处理。如果在线程忙碌时发送普通消息，remote-cli 会先发送飞书确认卡片，不会直接入队。只有点击 **Add to queue** 后消息才会入队；点击 **Cancel** 或确认超时都会丢弃消息。
 
+With a CLI and Router that support queue-start notifications, confirming a message keeps a static queue receipt. When the task actually starts, a new execution card appears at the bottom of the chat with its thread, working directory, task preview, and remaining queue count. Progress and results stay on that new card, and the old receipt points to it. Older clients retain the waiting-card behavior. Queued work remains in memory; this does not make queues persistent across service restarts.
+
 `/queue` 会列出正在执行和等待中的队列。`/queue clear` 清除当前 thread 中已确认和等待确认的消息。`/abort` 会中止当前任务并清空该 thread 的队列。在 abort 清理尚未结束时发送的新消息会等待清理完成，然后正常开始执行，不会跟随旧任务一起被丢弃。thread 忙碌时不允许切换 backend 或修改执行上下文；成功切换 backend 后会清除受影响的队列。当前任务结束后，即使它因模型容量等 backend 错误而失败，也会开始执行第一条已确认的排队消息。如果从队列中取出的任务失败，该 thread 的剩余队列会暂停；可以使用 `/queue continue` 继续，或使用 `/abort` 丢弃剩余消息。队列只保存在内存中，服务重启后会丢失。
 
 ### 图片输入

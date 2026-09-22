@@ -9,6 +9,7 @@ export class ConnectionHub {
   private connections: Map<string, WebSocket>;
   // Store deviceId -> last active time mapping
   private lastActiveMap: Map<string, number>;
+  private queueStartedDevices = new Set<string>();
 
   constructor() {
     this.connections = new Map();
@@ -20,7 +21,7 @@ export class ConnectionHub {
    * @param deviceId Device unique identifier
    * @param ws WebSocket connection
    */
-  registerConnection(deviceId: string, ws: WebSocket): void {
+  registerConnection(deviceId: string, ws: WebSocket, capabilities?: { queueStarted?: boolean }): void {
     // If device already has a connection, close the old connection first
     if (this.connections.has(deviceId)) {
       const oldWs = this.connections.get(deviceId)!;
@@ -34,6 +35,13 @@ export class ConnectionHub {
     // Register new connection
     this.connections.set(deviceId, ws);
     this.lastActiveMap.set(deviceId, Date.now());
+    if (capabilities?.queueStarted === true) this.queueStartedDevices.add(deviceId);
+    else this.queueStartedDevices.delete(deviceId);
+  }
+
+  /** Older clients need an execution card prepared at confirmation time. */
+  supportsQueueStarted(deviceId: string): boolean {
+    return this.queueStartedDevices.has(deviceId);
   }
 
   /**
@@ -43,6 +51,7 @@ export class ConnectionHub {
   unregisterConnection(deviceId: string): void {
     this.connections.delete(deviceId);
     this.lastActiveMap.delete(deviceId);
+    this.queueStartedDevices.delete(deviceId);
   }
 
   /**
@@ -192,5 +201,6 @@ export class ConnectionHub {
 
     this.connections.clear();
     this.lastActiveMap.clear();
+    this.queueStartedDevices.clear();
   }
 }

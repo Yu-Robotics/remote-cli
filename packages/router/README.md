@@ -11,6 +11,7 @@ The router server acts as a bridge between Feishu messaging and developer machin
 - **Code-change rendering** with collapsible, line-aware diff previews inside streaming cards
 - **Image message forwarding** for standalone images and mixed text-image posts to supported local backends, plus generated Codex images back to Feishu Card 2.0
 - **Client service management** is handled by the local CLI; the Router remains a separate long-running server process
+- **Queued task cards** appear at execution time for capable clients, with the thread, workspace, task preview, and remaining queue count; older clients retain waiting cards
 - **WebSocket connections** from local clients
 - **Feishu long connection** for receiving and sending messages
 
