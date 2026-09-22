@@ -120,7 +120,7 @@ Linux users upgrading from version 1.6.23 or earlier should run `remote-cli serv
 
 ### AI CLI Commands Passthrough
 
-Backend-specific commands are forwarded only where the active backend supports them. The built-in `/status`, `/context`, and `/skills` commands provide a consistent remote view across backends.
+Backend-specific commands are forwarded only where the active backend supports them. The built-in `/status`, `/context`, and `/skills` commands provide a consistent remote view across backends. On Pi, `/context` includes official RPC session totals and current context-window usage, and automatic provider retries are shown as progress without changing the final model response.
 - `/commit` - Commit code changes
 - `/review` - Code review
 - `/test` - Run tests

@@ -29,6 +29,17 @@ export interface ExecutorModelInfo {
   inputModalities?: string[];
 }
 
+export interface ExecutorContextUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  totalTokens?: number;
+  contextTokens?: number | null;
+  contextWindow?: number;
+  contextPercent?: number | null;
+}
+
 /**
  * Shared executor interface for all AI CLI backends (Claude, AGY, etc.)
  * Uses structural typing — existing Claude executors satisfy this without modification.
@@ -57,6 +68,8 @@ export interface IExecutor {
   setEffort?(effort: string): Promise<ExecuteResult>;
   isProcessRunning?(): boolean;
   getSessionId?(): string | null;
+  /** Return backend-provided token and context-window statistics when available. */
+  getContextUsage?(): Promise<ExecutorContextUsage | null> | ExecutorContextUsage | null;
 
   /**
    * Delete all persistent state (session files, history) associated with a thread.
