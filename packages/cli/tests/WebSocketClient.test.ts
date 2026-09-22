@@ -66,6 +66,9 @@ describe('WebSocketClient', () => {
       expect(mockWs.send).toHaveBeenCalledWith(
         expect.stringContaining(`"deviceId":"${deviceId}"`)
       );
+      const registration = mockWs.send.mock.calls.map((call: any[]) => JSON.parse(call[0]))
+        .find((message: any) => message.type === 'binding_request');
+      expect(registration.data.capabilities).toEqual({ queueStarted: true });
     });
 
     it('should handle connection errors', async () => {

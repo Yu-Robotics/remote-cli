@@ -58,6 +58,21 @@ describe('ConnectionHub', () => {
     });
   });
 
+  it('tracks queue-start support per connection and resets it for older clients', () => {
+    hub.registerConnection('new-client', mockWs, { queueStarted: true });
+    hub.registerConnection('old-client', mockWs);
+    expect(hub.supportsQueueStarted('new-client')).toBe(true);
+    expect(hub.supportsQueueStarted('old-client')).toBe(false);
+    hub.registerConnection('new-client', mockWs);
+    expect(hub.supportsQueueStarted('new-client')).toBe(false);
+    hub.registerConnection('new-client', mockWs, { queueStarted: true });
+    hub.unregisterConnection('new-client');
+    expect(hub.supportsQueueStarted('new-client')).toBe(false);
+    hub.registerConnection('new-client', mockWs, { queueStarted: true });
+    hub.closeAllConnections();
+    expect(hub.supportsQueueStarted('new-client')).toBe(false);
+  });
+
   describe('unregisterConnection', () => {
     it('should remove device connection', () => {
       const deviceId = 'dev_test_001';

@@ -36,6 +36,7 @@ describe('FeishuLongConnHandler', () => {
 
     mockConnectionHub = {
       isDeviceOnline: vi.fn(),
+      supportsQueueStarted: vi.fn().mockReturnValue(false),
       sendToDevice: vi.fn(),
       getConnectionStats: vi.fn()
     };
@@ -2196,6 +2197,7 @@ describe('FeishuLongConnHandler', () => {
       expect(firstResult).toBe('sent');
       expect(secondResult).toBe('already_processed');
       expect(mockConnectionHub.sendToDevice).toHaveBeenCalledTimes(1);
+      expect(mockClient.im.message.create).toHaveBeenCalledTimes(1);
       expect(mockClient.im.message.patch).toHaveBeenCalledWith({
         path: { message_id: 'card-1' },
         data: {
@@ -2205,6 +2207,61 @@ describe('FeishuLongConnHandler', () => {
           }),
         },
       });
+    });
+
+    it('defers card creation for a capable CLI until execution starts', async () => {
+      mockBindingManager.getUserBinding.mockResolvedValue({});
+      mockBindingManager.getActiveDevice.mockResolvedValue({ deviceId: 'device-1' });
+      mockConnectionHub.isDeviceOnline.mockReturnValue(true);
+      mockConnectionHub.supportsQueueStarted.mockReturnValue(true);
+      mockConnectionHub.sendToDevice.mockResolvedValue(true);
+      mockClient.im.message.patch.mockResolvedValue({});
+      const onStart = vi.fn();
+      handler.setOnStartStreaming(onStart);
+
+      await handler.sendQueueActionFromCardAction('ou_123', 'confirm', 'q-1', 't1', 'card-1');
+
+      expect(mockClient.im.message.create).not.toHaveBeenCalled();
+      expect(onStart).toHaveBeenCalledWith(expect.any(String), 'ou_123', null, 'device-1', 't1', false, 'card-1');
+      const executionId = onStart.mock.calls[0][0];
+      expect(mockConnectionHub.sendToDevice).toHaveBeenCalledWith('device-1', expect.objectContaining({
+        content: `/queue confirm q-1 ${executionId}`,
+      }));
+      await handler.markQueueCardStarted('card-1');
+      const card = JSON.parse(mockClient.im.message.patch.mock.calls.at(-1)[0].data.content);
+      expect(card.body.elements[0].content).toContain('Queued task started');
+      expect(card.body.elements[0].content).toContain('bottom of the chat');
+    });
+
+    it('keeps a fast start from being overwritten by the confirmation receipt', async () => {
+      mockBindingManager.getUserBinding.mockResolvedValue({});
+      mockBindingManager.getActiveDevice.mockResolvedValue({ deviceId: 'device-1' });
+      mockConnectionHub.isDeviceOnline.mockReturnValue(true);
+      mockConnectionHub.supportsQueueStarted.mockReturnValue(true);
+      mockClient.im.message.patch.mockResolvedValue({});
+      let sent!: (success: boolean) => void;
+      mockConnectionHub.sendToDevice.mockReturnValue(new Promise(resolve => { sent = resolve; }));
+      const confirmation = handler.sendQueueActionFromCardAction('ou_123', 'confirm', 'q-1', 't1', 'card-1');
+      await vi.waitFor(() => expect(mockConnectionHub.sendToDevice).toHaveBeenCalled());
+      const started = handler.markQueueCardStarted('card-1');
+      await Promise.resolve();
+      expect(mockClient.im.message.patch).not.toHaveBeenCalled();
+      sent(true);
+      await Promise.all([confirmation, started]);
+      expect(mockClient.im.message.patch.mock.calls[0][0].data.content).toContain('Added to queue');
+      expect(mockClient.im.message.patch.mock.calls[1][0].data.content).toContain('Queued task started');
+    });
+
+    it('preserves confirmation buttons and allows retry after a send failure', async () => {
+      mockBindingManager.getUserBinding.mockResolvedValue({});
+      mockBindingManager.getActiveDevice.mockResolvedValue({ deviceId: 'device-1' });
+      mockConnectionHub.isDeviceOnline.mockReturnValue(true);
+      mockConnectionHub.supportsQueueStarted.mockReturnValue(true);
+      mockConnectionHub.sendToDevice.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+      mockClient.im.message.patch.mockResolvedValue({});
+      await expect(handler.sendQueueActionFromCardAction('ou_123', 'confirm', 'q-1', 't1', 'card-1')).rejects.toThrow('Failed to send');
+      expect(mockClient.im.message.patch).not.toHaveBeenCalled();
+      await expect(handler.sendQueueActionFromCardAction('ou_123', 'confirm', 'q-1', 't1', 'card-1')).resolves.toBe('sent');
     });
 
     it('should handle new_thread with error', async () => {
