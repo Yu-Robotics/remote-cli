@@ -48,6 +48,8 @@ describe('MessageHandler Concurrency', () => {
       getThread: vi.fn().mockReturnValue({ id: 'thread-1', name: 'Thread 1' }),
       getDefaultThread: vi.fn().mockReturnValue({ id: 'thread-1', name: 'Thread 1' }),
       updateThread: vi.fn().mockResolvedValue(undefined),
+      createThread: vi.fn().mockResolvedValue({ id: 'thread-2', name: 'thread-2', sessionId: null }),
+      listThreads: vi.fn().mockReturnValue([{ id: 'thread-1', name: 'Thread 1' }]),
     };
 
     mockGuard = new DirectoryGuard(['/mock/dir']);
@@ -129,9 +131,83 @@ describe('MessageHandler Concurrency', () => {
 
     // abort bypasses busy check
     expect(mockExecutor.abort).toHaveBeenCalledTimes(1);
-    
+
     // Should respond with aborted message
     expect(mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ output: expect.stringContaining('aborted') }));
+  });
+
+  it('should allow /thread new even when the caller thread is busy', async () => {
+    // Regression: the router's "+ New" card button sends "/thread new" without a
+    // threadId, so it always resolves to the default thread. It must not be
+    // rejected just because that thread is busy.
+    mockThreadPool.setThreadBusy('thread-1', true);
+
+    await handler.handleMessage({
+      type: 'command',
+      messageId: 'msg-thread-new',
+      content: '/thread new',
+      timestamp: Date.now(),
+    } as any);
+
+    expect(mockThreadManager.createThread).toHaveBeenCalledTimes(1);
+    expect(mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+      messageId: 'msg-thread-new',
+      success: true,
+    }));
+  });
+
+  it('should allow /thread new with an explicit name when the caller thread is busy', async () => {
+    mockThreadPool.setThreadBusy('thread-1', true);
+
+    await handler.handleMessage({
+      type: 'command',
+      messageId: 'msg-thread-new-named',
+      content: '/thread new my-feature',
+      timestamp: Date.now(),
+    } as any);
+
+    expect(mockThreadManager.createThread).toHaveBeenCalledWith(
+      'my-feature',
+      '/mock/dir',
+      'claude'
+    );
+  });
+
+  it('should allow /thread list when the caller thread is busy', async () => {
+    mockThreadPool.setThreadBusy('thread-1', true);
+    mockThreadPool.getSummaries.mockReturnValue([
+      { id: 'thread-1', name: 'Thread 1', status: 'running', backend: 'claude' },
+    ]);
+
+    await handler.handleMessage({
+      type: 'command',
+      messageId: 'msg-thread-list',
+      content: '/thread list',
+      timestamp: Date.now(),
+    } as any);
+
+    expect(mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+      messageId: 'msg-thread-list',
+      success: true,
+      output: expect.stringContaining('Thread 1'),
+    }));
+  });
+
+  it('should still reject /thread delete when the caller thread is busy', async () => {
+    mockThreadPool.setThreadBusy('thread-1', true);
+    mockThreadManager.getThreadByName = vi.fn().mockReturnValue({ id: 'thread-2', name: 'thread-2' });
+
+    await handler.handleMessage({
+      type: 'command',
+      messageId: 'msg-thread-delete',
+      content: '/thread delete thread-2',
+      timestamp: Date.now(),
+    } as any);
+
+    expect(mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+      messageId: 'msg-thread-delete',
+      error: expect.stringContaining('is busy'),
+    }));
   });
 
   it('should wait for abort cleanup before starting a new command', async () => {
