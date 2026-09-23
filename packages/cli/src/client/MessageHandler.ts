@@ -279,6 +279,20 @@ export class MessageHandler {
       return;
     }
 
+    // /thread (list) and /thread new never touch the caller thread's execution
+    // context, so they bypass the busy check (like /abort and /queue). This also
+    // covers the router's "+ New" card button, which always arrives without a
+    // threadId and would otherwise be rejected whenever the default thread is busy.
+    // /thread delete is intentionally NOT exempted: it keeps its own busy/queue guards.
+    const trimmedForThreadCmd = content?.trim() ?? '';
+    if (
+      /^\/thread(?:\s+list)?$/.test(trimmedForThreadCmd)
+      || /^\/thread\s+new(?:\s|$)/.test(trimmedForThreadCmd)
+    ) {
+      await this.handleThreadCommand(messageId, resolvedThreadId, trimmedForThreadCmd);
+      return;
+    }
+
     // Backend switching has its own lifecycle handling and must run before the
     // normal command busy flag is acquired.
     if (content?.trim() === '/backend' || content?.trim().startsWith('/backend ')) {
