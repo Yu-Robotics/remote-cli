@@ -569,6 +569,8 @@ remote-cli 自身不处理的斜杠命令会转发给当前 AI 后端，各后�
 
 直接回复某张已经完成的飞书卡片，消息会继续路由到该卡片所属的 thread。Thread 按钮会同时显示各 thread 工作目录的最后一级名称和所用 backend，便于区分并行 workspace。自动生成的 `thread-2` 等名称会在按钮上只显示序号，例如 `2`，自定义名称保持不变。长回复被拆分成多张卡片时，每张续卡都会重复显示 thread 和工作目录头部。`/thread list` 可以查看所有 thread 的状态，`/status` 可以快速查看当前 backend、模型、工作目录和队列。
 
+Long streaming replies refresh only cards with changed content. Queued tasks combine incoming text while a refresh is pending, so card updates do not build up a backlog of intermediate text. Tool results, images, and the final response retain their order.
+
 Thread switch panels show `Reply from:` with the reply's full thread name and workspace. Under `Switch thread`, a check mark (`✓`) and primary button styling identify the destination of new top-level messages when the card is finalized or clicked. Selected buttons remain clickable. Switching updates only the clicked card; other historical cards retain their last displayed selection.
 
 ### 组合使用全局和按线程 backend

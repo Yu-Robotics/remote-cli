@@ -323,7 +323,7 @@ describe('FeishuLongConnHandler', () => {
       return elements;
     };
 
-    it('should not re-patch frozen messages that already exist in the chain', async () => {
+    it('finalizes only changed cards when the earlier chunks stay unchanged', async () => {
       mockClient.im.message.patch.mockResolvedValue({});
       mockClient.im.message.create.mockResolvedValue({ data: { message_id: 'msg_cont_1' } });
 
@@ -342,9 +342,10 @@ describe('FeishuLongConnHandler', () => {
       // Step 2: Finalize with same element count (no new content added)
       await handler.finalizeStreamingMessage('msg_123', makeElements(160), 'ABC123', 'ou_user_123');
 
-      // finalizeStreamingMessage patches all messages in the chain (first + continuations)
-      // chain has 2 messages, both are patched
-      expect(mockClient.im.message.patch).toHaveBeenCalledTimes(2);
+      expect(mockClient.im.message.patch).toHaveBeenCalledTimes(1);
+      expect(mockClient.im.message.patch).toHaveBeenCalledWith(expect.objectContaining({
+        path: { message_id: 'msg_cont_1' },
+      }));
 
       // Should NOT create any new messages (chain already covers all chunks)
       expect(mockClient.im.message.create).not.toHaveBeenCalled();
@@ -373,8 +374,11 @@ describe('FeishuLongConnHandler', () => {
       // Should NOT create any new continuation messages
       expect(mockClient.im.message.create).not.toHaveBeenCalled();
 
-      // finalizeStreamingMessage patches all 3 messages in the chain
-      expect(mockClient.im.message.patch).toHaveBeenCalledTimes(3);
+      // Only the tail receives the completion note.
+      expect(mockClient.im.message.patch).toHaveBeenCalledTimes(1);
+      expect(mockClient.im.message.patch).toHaveBeenCalledWith(expect.objectContaining({
+        path: { message_id: 'msg_cont_2' },
+      }));
     });
 
     it('should handle finalize when new content extends beyond existing chain', async () => {
@@ -397,8 +401,69 @@ describe('FeishuLongConnHandler', () => {
       // Should only create 1 new message (the 3rd chunk), not recreate existing ones
       expect(mockClient.im.message.create).toHaveBeenCalledTimes(1);
 
-      // All 3 chain messages are patched (chain[0] + existing cont + new cont)
+      // The previous tail changes; the unchanged first card is skipped.
+      expect(mockClient.im.message.patch).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('streaming card update cost', () => {
+    it.each([
+      { elements: 160, cards: 2 },
+      { elements: 7400, cards: 50 },
+    ])('patches only the changed tail in a $cards-card reply', async ({ elements: count, cards }) => {
+      let nextCard = 0;
+      mockClient.im.message.patch.mockResolvedValue({});
+      mockClient.im.message.create.mockImplementation(async () => ({ data: { message_id: `continuation-${++nextCard}` } }));
+      const elements = Array.from({ length: count }, (_, index) => ({ tag: 'markdown', content: `line ${index}` }));
+      await handler.updateStreamingMessage('root', elements, 'user-1');
+      expect(nextCard + 1).toBe(cards);
+      const lastCard = `continuation-${nextCard}`;
+      mockClient.im.message.patch.mockClear();
+      mockClient.im.message.create.mockClear();
+
+      elements[elements.length - 1] = { tag: 'markdown', content: 'Updated tail' };
+      await handler.updateStreamingMessage('root', elements, 'user-1');
+      await handler.updateStreamingMessage('root', elements, 'user-1');
+
+      expect(mockClient.im.message.patch).toHaveBeenCalledOnce();
+      expect(mockClient.im.message.patch).toHaveBeenCalledWith(expect.objectContaining({ path: { message_id: lastCard } }));
+      expect(mockClient.im.message.create).not.toHaveBeenCalled();
+
+      // Earlier content may change during finalization or layout changes.
+      mockClient.im.message.patch.mockClear();
+      elements[0] = { tag: 'markdown', content: 'Updated first card' };
+      await handler.updateStreamingMessage('root', elements, 'user-1');
+      expect(mockClient.im.message.patch).toHaveBeenCalledOnce();
+      expect(mockClient.im.message.patch).toHaveBeenCalledWith(expect.objectContaining({ path: { message_id: 'root' } }));
+    });
+
+    it('retries a failed patch instead of treating its content as delivered', async () => {
+      const elements = [{ tag: 'markdown', content: 'Original' }];
+      await handler.updateStreamingMessage('root', elements, 'user-1');
+      mockClient.im.message.patch.mockClear();
+      mockClient.im.message.patch.mockRejectedValueOnce(new Error('Temporary failure')).mockResolvedValue({});
+      const changed = [{ tag: 'markdown', content: 'Changed' }];
+
+      expect(await handler.updateStreamingMessage('root', changed, 'user-1')).toBe(false);
+      expect(await handler.updateStreamingMessage('root', changed, 'user-1')).toBe(true);
+      await handler.updateStreamingMessage('root', changed, 'user-1');
       expect(mockClient.im.message.patch).toHaveBeenCalledTimes(2);
+    });
+
+    it('retries a missing continuation before creating later chunks', async () => {
+      const elements = Array.from({ length: 310 }, (_, index) => ({ tag: 'markdown', content: `line ${index}` }));
+      mockClient.im.message.create.mockRejectedValueOnce(new Error('Temporary failure'))
+        .mockResolvedValueOnce({ data: { message_id: 'second' } })
+        .mockResolvedValueOnce({ data: { message_id: 'third' } });
+      expect(await handler.updateStreamingMessage('root', elements, 'user-1')).toBe(false);
+      expect(mockClient.im.message.create).toHaveBeenCalledOnce();
+      expect(await handler.updateStreamingMessage('root', elements, 'user-1')).toBe(true);
+
+      mockClient.im.message.patch.mockClear();
+      elements[elements.length - 1] = { tag: 'markdown', content: 'Updated tail' };
+      await handler.updateStreamingMessage('root', elements, 'user-1');
+      expect(mockClient.im.message.patch).toHaveBeenCalledOnce();
+      expect(mockClient.im.message.patch).toHaveBeenCalledWith(expect.objectContaining({ path: { message_id: 'third' } }));
     });
   });
 

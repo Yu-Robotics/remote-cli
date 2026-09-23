@@ -463,9 +463,18 @@ export class RouterServer {
                 const streamType = message.streamType || 'text';
 
                 switch (streamType) {
-                  case 'text':
-                    await this.handleTextChunk(message.messageId, message.openId, message.chunk || '');
+                  case 'text': {
+                    const update = this.handleTextChunk(message.messageId, message.openId, message.chunk || '');
+                    if (this.startedQueueMessages.has(message.messageId)) {
+                      // Text is accumulated synchronously. Let subsequent deltas
+                      // coalesce while the card patch runs; finalization still
+                      // waits for updateInFlight before rendering the result.
+                      void update.catch(error => console.error('[RouterServer] Failed to update queued text:', error));
+                    } else {
+                      await update;
+                    }
                     break;
+                  }
                   case 'tool_use':
                     if (message.toolUse) {
                       await this.handleToolUse(message.messageId, message.openId, message.toolUse);

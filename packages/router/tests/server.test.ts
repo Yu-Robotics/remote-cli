@@ -10,7 +10,7 @@ import { FeishuLongConnHandler } from '../src/feishu/FeishuLongConnHandler';
 import { ConnectionHub } from '../src/websocket/ConnectionHub';
 import { BindingManager } from '../src/binding/BindingManager';
 import { MessageType, MIN_SUPPORTED_CLI_VERSION, PROTOCOL_VERSION, ROUTER_VERSION } from '../src/types';
-import { createRedactedThinkingElement } from '../src/utils/ToolFormatter';
+import { createRedactedThinkingElement, createToolResultElement } from '../src/utils/ToolFormatter';
 
 // Mock dependencies
 vi.mock('koa');
@@ -221,6 +221,35 @@ describe('RouterServer', () => {
       await Promise.all([image, finished]);
       expect(mockFeishuHandler.finalizeStreamingMessage.mock.calls[0][1])
         .toContainEqual({ tag: 'img', img_key: 'queued-image' });
+    });
+
+    it('preserves text, tool, and image order while queued text patches are pending', async () => {
+      const send = await connect();
+      await send(started);
+      mockFeishuHandler.updateStreamingMessage.mockImplementation(() => new Promise(resolve => setTimeout(resolve, 100)));
+      mockFeishuHandler.uploadImage.mockImplementation(() => new Promise(resolve => setTimeout(() => resolve('image-key'), 200)));
+      vi.mocked(createToolResultElement).mockReturnValueOnce([{ tag: 'markdown', content: 'Tool result' }]);
+      const common = { messageId: 'queued-1', openId: 'user-1' };
+      const messages = [
+        send({ ...common, type: 'stream', chunk: 'Before tool' }),
+        send({ ...common, type: 'stream', streamType: 'tool_result', toolResult: { tool_use_id: 'tool-1', content: 'Done' } }),
+        send({ ...common, type: 'stream', chunk: 'Before image' }),
+        send({ ...common, type: 'stream', streamType: 'image', image: { type: 'image', data: 'aW1hZ2U=', mimeType: 'image/png' } }),
+        send({ ...common, type: 'stream', chunk: 'After image' }),
+        send({ ...common, type: 'response', success: true }),
+      ];
+      await vi.advanceTimersByTimeAsync(1000);
+      await Promise.all(messages);
+
+      expect(mockFeishuHandler.finalizeStreamingMessage).toHaveBeenCalledOnce();
+      const elements = mockFeishuHandler.finalizeStreamingMessage.mock.calls[0][1];
+      expect(elements.slice(1)).toEqual([
+        { tag: 'markdown', content: 'Before tool' },
+        { tag: 'markdown', content: 'Tool result' },
+        { tag: 'markdown', content: 'Before image' },
+        { tag: 'img', img_key: 'image-key' },
+        { tag: 'markdown', content: 'After image' },
+      ]);
     });
 
     it('announces tasks even when they fail before producing any stream', async () => {
@@ -441,7 +470,7 @@ describe('RouterServer', () => {
     expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenCalledTimes(2);
   });
 
-  it('should coalesce token deltas while a Feishu update is in flight', async () => {
+  it.each([false, true])('coalesces text while a patch is pending (queued: %s)', async (queued) => {
     await server.start();
     const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
     onStartStreaming('m1', 'u1', 'f1', 'd1');
@@ -455,25 +484,36 @@ describe('RouterServer', () => {
     const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
     onConnection(mockWs, { socket: { remoteAddress: '1' } });
     const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
+    if (queued) {
+      await onMessage(Buffer.from(JSON.stringify({ type: 'binding_request', data: { deviceId: 'd1' } })));
+      await onMessage(Buffer.from(JSON.stringify({
+        type: 'queue_started', messageId: 'm1', openId: 'u1', threadId: 'thread-1',
+        queueStarted: { threadName: 'thread-2', backend: 'codex', cwd: '/workspace', preview: 'Task', remainingCount: 0 },
+      })));
+    }
 
     const firstUpdate = onMessage(Buffer.from(JSON.stringify({
       type: 'stream', streamType: 'text', messageId: 'm1', openId: 'u1', chunk: 'a'
     })));
     expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenCalledTimes(1);
 
-    const deltaUpdates = Array.from({ length: 30 }, (_, index) => onMessage(Buffer.from(JSON.stringify({
-      type: 'stream', streamType: 'text', messageId: 'm1', openId: 'u1', chunk: String(index % 10)
+    const deltaUpdates = Array.from({ length: 30 }, () => onMessage(Buffer.from(JSON.stringify({
+      type: 'stream', streamType: 'text', messageId: 'm1', openId: 'u1', chunk: '0123456789'
     }))));
-    await Promise.all(deltaUpdates);
+    await vi.advanceTimersByTimeAsync(0);
 
     expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenCalledTimes(1);
     resolveFirstUpdate?.();
-    await firstUpdate;
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.all([firstUpdate, ...deltaUpdates]);
+    await onMessage(Buffer.from(JSON.stringify({ type: 'response', messageId: 'm1', openId: 'u1', success: true })));
 
     expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenCalledTimes(2);
-    expect(mockFeishuHandler.updateStreamingMessage.mock.calls[1][1]).toEqual([
-      expect.objectContaining({ content: 'a012345678901234567890123456789' })
-    ]);
+    const expectedText = 'a' + '0123456789'.repeat(30);
+    expect(mockFeishuHandler.updateStreamingMessage.mock.calls[1][1])
+      .toContainEqual(expect.objectContaining({ content: expectedText }));
+    expect(mockFeishuHandler.finalizeStreamingMessage.mock.calls[0][1])
+      .toContainEqual(expect.objectContaining({ content: expectedText }));
   });
 
   it('should handle finalize streaming message with error', async () => {
