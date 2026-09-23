@@ -1504,6 +1504,12 @@ describe('FeishuLongConnHandler', () => {
       });
     });
 
+    it('rejects generated images larger than 2 MiB', async () => {
+      await expect(handler.uploadImage(Buffer.alloc(2 * 1024 * 1024 + 1).toString('base64'), 'image/png'))
+        .resolves.toBeNull();
+      expect(mockClient.im.image.create).not.toHaveBeenCalled();
+    });
+
     it('downloads image resources through the SDK writeFile API', async () => {
       const imageData = Buffer.from('test-image-data');
       const writeFile = vi.fn().mockImplementation((filePath: string) => fs.writeFile(filePath, imageData));
