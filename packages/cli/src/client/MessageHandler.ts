@@ -9,6 +9,7 @@ import { createExecutor } from '../executor';
 import { FeishuNotificationAdapter } from '../hooks';
 import { ConfigManager } from '../config/ConfigManager';
 import { processFileReadContent } from '../utils/FileReadDetector';
+import { readLocalImages } from '../utils/LocalImageDetector';
 import { MachineCommands } from '../machines/MachineCommands';
 import type { PendingReplace } from '../machines/types';
 import { spawn, execFile } from 'child_process';
@@ -1705,16 +1706,47 @@ You can also use natural language commands to control Claude Code CLI.`,
     attachments?: Attachment[]
   ): Promise<boolean> {
     try {
+      const emittedLocalImages = new Set<string>();
+      const pendingLocalImageEmissions = new Set<Promise<void>>();
+      let streamedOutput = '';
+      const emitLocalImages = async (text: string): Promise<void> => {
+        const thread = this.threadManager.getThread(threadId);
+        if (!text || !thread?.workingDirectory) return;
+        const images = await readLocalImages(text, thread.workingDirectory, (candidate, cwd) => (
+          this.directoryGuard.isSafePath(candidate, cwd)
+        ));
+        for (const image of images) {
+          if (emittedLocalImages.has(image.path)) continue;
+          emittedLocalImages.add(image.path);
+          this.sendImage(messageId, threadId, {
+            type: 'image',
+            data: image.data,
+            mimeType: image.mimeType,
+          });
+        }
+      };
+      const queueLocalImages = (text: string): void => {
+        const pending = emitLocalImages(text).finally(() => pendingLocalImageEmissions.delete(pending));
+        pendingLocalImageEmissions.add(pending);
+      };
       const executeOptions = {
-        onStream: (chunk: string) => this.sendStreamChunk(messageId, threadId, chunk),
+        onStream: (chunk: string) => {
+          streamedOutput += chunk;
+          this.sendStreamChunk(messageId, threadId, chunk);
+        },
         onToolUse: (toolUse: ToolUseInfo) => this.sendToolUse(messageId, threadId, toolUse),
-        onToolResult: (toolResult: ToolResultInfo) => this.sendToolResult(messageId, threadId, toolResult),
+        onToolResult: (toolResult: ToolResultInfo) => {
+          this.sendToolResult(messageId, threadId, toolResult);
+          queueLocalImages(toolResult.content);
+        },
         onRedactedThinking: () => this.sendRedactedThinking(messageId, threadId),
         onPlanMode: (planContent: string) => this.sendPlanMode(messageId, threadId, planContent),
         onImage: (image: ImageBlock) => this.sendImage(messageId, threadId, image),
         attachments,
       };
       let result = await executor.execute(content, executeOptions);
+      await Promise.all(pendingLocalImageEmissions);
+      await emitLocalImages(`${streamedOutput}\n${result.output ?? ''}`);
 
       if (await this.clearInvalidCodexModel(threadId, executor, result.error)) {
         this.sendStreamChunk(
@@ -1740,14 +1772,22 @@ You can also use natural language commands to control Claude Code CLI.`,
           }
           this.sendStreamChunk(messageId, threadId, '✅ Compaction done. Retrying your request...\n');
           const retryResult = await executor.execute(content, {
-            onStream: (chunk: string) => this.sendStreamChunk(messageId, threadId, chunk),
+            onStream: (chunk: string) => {
+              streamedOutput += chunk;
+              this.sendStreamChunk(messageId, threadId, chunk);
+            },
             onToolUse: (toolUse: ToolUseInfo) => this.sendToolUse(messageId, threadId, toolUse),
-            onToolResult: (toolResult: ToolResultInfo) => this.sendToolResult(messageId, threadId, toolResult),
+            onToolResult: (toolResult: ToolResultInfo) => {
+              this.sendToolResult(messageId, threadId, toolResult);
+              queueLocalImages(toolResult.content);
+            },
             onRedactedThinking: () => this.sendRedactedThinking(messageId, threadId),
             onPlanMode: (planContent: string) => this.sendPlanMode(messageId, threadId, planContent),
             onImage: (image: ImageBlock) => this.sendImage(messageId, threadId, image),
             attachments,
           });
+          await Promise.all(pendingLocalImageEmissions);
+          await emitLocalImages(`${streamedOutput}\n${retryResult.output ?? ''}`);
           this.sendResponse(messageId, threadId, { success: retryResult.success, error: retryResult.error, threads: this.threadPool.getSummaries() });
           return retryResult.success;
         }

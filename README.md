@@ -481,6 +481,8 @@ You can send a standalone image or a rich-text message containing both text and 
 
 Codex App Server generated images are also forwarded back to Feishu. Codex emits the generated image through its app-server protocol; the CLI sends it to Router, Router uploads it to Feishu, and the image is rendered in the existing Card 2.0 response. This requires both CLI and Router versions with image forwarding support. Upgrading only Router is backward-compatible, but an older CLI will not generate or send image events; upgrading only CLI is also safe, but an older Router will ignore the optional image stream and still show the text response.
 
+All backends can also send a local image generated during a task when the tool result or final response includes its path or a Markdown image link, such as `chart.png` or `![chart](./chart.png)`. The file must be inside an allowed working directory and no larger than 10 MB. The CLI reads the file and reuses the same image stream; Router uploads it and renders it in the current Card 2.0 response. This path-based fallback is useful for charts and screenshots and does not require the backend to emit a native image event.
+
 ### Models and Reasoning Effort
 
 `/model` and `/effort` apply to the current thread and are stored separately for each backend:
