@@ -1,6 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'events';
 import { spawn } from 'child_process';
+import { mkdtemp, rm, writeFile } from 'fs/promises';
+import { tmpdir } from 'os';
+import path from 'path';
 import { MessageHandler } from '../src/client/MessageHandler';
 import { WebSocketClient } from '../src/client/WebSocketClient';
 import { DirectoryGuard } from '../src/security/DirectoryGuard';
@@ -166,6 +169,39 @@ describe('MessageHandler', () => {
           attachments: [expect.any(Object)]
         })
       );
+    });
+
+    it('should forward a local image path from a tool result', async () => {
+      const directory = await mkdtemp(path.join(tmpdir(), 'remote-cli-message-test-'));
+      const imagePath = path.join(directory, 'chart.png');
+      await writeFile(imagePath, Buffer.from('image-data'));
+      const thread = ctx.mockThreadManager.getDefaultThread();
+      thread.workingDirectory = directory;
+      const isSafePath = vi.spyOn(DirectoryGuard.prototype, 'isSafePath').mockReturnValue(true);
+
+      ctx.mockExecutor.execute.mockImplementation(async (_prompt: string, options: any) => {
+        options.onToolResult({ tool_use_id: 'tool-1', content: 'Saved chart.png', is_error: false });
+        return { success: true, output: '![chart](chart.png)' };
+      });
+
+      try {
+        await ctx.handler.handleMessage({
+          type: 'command',
+          messageId: 'msg-local-image',
+          content: 'make a chart',
+          timestamp: Date.now(),
+        } as any);
+
+        await vi.waitFor(() => expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+          type: 'stream',
+          streamType: 'image',
+          messageId: 'msg-local-image',
+          image: { type: 'image', data: Buffer.from('image-data').toString('base64'), mimeType: 'image/png' },
+        })));
+      } finally {
+        isSafePath.mockRestore();
+        await rm(directory, { recursive: true, force: true });
+      }
     });
   });
 
