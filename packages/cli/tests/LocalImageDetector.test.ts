@@ -57,4 +57,12 @@ describe('LocalImageDetector', () => {
 
     await expect(readLocalImages('chart.png', directory, () => false)).resolves.toEqual([]);
   });
+
+  it('skips images larger than 2 MiB', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'remote-cli-image-test-'));
+    temporaryDirectories.push(directory);
+    await writeFile(path.join(directory, 'large.png'), Buffer.alloc(2 * 1024 * 1024 + 1));
+
+    await expect(readLocalImages('large.png', directory, () => true)).resolves.toEqual([]);
+  });
 });

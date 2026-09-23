@@ -1294,8 +1294,8 @@ Examples:
   async uploadImage(data: string, mimeType: string): Promise<string | null> {
     try {
       const image = Buffer.from(data, 'base64');
-      if (image.length === 0 || image.length > 10 * 1024 * 1024) {
-        console.error('[FeishuHandler] Generated image exceeds the 10MB upload limit');
+      if (image.length === 0 || image.length > 2 * 1024 * 1024) {
+        console.error('[FeishuHandler] Generated image exceeds the 2 MiB upload limit');
         return null;
       }
       const supportedTypes = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/tiff', 'image/bmp', 'image/x-icon']);
