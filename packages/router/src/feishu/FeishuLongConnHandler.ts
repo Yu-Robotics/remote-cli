@@ -7,6 +7,7 @@ import { JsonStore } from '../storage/JsonStore';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { createHash } from 'crypto';
 
 /**
  * Feishu Long Connection Handler configuration
@@ -44,9 +45,8 @@ export class FeishuLongConnHandler {
   private threadSwitchCardState = new Map<string, { baseElements: any[]; threads: ThreadSummary[]; activeThreadId?: string; replyLabel?: string; createdAt: number }>();
   private readonly THREAD_SWITCH_STATE_TTL_MS = 24 * 60 * 60 * 1000; // 1 day
   private threadSwitchStateCleanupTimer: NodeJS.Timeout | null = null;
-  // Track the last processed text length for each message chain
-  // This helps us only send NEW content to existing messages, preventing duplication
-  private lastProcessedLengths: Map<string, number> = new Map();
+  // Remember successful card payloads without retaining another copy of the content.
+  private cardContentHashes = new Map<string, string[]>();
   // Per-message serialization locks to prevent concurrent updates from creating duplicates
   private messageLocks: Map<string, Promise<any>> = new Map();
   private queueCardDecisions = new Map<string, Promise<void>>();
@@ -1318,8 +1318,8 @@ Examples:
    * Automatically creates new messages if content exceeds Feishu's size limit
    *
    * This method uses an incremental approach to prevent content duplication:
-   * - Once a message (except the last one) is created, its content is frozen
-   * - Only the last message in the chain gets updated with new content
+   * - Unchanged cards are not patched again
+   * - Changed cards are updated even when chunk boundaries or headers change
    * - New messages are only created when the last message exceeds the limit
    *
    * @param messageId The Feishu message ID
@@ -1344,19 +1344,24 @@ Examples:
       // Split elements into chunks based on Feishu Card 2.0 limits
       const chunks = this.splitElementsIntoChunks(elements, continuationHeaderElements, trailingElements);
       console.log(`[FeishuHandler] Need ${chunks.length} card(s), currently have ${chain.length} card(s)`);
+      let hashes = this.cardContentHashes.get(messageId);
+      if (!hashes) {
+        hashes = [];
+        this.cardContentHashes.set(messageId, hashes);
+      }
+      const payloads = chunks.map(chunk => JSON.stringify({ schema: '2.0', body: { elements: chunk } }));
+      const nextHashes = payloads.map(payload => createHash('sha256').update(payload).digest('hex'));
+      const patchCard = async (index: number): Promise<void> => {
+        if (hashes[index] === nextHashes[index]) return;
+        await this.client.im.message.patch({
+          path: { message_id: chain[index] },
+          data: { content: payloads[index] },
+        });
+        // Failed requests must remain eligible for retry.
+        hashes[index] = nextHashes[index];
+      };
 
-      // Update the first message with the first chunk
-      await this.client.im.message.patch({
-        path: { message_id: chain[0] },
-        data: {
-          content: JSON.stringify({
-            schema: '2.0',
-            body: {
-              elements: chunks[0],
-            },
-          }),
-        },
-      });
+      await patchCard(0);
 
       // Handle continuation chunks: only create new cards, never delete during streaming.
       // Deleting a card causes Feishu UI to show "message retracted" which is confusing.
@@ -1367,19 +1372,8 @@ Examples:
 
         // Update existing continuation cards
         for (let i = 0; i < Math.min(existingContinuationCards.length, neededContinuationCards); i++) {
-          const cardMessageId = existingContinuationCards[i];
           const chunkIndex = i + 1;
-          await this.client.im.message.patch({
-            path: { message_id: cardMessageId },
-            data: {
-              content: JSON.stringify({
-                schema: '2.0',
-                body: {
-                  elements: chunks[chunkIndex],
-                },
-              }),
-            },
-          });
+          await patchCard(chunkIndex);
         }
 
         // Create new continuation cards if needed
@@ -1390,6 +1384,10 @@ Examples:
             const newMessageId = await this.createContinuationCard(openId, chunks[chunkIndex]);
             if (newMessageId) {
               chain.push(newMessageId);
+              hashes[chunkIndex] = nextHashes[chunkIndex];
+            } else {
+              // Keep card indices aligned so the missing chunk can be retried.
+              return false;
             }
           }
         }
@@ -1477,7 +1475,7 @@ Examples:
 
       // Clean up tracking state
       this.messageChains.delete(messageId);
-      this.lastProcessedLengths.delete(messageId);
+      this.cardContentHashes.delete(messageId);
 
       return true;
     } catch (error: any) {
