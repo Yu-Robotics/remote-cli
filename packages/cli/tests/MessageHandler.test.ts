@@ -118,6 +118,31 @@ describe('MessageHandler', () => {
     await ctx.handler.destroy();
   });
 
+  it('sends late task cards to the originating user and thread after another request completes', async () => {
+    ctx.mockExecutor.execute.mockResolvedValue({ success: true, output: 'Started in background' });
+    await ctx.handler.handleMessage({ type: 'command', messageId: 'launch-task', content: 'run tests', openId: 'original-user', timestamp: Date.now() });
+    const notify = ctx.mockExecutor.execute.mock.calls[0][1].onTaskNotification;
+    const original = ctx.mockThreadManager.getThread('default-thread-id')!;
+    vi.mocked(ctx.mockThreadManager.getThread).mockImplementation((id) => id === original.id
+      ? original : { ...original, id: 'second-thread-id', name: 'thread-2' });
+    await ctx.handler.handleMessage({ type: 'command', messageId: 'other-request', content: 'hello', openId: 'other-user', threadId: 'second-thread-id', timestamp: Date.now() });
+    ctx.mockWsClient.send.mockClear();
+    const task = { taskId: 'exec-42', status: 'completed', summary: 'Tests passed', outputFile: '' };
+    notify(task);
+    expect(ctx.mockWsClient.send).toHaveBeenCalledTimes(1);
+    expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'task_notification', openId: 'original-user', threadId: 'default-thread-id', threadName: 'default', taskNotification: task,
+    }));
+    const card = ctx.mockWsClient.send.mock.calls[0][0];
+    expect(card.messageId).not.toBe('launch-task');
+    expect(card.messageId).not.toBe('other-request');
+
+    ctx.mockWsClient.send.mockClear();
+    vi.mocked(ctx.mockThreadManager.getThread).mockReturnValue(undefined);
+    notify(task);
+    expect(ctx.mockWsClient.send).not.toHaveBeenCalled();
+  });
+
   describe('multimodal prompts', () => {
     it('should pass attachments to executor.execute', async () => {
       ctx.mockExecutor.execute.mockResolvedValue({ success: true, output: 'Saw the image' });

@@ -261,35 +261,40 @@ Please respond with /authorize grant or /authorize deny`;
    */
   private registerTaskNotificationHandler(): void {
     const handler = (context: TaskNotificationContext) => {
-      if (!this.enabledNotifications.has('task_notification')) return;
-
-      if (!this.currentOpenId) {
-        console.log(`[FeishuAdapter] No OpenID set, skipping task notification: ${context.taskId}`);
-        return;
-      }
-
-      try {
-        this.wsClient.send({
-          type: 'task_notification',
-          messageId: uuidv4(),
-          openId: this.currentOpenId,
-          threadId: context.threadId,
-          threadName: context.threadId ? this.threadNameResolver?.(context.threadId) : undefined,
-          taskNotification: {
-            taskId: context.taskId,
-            status: context.status,
-            summary: context.summary,
-            outputFile: context.outputFile,
-          },
-          timestamp: Date.now(),
-        });
-        console.log(`[FeishuAdapter] Sent task notification: ${context.taskId} (${context.status})`);
-      } catch (error) {
-        console.error('[FeishuAdapter] Failed to send task notification:', error);
-      }
+      this.sendTaskNotification(context, this.currentOpenId);
     };
     claudeCodeHooks.onTaskNotification(handler);
     this.registeredHandlers.push({ event: HookEventType.TASK_NOTIFICATION, handler });
+  }
+
+  /** Send the same task card for hooks and executor callbacks with an explicit recipient. */
+  sendTaskNotification(context: TaskNotificationContext, openId: string | undefined): void {
+    if (!this.enabledNotifications.has('task_notification')) return;
+
+    if (!openId) {
+      console.log(`[FeishuAdapter] No OpenID set, skipping task notification: ${context.taskId}`);
+      return;
+    }
+
+    try {
+      this.wsClient.send({
+        type: 'task_notification',
+        messageId: uuidv4(),
+        openId,
+        threadId: context.threadId,
+        threadName: context.threadId ? this.threadNameResolver?.(context.threadId) : undefined,
+        taskNotification: {
+          taskId: context.taskId,
+          status: context.status,
+          summary: context.summary,
+          outputFile: context.outputFile,
+        },
+        timestamp: Date.now(),
+      });
+      console.log(`[FeishuAdapter] Sent task notification: ${context.taskId} (${context.status})`);
+    } catch (error) {
+      console.error('[FeishuAdapter] Failed to send task notification:', error);
+    }
   }
 
   /**

@@ -472,6 +472,12 @@ With a CLI and Router that support queue-start notifications, confirming a messa
 
 `/queue` 会列出正在执行和等待中的队列。`/queue clear` 清除当前 thread 中已确认和等待确认的消息。`/abort` 会中止当前任务并清空该 thread 的队列。在 abort 清理尚未结束时发送的新消息会等待清理完成，然后正常开始执行，不会跟随旧任务一起被丢弃。thread 忙碌时不允许切换 backend 或修改执行上下文；成功切换 backend 后会清除受影响的队列。`/thread list` 和 `/thread new` 不受 thread 忙碌状态影响，因为它们不触碰该 thread 的执行上下文，所以即使 default thread 正在运行，卡片上的 **+ New** 按钮也能正常创建新 thread。当前任务结束后，即使它因模型容量等 backend 错误而失败，也会开始执行第一条已确认的排队消息。如果从队列中取出的任务失败，该 thread 的剩余队列会暂停；可以使用 `/queue continue` 继续，或使用 `/abort` 丢弃剩余消息。队列只保存在内存中，服务重启后会丢失。
 
+### Background Task Notifications
+
+Claude Code and Codex can send a standalone task card when a background task finishes, even after the original reply has completed. Both use the same completed, failed, and stopped card styles, show the originating thread, and let you reply to the card to continue that thread. Foreground commands stay in their original response; duplicate completion events do not create duplicate Codex task cards.
+
+Codex watches native command completion events and sub-agent terminal states. Command cards include the command, exit code when available, and an output excerpt; sub-agent cards use the reported result. It does not run another model turn to generate these cards. Native command notifications were verified with Codex 0.154.0; sub-agent event availability depends on the installed Codex version. Tracking lasts for the current executor process: clearing a conversation, switching its backend, or restarting/disconnecting the Codex process discards its watchers. This does not add durable background-task recovery or change AGY support.
+
 ### 图片输入
 
 可以直接向飞书机器人发送单独的图片，也可以发送同时包含文字和图片的富文本消息。remote-cli 会下载图片资源，并将文字与图片一起转发给当前的 Claude Persistent、Codex App Server、OpenCode ACP、Kimi Code ACP、ZCode app-server 或 Pi RPC 后端。AGY 当前只接受文本，不会处理图片附件。普通文件附件暂不支持。

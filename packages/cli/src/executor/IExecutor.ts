@@ -1,4 +1,4 @@
-import { ToolUseInfo, ToolResultInfo, Attachment, ImageBlock } from '../types';
+import { ToolUseInfo, ToolResultInfo, Attachment, ImageBlock, TaskNotificationInfo } from '../types';
 
 export interface ExecuteOptions {
   onStream?: (chunk: string) => void;
@@ -7,6 +7,8 @@ export interface ExecuteOptions {
   onRedactedThinking?: () => void;
   onPlanMode?: (planContent: string) => void;
   onImage?: (image: ImageBlock) => void;
+  /** May fire after execute resolves; recipients must remain bound to the originating request. */
+  onTaskNotification?: (notification: TaskNotificationInfo) => void;
   timeout?: number;
   /** Optional attachments (e.g. images) */
   attachments?: Attachment[];
