@@ -1,4 +1,5 @@
 import { ToolUseInfo, ToolResultInfo, TaskNotificationInfo } from '../types';
+import { createDiffPanels, createEditPanels, createWritePanels } from './DiffFormatter';
 
 /**
  * Feishu Card 2.0 element types
@@ -119,123 +120,6 @@ function extractEditContext(input: Record<string, unknown>): string {
   }
 
   return context;
-}
-
-const DIFF_MAX_LINES = 160;
-const DIFF_MAX_CHARS = 12000;
-
-function createEditDiff(input: Record<string, unknown>): string | null {
-  const oldString = typeof input.old_string === 'string' ? input.old_string : undefined;
-  const newString = typeof input.new_string === 'string' ? input.new_string : undefined;
-  const providedDiff = typeof input.diff === 'string' ? input.diff : undefined;
-
-  if (providedDiff) return formatDiffBlock(providedDiff);
-  if (oldString === undefined || newString === undefined) return null;
-
-  const filePath = typeof input.file_path === 'string' ? input.file_path : 'file';
-  const oldLines = oldString.split('\n');
-  const newLines = newString.split('\n');
-  const lineDiff = createLineDiff(oldLines, newLines);
-  if (lineDiff) {
-    return formatDiffBlock([
-      `--- ${filePath}`,
-      `+++ ${filePath}`,
-      `@@ -1,${oldLines.length} +1,${newLines.length} @@`,
-      ...lineDiff,
-    ].join('\n'));
-  }
-
-  const prefixLength = commonPrefixLength(oldLines, newLines);
-  const suffixLength = commonSuffixLength(oldLines, newLines, prefixLength);
-  const oldChanged = oldLines.slice(prefixLength, oldLines.length - suffixLength);
-  const newChanged = newLines.slice(prefixLength, newLines.length - suffixLength);
-  const contextBefore = oldLines.slice(Math.max(0, prefixLength - 2), prefixLength);
-  const contextAfter = oldLines.slice(oldLines.length - suffixLength, oldLines.length - suffixLength + 2);
-  const diffLines = [
-    `--- ${filePath}`,
-    `+++ ${filePath}`,
-    `@@ -${prefixLength + 1},${oldChanged.length} +${prefixLength + 1},${newChanged.length} @@`,
-    ...contextBefore.map((line) => ` ${line}`),
-    ...oldChanged.map((line) => `-${line}`),
-    ...newChanged.map((line) => `+${line}`),
-    ...contextAfter.map((line) => ` ${line}`),
-  ];
-
-  return formatDiffBlock(diffLines.join('\n'));
-}
-
-function createWriteDiff(input: Record<string, unknown>): string | null {
-  if (typeof input.content !== 'string') return null;
-  const filePath = typeof input.file_path === 'string' ? input.file_path : 'file';
-  const lines = input.content.split('\n');
-  return formatDiffBlock([
-    '--- /dev/null',
-    `+++ ${filePath}`,
-    `@@ -0,0 +1,${lines.length} @@`,
-    ...lines.map((line) => `+${line}`),
-  ].join('\n'));
-}
-
-function createLineDiff(oldLines: string[], newLines: string[]): string[] | null {
-  const maxMatrixCells = 160000;
-  if (oldLines.length * newLines.length > maxMatrixCells) return null;
-
-  const lengths = Array.from({ length: oldLines.length + 1 }, () => new Uint32Array(newLines.length + 1));
-  for (let oldIndex = oldLines.length - 1; oldIndex >= 0; oldIndex--) {
-    for (let newIndex = newLines.length - 1; newIndex >= 0; newIndex--) {
-      lengths[oldIndex][newIndex] = oldLines[oldIndex] === newLines[newIndex]
-        ? lengths[oldIndex + 1][newIndex + 1] + 1
-        : Math.max(lengths[oldIndex + 1][newIndex], lengths[oldIndex][newIndex + 1]);
-    }
-  }
-
-  const result: string[] = [];
-  let oldIndex = 0;
-  let newIndex = 0;
-  while (oldIndex < oldLines.length || newIndex < newLines.length) {
-    if (oldIndex < oldLines.length && newIndex < newLines.length && oldLines[oldIndex] === newLines[newIndex]) {
-      result.push(` ${oldLines[oldIndex]}`);
-      oldIndex++;
-      newIndex++;
-    } else if (oldIndex < oldLines.length && (newIndex === newLines.length || lengths[oldIndex + 1][newIndex] >= lengths[oldIndex][newIndex + 1])) {
-      result.push(`-${oldLines[oldIndex++]}`);
-    } else {
-      result.push(`+${newLines[newIndex++]}`);
-    }
-  }
-  return result;
-}
-
-function commonPrefixLength(oldLines: string[], newLines: string[]): number {
-  let length = 0;
-  while (length < oldLines.length && length < newLines.length && oldLines[length] === newLines[length]) length++;
-  return length;
-}
-
-function commonSuffixLength(oldLines: string[], newLines: string[], prefixLength: number): number {
-  let length = 0;
-  while (
-    length < oldLines.length - prefixLength &&
-    length < newLines.length - prefixLength &&
-    oldLines[oldLines.length - length - 1] === newLines[newLines.length - length - 1]
-  ) length++;
-  return length;
-}
-
-function formatDiffBlock(diff: string): string {
-  const lines = diff.split(/\r?\n/);
-  let truncated = lines.length > DIFF_MAX_LINES;
-  let content = lines.slice(0, DIFF_MAX_LINES).join('\n');
-  if (content.length > DIFF_MAX_CHARS) {
-    content = content.slice(0, DIFF_MAX_CHARS);
-    const lastNewline = content.lastIndexOf('\n');
-    content = lastNewline > 0 ? content.slice(0, lastNewline) : content;
-    truncated = true;
-  }
-  if (truncated) content += '\n... diff truncated; inspect the file for the complete change ...';
-  const longestBacktickRun = Math.max(0, ...Array.from(content.matchAll(/`+/g), (match) => match[0].length));
-  const fence = '`'.repeat(Math.max(3, longestBacktickRun + 1));
-  return `${fence}diff\n${content}\n${fence}`;
 }
 
 function looksLikeDiff(content: string): boolean {
@@ -422,6 +306,10 @@ export function createToolUseElement(toolInfo: ToolUseInfo): FeishuCardElement[]
     headerTitle += ` · \`${id.slice(0, 8)}\``;
   }
 
+  const diffPanels = name === 'Edit' ? createEditPanels(input, headerTitle)
+    : name === 'Write' ? createWritePanels(input, headerTitle) : null;
+  if (diffPanels) return [createDividerElement(), ...diffPanels];
+
   // Create collapsible panel with tool details inside
   const collapsiblePanel: FeishuCardElement = {
     tag: 'collapsible_panel',
@@ -444,10 +332,6 @@ export function createToolUseElement(toolInfo: ToolUseInfo): FeishuCardElement[]
     padding: '4px 8px',
     elements: [
       createMarkdownElement(context),
-      ...(['Edit', 'Write'].includes(name) ? (() => {
-        const diff = name === 'Edit' ? createEditDiff(input) : createWriteDiff(input);
-        return diff ? [createMarkdownElement(diff)] : [];
-      })() : []),
     ],
   };
 
@@ -477,12 +361,16 @@ export function createToolResultElement(resultInfo: ToolResultInfo): FeishuCardE
   // Prepare content elements inside the collapsible panel
   const panelElements: FeishuCardElement[] = [];
 
+  if (!is_error && (diff || looksLikeDiff(content))) {
+    const panels = createDiffPanels(diff || content, headerTitle);
+    if (content && !looksLikeDiff(content) && panels[0]?.elements) {
+      panels[0].elements.unshift(createMarkdownElement(`\`\`\`\n${truncate(content, 500)}\n\`\`\``));
+    }
+    return panels;
+  }
+
   if (content && !is_error) {
-    // For successful results, show the content in a code block
-    const formatted = diff || looksLikeDiff(content)
-      ? formatDiffBlock(diff || content)
-      : `\`\`\`\n${truncate(content, 500)}\n\`\`\``;
-    panelElements.push(createMarkdownElement(formatted));
+    panelElements.push(createMarkdownElement(`\`\`\`\n${truncate(content, 500)}\n\`\`\``));
   } else if (content && is_error) {
     // For errors, show the error message
     const truncated = truncate(content, 500);
