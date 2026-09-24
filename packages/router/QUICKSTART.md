@@ -7,11 +7,14 @@
 If you're developing or testing the router locally:
 
 ```bash
-# 1. Build the router package
+# 1. Install locked dependencies from the repository root
+npm ci
+
+# 2. Build the router package
 cd packages/router
 npm run build
 
-# 2. Create global symlink
+# 3. Create global symlink
 npm link
 ```
 
@@ -34,7 +37,7 @@ npm unlink
 
 ### For Production
 
-Install globally once published to npm:
+Install the published package globally:
 
 ```bash
 npm install -g @yu_robotics/remote-cli-router
@@ -151,7 +154,9 @@ The router server consists of:
 
 1. **HTTP Server (Koa)**
    - `/health` - Health check endpoint
-   - `/webhook/feishu` - Feishu webhook receiver
+   - `/api/version` - Router and protocol versions
+   - `/api/bind/request` - Create a client binding code
+   - `/api/feishu/card-callback` - HTTP card-action handler (not needed when using long-connection callbacks)
 
 2. **WebSocket Server**
    - `/ws` - WebSocket endpoint for local clients
@@ -160,6 +165,10 @@ The router server consists of:
 3. **Data Storage (JSON)**
    - `~/.remote-cli-router/config.json` - Server configuration
    - `~/.remote-cli-router/bindings.json` - User-device bindings
+
+4. **Feishu Long Connection**
+   - Outbound WebSocket connection authenticated with App ID and App Secret
+   - Receives message events and card-button callbacks without requiring an inbound webhook
 
 ## Endpoints
 
@@ -176,93 +185,59 @@ Returns server health and connection statistics:
 }
 ```
 
-### POST /webhook/feishu
+### Feishu Events
 
-Receives Feishu event webhooks. Automatically handles:
-- URL verification challenges
-- Message events (`im.message.receive_v1`)
-- Command routing to bound devices
+In the Feishu application console, enable **Long Connection** mode and subscribe to `im.message.receive_v1` and `card.action.trigger`. Messages and card actions arrive over the Router's outbound Feishu connection. There is no `/webhook/feishu` endpoint and no callback URL to configure. Internal deployments do not need a public domain solely for Feishu delivery; use TLS when exposing client connections publicly.
 
 ## WebSocket Protocol
 
 Local clients connect to `/ws` and exchange JSON messages:
 
-### Message Types
+### Message Shapes
 
-1. **Binding Request** (Client → Server)
-```json
-{
-  "type": "binding_request",
-  "messageId": "msg_xxx",
-  "timestamp": 1234567890,
-  "data": {
-    "deviceId": "dev_mac_xxx"
-  }
-}
-```
+Registration uses `binding_request` / `binding_confirm` with a nested `data` payload, including the device ID, protocol version, and optional capability flags. Commands, streams, and final responses use top-level payload fields; do not wrap these fields in `data`.
 
-2. **Binding Confirmation** (Server → Client)
-```json
-{
-  "type": "binding_confirm",
-  "messageId": "msg_xxx",
-  "timestamp": 1234567890,
-  "data": {
-    "success": true
-  }
-}
-```
+For example, a Router command and its CLI response have these shapes:
 
-3. **Heartbeat** (Bidirectional)
-```json
-{
-  "type": "heartbeat",
-  "messageId": "msg_xxx",
-  "timestamp": 1234567890,
-  "data": {}
-}
-```
-
-4. **Command** (Server → Client)
 ```json
 {
   "type": "command",
   "messageId": "msg_xxx",
   "timestamp": 1234567890,
-  "data": {
-    "openId": "ou_xxx",
-    "content": "Fix TypeScript errors",
-    "workingDir": "~/projects/my-app"
-  }
+  "openId": "ou_xxx",
+  "threadId": "default",
+  "content": "Fix TypeScript errors"
 }
 ```
 
-5. **Response** (Client → Server)
 ```json
 {
   "type": "response",
   "messageId": "msg_xxx",
   "timestamp": 1234567890,
-  "data": {
-    "openId": "ou_xxx",
-    "success": true,
-    "output": "Fixed 3 TypeScript errors..."
-  }
+  "openId": "ou_xxx",
+  "threadId": "default",
+  "success": true,
+  "output": "Fixed 3 TypeScript errors..."
 }
 ```
+
+These examples are not the complete protocol. See the [CLI types](../cli/src/types/index.ts), [Router dispatcher](src/server.ts), and [protocol versioning rules](../../CLAUDE.md#protocol-versioning) before implementing a client. Streaming, background task notifications, queue-start events, and task-recovery acknowledgments have their own fields and capability requirements.
 
 ## Connection Management
 
 - **Heartbeat Interval**: Configurable (default: 30 seconds)
-- **Connection Timeout**: 2x heartbeat interval without response
+- **Connection Timeout**: 3x heartbeat interval without incoming activity
 - **Stale Cleanup**: Automatic cleanup every heartbeat interval
 - **Reconnection**: Clients automatically reconnect on disconnect
+
+With task-recovery support on both sides, a reconnecting CLI reports running tasks and starts new recovery cards after the Router acknowledges them. Backends keep running during a Router outage. Old cards remain as they were; disconnected output is dropped, not buffered or replayed, and the new card marks the gap. The CLI retains only bounded final-status metadata for tasks completed while disconnected (at most 100 records for up to 24 hours, in memory). CLI restarts lose this recovery state. See [Automatic Startup and Recovery](../../README.md#automatic-client-startup) for operational limits.
 
 ## Security
 
 ### Directory Whitelisting
 
-The router itself doesn't enforce directory restrictions - this is handled by the local client. The router only forwards commands.
+The client checks allowed working directories. This is not a sandbox for backend file access or shell commands; backend processes retain the operating-system user's permissions. The Router does not enforce a filesystem allowlist on the client.
 
 ### Device Authentication
 
@@ -270,8 +245,8 @@ Each device:
 1. Generates a unique device ID based on machine characteristics
 2. Creates a binding code (valid for 5 minutes)
 3. User binds the code in Feishu with `/bind CODE`
-4. Router stores the binding: `open_id → device_id`
-5. All future messages from that user are routed to their device
+4. Router stores the user's device list and active device; each device can belong to only one user
+5. New top-level messages go to the selected device; replies to known cards can retain that card's device and thread routing
 
 ### Data Persistence
 
@@ -319,12 +294,12 @@ kill -TERM <PID>  # Or kill -9 <PID> if TERM doesn't work
 rm ~/.remote-cli-router/server.pid
 ```
 
-### Feishu webhook not working
+### Feishu messages or card buttons not working
 
-1. Verify webhook URL in Feishu console matches your domain
-2. Ensure HTTPS/SSL is configured (Feishu requires HTTPS)
-3. Check firewall allows inbound connections on server port
-4. Review server logs for errors
+1. Verify App ID and App Secret and enable the bot's Long Connection mode
+2. Subscribe to `im.message.receive_v1` and `card.action.trigger`, grant the required permissions, and publish the app
+3. Check outbound connectivity from the Router to Feishu; a public inbound webhook is not used
+4. Check Router logs for Feishu connection or API errors; test `/health` separately to verify the client-facing server
 
 ### Devices not connecting
 
@@ -390,7 +365,7 @@ See [README.md](../../README.md) section "Router Server Deployment" for:
 - Docker deployment with docker-compose
 - Nginx reverse proxy configuration
 - SSL/TLS setup
-- Redis alternatives (now using JSON storage)
+- Persistent JSON storage and Docker data-directory permissions
 - Monitoring and logging
 
 ## File Locations

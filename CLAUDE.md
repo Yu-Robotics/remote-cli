@@ -125,13 +125,13 @@ npm test -w @yu_robotics/remote-cli
 npm run test:coverage -w @yu_robotics/remote-cli
 
 # Run a single test file
-npm test -- DirectoryGuard.test.ts
+npm test -w @yu_robotics/remote-cli -- DirectoryGuard.test.ts
 
 # Run tests for a specific command
-npm test -- commands/init.test.ts
+npm test -w @yu_robotics/remote-cli -- commands/init.test.ts
 
 # Run integration tests
-npm test -- integration/full-workflow.test.ts
+npm test -w @yu_robotics/remote-cli -- integration/full-workflow.test.ts
 ```
 
 ### Development Mode
@@ -181,21 +181,22 @@ The CLI uses `os.homedir()` to locate the config directory (`~/.remote-cli/`). O
 import os from 'os';
 import { vi } from 'vitest';
 
-// Mock os.homedir() to respect process.env.HOME for isolated tests
-vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || os.homedir());
+// Capture the original function before mocking to avoid recursive fallback.
+const originalHomedir = os.homedir.bind(os);
+vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || originalHomedir());
 ```
 
 Without this mock, tests will write to the real home directory and contaminate each other.
 
 ### Security Architecture
 
-**DirectoryGuard** is the gatekeeper for all file system operations:
-1. **Path normalization**: Converts `~`, relative paths, and absolute paths to canonical form
-2. **Whitelist enforcement**: Only allows operations within directories specified in `config.security.allowedDirectories`
-3. **Path traversal prevention**: Blocks `../../etc/passwd` style attacks
+**DirectoryGuard** validates working-directory selections and explicitly guarded local image reads:
+1. **Path normalization**: Resolves `~`, relative paths, and absolute paths
+2. **Whitelist enforcement**: Checks selected paths against `config.security.allowedDirectories`
+3. **Scope**: These checks do not intercept arbitrary file access or shell commands inside backend processes
 
 The security model has **two application-level layers**:
-1. **Directory whitelist**: `DirectoryGuard.isAllowed()` checks working directories
+1. **Directory whitelist**: `DirectoryGuard.isSafePath()` checks working directories
 2. **Device authentication**: Router server binds devices to specific users via Feishu binding flow
 
 remote-cli does not install a global Claude Code `PreToolUse` hook. DirectoryGuard controls which working directory a thread may select, but it is not a process sandbox; AI backend processes inherit the permissions of the operating-system user.
@@ -284,83 +285,22 @@ The router server is fully implemented with:
 - `utils/PidManager.ts`: Server process management
 
 ### WebSocket Protocol
-The CLI and router use different message type systems:
 
-**CLI side** (`packages/cli/src/types/index.ts`):
-```typescript
-// Incoming from router
-interface IncomingMessage {
-  type: 'command' | 'status' | 'ping';
-  messageId: string;
-  content?: string;
-  workingDirectory?: string;
-  openId?: string;
-  timestamp: number;
-  isSlashCommand?: boolean;
-}
+Use the current [CLI types](packages/cli/src/types/index.ts), [Router types](packages/router/src/types/index.ts), [WebSocketClient](packages/cli/src/client/WebSocketClient.ts), and [Router dispatcher](packages/router/src/server.ts) as the protocol reference. The Router's generic `WSMessage` envelope does not describe every wire message: registration uses nested `data`, while commands, streaming output, and final responses carry their payload fields at the top level.
 
-// Outgoing to router
-interface OutgoingMessage {
-  type: 'result' | 'progress' | 'status' | 'pong';
-  messageId: string;
-  success?: boolean;
-  output?: string;
-  error?: string;
-  timestamp: number;
-  openId?: string;
-}
-```
-
-**Router side** (`packages/router/src/types/index.ts`):
-```typescript
-enum MessageType {
-  COMMAND = 'command',
-  RESPONSE = 'response',
-  BINDING_REQUEST = 'binding_request',
-  BINDING_CONFIRM = 'binding_confirm',
-  HEARTBEAT = 'heartbeat',
-  ERROR = 'error',
-  NOTIFICATION = 'notification'
-}
-
-interface WSMessage {
-  type: MessageType;
-  messageId: string;
-  timestamp: number;
-  data: any;
-}
-```
+- Registration exchanges the protocol version and optional capabilities such as `queueStarted` and `taskRecovery`.
+- `threadId` associates commands and output with a remote-cli thread; a backend's session ID is a separate identifier.
+- Streaming supports text, tools, images, filtered-thinking notices, and plan messages. Background tasks use separate `task_notification` cards.
+- Queue-start and task-recovery messages establish fresh execution cards before subsequent output is routed to them. Recovery sends metadata and later output, not a replay of disconnected output.
+- Follow the Protocol Versioning section below and both compatibility test files when changing the wire format.
 
 ### Redacted Thinking Handling
 
-When AI models' internal reasoning is flagged by safety systems, some or all of the thinking
-block is encrypted and returned as a `redacted_thinking` block. This applies to Claude 3.7 Sonnet
-and Gemini models.
+`ClaudePersistentExecutor` recognizes `redacted_thinking` messages and assistant content blocks. It invokes `onRedactedThinking()` instead of streaming encrypted content. The Router receives `streamType: 'redacted_thinking'` and renders a filtered-reasoning notice.
 
-**Implementation**:
-- `redacted_thinking` message type and content block type are fully supported in the CLI and Router
-- Encrypted content is stored in output buffer for API continuity but NOT displayed to users
-- Users see a friendly notification via Feishu Card 2.0: "💭 Some reasoning was filtered by safety systems"
-- Session continuity is maintained - the AI can use the redacted reasoning in future turns
-- The encrypted block must be preserved unmodified when passed back to the API
+Claude Code owns API history and session persistence. The executor's output buffer is not an API transcript: assistant blocks add a truncated diagnostic marker rather than the original encrypted block. Do not use this buffer to reconstruct API history or claim that remote-cli replays encrypted reasoning itself.
 
-**Architecture**:
-1. **CLI Side**: `ClaudePersistentExecutor` detects `redacted_thinking` type in stream
-2. **Callback**: Triggers `onRedactedThinking()` callback (not `onStream` - encrypted content not shown)
-3. **Storage**: Encrypted content stored in output buffer for session continuity
-4. **Router Side**: Receives `streamType: 'redacted_thinking'` message
-5. **Feishu Display**: `createRedactedThinkingElement()` renders user-friendly note card
-
-**Testing**:
-To test redacted thinking handling in development, use Anthropic's magic test string:
-```
-ANTHROPIC_MAGIC_STRING_TRIGGER_REDACTED_THINKING_46C9A13E193C177646C7398A98432ECCCE4C1253D5E2D82641AC0E52CC2876CB
-```
-
-**References**:
-- Anthropic Extended Thinking documentation
-- Claude 3.7 Sonnet safety features
-- Gemini thinking modes
+The [historical investigation](REDACTED_THINKING_ANALYSIS.md) records the original analysis and proposed tests; its model-specific assumptions are not a current backend support matrix.
 
 ## AGY CLI (Antigravity) Support
 
@@ -387,11 +327,7 @@ AGY CLI is auto-detected if already installed on the local machine (`agy --versi
    threads and clears per-thread overrides; adding `@` switches only the
    current thread. Use `/backend default @` to follow the global backend again.
 
-3. Restart the service to apply:
-   ```bash
-   remote-cli stop
-   remote-cli start
-   ```
+3. The successful `/backend` response applies the switch to future commands immediately; no service restart is required. A global switch is rejected while any thread is running.
 
 ### Executor Config Fields (`executor` in config)
 
@@ -455,11 +391,7 @@ Codex CLI is auto-detected if already installed on the local machine (`codex --v
    threads and clears per-thread overrides; adding `@` switches only the
    current thread. Use `/backend default @` to follow the global backend again.
 
-3. Restart the service to apply:
-   ```bash
-   remote-cli stop
-   remote-cli start
-   ```
+3. The successful `/backend` response applies the switch to future commands immediately; no service restart is required. A global switch is rejected while any thread is running.
 
 ### Executor Config Fields (`executor` in config)
 
@@ -485,6 +417,8 @@ CodexAppServerExecutor keeps one app-server process per active thread. It uses a
 
 Known gaps vs Claude backend: no native Claude hook events. The app-server path supports Codex image inputs.
 
+Codex background command and sub-agent completion events also produce standalone task cards through `onTaskNotification`. This tracking is process-local and depends on the events exposed by the installed Codex version; see [Background Task Notifications](README.md#background-task-notifications) for the supported behavior.
+
 **Slash passthrough (Codex)**: none — app-server has no interactive TUI slash-command protocol, so backend-specific slash commands are rejected. remote-cli's built-in commands (`/clear`, `/compact`, `/model`, `/effort`, ...) are handled locally.
 
 **Compact**: `/compact` uses app-server thread compaction.
@@ -493,7 +427,7 @@ Known gaps vs Claude backend: no native Claude hook events. The app-server path 
 
 ## OpenCode CLI Support
 
-The CLI supports OpenCode through a persistent `opencode acp` child process. `AcpClient` implements the ACP JSON-RPC transport without an extra runtime dependency, and `OpenCodeExecutor` maps ACP session updates onto `IExecutor` callbacks.
+The CLI supports OpenCode through a persistent `opencode acp` child process. `AcpClient` implements the ACP JSON-RPC transport without an extra runtime dependency. `OpenCodeExecutor` configures the shared `AcpExecutor`, which owns session persistence and maps session updates onto `IExecutor` callbacks.
 
 - Session pointers are stored per thread under `~/.remote-cli/opencode-sessions/` and loaded after process recreation or backend switches.
 - `/model` and `/effort` read and update ACP session configuration options.
@@ -505,8 +439,9 @@ Architecture:
 
 ```
 packages/cli/src/executor/
-  OpenCodeExecutor.ts       # IExecutor implementation and session persistence
-  acp/AcpClient.ts          # OpenCode ACP process and JSON-RPC transport
+  OpenCodeExecutor.ts       # OpenCode-specific ACP configuration
+  AcpExecutor.ts            # Shared execution and session persistence
+  acp/AcpClient.ts          # ACP process and JSON-RPC transport
   acp/AcpTypes.ts           # ACP transport types
 ```
 
@@ -524,9 +459,15 @@ Architecture:
 ```
 packages/cli/src/executor/
   KimiExecutor.ts           # Kimi-specific ACP configuration
-  OpenCodeExecutor.ts       # Shared persistent ACP executor implementation
+  AcpExecutor.ts            # Shared persistent executor implementation
   acp/AcpClient.ts          # ACP process and JSON-RPC transport
 ```
+
+## ZCode Support
+
+The official ZCode backend uses `zcode app-server --stdio`, including the bundled `zcode.cjs` entry point when discovered. It does not use an ACP bridge. `ZCodeExecutor` reuses `AcpExecutor` through the `zcode/ZCodeClient.ts` transport adapter, with launch discovery in `zcode/ZCodeCommand.ts`.
+
+Session pointers live under `~/.remote-cli/zcode-sessions/`. Model and effort controls, compaction, cancellation, images, permission prompts, and model questions use the ZCode transport. `/skills` maps to ZCode's native `/skill`. See [Using ZCode](README.md#using-zcode) for installation and authentication constraints.
 
 ## Pi Agent Support
 

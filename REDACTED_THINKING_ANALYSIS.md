@@ -1,7 +1,8 @@
 # Redacted Thinking Content Block Analysis & Fix Plan
 
 > **Status: IMPLEMENTED ✅**
-> Last updated: 2026-03-20
+> Original analysis updated: 2026-03-20.
+> **Historical investigation:** The missing-handler findings, model assumptions, and code excerpts below describe the pre-fix snapshot. Current handling is documented in [CLAUDE.md](CLAUDE.md#redacted-thinking-handling). Claude Code owns API history; remote-cli's display buffer is not a replayable transcript of encrypted reasoning.
 
 ## Executive Summary
 
@@ -704,4 +705,4 @@ If time is limited, implement a minimal fix:
 
 **Document prepared**: 2026-02-24
 **Author**: Claude Code Analysis
-**Status**: Pending review and implementation decision
+**Status**: Historical analysis retained after implementation. Use the current development guide for maintained behavior.

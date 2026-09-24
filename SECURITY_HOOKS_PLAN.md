@@ -1,7 +1,7 @@
 # Security Hooks Implementation Plan
 
-> **Status: IMPLEMENTED ✅**
-> Last updated: 2026-03-20
+> **Status: SUPERSEDED.** The former global Claude `PreToolUse` security hook is no longer installed; `HooksConfigurator` removes legacy remote-cli hooks. Do not use the installation plan below for current deployments. DirectoryGuard limits working-directory selection, not backend process permissions. See [Security](README.md#security) and [HooksConfigurator](packages/cli/src/security/HooksConfigurator.ts).
+> Original plan updated: 2026-03-20. The remaining sections preserve the historical design.
 
 ## Overview
 

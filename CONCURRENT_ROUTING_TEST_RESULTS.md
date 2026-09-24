@@ -1,5 +1,7 @@
 # Concurrent Routing Test Results & Analysis
 
+> **Status: HISTORICAL TEST SNAPSHOT.** The device-ownership issue below was subsequently fixed; [BindingManager](packages/router/src/binding/BindingManager.ts) rejects a device already owned by another user. The timeout observations and test counts are historical, not current test results. See the [fix record](DEVICE_COLLISION_FIX_COMPLETED.md) and run `npm test` from the repository root for current results.
+
 ## Executive Summary
 
 I've completed comprehensive concurrency testing of the router component. The tests revealed **ONE CRITICAL SECURITY/ROUTING BUG** and several areas where the system handles concurrency correctly.

@@ -1,7 +1,6 @@
 # File Transfer Design Plan
 
-> **Status: DRAFT / FUTURE 🏗️**
-> This document outlines a planned feature that has not yet been implemented.
+> **Status: HISTORICAL PROPOSAL / PARTIALLY IMPLEMENTED.** Ordinary file attachments remain unsupported. Image input for supported backends, Codex native image output, and local image output from all backends are implemented; see [Image Input](README.md#image-input) for current behavior and limits. The remaining design, including its transfer APIs and security assumptions, is a proposal rather than the current protocol.
 
 ## Executive Summary
 

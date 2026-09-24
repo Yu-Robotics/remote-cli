@@ -1,5 +1,7 @@
 # 设备冲突Bug修复 - 完成报告
 
+> **Historical completion report:** Test counts, timing observations, and deployment advice below describe the original fix. For current behavior, see [BindingManager](packages/router/src/binding/BindingManager.ts) and [README.md](README.md); run `npm test` for current verification.
+
 ## ✅ 修复状态：已完成
 
 修复时间：2026-02-19

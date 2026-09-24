@@ -9,17 +9,19 @@ The router server acts as a bridge between Feishu messaging and developer machin
 - **User-device binding** via Feishu bot commands
 - **Message routing** between Feishu and connected CLI clients
 - **Code-change rendering** with collapsible, line-aware diff previews inside streaming cards
-- **Image message forwarding** for standalone images and mixed text-image posts to supported local backends, plus generated Codex images back to Feishu Card 2.0
+- **Image message forwarding** for Feishu images to supported backends, plus Codex native image output and local image files returned by any backend
 - **Client service management** is handled by the local CLI; the Router remains a separate long-running server process
 - **Queued task cards** appear at execution time for capable clients, with the thread, workspace, task preview, and remaining queue count; older clients retain waiting cards
 - **WebSocket connections** from local clients
 - **Feishu long connection** for receiving and sending messages
+- **Task recovery** with compatible clients: new cards resume output after reconnecting, with a gap notice instead of replaying disconnected output
+- **Table-aware card splitting** and a single text fallback retry for a card rejected by Feishu's table limit
 
 ## Prerequisites
 
-- A cloud server with at least **1 CPU core** and **1GB RAM**
+- A server reachable by your local CLI clients, with outbound access to Feishu
 - **Node.js** >= 18.0.0
-- A **domain name** with SSL certificate (HTTPS required for Feishu)
+- For public deployments, a **domain name** and TLS reverse proxy for client connections; internal deployments can use HTTP on a trusted network
 - A **Feishu bot** with messaging permissions
 
 ## Installation
@@ -42,6 +44,8 @@ You will be prompted for:
 - Feishu Encrypt Key (optional)
 - Feishu Verification Token (optional)
 - Server Port (default: 3000)
+
+Configure the bot's **Long Connection** event mode with `im.message.receive_v1` and `card.action.trigger`. The Router opens the connection to Feishu; no inbound Feishu webhook URL is required. Encrypt Key and Verification Token are retained in the configuration wizard but are not used by the current long-connection handler.
 
 ### 2. Start the Server
 
@@ -85,7 +89,7 @@ The Feishu command reference includes the cross-backend `/status`, `/context`, a
 ## Architecture
 
 ```
-Mobile Phone -> Feishu -> Router Server -> WebSocket -> Local CLI -> Claude Code
+Mobile Phone -> Feishu -> Router Server -> WebSocket -> Local CLI -> AI Backend
                                                                         |
 Mobile Phone <- Feishu <- Router Server <- WebSocket <- Local CLI <- Results
 ```
@@ -149,7 +153,7 @@ Back up `./router-data` before upgrades and do not use `docker compose down -v` 
 
 ## Documentation
 
-For full documentation, see the [project README](https://github.com/xiaoyu/remote-cli#readme).
+For full documentation, see the [project README](https://github.com/Yu-Robotics/remote-cli#readme).
 
 ## License
 
