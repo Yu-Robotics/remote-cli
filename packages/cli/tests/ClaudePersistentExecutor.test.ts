@@ -121,6 +121,119 @@ describe('ClaudePersistentExecutor', () => {
     });
   });
 
+  describe('incremental text output', () => {
+    const emit = (message: Record<string, unknown>) => {
+      mockChildProcess.stdout.emit('data', Buffer.from(`${JSON.stringify(message)}\n`));
+    };
+    const stream = (event: Record<string, unknown>, parent: string | null = null) => {
+      emit({ type: 'stream_event', event, parent_tool_use_id: parent });
+    };
+    const beginText = (id: string, index = 0, parent: string | null = null, text = '') => {
+      stream({ type: 'message_start', message: { id } }, parent);
+      stream({ type: 'content_block_start', index, content_block: { type: 'text', text } }, parent);
+    };
+    const delta = (text: string, index = 0, parent: string | null = null) => {
+      stream({ type: 'content_block_delta', index, delta: { type: 'text_delta', text } }, parent);
+    };
+    const assistant = (id: string, content: Record<string, unknown>[], parent: string | null = null) => {
+      emit({ type: 'assistant', message: { id, role: 'assistant', content }, parent_tool_use_id: parent });
+    };
+
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => {
+      // Finish any turn left open by a failed assertion before closing the mock process.
+      emit({ type: 'result', subtype: 'success' });
+      mockChildProcess.emit('exit', 0, null);
+      mockChildProcess.emit('close', 0, null);
+      vi.useRealTimers();
+    });
+
+    it.each(['before', 'after'])('streams text before completion and deduplicates a final block received %s stream end', async (order) => {
+      const onStream = vi.fn();
+      const completed = vi.fn();
+      const result = executor.execute('Explain the change', { onStream }).then(completed);
+      await vi.advanceTimersByTimeAsync(1000);
+
+      beginText('message-1', 1, null, 'Hel');
+      delta('lo ', 1);
+      delta('world', 1);
+      stream({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'Internal reasoning' } });
+      emit({ type: 'system', subtype: 'status', status: 'compacting' });
+      emit({ type: 'system', subtype: 'api_retry', attempt: 1, retry_delay_ms: 1000 });
+
+      expect(onStream.mock.calls.map(([text]) => text)).toEqual(['Hel', 'lo ', 'world']);
+      expect(completed).not.toHaveBeenCalled();
+      if (order === 'after') stream({ type: 'message_stop' });
+      assistant('message-1', [{ type: 'text', text: 'Hello world' }]);
+      if (order === 'before') stream({ type: 'message_stop' });
+      expect(onStream.mock.calls.map(([text]) => text).join('')).toBe('Hello world');
+
+      emit({ type: 'result', subtype: 'success' });
+      await result;
+      expect(completed).toHaveBeenCalledWith(expect.objectContaining({ success: true, output: 'Hello world' }));
+    });
+
+    it('keeps interleaved messages distinct and preserves text without streaming events', async () => {
+      const onStream = vi.fn();
+      const result = executor.execute('Review the changes', { onStream });
+      await vi.advanceTimersByTimeAsync(1000);
+
+      beginText('main-message');
+      delta('Same');
+      beginText('child-message', 0, 'task-tool');
+      delta('Same', 0, 'task-tool');
+      assistant('child-message', [{ type: 'text', text: 'Same' }], 'task-tool');
+      assistant('main-message', [{ type: 'text', text: 'Same' }]);
+      // A second block may repeat the first block's text within the same message.
+      stream({ type: 'content_block_start', index: 2, content_block: { type: 'text', text: '' } });
+      delta('Same', 2);
+      assistant('main-message', [{ type: 'text', text: 'Same' }]);
+      assistant('unstreamed-message', [{ type: 'text', text: 'Same' }]);
+      // If only a prefix arrived incrementally, preserve the rest of the final block.
+      beginText('partial-message');
+      delta('Part');
+      assistant('partial-message', [{ type: 'text', text: 'Partial text' }]);
+      emit({ type: 'result', subtype: 'success' });
+
+      expect(onStream.mock.calls.map(([text]) => text)).toEqual(['Same', 'Same', 'Same', 'Same', 'Part', 'ial text']);
+      await expect(result).resolves.toMatchObject({ success: true, output: 'SameSameSameSamePartial text' });
+
+      const nextStream = vi.fn();
+      const next = executor.execute('Continue', { onStream: nextStream });
+      assistant('next-message', [{ type: 'text', text: 'Same' }]);
+      emit({ type: 'result', subtype: 'success' });
+      await expect(next).resolves.toMatchObject({ success: true, output: 'Same' });
+      expect(nextStream).toHaveBeenCalledTimes(1);
+      expect(nextStream).toHaveBeenCalledWith('Same');
+    });
+
+    it('keeps tool callbacks and plan text in order without duplicating streamed text', async () => {
+      const events: string[] = [];
+      const onPlanMode = vi.fn((text: string) => events.push(`plan:${text}`));
+      const result = executor.execute('Plan the change', {
+        onStream: (text) => events.push(`text:${text}`),
+        onToolUse: (tool) => events.push(`tool:${tool.name}`),
+        onPlanMode,
+      });
+      await vi.advanceTimersByTimeAsync(1000);
+
+      assistant('enter-plan', [{ type: 'tool_use', id: 'enter', name: 'EnterPlanMode', input: {} }]);
+      beginText('plan-message');
+      delta('Step 1.');
+      assistant('plan-message', [{ type: 'text', text: 'Step 1.' }]);
+      stream({ type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'read', name: 'Read' } });
+      stream({ type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"file_path":' } });
+      assistant('plan-message', [{ type: 'tool_use', id: 'read', name: 'Read', input: { file_path: 'README.md' } }]);
+      assistant('exit-plan', [{ type: 'tool_use', id: 'exit', name: 'ExitPlanMode', input: {} }]);
+      emit({ type: 'result', subtype: 'success' });
+
+      expect(events).toEqual(['text:Step 1.', 'tool:Read', 'plan:Step 1.']);
+      expect(onPlanMode).toHaveBeenCalledTimes(1);
+      expect(onPlanMode).toHaveBeenCalledWith('Step 1.');
+      await expect(result).resolves.toMatchObject({ success: true, output: 'Step 1.' });
+    });
+  });
+
   describe('process startup', () => {
     it('should return error if working directory does not exist', async () => {
       // Set working directory to a safe path
