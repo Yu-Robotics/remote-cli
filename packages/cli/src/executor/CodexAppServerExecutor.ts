@@ -5,6 +5,7 @@ import { DirectoryGuard } from '../security/DirectoryGuard';
 import type { Attachment, ImageBlock } from '../types';
 import type { ExecuteOptions, ExecuteResult, ExecutorModelInfo, IExecutor } from './IExecutor';
 import { AppServerMessage, CodexAppServerClient } from './CodexAppServerClient';
+import { CodexTaskNotifications } from './CodexTaskNotifications';
 
 export interface CodexAppServerTransport {
   start(): Promise<void>;
@@ -72,6 +73,7 @@ export class CodexAppServerExecutor implements IExecutor {
   private readonly inactivityTimeoutMs: number;
   private readonly compactTimeoutMs: number;
   private readonly client: CodexAppServerTransport;
+  private readonly taskNotifications: CodexTaskNotifications;
   private unsubscribeClient: (() => void) | null = null;
 
   private codexThreadId: string | null = null;
@@ -117,6 +119,7 @@ export class CodexAppServerExecutor implements IExecutor {
           command: options.codexCommand,
           cwd: this.currentWorkingDirectory,
         });
+    this.taskNotifications = new CodexTaskNotifications((method, params) => this.client.request(method, params));
     this.unsubscribeClient = this.client.onMessage((message) => this.handleMessage(message));
   }
 
@@ -198,6 +201,7 @@ export class CodexAppServerExecutor implements IExecutor {
   }
 
   resetContext(): void {
+    this.taskNotifications.clear();
     const previousId = this.codexThreadId;
     if (this.activeTurn || this.compactWaiter) {
       this.completeActive({ success: false, error: 'Conversation cleared by user' });
@@ -245,6 +249,7 @@ export class CodexAppServerExecutor implements IExecutor {
   async destroy(): Promise<void> {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.taskNotifications.clear();
     this.unsubscribeClient?.();
     this.unsubscribeClient = null;
     if (this.activeTurn) this.completeActive({ success: false, error: 'Executor destroyed' });
@@ -464,6 +469,7 @@ export class CodexAppServerExecutor implements IExecutor {
     const params = message.params ?? {};
 
     if (method === 'client/disconnected') {
+      this.taskNotifications.clear();
       this.threadReady = false;
       if (this.activeTurn) {
         this.completeActive({ success: false, error: params.error ?? 'Codex app-server disconnected' });
@@ -478,6 +484,14 @@ export class CodexAppServerExecutor implements IExecutor {
     }
 
     if (params.threadId && params.threadId !== this.codexThreadId) return;
+    const eventTurnId = params.turnId ?? params.turn?.id;
+    const matchesActiveTurn = !eventTurnId || eventTurnId === this.activeTurn?.turnId;
+    const notified = this.taskNotifications.handle(method, params,
+      matchesActiveTurn ? this.activeTurn?.options.onTaskNotification : undefined);
+    if (notified) return;
+    // Late background output must not become part of a subsequent turn.
+    if (eventTurnId && !matchesActiveTurn && method !== 'turn/started'
+      && params.item?.type !== 'contextCompaction') return;
     if (this.activeTurn) this.armInactivityTimer();
 
     switch (method) {
@@ -713,6 +727,7 @@ export class CodexAppServerExecutor implements IExecutor {
   }
 
   private async failAndRestart(error: string): Promise<void> {
+    this.taskNotifications.clear();
     this.threadReady = false;
     this.completeActive({ success: false, error });
     this.completeCompact({ success: false, error });

@@ -103,6 +103,53 @@ describe('CodexAppServerExecutor', () => {
     await existing.destroy();
   });
 
+  it('notifies the original request when its background command exits during a later turn', async () => {
+    const notify = vi.fn();
+    const first = executor.execute('start a background command', { onTaskNotification: notify });
+    await vi.waitFor(() => expect(transport.requests.some((entry) => entry.method === 'turn/start')).toBe(true));
+    const command = { type: 'commandExecution', id: 'exec-1', command: 'npm test', status: 'inProgress', processId: '42' };
+    transport.emit({ method: 'item/started', params: { threadId: 'codex-thread-1', turnId: 'turn-1', item: command } });
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await first;
+
+    transport.nextTurnId = 'turn-2';
+    const nextNotify = vi.fn();
+    const nextToolResult = vi.fn();
+    const nextStream = vi.fn();
+    const second = executor.execute('next task', { onTaskNotification: nextNotify, onToolResult: nextToolResult, onStream: nextStream });
+    await vi.waitFor(() => expect(transport.requests.filter((entry) => entry.method === 'turn/start')).toHaveLength(2));
+    const completion = { method: 'item/completed', params: { threadId: 'codex-thread-1', turnId: 'turn-1', item: {
+      ...command, status: 'completed', exitCode: 0, aggregatedOutput: 'All tests passed',
+    } } };
+    transport.emit({ ...completion, params: { ...completion.params, threadId: 'unrelated-thread' } });
+    expect(notify).not.toHaveBeenCalled();
+    transport.emit(completion);
+    transport.emit(completion);
+    transport.emit({ method: 'item/agentMessage/delta', params: { threadId: 'codex-thread-1', turnId: 'turn-1', delta: 'late reply' } });
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenCalledWith({ taskId: 'exec-1', status: 'completed', summary: expect.stringContaining('All tests passed'), outputFile: '' });
+    expect(nextNotify).not.toHaveBeenCalled();
+    expect(nextToolResult).not.toHaveBeenCalled();
+    expect(nextStream).not.toHaveBeenCalled();
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-2', status: 'completed' } } });
+    await expect(second).resolves.toMatchObject({ success: true, output: '' });
+  });
+
+  it.each(['reset', 'destroy', 'disconnect'])('stops watching old tasks after %s', async (action) => {
+    const notify = vi.fn();
+    const result = executor.execute('start task', { onTaskNotification: notify });
+    await vi.waitFor(() => expect(transport.requests.some((entry) => entry.method === 'turn/start')).toBe(true));
+    const command = { type: 'commandExecution', id: 'old-task', command: 'npm test', status: 'inProgress' };
+    transport.emit({ method: 'item/started', params: { threadId: 'codex-thread-1', turnId: 'turn-1', item: command } });
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await result;
+    if (action === 'reset') executor.resetContext();
+    else if (action === 'destroy') await executor.destroy();
+    else transport.emit({ method: 'client/disconnected', params: { error: 'closed' } });
+    transport.emit({ method: 'item/completed', params: { threadId: 'codex-thread-1', turnId: 'turn-1', item: { ...command, status: 'completed', exitCode: 0 } } });
+    expect(notify).not.toHaveBeenCalled();
+  });
+
   it('lists and validates models without changing the current turn', async () => {
     await expect(executor.listModels()).resolves.toEqual(expect.arrayContaining([
       expect.objectContaining({ id: 'gpt-a', isDefault: true }),
