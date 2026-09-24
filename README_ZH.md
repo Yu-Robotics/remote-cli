@@ -168,6 +168,8 @@ remote-cli service uninstall
 
 non-interactive 客户端在重新连接到较新版本的 Router 时会自动追平版本。客户端会等待所有 thread 和已确认队列进入空闲状态，从 npm 安装与 Router 完全一致的版本，然后退出并由进程管理器重新启动。短暂安装期间收到的新命令会被拒绝，并提示稍后重试。交互式启动不会自动升级。`--non-interactive` 设计用于由 systemd 或 macOS LaunchAgent 管理的客户端；手动使用该参数也会启用自动升级行为。如果 npm 安装或版本校验失败，现有进程会继续运行并稍后重试。
 
+When the Router restarts or its WebSocket connection drops, running backend processes continue. With CLI and Router 1.6.52 or newer, the CLI automatically reconnects and creates a new recovery card for each running task; old cards remain unchanged. The recovery card marks the output gap and displays only output produced after that card is ready. Output during disconnection or recovery is discarded, not buffered or replayed. The first resumed text segment uses plain text until a tool or image boundary to avoid broken Markdown fragments. Tasks that finish offline report only their completion or failure status. The CLI retains at most 100 such terminal records for up to 24 hours, in memory; restarting the CLI discards them. Recovery cards are requested one at a time. Automatic updates wait for pending task results to be acknowledged (or expire). Older Router versions keep the previous reconnect behavior.
+
 Linux 用户从 1.6.23 或更早版本升级后，需要再次执行 `remote-cli service install`，以使用正确的路径转义重新生成 systemd unit。
 
 ## 路由服务器部署
@@ -586,6 +588,8 @@ remote-cli 自身不处理的斜杠命令会转发给当前 AI 后端，各后�
 直接回复某张已经完成的飞书卡片，消息会继续路由到该卡片所属的 thread。Thread 按钮会同时显示各 thread 工作目录的最后一级名称和所用 backend，便于区分并行 workspace。自动生成的 `thread-2` 等名称会在按钮上只显示序号，例如 `2`，自定义名称保持不变。长回复被拆分成多张卡片时，每张续卡都会重复显示 thread 和工作目录头部。`/thread list` 可以查看所有 thread 的状态，`/status` 可以快速查看当前 backend、模型、工作目录和队列。
 
 Long streaming replies refresh only cards with changed content. Queued tasks combine incoming text while a refresh is pending, so card updates do not build up a backlog of intermediate text. Tool results, images, and the final response retain their order.
+
+Card splitting also counts tables embedded in Markdown and nested components, with a conservative budget of three tables per card. Large Markdown blocks split at table boundaries; excess tables inside indivisible containers remain readable as code text. If Feishu still rejects a card with a table-limit error, the Router retries that card once as text and preserves text mode for later updates. Other cards retain their normal formatting. This applies to every backend and requires Router 1.6.53 or newer.
 
 Claude Code streams text into response cards as it is generated. Completed content blocks do not repeat text that has already streamed, and tool cards continue to use complete tool calls.
 

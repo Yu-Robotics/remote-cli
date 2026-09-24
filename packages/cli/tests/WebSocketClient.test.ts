@@ -48,7 +48,7 @@ describe('WebSocketClient', () => {
 
       await connectPromise;
 
-      expect(WebSocket).toHaveBeenCalledWith(serverUrl);
+      expect(WebSocket).toHaveBeenCalledWith(serverUrl, { handshakeTimeout: 15000 });
       expect(client.isConnected()).toBe(true);
     });
 
@@ -89,6 +89,38 @@ describe('WebSocketClient', () => {
   });
 
   describe('auto reconnection', () => {
+    it('registers again before recovering a task and ignores callbacks from the old socket', async () => {
+      vi.useFakeTimers();
+      const callback = (ws: any, event: string) => ws.on.mock.calls.find(([name]: string[]) => name === event)[1];
+      const connect = client.connect();
+      callback(mockWs, 'open')();
+      await connect;
+      callback(mockWs, 'message')(Buffer.from(JSON.stringify({ type: 'binding_confirm',
+        data: { success: true, capabilities: { taskRecovery: true } } })));
+      client.trackTask({ messageId: 'task', openId: 'user', threadId: 'thread', threadName: 'default',
+        backend: 'claude', cwd: '/workspace', preview: 'Keep working' });
+      callback(mockWs, 'close')(1006, Buffer.from('restart'));
+      client.send({ type: 'stream', messageId: 'task', chunk: 'discarded' });
+      const next = { ...mockWs, on: vi.fn(), send: vi.fn() };
+      vi.mocked(WebSocket).mockImplementation(() => next);
+      vi.advanceTimersByTime(5000);
+      callback(next, 'open')();
+      expect(next.send).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(next.send.mock.calls[0][0]).type).toBe('binding_request');
+      callback(next, 'message')(Buffer.from(JSON.stringify({ type: 'binding_confirm',
+        data: { success: true, capabilities: { taskRecovery: true } } })));
+      const recovery = JSON.parse(next.send.mock.calls[1][0]);
+      expect(recovery.type).toBe('task_resume');
+      callback(mockWs, 'close')(1006, Buffer.from('delayed close'));
+      expect(client.isConnected()).toBe(true);
+      callback(next, 'message')(Buffer.from(JSON.stringify({ type: 'task_resume_ack', messageId: 'task',
+        recoveryId: recovery.taskResume.recoveryId, state: 'running', success: true })));
+      client.send({ type: 'stream', messageId: 'task', chunk: 'new output' });
+      expect(JSON.parse(next.send.mock.calls.at(-1)[0]).chunk).toBe('new output');
+      expect(JSON.stringify(next.send.mock.calls)).not.toContain('discarded');
+      client.disconnect();
+      vi.useRealTimers();
+    });
     it('should attempt reconnection after disconnect', async () => {
       vi.useFakeTimers();
 
@@ -149,6 +181,22 @@ describe('WebSocketClient', () => {
   });
 
   describe('heartbeat mechanism', () => {
+    it('terminates an unresponsive socket so that reconnection can start', async () => {
+      vi.useFakeTimers();
+      const connect = client.connect();
+      mockWs.on.mock.calls.find(([event]) => event === 'open')[1]();
+      await connect;
+      vi.advanceTimersByTime(30000);
+      expect(mockWs.terminate).not.toHaveBeenCalled();
+      const onMessage = mockWs.on.mock.calls.find(([event]) => event === 'message')[1];
+      onMessage(Buffer.from(JSON.stringify({ type: 'heartbeat' })));
+      vi.advanceTimersByTime(30000);
+      expect(mockWs.terminate).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(15000);
+      expect(mockWs.terminate).toHaveBeenCalledOnce();
+      client.disconnect();
+      vi.useRealTimers();
+    });
 
     it('should respect custom heartbeat interval', async () => {
       vi.useFakeTimers();

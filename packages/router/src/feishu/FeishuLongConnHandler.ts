@@ -8,6 +8,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { createHash } from 'crypto';
+import { CARD_TABLE_LIMIT, countCardTables, isCardTableLimitError, limitCardTables, plainTextCard, prepareTableElements } from '../utils/CardTables';
 
 /**
  * Feishu Long Connection Handler configuration
@@ -47,6 +48,7 @@ export class FeishuLongConnHandler {
   private threadSwitchStateCleanupTimer: NodeJS.Timeout | null = null;
   // Remember successful card payloads without retaining another copy of the content.
   private cardContentHashes = new Map<string, string[]>();
+  private plainTextCards = new Map<string, Set<number>>();
   // Per-message serialization locks to prevent concurrent updates from creating duplicates
   private messageLocks: Map<string, Promise<any>> = new Map();
   private queueCardDecisions = new Map<string, Promise<void>>();
@@ -1046,11 +1048,12 @@ Examples:
   /**
    * Split Card 2.0 elements into chunks based on Feishu limits
    *
-   * Feishu Card 2.0 has two main limits:
+   * Card packing budgets:
    * 1. Element count: Max 200 tagged nodes per card (we use 150 for safety)
    * 2. Data size: Max 3,000,000 characters in the data field (JSON.stringify result)
+   * 3. Tables: A conservative budget including tables embedded in Markdown
    *
-   * This function splits elements array into chunks that satisfy both limits,
+   * This function splits elements into chunks that satisfy these limits,
    * and adds continuation indicators between chunks for better UX.
    *
    * Note: Element counting uses recursive tag counting - all nodes with 'tag' property
@@ -1067,6 +1070,7 @@ Examples:
       return [elements];
     }
 
+    elements = prepareTableElements(elements);
     // Check if we need to split at all
     const needsSplitting = this.checkIfElementsNeedSplitting(elements);
     console.log(`[FeishuHandler] Elements check: count=${elements.length}, needsSplitting=${needsSplitting}`);
@@ -1079,6 +1083,8 @@ Examples:
     let currentChunk: any[] = [];
     let currentChunkSize = 0;
     let currentChunkTaggedNodes = 0;
+    let currentChunkTables = 0;
+    const headerTables = countCardTables(continuationHeaderElements);
 
     // Reserve space for continuation indicators and the repeated card header.
     const continuationHeaderSize = JSON.stringify(continuationHeaderElements).length;
@@ -1093,12 +1099,14 @@ Examples:
       const element = elements[i];
       const elementSize = JSON.stringify(element).length;
       const elementTaggedNodes = this.countTaggedNodes(element);
+      const elementTables = countCardTables(element);
 
       // Keep the switch panel caption and all button rows on the same card.
       const groupSize = element === trailingElements[0]
         ? trailingElements.reduce((sum, item) => sum + JSON.stringify(item).length, 0) : elementSize;
       const groupTaggedNodes = element === trailingElements[0]
         ? trailingElements.reduce((sum, item) => sum + this.countTaggedNodes(item), 0) : elementTaggedNodes;
+      const groupTables = element === trailingElements[0] ? countCardTables(trailingElements) : elementTables;
 
       // Check if adding this element would exceed limits
       // Reserve space for continuation indicators
@@ -1107,33 +1115,29 @@ Examples:
       const wouldExceedSizeLimit =
         currentChunkSize + groupSize + continuationIndicatorSize >
         (this.CARD_DATA_SIZE_LIMIT - this.CARD_SIZE_BUFFER);
+      const wouldExceedTableLimit = currentChunkTables + groupTables + headerTables > CARD_TABLE_LIMIT;
 
-      if (currentChunk.length > 0 && (wouldExceedElementLimit || wouldExceedSizeLimit)) {
+      if (currentChunk.length > 0 && (wouldExceedElementLimit || wouldExceedSizeLimit || wouldExceedTableLimit)) {
         // Start a new chunk
         chunks.push(currentChunk);
-        console.log(`[FeishuHandler] Chunk finished: ${currentChunk.length} top-level elements, ${currentChunkTaggedNodes} tagged nodes, ${currentChunkSize} bytes`);
         currentChunk = [];
         currentChunkSize = 0;
         currentChunkTaggedNodes = 0;
+        currentChunkTables = 0;
       }
 
       currentChunk.push(element);
       currentChunkSize += elementSize;
       currentChunkTaggedNodes += elementTaggedNodes;
+      currentChunkTables += elementTables;
     }
 
     // Add the last chunk if not empty
     if (currentChunk.length > 0) {
       chunks.push(currentChunk);
-      console.log(`[FeishuHandler] Chunk finished: ${currentChunk.length} top-level elements, ${currentChunkTaggedNodes} tagged nodes, ${currentChunkSize} bytes`);
     }
 
     console.log(`[FeishuHandler] Split ${elements.length} top-level elements into ${chunks.length} chunk(s)`);
-    chunks.forEach((chunk, i) => {
-      const chunkSize = JSON.stringify({ schema: '2.0', body: { elements: chunk } }).length;
-      const chunkTaggedNodes = chunk.reduce((sum, el) => sum + this.countTaggedNodes(el), 0);
-      console.log(`[FeishuHandler]   Chunk ${i + 1}: ${chunk.length} top-level, ${chunkTaggedNodes} tagged nodes, ${chunkSize} bytes`);
-    });
 
     // Add continuation indicators between chunks
     if (chunks.length > 1) {
@@ -1225,6 +1229,7 @@ Examples:
       console.log(`[FeishuHandler] Total tagged nodes (${totalTaggedNodes}) exceeds limit (${this.CARD_ELEMENT_LIMIT})`);
       return true;
     }
+    if (countCardTables(elements) > CARD_TABLE_LIMIT) return true;
 
     // Check data size limit
     const cardData = {
@@ -1253,26 +1258,39 @@ Examples:
    * @param elements Array of Feishu Card 2.0 elements
    * @returns The new message ID, or null on error
    */
-  private async createContinuationCard(openId: string, elements: any[]): Promise<string | null> {
+  private async createContinuationCard(openId: string, elements: any[], onTableLimit?: () => void, allowFallback = true): Promise<string | null> {
     try {
-      const result = await this.client.im.message.create({
+      const content = JSON.stringify({ schema: '2.0', body: { elements: limitCardTables(elements) } });
+      const result = await this.sendCardRequest(content, body => this.client.im.message.create({
         params: { receive_id_type: 'open_id' },
         data: {
           receive_id: openId,
           msg_type: 'interactive',
-          content: JSON.stringify({
-            schema: '2.0',
-            body: {
-              elements,
-            },
-          }),
+          content: body,
         },
-      });
+      }), onTableLimit, allowFallback);
 
       return result.data?.message_id || null;
     } catch (error: any) {
       console.error('Failed to create continuation card:', error?.message || error);
       return null;
+    }
+  }
+
+  /** Retry only a confirmed table-limit rejection, once, with readable text. */
+  private async sendCardRequest(content: string, send: (body: string) => Promise<any>, onTableLimit?: () => void, allowFallback = true): Promise<any> {
+    const checkedSend = async (body: string) => {
+      const result = await send(body);
+      if (result?.code) throw result;
+      return result;
+    };
+    try {
+      return await checkedSend(content);
+    } catch (error) {
+      if (!allowFallback || !isCardTableLimitError(error)) throw error;
+      console.warn('[FeishuHandler] Card table limit reached; retrying this card as text.');
+      onTableLimit?.();
+      return checkedSend(JSON.stringify(plainTextCard(JSON.parse(content))));
     }
   }
 
@@ -1349,14 +1367,26 @@ Examples:
         hashes = [];
         this.cardContentHashes.set(messageId, hashes);
       }
-      const payloads = chunks.map(chunk => JSON.stringify({ schema: '2.0', body: { elements: chunk } }));
+      let fallbackCards = this.plainTextCards.get(messageId);
+      if (!fallbackCards) {
+        fallbackCards = new Set();
+        this.plainTextCards.set(messageId, fallbackCards);
+      }
+      const payloadFor = (index: number) => JSON.stringify({ schema: '2.0',
+        body: { elements: fallbackCards.has(index) ? plainTextCard(chunks[index]) : chunks[index] } });
+      const payloads = chunks.map((_, index) => payloadFor(index));
       const nextHashes = payloads.map(payload => createHash('sha256').update(payload).digest('hex'));
+      const usePlainText = (index: number) => {
+        fallbackCards.add(index);
+        payloads[index] = payloadFor(index);
+        nextHashes[index] = createHash('sha256').update(payloads[index]).digest('hex');
+      };
       const patchCard = async (index: number): Promise<void> => {
         if (hashes[index] === nextHashes[index]) return;
-        await this.client.im.message.patch({
+        await this.sendCardRequest(payloads[index], content => this.client.im.message.patch({
           path: { message_id: chain[index] },
-          data: { content: payloads[index] },
-        });
+          data: { content },
+        }), () => usePlainText(index), !fallbackCards.has(index));
         // Failed requests must remain eligible for retry.
         hashes[index] = nextHashes[index];
       };
@@ -1381,7 +1411,9 @@ Examples:
           console.log(`[FeishuHandler] Creating ${neededContinuationCards - existingContinuationCards.length} new continuation card(s)`);
           for (let i = existingContinuationCards.length; i < neededContinuationCards; i++) {
             const chunkIndex = i + 1;
-            const newMessageId = await this.createContinuationCard(openId, chunks[chunkIndex]);
+            const newMessageId = await this.createContinuationCard(openId,
+              fallbackCards.has(chunkIndex) ? plainTextCard(chunks[chunkIndex]) : chunks[chunkIndex],
+              () => usePlainText(chunkIndex), !fallbackCards.has(chunkIndex));
             if (newMessageId) {
               chain.push(newMessageId);
               hashes[chunkIndex] = nextHashes[chunkIndex];
@@ -1463,8 +1495,9 @@ Examples:
         const lastCardId = chain?.[lastChunkIndex];
 
         if (lastCardId) {
+          const baseElements = chunks[lastChunkIndex].filter((element) => !threadSwitchElements.includes(element));
           this.threadSwitchCardState.set(lastCardId, {
-            baseElements: chunks[lastChunkIndex].filter((element) => !threadSwitchElements.includes(element)),
+            baseElements: this.plainTextCards.get(messageId)?.has(lastChunkIndex) ? plainTextCard(baseElements) : baseElements,
             threads,
             activeThreadId,
             replyLabel,
@@ -1476,6 +1509,7 @@ Examples:
       // Clean up tracking state
       this.messageChains.delete(messageId);
       this.cardContentHashes.delete(messageId);
+      this.plainTextCards.delete(messageId);
 
       return true;
     } catch (error: any) {

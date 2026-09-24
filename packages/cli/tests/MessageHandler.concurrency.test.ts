@@ -18,6 +18,8 @@ describe('MessageHandler Concurrency', () => {
     vi.clearAllMocks();
 
     mockWsClient = {
+      trackTask: vi.fn(),
+      hasPendingTaskResults: vi.fn(() => false),
       isConnected: vi.fn().mockReturnValue(true),
       send: vi.fn(),
     };

@@ -22,9 +22,10 @@ export class ConnectionHub {
    * @param ws WebSocket connection
    */
   registerConnection(deviceId: string, ws: WebSocket, capabilities?: { queueStarted?: boolean }): void {
-    // If device already has a connection, close the old connection first
-    if (this.connections.has(deviceId)) {
-      const oldWs = this.connections.get(deviceId)!;
+    const oldWs = this.connections.get(deviceId);
+    // Replace the mapping first so the old socket cannot unregister its replacement.
+    this.connections.set(deviceId, ws);
+    if (oldWs && oldWs !== ws) {
       try {
         oldWs.close();
       } catch (error) {
@@ -32,8 +33,6 @@ export class ConnectionHub {
       }
     }
 
-    // Register new connection
-    this.connections.set(deviceId, ws);
     this.lastActiveMap.set(deviceId, Date.now());
     if (capabilities?.queueStarted === true) this.queueStartedDevices.add(deviceId);
     else this.queueStartedDevices.delete(deviceId);
@@ -48,10 +47,16 @@ export class ConnectionHub {
    * Unregister device connection
    * @param deviceId Device unique identifier
    */
-  unregisterConnection(deviceId: string): void {
+  isCurrentConnection(deviceId: string, ws: WebSocket): boolean {
+    return this.connections.get(deviceId) === ws;
+  }
+
+  unregisterConnection(deviceId: string, ws?: WebSocket): boolean {
+    if (ws && !this.isCurrentConnection(deviceId, ws)) return false;
     this.connections.delete(deviceId);
     this.lastActiveMap.delete(deviceId);
     this.queueStartedDevices.delete(deviceId);
+    return true;
   }
 
   /**

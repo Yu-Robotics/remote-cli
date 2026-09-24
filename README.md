@@ -171,6 +171,8 @@ The installer captures the current Node.js executable, CLI entry point, `HOME`, 
 
 Non-interactive clients automatically catch up when they reconnect to a newer Router version. The client waits until all threads and confirmed queues are idle, installs the exact Router version from npm, and exits so its process supervisor can restart it. New commands received during the short installation window are rejected with a retry message. Interactive starts never auto-update. `--non-interactive` is intended for clients managed by systemd or a macOS LaunchAgent; manually using that flag also enables automatic update behavior. If npm installation or version verification fails, the existing process keeps running and retries later.
 
+When the Router restarts or its WebSocket connection drops, running backend processes continue. With CLI and Router 1.6.52 or newer, the CLI automatically reconnects and creates a new recovery card for each running task; old cards remain unchanged. The recovery card marks the output gap and displays only output produced after that card is ready. Output during disconnection or recovery is discarded, not buffered or replayed. The first resumed text segment uses plain text until a tool or image boundary to avoid broken Markdown fragments. Tasks that finish offline report only their completion or failure status. The CLI retains at most 100 such terminal records for up to 24 hours, in memory; restarting the CLI discards them. Recovery cards are requested one at a time. Automatic updates wait for pending task results to be acknowledged (or expire). Older Router versions keep the previous reconnect behavior.
+
 After upgrading from version 1.6.23 or earlier on Linux, run `remote-cli service install` again to regenerate the systemd unit with corrected path escaping.
 
 ## Router Server Deployment
@@ -589,6 +591,8 @@ Create one thread per project, incident, or goal instead of mixing unrelated wor
 Replying to a completed Feishu card routes the message back to that card's thread. Thread buttons show the last component of each thread's working directory alongside its backend, making parallel workspaces easier to distinguish. Automatically generated names such as `thread-2` are shown as their sequence number, such as `2`, while custom names remain unchanged. When a long response spans multiple cards, every continuation card repeats the thread and working-directory header. `/thread list` shows the current state of every thread, while `/status` gives a compact overview of active backends, models, working directories, and queues.
 
 Long streaming replies refresh only cards with changed content. Queued tasks combine incoming text while a refresh is pending, so card updates do not build up a backlog of intermediate text. Tool results, images, and the final response retain their order.
+
+Card splitting also counts tables embedded in Markdown and nested components, with a conservative budget of three tables per card. Large Markdown blocks split at table boundaries; excess tables inside indivisible containers remain readable as code text. If Feishu still rejects a card with a table-limit error, the Router retries that card once as text and preserves text mode for later updates. Other cards retain their normal formatting. This applies to every backend and requires Router 1.6.53 or newer.
 
 Claude Code streams text into response cards as it is generated. Completed content blocks do not repeat text that has already streamed, and tool cards continue to use complete tool calls.
 

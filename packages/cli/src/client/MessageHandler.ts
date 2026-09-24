@@ -203,6 +203,7 @@ export class MessageHandler {
     const hasRunningThread = this.threadPool.getSummaries().some((thread) => thread.status === 'running');
     if (
       this.automaticUpdateInProgress
+      || this.wsClient.hasPendingTaskResults()
       || hasRunningThread
       || hasQueuedCommands
       || this.pendingQueueConfirmations.size > 0
@@ -389,6 +390,7 @@ export class MessageHandler {
     const operationToken = this.beginThreadOperation(resolvedThreadId);
 
     try {
+      this.trackTask(messageId, resolvedThreadId, content || '');
       // Validate and set working directory if provided
       if (workingDirectory) {
         if (!this.directoryGuard.isSafePath(workingDirectory)) {
@@ -1006,6 +1008,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     console.log(`[MessageHandler] Starting queued message ${command.messageId} in thread ${threadId}: remaining=${this.threadQueues.get(threadId)?.length ?? 0}`);
     try {
       const executor = this.threadPool.getExecutor(threadId);
+      this.trackTask(command.messageId, threadId, command.content);
       await this.threadManager.updateThread(threadId, { lastActiveAt: Date.now() });
       this.wsClient.send({
         type: 'queue_started',
@@ -1873,6 +1876,15 @@ You can also use natural language commands to control Claude Code CLI.`,
 
   private getMessageOpenId(messageId: string): string | undefined {
     return this.messageOpenIds.get(messageId) ?? this.currentOpenId;
+  }
+
+  private trackTask(messageId: string, threadId: string, content: string): void {
+    const openId = this.getMessageOpenId(messageId);
+    const thread = this.threadManager.getThread(threadId);
+    if (!openId || !thread) return;
+    this.wsClient.trackTask({ messageId, threadId, openId, threadName: thread.name,
+      backend: this.threadPool.getBackendKey(threadId),
+      cwd: this.threadPool.getExecutor(threadId).getCurrentWorkingDirectory(), preview: content });
   }
 
   private sendStreamChunk(messageId: string, threadId: string | undefined, chunk: string): void {

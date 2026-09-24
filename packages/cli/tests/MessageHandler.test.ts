@@ -6,6 +6,7 @@ import { tmpdir } from 'os';
 import path from 'path';
 import { MessageHandler } from '../src/client/MessageHandler';
 import { WebSocketClient } from '../src/client/WebSocketClient';
+import { TaskRecovery } from '../src/client/TaskRecovery';
 import { DirectoryGuard } from '../src/security/DirectoryGuard';
 import { ThreadExecutorPool } from '../src/thread/ThreadExecutorPool';
 import { ThreadManager } from '../src/thread/ThreadManager';
@@ -45,6 +46,8 @@ function buildHandler(mockExecutorOverrides: Record<string, any> = {}) {
 
   const mockWsClient: any = {
     send: vi.fn(),
+    trackTask: vi.fn(),
+    hasPendingTaskResults: vi.fn(() => false),
     isConnected: vi.fn(() => true),
   };
 
@@ -238,6 +241,12 @@ describe('MessageHandler', () => {
   });
 
   describe('automatic update readiness', () => {
+    it('waits for an offline task result to reach the Router before updating', () => {
+      ctx.mockWsClient.hasPendingTaskResults.mockReturnValue(true);
+      expect(ctx.handler.tryBeginAutomaticUpdate()).toBe(false);
+      ctx.mockWsClient.hasPendingTaskResults.mockReturnValue(false);
+      expect(ctx.handler.tryBeginAutomaticUpdate()).toBe(true);
+    });
     it('locks new commands after becoming idle for an update', async () => {
       expect(ctx.handler.tryBeginAutomaticUpdate()).toBe(true);
 
@@ -286,6 +295,41 @@ describe('MessageHandler', () => {
   });
 
   describe('message handling', () => {
+    it('lets the executor finish offline and reports its status without rerunning the command', async () => {
+      const sendRaw = vi.fn();
+      const recovery = new TaskRecovery(sendRaw);
+      recovery.registered(true);
+      ctx.mockWsClient.send.mockImplementation(message => recovery.send(message));
+      ctx.mockWsClient.trackTask.mockImplementation(task => recovery.track(task));
+      ctx.mockWsClient.hasPendingTaskResults.mockImplementation(() => recovery.hasPendingResults());
+      let finish!: (result: any) => void;
+      let callbacks: any;
+      ctx.mockExecutor.execute.mockImplementation((_prompt, options) => {
+        callbacks = options;
+        return new Promise(resolve => { finish = resolve; });
+      });
+      try {
+        const running = ctx.handler.handleMessage({ type: 'command', messageId: 'offline-task',
+          openId: 'owner', content: 'Keep working', timestamp: Date.now() } as any);
+        await vi.waitFor(() => expect(ctx.mockExecutor.execute).toHaveBeenCalledOnce());
+        callbacks.onStream('before disconnect');
+        recovery.disconnected();
+        callbacks.onStream('offline body');
+        finish({ success: true, output: 'complete body' });
+        await running;
+        expect(ctx.handler.tryBeginAutomaticUpdate()).toBe(false);
+        recovery.registered(true);
+        const resume = sendRaw.mock.calls.map(([message]) => message).find(message => message.type === 'task_resume');
+        expect(resume).toMatchObject({ messageId: 'offline-task', openId: 'owner', threadId: 'default-thread-id',
+          taskResume: { state: 'completed', backend: 'claude', cwd: '/home/user/test-project' } });
+        recovery.acknowledge({ type: 'task_resume_ack', messageId: resume.messageId,
+          recoveryId: resume.taskResume.recoveryId, state: 'completed', success: true });
+        expect(ctx.handler.tryBeginAutomaticUpdate()).toBe(true);
+        expect(JSON.stringify(sendRaw.mock.calls)).not.toMatch(/offline body|complete body/);
+        expect(ctx.mockExecutor.execute).toHaveBeenCalledOnce();
+        expect(ctx.mockExecutor.abort).not.toHaveBeenCalled();
+      } finally { recovery.destroy(); }
+    });
     it('routes a command without a thread id to default and emits stream and response messages', async () => {
       ctx.mockExecutor.execute.mockImplementation(async (_prompt: string, options: any) => {
         options.onStream('Command executed successfully');
