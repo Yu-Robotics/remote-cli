@@ -1,6 +1,7 @@
 import WebSocket from 'ws';
 import { v4 as uuidv4 } from 'uuid';
 import { PROTOCOL_VERSION, CLI_VERSION } from '../types';
+import { TaskRecovery, type RecoverableTask } from './TaskRecovery';
 
 /**
  * WebSocket client configuration
@@ -36,6 +37,8 @@ export class WebSocketClient {
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private manualDisconnect = false;
   private connected = false;
+  private lastReceivedAt = 0;
+  private readonly taskRecovery = new TaskRecovery(message => this.sendRaw(message));
   private messageHandlers: Array<(message: any) => void> = [];
   private errorHandlers: Array<(error: Error) => void> = [];
   private closeHandlers: Array<(code: number, reason: string) => void> = [];
@@ -56,10 +59,13 @@ export class WebSocketClient {
       this.manualDisconnect = false;
 
       try {
-        this.ws = new WebSocket(this.serverUrl);
+        const socket = new WebSocket(this.serverUrl, { handshakeTimeout: 15000 });
+        this.ws = socket;
 
         const onOpen = () => {
+          if (this.ws !== socket) return;
           this.connected = true;
+          this.lastReceivedAt = Date.now();
           this.startHeartbeat();
           this.sendRegistration();
           this.connectHandlers.forEach(handler => handler());
@@ -67,6 +73,7 @@ export class WebSocketClient {
         };
 
         const onError = (error: Error) => {
+          if (this.ws !== socket) return;
           this.errorHandlers.forEach(handler => handler(error));
           if (!this.connected) {
             reject(error);
@@ -74,7 +81,9 @@ export class WebSocketClient {
         };
 
         const onClose = (code: number, reason: Buffer) => {
+          if (this.ws !== socket) return;
           this.connected = false;
+          this.taskRecovery.disconnected();
           this.stopHeartbeat();
           const reasonStr = reason.toString();
           this.closeHandlers.forEach(handler => handler(code, reasonStr));
@@ -85,8 +94,17 @@ export class WebSocketClient {
         };
 
         const onMessage = (data: WebSocket.Data) => {
+          if (this.ws !== socket) return;
           try {
             const message = JSON.parse(data.toString());
+            this.lastReceivedAt = Date.now();
+            if (message.type === 'binding_confirm' && message.data?.success === true) {
+              this.taskRecovery.registered(message.data?.capabilities?.taskRecovery === true);
+            }
+            if (message.type === 'task_resume_ack' || message.type === 'task_result_ack') {
+              this.taskRecovery.acknowledge(message);
+              return;
+            }
 
             // Stop reconnecting if the router rejects this CLI version
             if (
@@ -131,6 +149,7 @@ export class WebSocketClient {
     this.connected = false;
     this.stopHeartbeat();
     this.clearReconnectTimer();
+    this.taskRecovery.destroy();
 
     if (this.ws) {
       this.ws.close();
@@ -149,6 +168,18 @@ export class WebSocketClient {
    * @param message Message object
    */
   send(message: any): void {
+    this.taskRecovery.send(message);
+  }
+
+  trackTask(task: RecoverableTask): void {
+    this.taskRecovery.track(task);
+  }
+
+  hasPendingTaskResults(): boolean {
+    return this.taskRecovery.hasPendingResults();
+  }
+
+  private sendRaw(message: any): void {
     if (!this.connected || !this.ws) {
       throw new Error('Not connected to server');
     }
@@ -246,7 +277,7 @@ export class WebSocketClient {
         data: {
           deviceId: this.deviceId,
           protocolVersion: PROTOCOL_VERSION,
-          capabilities: { queueStarted: true },
+          capabilities: { queueStarted: true, taskRecovery: true },
         }
       }));
     }
@@ -259,6 +290,10 @@ export class WebSocketClient {
     this.stopHeartbeat();
     this.heartbeatTimer = setInterval(() => {
       if (this.ws && this.connected) {
+        if (Date.now() - this.lastReceivedAt >= this.heartbeatInterval * 3) {
+          this.ws.terminate();
+          return;
+        }
         this.ws.send(JSON.stringify({
           type: 'heartbeat',
           timestamp: Date.now()

@@ -8,7 +8,7 @@ import { JsonStore } from './storage/JsonStore';
 import { FeishuLongConnHandler } from './feishu/FeishuLongConnHandler';
 import { ConnectionHub } from './websocket/ConnectionHub';
 import { BindingManager } from './binding/BindingManager';
-import { MessageType, ToolUseInfo, ToolResultInfo, TaskNotificationInfo, PROTOCOL_VERSION, MIN_SUPPORTED_CLI_VERSION, ROUTER_VERSION, ThreadSummary, QueueConfirmationInfo, QueueStartedInfo, ImageBlock } from './types';
+import { MessageType, ToolUseInfo, ToolResultInfo, TaskNotificationInfo, PROTOCOL_VERSION, MIN_SUPPORTED_CLI_VERSION, ROUTER_VERSION, ThreadSummary, QueueConfirmationInfo, QueueStartedInfo, TaskResumeInfo, ImageBlock } from './types';
 import { FeishuCardElement, createToolUseElement, createToolResultElement, createMarkdownElement, createRedactedThinkingElement, createPlanModeElement, createTaskNotificationElement, createImageElement } from './utils/ToolFormatter';
 
 interface StreamingMessageState {
@@ -25,6 +25,9 @@ interface StreamingMessageState {
   pendingNewThread?: boolean;
   queueCardId?: string;
   queueStarted?: QueueStartedInfo;
+  recoveryId?: string;
+  recoveryPlainText?: boolean;
+  recoveryCwd?: string;
   updateInFlight?: Promise<void>;
   updatePending: boolean;
   finalizing: boolean;
@@ -47,6 +50,7 @@ export class RouterServer {
   private cleanupInterval: NodeJS.Timeout | null = null;
   // Track streaming messages and coalesced Feishu card update state.
   private streamingMessages = new Map<string, StreamingMessageState>();
+  private completedTasks = new Map<string, { deviceId: string; completedAt: number }>();
   private queueMessageOperations = new Map<string, Promise<void>>();
   private startedQueueMessages = new Map<string, number>();
   private readonly STREAMING_SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes timeout
@@ -280,6 +284,7 @@ export class RouterServer {
       console.log('New WebSocket connection from:', req.socket.remoteAddress);
 
       let deviceId: string | null = null;
+      let taskRecoveryEnabled = false;
       let heartbeatTimeout: NodeJS.Timeout | null = null;
 
       // Reset heartbeat timeout
@@ -302,6 +307,9 @@ export class RouterServer {
         try {
           const message = JSON.parse(data.toString());
 
+          if (deviceId && message.type !== MessageType.BINDING_REQUEST
+            && !this.connectionHub.isCurrentConnection(deviceId, ws)) return;
+
           // Update heartbeat on any message
           resetHeartbeat();
 
@@ -311,6 +319,9 @@ export class RouterServer {
           }
           // Serialize queued output through card creation, asynchronous tool/image
           // updates, and completion. Other threads retain independent streams.
+          if (taskRecoveryEnabled && (message.type === 'task_resume' || message.type === MessageType.RESPONSE)) {
+            this.startedQueueMessages.set(message.messageId, Date.now());
+          }
           if (this.startedQueueMessages.has(message.messageId)) {
             const previous = this.queueMessageOperations.get(message.messageId);
             const completed = new Promise<void>((resolve) => {
@@ -323,9 +334,24 @@ export class RouterServer {
             });
             this.queueMessageOperations.set(message.messageId, completed);
             if (previous) await previous;
+            if (deviceId && !this.connectionHub.isCurrentConnection(deviceId, ws)) return;
           }
 
           switch (message.type) {
+            case 'task_resume': {
+              if (!taskRecoveryEnabled || !deviceId) break;
+              const current = () => this.connectionHub.isCurrentConnection(deviceId!, ws);
+              let success = false;
+              try {
+                success = await this.handleTaskResume(message, deviceId, current);
+              } catch (error) {
+                console.error('[RouterServer] Failed to recover task card:', error);
+              }
+              if (current()) ws.send(JSON.stringify({ type: 'task_resume_ack', messageId: message.messageId,
+                recoveryId: message.taskResume?.recoveryId, state: message.taskResume?.state, success, timestamp: Date.now() }));
+              break;
+            }
+
             case MessageType.BINDING_REQUEST:
               // Device sends binding request with deviceId and optional protocolVersion
               deviceId = message.data.deviceId;
@@ -356,6 +382,7 @@ export class RouterServer {
                 }
                 console.log(`Device registered: ${deviceId} (protocol v${clientVersion})`);
 
+                taskRecoveryEnabled = message.data.capabilities?.taskRecovery === true;
                 // Send confirmation with version info for client-side version check
                 ws.send(JSON.stringify({
                   type: MessageType.BINDING_CONFIRM,
@@ -365,6 +392,7 @@ export class RouterServer {
                     success: true,
                     routerVersion: ROUTER_VERSION,
                     minCliVersion: MIN_SUPPORTED_CLI_VERSION,
+                    ...(taskRecoveryEnabled ? { capabilities: { taskRecovery: true } } : {}),
                   }
                 }));
               }
@@ -385,11 +413,16 @@ export class RouterServer {
               break;
 
             case MessageType.RESPONSE:
+              if (taskRecoveryEnabled && deviceId && this.isCompletedTask(message.messageId, deviceId)) {
+                ws.send(JSON.stringify({ type: 'task_result_ack', messageId: message.messageId, timestamp: Date.now() }));
+                break;
+              }
               // Device sends response to command - forward to Feishu via long connection
               const responseOpenId = message.openId || message.data?.openId;
               const responseMessageId = message.messageId;
               const sessionAbbr = message.sessionAbbr || message.data?.sessionAbbr;
-              const cwd = message.cwd || message.data?.cwd || this.streamingMessages.get(message.messageId)?.queueStarted?.cwd;
+              const cwd = message.cwd || message.data?.cwd || this.streamingMessages.get(message.messageId)?.queueStarted?.cwd
+                || this.streamingMessages.get(message.messageId)?.recoveryCwd;
               const responseThreadId = message.threadId || message.data?.threadId;
               const responseThreads: ThreadSummary[] | undefined = message.threads || message.data?.threads;
               const queueConfirmation: QueueConfirmationInfo | undefined = message.queueConfirmation || message.data?.queueConfirmation;
@@ -443,16 +476,26 @@ export class RouterServer {
                   const errorMsg = message.error || message.data?.error;
 
                   if (success) {
-                    await this.feishuLongConnHandler.sendMessage(
+                    const delivered = await this.feishuLongConnHandler.sendMessage(
                       responseOpenId,
                       output || '✅ Command completed successfully'
                     );
+                    if (delivered === false) throw new Error('Failed to deliver task result');
                   } else {
-                    await this.feishuLongConnHandler.sendMessage(
+                    const delivered = await this.feishuLongConnHandler.sendMessage(
                       responseOpenId,
                       `❌ Command failed:\n${errorMsg || 'Unknown error'}`
                     );
+                    if (delivered === false) throw new Error('Failed to deliver task result');
                   }
+                }
+              }
+              if (taskRecoveryEnabled && deviceId && this.connectionHub.isCurrentConnection(deviceId, ws)
+                && responseOpenId && responseMessageId && !queueConfirmation
+                && typeof (message.success ?? message.data?.success) === 'boolean') {
+                this.rememberCompletedTask(responseMessageId, deviceId);
+                if (this.connectionHub.isCurrentConnection(deviceId, ws)) {
+                  ws.send(JSON.stringify({ type: 'task_result_ack', messageId: responseMessageId, timestamp: Date.now() }));
                 }
               }
               break;
@@ -545,8 +588,7 @@ export class RouterServer {
       // Handle connection close
       ws.on('close', () => {
         if (heartbeatTimeout) clearTimeout(heartbeatTimeout);
-        if (deviceId) {
-          this.connectionHub.unregisterConnection(deviceId);
+        if (deviceId && this.connectionHub.unregisterConnection(deviceId, ws)) {
           // Clean up any streaming sessions for this device
           this.cleanupStreamingSessionsForDevice(deviceId);
           console.log('Device disconnected:', deviceId);
@@ -686,7 +728,7 @@ export class RouterServer {
 
       const elements = [...streamData.elements];
       if (streamData.currentTextContent.trim()) {
-        elements.push(createMarkdownElement(streamData.currentTextContent));
+        elements.push(...this.renderCurrentText(streamData));
       }
 
       streamData.lastRenderedTextLength = streamData.currentTextContent.length;
@@ -715,8 +757,9 @@ export class RouterServer {
 
     // Flush current text content to elements if any
     if (streamData.currentTextContent.trim()) {
-      streamData.elements.push(createMarkdownElement(streamData.currentTextContent));
+      streamData.elements.push(...this.renderCurrentText(streamData));
       streamData.currentTextContent = '';
+      streamData.recoveryPlainText = false;
       streamData.lastRenderedTextLength = 0;
     }
     streamData.updatePending = false;
@@ -752,8 +795,9 @@ export class RouterServer {
 
     // Flush current text content to elements if any
     if (streamData.currentTextContent.trim()) {
-      streamData.elements.push(createMarkdownElement(streamData.currentTextContent));
+      streamData.elements.push(...this.renderCurrentText(streamData));
       streamData.currentTextContent = '';
+      streamData.recoveryPlainText = false;
       streamData.lastRenderedTextLength = 0;
     }
     streamData.updatePending = false;
@@ -790,8 +834,9 @@ export class RouterServer {
 
     // Flush current text content to elements if any
     if (streamData.currentTextContent.trim()) {
-      streamData.elements.push(createMarkdownElement(streamData.currentTextContent));
+      streamData.elements.push(...this.renderCurrentText(streamData));
       streamData.currentTextContent = '';
+      streamData.recoveryPlainText = false;
       streamData.lastRenderedTextLength = 0;
     }
     streamData.updatePending = false;
@@ -863,8 +908,9 @@ export class RouterServer {
     }
 
     if (streamData.currentTextContent.trim()) {
-      streamData.elements.push(createMarkdownElement(streamData.currentTextContent));
+      streamData.elements.push(...this.renderCurrentText(streamData));
       streamData.currentTextContent = '';
+      streamData.recoveryPlainText = false;
       streamData.lastRenderedTextLength = 0;
     }
     streamData.updatePending = false;
@@ -880,6 +926,75 @@ export class RouterServer {
       );
       streamData.hasUpdated = true;
     }
+  }
+
+  private rememberCompletedTask(messageId: string, deviceId: string): void {
+    this.completedTasks.set(messageId, { deviceId, completedAt: Date.now() });
+    for (const [id, receipt] of this.completedTasks) {
+      if (Date.now() - receipt.completedAt > 24 * 60 * 60 * 1000 || this.completedTasks.size > 1000) {
+        this.completedTasks.delete(id);
+      }
+    }
+  }
+
+  private isCompletedTask(messageId: string, deviceId: string): boolean {
+    const receipt = this.completedTasks.get(messageId);
+    return receipt?.deviceId === deviceId && Date.now() - receipt.completedAt <= 24 * 60 * 60 * 1000;
+  }
+
+  /** A resumed segment may start inside a code fence or a table from the old card. */
+  private renderCurrentText(stream: StreamingMessageState): FeishuCardElement[] {
+    if (!stream.recoveryPlainText) return [createMarkdownElement(stream.currentTextContent)];
+    const characters = Array.from(stream.currentTextContent);
+    const elements: FeishuCardElement[] = [];
+    for (let start = 0; start < characters.length; start += 1000) {
+      const text = characters.slice(start, start + 1000).join('')
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      elements.push(createMarkdownElement(`<raw>${text}</raw>`));
+    }
+    return elements;
+  }
+
+  /** Restore only task routing and future output; no old transcript is replayed. */
+  private async handleTaskResume(message: any, deviceId: string, isCurrent: () => boolean): Promise<boolean> {
+    const info = message.taskResume as TaskResumeInfo | undefined;
+    const { messageId, openId, threadId } = message;
+    if (typeof messageId !== 'string' || !messageId || typeof openId !== 'string' || !openId
+      || typeof threadId !== 'string' || !threadId || !info
+      || typeof info.recoveryId !== 'string' || !info.recoveryId || info.recoveryId.length > 100
+      || typeof info.threadName !== 'string' || info.threadName.length > 100
+      || typeof info.backend !== 'string' || info.backend.length > 100
+      || typeof info.cwd !== 'string' || info.cwd.length > 4096
+      || typeof info.preview !== 'string' || info.preview.length > 240
+      || !['running', 'completed', 'failed'].includes(info.state)
+      || (info.error !== undefined && (typeof info.error !== 'string' || info.error.length > 500))) return false;
+    if (this.isCompletedTask(messageId, deviceId)) return true;
+    const previous = this.streamingMessages.get(messageId);
+    if (previous && (previous.deviceId !== deviceId || previous.openId !== openId
+      || (previous.threadId && previous.threadId !== threadId))) return false;
+
+    if (!previous || previous.recoveryId !== info.recoveryId) {
+      const escape = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const intro = `🔄 **${info.state === 'running' ? 'Connection restored — task continues' : 'Task status recovered'}**\n\n`
+        + `Output before this card, including output during disconnection, was not retained.\n\n`
+        + `**Thread:** <raw>${escape(info.threadName)}</raw> · **Backend:** <raw>${escape(info.backend)}</raw>\n`
+        + `**Working directory:** <raw>${escape(info.cwd)}</raw>\n**Task:** <raw>${escape(info.preview)}</raw>`;
+      const cardId = await this.feishuLongConnHandler.sendStreamingStart(openId, intro, info.threadName);
+      if (!cardId || !isCurrent()) return false;
+      this.streamingMessages.set(messageId, {
+        openId, deviceId, threadId, threadName: info.threadName, feishuMessageId: cardId,
+        elements: [createMarkdownElement(intro)], currentTextContent: '', hasUpdated: false,
+        createdAt: Date.now(), updatePending: false, finalizing: false, lastRenderedTextLength: 0,
+        recoveryId: info.recoveryId, recoveryPlainText: true, recoveryCwd: info.cwd,
+      });
+      this.cardThreadMap.set(cardId, { threadId, deviceId, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS });
+    }
+    if (info.state !== 'running') {
+      await this.finalizeStreamingMessage(messageId, info.state === 'completed', undefined, info.error, undefined, info.cwd);
+      if (!isCurrent()) return false;
+      this.rememberCompletedTask(messageId, deviceId);
+    }
+    return true;
   }
 
   /** Create a fresh card before accepting any output for a dequeued task. */
@@ -1003,8 +1118,9 @@ export class RouterServer {
     if (feishuMessageId) {
       // Flush any remaining text content
       if (streamData.currentTextContent.trim()) {
-        streamData.elements.push(createMarkdownElement(streamData.currentTextContent));
+        streamData.elements.push(...this.renderCurrentText(streamData));
         streamData.currentTextContent = '';
+        streamData.recoveryPlainText = false;
       }
 
       // If there are no elements at all, use the output parameter as fallback
@@ -1013,7 +1129,7 @@ export class RouterServer {
       }
 
       if (success) {
-        await this.feishuLongConnHandler.finalizeStreamingMessage(
+        const finalized = await this.feishuLongConnHandler.finalizeStreamingMessage(
           feishuMessageId,
           streamData.elements,
           sessionAbbr,
@@ -1024,15 +1140,17 @@ export class RouterServer {
           streamData.threadId,
           queueConfirmation
         );
+        if (finalized === false) throw new Error('Failed to finalize task card');
       } else {
         // Add error message to elements
+        const finalElements = [...streamData.elements];
         if (!queueConfirmation) {
           const errorMsg = error || 'Command failed';
-          streamData.elements.push(createMarkdownElement(`\n\n❌ **Error:** ${errorMsg}`));
+          finalElements.push(createMarkdownElement(`\n\n❌ **Error:** ${errorMsg}`));
         }
-        await this.feishuLongConnHandler.finalizeStreamingMessage(
+        const finalized = await this.feishuLongConnHandler.finalizeStreamingMessage(
           feishuMessageId,
-          streamData.elements,
+          finalElements,
           undefined,
           openId,
           cwd,
@@ -1041,6 +1159,7 @@ export class RouterServer {
           streamData.threadId,
           queueConfirmation
         );
+        if (finalized === false) throw new Error('Failed to finalize task card');
       }
     } else if (streamData.queueStarted) {
       // If card creation failed after session recovery, retain a text result
@@ -1051,14 +1170,17 @@ export class RouterServer {
         .concat(streamData.currentTextContent, output || '')
         .filter(Boolean)
         .join('\n\n');
-      await this.feishuLongConnHandler.sendMessage(openId,
+      const delivered = await this.feishuLongConnHandler.sendMessage(openId,
         `${text}\n\n${success ? '✅ Completed' : `❌ Error: ${error || 'Command failed'}`}`);
+      if (delivered === false) throw new Error('Failed to deliver task result');
     }
 
     // Clean up streaming session state (but NOT cardThreadMap — keep it alive
     // so users can reply to the completed card and route to the same thread).
-    this.streamingMessages.delete(messageId);
-    this.lastStreamUpdateTime.delete(messageId);
+    if (this.streamingMessages.get(messageId) === streamData) {
+      this.streamingMessages.delete(messageId);
+      this.lastStreamUpdateTime.delete(messageId);
+    }
   }
 
   /**

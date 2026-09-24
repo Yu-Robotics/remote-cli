@@ -107,7 +107,8 @@ describe('RouterServer', () => {
 
     mockConnectionHub = {
       registerConnection: vi.fn(),
-      unregisterConnection: vi.fn(),
+      unregisterConnection: vi.fn().mockReturnValue(true),
+      isCurrentConnection: vi.fn().mockReturnValue(true),
       updateLastActive: vi.fn(),
       getConnectionStats: vi.fn().mockReturnValue({ totalConnections: 0, deviceIds: [] }),
       cleanupStaleConnections: vi.fn(),
@@ -133,6 +134,158 @@ describe('RouterServer', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.useRealTimers();
+  });
+
+  describe('task recovery', () => {
+    const resume = {
+      type: 'task_resume', messageId: 'recovered-1', openId: 'user-1', threadId: 'thread-1',
+      taskResume: { recoveryId: 'recovery-1', threadName: 'thread-2', backend: 'claude',
+        cwd: '/workspace/project', preview: 'Review this change', state: 'running' },
+    };
+    async function connect() {
+      await server.start();
+      const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
+      const ws = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
+      onConnection(ws, { socket: { remoteAddress: '1' } });
+      const onMessage = ws.on.mock.calls.find(call => call[0] === 'message')[1];
+      const send = (message: any) => onMessage(Buffer.from(JSON.stringify(message)));
+      await send({ type: 'binding_request', data: { deviceId: 'device-1', capabilities: { taskRecovery: true } } });
+      expect(JSON.parse(ws.send.mock.calls[0][0]).data.capabilities).toEqual({ taskRecovery: true });
+      const close = ws.on.mock.calls.find(call => call[0] === 'close')[1];
+      const replies = () => ws.send.mock.calls.map(([message]) => JSON.parse(message));
+      return { send, close, replies };
+    }
+
+    it('creates one recovery card, preserves reply routing, and renders only later output', async () => {
+      const { send, replies } = await connect();
+      await send({ type: 'stream', messageId: resume.messageId, openId: 'user-1', chunk: 'lost text' });
+      await send(resume);
+      await send(resume);
+      expect(mockFeishuHandler.sendStreamingStart).toHaveBeenCalledOnce();
+      expect(mockFeishuHandler.sendStreamingStart.mock.calls[0][1]).toContain('was not retained');
+      expect(replies().at(-1)).toMatchObject({ type: 'task_resume_ack', success: true, recoveryId: 'recovery-1' });
+      const resolveThread = mockFeishuHandler.setOnResolveThread.mock.calls[0][0];
+      expect(resolveThread('execution-card')).toMatchObject({ threadId: 'thread-1', deviceId: 'device-1' });
+      await send({ type: 'stream', messageId: resume.messageId, openId: 'user-1', chunk: 'tail\n```\n</raw>' });
+      const result = { type: 'response', messageId: resume.messageId, openId: 'user-1', success: true };
+      await send(result);
+      expect(mockFeishuHandler.finalizeStreamingMessage).toHaveBeenCalledOnce();
+      const elements = mockFeishuHandler.finalizeStreamingMessage.mock.calls[0][1];
+      expect(elements.at(-1).content).toBe('<raw>tail\n```\n&lt;/raw&gt;</raw>');
+      expect(JSON.stringify(elements)).not.toContain('lost text');
+      expect(replies().at(-1).type).toBe('task_result_ack');
+      // Lost result acknowledgements must not create another terminal card.
+      await send(result);
+      await send({ ...resume, taskResume: { ...resume.taskResume, state: 'completed' } });
+      expect(mockFeishuHandler.finalizeStreamingMessage).toHaveBeenCalledOnce();
+      expect(mockFeishuHandler.sendStreamingStart).toHaveBeenCalledOnce();
+    });
+
+    it('waits for card creation, deduplicates retries, and can finish during recovery', async () => {
+      const { send, replies } = await connect();
+      let ready!: (card: string) => void;
+      mockFeishuHandler.sendStreamingStart.mockReturnValueOnce(new Promise(resolve => { ready = resolve; }));
+      const first = send(resume);
+      const retry = send({ ...resume, taskResume: { ...resume.taskResume, state: 'completed' } });
+      expect(replies().filter(message => message.type === 'task_resume_ack')).toHaveLength(0);
+      ready('recovery-card');
+      await Promise.all([first, retry]);
+      expect(mockFeishuHandler.sendStreamingStart).toHaveBeenCalledOnce();
+      expect(mockFeishuHandler.finalizeStreamingMessage).toHaveBeenCalledOnce();
+      expect(replies().filter(message => message.type === 'task_resume_ack')).toHaveLength(2);
+    });
+
+    it.each(['completed', 'failed'])('reports a task that %s offline', async state => {
+      const { send, replies } = await connect();
+      await send({ ...resume, taskResume: { ...resume.taskResume, state, error: state === 'failed' ? 'Backend failed' : undefined } });
+      expect(mockFeishuHandler.sendStreamingStart.mock.calls[0][1]).toContain('Task status recovered');
+      const elements = mockFeishuHandler.finalizeStreamingMessage.mock.calls[0][1];
+      if (state === 'failed') expect(elements.at(-1).content).toContain('Backend failed');
+      expect(replies().at(-1)).toMatchObject({ type: 'task_resume_ack', success: true });
+    });
+
+    it('retries a failed card API call without accepting early output', async () => {
+      const { send, replies } = await connect();
+      mockFeishuHandler.sendStreamingStart.mockRejectedValueOnce(new Error('API unavailable'));
+      await send(resume);
+      expect(replies().at(-1).success).toBe(false);
+      await send(resume);
+      expect(replies().at(-1).success).toBe(true);
+      expect(mockFeishuHandler.sendStreamingStart).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not mistake a queue confirmation for task completion', async () => {
+      const { send, replies } = await connect();
+      await send({ type: 'response', messageId: resume.messageId, openId: 'user-1', success: false,
+        queueConfirmation: { token: 'confirm-queue', threadId: 'thread-1' } });
+      expect(replies().some(message => message.type === 'task_result_ack')).toBe(false);
+      await send(resume);
+      expect(mockFeishuHandler.sendStreamingStart).toHaveBeenCalledOnce();
+      await send({ type: 'response', messageId: resume.messageId, openId: 'user-1', success: true });
+      expect(mockFeishuHandler.finalizeStreamingMessage).toHaveBeenCalledOnce();
+    });
+
+    it('retains a terminal card for retry when Feishu rejects finalization', async () => {
+      const { send, replies } = await connect();
+      const failed = { ...resume, taskResume: { ...resume.taskResume, state: 'failed', error: 'Backend failed' } };
+      mockFeishuHandler.finalizeStreamingMessage.mockResolvedValueOnce(false);
+      await send(failed);
+      expect(replies().at(-1).success).toBe(false);
+      await send(failed);
+      expect(replies().at(-1).success).toBe(true);
+      expect(mockFeishuHandler.sendStreamingStart).toHaveBeenCalledOnce();
+      const elements = mockFeishuHandler.finalizeStreamingMessage.mock.calls[1][1];
+      expect(elements.filter(element => element.content.includes('Backend failed'))).toHaveLength(1);
+    });
+
+    it('does not resurrect a card if its connection is replaced during creation', async () => {
+      const { send, close, replies } = await connect();
+      let ready!: (card: string) => void;
+      mockFeishuHandler.sendStreamingStart.mockReturnValueOnce(new Promise(resolve => { ready = resolve; }));
+      const pending = send(resume);
+      mockConnectionHub.isCurrentConnection.mockReturnValue(false);
+      mockConnectionHub.unregisterConnection.mockReturnValue(false);
+      close();
+      ready('obsolete-card');
+      await pending;
+      expect(replies().filter(message => message.type === 'task_resume_ack')).toHaveLength(0);
+      expect(mockFeishuHandler.setOnResolveThread.mock.calls[0][0]('obsolete-card')).toBeUndefined();
+    });
+
+    it('keeps the current recovery card when an obsolete socket closes', async () => {
+      const { send, close } = await connect();
+      await send(resume);
+      mockConnectionHub.unregisterConnection.mockReturnValue(false);
+      close();
+      await send({ type: 'response', messageId: resume.messageId, openId: 'user-1', success: true });
+      expect(mockFeishuHandler.finalizeStreamingMessage).toHaveBeenCalledOnce();
+    });
+
+    it('replaces an old card even if its default thread had not yet been resolved', async () => {
+      const { send, replies } = await connect();
+      mockFeishuHandler.setOnStartStreaming.mock.calls[0][0](resume.messageId, 'user-1', 'old-card', 'device-1');
+      await send(resume);
+      expect(replies().at(-1).success).toBe(true);
+      await send({ type: 'response', messageId: resume.messageId, openId: 'user-1', success: true });
+      expect(mockFeishuHandler.finalizeStreamingMessage.mock.calls[0][0]).toBe('execution-card');
+    });
+
+    it('keeps long resumed fragments independently renderable after card splitting', async () => {
+      const { send } = await connect();
+      await send(resume);
+      await send({ type: 'stream', messageId: resume.messageId, openId: 'user-1', chunk: '<&'.repeat(2500) });
+      await send({ type: 'stream', messageId: resume.messageId, openId: 'user-1', streamType: 'tool_use',
+        toolUse: { id: 'tool-1', name: 'Read', input: { file_path: '/workspace/file' } } });
+      await send({ type: 'stream', messageId: resume.messageId, openId: 'user-1', chunk: '**Next complete segment**' });
+      await send({ type: 'response', messageId: resume.messageId, openId: 'user-1', success: true });
+      const elements = mockFeishuHandler.finalizeStreamingMessage.mock.calls[0][1];
+      expect(elements.slice(1, -1)).toHaveLength(5);
+      for (const element of elements.slice(1, -1)) {
+        expect(element.content).toMatch(/^<raw>(&lt;&amp;)+<\/raw>$/);
+        expect(element.content.length).toBeLessThan(6000);
+      }
+      expect(elements.at(-1).content).toBe('**Next complete segment**');
+    });
   });
 
   describe('queued execution cards', () => {
@@ -927,7 +1080,7 @@ describe('RouterServer', () => {
     const onClose = mockWs.on.mock.calls.find(call => call[0] === 'close')[1];
     onClose();
     
-    expect(mockConnectionHub.unregisterConnection).toHaveBeenCalledWith('d1');
+    expect(mockConnectionHub.unregisterConnection).toHaveBeenCalledWith('d1', mockWs);
   });
 
   it('should stop the server gracefully', async () => {
