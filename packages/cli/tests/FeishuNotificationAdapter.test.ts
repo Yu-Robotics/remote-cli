@@ -504,6 +504,19 @@ describe('FeishuNotificationAdapter', () => {
   });
 
   describe('background task notifications (task_notification)', () => {
+    it('uses an explicit executor recipient and honors disabled notifications', () => {
+      adapter.setCurrentOpenId('another-user');
+      const task = { taskId: 'exec-42', status: 'completed' as const, summary: 'Done', outputFile: '', threadId: 'thread-2' };
+      adapter.sendTaskNotification(task, 'task-owner');
+      expect(mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'task_notification', openId: 'task-owner', threadId: 'thread-2',
+      }));
+      mockWsClient.send.mockClear();
+      const disabled = new FeishuNotificationAdapter(mockWsClient, { enabledNotifications: [] });
+      disabled.sendTaskNotification(task, 'task-owner');
+      expect(mockWsClient.send).not.toHaveBeenCalled();
+    });
+
     const emitTaskNotification = (overrides: Record<string, unknown> = {}) => {
       claudeCodeHooks.emit(HookEventType.TASK_NOTIFICATION, {
         taskId: 'b4a2f1',

@@ -1,6 +1,6 @@
 import { WebSocketClient } from './WebSocketClient';
 import { DirectoryGuard } from '../security/DirectoryGuard';
-import { IncomingMessage, OutgoingMessage, StructuredContent, ToolUseInfo, ToolResultInfo, Attachment, ImageBlock, QueueConfirmationInfo } from '../types';
+import { IncomingMessage, OutgoingMessage, StructuredContent, ToolUseInfo, ToolResultInfo, Attachment, ImageBlock, QueueConfirmationInfo, TaskNotificationInfo } from '../types';
 import { ThreadExecutorPool } from '../thread/ThreadExecutorPool';
 import { ThreadManager } from '../thread/ThreadManager';
 import { DEFAULT_THREAD_NAME } from '../thread/types';
@@ -1685,6 +1685,11 @@ You can also use natural language commands to control Claude Code CLI.`,
     attachments?: Attachment[]
   ): Promise<boolean> {
     try {
+      const openId = this.getMessageOpenId(messageId);
+      const onTaskNotification = (notification: TaskNotificationInfo): void => {
+        if (this.isDestroyed || !this.threadManager.getThread(threadId)) return;
+        this.notificationAdapter.sendTaskNotification({ ...notification, threadId }, openId);
+      };
       const emittedLocalImages = new Set<string>();
       const pendingLocalImageEmissions = new Set<Promise<void>>();
       let streamedOutput = '';
@@ -1709,6 +1714,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         pendingLocalImageEmissions.add(pending);
       };
       const executeOptions = {
+        onTaskNotification,
         onStream: (chunk: string) => {
           streamedOutput += chunk;
           this.sendStreamChunk(messageId, threadId, chunk);
@@ -1751,6 +1757,7 @@ You can also use natural language commands to control Claude Code CLI.`,
           }
           this.sendStreamChunk(messageId, threadId, '✅ Compaction done. Retrying your request...\n');
           const retryResult = await executor.execute(content, {
+            onTaskNotification,
             onStream: (chunk: string) => {
               streamedOutput += chunk;
               this.sendStreamChunk(messageId, threadId, chunk);

@@ -163,7 +163,7 @@ export interface IncomingMessage {
 export type StreamType = 'text' | 'tool_use' | 'tool_result' | 'redacted_thinking' | 'plan_mode' | 'image';
 
 /**
- * Background task notification payload (Claude Code 2.x)
+ * Background task notification payload shared by executor backends
  *
  * Sent by the CLI when a background task reaches a terminal state. Unlike
  * stream messages, this is not tied to any in-flight command's streaming
@@ -174,7 +174,7 @@ export interface TaskNotificationInfo {
   taskId: string;
   /** Terminal status of the task */
   status: 'completed' | 'failed' | 'stopped';
-  /** Short result summary produced by Claude Code */
+  /** Short task result summary */
   summary: string;
   /** Path to the task's full output file on the local machine */
   outputFile: string;
