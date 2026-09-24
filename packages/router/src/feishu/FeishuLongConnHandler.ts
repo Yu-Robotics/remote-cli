@@ -1586,7 +1586,7 @@ Examples:
     const expiresAt = new Date(info.expiresAt).toLocaleTimeString();
     return [
       { tag: 'hr' },
-      { tag: 'markdown', content: `⏳ **Thread is busy**\n\n**Thread:** ${info.threadName}  ·  **Backend:** ${info.backend}\n**Working directory:** \`${info.cwd}\`\n**Queued messages:** ${info.pendingCount}\n**Message:** ${info.preview}\n\nConfirmation expires at ${expiresAt}.` },
+      { tag: 'markdown', content: `⏳ **Queue confirmation**\n\n**Thread:** ${info.threadName}  ·  **Backend:** ${info.backend}\n**Working directory:** \`${info.cwd}\`\n**Already queued:** ${info.pendingCount}\n**Message:** ${info.preview}\n\nConfirmation expires at ${expiresAt}.` },
       {
         tag: 'column_set',
         flex_mode: 'stretch',
@@ -1804,7 +1804,7 @@ Examples:
 
   private async updateQueueConfirmationCard(cardMessageId: string, action: 'confirm' | 'cancel'): Promise<void> {
     const content = action === 'confirm'
-      ? '✅ **Added to queue**\n\nThis message has been accepted and will run after the current task finishes.'
+      ? '✅ **Added to queue**\n\nThis message has been accepted into the thread queue. Use /queue to check its status. If the queue is paused, use /queue continue to resume.'
       : '❌ **Queue request cancelled**\n\nThis message was not added to the thread queue.';
 
     try {

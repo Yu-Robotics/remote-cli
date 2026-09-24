@@ -1041,27 +1041,118 @@ describe('MessageHandler', () => {
       }));
     });
 
+    it.each(['success', 'failure', 'rejection'])('preserves queue order when a dequeued task ends with %s', async (outcome) => {
+      let busy = false;
+      ctx.mockThreadPool.isThreadBusy.mockImplementation(() => busy);
+      ctx.mockThreadPool.setThreadBusy.mockImplementation((_id: string, value: boolean) => { busy = value; });
+      const completions = new Map<string, (result: { success: boolean }) => void>();
+      let rejectSecond!: (error: Error) => void;
+      ctx.mockExecutor.execute.mockImplementation((content: string, options: any) => {
+        options.onStream(`Working on ${content}`);
+        if (content === 'Fourth task') return Promise.resolve({ success: true });
+        return new Promise((resolve, reject) => {
+          completions.set(content, resolve);
+          if (content === 'Second task') rejectSecond = reject;
+        });
+      });
+      const send = (messageId: string, content: string) => ctx.handler.handleMessage({
+        type: 'command', messageId, content, openId: 'owner', timestamp: Date.now(),
+      });
+      const confirmationFor = (messageId: string) => ctx.mockWsClient.send.mock.calls
+        .map((call: any[]) => call[0]).find((message: any) => message.messageId === messageId)?.queueConfirmation;
+
+      const first = send('first', 'First task');
+      await vi.waitFor(() => expect(completions.has('First task')).toBe(true));
+      await send('second', 'Second task');
+      const second = confirmationFor('second');
+      expect(second).toBeDefined();
+      await send('confirm-second', `/queue confirm ${second.id} execute-second`);
+      completions.get('First task')!({ success: true });
+      await first;
+      await vi.waitFor(() => expect(completions.has('Second task')).toBe(true));
+
+      await send('third', 'Third task');
+      const third = confirmationFor('third');
+      expect(third).toMatchObject({ pendingCount: 0 });
+      await send('confirm-third', `/queue confirm ${third.id} execute-third`);
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+        messageId: 'confirm-third', output: expect.stringContaining('Queue position: 1'),
+      }));
+      expect(ctx.mockExecutor.execute).toHaveBeenCalledTimes(2);
+      if (outcome === 'rejection') rejectSecond(new Error('Claude command failed'));
+      else completions.get('Second task')!({ success: outcome === 'success' });
+
+      if (outcome !== 'success') {
+        await vi.waitFor(() => expect(busy).toBe(false));
+        await send('fourth', 'Fourth task');
+        expect(ctx.mockExecutor.execute).toHaveBeenCalledTimes(2);
+        expect(confirmationFor('fourth')).toMatchObject({ pendingCount: 1 });
+        expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+          messageId: 'execute-second', error: expect.stringContaining('Queue paused'),
+        }));
+        await send('confirm-fourth', `/queue confirm ${confirmationFor('fourth').id} execute-fourth`);
+        expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+          messageId: 'confirm-fourth', output: expect.stringContaining('/queue continue'),
+        }));
+        expect(ctx.mockExecutor.execute).toHaveBeenCalledTimes(2);
+        await send('resume', '/queue continue');
+      }
+      await vi.waitFor(() => expect(completions.has('Third task')).toBe(true));
+      expect(ctx.mockExecutor.execute.mock.calls.map((call: any[]) => call[0]))
+        .toEqual(['First task', 'Second task', 'Third task']);
+      expect(ctx.mockWsClient.send.mock.calls.map((call: any[]) => call[0])
+        .filter((message: any) => message.type === 'queue_started').map((message: any) => message.messageId))
+        .toEqual(['execute-second', 'execute-third']);
+      completions.get('Third task')!({ success: true });
+      await vi.waitFor(() => expect(busy).toBe(false));
+      if (outcome !== 'success') {
+        expect(ctx.mockExecutor.execute.mock.calls.map((call: any[]) => call[0]))
+          .toEqual(['First task', 'Second task', 'Third task', 'Fourth task']);
+      }
+    });
+
     it('should start queued work after the active task ends with a capacity error', async () => {
-      (ctx.handler as any).threadQueues.set('default-thread-id', [{
-        messageId: 'msg-queued-after-capacity',
-        threadId: 'default-thread-id',
-        content: 'queued command',
-        enqueuedAt: Date.now(),
-      }]);
+      let busy = false;
+      ctx.mockThreadPool.isThreadBusy.mockImplementation(() => busy);
+      ctx.mockThreadPool.setThreadBusy.mockImplementation((_id: string, value: boolean) => { busy = value; });
+      let failActive!: (result: { success: boolean; error: string }) => void;
       ctx.mockExecutor.execute
-        .mockResolvedValueOnce({ success: false, error: 'Selected model is at capacity. Please try a different model.' })
+        .mockImplementationOnce(() => new Promise(resolve => { failActive = resolve; }))
         .mockResolvedValueOnce({ success: true, output: 'queued work completed' });
 
-      await ctx.handler.handleMessage({
+      const active = ctx.handler.handleMessage({
         type: 'command',
         messageId: 'msg-capacity',
         content: 'active command',
         timestamp: Date.now(),
       });
+      await vi.waitFor(() => expect(ctx.mockExecutor.execute).toHaveBeenCalledOnce());
+      await ctx.handler.handleMessage({
+        type: 'command', messageId: 'msg-queued-after-capacity', content: 'queued command', timestamp: Date.now(),
+      });
+      const confirmation = ctx.mockWsClient.send.mock.calls.map((call: any[]) => call[0])
+        .find((message: any) => message.messageId === 'msg-queued-after-capacity').queueConfirmation;
+      await ctx.handler.handleMessage({
+        type: 'command', messageId: 'confirm-after-capacity', content: `/queue confirm ${confirmation.id}`, timestamp: Date.now(),
+      });
+      failActive({ success: false, error: 'Selected model is at capacity. Please try a different model.' });
+      await active;
 
       await vi.waitFor(() => expect(ctx.mockExecutor.execute).toHaveBeenCalledTimes(2));
       expect(ctx.mockExecutor.execute).toHaveBeenNthCalledWith(2, 'queued command', expect.anything());
       expect((ctx.handler as any).pausedQueues.has('default-thread-id')).toBe(false);
+    });
+
+    it('does not leave an empty queue paused after its last task fails', async () => {
+      (ctx.handler as any).threadQueues.set('default-thread-id', [{
+        messageId: 'last-queued', threadId: 'default-thread-id', content: 'Last queued task', enqueuedAt: Date.now(),
+      }]);
+      ctx.mockExecutor.execute.mockRejectedValueOnce(new Error('Claude command failed'));
+      await (ctx.handler as any).startNextQueuedCommand('default-thread-id');
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'queue-status', content: '/queue', timestamp: Date.now() });
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+        messageId: 'queue-status', output: expect.stringContaining('No active or pending thread queues'),
+      }));
     });
 
     it('should pause remaining work when a task taken from the queue fails', async () => {
