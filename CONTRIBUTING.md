@@ -45,8 +45,8 @@ This project and everyone participating in it is governed by our commitment to:
 git clone https://github.com/YOUR_USERNAME/remote-cli.git
 cd remote-cli
 
-# Install dependencies
-npm install
+# Install locked dependencies from the repository root
+npm ci
 
 # Build all packages
 npm run build
@@ -115,7 +115,7 @@ npm test -w @yu_robotics/remote-cli
 npm run test:coverage -w @yu_robotics/remote-cli
 
 # Run specific test file
-npm test -- DirectoryGuard.test.ts
+npm test -w @yu_robotics/remote-cli -- DirectoryGuard.test.ts
 ```
 
 ### Test-Driven Development
@@ -261,17 +261,18 @@ Tests must be isolated and not depend on each other:
 import { vi } from 'vitest';
 import os from 'os';
 
-// Mock os.homedir() for test isolation
-vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || os.homedir());
+// Capture the original function before mocking to avoid recursive fallback.
+const originalHomedir = os.homedir.bind(os);
+vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || originalHomedir());
 ```
 
 ## Release Process
 
-1. Update version in relevant `package.json` files
-2. Update `CHANGELOG.md` with release notes
-3. Create a git tag: `git tag v1.0.0`
-4. Push tag: `git push origin v1.0.0`
-5. GitHub Actions will automatically publish to npm
+1. Keep the version synchronized in the root, CLI, and Router `package.json` files and `package-lock.json`. Runtime behavior changes require a version bump; documentation-only and test-only changes do not.
+2. Review both root README files and update them together when user-visible behavior changes. Update `CHANGELOG.md` with release notes.
+3. From the repository root, run `npm ci`, `npm run build`, and `npm test`.
+4. Commit the verified changes. When publishing a release, an authorized maintainer runs `npm publish -w @yu_robotics/remote-cli` and `npm publish -w @yu_robotics/remote-cli-router`; each package also runs its build and tests in `prepublishOnly`.
+5. Record the release with the corresponding Git tag and push it. This repository has no GitHub Actions publishing workflow; pushing a tag alone does not publish either package.
 
 ## Questions?
 
