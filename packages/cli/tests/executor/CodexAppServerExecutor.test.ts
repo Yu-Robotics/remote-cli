@@ -347,6 +347,28 @@ describe('CodexAppServerExecutor', () => {
     expect(onToolResult).toHaveBeenCalledTimes(4);
   });
 
+  it('keeps file boundaries when native file-change diffs contain only hunks', async () => {
+    const onToolResult = vi.fn();
+    const running = executor.execute('edit files', { onToolResult });
+    await vi.waitFor(() => expect(transport.requests.some((entry) => entry.method === 'turn/start')).toBe(true));
+    transport.emit({ method: 'item/completed', params: { threadId: 'codex-thread-1', item: {
+      type: 'fileChange', id: 'edit-many', status: 'completed', changes: [
+        { path: 'a.ts', kind: { type: 'update' }, diff: '@@ -1 +1 @@\n-old\n+new' },
+        { path: 'b.ts', kind: { type: 'add' }, diff: '@@ -0,0 +1 @@\n+created' },
+        { path: 'c.ts', kind: 'delete', diff: '@@ -1 +0,0 @@\n-removed' },
+        { path: 'd.ts', kind: 'update', diff: '--- a/d.ts\n+++ b/d.ts\n@@ -1 +1 @@\n-before\n+after' },
+      ],
+    } } });
+    const result = onToolResult.mock.calls[0][0];
+    expect(result.diff).toContain('--- a/a.ts\n+++ b/a.ts\n@@');
+    expect(result.diff).toContain('--- /dev/null\n+++ b/b.ts\n@@');
+    expect(result.diff).toContain('--- a/c.ts\n+++ /dev/null\n@@');
+    expect(result.diff.match(/\+\+\+ b\/d.ts/g)).toHaveLength(1);
+    expect(result.content).toBe('update: a.ts\nadd: b.ts\ndelete: c.ts\nupdate: d.ts');
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await running;
+  });
+
   it('forwards completed imageGeneration items as image callbacks', async () => {
     const onImage = vi.fn();
     const running = executor.execute('generate an image', { onImage });
