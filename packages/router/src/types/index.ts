@@ -71,6 +71,16 @@ export enum MessageType {
   TASK_NOTIFICATION = 'task_notification'  // Background task terminal-state event (Claude Code 2.x)
 }
 
+export interface TaskResumeInfo {
+  recoveryId: string;
+  threadName: string;
+  backend: string;
+  cwd: string;
+  preview: string;
+  state: 'running' | 'completed' | 'failed';
+  error?: string;
+}
+
 /**
  * Background task notification payload (Claude Code 2.x)
  *

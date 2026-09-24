@@ -180,11 +180,20 @@ export interface TaskNotificationInfo {
   outputFile: string;
 }
 
-/**
- * Outgoing message to router server
- */
+/** Metadata for restoring task routing without replaying output. */
+export interface TaskResumeInfo {
+  recoveryId: string;
+  threadName: string;
+  backend: string;
+  cwd: string;
+  preview: string;
+  state: 'running' | 'completed' | 'failed';
+  error?: string;
+}
+
+/** Outgoing message to router server. */
 export interface OutgoingMessage {
-  type: 'result' | 'progress' | 'status' | 'pong' | 'structured' | 'stream' | 'response' | 'task_notification' | 'queue_started';
+  type: 'result' | 'progress' | 'status' | 'pong' | 'structured' | 'stream' | 'response' | 'task_notification' | 'queue_started' | 'task_resume';
   messageId: string;
   success?: boolean;
   /** Plain text output (for backward compatibility) */
@@ -221,6 +230,8 @@ export interface OutgoingMessage {
   queueConfirmation?: QueueConfirmationInfo;
   /** Metadata for a fresh execution card when type is queue_started. */
   queueStarted?: QueueStartedInfo;
+  /** Bounded task metadata; never contains buffered stream output. */
+  taskResume?: TaskResumeInfo;
   /** Current working directory (for response messages) */
   cwd?: string;
   /** Session abbreviation */

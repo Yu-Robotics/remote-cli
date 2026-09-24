@@ -137,6 +137,88 @@ describe('FeishuLongConnHandler', () => {
   });
 
   describe('updateStreamingMessage', () => {
+    const tableError = { response: { data: { code: 230099,
+      msg: 'Failed to create card content, ext=ErrCode: 11310; ErrMsg: card table number over limit; ErrorValue: table;' } } };
+
+    it('delivers a table-heavy reply across cards instead of stalling after a successful prefix', async () => {
+      const rows = Array.from({ length: 20 }, (_, index) => ({ tag: 'markdown',
+        content: `| Name | Value |\n| --- | --- |\n| table-${index} | 1 |` }));
+      const delivered = new Map<string, any[]>();
+      const validate = (content: string) => {
+        const elements = JSON.parse(content).body.elements;
+        const tables = elements.filter(element => element.content?.includes('| --- | --- |'));
+        if (tables.length > 3) throw tableError;
+        return elements;
+      };
+      mockClient.im.message.patch.mockImplementation(async ({ path, data }) => {
+        delivered.set(path.message_id, validate(data.content));
+        return {};
+      });
+      mockClient.im.message.create.mockImplementation(async ({ data }) => {
+        const elements = validate(data.content);
+        const message_id = `continuation-${delivered.size}`;
+        delivered.set(message_id, elements);
+        return { data: { message_id } };
+      });
+      expect(await handler.updateStreamingMessage('root', rows.slice(0, 15), 'user')).toBe(true);
+      expect(delivered.size).toBe(5);
+      expect(await handler.updateStreamingMessage('root', rows, 'user')).toBe(true);
+      expect(delivered.size).toBe(7);
+      const received = Array.from(delivered.values()).flat().filter(element => element.content?.includes('| --- | --- |'));
+      expect(received).toEqual(rows);
+      const calls = mockClient.im.message.create.mock.calls.length + mockClient.im.message.patch.mock.calls.length;
+      expect(await handler.updateStreamingMessage('root', rows, 'user')).toBe(true);
+      expect(mockClient.im.message.create.mock.calls.length + mockClient.im.message.patch.mock.calls.length).toBe(calls);
+    });
+
+    it('retries a rejected patch once as text and keeps that card in text mode', async () => {
+      mockClient.im.message.patch.mockRejectedValueOnce(tableError).mockResolvedValue({});
+      const elements = [{ tag: 'markdown', content: 'A renderer-specific table fragment' }];
+      expect(await handler.updateStreamingMessage('root', elements, 'user')).toBe(true);
+      expect(mockClient.im.message.patch).toHaveBeenCalledTimes(2);
+      const fallback = JSON.parse(mockClient.im.message.patch.mock.calls[1][0].data.content);
+      expect(fallback.body.elements[0].content).toContain('```text\nA renderer-specific table fragment');
+      expect(await handler.updateStreamingMessage('root', elements, 'user')).toBe(true);
+      expect(mockClient.im.message.patch).toHaveBeenCalledTimes(2);
+      expect(await handler.updateStreamingMessage('root', [{ tag: 'markdown', content: 'Later output' }], 'user')).toBe(true);
+      expect(JSON.parse(mockClient.im.message.patch.mock.calls[2][0].data.content).body.elements[0].content).toContain('```text');
+    });
+
+    it('recovers continuation creation without duplicating cards on the next update', async () => {
+      mockClient.im.message.patch.mockResolvedValue({});
+      // The SDK can return an API error body without rejecting its promise.
+      mockClient.im.message.create.mockResolvedValueOnce(tableError.response.data)
+        .mockResolvedValue({ data: { message_id: 'continuation' } });
+      const elements = Array.from({ length: 160 }, (_, index) => ({ tag: 'markdown', content: `Line ${index}` }));
+      expect(await handler.updateStreamingMessage('root', elements, 'user')).toBe(true);
+      expect(mockClient.im.message.create).toHaveBeenCalledTimes(2);
+      expect(await handler.updateStreamingMessage('root', elements, 'user')).toBe(true);
+      expect(mockClient.im.message.create).toHaveBeenCalledTimes(2);
+      expect(mockClient.im.message.patch).toHaveBeenCalledOnce();
+    });
+
+    it('stops after a failed text fallback instead of looping on the same rejection', async () => {
+      mockClient.im.message.patch.mockRejectedValue(tableError);
+      const elements = [{ tag: 'markdown', content: 'Rejected content' }];
+      expect(await handler.updateStreamingMessage('root', elements, 'user')).toBe(false);
+      expect(mockClient.im.message.patch).toHaveBeenCalledTimes(2);
+      expect(await handler.updateStreamingMessage('root', elements, 'user')).toBe(false);
+      expect(mockClient.im.message.patch).toHaveBeenCalledTimes(3);
+    });
+
+    it('preserves a finalized fallback when its thread switch buttons are refreshed', async () => {
+      mockClient.im.message.patch.mockRejectedValueOnce(tableError).mockResolvedValue({});
+      const threads = [{ id: 't1', name: 'default', status: 'idle' as const },
+        { id: 't2', name: 'thread-2', status: 'idle' as const }];
+      expect(await handler.finalizeStreamingMessage('root', [{ tag: 'markdown', content: 'Renderer fragment' }],
+        undefined, 'user', '/workspace', 'default', threads, 't1')).toBe(true);
+      await (handler as any).refreshThreadSwitchButtons('root', 't2');
+      const elements = JSON.parse(mockClient.im.message.patch.mock.calls.at(-1)[0].data.content).body.elements;
+      expect(elements.some(element => element.content === '```text\nRenderer fragment\n```')).toBe(true);
+      expect(elements.some(element => element.content === 'Renderer fragment')).toBe(false);
+      expect(JSON.stringify(elements)).toContain('switch_thread');
+    });
+
     it('should update message within limit', async () => {
       mockClient.im.message.patch.mockResolvedValue({});
 
@@ -201,7 +283,7 @@ describe('FeishuLongConnHandler', () => {
     it('should not create continuation message if openId not provided', async () => {
       mockClient.im.message.patch.mockResolvedValue({});
 
-      const longContent = 'a'.repeat(5000);
+      const longContent = Array.from({ length: 160 }, (_, index) => ({ tag: 'markdown', content: `Line ${index}` }));
       const result = await handler.updateStreamingMessage('msg_123', longContent);
 
       expect(result).toBe(true);
@@ -212,7 +294,7 @@ describe('FeishuLongConnHandler', () => {
     it('should return false when patch fails', async () => {
       mockClient.im.message.patch.mockRejectedValue(new Error('API Error'));
 
-      const result = await handler.updateStreamingMessage('msg_123', 'Content');
+      const result = await handler.updateStreamingMessage('msg_123', [{ tag: 'markdown', content: 'Content' }]);
 
       expect(result).toBe(false);
     });
@@ -558,10 +640,11 @@ describe('FeishuLongConnHandler', () => {
       mockClient.im.message.create.mockResolvedValue({ data: { message_id: 'msg_cont_1' } });
 
       // Start an update that will be slow (patch takes time)
-      const updatePromise = handler.updateStreamingMessage('msg_123', 'Short content', 'ou_user_123');
+      const elements = [{ tag: 'markdown', content: 'Short content' }];
+      const updatePromise = handler.updateStreamingMessage('msg_123', elements, 'ou_user_123');
 
       // Immediately fire finalize while update is still pending
-      const finalizePromise = handler.finalizeStreamingMessage('msg_123', 'Short content', 'ABC123', 'ou_user_123');
+      const finalizePromise = handler.finalizeStreamingMessage('msg_123', elements, 'ABC123', 'ou_user_123');
 
       // Resolve the first patch
       await new Promise(r => setTimeout(r, 10));
@@ -576,7 +659,7 @@ describe('FeishuLongConnHandler', () => {
         patchResolver({});
       }
 
-      await Promise.all([updatePromise, finalizePromise]);
+      expect(await Promise.all([updatePromise, finalizePromise])).toEqual([true, true]);
 
       // Both should complete successfully without errors
       // The finalize should wait for the update to finish first

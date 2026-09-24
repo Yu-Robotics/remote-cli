@@ -127,7 +127,8 @@ describe('RouterServer - task_notification', () => {
 
     mockConnectionHub = {
       registerConnection: vi.fn(),
-      unregisterConnection: vi.fn(),
+      unregisterConnection: vi.fn().mockReturnValue(true),
+      isCurrentConnection: vi.fn().mockReturnValue(true),
       updateLastActive: vi.fn(),
       getConnectionStats: vi.fn().mockReturnValue({ totalConnections: 0, deviceIds: [] }),
       cleanupStaleConnections: vi.fn(),

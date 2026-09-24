@@ -25,6 +25,17 @@ describe('ConnectionHub', () => {
   });
 
   describe('registerConnection', () => {
+    it('ignores a delayed close from a replaced socket', () => {
+      const oldWs = { ...mockWs, close: vi.fn() };
+      hub.registerConnection('device', oldWs);
+      oldWs.close.mockImplementation(() => hub.unregisterConnection('device', oldWs));
+      hub.registerConnection('device', mockWs, { queueStarted: true });
+      expect(hub.unregisterConnection('device', oldWs)).toBe(false);
+      expect(hub.isCurrentConnection('device', mockWs)).toBe(true);
+      expect(hub.supportsQueueStarted('device')).toBe(true);
+      expect(hub.unregisterConnection('device', mockWs)).toBe(true);
+      expect(hub.isDeviceOnline('device')).toBe(false);
+    });
     it('should register a new device connection', () => {
       const deviceId = 'dev_test_001';
 
