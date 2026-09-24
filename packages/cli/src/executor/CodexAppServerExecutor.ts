@@ -620,13 +620,23 @@ export class CodexAppServerExecutor implements IExecutor {
       case 'fileChange': {
         const changes = Array.isArray(item.changes) ? item.changes : [];
         const diffs = changes
-          .map((change: any) => typeof change?.diff === 'string' ? change.diff : '')
+          .map((change: any) => {
+            if (typeof change?.diff !== 'string' || !change.diff) return '';
+            if (/^(?:diff --git |--- .*\r?\n\+\+\+ )/m.test(change.diff)) return change.diff;
+            // Native fileChange hunks can omit file headers. Preserve the file
+            // boundary before concatenating a multi-file tool result.
+            const filePath = String(change.path ?? 'file').replace(/\r/g, '\\r').replace(/\n/g, '\\n');
+            const kind = typeof change.kind === 'string' ? change.kind : change.kind?.type;
+            const oldPath = kind === 'add' ? '/dev/null' : `a/${filePath}`;
+            const newPath = kind === 'delete' ? '/dev/null' : `b/${filePath}`;
+            return `--- ${oldPath}\n+++ ${newPath}\n${change.diff}`;
+          })
           .filter(Boolean)
           .join('\n');
         this.emitToolUse(active, id, 'Edit', { file_path: changes[0]?.path ?? '', ...(diffs ? { diff: diffs } : {}) });
         active.options.onToolResult?.({
           tool_use_id: id,
-          content: changes.map((change: any) => `${change.kind ?? 'update'}: ${change.path ?? ''}`).join('\n'),
+          content: changes.map((change: any) => `${typeof change.kind === 'string' ? change.kind : change.kind?.type ?? 'update'}: ${change.path ?? ''}`).join('\n'),
           ...(diffs ? { diff: diffs } : {}),
           is_error: item.status !== 'completed',
         });

@@ -475,6 +475,14 @@ With a CLI and Router that support queue-start notifications, confirming a messa
 
 `/queue` lists active and pending queues. `/queue clear` removes confirmed and awaiting-confirmation messages for the current thread. `/abort` stops the current task and clears that thread's queue. A message sent while abort cleanup is still running waits for cleanup and then starts normally, so it is not discarded with the old task. Backend or execution-context changes are rejected while a thread is busy, and a successful backend switch clears affected queues. `/thread list` and `/thread new` are not blocked by a busy thread because they do not touch its execution context; the **+ New** card button therefore works even while the default thread is running. When the active task finishes, the first confirmed queued message starts even if the active task ended with a backend error such as model capacity. If a task that was taken from the queue fails, the remaining queue pauses; use `/queue continue` to resume or `/abort` to discard the remaining messages. Queues are in-memory and are discarded on service restart.
 
+### Code Change Previews
+
+Code edits use one collapsible preview per file, with the file path and added/deleted line counts in the header. Deleted lines are explicitly red and added lines green through Feishu rich text, independent of native `diff` syntax highlighting. A copyable diff preview preserves original spaces, tabs, and code characters; rich-text indentation is for display only.
+
+Previews retain three lines of context around each change. Display budgets are shared across files and hunks, with explicit notices for omitted lines, hunks, or files. A diff-only tool result is displayed even without a text message. Codex file-change events retain file boundaries, and ACP old/new text is compared so unchanged lines are not presented as replacements. Snippet-relative line numbers and Write content previews are labeled; Write does not imply a new file when its previous contents are unavailable.
+
+This changes display only. It does not merge tool calls with their results or alter backend execution. The Router upgrade enables the new previews for existing diff data; upgrading the CLI also preserves file names in Codex multi-file changes. Pi and AGY edit payload mappings are unchanged.
+
 ### Background Task Notifications
 
 Claude Code and Codex can send a standalone task card when a background task finishes, even after the original reply has completed. Both use the same completed, failed, and stopped card styles, show the originating thread, and let you reply to the card to continue that thread. Foreground commands stay in their original response; duplicate completion events do not create duplicate Codex task cards.

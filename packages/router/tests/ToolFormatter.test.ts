@@ -11,6 +11,11 @@ import {
 } from '../src/utils/ToolFormatter';
 import { ToolUseInfo, ToolResultInfo } from '../src/types';
 
+function renderedDiff(elements: ReturnType<typeof createToolUseElement>): string {
+  return elements.flatMap((element) => element.elements ?? [])
+    .find((element) => /`{3,}diff\n/.test(element.content ?? ''))?.content ?? '';
+}
+
 describe('ToolFormatter', () => {
   describe('getToolEmoji', () => {
     it('should return correct emoji for known tools', () => {
@@ -120,6 +125,19 @@ describe('ToolFormatter', () => {
   });
 
   describe('createToolUseElement', () => {
+    it('keeps parameter cards for edits without source text and unrelated backend tools', () => {
+      const edit = createToolUseElement({ name: 'Edit', id: 'edit', input: { file_path: '/tmp/app.ts' } });
+      expect(renderedDiff(edit)).toBe('');
+      expect(edit[1].elements[0].content).toContain('/tmp/app.ts');
+
+      const custom = createToolUseElement({ name: 'custom_compare', id: 'compare',
+        input: { old_string: 'before', new_string: 'after' } });
+      expect(renderedDiff(custom)).toBe('');
+      expect(custom[1].header.title.content).toContain('custom_compare');
+      expect(custom[1].elements[0].content).toContain('**old_string:** before');
+      expect(custom[1].elements[0].content).toContain('**new_string:** after');
+    });
+
     it('should create tool use elements', () => {
       const toolUse: ToolUseInfo = {
         name: 'Read',
@@ -214,7 +232,7 @@ describe('ToolFormatter', () => {
     });
 
     it('should render diff results as an expanded-length diff code block', () => {
-      const diff = ['--- a/src/app.ts', '+++ b/src/app.ts', '@@ -1,2 +1,2 @@', '-const oldValue = 1;', '+const newValue = 2;'].join('\n');
+      const diff = ['--- a/src/app.ts', '+++ b/src/app.ts', '@@ -1 +1 @@', '-const oldValue = 1;', '+const newValue = 2;'].join('\n');
       const elements = createToolResultElement({
         tool_use_id: 'tool_diff',
         content: 'file_change (update): completed',
@@ -222,9 +240,9 @@ describe('ToolFormatter', () => {
         is_error: false,
       });
 
-      expect(elements[0].elements[0].content).toContain('```diff');
-      expect(elements[0].elements[0].content).toContain('-const oldValue = 1;');
-      expect(elements[0].elements[0].content).not.toContain('file_change');
+      expect(renderedDiff(elements)).toContain('-const oldValue = 1;');
+      expect(elements[0].header.title.content).toContain('src/app.ts');
+      expect(JSON.stringify(elements)).toContain('file_change (update): completed');
     });
 
     it('should render an Edit preview inside the existing tool card', () => {
@@ -238,10 +256,9 @@ describe('ToolFormatter', () => {
         },
       });
 
-      expect(elements[1].elements).toHaveLength(2);
-      expect(elements[1].elements[1].content).toContain('```diff');
-      expect(elements[1].elements[1].content).toContain('-const oldValue = 1;');
-      expect(elements[1].elements[1].content).toContain('+const newValue = 2;');
+      expect(elements[1].header.title.content).toContain('/Users/test/src/app.ts');
+      expect(renderedDiff(elements)).toContain('-const oldValue = 1;');
+      expect(renderedDiff(elements)).toContain('+const newValue = 2;');
     });
 
     it('should preserve unchanged lines between separate edits', () => {
@@ -255,14 +272,14 @@ describe('ToolFormatter', () => {
         },
       });
 
-      const rendered = elements[1].elements[1].content as string;
+      const rendered = renderedDiff(elements);
       expect(rendered).toContain(' const unchanged = true;');
       expect(rendered).not.toContain('-const unchanged = true;');
       expect(rendered).not.toContain('+const unchanged = true;');
       expect(rendered.indexOf('-const first = 1;')).toBeLessThan(rendered.indexOf('+const first = 2;'));
     });
 
-    it('should render a new file preview for Write', () => {
+    it('renders Write contents without claiming an existing file was newly created', () => {
       const elements = createToolUseElement({
         name: 'Write',
         id: 'write_1',
@@ -272,9 +289,9 @@ describe('ToolFormatter', () => {
         },
       });
 
-      expect(elements[1].elements).toHaveLength(2);
-      expect(elements[1].elements[1].content).toContain('--- /dev/null');
-      expect(elements[1].elements[1].content).toContain('+export const value = 1;');
+      expect(JSON.stringify(elements)).toContain('previous file contents are unavailable');
+      expect(renderedDiff(elements)).toContain('+export const value = 1;');
+      expect(renderedDiff(elements)).not.toContain('/dev/null');
     });
 
     it('should use a longer fence when diff content contains triple backticks', () => {
@@ -285,8 +302,8 @@ describe('ToolFormatter', () => {
         is_error: false,
       });
 
-      const rendered = elements[0].elements[0].content as string;
-      expect(rendered.startsWith('````diff\n')).toBe(true);
+      const rendered = renderedDiff(elements);
+      expect(rendered).toContain('````diff\n');
       expect(rendered.endsWith('\n````')).toBe(true);
     });
 
@@ -299,8 +316,9 @@ describe('ToolFormatter', () => {
         is_error: false,
       });
 
-      const rendered = elements[0].elements[0].content as string;
-      expect(rendered).toContain('diff truncated');
+      const rendered = renderedDiff(elements);
+      expect(JSON.stringify(elements)).toContain('Preview shortened');
+      expect(rendered).toContain('40 lines omitted');
       expect(rendered).toContain('+line-159');
       expect(rendered).not.toContain('+line-160');
     });
