@@ -3,6 +3,8 @@
 > **Status: IMPLEMENTED ✅**
 > Last updated: 2026-03-20
 
+> **Historical plan:** The code excerpts and checklist describe the original fix. Current device ownership is enforced by [BindingManager](packages/router/src/binding/BindingManager.ts); use [README.md](README.md) for supported binding and device-switch commands.
+
 ## Problem Statement
 
 The router currently allows the same `deviceId` to be bound to multiple users simultaneously. This creates a **critical security and routing bug** where:

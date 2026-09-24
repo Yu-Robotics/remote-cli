@@ -110,7 +110,7 @@ You only need to send one message from your phone. Claude Code, AGY CLI, Codex C
 │  Router Server  │
 │  (Team Deploy)  │         ┌──────────────────────────────┐
 │  ┌───────────┐  │         │  Developer B's Work PC       │
-│  │ Webhook   │  │         │  ┌─────────────────────────┐ │
+│  │ Feishu WS │  │         │  ┌─────────────────────────┐ │
 │  │ Handler   │  │◀───────▶│  │  remote-cli (local)     │ │
 │  └───────────┘  │         │  └─────────────────────────┘ │
 │  ┌───────────┐  │         └──────────────────────────────┘
@@ -907,13 +907,15 @@ Startup also checks that the installed Codex CLI exposes `codex app-server --hel
 
 ### Development
 
+Run `npm ci` from the repository root after pulling dependency changes, before building or publishing either workspace. `npm publish` runs build and test checks but does not install missing dependencies.
+
 ```bash
 # Clone repository (replace with actual repository URL)
 git clone <repository-url>
 cd remote-cli
 
-# Install dependencies
-npm install
+# Install locked workspace dependencies
+npm ci
 
 # Build all packages
 npm run build

@@ -107,7 +107,7 @@ Bot： 📂 已切换到 ~/projects/.openclaw
 │   路由服务器     │
 │  (团队部署)      │         ┌──────────────────────────────┐
 │  ┌───────────┐  │         │      开发者 B 的工作电脑        │
-│  │ Webhook   │  │         │  ┌─────────────────────────┐ │
+│  │ Feishu WS │  │         │  ┌─────────────────────────┐ │
 │  │ 处理器    │  │◀───────▶│  │  remote-cli (本地)       │ │
 │  └───────────┘  │         │  └─────────────────────────┘ │
 │  ┌───────────┐  │         └──────────────────────────────┘
@@ -902,13 +902,15 @@ Codex app-server 是唯一支持的 Codex transport。启动时会自动迁移�
 
 ### 开发
 
+Run `npm ci` from the repository root after pulling dependency changes, before building or publishing either workspace. `npm publish` runs build and test checks but does not install missing dependencies.
+
 ```bash
 # 克隆仓库（请替换为实际的仓库地址）
 git clone <repository-url>
 cd remote-cli
 
-# 安装依赖
-npm install
+# Install locked workspace dependencies
+npm ci
 
 # 构建所有包
 npm run build

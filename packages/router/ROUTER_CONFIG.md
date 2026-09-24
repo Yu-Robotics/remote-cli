@@ -23,11 +23,12 @@ remote-cli-router config setup
 
 ### Optional Fields
 
-- **Feishu Encrypt Key**: For message encryption (optional)
-- **Feishu Verification Token**: For webhook verification (optional)
+- **Feishu Encrypt Key** and **Verification Token**: Retained in the wizard for compatibility; the current long-connection handler uses App ID and App Secret and does not read these fields
 - **Server Port**: Default is 3000
 - **Server Host**: Default is 0.0.0.0
 - **WebSocket Heartbeat Interval**: Default is 30000ms
+
+Enable Feishu **Long Connection** mode and subscribe to `im.message.receive_v1` and `card.action.trigger`. No public webhook endpoint is required. Clients must be able to reach the Router's HTTP and `/ws` endpoints; use TLS for public deployments.
 
 ### View Current Configuration
 
@@ -58,6 +59,8 @@ This file persists across router restarts, ensuring that user-device bindings ar
 ### Development
 
 ```bash
+# From the repository root
+npm ci
 cd packages/router
 npm run build
 npm run dev
@@ -66,7 +69,8 @@ npm run dev
 ### Production
 
 ```bash
-npm run build -w @yu_robotics/remote-cli-router
+npm install -g @yu_robotics/remote-cli-router
+remote-cli-router config setup
 remote-cli-router start
 ```
 
@@ -80,7 +84,9 @@ docker compose run --rm router config setup
 docker compose up -d
 ```
 
-The interactive setup writes configuration and bindings to the mounted `./router-data` directory. No App ID or App Secret is required in environment variables. Use `docker compose logs -f router` for logs and `docker compose down` to stop the service.
+The container uses `/router-data` as its home directory, so configuration and bindings live in `./router-data/.remote-cli-router/` on the host. Create `./router-data` before setup; on Linux, set `ROUTER_UID` and `ROUTER_GID` in `.env` to its owner's IDs. Set `ROUTER_PORT` before setup and enter the same port in the wizard. No App ID or App Secret is required in environment variables. See [Docker Compose](README.md#docker-compose-recommended-for-shared-routers) for the complete setup sequence.
+
+User-device bindings persist across Router restarts. The Router's active thread selection and historical card routing are held in memory. Task recovery rebuilds routing for reported tasks on new cards; it does not persist all Router state or recover a restarted CLI's in-memory task state.
 
 ## Differences from Redis-based Approach
 

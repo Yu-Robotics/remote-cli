@@ -7,12 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
+
+## [1.6.53] - 2026-09-24
+
 ### Added
-- Added a Kimi Code backend using the official persistent `kimi acp` server, with resumable sessions, model and thinking controls, image input, slash commands, cancellation, and permission handling.
-- Added an OpenCode backend using a persistent `opencode acp` process, with resumable per-thread sessions, native model and effort controls, image input, slash commands, compaction, cancellation, tool updates, and permission handling.
+- Added task recovery after Router restarts or WebSocket disconnections. Compatible clients report task metadata and resume later output on new cards with a gap notice, without buffering or replaying disconnected output.
+- Added bounded, in-memory completion receipts for tasks that finish offline; automatic CLI updates wait for pending results to be acknowledged or expire.
+
+### Fixed
+- Counted Markdown and nested tables during card splitting, with a conservative three-table budget and readable text fallbacks for indivisible content.
+- Retried a card rejected by Feishu's table limit once as text and retained that mode for subsequent updates to the same card.
+- Reduced verbose per-chunk split logging during long replies.
+
+## [1.6.51] - 2026-09-24
+
+### Added
+- Streamed Claude Code text incrementally instead of waiting for completed content blocks, without duplicating already streamed text.
+
+## 1.6.31–1.6.50 — Source History Summary
+
+This summary was reconstructed from repository commits. It records merged code changes rather than a complete per-version npm publication history; the dates above are source commit dates.
+
+- Removed the legacy Claude spawn and Codex exec transports, with configuration migration to the maintained backends.
+- Added the official ZCode app-server and Pi RPC backends, then improved Pi session controls, extension interactions, and command discovery.
+- Made `/new` an alias for `/clear` within the current thread.
+- Improved thread button wrapping, numeric ordering, workspace labels, continuation headers, and the distinction between a reply's source thread and the selected destination.
+- Moved queued tasks to fresh execution cards, preserved confirmed queue order, and reported paused queues with recovery commands.
+- Allowed all backends to return local image files through paths or Markdown links, with a 2 MiB forwarding limit.
+- Avoided repeatedly updating unchanged cards in long replies; allowed thread listing and creation while another task is running.
+- Added Codex background task completion cards and colored, line-aware diff previews.
+
+## [1.6.30] - 2026-09-17
 
 ### Fixed
 - Continued with the first confirmed queued message when the active task ends with a backend error, including temporary model-capacity failures.
+
+## [1.6.29] - 2026-09-16
+
+### Added
+- Added a Kimi Code backend using the official persistent `kimi acp` server, with resumable sessions, model and thinking controls, image input, slash commands, cancellation, and permission handling.
+
+## [1.6.28] - 2026-09-16
+
+### Added
+- Added an OpenCode backend using a persistent `opencode acp` process, with resumable per-thread sessions, native model and effort controls, image input, slash commands, compaction, cancellation, tool updates, and permission handling.
+
+## [1.6.27] - 2026-09-16
+
+### Removed
+- Removed legacy Gemini backend remnants.
 
 ## [1.6.26] - 2026-09-14
 
@@ -226,18 +271,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Claude Code integration via Agent SDK
 - Comprehensive test suite (80%+ coverage)
 
-[Unreleased]: https://github.com/xiaoyu/remote-cli/compare/v1.6.14...HEAD
-[1.6.21]: https://github.com/xiaoyu/remote-cli/compare/v1.6.20...v1.6.21
-[1.6.14]: https://github.com/xiaoyu/remote-cli/compare/v1.6.12...v1.6.14
-[1.6.12]: https://github.com/xiaoyu/remote-cli/compare/v1.6.11...v1.6.12
-[1.6.11]: https://github.com/xiaoyu/remote-cli/compare/v1.6.10...v1.6.11
-[1.6.10]: https://github.com/xiaoyu/remote-cli/compare/v1.6.9...v1.6.10
-[1.6.9]: https://github.com/xiaoyu/remote-cli/compare/v1.6.8...v1.6.9
-[1.6.8]: https://github.com/xiaoyu/remote-cli/compare/v1.6.7...v1.6.8
-[1.6.7]: https://github.com/xiaoyu/remote-cli/compare/v1.6.1...v1.6.7
-[1.6.1]: https://github.com/xiaoyu/remote-cli/compare/v1.1.39...v1.6.1
-[1.1.39]: https://github.com/xiaoyu/remote-cli/compare/v1.0.3...v1.1.39
-[1.0.3]: https://github.com/xiaoyu/remote-cli/compare/v1.0.2...v1.0.3
-[1.0.2]: https://github.com/xiaoyu/remote-cli/compare/v1.0.1...v1.0.2
-[1.0.1]: https://github.com/xiaoyu/remote-cli/compare/v1.0.0...v1.0.1
-[1.0.0]: https://github.com/xiaoyu/remote-cli/releases/tag/v1.0.0
+[Unreleased]: https://gitlab.xiaoyu.ai/xiaoyu_robot/remote-cli/-/compare/6be9198...main
+[1.6.53]: https://gitlab.xiaoyu.ai/xiaoyu_robot/remote-cli/-/commit/6be9198
+[1.6.51]: https://gitlab.xiaoyu.ai/xiaoyu_robot/remote-cli/-/commit/96fa68e
+[1.6.30]: https://gitlab.xiaoyu.ai/xiaoyu_robot/remote-cli/-/commit/9c5f0bb
+[1.6.29]: https://gitlab.xiaoyu.ai/xiaoyu_robot/remote-cli/-/commit/87282b4
+[1.6.28]: https://gitlab.xiaoyu.ai/xiaoyu_robot/remote-cli/-/commit/eb1f871
+[1.6.27]: https://gitlab.xiaoyu.ai/xiaoyu_robot/remote-cli/-/commit/2941561
+[1.6.21]: https://github.com/Yu-Robotics/remote-cli/compare/v1.6.20...v1.6.21
+[1.6.14]: https://github.com/Yu-Robotics/remote-cli/compare/v1.6.12...v1.6.14
+[1.6.12]: https://github.com/Yu-Robotics/remote-cli/compare/v1.6.11...v1.6.12
+[1.6.11]: https://github.com/Yu-Robotics/remote-cli/compare/v1.6.10...v1.6.11
+[1.6.10]: https://github.com/Yu-Robotics/remote-cli/compare/v1.6.9...v1.6.10
+[1.6.9]: https://github.com/Yu-Robotics/remote-cli/compare/v1.6.8...v1.6.9
+[1.6.8]: https://github.com/Yu-Robotics/remote-cli/compare/v1.6.7...v1.6.8
+[1.6.7]: https://github.com/Yu-Robotics/remote-cli/compare/v1.6.1...v1.6.7
+[1.6.1]: https://github.com/Yu-Robotics/remote-cli/compare/v1.1.39...v1.6.1
+[1.1.39]: https://github.com/Yu-Robotics/remote-cli/compare/v1.0.3...v1.1.39
+[1.0.3]: https://github.com/Yu-Robotics/remote-cli/compare/v1.0.2...v1.0.3
+[1.0.2]: https://github.com/Yu-Robotics/remote-cli/compare/v1.0.1...v1.0.2
+[1.0.1]: https://github.com/Yu-Robotics/remote-cli/compare/v1.0.0...v1.0.1
+[1.0.0]: https://github.com/Yu-Robotics/remote-cli/releases/tag/v1.0.0

@@ -1,5 +1,7 @@
 # Feishu Remote Control for Claude Code CLI - Implementation Plan
 
+> **Status: HISTORICAL DESIGN.** This is the original implementation proposal, not a deployment or security guide. Its Redis, webhook, sandbox, and executor descriptions do not represent the current implementation. Use [README.md](README.md) for supported behavior and [CLAUDE.md](CLAUDE.md) for current development guidance.
+
 ## Context
 
 ### Problem Background

@@ -5,15 +5,16 @@ Remote control Claude Code, AGY CLI, Codex CLI, OpenCode CLI, Kimi Code CLI, ZCo
 ## Features
 
 - **Remote Control**: Control your local development environment from anywhere via mobile
-- **Secure**: Directory whitelisting, command filtering, and device authentication
+- **Access Controls**: Working-directory allowlist and user-device binding
 - **Mobile-Optimized**: Simplified commands and rich text formatting for Feishu
 - **Readable Code Changes**: Edit operations show collapsible, line-aware diff previews inside the existing progress card
 - **Multi-Backend Support**: Supports Claude Code, AGY CLI (Antigravity), Codex CLI (OpenAI), OpenCode CLI, Kimi Code CLI, ZCode, and Pi
-- **Image Input and Output**: Forward standalone images and mixed text-image Feishu posts to Claude Persistent, Codex App Server, OpenCode ACP, Kimi Code ACP, ZCode, and Pi backends, and forward Codex App Server generated images back through Router
+- **Image Input and Output**: Forward Feishu images to supported backends and return Codex native image output. All backends can return local images through file paths or Markdown image links; files must be inside an allowed directory and no larger than 2 MiB. AGY does not accept image input.
 - **Multi-session (Threads)**: Create independent chat threads to parallelize tasks
 - **Remote Machine Management**: Control remote servers or Docker via SSH
 - **Persistent Process**: Long-running AI process with bidirectional streaming
 - **Non-Interactive Auto-Update**: Reconnect to a newer Router, wait for idle work, install its exact version, and exit for the process supervisor to restart
+- **Task Recovery**: With a compatible Router, running tasks continue across Router reconnects on new cards with an output-gap notice; disconnected output is not buffered or replayed
 
 ## Prerequisites
 
@@ -98,12 +99,12 @@ Linux users upgrading from version 1.6.23 or earlier should run `remote-cli serv
 | `/compact` | Compress history to save tokens |
 | `/cd <dir>` | Change working directory for this thread |
 | `/model [name]` | List models for the active backend or set this thread's model |
-| `/effort [auto|level]` | Show or set Codex/AGY/OpenCode/Kimi reasoning effort |
+| `/effort [auto|level]` | Show or set Codex/AGY/OpenCode/Kimi/ZCode/Pi reasoning effort |
 | `/backend` | List backends and show the current thread's effective backend |
 | `/backend <index>` | Switch all threads and clear per-thread backend overrides |
 | `/backend <index> @` | Switch only the current thread |
 | `/backend default @` | Clear the current thread override and follow the global backend |
-| `/bind <码>` | Bind a new device |
+| `/bind <code>` | Bind a new device |
 | `/unbind` | Unbind all devices |
 | `/device` | List and switch between bound devices |
 
@@ -153,14 +154,14 @@ When diagnosing a task, check `/status`, then `/context`, then `/queue`. Use `/a
 
 ## Security
 
-- **Directory whitelisting**: Only explicitly allowed directories are accessible
-- **Command filtering**: Dangerous commands are automatically blocked
+- **Directory whitelisting**: Controls which working directory a thread can select; it is not a process sandbox
+- **Backend permissions**: AI processes inherit the operating-system user's permissions. remote-cli does not install a global Claude security hook or automatically filter backend shell commands.
 - **Device authentication**: Each device has a unique hardware-based ID
 - **Binding codes**: Expire after 5 minutes
 
 ## Documentation
 
-For full documentation including router server deployment, see the [project README](https://github.com/xiaoyu/remote-cli#readme).
+For full documentation including router server deployment, see the [project README](https://github.com/Yu-Robotics/remote-cli#readme).
 
 ## License
 
