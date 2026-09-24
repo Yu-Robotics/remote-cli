@@ -472,6 +472,8 @@ With a CLI and Router that support queue-start notifications, confirming a messa
 
 `/queue` 会列出正在执行和等待中的队列。`/queue clear` 清除当前 thread 中已确认和等待确认的消息。`/abort` 会中止当前任务并清空该 thread 的队列。在 abort 清理尚未结束时发送的新消息会等待清理完成，然后正常开始执行，不会跟随旧任务一起被丢弃。thread 忙碌时不允许切换 backend 或修改执行上下文；成功切换 backend 后会清除受影响的队列。`/thread list` 和 `/thread new` 不受 thread 忙碌状态影响，因为它们不触碰该 thread 的执行上下文，所以即使 default thread 正在运行，卡片上的 **+ New** 按钮也能正常创建新 thread。当前任务结束后，即使它因模型容量等 backend 错误而失败，也会开始执行第一条已确认的排队消息。如果从队列中取出的任务失败，该 thread 的剩余队列会暂停；可以使用 `/queue continue` 继续，或使用 `/abort` 丢弃剩余消息。队列只保存在内存中，服务重启后会丢失。
 
+New messages cannot bypass confirmed work already waiting in a thread queue, even when the executor is idle. They require queue confirmation and join behind the existing work. If a queued task fails, its error card explicitly reports that the remaining queue is paused, with confirmed and awaiting-confirmation counts. Use `/queue continue` to resume in order, or `/queue clear` to discard pending work. A failure with nothing left waiting does not pause future messages. Queue positions count confirmed waiting messages, excluding the running task; the confirmation card shows the count before the new message is added.
+
 ### Code Change Previews
 
 Code edits use one collapsible preview per file, with the file path and added/deleted line counts in the header. Deleted lines are explicitly red and added lines green through Feishu rich text, independent of native `diff` syntax highlighting. A copyable diff preview preserves original spaces, tabs, and code characters; rich-text indentation is for display only.

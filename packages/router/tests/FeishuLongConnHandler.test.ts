@@ -481,6 +481,10 @@ describe('FeishuLongConnHandler', () => {
       });
 
       const buttonLayout = elements.find((element: any) => element.tag === 'column_set');
+      const details = elements.find((element: any) => element.tag === 'markdown').content;
+      expect(details).toContain('Queue confirmation');
+      expect(details).not.toContain('Thread is busy');
+      expect(details).toContain('Already queued:** 0');
       expect(buttonLayout).toMatchObject({
         tag: 'column_set',
         columns: [
@@ -2363,12 +2367,12 @@ describe('FeishuLongConnHandler', () => {
       expect(mockClient.im.message.patch).toHaveBeenCalledWith({
         path: { message_id: 'card-1' },
         data: {
-          content: JSON.stringify({
-            schema: '2.0',
-            body: { elements: [{ tag: 'markdown', content: '✅ **Added to queue**\n\nThis message has been accepted and will run after the current task finishes.' }] },
-          }),
+          content: expect.any(String),
         },
       });
+      const receipt = JSON.parse(mockClient.im.message.patch.mock.calls[0][0].data.content);
+      expect(receipt.body.elements[0].content).toContain('Added to queue');
+      expect(receipt.body.elements[0].content).toContain('/queue continue');
     });
 
     it('defers card creation for a capable CLI until execution starts', async () => {

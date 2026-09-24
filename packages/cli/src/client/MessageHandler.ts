@@ -329,11 +329,16 @@ export class MessageHandler {
       }
     }
 
-    // Per-thread busy check — set busy immediately to close the race window
-    if (this.threadPool.isThreadBusy(resolvedThreadId)) {
+    const threadBusy = this.threadPool.isThreadBusy(resolvedThreadId);
+    const queuedCount = this.threadQueues.get(resolvedThreadId)?.length ?? 0;
+    if (!threadBusy && !this.hasThreadQueueState(resolvedThreadId)) this.pausedQueues.delete(resolvedThreadId);
+    const queuePaused = this.pausedQueues.has(resolvedThreadId);
+    const ordinaryMessage = !isSlashCommand && !content?.trim().startsWith('/');
+    // An idle executor can still have a paused queue. New work must not overtake it.
+    if (threadBusy || (ordinaryMessage && (queuedCount > 0 || queuePaused))) {
       // Allow pending replace even when busy
       const pendingKey = openId || messageId;
-      if (this.pendingReplaces.has(pendingKey) && content && !content.startsWith('/')) {
+      if (threadBusy && this.pendingReplaces.has(pendingKey) && content && !content.startsWith('/')) {
         await this.executePendingReplace(messageId, resolvedThreadId, pendingKey, content);
         return;
       }
@@ -361,9 +366,13 @@ export class MessageHandler {
         );
         this.sendResponse(messageId, resolvedThreadId, {
           success: false,
-          output: `⏳ Thread "${thread.name}" is busy. Confirm whether to add this message to its queue.`,
+          output: queuePaused
+            ? `⏸️ Queue paused after a failed task. Confirm whether to add this message to the queue for "${thread.name}". Use /queue continue to resume, or /queue clear to discard pending messages.`
+            : `⏳ Thread "${thread.name}" ${threadBusy ? 'is busy' : 'has pending queued messages'}. Confirm whether to add this message to its queue.`,
           queueConfirmation,
         });
+        // Recover an idle, unpaused backlog without letting the new message skip it.
+        void this.startNextQueuedCommand(resolvedThreadId);
       }
       return;
     }
@@ -928,9 +937,10 @@ You can also use natural language commands to control Claude Code CLI.`,
       }
       queue.push({ ...pending.command, messageId: parts[3] || pending.command.messageId });
       this.threadQueues.set(threadId, queue);
+      console.log(`[MessageHandler] Queued message ${parts[3] || pending.command.messageId} in thread ${threadId}: position=${queue.length}, paused=${this.pausedQueues.has(threadId)}`);
       this.sendResponse(messageId, threadId, {
         success: true,
-        output: `✅ Added to queue for ${pending.info.threadName}.\nQueue position: ${queue.length}\nPending messages for this thread: ${queue.length}`,
+        output: `✅ Added to queue for ${pending.info.threadName}.\nQueue position: ${queue.length}\nPending messages for this thread: ${queue.length}${this.pausedQueues.has(threadId) ? '\n⏸️ Queue paused after a failed task. Use /queue continue to resume, or /queue clear to discard pending messages.' : ''}`,
       });
       void this.startNextQueuedCommand(threadId);
       return;
@@ -993,6 +1003,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     this.messageOpenIds.set(command.messageId, command.openId);
     this.notificationAdapter.setCurrentOpenId(command.openId);
     const operationToken = this.beginThreadOperation(threadId);
+    console.log(`[MessageHandler] Starting queued message ${command.messageId} in thread ${threadId}: remaining=${this.threadQueues.get(threadId)?.length ?? 0}`);
     try {
       const executor = this.threadPool.getExecutor(threadId);
       await this.threadManager.updateThread(threadId, { lastActiveAt: Date.now() });
@@ -1012,18 +1023,27 @@ You can also use natural language commands to control Claude Code CLI.`,
         timestamp: Date.now(),
       } satisfies OutgoingMessage);
       const processedContent = processFileReadContent(this.expandCommandShortcuts(command.content));
-      const success = await this.executeCommand(command.messageId, threadId, processedContent, executor, command.attachments);
-      if (!success) {
-        this.pausedQueues.add(threadId);
-      }
+      await this.executeCommand(command.messageId, threadId, processedContent, executor, command.attachments, true);
     } catch (error) {
-      this.pausedQueues.add(threadId);
-      this.sendResponse(command.messageId, threadId, { success: false, error: error instanceof Error ? error.message : 'Queued command failed' });
+      this.sendResponse(command.messageId, threadId, {
+        success: false,
+        error: this.pauseQueueAfterFailure(threadId, error instanceof Error ? error.message : 'Queued command failed'),
+      });
     } finally {
       if (this.finishThreadOperation(threadId, operationToken) && !this.pausedQueues.has(threadId)) {
         void this.startNextQueuedCommand(threadId);
       }
     }
+  }
+
+  private pauseQueueAfterFailure(threadId: string, error: string): string {
+    this.removeExpiredQueueConfirmations();
+    if (this.abortOperations.has(threadId) || !this.hasThreadQueueState(threadId)) return error;
+    this.pausedQueues.add(threadId);
+    const count = this.threadQueues.get(threadId)?.length ?? 0;
+    const pending = Array.from(this.pendingQueueConfirmations.values()).filter((item) => item.info.threadId === threadId).length;
+    console.warn(`[MessageHandler] Queue paused in thread ${threadId}: confirmed=${count}, awaiting_confirmation=${pending}`);
+    return `${error}\n\n⏸️ Queue paused after a failed task. Waiting: ${count} confirmed, ${pending} awaiting confirmation. Use /queue continue to resume, or /queue clear to discard pending messages.`;
   }
 
   private beginThreadOperation(threadId: string): symbol {
@@ -1717,8 +1737,16 @@ You can also use natural language commands to control Claude Code CLI.`,
     threadId: string,
     content: string,
     executor: IExecutor,
-    attachments?: Attachment[]
+    attachments?: Attachment[],
+    fromQueue = false,
   ): Promise<boolean> {
+    const complete = (success: boolean, error?: string): boolean => {
+      const responseError = fromQueue && !success
+        ? this.pauseQueueAfterFailure(threadId, error || 'Queued command failed') : error;
+      this.sendResponse(messageId, threadId, { success, error: responseError, threads: this.threadPool.getSummaries() });
+      if (fromQueue) console.log(`[MessageHandler] Finished queued message ${messageId} in thread ${threadId}: success=${success}, remaining=${this.threadQueues.get(threadId)?.length ?? 0}, paused=${this.pausedQueues.has(threadId)}`);
+      return success;
+    };
     try {
       const openId = this.getMessageOpenId(messageId);
       const onTaskNotification = (notification: TaskNotificationInfo): void => {
@@ -1784,11 +1812,7 @@ You can also use natural language commands to control Claude Code CLI.`,
             this.sendStreamChunk(messageId, threadId, chunk);
           });
           if (!compactResult.success) {
-            this.sendResponse(messageId, threadId, {
-              success: false,
-              error: `❌ Auto-compact failed: ${compactResult.error}\n\nUse /compact to try again, or /clear to start fresh.`,
-            });
-            return false;
+            return complete(false, `❌ Auto-compact failed: ${compactResult.error}\n\nUse /compact to try again, or /clear to start fresh.`);
           }
           this.sendStreamChunk(messageId, threadId, '✅ Compaction done. Retrying your request...\n');
           const retryResult = await executor.execute(content, {
@@ -1809,24 +1833,14 @@ You can also use natural language commands to control Claude Code CLI.`,
           });
           await Promise.all(pendingLocalImageEmissions);
           await emitLocalImages(`${streamedOutput}\n${retryResult.output ?? ''}`);
-          this.sendResponse(messageId, threadId, { success: retryResult.success, error: retryResult.error, threads: this.threadPool.getSummaries() });
-          return retryResult.success;
+          return complete(retryResult.success, retryResult.error);
         }
-        this.sendResponse(messageId, threadId, {
-          success: false,
-          error: '❌ Conversation history too long.\n\nUse /compact to compress it, or /clear to start fresh.',
-        });
-        return false;
+        return complete(false, '❌ Conversation history too long.\n\nUse /compact to compress it, or /clear to start fresh.');
       }
 
-      this.sendResponse(messageId, threadId, { success: result.success, error: result.error, threads: this.threadPool.getSummaries() });
-      return result.success;
+      return complete(result.success, result.error);
     } catch (error) {
-      this.sendResponse(messageId, threadId, {
-        success: false,
-        error: error instanceof Error ? error.message : 'Execution error',
-      });
-      return false;
+      return complete(false, error instanceof Error ? error.message : 'Execution error');
     }
   }
 
