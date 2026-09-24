@@ -587,7 +587,7 @@ remote-cli 自身不处理的斜杠命令会转发给当前 AI 后端，各后�
 
 Long streaming replies refresh only cards with changed content. Queued tasks combine incoming text while a refresh is pending, so card updates do not build up a backlog of intermediate text. Tool results, images, and the final response retain their order.
 
-Thread switch panels use larger, bold text for `Reply from:` with the reply's full thread name and workspace, and for `Switch thread`. Under `Switch thread`, a check mark (`✓`) and primary button styling identify the destination of new top-level messages when the card is finalized or clicked. Selected buttons remain clickable. Switching updates only the clicked card; other historical cards retain their last displayed selection.
+Thread switch panels use larger text without bold formatting for `Reply from:` with the reply's full thread name and workspace, and for `Switch thread`. Under `Switch thread`, a check mark (`✓`) and primary button styling identify the destination of new top-level messages when the card is finalized or clicked. Selected buttons remain clickable. Switching updates only the clicked card; other historical cards retain their last displayed selection.
 
 ### 组合使用全局和按线程 backend
 
