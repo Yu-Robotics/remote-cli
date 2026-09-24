@@ -58,6 +58,7 @@ interface ClaudeOutputMessage {
   content?: string | ContentBlock[];
   /** Nested message object (for assistant type with full message structure) */
   message?: {
+    id?: string;
     role: string;
     content?: ContentBlock[];
     stop_reason?: string | null;
@@ -86,8 +87,13 @@ interface ClaudeOutputMessage {
   /** Stream event details (for stream_event) */
   event?: {
     type: string;
+    message?: { id: string };
     index?: number;
     content_block?: {
+      type: string;
+      text?: string;
+    };
+    delta?: {
       type: string;
       text?: string;
     };
@@ -177,6 +183,8 @@ export class ClaudePersistentExecutor extends EventEmitter {
 
   // Output handling
   private currentOutputBuffer: string[] = [];
+  // Main-agent and subagent streams have independent message IDs and block indices.
+  private textStreams = new Map<string, { messageId: string; blocks: Map<number, string> }>();
   private currentStreamCallback?: (chunk: string) => void;
   private currentToolUseCallback?: (toolUse: ToolUseInfo) => void;
   private currentToolResultCallback?: (toolResult: ToolResultInfo) => void;
@@ -656,6 +664,53 @@ export class ClaudePersistentExecutor extends EventEmitter {
     }, this.defaultTimeout);
   }
 
+  private emitText(text: string): void {
+    if (!text) return;
+    this.currentOutputBuffer.push(text);
+    if (this.isInPlanMode) this.planModeBuffer.push(text);
+    this.currentStreamCallback?.(text);
+  }
+
+  private handleStreamEvent(message: ClaudeOutputMessage): void {
+    const event = message.event;
+    if (!event || !this.isProcessing) return;
+    const source = message.parent_tool_use_id ?? '';
+    if (event.type === 'message_start') {
+      this.textStreams.delete(source);
+      if (event.message?.id) {
+        this.textStreams.set(source, { messageId: event.message.id, blocks: new Map() });
+      }
+      return;
+    }
+
+    const stream = this.textStreams.get(source);
+    if (!stream || event.index === undefined) return;
+    if (event.type === 'content_block_start' && event.content_block?.type === 'text') {
+      const text = event.content_block.text ?? '';
+      stream.blocks.set(event.index, text);
+      this.emitText(text);
+    } else if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta'
+      && stream.blocks.has(event.index)) {
+      const text = event.delta.text ?? '';
+      stream.blocks.set(event.index, stream.blocks.get(event.index)! + text);
+      this.emitText(text);
+    }
+  }
+
+  private unstreamedText(message: ClaudeOutputMessage, text: string): string {
+    const stream = this.textStreams.get(message.parent_tool_use_id ?? '');
+    if (!stream || stream.messageId !== message.message?.id) return text;
+    // Claude emits complete assistant blocks without their original stream index.
+    // Consume each matching block once, preserving repeated text in later blocks.
+    for (const [index, streamedText] of stream.blocks) {
+      if (text.startsWith(streamedText)) {
+        stream.blocks.delete(index);
+        return text.slice(streamedText.length);
+      }
+    }
+    return text;
+  }
+
   /**
    * Handle a line of JSON output from Claude
    */
@@ -665,7 +720,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
       const parsedMessage: ClaudeOutputMessage = JSON.parse(line);
 
       // Skip logging for stream_event messages to avoid console spam
-      // These are internal protocol messages (content_block_start, content_block_delta, etc.)
+      // Token deltas are handled below without logging every fragment.
       if (parsedMessage.type !== 'stream_event') {
         const timestamp = new Date().toISOString();
         console.log(`[ClaudePersistent RAW ${timestamp}] ${line}`);
@@ -747,8 +802,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
           break;
 
         case 'stream_event':
-          // Stream events are internal protocol messages, silently ignore
-          // These include content_block_start, content_block_delta, etc.
+          this.handleStreamEvent(message);
           break;
 
         case 'result':
@@ -850,15 +904,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
                 // The tool will be executed by Claude CLI, and we'll receive the result in a 'user' message
                 // with tool_result content. We should emit the hook when we receive tool_result.
               } else if (block.type === 'text' && block.text) {
-                // Stream text content to callback for real-time display
-                this.currentOutputBuffer.push(block.text);
-                if (this.isInPlanMode) {
-                  // Buffer plan content instead of streaming; still stream for real-time visibility
-                  this.planModeBuffer.push(block.text);
-                }
-                if (this.currentStreamCallback) {
-                  this.currentStreamCallback(block.text);
-                }
+                this.emitText(this.unstreamedText(message, block.text));
               } else if (block.type === 'redacted_thinking') {
                 // Handle redacted thinking blocks (Claude 3.7 Sonnet, Gemini models)
                 console.log('[ClaudePersistent] Redacted thinking block detected in assistant message');
@@ -1187,6 +1233,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
    */
   private resetCurrentCommand(): void {
     this.currentOutputBuffer = [];
+    this.textStreams.clear();
     this.currentStreamCallback = undefined;
     this.currentToolUseCallback = undefined;
     this.currentToolResultCallback = undefined;
@@ -1263,6 +1310,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
     // guard, which returns early without clearing it — so without this reset
     // the stale text would leak into this command's final output.
     this.currentOutputBuffer = [];
+    this.textStreams.clear();
 
     // Reset structured content collection
     this.structuredContentBlocks = [];
