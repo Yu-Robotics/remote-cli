@@ -32,7 +32,7 @@ describe('ApprovalCards', () => {
     const groups = elements.filter((element: any) => element.tag === 'button_group');
     expect(groups).toHaveLength(1);
     expect(groups[0].buttons.map((button: any) => button.text.content))
-      .toEqual(['Allow', 'Deny', 'Allow and remember directory']);
+      .toEqual(['Allow once', 'Deny', 'Always allow']);
     expect(JSON.stringify(elements)).toContain('Write <config> in another project');
     expect(transport.registerReplyRoute).toHaveBeenCalledWith('card-1', 'thread-2', 'original-device');
     await expect(cards.click('someone-else', 'approval-1', 'card-1', 'approve')).rejects.toThrow('belong');
@@ -58,7 +58,7 @@ describe('ApprovalCards', () => {
     const command = request();
     command.approval = { requestId: command.messageId, kind: 'command', description: 'install tools', canRemember: false };
     await cards.receive(command, 'device', () => true);
-    expect(JSON.stringify(transport.create.mock.calls)).not.toContain('Allow and remember');
+    expect(JSON.stringify(transport.create.mock.calls)).not.toContain('Always allow');
     await expect(cards.click('owner', 'approval-1', 'card-1', 'remember')).rejects.toThrow('does not support');
     transport.ownsDevice.mockResolvedValue(false);
     await expect(cards.click('owner', 'approval-1', 'card-1', 'approve')).rejects.toThrow('no longer available');
