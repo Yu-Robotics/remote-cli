@@ -1,4 +1,4 @@
-import { ToolUseInfo, ToolResultInfo, Attachment, ImageBlock, TaskNotificationInfo } from '../types';
+import { ToolUseInfo, ToolResultInfo, Attachment, ImageBlock, TaskNotificationInfo, ApprovalRequestInfo, ApprovalAction, ApprovalStatus } from '../types';
 
 export interface ExecuteOptions {
   onStream?: (chunk: string) => void;
@@ -9,6 +9,9 @@ export interface ExecuteOptions {
   onImage?: (image: ImageBlock) => void;
   /** May fire after execute resolves; recipients must remain bound to the originating request. */
   onTaskNotification?: (notification: TaskNotificationInfo) => void;
+  /** Return true when an interactive card replaces the text approval prompt. */
+  onApprovalRequest?: (request: ApprovalRequestInfo) => boolean;
+  onApprovalResolved?: (requestId: string, status: ApprovalStatus) => void;
   timeout?: number;
   /** Optional attachments (e.g. images) */
   attachments?: Attachment[];
@@ -58,6 +61,7 @@ export interface IExecutor {
   // Optional — MessageHandler uses 'method' in executor checks for these
   isWaitingInput?(): boolean;
   sendInput?(input: string): boolean;
+  respondToApproval?(requestId: string, action: ApprovalAction): boolean;
   compact?(onStream?: (chunk: string) => void): Promise<ExecuteResult>;
   compactWhenFull?(onStream?: (chunk: string) => void): Promise<ExecuteResult>;
   /** Switch the active model for this executor. */

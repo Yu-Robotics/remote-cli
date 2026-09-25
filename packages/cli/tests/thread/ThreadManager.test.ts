@@ -114,6 +114,16 @@ describe('ThreadManager', () => {
   });
 
   describe('deleteThread', () => {
+    it('revokes saved Codex sandbox grants even after switching to another backend', async () => {
+      const thread = await manager.createThread('sandbox-grants', tmpDir, 'claude');
+      const directory = path.join(tmpDir, '.remote-cli', 'codex-sandbox');
+      await fs.mkdir(directory, { recursive: true });
+      const grant = path.join(directory, `${thread.id}.json`);
+      await fs.writeFile(grant, JSON.stringify({ mode: 'workspace-write', writableRoots: [tmpDir] }));
+      await manager.deleteThread(thread.id);
+      await expect(fs.stat(grant)).rejects.toThrow();
+      expect(manager.getThread(thread.id)).toBeUndefined();
+    });
     it('deletes a non-default thread', async () => {
       const t = await manager.createThread('deletable', tmpDir);
       await manager.deleteThread(t.id);

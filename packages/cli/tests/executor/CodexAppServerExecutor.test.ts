@@ -55,6 +55,7 @@ describe('CodexAppServerExecutor', () => {
     projectDir = path.join(tempHome, 'project');
     await fs.mkdir(projectDir);
     vi.spyOn(os, 'homedir').mockReturnValue(tempHome);
+    vi.spyOn(os, 'tmpdir').mockReturnValue(tempHome);
     transport = new FakeTransport();
     executor = new CodexAppServerExecutor(new DirectoryGuard([projectDir]), {
       threadId: 'remote-thread',
@@ -71,6 +72,208 @@ describe('CodexAppServerExecutor', () => {
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
     await fs.rm(tempHome, { recursive: true, force: true });
+  });
+
+  it('answers card approvals by opaque request ID, preserves directory scope, and expires outstanding cards', async () => {
+    await executor.configureSandbox('on');
+    const onApprovalRequest = vi.fn((_request: any) => true);
+    const onApprovalResolved = vi.fn();
+    const onStream = vi.fn();
+    const running = executor.execute('work', { onApprovalRequest, onApprovalResolved, onStream });
+    await vi.waitFor(() => expect(transport.requests.some(request => request.method === 'turn/start')).toBe(true));
+    transport.emit({ id: 100, method: 'item/commandExecution/requestApproval', params: { command: 'make install' } });
+    transport.emit({ id: 101, method: 'item/permissions/requestApproval', params: { permissions: { fileSystem: { write: [tempHome] } } } });
+    const command = onApprovalRequest.mock.calls[0][0] as any;
+    const directory = onApprovalRequest.mock.calls[1][0] as any;
+    expect(command).toMatchObject({ kind: 'command', canRemember: false, description: 'make install' });
+    expect(directory).toMatchObject({ kind: 'permissions', canRemember: true, writableRoots: [tempHome] });
+    expect(onStream).not.toHaveBeenCalled();
+    expect(executor.respondToApproval('stale-id', 'approve')).toBe(false);
+    expect(executor.respondToApproval(command.requestId, 'remember')).toBe(false);
+    expect(executor.respondToApproval(directory.requestId, 'remember')).toBe(true);
+    expect(transport.responses).toContainEqual({ id: 101, result: { permissions: { fileSystem: { write: [tempHome] } }, scope: 'session' } });
+    expect(onApprovalResolved).toHaveBeenCalledWith(directory.requestId, 'remembered');
+    expect(executor.getSandboxStatus()).toContain(tempHome);
+    expect(executor.respondToApproval(directory.requestId, 'approve')).toBe(false);
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await running;
+    expect(onApprovalResolved).toHaveBeenCalledWith(command.requestId, 'expired');
+    expect(executor.respondToApproval(command.requestId, 'approve')).toBe(false);
+    expect(transport.responses.some(response => response.id === 100)).toBe(false);
+  });
+
+  it('retains a failed transport reply for retry without approving a later request', async () => {
+    await executor.configureSandbox('on');
+    const onApprovalRequest = vi.fn((_request: any) => true);
+    const onApprovalResolved = vi.fn();
+    const running = executor.execute('work', { onApprovalRequest, onApprovalResolved });
+    await vi.waitFor(() => expect(transport.requests.some(request => request.method === 'turn/start')).toBe(true));
+    transport.emit({ id: 120, method: 'item/commandExecution/requestApproval', params: { command: 'first' } });
+    transport.emit({ id: 121, method: 'item/commandExecution/requestApproval', params: { command: 'second' } });
+    const first = onApprovalRequest.mock.calls[0][0];
+    const second = onApprovalRequest.mock.calls[1][0];
+    vi.spyOn(transport, 'respond').mockImplementationOnce(() => { throw new Error('Process unavailable'); });
+    expect(executor.respondToApproval(first.requestId, 'approve')).toBe(false);
+    expect(onApprovalResolved).not.toHaveBeenCalled();
+    expect(executor.respondToApproval(first.requestId, 'approve')).toBe(true);
+    expect(transport.responses).toEqual([{ id: 120, result: { decision: 'accept' } }]);
+    expect(executor.respondToApproval(second.requestId, 'deny')).toBe(true);
+    expect(transport.responses.at(-1)).toEqual({ id: 121, result: { decision: 'decline' } });
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await running;
+  });
+
+  it('keeps text approval fallback and invalidates cards resolved by text or native cancellation', async () => {
+    await executor.configureSandbox('on');
+    const onApprovalRequest = vi.fn((_request: any) => false);
+    const onApprovalResolved = vi.fn();
+    const onStream = vi.fn();
+    const running = executor.execute('work', { onApprovalRequest, onApprovalResolved, onStream });
+    await vi.waitFor(() => expect(transport.requests.some(request => request.method === 'turn/start')).toBe(true));
+    transport.emit({ id: 110, method: 'item/fileChange/requestApproval', params: { grantRoot: tempHome } });
+    const first = onApprovalRequest.mock.calls[0][0] as any;
+    expect(onStream).toHaveBeenCalledWith(expect.stringContaining('Reply yes'));
+    expect(executor.sendInput('no')).toBe(true);
+    expect(onApprovalResolved).toHaveBeenCalledWith(first.requestId, 'denied');
+    transport.emit({ id: 111, method: 'item/permissions/requestApproval', params: { permissions: { network: { enabled: true } } } });
+    const second = onApprovalRequest.mock.calls[1][0] as any;
+    expect(second.canRemember).toBe(false);
+    transport.emit({ method: 'serverRequest/resolved', params: { requestId: 111 } });
+    expect(onApprovalResolved).toHaveBeenCalledWith(second.requestId, 'expired');
+    expect(executor.respondToApproval(second.requestId, 'approve')).toBe(false);
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await running;
+  });
+
+  it('applies sandbox settings to new turns, directory changes, and restored sessions without leaking grants', async () => {
+    expect(await executor.configureSandbox('on')).toMatchObject({ success: true });
+    const extra = path.join(tempHome, 'other project');
+    expect(await executor.configureSandbox(`allow ${extra}`)).toMatchObject({ success: true });
+    const first = executor.execute('work');
+    await vi.waitFor(() => expect(transport.requests.some(request => request.method === 'turn/start')).toBe(true));
+    const threadParams = transport.requests.find(request => request.method === 'thread/start')!.params;
+    const turnParams = transport.requests.find(request => request.method === 'turn/start')!.params;
+    expect(threadParams).toMatchObject({ sandbox: 'workspace-write', approvalPolicy: 'on-request' });
+    expect(threadParams.config['sandbox_workspace_write.writable_roots']).toEqual(turnParams.sandboxPolicy.writableRoots);
+    expect(turnParams.sandboxPolicy).toMatchObject({ type: 'workspaceWrite', networkAccess: true });
+    expect(turnParams.sandboxPolicy.writableRoots).toContain(extra);
+    expect(turnParams.sandboxPolicy.writableRoots).not.toContain(tempHome);
+    expect(await executor.configureSandbox('off')).toMatchObject({ success: false });
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await first;
+    expect(await executor.configureSandbox('remove ' + extra)).toMatchObject({ success: true });
+    expect(await executor.configureSandbox('network off')).toMatchObject({ success: true });
+    await executor.destroy();
+
+    transport = new FakeTransport();
+    executor = new CodexAppServerExecutor(new DirectoryGuard([tempHome]), {
+      threadId: 'remote-thread', initialWorkingDirectory: projectDir, clientFactory: () => transport,
+    });
+    const changed = path.join(tempHome, 'new-project');
+    await fs.mkdir(changed);
+    await executor.setWorkingDirectory(changed);
+    const next = executor.execute('continue');
+    await vi.waitFor(() => expect(transport.requests.some(request => request.method === 'turn/start')).toBe(true));
+    const resume = transport.requests.find(request => request.method === 'thread/resume')!.params;
+    const turn = transport.requests.find(request => request.method === 'turn/start')!.params;
+    expect(resume).toMatchObject({ threadId: 'codex-thread-1', sandbox: 'workspace-write', cwd: changed });
+    expect(turn.sandboxPolicy.networkAccess).toBe(false);
+    expect(turn.sandboxPolicy.writableRoots).toContain(changed);
+    expect(turn.sandboxPolicy.writableRoots).not.toContain(projectDir);
+    expect(turn.sandboxPolicy.writableRoots).not.toContain(extra);
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await next;
+    executor.resetContext();
+    expect(executor.getSandboxStatus()).toContain('workspace-write');
+    expect(await executor.configureSandbox('default')).toMatchObject({ success: true });
+    expect(executor.getSandboxStatus()).toContain('not configured');
+  });
+
+  it('asks before escaping the sandbox even with autoApprove enabled and clears resolved requests', async () => {
+    await executor.configureSandbox('on');
+    const chunks: string[] = [];
+    const turn = executor.execute('work', { onStream: chunk => chunks.push(chunk) });
+    await vi.waitFor(() => expect(transport.requests.some(request => request.method === 'turn/start')).toBe(true));
+    transport.emit({ id: 7, method: 'item/commandExecution/requestApproval', params: {
+      threadId: 'codex-thread-1', turnId: 'turn-1', command: 'write outside workspace',
+    } });
+    expect(transport.responses).toEqual([]);
+    expect(executor.isWaitingInput()).toBe(true);
+    expect(chunks.join('')).toContain('outside the sandbox');
+    transport.emit({ method: 'serverRequest/resolved', params: { threadId: 'codex-thread-1', requestId: 7 } });
+    expect(executor.sendInput('yes')).toBe(false);
+    transport.emit({ id: 8, method: 'item/permissions/requestApproval', params: {
+      threadId: 'codex-thread-1', turnId: 'turn-1', permissions: { network: { enabled: true } },
+    } });
+    expect(executor.sendInput('no')).toBe(true);
+    expect(transport.responses.at(-1)).toEqual({ id: 8, result: { permissions: {}, scope: 'turn' } });
+    transport.emit({ id: 9, method: 'item/permissions/requestApproval', params: {
+      threadId: 'codex-thread-1', turnId: 'turn-1', permissions: { network: { enabled: true } },
+    } });
+    expect(executor.sendInput('remember')).toBe(false);
+    expect(executor.sendInput('always')).toBe(true);
+    expect(transport.responses.at(-1)?.result).toEqual({ permissions: { network: { enabled: true } }, scope: 'session' });
+    transport.emit({ id: 10, method: 'item/permissions/requestApproval', params: {
+      threadId: 'codex-thread-1', turnId: 'turn-1', permissions: { network: { enabled: true } },
+    } });
+    await executor.abort();
+    expect(transport.responses.at(-1)).toEqual({ id: 10, result: { permissions: {}, scope: 'turn' } });
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'interrupted' } } });
+    await turn;
+  });
+
+  it.each(['write', 'entries', 'fileChange'])('remembers an explicitly approved %s directory across backend recreation', async (format) => {
+    await executor.configureSandbox('on');
+    const extra = path.join(tempHome, 'shared');
+    const permissions = { fileSystem: format === 'write'
+      ? { write: [extra] } : { entries: [{ access: 'write', path: { type: 'path', path: extra } }] } };
+    const turn = executor.execute('work');
+    await vi.waitFor(() => expect(transport.requests.some(request => request.method === 'turn/start')).toBe(true));
+    transport.emit({ id: 11, method: format === 'fileChange' ? 'item/fileChange/requestApproval' : 'item/permissions/requestApproval', params: {
+      threadId: 'codex-thread-1', turnId: 'turn-1', permissions, grantRoot: format === 'fileChange' ? extra : undefined,
+    } });
+    expect(executor.sendInput('remember')).toBe(true);
+    expect(transport.responses.at(-1)?.result).toEqual(format === 'fileChange' ? { decision: 'acceptForSession' } : { permissions, scope: 'session' });
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await turn;
+    await executor.destroy();
+    executor = new CodexAppServerExecutor(new DirectoryGuard([projectDir]), {
+      threadId: 'remote-thread', initialWorkingDirectory: projectDir, clientFactory: () => new FakeTransport(),
+    });
+    expect(executor.getSandboxStatus()).toContain(extra);
+    await executor.deleteThreadData('remote-thread');
+    await expect(fs.stat(path.join(tempHome, '.remote-cli', 'codex-sandbox', 'remote-thread.json'))).rejects.toThrow();
+  });
+
+  it('rejects invalid policy changes and applies explicit read-only/full-access settings', async () => {
+    expect(await executor.configureSandbox('on unexpected')).toMatchObject({ success: false });
+    expect(await executor.configureSandbox('remove /missing-grant')).toMatchObject({ success: false });
+    expect(await executor.configureSandbox('read-only')).toMatchObject({ success: true });
+    expect(executor.getSandboxStatus()).toContain('Writable directories:\n- None');
+    const promise = executor.execute('inspect');
+    await vi.waitFor(() => expect(transport.requests.some(request => request.method === 'turn/start')).toBe(true));
+    expect(transport.requests.find(request => request.method === 'turn/start')!.params.sandboxPolicy)
+      .toEqual({ type: 'readOnly', networkAccess: true });
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await promise;
+    expect(await executor.configureSandbox('off')).toMatchObject({ success: true });
+    expect(executor.getSandboxStatus()).toContain('danger-full-access');
+  });
+
+  it('keeps the executor usable when a directory grant becomes invalid between turns', async () => {
+    const extra = path.join(tempHome, 'authorized');
+    await executor.configureSandbox('on');
+    await executor.configureSandbox(`allow ${extra}`);
+    const first = executor.execute('first');
+    await vi.waitFor(() => expect(transport.requests.some(request => request.method === 'turn/start')).toBe(true));
+    expect(transport.requests.find(request => request.method === 'turn/start')!.params.approvalsReviewer).toBe('user');
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await first;
+    await fs.rmdir(extra);
+    await fs.symlink(projectDir, extra);
+    await expect(executor.execute('second')).resolves.toMatchObject({ success: false, error: expect.stringContaining('symbolic-link target') });
+    expect(transport.requests.filter(request => request.method === 'turn/start')).toHaveLength(1);
+    expect(await executor.configureSandbox('default')).toMatchObject({ success: true });
   });
 
   it('starts a thread, streams one copy of agent text, and persists the thread id', async () => {

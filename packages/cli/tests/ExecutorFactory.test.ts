@@ -5,12 +5,13 @@ import { CodexAppServerExecutor } from '../src/executor/CodexAppServerExecutor';
 import { ZCodeExecutor } from '../src/executor/ZCodeExecutor';
 import { PiExecutor } from '../src/executor/PiExecutor';
 import { DirectoryGuard } from '../src/security/DirectoryGuard';
+import { existsSync } from 'fs';
 
 vi.mock('fs', async () => {
   const actual = await vi.importActual<typeof import('fs')>('fs');
   return {
     ...actual,
-    existsSync: vi.fn().mockReturnValue(true),
+    existsSync: vi.fn().mockImplementation((file) => String(file).includes('codex-sandbox') ? false : actual.existsSync(file)),
     readFileSync: vi.fn().mockReturnValue(''),
   };
 });
@@ -19,7 +20,9 @@ describe('executor/index', () => {
   let directoryGuard: DirectoryGuard;
   const originalEnv = process.env;
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    const actual = await vi.importActual<typeof import('fs')>('fs');
+    vi.mocked(existsSync).mockImplementation(file => String(file).includes('codex-sandbox') ? false : actual.existsSync(file));
     process.env = { ...originalEnv };
     directoryGuard = new DirectoryGuard(['/home/test/workspace']);
     vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -78,6 +81,16 @@ describe('executor/index', () => {
       expect(console.warn).toHaveBeenCalledWith(
         '[ExecutorFactory] Codex exec transport was removed; using app-server.'
       );
+      await executor.destroy();
+    });
+
+    it('passes sandbox configuration to the Codex executor', async () => {
+      const executor = createExecutor(directoryGuard, {
+        type: 'codex', codex: { sandbox: { mode: 'read-only', networkAccess: false } },
+      });
+      expect(executor).toBeInstanceOf(CodexAppServerExecutor);
+      expect((executor as CodexAppServerExecutor).getSandboxStatus()).toContain('read-only');
+      expect((executor as CodexAppServerExecutor).getSandboxStatus()).toContain('Network: restricted');
       await executor.destroy();
     });
 
