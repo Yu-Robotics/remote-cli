@@ -234,6 +234,8 @@ export class ClaudePersistentExecutor extends EventEmitter {
     input: Record<string, unknown>;
     description: string;
     generation: number;
+    grantRoots?: string[];
+    fileTool?: string;
     resolved?: (requestId: string, status: ApprovalStatus) => void;
   }>();
   private currentApprovalRequestCallback?: (request: ApprovalRequestInfo) => boolean;
@@ -816,6 +818,20 @@ export class ClaudePersistentExecutor extends EventEmitter {
       ? String(input.command ?? '').slice(0, 500)
       : `${toolName}: ${String(input.file_path ?? input.notebook_path ?? input.path ?? JSON.stringify(input)).slice(0, 500)}`;
 
+    // Remember support: file writes can map to a persistent directory grant;
+    // arbitrary commands and permission bundles cannot.
+    let canRemember = false;
+    let grantRoots: string[] | undefined;
+    if (kind === 'file') {
+      const target = input.file_path ?? input.notebook_path ?? input.path;
+      if (typeof target === 'string' && target) {
+        try {
+          grantRoots = [this.sandbox.normalize(path.dirname(target), this.currentWorkingDirectory)];
+          canRemember = true;
+        } catch { /* A path that cannot be resolved cannot be remembered. */ }
+      }
+    }
+
     const timer = setTimeout(() => {
       this.answerApproval(requestId, { behavior: 'deny', message: 'Approval request expired' }, 'expired');
     }, ClaudePersistentExecutor.APPROVAL_TIMEOUT_MS);
@@ -825,10 +841,11 @@ export class ClaudePersistentExecutor extends EventEmitter {
       if (pending?.socket === socket) this.answerApproval(requestId, { behavior: 'deny', message: 'Approval connection closed' }, 'expired');
     });
     this.pendingApprovals.set(requestId, { socket, timer, input, description, generation,
+      grantRoots, fileTool: kind === 'file' ? toolName : undefined,
       resolved: this.currentApprovalResolvedCallback });
 
     let cardShown = false;
-    try { cardShown = this.currentApprovalRequestCallback?.({ requestId, kind, description, canRemember: false }) === true; }
+    try { cardShown = this.currentApprovalRequestCallback?.({ requestId, kind, description, canRemember, writableRoots: grantRoots }) === true; }
     catch { /* A rendering failure can fall back to the text prompt. */ }
     if (!cardShown && this.pendingApprovals.has(requestId)) {
       if (this.currentStreamCallback) {
@@ -841,7 +858,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
 
   private answerApproval(
     requestId: string,
-    answer: { behavior: 'allow' | 'deny'; updatedInput?: Record<string, unknown>; message?: string },
+    answer: { behavior: 'allow' | 'deny'; updatedInput?: Record<string, unknown>; message?: string; updatedPermissions?: Array<Record<string, unknown>> },
     status: ApprovalStatus
   ): boolean {
     const pending = this.pendingApprovals.get(requestId);
@@ -861,7 +878,8 @@ export class ClaudePersistentExecutor extends EventEmitter {
   /** MessageHandler entry point for approval card actions. */
   respondToApproval(requestId: string, action: ApprovalAction): boolean {
     const pending = this.pendingApprovals.get(requestId);
-    if (!pending || !['approve', 'deny'].includes(action)) return false;
+    if (!pending || !['approve', 'deny', 'remember'].includes(action)) return false;
+    if (action === 'remember' && !pending.grantRoots?.length) return false;
     if (pending.generation !== this.approvalGeneration || !this.approvalTurnActive
       || !this.isProcessing || this.isStopping || this.isDestroyed) {
       this.answerApproval(requestId, { behavior: 'deny', message: 'Approval request expired' }, 'expired');
@@ -870,7 +888,36 @@ export class ClaudePersistentExecutor extends EventEmitter {
     if (action === 'deny') {
       return this.answerApproval(requestId, { behavior: 'deny', message: 'Denied by user' }, 'denied');
     }
+    if (action === 'remember') {
+      const delivered = this.answerApproval(requestId, {
+        behavior: 'allow', updatedInput: pending.input,
+        updatedPermissions: this.buildRememberRules(pending),
+      }, 'remembered');
+      if (delivered) {
+        // Also persist the directory for future Bash sandbox scope; it applies
+        // at the next process spawn because settings are spawn-time arguments.
+        const config = this.sandbox.getConfig() ?? { mode: 'workspace-write' as const };
+        const roots = pending.grantRoots!;
+        this.sandbox.configure({ ...config, writableRoots: [...new Set([...(config.writableRoots ?? []), ...roots])] });
+        // Let the file policy hook honor the grant immediately in this session.
+        this.filePolicyRoots = [...new Set([...this.filePolicyRoots, ...roots])];
+      }
+      return delivered;
+    }
     return this.answerApproval(requestId, { behavior: 'allow', updatedInput: pending.input }, 'approved');
+  }
+
+  /**
+   * Build Claude Code permission rules that let future file edits under the
+   * granted directories skip the prompt, written to the project's local
+   * settings via the permission-prompt tool's updatedPermissions channel.
+   */
+  private buildRememberRules(pending: { grantRoots?: string[]; fileTool?: string }): Array<Record<string, unknown>> {
+    const toolNames = new Set<string>(['Write', 'Edit']);
+    if (pending.fileTool === 'NotebookEdit') toolNames.add('NotebookEdit');
+    const rules = [...toolNames].flatMap(toolName =>
+      (pending.grantRoots ?? []).map(root => ({ toolName, ruleContent: `${root}/**` })));
+    return [{ type: 'addRules', rules, behavior: 'allow', destination: 'localSettings' }];
   }
 
   private denyAllPendingApprovals(message: string): void {

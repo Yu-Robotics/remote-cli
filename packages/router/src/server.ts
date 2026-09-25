@@ -86,8 +86,8 @@ export class RouterServer {
     this.approvalCards = new ApprovalCards({
       ownsDevice: async (openId, deviceId) => (await this.bindingManager.getDeviceBinding(deviceId))?.openId === openId,
       sendToDevice: (deviceId, message) => this.connectionHub.sendToDevice(deviceId, message),
-      create: (openId, elements) => this.feishuLongConnHandler.sendTaskNotificationCard(openId, elements),
-      update: (cardId, elements) => this.feishuLongConnHandler.updateApprovalCard(cardId, elements),
+      create: (openId, elements, header) => this.feishuLongConnHandler.sendTaskNotificationCard(openId, elements, header),
+      update: (cardId, elements, header) => this.feishuLongConnHandler.updateApprovalCard(cardId, elements, header),
       registerReplyRoute: (cardId, threadId, deviceId) => {
         this.cardThreadMap.set(cardId, { threadId, deviceId, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS });
       },

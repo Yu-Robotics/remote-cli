@@ -122,7 +122,7 @@ describe('ClaudePersistentExecutor approval channel', () => {
     const resolved = vi.fn();
     Object.assign(executor, { currentApprovalRequestCallback: () => cardSupported,
       currentStreamCallback: stream, currentApprovalResolvedCallback: resolved });
-    const pending = requestApproval({ id: 'text-request', tool_name: 'Write', input: { file_path: '/other/file' } });
+    const pending = requestApproval({ id: 'text-request', tool_name: 'Bash', input: { command: 'touch /other/file' } });
     await vi.waitFor(() => expect(executor.isWaitingInput()).toBe(true));
     if (!cardSupported) expect(stream).toHaveBeenCalledWith(expect.stringContaining('Reply yes or no'));
     expect(executor.sendInput('some unrelated message')).toBe(false);
@@ -134,6 +134,43 @@ describe('ClaudePersistentExecutor approval channel', () => {
     expect(resolved).toHaveBeenCalledWith('text-request', 'approved');
     expect(executor.isWaitingInput()).toBe(false);
     expect(executor.respondToApproval('text-request', 'approve')).toBe(false);
+  });
+
+  it('offers remember for file writes and applies the directory grant on remember', async () => {
+    const onApprovalRequest = vi.fn(() => true);
+    (executor as any).currentApprovalRequestCallback = onApprovalRequest;
+
+    const target = path.join(fs.realpathSync(home), 'shared', 'notes.txt');
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    const pending = requestApproval({ id: 'req-remember', tool_name: 'Write',
+      input: { file_path: target, content: 'x' } });
+    await vi.waitFor(() => expect(onApprovalRequest).toHaveBeenCalledOnce());
+    const request = onApprovalRequest.mock.calls[0][0];
+    expect(request).toMatchObject({ kind: 'file', canRemember: true });
+    expect(request.writableRoots).toEqual([fs.realpathSync(path.dirname(target))]);
+
+    expect(executor.respondToApproval('req-remember', 'remember')).toBe(true);
+    const answer = await pending;
+    expect(answer).toMatchObject({ behavior: 'allow' });
+    const update = (answer.updatedPermissions as any[])[0];
+    expect(update).toMatchObject({ type: 'addRules', behavior: 'allow', destination: 'localSettings' });
+    expect(JSON.stringify(update.rules)).toContain(`${fs.realpathSync(path.dirname(target))}/**`);
+    expect(update.rules.map((rule: any) => rule.toolName)).toEqual(expect.arrayContaining(['Write', 'Edit']));
+    // The directory is also persisted for future Bash sandbox scope.
+    expect((executor as any).sandbox.getConfig()?.writableRoots).toContain(fs.realpathSync(path.dirname(target)));
+    // The file policy hook honors the grant immediately within this session.
+    expect((executor as any).filePolicyRoots).toContain(fs.realpathSync(path.dirname(target)));
+  });
+
+  it('does not offer remember for command approvals', async () => {
+    const onApprovalRequest = vi.fn(() => true);
+    (executor as any).currentApprovalRequestCallback = onApprovalRequest;
+    const pending = requestApproval({ id: 'req-cmd', tool_name: 'Bash', input: { command: 'npm install' } });
+    await vi.waitFor(() => expect(onApprovalRequest).toHaveBeenCalledOnce());
+    expect(onApprovalRequest.mock.calls[0][0].canRemember).toBe(false);
+    expect(executor.respondToApproval('req-cmd', 'remember')).toBe(false);
+    expect(executor.respondToApproval('req-cmd', 'approve')).toBe(true);
+    await expect(pending).resolves.toMatchObject({ behavior: 'allow' });
   });
 
   it('requires a request ID when multiple approvals are pending', async () => {

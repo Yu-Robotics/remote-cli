@@ -82,7 +82,7 @@ describe('Router wire compatibility', () => {
       threadId: 'thread-2', threadName: 'thread-2', cwd: '/project', timestamp: 1,
       approval: { requestId: 'approval-1', kind: 'command', description: 'install', canRemember: false } };
     await receive(message);
-    expect(feishu.sendTaskNotificationCard).toHaveBeenCalledWith('owner', expect.any(Array));
+    expect(feishu.sendTaskNotificationCard).toHaveBeenCalledWith('owner', expect.any(Array), expect.objectContaining({ template: 'blue' }));
     await feishu.onApprovalAction!('owner', 'approval-1', 'approval-card', 'approve');
     expect(socket.send.mock.calls.map(call => JSON.parse(call[0]))).toContainEqual(expect.objectContaining({
       type: 'approval_response', messageId: 'approval-1', taskMessageId: 'task', threadId: 'thread-2', action: 'approve',
