@@ -973,22 +973,31 @@ export class RouterServer {
     if (previous && (previous.deviceId !== deviceId || previous.openId !== openId
       || (previous.threadId && previous.threadId !== threadId))) return false;
 
-    if (previous && previous.recoveryId !== info.recoveryId && !previous.finalizing) {
-      // The pre-disconnect session survived: the CLI reconnected before the old
-      // socket's close handler could run cleanup. Adopt the existing card instead
-      // of replacing it — retained output stays visible and new output continues
-      // in the same card, with a separator marking the possible gap.
-      previous.recoveryId = info.recoveryId;
-      previous.recoveryCwd = info.cwd;
-      previous.threadId = previous.threadId ?? threadId;
-      previous.threadName = previous.threadName ?? info.threadName;
-      previous.currentTextContent += '\n\n---\n🔄 **Connection restored** — output during the interruption may be missing.\n\n';
-      previous.createdAt = Date.now();
-      if (previous.feishuMessageId) {
+    // A failed terminal patch can retry on its own recovery card, but an old
+    // finalizing card cannot accept a newly resumed stream.
+    const reusable = previous?.feishuMessageId && (!previous.finalizing
+      || (previous.recoveryId === info.recoveryId && info.state !== 'running'));
+    if (previous && reusable) {
+      if (previous.recoveryId !== info.recoveryId) {
+        await previous.updateInFlight;
+        if (!isCurrent() || this.streamingMessages.get(messageId) !== previous || previous.finalizing) return false;
+        // Seal the old Markdown component before adding the gap notice. Later
+        // output may begin inside a lost code fence or table and stays plain.
+        if (previous.currentTextContent.trim()) previous.elements.push(...this.renderCurrentText(previous));
+        previous.currentTextContent = '';
+        previous.elements.push(createMarkdownElement('🔄 **Connection restored** — output during the interruption may be missing.'));
+        previous.recoveryPlainText = true;
+        previous.lastRenderedTextLength = 0;
+        previous.recoveryId = info.recoveryId;
+        previous.recoveryCwd = info.cwd;
+        previous.threadId = previous.threadId ?? threadId;
+        previous.threadName = previous.threadName ?? info.threadName;
+        previous.createdAt = Date.now();
         await this.updateStreamingText(messageId, openId, previous);
         if (!isCurrent()) return false;
       }
-    } else if (!previous) {
+      this.cardThreadMap.set(previous.feishuMessageId!, { threadId, deviceId, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS });
+    } else {
       const escape = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
       const intro = `🔄 **${info.state === 'running' ? 'Connection restored — task continues' : 'Task status recovered'}**\n\n`
         + `Output before this card, including output during disconnection, was not retained.\n\n`

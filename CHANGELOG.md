@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## 1.6.55 - 2026-09-25
+
+### Fixed
+- Separated recovery acknowledgement timeouts from retry backoff so ongoing output cannot trigger early retries or count the same failure twice.
+- Reset the failure budget after successful recovery and retained output isolation when a recovery round is paused; a later connection can retry bounded task metadata.
+- Required a usable card before acknowledging recovery, recreated missing or finalizing cards, and retried terminal delivery failures without creating duplicate recovery cards.
+- Isolated retained Markdown, the reconnection notice, and resumed plain text when reusing a card, while restoring its thread reply route.
+
 ## [1.6.53] - 2026-09-24
 
 ### Added

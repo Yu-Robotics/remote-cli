@@ -266,10 +266,65 @@ describe('RouterServer', () => {
       mockFeishuHandler.setOnStartStreaming.mock.calls[0][0](resume.messageId, 'user-1', 'old-card', 'device-1');
       await send(resume);
       expect(replies().at(-1).success).toBe(true);
+      expect(mockFeishuHandler.setOnResolveThread.mock.calls[0][0]('old-card'))
+        .toMatchObject({ threadId: 'thread-1', deviceId: 'device-1' });
       // No replacement card: the surviving card is adopted and later finalized.
       expect(mockFeishuHandler.sendStreamingStart).not.toHaveBeenCalled();
       await send({ type: 'response', messageId: resume.messageId, openId: 'user-1', success: true });
       expect(mockFeishuHandler.finalizeStreamingMessage.mock.calls[0][0]).toBe('old-card');
+    });
+
+    it('creates a recovery card when the surviving session has no card and retries failed delivery', async () => {
+      const { send, replies } = await connect();
+      mockFeishuHandler.setOnStartStreaming.mock.calls[0][0](resume.messageId, 'user-1', null, 'device-1');
+      const completed = { ...resume, taskResume: { ...resume.taskResume, state: 'completed' } };
+      mockFeishuHandler.sendStreamingStart.mockResolvedValueOnce(null);
+      await send(completed);
+      expect(replies().at(-1).success).toBe(false);
+      expect(mockFeishuHandler.finalizeStreamingMessage).not.toHaveBeenCalled();
+      mockFeishuHandler.finalizeStreamingMessage.mockResolvedValueOnce(false);
+      await send(completed);
+      expect(replies().at(-1).success).toBe(false);
+      await send(completed);
+      expect(replies().at(-1).success).toBe(true);
+      expect(mockFeishuHandler.sendStreamingStart).toHaveBeenCalledTimes(2);
+      expect(mockFeishuHandler.finalizeStreamingMessage).toHaveBeenCalledTimes(2);
+      expect(mockFeishuHandler.finalizeStreamingMessage.mock.calls[1][0]).toBe('execution-card');
+    });
+
+    it('creates a fresh recovery card when the surviving card is already finalizing', async () => {
+      const { send, replies } = await connect();
+      mockFeishuHandler.setOnStartStreaming.mock.calls[0][0](resume.messageId, 'user-1', 'old-card', 'device-1');
+      let finish!: (success: boolean) => void;
+      mockFeishuHandler.finalizeStreamingMessage.mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+      const stoppingCard = (server as any).finalizeStreamingMessage(resume.messageId, false, undefined, 'Connection lost');
+      await Promise.resolve();
+      await send(resume);
+      expect(replies().at(-1).success).toBe(true);
+      expect(mockFeishuHandler.sendStreamingStart).toHaveBeenCalledOnce();
+      finish(true);
+      await stoppingCard;
+      await send({ type: 'response', messageId: resume.messageId, openId: 'user-1', success: true });
+      expect(mockFeishuHandler.finalizeStreamingMessage.mock.calls.at(-1)[0]).toBe('execution-card');
+    });
+
+    it('isolates interrupted Markdown from the recovery notice and resumed text when adopting a card', async () => {
+      const { send } = await connect();
+      mockFeishuHandler.setOnStartStreaming.mock.calls[0][0](resume.messageId, 'user-1', 'old-card', 'device-1', 'thread-1');
+      await send({ type: 'stream', messageId: resume.messageId, openId: 'user-1', chunk: '```ts\nconst before = 1;' });
+      await send(resume);
+      await send(resume);
+      await send({ type: 'stream', messageId: resume.messageId, openId: 'user-1', chunk: 'tail\n```\n</raw>' });
+      await send({ type: 'stream', messageId: resume.messageId, openId: 'user-1', streamType: 'tool_use',
+        toolUse: { id: 'boundary', name: 'Read', input: { file_path: '/workspace/file' } } });
+      await send({ type: 'stream', messageId: resume.messageId, openId: 'user-1', chunk: '**New segment**' });
+      await send({ type: 'response', messageId: resume.messageId, openId: 'user-1', success: true });
+      const elements = mockFeishuHandler.finalizeStreamingMessage.mock.calls[0][1];
+      expect(elements[0].content).toBe('```ts\nconst before = 1;');
+      expect(elements[1].content).toContain('Connection restored');
+      expect(elements.filter(element => element.content?.includes('Connection restored'))).toHaveLength(1);
+      expect(elements[2].content).toBe('<raw>tail\n```\n&lt;/raw&gt;</raw>');
+      expect(elements.at(-1).content).toBe('**New segment**');
     });
 
     it('adopts a surviving streaming card and continues it with a gap separator', async () => {
