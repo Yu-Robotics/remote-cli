@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -6,18 +6,22 @@ import { ClaudeSandbox } from '../../src/executor/claude/ClaudeSandbox';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 
 describe('ClaudeSandbox', () => {
-  const home = os.homedir();
-  const threadId = `test-${Date.now()}`;
-  const storePath = path.join(home, '.remote-cli', 'claude-sandbox', `${encodeURIComponent(threadId)}.json`);
+  let home: string;
+  const threadId = 'sandbox-test';
+  let storePath: string;
   let guard: DirectoryGuard;
 
   beforeEach(() => {
+    home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'claude-sandbox-test-')));
+    vi.spyOn(os, 'homedir').mockReturnValue(home);
+    storePath = path.join(home, '.remote-cli', 'claude-sandbox', `${threadId}.json`);
     guard = new DirectoryGuard([process.cwd(), os.tmpdir()]);
-    if (fs.existsSync(storePath)) fs.unlinkSync(storePath);
   });
 
   afterEach(() => {
-    if (fs.existsSync(storePath)) fs.unlinkSync(storePath);
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    fs.rmSync(home, { recursive: true, force: true });
   });
 
   it('returns no spawn settings when unconfigured or in full-access mode', () => {
@@ -44,6 +48,36 @@ describe('ClaudeSandbox', () => {
     const settings = sandbox.spawnSettings(process.cwd()) as any;
     expect(settings.sandbox.filesystem.denyWrite).toEqual([fs.realpathSync(process.cwd())]);
     expect(settings.sandbox.filesystem.allowWrite).toBeUndefined();
+  });
+
+  it.each(['workspace-write', 'read-only'] as const)('requires native sandbox enforcement and explicit write approvals in %s mode', mode => {
+    const settings = new ClaudeSandbox(guard, { mode }, threadId).spawnSettings(process.cwd()) as any;
+    expect(settings.sandbox.failIfUnavailable).toBe(true);
+    // These ask rules must override previously saved native allow rules.
+    expect(settings.permissions.ask).toEqual(expect.arrayContaining(['Write', 'Edit', 'NotebookEdit', 'Bash']));
+  });
+
+  it('checks executable dependencies on PATH rather than a fixed installation directory', () => {
+    vi.spyOn(os, 'platform').mockReturnValue('linux');
+    vi.stubEnv('PATH', home);
+    const sandbox = new ClaudeSandbox(guard, { mode: 'read-only' }, threadId);
+    expect(() => sandbox.assertAvailable(home)).toThrow('bwrap, socat');
+    fs.writeFileSync(path.join(home, 'bwrap'), '', { mode: 0o700 });
+    expect(() => sandbox.assertAvailable(home)).toThrow('socat');
+    fs.writeFileSync(path.join(home, 'socat'), '', { mode: 0o700 });
+    expect(() => sandbox.assertAvailable(home)).not.toThrow();
+    fs.chmodSync(path.join(home, 'socat'), 0o600);
+    expect(() => sandbox.assertAvailable(home)).toThrow('socat');
+  });
+
+  it('allows native macOS enforcement but rejects unsupported platforms in restricted mode', () => {
+    const sandbox = new ClaudeSandbox(guard, { mode: 'workspace-write' }, threadId);
+    const platform = vi.spyOn(os, 'platform').mockReturnValue('darwin');
+    expect(() => sandbox.assertAvailable(home)).not.toThrow();
+    platform.mockReturnValue('win32');
+    expect(() => sandbox.assertAvailable(home)).toThrow('Native Windows is not supported');
+    expect(() => new ClaudeSandbox(guard, undefined).assertAvailable(home)).not.toThrow();
+    expect(() => new ClaudeSandbox(guard, { mode: 'danger-full-access' }).assertAvailable(home)).not.toThrow();
   });
 
   it('hard-denies network egress when networkAccess is false', () => {
