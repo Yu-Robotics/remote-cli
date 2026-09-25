@@ -560,9 +560,8 @@ export class MessageHandler {
     const trimmed = content.trim();
 
     if (trimmed === '/sandbox' || trimmed.startsWith('/sandbox ')) {
-      if (this.threadPool.getBackendKey(threadId) !== 'codex'
-        || !('getSandboxStatus' in executor) || !('configureSandbox' in executor)) {
-        this.sendResponse(messageId, threadId, { success: false, error: '/sandbox is currently supported only by the Codex backend.' });
+      if (!('getSandboxStatus' in executor) || !('configureSandbox' in executor)) {
+        this.sendResponse(messageId, threadId, { success: false, error: '/sandbox is currently supported by the Codex and Claude Code backends.' });
         return true;
       }
       const control = executor as IExecutor & {
@@ -668,7 +667,7 @@ Use /compact to reduce conversation context or /clear to start a fresh context.`
 - /cd <directory> - Change working directory for this thread
 - /model [name] - Show models for the active backend, or set this thread's model
 - /effort [auto|level] - Show or set effort for Codex/AGY/OpenCode/Kimi/ZCode/Pi (Claude Code is unsupported)
-- /sandbox [on|off|read-only|default|allow <directory>|remove <directory>|network on|off] - Configure this thread's Codex sandbox
+- /sandbox [on|off|read-only|default|allow <directory>|remove <directory>|network on|off] - Configure this thread's sandbox (Codex, Claude Code)
 - /backend - List backends and show the current thread's effective backend
 - /backend <index> - Switch all threads and clear per-thread backend overrides
 - /backend <index> @ - Switch only the current thread

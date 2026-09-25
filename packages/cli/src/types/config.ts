@@ -65,6 +65,26 @@ export interface CodexExecutorConfig {
   command?: string;
 }
 
+/**
+ * Claude Code sandbox configuration. Mirrors CodexSandboxConfig semantics;
+ * mapped to Claude Code's native sandbox settings at process spawn.
+ */
+export interface ClaudeSandboxConfig {
+  mode: 'workspace-write' | 'read-only' | 'danger-full-access';
+  /** Let sandboxed commands reach new network domains (asks via approval). Default: true. */
+  networkAccess?: boolean;
+  /** Additional writable directories explicitly authorized by the user. */
+  writableRoots?: string[];
+}
+
+/** Claude Code executor configuration. */
+export interface ClaudeExecutorConfig {
+  /** Optional sandbox policy. Unset preserves the existing backend behavior. */
+  sandbox?: ClaudeSandboxConfig;
+  /** Override claude binary command (default: 'claude') */
+  command?: string;
+}
+
 /** OpenCode CLI executor configuration. */
 export interface OpenCodeExecutorConfig {
   /** Model in provider/model form. Unset uses the OpenCode session default. */
@@ -112,6 +132,7 @@ export interface PiExecutorConfig {
  */
 export interface ExecutorConfig {
   type: 'auto' | 'claude-persistent' | 'agy' | 'codex' | 'opencode' | 'kimi' | 'zcode' | 'pi';
+  claude?: ClaudeExecutorConfig;
   agy?: AgyExecutorConfig;
   codex?: CodexExecutorConfig;
   opencode?: OpenCodeExecutorConfig;
