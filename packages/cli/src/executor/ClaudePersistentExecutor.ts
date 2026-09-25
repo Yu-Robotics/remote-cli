@@ -3,6 +3,7 @@ import { DirectoryGuard } from '../security/DirectoryGuard';
 import { claudeCodeHooks } from '../hooks/ClaudeCodeHooks';
 import { StructuredContent, ContentBlockUnion, ToolUseInfo, ToolResultInfo, Attachment, ApprovalRequestInfo, ApprovalAction, ApprovalStatus } from '../types';
 import { ClaudeSandbox } from './claude/ClaudeSandbox';
+import { evaluateFileWrite } from './claude/ClaudeFilePolicy';
 import type { ClaudeSandboxConfig } from '../types/config';
 import fs from 'fs';
 import path from 'path';
@@ -132,7 +133,7 @@ export interface PersistentClaudeOptions {
   onRedactedThinking?: () => void;
   /** Plan mode callback (fires when Claude completes plan between EnterPlanMode and ExitPlanMode) */
   onPlanMode?: (planContent: string) => void;
-  /** Approval request callback — return true when an interactive card replaces the default denial. */
+  /** Approval request callback — return true when an interactive card replaces the text prompt. */
   onApprovalRequest?: (request: ApprovalRequestInfo) => boolean;
   /** Approval resolved callback (card cleanup). */
   onApprovalResolved?: (requestId: string, status: ApprovalStatus) => void;
@@ -225,16 +226,26 @@ export class ClaudePersistentExecutor extends EventEmitter {
   private readonly claudeCommand: string;
   private approvalServer: net.Server | null = null;
   private approvalSocketPath?: string;
+  private approvalGeneration = 0;
+  private approvalTurnActive = false;
   private pendingApprovals = new Map<string, {
     socket: net.Socket;
     timer: NodeJS.Timeout;
     input: Record<string, unknown>;
+    description: string;
+    generation: number;
+    resolved?: (requestId: string, status: ApprovalStatus) => void;
   }>();
   private currentApprovalRequestCallback?: (request: ApprovalRequestInfo) => boolean;
   private currentApprovalResolvedCallback?: (requestId: string, status: ApprovalStatus) => void;
+  private filePolicyToken?: string;
+  private filePolicyRoots: string[] = [];
+  private filePolicyStarted = false;
+  private onFilePolicyStarted?: () => void;
   private static readonly APPROVAL_TIMEOUT_MS = 5 * 60 * 1000;
   private static readonly APPROVAL_SERVER_SCRIPT = path.join(__dirname, 'claude', 'approvalMcpServer.js');
   private static readonly APPROVAL_TOOL_NAME = 'mcp__remote-cli-approval__approval_prompt';
+  private static readonly FILE_POLICY_SCRIPT = path.join(__dirname, 'claude', 'filePolicyHook.js');
 
   // Activity tracking for timeout extension (optional, can be disabled)
   private activityTrackingEnabled = false;
@@ -432,9 +443,19 @@ export class ClaudePersistentExecutor extends EventEmitter {
         this.sandbox.assertAvailable(this.currentWorkingDirectory);
         // Override native acceptEdits/auto/bypass defaults for this process.
         args.push('--permission-mode', 'default');
-        const settings = this.sandbox.spawnSettings(this.currentWorkingDirectory);
-        if (settings) args.push('--settings', JSON.stringify(settings));
         const socketPath = await this.ensureApprovalServer();
+        let fileHookCommand: string | undefined;
+        if (this.sandbox.getConfig()?.mode === 'workspace-write') {
+          this.filePolicyToken = randomUUID();
+          this.filePolicyStarted = false;
+          this.filePolicyRoots = [this.sandbox.normalize(this.currentWorkingDirectory), ...this.sandbox.extraWritableRoots()];
+          const quote = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
+          // A failed hook launch must block the tool, not fall through to native allow rules.
+          fileHookCommand = [process.execPath, ClaudePersistentExecutor.FILE_POLICY_SCRIPT, socketPath, this.filePolicyToken]
+            .map(quote).join(' ') + ' || exit 2';
+        }
+        const settings = this.sandbox.spawnSettings(this.currentWorkingDirectory, fileHookCommand);
+        if (settings) args.push('--settings', JSON.stringify(settings));
         args.push('--mcp-config', JSON.stringify({
           mcpServers: {
             'remote-cli-approval': {
@@ -540,6 +561,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
       // Use 'close' event (fires after all I/O streams are closed, i.e. after all stdout
       // data events have been processed) instead of 'exit' for command completion logic.
       child.on('close', (code, signal) => {
+        this.clearApprovals('Claude process exited');
         this.claudeProcess = null;
 
         // Check if this was an intentional stop (abort/reset)
@@ -611,9 +633,21 @@ export class ClaudePersistentExecutor extends EventEmitter {
         throw err;
       }
 
+      if (this.filePolicyToken) {
+        try {
+          // SessionStart runs before stdin is consumed. Do not send a user task
+          // unless the native hook is active; disabled/managed-only hooks fail closed.
+          await this.waitForFilePolicy(child);
+        } catch (error) {
+          await this.stopProcess();
+          throw error;
+        }
+      }
+
       // Long-running error handler for errors that occur after startup
       child.on('error', (error) => {
         console.error('[ClaudePersistent] Process error:', error);
+        this.clearApprovals('Claude process failed');
         this.claudeProcess = null;
         this.isStarting = false;
 
@@ -651,6 +685,10 @@ export class ClaudePersistentExecutor extends EventEmitter {
    * Stop the persistent Claude process
    */
   private async stopProcess(): Promise<void> {
+    this.filePolicyToken = undefined;
+    this.filePolicyRoots = [];
+    this.filePolicyStarted = false;
+    this.clearApprovals('Claude process stopped');
     if (!this.claudeProcess) {
       return;
     }
@@ -688,6 +726,28 @@ export class ClaudePersistentExecutor extends EventEmitter {
 
   // ── Sandbox approval channel ─────────────────────────────────────────────
 
+  private waitForFilePolicy(child: ChildProcess): Promise<void> {
+    if (this.filePolicyStarted && this.claudeProcess === child) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const finish = (error?: Error) => {
+        clearTimeout(timer);
+        this.onFilePolicyStarted = undefined;
+        child.removeListener('close', onClose);
+        child.removeListener('error', onError);
+        error ? reject(error) : resolve();
+      };
+      const onClose = () => finish(new Error('Claude exited before sandbox file checks started.'));
+      const onError = (error: Error) => finish(error);
+      const timer = setTimeout(() => finish(new Error(
+        'Claude sandbox file checks did not start. Check native hook restrictions (disableAllHooks or allowManagedHooksOnly).'
+      )), 10000);
+      this.onFilePolicyStarted = () => finish();
+      child.once('close', onClose);
+      child.once('error', onError);
+      if (this.claudeProcess !== child) onClose();
+    });
+  }
+
   private async ensureApprovalServer(): Promise<string> {
     if (this.approvalServer && this.approvalSocketPath) return this.approvalSocketPath;
     const directory = path.join(os.homedir(), '.remote-cli', 'claude-approval');
@@ -696,7 +756,9 @@ export class ClaudePersistentExecutor extends EventEmitter {
     if (fs.existsSync(socketPath)) fs.unlinkSync(socketPath); // stale socket from a previous run
 
     this.approvalServer = net.createServer((socket) => {
+      const generation = this.approvalGeneration;
       let buffer = '';
+      socket.on('error', () => { /* The close listener expires any pending request. */ });
       socket.on('data', (chunk) => {
         buffer += chunk;
         let index;
@@ -705,7 +767,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
           buffer = buffer.slice(index + 1);
           if (!line.trim()) continue;
           try {
-            this.handleApprovalSocketRequest(JSON.parse(line), socket);
+            this.handleApprovalSocketRequest(JSON.parse(line), socket, generation);
           } catch (error) {
             console.error('[ClaudePersistent] Failed to handle approval request:', error);
             socket.end();
@@ -722,8 +784,29 @@ export class ClaudePersistentExecutor extends EventEmitter {
     return socketPath;
   }
 
-  private handleApprovalSocketRequest(payload: any, socket: net.Socket): void {
+  private handleApprovalSocketRequest(payload: any, socket: net.Socket, generation: number): void {
+    if (payload?.type === 'file_policy') {
+      let answer = { decision: 'deny', reason: 'File policy request is no longer active.' };
+      if (this.filePolicyToken && payload.token === this.filePolicyToken && this.claudeProcess
+        && !this.isDestroyed && !this.isStopping) {
+        if (payload.startup === true) {
+          this.filePolicyStarted = true;
+          this.onFilePolicyStarted?.();
+          answer = { decision: 'allow', reason: 'File policy ready.' };
+        } else if (this.isProcessing && this.approvalTurnActive && generation === this.approvalGeneration) {
+          answer = evaluateFileWrite(payload.tool_name, payload.input ?? {}, this.filePolicyRoots);
+        }
+      }
+      socket.end(JSON.stringify(answer) + '\n');
+      return;
+    }
     const requestId = typeof payload?.id === 'string' ? payload.id : randomUUID();
+    if (this.isDestroyed || this.isStopping || !this.isProcessing || !this.approvalTurnActive
+      || (!this.currentCommandResolve && !this.currentCommandReject)
+      || generation !== this.approvalGeneration || this.pendingApprovals.has(requestId)) {
+      socket.end(JSON.stringify({ id: requestId, behavior: 'deny', message: 'Approval request is no longer active.' }) + '\n');
+      return;
+    }
     const toolName = typeof payload?.tool_name === 'string' ? payload.tool_name : 'unknown';
     const input = (payload?.input && typeof payload.input === 'object') ? payload.input as Record<string, unknown> : {};
     const kind = toolName === 'Bash' ? 'command'
@@ -731,68 +814,77 @@ export class ClaudePersistentExecutor extends EventEmitter {
       : 'permissions';
     const description = toolName === 'Bash'
       ? String(input.command ?? '').slice(0, 500)
-      : `${toolName}: ${String(input.file_path ?? input.path ?? JSON.stringify(input)).slice(0, 500)}`;
-
-    const onRequest = this.currentApprovalRequestCallback;
-    const cardShown = onRequest ? onRequest({ requestId, kind, description, canRemember: false }) : false;
-    if (!cardShown) {
-      // Without an interactive card there is nobody to answer; fail closed.
-      try {
-        socket.write(JSON.stringify({ id: requestId, behavior: 'deny',
-          message: 'Approval requires a router with approval card support.' }) + '\n');
-      } catch { /* socket may already be closed */ }
-      socket.end();
-      return;
-    }
+      : `${toolName}: ${String(input.file_path ?? input.notebook_path ?? input.path ?? JSON.stringify(input)).slice(0, 500)}`;
 
     const timer = setTimeout(() => {
       this.answerApproval(requestId, { behavior: 'deny', message: 'Approval request expired' }, 'expired');
     }, ClaudePersistentExecutor.APPROVAL_TIMEOUT_MS);
     timer.unref?.();
     socket.on('close', () => {
-      if (this.pendingApprovals.delete(requestId)) {
-        clearTimeout(timer);
-        this.currentApprovalResolvedCallback?.(requestId, 'expired');
-      }
+      const pending = this.pendingApprovals.get(requestId);
+      if (pending?.socket === socket) this.answerApproval(requestId, { behavior: 'deny', message: 'Approval connection closed' }, 'expired');
     });
-    this.pendingApprovals.set(requestId, { socket, timer, input });
+    this.pendingApprovals.set(requestId, { socket, timer, input, description, generation,
+      resolved: this.currentApprovalResolvedCallback });
+
+    let cardShown = false;
+    try { cardShown = this.currentApprovalRequestCallback?.({ requestId, kind, description, canRemember: false }) === true; }
+    catch { /* A rendering failure can fall back to the text prompt. */ }
+    if (!cardShown && this.pendingApprovals.has(requestId)) {
+      if (this.currentStreamCallback) {
+        this.currentStreamCallback(`\nApproval required (${requestId}): ${description}\nReply yes or no. For multiple requests, reply yes <request ID> or no <request ID>.\n`);
+      } else {
+        this.answerApproval(requestId, { behavior: 'deny', message: 'No interactive approval channel is available.' }, 'denied');
+      }
+    }
   }
 
   private answerApproval(
     requestId: string,
     answer: { behavior: 'allow' | 'deny'; updatedInput?: Record<string, unknown>; message?: string },
     status: ApprovalStatus
-  ): void {
+  ): boolean {
     const pending = this.pendingApprovals.get(requestId);
-    if (!pending) return;
+    if (!pending) return false;
     this.pendingApprovals.delete(requestId);
     clearTimeout(pending.timer);
-    try {
-      pending.socket.write(JSON.stringify({ id: requestId, ...answer }) + '\n');
-    } catch { /* socket may already be closed */ }
-    pending.socket.end();
-    this.currentApprovalResolvedCallback?.(requestId, status);
+    let delivered = !pending.socket.destroyed && pending.socket.writable;
+    if (delivered) {
+      try { pending.socket.end(JSON.stringify({ id: requestId, ...answer }) + '\n'); }
+      catch { delivered = false; }
+    }
+    try { pending.resolved?.(requestId, delivered ? status : 'expired'); }
+    catch { /* Card cleanup failures must not reactivate an answered request. */ }
+    return delivered;
   }
 
   /** MessageHandler entry point for approval card actions. */
   respondToApproval(requestId: string, action: ApprovalAction): boolean {
     const pending = this.pendingApprovals.get(requestId);
-    if (!pending) return false;
-    if (action === 'deny') {
-      this.answerApproval(requestId, { behavior: 'deny', message: 'Denied by user' }, 'denied');
-    } else {
-      // 'remember' has no persistent grant channel in Claude Code's permission-prompt
-      // tool contract here, so it approves once.
-      this.answerApproval(requestId, { behavior: 'allow', updatedInput: pending.input },
-        action === 'remember' ? 'remembered' : 'approved');
+    if (!pending || !['approve', 'deny'].includes(action)) return false;
+    if (pending.generation !== this.approvalGeneration || !this.approvalTurnActive
+      || !this.isProcessing || this.isStopping || this.isDestroyed) {
+      this.answerApproval(requestId, { behavior: 'deny', message: 'Approval request expired' }, 'expired');
+      return false;
     }
-    return true;
+    if (action === 'deny') {
+      return this.answerApproval(requestId, { behavior: 'deny', message: 'Denied by user' }, 'denied');
+    }
+    return this.answerApproval(requestId, { behavior: 'allow', updatedInput: pending.input }, 'approved');
   }
 
   private denyAllPendingApprovals(message: string): void {
     for (const requestId of Array.from(this.pendingApprovals.keys())) {
       this.answerApproval(requestId, { behavior: 'deny', message }, 'expired');
     }
+  }
+
+  private clearApprovals(message: string): void {
+    this.approvalGeneration++;
+    this.approvalTurnActive = false;
+    this.currentApprovalRequestCallback = undefined;
+    this.currentApprovalResolvedCallback = undefined;
+    this.denyAllPendingApprovals(message);
   }
 
   getSandboxStatus(): string {
@@ -1317,6 +1409,16 @@ export class ClaudePersistentExecutor extends EventEmitter {
    * This is called by MessageHandler when user sends a message while waiting for input
    */
   sendInput(input: string): boolean {
+    if (this.pendingApprovals.size > 0) {
+      const match = /^(yes|y|approve|accept|no|n|deny|decline|cancel)(?:\s+(\S+))?$/i.exec(input.trim());
+      const requestId = match?.[2] ?? (this.pendingApprovals.size === 1 ? this.pendingApprovals.keys().next().value : undefined);
+      if (!match || !requestId || !this.pendingApprovals.has(requestId)) {
+        this.currentStreamCallback?.(`\nReply yes or no for a single approval, or specify yes <request ID> / no <request ID>:\n${Array.from(this.pendingApprovals, ([id, pending]) => `${id}: ${pending.description}`).join('\n')}\n`);
+        return false;
+      }
+      const action = ['yes', 'y', 'approve', 'accept'].includes(match[1].toLowerCase()) ? 'approve' : 'deny';
+      return this.respondToApproval(requestId, action);
+    }
     if (!this.claudeProcess || !this.isWaitingForInput) {
       console.log('[ClaudePersistent] Cannot send input - process not running or not waiting for input');
       return false;
@@ -1349,7 +1451,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
    * Check if currently waiting for user input
    */
   isWaitingInput(): boolean {
-    return this.isWaitingForInput;
+    return this.pendingApprovals.size > 0 || this.isWaitingForInput;
   }
 
   /**
@@ -1428,6 +1530,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
    * Reset current command state
    */
   private resetCurrentCommand(): void {
+    this.clearApprovals('Task is no longer active');
     this.currentOutputBuffer = [];
     this.textStreams.clear();
     this.currentStreamCallback = undefined;
@@ -1455,7 +1558,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
    * Process the command queue
    */
   private async processQueue(): Promise<void> {
-    if (this.isProcessing || this.commandQueue.length === 0) {
+    if (this.isProcessing || this.isStarting || this.commandQueue.length === 0) {
       return;
     }
 
@@ -1499,6 +1602,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
     this.currentPlanModeCallback = command.options.onPlanMode;
     this.currentApprovalRequestCallback = command.options.onApprovalRequest;
     this.currentApprovalResolvedCallback = command.options.onApprovalResolved;
+    this.approvalTurnActive = true;
     this.currentCommandResolve = command.resolve;
     this.currentCommandReject = command.reject;
 
@@ -1615,7 +1719,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
    * Stops the current process and rejects the pending command
    */
   async abort(): Promise<boolean> {
-    if (!this.isProcessing && !this.isWaitingForInput) {
+    if (!this.isProcessing && !this.isWaitingInput()) {
       console.log('[ClaudePersistent] No command is currently executing');
       return false;
     }
@@ -1850,7 +1954,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
     }
     this.commandQueue = [];
 
-    this.denyAllPendingApprovals('Executor destroyed');
+    this.clearApprovals('Executor destroyed');
 
     if (this.approvalServer) {
       const server = this.approvalServer;

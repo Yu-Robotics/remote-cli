@@ -163,8 +163,8 @@ MIT
 
 See the project [CHANGELOG.md](../../CHANGELOG.md) for release notes and user-visible changes.
 
-## Codex Approval Cards
+## Approval Cards
 
 When supported by the connected CLI, Codex permission requests appear as standalone cards with Allow, Deny, and (for explicit directory grants) Allow and remember directory buttons. Each button targets the original user, device, thread, and request. The card shows success only after the CLI confirms the decision. Completed requests cannot be approved again, and pending approvals receive fresh cards after reconnecting. After a Router crash, buttons on old cards may remain visible but are rejected as expired. Both CLI and Router must be upgraded to use this feature; unsupported peers and failed card delivery retain text approvals.
 
-Restricted Claude Code threads use the same approval card flow for file modifications and commands outside their native sandbox. The CLI enforces these approvals even when native settings previously auto-approved writes. Missing sandbox dependencies stop execution on the CLI; the Router cannot override that startup failure. See [Claude sandbox configuration](../../README.md#optional-claude-code-sandbox).
+Restricted Claude Code threads use the same approval card flow, titled Permission request, for outside writes, protected files, read-only-mode edits, and commands outside their native sandbox. Ordinary workspace and explicitly authorized directory edits in workspace-write mode do not create approval cards, unless a native ask rule requires one. If card creation fails, Claude accepts text replies without starting a new model turn; completed or expired requests cannot be approved later. The CLI enforces file boundaries before native allow rules; native deny and ask rules still apply. Sandboxed command networking is enabled by default, subject to native domain denials and administrator-managed restrictions; `/sandbox network off` disables it without changing the approval card flow. Missing sandbox dependencies stop execution on the CLI; the Router cannot override that startup failure. See [Claude sandbox configuration](../../README.md#optional-claude-code-sandbox).
