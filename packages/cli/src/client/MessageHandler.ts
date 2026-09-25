@@ -335,7 +335,9 @@ export class MessageHandler {
           this.sendResponse(messageId, resolvedThreadId, {
             success: sent,
             output: sent ? `✅ Sent: "${input}"` : undefined,
-            error: sent ? undefined : '❌ Failed to send input - executor is no longer waiting',
+            error: sent ? undefined : ex.isWaitingInput()
+              ? '❌ Input was not accepted. Check the pending request and reply again.'
+              : '❌ Failed to send input - executor is no longer waiting',
           });
         } else {
           this.sendResponse(messageId, resolvedThreadId, {

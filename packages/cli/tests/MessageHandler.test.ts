@@ -751,6 +751,40 @@ describe('MessageHandler', () => {
     });
   });
 
+  describe('approval fallback replies', () => {
+    it('routes text to a pending approval after card failure without queuing another model turn', async () => {
+      let options: any;
+      let finish!: (value: any) => void;
+      let waiting = false;
+      ctx.mockExecutor.isWaitingInput = vi.fn(() => waiting);
+      ctx.mockExecutor.sendInput = vi.fn((reply: string) => {
+        if (reply !== 'yes') return false;
+        waiting = false;
+        options.onApprovalResolved('fallback-request', 'approved');
+        return true;
+      });
+      ctx.mockExecutor.execute.mockImplementation((_prompt: string, opts: any) => {
+        options = opts;
+        return new Promise(resolve => { finish = resolve; });
+      });
+      await ctx.handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: { approvalCards: true } } } as any);
+      const running = ctx.handler.handleMessage({ type: 'command', messageId: 'work', content: 'work', openId: 'owner', timestamp: 1 });
+      await vi.waitFor(() => expect(options).toBeDefined());
+      options.onApprovalRequest({ requestId: 'fallback-request', kind: 'file', description: 'write', canRemember: false });
+      waiting = true;
+      await ctx.handler.handleMessage({ type: 'approval_unavailable', messageId: 'fallback-request' });
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'stream', chunk: expect.stringContaining('Reply yes, no') }));
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'invalid', content: 'maybe', openId: 'owner', timestamp: 2 });
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'invalid', error: expect.stringContaining('Check the pending request') }));
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'reply', content: 'yes', openId: 'owner', timestamp: 3 });
+      expect(ctx.mockExecutor.sendInput).toHaveBeenCalledWith('yes');
+      expect(ctx.mockExecutor.execute).toHaveBeenCalledTimes(1);
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'approval_resolved', messageId: 'fallback-request', status: 'approved' }));
+      finish({ success: true });
+      await running;
+    });
+  });
+
   describe('Codex sandbox commands', () => {
     it('routes status and directory authorization to the current Codex executor', async () => {
       const ctx = buildHandler({
@@ -1802,16 +1836,16 @@ describe('MessageHandler', () => {
       );
     });
 
-    it('should return error when sendInput returns false', async () => {
+    it.each([true, false])('reports rejected input with waiting state %s', async stillWaiting => {
       ctx = buildHandler({
-        isWaitingInput: vi.fn().mockReturnValue(true),
+        isWaitingInput: vi.fn().mockReturnValueOnce(true).mockReturnValue(stillWaiting),
         sendInput: vi.fn().mockReturnValue(false),
       });
 
       await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-input-fail', content: 'yes', timestamp: Date.now() });
 
       expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
-        expect.objectContaining({ success: false, error: expect.stringContaining('Failed') })
+        expect.objectContaining({ success: false, error: expect.stringContaining(stillWaiting ? 'Check the pending request' : 'no longer waiting') })
       );
     });
 

@@ -24,6 +24,7 @@ describe('ApprovalCards', () => {
   it('renders scoped choices, routes to the original device, and waits for the CLI before showing approval', async () => {
     await cards.receive(request(), 'original-device', () => true);
     const elements = transport.create.mock.calls[0][1];
+    expect(elements[0]).toMatchObject({ content: '**Permission request**' });
     expect(elements.filter((element: any) => element.tag === 'button').map((button: any) => button.text.content))
       .toEqual(['Allow', 'Deny', 'Allow and remember directory']);
     expect(JSON.stringify(elements)).toContain('&lt;config&gt;');
