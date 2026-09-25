@@ -86,7 +86,7 @@ docker compose up -d
 
 The container uses `/router-data` as its home directory, so configuration and bindings live in `./router-data/.remote-cli-router/` on the host. Create `./router-data` before setup; on Linux, set `ROUTER_UID` and `ROUTER_GID` in `.env` to its owner's IDs. Set `ROUTER_PORT` before setup and enter the same port in the wizard. No App ID or App Secret is required in environment variables. See [Docker Compose](README.md#docker-compose-recommended-for-shared-routers) for the complete setup sequence.
 
-User-device bindings persist across Router restarts. The Router's active thread selection and historical card routing are held in memory. Task recovery rebuilds routing for reported tasks on new cards; it does not persist all Router state or recover a restarted CLI's in-memory task state.
+User-device bindings persist across Router restarts. The Router's active thread selection and historical card routing are held in memory. Task recovery rebuilds routing for reported tasks on usable surviving cards or new recovery cards; it does not persist all Router state or recover a restarted CLI's in-memory task state.
 
 ## Differences from Redis-based Approach
 

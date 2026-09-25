@@ -77,6 +77,8 @@ describe('TaskRecovery', () => {
     recovery.registered(true);
     acknowledge(undefined, false);
     vi.advanceTimersByTime(30000); // first backoff: 2 × RETRY_DELAY
+    vi.advanceTimersByTime(15000); // wait for the second request's acknowledgement
+    expect(resumes()).toHaveLength(2);
     vi.advanceTimersByTime(60000); // second backoff: 4 × RETRY_DELAY
     expect(resumes()).toHaveLength(3);
     expect(new Set(resumes().map(message => message.taskResume.recoveryId)).size).toBe(1);
@@ -93,6 +95,7 @@ describe('TaskRecovery', () => {
     expect(resumes()).toHaveLength(1); // backed off: no retry yet at the old fixed delay
     vi.advanceTimersByTime(15000); // 30s total — first backoff retry fires
     expect(resumes()).toHaveLength(2);
+    acknowledge(undefined, false);
     vi.advanceTimersByTime(59000); // next delay is 60s
     expect(resumes()).toHaveLength(2);
     vi.advanceTimersByTime(1000);
@@ -105,17 +108,73 @@ describe('TaskRecovery', () => {
     expect(resumes()).toHaveLength(4);
   });
 
-  it('gives up after the recovery attempt cap instead of retrying forever', () => {
+  it('does not let ongoing output bypass recovery backoff', () => {
+    recovery.disconnected();
+    recovery.registered(true);
+    acknowledge(undefined, false);
+    for (let index = 0; index < 100; index++) recovery.send(stream('discarded while waiting'));
+    recovery.send(result());
+    expect(resumes()).toHaveLength(1);
+    vi.advanceTimersByTime(29999);
+    expect(resumes()).toHaveLength(1);
+    vi.advanceTimersByTime(1);
+    expect(resumes()).toHaveLength(2);
+    expect(resumes()[1].taskResume.state).toBe('completed');
+    expect(JSON.stringify(send.mock.calls)).not.toMatch(/discarded while waiting|entire transcript/);
+    acknowledge();
+    expect(recovery.hasPendingResults()).toBe(false);
+  });
+
+  it('allows more than twenty successful reconnections for the same running task', () => {
+    for (let index = 0; index < 25; index++) {
+      recovery.disconnected();
+      recovery.registered(true);
+      expect(resumes()).toHaveLength(index + 1);
+      acknowledge();
+      recovery.send(stream(`visible-${index}`));
+      expect(send.mock.calls.at(-1)?.[0].chunk).toBe(`visible-${index}`);
+    }
+    recovery.send(result());
+    expect(send.mock.calls.at(-1)?.[0].output).toBeUndefined();
+  });
+
+  it('retains output isolation after exhausting recovery and can recover on a later connection', () => {
     recovery.disconnected();
     recovery.registered(true);
     for (let index = 0; index < 25; index++) {
       acknowledge(undefined, false);
-      vi.advanceTimersByTime(300000); // jump past any backoff delay
+      vi.advanceTimersByTime(300000);
     }
     expect(resumes()).toHaveLength(20);
-    expect(recovery.hasPendingResults()).toBe(false);
+    const callsAfterExhaustion = send.mock.calls.length;
+    recovery.send(stream('must not escape after exhaustion'));
+    recovery.send({ type: 'structured', messageId: 'm1', content: 'old body' });
+    recovery.send(result());
     vi.advanceTimersByTime(600000);
-    expect(resumes()).toHaveLength(20); // no further attempts after giving up
+    expect(send).toHaveBeenCalledTimes(callsAfterExhaustion);
+    expect(recovery.hasPendingResults()).toBe(false);
+    recovery.disconnected();
+    recovery.registered(true);
+    expect(resumes()).toHaveLength(21);
+    expect(resumes().at(-1).taskResume.state).toBe('completed');
+    expect(JSON.stringify(send.mock.calls)).not.toMatch(/must not escape|old body|entire transcript/);
+    acknowledge();
+    expect(recovery.hasPendingResults()).toBe(false);
+  });
+
+  it('continues recovering another task after one task exhausts its recovery budget', () => {
+    recovery.track({ ...task, messageId: 'm2', threadId: 't2' });
+    recovery.disconnected();
+    recovery.registered(true);
+    for (let index = 1; index <= 20; index++) {
+      expect(resumes().at(-1).messageId).toBe('m1');
+      acknowledge(undefined, false);
+      if (index < 20) vi.advanceTimersToNextTimer();
+    }
+    expect(resumes().at(-1).messageId).toBe('m2');
+    acknowledge();
+    recovery.send(stream('second task continues', 'm2'));
+    expect(send.mock.calls.at(-1)?.[0].chunk).toBe('second task continues');
   });
 
   it('ignores an acknowledgement from an earlier connection', () => {
@@ -145,6 +204,7 @@ describe('TaskRecovery', () => {
     const running = resumes()[0];
     recovery.send(result());
     vi.advanceTimersByTime(15000);
+    vi.advanceTimersByTime(30000);
     expect(resumes().at(-1).taskResume.state).toBe('completed');
     acknowledge(running);
     expect(recovery.hasPendingResults()).toBe(true);

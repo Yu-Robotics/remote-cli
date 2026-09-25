@@ -231,7 +231,7 @@ These examples are not the complete protocol. See the [CLI types](../cli/src/typ
 - **Stale Cleanup**: Automatic cleanup every heartbeat interval
 - **Reconnection**: Clients automatically reconnect on disconnect
 
-With task-recovery support on both sides, a reconnecting CLI reports running tasks and starts new recovery cards after the Router acknowledges them. Backends keep running during a Router outage. Old cards remain as they were; disconnected output is dropped, not buffered or replayed, and the new card marks the gap. The CLI retains only bounded final-status metadata for tasks completed while disconnected (at most 100 records for up to 24 hours, in memory). CLI restarts lose this recovery state. See [Automatic Startup and Recovery](../../README.md#automatic-client-startup) for operational limits.
+With task-recovery support on both sides, a reconnecting CLI reports its tasks. Router 1.6.55 or newer reuses a surviving card only while it can accept output; otherwise it creates a recovery card before acknowledging the task. Backend processes keep running, while disconnected output is dropped rather than buffered or replayed. An independent notice marks the gap, and the first resumed text segment is displayed as plain text. CLI recovery retries use bounded backoff and pause after 20 consecutive failures; late output stays suppressed until a later connection can recover the task. Only bounded completion metadata is retained (at most 100 records for up to 24 hours, in memory). CLI restarts lose this state. See [Automatic Startup and Recovery](../../README.md#automatic-client-startup) for operational limits.
 
 ## Security
 

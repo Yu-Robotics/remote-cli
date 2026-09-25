@@ -14,7 +14,7 @@ Remote control Claude Code, AGY CLI, Codex CLI, OpenCode CLI, Kimi Code CLI, ZCo
 - **Remote Machine Management**: Control remote servers or Docker via SSH
 - **Persistent Process**: Long-running AI process with bidirectional streaming
 - **Non-Interactive Auto-Update**: Reconnect to a newer Router, wait for idle work, install its exact version, and exit for the process supervisor to restart
-- **Task Recovery**: With a compatible Router, running tasks continue across Router reconnects on new cards with an output-gap notice; disconnected output is not buffered or replayed
+- **Task Recovery**: With a compatible Router, running tasks resume output on a usable surviving card or a new card with an output-gap notice. Recovery retries use bounded backoff; disconnected output is not buffered or replayed, even after recovery is paused.
 
 ## Prerequisites
 
