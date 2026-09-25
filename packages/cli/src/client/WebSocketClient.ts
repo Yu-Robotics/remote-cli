@@ -112,17 +112,8 @@ export class WebSocketClient {
               message.data?.code === 'PROTOCOL_VERSION_INCOMPATIBLE'
             ) {
               console.error(`\n[remote-cli] ${message.data.message}`);
-              console.error('[remote-cli] Disconnecting until a compatible CLI version is installed.\n');
+              console.error('[remote-cli] Reconnection paused until this process restarts with a compatible CLI version.\n');
               this.manualDisconnect = true;
-            }
-
-            // Check for version mismatch on binding confirmation
-            if (message.type === 'binding_confirm' && message.data?.routerVersion) {
-              const routerVersion = message.data.routerVersion;
-              if (routerVersion !== CLI_VERSION) {
-                console.warn(`\n[remote-cli] ⚠️  Version mismatch: CLI ${CLI_VERSION} ↔ Router ${routerVersion}`);
-                console.warn('[remote-cli] Consider upgrading to the latest version for best compatibility.\n');
-              }
             }
 
             this.messageHandlers.forEach(handler => handler(message));

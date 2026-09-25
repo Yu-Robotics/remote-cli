@@ -18,6 +18,11 @@ export interface AutomaticUpdaterDependencies {
   failureRetryDelayMs: number;
 }
 
+export interface AutomaticUpdaterOptions extends Partial<AutomaticUpdaterDependencies> {
+  /** Exit after installation only when a supervisor will restart this process. */
+  restartAfterUpdate?: boolean;
+}
+
 function executeFile(command: string, args: string[], timeout: number): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(command, args, { encoding: 'utf8', timeout }, (error, stdout, stderr) => {
@@ -44,14 +49,18 @@ export async function installGlobalCliVersion(version: string, cliEntryPath = pa
 
 export class AutomaticUpdater {
   private pendingVersion?: string;
+  private installedVersion: string;
   private retryTimer?: NodeJS.Timeout;
   private updating = false;
+  private readonly restartAfterUpdate: boolean;
 
   constructor(
     private readonly currentVersion: string,
     private readonly readiness: UpdateReadiness,
-    dependencies: Partial<AutomaticUpdaterDependencies> = {}
+    dependencies: AutomaticUpdaterOptions = {}
   ) {
+    this.installedVersion = currentVersion;
+    this.restartAfterUpdate = dependencies.restartAfterUpdate ?? true;
     this.dependencies = {
       installVersion: dependencies.installVersion ?? ((version) => installGlobalCliVersion(version)),
       beforeRestart: dependencies.beforeRestart ?? (async () => {}),
@@ -64,15 +73,18 @@ export class AutomaticUpdater {
   private readonly dependencies: AutomaticUpdaterDependencies;
 
   async handleRouterVersion(routerVersion: string): Promise<void> {
-    if (!isNewerVersion(routerVersion, this.currentVersion)) return;
+    if (!isNewerVersion(routerVersion, this.installedVersion)) return;
     if (!this.pendingVersion || isNewerVersion(routerVersion, this.pendingVersion)) {
       this.pendingVersion = routerVersion;
+      console.log(`[AutoUpdate] Router ${routerVersion} is newer than running CLI ${this.currentVersion}.`);
     }
-    console.log(`[AutoUpdate] Router ${routerVersion} is newer than CLI ${this.currentVersion}.`);
     await this.attemptUpdate();
   }
 
   async handleProtocolMismatch(serverUrl: string): Promise<void> {
+    if (!this.restartAfterUpdate) {
+      console.warn(`[AutoUpdate] Router rejected running CLI ${this.currentVersion}. After the update is installed, stop this process and run "remote-cli start" again to connect.`);
+    }
     try {
       const response = await axios.get<{ success: boolean; version: string }>(`${serverUrl}/api/version`, { timeout: 5000 });
       if (response.data?.success && response.data.version) {
@@ -92,15 +104,29 @@ export class AutomaticUpdater {
     }
 
     this.updating = true;
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = undefined;
+    }
     const targetVersion = this.pendingVersion;
     console.log(`[AutoUpdate] Installing ${CLI_PACKAGE}@${targetVersion}...`);
     try {
       await this.dependencies.installVersion(targetVersion);
+      if (!this.restartAfterUpdate) {
+        this.installedVersion = targetVersion;
+        if (this.pendingVersion === targetVersion) this.pendingVersion = undefined;
+        this.updating = false;
+        this.readiness.endAutomaticUpdate();
+        console.log(`[AutoUpdate] CLI ${targetVersion} installed. Running CLI ${this.currentVersion} will continue; the new version takes effect the next time you start remote-cli.`);
+        if (this.pendingVersion) this.scheduleAttempt(this.dependencies.retryDelayMs);
+        return;
+      }
       console.log(`[AutoUpdate] CLI ${targetVersion} installed successfully. Exiting for the process supervisor to restart...`);
       await this.dependencies.beforeRestart();
       this.dependencies.exitProcess(0);
     } catch (error) {
       console.error('[AutoUpdate] Upgrade failed; continuing with the current process and retrying later:', error instanceof Error ? error.message : error);
+      console.error(`[AutoUpdate] To update manually: npm install -g ${CLI_PACKAGE}@${targetVersion}`);
       this.updating = false;
       this.readiness.endAutomaticUpdate();
       this.scheduleAttempt(this.dependencies.failureRetryDelayMs);

@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { startCommand, checkBackendAvailability, checkServerVersion, isNewerVersion } from '../../src/commands/start';
+import { startCommand, checkBackendAvailability, getServerVersion, isNewerVersion } from '../../src/commands/start';
 import { ConfigManager } from '../../src/config/ConfigManager';
 import { WebSocketClient } from '../../src/client/WebSocketClient';
 import { CLI_VERSION } from '../../src/types';
 import axios from 'axios';
 import { execFile } from 'child_process';
+import { AutomaticUpdater } from '../../src/update/AutomaticUpdater';
 
 const automaticUpdaterMocks = vi.hoisted(() => ({
   handleRouterVersion: vi.fn(),
@@ -81,15 +82,6 @@ vi.mock('ora', () => ({
   })),
 }));
 
-// Mock readline so promptYesNo never blocks on real stdin
-let mockReadlineAnswer = 'y';
-vi.mock('readline', () => ({
-  createInterface: vi.fn(() => ({
-    question: vi.fn((_q: string, cb: (a: string) => void) => cb(mockReadlineAnswer)),
-    close: vi.fn(),
-  })),
-}));
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -110,7 +102,6 @@ describe('start command', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     zCodeCommandMocks.isZCodeAvailable.mockReturnValue(false);
-    mockReadlineAnswer = 'y';
     vi.mocked(execFile).mockImplementation(((_command: string, _args: string[], _options: object, callback: Function) => {
       callback(null, '', '');
     }) as any);
@@ -246,8 +237,7 @@ describe('start command', () => {
       expect(result.daemonMode).toBe(false);
     });
 
-    it('should skip version prompts in non-interactive mode', async () => {
-      mockReadlineAnswer = 'n';
+    it('starts in non-interactive mode with a newer Router', async () => {
       vi.mocked(axios.get).mockResolvedValue({ data: { success: true, version: '99.0.0' } });
 
       const result = await startCommand({ daemon: true, nonInteractive: true });
@@ -278,8 +268,9 @@ describe('start command', () => {
       expect(mockWsClient.on).toHaveBeenCalledWith('error', expect.any(Function));
     });
 
-    it('passes reconnected Router versions to the automatic updater in non-interactive mode', async () => {
-      await startCommand({ nonInteractive: true });
+    it.each([true, false])('passes reconnect versions to the updater (non-interactive: %s)', async (nonInteractive) => {
+      await startCommand({ nonInteractive });
+      expect(AutomaticUpdater).toHaveBeenCalledWith(CLI_VERSION, expect.anything(), expect.objectContaining({ restartAfterUpdate: nonInteractive }));
       const messageHandler = mockWsClient.on.mock.calls.find(([event]: [string]) => event === 'message')?.[1];
 
       await messageHandler({ type: 'binding_confirm', data: { routerVersion: '1.6.26' } });
@@ -287,8 +278,8 @@ describe('start command', () => {
       expect(automaticUpdaterMocks.handleRouterVersion).toHaveBeenCalledWith('1.6.26');
     });
 
-    it('resolves the Router package version after a protocol rejection', async () => {
-      await startCommand({ nonInteractive: true });
+    it.each([true, false])('resolves the Router version after protocol rejection (non-interactive: %s)', async (nonInteractive) => {
+      await startCommand({ nonInteractive });
       const messageHandler = mockWsClient.on.mock.calls.find(([event]: [string]) => event === 'message')?.[1];
 
       await messageHandler({ type: 'error', data: { code: 'PROTOCOL_VERSION_INCOMPATIBLE' } });
@@ -389,59 +380,30 @@ describe('isNewerVersion', () => {
 });
 
 // ---------------------------------------------------------------------------
-// checkServerVersion unit tests
+// getServerVersion unit tests
 // ---------------------------------------------------------------------------
-describe('checkServerVersion', () => {
+describe('getServerVersion', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it('returns true and prompts when router is newer, user answers y', async () => {
+  it('returns the Router version for automatic update scheduling', async () => {
     vi.mocked(axios.get).mockResolvedValueOnce({ data: { success: true, version: '99.0.0' } });
-    mockReadlineAnswer = 'y';
-
-    const result = await checkServerVersion('http://localhost:3000');
-    expect(result).toBe(true);
+    await expect(getServerVersion('http://localhost:3000')).resolves.toBe('99.0.0');
   });
 
-  it('returns false when router is newer, user answers n', async () => {
-    vi.mocked(axios.get).mockResolvedValueOnce({ data: { success: true, version: '99.0.0' } });
-    mockReadlineAnswer = 'n';
-
-    const result = await checkServerVersion('http://localhost:3000');
-    expect(result).toBe(false);
-  });
-
-  it('returns true without prompting when versions are equal', async () => {
-    vi.mocked(axios.get).mockResolvedValueOnce({ data: { success: true, version: CLI_VERSION } });
-
-    const readline = await import('readline');
-    const result = await checkServerVersion('http://localhost:3000');
-    expect(result).toBe(true);
-    expect(readline.createInterface).not.toHaveBeenCalled();
-  });
-
-  it('returns true without prompting when CLI is newer', async () => {
-    vi.mocked(axios.get).mockResolvedValueOnce({ data: { success: true, version: '0.0.1' } });
-
-    const readline = await import('readline');
-    const result = await checkServerVersion('http://localhost:3000');
-    expect(result).toBe(true);
-    expect(readline.createInterface).not.toHaveBeenCalled();
-  });
-
-  it('returns true on network error (non-fatal)', async () => {
+  it('tolerates a missing version endpoint', async () => {
     vi.mocked(axios.get).mockRejectedValueOnce(new Error('ECONNREFUSED'));
-
-    const result = await checkServerVersion('http://localhost:3000');
-    expect(result).toBe(true);
+    await expect(getServerVersion('http://localhost:3000')).resolves.toBeUndefined();
   });
 
-  it('returns true when response has no version field', async () => {
-    vi.mocked(axios.get).mockResolvedValueOnce({ data: { success: false } });
-
-    const result = await checkServerVersion('http://localhost:3000');
-    expect(result).toBe(true);
+  it.each([
+    { success: false },
+    { success: true, version: 'latest;exit 1' },
+    { success: true, version: 42 },
+  ])('ignores invalid version responses: %j', async (data) => {
+    vi.mocked(axios.get).mockResolvedValueOnce({ data });
+    await expect(getServerVersion('http://localhost:3000')).resolves.toBeUndefined();
   });
 });
 
@@ -454,7 +416,6 @@ describe('startCommand version check integration', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
-    mockReadlineAnswer = 'y';
 
     mockConfig = {
       get: vi.fn(),
@@ -479,25 +440,15 @@ describe('startCommand version check integration', () => {
     (WebSocketClient as any).mockImplementation(() => mockWsClient);
   });
 
-  it('aborts startup when router is newer and user answers n', async () => {
+  it.each([true, false])('schedules updates after startup without asking for input (non-interactive: %s)', async (nonInteractive) => {
     vi.mocked(axios.get).mockResolvedValueOnce({ data: { success: true, version: '99.0.0' } });
-    mockReadlineAnswer = 'n';
 
-    const result = await startCommand({ daemon: false });
-
-    expect(result.success).toBe(false);
-    expect(result.error).toContain('upgrade');
-    expect(mockWsClient.connect).not.toHaveBeenCalled();
-  });
-
-  it('continues startup when router is newer and user answers y', async () => {
-    vi.mocked(axios.get).mockResolvedValueOnce({ data: { success: true, version: '99.0.0' } });
-    mockReadlineAnswer = 'y';
-
-    const result = await startCommand({ daemon: false });
+    const result = await startCommand({ nonInteractive });
 
     expect(result.success).toBe(true);
     expect(mockWsClient.connect).toHaveBeenCalled();
+    expect(automaticUpdaterMocks.handleRouterVersion).toHaveBeenCalledWith('99.0.0');
+    expect(mockConfig.set).toHaveBeenCalledWith('service.running', true);
   });
 
   it('continues startup normally when version check fails (network error)', async () => {
