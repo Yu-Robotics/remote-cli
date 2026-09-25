@@ -8,11 +8,10 @@ import { ThreadExecutorPool } from '../thread/ThreadExecutorPool';
 import { CLI_VERSION } from '../types';
 import type { ExecutorConfig } from '../types/config';
 import axios from 'axios';
-import * as readline from 'readline';
 import { execFile } from 'child_process';
 import ora, { type Ora } from 'ora';
 import { AutomaticUpdater } from '../update/AutomaticUpdater';
-import { isNewerVersion } from '../utils/version';
+import { isValidVersion } from '../utils/version';
 import { isZCodeAvailable } from '../executor/zcode/ZCodeCommand';
 
 export { isNewerVersion } from '../utils/version';
@@ -23,7 +22,7 @@ export { isNewerVersion } from '../utils/version';
 export interface StartCommandOptions {
   /** Run as daemon */
   daemon?: boolean;
-  /** Do not prompt for interactive startup confirmations */
+  /** Exit after automatic updates so a process supervisor can restart the CLI. */
   nonInteractive?: boolean;
 }
 
@@ -91,63 +90,21 @@ export async function checkBackendAvailability(type: string, spinner: Ora, execu
   }
 }
 
-/**
- * Prompt the user with a y/n question on stdin. Returns true if user answers 'y'.
- */
-export function promptYesNo(question: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    rl.question(question, (answer) => {
-      rl.close();
-      resolve(answer.trim().toLowerCase() === 'y');
-    });
-  });
-}
-
-/**
- * Query the router's /api/version endpoint and, if the router is newer than
- * the local CLI, prompt the user whether to continue or abort.
- * Returns false if the user chooses to abort.
- */
-export async function checkServerVersion(serverUrl: string, spinner?: Ora, nonInteractive = false): Promise<boolean> {
+/** Read the Router package version without requiring interactive input. */
+export async function getServerVersion(serverUrl: string): Promise<string | undefined> {
   try {
     const response = await axios.get<{ success: boolean; version: string }>(
       `${serverUrl}/api/version`,
       { timeout: 5000 }
     );
     const data = response.data;
-    if (!data?.success || !data?.version) return true;
-
-    if (isNewerVersion(data.version, CLI_VERSION)) {
-      // Stop spinner before prompting to avoid stdin interference
-      if (spinner) {
-        spinner.stop();
-      }
-      console.log('');
-      console.log(`⚠️  Version mismatch detected:`);
-      console.log(`   Router version : ${data.version}`);
-      console.log(`   CLI version    : ${CLI_VERSION}`);
-      console.log(`   The router has been upgraded. It is recommended to upgrade your CLI:`);
-      console.log(`   npm install -g @yu_robotics/remote-cli`);
-      console.log('');
-      if (nonInteractive) {
-        console.log('   Continuing without prompting because startup is non-interactive.');
-        return true;
-      }
-      const proceed = await promptYesNo('Continue with the current version? (y/n): ');
-      if (!proceed) {
-        console.log('Aborted. Please upgrade and try again.');
-        return false;
-      }
-      // Resume spinner after user input
-      if (spinner) {
-        spinner.start();
-      }
+    if (data?.success && typeof data.version === 'string' && isValidVersion(data.version)) {
+      return data.version;
     }
   } catch {
-    // Non-fatal: old routers without the endpoint, network errors, etc. — just continue.
+    // Older routers and temporary network failures must not prevent startup.
   }
-  return true;
+  return undefined;
 }
 
 /**
@@ -199,13 +156,8 @@ export async function startCommand(
       };
     }
 
-    // Check for newer router version — blocking prompt if outdated
     spinner.text = 'Checking server version...';
-    const shouldContinue = await checkServerVersion(serverUrl, spinner, options.nonInteractive);
-    if (!shouldContinue) {
-      spinner.fail('Startup aborted by user');
-      return { success: false, error: 'Startup aborted: please upgrade remote-cli to the latest version.' };
-    }
+    const serverVersion = await getServerVersion(serverUrl);
 
     // Initialize components
     spinner.text = 'Initializing components...';
@@ -265,14 +217,13 @@ export async function startCommand(
     const wsClient = new WebSocketClient(wsUrl, deviceId);
 
     const messageHandler = new MessageHandler(wsClient, threadPool, threadManager, directoryGuard, config);
-    const automaticUpdater = options.nonInteractive
-      ? new AutomaticUpdater(CLI_VERSION, messageHandler, {
-          beforeRestart: async () => {
-            wsClient.disconnect();
-            await messageHandler.destroy();
-          },
-        })
-      : undefined;
+    const automaticUpdater = new AutomaticUpdater(CLI_VERSION, messageHandler, {
+      restartAfterUpdate: options.nonInteractive === true,
+      beforeRestart: async () => {
+        wsClient.disconnect();
+        await messageHandler.destroy();
+      },
+    });
 
     // Setup event handlers
     wsClient.on('connected', () => {
@@ -288,10 +239,10 @@ export async function startCommand(
     });
 
     wsClient.on('message', async (message) => {
-      if (automaticUpdater && message.type === 'binding_confirm' && message.data?.routerVersion) {
+      if (message.type === 'binding_confirm' && message.data?.routerVersion) {
         void automaticUpdater.handleRouterVersion(message.data.routerVersion);
       }
-      if (automaticUpdater && message.type === 'error' && message.data?.code === 'PROTOCOL_VERSION_INCOMPATIBLE') {
+      if (message.type === 'error' && message.data?.code === 'PROTOCOL_VERSION_INCOMPATIBLE') {
         void automaticUpdater.handleProtocolMismatch(serverUrl);
       }
       await messageHandler.handleMessage(message);
@@ -321,6 +272,11 @@ export async function startCommand(
         ? 'Remote CLI service started in daemon mode'
         : 'Remote CLI service started'
     );
+
+    console.log(options.nonInteractive
+      ? '[AutoUpdate] Enabled: updates wait for idle work, then restart through the process supervisor.'
+      : '[AutoUpdate] Enabled: updates wait for idle work and take effect on your next start. This process will keep running.');
+    if (serverVersion) void automaticUpdater.handleRouterVersion(serverVersion);
 
     return {
       success: true,

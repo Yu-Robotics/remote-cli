@@ -70,7 +70,7 @@ program
   .command('start')
   .description('Start the remote CLI service')
   .option('-d, --daemon', 'Run as background daemon')
-  .option('--non-interactive', 'Do not prompt during automated startup')
+  .option('--non-interactive', 'Exit after automatic updates for a process supervisor to restart')
   .action(async (options) => {
     try {
       const result = await startCommand({

@@ -13,7 +13,7 @@ Remote control Claude Code, AGY CLI, Codex CLI, OpenCode CLI, Kimi Code CLI, ZCo
 - **Multi-session (Threads)**: Create independent chat threads to parallelize tasks
 - **Remote Machine Management**: Control remote servers or Docker via SSH
 - **Persistent Process**: Long-running AI process with bidirectional streaming
-- **Non-Interactive Auto-Update**: Reconnect to a newer Router, wait for idle work, install its exact version, and exit for the process supervisor to restart
+- **Automatic Updates**: Install the newer Router's exact version when idle. Manual clients keep running and use the update on their next start; supervised non-interactive clients exit for an immediate restart.
 - **Task Recovery**: With a compatible Router, running tasks resume output on a usable surviving card or a new card with an output-gap notice. Recovery retries use bounded backoff; disconnected output is not buffered or replayed, even after recovery is paused.
 
 ## Prerequisites
@@ -63,6 +63,8 @@ remote-cli start
 ```
 Help me fix TypeScript errors in ~/projects/my-app
 ```
+
+Manual starts automatically install updates when tasks and queues are idle, without exiting the running client. Updates take effect on the next start. Use `remote-cli service install` for automatic startup and supervised restarts after updates. If the Router rejects the running protocol, restart the manual client after installation to reconnect. See [Automatic Client Startup](../../README.md#automatic-client-startup) for update behavior and recovery.
 
 ## Commands
 
