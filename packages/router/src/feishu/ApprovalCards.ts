@@ -177,20 +177,20 @@ export class ApprovalCards {
       { tag: 'markdown', content: `${kindIcon} **${kindLabel}**\n${descriptionBlock}` },
     ];
     if (request.approval.canRemember) elements.push({ tag: 'markdown', content:
-      `🧠 *Allow and remember directory* also grants this thread write access to:\n${request.approval.writableRoots!.map(root => `- \`${escape(root)}\``).join('\n')}` });
+      `🧠 *Always allow* also grants this thread write access to:\n${request.approval.writableRoots!.map(root => `- \`${escape(root)}\``).join('\n')}` });
     if (request.approval.kind === 'permissions') elements.push({ tag: 'markdown', content: '*Allow grants the displayed permissions for the current turn.*' });
     if (request.approval.kind !== 'permissions') elements.push({ tag: 'markdown', content: '*Approving this action may allow execution outside the sandbox.*' });
     if (status === 'disconnected') elements.push({ tag: 'markdown', content: '*A pending request will get a new card after reconnecting.*' });
     if (entry.error) elements.push({ tag: 'markdown', content: `⚠️ ${escape(entry.error)}` });
     if (status === 'pending' && !entry.submitting) {
       const buttons: any[] = [
-        { tag: 'button', type: 'primary', text: { tag: 'plain_text', content: 'Allow' },
+        { tag: 'button', type: 'primary', text: { tag: 'plain_text', content: 'Allow once' },
           behaviors: [{ type: 'callback', value: { action: 'approval_reply', requestId: request.messageId, decision: 'approve' } }] },
         { tag: 'button', type: 'default', text: { tag: 'plain_text', content: 'Deny' },
           behaviors: [{ type: 'callback', value: { action: 'approval_reply', requestId: request.messageId, decision: 'deny' } }] },
       ];
       if (request.approval.canRemember) buttons.push({ tag: 'button', type: 'default',
-        text: { tag: 'plain_text', content: 'Allow and remember directory' },
+        text: { tag: 'plain_text', content: 'Always allow' },
         behaviors: [{ type: 'callback', value: { action: 'approval_reply', requestId: request.messageId, decision: 'remember' } }] });
       elements.push({ tag: 'button_group', buttons });
     }
