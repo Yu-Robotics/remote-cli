@@ -14,7 +14,7 @@ The router server acts as a bridge between Feishu messaging and developer machin
 - **Queued task cards** appear at execution time for capable clients, with the thread, workspace, task preview, and remaining queue count; older clients retain waiting cards
 - **WebSocket connections** from local clients
 - **Feishu long connection** for receiving and sending messages
-- **Task recovery** with compatible clients: new cards resume output after reconnecting, with a gap notice instead of replaying disconnected output
+- **Task recovery** with compatible clients: resume output on a usable surviving card or create a new one, with an independent gap notice and plain-text handling of resumed fragments; failed card creation is not acknowledged as successful recovery
 - **Table-aware card splitting** and a single text fallback retry for a card rejected by Feishu's table limit
 
 ## Prerequisites
