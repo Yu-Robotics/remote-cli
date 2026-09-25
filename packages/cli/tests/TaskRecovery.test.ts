@@ -76,13 +76,46 @@ describe('TaskRecovery', () => {
     recovery.disconnected();
     recovery.registered(true);
     acknowledge(undefined, false);
-    vi.advanceTimersByTime(15000);
-    vi.advanceTimersByTime(15000);
+    vi.advanceTimersByTime(30000); // first backoff: 2 × RETRY_DELAY
+    vi.advanceTimersByTime(60000); // second backoff: 4 × RETRY_DELAY
     expect(resumes()).toHaveLength(3);
     expect(new Set(resumes().map(message => message.taskResume.recoveryId)).size).toBe(1);
     acknowledge();
     vi.advanceTimersByTime(15000);
     expect(resumes()).toHaveLength(3);
+  });
+
+  it('backs off repeated recovery failures instead of retrying at a fixed interval', () => {
+    recovery.disconnected();
+    recovery.registered(true);
+    acknowledge(undefined, false);
+    vi.advanceTimersByTime(15000);
+    expect(resumes()).toHaveLength(1); // backed off: no retry yet at the old fixed delay
+    vi.advanceTimersByTime(15000); // 30s total — first backoff retry fires
+    expect(resumes()).toHaveLength(2);
+    vi.advanceTimersByTime(59000); // next delay is 60s
+    expect(resumes()).toHaveLength(2);
+    vi.advanceTimersByTime(1000);
+    expect(resumes()).toHaveLength(3);
+    acknowledge(); // a successful ack resets the backoff
+    recovery.disconnected();
+    recovery.registered(true);
+    acknowledge(undefined, false);
+    vi.advanceTimersByTime(15000);
+    expect(resumes()).toHaveLength(4);
+  });
+
+  it('gives up after the recovery attempt cap instead of retrying forever', () => {
+    recovery.disconnected();
+    recovery.registered(true);
+    for (let index = 0; index < 25; index++) {
+      acknowledge(undefined, false);
+      vi.advanceTimersByTime(300000); // jump past any backoff delay
+    }
+    expect(resumes()).toHaveLength(20);
+    expect(recovery.hasPendingResults()).toBe(false);
+    vi.advanceTimersByTime(600000);
+    expect(resumes()).toHaveLength(20); // no further attempts after giving up
   });
 
   it('ignores an acknowledgement from an earlier connection', () => {

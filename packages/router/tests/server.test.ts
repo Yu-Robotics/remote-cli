@@ -261,13 +261,47 @@ describe('RouterServer', () => {
       expect(mockFeishuHandler.finalizeStreamingMessage).toHaveBeenCalledOnce();
     });
 
-    it('replaces an old card even if its default thread had not yet been resolved', async () => {
+    it('adopts a surviving old card even if its thread had not yet been resolved', async () => {
       const { send, replies } = await connect();
       mockFeishuHandler.setOnStartStreaming.mock.calls[0][0](resume.messageId, 'user-1', 'old-card', 'device-1');
       await send(resume);
       expect(replies().at(-1).success).toBe(true);
+      // No replacement card: the surviving card is adopted and later finalized.
+      expect(mockFeishuHandler.sendStreamingStart).not.toHaveBeenCalled();
       await send({ type: 'response', messageId: resume.messageId, openId: 'user-1', success: true });
-      expect(mockFeishuHandler.finalizeStreamingMessage.mock.calls[0][0]).toBe('execution-card');
+      expect(mockFeishuHandler.finalizeStreamingMessage.mock.calls[0][0]).toBe('old-card');
+    });
+
+    it('adopts a surviving streaming card and continues it with a gap separator', async () => {
+      const { send, replies } = await connect();
+      mockFeishuHandler.setOnStartStreaming.mock.calls[0][0](resume.messageId, 'user-1', 'old-card', 'device-1', 'thread-1');
+      await send({ type: 'stream', messageId: resume.messageId, openId: 'user-1', chunk: 'kept output' });
+      await send(resume);
+      expect(mockFeishuHandler.sendStreamingStart).not.toHaveBeenCalled();
+      expect(replies().at(-1)).toMatchObject({ type: 'task_resume_ack', success: true, recoveryId: 'recovery-1' });
+      const patched = mockFeishuHandler.updateStreamingMessage.mock.calls.at(-1)[1];
+      expect(JSON.stringify(patched)).toContain('kept output');
+      expect(JSON.stringify(patched)).toContain('Connection restored');
+      // Output after recovery continues in the same adopted card.
+      await send({ type: 'stream', messageId: resume.messageId, openId: 'user-1', chunk: 'tail' });
+      await send({ type: 'response', messageId: resume.messageId, openId: 'user-1', success: true });
+      expect(mockFeishuHandler.finalizeStreamingMessage.mock.calls[0][0]).toBe('old-card');
+      const elements = mockFeishuHandler.finalizeStreamingMessage.mock.calls[0][1];
+      expect(JSON.stringify(elements)).toContain('kept output');
+      expect(JSON.stringify(elements)).toContain('tail');
+    });
+
+    it('finalizes in-flight streaming cards on graceful stop', async () => {
+      const { send } = await connect();
+      await send(resume);
+      await send({ type: 'stream', messageId: resume.messageId, openId: 'user-1', chunk: 'partial' });
+      mockFeishuHandler.finalizeStreamingMessage.mockClear();
+      await server.stop();
+      expect(mockFeishuHandler.finalizeStreamingMessage).toHaveBeenCalledOnce();
+      const [cardId, elements] = mockFeishuHandler.finalizeStreamingMessage.mock.calls[0];
+      expect(cardId).toBe('execution-card');
+      expect(JSON.stringify(elements)).toContain('partial');
+      expect(JSON.stringify(elements)).toContain('restarting');
     });
 
     it('keeps long resumed fragments independently renderable after card splitting', async () => {
