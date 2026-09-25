@@ -1014,7 +1014,7 @@ describe('FeishuLongConnHandler', () => {
       const elements = JSON.parse(mockClient.im.message.patch.mock.calls[0][0].data.content).body.elements;
       expect(elements[0].content).toContain(replyName);
       expect(elements).toContainEqual({
-        tag: 'markdown', content: `💬 **Reply from:** ${replyName} · project-b\n🔀 **Switch thread**`,
+        tag: 'markdown', content: `↩️ **Reply from:** ${replyName} · project-b\n🗂️ **Switch thread**`,
       });
       const buttons = getButtons(elements);
       expect(buttons[0]).toMatchObject({ type: 'default', disabled: false });
@@ -1032,7 +1032,7 @@ describe('FeishuLongConnHandler', () => {
       ];
       await handler.finalizeStreamingMessage('card-2', [], undefined, 'user', undefined, undefined, threads, 't2');
       const elements = JSON.parse(mockClient.im.message.patch.mock.calls[0][0].data.content).body.elements;
-      expect(elements).toContainEqual(expect.objectContaining({ content: '💬 **Reply from:** thread-2 · project-b\n🔀 **Switch thread**' }));
+      expect(elements).toContainEqual(expect.objectContaining({ content: '↩️ **Reply from:** thread-2 · project-b\n🗂️ **Switch thread**' }));
       expect(getButtons(elements)[0]).toMatchObject({ type: 'primary', text: { content: '✓ default' } });
       expect(getButtons(elements)[1].type).toBe('default');
     });
@@ -1071,7 +1071,7 @@ describe('FeishuLongConnHandler', () => {
       expect(mockClient.im.message.patch).toHaveBeenCalledTimes(1);
       expect(mockClient.im.message.patch.mock.calls[0][0].path.message_id).toBe('older-card');
       const elements = JSON.parse(mockClient.im.message.patch.mock.calls[0][0].data.content).body.elements;
-      expect(elements).toContainEqual(expect.objectContaining({ content: '💬 **Reply from:** thread-2 · project-b\n🔀 **Switch thread**' }));
+      expect(elements).toContainEqual(expect.objectContaining({ content: '↩️ **Reply from:** thread-2 · project-b\n🗂️ **Switch thread**' }));
       expect(getButtons(elements)[0]).toMatchObject({ type: 'primary', disabled: false });
 
       await handler.handleCardAction({
@@ -1079,7 +1079,7 @@ describe('FeishuLongConnHandler', () => {
         action: { value: { action: 'switch_thread', threadId: 't3', threadName: 'thread-3' } },
       });
       const switched = JSON.parse(mockClient.im.message.patch.mock.calls[1][0].data.content).body.elements;
-      expect(switched).toContainEqual(expect.objectContaining({ content: '💬 **Reply from:** thread-2 · project-b\n🔀 **Switch thread**' }));
+      expect(switched).toContainEqual(expect.objectContaining({ content: '↩️ **Reply from:** thread-2 · project-b\n🗂️ **Switch thread**' }));
       expect(getButtons(switched)[1]).toMatchObject({ type: 'primary', disabled: false });
     });
 
@@ -1094,7 +1094,7 @@ describe('FeishuLongConnHandler', () => {
       expect(getButtons(first)).toHaveLength(0);
       expect(first.some((element: any) => element.content?.includes('Reply from:'))).toBe(false);
       const last = JSON.parse(mockClient.im.message.create.mock.calls[0][0].data.content).body.elements;
-      expect(last).toContainEqual(expect.objectContaining({ content: '💬 **Reply from:** thread-1 · project\n🔀 **Switch thread**' }));
+      expect(last).toContainEqual(expect.objectContaining({ content: '↩️ **Reply from:** thread-1 · project\n🗂️ **Switch thread**' }));
       expect(getButtons(last)).toHaveLength(11);
       expect(getButtons(last).at(-1)).toMatchObject({ disabled: true, text: { content: '+ New (max)' } });
 

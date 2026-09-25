@@ -1567,7 +1567,7 @@ Examples:
 
     const caption = {
       tag: 'markdown',
-      content: replyLabel ? `💬 **Reply from:** ${replyLabel}\n🔀 **Switch thread**` : '🔀 **Switch thread**',
+      content: replyLabel ? `↩️ **Reply from:** ${replyLabel}\n🗂️ **Switch thread**` : '🗂️ **Switch thread**',
     };
     return [{ tag: 'hr' }, caption, ...rows];
   }
