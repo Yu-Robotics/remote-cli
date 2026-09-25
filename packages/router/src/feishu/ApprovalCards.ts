@@ -15,8 +15,8 @@ interface CardState {
 interface ApprovalCardTransport {
   ownsDevice(openId: string, deviceId: string): Promise<boolean>;
   sendToDevice(deviceId: string, message: object): Promise<boolean>;
-  create(openId: string, elements: any[]): Promise<string | null>;
-  update(cardId: string, elements: any[]): Promise<void>;
+  create(openId: string, elements: any[], header?: Record<string, unknown>): Promise<string | null>;
+  update(cardId: string, elements: any[], header?: Record<string, unknown>): Promise<void>;
   registerReplyRoute(cardId: string, threadId: string, deviceId: string): void;
 }
 
@@ -45,7 +45,7 @@ export class ApprovalCards {
     this.pending.set(key, entry);
     entry.ready = (async () => {
       try {
-        entry.cardId = await this.transport.create(request.openId, this.elements(entry)) ?? undefined;
+        entry.cardId = await this.transport.create(request.openId, this.elements(entry), this.header(entry)) ?? undefined;
         if (entry.cardId) this.transport.registerReplyRoute(entry.cardId, request.threadId, deviceId);
       } catch { /* Fall back to the existing text approval flow. */ }
       if (!entry.cardId) {
@@ -143,34 +143,56 @@ export class ApprovalCards {
     entry.updating = (async () => {
       await entry.ready;
       await previous;
-      if (entry.cardId) await this.transport.update(entry.cardId, this.elements(entry));
+      if (entry.cardId) await this.transport.update(entry.cardId, this.elements(entry), this.header(entry));
     })().catch(error => console.error('[ApprovalCards] Failed to update approval card:', error instanceof Error ? error.message : error));
     await entry.updating;
+  }
+
+  private header(entry: CardState): Record<string, unknown> {
+    const { status } = entry;
+    const [template, title]: [string, string] = status === 'pending'
+      ? (entry.submitting ? ['blue', '⏳ Waiting for CLI confirmation'] : ['blue', '🔐 Permission request'])
+      : ({
+        approved: ['green', '✅ Approved'],
+        remembered: ['green', '✅ Approved and directory access remembered'],
+        denied: ['red', '❌ Denied'],
+        expired: ['orange', '⏰ Approval expired'],
+        disconnected: ['grey', '🔌 Device disconnected'],
+      } as Record<string, [string, string]>)[status] ?? ['grey', '🔐 Permission request'];
+    return { template, title: { tag: 'plain_text', content: title } };
   }
 
   private elements(entry: CardState): any[] {
     const { request, status } = entry;
     const escape = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/[\\`*_{}\[\]()!|#]/g, '\\$&');
-    const label = status === 'pending' ? (entry.submitting ? 'Waiting for CLI confirmation' : 'Permission request')
-      : { approved: 'Approved', denied: 'Denied', remembered: 'Approved and directory access remembered',
-        expired: 'Approval expired', disconnected: 'Device disconnected. A pending request will get a new card after reconnecting.' }[status];
+    const [kindIcon, kindLabel] = ({ command: ['💻', 'Command'], file: ['📝', 'File'],
+      permissions: ['🔑', 'Permissions'] } as Record<string, [string, string]>)[request.approval.kind] ?? ['🔐', 'Request'];
+    const description = request.approval.description;
+    // Fenced code blocks keep commands readable; fall back to escaped text when
+    // the description itself contains a fence.
+    const descriptionBlock = description.includes('```') ? escape(description) : '```\n' + description + '\n```';
     const elements: any[] = [
-      { tag: 'markdown', content: `**${label}**` },
-      { tag: 'markdown', content: `Reply from: ${escape(request.threadName)}\nWorkspace: ${escape(request.cwd)}` },
-      { tag: 'markdown', content: escape(request.approval.description) },
+      { tag: 'markdown', content: `🧵 **${escape(request.threadName)}**  ·  📂 \`${escape(request.cwd)}\`` },
+      { tag: 'hr' },
+      { tag: 'markdown', content: `${kindIcon} **${kindLabel}**\n${descriptionBlock}` },
     ];
     if (request.approval.canRemember) elements.push({ tag: 'markdown', content:
-      `Remember grants write access to these directories and their children for this thread:\n${request.approval.writableRoots!.map(root => `- ${escape(root)}`).join('\n')}` });
-    if (request.approval.kind === 'permissions') elements.push({ tag: 'markdown', content: 'Allow grants the displayed permissions for the current turn.' });
-    if (request.approval.kind !== 'permissions') elements.push({ tag: 'markdown', content: 'Approving this action may allow execution outside the sandbox.' });
-    if (entry.error) elements.push({ tag: 'markdown', content: escape(entry.error) });
+      `🧠 *Allow and remember directory* also grants this thread write access to:\n${request.approval.writableRoots!.map(root => `- \`${escape(root)}\``).join('\n')}` });
+    if (request.approval.kind === 'permissions') elements.push({ tag: 'markdown', content: '*Allow grants the displayed permissions for the current turn.*' });
+    if (request.approval.kind !== 'permissions') elements.push({ tag: 'markdown', content: '*Approving this action may allow execution outside the sandbox.*' });
+    if (status === 'disconnected') elements.push({ tag: 'markdown', content: '*A pending request will get a new card after reconnecting.*' });
+    if (entry.error) elements.push({ tag: 'markdown', content: `⚠️ ${escape(entry.error)}` });
     if (status === 'pending' && !entry.submitting) {
-      const actions: Array<[ApprovalAction, string, string]> = [['approve', 'Allow', 'primary'], ['deny', 'Deny', 'default']];
-      if (request.approval.canRemember) actions.push(['remember', 'Allow and remember directory', 'default']);
-      for (const [action, label, type] of actions) elements.push({ tag: 'button', type,
-        text: { tag: 'plain_text', content: label },
-        behaviors: [{ type: 'callback', value: { action: 'approval_reply', requestId: request.messageId, decision: action } }],
-      });
+      const buttons: any[] = [
+        { tag: 'button', type: 'primary', text: { tag: 'plain_text', content: 'Allow' },
+          behaviors: [{ type: 'callback', value: { action: 'approval_reply', requestId: request.messageId, decision: 'approve' } }] },
+        { tag: 'button', type: 'default', text: { tag: 'plain_text', content: 'Deny' },
+          behaviors: [{ type: 'callback', value: { action: 'approval_reply', requestId: request.messageId, decision: 'deny' } }] },
+      ];
+      if (request.approval.canRemember) buttons.push({ tag: 'button', type: 'default',
+        text: { tag: 'plain_text', content: 'Allow and remember directory' },
+        behaviors: [{ type: 'callback', value: { action: 'approval_reply', requestId: request.messageId, decision: 'remember' } }] });
+      elements.push({ tag: 'button_group', buttons });
     }
     return elements;
   }

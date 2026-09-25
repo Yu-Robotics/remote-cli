@@ -1259,9 +1259,9 @@ Examples:
    * @param elements Array of Feishu Card 2.0 elements
    * @returns The new message ID, or null on error
    */
-  private async createContinuationCard(openId: string, elements: any[], onTableLimit?: () => void, allowFallback = true): Promise<string | null> {
+  private async createContinuationCard(openId: string, elements: any[], onTableLimit?: () => void, allowFallback = true, header?: Record<string, unknown>): Promise<string | null> {
     try {
-      const content = JSON.stringify({ schema: '2.0', body: { elements: limitCardTables(elements) } });
+      const content = JSON.stringify({ schema: '2.0', ...(header ? { header } : {}), body: { elements: limitCardTables(elements) } });
       const result = await this.sendCardRequest(content, body => this.client.im.message.create({
         params: { receive_id_type: 'open_id' },
         data: {
@@ -1303,14 +1303,14 @@ Examples:
    * session. Returns the Feishu message ID so the caller can register the
    * card in cardThreadMap for reply-to-continue-thread routing.
    */
-  async sendTaskNotificationCard(openId: string, elements: any[]): Promise<string | null> {
-    return this.createContinuationCard(openId, elements);
+  async sendTaskNotificationCard(openId: string, elements: any[], header?: Record<string, unknown>): Promise<string | null> {
+    return this.createContinuationCard(openId, elements, undefined, true, header);
   }
 
-  async updateApprovalCard(cardId: string, elements: any[]): Promise<void> {
+  async updateApprovalCard(cardId: string, elements: any[], header?: Record<string, unknown>): Promise<void> {
     await this.withMessageLock(cardId, async () => {
       await this.client.im.message.patch({ path: { message_id: cardId },
-        data: { content: JSON.stringify({ schema: '2.0', body: { elements } }) } });
+        data: { content: JSON.stringify({ schema: '2.0', ...(header ? { header } : {}), body: { elements } }) } });
     });
   }
 

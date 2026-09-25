@@ -111,6 +111,7 @@ async function handleMessage(message: any): Promise<void> {
       content: [{ type: 'text', text: JSON.stringify({
         behavior: answer.behavior === 'allow' ? 'allow' : 'deny',
         ...(answer.behavior === 'allow' ? { updatedInput: answer.updatedInput ?? args.input } : {}),
+        ...(answer.behavior === 'allow' && answer.updatedPermissions ? { updatedPermissions: answer.updatedPermissions } : {}),
         ...(answer.behavior !== 'allow' ? { message: answer.message ?? 'Denied by remote user' } : {}),
       }) }],
     });
