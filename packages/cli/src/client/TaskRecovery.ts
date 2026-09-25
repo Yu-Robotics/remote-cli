@@ -16,12 +16,17 @@ interface TaskState {
   recoveryId: string;
   needsRecovery: boolean;
   recovered: boolean;
+  recoveryAttempts: number;
   result?: { success: boolean; error?: string; finishedAt: number };
 }
 
 const RESULT_TTL = 24 * 60 * 60 * 1000;
 const MAX_RESULTS = 100;
 const RETRY_DELAY = 15000;
+const MAX_RETRY_DELAY = 5 * 60 * 1000;
+// Bounds total recovery effort per task so a permanently failing receiver
+// (e.g. Feishu outage) does not retry forever.
+const MAX_RECOVERY_ATTEMPTS = 20;
 
 /** Keeps bounded task metadata across socket reconnects, never process output. */
 export class TaskRecovery {
@@ -30,6 +35,7 @@ export class TaskRecovery {
   private supported = false;
   private inFlight?: { messageId: string; recoveryId: string; state: TaskResumeInfo['state'] };
   private retryTimer?: NodeJS.Timeout;
+  private consecutiveFailures = 0;
 
   constructor(private readonly sendRaw: (message: any) => void) {}
 
@@ -38,6 +44,7 @@ export class TaskRecovery {
       task: { ...task, threadName: task.threadName.slice(0, 100), backend: task.backend.slice(0, 100),
         cwd: task.cwd.slice(0, 4096), preview: task.preview.replace(/\s+/g, ' ').slice(0, 240) },
       recoveryId: uuidv4(), needsRecovery: !this.connected, recovered: !this.connected,
+      recoveryAttempts: 0,
     });
   }
 
@@ -55,6 +62,7 @@ export class TaskRecovery {
   registered(supported: boolean): void {
     this.connected = true;
     this.supported = supported;
+    this.consecutiveFailures = 0;
     if (!supported) {
       for (const [id, entry] of this.tasks) {
         if (entry.result) this.tasks.delete(id);
@@ -121,8 +129,13 @@ export class TaskRecovery {
         }
       }
     }
-    if (message.success === true) this.pump();
-    else this.scheduleRetry();
+    if (message.success === true) {
+      this.consecutiveFailures = 0;
+      this.pump();
+    } else {
+      this.consecutiveFailures += 1;
+      this.scheduleRetry();
+    }
   }
 
   hasPendingResults(): boolean {
@@ -139,11 +152,22 @@ export class TaskRecovery {
   private pump(): void {
     this.prune();
     if (!this.connected || !this.supported || this.inFlight) return;
-    const entry = Array.from(this.tasks.values()).find(item => item.needsRecovery);
+    let entry: TaskState | undefined;
+    for (const item of this.tasks.values()) {
+      if (!item.needsRecovery) continue;
+      if (item.recoveryAttempts >= MAX_RECOVERY_ATTEMPTS) {
+        console.error(`[TaskRecovery] Giving up on task ${item.task.messageId} after ${item.recoveryAttempts} recovery attempts; its status will not be recovered.`);
+        this.tasks.delete(item.task.messageId);
+        continue;
+      }
+      entry = item;
+      break;
+    }
     if (!entry) {
       if (this.hasPendingResults()) this.scheduleRetry();
       return;
     }
+    entry.recoveryAttempts += 1;
     const { task, result } = entry;
     const taskResume: TaskResumeInfo = {
       recoveryId: entry.recoveryId, threadName: task.threadName, backend: task.backend,
@@ -162,14 +186,18 @@ export class TaskRecovery {
 
   private scheduleRetry(): void {
     if (this.retryTimer || !this.connected || !this.supported) return;
+    // Exponential backoff per consecutive failure (nack or lost ack), so a
+    // persistent receiver failure does not hammer the socket and Feishu API.
+    const delay = Math.min(RETRY_DELAY * 2 ** this.consecutiveFailures, MAX_RETRY_DELAY);
     this.retryTimer = setTimeout(() => {
       this.retryTimer = undefined;
+      this.consecutiveFailures += 1;
       this.inFlight = undefined;
       for (const entry of this.tasks.values()) {
         if (entry.result) { entry.needsRecovery = true; entry.recovered = true; }
       }
       this.pump();
-    }, RETRY_DELAY);
+    }, delay);
     this.retryTimer.unref?.();
   }
 

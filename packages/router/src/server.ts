@@ -973,7 +973,22 @@ export class RouterServer {
     if (previous && (previous.deviceId !== deviceId || previous.openId !== openId
       || (previous.threadId && previous.threadId !== threadId))) return false;
 
-    if (!previous || previous.recoveryId !== info.recoveryId) {
+    if (previous && previous.recoveryId !== info.recoveryId && !previous.finalizing) {
+      // The pre-disconnect session survived: the CLI reconnected before the old
+      // socket's close handler could run cleanup. Adopt the existing card instead
+      // of replacing it — retained output stays visible and new output continues
+      // in the same card, with a separator marking the possible gap.
+      previous.recoveryId = info.recoveryId;
+      previous.recoveryCwd = info.cwd;
+      previous.threadId = previous.threadId ?? threadId;
+      previous.threadName = previous.threadName ?? info.threadName;
+      previous.currentTextContent += '\n\n---\n🔄 **Connection restored** — output during the interruption may be missing.\n\n';
+      previous.createdAt = Date.now();
+      if (previous.feishuMessageId) {
+        await this.updateStreamingText(messageId, openId, previous);
+        if (!isCurrent()) return false;
+      }
+    } else if (!previous) {
       const escape = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
       const intro = `🔄 **${info.state === 'running' ? 'Connection restored — task continues' : 'Task status recovered'}**\n\n`
         + `Output before this card, including output during disconnection, was not retained.\n\n`
@@ -1266,6 +1281,22 @@ export class RouterServer {
       clearInterval(this.cleanupInterval);
       this.cleanupInterval = null;
     }
+
+    // Finalize in-flight streaming cards before losing the Feishu connection,
+    // so a graceful restart does not leave users with permanently unfinished
+    // cards. (A hard crash still cannot do this.)
+    for (const [messageId, session] of Array.from(this.streamingMessages.entries())) {
+      if (session.finalizing) continue;
+      try {
+        await this.finalizeStreamingMessage(
+          messageId, false, undefined, 'Router server is restarting — task was interrupted.'
+        );
+      } catch (error) {
+        console.error(`[RouterServer] Failed to finalize streaming card ${messageId} during shutdown:`, error);
+      }
+    }
+    this.streamingMessages.clear();
+    this.lastStreamUpdateTime.clear();
 
     // Stop Feishu long connection
     try {
