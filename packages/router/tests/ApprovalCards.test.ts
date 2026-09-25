@@ -24,10 +24,16 @@ describe('ApprovalCards', () => {
   it('renders scoped choices, routes to the original device, and waits for the CLI before showing approval', async () => {
     await cards.receive(request(), 'original-device', () => true);
     const elements = transport.create.mock.calls[0][1];
-    expect(elements[0]).toMatchObject({ content: '**Permission request**' });
-    expect(elements.filter((element: any) => element.tag === 'button').map((button: any) => button.text.content))
+    const header = transport.create.mock.calls[0][2];
+    expect(header).toMatchObject({ template: 'blue', title: { content: '🔐 Permission request' } });
+    expect(JSON.stringify(elements)).toContain('🧵 **thread-2**');
+    expect(JSON.stringify(elements)).toContain('📂 `/project`');
+    expect(JSON.stringify(elements)).toContain('📝 **File**');
+    const groups = elements.filter((element: any) => element.tag === 'button_group');
+    expect(groups).toHaveLength(1);
+    expect(groups[0].buttons.map((button: any) => button.text.content))
       .toEqual(['Allow', 'Deny', 'Allow and remember directory']);
-    expect(JSON.stringify(elements)).toContain('&lt;config&gt;');
+    expect(JSON.stringify(elements)).toContain('Write <config> in another project');
     expect(transport.registerReplyRoute).toHaveBeenCalledWith('card-1', 'thread-2', 'original-device');
     await expect(cards.click('someone-else', 'approval-1', 'card-1', 'approve')).rejects.toThrow('belong');
     await expect(cards.click('owner', 'approval-1', 'wrong-card', 'approve')).rejects.toThrow('expired');
@@ -40,8 +46,9 @@ describe('ApprovalCards', () => {
     await vi.waitFor(() => expect(JSON.stringify(transport.update.mock.calls)).toContain('Waiting for CLI confirmation'));
     expect(JSON.stringify(transport.update.mock.calls)).not.toContain('Approved and directory');
     await cards.resolve({ type: 'approval_resolved', messageId: 'approval-1', openId: 'owner', threadId: 'thread-2', status: 'remembered', timestamp: 2 }, 'original-device');
-    expect(JSON.stringify(transport.update.mock.calls.at(-1))).toContain('Approved and directory access remembered');
-    expect(transport.update.mock.calls.at(-1)![1].some((element: any) => element.tag === 'button')).toBe(false);
+    const finalUpdate = transport.update.mock.calls.at(-1)!;
+    expect(finalUpdate[2]).toMatchObject({ template: 'green', title: { content: '✅ Approved and directory access remembered' } });
+    expect(finalUpdate[1].some((element: any) => element.tag === 'button_group')).toBe(false);
     await expect(cards.click('owner', 'approval-1', 'card-1', 'approve')).rejects.toThrow('expired');
     await cards.receive(request(), 'original-device', () => true);
     expect(transport.create).toHaveBeenCalledTimes(1);
@@ -99,7 +106,8 @@ describe('ApprovalCards', () => {
     expect(JSON.stringify(transport.update.mock.calls.at(-1))).toContain('No CLI confirmation');
     await cards.click('owner', 'approval-1', 'card-1', 'remember');
     await cards.resolve({ type: 'approval_resolved', messageId: 'approval-1', openId: 'owner', threadId: 'thread-2', status: 'pending', error: 'Save failed', timestamp: 2 }, 'device');
-    expect(transport.update.mock.calls.at(-1)![1].filter((element: any) => element.tag === 'button')).toHaveLength(3);
+    expect(transport.update.mock.calls.at(-1)![1].filter((element: any) => element.tag === 'button_group')).toHaveLength(1);
+    expect(transport.update.mock.calls.at(-1)![1].filter((element: any) => element.tag === 'button_group')[0].buttons).toHaveLength(3);
     await cards.click('owner', 'approval-1', 'card-1', 'deny');
     expect(transport.sendToDevice).toHaveBeenCalledTimes(4);
   });
