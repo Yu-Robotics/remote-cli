@@ -185,6 +185,8 @@ export class ThreadManager {
       throw new Error('Cannot delete the default thread.');
     }
 
+    // Revoke Codex directory grants even when this thread currently uses another backend.
+    await fs.rm(path.join(path.dirname(this.storePath), 'codex-sandbox', `${encodeURIComponent(id)}.json`), { force: true });
     delete this.store.threads[id];
     await this.persist();
   }

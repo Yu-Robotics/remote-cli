@@ -41,14 +41,26 @@ export interface AgyExecutorConfig {
 /**
  * Codex CLI (OpenAI) executor configuration
  */
+export interface CodexSandboxConfig {
+  mode: 'workspace-write' | 'read-only' | 'danger-full-access';
+  /** Allow network access inside the sandbox. Default: true. */
+  networkAccess?: boolean;
+  /** Additional writable directories explicitly authorized by the user. */
+  writableRoots?: string[];
+  /** Include download and package-cache directories. Default: true. */
+  developmentDirectories?: boolean;
+}
+
 export interface CodexExecutorConfig {
   /** Model passed as -m (e.g. 'gpt-5.2-codex'). Unset = codex default. */
   model?: string;
   /**
-   * Bypass all approvals and the sandbox via
-   * --dangerously-bypass-approvals-and-sandbox. Default: true.
+   * Use full access and approve tool requests when no sandbox is configured.
+   * Restricted sandbox modes always ask before widening permissions. Default: true.
    */
   autoApprove?: boolean;
+  /** Optional sandbox policy. Unset preserves the existing backend behavior. */
+  sandbox?: CodexSandboxConfig;
   /** Override codex binary command (default: 'codex') */
   command?: string;
 }

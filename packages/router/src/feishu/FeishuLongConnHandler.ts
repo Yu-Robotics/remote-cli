@@ -118,6 +118,7 @@ export class FeishuLongConnHandler {
    */
   onCardNewThread?: (openId: string) => Promise<void>;
   /** Callback invoked when a user confirms or cancels a queued command. */
+  onApprovalAction?: (openId: string, requestId: string, cardId: string, decision: string) => Promise<string>;
   onQueueAction?: (openId: string, action: 'confirm' | 'cancel', queueId: string, threadId: string, cardMessageId?: string) => Promise<'sent' | 'already_processed'>;
 
   /**
@@ -1306,6 +1307,13 @@ Examples:
     return this.createContinuationCard(openId, elements);
   }
 
+  async updateApprovalCard(cardId: string, elements: any[]): Promise<void> {
+    await this.withMessageLock(cardId, async () => {
+      await this.client.im.message.patch({ path: { message_id: cardId },
+        data: { content: JSON.stringify({ schema: '2.0', body: { elements } }) } });
+    });
+  }
+
   /**
    * Upload a generated image for use in a Feishu card.
    */
@@ -1697,11 +1705,24 @@ Examples:
     const actionValue = data?.action?.value;
     if (!openId || !actionValue) return;
 
-    let parsed: { action: string; threadId?: string; threadName?: string; queueId?: string };
+    let parsed: { action: string; threadId?: string; threadName?: string; queueId?: string; requestId?: string; decision?: string };
     try {
       parsed = typeof actionValue === 'string' ? JSON.parse(actionValue) : actionValue;
     } catch {
       return;
+    }
+
+    if (parsed.action === 'approval_reply') {
+      const cardId = data?.context?.open_message_id;
+      if (!parsed.requestId || !parsed.decision || !cardId || !this.onApprovalAction) {
+        return { toast: { type: 'error', content: 'This approval is no longer available.' } };
+      }
+      try {
+        const content = await this.onApprovalAction(openId, parsed.requestId, cardId, parsed.decision);
+        return { toast: { type: 'info', content } };
+      } catch (error) {
+        return { toast: { type: 'error', content: error instanceof Error ? error.message : 'Approval failed.' } };
+      }
     }
 
     if (parsed.action === 'switch_thread' && parsed.threadId) {

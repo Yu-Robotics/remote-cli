@@ -99,7 +99,7 @@ This is a remote CLI tool that allows developers to control Claude Code CLI from
   - `packages/cli`: Local client that runs on the developer's machine
   - `packages/router`: Routing server that manages user binding and message forwarding via Feishu
 - **Local client** connects to a router server via WebSocket and executes Claude Code commands
-- **Security model**: Working-directory selection controls + device authentication; backend processes are not sandboxed
+- **Security model**: Working-directory selection controls + device authentication; backend processes retain OS user permissions; Codex supports opt-in native command sandboxing
 
 ## Development Commands
 
@@ -288,7 +288,7 @@ The router server is fully implemented with:
 
 Use the current [CLI types](packages/cli/src/types/index.ts), [Router types](packages/router/src/types/index.ts), [WebSocketClient](packages/cli/src/client/WebSocketClient.ts), and [Router dispatcher](packages/router/src/server.ts) as the protocol reference. The Router's generic `WSMessage` envelope does not describe every wire message: registration uses nested `data`, while commands, streaming output, and final responses carry their payload fields at the top level.
 
-- Registration exchanges the protocol version and optional capabilities such as `queueStarted` and `taskRecovery`.
+- Registration exchanges the protocol version and optional capabilities such as `queueStarted`, `taskRecovery`, and `approvalCards`.
 - `threadId` associates commands and output with a remote-cli thread; a backend's session ID is a separate identifier.
 - Streaming supports text, tools, images, filtered-thinking notices, and plan messages. Background tasks use separate `task_notification` cards.
 - Queue-start and task-recovery messages establish fresh execution cards before subsequent output is routed to them. Recovery sends metadata and later output, not a replay of disconnected output.
@@ -399,7 +399,8 @@ Codex CLI is auto-detected if already installed on the local machine (`codex --v
 |-------|--------|---------|-------------|
 | `executor.type` | `auto`, `claude-persistent`, `agy`, `codex`, `opencode`, `kimi`, `zcode`, `pi` | `auto` | Which AI CLI backend to use (managed via `/backend` command) |
 | `executor.codex.model` | model name (e.g. `gpt-5.2-codex`) | *(unset)* | Model passed as `-m`. Unset = codex default. |
-| `executor.codex.autoApprove` | `true`/`false` | `true` | Bypass approvals and the sandbox via `--dangerously-bypass-approvals-and-sandbox` |
+| `executor.codex.autoApprove` | `true`/`false` | `true` | Use full access unless a restricted sandbox mode is configured; restricted modes relay approvals |
+| `executor.codex.sandbox` | Optional sandbox configuration object | *(unset)* | Native mode, networking, development directories, and extra writable roots; see README |
 | `executor.codex.command` | binary command | `codex` | Override codex binary |
 
 ### Architecture (Codex)
@@ -422,6 +423,10 @@ Codex background command and sub-agent completion events also produce standalone
 **Slash passthrough (Codex)**: none — app-server has no interactive TUI slash-command protocol, so backend-specific slash commands are rejected. remote-cli's built-in commands (`/clear`, `/compact`, `/model`, `/effort`, ...) are handled locally.
 
 **Compact**: `/compact` uses app-server thread compaction.
+
+**Approval cards**: Codex emits optional `onApprovalRequest`/`onApprovalResolved` callbacks. `MessageHandler` negotiates `approvalCards` and forwards request IDs independently of task-output recovery; pending approvals are replayed on registration. Router `ApprovalCards` owns rendering and validates the original user, device, card, and request before returning an `approval_response`. Only a CLI `approval_resolved` acknowledgement marks the card approved; terminal events invalidate remaining requests. Old peers and failed card creation retain text input. No backend other than Codex emits these callbacks yet.
+
+**Sandbox**: `/sandbox` is Codex-only. `CodexSandbox.ts` resolves native thread/turn policies and persists per-thread overrides in `~/.remote-cli/codex-sandbox/`. Workspace-write permits broad reads and networking, with writes to the current workspace, dedicated temporary/download paths, common caches, and explicit directory grants. Restricted modes never automatically accept requests to widen permissions. Native permission requests support `remember` for persistent writable-directory grants. Conversation resets retain these settings; deleting a thread revokes them. See [Optional Codex sandbox](README.md#optional-codex-sandbox).
 
 ---
 

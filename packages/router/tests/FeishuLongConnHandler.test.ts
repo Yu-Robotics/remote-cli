@@ -2352,6 +2352,16 @@ describe('FeishuLongConnHandler', () => {
   });
 
   describe('handleCardAction', () => {
+    it('passes approval clicks with the operator and source card, including errors for expired requests', async () => {
+      handler.onApprovalAction = vi.fn().mockResolvedValue('Waiting for CLI confirmation.');
+      const event = { operator: { open_id: 'owner' }, context: { open_message_id: 'card-1' },
+        action: { value: { action: 'approval_reply', requestId: 'request-1', decision: 'remember' } } };
+      expect(await handler.handleCardAction(event)).toEqual({ toast: { type: 'info', content: 'Waiting for CLI confirmation.' } });
+      expect(handler.onApprovalAction).toHaveBeenCalledWith('owner', 'request-1', 'card-1', 'remember');
+      vi.mocked(handler.onApprovalAction).mockRejectedValue(new Error('Approval expired'));
+      expect(await handler.handleCardAction(event)).toEqual({ toast: { type: 'error', content: 'Approval expired' } });
+    });
+
     it('should handle switch_thread action', async () => {
       const onCardSwitchThread = vi.fn().mockResolvedValue(undefined);
       handler.onCardSwitchThread = onCardSwitchThread;

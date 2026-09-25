@@ -1,3 +1,5 @@
+import { ApprovalCards } from './feishu/ApprovalCards';
+import type { ApprovalAction } from './types';
 import Koa from 'koa';
 import bodyParser from 'koa-bodyparser';
 import Router from '@koa/router';
@@ -47,6 +49,7 @@ export class RouterServer {
   private feishuLongConnHandler: FeishuLongConnHandler;
   private connectionHub: ConnectionHub;
   private bindingManager: BindingManager;
+  private approvalCards: ApprovalCards;
   private cleanupInterval: NodeJS.Timeout | null = null;
   // Track streaming messages and coalesced Feishu card update state.
   private streamingMessages = new Map<string, StreamingMessageState>();
@@ -80,6 +83,17 @@ export class RouterServer {
 
     // Share ConnectionHub with Feishu handler
     this.feishuLongConnHandler.setConnectionHub(this.connectionHub);
+    this.approvalCards = new ApprovalCards({
+      ownsDevice: async (openId, deviceId) => (await this.bindingManager.getDeviceBinding(deviceId))?.openId === openId,
+      sendToDevice: (deviceId, message) => this.connectionHub.sendToDevice(deviceId, message),
+      create: (openId, elements) => this.feishuLongConnHandler.sendTaskNotificationCard(openId, elements),
+      update: (cardId, elements) => this.feishuLongConnHandler.updateApprovalCard(cardId, elements),
+      registerReplyRoute: (cardId, threadId, deviceId) => {
+        this.cardThreadMap.set(cardId, { threadId, deviceId, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS });
+      },
+    });
+    this.feishuLongConnHandler.onApprovalAction = (openId, requestId, cardId, decision) =>
+      this.approvalCards.click(openId, requestId, cardId, decision as ApprovalAction);
 
     // Register callback for streaming message start
     this.feishuLongConnHandler.setOnStartStreaming((messageId: string, openId: string, feishuMessageId: string | null, deviceId: string, threadId?: string, pendingNewThread?: boolean, queueCardId?: string) => {
@@ -285,6 +299,7 @@ export class RouterServer {
 
       let deviceId: string | null = null;
       let taskRecoveryEnabled = false;
+      let approvalCardsEnabled = false;
       let heartbeatTimeout: NodeJS.Timeout | null = null;
 
       // Reset heartbeat timeout
@@ -313,6 +328,13 @@ export class RouterServer {
           // Update heartbeat on any message
           resetHeartbeat();
 
+          if (message.type === 'approval_request' || message.type === 'approval_resolved') {
+            if (!approvalCardsEnabled || !deviceId) return;
+            if (message.type === 'approval_request') {
+              await this.approvalCards.receive(message, deviceId, () => this.connectionHub.isCurrentConnection(deviceId!, ws));
+            } else await this.approvalCards.resolve(message, deviceId);
+            return;
+          }
           if (message.type === 'queue_started') {
             await this.handleQueueStarted(message, deviceId);
             return;
@@ -375,6 +397,7 @@ export class RouterServer {
                   break;
                 }
 
+                this.approvalCards.disconnect(deviceId);
                 if (message.data.capabilities?.queueStarted === true) {
                   this.connectionHub.registerConnection(deviceId, ws, { queueStarted: true });
                 } else {
@@ -383,6 +406,7 @@ export class RouterServer {
                 console.log(`Device registered: ${deviceId} (protocol v${clientVersion})`);
 
                 taskRecoveryEnabled = message.data.capabilities?.taskRecovery === true;
+                approvalCardsEnabled = message.data.capabilities?.approvalCards === true;
                 // Send confirmation with version info for client-side version check
                 ws.send(JSON.stringify({
                   type: MessageType.BINDING_CONFIRM,
@@ -392,7 +416,10 @@ export class RouterServer {
                     success: true,
                     routerVersion: ROUTER_VERSION,
                     minCliVersion: MIN_SUPPORTED_CLI_VERSION,
-                    ...(taskRecoveryEnabled ? { capabilities: { taskRecovery: true } } : {}),
+                    ...((taskRecoveryEnabled || approvalCardsEnabled) ? { capabilities: {
+                      ...(taskRecoveryEnabled ? { taskRecovery: true } : {}),
+                      ...(approvalCardsEnabled ? { approvalCards: true } : {}),
+                    } } : {}),
                   }
                 }));
               }
@@ -590,6 +617,7 @@ export class RouterServer {
         if (heartbeatTimeout) clearTimeout(heartbeatTimeout);
         if (deviceId && this.connectionHub.unregisterConnection(deviceId, ws)) {
           // Clean up any streaming sessions for this device
+          this.approvalCards.disconnect(deviceId);
           this.cleanupStreamingSessionsForDevice(deviceId);
           console.log('Device disconnected:', deviceId);
         }
@@ -1284,6 +1312,7 @@ export class RouterServer {
    */
   async stop(): Promise<void> {
     console.log('Stopping router server...');
+    this.approvalCards.destroy();
 
     // Stop cleanup interval
     if (this.cleanupInterval) {

@@ -90,6 +90,7 @@ export function createExecutor(
         model: model ?? executorConfig.codex?.model,
         effort,
         autoApprove: executorConfig.codex?.autoApprove ?? true,
+        sandbox: executorConfig.codex?.sandbox,
         initialWorkingDirectory,
         codexCommand: executorConfig.codex?.command,
         threadId,

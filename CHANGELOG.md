@@ -10,6 +10,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.60] - 2026-09-25
+
+### Added
+- Interactive Codex approval cards with Allow, Deny, and conditional persistent directory grants.
+- Additive capability negotiation and request-scoped approval responses, with text fallback for older routers or card delivery failures.
+
+### Fixed
+- Bind approval buttons to their original user, device, thread, and request; invalidate completed requests and reject duplicate or stale clicks.
+- Restore pending approvals with fresh cards after reconnecting, and show decisions only after CLI acknowledgement.
+
+## [1.6.59] - 2026-09-25
+
+### Added
+- Opt-in Codex native sandbox policies with per-thread directory grants, network controls, and development-friendly temporary/download/cache access.
+- `/sandbox` configuration commands and explicit, persistent writable-directory approval through `remember` for native Codex permission requests.
+
+### Security
+- Apply sandbox policy on thread creation, session restoration, working-directory changes, and every turn. Restricted modes relay privilege-expansion requests instead of auto-approving them.
+- Retain grants across conversation resets and backend switches; revoke them when a thread is deleted. Existing defaults and other backend execution policies are unchanged.
+
 ## 1.6.55 - 2026-09-25
 
 ### Fixed
