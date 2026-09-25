@@ -1,11 +1,14 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { randomUUID } from 'crypto';
 import { DirectoryGuard } from '../security/DirectoryGuard';
-import type { Attachment, ImageBlock } from '../types';
+import type { Attachment, ImageBlock, ApprovalAction, ApprovalStatus, ApprovalRequestInfo } from '../types';
 import type { ExecuteOptions, ExecuteResult, ExecutorModelInfo, IExecutor } from './IExecutor';
 import { AppServerMessage, CodexAppServerClient } from './CodexAppServerClient';
 import { CodexTaskNotifications } from './CodexTaskNotifications';
+import { CodexSandbox } from './CodexSandbox';
+import type { CodexSandboxConfig } from '../types/config';
 
 export interface CodexAppServerTransport {
   start(): Promise<void>;
@@ -22,6 +25,7 @@ export interface CodexAppServerExecutorOptions {
   model?: string;
   effort?: string;
   autoApprove?: boolean;
+  sandbox?: CodexSandboxConfig;
   initialWorkingDirectory?: string;
   codexCommand?: string;
   threadId?: string;
@@ -52,6 +56,8 @@ interface PendingUserInput {
   id: number | string;
   method: string;
   params: any;
+  approval?: ApprovalRequestInfo;
+  resolved?: ExecuteOptions['onApprovalResolved'];
 }
 
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000;
@@ -68,6 +74,7 @@ export class CodexAppServerExecutor implements IExecutor {
   private model?: string;
   private effort?: string;
   private readonly autoApprove: boolean;
+  private readonly sandbox: CodexSandbox;
   private readonly remoteThreadId?: string;
   private readonly sessionFilePath: string;
   private readonly inactivityTimeoutMs: number;
@@ -90,6 +97,7 @@ export class CodexAppServerExecutor implements IExecutor {
     this.effort = options.effort;
     this.autoApprove = options.autoApprove ?? true;
     this.remoteThreadId = options.threadId;
+    this.sandbox = new CodexSandbox(directoryGuard, options.sandbox, options.threadId);
     this.inactivityTimeoutMs = options.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS;
     this.compactTimeoutMs = options.compactTimeoutMs ?? DEFAULT_COMPACT_TIMEOUT_MS;
 
@@ -137,6 +145,9 @@ export class CodexAppServerExecutor implements IExecutor {
 
     const temporaryFiles: string[] = [];
     try {
+      // Resolve paths before marking a turn active so a rejected policy cannot
+      // leave the executor busy without an actual app-server turn.
+      const sandboxOptions = this.sandbox.turnOptions(this.currentWorkingDirectory);
       const input = await this.buildInput(prompt, options.attachments, temporaryFiles);
       return await new Promise<ExecuteResult>((resolve) => {
         const active: ActiveTurn = {
@@ -166,6 +177,7 @@ export class CodexAppServerExecutor implements IExecutor {
             approvalPolicy: 'never',
             sandboxPolicy: { type: 'dangerFullAccess' },
           } : {}),
+          ...sandboxOptions,
         };
 
         void this.client.request('turn/start', params).then((response) => {
@@ -198,6 +210,45 @@ export class CodexAppServerExecutor implements IExecutor {
       this.currentWorkingDirectory
     );
     this.client.setWorkingDirectory(this.currentWorkingDirectory);
+    if (this.sandbox.isRestricted()) {
+      // Reapply both thread defaults and the turn policy to the new workspace.
+      await this.client.stop();
+      this.threadReady = false;
+    }
+  }
+
+  getSandboxStatus(): string {
+    return this.sandbox.describe(this.currentWorkingDirectory);
+  }
+
+  async configureSandbox(command: string): Promise<ExecuteResult> {
+    if (this.activeTurn || this.compactWaiter) return { success: false, error: 'Wait for the running task before changing sandbox settings.' };
+    try {
+      const match = /^(\S+)(?:\s+([\s\S]*))?$/.exec(command.trim());
+      const action = match?.[1] ?? '';
+      const value = match?.[2] ?? '';
+      const config = this.sandbox.getConfig() ?? { mode: 'workspace-write' as const };
+      let next: CodexSandboxConfig | undefined = { ...config };
+      if (action === 'default' && !value) next = undefined;
+      else if (['on', 'off', 'read-only'].includes(action) && !value) {
+        next.mode = action === 'on' ? 'workspace-write' : action === 'off' ? 'danger-full-access' : 'read-only';
+      } else if (action === 'network' && ['on', 'off'].includes(value)) next.networkAccess = value === 'on';
+      else if (['allow', 'remove'].includes(action) && value) {
+        const directory = this.sandbox.normalize(value, this.currentWorkingDirectory);
+        next.writableRoots = action === 'allow'
+          ? [...new Set([...(config.writableRoots ?? []), directory])]
+          : (config.writableRoots ?? []).filter(root => root !== directory);
+        if (action === 'remove' && next.writableRoots.length === (config.writableRoots ?? []).length) {
+          return { success: false, error: 'That directory is not an extra grant. Default development directories are controlled by developmentDirectories in the configuration.' };
+        }
+      } else return { success: false, error: 'Usage: /sandbox on|off|read-only|default; /sandbox network on|off; /sandbox allow|remove <directory>' };
+      await this.client.stop();
+      this.threadReady = false;
+      this.sandbox.configure(next);
+      return { success: true, output: this.getSandboxStatus() };
+    } catch (error) {
+      return { success: false, error: this.errorMessage(error) };
+    }
   }
 
   resetContext(): void {
@@ -222,10 +273,13 @@ export class CodexAppServerExecutor implements IExecutor {
     if (!active || !this.codexThreadId) return false;
 
     for (const pending of this.pendingUserInputs.splice(0)) {
+      this.finishApproval(pending, 'expired');
       this.client.respond(
         pending.id,
         pending.method === 'item/tool/requestUserInput'
           ? { answers: {} }
+          : pending.method === 'item/permissions/requestApproval'
+          ? { permissions: {}, scope: 'turn' }
           : { decision: 'cancel' }
       );
     }
@@ -272,6 +326,30 @@ export class CodexAppServerExecutor implements IExecutor {
   sendInput(input: string): boolean {
     const pending = this.pendingUserInputs.shift();
     if (!pending) return false;
+    return this.resolveUserInput(pending, input);
+  }
+
+  respondToApproval(requestId: string, action: ApprovalAction): boolean {
+    const index = this.pendingUserInputs.findIndex(input => input.approval?.requestId === requestId);
+    if (index < 0 || !['approve', 'deny', 'remember'].includes(action)) return false;
+    if (action === 'remember' && !this.pendingUserInputs[index].approval?.canRemember) return false;
+    const [pending] = this.pendingUserInputs.splice(index, 1);
+    return this.resolveUserInput(pending, action === 'approve' ? 'yes' : action === 'deny' ? 'no' : 'remember');
+  }
+
+  private resolveUserInput(pending: PendingUserInput, input: string): boolean {
+    try {
+      return this.applyUserInput(pending, input);
+    } catch {
+      // A transport write failure must not orphan a pending card or answer a
+      // different request on retry. Process termination expires it normally.
+      if (this.activeTurn) this.pendingUserInputs.unshift(pending);
+      else this.finishApproval(pending, 'expired');
+      return false;
+    }
+  }
+
+  private applyUserInput(pending: PendingUserInput, input: string): boolean {
     const normalized = input.trim().toLowerCase();
 
     if (pending.method === 'item/tool/requestUserInput') {
@@ -284,6 +362,40 @@ export class CodexAppServerExecutor implements IExecutor {
       return true;
     }
 
+    if (pending.method === 'item/permissions/requestApproval') {
+      if (!['yes', 'y', 'accept', 'always', 'remember', 'no', 'n', 'decline', 'cancel'].includes(normalized)) {
+        this.pendingUserInputs.unshift(pending);
+        return false;
+      }
+      const approved = ['yes', 'y', 'accept', 'always', 'remember'].includes(normalized);
+      const permissions = approved ? pending.params.permissions ?? {} : {};
+      if (normalized === 'remember') {
+        try {
+          this.rememberApproval(pending);
+        } catch (error) {
+          this.pendingUserInputs.unshift(pending);
+          this.activeTurn?.options.onStream?.(`\n${this.errorMessage(error)}\n`);
+          return false;
+        }
+      }
+      this.client.respond(pending.id, { permissions, scope: ['always', 'remember'].includes(normalized) ? 'session' : 'turn' });
+      this.finishApproval(pending, normalized === 'remember' ? 'remembered' : approved ? 'approved' : 'denied');
+      return true;
+    }
+
+    if (normalized === 'remember' && pending.method === 'item/fileChange/requestApproval' && pending.params.grantRoot) {
+      try {
+        this.rememberApproval(pending);
+        this.client.respond(pending.id, { decision: 'acceptForSession' });
+        this.finishApproval(pending, 'remembered');
+        return true;
+      } catch (error) {
+        this.pendingUserInputs.unshift(pending);
+        this.activeTurn?.options.onStream?.(`\n${this.errorMessage(error)}\n`);
+        return false;
+      }
+    }
+
     const decision = normalized === 'always' ? 'acceptForSession'
       : normalized === 'yes' || normalized === 'y' || normalized === 'accept' ? 'accept'
       : normalized === 'cancel' ? 'cancel'
@@ -294,6 +406,7 @@ export class CodexAppServerExecutor implements IExecutor {
       return false;
     }
     this.client.respond(pending.id, { decision });
+    this.finishApproval(pending, decision === 'accept' || decision === 'acceptForSession' ? 'approved' : 'denied');
     return true;
   }
 
@@ -423,6 +536,7 @@ export class CodexAppServerExecutor implements IExecutor {
     this.clearThreadId();
     this.codexThreadId = null;
     this.threadReady = false;
+    this.sandbox.deleteData();
   }
 
   private async ensureThread(): Promise<void> {
@@ -436,6 +550,7 @@ export class CodexAppServerExecutor implements IExecutor {
         approvalPolicy: 'never',
         sandbox: 'danger-full-access',
       } : {}),
+      ...this.sandbox.threadOptions(this.currentWorkingDirectory),
     };
 
     if (this.codexThreadId) {
@@ -484,6 +599,14 @@ export class CodexAppServerExecutor implements IExecutor {
     }
 
     if (params.threadId && params.threadId !== this.codexThreadId) return;
+    if (method === 'serverRequest/resolved') {
+      this.pendingUserInputs = this.pendingUserInputs.filter(pending => {
+        if (pending.id !== params.requestId) return true;
+        this.finishApproval(pending, 'expired');
+        return false;
+      });
+      return;
+    }
     const eventTurnId = params.turnId ?? params.turn?.id;
     const matchesActiveTurn = !eventTurnId || eventTurnId === this.activeTurn?.turnId;
     const notified = this.taskNotifications.handle(method, params,
@@ -540,23 +663,91 @@ export class CodexAppServerExecutor implements IExecutor {
     }
   }
 
+  private approvalRoots(pending: Pick<PendingUserInput, 'method' | 'params'>): string[] {
+    if (this.sandbox.getConfig()?.mode !== 'workspace-write') {
+      throw new Error('Remember requires workspace-write mode and explicit writable directories.');
+    }
+    let writes: unknown[];
+    if (pending.method === 'item/fileChange/requestApproval') writes = [pending.params.grantRoot];
+    else {
+      const permissions = pending.params.permissions ?? {};
+      const entries = permissions.fileSystem?.entries ?? [];
+      const legacyWrites = permissions.fileSystem?.write ?? [];
+      if (permissions.network?.enabled || !Array.isArray(entries) || !Array.isArray(legacyWrites)
+        || entries.some((entry: any) => entry.access !== 'write' || entry.path?.type !== 'path')) {
+        throw new Error('Only explicit writable-directory grants can be remembered.');
+      }
+      writes = [...legacyWrites, ...entries.map((entry: any) => entry.path.path)];
+    }
+    if (!writes.length) throw new Error('No explicit writable directories were requested.');
+    return writes.map(root => {
+      if (typeof root !== 'string' || !path.isAbsolute(root)) throw new Error('Permission grants must use absolute directory paths.');
+      return this.sandbox.normalize(root);
+    });
+  }
+
+  private rememberApproval(pending: PendingUserInput): void {
+    const roots = this.approvalRoots(pending);
+    if (pending.approval?.writableRoots && JSON.stringify(roots) !== JSON.stringify(pending.approval.writableRoots)) {
+      throw new Error('The requested directory changed after the approval was displayed. Request a fresh authorization.');
+    }
+    const config = this.sandbox.getConfig()!;
+    this.sandbox.configure({ ...config, writableRoots: [...new Set([...(config.writableRoots ?? []), ...roots])] });
+  }
+
+  private queueApproval(id: number | string, method: string, params: any, fallback: string): void {
+    let writableRoots: string[] | undefined;
+    if (method !== 'item/commandExecution/requestApproval') {
+      try { writableRoots = this.approvalRoots({ method, params }); } catch { /* Not a persistent directory grant. */ }
+    }
+    const kind = method.includes('commandExecution') ? 'command' : method.includes('fileChange') ? 'file' : 'permissions';
+    const description = [params.reason, kind === 'command' ? params.command : undefined,
+      kind === 'file' && params.grantRoot ? `Requested directory: ${params.grantRoot}` : undefined,
+      kind === 'permissions' ? JSON.stringify(params.permissions ?? {}, null, 2) : undefined,
+      params.cwd ? `Command directory: ${params.cwd}` : undefined,
+    ].filter(Boolean).join('\n') || 'Codex requested permission for file changes.';
+    const approval: ApprovalRequestInfo = { requestId: randomUUID(), kind, description,
+      canRemember: !!writableRoots?.length, ...(writableRoots ? { writableRoots } : {}) };
+    this.pendingUserInputs.push({ id, method, params, approval, resolved: this.activeTurn?.options.onApprovalResolved });
+    let cardHandled = false;
+    try { cardHandled = this.activeTurn?.options.onApprovalRequest?.(approval) === true; } catch { /* Keep text approvals available. */ }
+    if (!cardHandled) this.activeTurn?.options.onStream?.(fallback);
+  }
+
+  private finishApproval(pending: PendingUserInput, status: ApprovalStatus): void {
+    try {
+      if (pending.approval) pending.resolved?.(pending.approval.requestId, status);
+    } catch { /* Rendering failures must not make an accepted request executable again. */ }
+  }
+
   private handleServerRequest(id: number | string, method: string, params: any): void {
     if (params.threadId && params.threadId !== this.codexThreadId) {
       this.client.respondError(id, 'Request does not belong to this remote-cli thread');
       return;
     }
+    if (!this.activeTurn || (params.turnId && this.activeTurn.turnId && params.turnId !== this.activeTurn.turnId)) {
+      this.client.respondError(id, 'Request does not belong to the active turn');
+      return;
+    }
     this.armInactivityTimer();
 
     if (method === 'item/commandExecution/requestApproval' || method === 'item/fileChange/requestApproval') {
-      if (this.autoApprove) {
+      if (this.autoApprove && !this.sandbox.isRestricted()) {
         this.client.respond(id, { decision: 'accept' });
         return;
       }
-      this.pendingUserInputs.push({ id, method, params });
       const subject = method.includes('commandExecution')
         ? params.command ?? params.reason ?? 'command execution'
         : params.reason ?? params.grantRoot ?? 'file changes';
-      this.activeTurn?.options.onStream?.(`\nApproval required for ${subject}. Reply yes, always, no, or cancel.\n`);
+      const boundary = this.sandbox.isRestricted() ? ' This may run outside the sandbox. Use /sandbox allow <directory> between tasks to save a directory grant.' : '';
+      const remember = method === 'item/fileChange/requestApproval' && params.grantRoot && this.sandbox.getConfig()?.mode === 'workspace-write'
+        ? `, remember (save write access to ${params.grantRoot})` : '';
+      this.queueApproval(id, method, params, `\nApproval required for ${subject}.${boundary} Reply yes, always${remember}, no, or cancel.\n`);
+      return;
+    }
+
+    if (method === 'item/permissions/requestApproval') {
+      this.queueApproval(id, method, params, `\nAdditional permissions requested: ${JSON.stringify(params.permissions ?? {})}\n${params.reason ?? ''}\nReply yes (this turn), always (this Codex session), remember (save writable directories for this thread), or no.\n`);
       return;
     }
 
@@ -721,7 +912,7 @@ export class CodexAppServerExecutor implements IExecutor {
     const active = this.activeTurn;
     if (!active) return;
     this.activeTurn = null;
-    this.pendingUserInputs = [];
+    for (const pending of this.pendingUserInputs.splice(0)) this.finishApproval(pending, 'expired');
     this.clearInactivityTimer();
     if (active.timeoutTimer) clearTimeout(active.timeoutTimer);
     void this.cleanupTemporaryFiles(active.temporaryFiles);

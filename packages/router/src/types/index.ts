@@ -278,3 +278,47 @@ export interface StructuredMessage extends WSMessage {
     cwd?: string;
   };
 }
+
+/** Optional approval-card protocol; negotiated through approvalCards capability. */
+export type ApprovalAction = 'approve' | 'deny' | 'remember';
+export type ApprovalStatus = 'approved' | 'denied' | 'remembered' | 'expired';
+
+export interface ApprovalRequestInfo {
+  requestId: string;
+  kind: 'command' | 'file' | 'permissions';
+  description: string;
+  canRemember: boolean;
+  writableRoots?: string[];
+}
+
+export interface ApprovalRequestMessage {
+  type: 'approval_request';
+  messageId: string;
+  taskMessageId: string;
+  openId: string;
+  threadId: string;
+  threadName: string;
+  cwd: string;
+  approval: ApprovalRequestInfo;
+  timestamp: number;
+}
+
+export interface ApprovalResponseMessage {
+  type: 'approval_response';
+  messageId: string;
+  taskMessageId: string;
+  openId: string;
+  threadId: string;
+  action: ApprovalAction;
+  timestamp: number;
+}
+
+export interface ApprovalResolvedMessage {
+  type: 'approval_resolved';
+  messageId: string;
+  openId: string;
+  threadId: string;
+  status: ApprovalStatus | 'pending';
+  error?: string;
+  timestamp: number;
+}

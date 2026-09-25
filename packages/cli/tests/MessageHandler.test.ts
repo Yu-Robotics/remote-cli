@@ -702,6 +702,80 @@ describe('MessageHandler', () => {
     });
   });
 
+  describe('approval cards', () => {
+    it('negotiates cards, keeps replies bound to the original task, and replays pending requests on reconnect', async () => {
+      await ctx.handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: { approvalCards: true } } } as any);
+      let options: any;
+      let finish!: (value: any) => void;
+      ctx.mockExecutor.execute.mockImplementation((_prompt: string, opts: any) => { options = opts; return new Promise(resolve => { finish = resolve; }); });
+      ctx.mockExecutor.respondToApproval = vi.fn().mockReturnValue(true);
+      const running = ctx.handler.handleMessage({ type: 'command', messageId: 'original-task', content: 'work', openId: 'owner', timestamp: 1 });
+      await vi.waitFor(() => expect(options).toBeDefined());
+      const approval = { requestId: 'request-1', kind: 'command', description: 'install', canRemember: false };
+      expect(options.onApprovalRequest(approval)).toBe(true);
+      const packet = ctx.mockWsClient.send.mock.calls.map((call: any[]) => call[0]).find((message: any) => message.type === 'approval_request');
+      expect(packet).toMatchObject({ messageId: 'request-1', taskMessageId: 'original-task', threadId: 'default-thread-id', openId: 'owner' });
+      ctx.mockWsClient.send.mockClear();
+      await ctx.handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: { approvalCards: true } } } as any);
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(packet);
+      const reply = { type: 'approval_response', messageId: 'request-1', taskMessageId: 'original-task', threadId: 'default-thread-id', openId: 'owner', action: 'approve' };
+      await ctx.handler.handleMessage({ ...reply, threadId: 'wrong-thread' } as any);
+      await ctx.handler.handleMessage({ ...reply, openId: 'other-user' } as any);
+      expect(ctx.mockExecutor.respondToApproval).not.toHaveBeenCalled();
+      await ctx.handler.handleMessage(reply as any);
+      expect(ctx.mockExecutor.respondToApproval).toHaveBeenCalledWith('request-1', 'approve');
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'approval_resolved', status: 'approved' }));
+      await ctx.handler.handleMessage(reply as any);
+      expect(ctx.mockExecutor.respondToApproval).toHaveBeenCalledTimes(1);
+      ctx.mockWsClient.send.mockClear();
+      await ctx.handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: { approvalCards: true } } } as any);
+      expect(ctx.mockWsClient.send).not.toHaveBeenCalled();
+      finish({ success: true });
+      await running;
+    });
+
+    it('retains text fallback for old routers and failed card delivery without sending a new model prompt', async () => {
+      let options: any;
+      let finish!: (value: any) => void;
+      ctx.mockExecutor.execute.mockImplementation((_prompt: string, opts: any) => { options = opts; return new Promise(resolve => { finish = resolve; }); });
+      const running = ctx.handler.handleMessage({ type: 'command', messageId: 'task', content: 'work', openId: 'owner', timestamp: 1 });
+      await vi.waitFor(() => expect(options).toBeDefined());
+      expect(options.onApprovalRequest({ requestId: 'request-1', kind: 'file', description: 'write', canRemember: true, writableRoots: ['/extra'] })).toBe(false);
+      expect(ctx.mockWsClient.send.mock.calls.some((call: any[]) => call[0].type === 'approval_request')).toBe(false);
+      await ctx.handler.handleMessage({ type: 'approval_unavailable', messageId: 'request-1' });
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'stream', messageId: 'task', chunk: expect.stringContaining('Reply yes, no, or remember') }));
+      expect(ctx.mockExecutor.execute).toHaveBeenCalledTimes(1);
+      options.onApprovalResolved('request-1', 'expired');
+      finish({ success: true });
+      await running;
+    });
+  });
+
+  describe('Codex sandbox commands', () => {
+    it('routes status and directory authorization to the current Codex executor', async () => {
+      const ctx = buildHandler({
+        getSandboxStatus: vi.fn(() => 'Codex sandbox: workspace-write'),
+        configureSandbox: vi.fn().mockResolvedValue({ success: true, output: 'Directory authorized' }),
+      });
+      ctx.mockConfig.get.mockReturnValue({ type: 'codex' });
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'sandbox-status', content: '/sandbox', timestamp: Date.now() });
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ output: 'Codex sandbox: workspace-write' }));
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'sandbox-allow', content: '/sandbox allow /tmp/shared project', timestamp: Date.now() });
+      expect(ctx.mockExecutor.configureSandbox).toHaveBeenCalledWith('allow /tmp/shared project');
+      expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
+    });
+
+    it('rejects unsupported backends and changes while a task is running', async () => {
+      const ctx = buildHandler({ configureSandbox: vi.fn() });
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'sandbox-claude', content: '/sandbox on', timestamp: Date.now() });
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ success: false, error: expect.stringContaining('only by the Codex') }));
+      ctx.mockConfig.get.mockReturnValue({ type: 'codex' });
+      vi.mocked(ctx.mockThreadPool.isThreadBusy).mockReturnValue(true);
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'sandbox-busy', content: '/sandbox off', timestamp: Date.now() });
+      expect(ctx.mockExecutor.configureSandbox).not.toHaveBeenCalled();
+    });
+  });
+
   describe('bare /model (list models for the active backend)', () => {
     function useBackend(executorConfig: any, threadOverrides: any = {}) {
       ctx.mockConfig.get.mockImplementation((key: string) =>

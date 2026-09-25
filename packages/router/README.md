@@ -162,3 +162,7 @@ MIT
 ## Changelog
 
 See the project [CHANGELOG.md](../../CHANGELOG.md) for release notes and user-visible changes.
+
+## Codex Approval Cards
+
+When supported by the connected CLI, Codex permission requests appear as standalone cards with Allow, Deny, and (for explicit directory grants) Allow and remember directory buttons. Each button targets the original user, device, thread, and request. The card shows success only after the CLI confirms the decision. Completed requests cannot be approved again, and pending approvals receive fresh cards after reconnecting. After a Router crash, buttons on old cards may remain visible but are rejected as expired. Both CLI and Router must be upgraded to use this feature; unsupported peers and failed card delivery retain text approvals.

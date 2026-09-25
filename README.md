@@ -442,6 +442,7 @@ Once connected, use these commands in Feishu:
 | `/compact` | Compress conversation history to save tokens |
 | `/model [name]` | List models for the active backend or set this thread's model |
 | `/effort [auto|level]` | Show or set per-thread reasoning effort for Codex/AGY/OpenCode/Kimi/ZCode/Pi |
+| `/sandbox [on/off/read-only/default]` | Show or configure the current Codex thread sandbox; use `allow/remove <directory>` and `network on/off` for access settings |
 | `/cd <dir>` | Change working directory for this thread |
 | `/backend` | List backends and show the current thread's effective backend |
 | `/bind <码>` | Bind a new device |
@@ -685,7 +686,7 @@ remote-cli config add-dir ~/safe/directory
 
 ### Execution Trust Model
 
-remote-cli does not install a global Claude Code `PreToolUse` hook and does not sandbox AI backend processes. A backend process inherits the permissions of the operating-system user running remote-cli and may access paths outside the selected working directory. For stronger isolation, run remote-cli under a dedicated OS account or inside a container or virtual machine.
+remote-cli does not install a global Claude Code `PreToolUse` hook. Backend processes run with the OS user's permissions; Codex optionally applies native sandbox restrictions to its commands through `/sandbox`. Sandboxing is not enabled automatically. Cross-project reads remain possible, and other backends keep their existing behavior. For isolation of the entire backend process, use a dedicated OS account, container, or virtual machine.
 
 ### Device Authentication
 
@@ -801,6 +802,7 @@ MIT License - see [LICENSE](LICENSE) file for details.
     - `model`: Model selected for Codex turns. Unset = codex default. Use `/model` in Feishu to query the authenticated account's available models.
     - `autoApprove`: Use `approvalPolicy: never` with full access (default true). When false, app-server approval requests are relayed through the existing mobile input flow.
     - `command`: codex binary to invoke (default `codex`).
+    - `sandbox`: Optional object with `mode` (`workspace-write`, `read-only`, or `danger-full-access`), `networkAccess` (default true), `developmentDirectories` (default true), and extra `writableRoots`. Restricted modes ask before widening permissions even with `autoApprove: true`.
 
 When loading configuration from remote-cli 1.6.30 or earlier, `executor.type: claude-spawn` is automatically migrated to `claude-persistent`, and the removed `executor.codex.transport` field is discarded. Codex always uses app-server.
 
@@ -908,6 +910,35 @@ Generated Codex images are returned to Feishu when both the CLI and Router suppo
 
 Codex app-server is the only supported Codex transport. Legacy `codex exec` configuration is migrated automatically during startup.
 Startup also checks that the installed Codex CLI exposes `codex app-server --help` and prints an upgrade command when the installed Codex CLI is too old.
+
+##### Optional Codex sandbox
+
+Sandboxing is opt-in; upgrading keeps existing execution behavior. On a Codex thread, use `/sandbox on` for workspace-write or `/sandbox read-only` for read-only execution. `/sandbox` shows the effective policy; `/sandbox off` explicitly selects full access, and `/sandbox default` removes the thread override and follows `executor.codex.sandbox` again. Policy changes apply between tasks, after the thread and queue are idle, and preserve the Codex conversation.
+
+Workspace-write permits cross-project reads and enables networking by default. Writable locations include the current working directory, a dedicated `<system-temp>/remote-cli/<threadId>` directory, `~/workspace/_incoming` for downloaded repositories, `~/.npm`, and pip/uv/go-build caches under `~/.cache` (under `~/Library/Caches` on macOS). The tool environment points `TMPDIR`, `TMP`, and `TEMP` at the dedicated temporary directory. These locations are created when needed; unrelated projects and the whole system temporary directory are not automatically writable. Set `developmentDirectories: false` to omit the download and cache locations. Read-only mode grants no writable directories.
+
+Use `/sandbox allow /absolute/directory` to authorize an additional writable directory for this thread and `/sandbox remove /absolute/directory` to remove that extra grant. Paths may contain spaces; do not add shell quotes. `/sandbox network off` restricts sandboxed command networking; `/sandbox network on` allows it. Settings are stored locally under `~/.remote-cli/codex-sandbox/<threadId>.json`, survive `/clear`, backend switches, and CLI restarts, and are deleted with the thread. Extra directory grants are separate from the working-directory whitelist and do not authorize `/cd` by themselves.
+
+When both CLI and Router support approval cards, Codex sends a separate card showing the originating thread, workspace, requested action, and permission scope. Click **Allow**, **Deny**, or **Allow and remember directory**. The persistent choice appears only for explicit directory grants in workspace-write mode; it is not offered for unrestricted command execution or network grants. Native permission approvals apply to the current turn. Command/file approvals may permit the requested action outside the sandbox.
+
+Buttons target the original device, thread, and approval request, even after you switch threads or devices. Cards show the final decision only after the CLI confirms it; repeated clicks cannot approve a different request. Completed, aborted, or disconnected requests invalidate old buttons. On reconnect, outstanding approvals receive new cards. After a Router crash, old cards may retain their visual buttons, but clicks are rejected; use the newly issued card. Approval cards require upgrading both CLI and Router. Older routers, or failed card delivery, use the existing text replies (`yes`, `no`, and `remember` for explicit directory grants).
+
+Permission requests are relayed even when `autoApprove` is true. For native permission requests, reply `yes` for this turn, `always` for the current Codex session, or `remember` to persist explicitly requested writable directories for this remote-cli thread. Network, wildcard, and special-path permissions cannot be remembered as directory grants. For file approvals that name an explicit grant root, `remember` saves that directory too. For command/file approvals, `yes` and `always` approve the displayed action and may permit execution outside the sandbox; they do not save a remote-cli directory grant. Reply `no` to refuse. Unknown or unavailable sandbox settings fail the operation without retrying in full-access mode.
+
+For Codex threads without an override, merge this property into `executor.codex` in `~/.remote-cli/config.json`, then restart the CLI to load the defaults:
+
+```json
+{
+  "sandbox": {
+    "mode": "workspace-write",
+    "networkAccess": true,
+    "developmentDirectories": true,
+    "writableRoots": []
+  }
+}
+```
+
+This policy limits accidental writes; it is not a credential boundary or isolation between mutually untrusted projects. Reads remain subject to the OS user's permissions, network access is independent, explicitly granted parent directories cover their children, and Codex may protect repository metadata such as `.git` even inside a writable workspace. Native sandbox availability depends on the installed Codex version and host OS. The app-server policy was checked against Codex 0.154.0; actual Linux boundary checks cover writes, symlinks, and networking. Other backend sandbox behavior is unchanged. Approval cards use additive protocol messages negotiated through a capability.
 
 ### Development
 

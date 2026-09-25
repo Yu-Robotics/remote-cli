@@ -1,10 +1,11 @@
+import type { ApprovalRequestInfo, ApprovalRequestMessage, ApprovalResponseMessage, ApprovalResolvedMessage, ApprovalStatus } from '../types';
 import { WebSocketClient } from './WebSocketClient';
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import { IncomingMessage, OutgoingMessage, StructuredContent, ToolUseInfo, ToolResultInfo, Attachment, ImageBlock, QueueConfirmationInfo, TaskNotificationInfo } from '../types';
 import { ThreadExecutorPool } from '../thread/ThreadExecutorPool';
 import { ThreadManager } from '../thread/ThreadManager';
 import { DEFAULT_THREAD_NAME } from '../thread/types';
-import type { ExecutorContextUsage, IExecutor } from '../executor/IExecutor';
+import type { ExecuteResult, ExecutorContextUsage, IExecutor } from '../executor/IExecutor';
 import { createExecutor } from '../executor';
 import { FeishuNotificationAdapter } from '../hooks';
 import { ConfigManager } from '../config/ConfigManager';
@@ -138,6 +139,8 @@ export class MessageHandler {
   private readonly activeThreadOperations = new Map<string, ActiveThreadOperation>();
   private readonly abortOperations = new Map<string, Promise<void>>();
   private automaticUpdateInProgress = false;
+  private approvalCardsSupported = false;
+  private readonly pendingApprovalCards = new Map<string, { request: ApprovalRequestMessage; executor: IExecutor }>();
 
   constructor(
     wsClient: WebSocketClient,
@@ -186,7 +189,21 @@ export class MessageHandler {
       case 'heartbeat':
         return;
 
-      case 'binding_confirm':
+      case 'binding_confirm': {
+        const data = (message as any).data;
+        if (data?.success !== true) return;
+        this.approvalCardsSupported = data.capabilities?.approvalCards === true;
+        for (const pending of this.pendingApprovalCards.values()) {
+          if (this.approvalCardsSupported) this.sendApprovalMessage(pending.request);
+          else this.showApprovalFallback(pending.request.messageId);
+        }
+        return;
+      }
+      case 'approval_response':
+        this.handleApprovalResponse(message as ApprovalResponseMessage);
+        return;
+      case 'approval_unavailable':
+        this.showApprovalFallback(message.messageId!);
         return;
 
       default:
@@ -378,7 +395,7 @@ export class MessageHandler {
       return;
     }
 
-    const queueSensitiveCommand = /^\/(?:clear|new|compact|cd|model|effort)(?:\s|$)/.test(content?.trim() ?? '')
+    const queueSensitiveCommand = /^\/(?:clear|new|compact|cd|model|effort|sandbox)(?:\s|$)/.test(content?.trim() ?? '')
       || /^\/thread\s+delete(?:\s|$)/.test(content?.trim() ?? '');
     if (queueSensitiveCommand && this.hasThreadQueueState(resolvedThreadId)) {
       this.sendResponse(messageId, resolvedThreadId, {
@@ -542,6 +559,23 @@ export class MessageHandler {
   ): Promise<boolean> {
     const trimmed = content.trim();
 
+    if (trimmed === '/sandbox' || trimmed.startsWith('/sandbox ')) {
+      if (this.threadPool.getBackendKey(threadId) !== 'codex'
+        || !('getSandboxStatus' in executor) || !('configureSandbox' in executor)) {
+        this.sendResponse(messageId, threadId, { success: false, error: '/sandbox is currently supported only by the Codex backend.' });
+        return true;
+      }
+      const control = executor as IExecutor & {
+        getSandboxStatus(): string;
+        configureSandbox(command: string): Promise<ExecuteResult>;
+      };
+      const result = trimmed === '/sandbox'
+        ? { success: true, output: control.getSandboxStatus() }
+        : await control.configureSandbox(trimmed.slice('/sandbox'.length).trim());
+      this.sendResponse(messageId, threadId, result);
+      return true;
+    }
+
     if (trimmed === '/status') {
       const cwd = executor.getCurrentWorkingDirectory();
       const allowedDirs = this.directoryGuard.getAllowedDirectories();
@@ -634,6 +668,7 @@ Use /compact to reduce conversation context or /clear to start a fresh context.`
 - /cd <directory> - Change working directory for this thread
 - /model [name] - Show models for the active backend, or set this thread's model
 - /effort [auto|level] - Show or set effort for Codex/AGY/OpenCode/Kimi/ZCode/Pi (Claude Code is unsupported)
+- /sandbox [on|off|read-only|default|allow <directory>|remove <directory>|network on|off] - Configure this thread's Codex sandbox
 - /backend - List backends and show the current thread's effective backend
 - /backend <index> - Switch all threads and clear per-thread backend overrides
 - /backend <index> @ - Switch only the current thread
@@ -1780,6 +1815,8 @@ You can also use natural language commands to control Claude Code CLI.`,
         pendingLocalImageEmissions.add(pending);
       };
       const executeOptions = {
+        onApprovalRequest: (approval: ApprovalRequestInfo) => this.forwardApproval(approval, executor, messageId, threadId),
+        onApprovalResolved: (requestId: string, status: ApprovalStatus) => this.resolveApprovalCard(requestId, status),
         onTaskNotification,
         onStream: (chunk: string) => {
           streamedOutput += chunk;
@@ -1885,6 +1922,56 @@ You can also use natural language commands to control Claude Code CLI.`,
     this.wsClient.trackTask({ messageId, threadId, openId, threadName: thread.name,
       backend: this.threadPool.getBackendKey(threadId),
       cwd: this.threadPool.getExecutor(threadId).getCurrentWorkingDirectory(), preview: content });
+  }
+
+  private forwardApproval(approval: ApprovalRequestInfo, executor: IExecutor, taskMessageId: string, threadId: string): boolean {
+    const openId = this.getMessageOpenId(taskMessageId);
+    if (!openId) return false;
+    const request: ApprovalRequestMessage = { type: 'approval_request', messageId: approval.requestId,
+      taskMessageId, openId, threadId, threadName: this.threadManager.getThread(threadId)?.name ?? threadId,
+      cwd: executor.getCurrentWorkingDirectory(), approval, timestamp: Date.now() };
+    this.pendingApprovalCards.set(approval.requestId, { request, executor });
+    if (this.approvalCardsSupported) this.sendApprovalMessage(request);
+    return this.approvalCardsSupported;
+  }
+
+  private sendApprovalMessage(message: ApprovalRequestMessage | ApprovalResolvedMessage): void {
+    try { this.wsClient.send(message); } catch { /* Pending approvals are resent after registration. */ }
+  }
+
+  private showApprovalFallback(requestId: string): void {
+    const pending = this.pendingApprovalCards.get(requestId);
+    if (!pending) return;
+    const { request } = pending;
+    this.sendStreamChunk(request.taskMessageId, request.threadId,
+      `\nApproval required: ${request.approval.description}\nReply yes, no${request.approval.canRemember ? ', or remember to save these directories' : ''}.\n`);
+  }
+
+  private resolveApprovalCard(requestId: string, status: ApprovalStatus): void {
+    const pending = this.pendingApprovalCards.get(requestId);
+    if (!pending) return;
+    this.pendingApprovalCards.delete(requestId);
+    if (this.approvalCardsSupported) this.sendApprovalMessage({ type: 'approval_resolved', messageId: requestId,
+      openId: pending.request.openId, threadId: pending.request.threadId, status, timestamp: Date.now() });
+  }
+
+  private handleApprovalResponse(message: ApprovalResponseMessage): void {
+    const pending = this.pendingApprovalCards.get(message.messageId);
+    if (!pending || pending.request.threadId !== message.threadId || pending.request.openId !== message.openId
+      || pending.request.taskMessageId !== message.taskMessageId) {
+      this.sendApprovalMessage({ type: 'approval_resolved', messageId: message.messageId,
+        openId: message.openId, threadId: message.threadId, status: 'expired', timestamp: Date.now() });
+      return;
+    }
+    let accepted = false;
+    try { accepted = pending.executor.respondToApproval?.(message.messageId, message.action) === true; } catch { /* Report failure without approving another request. */ }
+    if (accepted) {
+      this.resolveApprovalCard(message.messageId, message.action === 'remember' ? 'remembered' : message.action === 'deny' ? 'denied' : 'approved');
+    } else if (this.pendingApprovalCards.has(message.messageId)) {
+      this.sendApprovalMessage({ type: 'approval_resolved', messageId: message.messageId,
+        openId: message.openId, threadId: message.threadId, status: 'pending',
+        error: 'Approval could not be applied. Check the task output or choose another action.', timestamp: Date.now() });
+    }
   }
 
   private sendStreamChunk(messageId: string, threadId: string | undefined, chunk: string): void {
@@ -2195,6 +2282,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     this.notificationAdapter.unregister();
     try {
       await this.threadPool.destroyAll({ deleteData: false });
+      this.pendingApprovalCards.clear();
     } catch (err) {
       console.error('Error destroying thread executors:', err);
     }

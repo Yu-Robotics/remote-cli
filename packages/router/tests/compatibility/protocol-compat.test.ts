@@ -70,6 +70,27 @@ describe('Router wire compatibility', () => {
     expect(socket.close).not.toHaveBeenCalled();
   });
 
+  it('negotiates additive approval cards and routes a button response to the original request', async () => {
+    await receive({ type: 'binding_request', messageId: 'registration', data: {
+      deviceId: 'device-1', protocolVersion: PROTOCOL_VERSION, capabilities: { approvalCards: true, taskRecovery: true },
+    } });
+    expect(JSON.parse(socket.send.mock.calls[0][0]).data.capabilities).toEqual({ approvalCards: true, taskRecovery: true });
+    const feishu = vi.mocked(FeishuLongConnHandler).mock.instances[0];
+    vi.spyOn((server as any).bindingManager, 'getDeviceBinding').mockResolvedValue({ openId: 'owner' });
+    vi.mocked(feishu.sendTaskNotificationCard).mockResolvedValue('approval-card');
+    const message = { type: 'approval_request', messageId: 'approval-1', taskMessageId: 'task', openId: 'owner',
+      threadId: 'thread-2', threadName: 'thread-2', cwd: '/project', timestamp: 1,
+      approval: { requestId: 'approval-1', kind: 'command', description: 'install', canRemember: false } };
+    await receive(message);
+    expect(feishu.sendTaskNotificationCard).toHaveBeenCalledWith('owner', expect.any(Array));
+    await feishu.onApprovalAction!('owner', 'approval-1', 'approval-card', 'approve');
+    expect(socket.send.mock.calls.map(call => JSON.parse(call[0]))).toContainEqual(expect.objectContaining({
+      type: 'approval_response', messageId: 'approval-1', taskMessageId: 'task', threadId: 'thread-2', action: 'approve',
+    }));
+    await receive({ type: 'approval_resolved', messageId: 'approval-1', openId: 'owner', threadId: 'thread-2', status: 'approved' });
+    expect(JSON.stringify(vi.mocked(feishu.updateApprovalCard).mock.calls.at(-1))).toContain('Approved');
+  });
+
   it('rejects an unsupported CLI before registering it and explains how to recover', async () => {
     await receive({
       type: 'binding_request', messageId: 'registration', timestamp: 1000,
