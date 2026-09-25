@@ -151,7 +151,7 @@ export class ApprovalCards {
   private elements(entry: CardState): any[] {
     const { request, status } = entry;
     const escape = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/[\\`*_{}\[\]()!|#]/g, '\\$&');
-    const label = status === 'pending' ? (entry.submitting ? 'Waiting for CLI confirmation' : 'Codex permission request')
+    const label = status === 'pending' ? (entry.submitting ? 'Waiting for CLI confirmation' : 'Permission request')
       : { approved: 'Approved', denied: 'Denied', remembered: 'Approved and directory access remembered',
         expired: 'Approval expired', disconnected: 'Device disconnected. A pending request will get a new card after reconnecting.' }[status];
     const elements: any[] = [

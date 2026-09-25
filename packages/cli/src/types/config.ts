@@ -71,7 +71,7 @@ export interface CodexExecutorConfig {
  */
 export interface ClaudeSandboxConfig {
   mode: 'workspace-write' | 'read-only' | 'danger-full-access';
-  /** Let sandboxed commands reach new network domains (asks via approval). Default: true. */
+  /** Allow sandboxed networking, subject to native denials and managed restrictions. Default: true. */
   networkAccess?: boolean;
   /** Additional writable directories explicitly authorized by the user. */
   writableRoots?: string[];

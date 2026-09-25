@@ -39,7 +39,7 @@ describe('ClaudeSandbox', () => {
     expect(settings.sandbox.enabled).toBe(true);
     expect(settings.sandbox.autoAllowBashIfSandboxed).toBe(true);
     expect(settings.sandbox.filesystem.allowWrite).toEqual([fs.realpathSync(extra)]);
-    expect(settings.sandbox.network).toEqual({});
+    expect(settings.sandbox.network).toEqual({ allowedDomains: ['*'] });
     fs.rmdirSync(extra);
   });
 
@@ -55,6 +55,16 @@ describe('ClaudeSandbox', () => {
     expect(settings.sandbox.failIfUnavailable).toBe(true);
     // These ask rules must override previously saved native allow rules.
     expect(settings.permissions.ask).toEqual(expect.arrayContaining(['Write', 'Edit', 'NotebookEdit', 'Bash']));
+  });
+
+  it('delegates file decisions to a process-scoped hook while retaining command approvals', () => {
+    const settings = new ClaudeSandbox(guard, { mode: 'workspace-write' }, threadId)
+      .spawnSettings(process.cwd(), 'node hook.js || exit 2') as any;
+    expect(settings.permissions.ask).toEqual(['Bash', 'PowerShell', 'Monitor']);
+    expect(settings.permissions.allow).toBeUndefined();
+    expect(settings.hooks.SessionStart).toHaveLength(1);
+    expect(settings.hooks.PreToolUse[0].matcher).toBe('^(Write|Edit|NotebookEdit)$');
+    expect(settings.disableAllHooks).toBeUndefined();
   });
 
   it('checks executable dependencies on PATH rather than a fixed installation directory', () => {
@@ -83,7 +93,26 @@ describe('ClaudeSandbox', () => {
   it('hard-denies network egress when networkAccess is false', () => {
     const sandbox = new ClaudeSandbox(guard, { mode: 'workspace-write', networkAccess: false }, threadId);
     const settings = sandbox.spawnSettings(process.cwd()) as any;
-    expect(settings.sandbox.network).toEqual({ allowedDomains: [], strictAllowlist: true });
+    expect(settings.sandbox.network).toEqual({ allowedDomains: [], deniedDomains: ['*'], strictAllowlist: true });
+    expect(sandbox.describe(process.cwd())).toContain('Network: denied');
+  });
+
+  it.each(['workspace-write', 'read-only'] as const)('persists network off/on changes without relaxing %s filesystem restrictions', mode => {
+    const sandbox = new ClaudeSandbox(guard, { mode }, threadId);
+    const initial = sandbox.spawnSettings(process.cwd()) as any;
+    expect(initial.sandbox.network).toEqual({ allowedDomains: ['*'] });
+    expect(sandbox.describe(process.cwd())).toContain('Network: enabled');
+
+    sandbox.configure({ mode, networkAccess: false });
+    const disabled = new ClaudeSandbox(guard, { mode }, threadId);
+    expect((disabled.spawnSettings(process.cwd()) as any).sandbox.network).toEqual({
+      allowedDomains: [], deniedDomains: ['*'], strictAllowlist: true,
+    });
+
+    disabled.configure({ mode, networkAccess: true });
+    const enabled = new ClaudeSandbox(guard, { mode }, threadId);
+    expect(enabled.spawnSettings(process.cwd())).toEqual(initial);
+    expect(enabled.describe(process.cwd())).toContain('Network: enabled');
   });
 
   it('persists per-thread overrides and reloads them', () => {

@@ -24,88 +24,49 @@ vi.mock('os', async (importOriginal) => {
 
 // Prompts received by agy-format user events (recorded by the stdin mock below)
 const agyPrompts: string[] = [];
+const claudeInputs: Array<{ message: { content: string }; isSlashCommand?: boolean }> = [];
 
 // Mock child_process for ClaudePersistentExecutor and AgyExecutor
 vi.mock('child_process', () => {
+  const { EventEmitter } = require('events') as typeof import('events');
   return {
-    spawn: vi.fn().mockImplementation(() => {
-      let closeCallback: any;
-
-      const stdinWrite = vi.fn((data: string) => {
-        // Automatically respond to any command to prevent timeouts
-        setTimeout(() => {
-          if (mockStdoutOn) {
-            // Emulate a successful Claude stream JSON response
-            mockStdoutOn(Buffer.from(JSON.stringify({
-              type: 'result',
-              success: true
-            }) + '\n'));
-            // Emulate a successful agy stream-json response (no conversation_id,
-            // so no session file is written). Claude's parser ignores lines
-            // without a `type` field, agy's parser ignores lines without `event`.
-            mockStdoutOn(Buffer.from(JSON.stringify({
-              event: 'result',
-              result: { conversation_id: '', status: 'SUCCESS', response: 'ok', duration_seconds: 0, num_turns: 1, usage: {} },
-            }) + '\n'));
-          }
-        }, 10);
-        try {
-          const parsed = JSON.parse(data);
-          if (parsed.event === 'user') agyPrompts.push(parsed.message?.content ?? '');
-        } catch { /* not agy input */ }
-        return true;
-      });
-      const stdinEnd = vi.fn();
-      
-      let isKilled = false;
-      const kill = vi.fn(() => {
-        isKilled = true;
-        if (closeCallback) {
-          setTimeout(() => closeCallback(0), 10);
-        }
-      });
-      
-      let mockStdoutOn: any;
-      const stdout = {
-        on: vi.fn((event, cb) => {
-          if (event === 'data') mockStdoutOn = cb;
+    spawn: vi.fn().mockImplementation((_command: string, args: string[] = []) => {
+      const child = new EventEmitter() as any;
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      child.pid = 12345;
+      child.killed = false;
+      let closed = false;
+      const close = () => {
+        if (closed) return;
+        closed = true;
+        child.emit('close', 0, null);
+      };
+      child.stdin = {
+        write: vi.fn((data: string) => {
+          try {
+            const parsed = JSON.parse(data);
+            if (parsed.event === 'user') agyPrompts.push(parsed.message?.content ?? '');
+            if (parsed.type === 'user') claudeInputs.push(parsed);
+          } catch { /* Not a user event. */ }
+          setTimeout(() => {
+            if (closed) return;
+            child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'result', subtype: 'success' }) + '\n'));
+            child.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'result', result: {
+              conversation_id: '', status: 'SUCCESS', response: 'ok', duration_seconds: 0, num_turns: 1, usage: {},
+            } }) + '\n'));
+          }, 10);
+          return true;
         }),
-        once: vi.fn()
+        end: vi.fn(() => setTimeout(close, 10)),
+        on: vi.fn(),
       };
-
-      const on = vi.fn((event, cb) => {
-        if (event === 'close') {
-           closeCallback = cb;
-           if (isKilled) {
-             setTimeout(() => cb(0), 10);
-           }
-        }
-      });
-      const once = vi.fn((event, cb) => {
-        if (event === 'spawn') {
-           setTimeout(cb, 5);
-        }
-      });
-      const removeListener = vi.fn();
-      
-      // Auto-close for standalone commands like /compact that don't use stdin
-      setTimeout(() => {
-        if (closeCallback && !isKilled) {
-           closeCallback(0);
-        }
-      }, 50);
-
-      return {
-        stdin: { write: stdinWrite, end: stdinEnd, on: vi.fn() },
-        stdout,
-        stderr: { on: vi.fn(), once: vi.fn() },
-        on,
-        once,
-        removeListener,
-        kill,
-        pid: 12345,
-      };
-    })
+      child.kill = vi.fn(() => { child.killed = true; setTimeout(close, 10); });
+      setTimeout(() => child.emit('spawn'), 5);
+      // Persistent stream-json processes stay alive until EOF or a signal.
+      if (args.includes('-p') || args.includes('--print')) setTimeout(close, 50);
+      return child;
+    }),
   };
 });
 
@@ -115,6 +76,7 @@ describe('Executor Concurrency & Rapid Commands', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     agyPrompts.length = 0;
+    claudeInputs.length = 0;
     directoryGuard = new DirectoryGuard([os.tmpdir()]);
   });
 
@@ -159,23 +121,26 @@ describe('Executor Concurrency & Rapid Commands', () => {
       executor.resetContext();
       const p2 = executor.execute('Second command', {});
       
-      await Promise.all([p1, p2]);
-      
-      // We expect the executor to not crash, even if p1 fails due to process kill
-      expect(true).toBe(true); // just checking it resolves without unhandled rejection
-      // no destroy
+      const results = await Promise.all([p1, p2]);
+      expect(results.every(result => result.success)).toBe(true);
+      expect(claudeInputs.map(input => input.message.content)).toEqual(['First command', 'Second command']);
+      await executor.destroy();
     });
     
     it('should queue multiple slash commands and regular commands', async () => {
       const executor = new ClaudePersistentExecutor(directoryGuard);
+      (executor as any).sessionId = 'test-session';
       
       // Sending multiple commands rapidly
       const p1 = executor.execute('/clear', { }); // Assuming we could pass it as prompt
       const p2 = executor.execute('normal prompt', { });
       const p3 = executor.compact();
       
-      await Promise.all([p1, p2, p3]);
-      // no destroy
+      const results = await Promise.all([p1, p2, p3]);
+      expect(results.every(result => result.success)).toBe(true);
+      expect(claudeInputs.map(input => input.message.content)).toEqual(['/clear', 'normal prompt', '/compact']);
+      expect(claudeInputs[2].isSlashCommand).toBe(true);
+      await executor.destroy();
     });
   });
 });

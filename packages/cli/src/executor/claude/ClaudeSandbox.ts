@@ -124,7 +124,7 @@ export class ClaudeSandbox {
    * Sandboxed commands run without prompts; widening requests surface through
    * the permission-prompt tool instead.
    */
-  spawnSettings(cwd: string): Record<string, unknown> | undefined {
+  spawnSettings(cwd: string, fileHookCommand?: string): Record<string, unknown> | undefined {
     const config = this.getConfig();
     if (!config || !this.isRestricted()) return undefined;
     const filesystem: Record<string, unknown> = {};
@@ -139,14 +139,25 @@ export class ClaudeSandbox {
     if (config.networkAccess === false) {
       // Hard-deny egress instead of prompting for each new domain.
       network.allowedDomains = [];
+      // Native settings merge allowlists across scopes; an empty list alone
+      // would leave saved domains and WebFetch grants accessible.
+      network.deniedDomains = ['*'];
       network.strictAllowlist = true;
+    } else {
+      // Permit routine networking without per-domain prompts. Native deny
+      // rules and managed domain restrictions still take precedence.
+      network.allowedDomains = ['*'];
     }
     return {
       permissions: {
         // Ask rules take precedence over inherited allow rules. Bare Bash asks
         // still permit auto-approval when the command runs inside the sandbox.
-        ask: ['Bash', 'PowerShell', 'Monitor', 'Write', 'Edit', 'NotebookEdit'],
+        ask: ['Bash', 'PowerShell', 'Monitor', ...(fileHookCommand ? [] : ['Write', 'Edit', 'NotebookEdit'])],
       },
+      ...(fileHookCommand ? { hooks: {
+        SessionStart: [{ hooks: [{ type: 'command', command: fileHookCommand, timeout: 10 }] }],
+        PreToolUse: [{ matcher: '^(Write|Edit|NotebookEdit)$', hooks: [{ type: 'command', command: fileHookCommand, timeout: 10 }] }],
+      } } : {}),
       sandbox: {
         enabled: true,
         failIfUnavailable: true,
@@ -164,8 +175,8 @@ export class ClaudeSandbox {
     return [
       `Claude sandbox: ${config?.mode ?? 'not configured (existing Claude Code settings apply)'}`,
       ...(this.isRestricted() ? [
-        'Scope: OS-enforced for Bash commands; file edits and other tools ask via approval cards.',
-        `Network: ${config?.networkAccess === false ? 'denied' : 'new domains require approval'}`,
+        'Scope: OS-enforced for Bash commands; ordinary file edits in authorized directories are automatic in workspace-write mode.',
+        `Network: ${config?.networkAccess === false ? 'denied' : 'enabled (native deny rules and managed restrictions still apply)'}`,
         config?.mode === 'read-only'
           ? 'Workspace writes: require approval.'
           : `Writable directories:\n- ${this.normalize(cwd)}\n${this.extraWritableRoots().map(root => `- ${root}`).join('\n')}`,
