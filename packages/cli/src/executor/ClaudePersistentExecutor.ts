@@ -1,10 +1,14 @@
 import { spawn, ChildProcess } from 'child_process';
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import { claudeCodeHooks } from '../hooks/ClaudeCodeHooks';
-import { StructuredContent, ContentBlockUnion, ToolUseInfo, ToolResultInfo, Attachment } from '../types';
+import { StructuredContent, ContentBlockUnion, ToolUseInfo, ToolResultInfo, Attachment, ApprovalRequestInfo, ApprovalAction, ApprovalStatus } from '../types';
+import { ClaudeSandbox } from './claude/ClaudeSandbox';
+import type { ClaudeSandboxConfig } from '../types/config';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import net from 'net';
+import { randomUUID } from 'crypto';
 import { EventEmitter } from 'events';
 
 /**
@@ -128,6 +132,10 @@ export interface PersistentClaudeOptions {
   onRedactedThinking?: () => void;
   /** Plan mode callback (fires when Claude completes plan between EnterPlanMode and ExitPlanMode) */
   onPlanMode?: (planContent: string) => void;
+  /** Approval request callback — return true when an interactive card replaces the default denial. */
+  onApprovalRequest?: (request: ApprovalRequestInfo) => boolean;
+  /** Approval resolved callback (card cleanup). */
+  onApprovalResolved?: (requestId: string, status: ApprovalStatus) => void;
   /** Image and other attachments to include with the prompt */
   attachments?: Attachment[];
   /** Execution timeout (milliseconds), default 300000 (5 minutes) */
@@ -212,6 +220,22 @@ export class ClaudePersistentExecutor extends EventEmitter {
   private inputDetectionTimer?: NodeJS.Timeout;
   private lastOutputTime = 0;
 
+  // Sandbox and approval state
+  private readonly sandbox: ClaudeSandbox;
+  private readonly claudeCommand: string;
+  private approvalServer: net.Server | null = null;
+  private approvalSocketPath?: string;
+  private pendingApprovals = new Map<string, {
+    socket: net.Socket;
+    timer: NodeJS.Timeout;
+    input: Record<string, unknown>;
+  }>();
+  private currentApprovalRequestCallback?: (request: ApprovalRequestInfo) => boolean;
+  private currentApprovalResolvedCallback?: (requestId: string, status: ApprovalStatus) => void;
+  private static readonly APPROVAL_TIMEOUT_MS = 5 * 60 * 1000;
+  private static readonly APPROVAL_SERVER_SCRIPT = path.join(__dirname, 'claude', 'approvalMcpServer.js');
+  private static readonly APPROVAL_TOOL_NAME = 'mcp__remote-cli-approval__approval_prompt';
+
   // Activity tracking for timeout extension (optional, can be disabled)
   private activityTrackingEnabled = false;
 
@@ -219,11 +243,15 @@ export class ClaudePersistentExecutor extends EventEmitter {
     directoryGuard: DirectoryGuard,
     initialWorkingDirectory?: string,
     threadId?: string,
-    model?: string
+    model?: string,
+    sandbox?: ClaudeSandboxConfig,
+    claudeCommand?: string
   ) {
     super();
     this.directoryGuard = directoryGuard;
     this.model = model;
+    this.sandbox = new ClaudeSandbox(directoryGuard, sandbox, threadId);
+    this.claudeCommand = claudeCommand ?? 'claude';
     // Use provided working directory or fall back to process.cwd()
     // If a working directory is provided, validate it first
     if (initialWorkingDirectory) {
@@ -390,14 +418,34 @@ export class ClaudePersistentExecutor extends EventEmitter {
 
       // Build arguments
       // Note: --output-format=stream-json requires --verbose
+      const restricted = this.sandbox.isRestricted();
       const args: string[] = [
         '--input-format=stream-json',
         '--output-format=stream-json',
         '--include-partial-messages',
         '--verbose',
-        '--dangerously-skip-permissions',
-        '--disallowedTools=AskUserQuestion'
       ];
+      if (restricted) {
+        // Sandboxed mode: OS-enforced Bash isolation; widening requests surface
+        // through the permission-prompt MCP tool as approval cards. Skipping
+        // permissions would silence that channel, so it is omitted on purpose.
+        this.warnIfSandboxDependenciesMissing();
+        const settings = this.sandbox.spawnSettings(this.currentWorkingDirectory);
+        if (settings) args.push('--settings', JSON.stringify(settings));
+        const socketPath = await this.ensureApprovalServer();
+        args.push('--mcp-config', JSON.stringify({
+          mcpServers: {
+            'remote-cli-approval': {
+              command: process.execPath,
+              args: [ClaudePersistentExecutor.APPROVAL_SERVER_SCRIPT, socketPath],
+            },
+          },
+        }));
+        args.push('--permission-prompt-tool', ClaudePersistentExecutor.APPROVAL_TOOL_NAME);
+      } else {
+        args.push('--dangerously-skip-permissions');
+      }
+      args.push('--disallowedTools=AskUserQuestion');
 
       if (this.model) {
         args.push('--model', this.model);
@@ -410,11 +458,11 @@ export class ClaudePersistentExecutor extends EventEmitter {
         console.log('[ClaudePersistent] Starting new session');
       }
 
-      console.log(`[ClaudePersistent] Starting: claude ${args.join(' ')}`);
+      console.log(`[ClaudePersistent] Starting: ${this.claudeCommand} ${args.join(' ')}`);
       console.log(`[ClaudePersistent] Working directory: ${this.currentWorkingDirectory}`);
 
       // Spawn the process
-      const child = spawn('claude', args, {
+      const child = spawn(this.claudeCommand, args, {
         cwd: this.currentWorkingDirectory,
         stdio: ['pipe', 'pipe', 'pipe'],
         env: {
@@ -634,6 +682,163 @@ export class ClaudePersistentExecutor extends EventEmitter {
 
     this.claudeProcess = null;
     console.log('[ClaudePersistent] Process stopped');
+  }
+
+  // ── Sandbox approval channel ─────────────────────────────────────────────
+
+  private warnIfSandboxDependenciesMissing(): void {
+    if (process.platform !== 'linux') return;
+    for (const tool of ['bwrap', 'socat']) {
+      try {
+        fs.accessSync(`/usr/bin/${tool}`, fs.constants.X_OK);
+      } catch {
+        console.warn(`[ClaudePersistent] Sandbox dependency missing: ${tool}. Install it (e.g. apt install bubblewrap socat) or sandboxed commands will fail closed.`);
+      }
+    }
+  }
+
+  private async ensureApprovalServer(): Promise<string> {
+    if (this.approvalServer && this.approvalSocketPath) return this.approvalSocketPath;
+    const directory = path.join(os.homedir(), '.remote-cli', 'claude-approval');
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const socketPath = path.join(directory, `${encodeURIComponent(this.threadId || randomUUID())}.sock`);
+    if (fs.existsSync(socketPath)) fs.unlinkSync(socketPath); // stale socket from a previous run
+
+    this.approvalServer = net.createServer((socket) => {
+      let buffer = '';
+      socket.on('data', (chunk) => {
+        buffer += chunk;
+        let index;
+        while ((index = buffer.indexOf('\n')) >= 0) {
+          const line = buffer.slice(0, index);
+          buffer = buffer.slice(index + 1);
+          if (!line.trim()) continue;
+          try {
+            this.handleApprovalSocketRequest(JSON.parse(line), socket);
+          } catch (error) {
+            console.error('[ClaudePersistent] Failed to handle approval request:', error);
+            socket.end();
+          }
+        }
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      this.approvalServer!.once('error', reject);
+      this.approvalServer!.listen(socketPath, () => resolve());
+    });
+    fs.chmodSync(socketPath, 0o600);
+    this.approvalSocketPath = socketPath;
+    return socketPath;
+  }
+
+  private handleApprovalSocketRequest(payload: any, socket: net.Socket): void {
+    const requestId = typeof payload?.id === 'string' ? payload.id : randomUUID();
+    const toolName = typeof payload?.tool_name === 'string' ? payload.tool_name : 'unknown';
+    const input = (payload?.input && typeof payload.input === 'object') ? payload.input as Record<string, unknown> : {};
+    const kind = toolName === 'Bash' ? 'command'
+      : (toolName === 'Write' || toolName === 'Edit' || toolName === 'NotebookEdit') ? 'file'
+      : 'permissions';
+    const description = toolName === 'Bash'
+      ? String(input.command ?? '').slice(0, 500)
+      : `${toolName}: ${String(input.file_path ?? input.path ?? JSON.stringify(input)).slice(0, 500)}`;
+
+    const onRequest = this.currentApprovalRequestCallback;
+    const cardShown = onRequest ? onRequest({ requestId, kind, description, canRemember: false }) : false;
+    if (!cardShown) {
+      // Without an interactive card there is nobody to answer; fail closed.
+      try {
+        socket.write(JSON.stringify({ id: requestId, behavior: 'deny',
+          message: 'Approval requires a router with approval card support.' }) + '\n');
+      } catch { /* socket may already be closed */ }
+      socket.end();
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      this.answerApproval(requestId, { behavior: 'deny', message: 'Approval request expired' }, 'expired');
+    }, ClaudePersistentExecutor.APPROVAL_TIMEOUT_MS);
+    timer.unref?.();
+    socket.on('close', () => {
+      if (this.pendingApprovals.delete(requestId)) {
+        clearTimeout(timer);
+        this.currentApprovalResolvedCallback?.(requestId, 'expired');
+      }
+    });
+    this.pendingApprovals.set(requestId, { socket, timer, input });
+  }
+
+  private answerApproval(
+    requestId: string,
+    answer: { behavior: 'allow' | 'deny'; updatedInput?: Record<string, unknown>; message?: string },
+    status: ApprovalStatus
+  ): void {
+    const pending = this.pendingApprovals.get(requestId);
+    if (!pending) return;
+    this.pendingApprovals.delete(requestId);
+    clearTimeout(pending.timer);
+    try {
+      pending.socket.write(JSON.stringify({ id: requestId, ...answer }) + '\n');
+    } catch { /* socket may already be closed */ }
+    pending.socket.end();
+    this.currentApprovalResolvedCallback?.(requestId, status);
+  }
+
+  /** MessageHandler entry point for approval card actions. */
+  respondToApproval(requestId: string, action: ApprovalAction): boolean {
+    const pending = this.pendingApprovals.get(requestId);
+    if (!pending) return false;
+    if (action === 'deny') {
+      this.answerApproval(requestId, { behavior: 'deny', message: 'Denied by user' }, 'denied');
+    } else {
+      // 'remember' has no persistent grant channel in Claude Code's permission-prompt
+      // tool contract here, so it approves once.
+      this.answerApproval(requestId, { behavior: 'allow', updatedInput: pending.input },
+        action === 'remember' ? 'remembered' : 'approved');
+    }
+    return true;
+  }
+
+  private denyAllPendingApprovals(message: string): void {
+    for (const requestId of Array.from(this.pendingApprovals.keys())) {
+      this.answerApproval(requestId, { behavior: 'deny', message }, 'expired');
+    }
+  }
+
+  getSandboxStatus(): string {
+    return this.sandbox.describe(this.currentWorkingDirectory);
+  }
+
+  async configureSandbox(command: string): Promise<PersistentClaudeResult> {
+    if (this.isProcessing || this.commandQueue.length > 0) {
+      return { success: false, error: 'Wait for the running task before changing sandbox settings.' };
+    }
+    try {
+      const match = /^(\S+)(?:\s+([\s\S]*))?$/.exec(command.trim());
+      const action = match?.[1] ?? '';
+      const value = match?.[2] ?? '';
+      const config = this.sandbox.getConfig() ?? { mode: 'workspace-write' as const };
+      let next: ClaudeSandboxConfig | undefined = { ...config };
+      if (action === 'default' && !value) next = undefined;
+      else if (['on', 'off', 'read-only'].includes(action) && !value) {
+        next.mode = action === 'on' ? 'workspace-write' : action === 'off' ? 'danger-full-access' : 'read-only';
+      } else if (action === 'network' && ['on', 'off'].includes(value)) next.networkAccess = value === 'on';
+      else if (['allow', 'remove'].includes(action) && value) {
+        const directory = this.sandbox.normalize(value, this.currentWorkingDirectory);
+        next.writableRoots = action === 'allow'
+          ? [...new Set([...(config.writableRoots ?? []), directory])]
+          : (config.writableRoots ?? []).filter(root => root !== directory);
+        if (action === 'remove' && next.writableRoots.length === (config.writableRoots ?? []).length) {
+          return { success: false, error: 'That directory is not an extra grant.' };
+        }
+      } else return { success: false, error: 'Usage: /sandbox on|off|read-only|default; /sandbox network on|off; /sandbox allow|remove <directory>' };
+      this.sandbox.configure(next);
+      // Sandbox settings are spawn-time arguments; restart to apply. The saved
+      // session id keeps the conversation intact across the respawn.
+      await this.stopProcess();
+      return { success: true, output: this.getSandboxStatus() };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   /**
@@ -1301,6 +1506,8 @@ export class ClaudePersistentExecutor extends EventEmitter {
     this.currentToolResultCallback = command.options.onToolResult;
     this.currentRedactedThinkingCallback = command.options.onRedactedThinking;
     this.currentPlanModeCallback = command.options.onPlanMode;
+    this.currentApprovalRequestCallback = command.options.onApprovalRequest;
+    this.currentApprovalResolvedCallback = command.options.onApprovalResolved;
     this.currentCommandResolve = command.resolve;
     this.currentCommandReject = command.reject;
 
@@ -1433,6 +1640,8 @@ export class ClaudePersistentExecutor extends EventEmitter {
     }
 
     console.log('[ClaudePersistent] Aborting current command...');
+
+    this.denyAllPendingApprovals('Task aborted by user');
 
     // Emit task aborted hook before stopping
     if (this.currentTaskId) {
@@ -1591,7 +1800,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
     // Step 2: Run compact as a one-shot process outside the full context
     const compactResult = await new Promise<PersistentClaudeResult>((resolve) => {
       const child = spawn(
-        'claude',
+        this.claudeCommand,
         ['--resume', sessionIdBeforeCompact, '--print', '/compact'],
         {
           cwd: this.currentWorkingDirectory,
@@ -1650,6 +1859,15 @@ export class ClaudePersistentExecutor extends EventEmitter {
     }
     this.commandQueue = [];
 
+    this.denyAllPendingApprovals('Executor destroyed');
+
+    if (this.approvalServer) {
+      const server = this.approvalServer;
+      this.approvalServer = null;
+      this.approvalSocketPath = undefined;
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+
     if (this.currentCommandReject) {
       this.currentCommandReject(new Error('Executor has been destroyed'));
       this.resetCurrentCommand();
@@ -1673,6 +1891,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
     } catch {
       // File may not exist — not an error
     }
+    this.sandbox.deleteData();
   }
 
   /**

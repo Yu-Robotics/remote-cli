@@ -402,6 +402,8 @@ Codex CLI is auto-detected if already installed on the local machine (`codex --v
 | `executor.codex.autoApprove` | `true`/`false` | `true` | Use full access unless a restricted sandbox mode is configured; restricted modes relay approvals |
 | `executor.codex.sandbox` | Optional sandbox configuration object | *(unset)* | Native mode, networking, development directories, and extra writable roots; see README |
 | `executor.codex.command` | binary command | `codex` | Override codex binary |
+| `executor.claude.sandbox` | Optional sandbox configuration object | *(unset)* | Native mode, networking, and extra writable roots for Claude Code; see README |
+| `executor.claude.command` | binary command | `claude` | Override claude binary |
 
 ### Architecture (Codex)
 
@@ -426,7 +428,7 @@ Codex background command and sub-agent completion events also produce standalone
 
 **Approval cards**: Codex emits optional `onApprovalRequest`/`onApprovalResolved` callbacks. `MessageHandler` negotiates `approvalCards` and forwards request IDs independently of task-output recovery; pending approvals are replayed on registration. Router `ApprovalCards` owns rendering and validates the original user, device, card, and request before returning an `approval_response`. Only a CLI `approval_resolved` acknowledgement marks the card approved; terminal events invalidate remaining requests. Old peers and failed card creation retain text input. No backend other than Codex emits these callbacks yet.
 
-**Sandbox**: `/sandbox` is Codex-only. `CodexSandbox.ts` resolves native thread/turn policies and persists per-thread overrides in `~/.remote-cli/codex-sandbox/`. Workspace-write permits broad reads and networking, with writes to the current workspace, dedicated temporary/download paths, common caches, and explicit directory grants. Restricted modes never automatically accept requests to widen permissions. Native permission requests support `remember` for persistent writable-directory grants. Conversation resets retain these settings; deleting a thread revokes them. See [Optional Codex sandbox](README.md#optional-codex-sandbox).
+**Sandbox**: `/sandbox` works for Codex and Claude Code threads. `CodexSandbox.ts` resolves native thread/turn policies and persists per-thread overrides in `~/.remote-cli/codex-sandbox/`. Workspace-write permits broad reads and networking, with writes to the current workspace, dedicated temporary/download paths, common caches, and explicit directory grants. Restricted modes never automatically accept requests to widen permissions. Native permission requests support `remember` for persistent writable-directory grants. Conversation resets retain these settings; deleting a thread revokes them. See [Optional Codex sandbox](README.md#optional-codex-sandbox). The Claude Code variant lives in `executor/claude/ClaudeSandbox.ts` (overrides in `~/.remote-cli/claude-sandbox/`); it injects native sandbox settings and an embedded permission-prompt MCP server (`executor/claude/approvalMcpServer.ts`) at process spawn, so policy changes recycle the Claude process and restricted mode omits `--dangerously-skip-permissions`. Claude's OS sandbox covers Bash-family commands; file edits and other tools are gated through approval cards. See [Optional Claude Code sandbox](README.md#optional-claude-code-sandbox).
 
 ---
 
