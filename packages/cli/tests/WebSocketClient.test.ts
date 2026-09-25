@@ -89,6 +89,47 @@ describe('WebSocketClient', () => {
   });
 
   describe('auto reconnection', () => {
+    it('relays Router versions without telling newer clients to upgrade', async () => {
+      const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const received = vi.fn();
+        client.onMessage(received);
+        const connected = client.connect();
+        mockWs.on.mock.calls.find(([event]: string[]) => event === 'open')[1]();
+        await connected;
+        const message = { type: 'binding_confirm', data: { success: true, routerVersion: '0.0.1' } };
+        mockWs.on.mock.calls.find(([event]: string[]) => event === 'message')[1](JSON.stringify(message));
+
+        expect(received).toHaveBeenCalledWith(message);
+        expect(warning).not.toHaveBeenCalled();
+      } finally {
+        warning.mockRestore();
+      }
+    });
+
+    it('pauses reconnects after protocol rejection and explains that a restart is required', async () => {
+      vi.useFakeTimers();
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const received = vi.fn();
+        client.onMessage(received);
+        const connected = client.connect();
+        mockWs.on.mock.calls.find(([event]: string[]) => event === 'open')[1]();
+        await connected;
+        const message = { type: 'error', data: { code: 'PROTOCOL_VERSION_INCOMPATIBLE', message: 'Unsupported protocol' } };
+        mockWs.on.mock.calls.find(([event]: string[]) => event === 'message')[1](JSON.stringify(message));
+        mockWs.on.mock.calls.find(([event]: string[]) => event === 'close')[1](1000, Buffer.from('unsupported'));
+        await vi.advanceTimersByTimeAsync(5000);
+
+        expect(received).toHaveBeenCalledWith(message);
+        expect(WebSocket).toHaveBeenCalledOnce();
+        expect(error).toHaveBeenCalledWith(expect.stringContaining('this process restarts with a compatible CLI version'));
+      } finally {
+        error.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
     it('registers again before recovering a task and ignores callbacks from the old socket', async () => {
       vi.useFakeTimers();
       const callback = (ws: any, event: string) => ws.on.mock.calls.find(([name]: string[]) => name === event)[1];

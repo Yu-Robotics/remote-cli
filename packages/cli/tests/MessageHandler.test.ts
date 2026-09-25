@@ -5,6 +5,7 @@ import { mkdtemp, rm, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import path from 'path';
 import { MessageHandler } from '../src/client/MessageHandler';
+import { AutomaticUpdater } from '../src/update/AutomaticUpdater';
 import { WebSocketClient } from '../src/client/WebSocketClient';
 import { TaskRecovery } from '../src/client/TaskRecovery';
 import { DirectoryGuard } from '../src/security/DirectoryGuard';
@@ -241,6 +242,36 @@ describe('MessageHandler', () => {
   });
 
   describe('automatic update readiness', () => {
+    it('resumes command execution after a manual-mode update without restarting', async () => {
+      let finishInstall!: () => void;
+      const beforeRestart = vi.fn();
+      const exitProcess = vi.fn();
+      const updater = new AutomaticUpdater('1.6.65', ctx.handler, {
+        restartAfterUpdate: false,
+        installVersion: () => new Promise<void>(resolve => { finishInstall = resolve; }),
+        beforeRestart,
+        exitProcess,
+      });
+      ctx.mockExecutor.execute.mockResolvedValue({ success: true, output: 'done' });
+      const update = updater.handleRouterVersion('1.6.66');
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'during-update',
+        content: 'new work', timestamp: Date.now() } as any);
+      expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+        messageId: 'during-update', error: expect.stringContaining('automatic update'),
+      }));
+
+      finishInstall();
+      await update;
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'after-update',
+        content: 'continue work', timestamp: Date.now() } as any);
+
+      expect(ctx.mockExecutor.execute).toHaveBeenCalledOnce();
+      expect(beforeRestart).not.toHaveBeenCalled();
+      expect(exitProcess).not.toHaveBeenCalled();
+    });
+
     it('waits for an offline task result to reach the Router before updating', () => {
       ctx.mockWsClient.hasPendingTaskResults.mockReturnValue(true);
       expect(ctx.handler.tryBeginAutomaticUpdate()).toBe(false);
