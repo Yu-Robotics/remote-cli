@@ -429,7 +429,9 @@ export class ClaudePersistentExecutor extends EventEmitter {
         // Sandboxed mode: OS-enforced Bash isolation; widening requests surface
         // through the permission-prompt MCP tool as approval cards. Skipping
         // permissions would silence that channel, so it is omitted on purpose.
-        this.warnIfSandboxDependenciesMissing();
+        this.sandbox.assertAvailable(this.currentWorkingDirectory);
+        // Override native acceptEdits/auto/bypass defaults for this process.
+        args.push('--permission-mode', 'default');
         const settings = this.sandbox.spawnSettings(this.currentWorkingDirectory);
         if (settings) args.push('--settings', JSON.stringify(settings));
         const socketPath = await this.ensureApprovalServer();
@@ -685,17 +687,6 @@ export class ClaudePersistentExecutor extends EventEmitter {
   }
 
   // ── Sandbox approval channel ─────────────────────────────────────────────
-
-  private warnIfSandboxDependenciesMissing(): void {
-    if (process.platform !== 'linux') return;
-    for (const tool of ['bwrap', 'socat']) {
-      try {
-        fs.accessSync(`/usr/bin/${tool}`, fs.constants.X_OK);
-      } catch {
-        console.warn(`[ClaudePersistent] Sandbox dependency missing: ${tool}. Install it (e.g. apt install bubblewrap socat) or sandboxed commands will fail closed.`);
-      }
-    }
-  }
 
   private async ensureApprovalServer(): Promise<string> {
     if (this.approvalServer && this.approvalSocketPath) return this.approvalSocketPath;

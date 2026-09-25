@@ -951,6 +951,8 @@ The Claude sandbox enforces its policy at the OS level for Bash-family commands 
 
 Policy changes apply at process spawn, so `/sandbox` restarts the Claude process; the conversation is preserved through the saved session. Restricted mode omits `--dangerously-skip-permissions` so permission prompts keep flowing. `AskUserQuestion` remains disabled. Verified live against Claude Code 2.1.276: writes inside the workspace ran sandboxed without prompts, writes outside were blocked by the OS (`Read-only file system`), and the sandbox escape hatch surfaced as an approval request.
 
+Restricted mode explicitly selects the native `default` permission mode and adds ask rules for file modifications and commands outside the sandbox. Existing `acceptEdits`, automatic permission modes, and tool allow rules cannot silently approve these operations; a write in `read-only` mode must receive approval. Commands that remain inside the Bash sandbox still run without prompting. Startup fails if required dependencies are missing from `PATH` or the host platform is unsupported, and native `failIfUnavailable` prevents fallback when sandbox initialization is unavailable.
+
 ### Development
 
 Run `npm ci` from the repository root after pulling dependency changes, before building or publishing either workspace. `npm publish` runs build and test checks but does not install missing dependencies.

@@ -946,6 +946,8 @@ Claude 沙箱只对 Bash 系命令做 OS 级强制；文件编辑等其他工具
 
 策略在进程启动时注入，所以 `/sandbox` 会重启 Claude 进程；会话通过已保存的 session 保留。受限模式会去掉 `--dangerously-skip-permissions`，让权限提示保持流动。`AskUserQuestion` 保持禁用。已对 Claude Code 2.1.276 实测：工作区内写入沙箱内静默执行，工作区外写入被 OS 拦截（`Read-only file system`)，沙箱逃逸重试会以审批请求的形式出现。
 
+Restricted mode explicitly selects the native `default` permission mode and adds ask rules for file modifications and commands outside the sandbox. Existing `acceptEdits`, automatic permission modes, and tool allow rules cannot silently approve these operations; a write in `read-only` mode must receive approval. Commands that remain inside the Bash sandbox still run without prompting. Startup fails if required dependencies are missing from `PATH` or the host platform is unsupported, and native `failIfUnavailable` prevents fallback when sandbox initialization is unavailable.
+
 ### 开发
 
 Run `npm ci` from the repository root after pulling dependency changes, before building or publishing either workspace. `npm publish` runs build and test checks but does not install missing dependencies.

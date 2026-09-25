@@ -45,6 +45,28 @@ export class ClaudeSandbox {
     return mode === 'workspace-write' || mode === 'read-only';
   }
 
+  assertAvailable(cwd: string): void {
+    if (!this.isRestricted()) return;
+    const platform = os.platform();
+    if (platform === 'darwin') return;
+    if (platform !== 'linux') {
+      throw new Error('Claude sandbox requires macOS or Linux/WSL2. Native Windows is not supported.');
+    }
+    const directories = (process.env.PATH ?? '').split(path.delimiter);
+    const missing = ['bwrap', 'socat'].filter(tool => !directories.some(directory => {
+      const candidate = path.resolve(cwd, directory, tool);
+      try {
+        fs.accessSync(candidate, fs.constants.X_OK);
+        return fs.statSync(candidate).isFile();
+      } catch {
+        return false;
+      }
+    }));
+    if (missing.length > 0) {
+      throw new Error(`Claude sandbox dependencies missing from PATH: ${missing.join(', ')}. Install bubblewrap and socat before running sandboxed tasks (e.g. apt install bubblewrap socat).`);
+    }
+  }
+
   configure(config: ClaudeSandboxConfig | undefined): void {
     const validated = config === undefined ? undefined : this.validate(config);
     if (this.storePath) {
@@ -120,8 +142,14 @@ export class ClaudeSandbox {
       network.strictAllowlist = true;
     }
     return {
+      permissions: {
+        // Ask rules take precedence over inherited allow rules. Bare Bash asks
+        // still permit auto-approval when the command runs inside the sandbox.
+        ask: ['Bash', 'PowerShell', 'Monitor', 'Write', 'Edit', 'NotebookEdit'],
+      },
       sandbox: {
         enabled: true,
+        failIfUnavailable: true,
         autoAllowBashIfSandboxed: true,
         // Widening requests must go through the permission-prompt channel.
         allowUnsandboxedCommands: true,
@@ -138,7 +166,9 @@ export class ClaudeSandbox {
       ...(this.isRestricted() ? [
         'Scope: OS-enforced for Bash commands; file edits and other tools ask via approval cards.',
         `Network: ${config?.networkAccess === false ? 'denied' : 'new domains require approval'}`,
-        `Writable directories:\n- ${this.normalize(cwd)}\n${this.extraWritableRoots().map(root => `- ${root}`).join('\n')}`,
+        config?.mode === 'read-only'
+          ? 'Workspace writes: require approval.'
+          : `Writable directories:\n- ${this.normalize(cwd)}\n${this.extraWritableRoots().map(root => `- ${root}`).join('\n')}`,
         'Requests outside this policy require approval.',
       ] : []),
       'Usage: /sandbox on|off|read-only|default; /sandbox network on|off; /sandbox allow <directory>; /sandbox remove <directory>',
