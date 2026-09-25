@@ -597,7 +597,7 @@ Card splitting also counts tables embedded in Markdown and nested components, wi
 
 Claude Code streams text into response cards as it is generated. Completed content blocks do not repeat text that has already streamed, and tool cards continue to use complete tool calls.
 
-Thread switch panels use larger text without bold formatting for `Reply from:` with the reply's full thread name and workspace, and for `Switch thread`. Under `Switch thread`, a check mark (`✓`) and primary button styling identify the destination of new top-level messages when the card is finalized or clicked. Selected buttons remain clickable. Switching updates only the clicked card; other historical cards retain their last displayed selection.
+线程切换面板的两行说明文字使用 emoji 和加粗关键词、正文大小的字体：`💬 Reply from:` 显示回复所属线程的完整名称和工作目录，`🔀 Switch thread` 标记切换区域。在 `Switch thread` 下方，对勾（`✓`）和主色按钮样式标识出卡片 finalize 或点击后新的顶层消息将发往的线程。已选中的按钮仍可点击。切换只更新被点击的卡片；其他历史卡片保留各自最后显示的选择状态。
 
 ### 组合使用全局和按线程 backend
 
