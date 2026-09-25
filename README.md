@@ -442,7 +442,7 @@ Once connected, use these commands in Feishu:
 | `/compact` | Compress conversation history to save tokens |
 | `/model [name]` | List models for the active backend or set this thread's model |
 | `/effort [auto|level]` | Show or set per-thread reasoning effort for Codex/AGY/OpenCode/Kimi/ZCode/Pi |
-| `/sandbox [on/off/read-only/default]` | Show or configure the current Codex thread sandbox; use `allow/remove <directory>` and `network on/off` for access settings |
+| `/sandbox [on/off/read-only/default]` | Show or configure the current Codex or Claude Code thread sandbox; use `allow/remove <directory>` and `network on/off` for access settings |
 | `/cd <dir>` | Change working directory for this thread |
 | `/backend` | List backends and show the current thread's effective backend |
 | `/bind <码>` | Bind a new device |
@@ -686,7 +686,7 @@ remote-cli config add-dir ~/safe/directory
 
 ### Execution Trust Model
 
-remote-cli does not install a global Claude Code `PreToolUse` hook. Backend processes run with the OS user's permissions; Codex optionally applies native sandbox restrictions to its commands through `/sandbox`. Sandboxing is not enabled automatically. Cross-project reads remain possible, and other backends keep their existing behavior. For isolation of the entire backend process, use a dedicated OS account, container, or virtual machine.
+remote-cli does not install a global Claude Code `PreToolUse` hook. Backend processes run with the OS user's permissions; Codex and Claude Code optionally apply native sandbox restrictions to their commands through `/sandbox`. Sandboxing is not enabled automatically. Cross-project reads remain possible, and other backends keep their existing behavior. For isolation of the entire backend process, use a dedicated OS account, container, or virtual machine.
 
 ### Device Authentication
 
@@ -803,6 +803,9 @@ MIT License - see [LICENSE](LICENSE) file for details.
     - `autoApprove`: Use `approvalPolicy: never` with full access (default true). When false, app-server approval requests are relayed through the existing mobile input flow.
     - `command`: codex binary to invoke (default `codex`).
     - `sandbox`: Optional object with `mode` (`workspace-write`, `read-only`, or `danger-full-access`), `networkAccess` (default true), `developmentDirectories` (default true), and extra `writableRoots`. Restricted modes ask before widening permissions even with `autoApprove: true`.
+- `executor.claude`:
+    - `sandbox`: Optional object with `mode` (`workspace-write`, `read-only`, or `danger-full-access`), `networkAccess` (default true), and extra `writableRoots`. See Optional Claude Code sandbox.
+    - `command`: claude binary to invoke (default `claude`).
 
 When loading configuration from remote-cli 1.6.30 or earlier, `executor.type: claude-spawn` is automatically migrated to `claude-persistent`, and the removed `executor.codex.transport` field is discarded. Codex always uses app-server.
 
@@ -939,6 +942,14 @@ For Codex threads without an override, merge this property into `executor.codex`
 ```
 
 This policy limits accidental writes; it is not a credential boundary or isolation between mutually untrusted projects. Reads remain subject to the OS user's permissions, network access is independent, explicitly granted parent directories cover their children, and Codex may protect repository metadata such as `.git` even inside a writable workspace. Native sandbox availability depends on the installed Codex version and host OS. The app-server policy was checked against Codex 0.154.0; actual Linux boundary checks cover writes, symlinks, and networking. Other backend sandbox behavior is unchanged. Approval cards use additive protocol messages negotiated through a capability.
+
+##### Optional Claude Code sandbox
+
+Claude Code threads support the same `/sandbox` commands, mapped onto Claude Code's native sandbox (Seatbelt on macOS; bubblewrap + socat on Linux/WSL2 — install both packages, e.g. `apt install bubblewrap socat`; native Windows is not supported). Use `/sandbox on` for workspace-write, `/sandbox read-only`, `/sandbox off`, `/sandbox default`, `/sandbox allow|remove <directory>`, and `/sandbox network on|off`. Settings are stored under `~/.remote-cli/claude-sandbox/<threadId>.json`, and thread defaults come from `executor.claude.sandbox` in `~/.remote-cli/config.json` (same shape as Codex, without `developmentDirectories`).
+
+The Claude sandbox enforces its policy at the OS level for Bash-family commands only; file edits and other tools run in the Claude Code process and are gated by permission approvals instead. Sandboxed commands run without prompting; commands that need wider access trigger an approval card (the same card UI as Codex). Answering is only possible when both CLI and Router support approval cards — without that capability the request is denied instead of falling back to full access. Claude Code additionally keeps its own settings and hook files read-only inside writable directories.
+
+Policy changes apply at process spawn, so `/sandbox` restarts the Claude process; the conversation is preserved through the saved session. Restricted mode omits `--dangerously-skip-permissions` so permission prompts keep flowing. `AskUserQuestion` remains disabled. Verified live against Claude Code 2.1.276: writes inside the workspace ran sandboxed without prompts, writes outside were blocked by the OS (`Read-only file system`), and the sandbox escape hatch surfaced as an approval request.
 
 ### Development
 

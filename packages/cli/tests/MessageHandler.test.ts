@@ -768,11 +768,21 @@ describe('MessageHandler', () => {
     it('rejects unsupported backends and changes while a task is running', async () => {
       const ctx = buildHandler({ configureSandbox: vi.fn() });
       await ctx.handler.handleMessage({ type: 'command', messageId: 'sandbox-claude', content: '/sandbox on', timestamp: Date.now() });
-      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ success: false, error: expect.stringContaining('only by the Codex') }));
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ success: false, error: expect.stringContaining('Codex and Claude Code') }));
       ctx.mockConfig.get.mockReturnValue({ type: 'codex' });
       vi.mocked(ctx.mockThreadPool.isThreadBusy).mockReturnValue(true);
       await ctx.handler.handleMessage({ type: 'command', messageId: 'sandbox-busy', content: '/sandbox off', timestamp: Date.now() });
       expect(ctx.mockExecutor.configureSandbox).not.toHaveBeenCalled();
+    });
+
+    it('routes /sandbox to the Claude executor when it implements sandbox control', async () => {
+      const ctx = buildHandler({
+        getSandboxStatus: vi.fn(() => 'Claude sandbox: workspace-write'),
+        configureSandbox: vi.fn().mockResolvedValue({ success: true, output: 'Claude sandbox: workspace-write' }),
+      });
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'sandbox-claude-on', content: '/sandbox on', timestamp: Date.now() });
+      expect(ctx.mockExecutor.configureSandbox).toHaveBeenCalledWith('on');
+      expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
     });
   });
 

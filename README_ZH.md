@@ -439,7 +439,7 @@ remote-cli stop
 | `/compact` | 压缩对话历史以节省 Token |
 | `/model [name]` | 列出当前 backend 的模型，或设置当前线程的模型 |
 | `/effort [auto|level]` | 查看或设置 Codex/AGY/OpenCode/Kimi/ZCode/Pi 的线程思考等级 |
-| `/sandbox [on/off/read-only/default]` | Show or configure the current Codex thread sandbox; use `allow/remove <directory>` and `network on/off` for access settings |
+| `/sandbox [on/off/read-only/default]` | 查看或配置当前 Codex 或 Claude Code 线程的沙箱；用 `allow/remove <目录>` 和 `network on/off` 调整访问设置 |
 | `/cd <dir>` | 切换当前线程的工作目录 |
 | `/backend` | 列出后端并显示当前线程实际使用的后端 |
 | `/bind <码>` | 绑定新设备 |
@@ -683,7 +683,7 @@ remote-cli config add-dir ~/safe/directory
 
 ### 执行信任模型
 
-remote-cli does not install a global Claude Code `PreToolUse` hook. Backend processes run with the OS user's permissions; Codex optionally applies native sandbox restrictions to its commands through `/sandbox`. Sandboxing is not enabled automatically. Cross-project reads remain possible, and other backends keep their existing behavior. For isolation of the entire backend process, use a dedicated OS account, container, or virtual machine.
+remote-cli does not install a global Claude Code `PreToolUse` hook. Backend processes run with the OS user's permissions; Codex and Claude Code optionally apply native sandbox restrictions to their commands through `/sandbox`. Sandboxing is not enabled automatically. Cross-project reads remain possible, and other backends keep their existing behavior. For isolation of the entire backend process, use a dedicated OS account, container, or virtual machine.
 
 ### 设备认证
 
@@ -800,6 +800,9 @@ MIT 许可证 - 详见 [LICENSE](LICENSE) 文件。
     - `autoApprove`: 使用 `approvalPolicy: never` 和完全访问权限（默认 true）。设为 false 时，app-server 的审批请求会通过现有移动端输入流程转发。
     - `command`: codex 二进制命令（默认 `codex`）。
     - `sandbox`: Optional object with `mode` (`workspace-write`, `read-only`, or `danger-full-access`), `networkAccess` (default true), `developmentDirectories` (default true), and extra `writableRoots`. Restricted modes ask before widening permissions even with `autoApprove: true`.
+- `executor.claude`:
+    - `sandbox`: 可选对象，含 `mode`（`workspace-write`、`read-only` 或 `danger-full-access`）、`networkAccess`（默认 true）和额外的 `writableRoots`。参见"可选的 Claude Code 沙箱"。
+    - `command`: claude 二进制命令（默认 `claude`）。
 
 加载 remote-cli 1.6.30 或更早版本的配置时，`executor.type: claude-spawn` 会自动迁移为 `claude-persistent`，已移除的 `executor.codex.transport` 字段会被丢弃。Codex 始终使用 app-server。
 
@@ -934,6 +937,14 @@ For Codex threads without an override, merge this property into `executor.codex`
 ```
 
 This policy limits accidental writes; it is not a credential boundary or isolation between mutually untrusted projects. Reads remain subject to the OS user's permissions, network access is independent, explicitly granted parent directories cover their children, and Codex may protect repository metadata such as `.git` even inside a writable workspace. Native sandbox availability depends on the installed Codex version and host OS. The app-server policy was checked against Codex 0.154.0; actual Linux boundary checks cover writes, symlinks, and networking. Other backend sandbox behavior is unchanged. Approval cards use additive protocol messages negotiated through a capability.
+
+##### 可选的 Claude Code 沙箱
+
+Claude Code 线程支持相同的 `/sandbox` 命令，映射到 Claude Code 原生沙箱（macOS 用 Seatbelt;Linux/WSL2 用 bubblewrap + socat，需要安装这两个包，例如 `apt install bubblewrap socat`;Windows 原生不支持）。用法：`/sandbox on`（工作区可写）、`/sandbox read-only`、`/sandbox off`、`/sandbox default`、`/sandbox allow|remove <目录>`、`/sandbox network on|off`。设置保存在 `~/.remote-cli/claude-sandbox/<threadId>.json`，线程级默认值来自 `~/.remote-cli/config.json` 中的 `executor.claude.sandbox`（与 Codex 同构，但没有 `developmentDirectories`)。
+
+Claude 沙箱只对 Bash 系命令做 OS 级强制；文件编辑等其他工具在 Claude Code 进程内执行，由权限审批把关。沙箱内的命令不弹确认直接运行；需要扩大权限的命令会触发批准卡片（与 Codex 同一套卡片 UI)。只有 CLI 和 Router 都支持批准卡片时才能应答——否则请求会被拒绝，而不是回落到完全访问。Claude Code 还会让可写目录内它自己的设置和 hook 文件保持只读。
+
+策略在进程启动时注入，所以 `/sandbox` 会重启 Claude 进程；会话通过已保存的 session 保留。受限模式会去掉 `--dangerously-skip-permissions`，让权限提示保持流动。`AskUserQuestion` 保持禁用。已对 Claude Code 2.1.276 实测：工作区内写入沙箱内静默执行，工作区外写入被 OS 拦截（`Read-only file system`)，沙箱逃逸重试会以审批请求的形式出现。
 
 ### 开发
 

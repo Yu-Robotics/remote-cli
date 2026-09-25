@@ -94,6 +94,15 @@ describe('executor/index', () => {
       await executor.destroy();
     });
 
+    it('passes sandbox configuration to the Claude executor', async () => {
+      const executor = createExecutor(directoryGuard, {
+        type: 'claude-persistent', claude: { sandbox: { mode: 'read-only', networkAccess: false } },
+      });
+      expect(executor).toBeInstanceOf(ClaudePersistentExecutor);
+      expect((executor as ClaudePersistentExecutor).getSandboxStatus()).toContain('read-only');
+      await executor.destroy();
+    });
+
     it('creates the official ZCode app-server executor', async () => {
       const executor = createExecutor(
         directoryGuard,

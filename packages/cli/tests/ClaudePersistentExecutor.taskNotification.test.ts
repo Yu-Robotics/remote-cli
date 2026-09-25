@@ -12,7 +12,7 @@ vi.mock('child_process', () => ({
 // Mock fs for session file operations
 vi.mock('fs', () => ({
   default: {
-    existsSync: vi.fn(() => true),
+    existsSync: vi.fn((file: any) => String(file).includes('claude-sandbox') ? false : true),
     readFileSync: vi.fn(() => JSON.stringify({ id: 'test-session' })),
     writeFileSync: vi.fn(),
     unlinkSync: vi.fn(),
@@ -20,7 +20,7 @@ vi.mock('fs', () => ({
     statSync: vi.fn(),
     mkdirSync: vi.fn(),
   },
-  existsSync: vi.fn(() => true),
+  existsSync: vi.fn((file: any) => String(file).includes('claude-sandbox') ? false : true),
   readFileSync: vi.fn(() => JSON.stringify({ id: 'test-session' })),
   writeFileSync: vi.fn(),
   unlinkSync: vi.fn(),
