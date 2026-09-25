@@ -100,7 +100,7 @@ Linux users upgrading from version 1.6.23 or earlier should run `remote-cli serv
 | `/cd <dir>` | Change working directory for this thread |
 | `/model [name]` | List models for the active backend or set this thread's model |
 | `/effort [auto|level]` | Show or set Codex/AGY/OpenCode/Kimi/ZCode/Pi reasoning effort |
-| `/sandbox [on/off/read-only/default]` | Configure the current Codex thread sandbox, directory grants, and networking |
+| `/sandbox [on/off/read-only/default]` | Configure the current Codex or Claude Code thread sandbox, directory grants, and networking |
 | `/backend` | List backends and show the current thread's effective backend |
 | `/backend <index>` | Switch all threads and clear per-thread backend overrides |
 | `/backend <index> @` | Switch only the current thread |
@@ -158,6 +158,8 @@ When diagnosing a task, check `/status`, then `/context`, then `/queue`. Use `/a
 Codex permission requests use interactive cards when both CLI and Router support them. Choose Allow, Deny, or (for explicit directory grants) Allow and remember directory. Buttons stay bound to the original request and are invalidated when it finishes. Pending approvals get new cards after reconnecting; older routers and card delivery failures retain text replies.
 
 Codex supports an opt-in native sandbox through `/sandbox on`, `/sandbox read-only`, and `/sandbox off`. Use `/sandbox allow <directory>` to save extra writable directories for the current thread, `remove <directory>` to revoke them, and `network on|off` to control networking. The workspace-write default allows cross-project reads, networking, and writes to the current project, dedicated temporary/download directories, and common package caches. Grants survive conversation resets and backend switches. See [Codex sandbox configuration](../../README.md#optional-codex-sandbox) for boundaries, approval choices, and configuration defaults. Other backends retain their existing behavior.
+
+Claude Code also supports opt-in `/sandbox` policies. Restricted mode requires native sandbox availability and explicit approval for file modifications, including writes in read-only mode, regardless of existing automatic permission settings or tool allow rules. Missing Linux dependencies (`bubblewrap` and `socat` on `PATH`) stop execution instead of falling back to full access. See [Claude sandbox configuration](../../README.md#optional-claude-code-sandbox).
 
 - **Directory whitelisting**: Controls which working directory a thread can select; it is not a process sandbox
 - **Backend permissions**: AI processes inherit the operating-system user's permissions. remote-cli does not install a global Claude security hook or automatically filter backend shell commands.
