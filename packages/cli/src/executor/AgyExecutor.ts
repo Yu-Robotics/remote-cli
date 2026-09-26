@@ -535,13 +535,6 @@ export class AgyExecutor implements IExecutor {
     }
     if (this.conversationId) {
       args.push('--conversation', this.conversationId);
-    } else {
-      // A bare spawn joins agy's shared default-cli-project, where restart
-      // auto-resume can attach this thread to another thread's conversation
-      // (agy resumes conversations left active by killed processes), leaking
-      // memory across remote-cli threads. Force a dedicated project so every
-      // thread starts with a provably fresh conversation.
-      args.push('--new-project');
     }
     return args;
   }
