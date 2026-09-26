@@ -823,8 +823,6 @@ remote-cli config set executor.type agy
 remote-cli config set executor.agy.model gemini-3.8-flash-low
 ```
 
-The AGY backend runs one persistent stream-json process per thread and persists each thread's conversation id under `~/.remote-cli/agy-sessions/`. A thread with no stored conversation starts agy with `--new-project`, because a bare spawn would join agy's shared `default-cli-project`, where agy's restart auto-resume could attach the fresh process to another thread's conversation. This keeps memories strictly isolated between threads; `/clear` starts a fresh conversation (and project) for that thread.
-
 #### Using OpenCode CLI
 
 ```bash

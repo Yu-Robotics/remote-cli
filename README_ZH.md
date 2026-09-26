@@ -820,8 +820,6 @@ remote-cli config set executor.type agy
 remote-cli config set executor.agy.model gemini-3.8-flash-low
 ```
 
-AGY 后端为每个 thread 运行一个持久化的 stream-json 进程，并把各 thread 的 conversation id 保存在 `~/.remote-cli/agy-sessions/`。没有已存会话的 thread 会以 `--new-project` 启动 agy，因为裸启动会加入 agy 共享的 `default-cli-project`,agy 的重启自动恢复可能把新进程接到其他 thread 的会话上。这保证了 thread 之间的记忆严格隔离；`/clear` 会为该 thread 开启全新会话（和 project)。
-
 #### 使用 OpenCode CLI
 
 ```bash

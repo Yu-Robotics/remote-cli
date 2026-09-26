@@ -396,24 +396,9 @@ describe('AgyExecutor', () => {
     const idx = args.indexOf('--conversation');
     expect(idx).toBeGreaterThan(-1);
     expect(args[idx + 1]).toBe('conv-stored');
-    // A stored conversation must not also request a fresh project.
-    expect(args).not.toContain('--new-project');
 
     emitInit('conv-stored');
     emitResult({ conversation_id: 'conv-stored' });
-    await p;
-  });
-
-  it('forces a dedicated project for a fresh thread so bare spawns cannot auto-resume another conversation', async () => {
-    const p = executor.execute('hi');
-    await waitForSpawn();
-
-    const args = mockSpawn.mock.calls[0][1];
-    expect(args).toContain('--new-project');
-    expect(args).not.toContain('--conversation');
-
-    emitInit('conv-fresh');
-    emitResult({ conversation_id: 'conv-fresh' });
     await p;
   });
 
