@@ -143,13 +143,11 @@ export class AgyExecutor implements IExecutor {
    * Per-thread HOME directory for the agy child process. agy stores every
    * conversation under $HOME/.gemini/antigravity-cli — one global store shared
    * by all threads, which lets a fresh agent read other threads' transcripts
-   * when asked to recall ("上次聊到哪里"). Spawning with HOME pointed at this
+   * when asked to recall previous chats. Spawning with HOME pointed at this
    * directory gives each thread its own store, so recall-style digging finds
    * only its own conversations. Undefined on the legacy no-threadId path.
    */
   private readonly agyHome?: string;
-  /** Migration of the stored conversation into agyHome runs at most once. */
-  private conversationMigrated = false;
 
   private commandQueue: QueuedCommand[] = [];
   private isProcessing = false;
@@ -206,18 +204,13 @@ export class AgyExecutor implements IExecutor {
 
   /**
    * Environment for the agy child process. With a threadId, HOME points at the
-   * per-thread directory (set up lazily here). If setup fails, fall back to
-   * the shared HOME — isolation is best-effort, a working backend matters more.
+   * per-thread directory (set up lazily here). A setup failure prevents the
+   * process from starting so it cannot use the shared conversation store.
    */
   private buildEnv(): NodeJS.ProcessEnv {
     if (!this.agyHome) return { ...process.env };
-    try {
-      this.ensureThreadHome();
-      return { ...process.env, HOME: this.agyHome };
-    } catch (error) {
-      console.warn('[AgyExecutor] Failed to set up per-thread HOME, falling back to shared HOME:', error);
-      return { ...process.env };
-    }
+    this.ensureThreadHome();
+    return { ...process.env, HOME: this.agyHome };
   }
 
   /**
@@ -238,8 +231,6 @@ export class AgyExecutor implements IExecutor {
     fs.mkdirSync(threadCli, { recursive: true });
     for (const name of AGY_CLI_SHARED_FILES) this.linkShared(realCli, threadCli, name, 'file');
     for (const name of AGY_CLI_SHARED_DIRS) this.linkShared(realCli, threadCli, name, 'dir');
-
-    this.migrateConversation(realCli, threadCli);
   }
 
   /**
@@ -266,34 +257,6 @@ export class AgyExecutor implements IExecutor {
       fs.unlinkSync(link);
     }
     fs.symlinkSync(master, link, type);
-  }
-
-  /**
-   * Copy the thread's existing conversation out of the shared store into its
-   * HOME, so `--conversation <id>` keeps resuming after the switch to
-   * per-thread HOMEs. Best-effort: on failure agy transparently starts a
-   * fresh conversation (its standard stale-id behavior).
-   */
-  private migrateConversation(realCli: string, threadCli: string): void {
-    if (this.conversationMigrated || !this.conversationId) return;
-    this.conversationMigrated = true;
-    const id = this.conversationId;
-    try {
-      fs.mkdirSync(path.join(threadCli, 'conversations'), { recursive: true });
-      for (const suffix of ['.db', '.db-shm', '.db-wal']) {
-        const src = path.join(realCli, 'conversations', `${id}${suffix}`);
-        if (fs.existsSync(src)) {
-          fs.copyFileSync(src, path.join(threadCli, 'conversations', `${id}${suffix}`));
-        }
-      }
-      const brainSrc = path.join(realCli, 'brain', id);
-      if (fs.existsSync(brainSrc)) {
-        fs.cpSync(brainSrc, path.join(threadCli, 'brain', id), { recursive: true });
-      }
-      console.log(`[AgyExecutor] Migrated conversation ${id} into the per-thread HOME`);
-    } catch (error) {
-      console.warn('[AgyExecutor] Conversation migration failed (agy will start fresh on resume):', error);
-    }
   }
 
   // ─── IExecutor required ───────────────────────────────────────────────────
