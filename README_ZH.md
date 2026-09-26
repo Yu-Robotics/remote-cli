@@ -471,7 +471,7 @@ Backend 选择同时支持全局模式和按线程模式：
 
 Backend index 使用 `/backend` 显示的顺序（安装后通常为 Claude Code、Codex CLI、OpenCode CLI、Kimi Code CLI、ZCode、Pi、AGY CLI）。按线程选择会持久化到 `threads.json`。不同线程可以使用不同后端并行执行。受影响的线程正在执行时不会执行后端切换；任意线程正在执行时也不会执行全局切换。切换后端会保留各后端的会话数据，因此切回某个后端时可以恢复其之前的会话。
 
-**AGY 数据隔离**:agy 把所有会话存储在一个全局目录(`~/.gemini/antigravity-cli`)中,由所有线程共享,因此全新的 AGY 会话在被问及过往聊天时可能读到其他线程的转录。为防止这种情况,remote-cli 为每个线程的 agy 使用独立的 HOME(`~/.remote-cli/agy-homes/<threadId>`):登录凭据和设置通过软链指向你真实的 `~/.gemini`(所有线程共用一份 agy 登录态),而会话数据按线程隔离。已有的 AGY 会话会在首次使用时迁移到线程的 HOME 中,删除线程会移除其 HOME。其他后端本来就保持按线程的会话,不受影响。
+**AGY 数据隔离**:agy 把所有会话存储在一个全局目录(`~/.gemini/antigravity-cli`)中,由所有线程共享,因此全新的 AGY 会话在被问及过往聊天时可能读到其他线程的转录。为防止这种情况,remote-cli 为每个线程的 agy 使用独立的 HOME(`~/.remote-cli/agy-homes/<threadId>`):登录凭据和设置通过软链指向你真实的 `~/.gemini`(所有线程共用一份 agy 登录态),而会话数据按线程隔离。已有会话不会自动复制。升级保存了 AGY 会话的客户端前,先停止该客户端,根据 `~/.remote-cli/agy-sessions/<threadId>.json` 中的会话 ID,使用 SQLite 的 `.backup` 命令复制对应数据库,再将共享存储中的 `brain/<conversationId>` 目录复制到 `~/.remote-cli/agy-homes/<threadId>/.gemini/antigravity-cli/`,并保留共享存储作为备份。若无法准备独立 HOME,AGY 不会启动。删除线程时,如果其 AGY executor 仍处于活动状态,会删除独立 HOME。其他后端本来就保持按线程的会话,不受影响。
 
 ### 命令队列
 

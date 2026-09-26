@@ -22,7 +22,6 @@ vi.mock('fs', () => ({
     symlinkSync: vi.fn(),
     lstatSync: vi.fn(),
     copyFileSync: vi.fn(),
-    cpSync: vi.fn(),
     rmSync: vi.fn(),
   },
   existsSync: vi.fn(() => false),
@@ -35,7 +34,6 @@ vi.mock('fs', () => ({
   symlinkSync: vi.fn(),
   lstatSync: vi.fn(),
   copyFileSync: vi.fn(),
-  cpSync: vi.fn(),
   rmSync: vi.fn(),
 }));
 
@@ -129,7 +127,6 @@ describe('AgyExecutor', () => {
     mockFs.symlinkSync.mockImplementation(() => undefined);
     mockFs.lstatSync.mockImplementation(() => undefined);
     mockFs.copyFileSync.mockImplementation(() => undefined);
-    mockFs.cpSync.mockImplementation(() => undefined);
     mockFs.rmSync.mockImplementation(() => undefined);
 
     spawnedProcesses = [];
@@ -532,7 +529,7 @@ describe('AgyExecutor', () => {
     await p;
   });
 
-  it('migrates the stored conversation into the thread home on first spawn', async () => {
+  it('does not overwrite an existing conversation when resuming a thread', async () => {
     const sessionFile = path.join(os.homedir(), '.remote-cli', 'agy-sessions', 'thread-1.json');
     mockFs.existsSync.mockImplementation((p: string) => String(p) === sessionFile);
     mockFs.readFileSync.mockImplementation((p: string) =>
@@ -552,13 +549,10 @@ describe('AgyExecutor', () => {
     await waitForSpawn();
 
     const threadCli = path.join(threadGemini('thread-1'), 'antigravity-cli');
-    expect(mockFs.copyFileSync).toHaveBeenCalledWith(
+    expect(mockFs.copyFileSync).not.toHaveBeenCalledWith(
       cliMaster('conversations/conv-old.db'),
       path.join(threadCli, 'conversations', 'conv-old.db'));
-    expect(mockFs.cpSync).toHaveBeenCalledWith(
-      cliMaster('brain/conv-old'),
-      path.join(threadCli, 'brain', 'conv-old'),
-      { recursive: true });
+    expect(mockSpawn.mock.calls[0][1]).toContain('conv-old');
 
     emitInit('conv-old');
     emitResult({ conversation_id: 'conv-old' });
@@ -570,20 +564,16 @@ describe('AgyExecutor', () => {
     expect(mockFs.rmSync).toHaveBeenCalledWith(threadHome('thread-1'), { recursive: true, force: true });
   });
 
-  it('falls back to the shared HOME when thread home setup fails', async () => {
+  it('does not start agy when thread home setup fails', async () => {
     mockFs.mkdirSync.mockImplementation(() => {
       throw new Error('EROFS: read-only file system');
     });
 
-    const p = executor.execute('hi');
-    await waitForSpawn();
-
-    const [, , opts] = mockSpawn.mock.calls[0];
-    expect(opts.env.HOME).toBe(process.env.HOME);
-
-    emitInit();
-    emitResult();
-    await p;
+    await expect(executor.execute('hi')).resolves.toMatchObject({
+      success: false,
+      error: 'EROFS: read-only file system',
+    });
+    expect(mockSpawn).not.toHaveBeenCalled();
   });
 
   // ── Queueing ──────────────────────────────────────────────────────────────
