@@ -471,6 +471,8 @@ Backend 选择同时支持全局模式和按线程模式：
 
 Backend index 使用 `/backend` 显示的顺序（安装后通常为 Claude Code、Codex CLI、OpenCode CLI、Kimi Code CLI、ZCode、Pi、AGY CLI）。按线程选择会持久化到 `threads.json`。不同线程可以使用不同后端并行执行。受影响的线程正在执行时不会执行后端切换；任意线程正在执行时也不会执行全局切换。切换后端会保留各后端的会话数据，因此切回某个后端时可以恢复其之前的会话。
 
+**AGY 数据隔离**:agy 把所有会话存储在一个全局目录(`~/.gemini/antigravity-cli`)中,由所有线程共享,因此全新的 AGY 会话在被问及过往聊天时可能读到其他线程的转录。为防止这种情况,remote-cli 为每个线程的 agy 使用独立的 HOME(`~/.remote-cli/agy-homes/<threadId>`):登录凭据和设置通过软链指向你真实的 `~/.gemini`(所有线程共用一份 agy 登录态),而会话数据按线程隔离。已有的 AGY 会话会在首次使用时迁移到线程的 HOME 中,删除线程会移除其 HOME。其他后端本来就保持按线程的会话,不受影响。
+
 ### 命令队列
 
 每个 thread 同时只执行一条命令，因为 Claude Code、AGY、Codex、OpenCode、Kimi Code、ZCode 和 Pi 的会话都按顺序处理。如果在线程忙碌时发送普通消息，remote-cli 会先发送飞书确认卡片，不会直接入队。只有点击 **Add to queue** 后消息才会入队；点击 **Cancel** 或确认超时都会丢弃消息。

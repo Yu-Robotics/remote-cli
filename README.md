@@ -474,6 +474,8 @@ Backend selection supports both global and per-thread modes:
 
 The backend index follows the order shown by `/backend` (Claude Code, Codex CLI, OpenCode CLI, Kimi Code CLI, ZCode, Pi, then AGY CLI when installed). Per-thread backend choices are persisted in `threads.json`. Different threads can use different backends and execute concurrently. A backend switch is rejected while the affected thread is running; a global switch is rejected while any thread is running. Backend session data is preserved when switching, so returning to a backend can resume its previous session.
 
+**AGY data isolation**: agy stores all conversations in one global directory (`~/.gemini/antigravity-cli`) shared by every thread, so a fresh AGY session could read other threads' transcripts when asked about past chats. To prevent this, remote-cli runs each thread's agy with its own HOME (`~/.remote-cli/agy-homes/<threadId>`): login credentials and settings are symlinked from your real `~/.gemini` (one shared agy login), while conversation data stays per-thread. Existing AGY conversations are migrated into the thread's HOME on first use, and deleting a thread removes its HOME. Other backends already keep per-thread sessions and are unchanged.
+
 ### Command Queues
 
 Each thread executes one command at a time because Claude Code, AGY, Codex, OpenCode, Kimi Code, ZCode, and Pi sessions are sequential. If a normal message is sent while its thread is busy, remote-cli shows a Feishu confirmation card instead of queueing it immediately. The message is queued only after clicking **Add to queue**; clicking **Cancel** or waiting for the confirmation to expire discards it.
