@@ -300,10 +300,6 @@ export class FeishuLongConnHandler {
         }
         break;
 
-      case '/status':
-        await this.handleStatusCommand(openId, messageId);
-        break;
-
       case '/unbind':
         await this.handleUnbindCommand(openId, messageId);
         break;
@@ -440,50 +436,6 @@ export class FeishuLongConnHandler {
     } catch (error) {
       console.error('Error binding user:', error);
       await this.replyToMessage(messageId, '❌ Binding failed, please try again later');
-    }
-  }
-
-  /**
-   * Handle status command
-   */
-  private async handleStatusCommand(openId: string, messageId: string): Promise<void> {
-    try {
-      const binding = await this.bindingManager.getUserBinding(openId);
-      if (!binding) {
-        await this.replyToMessage(
-          messageId,
-          '❌ You have not bound a device yet, please send /bind <binding-code> to bind first'
-        );
-        return;
-      }
-
-      const devices = binding.devices;
-      if (devices.length === 0) {
-        await this.replyToMessage(messageId, '❌ No devices found');
-        return;
-      }
-
-      // Build status message
-      let message = `📊 Device Status\n\n`;
-
-      for (const device of devices) {
-        const isOnline = this.connectionHub?.isDeviceOnline(device.deviceId) || false;
-        const status = isOnline ? '🟢 Online' : '🔴 Offline';
-        const activeIndicator = device.isActive ? ' ⭐ ACTIVE' : '';
-
-        message += `\n**${device.deviceName}**${activeIndicator}\n`;
-        message += `Device ID: ${device.deviceId}\n`;
-        message += `Status: ${status}\n`;
-        message += `Bound: ${new Date(device.boundAt).toLocaleString('en-US')}\n`;
-        message += `Last Active: ${new Date(device.lastActiveAt).toLocaleString('en-US')}\n`;
-      }
-
-      message += `\n\nTotal Devices: ${devices.length}`;
-
-      await this.replyToMessage(messageId, message);
-    } catch (error) {
-      console.error('Error handling status command:', error);
-      await this.replyToMessage(messageId, '❌ Status query failed, please try again later');
     }
   }
 
@@ -741,12 +693,11 @@ export class FeishuLongConnHandler {
 Device management commands:
 /bind <binding-code> - Bind a new device
 /unbind - Unbind all devices
-/device - List all your devices
-/device list - List all your devices
+/device - List all your devices and their connection status
+/device list - List all your devices and their connection status
 /device switch <device-id-or-index> - Switch active device
 /device <device-id-or-index> - Quick switch to device
 /device unbind <device-id-or-index> - Unbind a specific device
-/status - View all device statuses
 /help - Show help information
 
 Backend and session commands (sent to active device):

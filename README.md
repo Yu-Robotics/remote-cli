@@ -446,7 +446,7 @@ Once connected, use these commands in Feishu:
 | `/backend` | List backends and show the current thread's effective backend |
 | `/bind <码>` | Bind a new device |
 | `/unbind` | Unbind all devices |
-| `/device` | List and switch between bound devices |
+| `/device` | List bound devices with connection status, or switch devices |
 
 ### Multi-session (Threads)
 
