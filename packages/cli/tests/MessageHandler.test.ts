@@ -519,7 +519,33 @@ describe('MessageHandler', () => {
       const statusResponse = vi.mocked(ctx.mockWsClient.send).mock.calls.at(-1)?.[0];
       expect(statusResponse.output).toContain('Backend: claude');
       expect(statusResponse.output).toContain('Reasoning effort: auto');
+      expect(statusResponse.output).not.toContain('Plan usage');
       expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
+    });
+
+    it('should append account usage when the active backend exposes it', async () => {
+      ctx.mockConfig.get.mockReturnValue({ type: 'codex' });
+      ctx.mockExecutor.getAccountUsage = vi.fn().mockResolvedValue('- 5-hour window: 72% remaining');
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-usage', content: '/status', timestamp: Date.now() });
+
+      const response = vi.mocked(ctx.mockWsClient.send).mock.calls.at(-1)?.[0];
+      expect(response).toMatchObject({ success: true });
+      expect(response.output).toContain('Plan usage (Codex CLI)');
+      expect(response.output).toContain('5-hour window: 72% remaining');
+      expect(ctx.mockExecutor.getAccountUsage).toHaveBeenCalledOnce();
+    });
+
+    it('should keep the normal status response when account usage fails', async () => {
+      ctx.mockConfig.get.mockReturnValue({ type: 'kimi' });
+      ctx.mockExecutor.getAccountUsage = vi.fn().mockRejectedValue(new Error('usage unavailable'));
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-usage-error', content: '/status', timestamp: Date.now() });
+
+      const response = vi.mocked(ctx.mockWsClient.send).mock.calls.at(-1)?.[0];
+      expect(response).toMatchObject({ success: true });
+      expect(response.output).toContain('Backend: kimi');
+      expect(response.output).not.toContain('Plan usage');
     });
 
     it('should show context diagnostics without invoking the executor', async () => {

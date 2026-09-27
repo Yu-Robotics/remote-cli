@@ -6,6 +6,7 @@ import { EventEmitter } from 'events';
 
 // Mock child_process
 vi.mock('child_process', () => ({
+  execFile: vi.fn(),
   spawn: vi.fn(),
 }));
 
@@ -37,7 +38,7 @@ vi.mock('fs', () => ({
   rmSync: vi.fn(),
 }));
 
-import { spawn } from 'child_process';
+import { execFile, spawn } from 'child_process';
 import * as fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -56,6 +57,7 @@ describe('AgyExecutor', () => {
   let executor: AgyExecutor;
   let directoryGuard: DirectoryGuard;
   const mockSpawn = spawn as any;
+  const mockExecFile = execFile as any;
   const mockFs = fs as any;
 
   // The most recently spawned mock process (respawns replace it)
@@ -222,6 +224,33 @@ describe('AgyExecutor', () => {
     emitInit();
     emitResult();
     await p;
+  });
+
+  it('combines native model quota and credit output for account usage', async () => {
+    mockExecFile.mockImplementation((_command: string, args: string[], _options: unknown, callback: Function) => {
+      const output = args[1] === '/usage'
+        ? '\u001b[32mWeekly quota remaining: 83%\u001b[0m'
+        : 'AI credits remaining: 120';
+      callback(null, output, '');
+      return {};
+    });
+
+    await expect(executor.getAccountUsage()).resolves.toBe(
+      'Model quota:\nWeekly quota remaining: 83%\n\nCredits:\nAI credits remaining: 120'
+    );
+    expect(mockExecFile).toHaveBeenCalledTimes(2);
+    expect(mockExecFile).toHaveBeenCalledWith(
+      'agy',
+      ['-p', '/usage'],
+      expect.objectContaining({ cwd: directoryGuard.resolveWorkingDirectory('~/test-project') }),
+      expect.any(Function)
+    );
+    expect(mockExecFile).toHaveBeenCalledWith(
+      'agy',
+      ['-p', '/credits'],
+      expect.anything(),
+      expect.any(Function)
+    );
   });
 
   // ── Prompt sending ────────────────────────────────────────────────────────

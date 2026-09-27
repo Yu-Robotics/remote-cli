@@ -545,6 +545,7 @@ remote-cli 自身不处理的斜杠命令会转发给当前 AI 后端，各后�
 - **Pi**：RPC `get_commands` 返回的扩展命令、提示模板和 `/skill:name` 技能通过持久化的 `pi --mode rpc` 会话发送；`/skills` 用于列出 Pi 技能。仅限 TUI 的内建命令会被拒绝。`/model`、`/effort`、`/compact` 和 `/abort` 仍由 remote-cli 自身处理
 
 内建命令（`/help`、`/status`、`/context`、`/skills`、`/clear`、`/new`、`/compact`、`/model`、`/cd`、`/thread`、`/backend`、`/abort`）可用于所有后端。`/new` 是 `/clear` 的完全别名：它会保留当前 remote-cli thread、工作目录、backend、模型和思考等级设置，同时启动一个全新的 backend 对话。`/effort` 可按线程设置 Codex、AGY、OpenCode、Kimi Code、ZCode 和 Pi 的思考等级；Claude Code 暂未实现。
+`/status` 始终显示当前 remote-cli thread 和运行状态。Codex、AGY 或 Kimi Code 能够提供信息时，还会追加当前账号的原生套餐用量：Codex 使用 app-server 限额接口，AGY 使用 `/usage` 和 `/credits`，Kimi Code 使用已认证的本地 Kimi server 账号用量接口。每个后端保留自己的字段和表述。用量查询不可用、未登录、不支持或失败时不会显示该区块，也不会影响原有状态响应。短生命周期的 Kimi server 仅绑定回环地址，并在查询完成后停止。
 `/context` 可用于所有后端，会显示当前会话、模型、工作目录和队列状态。Pi 还会显示官方 RPC 返回的会话 Token 总计和当前上下文窗口用量；其他后端无法提供精确用量时，仍会显示传输层未提供该信息的提示。`/skills` 在 Claude、AGY、OpenCode 和 Kimi Code 上使用原生信息命令，在 ZCode 上映射为原生 `/skill` 命令，在 Pi 上通过 RPC 列出技能；Codex 则扫描 `.agents/skills` 和 `~/.codex/skills` 下的本地 `SKILL.md` 文件。
 
 ### 示例工作流程

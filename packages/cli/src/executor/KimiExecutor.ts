@@ -1,6 +1,7 @@
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import { AcpExecutor } from './AcpExecutor';
 import type { AcpEventCallbacks, AcpTransport } from './acp/AcpClient';
+import { queryKimiAccountUsage } from './kimi/KimiAccountUsage';
 
 export interface KimiExecutorOptions {
   model?: string;
@@ -11,11 +12,16 @@ export interface KimiExecutorOptions {
   threadId?: string;
   sessionBaseDir?: string;
   clientFactory?: (callbacks: AcpEventCallbacks, cwd: string) => AcpTransport;
+  accountUsageQuery?: (command: string, cwd: string) => Promise<string | null>;
 }
 
 /** Kimi Code executor backed by the official persistent ACP server. */
 export class KimiExecutor extends AcpExecutor {
+  private readonly kimiCommand: string;
+  private readonly accountUsageQuery: (command: string, cwd: string) => Promise<string | null>;
+
   constructor(directoryGuard: DirectoryGuard, options: KimiExecutorOptions = {}) {
+    const kimiCommand = options.kimiCommand ?? 'kimi';
     super(directoryGuard, {
       model: options.model,
       effort: options.effort,
@@ -24,7 +30,7 @@ export class KimiExecutor extends AcpExecutor {
       threadId: options.threadId,
       sessionBaseDir: options.sessionBaseDir,
       clientFactory: options.clientFactory,
-      acpCommand: options.kimiCommand ?? 'kimi',
+      acpCommand: kimiCommand,
       acpArgs: ['acp'],
       backendLabel: 'Kimi Code',
       sessionNamespace: 'kimi-sessions',
@@ -33,5 +39,11 @@ export class KimiExecutor extends AcpExecutor {
       installCommand: 'npm install --global @moonshot-ai/kimi-code',
       authCommand: 'kimi login',
     });
+    this.kimiCommand = kimiCommand;
+    this.accountUsageQuery = options.accountUsageQuery ?? queryKimiAccountUsage;
+  }
+
+  async getAccountUsage(): Promise<string | null> {
+    return this.accountUsageQuery(this.kimiCommand, this.getCurrentWorkingDirectory());
   }
 }
