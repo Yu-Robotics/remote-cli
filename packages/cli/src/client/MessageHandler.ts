@@ -1602,7 +1602,7 @@ You can also use natural language commands to control Claude Code CLI.`,
    * its own --print invocation").
    */
   private static readonly AGY_PASSTHROUGH_COMMANDS = new Set([
-    '/help', '/model', '/skills', '/usage', '/config', '/changelog',
+    '/help', '/model', '/skills', '/usage', '/quota', '/config', '/changelog',
     '/agents', '/permissions', '/hooks', '/credits',
   ]);
 

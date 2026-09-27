@@ -538,7 +538,7 @@ Codex App Server 生成的图片也会转发回飞书。Codex 通过 app-server 
 remote-cli 自身不处理的斜杠命令会转发给当前 AI 后端，各后端支持程度不同：
 
 - **Claude Code**：完整透传（`claude <cmd> --print`）——所有 commands/skills 指令可用，例如 `/commit`、`/review`、`/test`
-- **AGY CLI (Antigravity)**：仅透传 agy 本地应答的只读信息类命令（`agy -p "<cmd>"`）：`/skills`、`/usage`、`/config`、`/changelog`、`/agents`、`/permissions`、`/hooks`、`/credits`。其他命令（包括 `/compact`——agy 在非交互模式下不会拦截它）会被拒绝并提示原因
+- **AGY CLI (Antigravity)**：仅透传 agy 本地应答的只读信息类命令（`agy -p "<cmd>"`）：`/skills`、`/usage`、`/quota`、`/config`、`/changelog`、`/agents`、`/permissions`、`/hooks`、`/credits`。其他命令（包括 `/compact`——agy 在非交互模式下不会拦截它）会被拒绝并提示原因
 - **Codex CLI (OpenAI)**：不透传——remote-cli 使用 app-server API，而不是交互式 TUI 的斜杠命令层，因此后端专属斜杠命令会被拒绝
 - **OpenCode CLI** 和 **Kimi Code CLI**：斜杠命令通过各自的持久化 ACP 会话发送；`/model`、`/effort`、`/compact` 和 `/abort` 等通用命令仍由 remote-cli 自身处理
 - **ZCode**：斜杠命令使用持久化的官方 app-server 会话；remote-cli 会把 `/skills` 映射为 ZCode 的 `/skill`，并直接处理 `/model`、`/effort`、`/compact` 和 `/abort`

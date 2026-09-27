@@ -242,7 +242,12 @@ describe('AgyExecutor', () => {
     expect(mockExecFile).toHaveBeenCalledWith(
       'agy',
       ['-p', '/usage'],
-      expect.objectContaining({ cwd: directoryGuard.resolveWorkingDirectory('~/test-project') }),
+      expect.objectContaining({
+        cwd: directoryGuard.resolveWorkingDirectory('~/test-project'),
+        env: expect.objectContaining({
+          HOME: path.join(os.homedir(), '.remote-cli', 'agy-homes', 'thread-1'),
+        }),
+      }),
       expect.any(Function)
     );
     expect(mockExecFile).toHaveBeenCalledWith(

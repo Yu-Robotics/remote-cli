@@ -2030,7 +2030,7 @@ describe('MessageHandler', () => {
 
     // '/help' and '/model' are handled by remote-cli built-ins and never
     // reach the passthrough, so they are not exercised here.
-    it.each(['/skills', '/usage', '/config', '/changelog', '/agents', '/permissions', '/hooks', '/credits'])(
+    it.each(['/skills', '/usage', '/quota', '/config', '/changelog', '/agents', '/permissions', '/hooks', '/credits'])(
       'should pass through %s on the AGY backend',
       async (cmd) => {
         useBackend({ type: 'agy' });

@@ -278,9 +278,17 @@ export class AgyExecutor implements IExecutor {
   }
 
   async getAccountUsage(): Promise<string | null> {
+    let env: NodeJS.ProcessEnv;
+    try {
+      env = this.buildEnv();
+    } catch (error) {
+      console.warn('[AgyExecutor] Account usage environment is unavailable:', error);
+      return null;
+    }
+
     const [usage, credits] = await Promise.all([
-      this.runInformationalCommand('/usage'),
-      this.runInformationalCommand('/credits'),
+      this.runInformationalCommand('/usage', env),
+      this.runInformationalCommand('/credits', env),
     ]);
     const sections = [
       usage ? `Model quota:\n${usage}` : null,
@@ -289,11 +297,14 @@ export class AgyExecutor implements IExecutor {
     return sections.length > 0 ? sections.join('\n\n') : null;
   }
 
-  private runInformationalCommand(command: '/usage' | '/credits'): Promise<string | null> {
+  private runInformationalCommand(
+    command: '/usage' | '/credits',
+    env: NodeJS.ProcessEnv,
+  ): Promise<string | null> {
     return new Promise((resolve) => {
       execFile(this.agyCommand, ['-p', command], {
         cwd: this.currentWorkingDirectory,
-        env: process.env,
+        env,
         encoding: 'utf8',
         timeout: ACCOUNT_USAGE_TIMEOUT_MS,
         maxBuffer: ACCOUNT_USAGE_MAX_BUFFER,
