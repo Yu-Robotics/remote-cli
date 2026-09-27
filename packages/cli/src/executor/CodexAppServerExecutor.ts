@@ -62,6 +62,81 @@ interface PendingUserInput {
 
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_COMPACT_TIMEOUT_MS = 10 * 60 * 1000;
+const ACCOUNT_USAGE_TIMEOUT_MS = 5_000;
+
+interface CodexRateLimitWindow {
+  usedPercent?: number;
+  windowDurationMins?: number | null;
+  resetsAt?: number | null;
+}
+
+interface CodexRateLimitSnapshot {
+  limitName?: string | null;
+  planType?: string | null;
+  primary?: CodexRateLimitWindow | null;
+  secondary?: CodexRateLimitWindow | null;
+  credits?: { balance?: string | null; hasCredits?: boolean; unlimited?: boolean } | null;
+  individualLimit?: { limit?: string; used?: string; remainingPercent?: number; resetsAt?: number } | null;
+  rateLimitReachedType?: string | null;
+}
+
+function formatWindowDuration(minutes?: number | null): string {
+  if (!Number.isFinite(minutes) || !minutes || minutes <= 0) return 'usage window';
+  if (minutes % (24 * 60) === 0) return `${minutes / (24 * 60)}-day window`;
+  if (minutes % 60 === 0) return `${minutes / 60}-hour window`;
+  return `${minutes}-minute window`;
+}
+
+function formatResetTime(seconds?: number | null): string {
+  if (!Number.isFinite(seconds) || !seconds || seconds <= 0) return '';
+  return `, resets ${new Date(seconds * 1000).toLocaleString('en-US', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  })}`;
+}
+
+function formatCodexAccountUsage(response: any): string | null {
+  const byId = response?.rateLimitsByLimitId;
+  const snapshots: Array<{ id?: string; value: CodexRateLimitSnapshot }> = byId
+    && typeof byId === 'object'
+    && Object.keys(byId).length > 0
+    ? Object.entries(byId).map(([id, value]) => ({ id, value: value as CodexRateLimitSnapshot }))
+    : response?.rateLimits && typeof response.rateLimits === 'object'
+      ? [{ value: response.rateLimits as CodexRateLimitSnapshot }]
+      : [];
+  const lines: string[] = [];
+
+  for (const { id, value } of snapshots) {
+    const label = value.limitName || id;
+    const prefix = snapshots.length > 1 && label ? `${label}: ` : '';
+    if (value.primary && typeof value.primary.usedPercent === 'number') {
+      const remaining = Math.max(0, Math.min(100, 100 - value.primary.usedPercent));
+      lines.push(`- ${prefix}${formatWindowDuration(value.primary.windowDurationMins)}: ${remaining}% remaining${formatResetTime(value.primary.resetsAt)}`);
+    }
+    if (value.secondary && typeof value.secondary.usedPercent === 'number') {
+      const remaining = Math.max(0, Math.min(100, 100 - value.secondary.usedPercent));
+      lines.push(`- ${prefix}${formatWindowDuration(value.secondary.windowDurationMins)}: ${remaining}% remaining${formatResetTime(value.secondary.resetsAt)}`);
+    }
+    if (value.credits?.unlimited) {
+      lines.push(`- ${prefix}Credits: unlimited`);
+    } else if (value.credits?.balance != null) {
+      lines.push(`- ${prefix}Credits: ${value.credits.balance}`);
+    } else if (value.credits && value.credits.hasCredits === false) {
+      lines.push(`- ${prefix}Credits: none remaining`);
+    }
+    if (value.individualLimit && typeof value.individualLimit.remainingPercent === 'number') {
+      const detail = value.individualLimit.used != null && value.individualLimit.limit != null
+        ? ` (${value.individualLimit.used} of ${value.individualLimit.limit} used)`
+        : '';
+      lines.push(`- ${prefix}Spend limit: ${value.individualLimit.remainingPercent}% remaining${detail}${formatResetTime(value.individualLimit.resetsAt)}`);
+    }
+    if (value.rateLimitReachedType) {
+      lines.push(`- ${prefix}Status: ${value.rateLimitReachedType.replaceAll('_', ' ')}`);
+    }
+  }
+
+  return lines.length > 0 ? lines.join('\n') : null;
+}
 
 /**
  * Persistent Codex executor backed by the official app-server protocol.
@@ -438,6 +513,18 @@ export class CodexAppServerExecutor implements IExecutor {
       cursor = typeof response?.nextCursor === 'string' ? response.nextCursor : null;
     } while (cursor);
     return models;
+  }
+
+  async getAccountUsage(): Promise<string | null> {
+    try {
+      const response = await this.client.request('account/rateLimits/read', {
+        excludeResetCreditDetails: true,
+      }, ACCOUNT_USAGE_TIMEOUT_MS);
+      return formatCodexAccountUsage(response);
+    } catch (error) {
+      console.warn('[CodexAppServerExecutor] Account usage is unavailable', this.errorMessage(error));
+      return null;
+    }
   }
 
   async setModel(model: string): Promise<ExecuteResult> {

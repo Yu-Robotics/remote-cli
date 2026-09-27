@@ -38,6 +38,7 @@ describe('KimiExecutor', () => {
   let transport: FakeKimiTransport;
   let callbacks: AcpEventCallbacks;
   let executor: KimiExecutor;
+  let accountUsageQuery: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
     home = await fs.mkdtemp(path.join(originalHomedir, '.kimi-executor-test-'));
@@ -46,6 +47,7 @@ describe('KimiExecutor', () => {
     process.env.HOME = home;
     transport = new FakeKimiTransport();
     callbacks = {};
+    accountUsageQuery = vi.fn().mockResolvedValue(null);
     executor = new KimiExecutor(new DirectoryGuard([home]), {
       initialWorkingDirectory: project,
       threadId: 'thread-kimi',
@@ -54,6 +56,7 @@ describe('KimiExecutor', () => {
         callbacks = next;
         return transport;
       },
+      accountUsageQuery,
     });
   });
 
@@ -92,6 +95,14 @@ describe('KimiExecutor', () => {
     await executor.listModels();
     await expect(executor.setEffort('auto')).resolves.toMatchObject({ success: true });
     expect(transport.setConfigOption).toHaveBeenCalledWith('session-kimi', 'thinking', 'on');
+  });
+
+  it('queries Kimi account usage independently from the ACP conversation', async () => {
+    accountUsageQuery.mockResolvedValue('- Monthly quota: 64% remaining');
+
+    await expect(executor.getAccountUsage()).resolves.toBe('- Monthly quota: 64% remaining');
+    expect(accountUsageQuery).toHaveBeenCalledWith('kimi', project);
+    expect(transport.prompt).not.toHaveBeenCalled();
   });
 
   it('returns Kimi login guidance when ACP requires authentication', async () => {

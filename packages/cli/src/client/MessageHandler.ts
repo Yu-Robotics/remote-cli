@@ -592,6 +592,17 @@ export class MessageHandler {
           return `  • ${t.name}${t.status === 'running' ? ' 🔄' : t.status === 'error' ? ' ❌' : ' ✅'} (${t.status}, backend: ${t.backend ?? 'claude'}${queueSuffix})`;
         })
         .join('\n');
+      let accountUsage: string | null = null;
+      if (typeof executor.getAccountUsage === 'function') {
+        try {
+          accountUsage = (await executor.getAccountUsage())?.trim() || null;
+        } catch (error) {
+          console.warn(`[MessageHandler] Failed to query ${backend} account usage`, error);
+        }
+      }
+      const accountUsageSection = accountUsage
+        ? `\n\n💳 Plan usage (${backendDisplayName(backend)}):\n${accountUsage}`
+        : '';
 
       this.sendResponse(messageId, threadId, {
         success: true,
@@ -603,7 +614,7 @@ export class MessageHandler {
 - Working Directory: ${cwd}
 - Allowed Directories: ${allowedDirs.join(', ')}
 - Connection: Active
-- Threads:\n${threadList}`,
+- Threads:\n${threadList}${accountUsageSection}`,
       });
       return true;
     }

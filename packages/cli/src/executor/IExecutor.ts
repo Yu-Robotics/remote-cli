@@ -76,6 +76,8 @@ export interface IExecutor {
   getSessionId?(): string | null;
   /** Return backend-provided token and context-window statistics when available. */
   getContextUsage?(): Promise<ExecutorContextUsage | null> | ExecutorContextUsage | null;
+  /** Return backend-provided account plan usage as display-ready text when available. */
+  getAccountUsage?(): Promise<string | null> | string | null;
 
   /**
    * Delete all persistent state (session files, history) associated with a thread.

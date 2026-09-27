@@ -1,4 +1,4 @@
-import { spawn, ChildProcess } from 'child_process';
+import { execFile, spawn, ChildProcess } from 'child_process';
 import { StringDecoder } from 'string_decoder';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -6,6 +6,7 @@ import * as path from 'path';
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import { IExecutor, ExecuteOptions, ExecuteResult } from './IExecutor';
 import { COMPACT_HANDOFF_PROMPT, seedPromptWithHandoff } from './compactHandoff';
+import { stripAnsi } from '../utils/stripAnsi';
 
 export interface AgyExecutorOptions {
   /** Model slug passed as --model. Leave unset to use agy's default. */
@@ -33,6 +34,8 @@ export interface AgyExecutorOptions {
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000;
 /** Default grace period (ms) before SIGTERM escalates to SIGKILL. */
 const DEFAULT_KILL_ESCALATION_MS = 3_000;
+const ACCOUNT_USAGE_TIMEOUT_MS = 15_000;
+const ACCOUNT_USAGE_MAX_BUFFER = 128 * 1024;
 const SUPPORTED_EFFORTS = ['low', 'medium', 'high'] as const;
 
 /**
@@ -272,6 +275,37 @@ export class AgyExecutor implements IExecutor {
 
   getCurrentWorkingDirectory(): string {
     return this.currentWorkingDirectory;
+  }
+
+  async getAccountUsage(): Promise<string | null> {
+    const [usage, credits] = await Promise.all([
+      this.runInformationalCommand('/usage'),
+      this.runInformationalCommand('/credits'),
+    ]);
+    const sections = [
+      usage ? `Model quota:\n${usage}` : null,
+      credits ? `Credits:\n${credits}` : null,
+    ].filter((section): section is string => section !== null);
+    return sections.length > 0 ? sections.join('\n\n') : null;
+  }
+
+  private runInformationalCommand(command: '/usage' | '/credits'): Promise<string | null> {
+    return new Promise((resolve) => {
+      execFile(this.agyCommand, ['-p', command], {
+        cwd: this.currentWorkingDirectory,
+        env: process.env,
+        encoding: 'utf8',
+        timeout: ACCOUNT_USAGE_TIMEOUT_MS,
+        maxBuffer: ACCOUNT_USAGE_MAX_BUFFER,
+      }, (error, stdout) => {
+        if (error) {
+          console.warn(`[AgyExecutor] ${command} is unavailable: ${error.message}`);
+          resolve(null);
+          return;
+        }
+        resolve(stripAnsi(stdout).trim() || null);
+      });
+    });
   }
 
   async setWorkingDirectory(targetPath: string): Promise<void> {

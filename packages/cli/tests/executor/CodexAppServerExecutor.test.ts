@@ -17,6 +17,7 @@ class FakeTransport implements CodexAppServerTransport {
     { id: 'gpt-a', displayName: 'GPT A', isDefault: true, defaultReasoningEffort: 'medium', supportedReasoningEfforts: [{ reasoningEffort: 'low' }, { reasoningEffort: 'medium' }, { reasoningEffort: 'high' }] },
     { id: 'gpt-b', displayName: 'GPT B', isDefault: false, defaultReasoningEffort: 'high', supportedReasoningEfforts: [{ reasoningEffort: 'medium' }, { reasoningEffort: 'high' }] },
   ];
+  rateLimitsResponse: any = { rateLimits: {} };
   cwd: string | null = null;
 
   async start(): Promise<void> { this.running = true; }
@@ -37,6 +38,7 @@ class FakeTransport implements CodexAppServerTransport {
     if (method === 'thread/resume') return { thread: { id: params.threadId } };
     if (method === 'turn/start') return { turn: { id: this.nextTurnId, status: 'inProgress' } };
     if (method === 'model/list') return { data: this.models, nextCursor: null };
+    if (method === 'account/rateLimits/read') return this.rateLimitsResponse;
     return {};
   }
 }
@@ -365,6 +367,35 @@ describe('CodexAppServerExecutor', () => {
     expect(transport.requests.findLast((request) => request.method === 'turn/start')?.params.model).toBe('gpt-b');
     transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
     await promise;
+  });
+
+  it('reads and formats Codex account rate limits without starting a thread', async () => {
+    transport.rateLimitsResponse = {
+      rateLimits: {},
+      rateLimitsByLimitId: {
+        codex: {
+          limitName: 'Codex',
+          primary: { usedPercent: 28, windowDurationMins: 300, resetsAt: 1_900_000_000 },
+          secondary: { usedPercent: 61, windowDurationMins: 10_080 },
+          credits: { hasCredits: true, unlimited: false, balance: '12.50' },
+        },
+      },
+    };
+
+    await expect(executor.getAccountUsage()).resolves.toEqual(expect.stringContaining('5-hour window: 72% remaining'));
+    const output = await executor.getAccountUsage();
+    expect(output).toContain('7-day window: 39% remaining');
+    expect(output).toContain('Credits: 12.50');
+    expect(transport.requests).toContainEqual({
+      method: 'account/rateLimits/read',
+      params: { excludeResetCreditDetails: true },
+    });
+    expect(transport.requests.some((request) => request.method === 'thread/start')).toBe(false);
+  });
+
+  it('hides Codex account usage when the app-server method is unavailable', async () => {
+    vi.spyOn(transport, 'request').mockRejectedValueOnce(new Error('Method not found'));
+    await expect(executor.getAccountUsage()).resolves.toBeNull();
   });
 
   it('clears a selected model so the backend default is used', async () => {
