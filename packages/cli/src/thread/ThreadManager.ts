@@ -1,5 +1,6 @@
 import { promises as fs } from 'fs';
 import path from 'path';
+import os from 'os';
 import { randomUUID } from 'crypto';
 import {
   Thread,
@@ -175,7 +176,7 @@ export class ThreadManager {
   /**
    * Delete a thread.
    * Cannot delete the default thread.
-   * Removes the thread's session file if it exists.
+   * Removes AGY data even when that backend has no active executor.
    */
   async deleteThread(id: string): Promise<void> {
     const thread = this.store.threads[id];
@@ -185,8 +186,17 @@ export class ThreadManager {
       throw new Error('Cannot delete the default thread.');
     }
 
-    // Revoke Codex directory grants even when this thread currently uses another backend.
-    await fs.rm(path.join(path.dirname(this.storePath), 'codex-sandbox', `${encodeURIComponent(id)}.json`), { force: true });
+    const dataDir = path.dirname(this.storePath);
+    const agyDataDir = path.join(os.homedir(), '.remote-cli');
+    // Thread IDs are generated UUIDs; refuse a malformed persisted ID before
+    // using it as a filesystem component for recursive cleanup.
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+      throw new Error('Invalid thread ID for data cleanup');
+    }
+    // Revoke Codex grants and remove AGY data regardless of the active backend.
+    await fs.rm(path.join(dataDir, 'codex-sandbox', `${id}.json`), { force: true });
+    await fs.rm(path.join(agyDataDir, 'agy-sessions', `${id}.json`), { force: true });
+    await fs.rm(path.join(agyDataDir, 'agy-homes', id), { recursive: true, force: true });
     delete this.store.threads[id];
     await this.persist();
   }

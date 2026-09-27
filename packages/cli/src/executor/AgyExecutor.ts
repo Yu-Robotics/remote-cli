@@ -39,6 +39,7 @@ const SUPPORTED_EFFORTS = ['low', 'medium', 'high'] as const;
  * Entries shared from the real ~/.gemini into each per-thread HOME via symlink.
  * agy resolves its data directory from $HOME/.gemini — without sharing these,
  * every thread would need its own agy login and would re-download program data.
+ * These links are not a filesystem security boundary.
  */
 const AGY_HOME_SHARED_FILES = [
   'oauth_creds.json',
@@ -142,10 +143,9 @@ export class AgyExecutor implements IExecutor {
   /**
    * Per-thread HOME directory for the agy child process. agy stores every
    * conversation under $HOME/.gemini/antigravity-cli — one global store shared
-   * by all threads, which lets a fresh agent read other threads' transcripts
-   * when asked to recall previous chats. Spawning with HOME pointed at this
-   * directory gives each thread its own store, so recall-style digging finds
-   * only its own conversations. Undefined on the legacy no-threadId path.
+   * by all threads. A per-thread HOME redirects agy's default data lookup,
+   * but tools still run with the user's filesystem permissions and inherit
+   * this HOME. Undefined on the legacy no-threadId path.
    */
   private readonly agyHome?: string;
 
@@ -216,8 +216,8 @@ export class AgyExecutor implements IExecutor {
   /**
    * Create the thread's HOME layout: auth/config files and program directories
    * symlinked from the real ~/.gemini, data directories left for agy to create
-   * per-thread. Runs before every spawn — cheap (symlink checks) and covers
-   * the credential-refresh drift guard.
+   * per-thread. Runs before every spawn and leaves any files that agy replaced
+   * locally untouched rather than overwriting shared credentials.
    */
   private ensureThreadHome(): void {
     const realGemini = path.join(os.homedir(), '.gemini');
@@ -234,11 +234,9 @@ export class AgyExecutor implements IExecutor {
   }
 
   /**
-   * Symlink one entry of the master store into the thread home. If agy
-   * replaced the link with a regular file (e.g. rewriting credentials on
-   * token refresh), the thread-local file is fresher — adopt it into the
-   * master, then re-link. Replaced directories are left alone (a thread-local
-   * cache/bin copy is harmless; deleting it risks data loss).
+   * Symlink one entry of the master store into the thread home. A regular
+   * thread-local replacement may be stale or newer than the master. Never
+   * overwrite either copy without a reliable cross-process freshness rule.
    */
   private linkShared(masterDir: string, threadDir: string, name: string, type: 'file' | 'dir'): void {
     const master = path.join(masterDir, name);
@@ -252,9 +250,10 @@ export class AgyExecutor implements IExecutor {
         return; // lstat failed — leave the entry untouched
       }
       if (isLink) return;
-      if (type === 'dir') return;
-      fs.copyFileSync(link, master);
-      fs.unlinkSync(link);
+      if (name === 'oauth_creds.json' || name === 'google_accounts.json') {
+        console.warn(`[AgyExecutor] Thread-local ${name} replaced its shared link; leaving both copies untouched.`);
+      }
+      return;
     }
     fs.symlinkSync(master, link, type);
   }
@@ -563,6 +562,15 @@ export class AgyExecutor implements IExecutor {
       throw new Error('Executor has been destroyed');
     }
 
+    const env = this.buildEnv();
+    if (this.agyHome && this.conversationId) {
+      const conversationsDir = path.join(this.agyHome, '.gemini', 'antigravity-cli', 'conversations');
+      if (path.basename(this.conversationId) !== this.conversationId ||
+          !fs.existsSync(path.join(conversationsDir, `${this.conversationId}.db`))) {
+        throw new Error('AGY saved conversation is missing from this thread HOME. Restore its database using the one-time migration steps in README.md, or use /clear to start a new conversation.');
+      }
+    }
+
     const args = this.buildArgs();
     console.log(`[AgyExecutor] Spawning: ${this.agyCommand} ${args.join(' ')} (cwd: ${this.currentWorkingDirectory})`);
 
@@ -572,7 +580,7 @@ export class AgyExecutor implements IExecutor {
 
     const proc = spawn(this.agyCommand, args, {
       cwd: this.currentWorkingDirectory,
-      env: this.buildEnv(),
+      env,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
