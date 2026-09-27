@@ -1857,10 +1857,10 @@ describe('FeishuLongConnHandler', () => {
       expect(spy).toHaveBeenCalledWith('msg_1', expect.stringContaining('Please provide binding code'));
     });
 
-    it('should route /status command', async () => {
-      const spy = vi.spyOn(handler as any, 'handleStatusCommand').mockResolvedValue(undefined);
-      await (handler as any).handleCommand('ou_123', 'msg_1', '/status');
-      expect(spy).toHaveBeenCalledWith('ou_123', 'msg_1');
+    it('should pass /status to the active CLI backend', async () => {
+      const spy = vi.spyOn(handler as any, 'handleSlashCommandPassthrough').mockResolvedValue(undefined);
+      await (handler as any).handleCommand('ou_123', 'msg_1', '/status', 'thread-2', 'Thread 2');
+      expect(spy).toHaveBeenCalledWith('ou_123', 'msg_1', '/status', '/status', 'thread-2', 'Thread 2');
     });
 
     it('should route /unbind command', async () => {
@@ -1926,50 +1926,6 @@ describe('FeishuLongConnHandler', () => {
       await (handler as any).handleBindCommand('ou_123', 'msg_1', 'CODE');
 
       expect(replySpy).toHaveBeenCalledWith('msg_1', expect.stringContaining('Binding failed'));
-    });
-  });
-
-  describe('handleStatusCommand', () => {
-    it('should show status for bound user', async () => {
-      mockBindingManager.getUserBinding.mockResolvedValue({
-        devices: [
-          { deviceId: 'dev_1', deviceName: 'D1', isActive: true, boundAt: Date.now(), lastActiveAt: Date.now() }
-        ]
-      });
-      mockConnectionHub.isDeviceOnline.mockReturnValue(true);
-      const replySpy = vi.spyOn(handler as any, 'replyToMessage').mockResolvedValue(undefined);
-
-      await (handler as any).handleStatusCommand('ou_123', 'msg_1');
-
-      expect(replySpy).toHaveBeenCalledWith('msg_1', expect.stringContaining('🟢 Online'));
-      expect(replySpy).toHaveBeenCalledWith('msg_1', expect.stringContaining('⭐ ACTIVE'));
-    });
-
-    it('should show error for unbound user', async () => {
-      mockBindingManager.getUserBinding.mockResolvedValue(null);
-      const replySpy = vi.spyOn(handler as any, 'replyToMessage').mockResolvedValue(undefined);
-
-      await (handler as any).handleStatusCommand('ou_123', 'msg_1');
-
-      expect(replySpy).toHaveBeenCalledWith('msg_1', expect.stringContaining('not bound a device'));
-    });
-
-    it('should show message for no devices', async () => {
-      mockBindingManager.getUserBinding.mockResolvedValue({ devices: [] });
-      const replySpy = vi.spyOn(handler as any, 'replyToMessage').mockResolvedValue(undefined);
-
-      await (handler as any).handleStatusCommand('ou_123', 'msg_1');
-
-      expect(replySpy).toHaveBeenCalledWith('msg_1', expect.stringContaining('No devices found'));
-    });
-
-    it('should handle errors', async () => {
-      mockBindingManager.getUserBinding.mockRejectedValue(new Error('DB Error'));
-      const replySpy = vi.spyOn(handler as any, 'replyToMessage').mockResolvedValue(undefined);
-
-      await (handler as any).handleStatusCommand('ou_123', 'msg_1');
-
-      expect(replySpy).toHaveBeenCalledWith('msg_1', expect.stringContaining('Status query failed'));
     });
   });
 
