@@ -114,6 +114,21 @@ describe('ThreadManager', () => {
   });
 
   describe('deleteThread', () => {
+    it('removes dormant AGY data even when the active backend is different', async () => {
+      const thread = await manager.createThread('dormant-agy', tmpDir, 'claude');
+      const dataDir = path.join(tmpDir, '.remote-cli');
+      const home = path.join(dataDir, 'agy-homes', thread.id);
+      const session = path.join(dataDir, 'agy-sessions', `${thread.id}.json`);
+      await fs.mkdir(home, { recursive: true });
+      await fs.mkdir(path.dirname(session), { recursive: true });
+      await fs.writeFile(path.join(home, 'sentinel'), 'conversation data');
+      await fs.writeFile(session, JSON.stringify({ id: 'old-conversation' }));
+
+      await manager.deleteThread(thread.id);
+
+      await expect(fs.stat(home)).rejects.toThrow();
+      await expect(fs.stat(session)).rejects.toThrow();
+    });
     it('revokes saved Codex sandbox grants even after switching to another backend', async () => {
       const thread = await manager.createThread('sandbox-grants', tmpDir, 'claude');
       const directory = path.join(tmpDir, '.remote-cli', 'codex-sandbox');

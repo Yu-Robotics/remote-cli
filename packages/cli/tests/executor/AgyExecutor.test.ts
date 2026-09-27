@@ -61,6 +61,7 @@ describe('AgyExecutor', () => {
   // The most recently spawned mock process (respawns replace it)
   let proc: any;
   let spawnedProcesses: any[];
+  const persistedConversations = new Set<string>();
 
   const makeMockProcess = () => {
     const p: any = new EventEmitter();
@@ -78,6 +79,7 @@ describe('AgyExecutor', () => {
   };
 
   const emitInit = (conversationId = 'conv-aaa', target?: any) => {
+    persistedConversations.add(conversationId);
     emitJson({
       event: 'init',
       conversation_id: conversationId,
@@ -116,12 +118,14 @@ describe('AgyExecutor', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    persistedConversations.clear();
 
     vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(console, 'log').mockImplementation(() => {});
 
-    mockFs.existsSync.mockReturnValue(false);
+    mockFs.existsSync.mockImplementation((p: string) =>
+      [...persistedConversations].some(id => String(p).endsWith(path.join('conversations', `${id}.db`))));
     mockFs.readFileSync.mockReturnValue('{}');
     mockFs.mkdirSync.mockImplementation(() => undefined);
     mockFs.symlinkSync.mockImplementation(() => undefined);
@@ -435,11 +439,9 @@ describe('AgyExecutor', () => {
 
   // ── Per-thread HOME isolation ─────────────────────────────────────────────
   //
-  // agy stores every conversation under $HOME/.gemini/antigravity-cli, so all
-  // threads share one global store and a fresh agent can read other threads'
-  // transcripts when asked to recall. Spawning agy with a per-thread HOME
-  // (auth/config symlinked from the real ~/.gemini) gives each thread its own
-  // store: recall-style digging finds only its own conversations.
+  // agy defaults to storing conversations under $HOME/.gemini/antigravity-cli.
+  // A per-thread HOME redirects that default lookup, but linked directories
+  // and ordinary OS-user permissions do not enforce read isolation.
 
   const threadHome = (id: string) => path.join(os.homedir(), '.remote-cli', 'agy-homes', id);
   const threadGemini = (id: string) => path.join(threadHome(id), '.gemini');
@@ -510,7 +512,7 @@ describe('AgyExecutor', () => {
     await p;
   });
 
-  it('syncs a rewritten credential file back to the master and re-links it', async () => {
+  it('leaves a rewritten credential local rather than overwriting the shared master', async () => {
     const master = path.join(os.homedir(), '.gemini', 'oauth_creds.json');
     const link = path.join(threadGemini('thread-1'), 'oauth_creds.json');
     mockFs.existsSync.mockImplementation((p: string) => [master, link].includes(String(p)));
@@ -520,9 +522,10 @@ describe('AgyExecutor', () => {
     const p = executor.execute('hi');
     await waitForSpawn();
 
-    expect(mockFs.copyFileSync).toHaveBeenCalledWith(link, master);
-    expect(mockFs.unlinkSync).toHaveBeenCalledWith(link);
-    expect(mockFs.symlinkSync).toHaveBeenCalledWith(master, link, 'file');
+    expect(mockFs.copyFileSync).not.toHaveBeenCalled();
+    expect(mockFs.unlinkSync).not.toHaveBeenCalledWith(link);
+    expect(mockFs.symlinkSync).not.toHaveBeenCalledWith(master, link, 'file');
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('oauth_creds.json replaced its shared link'));
 
     emitInit();
     emitResult();
@@ -542,13 +545,14 @@ describe('AgyExecutor', () => {
     });
 
     const cliMaster = (n: string) => path.join(os.homedir(), '.gemini', 'antigravity-cli', n);
+    const threadCli = path.join(threadGemini('thread-1'), 'antigravity-cli');
     mockFs.existsSync.mockImplementation((p: string) =>
-      [cliMaster('conversations/conv-old.db'), cliMaster('brain/conv-old')].includes(String(p)));
+      [cliMaster('conversations/conv-old.db'), cliMaster('brain/conv-old'),
+        path.join(threadCli, 'conversations', 'conv-old.db')].includes(String(p)));
 
     const p = executor.execute('hi');
     await waitForSpawn();
 
-    const threadCli = path.join(threadGemini('thread-1'), 'antigravity-cli');
     expect(mockFs.copyFileSync).not.toHaveBeenCalledWith(
       cliMaster('conversations/conv-old.db'),
       path.join(threadCli, 'conversations', 'conv-old.db'));
@@ -557,6 +561,23 @@ describe('AgyExecutor', () => {
     emitInit('conv-old');
     emitResult({ conversation_id: 'conv-old' });
     await p;
+  });
+
+  it('fails before spawning when a saved conversation has not been migrated', async () => {
+    const sessionFile = path.join(os.homedir(), '.remote-cli', 'agy-sessions', 'thread-1.json');
+    mockFs.existsSync.mockImplementation((p: string) => String(p) === sessionFile);
+    mockFs.readFileSync.mockReturnValue(JSON.stringify({ id: 'conv-old' }));
+    await executor.destroy();
+    executor = new AgyExecutor(directoryGuard, {
+      initialWorkingDirectory: '~/test-project',
+      threadId: 'thread-1',
+    });
+
+    await expect(executor.execute('hi')).resolves.toMatchObject({
+      success: false,
+      error: expect.stringContaining('one-time migration'),
+    });
+    expect(mockSpawn).not.toHaveBeenCalled();
   });
 
   it('deletes the thread home on deleteThreadData', async () => {
