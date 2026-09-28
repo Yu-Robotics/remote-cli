@@ -436,6 +436,7 @@ remote-cli stop
 | `/clear` | 清除当前线程的对话上下文 |
 | `/new` | `/clear` 的别名；在当前线程中开始全新对话 |
 | `/compact` | 压缩对话历史以节省 Token |
+| `/delegation [on|off]` | Inspect or enable delegation between installed agent backends in the current thread |
 | `/model [name]` | 列出当前 backend 的模型，或设置当前线程的模型 |
 | `/effort [auto|level]` | 查看或设置 Codex/AGY/OpenCode/Kimi/ZCode/Pi 的线程思考等级 |
 | `/sandbox [on/off/read-only/default]` | 查看或配置当前 Codex 或 Claude Code 线程的沙箱；用 `allow/remove <目录>` 和 `network on/off` 调整访问设置 |
@@ -444,6 +445,83 @@ remote-cli stop
 | `/bind <码>` | 绑定新设备 |
 | `/unbind` | 解绑所有设备 |
 | `/device` | 列出绑定设备及其连接状态，或切换设备 |
+
+### Cross-backend Delegation
+
+Claude Code, Codex, Pi, AGY, OpenCode, Kimi Code, and ZCode can each coordinate
+independent tasks on the installed backends, including another session of the
+same backend. Keep talking to
+your existing thread; its selected backend collects worker results and answers
+you. Workers do not create extra thread buttons.
+
+```text
+/delegation
+/delegation on
+Ask Pi to inspect the relevant files, ask Codex to implement the agreed fix,
+then ask Claude Code to review it. Wait for each result before continuing.
+/delegation off
+```
+
+Delegation is **off by default**. The setting is saved per thread and survives
+backend switches and conversation resets. Install, authenticate, and select a
+working model for each desired backend first. Discovery checks its configured executable;
+authentication and remaining quota are checked only when a task runs.
+
+The shared Router can be upgraded before local CLIs. This feature keeps protocol
+version 1 and its existing command, tool-progress, and response formats. Older
+CLIs continue their existing workflows; delegation requires upgrading the local
+CLI and enabling it in that thread. CLI and Router package versions need not
+match to connect. Optional approval cards and task recovery remain negotiated
+per device, so newer and older CLIs can share one Router.
+
+The coordinator receives registered tools through MCP or an explicitly loaded
+Pi extension. OpenCode and Kimi use ACP session MCP servers; ZCode uses its
+native app-server session MCP servers. AGY uses an isolated per-thread MCP
+configuration restored on opt-out, and inherits its bridge credentials only
+through the process environment. No skill installation or global backend
+configuration change is required. ZCode's session MCP override replaces custom
+user-configured MCP servers while delegation is enabled; its native and plugin
+tools remain available, and opt-out restores the normal MCP configuration.
+Each worker receives a self-contained task,
+uses the parent's working directory, and has an independent conversation. The
+coordinator must include needed context; past messages and image attachments
+are not copied automatically.
+
+Worker progress appears as a task in the existing reply card. Results return
+to the coordinator for its final answer. Child approvals and questions use the
+existing card/text input flow, tied to the original user and worker. Worker
+approval cards omit Remember; configure persistent grants on the real thread.
+`/abort` cancels both the coordinator and its managed workers. Ending the parent
+turn also stops unfinished workers; cancellation does not undo existing edits.
+
+There is one active worker per parent and at most three per CLI process in
+non-overlapping workspaces. A turn can start at most 12 tasks; each worker has a
+30-minute limit. Results are limited to 32 KiB and captured output to 256 KiB.
+Managed tasks using overlapping workspace directories are serialized. This
+does not lock files against the coordinator's native parallel tools or external
+editors, so the coordinator is instructed to wait instead of editing concurrently.
+
+Workers inherit the target backend's saved thread permissions. A sandboxed
+coordinator can delegate only to the same backend in this release. Explicit
+`read_only` requests use Claude/Codex native read-only policies with their normal
+approval behavior. Pi, AGY, OpenCode, Kimi, and ZCode reject that mode because
+remote-cli does not enforce a read-only sandbox for those workers. Unrestricted
+coordinators can choose any installed, authenticated worker.
+
+All 49 directed combinations are covered at the task-manager test boundary.
+Live model delegation was verified for the original Claude Code/Codex/Pi matrix.
+The four additional adapters have protocol and lifecycle tests; ZCode also
+passed live MCP tool registration. Their live model tests
+were blocked by missing local authentication (AGY, OpenCode, Kimi) or an unset
+model (ZCode), so those model combinations and native persisted-session
+restoration remain unverified.
+
+Router reconnection uses the existing parent task recovery and approval replay;
+disconnected progress is not buffered. Restarting the CLI marks retained running
+task records interrupted and never automatically repeats them. Records under
+`~/.remote-cli/delegation/` retain at most 200 completed tasks for seven days.
+If worker shutdown cannot be confirmed, its workspace stays blocked until the
+worker is stopped and the CLI restarts.
 
 ### 多会话（Thread）管理
 

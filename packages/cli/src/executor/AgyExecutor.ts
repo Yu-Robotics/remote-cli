@@ -7,6 +7,8 @@ import { DirectoryGuard } from '../security/DirectoryGuard';
 import { IExecutor, ExecuteOptions, ExecuteResult } from './IExecutor';
 import { COMPACT_HANDOFF_PROMPT, seedPromptWithHandoff } from './compactHandoff';
 import { stripAnsi } from '../utils/stripAnsi';
+import { configureAgyDelegation } from './agy/AgyDelegationConfig';
+import { delegationEnvironment, sameConnection, type DelegationConnection } from '../delegation/contract';
 
 export interface AgyExecutorOptions {
   /** Model slug passed as --model. Leave unset to use agy's default. */
@@ -165,6 +167,9 @@ export class AgyExecutor implements IExecutor {
   private attachmentWarningShown = false;
   /** Model or effort switch requested while a command was running — respawn when it finishes. */
   private pendingSettingsChange = false;
+  private delegationConnection?: DelegationConnection;
+  private delegationConfigured = false;
+  private readonly pendingExits = new Set<Promise<void>>();
   /** Handoff summary from compactWhenFull, wrapped into the next prompt (consumed once). */
   private pendingContextSeed: string | null = null;
 
@@ -213,7 +218,9 @@ export class AgyExecutor implements IExecutor {
   private buildEnv(): NodeJS.ProcessEnv {
     if (!this.agyHome) return { ...process.env };
     this.ensureThreadHome();
-    return { ...process.env, HOME: this.agyHome };
+    return { ...process.env, HOME: this.agyHome,
+      REMOTE_CLI_DELEGATION_URL: undefined, REMOTE_CLI_DELEGATION_TOKEN: undefined,
+      ...(this.delegationConnection ? delegationEnvironment(this.delegationConnection) : {}) };
   }
 
   /**
@@ -275,6 +282,22 @@ export class AgyExecutor implements IExecutor {
 
   getCurrentWorkingDirectory(): string {
     return this.currentWorkingDirectory;
+  }
+
+  async configureDelegation(connection?: DelegationConnection): Promise<void> {
+    if (this.delegationConfigured && sameConnection(this.delegationConnection, connection)) return;
+    if (this.isProcessing) throw new Error('Cannot change delegation during an active turn');
+    if (!this.agyHome) {
+      if (connection) throw new Error('AGY delegation requires a thread-scoped HOME');
+      return;
+    }
+    this.killProcess();
+    await this.waitForExit();
+    if (this.isDestroyed) throw new Error('Executor has been destroyed');
+    this.ensureThreadHome();
+    await configureAgyDelegation(this.agyCommand, this.agyHome, !!connection);
+    this.delegationConnection = connection;
+    this.delegationConfigured = true;
   }
 
   async getAccountUsage(): Promise<string | null> {
@@ -368,9 +391,23 @@ export class AgyExecutor implements IExecutor {
       } catch { /* already closed */ }
     }
     this.killProcess('Executor destroyed');
+    if (this.agyHome && this.delegationConnection) {
+      await configureAgyDelegation(this.agyCommand, this.agyHome, false);
+      this.delegationConnection = undefined;
+    }
   }
 
   // ─── IExecutor optional ───────────────────────────────────────────────────
+
+  async waitForExit(): Promise<void> {
+    if (!this.pendingExits.size) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([Promise.all(this.pendingExits), new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('AGY process exit could not be confirmed')), this.killEscalationMs + 5_000);
+      })]);
+    } finally { if (timer) clearTimeout(timer); }
+  }
 
   isProcessRunning(): boolean {
     return this.proc !== null;
@@ -627,7 +664,11 @@ export class AgyExecutor implements IExecutor {
       cwd: this.currentWorkingDirectory,
       env,
       stdio: ['pipe', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
     });
+    const exited = new Promise<void>(resolve => proc.once('close', () => resolve()));
+    this.pendingExits.add(exited);
+    void exited.then(() => this.pendingExits.delete(exited));
 
     proc.stdout!.on('data', (data: Buffer) => this.handleStdout(proc, data));
     proc.stderr!.on('data', (data: Buffer) => {
@@ -689,14 +730,14 @@ export class AgyExecutor implements IExecutor {
     if (proc) {
       let exited = false;
       proc.once('exit', () => { exited = true; });
-      proc.kill(); // SIGTERM
+      this.signalProcess(proc, 'SIGTERM');
 
       // Escalate to SIGKILL if the process ignores SIGTERM — a lingering
       // process would share the conversation store with the next respawn.
       const escalate = setTimeout(() => {
         if (!exited) {
           console.warn('[AgyExecutor] Process ignored SIGTERM, escalating to SIGKILL');
-          proc.kill('SIGKILL');
+          this.signalProcess(proc, 'SIGKILL');
         }
       }, this.killEscalationMs);
       // Never let the watchdog hold the event loop open by itself
@@ -712,6 +753,14 @@ export class AgyExecutor implements IExecutor {
   }
 
   // ─── Wire protocol parsing ────────────────────────────────────────────────
+
+  private signalProcess(proc: ChildProcess, signal: NodeJS.Signals): void {
+    if (process.platform !== 'win32' && proc.pid) {
+      try { process.kill(-proc.pid, signal); return; } catch { /* Fall back to the direct child. */ }
+    }
+    if (signal === 'SIGTERM') proc.kill();
+    else proc.kill(signal);
+  }
 
   private handleStdout(proc: ChildProcess, data: Buffer): void {
     if (proc !== this.proc) return; // stale process

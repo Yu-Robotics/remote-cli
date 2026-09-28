@@ -24,6 +24,17 @@ describe('Codex sandbox policy', () => {
     await fs.rm(home, { recursive: true, force: true });
   });
 
+  it('creates TMPDIR for a fresh read-only session without granting model write access', async () => {
+    const sandbox = new CodexSandbox(guard, { mode: 'read-only', networkAccess: false }, 'fresh-worker');
+    await expect(fs.stat(sandbox.temporaryDirectory)).rejects.toMatchObject({ code: 'ENOENT' });
+    const options: any = sandbox.threadOptions(project);
+    expect((await fs.stat(sandbox.temporaryDirectory)).isDirectory()).toBe(true);
+    expect(options.sandbox).toBe('read-only');
+    expect(options.config['shell_environment_policy.set.TMPDIR']).toBe(sandbox.temporaryDirectory);
+    expect(options.config['sandbox_workspace_write.writable_roots']).toEqual([]);
+    expect(sandbox.turnOptions(project)).toMatchObject({ sandboxPolicy: { type: 'readOnly', networkAccess: false } });
+  });
+
   it('leaves unconfigured sessions unchanged and limits development writes without granting the whole whitelist', () => {
     const legacy = new CodexSandbox(guard, undefined, 'legacy');
     expect(legacy.turnOptions(project)).toEqual({});

@@ -64,7 +64,8 @@ export function createExecutor(
   initialWorkingDirectory?: string,
   threadId?: string,
   model?: string,
-  effort?: string
+  effort?: string,
+  runtime: { lifecycleHooks?: boolean } = {},
 ): IExecutor {
   const executorType = executorConfig.type as string;
   switch (executorType) {
@@ -144,17 +145,17 @@ export function createExecutor(
     case 'claude-persistent':
       console.log('[ExecutorFactory] Using Claude persistent executor');
       return new ClaudePersistentExecutor(directoryGuard, initialWorkingDirectory, threadId, model,
-        executorConfig.claude?.sandbox, executorConfig.claude?.command);
+        executorConfig.claude?.sandbox, executorConfig.claude?.command, runtime.lifecycleHooks);
 
     case 'claude-spawn':
       console.warn('[ExecutorFactory] Claude spawn mode was removed; using persistent mode.');
       return new ClaudePersistentExecutor(directoryGuard, initialWorkingDirectory, threadId, model,
-        executorConfig.claude?.sandbox, executorConfig.claude?.command);
+        executorConfig.claude?.sandbox, executorConfig.claude?.command, runtime.lifecycleHooks);
 
     case 'auto':
     default:
       console.log('[ExecutorFactory] Using Claude persistent executor (auto)');
       return new ClaudePersistentExecutor(directoryGuard, initialWorkingDirectory, threadId, model,
-        executorConfig.claude?.sandbox, executorConfig.claude?.command);
+        executorConfig.claude?.sandbox, executorConfig.claude?.command, runtime.lifecycleHooks);
   }
 }

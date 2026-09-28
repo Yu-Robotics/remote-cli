@@ -15,12 +15,16 @@ import { MachineCommands } from '../machines/MachineCommands';
 import type { PendingReplace } from '../machines/types';
 import { spawn, execFile } from 'child_process';
 import { readdir, readFile } from 'fs/promises';
+import { realpathSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 import type { ExecutorConfig } from '../types/config';
 import { backendKeyOf } from '../types/config';
 import { v4 as uuidv4 } from 'uuid';
 import { isZCodeAvailable } from '../executor/zcode/ZCodeCommand';
+import { DelegationManager, workspacesOverlap, type DelegationScope } from '../delegation/DelegationManager';
+import { DelegationBridge } from '../delegation/DelegationBridge';
+import { DELEGATION_INSTRUCTIONS } from '../delegation/contract';
 
 /**
  * Detected backend information
@@ -141,6 +145,8 @@ export class MessageHandler {
   private automaticUpdateInProgress = false;
   private approvalCardsSupported = false;
   private readonly pendingApprovalCards = new Map<string, { request: ApprovalRequestMessage; executor: IExecutor }>();
+  private readonly delegation: DelegationManager;
+  private readonly delegationBridges = new Map<string, DelegationBridge>();
 
   constructor(
     wsClient: WebSocketClient,
@@ -154,6 +160,7 @@ export class MessageHandler {
     this.threadManager = threadManager;
     this.directoryGuard = directoryGuard;
     this.config = config;
+    this.delegation = new DelegationManager(directoryGuard);
 
     this.notificationAdapter = new FeishuNotificationAdapter(wsClient);
     this.notificationAdapter.setThreadNameResolver((threadId) => this.threadManager.getThread(threadId)?.name);
@@ -325,9 +332,10 @@ export class MessageHandler {
       return;
     }
 
-    // Check if executor is waiting for interactive input
-    if ('isWaitingInput' in executor && typeof executor.isWaitingInput === 'function') {
-      const ex = executor as { isWaitingInput(): boolean; sendInput(input: string): boolean };
+    // Child input belongs to the child executor, even though the parent owns the thread.
+    const inputExecutor = this.delegation.waitingExecutor(resolvedThreadId) ?? executor;
+    if ('isWaitingInput' in inputExecutor && typeof inputExecutor.isWaitingInput === 'function') {
+      const ex = inputExecutor as { isWaitingInput(): boolean; sendInput(input: string): boolean };
       if (ex.isWaitingInput()) {
         const input = content?.trim();
         if (input) {
@@ -398,6 +406,7 @@ export class MessageHandler {
     }
 
     const queueSensitiveCommand = /^\/(?:clear|new|compact|cd|model|effort|sandbox)(?:\s|$)/.test(content?.trim() ?? '')
+      || /^\/delegation\s+(?:on|off)(?:\s|$)/.test(content?.trim() ?? '')
       || /^\/thread\s+delete(?:\s|$)/.test(content?.trim() ?? '');
     if (queueSensitiveCommand && this.hasThreadQueueState(resolvedThreadId)) {
       this.sendResponse(messageId, resolvedThreadId, {
@@ -488,6 +497,7 @@ export class MessageHandler {
     const activeOperation = this.activeThreadOperations.get(threadId);
     let aborted = false;
     const operation = (async () => {
+      await this.delegation.cancelThread(threadId);
       aborted = await executor.abort();
       if (activeOperation) await activeOperation.done;
     })();
@@ -560,6 +570,38 @@ export class MessageHandler {
     executor: IExecutor
   ): Promise<boolean> {
     const trimmed = content.trim();
+
+    if (trimmed === '/delegation' || trimmed.startsWith('/delegation ')) {
+      const argument = trimmed.slice('/delegation'.length).trim();
+      if (argument && argument !== 'on' && argument !== 'off') {
+        this.sendResponse(messageId, threadId, { success: false, error: 'Usage: /delegation [on|off]' });
+        return true;
+      }
+      if (argument === 'on' && !executor.configureDelegation) {
+        this.sendResponse(messageId, threadId, { success: false, error: 'This executor does not support delegation tool registration.' });
+        return true;
+      }
+      if (argument) {
+        if (argument === 'off') {
+          await executor.configureDelegation?.(undefined);
+          await this.delegationBridges.get(threadId)?.close();
+          this.delegationBridges.delete(threadId);
+        }
+        await this.threadManager.updateThread(threadId, { delegation: argument === 'on' });
+      }
+      const config = (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
+      const backends = await this.delegation.registry.list(config);
+      this.sendResponse(messageId, threadId, { success: true, output: [
+        `Delegation: ${this.threadManager.getThread(threadId)?.delegation ? 'on' : 'off'}`,
+        `Coordinator: ${executor.configureDelegation ? backendDisplayName(this.threadPool.getBackendKey(threadId)) : 'unsupported for this backend'}`,
+        ...(this.threadPool.getBackendKey(threadId) === 'zcode'
+          ? ['ZCode delegation temporarily replaces user-configured MCP servers. Native tools and plugins remain available; /delegation off restores the normal MCP configuration.'] : []),
+        ...backends.map(item => `${item.backend}: ${item.installed ? item.version : item.reason}`),
+        'Authentication and quota are checked when a task runs. Sandboxed coordinators can delegate only to the same backend. Enforced read-only workers are available only for Claude Code and Codex.',
+        'Usage: /delegation on|off. Applies to this thread; workers use independent sessions.',
+      ].join('\n') });
+      return true;
+    }
 
     if (trimmed === '/sandbox' || trimmed.startsWith('/sandbox ')) {
       if (!('getSandboxStatus' in executor) || !('configureSandbox' in executor)) {
@@ -681,6 +723,7 @@ Use /compact to reduce conversation context or /clear to start a fresh context.`
 - /model [name] - Show models for the active backend, or set this thread's model
 - /effort [auto|level] - Show or set effort for Codex/AGY/OpenCode/Kimi/ZCode/Pi (Claude Code is unsupported)
 - /sandbox [on|off|read-only|default|allow <directory>|remove <directory>|network on|off] - Configure this thread's sandbox (Codex, Claude Code)
+- /delegation [on|off] - Delegate tasks between installed agent backends in this thread
 - /backend - List backends and show the current thread's effective backend
 - /backend <index> - Switch all threads and clear per-thread backend overrides
 - /backend <index> @ - Switch only the current thread
@@ -1295,6 +1338,10 @@ You can also use natural language commands to control Claude Code CLI.`,
       }
 
       try {
+        await this.delegation.cancelThread(target.id);
+        await this.delegationBridges.get(target.id)?.close();
+        this.delegationBridges.delete(target.id);
+        await this.delegation.store.deleteThread(target.id);
         await this.threadPool.destroyThread(target.id);
         await this.threadManager.deleteThread(target.id);
         this.sendResponse(messageId, callerThreadId, {
@@ -1687,7 +1734,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     if (backend === 'codex') {
       this.sendResponse(messageId, threadId, {
         success: false,
-        error: `❌ "${command}" is not exposed as a Codex backend command.\n\nBuilt-in commands (/clear, /compact, /model, /effort, /cd, /thread, /backend, /abort, /status, /help) work on the supported backends.`,
+        error: `❌ "${command}" is not exposed as a Codex backend command.\n\nBuilt-in commands (/clear, /compact, /model, /effort, /cd, /thread, /backend, /delegation, /abort, /status, /help) work on the supported backends.`,
       });
       return;
     }
@@ -1790,7 +1837,11 @@ You can also use natural language commands to control Claude Code CLI.`,
     attachments?: Attachment[],
     fromQueue = false,
   ): Promise<boolean> {
-    const complete = (success: boolean, error?: string): boolean => {
+    let delegationScope: DelegationScope | undefined;
+    let delegationBridge: DelegationBridge | undefined;
+    const complete = async (success: boolean, error?: string): Promise<boolean> => {
+      delegationBridge?.activate(undefined);
+      await delegationScope?.close();
       const responseError = fromQueue && !success
         ? this.pauseQueueAfterFailure(threadId, error || 'Queued command failed') : error;
       this.sendResponse(messageId, threadId, { success, error: responseError, threads: this.threadPool.getSummaries() });
@@ -1799,12 +1850,45 @@ You can also use natural language commands to control Claude Code CLI.`,
     };
     try {
       const openId = this.getMessageOpenId(messageId);
+      const thread = this.threadManager.getThread(threadId);
+      if (this.delegation.blocksWorkspace(executor.getCurrentWorkingDirectory(), threadId)) {
+        throw new Error('A delegated worker holds this workspace. Wait for it to finish; if worker cleanup failed, stop the worker and restart the CLI.');
+      }
+      if (thread?.delegation && executor.configureDelegation) {
+        delegationScope = this.delegation.begin({ thread, messageId,
+          backend: this.threadPool.getBackendKey(threadId),
+          config: (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' },
+          cwd: executor.getCurrentWorkingDirectory(),
+          onToolUse: tool => this.sendToolUse(messageId, threadId, tool),
+          onToolResult: result => this.sendToolResult(messageId, threadId, result),
+          onNotice: text => this.sendStreamChunk(messageId, threadId, text),
+          onApproval: (request, child) => this.forwardApproval(request, child, messageId, threadId),
+          onApprovalResolved: (id, status) => this.resolveApprovalCard(id, status),
+          isWorkspaceBusy: cwd => this.threadManager.listThreads().some(other => {
+            if (other.id === threadId || !this.threadPool.isThreadBusy(other.id)) return false;
+            try { return workspacesOverlap(realpathSync(this.threadPool.getExecutor(other.id).getCurrentWorkingDirectory()), cwd); }
+            catch { return true; }
+          }),
+        });
+        delegationBridge = this.delegationBridges.get(threadId) ?? new DelegationBridge();
+        this.delegationBridges.set(threadId, delegationBridge);
+        const connection = await delegationBridge.start();
+        delegationBridge.activate(delegationScope.invoke);
+        await executor.configureDelegation(connection);
+        if (delegationScope.isClosed() || this.isDestroyed || this.abortOperations.has(threadId)) {
+          throw new Error('Delegation was cancelled before the coordinator started');
+        }
+        content = `${DELEGATION_INSTRUCTIONS}\n\nUser request:\n${content}`;
+      } else if (executor.configureDelegation) {
+        await executor.configureDelegation(undefined);
+      }
       const onTaskNotification = (notification: TaskNotificationInfo): void => {
         if (this.isDestroyed || !this.threadManager.getThread(threadId)) return;
         this.notificationAdapter.sendTaskNotification({ ...notification, threadId }, openId);
       };
       const emittedLocalImages = new Set<string>();
       const pendingLocalImageEmissions = new Set<Promise<void>>();
+      const delegationControlTools = new Set<string>();
       let streamedOutput = '';
       const emitLocalImages = async (text: string): Promise<void> => {
         const thread = this.threadManager.getThread(threadId);
@@ -1834,8 +1918,15 @@ You can also use natural language commands to control Claude Code CLI.`,
           streamedOutput += chunk;
           this.sendStreamChunk(messageId, threadId, chunk);
         },
-        onToolUse: (toolUse: ToolUseInfo) => this.sendToolUse(messageId, threadId, toolUse),
+        onToolUse: (toolUse: ToolUseInfo) => {
+          if (delegationScope && /remote_cli_(list_backends|delegate|result|cancel)$/.test(toolUse.name)) {
+            delegationControlTools.add(toolUse.id);
+            return;
+          }
+          this.sendToolUse(messageId, threadId, toolUse);
+        },
         onToolResult: (toolResult: ToolResultInfo) => {
+          if (delegationControlTools.delete(toolResult.tool_use_id)) return;
           this.sendToolResult(messageId, threadId, toolResult);
           queueLocalImages(toolResult.content);
         },
@@ -1867,22 +1958,7 @@ You can also use natural language commands to control Claude Code CLI.`,
             return complete(false, `❌ Auto-compact failed: ${compactResult.error}\n\nUse /compact to try again, or /clear to start fresh.`);
           }
           this.sendStreamChunk(messageId, threadId, '✅ Compaction done. Retrying your request...\n');
-          const retryResult = await executor.execute(content, {
-            onTaskNotification,
-            onStream: (chunk: string) => {
-              streamedOutput += chunk;
-              this.sendStreamChunk(messageId, threadId, chunk);
-            },
-            onToolUse: (toolUse: ToolUseInfo) => this.sendToolUse(messageId, threadId, toolUse),
-            onToolResult: (toolResult: ToolResultInfo) => {
-              this.sendToolResult(messageId, threadId, toolResult);
-              queueLocalImages(toolResult.content);
-            },
-            onRedactedThinking: () => this.sendRedactedThinking(messageId, threadId),
-            onPlanMode: (planContent: string) => this.sendPlanMode(messageId, threadId, planContent),
-            onImage: (image: ImageBlock) => this.sendImage(messageId, threadId, image),
-            attachments,
-          });
+          const retryResult = await executor.execute(content, executeOptions);
           await Promise.all(pendingLocalImageEmissions);
           await emitLocalImages(`${streamedOutput}\n${retryResult.output ?? ''}`);
           return complete(retryResult.success, retryResult.error);
@@ -1976,7 +2052,11 @@ You can also use natural language commands to control Claude Code CLI.`,
       return;
     }
     let accepted = false;
-    try { accepted = pending.executor.respondToApproval?.(message.messageId, message.action) === true; } catch { /* Report failure without approving another request. */ }
+    try {
+      if (message.action !== 'remember' || pending.request.approval.canRemember) {
+        accepted = pending.executor.respondToApproval?.(message.messageId, message.action) === true;
+      }
+    } catch { /* Report failure without approving another request. */ }
     if (accepted) {
       this.resolveApprovalCard(message.messageId, message.action === 'remember' ? 'remembered' : message.action === 'deny' ? 'denied' : 'approved');
     } else if (this.pendingApprovalCards.has(message.messageId)) {
@@ -2293,6 +2373,9 @@ You can also use natural language commands to control Claude Code CLI.`,
     this.isDestroyed = true;
     this.notificationAdapter.unregister();
     try {
+      await this.delegation.destroy();
+      await Promise.all([...this.delegationBridges.values()].map(bridge => bridge.close()));
+      this.delegationBridges.clear();
       await this.threadPool.destroyAll({ deleteData: false });
       this.pendingApprovalCards.clear();
     } catch (err) {

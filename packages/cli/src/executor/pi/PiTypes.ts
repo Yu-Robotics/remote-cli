@@ -1,7 +1,11 @@
+import path from 'path';
+import type { DelegationConnection } from '../../delegation/contract';
+
 export const PI_THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 export type PiThinkingLevel = (typeof PI_THINKING_LEVELS)[number];
 
 export interface PiLaunchOptions {
+  delegation?: DelegationConnection;
   command?: string;
   cwd?: string;
   /** Whether Pi should trust project-local resources for this non-interactive run. */
@@ -63,6 +67,7 @@ export function formatPiModelRef(model: Pick<PiModel, 'id' | 'provider'>): strin
 export function buildPiRpcArgs(options: PiLaunchOptions): { command: string; args: string[] } {
   const command = options.command ?? 'pi';
   const args = ['--mode', 'rpc'];
+  if (options.delegation) args.push('--extension', path.join(__dirname, '../../delegation/piExtension.js'));
   if (options.approveProject === true) args.push('--approve');
   else if (options.approveProject === false) args.push('--no-approve');
   if (options.sessionFile) {

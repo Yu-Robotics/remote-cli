@@ -104,6 +104,31 @@ describe('CodexAppServerExecutor', () => {
     expect(transport.responses.some(response => response.id === 100)).toBe(false);
   });
 
+  it('adds and removes delegation on the same resumed conversation while preserving sandbox settings', async () => {
+    await executor.configureSandbox('on');
+    const runTurn = async () => {
+      const before = transport.requests.filter(request => request.method === 'turn/start').length;
+      const result = executor.execute('work', {});
+      await vi.waitFor(() => expect(transport.requests.filter(request => request.method === 'turn/start').length).toBe(before + 1));
+      transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+      await result;
+    };
+    await runTurn();
+    await executor.configureDelegation({ url: 'http://127.0.0.1:12345/', token: 'private-test-token' });
+    await runTurn();
+    const resumed = transport.requests.filter(request => request.method === 'thread/resume').at(-1)!.params;
+    expect(resumed.threadId).toBe('codex-thread-1');
+    expect(resumed.sandbox).toBe('workspace-write');
+    expect(resumed.config['mcp_servers.remote_cli_delegation']).toMatchObject({ enabled: true, required: true, tool_timeout_sec: 35,
+      default_tools_approval_mode: 'approve',
+      enabled_tools: ['remote_cli_list_backends', 'remote_cli_delegate', 'remote_cli_result', 'remote_cli_cancel'] });
+    expect(resumed.approvalPolicy).toBe('on-request');
+    expect(resumed.config['sandbox_workspace_write.exclude_slash_tmp']).toBe(true);
+    await executor.configureDelegation(undefined);
+    await runTurn();
+    expect(transport.requests.filter(request => request.method === 'thread/resume').at(-1)!.params.config['mcp_servers.remote_cli_delegation'].enabled).toBe(false);
+  });
+
   it('retains a failed transport reply for retry without approving a later request', async () => {
     await executor.configureSandbox('on');
     const onApprovalRequest = vi.fn((_request: any) => true);

@@ -18,6 +18,7 @@ vi.mock('../../src/feishu/FeishuLongConnHandler');
 
 describe('Router wire compatibility', () => {
   let server: RouterServer;
+  let wss: EventEmitter;
   let socket: EventEmitter & { send: ReturnType<typeof vi.fn>; close: ReturnType<typeof vi.fn>; readyState: number };
   let receive: (message: object) => Promise<void>;
 
@@ -28,7 +29,7 @@ describe('Router wire compatibility', () => {
     vi.spyOn(Koa.prototype, 'listen').mockReturnValue({
       close: (callback: () => void) => callback(),
     } as unknown as Server);
-    const wss = Object.assign(new EventEmitter(), { close: vi.fn() });
+    wss = Object.assign(new EventEmitter(), { close: vi.fn() });
     vi.mocked(WebSocketServer).mockImplementation(() => wss as unknown as WebSocketServer);
     const config = { get: (_section: string, key: string) => key === 'heartbeatInterval' ? 30000 : 'test' };
     server = new RouterServer(config as unknown as ConfigManager, {} as JsonStore);
@@ -89,6 +90,53 @@ describe('Router wire compatibility', () => {
     }));
     await receive({ type: 'approval_resolved', messageId: 'approval-1', openId: 'owner', threadId: 'thread-2', status: 'approved' });
     expect(JSON.stringify(vi.mocked(feishu.updateApprovalCard).mock.calls.at(-1))).toContain('Approved');
+  });
+
+  it('serves a legacy CLI alongside a current CLI without requiring new capabilities', async () => {
+    await receive({ type: 'binding_request', messageId: 'legacy-registration', data: { deviceId: 'legacy-device' } });
+    const currentSocket = Object.assign(new EventEmitter(), { send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN });
+    wss.emit('connection', currentSocket, { socket: { remoteAddress: '127.0.0.2' } });
+    const onCurrentMessage = currentSocket.listeners('message')[0];
+    const receiveCurrent = async (message: object) => { await onCurrentMessage(Buffer.from(JSON.stringify(message))); };
+    await receiveCurrent({ type: 'binding_request', messageId: 'current-registration', data: {
+      deviceId: 'current-device', protocolVersion: 1,
+      capabilities: { queueStarted: true, taskRecovery: true, approvalCards: true },
+    } });
+
+    const feishu = vi.mocked(FeishuLongConnHandler).mock.instances[0];
+    const hub = vi.mocked(feishu.setConnectionHub).mock.calls[0][0];
+    const startStreaming = vi.mocked(feishu.setOnStartStreaming).mock.calls[0][0];
+    const legacyCommand = { type: 'command', messageId: 'legacy-task', openId: 'legacy-user', content: 'Inspect the project', timestamp: 1000 };
+    const currentCommand = { type: 'command', messageId: 'current-task', openId: 'current-user', threadId: 'thread-2', content: 'Delegate a review', timestamp: 1000 };
+    startStreaming('legacy-task', 'legacy-user', 'legacy-card', 'legacy-device');
+    startStreaming('current-task', 'current-user', 'current-card', 'current-device', 'thread-2');
+    expect(await hub.sendToDevice('legacy-device', legacyCommand)).toBe(true);
+    expect(await hub.sendToDevice('current-device', currentCommand)).toBe(true);
+    expect(JSON.parse(socket.send.mock.calls.at(-1)![0])).toEqual(legacyCommand);
+    expect(JSON.parse(currentSocket.send.mock.calls.at(-1)![0])).toEqual(currentCommand);
+
+    await receive({ type: 'stream', messageId: 'legacy-task', openId: 'legacy-user', chunk: 'Legacy progress' });
+    await receiveCurrent({ type: 'stream', messageId: 'current-task', openId: 'current-user', streamType: 'tool_use',
+      toolUse: { id: 'delegated-task', name: 'Task', input: { description: 'Review the project', subagent_type: 'codex' } } });
+    await receiveCurrent({ type: 'stream', messageId: 'current-task', openId: 'current-user', streamType: 'tool_result',
+      toolResult: { tool_use_id: 'delegated-task', content: 'Delegated review complete' } });
+    await receive({ type: 'response', messageId: 'legacy-task', data: { openId: 'legacy-user', success: true, output: 'Legacy progress' } });
+    await receiveCurrent({ type: 'response', messageId: 'current-task', openId: 'current-user', threadId: 'thread-2', success: true });
+
+    const finalCards = vi.mocked(feishu.finalizeStreamingMessage).mock.calls;
+    expect(finalCards).toHaveLength(2);
+    expect(finalCards[0][0]).toBe('legacy-card');
+    expect(JSON.stringify(finalCards[0][1])).toContain('Legacy progress');
+    expect(finalCards[0][3]).toBe('legacy-user');
+    expect(finalCards[1][0]).toBe('current-card');
+    expect(JSON.stringify(finalCards[1][1])).toContain('Delegated review complete');
+    expect(finalCards[1][3]).toBe('current-user');
+    expect(socket.send.mock.calls.map(([value]) => JSON.parse(value).type)).toEqual(['binding_confirm', 'command']);
+    expect(currentSocket.send.mock.calls.map(([value]) => JSON.parse(value).type)).toEqual(['binding_confirm', 'command', 'task_result_ack']);
+    expect(hub.supportsQueueStarted('legacy-device')).toBe(false);
+    expect(hub.supportsQueueStarted('current-device')).toBe(true);
+    expect(socket.close).not.toHaveBeenCalled();
+    expect(currentSocket.close).not.toHaveBeenCalled();
   });
 
   it('rejects an unsupported CLI before registering it and explains how to recover', async () => {

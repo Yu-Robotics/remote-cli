@@ -1,0 +1,419 @@
+# Cross-Backend Delegation Plan
+
+Status: both phases implemented and validated on 2026-09-29. Version 1.6.79.
+The initial Claude Code/Codex/Pi phase and the authorized expansion to every
+existing backend are complete. Live authentication/configuration limits are
+recorded separately below; they are not reported as successful model tests.
+The user authorized committing and pushing these changes to main after validation.
+No deployment occurred.
+
+## Execution record
+
+The approved first release supports Claude Code, Codex, and Pi as coordinators
+and workers, including all nine directed combinations. Keep the existing thread
+and backend interaction. The user authorized autonomous implementation, testing,
+and maintenance of this document, followed by a request to commit and push.
+Package publication was not requested.
+Do not start, stop, or deploy the production Router.
+
+## Expansion to all installed backends
+
+The second phase preserves the same opt-in thread workflow and adds AGY,
+OpenCode, Kimi Code, and ZCode. Each backend should be a worker and, where its
+native protocol can register tools reliably, a coordinator. Do not substitute
+prompt-only instructions for actual tool registration or claim a live pairing
+has passed solely from mocked tests.
+
+- [x] Verify all four native tool-registration and session-resume contracts.
+  ACP session MCP servers are the starting point for OpenCode and Kimi; AGY
+  and ZCode require their own native integration and isolated configuration.
+- [x] Expand discovery and worker policy, including ZCode bundled-script
+  discovery, missing executables, sandbox restrictions, and session cleanup.
+- [x] Implement coordinator adapters without editing the user's global MCP
+  configuration. Opt-out must remove managed tools from resumed conversations;
+  delegated workers must not acquire the coordinator's managed tools.
+- [x] Cover all supported directed pairs at the manager boundary, plus actual
+  wire registration, resume, opt-out, cancellation, and permission behavior.
+- [x] Run live checks when installation and existing authentication permit it.
+  Record authentication/quota/environment blockers separately from code errors.
+- [x] Review the final diff, synchronize README files and package versions,
+  run builds and tests, and update this document with the verified matrix.
+
+Carry forward all first-phase limits and task ownership rules. Only Claude Code
+and Codex currently provide an enforced read-only worker policy; reject that
+mode for other workers. A restricted coordinator still cannot delegate to a
+different backend. This expansion does not authorize deploying the Router or
+changing the user's backend authentication or global MCP settings.
+
+## First-phase execution checklist
+
+- [x] Capture the accepted scope and continuity instructions.
+- [x] Verify coordinator protocols and installed-version behavior.
+- [x] Implement discovery, task ownership, limits, and worker lifecycle.
+- [x] Register native tools in Claude Code, Codex, and Pi.
+- [x] Integrate thread controls, task progress, approvals, queues, and cleanup.
+- [x] Add meaningful regression, compatibility, and adapter coverage.
+- [x] Run real-backend smoke tests across all nine directed combinations.
+- [x] Review the diff, synchronize documentation and versions, build, test, and
+  verify npm package contents.
+
+Baseline: main at `6c378be`, version 1.6.77. Reference branch:
+`codex/pi-feishu-orchestration` at `507a091`. Implementation is on main and does
+not depend on merging the reference branch.
+
+## Expansion implementation and evidence
+
+The expansion adds all seven backend IDs to discovery, tool schemas, and worker
+policy. OpenCode/Kimi use standard ACP stdio MCP entries on new/load; ZCode uses
+its own session create/resume schema, with `isolation: session` and a 35-second
+MCP timeout. Ordinary ZCode sessions omit the override. AGY detaches only its
+per-thread config directory symlink, uses native `agy mcp add` (including its
+JSON-with-comments parser), and restores the original configuration on opt-out.
+Bridge credentials stay in the child environment for AGY, never in its MCP file.
+
+All transports keep parent and worker sessions separate. Managed workers receive
+no delegation server/extension. ACP session-load history is suppressed from live
+output. Changing delegation waits for old processes to exit before resuming;
+worker workspace leases are held until exit is confirmed. Cleanup never restarts
+a destroyed ACP worker just to delete its session pointer. Normal explicit
+thread deletion retains its existing native deletion attempt.
+
+| Backend | Local version | Additional live verification | Model delegation result |
+| --- | --- | --- | --- |
+| AGY | 1.2.12 | Native MCP config command succeeded in a private thread HOME | Blocked: authentication required |
+| OpenCode | 2.0.4 | ACP process started and returned its authentication error | Blocked: provider authentication required |
+| Kimi Code | 0.43.1 | ACP process started and returned its authentication error | Blocked: onboarding/authentication required |
+| ZCode | 0.16.9 | Native MCP reported connected with four tools; active-session resume RPC accepted | Blocked: no selected model |
+
+A subsequent ZCode cross-process resume probe returned `Session not found` for
+an unused session whose model was unconfigured. Persisted-session restoration
+has not been validated live for these four backends. A regression now allows
+recreation for an explicit missing-session error while preserving the original
+session pointer on MCP or other load failures. No accounts were provisioned or
+changed to bypass the live-test blockers.
+
+The official ACP [session lifecycle](https://agentclientprotocol.com/protocol/session-setup)
+requires stdio MCP support and supplies servers on creation and loading. AGY's
+[configuration documentation](https://antigravity.google/docs/cli/features/)
+and its local `mcp add --help` identify the user MCP configuration. The installed
+ZCode bundle's session schemas and runtime conversion were inspected locally.
+
+Known ZCode limitation: a nonempty native session MCP override replaces custom
+user-configured MCP servers while enabled. Native tools and plugin MCP servers
+remain available; opt-out restores normal configuration. This is documented in
+both READMEs and `/delegation` output. Merging arbitrary native user MCP settings
+is deferred rather than duplicating ZCode's version-specific configuration loader.
+
+- Manager tests cover all 49 directed backend pairs, per-backend model selection,
+  separate worker identities, and inherited permissions.
+- Real subprocess fixtures cover OpenCode/Kimi/ZCode registration, process
+  recycling, resume, opt-out, history replay suppression, and cleanup.
+- AGY filesystem/process tests verify global config preservation, independent
+  worker configuration, stale-registration cleanup, rollback on config failure,
+  and restoration of the original directory link.
+- `npm run build`: CLI and Router passed.
+- `npm test`: 1855 tests passed, CLI 1282 and Router 573, across 94 files.
+- Follow-up rolling-upgrade regressions passed: a legacy CLI completes commands
+  and streaming replies alongside a current CLI on the same Router; a delegated
+  worker uses text approval when an older Router has no approval-card capability.
+- The targeted protocol, lifecycle, discovery, policy, and adapter run passed
+  187 tests across 13 files. New delegation modules and the AGY configuration
+  adapter reached 90.59% lines/statements, 87.43% branches, and 95.23% functions.
+  MCP subprocess coverage is not merged into that report; the actual stdio
+  protocol test passed separately.
+- `npm pack -w @yu_robotics/remote-cli --dry-run --json --ignore-scripts`:
+  the compiled MCP server, Pi extension, contract, manager, and AGY configuration
+  adapter are present in the installable CLI package.
+- `git diff --check`: passed. Root README delegation sections and heading
+  structures match. Root, CLI, Router, and lockfile versions are all 1.6.79.
+- Validation did not change the production Router or publish packages. The user
+  subsequently authorized committing and pushing the verified changes. Live
+  Feishu UI and macOS runtime validation remain unperformed.
+
+Temporary evidence:
+
+- `/tmp/remote-cli-expansion-smoke-result.json`: the four explicit live blockers.
+- `/tmp/remote-cli-expanded-registration.log`: four connected ZCode MCP tools.
+- `/tmp/remote-cli-expanded-resume.log`: the cross-process missing-session probe.
+- `/tmp/remote-cli-expanded-build.log`: successful build output.
+- `/tmp/remote-cli-expanded-full-test.log`: expansion baseline test output.
+- `/tmp/remote-cli-delegation-rolling-upgrade-tests.log`: latest full CLI and
+  Router test output, including mixed-client and approval-fallback regressions.
+- `/tmp/remote-cli-expanded-coverage/coverage-summary.json`: targeted coverage.
+- `/tmp/remote-cli-expanded-pack.json`: installable CLI package contents.
+
+## First-phase verification results
+
+- `npm run build`: CLI and Router passed.
+- `npm test`: 1797 tests passed, CLI 1225 and Router 572, across 92 files.
+- New delegation modules: 89.75% lines/statements, 84.84% branches, and 94.82%
+  functions in the targeted V8 coverage run. MCP subprocess coverage is not
+  merged into that report; its real stdio protocol test passed separately.
+- `npm pack -w @yu_robotics/remote-cli --dry-run --json --ignore-scripts`:
+  compiled MCP server, Pi extension, contract, and manager are included.
+- `git diff --check`: passed. Root README sections and heading structures match.
+  At this earlier checkpoint, all package and lockfile versions were 1.6.78.
+- The repeated live matrix passed all nine unique pairs and all three parent
+  turns. Each worker independently read `fixture.txt` and returned the expected
+  marker. The same-backend combinations used distinct sessions.
+- Claude Code 2.1.276, Codex 0.154.0, and Pi 0.87.1 were exercised on Linux.
+  Claude Code used the existing Kimi-backed account configuration; this verifies
+  the Claude Code protocol, not a particular Anthropic model. Pi used
+  `openai-codex/gpt-5.6-luna` from an isolated test installation.
+- Fresh/resumed tool registration passed for all three coordinators. Additional
+  native read-only delegation passed for Claude-to-Claude and Codex-to-Codex,
+  without approving any extra request in the final read-only probes.
+- Live sandbox testing found and fixed two issues: Codex MCP invocation needed
+  a scoped tool approval configuration, and new Codex read-only sessions needed
+  their private TMPDIR created before native sandbox startup.
+- No live Feishu UI or macOS runtime test was performed. Router forwarding,
+  cards' existing event flow, registration/approval replay, and queue handling
+  were verified by automated integration tests. Production services were not
+  restarted.
+- Temporary Pi authentication used a private access-token-only fixture, with no
+  copied refresh token or permanent account configuration changes. The fixture
+  and its location file have been deleted. Pi's test installation remains at
+  `/tmp/remote-cli-delegation-tools`; production configuration does not reference it.
+
+Local diagnostic evidence (temporary files, not repository dependencies):
+
+- `/tmp/remote-cli-delegation-final-tests.log`
+- `/tmp/remote-cli-delegation-build.log`
+- `/tmp/remote-cli-delegation-coverage/coverage-summary.json`
+- `/tmp/remote-cli-delegation-matrix-result.json`
+- `/tmp/remote-cli-delegation-matrix-final.log`
+- `/tmp/remote-cli-delegation-sandbox-final-result.json` (Claude passed; records
+  the Codex TMPDIR failure before the fix)
+- `/tmp/remote-cli-delegation-sandbox-codex-corrected-result.json` (Codex passed
+  after the TMPDIR fix)
+
+Continuation: implementation, review, build, automated validation, and packaging
+checks are complete for both phases. The user authorized committing and pushing
+the completed implementation and compatibility regressions to main.
+Remaining live verification requires authenticated/configured backends; the
+table above records each blocker. Do not repeat live
+model calls against the four unauthenticated/unconfigured backends without a
+configuration change. Deployment and package publication have not been authorized.
+
+## 1. Delivered product contract
+
+Keep the existing thread, backend, workspace, and native conversation. The
+selected backend remains responsible for the final answer. Claude Code, Codex,
+Pi, AGY, OpenCode, Kimi Code, and ZCode can discover local workers, assign a task, await its
+result, and continue that conversation. Same-backend workers are separate
+sessions, not concurrent turns in the primary session.
+
+- `/delegation` reports the per-thread setting and executable discovery.
+- `/delegation on|off` changes future turns while the thread is idle. The setting
+  defaults to off, is persisted in thread metadata, and survives context resets
+  and backend switches. Queued work must be cleared before changing its policy.
+- Unsupported coordinators keep their normal execution behavior; `/delegation`
+  reports their lack of support, and enabling is rejected.
+- Workers receive only a self-contained objective supplied by the coordinator.
+  They do not inherit the parent's transcript, attachments, or hidden context.
+- Workers do not become user-facing threads. Task progress appears in the
+  parent's reply card, and the coordinator summarizes worker results.
+- Installation, authentication, quota, and task success are separate facts.
+  Discovery does not send a model request or claim an account is authenticated.
+- There is no automatic retry, fallback to another provider, recursive managed
+  delegation, cross-device dispatch, or separate orchestration mode.
+- Router-first upgrades are a compatibility requirement: supported protocol-v1
+  CLIs must retain ordinary command execution, output, and task completion while
+  newer CLIs use delegation on the same Router. Package version equality must
+  not become a connection requirement. This feature adds no wire message type
+  or required field and does not raise the minimum accepted protocol version.
+  Delegation tools execute locally and reuse existing tool events. Older CLIs
+  need an upgrade only to enable delegation itself. Optional cards/recovery are
+  negotiated independently for each connection; missing capabilities stay off.
+
+## 2. Architecture and retained reference ideas
+
+```mermaid
+flowchart TD
+    User[Existing Feishu thread] --> Main[Selected Claude Code / Codex / Pi]
+    Main --> Adapter[Registered MCP tools / Pi extension]
+    Adapter --> Bridge[Authenticated loopback bridge]
+    Bridge --> Registry[Configured executable discovery]
+    Bridge --> Manager[Owned and bounded child tasks]
+    Manager --> Policy[Resolve saved thread policy]
+    Policy --> Factory[Existing executor factory]
+    Factory --> Worker[Independent native worker session]
+    Worker --> Result[Bounded result returned to coordinator]
+    Result --> Main
+    Manager --> Progress[Existing task / approval / text events]
+    Progress --> Router[Existing Router reply card]
+    Main --> Router
+```
+
+| Reference branch idea | Adopted behavior | Boundary |
+| --- | --- | --- |
+| Explicit Pi tools | Native tool registration on all three coordinators | No dependence on skill discovery or prompt-only tool simulation |
+| Backend registry | Canonical backend IDs, configured binaries, cached availability | Does not change the primary backend |
+| Task ownership and workers | Dedicated existing executor per child and parent-scoped IDs | Does not duplicate backend transports |
+| Persistent task state | Atomic bounded JSON records with interrupted-state reconciliation | No mandatory SQLite or full transcript archive |
+| Task visibility | Existing Task cards and approval messages | No new Feishu workflow or extra thread buttons |
+| Resource control | Launch, concurrency, time, output, and storage limits | No promise of OS isolation for unrestricted backends |
+
+The reference `codex/pi-feishu-orchestration` remains a source of design ideas,
+not a merge dependency. This implementation is built on main and does not adopt
+its Pi-only primary workflow, global configuration changes, scheduling, Bitable
+integration, or replacement of normal thread interactions.
+
+## 3. Module and tool contracts
+
+| Module | Responsibility |
+| --- | --- |
+| `delegation/contract.ts` | Four tool schemas, shared instructions, MCP launch data |
+| `BackendRegistry.ts` | Five-second version probes, configured paths, 30-second cache |
+| `DelegationBridge.ts` | Per-thread authenticated loopback endpoint active only during a parent turn |
+| `mcpServer.ts` | Stdio JSON-RPC MCP adapter for Claude and Codex |
+| `piExtension.ts` | Explicit Pi tool registration without replacing native tools |
+| `WorkerPolicy.ts` | Resolve saved permissions against the real parent thread |
+| `DelegationManager.ts` | Ownership, idempotency, leases, bounded worker execution and cleanup |
+| `DelegationStore.ts` | Atomic private records, bounded retention, restart reconciliation |
+| `MessageHandler.ts` | Opt-in, queue integration, parent callbacks, approvals and cancellation |
+
+| Tool | Behavior |
+| --- | --- |
+| `remote_cli_list_backends` | Return installed backends, versions and applicable restrictions |
+| `remote_cli_delegate` | Start one task with backend, objective and optional `inherit` or `read_only` mode |
+| `remote_cli_result` | Return an owned task's state and final result; wait up to 25 seconds |
+| `remote_cli_cancel` | Stop an owned worker; existing filesystem changes are not rolled back |
+
+Worker results are task data, not new user instructions. A successful native
+turn does not prove acceptance criteria were met; the coordinator must check
+the returned result and report unresolved work. A call ID cannot be
+reused with different arguments. Duplicate calls within a turn reuse their
+original promise. A task ID from another turn cannot be queried or cancelled.
+Native polling tool cards are suppressed; the manager emits one task entry and
+one terminal result. Worker questions are forwarded through the parent card.
+
+## 4. Native coordinator adapters
+
+| Coordinator | Registration and resumption | Worker implementation |
+| --- | --- | --- |
+| Claude Code | Compose the delegation MCP server with existing approval MCP settings; recycle idle process while retaining session ID | `ClaudePersistentExecutor` |
+| Codex | Apply an MCP configuration override to both `thread/start` and `thread/resume`; explicitly disable it after opt-out | `CodexAppServerExecutor` |
+| Pi | Explicit `--extension` with process-local URL/token; retain session file on enable/disable | `PiExecutor` |
+| OpenCode / Kimi | Pass session-local stdio MCP servers on ACP new/load; replayed history is not emitted as new output | `AcpExecutor`, `AcpClient` |
+| ZCode | Pass native session MCP servers with session isolation; omit overrides when disabled | `ZCodeClient` |
+| AGY | Detach only the per-thread config symlink, register via native `mcp add`, restore original config on opt-out; keep credentials in process env | `AgyExecutor`, `agy/AgyDelegationConfig` |
+
+All workers have unique synthetic remote-cli session keys and use the existing
+factory, model selection, effort selection, sandbox, image-capable transport,
+and native error handling. No worker receives the managed delegation tools.
+Ordinary native tools remain enabled, so native backend-internal subagents are
+outside the managed delegation depth limit.
+
+The installed Codex schema has `dynamicTools` on `ThreadStartParams`, but not
+`ThreadResumeParams`. MCP configuration was verified on both new and resumed
+conversations, avoiding a forced conversation reset. Reference:
+[official Codex app-server documentation](https://developers.openai.com/codex/app-server/).
+
+Read-only smoke testing also exposed an existing Codex sandbox startup bug:
+`TMPDIR` was configured but not created for fresh read-only sessions. The fix
+creates its private directory without adding model writable roots, with a
+regression test. This affects fresh Codex read-only sessions as well as workers.
+
+Read-only smoke testing found that Codex emits an additional MCP tool approval
+elicitation for the local bridge. The coordinator override now limits the server
+to these four tools and pre-authorizes their invocation after `/delegation on`,
+using the official `default_tools_approval_mode` setting. Child sandbox policies
+and permission requests remain unchanged. Claude similarly adds only those four
+MCP tool names to its process-local allow list, retaining native ask/deny rules.
+See [Codex configuration reference](https://developers.openai.com/codex/config-reference/).
+
+## 5. Permissions and workspace coordination
+
+- Resolve the target's saved sandbox policy using the real thread ID before
+  creating the synthetic worker identity. Passing a fresh ID alone would miss
+  per-thread policy files.
+- Unrestricted coordinators support all 49 directed pairs at the manager boundary. Restricted
+  coordinators may delegate only to the same backend; equivalence between
+  different native sandbox systems is not assumed.
+- `read_only` uses the native Claude/Codex policy, including normal approvals.
+  Pi, AGY, OpenCode, Kimi, and ZCode reject it instead of treating an instruction as filesystem enforcement.
+- Worker approval cards omit Remember. Persistent grants should be configured
+  on the real thread. Temporary worker policy/session pointers are cleaned up
+  after execution; native CLI transcript retention remains backend-owned.
+- Child approval decisions are bound to the original user, message, thread,
+  request and executor. Registration replays pending approvals. Parent and child
+  questions use the existing input flow; an answer does not create another task.
+- Canonical workspace leases cover identical and ancestor/descendant paths.
+  A worker cannot overlap another managed worker or another busy managed thread
+  in those directories. Other threads are blocked from starting normal model
+  work in a leased workspace.
+- This is not a filesystem lock. The coordinator's native parallel tools,
+  unrestricted shell commands, and external editors can still access files.
+  Instructions require the coordinator to await a writing worker before editing.
+- The loopback bearer token prevents accidental cross-thread calls; it does not
+  create isolation from other processes running with the same OS permissions.
+  Launch logs redact MCP and sandbox configuration values.
+
+## 6. Lifecycle, limits, and recovery
+
+| Limit | Value |
+| --- | --- |
+| Active workers per parent | 1 |
+| Active workers per CLI process | 3, in non-overlapping workspaces |
+| Launches per parent turn | 12 |
+| Managed delegation tool calls per turn | 500 |
+| Worker duration | 30 minutes |
+| Final result | 32 KiB, UTF-8-safe truncation marker included |
+| Captured text/tool-result output | 256 KiB, then stop |
+| Objective | 24000 characters; diagnostic record stores first 1000 |
+| Tool wait / HTTP timeout | 25 seconds / 32 seconds |
+| Shutdown | Up to 2 seconds for abort, then 10 seconds for destroy |
+| Task record retention | 200 terminal records, seven days |
+
+A parent ending, `/abort`, deletion, or CLI shutdown closes the scope and stops
+managed children. Cancel remains idempotent. Cancellation during version probing
+or initial persistence cannot start a worker after closure. Ending a parent
+without awaiting its result stops that child before the next queued task starts.
+
+If cleanup cannot be confirmed, return interrupted status and retain the
+workspace lease and capacity reservation. Stop the worker and restart the CLI
+before using the workspace again. The queue does not wait forever on a broken
+worker. Successful cleanup removes synthetic session pointers and policy files.
+
+Router outages do not restart workers. Existing task recovery restores the
+parent output route and replays pending approvals; disconnected child progress
+is not buffered. Native result polling continues locally. A CLI restart marks
+retained running records interrupted and does not replay their tasks or edits.
+Persistent records are diagnostic; they are not resumable worker sessions.
+
+## 7. Validation and release gate
+
+The release must include:
+
+- Unit coverage for ownership, discovery, sandbox inheritance, idempotency,
+  capacity, nested workspace conflicts, timeouts, UTF-8 output bounds, cancellation,
+  cleanup failure, record retention and restart reconciliation.
+- Actual MCP subprocess framing tests and Pi extension registration/cancellation.
+- Fresh/resumed coordinator configuration tests with native tools preserved.
+- MessageHandler tests for queue draining, opt-in persistence, opt-out, child
+  questions, parent termination, wrong-owner approvals and registration replay.
+- Router forwarding/help coverage; no new wire protocol messages.
+- Mixed-client compatibility coverage: legacy registration without metadata,
+  ordinary commands, streaming and nested responses alongside a current CLI's
+  delegated Task events, with acknowledgements limited to negotiated clients.
+- New CLI with an older Router: delegated workers fall back to text approval
+  when the registration response has no approval-card capability, and replies
+  reach the worker rather than the coordinator.
+- Full CLI/Router builds and tests, synchronized manifests/lockfile, paired root
+  README sections, and package README updates.
+- Real backend tool calls across all nine pairs. Distinguish these from mocked
+  transport tests and do not claim untested live Feishu or macOS validation.
+
+## 8. Deferred work
+
+Native live verification of the four additional backends requires working local
+authentication/model configuration. ZCode custom user MCP coexistence while
+delegation is enabled requires a native merge API or an explicitly supported
+configuration source; the current temporary override is disclosed to users.
+
+Future changes may add cross-backend sandbox policy translation, detached workers,
+parallel read-only workers, isolated worktrees, resumable worker conversations,
+attachment transfer, additional future backends, richer progress, and orchestration
+scheduling. Each should preserve the selected thread/backend contract and have
+its own capability and failure checks. They are not required for this release.

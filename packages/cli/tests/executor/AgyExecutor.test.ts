@@ -72,7 +72,7 @@ describe('AgyExecutor', () => {
     // stdin must be a real EventEmitter so async socket errors (EPIPE) can be tested
     p.stdin = Object.assign(new EventEmitter(), { write: vi.fn(), end: vi.fn() });
     p.kill = vi.fn();
-    p.pid = Math.floor(Math.random() * 100000);
+    p.pid = 424242 + spawnedProcesses.length;
     return p;
   };
 
@@ -121,6 +121,10 @@ describe('AgyExecutor', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     persistedConversations.clear();
+    // Mocked children must never send a real signal to an unrelated process.
+    vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw Object.assign(new Error('Mock process group is absent'), { code: 'ESRCH' });
+    });
 
     vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -155,7 +159,24 @@ describe('AgyExecutor', () => {
       p.emit('close', 0, null);
     }
     await executor.destroy();
+    vi.mocked(process.kill).mockRestore();
     vi.clearAllMocks();
+  });
+
+  it.skipIf(process.platform === 'win32')('cancels the backend process group and confirms exit before releasing cleanup', async () => {
+    vi.mocked(process.kill).mockReturnValue(true);
+    const running = executor.execute('Run a task');
+    await waitForSpawn();
+    await executor.abort();
+    expect(process.kill).toHaveBeenCalledWith(-proc.pid, 'SIGTERM');
+    let exited = false;
+    const waiting = executor.waitForExit().then(() => { exited = true; });
+    await Promise.resolve();
+    expect(exited).toBe(false);
+    proc.emit('exit', 0, null);
+    proc.emit('close', 0, null);
+    await waiting;
+    expect(await running).toMatchObject({ success: false });
   });
 
   // ── Process spawning ──────────────────────────────────────────────────────

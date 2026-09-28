@@ -710,6 +710,7 @@ Backend and session commands (sent to active device):
 /queue - Inspect or manage confirmed messages for busy threads
 /model [name] - Show models or set this thread's model
 /effort [auto|low|medium|high] - Show or set Codex/AGY reasoning effort
+/delegation [on|off] - Delegate between installed agent backends in the current thread
 /backend - List backends and show the current thread's effective backend
 /backend <index> - Switch all threads and clear per-thread backend overrides
 /backend <index> @ - Switch only the current thread
