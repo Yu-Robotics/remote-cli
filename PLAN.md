@@ -646,7 +646,7 @@ services:
       - FEISHU_ENCRYPT_KEY=${FEISHU_ENCRYPT_KEY}
     volumes:
       - router_data:/root/.remote-cli-router
-    restart: unless-stopped
+    restart: always
 
 volumes:
   router_data:
