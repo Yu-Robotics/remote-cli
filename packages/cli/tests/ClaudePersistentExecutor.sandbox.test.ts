@@ -7,6 +7,8 @@ import path from 'path';
 import { ClaudePersistentExecutor } from '../src/executor/ClaudePersistentExecutor';
 import { DirectoryGuard } from '../src/security/DirectoryGuard';
 import type { ClaudeSandboxConfig } from '../src/types/config';
+import { createExecutor } from '../src/executor';
+import { claudeCodeHooks } from '../src/hooks/ClaudeCodeHooks';
 
 vi.mock('child_process', () => ({ spawn: vi.fn() }));
 
@@ -47,6 +49,48 @@ describe('Claude sandbox launch policy', () => {
     vi.spyOn(executor as any, 'ensureApprovalServer').mockResolvedValue('/tmp/test-approval.sock');
     return executor;
   }
+
+  it('composes delegation with sandbox approvals and redacts credentials in launch logs', async () => {
+    for (const tool of ['bwrap', 'socat']) fs.writeFileSync(path.join(home, tool), '', { mode: 0o700 });
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const active = create({ mode: 'read-only' });
+    await active.configureDelegation({ url: 'http://127.0.0.1:12345/', token: 'private-test-token' });
+    const result = active.execute('review');
+    await vi.advanceTimersByTimeAsync(1000);
+    const args = vi.mocked(spawn).mock.calls[0][1] as string[];
+    const servers = JSON.parse(args[args.indexOf('--mcp-config') + 1]).mcpServers;
+    const permissions = JSON.parse(args[args.indexOf('--settings') + 1]).permissions;
+    expect(permissions.allow).toHaveLength(4);
+    expect(permissions.allow).toContain('mcp__remote-cli-delegation__remote_cli_delegate');
+    expect(permissions.ask).toContain('Write');
+    expect(servers['remote-cli-approval']).toBeDefined();
+    expect(servers['remote-cli-delegation'].env.REMOTE_CLI_DELEGATION_TOKEN).toBe('private-test-token');
+    expect(args).not.toContain('--dangerously-skip-permissions');
+    expect(log.mock.calls.flat().join(' ')).not.toContain('private-test-token');
+    child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'result', subtype: 'success' }) + '\n'));
+    await result;
+  });
+
+  it('keeps a delegated worker output scoped to callbacks instead of global user notifications', async () => {
+    const started = vi.spyOn(claudeCodeHooks, 'notifyTaskStarted');
+    const completed = vi.spyOn(claudeCodeHooks, 'notifyTaskCompleted');
+    const notification = vi.spyOn(claudeCodeHooks, 'notifyTaskNotification');
+    executor = createExecutor(new DirectoryGuard([home]), { type: 'claude-persistent' }, home,
+      'delegate-test', undefined, undefined, { lifecycleHooks: false }) as ClaudePersistentExecutor;
+    const stream = vi.fn();
+    const result = executor.execute('Review a file', { onStream: stream });
+    await vi.advanceTimersByTimeAsync(1000);
+    for (const message of [
+      { type: 'assistant', message: { content: [{ type: 'text', text: 'Worker answer' }] } },
+      { type: 'system', subtype: 'task_notification', task_id: 'background', status: 'completed', summary: 'Done' },
+      { type: 'result', subtype: 'success' },
+    ]) child.stdout.emit('data', Buffer.from(JSON.stringify(message) + '\n'));
+    await expect(result).resolves.toMatchObject({ success: true, output: expect.stringContaining('Worker answer') });
+    expect(stream).toHaveBeenCalledWith('Worker answer');
+    expect(started).not.toHaveBeenCalled();
+    expect(completed).not.toHaveBeenCalled();
+    expect(notification).not.toHaveBeenCalled();
+  });
 
   it.each(['workspace-write', 'read-only'] as const)('launches %s with mandatory enforcement and approval rules', async mode => {
     for (const tool of ['bwrap', 'socat']) fs.writeFileSync(path.join(home, tool), '', { mode: 0o700 });

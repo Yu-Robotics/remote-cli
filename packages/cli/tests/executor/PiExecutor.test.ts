@@ -182,6 +182,21 @@ describe('PiExecutor', () => {
     expect(stored).toMatchObject({ id: 'sess-pi-1', cwd: project });
   });
 
+  it('reconfigures delegation without clearing the Pi session or replacing ordinary tools', async () => {
+    await executor.execute('first', {});
+    const session = executor.getSessionId();
+    const connection = { url: 'http://127.0.0.1:12345/', token: 'test-token' };
+    await executor.configureDelegation(connection);
+    await executor.execute('delegate', {});
+    expect(transport.launch.delegation).toEqual(connection);
+    expect(executor.getSessionId()).toBe(session);
+    expect(transport.request.mock.calls.some(([command]) => command.type === 'new_session')).toBe(false);
+    await executor.configureDelegation(undefined);
+    await executor.execute('ordinary', {});
+    expect(transport.launch.delegation).toBeUndefined();
+    expect(executor.getSessionId()).toBe(session);
+  });
+
   it('fails a settled agent turn that produced no text', async () => {
     transport.request.mockImplementation(async (command: Record<string, unknown>) => {
       if (command.type === 'prompt') {

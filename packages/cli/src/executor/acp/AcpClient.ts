@@ -1,6 +1,7 @@
 import { ChildProcess, spawn } from 'child_process';
 import * as readline from 'readline';
 import type {
+  AcpMcpServer,
   AcpConfigOption,
   AcpContentBlock,
   AcpJsonRpcErrorResponse,
@@ -42,14 +43,15 @@ interface PendingRequest {
 
 export interface AcpTransport {
   initialize(): Promise<unknown>;
-  newSession(cwd: string): Promise<AcpSessionResult>;
-  loadSession(sessionId: string, cwd: string): Promise<AcpSessionResult>;
+  newSession(cwd: string, mcpServers?: AcpMcpServer[]): Promise<AcpSessionResult>;
+  loadSession(sessionId: string, cwd: string, mcpServers?: AcpMcpServer[]): Promise<AcpSessionResult>;
   prompt(sessionId: string, blocks: AcpContentBlock[]): Promise<{ stopReason: string }>;
   setConfigOption(sessionId: string, configId: string, value: string): Promise<AcpSessionResult>;
   compactSession?(sessionId: string): Promise<{ stopReason: string }>;
   deleteSession(sessionId: string): Promise<void>;
   sendCancel(sessionId: string): void;
   destroy(): void;
+  waitForExit?(): Promise<void>;
 }
 
 export class AcpClient implements AcpTransport {
@@ -61,6 +63,7 @@ export class AcpClient implements AcpTransport {
   private destroyed = false;
   private closed = false;
   private killTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly exited: Promise<void>;
 
   constructor(command: string, args: string[], cwd: string, callbacks: AcpEventCallbacks) {
     this.callbacks = callbacks;
@@ -68,7 +71,9 @@ export class AcpClient implements AcpTransport {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: process.env,
+      detached: process.platform !== 'win32',
     });
+    this.exited = new Promise(resolve => this.child.once('close', () => resolve()));
 
     this.child.stdout!.on('error', () => {});
     this.child.stdin?.on('error', () => {});
@@ -95,12 +100,12 @@ export class AcpClient implements AcpTransport {
     return this.sendRequest('initialize', { protocolVersion: 1, clientCapabilities: {} });
   }
 
-  async newSession(cwd: string): Promise<AcpSessionResult> {
-    return this.sendRequest('session/new', { cwd, mcpServers: [] }) as Promise<AcpSessionResult>;
+  async newSession(cwd: string, mcpServers: AcpMcpServer[] = []): Promise<AcpSessionResult> {
+    return this.sendRequest('session/new', { cwd, mcpServers }) as Promise<AcpSessionResult>;
   }
 
-  async loadSession(sessionId: string, cwd: string): Promise<AcpSessionResult> {
-    return this.sendRequest('session/load', { sessionId, cwd, mcpServers: [] }) as Promise<AcpSessionResult>;
+  async loadSession(sessionId: string, cwd: string, mcpServers: AcpMcpServer[] = []): Promise<AcpSessionResult> {
+    return this.sendRequest('session/load', { sessionId, cwd, mcpServers }) as Promise<AcpSessionResult>;
   }
 
   async prompt(sessionId: string, blocks: AcpContentBlock[]): Promise<{ stopReason: string }> {
@@ -132,12 +137,21 @@ export class AcpClient implements AcpTransport {
       this.child.stdin?.end();
     } catch {}
     if (!this.child.killed) {
-      this.child.kill('SIGTERM');
+      this.signalProcess('SIGTERM');
       this.killTimer = setTimeout(() => {
-        if (!this.closed) this.child.kill('SIGKILL');
+        if (!this.closed) this.signalProcess('SIGKILL');
       }, SIGKILL_GRACE_MS);
       this.killTimer.unref?.();
     }
+  }
+
+  waitForExit(): Promise<void> { return this.exited; }
+
+  private signalProcess(signal: NodeJS.Signals): void {
+    if (process.platform !== 'win32' && this.child.pid) {
+      try { process.kill(-this.child.pid, signal); return; } catch { /* Fall back to the direct child. */ }
+    }
+    this.child.kill(signal);
   }
 
   private sendRequest(method: string, params: unknown): Promise<unknown> {

@@ -1881,6 +1881,12 @@ describe('FeishuLongConnHandler', () => {
       expect(spy).toHaveBeenCalledWith('ou_123', 'msg_1');
     });
 
+    it('forwards delegation controls to the selected device and thread', async () => {
+      const spy = vi.spyOn(handler as any, 'handleSlashCommandPassthrough').mockResolvedValue(undefined);
+      await (handler as any).handleCommand('ou_123', 'msg_1', '/delegation on', 'thread-2');
+      expect(spy).toHaveBeenCalledWith('ou_123', 'msg_1', '/delegation on', '/delegation', 'thread-2', undefined);
+    });
+
     it('should passthrough unknown slash commands', async () => {
       const spy = vi.spyOn(handler as any, 'handleSlashCommandPassthrough').mockResolvedValue(undefined);
       await (handler as any).handleCommand('ou_123', 'msg_1', '/unknown arg1');
@@ -2135,6 +2141,7 @@ describe('FeishuLongConnHandler', () => {
       await (handler as any).handleHelpCommand('ou_123', 'msg_1');
       expect(replySpy).toHaveBeenCalledWith('msg_1', expect.stringContaining('Feishu Remote Control Help'));
       const helpMessage = replySpy.mock.calls.at(-1)?.[1] as string;
+      expect(helpMessage).toContain('/delegation [on|off]');
       expect(helpMessage).toContain('/backend <index> - Switch all threads');
       expect(helpMessage).toContain('/backend <index> @ - Switch only the current thread');
       expect(helpMessage).toContain('/backend default @ - Clear the current thread override');

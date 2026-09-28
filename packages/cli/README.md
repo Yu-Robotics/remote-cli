@@ -104,6 +104,7 @@ Linux users upgrading from version 1.6.23 or earlier should run `remote-cli serv
 | `/effort [auto|level]` | Show or set Codex/AGY/OpenCode/Kimi/ZCode/Pi reasoning effort |
 | `/sandbox [on/off/read-only/default]` | Configure the current Codex or Claude Code thread sandbox, directory grants, and networking |
 | `/backend` | List backends and show the current thread's effective backend |
+| `/delegation [on|off]` | Inspect or enable delegation between installed agent backends in this thread |
 | `/backend <index>` | Switch all threads and clear per-thread backend overrides |
 | `/backend <index> @` | Switch only the current thread |
 | `/backend default @` | Clear the current thread override and follow the global backend |
@@ -112,6 +113,22 @@ Linux users upgrading from version 1.6.23 or earlier should run `remote-cli serv
 | `/device` | List and switch between bound devices |
 
 ### Threads & Machines
+
+Use `/delegation on` in an existing thread to let its selected backend assign
+bounded tasks to other installed, authenticated backends. Claude Code, Codex,
+Pi, AGY, OpenCode, Kimi Code, and ZCode can coordinate or work, including sessions of
+the same backend. Workers return results to the original conversation and use
+its working directory; they do not create extra thread buttons. `/delegation`
+shows discovery and restrictions; `/delegation off` disables the feature. The
+setting is off by default and persists per thread.
+
+Child progress, approvals, and questions use the existing reply flow. `/abort`
+stops managed children as well as the parent. Sandboxed coordinators can delegate
+only to the same backend; enforced read-only workers require Claude Code or Codex. There is one
+active child per parent and at most three per CLI process, with overlapping
+workspaces serialized and bounded time/output. See
+[Cross-backend Delegation](../../README.md#cross-backend-delegation) for limits,
+recovery, context transfer, and permission behavior.
 
 | Command | Description |
 |---------|-------------|

@@ -11,6 +11,7 @@ import type {
   IExecutor,
 } from './IExecutor';
 import { PiClient } from './pi/PiClient';
+import { sameConnection, type DelegationConnection } from '../delegation/contract';
 import {
   formatPiModelRef,
   isPiThinkingLevel,
@@ -202,6 +203,14 @@ export class PiExecutor implements IExecutor {
   private activeTurn: ActiveTurn | null = null;
   private pendingUi: PendingUiRequest | null = null;
   private destroyed = false;
+  private delegation?: DelegationConnection;
+
+  async configureDelegation(connection?: DelegationConnection): Promise<void> {
+    if (sameConnection(this.delegation, connection)) return;
+    if (this.activeTurn) throw new Error('Cannot change delegation while Pi is busy');
+    await this.recycleClient();
+    this.delegation = connection;
+  }
 
   constructor(directoryGuard: DirectoryGuard, options: PiExecutorOptions = {}) {
     this.directoryGuard = directoryGuard;
@@ -688,6 +697,7 @@ export class PiExecutor implements IExecutor {
       provider: this.provider,
       model: this.model,
       thinking: this.effort,
+      delegation: this.delegation,
     };
   }
 

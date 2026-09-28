@@ -4,7 +4,7 @@ import * as path from 'path';
 import * as readline from 'readline';
 import { readFileSync } from 'fs';
 import type { AcpEventCallbacks, AcpToolCallUpdate, AcpTransport } from '../acp/AcpClient';
-import type { AcpConfigOption, AcpContentBlock, AcpPermissionOption, AcpSessionResult } from '../acp/AcpTypes';
+import type { AcpConfigOption, AcpContentBlock, AcpMcpServer, AcpPermissionOption, AcpSessionResult } from '../acp/AcpTypes';
 import { resolveZCodeLaunch, type ZCodeLaunchSpec } from './ZCodeCommand';
 
 interface PendingRequest {
@@ -63,9 +63,11 @@ export class ZCodeClient implements AcpTransport {
   private readonly sequence = new Map<string, number>();
   private readonly reader: readline.Interface;
   private nextId = 1;
+  private sessionServers?: AcpMcpServer[];
   private destroyed = false;
   private closed = false;
   private killTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly exited: Promise<void>;
 
   constructor(options: ZCodeClientOptions, callbacks: AcpEventCallbacks) {
     this.callbacks = callbacks;
@@ -80,6 +82,7 @@ export class ZCodeClient implements AcpTransport {
       env: launch.env,
       detached: process.platform !== 'win32',
     });
+    this.exited = new Promise(resolve => this.child.once('close', () => resolve()));
     this.child.stdin?.on('error', () => {});
     this.child.stdout?.on('error', () => {});
     this.child.stderr?.on('data', (chunk: Buffer) => {
@@ -100,22 +103,30 @@ export class ZCodeClient implements AcpTransport {
     return {};
   }
 
-  async newSession(cwd: string): Promise<AcpSessionResult> {
+  async newSession(cwd: string, mcpServers?: AcpMcpServer[]): Promise<AcpSessionResult> {
+    this.sessionServers = mcpServers;
     const result = await this.request('session/create', {
       workspace: { workspacePath: cwd, workspaceKey: cwd },
       mode: this.autoApprove ? 'yolo' : 'build',
+      ...(this.sessionServers ? { mcpServers: this.nativeMcpServers() } : {}),
     });
     const sessionId = result?.session?.sessionId;
     if (typeof sessionId !== 'string' || !sessionId) throw new Error('ZCode did not return a session ID');
     return this.captureSession(sessionId, result);
   }
 
-  async loadSession(sessionId: string, cwd: string): Promise<AcpSessionResult> {
+  async loadSession(sessionId: string, cwd: string, mcpServers = this.sessionServers): Promise<AcpSessionResult> {
+    this.sessionServers = mcpServers;
     const result = await this.request('session/resume', {
       sessionId,
       workspace: { workspacePath: cwd, workspaceKey: cwd },
+      ...(this.sessionServers ? { mcpServers: this.nativeMcpServers() } : {}),
     });
     return this.captureSession(sessionId, result);
+  }
+
+  private nativeMcpServers() {
+    return this.sessionServers?.map(server => ({ ...server, isolation: 'session', timeoutMs: 35_000 }));
   }
 
   async prompt(sessionId: string, blocks: AcpContentBlock[]): Promise<{ stopReason: string }> {
@@ -211,6 +222,8 @@ export class ZCodeClient implements AcpTransport {
       prompt.resolve({ stopReason: 'cancelled' });
     }
   }
+
+  waitForExit(): Promise<void> { return this.exited; }
 
   destroy(): void {
     if (this.destroyed) return;

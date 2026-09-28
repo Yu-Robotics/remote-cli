@@ -122,6 +122,9 @@ export class CodexSandbox {
     const config = this.getConfig();
     if (!config) return {};
     if (!this.isRestricted()) return { sandbox: config.mode };
+    // Native sandbox setup uses TMPDIR even in read-only mode. Creating its
+    // private directory does not add it to the model's writable roots.
+    fs.mkdirSync(this.temporaryDirectory, { recursive: true, mode: 0o700 });
     return {
       sandbox: config.mode,
       approvalPolicy: 'on-request',

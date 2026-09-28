@@ -9,6 +9,7 @@ import { AppServerMessage, CodexAppServerClient } from './CodexAppServerClient';
 import { CodexTaskNotifications } from './CodexTaskNotifications';
 import { CodexSandbox } from './CodexSandbox';
 import type { CodexSandboxConfig } from '../types/config';
+import { DELEGATION_TOOLS, delegationMcpConfig, sameConnection, type DelegationConnection } from '../delegation/contract';
 
 export interface CodexAppServerTransport {
   start(): Promise<void>;
@@ -165,6 +166,17 @@ export class CodexAppServerExecutor implements IExecutor {
   private pendingUserInputs: PendingUserInput[] = [];
   private inactivityTimer: ReturnType<typeof setTimeout> | null = null;
   private destroyed = false;
+  private delegation?: DelegationConnection;
+  private delegationConfigured = false;
+
+  async configureDelegation(connection?: DelegationConnection): Promise<void> {
+    if (this.delegationConfigured && sameConnection(this.delegation, connection)) return;
+    if (this.activeTurn || this.compactWaiter) throw new Error('Cannot change delegation while Codex is busy');
+    await this.client.stop();
+    this.threadReady = false;
+    this.delegation = connection;
+    this.delegationConfigured = true;
+  }
 
   constructor(directoryGuard: DirectoryGuard, options: CodexAppServerExecutorOptions = {}) {
     this.directoryGuard = directoryGuard;
@@ -639,6 +651,16 @@ export class CodexAppServerExecutor implements IExecutor {
       } : {}),
       ...this.sandbox.threadOptions(this.currentWorkingDirectory),
     };
+    if (this.delegationConfigured) {
+      common.config = { ...common.config,
+        'mcp_servers.remote_cli_delegation': this.delegation
+          ? { ...delegationMcpConfig(this.delegation), enabled: true, required: true, tool_timeout_sec: 35,
+            // /delegation on authorizes these local control tools. Each worker
+            // still enforces its inherited sandbox and requests native approvals.
+            enabled_tools: DELEGATION_TOOLS.map(tool => tool.name), default_tools_approval_mode: 'approve' }
+          : { command: process.execPath, enabled: false },
+      };
+    }
 
     if (this.codexThreadId) {
       try {

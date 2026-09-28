@@ -1,3 +1,11 @@
+/** Stdio MCP server supplied by the client for this session only. */
+export interface AcpMcpServer {
+  name: string;
+  command: string;
+  args: string[];
+  env: Array<{ name: string; value: string }>;
+}
+
 export type AcpContentBlock =
   | { type: 'text'; text: string }
   | { type: 'image'; data: string; mimeType: string }
@@ -56,4 +64,3 @@ export interface AcpJsonRpcErrorResponse {
 }
 
 export type AcpJsonRpcResponse = AcpJsonRpcSuccessResponse | AcpJsonRpcErrorResponse;
-

@@ -12,6 +12,7 @@ The router server acts as a bridge between Feishu messaging and developer machin
 - **Image message forwarding** for Feishu images to supported backends, plus Codex native image output and local image files returned by any backend
 - **Client service management** is handled by the local CLI; the Router remains a separate long-running server process
 - **Queued task cards** appear at execution time for capable clients, with the thread, workspace, task preview, and remaining queue count; older clients retain waiting cards
+- **Delegated task progress** uses the existing reply and approval cards. With a supporting local CLI, `/delegation on` enables Claude Code, Codex, Pi, AGY, OpenCode, Kimi Code, and ZCode workers within the selected thread; the Router does not run or select workers. See [Cross-backend Delegation](../../README.md#cross-backend-delegation).
 - **WebSocket connections** from local clients
 - **Feishu long connection** for receiving and sending messages
 - **Task recovery** with compatible clients: resume output on a usable surviving card or create a new one, with an independent gap notice and plain-text handling of resumed fragments; failed card creation is not acknowledged as successful recovery

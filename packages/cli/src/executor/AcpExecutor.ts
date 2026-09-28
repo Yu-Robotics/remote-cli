@@ -4,7 +4,8 @@ import * as path from 'path';
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import type { ExecuteOptions, ExecuteResult, ExecutorModelInfo, IExecutor } from './IExecutor';
 import { AcpClient, type AcpEventCallbacks, type AcpToolCallUpdate, type AcpTransport } from './acp/AcpClient';
-import type { AcpConfigOption, AcpContentBlock, AcpPermissionOption, AcpSessionResult } from './acp/AcpTypes';
+import type { AcpConfigOption, AcpContentBlock, AcpMcpServer, AcpPermissionOption, AcpSessionResult } from './acp/AcpTypes';
+import { delegationSessionServers, sameConnection, type DelegationConnection } from '../delegation/contract';
 
 const CANCEL_GRACE_MS = 3_000;
 
@@ -111,6 +112,10 @@ export abstract class AcpExecutor implements IExecutor {
   private model?: string;
   private effort?: string;
   private client: AcpTransport | null = null;
+  private readonly transports = new Set<AcpTransport>();
+  private readonly pendingExits = new Set<Promise<void>>();
+  private delegationConnection?: DelegationConnection;
+  private replayingSession = false;
   private sessionId: string | null = null;
   private configOptions: AcpConfigOption[] = [];
   private activeCallbacks: ActiveCallbacks = {};
@@ -165,6 +170,15 @@ export abstract class AcpExecutor implements IExecutor {
     return this.currentWorkingDirectory;
   }
 
+  async configureDelegation(connection?: DelegationConnection): Promise<void> {
+    if (sameConnection(this.delegationConnection, connection)) return;
+    if (this.isProcessing) throw new Error('Cannot change delegation during an active turn');
+    this.destroyClient();
+    await this.waitForExit();
+    if (this.isDestroyed) throw new Error('Executor has been destroyed');
+    this.delegationConnection = connection;
+  }
+
   async setWorkingDirectory(targetPath: string): Promise<void> {
     const resolved = this.directoryGuard.resolveWorkingDirectory(targetPath);
     if (resolved === this.currentWorkingDirectory) return;
@@ -199,6 +213,16 @@ export abstract class AcpExecutor implements IExecutor {
     for (const command of queued) command.reject(new Error('Executor has been destroyed'));
     this.cancelPendingPermission();
     this.destroyClient();
+  }
+
+  async waitForExit(): Promise<void> {
+    if (!this.pendingExits.size) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([Promise.all(this.pendingExits), new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Backend process exit could not be confirmed')), 8_000);
+      })]);
+    } finally { if (timer) clearTimeout(timer); }
   }
 
   isWaitingInput(): boolean {
@@ -323,7 +347,7 @@ export abstract class AcpExecutor implements IExecutor {
   async deleteThreadData(_threadId: string): Promise<void> {
     const stored = this.sessionId;
     try {
-      if (stored) {
+      if (stored && !this.isDestroyed) {
         const { client } = await this.ensureSession();
         await client.deleteSession(stored);
       }
@@ -390,31 +414,40 @@ export abstract class AcpExecutor implements IExecutor {
   }
 
   private async ensureSession(): Promise<{ client: AcpTransport; sessionId: string }> {
+    if (this.isDestroyed) throw new Error('Executor has been destroyed');
     if (this.client && this.sessionId) return { client: this.client, sessionId: this.sessionId };
     const client = this.createClient();
+    this.transports.add(client);
     try {
       await client.initialize();
+      const servers = delegationSessionServers(this.delegationConnection);
+      const extra: [AcpMcpServer[]?] = servers.length ? [servers] : [];
       let result;
       if (this.sessionId) {
         try {
-          result = await client.loadSession(this.sessionId, this.currentWorkingDirectory);
+          this.replayingSession = true;
+          result = await client.loadSession(this.sessionId, this.currentWorkingDirectory, ...extra);
         } catch (error) {
+          const missingSession = /\bsession (?:not found|does not exist|no longer exists|is missing)\b/i
+            .test(error instanceof Error ? error.message : String(error));
+          if (this.delegationConnection && !missingSession) throw error;
           console.warn(`[${this.backendLabel}Executor] Stored session could not be loaded; starting fresh`, error);
           this.clearSessionPointer();
-        }
+        } finally { this.replayingSession = false; }
       }
       if (!this.sessionId) {
-        result = await client.newSession(this.currentWorkingDirectory);
+        result = await client.newSession(this.currentWorkingDirectory, ...extra);
         if (!result.sessionId) throw new Error(`${this.backendLabel} did not return a session ID`);
         this.sessionId = result.sessionId;
         this.saveSessionPointer();
       }
       this.updateConfigOptions(result);
+      if (this.isDestroyed) throw new Error('Executor has been destroyed');
       this.client = client;
       await this.applyConfiguredOptions(client, this.sessionId!);
       return { client, sessionId: this.sessionId! };
     } catch (error) {
-      client.destroy();
+      this.retireClient(client);
       throw error;
     }
   }
@@ -424,6 +457,7 @@ export abstract class AcpExecutor implements IExecutor {
       onTextChunk: (content) => this.handleContent(content, false),
       onThoughtChunk: (content) => this.handleContent(content, true),
       onToolCall: (tool) => {
+        if (this.replayingSession) return;
         const previous = this.activeToolCalls.get(tool.toolCallId);
         const merged = { ...previous, ...tool };
         this.activeToolCalls.set(tool.toolCallId, merged);
@@ -431,6 +465,7 @@ export abstract class AcpExecutor implements IExecutor {
         this.activeCallbacks.onToolUse?.({ id: tool.toolCallId, ...mapped });
       },
       onToolResult: (tool) => {
+        if (this.replayingSession) return;
         const merged = { ...this.activeToolCalls.get(tool.toolCallId), ...tool };
         this.activeToolCalls.delete(tool.toolCallId);
         this.activeCallbacks.onToolResult?.({
@@ -439,7 +474,7 @@ export abstract class AcpExecutor implements IExecutor {
           is_error: tool.status === 'failed',
         });
       },
-      onPlan: (entries) => this.activeCallbacks.onPlanMode?.(
+      onPlan: (entries) => !this.replayingSession && this.activeCallbacks.onPlanMode?.(
         entries.map((entry) => `[${entry.status ?? 'pending'}] ${entry.content}`).join('\n')
       ),
       onConfigOptions: (options) => { this.configOptions = options; },
@@ -464,6 +499,7 @@ export abstract class AcpExecutor implements IExecutor {
   }
 
   private handleContent(content: AcpContentBlock, thinking: boolean): void {
+    if (this.replayingSession) return;
     if (content.type === 'text' && typeof content.text === 'string') {
       this.activeCallbacks.onStream?.(content.text);
     } else if (!thinking && content.type === 'image' && typeof content.data === 'string' && typeof content.mimeType === 'string') {
@@ -506,8 +542,18 @@ export abstract class AcpExecutor implements IExecutor {
   private destroyClient(): void {
     this.clearAbortTimer();
     this.cancelPendingPermission();
-    this.client?.destroy();
+    for (const client of this.transports) this.retireClient(client);
     this.client = null;
+  }
+
+  private retireClient(client: AcpTransport): void {
+    if (!this.transports.delete(client)) return;
+    client.destroy();
+    if (client.waitForExit) {
+      const exited = client.waitForExit();
+      this.pendingExits.add(exited);
+      void exited.then(() => this.pendingExits.delete(exited), () => undefined);
+    }
   }
 
   private clearAbortTimer(): void {

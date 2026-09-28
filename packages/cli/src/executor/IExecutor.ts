@@ -1,4 +1,5 @@
 import { ToolUseInfo, ToolResultInfo, Attachment, ImageBlock, TaskNotificationInfo, ApprovalRequestInfo, ApprovalAction, ApprovalStatus } from '../types';
+import type { DelegationConnection } from '../delegation/contract';
 
 export interface ExecuteOptions {
   onStream?: (chunk: string) => void;
@@ -57,8 +58,12 @@ export interface IExecutor {
   resetContext(): void;
   abort(): Promise<boolean>;
   destroy(): Promise<void> | void;
+  /** Optional process-exit confirmation used before releasing a delegated workspace. */
+  waitForExit?(): Promise<void>;
 
   // Optional — MessageHandler uses 'method' in executor checks for these
+  /** Enable tools for future turns without changing the native conversation. */
+  configureDelegation?(connection?: DelegationConnection): Promise<void>;
   isWaitingInput?(): boolean;
   sendInput?(input: string): boolean;
   respondToApproval?(requestId: string, action: ApprovalAction): boolean;

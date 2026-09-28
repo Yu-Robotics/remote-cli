@@ -18,6 +18,8 @@ export interface Thread {
   lastActiveAt: number;
   /** Optional backend override. Unset means use the global executor backend. */
   backend?: BackendKey;
+  /** Optional cross-backend tool delegation for this thread. Defaults to false. */
+  delegation?: boolean;
   /**
    * @deprecated Legacy model field — honored for the Claude backend only.
    * Model names are backend-specific (Claude's "opus" is rejected by agy),

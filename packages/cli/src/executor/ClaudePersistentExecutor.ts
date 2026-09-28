@@ -11,6 +11,7 @@ import os from 'os';
 import net from 'net';
 import { randomUUID } from 'crypto';
 import { EventEmitter } from 'events';
+import { DELEGATION_TOOLS, delegationMcpConfig, sameConnection, type DelegationConnection } from '../delegation/contract';
 
 /**
  * Claude stream JSON input message
@@ -258,7 +259,8 @@ export class ClaudePersistentExecutor extends EventEmitter {
     threadId?: string,
     model?: string,
     sandbox?: ClaudeSandboxConfig,
-    claudeCommand?: string
+    claudeCommand?: string,
+    private readonly lifecycleHooks = true,
   ) {
     super();
     this.directoryGuard = directoryGuard;
@@ -381,6 +383,15 @@ export class ClaudePersistentExecutor extends EventEmitter {
     return this.currentWorkingDirectory;
   }
 
+  private delegation?: DelegationConnection;
+
+  async configureDelegation(connection?: DelegationConnection): Promise<void> {
+    if (sameConnection(this.delegation, connection)) return;
+    if (this.isProcessing || this.isStarting || this.commandQueue.length) throw new Error('Cannot change delegation while Claude is busy');
+    await this.stopProcess();
+    this.delegation = connection;
+  }
+
   /**
    * Set working directory
    *
@@ -432,6 +443,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
       // Build arguments
       // Note: --output-format=stream-json requires --verbose
       const restricted = this.sandbox.isRestricted();
+      const mcpServers: Record<string, unknown> = {};
       const args: string[] = [
         '--input-format=stream-json',
         '--output-format=stream-json',
@@ -457,19 +469,22 @@ export class ClaudePersistentExecutor extends EventEmitter {
             .map(quote).join(' ') + ' || exit 2';
         }
         const settings = this.sandbox.spawnSettings(this.currentWorkingDirectory, fileHookCommand);
+        if (settings && this.delegation) {
+          const permissions = settings.permissions as { allow?: string[] };
+          permissions.allow = [...(permissions.allow ?? []),
+            ...DELEGATION_TOOLS.map(tool => `mcp__remote-cli-delegation__${tool.name}`)];
+        }
         if (settings) args.push('--settings', JSON.stringify(settings));
-        args.push('--mcp-config', JSON.stringify({
-          mcpServers: {
-            'remote-cli-approval': {
-              command: process.execPath,
-              args: [ClaudePersistentExecutor.APPROVAL_SERVER_SCRIPT, socketPath],
-            },
-          },
-        }));
+        mcpServers['remote-cli-approval'] = {
+          command: process.execPath,
+          args: [ClaudePersistentExecutor.APPROVAL_SERVER_SCRIPT, socketPath],
+        };
         args.push('--permission-prompt-tool', ClaudePersistentExecutor.APPROVAL_TOOL_NAME);
       } else {
         args.push('--dangerously-skip-permissions');
       }
+      if (this.delegation) mcpServers['remote-cli-delegation'] = delegationMcpConfig(this.delegation);
+      if (Object.keys(mcpServers).length) args.push('--mcp-config', JSON.stringify({ mcpServers }));
       args.push('--disallowedTools=AskUserQuestion');
 
       if (this.model) {
@@ -483,7 +498,9 @@ export class ClaudePersistentExecutor extends EventEmitter {
         console.log('[ClaudePersistent] Starting new session');
       }
 
-      console.log(`[ClaudePersistent] Starting: ${this.claudeCommand} ${args.join(' ')}`);
+      const loggedArgs = args.map((arg, index) => ['--mcp-config', '--settings'].includes(args[index - 1])
+        ? '[redacted configuration]' : arg);
+      console.log(`[ClaudePersistent] Starting: ${this.claudeCommand} ${loggedArgs.join(' ')}`);
       console.log(`[ClaudePersistent] Working directory: ${this.currentWorkingDirectory}`);
 
       // Spawn the process
@@ -1120,7 +1137,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
             // Claude Code 2.x: a background task reached a terminal state.
             // This event is independent of any in-flight command, so it is
             // surfaced via the hooks event bus rather than per-command callbacks.
-            if (message.task_id && message.status && message.summary !== undefined) {
+            if (this.lifecycleHooks && message.task_id && message.status && message.summary !== undefined) {
               console.log(`[ClaudePersistent] Background task ${message.task_id} ${message.status}`);
               claudeCodeHooks.notifyTaskNotification({
                 taskId: message.task_id,
@@ -1316,7 +1333,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
 
                 // Emit hook for tool execution completion (this is the ACTUAL execution result)
                 // Note: We don't have the original tool name here, but we have the tool_use_id
-                claudeCodeHooks.notifyToolExecuted(
+                if (this.lifecycleHooks) claudeCodeHooks.notifyToolExecuted(
                   {
                     toolName: toolUseId || 'unknown', // Use tool_use_id as identifier
                     params: {}, // Original params not available in tool_result
@@ -1427,13 +1444,14 @@ export class ClaudePersistentExecutor extends EventEmitter {
     this.isWaitingForInput = true;
 
     // Emit hook to notify user (fire and forget)
-    claudeCodeHooks.requestUserInput({
+    if (this.lifecycleHooks) claudeCodeHooks.requestUserInput({
       prompt,
       type: 'text',
       timeout: 300000, // 5 minutes timeout for input
     }).catch(() => {
       // Ignore errors from notification
     });
+    else this.currentStreamCallback?.(`\n${prompt}\n`);
 
     // Wait for input via sendInput() or timeout
     return new Promise((resolve) => {
@@ -1520,7 +1538,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
     console.log(`[ClaudePersistent] Completing command, success=${success}, output length=${output.length}, output preview: ${output.substring(0, 100)}...`);
 
     // Emit task completion hooks
-    if (this.currentTaskId) {
+    if (this.lifecycleHooks && this.currentTaskId) {
       const endTime = Date.now();
       const duration = endTime - this.currentTaskStartTime;
 
@@ -1673,7 +1691,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
     this.currentTaskStartTime = Date.now();
 
     // Emit task started hook
-    claudeCodeHooks.notifyTaskStarted({
+    if (this.lifecycleHooks) claudeCodeHooks.notifyTaskStarted({
       taskId: this.currentTaskId,
       description: command.prompt,
       workingDirectory: this.currentWorkingDirectory,
@@ -1786,7 +1804,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
     this.denyAllPendingApprovals('Task aborted by user');
 
     // Emit task aborted hook before stopping
-    if (this.currentTaskId) {
+    if (this.lifecycleHooks && this.currentTaskId) {
       claudeCodeHooks.notifyTaskAborted(
         {
           taskId: this.currentTaskId,
