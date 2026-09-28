@@ -268,7 +268,7 @@ docker compose run --rm router config setup
 docker compose up -d
 ```
 
-The setup wizard stores configuration and bindings in `./router-data`, so they survive container recreation. Compose runs the container with `ROUTER_UID` and `ROUTER_GID`; these values must match the owner of `./router-data` to avoid bind-mount permission errors. `ROUTER_PORT` controls both the host port and the Router's container port, and must match the port entered during setup. Router logs are available with `docker compose logs -f router`; stop it with `docker compose down`. Open the configured port only to the trusted internal network, or place the Router behind an HTTPS reverse proxy for public access.
+The setup wizard stores configuration and bindings in `./router-data`, so they survive container recreation. Compose runs the container with `ROUTER_UID` and `ROUTER_GID`; these values must match the owner of `./router-data` to avoid bind-mount permission errors. `ROUTER_PORT` controls both the host port and the Router's container port, and must match the port entered during setup. The Compose service uses `restart: always`, so Docker starts the Router again after unexpected exits and Docker daemon restarts. An explicit `docker compose down` still removes the container. Router logs are available with `docker compose logs -f router`; stop it with `docker compose down`. Open the configured port only to the trusted internal network, or place the Router behind an HTTPS reverse proxy for public access.
 
 ### Nginx Configuration (Production)
 

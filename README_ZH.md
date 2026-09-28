@@ -265,7 +265,7 @@ docker compose run --rm router config setup
 docker compose up -d
 ```
 
-配置和绑定关系会保存到 `./router-data`，因此重建容器后仍然保留。Compose 使用 `ROUTER_UID` 和 `ROUTER_GID` 运行容器；它们必须与 `./router-data` 的所有者一致，才能避免 bind mount 权限错误。`ROUTER_PORT` 同时控制宿主机端口和 Router 容器端口，必须与配置向导中填写的端口一致。查看 Router 日志：`docker compose logs -f router`；停止服务：`docker compose down`。只应向可信内网开放配置的端口，公网部署时应放在 HTTPS 反向代理之后。
+配置和绑定关系会保存到 `./router-data`，因此重建容器后仍然保留。Compose 使用 `ROUTER_UID` 和 `ROUTER_GID` 运行容器；它们必须与 `./router-data` 的所有者一致，才能避免 bind mount 权限错误。`ROUTER_PORT` 同时控制宿主机端口和 Router 容器端口，必须与配置向导中填写的端口一致。Compose 服务使用 `restart: always`，因此 Router 在意外退出或 Docker daemon 重启后会重新启动；显式执行 `docker compose down` 仍会删除容器。查看 Router 日志：`docker compose logs -f router`；停止服务：`docker compose down`。只应向可信内网开放配置的端口，公网部署时应放在 HTTPS 反向代理之后。
 
 ### Nginx 配置（生产环境）
 

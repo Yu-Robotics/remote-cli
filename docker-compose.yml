@@ -6,7 +6,7 @@ services:
     image: remote-cli-router:local
     container_name: remote-cli-router
     user: "${ROUTER_UID:-1000}:${ROUTER_GID:-1000}"
-    restart: unless-stopped
+    restart: always
     environment:
       ROUTER_PORT: "${ROUTER_PORT:-3000}"
     ports:
