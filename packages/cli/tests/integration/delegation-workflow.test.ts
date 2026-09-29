@@ -167,6 +167,26 @@ describe('delegation in the existing thread workflow', () => {
     expect(responseFor('managed')?.success).toBe(true);
   });
 
+  it('rejects a same-backend tool call and still lets the coordinator obtain a different backend result', async () => {
+    await handler.handleMessage(message('enable', '/delegation on'));
+    expect(responseFor('enable').output).toContain('Same-backend delegation is disabled');
+    main.execute.mockImplementationOnce(async () => {
+      const discovery = await call('remote_cli_list_backends');
+      expect(discovery.backends.find((item: any) => item.backend === 'codex')).toMatchObject({ worker: false });
+      await expect(call('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' }))
+        .rejects.toThrow('Same-backend delegation is disabled');
+      expect(worker.execute).not.toHaveBeenCalled();
+      const task = await call('remote_cli_delegate', { backend: 'claude', objective: 'Inspect' });
+      const result = await call('remote_cli_result', { taskId: task.taskId });
+      expect(result).toMatchObject({ state: 'succeeded', output: 'child answer' });
+      return { success: true, output: 'Verified cross-backend result' };
+    });
+    await handler.handleMessage(message('parent', 'Inspect this'));
+    expect(responseFor('parent')).toMatchObject({ success: true });
+    expect(worker.execute).toHaveBeenCalledOnce();
+    expect(main.execute).toHaveBeenCalledOnce();
+  });
+
   it('persists opt-in, returns child progress in the original reply, and drains the next queued message', async () => {
     await handler.handleMessage(message('enable', '/delegation on'));
     expect((await ThreadManager.initialize(home)).getDefaultThread().delegation).toBe(true);
@@ -314,17 +334,21 @@ describe('delegation in the existing thread workflow', () => {
     expect(main.execute).toHaveBeenCalledOnce();
   });
 
-  it('waits and resumes the same coordinator with results when it returns early, before draining the queue', async () => {
+  it('waits for a verbose worker and resumes the coordinator with its conclusion before draining the queue', async () => {
     await handler.handleMessage(message('enable', '/delegation on'));
     fs.writeFileSync(path.join(home, 'stale.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+cZYsAAAAASUVORK5CYII=', 'base64'));
     let finish!: (result: ExecuteResult) => void;
     let staleOptions!: ExecuteOptions;
-    worker.execute.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    worker.execute.mockImplementationOnce((_prompt: string, options: ExecuteOptions) => new Promise(resolve => {
+      options.onToolResult?.({ tool_use_id: 'research', content: 'Large evidence'.repeat(30000) });
+      options.onStream?.('Research progress'.repeat(30000));
+      finish = resolve;
+    }));
     worker.abort.mockImplementation(async () => { finish({ success: false }); return true; });
     main.execute.mockImplementationOnce(async (_prompt: string, options: ExecuteOptions) => {
       staleOptions = options;
       options.onStream?.('Starting the review.');
-      await call('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' });
+      await call('remote_cli_delegate', { backend: 'claude', objective: 'Inspect' });
       options.onStream?.('Still waiting for the worker.');
       options.onPlanMode?.('A stale waiting plan');
       options.onImage?.({ type: 'image', data: 'c3RhbGU=', mimeType: 'image/png' });
@@ -332,6 +356,7 @@ describe('delegation in the existing thread workflow', () => {
     }).mockImplementationOnce(async (prompt: string, options: ExecuteOptions) => {
       expect(prompt).toContain('Verified child result');
       expect(prompt).toContain('succeeded');
+      expect(prompt).toContain('"truncated":true');
       expect(prompt).not.toContain('Unique original request');
       expect(options.attachments).toBeUndefined();
       staleOptions.onStream?.('Late stale waiting text');
@@ -349,7 +374,7 @@ describe('delegation in the existing thread workflow', () => {
     const confirmation = responseFor('next').queueConfirmation;
     await handler.handleMessage(message('confirm', `/queue confirm ${confirmation.id}`));
     expect(main.execute).toHaveBeenCalledTimes(1);
-    finish({ success: true, output: 'Verified child result' });
+    finish({ success: true, output: `Review context\n${'x'.repeat(40 * 1024)}\nVerified child result` });
     await active;
     await vi.waitFor(() => expect(responseFor('next')?.success).toBe(true));
     expect(main.execute).toHaveBeenCalledTimes(3);
@@ -371,7 +396,7 @@ describe('delegation in the existing thread workflow', () => {
       return { success: true };
     });
     main.execute.mockImplementationOnce(async () => {
-      await call('remote_cli_delegate', { backend: 'codex', objective: 'Inspect once' });
+      await call('remote_cli_delegate', { backend: 'claude', objective: 'Inspect once' });
       return { success: true };
     }).mockResolvedValueOnce({ success: false, error: 'Prompt too long' })
       .mockImplementationOnce(async (prompt: string, options: ExecuteOptions) => {
@@ -402,7 +427,7 @@ describe('delegation in the existing thread workflow', () => {
       }
       worker.execute.mockResolvedValueOnce({ success: true, output: 'Saved work\n```example\ncode\n```' });
       main.execute.mockImplementationOnce(async () => {
-        await call('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' });
+        await call('remote_cli_delegate', { backend: 'claude', objective: 'Inspect' });
         return { success: true };
       }).mockImplementation(async () => {
         if (failure === 'exception') throw new Error('Connection lost');
@@ -422,7 +447,7 @@ describe('delegation in the existing thread workflow', () => {
   it('retains explicitly fetched worker results when the coordinator fails before completing its reply', async () => {
     await handler.handleMessage(message('enable', '/delegation on'));
     main.execute.mockImplementationOnce(async () => {
-      const child = await call('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' });
+      const child = await call('remote_cli_delegate', { backend: 'claude', objective: 'Inspect' });
       await call('remote_cli_result', { taskId: child.taskId });
       return { success: false, error: 'Connection lost' };
     });
@@ -441,11 +466,11 @@ describe('delegation in the existing thread workflow', () => {
     worker.execute.mockResolvedValueOnce({ success: true, output: 'First worker result' })
       .mockResolvedValueOnce({ success: true, output: 'Second worker result' });
     main.execute.mockImplementationOnce(async () => {
-      await call('remote_cli_delegate', { backend: 'codex', objective: 'First inspection' });
+      await call('remote_cli_delegate', { backend: 'claude', objective: 'First inspection' });
       return { success: true };
     }).mockImplementationOnce(async (prompt: string, options: ExecuteOptions) => {
       expect(prompt).toContain('First worker result');
-      await call('remote_cli_delegate', { backend: 'codex', objective: 'Second inspection' });
+      await call('remote_cli_delegate', { backend: 'claude', objective: 'Second inspection' });
       options.onStream?.('Premature second result summary');
       return { success: true };
     }).mockImplementationOnce(async (prompt: string, options: ExecuteOptions) => {
@@ -468,10 +493,10 @@ describe('delegation in the existing thread workflow', () => {
     await handler.handleMessage(message('enable', '/delegation on'));
     main.compactWhenFull = vi.fn(async () => ({ success: true }));
     main.execute.mockImplementationOnce(async () => {
-      await call('remote_cli_delegate', { backend: 'codex', objective: 'First inspection' });
+      await call('remote_cli_delegate', { backend: 'claude', objective: 'First inspection' });
       return { success: true };
     }).mockImplementationOnce(async () => {
-      const child = await call('remote_cli_delegate', { backend: 'codex', objective: 'Second inspection' });
+      const child = await call('remote_cli_delegate', { backend: 'claude', objective: 'Second inspection' });
       await call('remote_cli_result', { taskId: child.taskId });
       return { success: false, error: 'Prompt too long' };
     });
@@ -488,7 +513,7 @@ describe('delegation in the existing thread workflow', () => {
     main.compactWhenFull = vi.fn(() => new Promise(resolve => { finishCompact = resolve; }));
     main.abort.mockImplementation(async () => { finishCompact({ success: true }); return true; });
     main.execute.mockImplementationOnce(async () => {
-      await call('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' });
+      await call('remote_cli_delegate', { backend: 'claude', objective: 'Inspect' });
       return { success: true };
     }).mockResolvedValueOnce({ success: false, error: 'Prompt too long' });
     const active = handler.handleMessage(message('parent', 'Work'));
@@ -505,7 +530,7 @@ describe('delegation in the existing thread workflow', () => {
   it('suppresses stale prose after child completion until its final result is retrieved', async () => {
     await handler.handleMessage(message('enable', '/delegation on'));
     main.execute.mockImplementationOnce(async (_prompt: string, options: ExecuteOptions) => {
-      const task = await call('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' });
+      const task = await call('remote_cli_delegate', { backend: 'claude', objective: 'Inspect' });
       await vi.waitFor(() => expect(socket.send.mock.calls.some(([value]: any[]) => value.chunk?.includes('Completed</text_tag>'))).toBe(true));
       options.onStream?.('The worker is still running.');
       const result = await call('remote_cli_result', { taskId: task.taskId });
@@ -525,7 +550,7 @@ describe('delegation in the existing thread workflow', () => {
     worker.execute.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
     worker.abort.mockImplementation(async () => { finish({ success: false, error: 'Aborted' }); return true; });
     main.execute.mockImplementationOnce(async () => {
-      await call('remote_cli_delegate', { backend: 'codex', objective: 'Wait' });
+      await call('remote_cli_delegate', { backend: 'claude', objective: 'Wait' });
       return { success: true };
     });
     const active = handler.handleMessage(message('parent', 'Work'));
@@ -547,7 +572,7 @@ describe('delegation in the existing thread workflow', () => {
     worker.abort.mockImplementation(async () => { finish({ success: false }); return true; });
     main.compactWhenFull = vi.fn(async () => ({ success: true }));
     main.execute.mockImplementationOnce(async () => {
-      await call('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' });
+      await call('remote_cli_delegate', { backend: 'claude', objective: 'Inspect' });
       return { success: false, error: 'Prompt too long' };
     });
     await handler.handleMessage(message('parent', 'Work'));
@@ -567,7 +592,7 @@ describe('delegation in the existing thread workflow', () => {
       worker.execute.mockImplementationOnce(() => new Promise(() => undefined));
     }
     main.execute.mockImplementationOnce(async () => {
-      await call('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' });
+      await call('remote_cli_delegate', { backend: 'claude', objective: 'Inspect' });
       return { success: true };
     }).mockImplementationOnce(async (prompt: string, options: ExecuteOptions) => {
       expect(prompt).toContain(state);
@@ -575,7 +600,7 @@ describe('delegation in the existing thread workflow', () => {
       const notices = socket.send.mock.calls.map(([value]: any[]) => value)
         .filter((value: any) => value.messageId === 'parent' && value.streamType === 'text')
         .map((value: any) => value.chunk).join('');
-      expect(notices).toContain('Codex · Delegated task');
+      expect(notices).toContain('Claude Code · Delegated task');
       expect(notices).toContain(`**Reason:** <raw>${state === 'failed' ? 'Quota exhausted' : 'Delegated task timed out'}</raw>`);
       options.onStream?.('The worker could not finish the request.');
       return { success: true };
@@ -594,7 +619,7 @@ describe('delegation in the existing thread workflow', () => {
     worker.abort.mockImplementation(async () => { finishChild({ success: false }); return true; });
     main.isWaitingInput = () => waiting;
     main.execute.mockImplementationOnce(async (_prompt: string, options: ExecuteOptions) => {
-      const task = await call('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' });
+      const task = await call('remote_cli_delegate', { backend: 'claude', objective: 'Inspect' });
       await new Promise<void>(resolve => {
         main.sendInput = vi.fn(() => { waiting = false; resolve(); return true; });
         options.onStream?.('Choose output language: A or B');

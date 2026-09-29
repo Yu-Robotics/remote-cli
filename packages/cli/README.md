@@ -133,8 +133,10 @@ Linux users upgrading from version 1.6.23 or earlier should run `remote-cli serv
 
 Use `/delegation on` in an existing thread to let its selected backend assign
 bounded tasks to other installed, authenticated backends. Claude Code, Codex,
-Pi, AGY, OpenCode, Kimi Code, and ZCode can coordinate or work, including sessions of
-the same backend. Workers return results to the original conversation and use
+Pi, AGY, OpenCode, Kimi Code, and ZCode can coordinate or work. From CLI 1.6.95,
+same-backend delegation is rejected before launching a worker; discovery marks
+the current backend unavailable as a worker. Use the current backend directly
+or its native subagents, if supported. Workers return results to the original conversation and use
 its working directory; they do not create extra thread buttons. `/delegation`
 shows discovery and restrictions; `/delegation off` disables the feature. The
 setting is off by default and persists per thread. Start with one trial thread;
@@ -152,6 +154,15 @@ and elapsed time. Failed, timed-out, cancelled, and interrupted tasks include a
 bounded reason; the coordinator still receives the existing task result. This
 uses the existing text stream and works with older Routers. It adds no probes,
 cooldowns, retries, or changes to ordinary non-delegated sessions.
+
+CLI 1.6.95 no longer aborts workers because their intermediate text or tool
+results exceed a cumulative output threshold. Individual results remain bounded
+to 32 KiB and combined result continuations to 64 KiB. Oversized result text
+keeps its beginning and end with an explicit truncation marker and flag;
+truncation does not change the task's success or failure status. These limits
+bound retained delegation results, not backend output buffers. Worker timeouts,
+cancellation, and cleanup still apply. This requires a local CLI upgrade and
+works with existing Routers.
 
 Child progress, approvals, and questions use the existing reply flow. `/abort`
 stops managed children as well as the parent. While delegated results remain
@@ -173,8 +184,10 @@ remote-cli sandbox policy: with no coordinator sandbox, `inherit` launches
 unrestricted workers, ignoring separate target sandbox settings without changing
 them. Research tasks should put no-write requirements in the objective instead
 of enabling a sandbox. Other backend approval options retain their behavior.
-Sandboxed coordinators can delegate only to the same backend; `read_only` is
-available only for an already sandboxed Claude Code or Codex coordinator.
+Sandboxed coordinators have no eligible managed workers: same-backend delegation
+is disabled and cross-backend sandbox translation remains unsupported. Saved
+sandbox policies are not weakened. `read_only` remains recognized for
+compatibility but is unavailable; discovery reports the rejection reason.
 There is one
 active child per parent and at most three per CLI process, with overlapping
 workspaces serialized and bounded time/output. Workspace reservations apply to

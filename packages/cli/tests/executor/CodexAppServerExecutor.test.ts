@@ -78,6 +78,49 @@ describe('CodexAppServerExecutor', () => {
     await fs.rm(tempHome, { recursive: true, force: true });
   });
 
+  it('keeps text and tool callbacks isolated between independent Codex executors', async () => {
+    const otherTransport = new FakeTransport();
+    otherTransport.nextThreadId = 'codex-worker';
+    const other = new CodexAppServerExecutor(new DirectoryGuard([projectDir]), {
+      threadId: 'delegate-test', initialWorkingDirectory: projectDir, delegationWorker: true,
+      clientFactory: () => otherTransport,
+    });
+    const parentStream = vi.fn();
+    const childStream = vi.fn();
+    const parentTools = vi.fn();
+    const childTools = vi.fn();
+    try {
+      const parentRun = executor.execute('Parent task', { onStream: parentStream, onToolResult: parentTools });
+      const childRun = other.execute('Independent task', { onStream: childStream, onToolResult: childTools });
+      await vi.waitFor(() => {
+        expect(transport.requests.some(request => request.method === 'turn/start')).toBe(true);
+        expect(otherTransport.requests.some(request => request.method === 'turn/start')).toBe(true);
+      });
+      const text = (threadId: string, delta: string) => ({ method: 'item/agentMessage/delta',
+        params: { threadId, turnId: 'turn-1', delta } });
+      const tool = (threadId: string, output: string) => ({ method: 'item/completed', params: {
+        threadId, turnId: 'turn-1', item: { type: 'commandExecution', id: 'shared-tool-id',
+          command: 'inspect', status: 'completed', exitCode: 0, aggregatedOutput: output },
+      } });
+      for (const target of [transport, otherTransport]) {
+        target.emit(text('codex-thread-1', 'Parent answer'));
+        target.emit(text('codex-worker', 'Worker answer'));
+        target.emit(tool('codex-thread-1', 'Parent evidence'));
+        target.emit(tool('codex-worker', 'Worker evidence'));
+      }
+      expect(parentStream.mock.calls).toEqual([['Parent answer']]);
+      expect(childStream.mock.calls).toEqual([['Worker answer']]);
+      expect(parentTools.mock.calls.map(([result]) => result.content)).toEqual(['Parent evidence']);
+      expect(childTools.mock.calls.map(([result]) => result.content)).toEqual(['Worker evidence']);
+      for (const target of [transport, otherTransport]) {
+        target.emit({ method: 'turn/completed', params: { threadId: target.nextThreadId,
+          turn: { id: 'turn-1', status: 'completed' } } });
+      }
+      await expect(parentRun).resolves.toMatchObject({ success: true, output: 'Parent answer' });
+      await expect(childRun).resolves.toMatchObject({ success: true, output: 'Worker answer' });
+    } finally { await other.destroy(); }
+  });
+
   it('preserves all backend bindings when a directory change reaches an internally busy executor', async () => {
     await executor.destroy();
     const manager = await ThreadManager.initialize(tempHome);

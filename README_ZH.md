@@ -449,7 +449,13 @@ remote-cli stop
 
 ### 跨后端任务委派
 
-Claude Code、Codex、Pi、AGY、OpenCode、Kimi Code 和 ZCode 都可以协调已安装后端上的独立任务，也可以调用同一后端的另一个会话。继续在现有线程中对话即可；当前选中的后端会收集执行者的结果并回复。执行者不会产生额外的线程按钮。
+Claude Code, Codex, Pi, AGY, OpenCode, Kimi Code, and ZCode can each coordinate
+independent tasks on other installed backends. From CLI 1.6.95, managed
+same-backend delegation is rejected before a worker starts, and discovery marks
+the current backend unavailable as a worker. Use the current backend directly
+or its native subagents, if supported. Keep talking to your existing thread;
+its selected backend collects worker results and answers you. Workers do not
+create extra thread buttons.
 
 ```text
 /delegation
@@ -486,7 +492,8 @@ early, the CLI keeps the request busy, waits for terminal results, and resumes
 the same coordinator session with those results before releasing the queue.
 The original request and image attachments are not sent again. The combined
 continuation data is capped at 64 KiB, preserving every task's identity and status;
-truncated text can still be retrieved through the result tool. A coordinator that
+individual results remain available through the result tool, subject to the
+per-task limit below. A coordinator that
 successfully processed every result finishes normally without an extra turn.
 
 CLI 1.6.89 and newer retain results until the coordinator execution succeeds.
@@ -505,25 +512,48 @@ a new worker is not replayed after failure. Abort and shutdown suppress the
 failure-result fallback as well as further continuation.
 Cancellation does not undo existing edits.
 
-每个父任务同时只能有一个执行者；一个 CLI 进程最多可在互不重叠的工作区中运行三个执行者。单次主任务最多启动 12 个子任务，每个子任务限时 30 分钟。最终结果上限为 32 KiB，捕获的输出上限为 256 KiB。工作区路径重叠的受管理任务会串行执行。工作区占用限制只约束启用委派的线程和受管理的执行者；关闭委派的普通线程仍可访问该工作区。它不会阻止这些线程、协调者的原生并行工具或外部编辑器改文件。并行写入应使用不同工作区；协调者会被要求等待写入任务完成后再编辑。
+There is one active worker per parent and at most three per CLI process in
+non-overlapping workspaces. A turn can start at most 12 tasks; each worker has a
+30-minute limit. From CLI 1.6.95, intermediate text and tool-result volume does
+not abort workers; the delegation manager does not retain those intermediate
+outputs. Each returned result is limited to 32 KiB. Oversized result text keeps
+its beginning and end, marks the omitted middle, and sets `truncated: true`
+without changing the worker's success or failure status. Combined continuations
+use the same truncation policy within their 64 KiB budget. These limits bound
+retained delegation results, not the backend's own output buffers.
+Managed tasks using overlapping workspace directories are serialized. These
+reservations restrict delegation-enabled threads and workers; opted-out ordinary
+threads retain access to their workspace. This does not lock files against those
+threads, the coordinator's native parallel tools, or external editors. Use separate
+workspaces for independent writers; the coordinator is instructed to wait for
+its worker instead of editing concurrently.
 
 Workers follow the coordinator's effective remote-cli sandbox policy. The default
 `inherit` mode launches unrestricted workers when the coordinator has no sandbox,
 even if the target backend has separate saved sandbox settings. This does not
 change those saved settings or other backend approval options. For research
 tasks, use `inherit` and put any no-write requirement in the objective; such an
-instruction is not an enforced sandbox. Unrestricted coordinators can choose any
-installed, authenticated worker, but cannot request `read_only` to enable a new
-worker sandbox.
+instruction is not an enforced sandbox. Unrestricted coordinators can choose
+installed, authenticated workers on a different backend, but cannot request
+`read_only` to enable a new worker sandbox.
 
-A sandboxed coordinator can delegate only to the same backend in this release;
-its saved restrictions remain in effect. Only an already sandboxed Claude Code
-or Codex coordinator can use `read_only` to request stricter native read-only
-execution, with the normal approval behavior. Discovery reports `readOnly` only
-when that mode is allowed for the current coordinator. Cross-backend sandbox
-translation remains deferred.
+A sandboxed coordinator has no eligible managed workers in this release:
+same-backend delegation is disabled, and cross-backend sandbox translation
+remains deferred. Discovery reports `worker: false` with a reason, and launch
+requests are rejected without weakening saved sandbox settings. `read_only`
+remains a recognized compatibility value but is unavailable under this policy.
+Native backend task/subagent tools are not changed by these managed delegation
+rules; their availability depends on the backend.
 
-任务管理器层面的测试覆盖全部 49 种有向后端组合。原先 Claude Code、Codex 和 Pi 之间的矩阵已通过真实模型委派验证。新增四个适配器有协议和生命周期测试；ZCode 还通过了真实 MCP 工具注册验证。AGY、OpenCode、Kimi 因本地未完成认证，ZCode 因未设置模型，尚未完成真实模型测试；这些组合及原生持久会话恢复仍待验证。
+All 42 different-backend combinations and seven same-backend rejections are
+covered at the task-manager test boundary with mocked executors. Earlier live
+model delegation verified the original Claude Code/Codex/Pi matrix before this
+cross-backend-only policy.
+The four additional adapters have protocol and lifecycle tests; ZCode also
+passed live MCP tool registration. Their live model tests
+were blocked by missing local authentication (AGY, OpenCode, Kimi) or an unset
+model (ZCode), so those model combinations and native persisted-session
+restoration remain unverified.
 
 Router 重连沿用父任务的恢复和待审批重放机制；断线期间的子任务进度不会缓存。CLI 重启会将保留的运行中记录标记为中断，不会自动重做任务。`~/.remote-cli/delegation/` 下最多保留 200 条已完成记录，保存七天。若无法确认执行者已退出，其工作区会继续阻止后续启用委派的任务，直到执行者停止且 CLI 重启；关闭委派的普通线程不受此占用限制。若初始任务记录无法写入，CLI 会拒绝启动执行者。对于 Pi，若无法确认 RPC 进程已退出，CLI 也会阻止启动新的 Pi 进程，并在超时或中止错误中说明这一情况。
 

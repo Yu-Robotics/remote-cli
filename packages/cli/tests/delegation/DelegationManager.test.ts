@@ -39,7 +39,31 @@ describe('cross-backend delegation', () => {
 
   afterEach(async () => { await manager.destroy(); vi.restoreAllMocks(); fs.rmSync(home, { recursive: true, force: true }); });
 
-  it.each(DELEGATION_BACKENDS.flatMap(main => DELEGATION_BACKENDS.map(child => [main, child] as const)))
+  it.each(DELEGATION_BACKENDS)('rejects same-backend %s delegation before creating a worker or reserving the workspace', async backend => {
+    parent.backend = backend;
+    const scope = manager.begin(parent);
+    const discovery = await scope.invoke('remote_cli_list_backends', {}, 'list') as { backends: BackendAvailability[] };
+    expect(discovery.backends.find(item => item.backend === backend)).toMatchObject({
+      installed: true, coordinator: true, worker: false, readOnly: false,
+      reason: expect.stringContaining('Same-backend delegation is disabled'),
+    });
+    expect(discovery.backends.filter(item => item.backend !== backend).every(item => item.worker)).toBe(true);
+    for (const mode of [undefined, 'inherit', 'read_only']) {
+      await expect(scope.invoke('remote_cli_delegate', { backend, objective: 'Inspect', ...(mode ? { mode } : {}) }, `same-${mode}`))
+        .rejects.toThrow('Same-backend delegation is disabled');
+    }
+    expect(factory).not.toHaveBeenCalled();
+    expect(parent.onToolUse).not.toHaveBeenCalled();
+    expect(scope.hasTasks()).toBe(false);
+    expect(scope.getLaunchRevision()).toBe(0);
+    expect(manager.blocksWorkspace(home, 'other')).toBe(false);
+    expect(fs.existsSync(path.join(home, '.remote-cli', 'delegation'))).toBe(false);
+    const other = DELEGATION_BACKENDS.find(item => item !== backend)!;
+    const task: any = await scope.invoke('remote_cli_delegate', { backend: other, objective: 'Inspect' }, 'other');
+    await expect(scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result')).resolves.toMatchObject({ state: 'succeeded' });
+  });
+
+  it.each(DELEGATION_BACKENDS.flatMap(main => DELEGATION_BACKENDS.filter(child => child !== main).map(child => [main, child] as const)))
   ('returns a %s coordinator\'s %s child result without reusing the primary session', async (main, child) => {
     parent.backend = main;
     const scope = manager.begin(parent);
@@ -61,6 +85,7 @@ describe('cross-backend delegation', () => {
   });
 
   it('uses the legacy Claude model when no per-backend model is saved', async () => {
+    parent.backend = 'codex';
     parent.thread.model = 'legacy-claude-model';
     delete parent.thread.models?.claude;
     const scope = manager.begin(parent);
@@ -138,7 +163,8 @@ describe('cross-backend delegation', () => {
   });
 
   it('bounds the aggregate continuation while retaining every task status and the full tool result', async () => {
-    vi.mocked(worker.execute).mockResolvedValue({ success: true, output: '"\\\n'.repeat(6000) });
+    const output = `Review context\n${'"\\\n'.repeat(6000)}\nVerified conclusion`;
+    vi.mocked(worker.execute).mockResolvedValue({ success: true, output });
     const scope = manager.begin(parent);
     const ids: string[] = [];
     for (let index = 0; index < 12; index++) {
@@ -150,8 +176,12 @@ describe('cross-backend delegation', () => {
     expect(results.map(result => result.taskId)).toEqual(ids);
     expect(results.every(result => result.state === 'succeeded' && result.truncated)).toBe(true);
     expect(Buffer.byteLength(JSON.stringify(results))).toBeLessThanOrEqual(64 * 1024);
+    for (const result of results) {
+      expect(result.output).toMatch(/^Review context\n/);
+      expect(result.output).toMatch(/\nVerified conclusion$/);
+    }
     await expect(scope.invoke('remote_cli_result', { taskId: ids[0] }, 'full'))
-      .resolves.toMatchObject({ output: '"\\\n'.repeat(6000), truncated: false });
+      .resolves.toMatchObject({ output, truncated: false });
   });
 
   it.each(['session cleanup', 'metadata pruning'])('finishes the completion barrier when %s stalls after confirmed worker exit', async stage => {
@@ -225,6 +255,7 @@ describe('cross-backend delegation', () => {
   });
 
   it('routes approvals to the child executor and does not offer persistent child grants', async () => {
+    parent.backend = 'codex';
     vi.mocked(worker.execute).mockImplementation(async (_, options) => {
       options.onApprovalRequest?.({ requestId: 'permission', kind: 'command', description: 'Write outside workspace', canRemember: true });
       options.onApprovalResolved?.('permission', 'denied');
@@ -237,15 +268,22 @@ describe('cross-backend delegation', () => {
     expect(parent.onApprovalResolved).toHaveBeenCalledWith('permission', 'denied');
   });
 
-  it('bounds final output and still releases the workspace after a failed task', async () => {
-    vi.mocked(worker.execute).mockResolvedValueOnce({ success: false, output: '\u{1f680}'.repeat(100000), error: 'Failed' });
+  it.each([true, false])('bounds final output without losing the conclusion or changing success=%s', async success => {
+    vi.mocked(worker.execute).mockResolvedValueOnce({ success,
+      output: `Review context\n${'\u{1f680}'.repeat(100000)}\nVerified conclusion`,
+      error: success ? undefined : 'Failed' });
     const scope = manager.begin(parent);
     const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' }, 'first');
     const result: any = await scope.invoke('remote_cli_result', { taskId: task.taskId }, 'read');
-    expect(result).toMatchObject({ state: 'failed', truncated: true });
+    expect(result).toMatchObject({ state: success ? 'succeeded' : 'failed', truncated: true });
     expect(Buffer.byteLength(result.output)).toBeLessThanOrEqual(32 * 1024);
+    expect(result.output).toMatch(/^Review context\n/);
+    expect(result.output).toContain('[Output truncated]');
+    expect(result.output).toMatch(/\nVerified conclusion$/);
     expect(result.output).not.toContain('\ufffd');
-    expect(parent.onNotice).toHaveBeenCalledWith(expect.stringContaining('**Reason:** <raw>Failed</raw>'));
+    expect(parent.onToolResult).toHaveBeenCalledWith({ tool_use_id: task.taskId,
+      content: JSON.stringify(result), is_error: !success });
+    if (!success) expect(parent.onNotice).toHaveBeenCalledWith(expect.stringContaining('**Reason:** <raw>Failed</raw>'));
     await expect(scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Retry once' }, 'second')).resolves.toHaveProperty('taskId');
   });
 
@@ -291,11 +329,13 @@ describe('cross-backend delegation', () => {
     const directory = path.join(home, '.remote-cli', `${backend}-sandbox`);
     fs.mkdirSync(directory, { recursive: true });
     fs.writeFileSync(path.join(directory, 'owner.json'), JSON.stringify({ mode: 'danger-full-access' }));
-    const config = workerConfiguration(parent.config, guard, 'owner', backend, backend, 'inherit');
-    expect(config[backend]?.sandbox).toEqual({ mode: 'danger-full-access' });
+    const target = backend === 'claude' ? 'codex' : 'claude';
+    const config = workerConfiguration(parent.config, guard, 'owner', backend, target, 'inherit');
+    expect(config[target]?.sandbox).toEqual({ mode: 'danger-full-access' });
   });
 
   it.each(['claude', 'codex'] as const)('rejects extra read-only sandboxing for an unrestricted %s worker and allows an inherit retry', async backend => {
+    parent.backend = backend === 'claude' ? 'codex' : 'claude';
     const scope = manager.begin(parent);
     await expect(scope.invoke('remote_cli_delegate', { backend, objective: 'Research', mode: 'read_only' }, 'readonly'))
       .rejects.toThrow('Use inherit');
@@ -308,37 +348,31 @@ describe('cross-backend delegation', () => {
     expect(factory.mock.calls[0][1][backend].sandbox).toEqual({ mode: 'danger-full-access' });
   });
 
-  it.each(['claude', 'codex'] as const)('preserves saved %s restrictions despite using a new worker session', async backend => {
+  it.each((['claude', 'codex'] as const).flatMap(backend => (['configured', 'saved'] as const).map(source => [backend, source] as const)))
+  ('blocks all managed workers for a %s coordinator with %s sandbox restrictions', async (backend, source) => {
     parent.backend = backend;
-    const directory = path.join(home, '.remote-cli', `${backend}-sandbox`); fs.mkdirSync(directory, { recursive: true });
-    fs.writeFileSync(path.join(directory, 'owner.json'), JSON.stringify({ mode: 'read-only', networkAccess: false }));
-    const config = workerConfiguration(parent.config, guard, 'owner', backend, backend, 'inherit');
-    expect(config[backend]?.sandbox).toMatchObject({ mode: 'read-only', networkAccess: false });
-    expect(() => workerConfiguration(parent.config, guard, 'owner', backend, 'pi', 'inherit')).toThrow('sandbox');
-    expect(() => workerConfiguration(parent.config, guard, 'owner', backend, backend === 'codex' ? 'claude' : 'codex', 'inherit'))
-      .toThrow('same backend');
+    const sandbox = { mode: 'workspace-write' as const, networkAccess: false, writableRoots: [home] };
+    const savedPath = path.join(home, '.remote-cli', `${backend}-sandbox`, 'owner.json');
+    if (source === 'configured') parent.config[backend] = { sandbox };
+    else {
+      fs.mkdirSync(path.dirname(savedPath), { recursive: true });
+      fs.writeFileSync(savedPath, JSON.stringify(sandbox));
+    }
+    const originalConfig = JSON.stringify(parent.config);
     const scope = manager.begin(parent);
     const discovery = await scope.invoke('remote_cli_list_backends', {}, 'list') as { backends: BackendAvailability[] };
-    expect(discovery.backends.find(item => item.backend === backend))
-      .toMatchObject({ worker: true, readOnly: true });
-    for (const other of discovery.backends.filter(item => item.backend !== backend)) {
-      expect(other).toMatchObject({ worker: false, readOnly: false });
+    for (const item of discovery.backends) {
+      expect(item).toMatchObject({ worker: false, readOnly: false });
+      await expect(scope.invoke('remote_cli_delegate', { backend: item.backend, objective: 'Inspect' }, item.backend))
+        .rejects.toThrow(item.backend === backend ? 'Same-backend' : 'coordinator sandbox is enabled');
     }
-  });
-
-  it.each(['claude', 'codex'] as const)('allows a sandboxed %s coordinator to request stricter read-only execution', backend => {
-    const sandbox = { mode: 'workspace-write' as const, networkAccess: false, writableRoots: [home] };
-    parent.config[backend] = { sandbox };
-    const config = workerConfiguration(parent.config, guard, 'owner', backend, backend, 'read_only');
-    expect(config[backend]?.sandbox).toMatchObject({ mode: 'read-only', networkAccess: false, writableRoots: [] });
-    if (backend === 'codex') expect(config.codex?.sandbox?.developmentDirectories).toBe(false);
-    expect(parent.config[backend]?.sandbox).toEqual(sandbox);
-  });
-
-  it.each(['pi', 'agy', 'opencode', 'kimi', 'zcode'] as const)('rejects unsupported sandbox policies for %s workers', backend => {
-    expect(() => workerConfiguration(parent.config, guard, 'owner', 'pi', backend, 'read_only')).toThrow('Use inherit');
-    expect(() => workerConfiguration({ type: 'codex', codex: { sandbox: { mode: 'workspace-write' } } },
-      guard, 'owner', 'codex', backend, 'inherit')).toThrow('cannot enforce');
+    const target = backend === 'claude' ? 'codex' : 'claude';
+    await expect(scope.invoke('remote_cli_delegate', { backend: target, objective: 'Inspect', mode: 'read_only' }, 'readonly'))
+      .rejects.toThrow('coordinator sandbox is enabled');
+    expect(factory).not.toHaveBeenCalled();
+    expect(scope.getLaunchRevision()).toBe(0);
+    expect(JSON.stringify(parent.config)).toBe(originalConfig);
+    if (source === 'saved') expect(JSON.parse(fs.readFileSync(savedPath, 'utf8'))).toEqual(sandbox);
   });
 
   it('retains the workspace lease until a stopped worker actually exits', async () => {
@@ -368,7 +402,7 @@ describe('cross-backend delegation', () => {
     vi.mocked(worker.abort).mockImplementation(() => new Promise(() => undefined));
     vi.mocked(worker.destroy).mockImplementation(() => new Promise(() => undefined));
     const scope = manager.begin(parent);
-    const task: any = await scope.invoke('remote_cli_delegate', { backend: 'claude', objective: 'Wait' }, 'start');
+    const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Wait' }, 'start');
     await expect(scope.invoke('remote_cli_cancel', { taskId: task.taskId }, 'cancel')).resolves.toMatchObject({ state: 'interrupted' });
     expect(manager.blocksWorkspace(home, parent.thread.id)).toBe(true);
     expect(manager.blocksWorkspace(home, 'other')).toBe(true);
@@ -391,14 +425,24 @@ describe('cross-backend delegation', () => {
     await expect(busy.invoke('remote_cli_delegate', { backend: 'pi', objective: 'Work' }, 'busy')).rejects.toThrow('busy');
   });
 
-  it('stops a noisy worker once its captured output reaches the limit', async () => {
+  it.each(DELEGATION_BACKENDS)('returns a %s worker result after large intermediate text and tool output', async backend => {
+    parent.backend = backend === 'claude' ? 'codex' : 'claude';
     vi.mocked(worker.execute).mockImplementation(async (_, options) => {
-      options.onStream?.('x'.repeat(257 * 1024));
-      return { success: true, output: 'late success' };
+      options.onToolResult?.({ tool_use_id: 'large-read', content: 'x'.repeat(257 * 1024) });
+      for (let index = 0; index < 100; index++) {
+        options.onStream?.('Progress'.repeat(1024));
+        options.onToolResult?.({ tool_use_id: `read-${index}`, content: 'Evidence'.repeat(1024) });
+      }
+      return { success: true, output: 'Verified research result' };
     });
     const scope = manager.begin(parent);
-    const task: any = await scope.invoke('remote_cli_delegate', { backend: 'pi', objective: 'Work' }, 'start');
-    await expect(scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result')).resolves.toMatchObject({ state: 'failed', error: expect.stringContaining('capture limit') });
+    const task: any = await scope.invoke('remote_cli_delegate', { backend, objective: 'Research' }, 'start');
+    const result = { taskId: task.taskId, backend, state: 'succeeded', output: 'Verified research result', truncated: false };
+    await expect(scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result')).resolves.toEqual(result);
+    expect(parent.onToolResult).toHaveBeenCalledTimes(1);
+    expect(parent.onToolResult).toHaveBeenCalledWith({ tool_use_id: task.taskId,
+      content: JSON.stringify(result), is_error: false });
+    expect(worker.abort).not.toHaveBeenCalled();
     expect(worker.destroy).toHaveBeenCalledOnce();
   });
 
