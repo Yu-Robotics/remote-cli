@@ -122,10 +122,9 @@ interface ActiveCommand {
  * restarts via `--conversation <id>`, which we persist per thread.
  *
  * The process is respawned (resuming the conversation) when:
- *  - setWorkingDirectory() changes cwd
  *  - the process exits unexpectedly
  *  - abort() kills it mid-command
- * resetContext()/compactWhenFull() additionally drop the conversation id,
+ * Directory changes and resetContext()/compactWhenFull() drop the conversation id,
  * so the next command starts a fresh session (agy has no /compact).
  *
  * Note: agy stream-json input supports text blocks only — image
@@ -346,18 +345,16 @@ export class AgyExecutor implements IExecutor {
     });
   }
 
+  isBusy(): boolean {
+    return this.isProcessing || this.activeCommand !== null || this.commandQueue.length > 0;
+  }
+
   async setWorkingDirectory(targetPath: string): Promise<void> {
-    const resolved = this.directoryGuard.resolveWorkingDirectory(targetPath);
-
-    // Changing cwd requires a respawn (tools run relative to the process cwd).
-    // The conversation id is kept, so the respawn resumes context.
-    const needsRestart = this.currentWorkingDirectory !== resolved && this.proc !== null;
+    const resolved = this.directoryGuard.resolveWorkingDirectory(targetPath, this.currentWorkingDirectory);
+    if (resolved === this.currentWorkingDirectory) return;
+    if (this.isBusy()) throw new Error('Cannot change working directory while AGY is busy');
+    this.resetContext();
     this.currentWorkingDirectory = resolved;
-
-    if (needsRestart) {
-      console.log(`[AgyExecutor] Restarting process in new directory: ${resolved}`);
-      this.killProcess();
-    }
   }
 
   resetContext(): void {

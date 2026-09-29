@@ -399,29 +399,26 @@ export class ClaudePersistentExecutor extends EventEmitter {
    * the previous session. This prevents session conflicts when switching between
    * directories that may have their own .claude-session files.
    */
+  isBusy(): boolean {
+    return this.isProcessing || this.isStarting || this.commandQueue.length > 0;
+  }
+
   async setWorkingDirectory(targetPath: string): Promise<void> {
     const resolvedPath = this.directoryGuard.resolveWorkingDirectory(
       targetPath,
       this.currentWorkingDirectory
     );
 
-    // If directory changes, we need to restart the process with a fresh session
-    const needsRestart = this.currentWorkingDirectory !== resolvedPath && this.claudeProcess !== null;
-
-    this.currentWorkingDirectory = resolvedPath;
-    // Note: sessionFilePath is NOT updated here — per-thread session files are bound to the
-    // thread ID, not the working directory. For legacy (no threadId), session resets on dir change.
-
-    // Start fresh session when changing directories - don't inherit previous session
-    // This prevents errors when switching to a directory with old session files
-    this.sessionId = null;
-    console.log('[ClaudePersistent] Working directory changed, starting fresh session (no session inheritance)');
-
-    if (needsRestart) {
-      console.log('[ClaudePersistent] Restarting process in new directory...');
-      await this.stopProcess();
-      await this.startProcess();
+    if (resolvedPath === this.currentWorkingDirectory) return;
+    if (this.isBusy()) {
+      throw new Error('Cannot change working directory while Claude is busy');
     }
+    await this.stopProcess();
+    // Clear both copies before acknowledging the change, including idle executors.
+    if (fs.existsSync(this.sessionFilePath)) fs.unlinkSync(this.sessionFilePath);
+    this.sessionId = null;
+    this.currentWorkingDirectory = resolvedPath;
+    console.log('[ClaudePersistent] Working directory changed; the next command starts a fresh session');
   }
 
   /**

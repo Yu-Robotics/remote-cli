@@ -116,7 +116,7 @@ Linux users upgrading from version 1.6.23 or earlier should run `remote-cli serv
 | `/clear` | Clear context for this thread |
 | `/new` | Alias for `/clear`; start a fresh conversation in this thread |
 | `/compact` | Compress history to save tokens |
-| `/cd <dir>` | Change working directory for this thread |
+| `/cd <dir>` | Change directory; a different directory starts fresh conversations for this thread |
 | `/model [name]` | List models for the active backend or set this thread's model |
 | `/effort [auto|level]` | Show or set Codex/AGY/OpenCode/Kimi/ZCode/Pi reasoning effort |
 | `/sandbox [on/off/read-only/default]` | Configure the current Codex or Claude Code thread sandbox, directory grants, and networking |
@@ -196,6 +196,8 @@ Backend-specific commands are forwarded only where the active backend supports t
 ## Advanced Usage
 
 Use one thread per project or task so each thread keeps its own working directory, backend session, model, and queue. Use `/backend <index>` for a global switch, or `/backend <index> @` to override only the current thread. `/backend default @` removes that override.
+
+With CLI 1.6.93 or newer, `/cd` to a different normalized directory clears saved conversation bindings for every backend in that thread, including inactive ones. Returning to the old directory does not restore its previous conversation. Selecting the same directory preserves context; backend switching without a directory change still resumes conversations. Thread identity, model, effort, sandbox grants, delegation settings, and native history files remain intact. Separate plans should use separate threads, even when they share a directory. This change requires a CLI upgrade and works with existing Routers.
 
 Thread switch panels show `Reply from:` with the reply's full thread name and workspace. Under `Switch thread`, a check mark (`✓`) and primary button styling identify the destination of new top-level messages when the card is finalized or clicked. Selected buttons remain clickable. Switching updates only the clicked card; other historical cards retain their last displayed selection.
 

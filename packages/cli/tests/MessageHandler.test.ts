@@ -79,6 +79,7 @@ function buildHandler(mockExecutorOverrides: Record<string, any> = {}) {
 
   const mockThreadPool = {
     getExecutor: vi.fn().mockReturnValue(mockExecutor),
+    setWorkingDirectory: vi.fn().mockResolvedValue({ cwd: '/home/user/test-project', changed: true }),
     isThreadBusy: vi.fn().mockReturnValue(false),
     setThreadBusy: vi.fn(),
     setThreadError: vi.fn(),
@@ -651,14 +652,14 @@ describe('MessageHandler', () => {
     it('should handle /cd command with valid directory', async () => {
       await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-123', content: '/cd ~/test-project', timestamp: Date.now() });
 
-      expect(ctx.mockExecutor.setWorkingDirectory).toHaveBeenCalledWith('~/test-project');
+      expect(ctx.mockThreadPool.setWorkingDirectory).toHaveBeenCalledWith('default-thread-id', '~/test-project');
       expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
         expect.objectContaining({ type: 'response', messageId: 'msg-123', success: true })
       );
     });
 
     it('should handle /cd command with invalid directory', async () => {
-      ctx.mockExecutor.setWorkingDirectory.mockRejectedValueOnce(new Error('Directory not allowed'));
+      vi.mocked(ctx.mockThreadPool.setWorkingDirectory).mockRejectedValueOnce(new Error('Directory not allowed'));
 
       await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-123', content: '/cd /etc', timestamp: Date.now() });
 
@@ -1963,19 +1964,23 @@ describe('MessageHandler', () => {
   });
 
   describe('/cd command', () => {
-    it('should persist working directory to ThreadManager after /cd', async () => {
-      ctx.mockExecutor.setWorkingDirectory = vi.fn().mockResolvedValue(undefined);
-      ctx.mockExecutor.getCurrentWorkingDirectory = vi.fn().mockReturnValue('/new/dir');
+    it('reports the directory change and conversation reset returned by the pool', async () => {
+      vi.mocked(ctx.mockThreadPool.setWorkingDirectory).mockResolvedValueOnce({ cwd: '/new/dir', changed: true });
 
       await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-cd', content: '/cd /new/dir', timestamp: Date.now() });
 
-      expect(ctx.mockThreadManager.updateThread).toHaveBeenCalledWith(
-        'default-thread-id',
-        expect.objectContaining({ workingDirectory: '/new/dir' })
-      );
+      expect(ctx.mockThreadPool.setWorkingDirectory).toHaveBeenCalledWith('default-thread-id', '/new/dir');
       expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
-        expect.objectContaining({ success: true, output: expect.stringContaining('/new/dir') })
+        expect.objectContaining({ success: true, output: expect.stringContaining('Conversation context cleared for all backends') })
       );
+    });
+
+    it('does not claim a conversation reset when the directory is unchanged', async () => {
+      vi.mocked(ctx.mockThreadPool.setWorkingDirectory).mockResolvedValueOnce({ cwd: '/new/dir', changed: false });
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'same-cd', content: '/cd /new/dir', timestamp: Date.now() });
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+        success: true, output: '✅ Changed working directory to: /new/dir',
+      }));
     });
 
     it('should return error when /cd is called without directory argument', async () => {

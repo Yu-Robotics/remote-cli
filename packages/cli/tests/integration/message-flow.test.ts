@@ -6,6 +6,7 @@ import { ThreadExecutorPool } from '../../src/thread/ThreadExecutorPool';
 import { ThreadManager } from '../../src/thread/ThreadManager';
 import { IncomingMessage } from '../../src/types';
 import os from 'os';
+import path from 'path';
 
 // Mock os.homedir() to respect process.env.HOME for isolated tests
 const originalHomedir = os.homedir();
@@ -57,6 +58,7 @@ describe('Integration: Message Flow', () => {
 
     mockThreadPool = {
       getExecutor: vi.fn().mockReturnValue(executor),
+      setWorkingDirectory: vi.fn().mockResolvedValue({ cwd: path.join(os.homedir(), 'projects'), changed: false }),
       isThreadBusy: vi.fn().mockReturnValue(false),
       setThreadBusy: vi.fn(),
       setThreadError: vi.fn(),
@@ -251,10 +253,23 @@ describe('Integration: Message Flow', () => {
 
     it('should handle relative paths from allowed directories', async () => {
       executor.execute.mockResolvedValueOnce({ success: true, output: 'Task done' });
+      executor.getCurrentWorkingDirectory.mockReturnValue(path.join(os.homedir(), 'projects'));
 
-      await handler.handleMessage({ type: 'command', messageId: 'msg_011', content: 'Execute task', workingDirectory: '~/projects/my-app', timestamp: Date.now() });
+      await handler.handleMessage({ type: 'command', messageId: 'msg_011', content: 'Execute task', workingDirectory: './my-app', timestamp: Date.now() });
 
+      expect(mockThreadPool.setWorkingDirectory).toHaveBeenCalledWith('default-id', './my-app');
       expect(executor.execute).toHaveBeenCalledWith('Execute task', expect.any(Object));
+    });
+
+    it('does not execute a prompt if the directory and session transition fails', async () => {
+      mockThreadPool.setWorkingDirectory.mockRejectedValueOnce(new Error('Cannot remove stale session binding'));
+
+      await handler.handleMessage({ type: 'command', messageId: 'failed-cd', content: 'Execute task', workingDirectory: '~/work', timestamp: Date.now() });
+
+      expect(executor.execute).not.toHaveBeenCalled();
+      expect(wsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'response', messageId: 'failed-cd', success: false, error: 'Cannot remove stale session binding',
+      }));
     });
 
     it('should reject path traversal attempts', async () => {
