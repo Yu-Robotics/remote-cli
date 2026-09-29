@@ -172,6 +172,56 @@ describe('PiClient process lifecycle', () => {
     expect(spawn).toHaveBeenCalledTimes(2);
   });
 
+  it('keeps a session reset blocked until the previous Pi process actually exits', async () => {
+    const project = fs.mkdtempSync(path.join(os.homedir(), '.pi-reset-stop-'));
+    const processes: Array<ReturnType<typeof createProcess>> = [];
+    function createProcess() {
+      const proc = Object.assign(new EventEmitter(), {
+        stdin: {
+          end: vi.fn(), destroyed: false, writable: true, on: vi.fn(),
+          write: vi.fn((line: string) => {
+            const command = JSON.parse(line);
+            queueMicrotask(() => proc.stdout.emit('data', Buffer.from(JSON.stringify({
+              type: 'response', id: command.id, command: command.type, success: true,
+              data: command.type === 'get_state' ? { sessionId: 'pi-session' } : { models: [] },
+            }) + '\n')));
+            return true;
+          }),
+        },
+        stdout: new EventEmitter(), stderr: new EventEmitter(), exitCode: null as number | null, signalCode: null,
+        kill: vi.fn(() => true),
+      });
+      processes.push(proc);
+      return proc;
+    }
+    vi.mocked(spawn).mockImplementation(() => createProcess() as any);
+    const executor = new PiExecutor(new DirectoryGuard([project]), {
+      initialWorkingDirectory: project, sessionBaseDir: path.join(project, 'sessions'), threadId: 'ordinary',
+      clientFactory: launch => new PiClient({ ...launch, killEscalationMs: 10 }),
+    });
+    try {
+      await executor.listModels();
+      const previous = processes[0];
+      executor.resetContext();
+      await expect(executor.listModels()).rejects.toThrow('exit could not be confirmed');
+      expect(spawn).toHaveBeenCalledTimes(1);
+      executor.resetContext();
+      await expect(executor.execute('Continue')).resolves.toMatchObject({
+        success: false, error: expect.stringContaining('exit could not be confirmed'),
+      });
+      expect(spawn).toHaveBeenCalledTimes(1);
+      expect(previous.exitCode).toBeNull();
+      previous.exitCode = 0;
+      previous.emit('exit', 0, null);
+      await expect(executor.listModels()).resolves.toEqual([]);
+      expect(spawn).toHaveBeenCalledTimes(2);
+    } finally {
+      for (const proc of processes) { proc.exitCode = 0; proc.emit('exit', 0, null); }
+      await executor.destroy();
+      fs.rmSync(project, { recursive: true, force: true });
+    }
+  });
+
   it('keeps a delegated Pi workspace blocked after abort and repeated cleanup fail', async () => {
     const project = fs.mkdtempSync(path.join(os.homedir(), '.delegated-pi-stop-'));
     const guard = new DirectoryGuard([project]);

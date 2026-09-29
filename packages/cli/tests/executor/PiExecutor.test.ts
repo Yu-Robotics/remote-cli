@@ -312,6 +312,35 @@ describe('PiExecutor', () => {
     await expect(fs.readFile(pointerPath, 'utf8')).resolves.toContain('sess-pi-1');
   });
 
+  it('does not report successful destruction when a reset session has not stopped', async () => {
+    await executor.listModels();
+    const previous = transport;
+    const stop = vi.spyOn(previous, 'stop').mockRejectedValue(new Error('Pi RPC process exit could not be confirmed'));
+    try {
+      executor.resetContext();
+      await expect(executor.destroy()).rejects.toThrow('exit could not be confirmed');
+      expect(previous.running).toBe(true);
+      expect(transport.starts).toBe(0);
+    } finally { stop.mockRestore(); }
+  });
+
+  it('does not start a replacement session when destroyed while waiting for the old process', async () => {
+    await executor.listModels();
+    let exited!: () => void;
+    const previous = transport;
+    const exit = new Promise<void>(resolve => { exited = resolve; });
+    const stop = vi.spyOn(previous, 'stop').mockImplementation(async () => { await exit; previous.running = false; });
+    try {
+      executor.resetContext();
+      const query = expect(executor.listModels()).rejects.toThrow('Executor has been destroyed');
+      const destroying = executor.destroy();
+      exited();
+      await destroying;
+      await query;
+      expect(transport.starts).toBe(0);
+    } finally { exited(); stop.mockRestore(); }
+  });
+
   it('applies clearModel to the running RPC immediately', async () => {
     await executor.listModels();
     await expect(executor.setModel('anthropic/claude-sonnet-4')).resolves.toMatchObject({ success: true });
