@@ -80,7 +80,7 @@ describe('cross-backend delegation', () => {
       .resolves.toMatchObject({ state: 'running' });
     expect(scope.hasPendingResults()).toBe(true);
     finish({ success: true, output: 'Terminal result' });
-    await vi.waitFor(() => expect(parent.onNotice).toHaveBeenCalledWith(expect.stringContaining('task succeeded')));
+    await vi.waitFor(() => expect(parent.onNotice).toHaveBeenCalledWith(expect.stringContaining('Completed')));
     expect(scope.hasPendingResults()).toBe(true);
     await expect(scope.collectPendingResults()).resolves.toEqual([
       expect.objectContaining({ taskId: task.taskId, state: 'succeeded', output: 'Terminal result' }),
@@ -245,6 +245,7 @@ describe('cross-backend delegation', () => {
     expect(result).toMatchObject({ state: 'failed', truncated: true });
     expect(Buffer.byteLength(result.output)).toBeLessThanOrEqual(32 * 1024);
     expect(result.output).not.toContain('\ufffd');
+    expect(parent.onNotice).toHaveBeenCalledWith(expect.stringContaining('**Reason:** <raw>Failed</raw>'));
     await expect(scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Retry once' }, 'second')).resolves.toHaveProperty('taskId');
   });
 
@@ -257,6 +258,7 @@ describe('cross-backend delegation', () => {
     const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Wait' }, 'start');
     await expect(scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result')).resolves.toMatchObject({ state: 'timed_out' });
     expect(worker.destroy).toHaveBeenCalled();
+    expect(parent.onNotice).toHaveBeenCalledWith(expect.stringContaining('Timed out'));
   });
 
   it.each(['claude', 'codex'] as const)('keeps an unrestricted coordinator\'s %s worker unsandboxed despite target settings', async backend => {

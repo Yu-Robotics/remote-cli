@@ -146,6 +146,13 @@ conversations.
 `/status` shows `Delegation: on/off (current thread)` for the thread receiving
 the command. Reading this setting does not initialize delegation or start workers.
 
+CLI 1.6.94 and newer show each finished worker as a result block in the existing
+reply card, with a colored status label, backend name, short task description,
+and elapsed time. Failed, timed-out, cancelled, and interrupted tasks include a
+bounded reason; the coordinator still receives the existing task result. This
+uses the existing text stream and works with older Routers. It adds no probes,
+cooldowns, retries, or changes to ordinary non-delegated sessions.
+
 Child progress, approvals, and questions use the existing reply flow. `/abort`
 stops managed children as well as the parent. While delegated results remain
 missing from the active execution, the CLI suppresses coordinator prose/plans/images and displays

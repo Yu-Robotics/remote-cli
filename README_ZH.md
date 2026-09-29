@@ -463,6 +463,13 @@ Claude Code、Codex、Pi、AGY、OpenCode、Kimi Code 和 ZCode 都可以协调�
 `/status` shows `Delegation: on/off (current thread)` for the thread receiving
 the command. Reading this setting does not initialize delegation or start workers.
 
+CLI 1.6.94 and newer show each finished worker as a result block in the existing
+reply card, with a colored status label, backend name, short task description,
+and elapsed time. Failed, timed-out, cancelled, and interrupted tasks include a
+bounded reason; the coordinator still receives the existing task result. This
+uses the existing text stream and works with older Routers. It adds no probes,
+cooldowns, retries, or changes to ordinary non-delegated sessions.
+
 建议先在一个测试线程中启用。从未启用委派的线程不会注册受管理的工具、添加提示词前缀、清理后端委派配置，或检查委派工作区占用；其普通进程处理和会话输出保持原样。
 
 线程使用过委派后，`/delegation off` 会移除受管理的工具。CLI 会记录哪些后端需要清理，重启或切换后端后也能继续处理。原生斜杠命令恢复会话前同样会执行清理。移除工具时，每个执行器实例可能重启一次后端进程，但会保留已保存的对话；已经清理过的进程不会反复重启。未使用过委派的后端无需清理。

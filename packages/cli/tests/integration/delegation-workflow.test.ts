@@ -506,7 +506,7 @@ describe('delegation in the existing thread workflow', () => {
     await handler.handleMessage(message('enable', '/delegation on'));
     main.execute.mockImplementationOnce(async (_prompt: string, options: ExecuteOptions) => {
       const task = await call('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' });
-      await vi.waitFor(() => expect(socket.send.mock.calls.some(([value]: any[]) => value.chunk?.includes('task succeeded'))).toBe(true));
+      await vi.waitFor(() => expect(socket.send.mock.calls.some(([value]: any[]) => value.chunk?.includes('Completed</text_tag>'))).toBe(true));
       options.onStream?.('The worker is still running.');
       const result = await call('remote_cli_result', { taskId: task.taskId });
       options.onStream?.(`Final answer: ${result.output}`);
@@ -572,6 +572,11 @@ describe('delegation in the existing thread workflow', () => {
     }).mockImplementationOnce(async (prompt: string, options: ExecuteOptions) => {
       expect(prompt).toContain(state);
       expect(prompt).toContain(state === 'failed' ? 'Quota exhausted' : 'Delegated task timed out');
+      const notices = socket.send.mock.calls.map(([value]: any[]) => value)
+        .filter((value: any) => value.messageId === 'parent' && value.streamType === 'text')
+        .map((value: any) => value.chunk).join('');
+      expect(notices).toContain('Codex · Delegated task');
+      expect(notices).toContain(`**Reason:** <raw>${state === 'failed' ? 'Quota exhausted' : 'Delegated task timed out'}</raw>`);
       options.onStream?.('The worker could not finish the request.');
       return { success: true };
     });

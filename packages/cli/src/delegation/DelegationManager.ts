@@ -12,6 +12,7 @@ import { BackendRegistry } from './BackendRegistry';
 import { DelegationStore, type DelegatedTaskRecord } from './DelegationStore';
 import { DELEGATION_BACKENDS, type DelegationBackend, type DelegationHandler } from './contract';
 import { workerConfiguration } from './WorkerPolicy';
+import { formatDelegationNotice } from './DelegationNotice';
 
 export const DELEGATION_LIMITS = { launches: 12, concurrent: 3, timeoutMs: 30 * 60_000,
   resultBytes: 32 * 1024, continuationBytes: 64 * 1024, streamBytes: 256 * 1024,
@@ -247,7 +248,7 @@ export class DelegationManager {
         await deadline(async () => { await save(task); await this.store.prune(); }, this.cleanupMs)
           .catch(() => console.warn('[Delegation] Final task metadata could not be saved or pruned'));
         notify(() => parent.onToolResult({ tool_use_id: task.record.id, content: JSON.stringify(view(task)), is_error: task.record.state !== 'succeeded' }));
-        notify(() => parent.onNotice(`\nDelegated ${backend} task ${task.record.state}.\n`));
+        notify(() => parent.onNotice(formatDelegationNotice(task.record)));
         task.settle();
       }
     };
