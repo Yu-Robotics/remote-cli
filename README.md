@@ -453,10 +453,12 @@ Once connected, use these commands in Feishu:
 ### Cross-backend Delegation
 
 Claude Code, Codex, Pi, AGY, OpenCode, Kimi Code, and ZCode can each coordinate
-independent tasks on the installed backends, including another session of the
-same backend. Keep talking to
-your existing thread; its selected backend collects worker results and answers
-you. Workers do not create extra thread buttons.
+independent tasks on other installed backends. From CLI 1.6.95, managed
+same-backend delegation is rejected before a worker starts, and discovery marks
+the current backend unavailable as a worker. Use the current backend directly
+or its native subagents, if supported. Keep talking to your existing thread;
+its selected backend collects worker results and answers you. Workers do not
+create extra thread buttons.
 
 ```text
 /delegation
@@ -521,7 +523,8 @@ early, the CLI keeps the request busy, waits for terminal results, and resumes
 the same coordinator session with those results before releasing the queue.
 The original request and image attachments are not sent again. The combined
 continuation data is capped at 64 KiB, preserving every task's identity and status;
-truncated text can still be retrieved through the result tool. A coordinator that
+individual results remain available through the result tool, subject to the
+per-task limit below. A coordinator that
 successfully processed every result finishes normally without an extra turn.
 
 CLI 1.6.89 and newer retain results until the coordinator execution succeeds.
@@ -542,7 +545,13 @@ Cancellation does not undo existing edits.
 
 There is one active worker per parent and at most three per CLI process in
 non-overlapping workspaces. A turn can start at most 12 tasks; each worker has a
-30-minute limit. Results are limited to 32 KiB and captured output to 256 KiB.
+30-minute limit. From CLI 1.6.95, intermediate text and tool-result volume does
+not abort workers; the delegation manager does not retain those intermediate
+outputs. Each returned result is limited to 32 KiB. Oversized result text keeps
+its beginning and end, marks the omitted middle, and sets `truncated: true`
+without changing the worker's success or failure status. Combined continuations
+use the same truncation policy within their 64 KiB budget. These limits bound
+retained delegation results, not the backend's own output buffers.
 Managed tasks using overlapping workspace directories are serialized. These
 reservations restrict delegation-enabled threads and workers; opted-out ordinary
 threads retain access to their workspace. This does not lock files against those
@@ -555,19 +564,22 @@ Workers follow the coordinator's effective remote-cli sandbox policy. The defaul
 even if the target backend has separate saved sandbox settings. This does not
 change those saved settings or other backend approval options. For research
 tasks, use `inherit` and put any no-write requirement in the objective; such an
-instruction is not an enforced sandbox. Unrestricted coordinators can choose any
-installed, authenticated worker, but cannot request `read_only` to enable a new
-worker sandbox.
+instruction is not an enforced sandbox. Unrestricted coordinators can choose
+installed, authenticated workers on a different backend, but cannot request
+`read_only` to enable a new worker sandbox.
 
-A sandboxed coordinator can delegate only to the same backend in this release;
-its saved restrictions remain in effect. Only an already sandboxed Claude Code
-or Codex coordinator can use `read_only` to request stricter native read-only
-execution, with the normal approval behavior. Discovery reports `readOnly` only
-when that mode is allowed for the current coordinator. Cross-backend sandbox
-translation remains deferred.
+A sandboxed coordinator has no eligible managed workers in this release:
+same-backend delegation is disabled, and cross-backend sandbox translation
+remains deferred. Discovery reports `worker: false` with a reason, and launch
+requests are rejected without weakening saved sandbox settings. `read_only`
+remains a recognized compatibility value but is unavailable under this policy.
+Native backend task/subagent tools are not changed by these managed delegation
+rules; their availability depends on the backend.
 
-All 49 directed combinations are covered at the task-manager test boundary.
-Live model delegation was verified for the original Claude Code/Codex/Pi matrix.
+All 42 different-backend combinations and seven same-backend rejections are
+covered at the task-manager test boundary with mocked executors. Earlier live
+model delegation verified the original Claude Code/Codex/Pi matrix before this
+cross-backend-only policy.
 The four additional adapters have protocol and lifecycle tests; ZCode also
 passed live MCP tool registration. Their live model tests
 were blocked by missing local authentication (AGY, OpenCode, Kimi) or an unset

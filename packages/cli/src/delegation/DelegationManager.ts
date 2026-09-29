@@ -15,7 +15,7 @@ import { workerConfiguration } from './WorkerPolicy';
 import { formatDelegationNotice } from './DelegationNotice';
 
 export const DELEGATION_LIMITS = { launches: 12, concurrent: 3, timeoutMs: 30 * 60_000,
-  resultBytes: 32 * 1024, continuationBytes: 64 * 1024, streamBytes: 256 * 1024,
+  resultBytes: 32 * 1024, continuationBytes: 64 * 1024,
   storageTimeoutMs: 10_000, calls: 500 } as const;
 
 export function workspacesOverlap(first: string, second: string): boolean {
@@ -75,13 +75,18 @@ export interface DelegationScope {
   waitingExecutor(): IExecutor | undefined;
 }
 
-function bounded(text: string, limit: number): { text: string; truncated: boolean } {
+function bounded(text: string, limit: number, preserveEnd = false): { text: string; truncated: boolean } {
   const buffer = Buffer.from(text);
   if (buffer.length <= limit) return { text, truncated: false };
-  const marker = '\n[Output truncated]';
-  let end = limit - Buffer.byteLength(marker);
+  const marker = preserveEnd ? '\n[Output truncated]\n' : '\n[Output truncated]';
+  const available = limit - Buffer.byteLength(marker);
+  if (available <= 0) return { text: marker.slice(0, limit), truncated: true };
+  // Worker output can contain progress before its conclusion. Keep both ends.
+  let end = preserveEnd ? Math.floor(available / 2) : available;
   while (end > 0 && (buffer[end] & 0xc0) === 0x80) end--;
-  return { text: buffer.subarray(0, end).toString('utf8') + marker, truncated: true };
+  let start = preserveEnd ? buffer.length - (available - end) : buffer.length;
+  while (start < buffer.length && (buffer[start] & 0xc0) === 0x80) start++;
+  return { text: buffer.subarray(0, end).toString('utf8') + marker + buffer.subarray(start).toString('utf8'), truncated: true };
 }
 
 function boundedResults(terminal: DelegatedTaskResult[]): DelegatedTaskResult[] {
@@ -90,7 +95,7 @@ function boundedResults(terminal: DelegatedTaskResult[]): DelegatedTaskResult[] 
   for (let limit = DELEGATION_LIMITS.resultBytes / 2;
     Buffer.byteLength(JSON.stringify(results)) > DELEGATION_LIMITS.continuationBytes; limit = Math.floor(limit / 2)) {
     results = terminal.map(result => {
-      const output = bounded(result.output ?? '', limit);
+      const output = bounded(result.output ?? '', limit, true);
       const error = bounded(result.error ?? '', limit);
       return { ...result, output: output.text, error: error.text || undefined,
         truncated: result.truncated || output.truncated || error.truncated };
@@ -174,7 +179,6 @@ export class DelegationManager {
     };
     const run = async (task: Task, configuration: ExecutorConfig, objective: string): Promise<void> => {
       const backend = task.record.backend as DelegationBackend;
-      let bytes = 0;
       try {
         if (task.record.state !== 'running') return;
         const childId = `delegate-${task.record.id}`;
@@ -191,32 +195,24 @@ export class DelegationManager {
           task.record.state = 'timed_out'; task.record.error = 'Delegated task timed out';
           void stop(task).catch(() => undefined);
         }, this.timeoutMs);
-        const count = (text: string) => {
-          bytes += Buffer.byteLength(text);
-          if (bytes > DELEGATION_LIMITS.streamBytes && task.record.state === 'running') {
-            task.record.state = 'failed'; task.record.error = 'Delegated output exceeded the capture limit';
-            void stop(task).catch(() => undefined);
-          }
-        };
         const result = await Promise.race([task.interrupted, task.executor.execute(
           `You are executing one delegated task in an independent session. Complete only this objective and return a concise result with verification and remaining issues. Do not delegate to other agents.\n\n${objective}`,
           {
             timeout: this.timeoutMs,
             onStream: text => {
-              count(text);
+              // Intermediate output is not retained here; only relay input prompts.
               queueMicrotask(() => {
                 if (!closed && task.record.state === 'running' && task.executor?.isWaitingInput?.()) {
                   notify(() => parent.onNotice(`\n[${backend} delegated task]\n${bounded(text, 4000).text}`));
                 }
               });
             },
-            onToolResult: result => count(result.content),
             onApprovalRequest: request => !closed && task.record.state === 'running' && parent.onApproval({ ...request,
               description: `[${backend} delegated task] ${request.description}`, canRemember: false }, task.executor!),
             onApprovalResolved: parent.onApprovalResolved,
           })]);
         if (task.record.state === 'running') {
-          const output = bounded(result.output ?? '', DELEGATION_LIMITS.resultBytes);
+          const output = bounded(result.output ?? '', DELEGATION_LIMITS.resultBytes, true);
           task.record.state = result.success ? 'succeeded' : 'failed';
           task.record.output = output.text; task.record.truncated = output.truncated;
           if (result.error) task.record.error = bounded(result.error, 4000).text;
@@ -305,10 +301,10 @@ export class DelegationManager {
         const mode = args.mode ?? 'inherit';
         if (mode !== 'inherit' && mode !== 'read_only') throw new Error('Unsupported execution mode');
         const backend = args.backend as DelegationBackend;
+        const configuration = workerConfiguration(parent.config, this.guard, parent.thread.id, parent.backend, backend, mode);
         launchRevision++;
         starting = true;
         try {
-          const configuration = workerConfiguration(parent.config, this.guard, parent.thread.id, parent.backend, backend, mode);
           const available = await this.registry.get(backend, parent.config);
           if (!available.installed) throw new Error(`${backend}: ${available.reason}`);
           await deadline(() => this.store.initialize(), DELEGATION_LIMITS.storageTimeoutMs, 'Task record initialization timed out');

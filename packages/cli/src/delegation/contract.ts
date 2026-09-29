@@ -24,11 +24,11 @@ export const DELEGATION_TOOLS = [
   {
     name: 'remote_cli_delegate',
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
-    description: 'Start one bounded task in an independent backend session in this workspace. Pass self-contained context and acceptance criteria; the worker does not inherit this conversation. Use inherit by default, including research tasks; put no-write requirements in the objective instead of enabling an extra sandbox. Do not edit files concurrently with a writing worker. Wait using remote_cli_result before finishing. Workers cannot delegate again.',
+    description: 'Start one bounded task on a different backend in this workspace. Same-backend delegation is rejected; use the current backend directly or its native subagents, if supported. Pass self-contained context and acceptance criteria; the worker does not inherit this conversation. Use inherit, including research tasks; put no-write requirements in the objective instead of enabling an extra sandbox. Do not edit files concurrently with a writing worker. Wait using remote_cli_result before finishing. Workers cannot delegate again.',
     inputSchema: object({
       backend: { type: 'string', enum: DELEGATION_BACKENDS },
       objective: { type: 'string', minLength: 1, maxLength: 24000 },
-      mode: { type: 'string', enum: ['inherit', 'read_only'], description: 'Defaults to inherit: workers follow the coordinator sandbox; an unrestricted coordinator launches unrestricted workers regardless of the target backend\'s saved sandbox. read_only is allowed only when discovery reports readOnly=true, for an already sandboxed Claude Code or Codex coordinator delegating to the same backend.' },
+      mode: { type: 'string', enum: ['inherit', 'read_only'], description: 'Defaults to inherit: an unrestricted coordinator launches unrestricted workers regardless of the target backend\'s saved sandbox. Sandboxed coordinators cannot delegate across backends. read_only is retained as a compatibility value but is rejected by the current cross-backend-only policy.' },
     }, ['backend', 'objective']),
   },
   {
@@ -48,7 +48,7 @@ export const DELEGATION_TOOLS = [
   },
 ] as const;
 
-export const DELEGATION_INSTRUCTIONS = 'Remote CLI delegation is enabled for this turn. Use remote_cli_list_backends to discover workers. Delegate bounded tasks when useful, provide context, and await remote_cli_result before completing. Use the default inherit mode, including for research; put no-write requirements in the objective. Workers follow the coordinator sandbox, so an unrestricted coordinator must not request read_only. The current thread and backend remain responsible for the answer. Do not perform concurrent writes while a delegated worker may be writing. Do not delegate recursively or assume worker memory is shared.';
+export const DELEGATION_INSTRUCTIONS = 'Remote CLI delegation is enabled for this turn. Use remote_cli_list_backends to discover workers. Delegate bounded tasks only to a different backend, provide context, and await remote_cli_result before completing. Use the default inherit mode, including for research; put no-write requirements in the objective. Sandboxed coordinators cannot delegate across backends, and unrestricted coordinators must not request read_only. The current thread and backend remain responsible for the answer. Do not perform concurrent writes while a delegated worker may be writing. Do not delegate recursively or assume worker memory is shared.';
 
 export function sameConnection(a?: DelegationConnection, b?: DelegationConnection): boolean {
   return a?.url === b?.url && a?.token === b?.token;

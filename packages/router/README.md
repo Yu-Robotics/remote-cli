@@ -12,7 +12,7 @@ The router server acts as a bridge between Feishu messaging and developer machin
 - **Image message forwarding** for Feishu images to supported backends, plus Codex native image output and local image files returned by any backend
 - **Client service management** is handled by the local CLI; the Router remains a separate long-running server process
 - **Queued task cards** appear at execution time for capable clients, with the thread, workspace, task preview, and remaining queue count; older clients retain waiting cards
-- **Delegated task progress** uses the existing reply and approval cards. With a supporting local CLI, `/delegation on` enables Claude Code, Codex, Pi, AGY, OpenCode, Kimi Code, and ZCode workers within the selected thread; the Router does not run or select workers. Worker sandbox policy follows the coordinator: an unrestricted coordinator launches unrestricted workers, while sandboxed coordinators retain their restrictions. Other backend approval options still apply. This policy is enforced on the local CLI and requires upgrading it. See [Cross-backend Delegation](../../README.md#cross-backend-delegation).
+- **Delegated task progress** uses the existing reply and approval cards. With a supporting local CLI, `/delegation on` enables Claude Code, Codex, Pi, AGY, OpenCode, Kimi Code, and ZCode workers within the selected thread; the Router does not run or select workers. From CLI 1.6.95, managed delegation accepts only a different backend. An unrestricted coordinator launches unrestricted workers; sandboxed coordinators have no eligible workers until cross-backend sandbox translation is supported. Native backend task/subagent tools are unchanged. Other backend approval options still apply. This policy is enforced on the local CLI and requires upgrading it. See [Cross-backend Delegation](../../README.md#cross-backend-delegation).
 - **WebSocket connections** from local clients
 - **Feishu long connection** for receiving and sending messages
 - **Task recovery** with compatible clients: resume output on a usable surviving card or create a new one, with an independent gap notice and plain-text handling of resumed fragments; failed card creation is not acknowledged as successful recovery
@@ -43,6 +43,15 @@ and elapsed time. Failed, timed-out, cancelled, and interrupted tasks include a
 bounded reason; the coordinator still receives the existing task result. This
 uses the existing text stream and works with older Routers. It adds no probes,
 cooldowns, retries, or changes to ordinary non-delegated sessions.
+
+CLI 1.6.95 no longer aborts workers because their intermediate text or tool
+results exceed a cumulative output threshold. Individual results remain bounded
+to 32 KiB and combined result continuations to 64 KiB. Oversized result text
+keeps its beginning and end with an explicit truncation marker and flag;
+truncation does not change the task's success or failure status. These limits
+bound retained delegation results, not backend output buffers. Worker timeouts,
+cancellation, and cleanup still apply. This requires a local CLI upgrade and
+works with existing Routers.
 
 CLI 1.6.89 can compact/retry result continuations that launched no new workers.
 Results remain retained until the coordinator execution succeeds. If its reply

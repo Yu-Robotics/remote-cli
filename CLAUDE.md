@@ -515,7 +515,9 @@ Resume-failure behavior with a stale id (verified live): agy warns `conversation
 Delegation is an opt-in per-thread feature (`/delegation on|off`). The selected
 backend remains the coordinator and owns the user-facing answer. Claude Code,
 Codex, Pi, AGY, OpenCode, Kimi, and ZCode can use registered local tools to
-start independent worker sessions on those same backends. Workers do not inherit
+start independent worker sessions on a different backend. Same-backend managed
+delegation is rejected; native backend task/subagent tools remain unchanged.
+Workers do not inherit
 the coordinator transcript or become user-facing threads.
 
 `MessageHandler` creates a `DelegationScope` for an enabled coordinator turn and
@@ -527,8 +529,10 @@ task IDs, limits, workspace reservations, child executors, results, cancellation
 and cleanup. `WorkerPolicy` resolves the coordinator's effective sandbox against
 the real parent thread before creating a synthetic worker identity. Unrestricted
 coordinators launch unrestricted workers without loading the target's separate
-sandbox settings. Sandboxed coordinators retain same-backend restrictions;
-`read_only` is available only within that restricted path. `DelegationStore`
+sandbox settings. Sandboxed coordinators have no eligible workers until
+cross-backend sandbox translation is supported; `read_only` remains a recognized
+but unavailable compatibility value. Discovery and launch use the same policy.
+`DelegationStore`
 keeps bounded diagnostic task records and marks interrupted runs after restart.
 
 Worker completion and terminal-result delivery are separate states. While results

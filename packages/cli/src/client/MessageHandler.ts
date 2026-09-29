@@ -603,7 +603,8 @@ export class MessageHandler {
         ...(this.threadPool.getBackendKey(threadId) === 'zcode'
           ? ['ZCode delegation temporarily replaces user-configured MCP servers. Native tools and plugins remain available; /delegation off restores the normal MCP configuration.'] : []),
         ...backends.map(item => `${item.backend}: ${item.installed ? item.version : item.reason}`),
-        'Authentication and quota are checked when a task runs. Sandboxed coordinators can delegate only to the same backend. Enforced read-only workers are available only for Claude Code and Codex.',
+        'Same-backend delegation is disabled. Use the current backend directly or its native subagents, if supported.',
+        'Authentication and quota are checked when a task runs. Cross-backend delegation is unavailable while the coordinator sandbox is enabled.',
         'Usage: /delegation on|off. Applies to this thread; workers use independent sessions.',
       ].join('\n') });
       return true;

@@ -1,5 +1,28 @@
 # Cross-Backend Delegation Plan
 
+## Follow-up: cross-backend-only workers and result retention
+
+Status: implemented and validated, 2026-09-30. Version 1.6.95.
+
+- Reject managed delegation to the coordinator's own backend in the shared
+  worker policy, before probing, persistence, or worker creation. Discovery
+  reports the same restriction; native backend task/subagent tools are unchanged.
+- Keep the current sandbox boundary: restricted coordinators have no eligible
+  workers until cross-backend sandbox equivalence is implemented. Do not weaken
+  sandbox settings or silently fall back to unrestricted execution.
+- Remove the cumulative intermediate-output abort and retain bounded terminal
+  results with UTF-8-safe beginning/end truncation. Timeout and cleanup remain.
+- Verify 42 allowed different-backend combinations, seven same-backend
+  rejections, result delivery, sandbox rejection, and mixed-version behavior.
+
+Validation: both packages build; 1,367 CLI tests and 615 Router tests pass.
+CLI line coverage is 87.61%; WorkerPolicy and the shared tool contract have
+100% coverage. Tests use mocked executors and the real delegation bridge.
+A separate Codex transport test confirms independent executor callbacks reject
+other thread IDs. This is code-level isolation evidence, not a reconstruction
+of historical live byte counters. Claude cross-review could not run because
+the configured provider returned an authentication error (HTTP 403).
+
 ## Follow-up: recover result delivery and parse nested Markdown
 
 Status: implemented and validated, 2026-09-29. Version 1.6.89.
@@ -201,8 +224,9 @@ remain available; opt-out restores normal configuration. This is documented in
 both READMEs and `/delegation` output. Merging arbitrary native user MCP settings
 is deferred rather than duplicating ZCode's version-specific configuration loader.
 
-- Manager tests cover all 49 directed backend pairs, per-backend model selection,
-  separate worker identities, and inherited permissions.
+- Original expansion tests covered all 49 directed backend pairs. The 1.6.95
+  policy allows 42 different-backend pairs and rejects the seven same-backend
+  pairs, retaining model-selection and separate-session coverage.
 - Real subprocess fixtures cover OpenCode/Kimi/ZCode registration, process
   recycling, resume, opt-out, history replay suppression, and cleanup.
 - AGY filesystem/process tests verify global config preservation, independent
@@ -297,8 +321,9 @@ configuration change. Deployment and package publication have not been authorize
 Keep the existing thread, backend, workspace, and native conversation. The
 selected backend remains responsible for the final answer. Claude Code, Codex,
 Pi, AGY, OpenCode, Kimi Code, and ZCode can discover local workers, assign a task, await its
-result, and continue that conversation. Same-backend workers are separate
-sessions, not concurrent turns in the primary session.
+result, and continue that conversation. Managed workers must use a different
+backend. Same-backend requests are rejected before launch; native backend
+task/subagent tools remain backend-owned.
 
 - `/delegation` reports the per-thread setting and executable discovery.
 - `/delegation on|off` changes future turns while the thread is idle. The setting
@@ -373,7 +398,7 @@ integration, or replacement of normal thread interactions.
 | Tool | Behavior |
 | --- | --- |
 | `remote_cli_list_backends` | Return installed backends, versions and applicable restrictions |
-| `remote_cli_delegate` | Start one task with backend, objective and optional `inherit` or `read_only` mode |
+| `remote_cli_delegate` | Start one task on a different backend with an objective and `inherit` mode; `read_only` is recognized but rejected |
 | `remote_cli_result` | Return an owned task's state and final result; wait up to 25 seconds |
 | `remote_cli_cancel` | Stop an owned worker; existing filesystem changes are not rolled back |
 
@@ -427,16 +452,15 @@ See [Codex configuration reference](https://developers.openai.com/codex/config-r
   miss per-thread policy files. When the coordinator is unrestricted, launch
   unrestricted workers without loading the target backend's saved sandbox policy.
   Do not modify saved policies or other backend approval options.
-- Unrestricted coordinators support all 49 directed pairs at the manager boundary. Restricted
-  coordinators may delegate only to the same backend; equivalence between
-  different native sandbox systems is not assumed.
+- Unrestricted coordinators support 42 different-backend directed pairs at the
+  manager boundary; seven same-backend pairs are rejected. Restricted
+  coordinators have no eligible managed workers: same-backend delegation is
+  disabled, and equivalence between different native sandboxes is not assumed.
 - Use `inherit` by default, including research tasks whose no-write requirements
-  belong in the objective. `read_only` is available only to an already sandboxed
-  Claude/Codex coordinator delegating to the same backend, and uses that native
-  policy with normal approvals. Unrestricted coordinators must not enable an
-  extra worker sandbox; an explicit `read_only` request is rejected with guidance
-  to use `inherit`. Discovery reports only the modes allowed in the current turn.
-  Pi, AGY, OpenCode, Kimi, and ZCode cannot enforce a read-only sandbox.
+  belong in the objective. `read_only` remains recognized for compatibility but
+  is unavailable under the cross-backend-only policy. Unrestricted coordinators
+  cannot enable an extra worker sandbox. Discovery and launch share this policy
+  and explain why a target is unavailable; saved backend settings are unchanged.
 - Worker approval cards omit Remember. Persistent grants should be configured
   on the real thread. Temporary worker policy/session pointers are cleaned up
   after execution; native CLI transcript retention remains backend-owned.
@@ -463,15 +487,22 @@ See [Codex configuration reference](https://developers.openai.com/codex/config-r
 | Launches per parent turn | 12 |
 | Managed delegation tool calls per turn | 500 |
 | Worker duration | 30 minutes |
-| Final result | 32 KiB, UTF-8-safe truncation marker included |
+| Final result | 32 KiB, preserving beginning and end with a UTF-8-safe truncation marker |
 | Automatic continuation results | 64 KiB combined JSON, preserving all task IDs and terminal states |
-| Captured text/tool-result output | 256 KiB, then stop |
+| Intermediate text/tool-result output | Not retained by the delegation manager; volume alone does not stop the worker |
 | Objective | 24000 characters; diagnostic record stores first 1000 |
 | Tool wait / HTTP timeout | 25 seconds / 32 seconds |
 | Initial task record | Up to 10 seconds each for store initialization and the first durable write |
 | Shutdown | Up to 2 seconds for abort, then 10 seconds for destroy |
 | Session and metadata cleanup | Up to 10 seconds per cleanup stage after confirmed process exit |
 | Task record retention | 200 terminal records, seven days |
+
+CLI 1.6.95 removes the cumulative intermediate-output abort. Large tool reads
+can finish with a concise result instead of failing before completion. Oversized
+returned text and combined continuations omit their middle and set `truncated`
+without changing task success or failure. These limits bound retained delegation
+results, not the backend's own output buffers. Timeout, cancellation, and cleanup
+remain enforced independently of output volume.
 
 A failed parent, `/abort`, deletion, or CLI shutdown closes the scope and stops
 managed children. Cancel remains idempotent. Cancellation during version probing
