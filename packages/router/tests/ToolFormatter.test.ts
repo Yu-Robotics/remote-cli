@@ -62,6 +62,26 @@ describe('ToolFormatter', () => {
   });
 
   describe('extractToolContext', () => {
+    it.each([
+      ['Bash', { description: 'Run project tests' }, 'Run project tests'],
+      ['Bash', {}, 'no parameters'],
+      ['Bash', { command: ['npm', 'test'] }, '["npm","test"]'],
+      ['Read', { path: '/tmp/example.ts' }, '/tmp/example.ts'],
+      ['Write', { file_path: '/tmp/example.ts' }, '/tmp/example.ts'],
+      ['Edit', { file_path: '/tmp/example.ts', old_string: ['old'], new_string: ['new'] }, 'old_string'],
+      ['Grep', { path: '/tmp/project' }, '/tmp/project'],
+      ['Glob', { pattern: '*.ts', path: ['src'] }, 'src'],
+      ['Task', { subagent_type: 'explore', description: ['Inspect files'] }, '["Inspect files"]'],
+      ['WebFetch', { url: 'https://example.com', prompt: ['Summarize'] }, '["Summarize"]'],
+      ['WebSearch', { query: null }, 'query'],
+      ['TodoWrite', { todos: { pending: 'Review' } }, 'Review'],
+      ['AskUserQuestion', { questions: [null] }, 'questions'],
+    ])('preserves available parameters for incomplete or nonstandard %s input', (name, input, expected) => {
+      const context = extractToolContext(name as string, input as Record<string, unknown>);
+      expect(context).toContain(expected);
+      expect(context).not.toContain('[object Object]');
+    });
+
     it('should extract Bash context', () => {
       const input = {
         command: 'npm test',
@@ -184,6 +204,14 @@ describe('ToolFormatter', () => {
   });
 
   describe('createToolUseElement', () => {
+    it.each([undefined, null, 'arguments pending'])('renders a tool card when input is %s', input => {
+      const elements = createToolUseElement({ name: 'Bash', id: 'pending-tool', input } as ToolUseInfo);
+      expect(elements[1].header.title.content).toContain('Bash');
+      expect(elements[1].elements[0].content).toBeTruthy();
+      expect(elements[1].elements[0].content).not.toContain('undefined');
+      if (typeof input === 'string') expect(elements[1].elements[0].content).toContain(input);
+    });
+
     it('keeps parameter cards for edits without source text and unrelated backend tools', () => {
       const edit = createToolUseElement({ name: 'Edit', id: 'edit', input: { file_path: '/tmp/app.ts' } });
       expect(renderedDiff(edit)).toBe('');

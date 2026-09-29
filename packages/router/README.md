@@ -18,6 +18,12 @@ The router server acts as a bridge between Feishu messaging and developer machin
 - **Task recovery** with compatible clients: resume output on a usable surviving card or create a new one, with an independent gap notice and plain-text handling of resumed fragments; failed card creation is not acknowledged as successful recovery
 - **Table-aware card splitting** and a single text fallback retry for a card rejected by Feishu's table limit
 
+Router 1.6.90 checks tool parameters before using specialized card formatting.
+Missing or incompatible fields fall back to a bounded parameter summary;
+missing input shows a no-parameters placeholder. Later tool events and task
+completion continue normally. Older CLIs remain compatible; backend execution
+and the wire protocol are unchanged.
+
 Supporting CLIs enforce delegated task completion locally: they suppress stale
 coordinator prose while results are missing from the active execution and keep the parent request busy
 until those results have reached the coordinator. Early returns trigger a

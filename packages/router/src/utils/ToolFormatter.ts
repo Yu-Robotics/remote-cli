@@ -38,10 +38,18 @@ export function getToolEmoji(toolName: string): string {
   return TOOL_EMOJIS[toolName] || '🔧';
 }
 
+/** Tool events may arrive before arguments or use a backend-specific schema. */
+function normalizeToolInput(input: unknown): Record<string, unknown> {
+  if (input === null || input === undefined) return {};
+  return typeof input === 'object' && !Array.isArray(input)
+    ? input as Record<string, unknown> : { input };
+}
+
 /**
  * Extract context from tool input based on tool type
  */
-export function extractToolContext(toolName: string, input: Record<string, unknown>): string {
+export function extractToolContext(toolName: string, rawInput: unknown): string {
+  const input = normalizeToolInput(rawInput);
   switch (toolName) {
     case 'Bash':
       return extractBashContext(input);
@@ -71,10 +79,12 @@ export function extractToolContext(toolName: string, input: Record<string, unkno
 }
 
 function extractBashContext(input: Record<string, unknown>): string {
-  const command = input.command as string;
-  const description = input.description as string;
+  const { command, description } = input;
+  if (typeof command !== 'string' || (description != null && typeof description !== 'string')) {
+    return formatGenericContext(input);
+  }
 
-  if (description && description.length > 0 && description.length < 100) {
+  if (typeof description === 'string' && description.length > 0 && description.length < 100) {
     return `**${description}**\n\`\`\`bash\n${truncate(command, 500)}\n\`\`\``;
   }
 
@@ -82,7 +92,8 @@ function extractBashContext(input: Record<string, unknown>): string {
 }
 
 function extractReadContext(input: Record<string, unknown>): string {
-  const filePath = input.file_path as string;
+  const filePath = input.file_path;
+  if (typeof filePath !== 'string') return formatGenericContext(input);
   const offset = input.offset as number | undefined;
   const limit = input.limit as number | undefined;
 
@@ -99,8 +110,8 @@ function extractReadContext(input: Record<string, unknown>): string {
 }
 
 function extractWriteContext(input: Record<string, unknown>): string {
-  const filePath = input.file_path as string;
-  const content = input.content as string;
+  const { file_path: filePath, content } = input;
+  if (typeof filePath !== 'string' || typeof content !== 'string') return formatGenericContext(input);
   const lines = content.split('\n').length;
   const chars = content.length;
 
@@ -108,13 +119,14 @@ function extractWriteContext(input: Record<string, unknown>): string {
 }
 
 function extractEditContext(input: Record<string, unknown>): string {
-  const filePath = input.file_path as string;
-  const oldString = input.old_string as string;
-  const newString = input.new_string as string;
+  const { file_path: filePath, old_string: oldString, new_string: newString } = input;
+  if (typeof filePath !== 'string'
+    || (oldString != null && typeof oldString !== 'string')
+    || (newString != null && typeof newString !== 'string')) return formatGenericContext(input);
 
   let context = `**File:** ${formatFilePath(filePath)}`;
 
-  if (oldString && newString) {
+  if (typeof oldString === 'string' && typeof newString === 'string' && oldString && newString) {
     const oldLines = oldString.split('\n').length;
     const newLines = newString.split('\n').length;
     context += `\n**Change:** ${oldLines} → ${newLines} lines`;
@@ -128,14 +140,14 @@ function looksLikeDiff(content: string): boolean {
 }
 
 function extractGrepContext(input: Record<string, unknown>): string {
-  const pattern = input.pattern as string;
-  const path = input.path as string | undefined;
+  const { pattern, path } = input;
+  if (typeof pattern !== 'string' || (path != null && typeof path !== 'string')) return formatGenericContext(input);
   const glob = input.glob as string | undefined;
   const type = input.type as string | undefined;
 
   let context = `**Pattern:** \`${truncate(pattern, 100)}\``;
 
-  if (path) {
+  if (typeof path === 'string' && path) {
     context += `\n**Path:** ${formatFilePath(path)}`;
   }
 
@@ -151,12 +163,12 @@ function extractGrepContext(input: Record<string, unknown>): string {
 }
 
 function extractGlobContext(input: Record<string, unknown>): string {
-  const pattern = input.pattern as string;
-  const path = input.path as string | undefined;
+  const { pattern, path } = input;
+  if (typeof pattern !== 'string' || (path != null && typeof path !== 'string')) return formatGenericContext(input);
 
   let context = `**Pattern:** \`${pattern}\``;
 
-  if (path) {
+  if (typeof path === 'string' && path) {
     context += `\n**Path:** ${formatFilePath(path)}`;
   }
 
@@ -164,17 +176,18 @@ function extractGlobContext(input: Record<string, unknown>): string {
 }
 
 function extractTaskContext(input: Record<string, unknown>): string {
-  const subagentType = input.subagent_type as string;
-  const description = input.description as string;
-  const prompt = input.prompt as string;
+  const { subagent_type: subagentType, description, prompt } = input;
+  if (typeof subagentType !== 'string'
+    || (description != null && typeof description !== 'string')
+    || (prompt != null && typeof prompt !== 'string')) return formatGenericContext(input);
 
   let context = `**Agent:** ${subagentType}`;
 
-  if (description) {
+  if (typeof description === 'string' && description) {
     context += `\n**Task:** ${truncate(description, 100)}`;
   }
 
-  if (prompt && prompt.length < 200) {
+  if (typeof prompt === 'string' && prompt && prompt.length < 200) {
     context += `\n**Prompt:** ${truncate(prompt, 150)}`;
   }
 
@@ -182,12 +195,12 @@ function extractTaskContext(input: Record<string, unknown>): string {
 }
 
 function extractWebFetchContext(input: Record<string, unknown>): string {
-  const url = input.url as string;
-  const prompt = input.prompt as string | undefined;
+  const { url, prompt } = input;
+  if (typeof url !== 'string' || (prompt != null && typeof prompt !== 'string')) return formatGenericContext(input);
 
   let context = `**URL:** ${url}`;
 
-  if (prompt && prompt.length < 150) {
+  if (typeof prompt === 'string' && prompt && prompt.length < 150) {
     context += `\n**Prompt:** ${truncate(prompt, 100)}`;
   }
 
@@ -195,15 +208,17 @@ function extractWebFetchContext(input: Record<string, unknown>): string {
 }
 
 function extractWebSearchContext(input: Record<string, unknown>): string {
-  const query = input.query as string;
+  const query = input.query;
+  if (typeof query !== 'string') return formatGenericContext(input);
 
   return `**Query:** ${truncate(query, 150)}`;
 }
 
 function extractTodoWriteContext(input: Record<string, unknown>): string {
-  const todos = input.todos as Array<{ content: string; status: string }> | undefined;
+  const todos = input.todos;
+  if (todos != null && !Array.isArray(todos)) return formatGenericContext(input);
 
-  if (!todos || todos.length === 0) {
+  if (!Array.isArray(todos) || todos.length === 0) {
     return '**Updating todo list**';
   }
 
@@ -211,13 +226,15 @@ function extractTodoWriteContext(input: Record<string, unknown>): string {
 }
 
 function extractAskUserQuestionContext(input: Record<string, unknown>): string {
-  const questions = input.questions as Array<{ question: string }> | undefined;
+  const questions = input.questions;
+  if (questions != null && !Array.isArray(questions)) return formatGenericContext(input);
 
-  if (!questions || questions.length === 0) {
+  if (!Array.isArray(questions) || questions.length === 0) {
     return '**Asking user question**';
   }
 
   if (questions.length === 1) {
+    if (typeof questions[0]?.question !== 'string') return formatGenericContext(input);
     return `**Question:** ${truncate(questions[0].question, 150)}`;
   }
 
@@ -232,7 +249,8 @@ function formatGenericContext(input: Record<string, unknown>): string {
 
   const summary = keys.slice(0, 3).map(key => {
     const value = input[key];
-    const valueStr = typeof value === 'string' ? truncate(value, 50) : JSON.stringify(value);
+    const valueStr = typeof value === 'string' ? truncate(value, 50)
+      : truncate(JSON.stringify(value) ?? String(value), 200);
     return `**${key}:** ${valueStr}`;
   }).join('\n');
 
@@ -330,7 +348,8 @@ export function createImageElement(imageKey: string): FeishuCardElement {
  * Create a Feishu Card 2.0 tool use element with collapsible panel
  */
 export function createToolUseElement(toolInfo: ToolUseInfo): FeishuCardElement[] {
-  const { name, input, id } = toolInfo;
+  const { name, id } = toolInfo;
+  const input = normalizeToolInput(toolInfo.input);
   const emoji = getToolEmoji(name);
   const context = extractToolContext(name, input);
 
