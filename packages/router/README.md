@@ -16,7 +16,13 @@ The router server acts as a bridge between Feishu messaging and developer machin
 - **WebSocket connections** from local clients
 - **Feishu long connection** for receiving and sending messages
 - **Task recovery** with compatible clients: resume output on a usable surviving card or create a new one, with an independent gap notice and plain-text handling of resumed fragments; failed card creation is not acknowledged as successful recovery
-- **Table-aware card splitting** and a single text fallback retry for a card rejected by Feishu's table limit
+- **Table-aware card splitting** and a single text fallback retry for a card rejected by Feishu's table limit or Markdown parser
+
+Router 1.6.91 extends the text fallback to confirmed Markdown parse errors
+(`11311`). It retries the affected card once with Markdown shown as literal code
+text, and retains that format for later updates and thread-button refreshes.
+Other cards keep their normal formatting. Older CLIs remain compatible;
+this fallback requires only a Router upgrade.
 
 Router 1.6.90 checks tool parameters before using specialized card formatting.
 Missing or incompatible fields fall back to a bounded parameter summary;

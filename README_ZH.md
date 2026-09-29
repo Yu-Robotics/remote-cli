@@ -688,6 +688,8 @@ Long streaming replies refresh only cards with changed content. Queued tasks com
 
 Card splitting also counts tables embedded in Markdown and nested components, with a conservative budget of three tables per card. Large Markdown blocks split at table boundaries; excess tables inside indivisible containers remain readable as code text. If Feishu still rejects a card with a table-limit error, the Router retries that card once as text and preserves text mode for later updates. Other cards retain their normal formatting. This applies to every backend and requires Router 1.6.53 or newer.
 
+Router 1.6.91 extends this fallback to confirmed Markdown parse errors (`11311`). It retries the affected card once with Markdown shown as literal code text, and retains that format for later updates and thread-button refreshes. Other cards keep their normal formatting. This requires only a Router upgrade and works with older CLIs.
+
 Claude Code streams text into response cards as it is generated. Completed content blocks do not repeat text that has already streamed, and tool cards continue to use complete tool calls.
 
 Router 1.6.90 checks tool parameters before using specialized card formatting. Missing or incompatible fields fall back to a bounded parameter summary; missing input shows a no-parameters placeholder. Later tool events and task completion continue normally. This display fix works with older CLIs and does not change backend execution or the wire protocol.
