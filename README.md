@@ -542,6 +542,8 @@ If worker shutdown cannot be confirmed, its workspace stays blocked for
 subsequent delegation-enabled work until the worker is stopped and the CLI
 restarts. Opted-out ordinary threads are not blocked by this reservation.
 If the initial task record cannot be written, the CLI refuses to start the worker.
+For Pi, an unconfirmed RPC exit also blocks a new Pi process from starting and
+is reported in timeout or abort errors.
 
 ### Multi-session (Threads)
 

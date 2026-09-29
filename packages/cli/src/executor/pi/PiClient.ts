@@ -28,6 +28,7 @@ export class PiClient implements PiTransport {
   private proc: ChildProcess | null = null;
   private startPromise: Promise<void> | null = null;
   private stopPromise: Promise<void> | null = null;
+  private unconfirmedStopProc: ChildProcess | null = null;
   private nextRequestId = 1;
   private pending = new Map<string, PendingRequest>();
   private handlers = new Set<(event: Record<string, any>) => void>();
@@ -58,6 +59,7 @@ export class PiClient implements PiTransport {
 
   async start(): Promise<void> {
     if (this.stopPromise) await this.stopPromise;
+    if (this.unconfirmedStopProc) throw new Error('Pi RPC process exit could not be confirmed');
     if (this.proc) return;
     if (this.startPromise) return this.startPromise;
     this.startPromise = this.startInternal();
@@ -94,12 +96,19 @@ export class PiClient implements PiTransport {
 
   async stop(): Promise<void> {
     if (this.stopPromise) return this.stopPromise;
+    if (this.unconfirmedStopProc) {
+      if (this.unconfirmedStopProc.exitCode === null && this.unconfirmedStopProc.signalCode === null) {
+        throw new Error('Pi RPC process exit could not be confirmed');
+      }
+      this.unconfirmedStopProc = null;
+    }
     const proc = this.proc;
     this.startPromise = null;
     this.stopping = true;
     this.proc = null;
     this.failAll(new Error('Pi RPC process stopped'));
     if (!proc) return;
+    this.unconfirmedStopProc = proc;
 
     try {
       proc.stdin?.end();
@@ -110,6 +119,7 @@ export class PiClient implements PiTransport {
     const stopping = new Promise<void>((resolve, reject) => {
       let settled = false;
       const finish = () => {
+        if (this.unconfirmedStopProc === proc) this.unconfirmedStopProc = null;
         if (settled) return;
         settled = true;
         clearTimeout(escalation);

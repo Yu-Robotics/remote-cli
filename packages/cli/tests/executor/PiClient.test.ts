@@ -1,8 +1,16 @@
 import { EventEmitter } from 'events';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { spawn } from 'child_process';
 import { buildPiRpcArgs, consumeJsonl, formatPiModelRef, parsePiModelRef } from '../../src/executor/pi/PiTypes';
 import { PiClient } from '../../src/executor/pi/PiClient';
+import { PiExecutor } from '../../src/executor/PiExecutor';
+import { DelegationManager } from '../../src/delegation/DelegationManager';
+import { BackendRegistry } from '../../src/delegation/BackendRegistry';
+import { DelegationStore } from '../../src/delegation/DelegationStore';
+import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 
 vi.mock('child_process', () => ({
   spawn: vi.fn(),
@@ -142,6 +150,76 @@ describe('PiClient process lifecycle', () => {
     await expect(firstStop).rejects.toThrow('exit could not be confirmed');
     await expect(secondStop).rejects.toThrow('exit could not be confirmed');
     expect(proc.kill).toHaveBeenCalledWith('SIGKILL');
+  });
+
+  it('keeps an unconfirmed exit failed across later stop calls until exit is observed', async () => {
+    const proc = Object.assign(new EventEmitter(), {
+      stdin: { end: vi.fn(), write: vi.fn(), destroyed: false, writable: true, on: vi.fn() },
+      stdout: new EventEmitter(), stderr: new EventEmitter(), exitCode: null as number | null, signalCode: null,
+      kill: vi.fn(() => true),
+    });
+    vi.mocked(spawn).mockReturnValue(proc as any);
+    const client = new PiClient({ command: 'pi', killEscalationMs: 10 });
+    await client.start();
+    await expect(client.stop()).rejects.toThrow('exit could not be confirmed');
+    await expect(client.stop()).rejects.toThrow('exit could not be confirmed');
+    await expect(client.start()).rejects.toThrow('exit could not be confirmed');
+    expect(spawn).toHaveBeenCalledTimes(1);
+    proc.exitCode = 0;
+    proc.emit('exit', 0, null);
+    await expect(client.stop()).resolves.toBeUndefined();
+    await expect(client.start()).resolves.toBeUndefined();
+    expect(spawn).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps a delegated Pi workspace blocked after abort and repeated cleanup fail', async () => {
+    const project = fs.mkdtempSync(path.join(os.homedir(), '.delegated-pi-stop-'));
+    const guard = new DirectoryGuard([project]);
+    const proc = Object.assign(new EventEmitter(), {
+      stdin: {
+        end: vi.fn(), destroyed: false, writable: true, on: vi.fn(),
+        write: vi.fn((line: string) => {
+          const command = JSON.parse(line);
+          if (command.type === 'abort') throw new Error('Abort RPC failed');
+          if (command.type !== 'prompt') {
+            queueMicrotask(() => proc.stdout.emit('data', Buffer.from(JSON.stringify({
+              type: 'response', id: command.id, command: command.type, success: true,
+              data: command.type === 'get_state' ? { sessionId: 'pi-worker' } : undefined,
+            }) + '\n')));
+          }
+          return true;
+        }),
+      },
+      stdout: new EventEmitter(), stderr: new EventEmitter(), exitCode: null as number | null, signalCode: null,
+      kill: vi.fn(() => true),
+    });
+    vi.mocked(spawn).mockReturnValue(proc as any);
+    const factory = vi.fn((_guard, _config, cwd, threadId) => new PiExecutor(guard, {
+      initialWorkingDirectory: cwd, threadId, sessionBaseDir: path.join(project, 'sessions'),
+      clientFactory: launch => new PiClient({ ...launch, killEscalationMs: 10 }),
+    }));
+    const manager = new DelegationManager(guard, factory as any, new BackendRegistry(async () => '1.0'),
+      new DelegationStore(path.join(project, 'records')), 1000, 2000);
+    try {
+      const scope = manager.begin({
+        thread: { id: 'owner', name: 'default', workingDirectory: project, sessionId: null,
+          createdAt: 0, lastActiveAt: 0 },
+        cwd: project, messageId: 'message-1', backend: 'claude', config: { type: 'auto' },
+        onToolUse: vi.fn(), onToolResult: vi.fn(), onNotice: vi.fn(), onApproval: vi.fn(() => true),
+        onApprovalResolved: vi.fn(),
+      });
+      const started = await scope.invoke('remote_cli_delegate', { backend: 'pi', objective: 'Wait' }, 'start') as { taskId: string };
+      await vi.waitFor(() => expect(proc.stdin.write).toHaveBeenCalledWith(expect.stringContaining('"type":"prompt"')));
+      const result = await scope.invoke('remote_cli_cancel', { taskId: started.taskId }, 'cancel');
+      expect(result).toMatchObject({ state: 'interrupted' });
+      expect(manager.blocksWorkspace(project, 'other')).toBe(true);
+      expect(proc.exitCode).toBeNull();
+    } finally {
+      await manager.destroy();
+      proc.exitCode = 0;
+      proc.emit('exit', 0, null);
+      fs.rmSync(project, { recursive: true, force: true });
+    }
   });
 
   it('does not treat a failed kill signal as a confirmed process exit', async () => {

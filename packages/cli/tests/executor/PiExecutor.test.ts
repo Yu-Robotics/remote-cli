@@ -530,6 +530,52 @@ describe('PiExecutor', () => {
     expect(transport.request).toHaveBeenCalledWith({ type: 'abort' });
   });
 
+  it('completes a timed-out turn when abort and process cleanup both fail', async () => {
+    await executor.listModels();
+    transport.request.mockImplementation(async (command: Record<string, unknown>) => {
+      if (command.type === 'prompt') {
+        transport.emit({ type: 'agent_start' });
+        return { type: 'response', command: 'prompt', success: true };
+      }
+      if (command.type === 'abort') throw new Error('Abort RPC failed');
+      return { type: 'response', command: String(command.type), success: true };
+    });
+    const stop = vi.spyOn(transport, 'stop').mockRejectedValue(new Error('Pi RPC process exit could not be confirmed'));
+    try {
+      const result = executor.execute('long turn', { timeout: 10 });
+      await expect(Promise.race([
+        result,
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Timed-out turn did not settle')), 250)),
+      ])).resolves.toMatchObject({ success: false, error: expect.stringContaining('timed out') });
+    } finally {
+      stop.mockRestore();
+    }
+  });
+
+  it('settles an explicit abort even when process cleanup cannot confirm exit', async () => {
+    await executor.listModels();
+    transport.request.mockImplementation(async (command: Record<string, unknown>) => {
+      if (command.type === 'prompt') {
+        transport.emit({ type: 'agent_start' });
+        return { type: 'response', command: 'prompt', success: true };
+      }
+      if (command.type === 'abort') throw new Error('Abort RPC failed');
+      return { type: 'response', command: String(command.type), success: true };
+    });
+    const stop = vi.spyOn(transport, 'stop').mockRejectedValue(new Error('Pi RPC process exit could not be confirmed'));
+    try {
+      const running = executor.execute('long turn');
+      await vi.waitFor(() => expect(transport.request).toHaveBeenCalledWith(expect.objectContaining({ type: 'prompt' })));
+      await expect(executor.abort()).rejects.toThrow('exit could not be confirmed');
+      await expect(Promise.race([
+        running,
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Aborted turn did not settle')), 250)),
+      ])).resolves.toMatchObject({ success: false, error: expect.stringContaining('exit could not be confirmed') });
+    } finally {
+      stop.mockRestore();
+    }
+  });
+
   it('starts a fresh Pi session after a working-directory change', async () => {
     const other = path.join(home, 'other');
     await fs.mkdir(other);
