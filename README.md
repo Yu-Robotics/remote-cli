@@ -444,7 +444,7 @@ Once connected, use these commands in Feishu:
 | `/model [name]` | List models for the active backend or set this thread's model |
 | `/effort [auto|level]` | Show or set per-thread reasoning effort for Codex/AGY/OpenCode/Kimi/ZCode/Pi |
 | `/sandbox [on/off/read-only/default]` | Show or configure the current Codex or Claude Code thread sandbox; use `allow/remove <directory>` and `network on/off` for access settings |
-| `/cd <dir>` | Change working directory for this thread |
+| `/cd <dir>` | Change directory; a different directory starts fresh conversations for this thread |
 | `/backend` | List backends and show the current thread's effective backend |
 | `/bind <码>` | Bind a new device |
 | `/unbind` | Unbind all devices |
@@ -739,6 +739,8 @@ Create one thread per project, incident, or goal instead of mixing unrelated wor
 /thread new docs
 /cd ~/workspace/docs
 ```
+
+With CLI 1.6.93 or newer, `/cd` to a different normalized directory clears this thread's saved conversation bindings for **all backends**, including inactive ones. The next message starts a fresh conversation. Returning to the previous directory does not restore its old conversation. `/cd` to the same directory preserves context, and switching backends without changing directory still resumes each backend's conversation. Thread identity, model, effort, sandbox grants, and delegation settings are retained; native conversation history is not deleted. Use separate threads for separate plans, even within the same directory. This behavior is enforced by the CLI and requires no Router protocol changes.
 
 Replying to a completed Feishu card routes the message back to that card's thread. Thread buttons show the last component of each thread's working directory alongside its backend, making parallel workspaces easier to distinguish. Automatically generated names such as `thread-2` are shown as their sequence number, such as `2`, while custom names remain unchanged. When a long response spans multiple cards, every continuation card repeats the thread and working-directory header. `/thread list` shows the current state of every thread, while `/status` gives a compact overview of active backends, models, working directories, and queues.
 
@@ -1056,8 +1058,9 @@ remote-cli config set executor.codex.model gpt-5.2-codex
 
 The Codex backend runs one persistent `codex app-server` process per active
 remote-cli thread. Conversation continuity is preserved across messages,
-working-directory changes, backend switches, and service restarts by resuming
-the persisted Codex thread id. `/model` queries app-server's model catalog,
+backend switches, and service restarts by resuming the persisted Codex thread id
+while the working directory stays the same. Changing directory starts a fresh
+conversation. `/model` queries app-server's model catalog,
 `/compact` uses native thread compaction, `/abort` interrupts the active turn,
 and image messages are sent as Codex image inputs.
 Generated Codex images are returned to Feishu when both the CLI and Router support image forwarding.

@@ -351,7 +351,7 @@ AgyExecutor uses a **persistent stream-json process** — a single long-lived ag
 
 - **In** (stdin, one NDJSON line per turn): `{"event":"user","message":{"content":"..."}}` — text blocks only; image attachments are dropped with a warning.
 - **Out** (stdout NDJSON): `init` (carries `conversation_id`), `step_update` (`agent_response` text deltas → `onStream`; `tool` steps with `tool_info` → `onToolUse`/`onToolResult`; `user_input`/`system_message`/`checkpoint` ignored), `result` (terminal; `status` SUCCESS/ERROR/INTERRUPTED/CANCELED → command completion).
-- **Resume**: the `conversation_id` is persisted per thread (`~/.remote-cli/agy-sessions/<threadId>.json`) and passed via `--conversation <id>` when respawning (process crash, `setWorkingDirectory`, abort).
+- **Resume**: the `conversation_id` is persisted per thread (`~/.remote-cli/agy-sessions/<threadId>.json`) and passed via `--conversation <id>` when respawning after a process crash or abort. Changing directory clears the conversation ID and any pending compact summary.
 - **Per-thread data separation, not read isolation**: agy normally stores all conversations under `$HOME/.gemini/antigravity-cli`. The executor redirects its default lookup with `HOME=~/.remote-cli/agy-homes/<threadId>`; auth/config files and program directories are linked from the real `~/.gemini`, while `brain/` and `conversations/` are per-thread. Symlinks and the user's OS permissions still permit cross-thread reads, and AGY tools inherit the changed `HOME`. Existing conversations require a one-time manual migration before upgrading; startup never copies conversation data and refuses to resume a saved ID whose database is missing. If agy replaces a credential symlink with a local file, both copies are left untouched; the master is never overwritten. Setup failure stops AGY rather than using the shared HOME. `/thread delete` removes AGY data even when its executor is inactive.
 - **Abort**: the protocol has no cancel request (`control_request` is unsupported), so abort kills the process; the next command resumes the conversation.
 - AGY tool names map to Claude-style names for the router's tool cards (`run_command`→Bash, `view_file`→Read, etc.); unknown tools pass through unchanged.
@@ -413,7 +413,7 @@ packages/cli/src/executor/
   CodexAppServerExecutor.ts # persistent app-server executor (implements IExecutor)
 ```
 
-CodexAppServerExecutor keeps one app-server process per active thread. It uses app-server requests for turns, model catalog lookup, reasoning effort updates, compaction, and turn interruption. The persisted Codex thread id is resumed after process recreation, working-directory changes, backend switches, and service restarts.
+CodexAppServerExecutor keeps one app-server process per active thread. It uses app-server requests for turns, model catalog lookup, reasoning effort updates, compaction, and turn interruption. The persisted Codex thread id is resumed after process recreation, backend switches, and service restarts while the working directory stays the same. Changing directory clears the binding and starts a fresh conversation on the next command.
 
 - `/model` stores the selection under `thread.models.codex`; bare `/model` queries the app-server model catalog. `/effort` stores the per-thread override under `thread.efforts.codex`; `auto` clears it and restores the selected model's default reasoning effort.
 - Startup verifies that the installed Codex CLI exposes `codex app-server --help` and prints an upgrade command when it does not.
@@ -503,7 +503,8 @@ packages/cli/src/executor/
 Each backend keeps its own per-thread session pointer (claude session file, `~/.remote-cli/agy-sessions/<threadId>.json`, `~/.remote-cli/codex-sessions/<threadId>.json`, `~/.remote-cli/opencode-sessions/<threadId>.json`, `~/.remote-cli/kimi-sessions/<threadId>.json`, `~/.remote-cli/zcode-sessions/<threadId>.json`, `~/.remote-cli/pi-sessions/<threadId>.json`). `ThreadExecutorPool.destroyThread(threadId, { deleteData })` controls whether that pointer is wiped:
 
 - `/thread delete` → `deleteData: true` (default) — session data deleted.
-- `/backend` switch (`switchBackend` → `destroyAll({ deleteData: false })`) — executor processes are torn down but session files are PRESERVED, so switching back to a backend resumes each thread's previous conversation on it.
+- `/backend` switch (`switchBackend` → `destroyAll({ deleteData: false })`) — executor processes are torn down but session files are PRESERVED, so switching back to a backend resumes each thread's previous conversation on it, provided the working directory has not changed.
+- `/cd` to a different normalized directory goes through `ThreadExecutorPool.setWorkingDirectory`: validate the destination, remove all seven backend pointers for the thread, reset the active executor's context, and persist the new directory. Returning to an earlier directory does not restore its previous conversation. The same directory is a no-op. Thread preferences and native transcript files are preserved.
 
 Resume-failure behavior with a stale id (verified live): agy warns `conversation "<id>" not found` and transparently starts a fresh conversation; codex exits with `no rollout found for thread id` (user recovers with `/clear`).
 

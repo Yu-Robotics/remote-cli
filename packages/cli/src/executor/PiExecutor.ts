@@ -346,12 +346,17 @@ export class PiExecutor implements IExecutor {
     return this.currentWorkingDirectory;
   }
 
+  isBusy(): boolean {
+    return this.activeTurn !== null;
+  }
+
   async setWorkingDirectory(targetPath: string): Promise<void> {
     const resolved = this.directoryGuard.resolveWorkingDirectory(
       targetPath,
       this.currentWorkingDirectory
     );
     if (resolved === this.currentWorkingDirectory) return;
+    if (this.isBusy()) throw new Error('Cannot change working directory while Pi is busy');
 
     this.currentWorkingDirectory = resolved;
     // A Pi session owns the cwd recorded in its session header. Reopening the
@@ -928,6 +933,10 @@ export class PiExecutor implements IExecutor {
   private loadPointer(): void {
     try {
       const stored = JSON.parse(fs.readFileSync(this.sessionFilePath, 'utf8')) as SessionPointer;
+      if (stored.cwd && stored.cwd !== this.currentWorkingDirectory) {
+        this.clearPointer();
+        return;
+      }
       if (stored.id) this.sessionId = stored.id;
       if (stored.sessionFile) this.sessionFile = stored.sessionFile;
     } catch {

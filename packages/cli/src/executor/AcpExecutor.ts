@@ -182,9 +182,14 @@ export abstract class AcpExecutor implements IExecutor {
     this.delegationConnection = connection;
   }
 
+  isBusy(): boolean {
+    return this.isProcessing || this.commandQueue.length > 0;
+  }
+
   async setWorkingDirectory(targetPath: string): Promise<void> {
-    const resolved = this.directoryGuard.resolveWorkingDirectory(targetPath);
+    const resolved = this.directoryGuard.resolveWorkingDirectory(targetPath, this.currentWorkingDirectory);
     if (resolved === this.currentWorkingDirectory) return;
+    if (this.isBusy()) throw new Error(`Cannot change working directory while ${this.backendLabel} is busy`);
     this.currentWorkingDirectory = resolved;
     this.destroyClient();
     this.clearSessionPointer();

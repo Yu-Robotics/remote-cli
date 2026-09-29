@@ -2,6 +2,7 @@ import { ThreadManager } from './ThreadManager';
 import { ThreadSummary } from './types';
 import type { Thread } from './types';
 import path from 'path';
+import { promises as fs } from 'fs';
 import type { IExecutor } from '../executor/IExecutor';
 import type { DirectoryGuard } from '../security/DirectoryGuard';
 import type { BackendKey, ExecutorConfig } from '../types/config';
@@ -92,6 +93,25 @@ export class ThreadExecutorPool {
       this.executors.set(threadId, executor);
     }
     return executor;
+  }
+
+  /** Changing projects invalidates this thread's sessions on every backend. */
+  async setWorkingDirectory(threadId: string, targetPath: string): Promise<{ cwd: string; changed: boolean }> {
+    const executor = this.getExecutor(threadId);
+    const previous = executor.getCurrentWorkingDirectory();
+    const cwd = this.directoryGuard.resolveWorkingDirectory(targetPath, previous);
+    if (cwd === previous) return { cwd, changed: false };
+    const destination = await fs.stat(cwd).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') throw new Error(`Directory does not exist: ${cwd}`);
+      throw error;
+    });
+    if (!destination.isDirectory()) throw new Error(`Not a directory: ${cwd}`);
+    if (executor.isBusy?.()) throw new Error('Cannot change working directory while this thread is busy');
+
+    await this.threadManager.clearBackendSessionPointers(threadId);
+    await executor.setWorkingDirectory(cwd);
+    await this.threadManager.updateThread(threadId, { workingDirectory: cwd, sessionId: null });
+    return { cwd, changed: true };
   }
 
   /** Return the backend actually used by a thread. */

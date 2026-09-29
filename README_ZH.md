@@ -441,7 +441,7 @@ remote-cli stop
 | `/model [name]` | 列出当前 backend 的模型，或设置当前线程的模型 |
 | `/effort [auto|level]` | 查看或设置 Codex/AGY/OpenCode/Kimi/ZCode/Pi 的线程思考等级 |
 | `/sandbox [on/off/read-only/default]` | 查看或配置当前 Codex 或 Claude Code 线程的沙箱；用 `allow/remove <目录>` 和 `network on/off` 调整访问设置 |
-| `/cd <dir>` | 切换当前线程的工作目录 |
+| `/cd <dir>` | Change directory; a different directory starts fresh conversations for this thread |
 | `/backend` | 列出后端并显示当前线程实际使用的后端 |
 | `/bind <码>` | 绑定新设备 |
 | `/unbind` | 解绑所有设备 |
@@ -681,6 +681,8 @@ remote-cli 自身不处理的斜杠命令会转发给当前 AI 后端，各后�
 /thread new docs
 /cd ~/workspace/docs
 ```
+
+With CLI 1.6.93 or newer, `/cd` to a different normalized directory clears this thread's saved conversation bindings for **all backends**, including inactive ones. The next message starts a fresh conversation. Returning to the previous directory does not restore its old conversation. `/cd` to the same directory preserves context, and switching backends without changing directory still resumes each backend's conversation. Thread identity, model, effort, sandbox grants, and delegation settings are retained; native conversation history is not deleted. Use separate threads for separate plans, even within the same directory. This behavior is enforced by the CLI and requires no Router protocol changes.
 
 直接回复某张已经完成的飞书卡片，消息会继续路由到该卡片所属的 thread。Thread 按钮会同时显示各 thread 工作目录的最后一级名称和所用 backend，便于区分并行 workspace。自动生成的 `thread-2` 等名称会在按钮上只显示序号，例如 `2`，自定义名称保持不变。长回复被拆分成多张卡片时，每张续卡都会重复显示 thread 和工作目录头部。`/thread list` 可以查看所有 thread 的状态，`/status` 可以快速查看当前 backend、模型、工作目录和队列。
 
@@ -996,11 +998,13 @@ remote-cli config set executor.type codex
 remote-cli config set executor.codex.model gpt-5.2-codex
 ```
 
-Codex 后端为每个活跃的 remote-cli thread 运行一个持久化的
-`codex app-server` 进程。通过恢复已持久化的 Codex thread id，在消息之间、
-工作目录变更、后端切换和服务重启后保持会话连续性。`/model` 查询 app-server
-模型目录，`/compact` 使用原生 thread 压缩，`/abort` 中断当前 turn，图片消息也会
-作为 Codex 图片输入发送。
+The Codex backend runs one persistent `codex app-server` process per active
+remote-cli thread. Conversation continuity is preserved across messages,
+backend switches, and service restarts by resuming the persisted Codex thread id
+while the working directory stays the same. Changing directory starts a fresh
+conversation. `/model` queries app-server's model catalog,
+`/compact` uses native thread compaction, `/abort` interrupts the active turn,
+and image messages are sent as Codex image inputs.
 
 Codex app-server 是唯一支持的 Codex transport。启动时会自动迁移旧的 `codex exec` 配置。
 启动时还会通过 `codex app-server --help` 检查已安装 Codex CLI 的能力；如果版本过旧，会显示升级命令。

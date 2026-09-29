@@ -718,7 +718,7 @@ describe('AgyExecutor', () => {
     expect(spawnedProcesses.length).toBe(procsBefore);
   });
 
-  it('setWorkingDirectory to a new directory kills the process; next execute respawns there and resumes the conversation', async () => {
+  it('starts a fresh conversation after changing directory and drops a pending compact summary', async () => {
     const p = executor.execute('hi');
     await waitForSpawn();
     emitInit('conv-keep');
@@ -726,19 +726,22 @@ describe('AgyExecutor', () => {
     await p;
 
     const oldProc = proc;
+    (executor as any).pendingContextSeed = 'Previous project summary';
+    const other = path.join(executor.getCurrentWorkingDirectory(), 'work');
     await executor.setWorkingDirectory('./work');
     expect(oldProc.kill).toHaveBeenCalled();
+    expect(executor.getSessionId()).toBeNull();
+    expect((executor as any).pendingContextSeed).toBeNull();
 
     const p2 = executor.execute('after move');
     await waitForSpawn();
     expect(spawnedProcesses.length).toBe(2);
     const [_, args, opts] = mockSpawn.mock.calls[1];
-    expect(opts.cwd).toBe(directoryGuard.resolveWorkingDirectory('./work'));
-    expect(args).toContain('--conversation');
-    expect(args[args.indexOf('--conversation') + 1]).toBe('conv-keep');
+    expect(opts.cwd).toBe(other);
+    expect(args).not.toContain('--conversation');
 
-    emitInit('conv-keep');
-    emitResult({ conversation_id: 'conv-keep' });
+    emitInit('conv-new');
+    emitResult({ conversation_id: 'conv-new' });
     await p2;
   });
 

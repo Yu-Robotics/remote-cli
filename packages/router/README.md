@@ -122,6 +122,8 @@ Clients automatically install a newer Router's exact published npm version when 
 
 The Feishu command reference includes the cross-backend `/status`, `/context`, and `/skills` commands, the `/clear` and `/new` fresh-conversation aliases, plus per-thread queue controls. See the root [README](../../README.md) for the complete command and backend behavior reference.
 
+CLI 1.6.93 makes `/cd` to a different directory start fresh conversations for all backends in that thread, including inactive ones. Returning to the old directory does not restore its old conversations. Same-directory `/cd` and backend-only switches preserve context. Thread settings and native history files remain intact. The CLI enforces this behavior without a protocol change; upgrading only the Router does not change an older CLI's directory behavior.
+
 With CLI 1.6.84 or newer, `/status` also shows `Delegation: on/off (current thread)`.
 The CLI reads this saved setting without initializing delegation or starting workers.
 Older CLIs keep their existing status output.

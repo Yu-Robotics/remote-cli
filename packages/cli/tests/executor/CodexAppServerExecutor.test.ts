@@ -4,6 +4,8 @@ import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CodexAppServerExecutor, CodexAppServerTransport } from '../../src/executor/CodexAppServerExecutor';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
+import { ThreadManager } from '../../src/thread/ThreadManager';
+import { ThreadExecutorPool } from '../../src/thread/ThreadExecutorPool';
 
 class FakeTransport implements CodexAppServerTransport {
   running = false;
@@ -74,6 +76,40 @@ describe('CodexAppServerExecutor', () => {
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
     await fs.rm(tempHome, { recursive: true, force: true });
+  });
+
+  it('preserves all backend bindings when a directory change reaches an internally busy executor', async () => {
+    await executor.destroy();
+    const manager = await ThreadManager.initialize(tempHome);
+    const threadId = manager.getDefaultThread().id;
+    await manager.updateThread(threadId, { workingDirectory: projectDir });
+    const guard = new DirectoryGuard([tempHome]);
+    executor = new CodexAppServerExecutor(guard, {
+      threadId, initialWorkingDirectory: projectDir, clientFactory: () => transport,
+    });
+    const pool = new ThreadExecutorPool(manager, guard, { type: 'codex' }, () => executor);
+    const other = path.join(tempHome, 'other');
+    await fs.mkdir(other);
+    const pointers: string[] = [];
+    for (const backend of ['claude', 'agy', 'opencode', 'kimi', 'zcode', 'pi']) {
+      const file = path.join(tempHome, '.remote-cli', `${backend}-sessions`, `${threadId}.json`);
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, JSON.stringify({ id: `old-${backend}`, cwd: projectDir }));
+      pointers.push(file);
+    }
+    const running = executor.execute('work');
+    await vi.waitFor(() => expect(transport.requests.some(request => request.method === 'turn/start')).toBe(true));
+    pointers.push(path.join(tempHome, '.remote-cli', 'codex-sessions', `${threadId}.json`));
+    const before = await Promise.all(pointers.map(file => fs.readFile(file, 'utf8')));
+
+    expect(pool.isThreadBusy(threadId)).toBe(false);
+    await expect(pool.setWorkingDirectory(threadId, other)).rejects.toThrow('busy');
+    expect(await Promise.all(pointers.map(file => fs.readFile(file, 'utf8')))).toEqual(before);
+    expect(manager.getThread(threadId)?.workingDirectory).toBe(projectDir);
+    expect(executor.getCurrentWorkingDirectory()).toBe(projectDir);
+
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await expect(running).resolves.toMatchObject({ success: true });
   });
 
   it('answers card approvals by opaque request ID, preserves directory scope, and expires outstanding cards', async () => {
@@ -207,16 +243,19 @@ describe('CodexAppServerExecutor', () => {
     const changed = path.join(tempHome, 'new-project');
     await fs.mkdir(changed);
     await executor.setWorkingDirectory(changed);
+    transport.nextThreadId = 'codex-thread-2';
     const next = executor.execute('continue');
     await vi.waitFor(() => expect(transport.requests.some(request => request.method === 'turn/start')).toBe(true));
-    const resume = transport.requests.find(request => request.method === 'thread/resume')!.params;
+    const started = transport.requests.find(request => request.method === 'thread/start')!.params;
     const turn = transport.requests.find(request => request.method === 'turn/start')!.params;
-    expect(resume).toMatchObject({ threadId: 'codex-thread-1', sandbox: 'workspace-write', cwd: changed });
+    expect(started).toMatchObject({ sandbox: 'workspace-write', cwd: changed });
+    expect(transport.requests.some(request => request.method === 'thread/resume')).toBe(false);
+    expect(turn.threadId).toBe('codex-thread-2');
     expect(turn.sandboxPolicy.networkAccess).toBe(false);
     expect(turn.sandboxPolicy.writableRoots).toContain(changed);
     expect(turn.sandboxPolicy.writableRoots).not.toContain(projectDir);
     expect(turn.sandboxPolicy.writableRoots).not.toContain(extra);
-    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-2', turn: { id: 'turn-1', status: 'completed' } } });
     await next;
     executor.resetContext();
     expect(executor.getSandboxStatus()).toContain('workspace-write');

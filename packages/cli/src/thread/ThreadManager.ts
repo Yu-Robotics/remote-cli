@@ -1,4 +1,4 @@
-import { promises as fs } from 'fs';
+import { constants, promises as fs } from 'fs';
 import path from 'path';
 import os from 'os';
 import { randomUUID } from 'crypto';
@@ -214,6 +214,33 @@ export class ThreadManager {
    */
   getSessionFilePath(threadId: string): string {
     return path.join(this.sessionsDir, `${threadId}.json`);
+  }
+
+  /** Forget every backend binding without deleting transcripts or thread settings. */
+  async clearBackendSessionPointers(threadId: string): Promise<void> {
+    if (!this.store.threads[threadId]) throw new Error(`Thread not found: ${threadId}`);
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(threadId)) {
+      throw new Error('Invalid thread ID for session cleanup');
+    }
+    const roots = new Set([path.dirname(this.storePath), path.join(os.homedir(), '.remote-cli')]);
+    const namespaces = ['claude', 'codex', 'agy', 'opencode', 'kimi', 'zcode', 'pi'];
+    const pointers: string[] = [];
+    for (const root of roots) {
+      for (const backend of namespaces) {
+        const pointer = path.join(root, `${backend}-sessions`, `${threadId}.json`);
+        try {
+          const stat = await fs.lstat(pointer);
+          if (!stat.isFile() && !stat.isSymbolicLink()) throw new Error(`Session binding is not a file: ${pointer}`);
+          await fs.access(path.dirname(pointer), constants.W_OK | constants.X_OK);
+          pointers.push(pointer);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
+      }
+    }
+    // Validate every location before deleting any binding; predictable failures
+    // such as an invalid pointer or unwritable directory leave all sessions intact.
+    for (const pointer of pointers) await fs.rm(pointer, { force: true });
   }
 
   /**

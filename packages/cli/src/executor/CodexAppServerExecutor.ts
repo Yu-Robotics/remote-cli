@@ -294,17 +294,21 @@ export class CodexAppServerExecutor implements IExecutor {
     return this.currentWorkingDirectory;
   }
 
+  isBusy(): boolean {
+    return this.activeTurn !== null || this.compactWaiter !== null;
+  }
+
   async setWorkingDirectory(targetPath: string): Promise<void> {
-    this.currentWorkingDirectory = this.directoryGuard.resolveWorkingDirectory(
+    const resolved = this.directoryGuard.resolveWorkingDirectory(
       targetPath,
       this.currentWorkingDirectory
     );
-    this.client.setWorkingDirectory(this.currentWorkingDirectory);
-    if (this.sandbox.isRestricted()) {
-      // Reapply both thread defaults and the turn policy to the new workspace.
-      await this.client.stop();
-      this.threadReady = false;
-    }
+    if (resolved === this.currentWorkingDirectory) return;
+    if (this.isBusy()) throw new Error('Cannot change working directory while Codex is busy');
+    await this.client.stop();
+    this.resetContext();
+    this.currentWorkingDirectory = resolved;
+    this.client.setWorkingDirectory(resolved);
   }
 
   getSandboxStatus(): string {

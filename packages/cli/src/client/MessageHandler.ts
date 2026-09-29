@@ -421,7 +421,7 @@ export class MessageHandler {
       this.trackTask(messageId, resolvedThreadId, content || '');
       // Validate and set working directory if provided
       if (workingDirectory) {
-        if (!this.directoryGuard.isSafePath(workingDirectory)) {
+        if (!this.directoryGuard.isSafePath(workingDirectory, executor.getCurrentWorkingDirectory())) {
           this.sendResponse(messageId, resolvedThreadId, {
             success: false,
             error: `Directory not in whitelist: ${workingDirectory}\n\nAllowed directories:\n${this.directoryGuard
@@ -431,7 +431,7 @@ export class MessageHandler {
           });
           return;
         }
-        await executor.setWorkingDirectory(workingDirectory);
+        await this.threadPool.setWorkingDirectory(resolvedThreadId, workingDirectory);
       }
 
       // Update thread activity timestamp
@@ -808,13 +808,10 @@ You can also use natural language commands to control Claude Code CLI.`,
       }
       const targetDir = parts.slice(1).join(' ');
       try {
-        await executor.setWorkingDirectory(targetDir);
-        const newCwd = executor.getCurrentWorkingDirectory();
-        // Persist the thread's working directory (restored on next startup via ThreadExecutorPool)
-        await this.threadManager.updateThread(threadId, { workingDirectory: newCwd });
+        const { cwd: newCwd, changed } = await this.threadPool.setWorkingDirectory(threadId, targetDir);
         this.sendResponse(messageId, threadId, {
           success: true,
-          output: `✅ Changed working directory to: ${newCwd}`,
+          output: `✅ Changed working directory to: ${newCwd}${changed ? '\nConversation context cleared for all backends in this thread.' : ''}`,
         });
       } catch (error) {
         this.sendResponse(messageId, threadId, {
