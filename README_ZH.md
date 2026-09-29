@@ -227,6 +227,7 @@ remote-cli-router config
    | 获取与发送单聊、群组消息 | 获取和发送单聊、群组消息 | `im:message` |
    | 读取用户发给机器人的单聊消息 | 读取用户发给机器人的单聊消息 | `im:message.p2p_msg:readonly` |
    | 以应用的身份发消息 | 以应用的身份发送消息 | `im:message:send_as_bot` |
+   | Get and upload image or file resources | Upload images for response cards | `im:resource` |
 5. 在**事件与回调**部分开启**长连接**
 6. 订阅事件：`im.message.receive_v1` ([接收消息 v2.0](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/events/receive))
 7. 开启消息卡片回调：`card.action.trigger`（用于处理卡片上的交互按钮）
@@ -543,6 +544,14 @@ Codex watches native command completion events and sub-agent terminal states. Co
 Codex App Server 生成的图片也会转发回飞书。Codex 通过 app-server 协议返回生成图片，CLI 将图片发送给 Router，Router 上传到飞书，并在原有的 Card 2.0 响应中显示。该功能需要 CLI 和 Router 都升级到支持图片转发的版本。只升级 Router 是兼容的，但旧 CLI 不会生成或发送图片事件；只升级 CLI 也不会破坏兼容性，但旧 Router 会忽略可选的图片流消息，仍然显示文本响应。
 
 所有 backend 也可以发送任务期间生成的本地图片，只要工具结果或最终回复中包含图片路径或 Markdown 图片链接，例如 `chart.png` 或 `![chart](./chart.png)`。文件必须位于允许的工作目录内，且不超过 2 MiB。CLI 会读取文件并复用同一条图片流，Router 上传到飞书并将其显示在当前 Card 2.0 回复卡片中。这个路径回退机制适用于图表和截图，不要求 backend 发出原生图片事件。
+
+Image uploads require the bot application's `im:resource` permission; publish
+the updated Feishu application permissions before retrying a denied upload.
+Router 1.6.85 and newer display local and URL-based Markdown image references
+as captions, while uploaded images use separate card image components. This
+prevents file paths from being interpreted as Feishu image keys during streaming
+or final rendering. Code examples and inline references to Feishu `img_` keys
+are preserved. An older CLI without image forwarding can still show the caption.
 
 ### 模型与思考等级
 

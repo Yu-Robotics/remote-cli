@@ -115,6 +115,42 @@ describe('ToolFormatter', () => {
   });
 
   describe('createMarkdownElement', () => {
+    it.each([
+      '![Diagram](/home/user/workspace/remote-cli/dist/artifacts/orchestration-comparison.png)',
+      '![Diagram](./dist/artifacts/chart.png)',
+      '![Diagram](<./artifacts/chart with spaces.png> "Chart")',
+      '![Diagram](./artifacts/chart(1).png)',
+      '![Diagram](https://example.com/chart.png)',
+      '![Diagram][chart]\n\n[chart]: ./artifacts/chart.png',
+    ])('keeps non-Feishu image destinations out of card image markup: %s', input => {
+      const content = createMarkdownElement(input).content;
+      expect(content).toContain('<raw>Diagram</raw>');
+      expect(content).not.toContain('![Diagram]');
+    });
+
+    it('preserves uploaded keys, ordinary links, raw text, and code examples', () => {
+      const content = [
+        '**Result**: ![Diagram](img_v3_uploaded-key)',
+        '[Download](https://example.com/chart.png)',
+        '`![example](./chart.png)`',
+        '<raw>![example](./chart.png)</raw>',
+        '\\![example](./chart.png)',
+        '\n    ![indented example](./chart.png)\n',
+        '```markdown\n![example](./chart.png)\n````',
+        '~~~markdown\n![unfinished example](./chart.png)',
+      ].join('\n');
+      expect(createMarkdownElement(content).content).toBe(content);
+    });
+
+    it('makes image links safe while the destination is still streaming', () => {
+      const link = '![Diagram](/home/user/workspace/remote-cli/dist/artifacts/orchestration-comparison.png)';
+      for (let length = '![Diagram]'.length; length <= link.length; length++) {
+        const content = createMarkdownElement(link.slice(0, length)).content;
+        expect(content).toContain('<raw>Diagram</raw>');
+        expect(content).not.toContain('![Diagram]');
+      }
+    });
+
     it('should create a markdown element', () => {
       const markdown = createMarkdownElement('# Hello World');
       expect(markdown).toEqual({

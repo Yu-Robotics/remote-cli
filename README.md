@@ -230,6 +230,7 @@ You will be prompted for:
    | 获取与发送单聊、群组消息 | Get and send single/group messages | `im:message` |
    | 读取用户发给机器人的单聊消息 | Read user's private messages to bot | `im:message.p2p_msg:readonly` |
    | 以应用的身份发消息 | Send messages as bot | `im:message:send_as_bot` |
+   | Get and upload image or file resources | Upload images for response cards | `im:resource` |
 5. Enable **Long Connection** in Event & Callback section
 6. Subscribe to event: `im.message.receive_v1` ([Receive Message v2.0](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/events/receive))
 7. Enable message card callback: `card.action.trigger` (for interactive card buttons)
@@ -611,6 +612,14 @@ You can send a standalone image or a rich-text message containing both text and 
 Codex App Server generated images are also forwarded back to Feishu. Codex emits the generated image through its app-server protocol; the CLI sends it to Router, Router uploads it to Feishu, and the image is rendered in the existing Card 2.0 response. This requires both CLI and Router versions with image forwarding support. Upgrading only Router is backward-compatible, but an older CLI will not generate or send image events; upgrading only CLI is also safe, but an older Router will ignore the optional image stream and still show the text response.
 
 All backends can also send a local image generated during a task when the tool result or final response includes its path or a Markdown image link, such as `chart.png` or `![chart](./chart.png)`. The file must be inside an allowed working directory and no larger than 2 MiB. The CLI reads the file and reuses the same image stream; Router uploads it and renders it in the current Card 2.0 response. This path-based fallback is useful for charts and screenshots and does not require the backend to emit a native image event.
+
+Image uploads require the bot application's `im:resource` permission; publish
+the updated Feishu application permissions before retrying a denied upload.
+Router 1.6.85 and newer display local and URL-based Markdown image references
+as captions, while uploaded images use separate card image components. This
+prevents file paths from being interpreted as Feishu image keys during streaming
+or final rendering. Code examples and inline references to Feishu `img_` keys
+are preserved. An older CLI without image forwarding can still show the caption.
 
 ### Models and Reasoning Effort
 

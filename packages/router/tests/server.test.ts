@@ -25,10 +25,10 @@ vi.mock('../src/storage/JsonStore');
 vi.mock('../src/feishu/FeishuLongConnHandler');
 vi.mock('../src/websocket/ConnectionHub');
 vi.mock('../src/binding/BindingManager');
-vi.mock('../src/utils/ToolFormatter', () => ({
+vi.mock('../src/utils/ToolFormatter', async (importActual) => ({
   createToolUseElement: vi.fn(() => []),
   createToolResultElement: vi.fn(() => []),
-  createMarkdownElement: vi.fn((text) => ({ tag: 'markdown', content: text })),
+  createMarkdownElement: vi.fn((await importActual<typeof import('../src/utils/ToolFormatter')>()).createMarkdownElement),
   createRedactedThinkingElement: vi.fn(() => []),
   createPlanModeElement: vi.fn(() => []),
   createImageElement: vi.fn((imageKey) => ({ tag: 'img', img_key: imageKey })),
@@ -463,6 +463,41 @@ describe('RouterServer', () => {
       await Promise.all([image, finished]);
       expect(mockFeishuHandler.finalizeStreamingMessage.mock.calls[0][1])
         .toContainEqual({ tag: 'img', img_key: 'queued-image' });
+    });
+
+    it.each(['img_v3_uploaded', null])('keeps local image Markdown safe when upload returns %s', async imageKey => {
+      const send = await connect();
+      await send(started);
+      mockFeishuHandler.uploadImage.mockResolvedValue(imageKey);
+      const common = { messageId: 'queued-1', openId: 'user-1' };
+      for (const chunk of ['Here is the diagram:\n![Diagram](', '/home/user/workspace/remote-cli/', 'dist/artifacts/orchestration-comparison.png)']) {
+        await send({ ...common, type: 'stream', chunk });
+        await vi.advanceTimersByTimeAsync(1000);
+      }
+      await send({ ...common, type: 'stream', streamType: 'image', image: { type: 'image', data: 'aW1hZ2U=', mimeType: 'image/png' } });
+      await send({ ...common, type: 'response', success: true });
+
+      const elements = mockFeishuHandler.finalizeStreamingMessage.mock.calls[0][1];
+      for (const [, patch] of mockFeishuHandler.updateStreamingMessage.mock.calls) {
+        expect(JSON.stringify(patch)).not.toContain('![Diagram]');
+      }
+      expect(JSON.stringify(elements)).not.toContain('![Diagram]');
+      expect(JSON.stringify(elements)).toContain('Here is the diagram:');
+      if (imageKey) expect(elements).toContainEqual({ tag: 'img', img_key: imageKey });
+      else expect(JSON.stringify(elements)).toContain('Generated image could not be uploaded to Feishu.');
+    });
+
+    it('renders a final-only local image reference safely for a CLI without image events', async () => {
+      const send = await connect();
+      mockFeishuHandler.setOnStartStreaming.mock.calls[0][0](
+        'queued-1', 'user-1', 'legacy-card', 'device-1', 'thread-1',
+      );
+      await send({ type: 'response', messageId: 'queued-1', openId: 'user-1', success: true,
+        output: '![Diagram](/workspace/chart.png)' });
+      const elements = mockFeishuHandler.finalizeStreamingMessage.mock.calls[0][1];
+      expect(JSON.stringify(elements)).toContain('<raw>Diagram</raw>');
+      expect(JSON.stringify(elements)).not.toContain('![Diagram]');
+      expect(mockFeishuHandler.uploadImage).not.toHaveBeenCalled();
     });
 
     it('preserves text, tool, and image order while queued text patches are pending', async () => {
