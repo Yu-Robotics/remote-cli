@@ -20,6 +20,12 @@ The router server acts as a bridge between Feishu messaging and developer machin
 
 ## Prerequisites
 
+Image uploads require the bot application's `im:resource` permission. Publish
+permission changes in the Feishu developer console before retrying an upload.
+Router 1.6.85 and newer render local and URL-based Markdown image references as
+captions, with uploaded images in separate card image components. Code examples
+and inline Feishu `img_` keys are preserved. Older CLIs remain compatible.
+
 - A server reachable by your local CLI clients, with outbound access to Feishu
 - **Node.js** >= 18.0.0
 - For public deployments, a **domain name** and TLS reverse proxy for client connections; internal deployments can use HTTP on a trusted network

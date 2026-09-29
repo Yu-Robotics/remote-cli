@@ -26,6 +26,11 @@ The client is normally installed and run directly on the developer's machine rat
 
 ## Installation
 
+Sending local image files requires a Router with image forwarding support and
+the bot application's `im:resource` permission. Router 1.6.85 and newer render
+local and URL-based Markdown image references as captions; the uploaded image
+is rendered separately using its Feishu image key. Code examples are preserved.
+
 ```bash
 npm install -g @yu_robotics/remote-cli
 ```

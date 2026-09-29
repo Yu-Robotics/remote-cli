@@ -270,13 +270,48 @@ export function createDividerElement(): FeishuCardElement {
   return { tag: 'hr' };
 }
 
+/** Keep image files on the upload channel instead of treating their paths as Feishu keys. */
+function sanitizeMarkdownImages(content: string): string {
+  const sanitizeText = (text: string): string => text.replace(
+    /(`+)([\s\S]*?)\1(?!`)|<raw>[\s\S]*?(?:<\/raw>|$)|\\[\s\S]|!\[((?:\\.|[^\]\\])*)\](?:\(\s*(<[^>\r\n]*>|(?:\\.|[^\s()\\]|\([^()\r\n]*\))+)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*\)|\[[^\]\r\n]*\])?/gi,
+    (token: string, _code: string, _body: string, label: string | undefined, destination: string | undefined) => {
+      if (label === undefined || (destination && !label.includes('[') && /^(?:img_[\w-]+|<img_[\w-]+>)$/.test(destination))) return token;
+      const caption = (label.replace(/\\(.)/g, '$1') || 'Image')
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      return `<raw>${caption}</raw>`;
+    },
+  );
+
+  let output = '';
+  let prose = '';
+  let fence: string | undefined;
+  for (const line of content.split(/(?<=\n)/)) {
+    const body = line.replace(/^(?: {0,3}>[ \t]?)+/, '');
+    const marker = /^ {0,3}(`{3,}|~{3,})([^\n]*)(?:\n|$)/.exec(body);
+    if (fence) {
+      output += line;
+      if (marker && marker[1][0] === fence[0] && marker[1].length >= fence.length && !marker[2].trim()) fence = undefined;
+    } else if (marker && (marker[1][0] === '~' || !marker[2].includes('`'))) {
+      output += sanitizeText(prose) + line;
+      prose = '';
+      fence = marker[1];
+    } else if (/^(?: {4}|\t)/.test(body)) {
+      output += sanitizeText(prose) + line;
+      prose = '';
+    } else {
+      prose += line;
+    }
+  }
+  return output + sanitizeText(prose);
+}
+
 /**
  * Create a Feishu Card 2.0 markdown element
  */
 export function createMarkdownElement(content: string): FeishuCardElement {
   return {
     tag: 'markdown',
-    content,
+    content: sanitizeMarkdownImages(content),
   };
 }
 
