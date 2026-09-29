@@ -436,7 +436,7 @@ remote-cli stop
 | `/clear` | 清除当前线程的对话上下文 |
 | `/new` | `/clear` 的别名；在当前线程中开始全新对话 |
 | `/compact` | 压缩对话历史以节省 Token |
-| `/delegation [on|off]` | Inspect or enable delegation between installed agent backends in the current thread |
+| `/delegation [on|off]` | 查看或启用当前线程中已安装 agent 后端之间的任务委派 |
 | `/model [name]` | 列出当前 backend 的模型，或设置当前线程的模型 |
 | `/effort [auto|level]` | 查看或设置 Codex/AGY/OpenCode/Kimi/ZCode/Pi 的线程思考等级 |
 | `/sandbox [on/off/read-only/default]` | 查看或配置当前 Codex 或 Claude Code 线程的沙箱；用 `allow/remove <目录>` 和 `network on/off` 调整访问设置 |
@@ -446,98 +446,36 @@ remote-cli stop
 | `/unbind` | 解绑所有设备 |
 | `/device` | 列出绑定设备及其连接状态，或切换设备 |
 
-### Cross-backend Delegation
+### 跨后端任务委派
 
-Claude Code, Codex, Pi, AGY, OpenCode, Kimi Code, and ZCode can each coordinate
-independent tasks on the installed backends, including another session of the
-same backend. Keep talking to
-your existing thread; its selected backend collects worker results and answers
-you. Workers do not create extra thread buttons.
+Claude Code、Codex、Pi、AGY、OpenCode、Kimi Code 和 ZCode 都可以协调已安装后端上的独立任务，也可以调用同一后端的另一个会话。继续在现有线程中对话即可；当前选中的后端会收集执行者的结果并回复。执行者不会产生额外的线程按钮。
 
 ```text
 /delegation
 /delegation on
-Ask Pi to inspect the relevant files, ask Codex to implement the agreed fix,
-then ask Claude Code to review it. Wait for each result before continuing.
+先让 Pi 检查相关文件，再让 Codex 实现商定的修复，最后让 Claude Code 审查。每一步都等待结果后再继续。
 /delegation off
 ```
 
-Delegation is **off by default**. The setting is saved per thread and survives
-backend switches and conversation resets. Install, authenticate, and select a
-working model for each desired backend first. Discovery checks its configured executable;
-authentication and remaining quota are checked only when a task runs.
+委派**默认关闭**。开关按线程保存，切换后端或清除对话上下文后仍然有效。请先安装所需后端、完成认证并选择可用模型。后端发现只检查配置的可执行文件；认证状态和剩余额度要到任务运行时才能确定。
 
-For staged rollout, enable one trial thread first. Never-enabled threads skip
-all delegation setup: no managed tool registration, prompt prefix, backend
-configuration cleanup, or delegation workspace admission checks. Their ordinary
-process handling and session output remain unchanged.
+建议先在一个测试线程中启用。从未启用委派的线程不会注册受管理的工具、添加提示词前缀、清理后端委派配置，或检查委派工作区占用；其普通进程处理和会话输出保持原样。
 
-After a thread has used delegation, `/delegation off` removes its managed tools.
-The CLI records which backends need cleanup, including after a restart or a
-backend switch. Cleanup also runs before native slash commands can resume such a
-session. Removing tools may recycle that backend process once per executor
-instance; it preserves the saved conversation and does not repeatedly restart
-an already cleaned process. Backends never used for delegation skip this cleanup.
+线程使用过委派后，`/delegation off` 会移除受管理的工具。CLI 会记录哪些后端需要清理，重启或切换后端后也能继续处理。原生斜杠命令恢复会话前同样会执行清理。移除工具时，每个执行器实例可能重启一次后端进程，但会保留已保存的对话；已经清理过的进程不会反复重启。未使用过委派的后端无需清理。
 
-The shared Router can be upgraded before local CLIs. This feature keeps protocol
-version 1 and its existing command, tool-progress, and response formats. Older
-CLIs continue their existing workflows; delegation requires upgrading the local
-CLI and enabling it in that thread. CLI and Router package versions need not
-match to connect. Optional approval cards and task recovery remain negotiated
-per device, so newer and older CLIs can share one Router.
+共享 Router 可以先于本机 CLI 升级。本功能仍使用协议版本 1，保持原有命令、工具进度和回复格式。旧版 CLI 可继续原有流程；使用委派需要升级本机 CLI，并在目标线程中启用。CLI 与 Router 的包版本无需一致即可连接。审批卡片和任务恢复等可选能力按设备分别协商，因此新旧 CLI 可以共用同一个 Router。
 
-The coordinator receives registered tools through MCP or an explicitly loaded
-Pi extension. OpenCode and Kimi use ACP session MCP servers; ZCode uses its
-native app-server session MCP servers. AGY uses an isolated per-thread MCP
-configuration restored on opt-out, and inherits its bridge credentials only
-through the process environment. No skill installation or global backend
-configuration change is required. ZCode's session MCP override replaces custom
-user-configured MCP servers while delegation is enabled; its native and plugin
-tools remain available, and opt-out restores the normal MCP configuration.
-Each worker receives a self-contained task,
-uses the parent's working directory, and has an independent conversation. The
-coordinator must include needed context; past messages and image attachments
-are not copied automatically.
+协调者通过 MCP 或显式加载的 Pi 扩展获得委派工具。OpenCode 和 Kimi 使用 ACP 会话的 MCP 服务；ZCode 使用原生 app-server 会话 MCP 服务。AGY 使用按线程隔离的 MCP 配置，关闭委派时恢复原配置；桥接凭据只通过进程环境变量传递。无需安装 skill 或修改后端的全局配置。启用委派期间，ZCode 的会话 MCP 覆盖会替换用户自定义的 MCP 服务；原生工具和插件工具仍可用，关闭委派后会恢复正常 MCP 配置。每个执行者在父线程的工作目录中使用独立对话，只接收一项自包含任务。协调者需要提供必要上下文；历史消息和图片附件不会自动复制过去。
 
-Worker progress appears as a task in the existing reply card. Results return
-to the coordinator for its final answer. Child approvals and questions use the
-existing card/text input flow, tied to the original user and worker. Worker
-approval cards omit Remember; configure persistent grants on the real thread.
-`/abort` cancels both the coordinator and its managed workers. Ending the parent
-turn also stops unfinished workers; cancellation does not undo existing edits.
+执行者进度会显示为现有回复卡片中的任务，结果返回协调者生成最终答复。子任务的审批和提问沿用现有卡片或文本输入流程，并绑定原用户和执行者。子任务审批卡片不提供“记住”选项；持久授权应在原线程中配置。`/abort` 会取消协调者和受管理的执行者。父任务结束时也会停止尚未完成的执行者；取消不会撤销已经产生的文件改动。
 
-There is one active worker per parent and at most three per CLI process in
-non-overlapping workspaces. A turn can start at most 12 tasks; each worker has a
-30-minute limit. Results are limited to 32 KiB and captured output to 256 KiB.
-Managed tasks using overlapping workspace directories are serialized. These
-reservations restrict delegation-enabled threads and workers; opted-out ordinary
-threads retain access to their workspace. This does not lock files against those
-threads, the coordinator's native parallel tools, or external editors. Use separate
-workspaces for independent writers; the coordinator is instructed to wait for
-its worker instead of editing concurrently.
+每个父任务同时只能有一个执行者；一个 CLI 进程最多可在互不重叠的工作区中运行三个执行者。单次主任务最多启动 12 个子任务，每个子任务限时 30 分钟。最终结果上限为 32 KiB，捕获的输出上限为 256 KiB。工作区路径重叠的受管理任务会串行执行。工作区占用限制只约束启用委派的线程和受管理的执行者；关闭委派的普通线程仍可访问该工作区。它不会阻止这些线程、协调者的原生并行工具或外部编辑器改文件。并行写入应使用不同工作区；协调者会被要求等待写入任务完成后再编辑。
 
-Workers inherit the target backend's saved thread permissions. A sandboxed
-coordinator can delegate only to the same backend in this release. Explicit
-`read_only` requests use Claude/Codex native read-only policies with their normal
-approval behavior. Pi, AGY, OpenCode, Kimi, and ZCode reject that mode because
-remote-cli does not enforce a read-only sandbox for those workers. Unrestricted
-coordinators can choose any installed, authenticated worker.
+执行者继承目标后端在该线程中保存的权限设置。本版本中，已启用沙箱的协调者只能委派给同一后端。显式 `read_only` 请求使用 Claude Code 或 Codex 的原生只读策略及其正常审批流程。Pi、AGY、OpenCode、Kimi 和 ZCode 会拒绝此模式，因为 remote-cli 尚未为这些执行者强制实施只读沙箱。未受限的协调者可以选择任意已安装且完成认证的执行者。
 
-All 49 directed combinations are covered at the task-manager test boundary.
-Live model delegation was verified for the original Claude Code/Codex/Pi matrix.
-The four additional adapters have protocol and lifecycle tests; ZCode also
-passed live MCP tool registration. Their live model tests
-were blocked by missing local authentication (AGY, OpenCode, Kimi) or an unset
-model (ZCode), so those model combinations and native persisted-session
-restoration remain unverified.
+任务管理器层面的测试覆盖全部 49 种有向后端组合。原先 Claude Code、Codex 和 Pi 之间的矩阵已通过真实模型委派验证。新增四个适配器有协议和生命周期测试；ZCode 还通过了真实 MCP 工具注册验证。AGY、OpenCode、Kimi 因本地未完成认证，ZCode 因未设置模型，尚未完成真实模型测试；这些组合及原生持久会话恢复仍待验证。
 
-Router reconnection uses the existing parent task recovery and approval replay;
-disconnected progress is not buffered. Restarting the CLI marks retained running
-task records interrupted and never automatically repeats them. Records under
-`~/.remote-cli/delegation/` retain at most 200 completed tasks for seven days.
-If worker shutdown cannot be confirmed, its workspace stays blocked for
-subsequent delegation-enabled work until the worker is stopped and the CLI
-restarts. Opted-out ordinary threads are not blocked by this reservation.
+Router 重连沿用父任务的恢复和待审批重放机制；断线期间的子任务进度不会缓存。CLI 重启会将保留的运行中记录标记为中断，不会自动重做任务。`~/.remote-cli/delegation/` 下最多保留 200 条已完成记录，保存七天。若无法确认执行者已退出，其工作区会继续阻止后续启用委派的任务，直到执行者停止且 CLI 重启；关闭委派的普通线程不受此占用限制。若初始任务记录无法写入，CLI 会拒绝启动执行者。
 
 ### 多会话（Thread）管理
 

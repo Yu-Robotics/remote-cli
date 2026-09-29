@@ -57,6 +57,26 @@ describe('cross-backend delegation', () => {
     expect(record).toMatchObject({ threadId: 'owner', parentMessageId: 'message-1', state: 'succeeded' });
   });
 
+  it('uses the legacy Claude model when no per-backend model is saved', async () => {
+    parent.thread.model = 'legacy-claude-model';
+    delete parent.thread.models?.claude;
+    const scope = manager.begin(parent);
+    const started: any = await scope.invoke('remote_cli_delegate', { backend: 'claude', objective: 'Review' }, 'start');
+    await scope.invoke('remote_cli_result', { taskId: started.taskId }, 'result');
+    expect(factory.mock.calls[0][4]).toBe('legacy-claude-model');
+  });
+
+  it('does not launch a worker when its initial task record cannot be persisted', async () => {
+    const store = new DelegationStore(path.join(home, 'failed-records'));
+    vi.spyOn(store, 'write').mockRejectedValue(new Error('Disk is full'));
+    manager = new DelegationManager(guard, factory as any, new BackendRegistry(async () => '1.0'), store);
+    const scope = manager.begin(parent);
+    await expect(scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Edit files' }, 'start'))
+      .rejects.toThrow('Disk is full');
+    expect(factory).not.toHaveBeenCalled();
+    expect(manager.blocksWorkspace(home, 'other')).toBe(false);
+  });
+
   it('deduplicates a replayed call and rejects a reused ID with changed arguments', async () => {
     const scope = manager.begin(parent);
     const args = { backend: 'codex', objective: 'Inspect' };

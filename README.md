@@ -541,6 +541,7 @@ task records interrupted and never automatically repeats them. Records under
 If worker shutdown cannot be confirmed, its workspace stays blocked for
 subsequent delegation-enabled work until the worker is stopped and the CLI
 restarts. Opted-out ordinary threads are not blocked by this reservation.
+If the initial task record cannot be written, the CLI refuses to start the worker.
 
 ### Multi-session (Threads)
 

@@ -509,6 +509,30 @@ Resume-failure behavior with a stale id (verified live): agy warns `conversation
 
 ---
 
+## Cross-Backend Delegation
+
+Delegation is an opt-in per-thread feature (`/delegation on|off`). The selected
+backend remains the coordinator and owns the user-facing answer. Claude Code,
+Codex, Pi, AGY, OpenCode, Kimi, and ZCode can use registered local tools to
+start independent worker sessions on those same backends. Workers do not inherit
+the coordinator transcript or become user-facing threads.
+
+`MessageHandler` creates a `DelegationScope` for an enabled coordinator turn and
+activates its `DelegationBridge`. The bridge accepts only authenticated loopback
+calls while that scope is active. Backend adapters register the four tools via
+MCP or the Pi extension without modifying global backend configuration.
+`BackendRegistry` discovers configured executables; `DelegationManager` owns
+task IDs, limits, workspace reservations, child executors, results, cancellation,
+and cleanup. `WorkerPolicy` resolves saved sandbox settings against the real
+parent thread before creating a synthetic worker identity. `DelegationStore`
+keeps bounded diagnostic task records and marks interrupted runs after restart.
+
+The Router receives existing task, tool, approval, and response events; the
+wire protocol remains version 1. Never-enabled threads bypass delegation setup
+and admission checks. Managed worker cleanup must be confirmed before releasing
+its workspace reservation. See `DELEGATION_PLAN.md` for the product contract,
+limits, and validation matrix.
+
 ## Common Pitfalls
 
 1. **Forgetting to reload ConfigManager**: Always call `initialize()` again after commands that modify config

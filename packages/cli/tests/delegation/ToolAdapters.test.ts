@@ -65,6 +65,8 @@ describe('native delegation tool adapters', () => {
     child.stdin.write(encoded.subarray(split));
     const result = await response;
     expect(JSON.parse(result.content[0].text).args.objective).toBe('Read \u00e9vidence');
+    const malformedArgs = await request(5, 'tools/call', { name: 'remote_cli_delegate', arguments: [] });
+    expect(JSON.parse(malformedArgs.content[0].text).args).toEqual({});
     bridge.activate(undefined);
     expect(await request(4, 'tools/call', { name: 'remote_cli_list_backends', arguments: {} })).toMatchObject({ isError: true });
   });

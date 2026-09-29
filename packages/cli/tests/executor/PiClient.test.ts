@@ -127,4 +127,32 @@ describe('PiClient process lifecycle', () => {
     expect(proc.kill).toHaveBeenCalled();
     expect(client.isRunning()).toBe(false);
   });
+
+  it('rejects an unconfirmed stop when the process never exits', async () => {
+    const proc = Object.assign(new EventEmitter(), {
+      stdin: { end: vi.fn(), write: vi.fn(), destroyed: false, writable: true, on: vi.fn() },
+      stdout: new EventEmitter(), stderr: new EventEmitter(), exitCode: null, signalCode: null,
+      kill: vi.fn(() => true),
+    });
+    vi.mocked(spawn).mockReturnValue(proc as any);
+    const client = new PiClient({ command: 'pi', killEscalationMs: 10 });
+    await client.start();
+    const firstStop = client.stop();
+    const secondStop = client.stop();
+    await expect(firstStop).rejects.toThrow('exit could not be confirmed');
+    await expect(secondStop).rejects.toThrow('exit could not be confirmed');
+    expect(proc.kill).toHaveBeenCalledWith('SIGKILL');
+  });
+
+  it('does not treat a failed kill signal as a confirmed process exit', async () => {
+    const proc = Object.assign(new EventEmitter(), {
+      stdin: { end: vi.fn(), write: vi.fn(), destroyed: false, writable: true, on: vi.fn() },
+      stdout: new EventEmitter(), stderr: new EventEmitter(), exitCode: null, signalCode: null,
+      kill: vi.fn(() => { throw new Error('Signal failed'); }),
+    });
+    vi.mocked(spawn).mockReturnValue(proc as any);
+    const client = new PiClient({ command: 'pi', killEscalationMs: 10 });
+    await client.start();
+    await expect(client.stop()).rejects.toThrow('exit could not be confirmed');
+  });
 });

@@ -14,7 +14,7 @@ import { createExecutor } from '../executor';
  * honored for the Claude backend only (model names are backend-specific —
  * a Claude name like "opus" is rejected by agy/codex).
  */
-function resolveThreadModel(thread: Thread, config: ExecutorConfig): string | undefined {
+export function resolveThreadModel(thread: Thread, config: ExecutorConfig): string | undefined {
   const key = backendKeyOf(config.type as string);
   return thread.models?.[key] ?? (key === 'claude' ? thread.model || undefined : undefined);
 }
