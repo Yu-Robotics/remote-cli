@@ -518,6 +518,7 @@ describe('MessageHandler', () => {
       );
       const statusResponse = vi.mocked(ctx.mockWsClient.send).mock.calls.at(-1)?.[0];
       expect(statusResponse.output).toContain('Backend: claude');
+      expect(statusResponse.output).toContain('Delegation: off (current thread)');
       expect(statusResponse.output).toContain('Reasoning effort: auto');
       expect(statusResponse.output).not.toContain('Plan usage');
       expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();

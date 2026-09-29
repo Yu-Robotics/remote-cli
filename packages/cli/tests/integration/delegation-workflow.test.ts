@@ -83,6 +83,36 @@ describe('delegation in the existing thread workflow', () => {
     expect(fs.existsSync(path.join(home, '.remote-cli', 'delegation'))).toBe(false);
   });
 
+  it('reports each thread delegation setting without initializing delegation', async () => {
+    const delegatedThread = await threads.createThread('delegated', home);
+    await threads.updateThread(delegatedThread.id, { delegation: true });
+    const delegated = { ...main, execute: vi.fn(), configureDelegation: vi.fn() };
+    otherExecutors.set(delegatedThread.id, delegated);
+    const discover = vi.spyOn(BackendRegistry.prototype, 'list');
+    const begin = vi.spyOn(DelegationManager.prototype, 'begin');
+
+    await handler.handleMessage(message('default-status', '/status'));
+    await handler.handleMessage({ ...message('delegated-status', '/status'), threadId: delegatedThread.id });
+
+    expect(responseFor('default-status')).toMatchObject({ success: true });
+    expect(responseFor('default-status').output).toContain('Thread: default');
+    expect(responseFor('default-status').output).toContain('Delegation: off (current thread)');
+    expect(responseFor('delegated-status')).toMatchObject({ success: true });
+    expect(responseFor('delegated-status').output).toContain('Thread: delegated');
+    expect(responseFor('delegated-status').output).toContain('Delegation: on (current thread)');
+    expect(discover).not.toHaveBeenCalled();
+    expect(begin).not.toHaveBeenCalled();
+    expect(main.configureDelegation).not.toHaveBeenCalled();
+    expect(delegated.configureDelegation).not.toHaveBeenCalled();
+    expect(main.execute).not.toHaveBeenCalled();
+    expect(delegated.execute).not.toHaveBeenCalled();
+    expect(worker.execute).not.toHaveBeenCalled();
+    expect(fs.existsSync(path.join(home, '.remote-cli', 'delegation'))).toBe(false);
+    const saved = await ThreadManager.initialize(home);
+    expect(saved.getDefaultThread().delegation).toBeUndefined();
+    expect(saved.getThread(delegatedThread.id)?.delegation).toBe(true);
+  });
+
   it('restores owned cleanup across a CLI restart without touching an unused backend', async () => {
     await handler.handleMessage(message('enable', '/delegation on'));
     await handler.handleMessage(message('managed', 'Use this coordinator'));

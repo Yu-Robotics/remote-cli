@@ -89,6 +89,10 @@ Clients automatically install a newer Router's exact published npm version when 
 
 The Feishu command reference includes the cross-backend `/status`, `/context`, and `/skills` commands, the `/clear` and `/new` fresh-conversation aliases, plus per-thread queue controls. See the root [README](../../README.md) for the complete command and backend behavior reference.
 
+With CLI 1.6.84 or newer, `/status` also shows `Delegation: on/off (current thread)`.
+The CLI reads this saved setting without initializing delegation or starting workers.
+Older CLIs keep their existing status output.
+
 ## Architecture
 
 ```
