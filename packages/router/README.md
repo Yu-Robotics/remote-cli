@@ -36,6 +36,14 @@ until those results have reached the coordinator. Early returns trigger a
 continuation in the same session, without replaying the original request or
 attachments. The Router displays the existing task progress and reply events;
 no new protocol capability is required for this completion barrier.
+
+CLI 1.6.94 and newer show each finished worker as a result block in the existing
+reply card, with a colored status label, backend name, short task description,
+and elapsed time. Failed, timed-out, cancelled, and interrupted tasks include a
+bounded reason; the coordinator still receives the existing task result. This
+uses the existing text stream and works with older Routers. It adds no probes,
+cooldowns, retries, or changes to ordinary non-delegated sessions.
+
 CLI 1.6.89 can compact/retry result continuations that launched no new workers.
 Results remain retained until the coordinator execution succeeds. If its reply
 still fails, bounded completed worker results appear as plain text alongside the
