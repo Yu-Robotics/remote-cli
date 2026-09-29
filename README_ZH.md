@@ -428,7 +428,7 @@ remote-cli stop
 | 命令 | 说明 |
 |---------|-------------|
 | `/help` | 显示帮助信息 |
-| `/status` | 显示 backend、模型、思考等级、队列和线程状态 |
+| `/status` | Show backend, model, effort, delegation, queue, and thread status |
 | `/context` | 显示当前会话上下文和队列诊断信息 |
 | `/skills` | 列出当前 backend 可用的 skills |
 | `/abort` | 中止当前线程正在运行的 AI 任务 |
@@ -458,6 +458,9 @@ Claude Code、Codex、Pi、AGY、OpenCode、Kimi Code 和 ZCode 都可以协调�
 ```
 
 委派**默认关闭**。开关按线程保存，切换后端或清除对话上下文后仍然有效。请先安装所需后端、完成认证并选择可用模型。后端发现只检查配置的可执行文件；认证状态和剩余额度要到任务运行时才能确定。
+
+`/status` shows `Delegation: on/off (current thread)` for the thread receiving
+the command. Reading this setting does not initialize delegation or start workers.
 
 建议先在一个测试线程中启用。从未启用委派的线程不会注册受管理的工具、添加提示词前缀、清理后端委派配置，或检查委派工作区占用；其普通进程处理和会话输出保持原样。
 

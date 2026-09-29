@@ -665,6 +665,7 @@ export class MessageHandler {
         output: `📊 Status:
 - Thread: ${thread?.name ?? threadId}
 - Backend: ${backend}
+- Delegation: ${thread?.delegation ? 'on' : 'off'} (current thread)
 - Model: ${model ?? 'backend default'}
 - Reasoning effort: ${effort}
 - Working Directory: ${cwd}

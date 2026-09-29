@@ -91,7 +91,7 @@ Linux users upgrading from version 1.6.23 or earlier should run `remote-cli serv
 | Command | Description |
 |---------|-------------|
 | `/help` | Show help information |
-| `/status` | Show backend, model, effort, queue, and thread status |
+| `/status` | Show backend, model, effort, delegation, queue, and thread status |
 | `/context` | Show current session context and queue diagnostics |
 | `/skills` | List available skills for the active backend |
 | `/abort` | Abort executing task in current thread |
@@ -125,6 +125,9 @@ never-enabled threads skip managed tools, prompt changes, and delegation
 configuration. Turning it off cleans only backends used for delegation, including
 when resumed after a CLI restart or a backend switch, while preserving their
 conversations.
+
+`/status` shows `Delegation: on/off (current thread)` for the thread receiving
+the command. Reading this setting does not initialize delegation or start workers.
 
 Child progress, approvals, and questions use the existing reply flow. `/abort`
 stops managed children as well as the parent. Sandboxed coordinators can delegate

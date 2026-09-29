@@ -431,7 +431,7 @@ Once connected, use these commands in Feishu:
 | Command | Description |
 |---------|-------------|
 | `/help` | Show help information |
-| `/status` | Show backend, model, effort, queue, and thread status |
+| `/status` | Show backend, model, effort, delegation, queue, and thread status |
 | `/context` | Show current session context and queue diagnostics |
 | `/skills` | List available skills for the active backend |
 | `/abort` | Abort the currently executing task in this thread |
@@ -469,6 +469,9 @@ Delegation is **off by default**. The setting is saved per thread and survives
 backend switches and conversation resets. Install, authenticate, and select a
 working model for each desired backend first. Discovery checks its configured executable;
 authentication and remaining quota are checked only when a task runs.
+
+`/status` shows `Delegation: on/off (current thread)` for the thread receiving
+the command. Reading this setting does not initialize delegation or start workers.
 
 For staged rollout, enable one trial thread first. Never-enabled threads skip
 all delegation setup: no managed tool registration, prompt prefix, backend
