@@ -27,6 +27,7 @@ export class PiClient implements PiTransport {
   private readonly killEscalationMs: number;
   private proc: ChildProcess | null = null;
   private startPromise: Promise<void> | null = null;
+  private stopPromise: Promise<void> | null = null;
   private nextRequestId = 1;
   private pending = new Map<string, PendingRequest>();
   private handlers = new Set<(event: Record<string, any>) => void>();
@@ -56,6 +57,7 @@ export class PiClient implements PiTransport {
   }
 
   async start(): Promise<void> {
+    if (this.stopPromise) await this.stopPromise;
     if (this.proc) return;
     if (this.startPromise) return this.startPromise;
     this.startPromise = this.startInternal();
@@ -91,6 +93,7 @@ export class PiClient implements PiTransport {
   }
 
   async stop(): Promise<void> {
+    if (this.stopPromise) return this.stopPromise;
     const proc = this.proc;
     this.startPromise = null;
     this.stopping = true;
@@ -104,7 +107,7 @@ export class PiClient implements PiTransport {
       // The stream may already be closed.
     }
 
-    await new Promise<void>((resolve) => {
+    const stopping = new Promise<void>((resolve, reject) => {
       let settled = false;
       const finish = () => {
         if (settled) return;
@@ -113,15 +116,22 @@ export class PiClient implements PiTransport {
         clearTimeout(giveUp);
         resolve();
       };
+      const fail = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(escalation);
+        clearTimeout(giveUp);
+        reject(new Error('Pi RPC process exit could not be confirmed'));
+      };
 
       proc.once('exit', finish);
 
       const escalation = setTimeout(() => {
-        try { proc.kill('SIGKILL'); } catch { finish(); }
+        try { proc.kill('SIGKILL'); } catch { fail(); }
       }, this.killEscalationMs);
       if (typeof escalation.unref === 'function') escalation.unref();
 
-      const giveUp = setTimeout(finish, this.killEscalationMs + 1_000);
+      const giveUp = setTimeout(fail, this.killEscalationMs + 1_000);
       if (typeof giveUp.unref === 'function') giveUp.unref();
 
       if (proc.exitCode !== null || proc.signalCode !== null) {
@@ -132,9 +142,12 @@ export class PiClient implements PiTransport {
       try {
         proc.kill();
       } catch {
-        finish();
+        fail();
       }
     });
+    this.stopPromise = stopping;
+    try { await stopping; }
+    finally { if (this.stopPromise === stopping) this.stopPromise = null; }
   }
 
   private async startInternal(): Promise<void> {

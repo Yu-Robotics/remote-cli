@@ -4,6 +4,7 @@ import path from 'path';
 import type { DirectoryGuard } from '../security/DirectoryGuard';
 import type { BackendKey, ExecutorConfig } from '../types/config';
 import type { Thread } from '../thread/types';
+import { resolveThreadModel } from '../thread/ThreadExecutorPool';
 import type { IExecutor, ExecuteResult } from '../executor/IExecutor';
 import type { ApprovalRequestInfo, ApprovalStatus, ToolUseInfo, ToolResultInfo } from '../types';
 import { createExecutor } from '../executor';
@@ -136,7 +137,8 @@ export class DelegationManager {
         if (task.record.state !== 'running') return;
         const childId = `delegate-${task.record.id}`;
         task.executor = this.factory(this.guard, configuration, cwd, childId,
-          parent.thread.models?.[backend], parent.thread.efforts?.[backend], { lifecycleHooks: false, delegationWorker: true });
+          resolveThreadModel(parent.thread, configuration), parent.thread.efforts?.[backend],
+          { lifecycleHooks: false, delegationWorker: true });
         if (fs.realpathSync(task.executor.getCurrentWorkingDirectory()) !== cwd) {
           throw new Error('Worker refused the delegated workspace; refusing a fallback directory');
         }
@@ -264,7 +266,16 @@ export class DelegationManager {
             parentMessageId: parent.messageId, backend, objective: objective.slice(0, 1000),
             state: 'running', startedAt: Date.now() }, done: new Promise<void>(resolve => { settle = resolve; }), settle, interrupted, interrupt };
           tasks.set(task.record.id, task);
-          await save(task);
+          try {
+            await this.store.write(task.record);
+          } catch (error) {
+            tasks.delete(task.record.id);
+            this.running--;
+            this.workspaces.delete(cwd);
+            launches--;
+            task.settle();
+            throw error;
+          }
           if (closed) { task.record.state = 'cancelled'; }
           notify(() => parent.onToolUse({ id: task.record.id, name: 'Task', input: {
               description: `${backend}: ${objective.slice(0, 120)}`, prompt: objective.slice(0, 1000), subagent_type: backend,

@@ -4,6 +4,10 @@ import type { AddressInfo, Socket } from 'net';
 import type { DelegationConnection, DelegationHandler } from './contract';
 import { DELEGATION_TOOLS } from './contract';
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
 /** One authenticated local endpoint per coordinator, active only during its turn. */
 export class DelegationBridge {
   private server?: http.Server;
@@ -50,12 +54,13 @@ export class DelegationBridge {
       request.on('error', () => { /* The caller may have been cancelled. */ });
       request.on('end', () => {
         if (size > 128 * 1024) return;
-        let payload: any;
+        let payload: unknown;
         try { payload = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
         catch { answer(400, { error: 'Invalid JSON' }); return; }
-        if (!DELEGATION_TOOLS.some(tool => tool.name === payload?.name)
+        if (!isRecord(payload) || typeof payload.name !== 'string'
+          || !DELEGATION_TOOLS.some(tool => tool.name === payload.name)
           || typeof payload.callId !== 'string' || payload.callId.length > 200
-          || !payload.args || typeof payload.args !== 'object' || Array.isArray(payload.args)) {
+          || !isRecord(payload.args)) {
           answer(400, { error: 'Invalid delegation call' }); return;
         }
         if (this.handler !== handler) { answer(409, { error: 'Delegation turn expired' }); return; }

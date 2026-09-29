@@ -26,7 +26,12 @@ describe('delegation transport and discovery', () => {
     const bridge = new DelegationBridge(); bridges.push(bridge);
     const connection = await bridge.start();
     const handler = vi.fn(async () => ({})); bridge.activate(handler);
-    for (const body of ['not-json', JSON.stringify({ name: 'shell', args: {}, callId: 'x' })]) {
+    for (const body of [
+      'not-json',
+      JSON.stringify({ name: 'shell', args: {}, callId: 'x' }),
+      JSON.stringify({ name: 'remote_cli_delegate', args: [], callId: 'x' }),
+      JSON.stringify({ name: 'remote_cli_delegate', args: {}, callId: 42 }),
+    ]) {
       const response = await fetch(connection.url, { method: 'POST', headers: { authorization: `Bearer ${connection.token}` }, body });
       expect(response.status).toBe(400);
     }
