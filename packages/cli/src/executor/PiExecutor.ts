@@ -280,11 +280,11 @@ export class PiExecutor implements IExecutor {
       };
       if (options.timeout && options.timeout > 0) {
         active.timeoutTimer = setTimeout(() => {
-          void this.failActive(`Command timed out after ${options.timeout}ms`);
+          void this.failActive(active, `Command timed out after ${options.timeout}ms`);
         }, options.timeout);
       } else {
         active.timeoutTimer = setTimeout(() => {
-          void this.failActive(`Command timed out after ${DEFAULT_TURN_TIMEOUT_MS}ms`);
+          void this.failActive(active, `Command timed out after ${DEFAULT_TURN_TIMEOUT_MS}ms`);
         }, DEFAULT_TURN_TIMEOUT_MS);
       }
       this.activeTurn = active;
@@ -376,20 +376,25 @@ export class PiExecutor implements IExecutor {
 
   async abort(): Promise<boolean> {
     if (!this.client.isRunning()) return false;
+    const active = this.activeTurn;
     try {
       await this.client.request({ type: 'clear_queue' });
     } catch {
       // Queue may already be empty.
     }
+    let cleanupError: unknown;
     try {
       await this.client.request({ type: 'abort' });
     } catch {
-      await this.recycleClient();
+      try { await this.recycleClient(); }
+      catch (error) { cleanupError = error; }
     }
-    if (this.activeTurn) {
-      this.completeActive({ success: false, error: 'Aborted', sessionAbbr: this.sessionAbbr() });
+    if (active && this.activeTurn === active) {
+      this.completeActive({ success: false, error: cleanupError ? this.friendlyError(cleanupError) : 'Aborted',
+        sessionAbbr: this.sessionAbbr() });
     }
     this.cancelPendingUi(true);
+    if (cleanupError) throw cleanupError;
     return true;
   }
 
@@ -947,14 +952,20 @@ export class PiExecutor implements IExecutor {
     active.resolve(result);
   }
 
-  private async failActive(error: string): Promise<void> {
-    if (!this.activeTurn) return;
+  private async failActive(active: ActiveTurn, error: string): Promise<void> {
+    if (this.activeTurn !== active) return;
+    let cleanupError: unknown;
     try {
       await this.client.request({ type: 'abort' });
     } catch {
-      await this.recycleClient();
+      try { await this.recycleClient(); }
+      catch (failure) { cleanupError = failure; }
     }
-    this.completeActive({ success: false, error, sessionAbbr: this.sessionAbbr() });
+    if (this.activeTurn === active) {
+      this.completeActive({ success: false,
+        error: cleanupError ? `${error}; ${this.friendlyError(cleanupError)}` : error,
+        sessionAbbr: this.sessionAbbr() });
+    }
   }
 
   private cancelPendingUi(cancel = false): void {

@@ -39,3 +39,20 @@ All six findings were addressed on `codex/fix-delegation-review`:
 - The HTTP, JSON-RPC, and Pi extension boundaries parse external values as `unknown` and narrow them before use.
 
 Verification: `npm run build` passed. CLI coverage passed with 1,297 tests and 86.72% line coverage; Router coverage passed with 573 tests and 92.29% line coverage.
+
+## Second-review follow-up
+
+MR !8 exposed two more Pi shutdown paths. A timeout could leave an unhandled
+rejection when abort RPC and process cleanup both failed. A later `stop()` could
+also report success after the first attempt lost its process reference, allowing
+delegation cleanup to release the workspace while Pi was still alive.
+
+The timeout and explicit abort paths now settle the active turn even when
+cleanup fails. `PiClient` retains the unconfirmed process until its exit is
+observed, rejects repeated cleanup attempts, and refuses a new start in the
+meantime. A process-level delegation cancellation test checks that the workspace
+remains blocked in this scenario.
+
+Final verification: `npm run build` passed. CLI coverage passed with 1,301
+tests and 87.11% line coverage; Router coverage passed with 573 tests and
+92.29% line coverage.
