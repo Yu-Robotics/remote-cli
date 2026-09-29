@@ -508,20 +508,29 @@ are not copied automatically.
 
 Worker progress appears as a task in the existing reply card. Results return
 to the coordinator for its final answer. The CLI suppresses coordinator prose,
-plans, and images while a delegated result is outstanding; program-owned progress
+plans, and images while results are missing from the active execution; program-owned progress
 and genuine approval/question prompts remain visible. If the coordinator returns
 early, the CLI keeps the request busy, waits for terminal results, and resumes
 the same coordinator session with those results before releasing the queue.
 The original request and image attachments are not sent again. The combined
 continuation data is capped at 64 KiB, preserving every task's identity and status;
 truncated text can still be retrieved through the result tool. A coordinator that
-already retrieved every result finishes normally without an extra turn.
+successfully processed every result finishes normally without an extra turn.
+
+CLI 1.6.89 and newer retain results until the coordinator execution succeeds.
+Existing model recovery and automatic compaction can retry a result continuation
+if that execution accepted no new worker launch. The retry uses the same result
+batch, without restarting completed workers or resending the original attachments.
+If the reply still fails, the card includes bounded completed worker results as
+plain text, alongside the failure. This fallback does not provide automatic
+recovery on a later request or guarantee delivery across disconnects/restarts.
 
 Child approvals and questions use the existing card/text input flow, tied to the
 original user and worker. Worker approval cards omit Remember; configure persistent
 grants on the real thread. `/abort`, CLI shutdown, and coordinator failure cancel
-unfinished workers without automatic continuation. After launching children,
-coordinator errors are returned directly instead of retrying the original request.
+unfinished workers without automatic continuation. An execution that launched
+a new worker is not replayed after failure. Abort and shutdown suppress the
+failure-result fallback as well as further continuation.
 Cancellation does not undo existing edits.
 
 There is one active worker per parent and at most three per CLI process in
@@ -640,6 +649,8 @@ as captions, while uploaded images use separate card image components. This
 prevents file paths from being interpreted as Feishu image keys during streaming
 or final rendering. Code examples and inline references to Feishu `img_` keys
 are preserved. An older CLI without image forwarding can still show the caption.
+Router 1.6.89 and newer recognize Markdown list and quote boundaries when
+filtering image references, preserving actual fenced and indented code examples.
 
 ### Models and Reasoning Effort
 

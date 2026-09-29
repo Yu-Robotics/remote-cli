@@ -531,12 +531,18 @@ sandbox settings. Sandboxed coordinators retain same-backend restrictions;
 keeps bounded diagnostic task records and marks interrupted runs after restart.
 
 Worker completion and terminal-result delivery are separate states. While results
-are outstanding, `MessageHandler` suppresses coordinator prose/plans/images while
+are missing from the active execution, `MessageHandler` suppresses coordinator prose/plans/images while
 keeping program-owned progress and genuine input prompts visible. A successful
 early return drains pending launches and results, then resumes the same session
 without replaying the original request or attachments. The parent stays busy
-until summarization finishes. Abort, shutdown, and coordinator errors never
-trigger this continuation; errors after child launch do not replay the request.
+until summarization finishes. Results staged through a continuation or result
+tool are acknowledged only when that coordinator execution succeeds. Recovery
+uses a per-execution launch revision: completed historical workers do not disable
+model recovery or compaction, but an execution that accepts a new launch is not
+replayed. The bridge is inactive between executions and during compaction. A
+terminal failure displays bounded retained results without replaying workers;
+abort and shutdown suppress this fallback and further continuation. There is no
+automatic cross-request result recovery.
 
 The Router receives existing task, tool, approval, and response events; the
 wire protocol remains version 1. Never-enabled threads bypass delegation setup

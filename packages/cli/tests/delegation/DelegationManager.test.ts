@@ -69,7 +69,7 @@ describe('cross-backend delegation', () => {
     expect(factory.mock.calls[0][4]).toBe('legacy-claude-model');
   });
 
-  it('keeps results outstanding after polling and completion until the coordinator receives them', async () => {
+  it('retains completed results until a coordinator execution successfully consumes them', async () => {
     let finish!: (result: ExecuteResult) => void;
     vi.mocked(worker.execute).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
     const scope = manager.begin(parent);
@@ -85,7 +85,18 @@ describe('cross-backend delegation', () => {
     await expect(scope.collectPendingResults()).resolves.toEqual([
       expect.objectContaining({ taskId: task.taskId, state: 'succeeded', output: 'Terminal result' }),
     ]);
+    expect(scope.hasPendingResults()).toBe(true);
+    scope.beginExecution([task.taskId]);
     expect(scope.hasPendingResults()).toBe(false);
+    expect(scope.getRetainedResults()).toHaveLength(1);
+    scope.finishExecution(false);
+    expect(scope.hasPendingResults()).toBe(true);
+    scope.beginExecution();
+    await scope.invoke('remote_cli_result', { taskId: task.taskId }, 'receive');
+    expect(scope.hasPendingResults()).toBe(false);
+    expect(scope.getRetainedResults()).toHaveLength(1);
+    scope.finishExecution(true);
+    expect(scope.getRetainedResults()).toEqual([]);
     await expect(scope.collectPendingResults()).resolves.toEqual([]);
   });
 
@@ -98,6 +109,7 @@ describe('cross-backend delegation', () => {
     const launch = scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' }, 'start');
     const collected = scope.collectPendingResults();
     expect(scope.hasPendingResults()).toBe(true);
+    expect(scope.getLaunchRevision()).toBe(1);
     expect(factory).not.toHaveBeenCalled();
     discover('1.0');
     await launch;
@@ -105,6 +117,23 @@ describe('cross-backend delegation', () => {
     finish({ success: true, output: 'Launched before the barrier' });
     await expect(collected).resolves.toEqual([
       expect.objectContaining({ state: 'succeeded', output: 'Launched before the barrier' }),
+    ]);
+  });
+
+  it('does not acknowledge a late tool response as part of a later coordinator execution', async () => {
+    let finish!: (result: ExecuteResult) => void;
+    vi.mocked(worker.execute).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const scope = manager.begin(parent);
+    const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' }, 'start');
+    const response = scope.invoke('remote_cli_result', { taskId: task.taskId }, 'pending-result');
+    scope.finishExecution(true);
+    scope.beginExecution();
+    finish({ success: true, output: 'Late worker result' });
+    await response;
+    scope.finishExecution(true);
+    expect(scope.hasPendingResults()).toBe(true);
+    expect(scope.getRetainedResults()).toEqual([
+      expect.objectContaining({ taskId: task.taskId, output: 'Late worker result' }),
     ]);
   });
 

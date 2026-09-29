@@ -31,7 +31,7 @@ vi.mock('../src/utils/ToolFormatter', async (importActual) => ({
   createMarkdownElement: vi.fn((await importActual<typeof import('../src/utils/ToolFormatter')>()).createMarkdownElement),
   createRedactedThinkingElement: vi.fn(() => []),
   createPlanModeElement: vi.fn(() => []),
-  createImageElement: vi.fn((imageKey) => ({ tag: 'img', img_key: imageKey })),
+  createImageElement: vi.fn((await importActual<typeof import('../src/utils/ToolFormatter')>()).createImageElement),
 }));
 
 describe('RouterServer', () => {
@@ -462,15 +462,15 @@ describe('RouterServer', () => {
       uploaded('queued-image');
       await Promise.all([image, finished]);
       expect(mockFeishuHandler.finalizeStreamingMessage.mock.calls[0][1])
-        .toContainEqual({ tag: 'img', img_key: 'queued-image' });
+        .toContainEqual(expect.objectContaining({ tag: 'img', img_key: 'queued-image' }));
     });
 
-    it.each(['img_v3_uploaded', null])('keeps local image Markdown safe when upload returns %s', async imageKey => {
+    it.each(['img_v3_uploaded', null])('keeps nested local image Markdown safe when upload returns %s', async imageKey => {
       const send = await connect();
       await send(started);
       mockFeishuHandler.uploadImage.mockResolvedValue(imageKey);
       const common = { messageId: 'queued-1', openId: 'user-1' };
-      for (const chunk of ['Here is the diagram:\n![Diagram](', '/home/user/workspace/remote-cli/', 'dist/artifacts/orchestration-comparison.png)']) {
+      for (const chunk of ['> - Here is the diagram:\n>     ![Diagram](', '/home/user/workspace/remote-cli/', 'dist/artifacts/orchestration-comparison.png)']) {
         await send({ ...common, type: 'stream', chunk });
         await vi.advanceTimersByTimeAsync(1000);
       }
@@ -483,7 +483,7 @@ describe('RouterServer', () => {
       }
       expect(JSON.stringify(elements)).not.toContain('![Diagram]');
       expect(JSON.stringify(elements)).toContain('Here is the diagram:');
-      if (imageKey) expect(elements).toContainEqual({ tag: 'img', img_key: imageKey });
+      if (imageKey) expect(elements).toContainEqual(expect.objectContaining({ tag: 'img', img_key: imageKey }));
       else expect(JSON.stringify(elements)).toContain('Generated image could not be uploaded to Feishu.');
     });
 
@@ -524,7 +524,7 @@ describe('RouterServer', () => {
         { tag: 'markdown', content: 'Before tool' },
         { tag: 'markdown', content: 'Tool result' },
         { tag: 'markdown', content: 'Before image' },
-        { tag: 'img', img_key: 'image-key' },
+        expect.objectContaining({ tag: 'img', img_key: 'image-key' }),
         { tag: 'markdown', content: 'After image' },
       ]);
     });
