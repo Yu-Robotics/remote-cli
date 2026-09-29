@@ -10,7 +10,7 @@ import { FeishuLongConnHandler } from '../src/feishu/FeishuLongConnHandler';
 import { ConnectionHub } from '../src/websocket/ConnectionHub';
 import { BindingManager } from '../src/binding/BindingManager';
 import { MessageType, MIN_SUPPORTED_CLI_VERSION, PROTOCOL_VERSION, ROUTER_VERSION } from '../src/types';
-import { createRedactedThinkingElement, createToolResultElement } from '../src/utils/ToolFormatter';
+import { createRedactedThinkingElement, createToolResultElement, createToolUseElement } from '../src/utils/ToolFormatter';
 
 // Mock dependencies
 vi.mock('koa');
@@ -1035,7 +1035,12 @@ describe('RouterServer', () => {
     expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenCalled();
   });
 
-  it('should handle WebSocket stream tool_use', async () => {
+  it('keeps streaming after a Bash event without command arguments', async () => {
+    const formatter = await vi.importActual<typeof import('../src/utils/ToolFormatter')>('../src/utils/ToolFormatter');
+    vi.mocked(createToolUseElement)
+      .mockImplementationOnce(formatter.createToolUseElement)
+      .mockImplementationOnce(formatter.createToolUseElement);
+    vi.mocked(createToolResultElement).mockImplementationOnce(formatter.createToolResultElement);
     await server.start();
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
     const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
@@ -1050,10 +1055,29 @@ describe('RouterServer', () => {
       streamType: 'tool_use',
       messageId: 'm1',
       openId: 'u1',
-      toolUse: { name: 'ls', tool_use_id: '1', input: {} }
+      toolUse: { name: 'Bash', id: 'partial-tool', input: { description: 'Waiting for command arguments' } }
     })));
-    
+
     expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenCalled();
+    const partialElements = mockFeishuHandler.updateStreamingMessage.mock.lastCall[1];
+    expect(JSON.stringify(partialElements)).toContain('Waiting for command arguments');
+
+    await onMessage(Buffer.from(JSON.stringify({
+      type: 'stream', streamType: 'tool_use', messageId: 'm1', openId: 'u1',
+      toolUse: { name: 'Bash', id: 'complete-tool', input: { command: 'echo recovered' } },
+    })));
+    await onMessage(Buffer.from(JSON.stringify({
+      type: 'stream', streamType: 'tool_result', messageId: 'm1', openId: 'u1',
+      toolResult: { tool_use_id: 'complete-tool', content: 'recovered', is_error: false },
+    })));
+    await onMessage(Buffer.from(JSON.stringify({ type: 'response', messageId: 'm1', openId: 'u1', success: true })));
+
+    const elements = mockFeishuHandler.finalizeStreamingMessage.mock.lastCall[1];
+    const rendered = JSON.stringify(elements);
+    expect(rendered).toContain('Waiting for command arguments');
+    expect(rendered).toContain('echo recovered');
+    expect(rendered).toContain('SUCCESS');
+    expect(console.error).not.toHaveBeenCalledWith('Error processing message:', expect.anything());
   });
 
   it('should handle WebSocket stream tool_result', async () => {

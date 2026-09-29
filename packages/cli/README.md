@@ -33,6 +33,11 @@ is rendered separately using its Feishu image key. Code examples are preserved.
 Router 1.6.89 also handles images inside Markdown lists and quoted containers
 without mistaking ordinary indentation for code.
 
+Router 1.6.90 also handles tool events with missing or incompatible parameters
+using a bounded summary, or a no-parameters placeholder when input is missing.
+Subsequent output continues normally. This display fix requires only a Router
+upgrade and works with older CLIs without changing backend execution.
+
 ```bash
 npm install -g @yu_robotics/remote-cli
 ```
