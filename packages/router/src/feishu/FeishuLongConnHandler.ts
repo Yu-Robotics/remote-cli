@@ -8,7 +8,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { createHash } from 'crypto';
-import { CARD_TABLE_LIMIT, countCardTables, isCardTableLimitError, limitCardTables, plainTextCard, prepareTableElements } from '../utils/CardTables';
+import { CARD_TABLE_LIMIT, countCardTables, isCardMarkdownParseError, isCardTableLimitError, limitCardTables, plainTextCard, prepareTableElements } from '../utils/CardTables';
 
 /**
  * Feishu Long Connection Handler configuration
@@ -1211,7 +1211,7 @@ Examples:
    * @param elements Array of Feishu Card 2.0 elements
    * @returns The new message ID, or null on error
    */
-  private async createContinuationCard(openId: string, elements: any[], onTableLimit?: () => void, allowFallback = true, header?: Record<string, unknown>): Promise<string | null> {
+  private async createContinuationCard(openId: string, elements: any[], onTextFallback?: () => void, allowFallback = true, header?: Record<string, unknown>): Promise<string | null> {
     try {
       const content = JSON.stringify({ schema: '2.0', ...(header ? { header } : {}), body: { elements: limitCardTables(elements) } });
       const result = await this.sendCardRequest(content, body => this.client.im.message.create({
@@ -1221,7 +1221,7 @@ Examples:
           msg_type: 'interactive',
           content: body,
         },
-      }), onTableLimit, allowFallback);
+      }), onTextFallback, allowFallback);
 
       return result.data?.message_id || null;
     } catch (error: any) {
@@ -1230,8 +1230,8 @@ Examples:
     }
   }
 
-  /** Retry only a confirmed table-limit rejection, once, with readable text. */
-  private async sendCardRequest(content: string, send: (body: string) => Promise<any>, onTableLimit?: () => void, allowFallback = true): Promise<any> {
+  /** Retry a confirmed table-limit or Markdown parse rejection once with readable text. */
+  private async sendCardRequest(content: string, send: (body: string) => Promise<any>, onTextFallback?: () => void, allowFallback = true): Promise<any> {
     const checkedSend = async (body: string) => {
       const result = await send(body);
       if (result?.code) throw result;
@@ -1240,9 +1240,10 @@ Examples:
     try {
       return await checkedSend(content);
     } catch (error) {
-      if (!allowFallback || !isCardTableLimitError(error)) throw error;
-      console.warn('[FeishuHandler] Card table limit reached; retrying this card as text.');
-      onTableLimit?.();
+      const tableLimit = isCardTableLimitError(error);
+      if (!allowFallback || (!tableLimit && !isCardMarkdownParseError(error))) throw error;
+      console.warn(`[FeishuHandler] ${tableLimit ? 'Card table limit reached' : 'Card Markdown parse failed'}; retrying this card as text.`);
+      onTextFallback?.();
       return checkedSend(JSON.stringify(plainTextCard(JSON.parse(content))));
     }
   }

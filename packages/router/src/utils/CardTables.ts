@@ -126,3 +126,9 @@ export function isCardTableLimitError(error: any): boolean {
   return Number(detail?.code) === 230099 && typeof detail?.msg === 'string'
     && /ErrCode:\s*11310\b/.test(detail.msg) && /table number over limit/i.test(detail.msg);
 }
+
+export function isCardMarkdownParseError(error: any): boolean {
+  const detail = error?.response?.data ?? error;
+  return Number(detail?.code) === 230099 && typeof detail?.msg === 'string'
+    && /ErrCode:\s*11311\b/.test(detail.msg) && /markdown content parse error/i.test(detail.msg);
+}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CARD_TABLE_LIMIT, countCardTables, isCardTableLimitError, limitCardTables, plainTextCard, prepareTableElements } from '../src/utils/CardTables';
+import { CARD_TABLE_LIMIT, countCardTables, isCardMarkdownParseError, isCardTableLimitError, limitCardTables, plainTextCard, prepareTableElements } from '../src/utils/CardTables';
 
 const table = (name: string) => `| Name | Value |\n| --- | --- |\n| ${name} | 1 |\n`;
 
@@ -63,5 +63,16 @@ describe('card table budgets', () => {
     expect(isCardTableLimitError({ ...detail, code: 230020 })).toBe(false);
     expect(isCardTableLimitError({ ...detail, msg: 'ErrCode: 11310; element limit exceeded' })).toBe(false);
     expect(isCardTableLimitError(new Error('Request failed with status code 400'))).toBe(false);
+  });
+
+  it('recognizes Markdown parse rejections without treating unrelated errors as text failures', () => {
+    const detail = { code: 230099, msg: 'ext=ErrCode: 11311; ErrPath: ROOT -> body -> elements -> [7](tag: markdown); ErrMsg: markdown content parse error; ErrorValue: markdown;' };
+    expect(isCardMarkdownParseError({ response: { data: detail } })).toBe(true);
+    expect(isCardMarkdownParseError(detail)).toBe(true);
+    expect(isCardMarkdownParseError({ ...detail, code: 230020 })).toBe(false);
+    expect(isCardMarkdownParseError({ ...detail, msg: 'ErrCode: 200570; card contains invalid image keys' })).toBe(false);
+    expect(isCardMarkdownParseError({ ...detail, msg: 'ErrCode: 11311; element limit exceeded' })).toBe(false);
+    expect(isCardMarkdownParseError({ ...detail, msg: 'ErrCode: 113110; markdown content parse error' })).toBe(false);
+    expect(isCardMarkdownParseError(new Error('Request failed with status code 400'))).toBe(false);
   });
 });

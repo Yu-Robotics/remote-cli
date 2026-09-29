@@ -38,6 +38,11 @@ using a bounded summary, or a no-parameters placeholder when input is missing.
 Subsequent output continues normally. This display fix requires only a Router
 upgrade and works with older CLIs without changing backend execution.
 
+Router 1.6.91 retries confirmed Markdown parse errors (`11311`) once with the
+affected card's Markdown shown as literal code text. It retains that format
+for later updates and thread-button refreshes; other cards keep their normal
+formatting. This requires only a Router upgrade and works with older CLIs.
+
 ```bash
 npm install -g @yu_robotics/remote-cli
 ```
