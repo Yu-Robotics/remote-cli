@@ -59,6 +59,30 @@ describe('AcpClient', () => {
     vi.clearAllMocks();
   });
 
+  it.each([false, true])('uses process-group cleanup only for managed ACP processes: %s', async managed => {
+    client.destroy();
+    fake.process.emit('close', 0, null);
+    fake = fakeProcess();
+    fake.process.pid = 424242;
+    vi.mocked(spawn).mockReturnValue(fake.process);
+    const signal = vi.spyOn(process, 'kill').mockReturnValue(true);
+    try {
+      client = new AcpClient('opencode', ['acp'], '/tmp', callbacks, managed);
+      const grouped = managed && process.platform !== 'win32';
+      expect(vi.mocked(spawn).mock.calls.at(-1)?.[2]?.detached).toBe(grouped ? true : undefined);
+      client.destroy();
+      if (grouped) {
+        expect(signal).toHaveBeenCalledWith(-424242, 'SIGTERM');
+        expect(fake.process.kill).not.toHaveBeenCalled();
+      } else {
+        expect(signal).not.toHaveBeenCalled();
+        expect(fake.process.kill).toHaveBeenCalledWith('SIGTERM');
+      }
+      fake.process.emit('close', 0, null);
+      await client.waitForExit();
+    } finally { signal.mockRestore(); }
+  });
+
   it('initializes ACP protocol version 1', async () => {
     const pending = client.initialize();
     const sent = request(fake.lines, 'initialize');

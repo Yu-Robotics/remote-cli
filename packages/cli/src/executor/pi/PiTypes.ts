@@ -6,6 +6,7 @@ export type PiThinkingLevel = (typeof PI_THINKING_LEVELS)[number];
 
 export interface PiLaunchOptions {
   delegation?: DelegationConnection;
+  delegationWorker?: boolean;
   command?: string;
   cwd?: string;
   /** Whether Pi should trust project-local resources for this non-interactive run. */

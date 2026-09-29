@@ -65,7 +65,7 @@ export function createExecutor(
   threadId?: string,
   model?: string,
   effort?: string,
-  runtime: { lifecycleHooks?: boolean } = {},
+  runtime: { lifecycleHooks?: boolean; delegationWorker?: boolean } = {},
 ): IExecutor {
   const executorType = executorConfig.type as string;
   switch (executorType) {
@@ -78,6 +78,7 @@ export function createExecutor(
         autoApprove: executorConfig.agy?.autoApprove ?? true,
         initialWorkingDirectory,
         agyCommand: executorConfig.agy?.command,
+        delegationWorker: runtime.delegationWorker,
         threadId,
       });
 
@@ -94,6 +95,7 @@ export function createExecutor(
         sandbox: executorConfig.codex?.sandbox,
         initialWorkingDirectory,
         codexCommand: executorConfig.codex?.command,
+        delegationWorker: runtime.delegationWorker,
         threadId,
       });
 
@@ -105,6 +107,7 @@ export function createExecutor(
         autoApprove: executorConfig.opencode?.autoApprove ?? true,
         initialWorkingDirectory,
         openCodeCommand: executorConfig.opencode?.command,
+        delegationWorker: runtime.delegationWorker,
         threadId,
       });
 
@@ -116,6 +119,7 @@ export function createExecutor(
         autoApprove: executorConfig.kimi?.autoApprove ?? true,
         initialWorkingDirectory,
         kimiCommand: executorConfig.kimi?.command,
+        delegationWorker: runtime.delegationWorker,
         threadId,
       });
 
@@ -127,6 +131,7 @@ export function createExecutor(
         autoApprove: executorConfig.zcode?.autoApprove ?? true,
         initialWorkingDirectory,
         zcodeCommand: executorConfig.zcode?.command,
+        delegationWorker: runtime.delegationWorker,
         threadId,
       });
 
@@ -139,6 +144,7 @@ export function createExecutor(
         autoApprove: executorConfig.pi?.autoApprove ?? true,
         initialWorkingDirectory,
         piCommand: executorConfig.pi?.command,
+        delegationWorker: runtime.delegationWorker,
         threadId,
       });
 

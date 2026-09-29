@@ -184,6 +184,8 @@ describe('PiExecutor', () => {
 
   it('reconfigures delegation without clearing the Pi session or replacing ordinary tools', async () => {
     await executor.execute('first', {});
+    expect(transport.launch.delegation).toBeUndefined();
+    expect(transport.launch.delegationWorker).toBe(false);
     const session = executor.getSessionId();
     const connection = { url: 'http://127.0.0.1:12345/', token: 'test-token' };
     await executor.configureDelegation(connection);

@@ -149,8 +149,10 @@ export class PiClient implements PiTransport {
       proc = spawn(command, args, {
         cwd: this.options.cwd,
         env: { ...process.env,
-          REMOTE_CLI_DELEGATION_URL: this.options.delegation?.url,
-          REMOTE_CLI_DELEGATION_TOKEN: this.options.delegation?.token,
+          ...(this.options.delegation || this.options.delegationWorker ? {
+            REMOTE_CLI_DELEGATION_URL: this.options.delegation?.url,
+            REMOTE_CLI_DELEGATION_TOKEN: this.options.delegation?.token,
+          } : {}),
         },
         stdio: ['pipe', 'pipe', 'pipe'],
       });

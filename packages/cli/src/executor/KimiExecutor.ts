@@ -10,6 +10,7 @@ export interface KimiExecutorOptions {
   initialWorkingDirectory?: string;
   kimiCommand?: string;
   threadId?: string;
+  delegationWorker?: boolean;
   sessionBaseDir?: string;
   clientFactory?: (callbacks: AcpEventCallbacks, cwd: string) => AcpTransport;
   accountUsageQuery?: (command: string, cwd: string) => Promise<string | null>;
@@ -28,6 +29,7 @@ export class KimiExecutor extends AcpExecutor {
       autoApprove: options.autoApprove,
       initialWorkingDirectory: options.initialWorkingDirectory,
       threadId: options.threadId,
+      delegationWorker: options.delegationWorker,
       sessionBaseDir: options.sessionBaseDir,
       clientFactory: options.clientFactory,
       acpCommand: kimiCommand,

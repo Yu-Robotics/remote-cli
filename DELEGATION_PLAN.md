@@ -1,5 +1,55 @@
 # Cross-Backend Delegation Plan
 
+## Follow-up: isolate disabled threads
+
+Status: implemented and validated after commit `175cd22` on 2026-09-29. Version 1.6.80.
+The user requested staged rollout with ordinary execution preserved when
+delegation is disabled and authorized committing and pushing this follow-up to
+main after validation. Publication and deployment are outside this change.
+
+- [x] Keep never-enabled threads out of delegation configuration and workspace
+  admission checks. Record which backends have owned tools so opt-out cleanup
+  still works after backend switches and CLI restarts.
+- [x] Restrict process-group ownership, session replay filtering, and delegated
+  sandbox preparation to coordinators with delegation enabled and managed workers.
+- [x] Restore ordinary retry, approval, and lifecycle behavior; retain credential
+  redaction in diagnostic logging. Opt-out may recycle a previously managed
+  process once to remove its tools, while preserving the native conversation.
+- [x] Test never-enabled execution, enable/disable transitions, persisted cleanup,
+  ordinary cancellation, and mixed enabled/disabled threads in one workspace.
+- [x] Synchronize documentation and versions, then run builds and regression tests.
+
+Workspace reservations coordinate opted-in threads and managed workers only.
+They must not reject ordinary requests in opted-out threads. Those threads, like
+external editors and native parallel tools, can still access the same files;
+this feature does not claim filesystem isolation between them.
+
+The thread's persisted `delegationBackends` records which native sessions may
+retain managed tools. Never-enabled threads do not call `configureDelegation`;
+opted-out threads clean only recorded backends before ordinary turns or native
+slash commands can resume them. Cleanup is idempotent within each executor and
+preserves native conversation pointers. Managed workers have an explicit runtime
+role instead of changing the default lifecycle of every backend process.
+
+Validation for this follow-up:
+
+- Focused delegation and executor regression run: 259 tests passed in 14 files.
+- Final full suite after slash-command cleanup coverage: 1,293 CLI tests and 573
+  Router tests passed across 94 files, including rolling-upgrade compatibility.
+- `npm run build`: both packages passed at version 1.6.80.
+- Both root README delegation sections match; heading hierarchies remain aligned.
+  Package versions and lockfile entries are synchronized. `git diff --check` passed.
+- Real subprocess fixtures cover ACP tool registration, restoration, opt-out,
+  and destroyed-worker cleanup. This follow-up did not repeat authenticated live
+  model calls; the original verification and its limits are recorded below.
+- Logs: `/tmp/remote-cli-delegation-isolation-targeted.log`,
+  `/tmp/remote-cli-delegation-isolation-full-tests.log`, and
+  `/tmp/remote-cli-delegation-isolation-build.log`.
+- Validation did not start or stop production processes or publish or deploy
+  packages. The follow-up is ready for the authorized commit and push.
+
+## Initial implementation record
+
 Status: both phases implemented and validated on 2026-09-29. Version 1.6.79.
 The initial Claude Code/Codex/Pi phase and the authorized expansion to every
 existing backend are complete. Live authentication/configuration limits are
@@ -73,7 +123,8 @@ Bridge credentials stay in the child environment for AGY, never in its MCP file.
 
 All transports keep parent and worker sessions separate. Managed workers receive
 no delegation server/extension. ACP session-load history is suppressed from live
-output. Changing delegation waits for old processes to exit before resuming;
+output only for delegation-enabled coordinators and managed workers. Ordinary
+session-load output retains the pre-delegation behavior. Changing delegation waits for old processes to exit before resuming;
 worker workspace leases are held until exit is confirmed. Cleanup never restarts
 a destroyed ACP worker just to delete its session pointer. Normal explicit
 thread deletion retains its existing native deletion attempt.
@@ -295,7 +346,7 @@ one terminal result. Worker questions are forwarded through the parent card.
 | Claude Code | Compose the delegation MCP server with existing approval MCP settings; recycle idle process while retaining session ID | `ClaudePersistentExecutor` |
 | Codex | Apply an MCP configuration override to both `thread/start` and `thread/resume`; explicitly disable it after opt-out | `CodexAppServerExecutor` |
 | Pi | Explicit `--extension` with process-local URL/token; retain session file on enable/disable | `PiExecutor` |
-| OpenCode / Kimi | Pass session-local stdio MCP servers on ACP new/load; replayed history is not emitted as new output | `AcpExecutor`, `AcpClient` |
+| OpenCode / Kimi | Pass session-local stdio MCP servers on ACP new/load; managed sessions suppress replayed history | `AcpExecutor`, `AcpClient` |
 | ZCode | Pass native session MCP servers with session isolation; omit overrides when disabled | `ZCodeClient` |
 | AGY | Detach only the per-thread config symlink, register via native `mcp add`, restore original config on opt-out; keep credentials in process env | `AgyExecutor`, `agy/AgyDelegationConfig` |
 
@@ -341,10 +392,10 @@ See [Codex configuration reference](https://developers.openai.com/codex/config-r
   questions use the existing input flow; an answer does not create another task.
 - Canonical workspace leases cover identical and ancestor/descendant paths.
   A worker cannot overlap another managed worker or another busy managed thread
-  in those directories. Other threads are blocked from starting normal model
-  work in a leased workspace.
-- This is not a filesystem lock. The coordinator's native parallel tools,
-  unrestricted shell commands, and external editors can still access files.
+  in those directories. Delegation-enabled threads cannot start model work in a
+  leased workspace. Opted-out ordinary threads bypass delegation admission checks.
+- This is not a filesystem lock. Opted-out threads, the coordinator's native parallel
+  tools, unrestricted shell commands, and external editors can still access files.
   Instructions require the coordinator to await a writing worker before editing.
 - The loopback bearer token prevents accidental cross-thread calls; it does not
   create isolation from other processes running with the same OS permissions.
@@ -373,7 +424,8 @@ without awaiting its result stops that child before the next queued task starts.
 
 If cleanup cannot be confirmed, return interrupted status and retain the
 workspace lease and capacity reservation. Stop the worker and restart the CLI
-before using the workspace again. The queue does not wait forever on a broken
+before using the workspace for delegation-enabled work again. Opted-out ordinary
+threads bypass this reservation. The queue does not wait forever on a broken
 worker. Successful cleanup removes synthetic session pointers and policy files.
 
 Router outages do not restart workers. Existing task recovery restores the

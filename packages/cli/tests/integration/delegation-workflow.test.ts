@@ -19,6 +19,7 @@ describe('delegation in the existing thread workflow', () => {
   let main: any;
   let worker: any;
   let socket: any;
+  let otherExecutors: Map<string, any>;
   let connection: DelegationConnection | undefined;
   let callCounter = 0;
 
@@ -48,7 +49,8 @@ describe('delegation in the existing thread workflow', () => {
     const guard = new DirectoryGuard([home]);
     const config: any = { get: vi.fn(key => key === 'executor' ? { type: 'codex' } : undefined),
       getAll: () => ({}), has: () => true, getConfigDir: () => home };
-    pool = new ThreadExecutorPool(threads, guard, { type: 'codex' }, () => main);
+    otherExecutors = new Map();
+    pool = new ThreadExecutorPool(threads, guard, { type: 'codex' }, (_guard, _config, _cwd, id) => otherExecutors.get(id!) ?? main);
     socket = { send: vi.fn(), trackTask: vi.fn(), hasPendingTaskResults: () => false, isConnected: () => true };
     handler = new MessageHandler(socket, pool, threads, guard, config);
     (handler as any).delegation = new DelegationManager(guard, () => worker, new BackendRegistry(async () => 'test 1.0'));
@@ -58,6 +60,82 @@ describe('delegation in the existing thread workflow', () => {
 
   const message = (id: string, content: string) => ({ type: 'command' as const, messageId: id, content, openId: 'owner', timestamp: Date.now() });
   const responseFor = (id: string) => socket.send.mock.calls.map(([value]: any[]) => value).reverse().find((value: any) => value.type === 'response' && value.messageId === id);
+
+  it('keeps never-enabled requests and an explicit off command independent of delegation setup', async () => {
+    main.configureDelegation.mockRejectedValue(new Error('Delegation setup must not run'));
+    main.listModels = vi.fn(async () => []);
+    main.execute.mockImplementation(async (prompt: string, options: ExecuteOptions) => {
+      options.onStream?.(prompt);
+      return { success: true };
+    });
+    await handler.handleMessage(message('first', 'Ordinary request'));
+    await handler.handleMessage(message('disable', '/delegation off'));
+    await handler.handleMessage(message('models', '/model'));
+    await handler.handleMessage(message('second', 'Continue normally'));
+    expect(main.execute.mock.calls.map(([prompt]: any[]) => prompt)).toEqual(['Ordinary request', 'Continue normally']);
+    expect(main.configureDelegation).not.toHaveBeenCalled();
+    expect(worker.execute).not.toHaveBeenCalled();
+    expect(responseFor('first')?.success).toBe(true);
+    expect(responseFor('disable')?.success).toBe(true);
+    expect(responseFor('models')?.success).toBe(true);
+    expect(responseFor('second')?.success).toBe(true);
+    expect(threads.getDefaultThread().delegationBackends).toBeUndefined();
+    expect(fs.existsSync(path.join(home, '.remote-cli', 'delegation'))).toBe(false);
+  });
+
+  it('restores owned cleanup across a CLI restart without touching an unused backend', async () => {
+    await handler.handleMessage(message('enable', '/delegation on'));
+    await handler.handleMessage(message('managed', 'Use this coordinator'));
+    await handler.handleMessage(message('disable', '/delegation off'));
+    const restored = await ThreadManager.initialize(home);
+    expect(restored.getDefaultThread()).toMatchObject({ delegation: false, delegationBackends: ['codex'] });
+    await handler.destroy();
+    threads = restored;
+    const guard = new DirectoryGuard([home]);
+    const config: any = { get: () => ({ type: 'codex' }), getAll: () => ({}), has: () => true, getConfigDir: () => home };
+    pool = new ThreadExecutorPool(threads, guard, { type: 'codex' }, () => main);
+    handler = new MessageHandler(socket, pool, threads, guard, config);
+    main.configureDelegation.mockClear();
+    main.listModels = vi.fn(async () => []);
+    await handler.handleMessage(message('models', '/model'));
+    expect(main.listModels).toHaveBeenCalledOnce();
+    expect(main.configureDelegation).toHaveBeenCalledWith(undefined);
+    expect(main.configureDelegation.mock.invocationCallOrder[0]).toBeLessThan(main.listModels.mock.invocationCallOrder[0]);
+    expect(responseFor('models')?.success).toBe(true);
+    await handler.handleMessage(message('restored', 'Resume ordinary work'));
+    expect(main.configureDelegation).toHaveBeenCalledWith(undefined);
+    expect(main.execute).toHaveBeenLastCalledWith('Resume ordinary work', expect.anything());
+    main.configureDelegation.mockClear();
+    await pool.switchThreadBackend(threads.getDefaultThread().id, 'pi');
+    await handler.handleMessage(message('unused', 'Use another backend normally'));
+    expect(main.configureDelegation).not.toHaveBeenCalled();
+    expect(responseFor('unused')?.success).toBe(true);
+  });
+
+  it('lets an opted-out thread execute in a workspace held by a delegated worker', async () => {
+    await handler.handleMessage(message('enable', '/delegation on'));
+    const ordinaryThread = await threads.createThread('ordinary', home);
+    const ordinary = { ...main, execute: vi.fn(async () => ({ success: true })), configureDelegation: vi.fn() };
+    otherExecutors.set(ordinaryThread.id, ordinary);
+    let finish!: (result: ExecuteResult) => void;
+    worker.execute.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    worker.abort.mockImplementation(async () => { finish?.({ success: false }); return true; });
+    main.execute.mockImplementationOnce(async () => {
+      const task = await call('remote_cli_delegate', { backend: 'claude', objective: 'Review' });
+      await call('remote_cli_result', { taskId: task.taskId });
+      return { success: true };
+    });
+    const active = handler.handleMessage(message('managed', 'Review'));
+    await vi.waitFor(() => expect(worker.execute).toHaveBeenCalledOnce());
+    await handler.handleMessage({ ...message('ordinary', 'Ordinary work'), threadId: ordinaryThread.id });
+    expect(responseFor('ordinary')?.success).toBe(true);
+    expect(ordinary.execute).toHaveBeenCalledWith('Ordinary work', expect.anything());
+    expect(ordinary.configureDelegation).not.toHaveBeenCalled();
+    expect(worker.abort).not.toHaveBeenCalled();
+    finish({ success: true, output: 'Review complete' });
+    await active;
+    expect(responseFor('managed')?.success).toBe(true);
+  });
 
   it('persists opt-in, returns child progress in the original reply, and drains the next queued message', async () => {
     await handler.handleMessage(message('enable', '/delegation on'));

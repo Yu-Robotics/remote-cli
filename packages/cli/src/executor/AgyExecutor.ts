@@ -22,6 +22,7 @@ export interface AgyExecutorOptions {
   agyCommand?: string;
   /** Thread ID for per-thread conversation persistence */
   threadId?: string;
+  delegationWorker?: boolean;
   /**
    * Inactivity timeout: if agy produces no stdout for this long while a
    * command is in flight, the command fails and the process is killed.
@@ -168,6 +169,8 @@ export class AgyExecutor implements IExecutor {
   /** Model or effort switch requested while a command was running — respawn when it finishes. */
   private pendingSettingsChange = false;
   private delegationConnection?: DelegationConnection;
+  private readonly delegationWorker: boolean;
+  private readonly managedProcesses = new WeakSet<ChildProcess>();
   private delegationConfigured = false;
   private readonly pendingExits = new Set<Promise<void>>();
   /** Handoff summary from compactWhenFull, wrapped into the next prompt (consumed once). */
@@ -180,6 +183,7 @@ export class AgyExecutor implements IExecutor {
     this.autoApprove = options.autoApprove ?? true;
     this.agyCommand = options.agyCommand ?? 'agy';
     this.threadId = options.threadId;
+    this.delegationWorker = options.delegationWorker ?? false;
     this.inactivityTimeoutMs = options.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS;
     this.killEscalationMs = options.killEscalationMs ?? DEFAULT_KILL_ESCALATION_MS;
 
@@ -216,11 +220,11 @@ export class AgyExecutor implements IExecutor {
    * process from starting so it cannot use the shared conversation store.
    */
   private buildEnv(): NodeJS.ProcessEnv {
-    if (!this.agyHome) return { ...process.env };
+    const delegationEnv = this.delegationConnection ? delegationEnvironment(this.delegationConnection)
+      : this.delegationWorker ? { REMOTE_CLI_DELEGATION_URL: undefined, REMOTE_CLI_DELEGATION_TOKEN: undefined } : {};
+    if (!this.agyHome) return { ...process.env, ...delegationEnv };
     this.ensureThreadHome();
-    return { ...process.env, HOME: this.agyHome,
-      REMOTE_CLI_DELEGATION_URL: undefined, REMOTE_CLI_DELEGATION_TOKEN: undefined,
-      ...(this.delegationConnection ? delegationEnvironment(this.delegationConnection) : {}) };
+    return { ...process.env, HOME: this.agyHome, ...delegationEnv };
   }
 
   /**
@@ -664,8 +668,9 @@ export class AgyExecutor implements IExecutor {
       cwd: this.currentWorkingDirectory,
       env,
       stdio: ['pipe', 'pipe', 'pipe'],
-      detached: process.platform !== 'win32',
+      ...((this.delegationWorker || this.delegationConnection) && process.platform !== 'win32' ? { detached: true } : {}),
     });
+    if (this.delegationWorker || this.delegationConnection) this.managedProcesses.add(proc);
     const exited = new Promise<void>(resolve => proc.once('close', () => resolve()));
     this.pendingExits.add(exited);
     void exited.then(() => this.pendingExits.delete(exited));
@@ -755,7 +760,7 @@ export class AgyExecutor implements IExecutor {
   // ─── Wire protocol parsing ────────────────────────────────────────────────
 
   private signalProcess(proc: ChildProcess, signal: NodeJS.Signals): void {
-    if (process.platform !== 'win32' && proc.pid) {
+    if (this.managedProcesses.has(proc) && process.platform !== 'win32' && proc.pid) {
       try { process.kill(-proc.pid, signal); return; } catch { /* Fall back to the direct child. */ }
     }
     if (signal === 'SIGTERM') proc.kill();

@@ -49,6 +49,7 @@ describe('cross-backend delegation', () => {
     expect(factory.mock.calls[0][3]).toMatch(/^delegate-/);
     expect(factory.mock.calls[0][3]).not.toBe(parent.thread.id);
     expect(factory.mock.calls[0][4]).toBe(parent.thread.models![child]);
+    expect(factory.mock.calls[0][6]).toEqual({ lifecycleHooks: false, delegationWorker: true });
     expect(worker.deleteThreadData).toHaveBeenCalledWith(factory.mock.calls[0][3]);
     expect(parent.onToolUse).toHaveBeenCalledTimes(1);
     expect(parent.onToolResult).toHaveBeenCalledTimes(1);

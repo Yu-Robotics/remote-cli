@@ -65,13 +65,13 @@ export class AcpClient implements AcpTransport {
   private killTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly exited: Promise<void>;
 
-  constructor(command: string, args: string[], cwd: string, callbacks: AcpEventCallbacks) {
+  constructor(command: string, args: string[], cwd: string, callbacks: AcpEventCallbacks, private readonly managedProcess = false) {
     this.callbacks = callbacks;
     this.child = spawn(command, args, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: process.env,
-      detached: process.platform !== 'win32',
+      ...(managedProcess && process.platform !== 'win32' ? { detached: true } : {}),
     });
     this.exited = new Promise(resolve => this.child.once('close', () => resolve()));
 
@@ -148,7 +148,7 @@ export class AcpClient implements AcpTransport {
   waitForExit(): Promise<void> { return this.exited; }
 
   private signalProcess(signal: NodeJS.Signals): void {
-    if (process.platform !== 'win32' && this.child.pid) {
+    if (this.managedProcess && process.platform !== 'win32' && this.child.pid) {
       try { process.kill(-this.child.pid, signal); return; } catch { /* Fall back to the direct child. */ }
     }
     this.child.kill(signal);

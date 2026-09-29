@@ -467,6 +467,18 @@ backend switches and conversation resets. Install, authenticate, and select a
 working model for each desired backend first. Discovery checks its configured executable;
 authentication and remaining quota are checked only when a task runs.
 
+For staged rollout, enable one trial thread first. Never-enabled threads skip
+all delegation setup: no managed tool registration, prompt prefix, backend
+configuration cleanup, or delegation workspace admission checks. Their ordinary
+process handling and session output remain unchanged.
+
+After a thread has used delegation, `/delegation off` removes its managed tools.
+The CLI records which backends need cleanup, including after a restart or a
+backend switch. Cleanup also runs before native slash commands can resume such a
+session. Removing tools may recycle that backend process once per executor
+instance; it preserves the saved conversation and does not repeatedly restart
+an already cleaned process. Backends never used for delegation skip this cleanup.
+
 The shared Router can be upgraded before local CLIs. This feature keeps protocol
 version 1 and its existing command, tool-progress, and response formats. Older
 CLIs continue their existing workflows; delegation requires upgrading the local
@@ -497,9 +509,12 @@ turn also stops unfinished workers; cancellation does not undo existing edits.
 There is one active worker per parent and at most three per CLI process in
 non-overlapping workspaces. A turn can start at most 12 tasks; each worker has a
 30-minute limit. Results are limited to 32 KiB and captured output to 256 KiB.
-Managed tasks using overlapping workspace directories are serialized. This
-does not lock files against the coordinator's native parallel tools or external
-editors, so the coordinator is instructed to wait instead of editing concurrently.
+Managed tasks using overlapping workspace directories are serialized. These
+reservations restrict delegation-enabled threads and workers; opted-out ordinary
+threads retain access to their workspace. This does not lock files against those
+threads, the coordinator's native parallel tools, or external editors. Use separate
+workspaces for independent writers; the coordinator is instructed to wait for
+its worker instead of editing concurrently.
 
 Workers inherit the target backend's saved thread permissions. A sandboxed
 coordinator can delegate only to the same backend in this release. Explicit
@@ -520,8 +535,9 @@ Router reconnection uses the existing parent task recovery and approval replay;
 disconnected progress is not buffered. Restarting the CLI marks retained running
 task records interrupted and never automatically repeats them. Records under
 `~/.remote-cli/delegation/` retain at most 200 completed tasks for seven days.
-If worker shutdown cannot be confirmed, its workspace stays blocked until the
-worker is stopped and the CLI restarts.
+If worker shutdown cannot be confirmed, its workspace stays blocked for
+subsequent delegation-enabled work until the worker is stopped and the CLI
+restarts. Opted-out ordinary threads are not blocked by this reservation.
 
 ### 多会话（Thread）管理
 
