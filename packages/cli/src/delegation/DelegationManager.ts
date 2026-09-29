@@ -64,7 +64,11 @@ export interface DelegationScope {
   invoke: DelegationHandler;
   isClosed(): boolean;
   hasTasks(): boolean;
+  getLaunchRevision(): number;
+  beginExecution(taskIds?: readonly string[]): void;
+  finishExecution(success: boolean): void;
   hasPendingResults(): boolean;
+  getRetainedResults(): DelegatedTaskResult[];
   collectPendingResults(): Promise<DelegatedTaskResult[]>;
   close(): Promise<void>;
   waitingExecutor(): IExecutor | undefined;
@@ -77,6 +81,21 @@ function bounded(text: string, limit: number): { text: string; truncated: boolea
   let end = limit - Buffer.byteLength(marker);
   while (end > 0 && (buffer[end] & 0xc0) === 0x80) end--;
   return { text: buffer.subarray(0, end).toString('utf8') + marker, truncated: true };
+}
+
+function boundedResults(terminal: DelegatedTaskResult[]): DelegatedTaskResult[] {
+  let results = terminal;
+  // Keep every task's identity and terminal status, reducing only text.
+  for (let limit = DELEGATION_LIMITS.resultBytes / 2;
+    Buffer.byteLength(JSON.stringify(results)) > DELEGATION_LIMITS.continuationBytes; limit = Math.floor(limit / 2)) {
+    results = terminal.map(result => {
+      const output = bounded(result.output ?? '', limit);
+      const error = bounded(result.error ?? '', limit);
+      return { ...result, output: output.text, error: error.text || undefined,
+        truncated: result.truncated || output.truncated || error.truncated };
+    });
+  }
+  return results;
 }
 
 async function deadline<T>(operation: () => T | Promise<T>, milliseconds: number, message = 'Worker cleanup timed out'): Promise<T> {
@@ -109,7 +128,11 @@ export class DelegationManager {
     const calls = new Map<string, { signature: string; result: Promise<unknown> }>();
     let closed = false;
     let launches = 0;
+    let launchRevision = 0;
     let starting = false;
+    let execution = 0;
+    let acceptingResults = true;
+    const stagedResults = new Set<string>();
     const cwd = fs.realpathSync(this.guard.resolveWorkingDirectory(parent.cwd));
     this.guard.resolveWorkingDirectory(cwd);
     const getTask = (value: unknown): Task => {
@@ -122,8 +145,8 @@ export class DelegationManager {
       output: task.record.finishedAt ? task.record.output : undefined,
       error: task.record.finishedAt ? task.record.error : undefined,
       truncated: task.record.truncated ?? false });
-    const receive = (task: Task): DelegatedTaskResult => {
-      if (task.record.finishedAt) task.resultDelivered = true;
+    const receive = (task: Task, requestedDuring: number): DelegatedTaskResult => {
+      if (task.record.finishedAt && acceptingResults && requestedDuring === execution) stagedResults.add(task.record.id);
       return view(task);
     };
     const save = (task: Task) => this.store.write(task.record).catch(error => {
@@ -230,6 +253,7 @@ export class DelegationManager {
     };
     const invoke: DelegationHandler = async (name, args, callId) => {
       if (closed) throw new Error('Delegation turn has ended');
+      const requestedDuring = execution;
       if (!callId || callId.length > 200) throw new Error('Invalid tool call ID');
       const signature = JSON.stringify({ name, args });
       const existing = calls.get(callId);
@@ -263,14 +287,15 @@ export class DelegationManager {
             try { await Promise.race([task.done, new Promise<void>(resolve => { timer = setTimeout(resolve, seconds * 1000); })]); }
             finally { clearTimeout(timer); }
           }
-          return receive(task);
+          return receive(task, requestedDuring);
         }
         if (name === 'remote_cli_cancel') {
           const task = getTask(args.taskId);
           await cancel(task);
-          return receive(task);
+          return receive(task, requestedDuring);
         }
         if (name !== 'remote_cli_delegate') throw new Error('Unknown delegation tool');
+        if (!acceptingResults) throw new Error('The coordinator execution has ended');
         if (starting || [...tasks.values()].some(task => !task.record.finishedAt)) throw new Error('Wait for the current delegated task before starting another');
         if (launches >= DELEGATION_LIMITS.launches) throw new Error('Delegated task limit reached');
         if (!DELEGATION_BACKENDS.includes(args.backend as DelegationBackend)) throw new Error('Unsupported worker backend');
@@ -279,6 +304,7 @@ export class DelegationManager {
         const mode = args.mode ?? 'inherit';
         if (mode !== 'inherit' && mode !== 'read_only') throw new Error('Unsupported execution mode');
         const backend = args.backend as DelegationBackend;
+        launchRevision++;
         starting = true;
         try {
           const configuration = workerConfiguration(parent.config, this.guard, parent.thread.id, parent.backend, backend, mode);
@@ -313,7 +339,7 @@ export class DelegationManager {
               description: `${backend}: ${objective.slice(0, 120)}`, prompt: objective.slice(0, 1000), subagent_type: backend,
           } }));
           void run(task, configuration, objective).catch(() => undefined);
-          return receive(task);
+          return receive(task, requestedDuring);
         } finally { starting = false; }
       })();
       calls.set(callId, { signature, result });
@@ -323,7 +349,26 @@ export class DelegationManager {
       invoke,
       isClosed: () => closed,
       hasTasks: () => starting || tasks.size > 0,
-      hasPendingResults: () => starting || [...tasks.values()].some(task => !task.resultDelivered),
+      getLaunchRevision: () => launchRevision,
+      beginExecution: (taskIds = []) => {
+        if (closed) throw new Error('Delegation was cancelled');
+        execution++;
+        acceptingResults = true;
+        stagedResults.clear();
+        for (const id of taskIds) {
+          if (tasks.get(id)?.record.finishedAt) stagedResults.add(id);
+        }
+      },
+      finishExecution: success => {
+        acceptingResults = false;
+        if (success && !closed) {
+          for (const id of stagedResults) tasks.get(id)!.resultDelivered = true;
+        }
+        stagedResults.clear();
+      },
+      hasPendingResults: () => starting || [...tasks.values()].some(task => !task.resultDelivered && !stagedResults.has(task.record.id)),
+      getRetainedResults: () => boundedResults([...tasks.values()]
+        .filter(task => task.record.finishedAt && !task.resultDelivered).map(view)),
       collectPendingResults: async () => {
         if (closed) throw new Error('Delegation was cancelled');
         // The caller disables the bridge first, so no new calls can escape this
@@ -333,20 +378,7 @@ export class DelegationManager {
         const pending = [...tasks.values()].filter(task => !task.resultDelivered);
         await Promise.all(pending.map(task => task.done));
         if (closed) throw new Error('Delegation was cancelled');
-        const terminal = pending.map(view);
-        let results = terminal;
-        // Keep every task's identity and terminal status, reducing only text.
-        for (let limit = DELEGATION_LIMITS.resultBytes / 2;
-          Buffer.byteLength(JSON.stringify(results)) > DELEGATION_LIMITS.continuationBytes; limit = Math.floor(limit / 2)) {
-          results = terminal.map(result => {
-            const output = bounded(result.output ?? '', limit);
-            const error = bounded(result.error ?? '', limit);
-            return { ...result, output: output.text, error: error.text || undefined,
-              truncated: result.truncated || output.truncated || error.truncated };
-          });
-        }
-        for (const task of pending) task.resultDelivered = true;
-        return results;
+        return boundedResults(pending.map(view));
       },
       waitingExecutor: () => [...tasks.values()].find(task => task.executor?.isWaitingInput?.())?.executor,
       close: async () => {

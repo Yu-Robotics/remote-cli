@@ -142,6 +142,29 @@ describe('ToolFormatter', () => {
       expect(createMarkdownElement(content).content).toBe(content);
     });
 
+    it.each([
+      '- Screenshot\n    ![Diagram](/tmp/chart.png)',
+      '> - Screenshot\n>     ![Diagram](./chart.png)',
+      '1. Screenshot\n\n    ![Diagram](https://example.com/chart.png)',
+      'Screenshot:\n    ![Diagram](./chart.png)',
+    ])('sanitizes images indented inside prose rather than code: %s', input => {
+      const content = createMarkdownElement(input).content;
+      expect(content).toContain('<raw>Diagram</raw>');
+      expect(content).not.toContain('![Diagram]');
+    });
+
+    it('ends code protection when its containing quote ends', () => {
+      const example = '> ```markdown\n> ![Example](./example.png)\n';
+      const content = createMarkdownElement(`${example}\n![Diagram](/tmp/chart.png)`).content;
+      expect(content).toBe(`${example}\n<raw>Diagram</raw>`);
+    });
+
+    it('preserves nested code examples while sanitizing later images in the same list', () => {
+      const example = '- Example\n\n    ```markdown\n    ![Example](./example.png)\n    ```\n';
+      const content = createMarkdownElement(`${example}\n    ![Diagram](./chart.png)`).content;
+      expect(content).toBe(`${example}\n    <raw>Diagram</raw>`);
+    });
+
     it('makes image links safe while the destination is still streaming', () => {
       const link = '![Diagram](/home/user/workspace/remote-cli/dist/artifacts/orchestration-comparison.png)';
       for (let length = '![Diagram]'.length; length <= link.length; length++) {

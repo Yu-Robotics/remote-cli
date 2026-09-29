@@ -1,5 +1,6 @@
 import { ToolUseInfo, ToolResultInfo, TaskNotificationInfo } from '../types';
 import { createDiffPanels, createEditPanels, createWritePanels } from './DiffFormatter';
+import MarkdownIt from 'markdown-it';
 
 /**
  * Feishu Card 2.0 element types
@@ -270,8 +271,11 @@ export function createDividerElement(): FeishuCardElement {
   return { tag: 'hr' };
 }
 
+const cardMarkdownParser = new MarkdownIt('commonmark');
+
 /** Keep image files on the upload channel instead of treating their paths as Feishu keys. */
 function sanitizeMarkdownImages(content: string): string {
+  if (!content.includes('![')) return content;
   const sanitizeText = (text: string): string => text.replace(
     /(`+)([\s\S]*?)\1(?!`)|<raw>[\s\S]*?(?:<\/raw>|$)|\\[\s\S]|!\[((?:\\.|[^\]\\])*)\](?:\(\s*(<[^>\r\n]*>|(?:\\.|[^\s()\\]|\([^()\r\n]*\))+)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*\)|\[[^\]\r\n]*\])?/gi,
     (token: string, _code: string, _body: string, label: string | undefined, destination: string | undefined) => {
@@ -282,27 +286,22 @@ function sanitizeMarkdownImages(content: string): string {
     },
   );
 
-  let output = '';
-  let prose = '';
-  let fence: string | undefined;
-  for (const line of content.split(/(?<=\n)/)) {
-    const body = line.replace(/^(?: {0,3}>[ \t]?)+/, '');
-    const marker = /^ {0,3}(`{3,}|~{3,})([^\n]*)(?:\n|$)/.exec(body);
-    if (fence) {
-      output += line;
-      if (marker && marker[1][0] === fence[0] && marker[1].length >= fence.length && !marker[2].trim()) fence = undefined;
-    } else if (marker && (marker[1][0] === '~' || !marker[2].includes('`'))) {
-      output += sanitizeText(prose) + line;
-      prose = '';
-      fence = marker[1];
-    } else if (/^(?: {4}|\t)/.test(body)) {
-      output += sanitizeText(prose) + line;
-      prose = '';
-    } else {
-      prose += line;
-    }
+  // Use parsed block boundaries: indentation can belong to a list or paragraph,
+  // and an unclosed fence ends when its quote or list container ends.
+  const lineOffsets = [0];
+  for (const newline of content.matchAll(/\r\n|\r|\n/g)) {
+    lineOffsets.push(newline.index! + newline[0].length);
   }
-  return output + sanitizeText(prose);
+  let output = '';
+  let offset = 0;
+  for (const token of cardMarkdownParser.parse(content, {})) {
+    if (!token.map || (token.type !== 'fence' && token.type !== 'code_block')) continue;
+    const start = lineOffsets[token.map[0]] ?? content.length;
+    const end = lineOffsets[token.map[1]] ?? content.length;
+    output += sanitizeText(content.slice(offset, start)) + content.slice(start, end);
+    offset = end;
+  }
+  return output + sanitizeText(content.slice(offset));
 }
 
 /**

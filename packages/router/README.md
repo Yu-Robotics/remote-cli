@@ -19,11 +19,17 @@ The router server acts as a bridge between Feishu messaging and developer machin
 - **Table-aware card splitting** and a single text fallback retry for a card rejected by Feishu's table limit
 
 Supporting CLIs enforce delegated task completion locally: they suppress stale
-coordinator prose while results are outstanding and keep the parent request busy
+coordinator prose while results are missing from the active execution and keep the parent request busy
 until those results have reached the coordinator. Early returns trigger a
 continuation in the same session, without replaying the original request or
 attachments. The Router displays the existing task progress and reply events;
 no new protocol capability is required for this completion barrier.
+CLI 1.6.89 can compact/retry result continuations that launched no new workers.
+Results remain retained until the coordinator execution succeeds. If its reply
+still fails, bounded completed worker results appear as plain text alongside the
+failure; no new wire capability is required. Abort/shutdown suppress this fallback.
+It does not provide automatic recovery on a later request or guarantee delivery
+across disconnects/restarts.
 
 ## Prerequisites
 
@@ -32,6 +38,8 @@ permission changes in the Feishu developer console before retrying an upload.
 Router 1.6.85 and newer render local and URL-based Markdown image references as
 captions, with uploaded images in separate card image components. Code examples
 and inline Feishu `img_` keys are preserved. Older CLIs remain compatible.
+Router 1.6.89 also recognizes Markdown list and quote boundaries, so images
+inside those containers are filtered while actual code examples stay unchanged.
 
 - A server reachable by your local CLI clients, with outbound access to Feishu
 - **Node.js** >= 18.0.0

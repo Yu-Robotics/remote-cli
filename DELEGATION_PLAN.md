@@ -1,5 +1,29 @@
 # Cross-Backend Delegation Plan
 
+## Follow-up: recover result delivery and parse nested Markdown
+
+Status: implemented and validated, 2026-09-29. Version 1.6.89.
+
+- Gate recovery on launches accepted by the current coordinator execution, not
+  all historical tasks. Advance the revision before asynchronous launch setup.
+- Stage exact result IDs for the active execution and acknowledge them only on
+  success. Ignore late tool responses from earlier executions. Retain failed
+  deliveries for bounded fallback output without automatic cross-request replay.
+- Disable the bridge between executions and during compaction. Cancellation
+  prevents retries, acknowledgement of late success, and failure-result output.
+- Parse Markdown code-block boundaries with markdown-it 14, preserving Node 18
+  support. Filter image links in lists and quotes while retaining code examples.
+- Cover compaction/retry, failed and explicit-result delivery, multiple batches,
+  late responses, abort during recovery, and nested image references.
+
+Validation: both packages build; 1,338 CLI tests and 590 Router tests pass.
+CLI line coverage is 87.38%. ToolFormatter coverage is 88.44% for lines,
+81.48% for functions, and 85.18% for branches. Router image integration tests
+exercise the real image formatter and nested streamed Markdown. An independent
+source review found no additional concrete issue. Native model context-limit
+recovery and live Feishu rendering were not exercised; workflow tests use
+mocked native executors with the real delegation bridge.
+
 ## Follow-up: enforce coordinator completion
 
 Status: implemented and validated, 2026-09-29. Version 1.6.88.
@@ -456,9 +480,14 @@ coordinator return is not sufficient to finish the parent request: the CLI drain
 in-flight launches and unconsumed results, then resumes the same coordinator
 session with terminal results. It rechecks cancellation before resuming, retains
 the busy operation and queue order, and omits the original request and attachments.
-If all results were already retrieved, no extra coordinator turn is needed.
-Coordinator failures after any child launch do not retry or compact/replay the
-original request. Session deletion and final metadata maintenance have deadlines;
+If a successful execution consumed all results, no extra coordinator turn is
+needed. Results are acknowledged only after that execution succeeds; failed
+delivery retains a bounded terminal-result fallback. Model recovery and automatic
+compaction can retry an execution that accepted no new worker launch, including
+a continuation containing completed historical results. No failed execution
+that accepted a new launch is replayed. Abort/shutdown suppress both continuation
+and failure-result fallback. This is not automatic cross-request result recovery.
+Session deletion and final metadata maintenance have deadlines;
 an unavailable diagnostic store cannot hold a confirmed-exited worker forever.
 
 If cleanup cannot be confirmed, return interrupted status and retain the

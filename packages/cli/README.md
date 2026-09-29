@@ -30,6 +30,8 @@ Sending local image files requires a Router with image forwarding support and
 the bot application's `im:resource` permission. Router 1.6.85 and newer render
 local and URL-based Markdown image references as captions; the uploaded image
 is rendered separately using its Feishu image key. Code examples are preserved.
+Router 1.6.89 also handles images inside Markdown lists and quoted containers
+without mistaking ordinary indentation for code.
 
 ```bash
 npm install -g @yu_robotics/remote-cli
@@ -136,12 +138,18 @@ the command. Reading this setting does not initialize delegation or start worker
 
 Child progress, approvals, and questions use the existing reply flow. `/abort`
 stops managed children as well as the parent. While delegated results remain
-outstanding, the CLI suppresses coordinator prose/plans/images and displays
+missing from the active execution, the CLI suppresses coordinator prose/plans/images and displays
 program-owned progress and real input prompts. An early coordinator return keeps
 the request busy: the CLI waits, then resumes the same session with bounded
 terminal results before draining the queue. Original requests and attachments
-are not replayed. Abort, shutdown, and coordinator failure stop this continuation;
-errors after launching children are not retried automatically.
+are not replayed. CLI 1.6.89 retains results until a coordinator execution succeeds.
+Existing model recovery and automatic compaction can retry a result continuation
+if that execution accepted no new worker launch. If it still fails, bounded
+completed worker results appear as plain text alongside the failure; workers
+are not restarted. This is not automatic recovery on a later request or across
+disconnects/restarts. Abort and shutdown stop continuation and suppress this
+failure-result fallback. A failed execution that launched a new worker is never
+replayed automatically.
 
 Workers follow the coordinator's
 remote-cli sandbox policy: with no coordinator sandbox, `inherit` launches
