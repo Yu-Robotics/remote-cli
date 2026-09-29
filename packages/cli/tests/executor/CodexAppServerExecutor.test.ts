@@ -114,6 +114,8 @@ describe('CodexAppServerExecutor', () => {
       await result;
     };
     await runTurn();
+    expect(transport.requests.find(request => request.method === 'thread/start')!.params.config)
+      .not.toHaveProperty('mcp_servers.remote_cli_delegation');
     await executor.configureDelegation({ url: 'http://127.0.0.1:12345/', token: 'private-test-token' });
     await runTurn();
     const resumed = transport.requests.filter(request => request.method === 'thread/resume').at(-1)!.params;
@@ -127,6 +129,12 @@ describe('CodexAppServerExecutor', () => {
     await executor.configureDelegation(undefined);
     await runTurn();
     expect(transport.requests.filter(request => request.method === 'thread/resume').at(-1)!.params.config['mcp_servers.remote_cli_delegation'].enabled).toBe(false);
+    const stopped = vi.spyOn(transport, 'stop');
+    const resumedCount = transport.requests.filter(request => request.method === 'thread/resume').length;
+    await executor.configureDelegation(undefined);
+    await runTurn();
+    expect(stopped).not.toHaveBeenCalled();
+    expect(transport.requests.filter(request => request.method === 'thread/resume')).toHaveLength(resumedCount);
   });
 
   it('retains a failed transport reply for retry without approving a later request', async () => {

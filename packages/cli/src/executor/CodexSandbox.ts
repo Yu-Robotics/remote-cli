@@ -118,13 +118,13 @@ export class CodexSandbox {
     };
   }
 
-  threadOptions(cwd: string): Record<string, unknown> {
+  threadOptions(cwd: string, prepareDelegatedSession = false): Record<string, unknown> {
     const config = this.getConfig();
     if (!config) return {};
     if (!this.isRestricted()) return { sandbox: config.mode };
     // Native sandbox setup uses TMPDIR even in read-only mode. Creating its
     // private directory does not add it to the model's writable roots.
-    fs.mkdirSync(this.temporaryDirectory, { recursive: true, mode: 0o700 });
+    if (prepareDelegatedSession) fs.mkdirSync(this.temporaryDirectory, { recursive: true, mode: 0o700 });
     return {
       sandbox: config.mode,
       approvalPolicy: 'on-request',

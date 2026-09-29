@@ -11,6 +11,7 @@ export interface ZCodeExecutorOptions {
   initialWorkingDirectory?: string;
   zcodeCommand?: string;
   threadId?: string;
+  delegationWorker?: boolean;
   sessionBaseDir?: string;
   launch?: ZCodeLaunchSpec;
   clientFactory?: (callbacks: AcpEventCallbacks, cwd: string) => AcpTransport;
@@ -40,6 +41,7 @@ export class ZCodeExecutor extends AcpExecutor {
       installCommand: 'download ZCode from https://zcode.z.ai/en/docs/install',
       authCommand: 'zcode login',
       threadId: options.threadId,
+      delegationWorker: options.delegationWorker,
       sessionBaseDir: options.sessionBaseDir,
       clientFactory,
     };

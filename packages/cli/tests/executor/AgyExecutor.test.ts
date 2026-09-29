@@ -164,6 +164,8 @@ describe('AgyExecutor', () => {
   });
 
   it.skipIf(process.platform === 'win32')('cancels the backend process group and confirms exit before releasing cleanup', async () => {
+    await executor.destroy();
+    executor = new AgyExecutor(directoryGuard, { initialWorkingDirectory: '~/test-project', threadId: 'worker', delegationWorker: true });
     vi.mocked(process.kill).mockReturnValue(true);
     const running = executor.execute('Run a task');
     await waitForSpawn();
@@ -177,6 +179,32 @@ describe('AgyExecutor', () => {
     proc.emit('close', 0, null);
     await waiting;
     expect(await running).toMatchObject({ success: false });
+  });
+
+  it('preserves direct-child cancellation for an ordinary AGY session', async () => {
+    const running = executor.execute('Run a normal task');
+    await waitForSpawn();
+    expect(vi.mocked(spawn).mock.calls.at(-1)?.[2]?.detached).toBeUndefined();
+    await executor.abort();
+    expect(proc.kill).toHaveBeenCalledWith();
+    expect(process.kill).not.toHaveBeenCalled();
+    expect(await running).toMatchObject({ success: false });
+  });
+
+  it.each([false, true])('preserves ordinary environment inheritance and strips managed AGY worker credentials: %s', async delegationWorker => {
+    vi.stubEnv('REMOTE_CLI_DELEGATION_URL', 'http://127.0.0.1:12345/');
+    vi.stubEnv('REMOTE_CLI_DELEGATION_TOKEN', 'parent-test-token');
+    await executor.destroy();
+    executor = new AgyExecutor(directoryGuard, { initialWorkingDirectory: '~/test-project', threadId: 'environment', delegationWorker });
+    try {
+      const running = executor.execute('Work');
+      await waitForSpawn();
+      const env = vi.mocked(spawn).mock.calls.at(-1)?.[2]?.env;
+      expect(env?.REMOTE_CLI_DELEGATION_URL).toBe(delegationWorker ? undefined : 'http://127.0.0.1:12345/');
+      expect(env?.REMOTE_CLI_DELEGATION_TOKEN).toBe(delegationWorker ? undefined : 'parent-test-token');
+      await executor.abort();
+      await running;
+    } finally { vi.unstubAllEnvs(); }
   });
 
   // ── Process spawning ──────────────────────────────────────────────────────

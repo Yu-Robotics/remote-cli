@@ -31,6 +31,7 @@ export interface PiExecutorOptions {
   initialWorkingDirectory?: string;
   piCommand?: string;
   threadId?: string;
+  delegationWorker?: boolean;
   sessionBaseDir?: string;
   clientFactory?: (launch: PiLaunchOptions) => PiTransport;
 }
@@ -204,6 +205,7 @@ export class PiExecutor implements IExecutor {
   private pendingUi: PendingUiRequest | null = null;
   private destroyed = false;
   private delegation?: DelegationConnection;
+  private readonly delegationWorker: boolean;
 
   async configureDelegation(connection?: DelegationConnection): Promise<void> {
     if (sameConnection(this.delegation, connection)) return;
@@ -219,6 +221,7 @@ export class PiExecutor implements IExecutor {
     this.provider = options.provider;
     this.autoApprove = options.autoApprove ?? true;
     this.threadId = options.threadId;
+    this.delegationWorker = options.delegationWorker ?? false;
     this.piCommand = options.piCommand;
 
     if (options.initialWorkingDirectory) {
@@ -698,6 +701,7 @@ export class PiExecutor implements IExecutor {
       model: this.model,
       thinking: this.effort,
       delegation: this.delegation,
+      delegationWorker: this.delegationWorker,
     };
   }
 

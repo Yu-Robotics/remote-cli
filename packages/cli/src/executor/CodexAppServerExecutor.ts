@@ -30,6 +30,7 @@ export interface CodexAppServerExecutorOptions {
   initialWorkingDirectory?: string;
   codexCommand?: string;
   threadId?: string;
+  delegationWorker?: boolean;
   inactivityTimeoutMs?: number;
   compactTimeoutMs?: number;
   clientFactory?: (cwd: string) => CodexAppServerTransport;
@@ -168,6 +169,7 @@ export class CodexAppServerExecutor implements IExecutor {
   private destroyed = false;
   private delegation?: DelegationConnection;
   private delegationConfigured = false;
+  private readonly delegationWorker: boolean;
 
   async configureDelegation(connection?: DelegationConnection): Promise<void> {
     if (this.delegationConfigured && sameConnection(this.delegation, connection)) return;
@@ -184,6 +186,7 @@ export class CodexAppServerExecutor implements IExecutor {
     this.effort = options.effort;
     this.autoApprove = options.autoApprove ?? true;
     this.remoteThreadId = options.threadId;
+    this.delegationWorker = options.delegationWorker ?? false;
     this.sandbox = new CodexSandbox(directoryGuard, options.sandbox, options.threadId);
     this.inactivityTimeoutMs = options.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS;
     this.compactTimeoutMs = options.compactTimeoutMs ?? DEFAULT_COMPACT_TIMEOUT_MS;
@@ -649,7 +652,7 @@ export class CodexAppServerExecutor implements IExecutor {
         approvalPolicy: 'never',
         sandbox: 'danger-full-access',
       } : {}),
-      ...this.sandbox.threadOptions(this.currentWorkingDirectory),
+      ...this.sandbox.threadOptions(this.currentWorkingDirectory, this.delegationWorker || !!this.delegation),
     };
     if (this.delegationConfigured) {
       common.config = { ...common.config,

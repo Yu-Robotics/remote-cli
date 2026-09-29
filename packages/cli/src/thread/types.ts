@@ -20,6 +20,8 @@ export interface Thread {
   backend?: BackendKey;
   /** Optional cross-backend tool delegation for this thread. Defaults to false. */
   delegation?: boolean;
+  /** Backends that may retain managed tools and require opt-out cleanup on resume. */
+  delegationBackends?: BackendKey[];
   /**
    * @deprecated Legacy model field — honored for the Claude backend only.
    * Model names are backend-specific (Claude's "opus" is rejected by agy),

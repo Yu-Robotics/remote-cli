@@ -62,29 +62,43 @@ describe('ACP-family delegation sessions', () => {
     const options = { initialWorkingDirectory: directory, sessionBaseDir: directory, threadId: 'test', clientFactory: factory };
     const Constructor = { opencode: OpenCodeExecutor, kimi: KimiExecutor, zcode: ZCodeExecutor }[backend];
     executor = new Constructor(new DirectoryGuard([directory]), options);
+    expect(await executor.execute('Ordinary')).toMatchObject({ success: true, output: 'tools=0' });
+    const session = executor.getSessionId();
     const first = { url: 'http://127.0.0.1:9999/', token: 'private-first' };
     await executor.configureDelegation(first);
     expect(await executor.execute('First')).toMatchObject({ success: true, output: 'tools=1' });
-    const session = executor.getSessionId();
     await executor.configureDelegation({ ...first, token: 'private-second' });
     expect(await executor.execute('Resume')).toMatchObject({ success: true, output: 'tools=1' });
     await executor.configureDelegation(undefined);
-    expect(await executor.execute('Disabled')).toMatchObject({ success: true, output: 'tools=0' });
+    expect(await executor.execute('Disabled')).toMatchObject({ success: true, output: backend === 'zcode' ? 'tools=0' : 'OLD HISTORYtools=0' });
     expect(executor.getSessionId()).toBe(session);
     const requests = fs.readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line));
     const sessions = requests.filter(request => ['session/new', 'session/load', 'session/create', 'session/resume'].includes(request.method));
-    expect(sessions).toHaveLength(3);
-    expect(sessions[0].params.mcpServers[0]).toMatchObject({ name: 'remote-cli-delegation', command: process.execPath,
+    expect(sessions).toHaveLength(4);
+    expect(sessions[0].params.mcpServers).toEqual(backend === 'zcode' ? undefined : []);
+    expect(sessions[1].params.mcpServers[0]).toMatchObject({ name: 'remote-cli-delegation', command: process.execPath,
       env: expect.arrayContaining([{ name: 'REMOTE_CLI_DELEGATION_TOKEN', value: 'private-first' }]) });
-    expect(sessions[1].params).toMatchObject({ sessionId: session, mcpServers: [expect.objectContaining({
+    expect(sessions[2].params).toMatchObject({ sessionId: session, mcpServers: [expect.objectContaining({
       env: expect.arrayContaining([{ name: 'REMOTE_CLI_DELEGATION_TOKEN', value: 'private-second' }]),
     })] });
-    if (backend === 'zcode') expect(sessions[0].params.mcpServers[0]).toMatchObject({ isolation: 'session', timeoutMs: 35000 });
-    expect(sessions[2].params.mcpServers).toEqual(backend === 'zcode' ? undefined : []);
+    if (backend === 'zcode') expect(sessions[1].params.mcpServers[0]).toMatchObject({ isolation: 'session', timeoutMs: 35000 });
+    expect(sessions[3].params.mcpServers).toEqual(backend === 'zcode' ? undefined : []);
+    await executor.deleteThreadData('test');
+    await executor.destroy(); await executor.waitForExit();
+  });
+
+  it('does not respawn a destroyed delegated worker to remove its session pointer', async () => {
+    const log = path.join(directory, 'worker.jsonl');
+    executor = new OpenCodeExecutor(new DirectoryGuard([directory]), {
+      initialWorkingDirectory: directory, sessionBaseDir: directory, threadId: 'worker', delegationWorker: true,
+      clientFactory: (callbacks, cwd) => new AcpClient(process.execPath, [path.join(directory, 'server.cjs'), log], cwd, callbacks, true),
+    });
+    await executor.execute('Worker');
     await executor.destroy(); await executor.waitForExit();
     const requestsBeforeDelete = fs.readFileSync(log, 'utf8');
-    await executor.deleteThreadData('test');
+    await executor.deleteThreadData('worker');
     expect(fs.readFileSync(log, 'utf8')).toBe(requestsBeforeDelete);
+    expect(fs.existsSync(path.join(directory, 'worker.json'))).toBe(false);
   });
 
   it('keeps history when restoring with MCP tools fails instead of silently starting over', async () => {

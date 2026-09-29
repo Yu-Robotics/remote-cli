@@ -23,6 +23,7 @@ export interface AcpExecutorOptions {
   installCommand: string;
   authCommand: string;
   threadId?: string;
+  delegationWorker?: boolean;
   /** Override session pointer storage for isolated tests. */
   sessionBaseDir?: string;
   clientFactory?: (callbacks: AcpEventCallbacks, cwd: string) => AcpTransport;
@@ -112,7 +113,8 @@ export abstract class AcpExecutor implements IExecutor {
   private model?: string;
   private effort?: string;
   private client: AcpTransport | null = null;
-  private readonly transports = new Set<AcpTransport>();
+  private readonly transports = new Map<AcpTransport, boolean>();
+  private readonly delegationWorker: boolean;
   private readonly pendingExits = new Set<Promise<void>>();
   private delegationConnection?: DelegationConnection;
   private replayingSession = false;
@@ -132,6 +134,7 @@ export abstract class AcpExecutor implements IExecutor {
     this.effort = options.effort;
     this.autoApprove = options.autoApprove ?? true;
     this.threadId = options.threadId;
+    this.delegationWorker = options.delegationWorker ?? false;
     this.backendLabel = options.backendLabel;
     this.effortConfigId = options.effortConfigId;
     this.effortAutoValue = options.effortAutoValue;
@@ -140,7 +143,7 @@ export abstract class AcpExecutor implements IExecutor {
     const command = options.acpCommand;
     const args = options.acpArgs;
     this.clientFactory = options.clientFactory
-      ?? ((callbacks, cwd) => new AcpClient(command, args, cwd, callbacks));
+      ?? ((callbacks, cwd) => new AcpClient(command, args, cwd, callbacks, this.isDelegationManaged()));
 
     try {
       this.currentWorkingDirectory = options.initialWorkingDirectory
@@ -347,7 +350,7 @@ export abstract class AcpExecutor implements IExecutor {
   async deleteThreadData(_threadId: string): Promise<void> {
     const stored = this.sessionId;
     try {
-      if (stored && !this.isDestroyed) {
+      if (stored && (!this.isDestroyed || !this.delegationWorker)) {
         const { client } = await this.ensureSession();
         await client.deleteSession(stored);
       }
@@ -414,10 +417,11 @@ export abstract class AcpExecutor implements IExecutor {
   }
 
   private async ensureSession(): Promise<{ client: AcpTransport; sessionId: string }> {
-    if (this.isDestroyed) throw new Error('Executor has been destroyed');
+    const managed = this.isDelegationManaged();
+    if (this.isDestroyed && managed) throw new Error('Executor has been destroyed');
     if (this.client && this.sessionId) return { client: this.client, sessionId: this.sessionId };
     const client = this.createClient();
-    this.transports.add(client);
+    this.transports.set(client, managed);
     try {
       await client.initialize();
       const servers = delegationSessionServers(this.delegationConnection);
@@ -425,7 +429,7 @@ export abstract class AcpExecutor implements IExecutor {
       let result;
       if (this.sessionId) {
         try {
-          this.replayingSession = true;
+          this.replayingSession = managed;
           result = await client.loadSession(this.sessionId, this.currentWorkingDirectory, ...extra);
         } catch (error) {
           const missingSession = /\bsession (?:not found|does not exist|no longer exists|is missing)\b/i
@@ -442,7 +446,7 @@ export abstract class AcpExecutor implements IExecutor {
         this.saveSessionPointer();
       }
       this.updateConfigOptions(result);
-      if (this.isDestroyed) throw new Error('Executor has been destroyed');
+      if (this.isDestroyed && managed) throw new Error('Executor has been destroyed');
       this.client = client;
       await this.applyConfiguredOptions(client, this.sessionId!);
       return { client, sessionId: this.sessionId! };
@@ -542,7 +546,9 @@ export abstract class AcpExecutor implements IExecutor {
   private destroyClient(): void {
     this.clearAbortTimer();
     this.cancelPendingPermission();
-    for (const client of this.transports) this.retireClient(client);
+    for (const [client, managed] of this.transports) {
+      if (managed || client === this.client) this.retireClient(client);
+    }
     this.client = null;
   }
 
@@ -554,6 +560,10 @@ export abstract class AcpExecutor implements IExecutor {
       this.pendingExits.add(exited);
       void exited.then(() => this.pendingExits.delete(exited), () => undefined);
     }
+  }
+
+  private isDelegationManaged(): boolean {
+    return this.delegationWorker || this.delegationConnection !== undefined;
   }
 
   private clearAbortTimer(): void {

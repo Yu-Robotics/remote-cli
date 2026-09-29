@@ -120,13 +120,19 @@ Pi, AGY, OpenCode, Kimi Code, and ZCode can coordinate or work, including sessio
 the same backend. Workers return results to the original conversation and use
 its working directory; they do not create extra thread buttons. `/delegation`
 shows discovery and restrictions; `/delegation off` disables the feature. The
-setting is off by default and persists per thread.
+setting is off by default and persists per thread. Start with one trial thread;
+never-enabled threads skip managed tools, prompt changes, and delegation
+configuration. Turning it off cleans only backends used for delegation, including
+when resumed after a CLI restart or a backend switch, while preserving their
+conversations.
 
 Child progress, approvals, and questions use the existing reply flow. `/abort`
 stops managed children as well as the parent. Sandboxed coordinators can delegate
 only to the same backend; enforced read-only workers require Claude Code or Codex. There is one
 active child per parent and at most three per CLI process, with overlapping
-workspaces serialized and bounded time/output. See
+workspaces serialized and bounded time/output. Workspace reservations apply to
+delegation-enabled work; opted-out threads keep ordinary workspace access, so
+use separate workspaces for independent writers. See
 [Cross-backend Delegation](../../README.md#cross-backend-delegation) for limits,
 recovery, context transfer, and permission behavior.
 

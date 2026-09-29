@@ -479,12 +479,15 @@ export class ClaudePersistentExecutor extends EventEmitter {
           command: process.execPath,
           args: [ClaudePersistentExecutor.APPROVAL_SERVER_SCRIPT, socketPath],
         };
+        if (!this.delegation) args.push('--mcp-config', JSON.stringify({ mcpServers }));
         args.push('--permission-prompt-tool', ClaudePersistentExecutor.APPROVAL_TOOL_NAME);
       } else {
         args.push('--dangerously-skip-permissions');
       }
-      if (this.delegation) mcpServers['remote-cli-delegation'] = delegationMcpConfig(this.delegation);
-      if (Object.keys(mcpServers).length) args.push('--mcp-config', JSON.stringify({ mcpServers }));
+      if (this.delegation) {
+        mcpServers['remote-cli-delegation'] = delegationMcpConfig(this.delegation);
+        args.push('--mcp-config', JSON.stringify({ mcpServers }));
+      }
       args.push('--disallowedTools=AskUserQuestion');
 
       if (this.model) {

@@ -136,7 +136,7 @@ export class DelegationManager {
         if (task.record.state !== 'running') return;
         const childId = `delegate-${task.record.id}`;
         task.executor = this.factory(this.guard, configuration, cwd, childId,
-          parent.thread.models?.[backend], parent.thread.efforts?.[backend], { lifecycleHooks: false });
+          parent.thread.models?.[backend], parent.thread.efforts?.[backend], { lifecycleHooks: false, delegationWorker: true });
         if (fs.realpathSync(task.executor.getCurrentWorkingDirectory()) !== cwd) {
           throw new Error('Worker refused the delegated workspace; refusing a fallback directory');
         }

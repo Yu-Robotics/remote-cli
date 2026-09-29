@@ -9,6 +9,7 @@ export interface OpenCodeExecutorOptions {
   initialWorkingDirectory?: string;
   openCodeCommand?: string;
   threadId?: string;
+  delegationWorker?: boolean;
   /** Override session pointer storage for isolated tests. */
   sessionBaseDir?: string;
   clientFactory?: (callbacks: AcpEventCallbacks, cwd: string) => AcpTransport;
@@ -23,6 +24,7 @@ export class OpenCodeExecutor extends AcpExecutor {
       autoApprove: options.autoApprove,
       initialWorkingDirectory: options.initialWorkingDirectory,
       threadId: options.threadId,
+      delegationWorker: options.delegationWorker,
       sessionBaseDir: options.sessionBaseDir,
       clientFactory: options.clientFactory,
       acpCommand: options.openCodeCommand ?? 'opencode',

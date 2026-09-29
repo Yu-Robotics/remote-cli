@@ -74,6 +74,26 @@ describe('Pi RPC helpers', () => {
 describe('PiClient process lifecycle', () => {
   afterEach(() => {
     vi.mocked(spawn).mockReset();
+    vi.unstubAllEnvs();
+  });
+
+  it.each([false, true])('preserves ordinary environment inheritance and strips managed worker credentials: %s', async delegationWorker => {
+    vi.stubEnv('REMOTE_CLI_DELEGATION_URL', 'http://127.0.0.1:12345/');
+    vi.stubEnv('REMOTE_CLI_DELEGATION_TOKEN', 'parent-test-token');
+    const proc = Object.assign(new EventEmitter(), {
+      stdin: { end: vi.fn(), write: vi.fn(), destroyed: false, writable: true, on: vi.fn() },
+      stdout: new EventEmitter(), stderr: new EventEmitter(), exitCode: null as number | null, signalCode: null,
+      kill: vi.fn(() => { setImmediate(() => { proc.exitCode = 0; proc.emit('exit', 0, null); proc.emit('close', 0, null); }); return true; }),
+    });
+    vi.mocked(spawn).mockReturnValue(proc as any);
+    const client = new PiClient({ command: 'pi', delegationWorker });
+    try {
+      await client.start();
+      const launch = vi.mocked(spawn).mock.calls.at(-1)!;
+      expect(launch[1]).not.toContain('--extension');
+      expect(launch[2]?.env?.REMOTE_CLI_DELEGATION_TOKEN).toBe(delegationWorker ? undefined : 'parent-test-token');
+      expect(launch[2]?.env?.REMOTE_CLI_DELEGATION_URL).toBe(delegationWorker ? undefined : 'http://127.0.0.1:12345/');
+    } finally { await client.stop(); }
   });
 
   it('does not resolve stop until the child process exits', async () => {
