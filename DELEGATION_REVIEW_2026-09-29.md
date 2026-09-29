@@ -56,3 +56,23 @@ remains blocked in this scenario.
 Final verification: `npm run build` passed. CLI coverage passed with 1,301
 tests and 87.11% line coverage; Router coverage passed with 573 tests and
 92.29% line coverage.
+
+## Third-review follow-up: session resets
+
+The remaining P2 allowed `/clear` and `/new` to replace a `PiClient` that still
+owned an unconfirmed process. The replacement lost the old client's startup
+guard and could launch another Pi process in the same workspace.
+
+`PiExecutor` now retains replaced clients until their shutdown is confirmed.
+Session startup, recycling, and destruction all include these clients. Repeated
+resets cannot discard a failed stop, late exit permits a later retry, and
+destruction during a pending reset cannot start a replacement process.
+
+The three regression tests fail on `a01b072` and pass with the fix. They cover
+real Pi transport behavior with simulated child processes, unsuccessful shutdown
+after reset, and destruction while waiting for exit. Version: 1.6.83.
+Verification: both packages build successfully. All 1,304 CLI tests and 573
+Router tests pass; line coverage is 87.15% for CLI and 92.29% for Router. The
+standalone reset probe now reports `AFTER_CLEAR_BLOCKED`, and the earlier
+timeout/crash and delegated workspace-retention probes still pass. These are
+local simulations, not authenticated Pi model runs or production deployment.

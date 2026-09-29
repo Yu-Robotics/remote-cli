@@ -198,6 +198,7 @@ export class PiExecutor implements IExecutor {
   private readonly createClient: (launch: PiLaunchOptions) => PiTransport;
 
   private client: PiTransport;
+  private readonly retiredClients = new Set<PiTransport>();
   private unsubscribe: (() => void) | null = null;
   private sessionId: string | null = null;
   private sessionFile: string | null = null;
@@ -406,7 +407,7 @@ export class PiExecutor implements IExecutor {
     }
     this.unsubscribe?.();
     this.unsubscribe = null;
-    await this.client.stop();
+    await this.recycleClient();
   }
 
   isWaitingInput(): boolean {
@@ -662,6 +663,10 @@ export class PiExecutor implements IExecutor {
   }
 
   private async ensureClient(): Promise<void> {
+    if (this.retiredClients.size > 0) {
+      await Promise.all([...this.retiredClients].map(client => this.stopRetiredClient(client)));
+    }
+    if (this.destroyed) throw new Error('Executor has been destroyed');
     if (!this.client.isRunning()) {
       this.client.updateLaunch?.(this.buildLaunch());
       await this.client.start();
@@ -670,16 +675,26 @@ export class PiExecutor implements IExecutor {
   }
 
   private async recycleClient(): Promise<void> {
-    await this.client.stop();
+    await Promise.all([
+      this.client.stop(),
+      ...[...this.retiredClients].map(client => this.stopRetiredClient(client)),
+    ]);
+  }
+
+  private async stopRetiredClient(client: PiTransport): Promise<void> {
+    await client.stop();
+    // Keep failed shutdowns owned by this executor across context resets.
+    this.retiredClients.delete(client);
   }
 
   private replaceClient(): void {
     this.unsubscribe?.();
     this.unsubscribe = null;
     const previous = this.client;
+    this.retiredClients.add(previous);
     this.client = this.createClient(this.buildLaunch());
     this.unsubscribe = this.client.onEvent((event) => this.handleEvent(event));
-    void previous.stop().catch((error) => {
+    void this.stopRetiredClient(previous).catch((error) => {
       console.warn('[PiExecutor] Failed to stop previous Pi RPC process', error);
     });
   }

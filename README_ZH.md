@@ -477,6 +477,11 @@ Claude Code、Codex、Pi、AGY、OpenCode、Kimi Code 和 ZCode 都可以协调�
 
 Router 重连沿用父任务的恢复和待审批重放机制；断线期间的子任务进度不会缓存。CLI 重启会将保留的运行中记录标记为中断，不会自动重做任务。`~/.remote-cli/delegation/` 下最多保留 200 条已完成记录，保存七天。若无法确认执行者已退出，其工作区会继续阻止后续启用委派的任务，直到执行者停止且 CLI 重启；关闭委派的普通线程不受此占用限制。若初始任务记录无法写入，CLI 会拒绝启动执行者。对于 Pi，若无法确认 RPC 进程已退出，CLI 也会阻止启动新的 Pi 进程，并在超时或中止错误中说明这一情况。
 
+For Pi, `/clear` and `/new` reset the conversation without bypassing pending
+process cleanup. A replacement session waits for all previous Pi processes
+owned by that thread to exit. If cleanup fails, retry after the old process
+has exited; repeating a context reset does not remove this protection.
+
 ### 多会话（Thread）管理
 
 支持同时开启多个会话，互不干扰。

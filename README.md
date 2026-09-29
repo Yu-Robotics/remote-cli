@@ -545,6 +545,11 @@ If the initial task record cannot be written, the CLI refuses to start the worke
 For Pi, an unconfirmed RPC exit also blocks a new Pi process from starting and
 is reported in timeout or abort errors.
 
+For Pi, `/clear` and `/new` reset the conversation without bypassing pending
+process cleanup. A replacement session waits for all previous Pi processes
+owned by that thread to exit. If cleanup fails, retry after the old process
+has exited; repeating a context reset does not remove this protection.
+
 ### Multi-session (Threads)
 
 Start multiple independent sessions simultaneously.
