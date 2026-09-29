@@ -471,11 +471,41 @@ the command. Reading this setting does not initialize delegation or start worker
 
 协调者通过 MCP 或显式加载的 Pi 扩展获得委派工具。OpenCode 和 Kimi 使用 ACP 会话的 MCP 服务；ZCode 使用原生 app-server 会话 MCP 服务。AGY 使用按线程隔离的 MCP 配置，关闭委派时恢复原配置；桥接凭据只通过进程环境变量传递。无需安装 skill 或修改后端的全局配置。启用委派期间，ZCode 的会话 MCP 覆盖会替换用户自定义的 MCP 服务；原生工具和插件工具仍可用，关闭委派后会恢复正常 MCP 配置。每个执行者在父线程的工作目录中使用独立对话，只接收一项自包含任务。协调者需要提供必要上下文；历史消息和图片附件不会自动复制过去。
 
-执行者进度会显示为现有回复卡片中的任务，结果返回协调者生成最终答复。子任务的审批和提问沿用现有卡片或文本输入流程，并绑定原用户和执行者。子任务审批卡片不提供“记住”选项；持久授权应在原线程中配置。`/abort` 会取消协调者和受管理的执行者。父任务结束时也会停止尚未完成的执行者；取消不会撤销已经产生的文件改动。
+Worker progress appears as a task in the existing reply card. Results return
+to the coordinator for its final answer. The CLI suppresses coordinator prose,
+plans, and images while a delegated result is outstanding; program-owned progress
+and genuine approval/question prompts remain visible. If the coordinator returns
+early, the CLI keeps the request busy, waits for terminal results, and resumes
+the same coordinator session with those results before releasing the queue.
+The original request and image attachments are not sent again. The combined
+continuation data is capped at 64 KiB, preserving every task's identity and status;
+truncated text can still be retrieved through the result tool. A coordinator that
+already retrieved every result finishes normally without an extra turn.
+
+Child approvals and questions use the existing card/text input flow, tied to the
+original user and worker. Worker approval cards omit Remember; configure persistent
+grants on the real thread. `/abort`, CLI shutdown, and coordinator failure cancel
+unfinished workers without automatic continuation. After launching children,
+coordinator errors are returned directly instead of retrying the original request.
+Cancellation does not undo existing edits.
 
 每个父任务同时只能有一个执行者；一个 CLI 进程最多可在互不重叠的工作区中运行三个执行者。单次主任务最多启动 12 个子任务，每个子任务限时 30 分钟。最终结果上限为 32 KiB，捕获的输出上限为 256 KiB。工作区路径重叠的受管理任务会串行执行。工作区占用限制只约束启用委派的线程和受管理的执行者；关闭委派的普通线程仍可访问该工作区。它不会阻止这些线程、协调者的原生并行工具或外部编辑器改文件。并行写入应使用不同工作区；协调者会被要求等待写入任务完成后再编辑。
 
-执行者继承目标后端在该线程中保存的权限设置。本版本中，已启用沙箱的协调者只能委派给同一后端。显式 `read_only` 请求使用 Claude Code 或 Codex 的原生只读策略及其正常审批流程。Pi、AGY、OpenCode、Kimi 和 ZCode 会拒绝此模式，因为 remote-cli 尚未为这些执行者强制实施只读沙箱。未受限的协调者可以选择任意已安装且完成认证的执行者。
+Workers follow the coordinator's effective remote-cli sandbox policy. The default
+`inherit` mode launches unrestricted workers when the coordinator has no sandbox,
+even if the target backend has separate saved sandbox settings. This does not
+change those saved settings or other backend approval options. For research
+tasks, use `inherit` and put any no-write requirement in the objective; such an
+instruction is not an enforced sandbox. Unrestricted coordinators can choose any
+installed, authenticated worker, but cannot request `read_only` to enable a new
+worker sandbox.
+
+A sandboxed coordinator can delegate only to the same backend in this release;
+its saved restrictions remain in effect. Only an already sandboxed Claude Code
+or Codex coordinator can use `read_only` to request stricter native read-only
+execution, with the normal approval behavior. Discovery reports `readOnly` only
+when that mode is allowed for the current coordinator. Cross-backend sandbox
+translation remains deferred.
 
 任务管理器层面的测试覆盖全部 49 种有向后端组合。原先 Claude Code、Codex 和 Pi 之间的矩阵已通过真实模型委派验证。新增四个适配器有协议和生命周期测试；ZCode 还通过了真实 MCP 工具注册验证。AGY、OpenCode、Kimi 因本地未完成认证，ZCode 因未设置模型，尚未完成真实模型测试；这些组合及原生持久会话恢复仍待验证。
 
@@ -971,6 +1001,8 @@ Use `/sandbox allow /absolute/directory` to authorize an additional writable dir
 When both CLI and Router support approval cards, Codex and Claude Code send a separate card with a colored header showing the status, the originating thread and workspace, the requested action (commands render in a code block), and the permission scope. Click **Allow once**, **Deny**, or **Always allow**. The persistent choice appears only for explicit directory grants in workspace-write mode; it is not offered for unrestricted command execution or network grants. Native permission approvals apply to the current turn. Command/file approvals may permit the requested action outside the sandbox.
 
 Buttons target the original device, thread, and approval request, even after you switch threads or devices. Cards show the final decision only after the CLI confirms it; repeated clicks cannot approve a different request. Completed, aborted, or disconnected requests invalidate old buttons. On reconnect, outstanding approvals receive new cards. After a Router crash, old cards may retain their visual buttons, but clicks are rejected; use the newly issued card. Approval cards require upgrading both CLI and Router. Older routers, or failed card delivery, use the existing text replies (`yes`, `no`, and `remember` for explicit directory grants).
+
+When the Router reports that an approval card could not be delivered, CLI 1.6.88 and newer show the requested action in a code block above the text reply instructions. This also applies to delegated worker approval requests, which never offer persistent grants.
 
 Permission requests are relayed even when `autoApprove` is true. For native permission requests, reply `yes` for this turn, `always` for the current Codex session, or `remember` to persist explicitly requested writable directories for this remote-cli thread. Network, wildcard, and special-path permissions cannot be remembered as directory grants. For file approvals that name an explicit grant root, `remember` saves that directory too. For command/file approvals, `yes` and `always` approve the displayed action and may permit execution outside the sandbox; they do not save a remote-cli directory grant. Reply `no` to refuse. Unknown or unavailable sandbox settings fail the operation without retrying in full-access mode.
 

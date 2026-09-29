@@ -18,17 +18,17 @@ export const DELEGATION_TOOLS = [
   {
     name: 'remote_cli_list_backends',
     annotations: { readOnlyHint: true, openWorldHint: false },
-    description: 'Discover installed local agent backends and their execution restrictions before delegating. Installation does not prove authentication or remaining quota.',
+    description: 'Discover installed local agent backends and their execution restrictions before delegating. worker and readOnly reflect the current coordinator sandbox policy. Installation does not prove authentication or remaining quota.',
     inputSchema: object({}),
   },
   {
     name: 'remote_cli_delegate',
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
-    description: 'Start one bounded task in an independent backend session in this workspace. Pass self-contained context and acceptance criteria; the worker does not inherit this conversation. Do not edit files concurrently with a writing worker. Wait using remote_cli_result before finishing. Workers cannot delegate again.',
+    description: 'Start one bounded task in an independent backend session in this workspace. Pass self-contained context and acceptance criteria; the worker does not inherit this conversation. Use inherit by default, including research tasks; put no-write requirements in the objective instead of enabling an extra sandbox. Do not edit files concurrently with a writing worker. Wait using remote_cli_result before finishing. Workers cannot delegate again.',
     inputSchema: object({
       backend: { type: 'string', enum: DELEGATION_BACKENDS },
       objective: { type: 'string', minLength: 1, maxLength: 24000 },
-      mode: { type: 'string', enum: ['inherit', 'read_only'], description: 'inherit preserves applicable sandbox restrictions; read_only requires the enforced native sandbox of Claude Code or Codex.' },
+      mode: { type: 'string', enum: ['inherit', 'read_only'], description: 'Defaults to inherit: workers follow the coordinator sandbox; an unrestricted coordinator launches unrestricted workers regardless of the target backend\'s saved sandbox. read_only is allowed only when discovery reports readOnly=true, for an already sandboxed Claude Code or Codex coordinator delegating to the same backend.' },
     }, ['backend', 'objective']),
   },
   {
@@ -48,7 +48,7 @@ export const DELEGATION_TOOLS = [
   },
 ] as const;
 
-export const DELEGATION_INSTRUCTIONS = 'Remote CLI delegation is enabled for this turn. Use remote_cli_list_backends to discover workers. Delegate bounded tasks when useful, provide context, and await remote_cli_result before completing. The current thread and backend remain responsible for the answer. Do not perform concurrent writes while a delegated worker may be writing. Do not delegate recursively or assume worker memory is shared.';
+export const DELEGATION_INSTRUCTIONS = 'Remote CLI delegation is enabled for this turn. Use remote_cli_list_backends to discover workers. Delegate bounded tasks when useful, provide context, and await remote_cli_result before completing. Use the default inherit mode, including for research; put no-write requirements in the objective. Workers follow the coordinator sandbox, so an unrestricted coordinator must not request read_only. The current thread and backend remain responsible for the answer. Do not perform concurrent writes while a delegated worker may be writing. Do not delegate recursively or assume worker memory is shared.';
 
 export function sameConnection(a?: DelegationConnection, b?: DelegationConnection): boolean {
   return a?.url === b?.url && a?.token === b?.token;

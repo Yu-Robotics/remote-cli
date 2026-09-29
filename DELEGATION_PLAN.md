@@ -1,5 +1,27 @@
 # Cross-Backend Delegation Plan
 
+## Follow-up: enforce coordinator completion
+
+Status: implemented and validated, 2026-09-29. Version 1.6.88.
+
+- Track terminal-result delivery independently of worker completion. Running
+  snapshots and user-facing progress do not count as result delivery.
+- Suppress coordinator prose, plans, and images while results are outstanding;
+  retain program-owned task progress and real approval/question prompts.
+- On a successful early coordinator return, deactivate the tool bridge, drain
+  in-flight launches, wait for bounded worker cleanup, and resume the same
+  coordinator with bounded terminal results. Keep the parent operation busy.
+- Do not replay the original request or attachments. Cancelled, failed, and
+  shutting-down parents must not resume. Preserve ordinary opt-out execution.
+- Verify unread completion, launch races, abort during host waiting, child
+  failure/timeout, stale callback suppression, queue order, and attachment handling.
+
+Validation: both packages build; 1,328 CLI tests and 584 Router tests pass.
+CLI line coverage is 87.29%. The workflow tests use the real delegation bridge
+with mocked native executors. A bounded independent source review found no
+additional concrete issue. Live Feishu rendering and native model continuation
+were not revalidated for this change.
+
 ## Follow-up: isolate disabled threads
 
 Status: implemented and validated after commit `175cd22` on 2026-09-29. Version 1.6.80.
@@ -376,14 +398,21 @@ See [Codex configuration reference](https://developers.openai.com/codex/config-r
 
 ## 5. Permissions and workspace coordination
 
-- Resolve the target's saved sandbox policy using the real thread ID before
-  creating the synthetic worker identity. Passing a fresh ID alone would miss
-  per-thread policy files.
+- Resolve the coordinator's effective sandbox policy using the real thread ID
+  before creating the synthetic worker identity. Passing a fresh ID alone would
+  miss per-thread policy files. When the coordinator is unrestricted, launch
+  unrestricted workers without loading the target backend's saved sandbox policy.
+  Do not modify saved policies or other backend approval options.
 - Unrestricted coordinators support all 49 directed pairs at the manager boundary. Restricted
   coordinators may delegate only to the same backend; equivalence between
   different native sandbox systems is not assumed.
-- `read_only` uses the native Claude/Codex policy, including normal approvals.
-  Pi, AGY, OpenCode, Kimi, and ZCode reject it instead of treating an instruction as filesystem enforcement.
+- Use `inherit` by default, including research tasks whose no-write requirements
+  belong in the objective. `read_only` is available only to an already sandboxed
+  Claude/Codex coordinator delegating to the same backend, and uses that native
+  policy with normal approvals. Unrestricted coordinators must not enable an
+  extra worker sandbox; an explicit `read_only` request is rejected with guidance
+  to use `inherit`. Discovery reports only the modes allowed in the current turn.
+  Pi, AGY, OpenCode, Kimi, and ZCode cannot enforce a read-only sandbox.
 - Worker approval cards omit Remember. Persistent grants should be configured
   on the real thread. Temporary worker policy/session pointers are cleaned up
   after execution; native CLI transcript retention remains backend-owned.
@@ -411,16 +440,26 @@ See [Codex configuration reference](https://developers.openai.com/codex/config-r
 | Managed delegation tool calls per turn | 500 |
 | Worker duration | 30 minutes |
 | Final result | 32 KiB, UTF-8-safe truncation marker included |
+| Automatic continuation results | 64 KiB combined JSON, preserving all task IDs and terminal states |
 | Captured text/tool-result output | 256 KiB, then stop |
 | Objective | 24000 characters; diagnostic record stores first 1000 |
 | Tool wait / HTTP timeout | 25 seconds / 32 seconds |
+| Initial task record | Up to 10 seconds each for store initialization and the first durable write |
 | Shutdown | Up to 2 seconds for abort, then 10 seconds for destroy |
+| Session and metadata cleanup | Up to 10 seconds per cleanup stage after confirmed process exit |
 | Task record retention | 200 terminal records, seven days |
 
-A parent ending, `/abort`, deletion, or CLI shutdown closes the scope and stops
+A failed parent, `/abort`, deletion, or CLI shutdown closes the scope and stops
 managed children. Cancel remains idempotent. Cancellation during version probing
-or initial persistence cannot start a worker after closure. Ending a parent
-without awaiting its result stops that child before the next queued task starts.
+or initial persistence cannot start a worker after closure. A successful native
+coordinator return is not sufficient to finish the parent request: the CLI drains
+in-flight launches and unconsumed results, then resumes the same coordinator
+session with terminal results. It rechecks cancellation before resuming, retains
+the busy operation and queue order, and omits the original request and attachments.
+If all results were already retrieved, no extra coordinator turn is needed.
+Coordinator failures after any child launch do not retry or compact/replay the
+original request. Session deletion and final metadata maintenance have deadlines;
+an unavailable diagnostic store cannot hold a confirmed-exited worker forever.
 
 If cleanup cannot be confirmed, return interrupted status and retain the
 workspace lease and capacity reservation. Stop the worker and restart the CLI

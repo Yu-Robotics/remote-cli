@@ -523,9 +523,20 @@ calls while that scope is active. Backend adapters register the four tools via
 MCP or the Pi extension without modifying global backend configuration.
 `BackendRegistry` discovers configured executables; `DelegationManager` owns
 task IDs, limits, workspace reservations, child executors, results, cancellation,
-and cleanup. `WorkerPolicy` resolves saved sandbox settings against the real
-parent thread before creating a synthetic worker identity. `DelegationStore`
+and cleanup. `WorkerPolicy` resolves the coordinator's effective sandbox against
+the real parent thread before creating a synthetic worker identity. Unrestricted
+coordinators launch unrestricted workers without loading the target's separate
+sandbox settings. Sandboxed coordinators retain same-backend restrictions;
+`read_only` is available only within that restricted path. `DelegationStore`
 keeps bounded diagnostic task records and marks interrupted runs after restart.
+
+Worker completion and terminal-result delivery are separate states. While results
+are outstanding, `MessageHandler` suppresses coordinator prose/plans/images while
+keeping program-owned progress and genuine input prompts visible. A successful
+early return drains pending launches and results, then resumes the same session
+without replaying the original request or attachments. The parent stays busy
+until summarization finishes. Abort, shutdown, and coordinator errors never
+trigger this continuation; errors after child launch do not replay the request.
 
 The Router receives existing task, tool, approval, and response events; the
 wire protocol remains version 1. Never-enabled threads bypass delegation setup

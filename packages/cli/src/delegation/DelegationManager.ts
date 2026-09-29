@@ -14,7 +14,8 @@ import { DELEGATION_BACKENDS, type DelegationBackend, type DelegationHandler } f
 import { workerConfiguration } from './WorkerPolicy';
 
 export const DELEGATION_LIMITS = { launches: 12, concurrent: 3, timeoutMs: 30 * 60_000,
-  resultBytes: 32 * 1024, streamBytes: 256 * 1024, calls: 500 } as const;
+  resultBytes: 32 * 1024, continuationBytes: 64 * 1024, streamBytes: 256 * 1024,
+  storageTimeoutMs: 10_000, calls: 500 } as const;
 
 export function workspacesOverlap(first: string, second: string): boolean {
   const contains = (root: string, candidate: string) => {
@@ -40,6 +41,7 @@ export interface DelegationParent {
 
 interface Task {
   record: DelegatedTaskRecord;
+  resultDelivered: boolean;
   executor?: IExecutor;
   done: Promise<void>;
   settle: () => void;
@@ -49,9 +51,21 @@ interface Task {
   interrupt: () => void;
 }
 
+export interface DelegatedTaskResult {
+  taskId: string;
+  backend: string;
+  state: DelegatedTaskRecord['state'];
+  output?: string;
+  error?: string;
+  truncated: boolean;
+}
+
 export interface DelegationScope {
   invoke: DelegationHandler;
   isClosed(): boolean;
+  hasTasks(): boolean;
+  hasPendingResults(): boolean;
+  collectPendingResults(): Promise<DelegatedTaskResult[]>;
   close(): Promise<void>;
   waitingExecutor(): IExecutor | undefined;
 }
@@ -65,11 +79,11 @@ function bounded(text: string, limit: number): { text: string; truncated: boolea
   return { text: buffer.subarray(0, end).toString('utf8') + marker, truncated: true };
 }
 
-async function deadline<T>(operation: () => T | Promise<T>, milliseconds: number): Promise<T> {
+async function deadline<T>(operation: () => T | Promise<T>, milliseconds: number, message = 'Worker cleanup timed out'): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([Promise.resolve().then(operation), new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error('Worker cleanup timed out')), milliseconds);
+      timer = setTimeout(() => reject(new Error(message)), milliseconds);
     })]);
   } finally { clearTimeout(timer); }
 }
@@ -103,11 +117,15 @@ export class DelegationManager {
       if (!task) throw new Error('Task does not belong to this parent request');
       return task;
     };
-    const view = (task: Task) => ({ taskId: task.record.id, backend: task.record.backend,
+    const view = (task: Task): DelegatedTaskResult => ({ taskId: task.record.id, backend: task.record.backend,
       state: task.record.finishedAt ? task.record.state : 'running',
       output: task.record.finishedAt ? task.record.output : undefined,
       error: task.record.finishedAt ? task.record.error : undefined,
       truncated: task.record.truncated ?? false });
+    const receive = (task: Task): DelegatedTaskResult => {
+      if (task.record.finishedAt) task.resultDelivered = true;
+      return view(task);
+    };
     const save = (task: Task) => this.store.write(task.record).catch(error => {
       console.warn('[Delegation] Could not persist task state:', error instanceof Error ? error.message : 'Storage failure');
     });
@@ -198,12 +216,13 @@ export class DelegationManager {
           console.warn('[Delegation] Worker cleanup failed:', error instanceof Error ? error.message : 'Cleanup failure');
         }
         if (cleaned) {
-          await task.executor?.deleteThreadData?.(`delegate-${task.record.id}`).catch(() => undefined);
+          await deadline(() => task.executor?.deleteThreadData?.(`delegate-${task.record.id}`), this.cleanupMs)
+            .catch(() => console.warn('[Delegation] Worker session cleanup did not finish'));
           this.running--; this.workspaces.delete(cwd);
         } else this.workspaces.set(cwd, `quarantined:${parent.thread.id}`);
         task.record.finishedAt = Date.now();
-        await save(task);
-        await this.store.prune().catch(() => undefined);
+        await deadline(async () => { await save(task); await this.store.prune(); }, this.cleanupMs)
+          .catch(() => console.warn('[Delegation] Final task metadata could not be saved or pruned'));
         notify(() => parent.onToolResult({ tool_use_id: task.record.id, content: JSON.stringify(view(task)), is_error: task.record.state !== 'succeeded' }));
         notify(() => parent.onNotice(`\nDelegated ${backend} task ${task.record.state}.\n`));
         task.settle();
@@ -223,8 +242,16 @@ export class DelegationManager {
         if (name === 'remote_cli_list_backends') {
           const backends = await this.registry.list(parent.config);
           return { backends: backends.map(item => {
-            try { workerConfiguration(parent.config, this.guard, parent.thread.id, parent.backend, item.backend, 'inherit'); return item; }
-            catch (error) { return { ...item, worker: false, reason: (error as Error).message }; }
+            const configure = (mode: 'inherit' | 'read_only') =>
+              workerConfiguration(parent.config, this.guard, parent.thread.id, parent.backend, item.backend, mode);
+            try { configure('inherit'); }
+            catch (error) { return { ...item, worker: false, readOnly: false, reason: (error as Error).message }; }
+            let readOnly = item.readOnly;
+            if (readOnly) {
+              try { configure('read_only'); }
+              catch { readOnly = false; }
+            }
+            return { ...item, readOnly };
           }), workspace: cwd, maxConcurrentChildren: 1 };
         }
         if (name === 'remote_cli_result') {
@@ -236,9 +263,13 @@ export class DelegationManager {
             try { await Promise.race([task.done, new Promise<void>(resolve => { timer = setTimeout(resolve, seconds * 1000); })]); }
             finally { clearTimeout(timer); }
           }
-          return view(task);
+          return receive(task);
         }
-        if (name === 'remote_cli_cancel') return cancel(getTask(args.taskId));
+        if (name === 'remote_cli_cancel') {
+          const task = getTask(args.taskId);
+          await cancel(task);
+          return receive(task);
+        }
         if (name !== 'remote_cli_delegate') throw new Error('Unknown delegation tool');
         if (starting || [...tasks.values()].some(task => !task.record.finishedAt)) throw new Error('Wait for the current delegated task before starting another');
         if (launches >= DELEGATION_LIMITS.launches) throw new Error('Delegated task limit reached');
@@ -253,7 +284,7 @@ export class DelegationManager {
           const configuration = workerConfiguration(parent.config, this.guard, parent.thread.id, parent.backend, backend, mode);
           const available = await this.registry.get(backend, parent.config);
           if (!available.installed) throw new Error(`${backend}: ${available.reason}`);
-          await this.store.initialize();
+          await deadline(() => this.store.initialize(), DELEGATION_LIMITS.storageTimeoutMs, 'Task record initialization timed out');
           if (closed) throw new Error('Delegation turn has ended');
           if (this.running >= DELEGATION_LIMITS.concurrent
             || [...this.workspaces.keys()].some(active => workspacesOverlap(active, cwd))
@@ -264,10 +295,11 @@ export class DelegationManager {
           const interrupted = new Promise<ExecuteResult>(resolve => { interrupt = () => resolve({ success: false }); });
           const task: Task = { record: { id: randomUUID(), threadId: parent.thread.id,
             parentMessageId: parent.messageId, backend, objective: objective.slice(0, 1000),
-            state: 'running', startedAt: Date.now() }, done: new Promise<void>(resolve => { settle = resolve; }), settle, interrupted, interrupt };
+            state: 'running', startedAt: Date.now() }, resultDelivered: false,
+            done: new Promise<void>(resolve => { settle = resolve; }), settle, interrupted, interrupt };
           tasks.set(task.record.id, task);
           try {
-            await this.store.write(task.record);
+            await deadline(() => this.store.write(task.record), DELEGATION_LIMITS.storageTimeoutMs, 'Initial task record write timed out');
           } catch (error) {
             tasks.delete(task.record.id);
             this.running--;
@@ -281,7 +313,7 @@ export class DelegationManager {
               description: `${backend}: ${objective.slice(0, 120)}`, prompt: objective.slice(0, 1000), subagent_type: backend,
           } }));
           void run(task, configuration, objective).catch(() => undefined);
-          return view(task);
+          return receive(task);
         } finally { starting = false; }
       })();
       calls.set(callId, { signature, result });
@@ -290,6 +322,32 @@ export class DelegationManager {
     const scope: DelegationScope = {
       invoke,
       isClosed: () => closed,
+      hasTasks: () => starting || tasks.size > 0,
+      hasPendingResults: () => starting || [...tasks.values()].some(task => !task.resultDelivered),
+      collectPendingResults: async () => {
+        if (closed) throw new Error('Delegation was cancelled');
+        // The caller disables the bridge first, so no new calls can escape this
+        // snapshot. Include launches still waiting for discovery or persistence.
+        await Promise.allSettled([...calls.values()].map(call => call.result));
+        if (closed) throw new Error('Delegation was cancelled');
+        const pending = [...tasks.values()].filter(task => !task.resultDelivered);
+        await Promise.all(pending.map(task => task.done));
+        if (closed) throw new Error('Delegation was cancelled');
+        const terminal = pending.map(view);
+        let results = terminal;
+        // Keep every task's identity and terminal status, reducing only text.
+        for (let limit = DELEGATION_LIMITS.resultBytes / 2;
+          Buffer.byteLength(JSON.stringify(results)) > DELEGATION_LIMITS.continuationBytes; limit = Math.floor(limit / 2)) {
+          results = terminal.map(result => {
+            const output = bounded(result.output ?? '', limit);
+            const error = bounded(result.error ?? '', limit);
+            return { ...result, output: output.text, error: error.text || undefined,
+              truncated: result.truncated || output.truncated || error.truncated };
+          });
+        }
+        for (const task of pending) task.resultDelivered = true;
+        return results;
+      },
       waitingExecutor: () => [...tasks.values()].find(task => task.executor?.isWaitingInput?.())?.executor,
       close: async () => {
         closed = true;

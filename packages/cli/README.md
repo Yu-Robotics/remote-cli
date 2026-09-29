@@ -135,8 +135,22 @@ conversations.
 the command. Reading this setting does not initialize delegation or start workers.
 
 Child progress, approvals, and questions use the existing reply flow. `/abort`
-stops managed children as well as the parent. Sandboxed coordinators can delegate
-only to the same backend; enforced read-only workers require Claude Code or Codex. There is one
+stops managed children as well as the parent. While delegated results remain
+outstanding, the CLI suppresses coordinator prose/plans/images and displays
+program-owned progress and real input prompts. An early coordinator return keeps
+the request busy: the CLI waits, then resumes the same session with bounded
+terminal results before draining the queue. Original requests and attachments
+are not replayed. Abort, shutdown, and coordinator failure stop this continuation;
+errors after launching children are not retried automatically.
+
+Workers follow the coordinator's
+remote-cli sandbox policy: with no coordinator sandbox, `inherit` launches
+unrestricted workers, ignoring separate target sandbox settings without changing
+them. Research tasks should put no-write requirements in the objective instead
+of enabling a sandbox. Other backend approval options retain their behavior.
+Sandboxed coordinators can delegate only to the same backend; `read_only` is
+available only for an already sandboxed Claude Code or Codex coordinator.
+There is one
 active child per parent and at most three per CLI process, with overlapping
 workspaces serialized and bounded time/output. Workspace reservations apply to
 delegation-enabled work; opted-out threads keep ordinary workspace access, so
@@ -188,7 +202,9 @@ When diagnosing a task, check `/status`, then `/context`, then `/queue`. Use `/a
 
 ## Security
 
-Codex permission requests use interactive cards when both CLI and Router support them. Choose Allow, Deny, or (for explicit directory grants) Allow and remember directory. Buttons stay bound to the original request and are invalidated when it finishes. Pending approvals get new cards after reconnecting; older routers and card delivery failures retain text replies.
+Codex and Claude Code permission requests use interactive cards when both CLI and Router support them. Choose Allow once, Deny, or (for explicit directory grants) Always allow. Buttons stay bound to the original request and are invalidated when it finishes. Pending approvals get new cards after reconnecting; older routers and card delivery failures retain text replies.
+
+When the Router reports that an approval card could not be delivered, CLI 1.6.88 and newer show the requested action in a code block above the text reply instructions. This also applies to delegated worker approval requests, which never offer persistent grants.
 
 Codex supports an opt-in native sandbox through `/sandbox on`, `/sandbox read-only`, and `/sandbox off`. Use `/sandbox allow <directory>` to save extra writable directories for the current thread, `remove <directory>` to revoke them, and `network on|off` to control networking. The workspace-write default allows cross-project reads, networking, and writes to the current project, dedicated temporary/download directories, and common package caches. Grants survive conversation resets and backend switches. See [Codex sandbox configuration](../../README.md#optional-codex-sandbox) for boundaries, approval choices, and configuration defaults. Other backends retain their existing behavior.
 

@@ -314,19 +314,161 @@ describe('delegation in the existing thread workflow', () => {
     expect(main.execute).toHaveBeenCalledOnce();
   });
 
-  it('cleans unfinished children when the parent ends without waiting for a result', async () => {
+  it('waits and resumes the same coordinator with results when it returns early, before draining the queue', async () => {
     await handler.handleMessage(message('enable', '/delegation on'));
-    worker.execute.mockImplementationOnce(() => new Promise(() => undefined));
-    main.execute.mockImplementationOnce(async () => {
+    fs.writeFileSync(path.join(home, 'stale.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+cZYsAAAAASUVORK5CYII=', 'base64'));
+    let finish!: (result: ExecuteResult) => void;
+    let staleOptions!: ExecuteOptions;
+    worker.execute.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    worker.abort.mockImplementation(async () => { finish({ success: false }); return true; });
+    main.execute.mockImplementationOnce(async (_prompt: string, options: ExecuteOptions) => {
+      staleOptions = options;
+      options.onStream?.('Starting the review.');
       await call('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' });
+      options.onStream?.('Still waiting for the worker.');
+      options.onPlanMode?.('A stale waiting plan');
+      options.onImage?.({ type: 'image', data: 'c3RhbGU=', mimeType: 'image/png' });
+      return { success: true, output: 'Still waiting for the worker.\n![stale image](./stale.png)' };
+    }).mockImplementationOnce(async (prompt: string, options: ExecuteOptions) => {
+      expect(prompt).toContain('Verified child result');
+      expect(prompt).toContain('succeeded');
+      expect(prompt).not.toContain('Unique original request');
+      expect(options.attachments).toBeUndefined();
+      staleOptions.onStream?.('Late stale waiting text');
+      options.onStream?.('The review is complete.');
+      return { success: true, output: 'The review is complete.' };
+    });
+    const attachments = [{ type: 'image' as const, data: 'aW1hZ2U=', mimeType: 'image/png' }];
+    const active = handler.handleMessage({ ...message('parent', 'Unique original request'), attachments });
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+    await vi.waitFor(async () => expect(await main.execute.mock.results[0].value).toMatchObject({ success: true }));
+    expect(responseFor('parent')).toBeUndefined();
+    expect(pool.isThreadBusy(threads.getDefaultThread().id)).toBe(true);
+    expect(worker.abort).not.toHaveBeenCalled();
+    await handler.handleMessage(message('next', 'Continue'));
+    const confirmation = responseFor('next').queueConfirmation;
+    await handler.handleMessage(message('confirm', `/queue confirm ${confirmation.id}`));
+    expect(main.execute).toHaveBeenCalledTimes(1);
+    finish({ success: true, output: 'Verified child result' });
+    await active;
+    await vi.waitFor(() => expect(responseFor('next')?.success).toBe(true));
+    expect(main.execute).toHaveBeenCalledTimes(3);
+    expect(main.execute.mock.calls[0][1].attachments).toEqual(attachments);
+    expect(worker.execute).toHaveBeenCalledOnce();
+    expect(worker.destroy).toHaveBeenCalledOnce();
+    expect(responseFor('parent').success).toBe(true);
+    const output = socket.send.mock.calls.map(([value]: any[]) => value).filter((value: any) => value.messageId === 'parent');
+    expect(JSON.stringify(output)).toContain('Starting the review.');
+    expect(JSON.stringify(output)).toContain('The review is complete.');
+    expect(JSON.stringify(output)).not.toMatch(/Still waiting|stale waiting|c3RhbGU=/);
+    expect(output.some((value: any) => value.streamType === 'image')).toBe(false);
+  });
+
+  it('suppresses stale prose after child completion until its final result is retrieved', async () => {
+    await handler.handleMessage(message('enable', '/delegation on'));
+    main.execute.mockImplementationOnce(async (_prompt: string, options: ExecuteOptions) => {
+      const task = await call('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' });
+      await vi.waitFor(() => expect(socket.send.mock.calls.some(([value]: any[]) => value.chunk?.includes('task succeeded'))).toBe(true));
+      options.onStream?.('The worker is still running.');
+      const result = await call('remote_cli_result', { taskId: task.taskId });
+      options.onStream?.(`Final answer: ${result.output}`);
       return { success: true };
     });
     await handler.handleMessage(message('parent', 'Work'));
+    expect(main.execute).toHaveBeenCalledOnce();
+    const output = JSON.stringify(socket.send.mock.calls);
+    expect(output).not.toContain('The worker is still running.');
+    expect(output).toContain('Final answer: child answer');
+  });
+
+  it.each(['abort', 'shutdown'])('does not resume an early-returned coordinator after %s during host waiting', async action => {
+    await handler.handleMessage(message('enable', '/delegation on'));
+    let finish!: (result: ExecuteResult) => void;
+    worker.execute.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    worker.abort.mockImplementation(async () => { finish({ success: false, error: 'Aborted' }); return true; });
+    main.execute.mockImplementationOnce(async () => {
+      await call('remote_cli_delegate', { backend: 'codex', objective: 'Wait' });
+      return { success: true };
+    });
+    const active = handler.handleMessage(message('parent', 'Work'));
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+    await vi.waitFor(async () => expect(await main.execute.mock.results[0].value).toMatchObject({ success: true }));
+    if (action === 'abort') await handler.handleMessage(message('abort', '/abort'));
+    else await handler.destroy();
+    await active;
+    expect(main.execute).toHaveBeenCalledOnce();
+    expect(responseFor('parent')).toMatchObject({ success: false, error: expect.stringMatching(/cancel/i) });
+    if (action === 'abort') expect(responseFor('abort').success).toBe(true);
+    expect(worker.destroy).toHaveBeenCalledOnce();
+  });
+
+  it('cancels unfinished children on coordinator failure without replaying the user request', async () => {
+    await handler.handleMessage(message('enable', '/delegation on'));
+    let finish!: (result: ExecuteResult) => void;
+    worker.execute.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    worker.abort.mockImplementation(async () => { finish({ success: false }); return true; });
+    main.compactWhenFull = vi.fn(async () => ({ success: true }));
+    main.execute.mockImplementationOnce(async () => {
+      await call('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' });
+      return { success: false, error: 'Prompt too long' };
+    });
+    await handler.handleMessage(message('parent', 'Work'));
+    expect(main.execute).toHaveBeenCalledOnce();
+    expect(main.compactWhenFull).not.toHaveBeenCalled();
     expect(worker.abort).toHaveBeenCalledOnce();
     expect(worker.destroy).toHaveBeenCalledOnce();
-    expect(responseFor('parent').success).toBe(true);
-    await handler.handleMessage(message('next', 'Continue'));
-    expect(responseFor('next').success).toBe(true);
+    expect(responseFor('parent')).toMatchObject({ success: false, error: 'Prompt too long' });
+  });
+
+  it.each(['failed', 'timed_out'])('hands a %s child result back to an early-returned coordinator without retrying the child', async state => {
+    await handler.handleMessage(message('enable', '/delegation on'));
+    if (state === 'failed') worker.execute.mockResolvedValue({ success: false, error: 'Quota exhausted' });
+    else {
+      const guard = new DirectoryGuard([home]);
+      (handler as any).delegation = new DelegationManager(guard, () => worker, new BackendRegistry(async () => 'test 1.0'), undefined, 20);
+      worker.execute.mockImplementationOnce(() => new Promise(() => undefined));
+    }
+    main.execute.mockImplementationOnce(async () => {
+      await call('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' });
+      return { success: true };
+    }).mockImplementationOnce(async (prompt: string, options: ExecuteOptions) => {
+      expect(prompt).toContain(state);
+      expect(prompt).toContain(state === 'failed' ? 'Quota exhausted' : 'Delegated task timed out');
+      options.onStream?.('The worker could not finish the request.');
+      return { success: true };
+    });
+    await handler.handleMessage(message('parent', 'Work'));
+    expect(main.execute).toHaveBeenCalledTimes(2);
+    expect(worker.execute).toHaveBeenCalledOnce();
+    expect(responseFor('parent')).toMatchObject({ success: true });
+  });
+
+  it('relays genuine coordinator questions emitted before the waiting flag is set while a child is active', async () => {
+    await handler.handleMessage(message('enable', '/delegation on'));
+    let waiting = false;
+    let finishChild!: (result: ExecuteResult) => void;
+    worker.execute.mockImplementationOnce(() => new Promise(resolve => { finishChild = resolve; }));
+    worker.abort.mockImplementation(async () => { finishChild({ success: false }); return true; });
+    main.isWaitingInput = () => waiting;
+    main.execute.mockImplementationOnce(async (_prompt: string, options: ExecuteOptions) => {
+      const task = await call('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' });
+      await new Promise<void>(resolve => {
+        main.sendInput = vi.fn(() => { waiting = false; resolve(); return true; });
+        options.onStream?.('Choose output language: A or B');
+        waiting = true;
+      });
+      finishChild({ success: true, output: 'Complete' });
+      await call('remote_cli_result', { taskId: task.taskId });
+      options.onStream?.('Final answer');
+      return { success: true };
+    });
+    const active = handler.handleMessage(message('parent', 'Work'));
+    await vi.waitFor(() => expect(JSON.stringify(socket.send.mock.calls)).toContain('Choose output language'));
+    await handler.handleMessage(message('input', 'A'));
+    await active;
+    expect(main.sendInput).toHaveBeenCalledWith('A');
+    expect(main.execute).toHaveBeenCalledOnce();
+    expect(responseFor('parent')).toMatchObject({ success: true });
   });
 
   it('rejects unsupported coordinators without changing the selected backend or ordinary execution', async () => {

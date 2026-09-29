@@ -192,7 +192,9 @@ export class ApprovalCards {
       if (request.approval.canRemember) buttons.push({ tag: 'button', type: 'default',
         text: { tag: 'plain_text', content: 'Always allow' },
         behaviors: [{ type: 'callback', value: { action: 'approval_reply', requestId: request.messageId, decision: 'remember' } }] });
-      elements.push({ tag: 'button_group', buttons });
+      elements.push({ tag: 'column_set', flex_mode: 'stretch', columns: buttons.map(button => ({
+        tag: 'column', width: 'auto', elements: [button],
+      })) });
     }
     return elements;
   }

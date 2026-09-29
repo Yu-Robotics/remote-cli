@@ -810,6 +810,33 @@ describe('MessageHandler', () => {
   });
 
   describe('approval fallback replies', () => {
+    it.each([
+      { description: '[claude delegated task] curl -sS "https://example.com/weather"\n  | python3 -c "print(1)"', fence: '```' },
+      { description: '[claude delegated task] cat <<EOF\n```sh\ncurl https://example.com/weather\n```\nEOF', fence: '````' },
+    ])('preserves command formatting when approval card delivery fails: $fence', async ({ description, fence }) => {
+      let options: any;
+      let finish!: (value: any) => void;
+      ctx.mockExecutor.execute.mockImplementation((_prompt: string, opts: any) => {
+        options = opts;
+        return new Promise(resolve => { finish = resolve; });
+      });
+      await ctx.handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: { approvalCards: true } } } as any);
+      const running = ctx.handler.handleMessage({ type: 'command', messageId: 'weather-task', content: 'Check the weather', openId: 'owner', timestamp: 1 });
+      await vi.waitFor(() => expect(options).toBeDefined());
+      const handled = options.onApprovalRequest({ requestId: 'weather-approval', kind: 'command', description, canRemember: false });
+      await ctx.handler.handleMessage({ type: 'approval_unavailable', messageId: 'weather-approval' });
+      options.onApprovalResolved('weather-approval', 'expired');
+      finish({ success: true });
+      await running;
+
+      expect(handled).toBe(true);
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'stream', messageId: 'weather-task',
+        chunk: expect.stringContaining(`${fence}\n${description}\n${fence}`),
+      }));
+      expect(ctx.mockExecutor.execute).toHaveBeenCalledTimes(1);
+    });
+
     it('routes text to a pending approval after card failure without queuing another model turn', async () => {
       let options: any;
       let finish!: (value: any) => void;

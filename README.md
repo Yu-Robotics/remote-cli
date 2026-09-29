@@ -507,11 +507,22 @@ coordinator must include needed context; past messages and image attachments
 are not copied automatically.
 
 Worker progress appears as a task in the existing reply card. Results return
-to the coordinator for its final answer. Child approvals and questions use the
-existing card/text input flow, tied to the original user and worker. Worker
-approval cards omit Remember; configure persistent grants on the real thread.
-`/abort` cancels both the coordinator and its managed workers. Ending the parent
-turn also stops unfinished workers; cancellation does not undo existing edits.
+to the coordinator for its final answer. The CLI suppresses coordinator prose,
+plans, and images while a delegated result is outstanding; program-owned progress
+and genuine approval/question prompts remain visible. If the coordinator returns
+early, the CLI keeps the request busy, waits for terminal results, and resumes
+the same coordinator session with those results before releasing the queue.
+The original request and image attachments are not sent again. The combined
+continuation data is capped at 64 KiB, preserving every task's identity and status;
+truncated text can still be retrieved through the result tool. A coordinator that
+already retrieved every result finishes normally without an extra turn.
+
+Child approvals and questions use the existing card/text input flow, tied to the
+original user and worker. Worker approval cards omit Remember; configure persistent
+grants on the real thread. `/abort`, CLI shutdown, and coordinator failure cancel
+unfinished workers without automatic continuation. After launching children,
+coordinator errors are returned directly instead of retrying the original request.
+Cancellation does not undo existing edits.
 
 There is one active worker per parent and at most three per CLI process in
 non-overlapping workspaces. A turn can start at most 12 tasks; each worker has a
@@ -523,12 +534,21 @@ threads, the coordinator's native parallel tools, or external editors. Use separ
 workspaces for independent writers; the coordinator is instructed to wait for
 its worker instead of editing concurrently.
 
-Workers inherit the target backend's saved thread permissions. A sandboxed
-coordinator can delegate only to the same backend in this release. Explicit
-`read_only` requests use Claude/Codex native read-only policies with their normal
-approval behavior. Pi, AGY, OpenCode, Kimi, and ZCode reject that mode because
-remote-cli does not enforce a read-only sandbox for those workers. Unrestricted
-coordinators can choose any installed, authenticated worker.
+Workers follow the coordinator's effective remote-cli sandbox policy. The default
+`inherit` mode launches unrestricted workers when the coordinator has no sandbox,
+even if the target backend has separate saved sandbox settings. This does not
+change those saved settings or other backend approval options. For research
+tasks, use `inherit` and put any no-write requirement in the objective; such an
+instruction is not an enforced sandbox. Unrestricted coordinators can choose any
+installed, authenticated worker, but cannot request `read_only` to enable a new
+worker sandbox.
+
+A sandboxed coordinator can delegate only to the same backend in this release;
+its saved restrictions remain in effect. Only an already sandboxed Claude Code
+or Codex coordinator can use `read_only` to request stricter native read-only
+execution, with the normal approval behavior. Discovery reports `readOnly` only
+when that mode is allowed for the current coordinator. Cross-backend sandbox
+translation remains deferred.
 
 All 49 directed combinations are covered at the task-manager test boundary.
 Live model delegation was verified for the original Claude Code/Codex/Pi matrix.
@@ -1041,6 +1061,8 @@ Use `/sandbox allow /absolute/directory` to authorize an additional writable dir
 When both CLI and Router support approval cards, Codex and Claude Code send a separate card with a colored header showing the status, the originating thread and workspace, the requested action (commands render in a code block), and the permission scope. Click **Allow once**, **Deny**, or **Always allow**. The persistent choice appears only for explicit directory grants in workspace-write mode; it is not offered for unrestricted command execution or network grants. Native permission approvals apply to the current turn. Command/file approvals may permit the requested action outside the sandbox.
 
 Buttons target the original device, thread, and approval request, even after you switch threads or devices. Cards show the final decision only after the CLI confirms it; repeated clicks cannot approve a different request. Completed, aborted, or disconnected requests invalidate old buttons. On reconnect, outstanding approvals receive new cards. After a Router crash, old cards may retain their visual buttons, but clicks are rejected; use the newly issued card. Approval cards require upgrading both CLI and Router. Older routers, or failed card delivery, use the existing text replies (`yes`, `no`, and `remember` for explicit directory grants).
+
+When the Router reports that an approval card could not be delivered, CLI 1.6.88 and newer show the requested action in a code block above the text reply instructions. This also applies to delegated worker approval requests, which never offer persistent grants.
 
 Permission requests are relayed even when `autoApprove` is true. For native permission requests, reply `yes` for this turn, `always` for the current Codex session, or `remember` to persist explicitly requested writable directories for this remote-cli thread. Network, wildcard, and special-path permissions cannot be remembered as directory grants. For file approvals that name an explicit grant root, `remember` saves that directory too. For command/file approvals, `yes` and `always` approve the displayed action and may permit execution outside the sandbox; they do not save a remote-cli directory grant. Reply `no` to refuse. Unknown or unavailable sandbox settings fail the operation without retrying in full-access mode.
 

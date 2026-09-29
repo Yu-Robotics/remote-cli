@@ -29,9 +29,10 @@ describe('ApprovalCards', () => {
     expect(JSON.stringify(elements)).toContain('🧵 **thread-2**');
     expect(JSON.stringify(elements)).toContain('📂 `/project`');
     expect(JSON.stringify(elements)).toContain('📝 **File**');
-    const groups = elements.filter((element: any) => element.tag === 'button_group');
-    expect(groups).toHaveLength(1);
-    expect(groups[0].buttons.map((button: any) => button.text.content))
+    const rows = elements.filter((element: any) => element.tag === 'column_set');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].columns.every((column: any) => column.tag === 'column')).toBe(true);
+    expect(rows[0].columns.flatMap((column: any) => column.elements).map((button: any) => button.text.content))
       .toEqual(['Allow once', 'Deny', 'Always allow']);
     expect(JSON.stringify(elements)).toContain('Write <config> in another project');
     expect(transport.registerReplyRoute).toHaveBeenCalledWith('card-1', 'thread-2', 'original-device');
@@ -48,7 +49,7 @@ describe('ApprovalCards', () => {
     await cards.resolve({ type: 'approval_resolved', messageId: 'approval-1', openId: 'owner', threadId: 'thread-2', status: 'remembered', timestamp: 2 }, 'original-device');
     const finalUpdate = transport.update.mock.calls.at(-1)!;
     expect(finalUpdate[2]).toMatchObject({ template: 'green', title: { content: '✅ Approved and directory access remembered' } });
-    expect(finalUpdate[1].some((element: any) => element.tag === 'button_group')).toBe(false);
+    expect(finalUpdate[1].some((element: any) => element.tag === 'column_set')).toBe(false);
     await expect(cards.click('owner', 'approval-1', 'card-1', 'approve')).rejects.toThrow('expired');
     await cards.receive(request(), 'original-device', () => true);
     expect(transport.create).toHaveBeenCalledTimes(1);
@@ -106,8 +107,9 @@ describe('ApprovalCards', () => {
     expect(JSON.stringify(transport.update.mock.calls.at(-1))).toContain('No CLI confirmation');
     await cards.click('owner', 'approval-1', 'card-1', 'remember');
     await cards.resolve({ type: 'approval_resolved', messageId: 'approval-1', openId: 'owner', threadId: 'thread-2', status: 'pending', error: 'Save failed', timestamp: 2 }, 'device');
-    expect(transport.update.mock.calls.at(-1)![1].filter((element: any) => element.tag === 'button_group')).toHaveLength(1);
-    expect(transport.update.mock.calls.at(-1)![1].filter((element: any) => element.tag === 'button_group')[0].buttons).toHaveLength(3);
+    const rows = transport.update.mock.calls.at(-1)![1].filter((element: any) => element.tag === 'column_set');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].columns.flatMap((column: any) => column.elements)).toHaveLength(3);
     await cards.click('owner', 'approval-1', 'card-1', 'deny');
     expect(transport.sendToDevice).toHaveBeenCalledTimes(4);
   });

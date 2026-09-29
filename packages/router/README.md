@@ -12,11 +12,18 @@ The router server acts as a bridge between Feishu messaging and developer machin
 - **Image message forwarding** for Feishu images to supported backends, plus Codex native image output and local image files returned by any backend
 - **Client service management** is handled by the local CLI; the Router remains a separate long-running server process
 - **Queued task cards** appear at execution time for capable clients, with the thread, workspace, task preview, and remaining queue count; older clients retain waiting cards
-- **Delegated task progress** uses the existing reply and approval cards. With a supporting local CLI, `/delegation on` enables Claude Code, Codex, Pi, AGY, OpenCode, Kimi Code, and ZCode workers within the selected thread; the Router does not run or select workers. See [Cross-backend Delegation](../../README.md#cross-backend-delegation).
+- **Delegated task progress** uses the existing reply and approval cards. With a supporting local CLI, `/delegation on` enables Claude Code, Codex, Pi, AGY, OpenCode, Kimi Code, and ZCode workers within the selected thread; the Router does not run or select workers. Worker sandbox policy follows the coordinator: an unrestricted coordinator launches unrestricted workers, while sandboxed coordinators retain their restrictions. Other backend approval options still apply. This policy is enforced on the local CLI and requires upgrading it. See [Cross-backend Delegation](../../README.md#cross-backend-delegation).
 - **WebSocket connections** from local clients
 - **Feishu long connection** for receiving and sending messages
 - **Task recovery** with compatible clients: resume output on a usable surviving card or create a new one, with an independent gap notice and plain-text handling of resumed fragments; failed card creation is not acknowledged as successful recovery
 - **Table-aware card splitting** and a single text fallback retry for a card rejected by Feishu's table limit
+
+Supporting CLIs enforce delegated task completion locally: they suppress stale
+coordinator prose while results are outstanding and keep the parent request busy
+until those results have reached the coordinator. Early returns trigger a
+continuation in the same session, without replaying the original request or
+attachments. The Router displays the existing task progress and reply events;
+no new protocol capability is required for this completion barrier.
 
 ## Prerequisites
 
@@ -178,6 +185,8 @@ See the project [CHANGELOG.md](../../CHANGELOG.md) for release notes and user-vi
 
 ## Approval Cards
 
-When supported by the connected CLI, Codex permission requests appear as standalone cards with Allow, Deny, and (for explicit directory grants) Allow and remember directory buttons. Each button targets the original user, device, thread, and request. The card shows success only after the CLI confirms the decision. Completed requests cannot be approved again, and pending approvals receive fresh cards after reconnecting. After a Router crash, buttons on old cards may remain visible but are rejected as expired. Both CLI and Router must be upgraded to use this feature; unsupported peers and failed card delivery retain text approvals.
+When supported by the connected CLI, Codex and Claude Code permission requests appear as standalone cards with Allow once, Deny, and (for explicit directory grants) Always allow buttons. Buttons use the same column layout as thread-switch controls. Each button targets the original user, device, thread, and request. The card shows success only after the CLI confirms the decision. Completed requests cannot be approved again, and pending approvals receive fresh cards after reconnecting. After a Router crash, buttons on old cards may remain visible but are rejected as expired. Both CLI and Router must be upgraded to use this feature; unsupported peers and failed card delivery retain text approvals.
+
+When the Router reports that an approval card could not be delivered, CLI 1.6.88 and newer show the requested action in a code block above the text reply instructions. This also applies to delegated worker approval requests, which never offer persistent grants.
 
 Restricted Claude Code threads use the same approval card flow, titled Permission request, for outside writes, protected files, read-only-mode edits, and commands outside their native sandbox. Ordinary workspace and explicitly authorized directory edits in workspace-write mode do not create approval cards, unless a native ask rule requires one. If card creation fails, Claude accepts text replies without starting a new model turn; completed or expired requests cannot be approved later. The CLI enforces file boundaries before native allow rules; native deny and ask rules still apply. Sandboxed command networking is enabled by default, subject to native domain denials and administrator-managed restrictions; `/sandbox network off` disables it without changing the approval card flow. Missing sandbox dependencies stop execution on the CLI; the Router cannot override that startup failure. See [Claude sandbox configuration](../../README.md#optional-claude-code-sandbox).
