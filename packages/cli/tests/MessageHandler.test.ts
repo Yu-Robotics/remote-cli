@@ -21,6 +21,7 @@ vi.mock('child_process', async (importActual) => {
 });
 
 const mockSpawn = vi.mocked(spawn);
+const testContexts = new Set<{ handler: MessageHandler; workingDirectory: string }>();
 
 /** A fake ChildProcess with EventEmitter stdout/stderr. */
 function fakeChild() {
@@ -106,7 +107,9 @@ function buildHandler(mockExecutorOverrides: Record<string, any> = {}) {
     mockConfig
   );
 
-  return { handler, mockExecutor, mockWsClient, mockThreadPool, mockThreadManager, mockConfig, workingDirectory };
+  const context = { handler, mockExecutor, mockWsClient, mockThreadPool, mockThreadManager, mockConfig, workingDirectory };
+  testContexts.add(context);
+  return context;
 }
 
 describe('MessageHandler', () => {
@@ -123,7 +126,15 @@ describe('MessageHandler', () => {
   });
 
   afterEach(async () => {
-    await ctx.handler.destroy();
+    const contexts = [...testContexts];
+    testContexts.clear();
+    await Promise.all(contexts.map(async ({ handler, workingDirectory }) => {
+      try {
+        await handler.destroy();
+      } finally {
+        await rm(workingDirectory, { recursive: true, force: true });
+      }
+    }));
   });
 
   it('sends late task cards to the originating user and thread after another request completes', async () => {
