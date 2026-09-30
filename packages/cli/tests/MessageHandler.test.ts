@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'events';
 import { spawn } from 'child_process';
 import { mkdtemp, rm, writeFile } from 'fs/promises';
+import { mkdtempSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
 import { MessageHandler } from '../src/client/MessageHandler';
@@ -35,10 +36,12 @@ function fakeChild() {
  * The mock executor is bound to the 'default' thread.
  */
 function buildHandler(mockExecutorOverrides: Record<string, any> = {}) {
+  // The working-directory guard stats this path, so the fixture must exist.
+  const workingDirectory = mkdtempSync(path.join(tmpdir(), 'message-handler-cwd-'));
   const mockExecutor: any = {
     execute: vi.fn(),
     setWorkingDirectory: vi.fn().mockResolvedValue(undefined),
-    getCurrentWorkingDirectory: vi.fn(() => '/home/user/test-project'),
+    getCurrentWorkingDirectory: vi.fn(() => workingDirectory),
     resetContext: vi.fn(),
     abort: vi.fn().mockResolvedValue(true),
     destroy: vi.fn().mockResolvedValue(undefined),
@@ -103,7 +106,7 @@ function buildHandler(mockExecutorOverrides: Record<string, any> = {}) {
     mockConfig
   );
 
-  return { handler, mockExecutor, mockWsClient, mockThreadPool, mockThreadManager, mockConfig };
+  return { handler, mockExecutor, mockWsClient, mockThreadPool, mockThreadManager, mockConfig, workingDirectory };
 }
 
 describe('MessageHandler', () => {
@@ -353,7 +356,7 @@ describe('MessageHandler', () => {
         recovery.registered(true);
         const resume = sendRaw.mock.calls.map(([message]) => message).find(message => message.type === 'task_resume');
         expect(resume).toMatchObject({ messageId: 'offline-task', openId: 'owner', threadId: 'default-thread-id',
-          taskResume: { state: 'completed', backend: 'claude', cwd: '/home/user/test-project' } });
+          taskResume: { state: 'completed', backend: 'claude', cwd: ctx.workingDirectory } });
         recovery.acknowledge({ type: 'task_resume_ack', messageId: resume.messageId,
           recoveryId: resume.taskResume.recoveryId, state: 'completed', success: true });
         expect(ctx.handler.tryBeginAutomaticUpdate()).toBe(true);
@@ -389,7 +392,7 @@ describe('MessageHandler', () => {
           success: true,
           output: undefined,
           threadId: 'default-thread-id',
-          cwd: '/home/user/test-project',
+          cwd: ctx.workingDirectory,
           timestamp: expect.any(Number),
         })
       );
@@ -1263,7 +1266,7 @@ describe('MessageHandler', () => {
         expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
           type: 'queue_started', messageId: 'queued-run', openId: 'owner', threadId: 'default-thread-id',
           queueStarted: {
-            threadName: 'default', backend, cwd: '/home/user/test-project',
+            threadName: 'default', backend, cwd: ctx.workingDirectory,
             preview: 'Review the image', remainingCount: 1,
           },
         }));
@@ -1544,7 +1547,7 @@ describe('MessageHandler', () => {
       await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-123', content: 'test command', timestamp: Date.now() });
 
       expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
-        expect.objectContaining({ cwd: '/home/user/test-project' })
+        expect.objectContaining({ cwd: ctx.workingDirectory })
       );
     });
   });
@@ -2020,7 +2023,7 @@ describe('MessageHandler', () => {
       expect(mockSpawn).toHaveBeenCalledWith(
         'claude',
         ['/doctor', '--print'],
-        expect.objectContaining({ cwd: '/home/user/test-project' })
+        expect.objectContaining({ cwd: ctx.workingDirectory })
       );
 
       child.stdout.emit('data', Buffer.from('doctor output'));
@@ -2039,7 +2042,7 @@ describe('MessageHandler', () => {
       expect(mockSpawn).toHaveBeenCalledWith(
         'agy',
         ['-p', '/usage'],
-        expect.objectContaining({ cwd: '/home/user/test-project' })
+        expect.objectContaining({ cwd: ctx.workingDirectory })
       );
 
       child.stdout.emit('data', Buffer.from('Weekly Limit Remaining 87%'));
@@ -2074,6 +2077,28 @@ describe('MessageHandler', () => {
         await done;
       }
     );
+
+    it('should reject a passthrough command when the working directory is gone', async () => {
+      useBackend({ type: 'agy' });
+      ctx.mockExecutor.getCurrentWorkingDirectory.mockReturnValue(
+        path.join(ctx.workingDirectory, 'deleted-subdirectory'));
+
+      await ctx.handler.handleMessage({
+        type: 'command',
+        messageId: 'msg-slash-missing-dir',
+        content: '/usage',
+        isSlashCommand: true,
+        timestamp: Date.now(),
+      } as any);
+
+      expect(mockSpawn).not.toHaveBeenCalled();
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          success: false,
+          error: expect.stringContaining('Working directory no longer exists'),
+        })
+      );
+    });
 
     it('should reject /compact on the AGY backend (model would fake a compaction)', async () => {
       useBackend({ type: 'agy' });

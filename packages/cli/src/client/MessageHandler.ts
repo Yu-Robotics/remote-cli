@@ -11,6 +11,7 @@ import { FeishuNotificationAdapter } from '../hooks';
 import { ConfigManager } from '../config/ConfigManager';
 import { processFileReadContent } from '../utils/FileReadDetector';
 import { readLocalImages } from '../utils/LocalImageDetector';
+import { assertWorkingDirectoryExists } from '../utils/WorkingDirectory';
 import { MachineCommands } from '../machines/MachineCommands';
 import type { PendingReplace } from '../machines/types';
 import { spawn, execFile } from 'child_process';
@@ -1795,6 +1796,19 @@ You can also use natural language commands to control Claude Code CLI.`,
     return new Promise((resolve) => {
       const chunks: string[] = [];
       const errorChunks: string[] = [];
+
+      // spawn() reports a missing cwd as an ENOENT naming this binary, so check
+      // the directory first and answer with the recovery guidance instead.
+      try {
+        assertWorkingDirectoryExists(executor.getCurrentWorkingDirectory());
+      } catch (error) {
+        this.sendResponse(messageId, threadId, {
+          success: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        resolve();
+        return;
+      }
 
       console.log(`[MessageHandler] Spawning ${label} for command: ${args.join(' ')}`);
 

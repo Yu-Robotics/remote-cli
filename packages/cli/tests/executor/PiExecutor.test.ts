@@ -192,6 +192,19 @@ describe('PiExecutor', () => {
     expect(transport.request).not.toHaveBeenCalled();
   });
 
+  it('still reports a genuinely missing Pi executable as not installed', async () => {
+    // The directory exists, so the guard passes; the spawn ENOENT must keep its
+    // own meaning and not be reported as a working-directory problem.
+    transport.start = vi.fn(async () => {
+      throw new Error('spawn pi ENOENT');
+    });
+
+    const result = await executor.execute('inspect');
+
+    expect(result).toMatchObject({ success: false, error: expect.stringContaining('Pi CLI is not installed or not found on PATH') });
+    expect(result.error).not.toContain('Working directory no longer exists');
+  });
+
   it('reconfigures delegation without clearing the Pi session or replacing ordinary tools', async () => {
     await executor.execute('first', {});
     expect(transport.launch.delegation).toBeUndefined();

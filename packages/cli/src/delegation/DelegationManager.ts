@@ -13,6 +13,7 @@ import { DelegationStore, type DelegatedTaskRecord } from './DelegationStore';
 import { DELEGATION_BACKENDS, type DelegationBackend, type DelegationHandler } from './contract';
 import { workerConfiguration } from './WorkerPolicy';
 import { formatDelegationNotice } from './DelegationNotice';
+import { assertWorkingDirectoryExists } from '../utils/WorkingDirectory';
 
 export const DELEGATION_LIMITS = { launches: 12, concurrent: 3, timeoutMs: 30 * 60_000,
   resultBytes: 32 * 1024, continuationBytes: 64 * 1024,
@@ -130,6 +131,10 @@ export class DelegationManager {
 
   begin(parent: DelegationParent): DelegationScope {
     if (this.scopes.has(parent.thread.id)) throw new Error('This thread already owns a delegation turn');
+    // Fail with recovery guidance before realpathSync reports a raw ENOENT.
+    // This must stay above scopes.set: a throw after registration would leave
+    // a scope behind and reject every later delegation turn on this thread.
+    assertWorkingDirectoryExists(parent.cwd);
     const tasks = new Map<string, Task>();
     const calls = new Map<string, { signature: string; result: Promise<unknown> }>();
     let closed = false;
