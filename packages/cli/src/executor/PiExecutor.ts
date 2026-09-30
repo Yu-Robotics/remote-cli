@@ -12,6 +12,7 @@ import type {
 } from './IExecutor';
 import { PiClient } from './pi/PiClient';
 import { sameConnection, type DelegationConnection } from '../delegation/contract';
+import { assertWorkingDirectoryExists } from '../utils/WorkingDirectory';
 import {
   formatPiModelRef,
   isPiThinkingLevel,
@@ -668,10 +669,13 @@ export class PiExecutor implements IExecutor {
   }
 
   private async ensureClient(): Promise<void> {
+    if (this.destroyed) throw new Error('Executor has been destroyed');
+    assertWorkingDirectoryExists(this.currentWorkingDirectory);
     if (this.retiredClients.size > 0) {
       await Promise.all([...this.retiredClients].map(client => this.stopRetiredClient(client)));
     }
     if (this.destroyed) throw new Error('Executor has been destroyed');
+    assertWorkingDirectoryExists(this.currentWorkingDirectory);
     if (!this.client.isRunning()) {
       this.client.updateLaunch?.(this.buildLaunch());
       await this.client.start();

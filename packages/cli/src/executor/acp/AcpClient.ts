@@ -1,5 +1,6 @@
 import { ChildProcess, spawn } from 'child_process';
 import * as readline from 'readline';
+import { assertWorkingDirectoryExists } from '../../utils/WorkingDirectory';
 import type {
   AcpMcpServer,
   AcpConfigOption,
@@ -67,6 +68,7 @@ export class AcpClient implements AcpTransport {
 
   constructor(command: string, args: string[], cwd: string, callbacks: AcpEventCallbacks, private readonly managedProcess = false) {
     this.callbacks = callbacks;
+    assertWorkingDirectoryExists(cwd);
     this.child = spawn(command, args, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],

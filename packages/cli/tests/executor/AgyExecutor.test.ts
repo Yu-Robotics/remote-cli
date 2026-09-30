@@ -43,6 +43,12 @@ import * as fs from 'fs';
 import os from 'os';
 import path from 'path';
 
+function isTestWorkingDirectory(value: unknown): boolean {
+  const normalized = path.normalize(String(value));
+  return normalized.endsWith(path.join('test-project'))
+    || normalized.endsWith(path.join('test-project', 'work'));
+}
+
 /**
  * Tests for AgyExecutor — the Antigravity CLI (agy) backend.
  *
@@ -130,8 +136,11 @@ describe('AgyExecutor', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(console, 'log').mockImplementation(() => {});
 
-    mockFs.existsSync.mockImplementation((p: string) =>
-      [...persistedConversations].some(id => String(p).endsWith(path.join('conversations', `${id}.db`))));
+    mockFs.existsSync.mockImplementation((p: string) => {
+      const value = String(p);
+      return isTestWorkingDirectory(value)
+        || [...persistedConversations].some(id => value.endsWith(path.join('conversations', `${id}.db`)));
+    });
     mockFs.readFileSync.mockReturnValue('{}');
     mockFs.mkdirSync.mockImplementation(() => undefined);
     mockFs.symlinkSync.mockImplementation(() => undefined);
@@ -559,7 +568,8 @@ describe('AgyExecutor', () => {
   it('links auth and config files from the real ~/.gemini into the thread home', async () => {
     const master = (n: string) => path.join(os.homedir(), '.gemini', n);
     mockFs.existsSync.mockImplementation((p: string) =>
-      [master('oauth_creds.json'), master('settings.json'), master('skills')].includes(String(p)));
+      isTestWorkingDirectory(p)
+      || [master('oauth_creds.json'), master('settings.json'), master('skills')].includes(String(p)));
 
     const p = executor.execute('hi');
     await waitForSpawn();
@@ -577,7 +587,8 @@ describe('AgyExecutor', () => {
   it('links program directories inside antigravity-cli but leaves data directories per-thread', async () => {
     const cliMaster = (n: string) => path.join(os.homedir(), '.gemini', 'antigravity-cli', n);
     mockFs.existsSync.mockImplementation((p: string) =>
-      [cliMaster('bin'), cliMaster('builtin')].includes(String(p)));
+      isTestWorkingDirectory(p)
+      || [cliMaster('bin'), cliMaster('builtin')].includes(String(p)));
 
     const p = executor.execute('hi');
     await waitForSpawn();
@@ -598,7 +609,7 @@ describe('AgyExecutor', () => {
   it('leaves a rewritten credential local rather than overwriting the shared master', async () => {
     const master = path.join(os.homedir(), '.gemini', 'oauth_creds.json');
     const link = path.join(threadGemini('thread-1'), 'oauth_creds.json');
-    mockFs.existsSync.mockImplementation((p: string) => [master, link].includes(String(p)));
+    mockFs.existsSync.mockImplementation((p: string) => isTestWorkingDirectory(p) || [master, link].includes(String(p)));
     // The link was replaced by a regular file (agy rewrote credentials on refresh)
     mockFs.lstatSync.mockImplementation((p: string) => ({ isSymbolicLink: () => String(p) !== link }));
 
@@ -617,7 +628,7 @@ describe('AgyExecutor', () => {
 
   it('does not overwrite an existing conversation when resuming a thread', async () => {
     const sessionFile = path.join(os.homedir(), '.remote-cli', 'agy-sessions', 'thread-1.json');
-    mockFs.existsSync.mockImplementation((p: string) => String(p) === sessionFile);
+    mockFs.existsSync.mockImplementation((p: string) => isTestWorkingDirectory(p) || String(p) === sessionFile);
     mockFs.readFileSync.mockImplementation((p: string) =>
       String(p) === sessionFile ? JSON.stringify({ id: 'conv-old' }) : '{}');
 
@@ -630,7 +641,8 @@ describe('AgyExecutor', () => {
     const cliMaster = (n: string) => path.join(os.homedir(), '.gemini', 'antigravity-cli', n);
     const threadCli = path.join(threadGemini('thread-1'), 'antigravity-cli');
     mockFs.existsSync.mockImplementation((p: string) =>
-      [cliMaster('conversations/conv-old.db'), cliMaster('brain/conv-old'),
+      isTestWorkingDirectory(p)
+      || [cliMaster('conversations/conv-old.db'), cliMaster('brain/conv-old'),
         path.join(threadCli, 'conversations', 'conv-old.db')].includes(String(p)));
 
     const p = executor.execute('hi');
@@ -648,7 +660,7 @@ describe('AgyExecutor', () => {
 
   it('fails before spawning when a saved conversation has not been migrated', async () => {
     const sessionFile = path.join(os.homedir(), '.remote-cli', 'agy-sessions', 'thread-1.json');
-    mockFs.existsSync.mockImplementation((p: string) => String(p) === sessionFile);
+    mockFs.existsSync.mockImplementation((p: string) => isTestWorkingDirectory(p) || String(p) === sessionFile);
     mockFs.readFileSync.mockReturnValue(JSON.stringify({ id: 'conv-old' }));
     await executor.destroy();
     executor = new AgyExecutor(directoryGuard, {
@@ -952,6 +964,15 @@ describe('AgyExecutor', () => {
     const result = await p;
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/not installed|not found/i);
+  });
+
+  it('reports a missing working directory without trying to spawn agy', async () => {
+    mockFs.existsSync.mockReturnValue(false);
+
+    const result = await executor.execute('hi');
+
+    expect(result).toMatchObject({ success: false, error: expect.stringContaining('Working directory no longer exists') });
+    expect(mockSpawn).not.toHaveBeenCalled();
   });
 
   it('fails the in-flight command when the process exits unexpectedly', async () => {

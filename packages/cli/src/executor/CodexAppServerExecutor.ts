@@ -10,6 +10,7 @@ import { CodexTaskNotifications } from './CodexTaskNotifications';
 import { CodexSandbox } from './CodexSandbox';
 import type { CodexSandboxConfig } from '../types/config';
 import { DELEGATION_TOOLS, delegationMcpConfig, sameConnection, type DelegationConnection } from '../delegation/contract';
+import { assertWorkingDirectoryExists } from '../utils/WorkingDirectory';
 
 export interface CodexAppServerTransport {
   start(): Promise<void>;
@@ -673,6 +674,7 @@ export class CodexAppServerExecutor implements IExecutor {
   }
 
   private async ensureThread(): Promise<void> {
+    assertWorkingDirectoryExists(this.currentWorkingDirectory);
     if (this.threadReady && this.client.isRunning()) return;
     await this.client.start();
 

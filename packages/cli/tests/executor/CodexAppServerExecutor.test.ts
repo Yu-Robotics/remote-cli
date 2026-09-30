@@ -159,6 +159,15 @@ describe('CodexAppServerExecutor', () => {
     await expect(running).resolves.toMatchObject({ success: true });
   });
 
+  it('reports a deleted working directory before starting a Codex turn', async () => {
+    await fs.rm(projectDir, { recursive: true, force: true });
+
+    const result = await executor.execute('inspect');
+
+    expect(result).toMatchObject({ success: false, error: expect.stringContaining('Working directory no longer exists') });
+    expect(transport.requests).toEqual([]);
+  });
+
   it('answers card approvals by opaque request ID, preserves directory scope, and expires outstanding cards', async () => {
     await executor.configureSandbox('on');
     const onApprovalRequest = vi.fn((_request: any) => true);

@@ -29,13 +29,14 @@ vi.mock('fs', () => ({
 }));
 
 import { spawn } from 'child_process';
-import fs from 'fs';
+import fs, * as fsModule from 'fs';
 
 describe('ClaudePersistentExecutor', () => {
   let executor: ClaudePersistentExecutor;
   let directoryGuard: DirectoryGuard;
   const mockSpawn = spawn as any;
   const mockFs = fs as any;
+  const mockFsModule = fsModule as any;
   let mockChildProcess: any;
 
   beforeEach(() => {
@@ -47,6 +48,7 @@ describe('ClaudePersistentExecutor', () => {
 
     // Reset mock implementations
     mockFs.existsSync.mockReturnValue(true);  // Default: files and directories exist
+    mockFsModule.existsSync.mockImplementation((file: any) => !String(file).includes('claude-sandbox'));
     mockFs.readFileSync.mockReturnValue(JSON.stringify({ id: 'test-session' }));  // Default: valid session
 
     directoryGuard = new DirectoryGuard(['~/test-project', './work']);
@@ -251,12 +253,13 @@ describe('ClaudePersistentExecutor', () => {
         // Second call is for working directory validation in startProcess, return false
         return false;
       });
+      mockFsModule.existsSync.mockReturnValue(false);
 
       // Execute a command - should fail gracefully without crashing
       const result = await executor.execute('test command');
 
       expect(result.success).toBe(false);
-      expect(result.error).toContain('Working directory does not exist');
+      expect(result.error).toContain('Working directory no longer exists');
       expect(mockSpawn).not.toHaveBeenCalled();
     });
   });

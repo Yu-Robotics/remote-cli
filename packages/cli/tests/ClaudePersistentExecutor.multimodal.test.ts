@@ -4,17 +4,24 @@ import { DirectoryGuard } from '../src/security/DirectoryGuard';
 import { spawn } from 'child_process';
 
 vi.mock('child_process');
-vi.mock('fs', () => ({
-  default: {
-    existsSync: vi.fn().mockReturnValue(true),
-    readFileSync: vi.fn().mockReturnValue('{}'),
-    writeFileSync: vi.fn(),
-    mkdirSync: vi.fn(),
-    promises: {
-      unlink: vi.fn()
-    }
-  }
-}));
+vi.mock('fs', () => {
+  const existsSync = vi.fn().mockReturnValue(true);
+  const readFileSync = vi.fn().mockReturnValue('{}');
+  const writeFileSync = vi.fn();
+  const mkdirSync = vi.fn();
+  const promises = {
+    unlink: vi.fn()
+  };
+
+  return {
+    default: { existsSync, readFileSync, writeFileSync, mkdirSync, promises },
+    existsSync,
+    readFileSync,
+    writeFileSync,
+    mkdirSync,
+    promises
+  };
+});
 vi.mock('os');
 
 describe('ClaudePersistentExecutor - multimodal', () => {
