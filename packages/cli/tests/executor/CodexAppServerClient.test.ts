@@ -1,4 +1,5 @@
 import { EventEmitter } from 'events';
+import path from 'path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { spawn } from 'child_process';
 import { CodexAppServerClient } from '../../src/executor/CodexAppServerClient';
@@ -52,11 +53,12 @@ describe('CodexAppServerClient', () => {
   it('starts app-server and completes the required initialization handshake', async () => {
     const process = fakeProcess();
     mockSpawn.mockReturnValue(process);
-    const client = new CodexAppServerClient({ command: '/opt/codex', cwd: '/workspace' });
+    const cwd = globalThis.process.cwd();
+    const client = new CodexAppServerClient({ command: '/opt/codex', cwd });
 
     await client.start();
 
-    expect(mockSpawn).toHaveBeenCalledWith('/opt/codex', ['app-server', '--stdio'], expect.objectContaining({ cwd: '/workspace' }));
+    expect(mockSpawn).toHaveBeenCalledWith('/opt/codex', ['app-server', '--stdio'], expect.objectContaining({ cwd }));
     const messages = process.stdin.writes.map((line: string) => JSON.parse(line));
     expect(messages[0]).toMatchObject({
       method: 'initialize',
@@ -64,6 +66,14 @@ describe('CodexAppServerClient', () => {
     });
     expect(messages[1]).toEqual({ method: 'initialized' });
     await client.stop();
+  });
+
+  it('reports a missing working directory before attempting to start Codex', async () => {
+    const missing = path.join(process.cwd(), '.remote-cli-test-missing-working-directory');
+    const client = new CodexAppServerClient({ command: '/opt/codex', cwd: missing });
+
+    await expect(client.start()).rejects.toThrow('Working directory no longer exists');
+    expect(mockSpawn).not.toHaveBeenCalled();
   });
 
   it('records the version reported by the running app-server', async () => {
@@ -80,10 +90,11 @@ describe('CodexAppServerClient', () => {
   it('reads the version that a fresh Codex command would run', async () => {
     const process = fakeVersionProcess();
     mockSpawn.mockReturnValue(process);
-    const client = new CodexAppServerClient({ command: '/opt/codex', cwd: '/workspace' });
+    const cwd = globalThis.process.cwd();
+    const client = new CodexAppServerClient({ command: '/opt/codex', cwd });
 
     await expect(client.getCommandVersion()).resolves.toBe('0.159.2');
-    expect(mockSpawn).toHaveBeenCalledWith('/opt/codex', ['--version'], expect.objectContaining({ cwd: '/workspace' }));
+    expect(mockSpawn).toHaveBeenCalledWith('/opt/codex', ['--version'], expect.objectContaining({ cwd }));
   });
 
   it('correlates responses and forwards fragmented notifications', async () => {

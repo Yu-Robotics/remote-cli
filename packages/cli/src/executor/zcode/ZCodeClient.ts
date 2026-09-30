@@ -6,6 +6,7 @@ import { readFileSync } from 'fs';
 import type { AcpEventCallbacks, AcpToolCallUpdate, AcpTransport } from '../acp/AcpClient';
 import type { AcpConfigOption, AcpContentBlock, AcpMcpServer, AcpPermissionOption, AcpSessionResult } from '../acp/AcpTypes';
 import { resolveZCodeLaunch, type ZCodeLaunchSpec } from './ZCodeCommand';
+import { assertWorkingDirectoryExists } from '../../utils/WorkingDirectory';
 
 interface PendingRequest {
   resolve: (value: any) => void;
@@ -76,6 +77,7 @@ export class ZCodeClient implements AcpTransport {
     this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
     this.compactPollIntervalMs = options.compactPollIntervalMs ?? 2_000;
     const launch = options.launch ?? resolveZCodeLaunch(options.command);
+    assertWorkingDirectoryExists(options.cwd);
     this.child = spawn(launch.command, launch.args, {
       cwd: options.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],

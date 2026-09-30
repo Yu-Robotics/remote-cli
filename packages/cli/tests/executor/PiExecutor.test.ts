@@ -182,6 +182,16 @@ describe('PiExecutor', () => {
     expect(stored).toMatchObject({ id: 'sess-pi-1', cwd: project });
   });
 
+  it('reports a deleted working directory before starting Pi', async () => {
+    await fs.rm(project, { recursive: true, force: true });
+
+    const result = await executor.execute('inspect');
+
+    expect(result).toMatchObject({ success: false, error: expect.stringContaining('Working directory no longer exists') });
+    expect(transport.starts).toBe(0);
+    expect(transport.request).not.toHaveBeenCalled();
+  });
+
   it('reconfigures delegation without clearing the Pi session or replacing ordinary tools', async () => {
     await executor.execute('first', {});
     expect(transport.launch.delegation).toBeUndefined();

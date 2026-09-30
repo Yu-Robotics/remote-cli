@@ -1,6 +1,7 @@
 import { ChildProcess, spawn } from 'child_process';
 import { StringDecoder } from 'string_decoder';
 import { buildPiRpcArgs, consumeJsonl, type PiLaunchOptions, type PiRpcResponse, type PiTransport } from './PiTypes';
+import { assertWorkingDirectoryExists } from '../../utils/WorkingDirectory';
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_KILL_ESCALATION_MS = 3_000;
@@ -161,6 +162,7 @@ export class PiClient implements PiTransport {
   }
 
   private async startInternal(): Promise<void> {
+    assertWorkingDirectoryExists(this.options.cwd);
     this.stopping = false;
     this.stdoutBuffer = '';
     this.stderrTail = '';

@@ -12,6 +12,7 @@ import net from 'net';
 import { randomUUID } from 'crypto';
 import { EventEmitter } from 'events';
 import { DELEGATION_TOOLS, delegationMcpConfig, sameConnection, type DelegationConnection } from '../delegation/contract';
+import { assertWorkingDirectoryExists } from '../utils/WorkingDirectory';
 
 /**
  * Claude stream JSON input message
@@ -432,10 +433,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
     this.isStarting = true;
 
     try {
-      // Verify working directory exists
-      if (!fs.existsSync(this.currentWorkingDirectory)) {
-        throw new Error(`Working directory does not exist: ${this.currentWorkingDirectory}`);
-      }
+      assertWorkingDirectoryExists(this.currentWorkingDirectory);
 
       // Build arguments
       // Note: --output-format=stream-json requires --verbose
@@ -1765,6 +1763,12 @@ export class ClaudePersistentExecutor extends EventEmitter {
       };
     }
 
+    try {
+      assertWorkingDirectoryExists(this.currentWorkingDirectory);
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+
     return new Promise((resolve, reject) => {
       // Add to queue
       this.commandQueue.push({
@@ -1952,6 +1956,12 @@ export class ClaudePersistentExecutor extends EventEmitter {
     const sessionIdBeforeCompact = this.sessionId;
     if (!sessionIdBeforeCompact) {
       return { success: false, error: 'No active session to compact.' };
+    }
+
+    try {
+      assertWorkingDirectoryExists(this.currentWorkingDirectory);
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
 
     // Step 1: Stop the persistent process so it doesn't conflict

@@ -7,6 +7,7 @@ import { DirectoryGuard } from '../security/DirectoryGuard';
 import { IExecutor, ExecuteOptions, ExecuteResult } from './IExecutor';
 import { COMPACT_HANDOFF_PROMPT, seedPromptWithHandoff } from './compactHandoff';
 import { stripAnsi } from '../utils/stripAnsi';
+import { assertWorkingDirectoryExists } from '../utils/WorkingDirectory';
 import { configureAgyDelegation } from './agy/AgyDelegationConfig';
 import { delegationEnvironment, sameConnection, type DelegationConnection } from '../delegation/contract';
 
@@ -640,10 +641,11 @@ export class AgyExecutor implements IExecutor {
   // ─── Process lifecycle ────────────────────────────────────────────────────
 
   private ensureProcess(): ChildProcess {
-    if (this.proc) return this.proc;
     if (this.isDestroyed) {
       throw new Error('Executor has been destroyed');
     }
+    assertWorkingDirectoryExists(this.currentWorkingDirectory);
+    if (this.proc) return this.proc;
 
     const env = this.buildEnv();
     if (this.agyHome && this.conversationId) {

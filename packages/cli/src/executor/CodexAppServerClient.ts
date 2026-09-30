@@ -1,5 +1,6 @@
 import { ChildProcess, spawn } from 'child_process';
 import { StringDecoder } from 'string_decoder';
+import { assertWorkingDirectoryExists } from '../utils/WorkingDirectory';
 
 export interface CodexAppServerClientOptions {
   command?: string;
@@ -136,6 +137,7 @@ export class CodexAppServerClient {
   }
 
   private async startInternal(): Promise<void> {
+    assertWorkingDirectoryExists(this.cwd);
     this.stopping = false;
     this.stdoutBuffer = '';
     this.stderrTail = '';

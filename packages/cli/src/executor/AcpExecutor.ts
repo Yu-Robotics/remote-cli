@@ -6,6 +6,7 @@ import type { ExecuteOptions, ExecuteResult, ExecutorModelInfo, IExecutor } from
 import { AcpClient, type AcpEventCallbacks, type AcpToolCallUpdate, type AcpTransport } from './acp/AcpClient';
 import type { AcpConfigOption, AcpContentBlock, AcpMcpServer, AcpPermissionOption, AcpSessionResult } from './acp/AcpTypes';
 import { delegationSessionServers, sameConnection, type DelegationConnection } from '../delegation/contract';
+import { assertWorkingDirectoryExists } from '../utils/WorkingDirectory';
 
 const CANCEL_GRACE_MS = 3_000;
 
@@ -424,6 +425,7 @@ export abstract class AcpExecutor implements IExecutor {
   private async ensureSession(): Promise<{ client: AcpTransport; sessionId: string }> {
     const managed = this.isDelegationManaged();
     if (this.isDestroyed && managed) throw new Error('Executor has been destroyed');
+    assertWorkingDirectoryExists(this.currentWorkingDirectory);
     if (this.client && this.sessionId) return { client: this.client, sessionId: this.sessionId };
     const client = this.createClient();
     this.transports.set(client, managed);

@@ -723,6 +723,8 @@ remote-cli 自身不处理的斜杠命令会转发给当前 AI 后端，各后�
 
 With CLI 1.6.93 or newer, `/cd` to a different normalized directory clears this thread's saved conversation bindings for **all backends**, including inactive ones. The next message starts a fresh conversation. Returning to the previous directory does not restore its old conversation. `/cd` to the same directory preserves context, and switching backends without changing directory still resumes each backend's conversation. Thread identity, model, effort, sandbox grants, and delegation settings are retained; native conversation history is not deleted. Use separate threads for separate plans, even within the same directory. This behavior is enforced by the CLI and requires no Router protocol changes.
 
+如果已保存的工作目录后来被删除或重命名，下一条后端命令会在启动后端前停止并提示目录缺失。使用 `/cd <目录>` 选择一个已有目录即可恢复该线程；无需重新安装后端 CLI。
+
 直接回复某张已经完成的飞书卡片，消息会继续路由到该卡片所属的 thread。Thread 按钮会同时显示各 thread 工作目录的最后一级名称和所用 backend，便于区分并行 workspace。自动生成的 `thread-2` 等名称会在按钮上只显示序号，例如 `2`，自定义名称保持不变。长回复被拆分成多张卡片时，每张续卡都会重复显示 thread 和工作目录头部。`/thread list` 可以查看所有 thread 的状态，`/status` 可以快速查看当前 backend、模型、工作目录和队列。
 
 Long streaming replies refresh only cards with changed content. Queued tasks combine incoming text while a refresh is pending, so card updates do not build up a backlog of intermediate text. Tool results, images, and the final response retain their order.

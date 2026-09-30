@@ -81,6 +81,15 @@ describe('OpenCodeExecutor', () => {
     expect(stored.id).toBe('ses-new');
   });
 
+  it('reports a deleted working directory before creating an ACP session', async () => {
+    await fs.rm(project, { recursive: true, force: true });
+
+    const result = await executor.execute('inspect');
+
+    expect(result).toMatchObject({ success: false, error: expect.stringContaining('Working directory no longer exists') });
+    expect(transport.initialize).not.toHaveBeenCalled();
+  });
+
   it('loads a persisted session after executor recreation', async () => {
     await fs.mkdir(path.join(home, '.remote-cli', 'opencode-sessions'), { recursive: true });
     await fs.writeFile(
