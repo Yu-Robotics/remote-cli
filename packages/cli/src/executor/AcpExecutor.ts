@@ -586,7 +586,9 @@ export abstract class AcpExecutor implements IExecutor {
 
   private friendlyError(error: unknown): string {
     const message = error instanceof Error ? error.message : String(error);
-    if (/ENOENT|not found/i.test(message)) {
+    // Match ENOENT only: a broader "not found" test also matches an ENOENT whose
+    // text embeds a path containing that phrase, mislabelling the directory error.
+    if (/ENOENT/i.test(message)) {
       return `${this.backendLabel} CLI is not installed or not found on PATH. Install it with \`${this.installCommand}\`, or use /backend to switch backends.`;
     }
     if (/provider\.auth|authentication required|no provider configured|not available in your country/i.test(message)) {

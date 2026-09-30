@@ -246,6 +246,18 @@ describe('cross-backend delegation', () => {
     expect(factory).not.toHaveBeenCalled();
   });
 
+  it('reports a deleted working directory instead of a raw filesystem error and registers no scope', () => {
+    fs.rmSync(home, { recursive: true, force: true });
+
+    expect(() => manager.begin(parent)).toThrow('Working directory no longer exists');
+
+    // No scope may survive the failure: a registered scope would reject every
+    // later delegation turn on this thread until the CLI restarts.
+    fs.mkdirSync(home, { recursive: true });
+    const scope = manager.begin(parent);
+    expect(scope.hasTasks()).toBe(false);
+  });
+
   it('does not leak results or cancellation across parent requests', async () => {
     const first = manager.begin(parent);
     const task: any = await first.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' }, 'start');

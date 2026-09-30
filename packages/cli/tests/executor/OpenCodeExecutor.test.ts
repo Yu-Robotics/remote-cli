@@ -90,6 +90,31 @@ describe('OpenCodeExecutor', () => {
     expect(transport.initialize).not.toHaveBeenCalled();
   });
 
+  it('keeps the directory error when the path itself contains "not found"', async () => {
+    // A parent directory named e.g. "bug_not_found" makes the friendly
+    // working-directory message contain "not found"; the CLI-not-installed
+    // mapping must not claim that text as a missing executable.
+    const tricky = path.join(home, 'bug_not_found');
+    const missing = path.join(tricky, 'project');
+    await fs.mkdir(tricky);
+
+    const trickyExecutor = new OpenCodeExecutor(new DirectoryGuard([home]), {
+      initialWorkingDirectory: missing,
+      threadId: 'thread-tricky',
+      sessionBaseDir: path.join(home, '.remote-cli', 'opencode-sessions'),
+      clientFactory: () => transport,
+    });
+    try {
+      const result = await trickyExecutor.execute('inspect');
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Working directory no longer exists');
+      expect(result.error).not.toContain('is not installed');
+    } finally {
+      await trickyExecutor.destroy();
+    }
+  });
+
   it('loads a persisted session after executor recreation', async () => {
     await fs.mkdir(path.join(home, '.remote-cli', 'opencode-sessions'), { recursive: true });
     await fs.writeFile(

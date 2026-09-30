@@ -76,6 +76,32 @@ describe('CodexAppServerClient', () => {
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
+  it('still reports a genuinely missing Codex executable as not installed', async () => {
+    // The directory exists, so the guard passes and the spawn ENOENT must keep
+    // its own meaning: the two causes must not collapse into one message.
+    const client = new CodexAppServerClient({ command: '/opt/codex', cwd: process.cwd() });
+    mockSpawn.mockImplementation(() => {
+      const process: any = new EventEmitter();
+      process.stdout = new EventEmitter();
+      process.stderr = new EventEmitter();
+      // A real spawn that fails keeps a usable stdin; the failure arrives as a
+      // process 'error' event carrying the ENOENT code.
+      process.stdin = Object.assign(new EventEmitter(), {
+        writable: true,
+        destroyed: false,
+        write: vi.fn(() => {
+          setTimeout(() => process.emit('error', Object.assign(new Error('spawn /opt/codex ENOENT'), { code: 'ENOENT' })), 0);
+          return true;
+        }),
+        end: vi.fn(),
+      });
+      process.kill = vi.fn();
+      return process;
+    });
+
+    await expect(client.start()).rejects.toThrow('Codex CLI (codex) is not installed or not found on PATH');
+  });
+
   it('records the version reported by the running app-server', async () => {
     const process = fakeProcess('remote_cli/0.159.2 (Linux; aarch64)');
     mockSpawn.mockReturnValue(process);

@@ -1020,7 +1020,10 @@ export class PiExecutor implements IExecutor {
 
   private friendlyError(error: unknown): string {
     const message = error instanceof Error ? error.message : String(error);
-    if (/ENOENT|not found on PATH|not installed/i.test(message)) {
+    // Match ENOENT only: broader phrases such as "not found on PATH" also match a
+    // message that embeds a working-directory path containing that text, which
+    // would mislabel the directory error as a missing executable.
+    if (/ENOENT/i.test(message)) {
       return `Pi CLI is not installed or not found on PATH. Install it with \`${INSTALL_COMMAND}\`, authenticate with \`pi\`, or use /backend to switch backends.`;
     }
     return message;
