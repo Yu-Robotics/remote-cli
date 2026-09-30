@@ -21,11 +21,15 @@ class FakeTransport implements CodexAppServerTransport {
   ];
   rateLimitsResponse: any = { rateLimits: {} };
   cwd: string | null = null;
+  serverVersion: string | null = null;
+  commandVersion: string | null = null;
 
   async start(): Promise<void> { this.running = true; }
   async stop(): Promise<void> { this.running = false; }
   isRunning(): boolean { return this.running; }
   setWorkingDirectory(cwd: string): void { this.cwd = cwd; }
+  getServerVersion(): string | null { return this.serverVersion; }
+  async getCommandVersion(): Promise<string | null> { return this.commandVersion; }
   onMessage(handler: (message: any) => void): () => void {
     this.handler = handler;
     return () => { this.handler = null; };
@@ -577,6 +581,48 @@ describe('CodexAppServerExecutor', () => {
       expect.objectContaining({ id: 'gpt-b', displayName: 'gpt-b' }),
     ]);
     expect(transport.requests.filter((request) => request.method === 'model/list')).toHaveLength(2);
+  });
+
+  it('refreshes an idle app-server after a Codex CLI upgrade while preserving its session', async () => {
+    const first = executor.execute('first', {});
+    await vi.waitFor(() => expect(transport.requests.some((request) => request.method === 'turn/start')).toBe(true));
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await first;
+
+    transport.serverVersion = '0.154.0';
+    transport.commandVersion = '0.159.2';
+    const stop = vi.spyOn(transport, 'stop');
+
+    await executor.listModels();
+    expect(stop).toHaveBeenCalledTimes(1);
+
+    const second = executor.execute('second', {});
+    await vi.waitFor(() => expect(transport.requests.some((request) => request.method === 'thread/resume')).toBe(true));
+    expect(transport.requests.findLast((request) => request.method === 'thread/resume')?.params).toMatchObject({ threadId: 'codex-thread-1' });
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await second;
+  });
+
+  it('does not restart an app-server that becomes busy while checking its command version', async () => {
+    transport.running = true;
+    transport.serverVersion = '0.154.0';
+    let releaseVersion: ((version: string | null) => void) | undefined;
+    vi.spyOn(transport, 'getCommandVersion').mockImplementation(() => new Promise((resolve) => {
+      releaseVersion = resolve;
+    }));
+    const stop = vi.spyOn(transport, 'stop');
+
+    const listing = executor.listModels();
+    await vi.waitFor(() => expect(releaseVersion).toBeDefined());
+    const running = executor.execute('running', {});
+    await vi.waitFor(() => expect(transport.requests.some((request) => request.method === 'turn/start')).toBe(true));
+
+    releaseVersion!('0.159.2');
+    await listing;
+    expect(stop).not.toHaveBeenCalled();
+
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await running;
   });
 
   it('clears only the conversation pointer and preserves model and cwd', async () => {

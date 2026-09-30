@@ -171,6 +171,8 @@ When the Router restarts or its WebSocket connection drops, running backend proc
 
 Recovery requests are serialized. Each request waits up to 15 seconds for acknowledgement; failure triggers exponential backoff starting at 30 seconds and capped at five minutes. Incoming output cannot bypass that wait. After 20 consecutive failures, recovery for that task pauses for the current connection, while later output remains suppressed. Successful recovery resets the failure count, and a new connection starts another recovery round. Other tasks can recover once the paused task is skipped.
 
+Router 1.6.92 also requires a successful recovery-notice update before acknowledging reuse of a surviving card. Failed updates remain retryable within the same recovery round without duplicating the notice. Card-update failures log the root reply ID, affected card ID and number, and Feishu error and trace codes without logging the card body. This requires only a Router upgrade and works with older recovery-capable CLIs.
+
 Tasks that finish offline report only their completion or failure status. The CLI retains at most 100 terminal records for up to 24 hours, in memory; restarting the CLI discards them. A graceful Router stop marks unfinished reply cards as interrupted while backend tasks continue. Automatic updates wait for pending results to be acknowledged, expire, or exhaust their recovery budget; paused records do not block an update. Older Router versions keep their previous reconnect behavior.
 
 Linux 用户从 1.6.23 或更早版本升级后，需要再次执行 `remote-cli service install`，以使用正确的路径转义重新生成 systemd unit。
@@ -1042,6 +1044,10 @@ while the working directory stays the same. Changing directory starts a fresh
 conversation. `/model` queries app-server's model catalog,
 `/compact` uses native thread compaction, `/abort` interrupts the active turn,
 and image messages are sent as Codex image inputs.
+
+如果某个空闲线程的 app-server 启动后本地 Codex CLI 被升级，下一次 `/model`、
+`/model <name>` 或 `/effort` 会检测版本变化并重建该 app-server。保存的 Codex
+会话会在下一轮继续使用。
 
 Codex app-server 是唯一支持的 Codex transport。启动时会自动迁移旧的 `codex exec` 配置。
 启动时还会通过 `codex app-server --help` 检查已安装 Codex CLI 的能力；如果版本过旧，会显示升级命令。

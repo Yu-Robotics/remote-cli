@@ -43,6 +43,12 @@ affected card's Markdown shown as literal code text. It retains that format
 for later updates and thread-button refreshes; other cards keep their normal
 formatting. This requires only a Router upgrade and works with older CLIs.
 
+Router 1.6.92 waits for a successful recovery-notice update before acknowledging
+reuse of a surviving card. Failed updates can retry within the same recovery
+round without duplicating the notice. Router update-failure logs identify the
+affected card and Feishu error codes without logging the card body. This works
+with older recovery-capable CLIs and requires only a Router upgrade.
+
 ```bash
 npm install -g @yu_robotics/remote-cli
 ```

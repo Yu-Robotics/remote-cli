@@ -20,6 +20,8 @@ export interface CodexAppServerTransport {
   stop(): Promise<void>;
   isRunning(): boolean;
   setWorkingDirectory(cwd: string): void;
+  getServerVersion?(): string | null;
+  getCommandVersion?(): Promise<string | null>;
 }
 
 export interface CodexAppServerExecutorOptions {
@@ -505,6 +507,7 @@ export class CodexAppServerExecutor implements IExecutor {
   }
 
   async listModels(): Promise<ExecutorModelInfo[]> {
+    await this.refreshModelCatalogAfterCommandUpgrade();
     const models: ExecutorModelInfo[] = [];
     let cursor: string | null = null;
     do {
@@ -532,6 +535,30 @@ export class CodexAppServerExecutor implements IExecutor {
       cursor = typeof response?.nextCursor === 'string' ? response.nextCursor : null;
     } while (cursor);
     return models;
+  }
+
+  /**
+   * Codex app-server keeps its bundled model catalog for the lifetime of the
+   * process. If the CLI was upgraded since this persistent process started,
+   * recreate the idle transport so `/model` and model validation use the new
+   * catalog. The saved Codex thread id remains intact and is resumed later.
+   */
+  private async refreshModelCatalogAfterCommandUpgrade(): Promise<void> {
+    if (!this.client.isRunning() || this.isBusy()) return;
+    const runningVersion = this.client.getServerVersion?.();
+    if (!runningVersion) return;
+    let commandVersion: string | null;
+    try {
+      commandVersion = await this.client.getCommandVersion?.() ?? null;
+    } catch {
+      return;
+    }
+    if (!commandVersion || commandVersion === runningVersion) return;
+    if (this.isBusy() || !this.client.isRunning() || this.client.getServerVersion?.() !== runningVersion) return;
+
+    console.log(`[CodexAppServerExecutor] Codex upgraded from ${runningVersion} to ${commandVersion}; refreshing the idle model catalog`);
+    await this.client.stop();
+    this.threadReady = false;
   }
 
   async getAccountUsage(): Promise<string | null> {

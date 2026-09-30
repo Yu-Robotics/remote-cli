@@ -28,6 +28,7 @@ interface StreamingMessageState {
   queueCardId?: string;
   queueStarted?: QueueStartedInfo;
   recoveryId?: string;
+  recoveryCardPending?: boolean;
   recoveryPlainText?: boolean;
   recoveryCwd?: string;
   updateInFlight?: Promise<void>;
@@ -1017,12 +1018,26 @@ export class RouterServer {
         previous.recoveryPlainText = true;
         previous.lastRenderedTextLength = 0;
         previous.recoveryId = info.recoveryId;
+        previous.recoveryCardPending = true;
         previous.recoveryCwd = info.cwd;
         previous.threadId = previous.threadId ?? threadId;
         previous.threadName = previous.threadName ?? info.threadName;
         previous.createdAt = Date.now();
-        await this.updateStreamingText(messageId, openId, previous);
-        if (!isCurrent()) return false;
+      }
+      if (previous.recoveryCardPending) {
+        const elements = [...previous.elements];
+        if (previous.currentTextContent.trim()) elements.push(...this.renderCurrentText(previous));
+        const textLength = previous.currentTextContent.length;
+        const updated = await this.feishuLongConnHandler.updateStreamingMessage(
+          previous.feishuMessageId!, elements, openId, previous.threadName
+        );
+        if (!updated || !isCurrent() || this.streamingMessages.get(messageId) !== previous) return false;
+        // Keep the staged recovery notice on failure so the same round can retry
+        // without appending a duplicate notice or acknowledging a failed patch.
+        previous.recoveryCardPending = false;
+        previous.hasUpdated = true;
+        previous.lastRenderedTextLength = textLength;
+        this.lastStreamUpdateTime.set(messageId, Date.now());
       }
       this.cardThreadMap.set(previous.feishuMessageId!, { threadId, deviceId, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS });
     } else {

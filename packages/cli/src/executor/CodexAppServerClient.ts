@@ -27,6 +27,15 @@ interface PendingRequest {
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_KILL_ESCALATION_MS = 3_000;
 const STDERR_TAIL_LIMIT = 4_000;
+const VERSION_PROBE_TIMEOUT_MS = 3_000;
+const VERSION_PROBE_OUTPUT_LIMIT = 1_000;
+
+function parseCodexVersion(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const match = /\/(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)(?:\s|\(|$)/.exec(value)
+    ?? /\b(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\b/.exec(value);
+  return match?.[1] ?? null;
+}
 
 /**
  * Minimal stdio JSON-RPC client for `codex app-server`.
@@ -49,6 +58,7 @@ export class CodexAppServerClient {
   private stdoutBuffer = '';
   private stderrTail = '';
   private stopping = false;
+  private serverVersion: string | null = null;
 
   constructor(options: CodexAppServerClientOptions = {}) {
     this.command = options.command ?? 'codex';
@@ -63,6 +73,49 @@ export class CodexAppServerClient {
 
   isRunning(): boolean {
     return this.proc !== null;
+  }
+
+  /** Version reported by the currently running app-server, when available. */
+  getServerVersion(): string | null {
+    return this.serverVersion;
+  }
+
+  /** Resolve the version that a fresh invocation of the configured command would run. */
+  async getCommandVersion(): Promise<string | null> {
+    return new Promise((resolve) => {
+      let settled = false;
+      let output = '';
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const finish = (version: string | null) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        resolve(version);
+      };
+      let proc: ChildProcess;
+      try {
+        proc = spawn(this.command, ['--version'], {
+          cwd: this.cwd,
+          env: { ...process.env },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+      } catch {
+        finish(null);
+        return;
+      }
+      const append = (chunk: Buffer | string) => {
+        output = (output + chunk.toString()).slice(-VERSION_PROBE_OUTPUT_LIMIT);
+      };
+      proc.stdout?.on('data', append);
+      proc.stderr?.on('data', append);
+      proc.once('error', () => finish(null));
+      proc.once('close', (code) => finish(code === 0 ? parseCodexVersion(output) : null));
+      timer = setTimeout(() => {
+        try { proc.kill(); } catch { /* The version probe may have already exited. */ }
+        finish(null);
+      }, VERSION_PROBE_TIMEOUT_MS);
+      if (typeof timer.unref === 'function') timer.unref();
+    });
   }
 
   onMessage(handler: MessageHandler): () => void {
@@ -86,6 +139,7 @@ export class CodexAppServerClient {
     this.stopping = false;
     this.stdoutBuffer = '';
     this.stderrTail = '';
+    this.serverVersion = null;
     this.decoder = new StringDecoder('utf8');
 
     let proc: ChildProcess;
@@ -130,7 +184,7 @@ export class CodexAppServerClient {
     });
 
     try {
-      await this.requestRaw('initialize', {
+      const initialized = await this.requestRaw('initialize', {
         clientInfo: {
           name: 'remote_cli',
           title: 'Remote CLI',
@@ -138,6 +192,7 @@ export class CodexAppServerClient {
         },
         capabilities: { experimentalApi: true },
       });
+      this.serverVersion = parseCodexVersion(initialized?.userAgent);
       this.notify('initialized');
     } catch (error) {
       await this.stop();
@@ -169,6 +224,7 @@ export class CodexAppServerClient {
     this.startPromise = null;
     this.stopping = true;
     this.proc = null;
+    this.serverVersion = null;
     this.failAll(new Error('Codex app-server stopped'));
     if (!proc) return;
 

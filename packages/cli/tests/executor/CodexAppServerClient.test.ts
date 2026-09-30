@@ -10,7 +10,7 @@ vi.mock('child_process', async (importActual) => {
 
 const mockSpawn = vi.mocked(spawn);
 
-function fakeProcess() {
+function fakeProcess(userAgent = 'test') {
   const process: any = new EventEmitter();
   process.stdout = new EventEmitter();
   process.stderr = new EventEmitter();
@@ -22,13 +22,25 @@ function fakeProcess() {
       process.stdin.writes.push(data);
       const message = JSON.parse(data);
       if (message.method === 'initialize') {
-        queueMicrotask(() => process.stdout.emit('data', Buffer.from(`${JSON.stringify({ id: message.id, result: { userAgent: 'test' } })}\n`)));
+        queueMicrotask(() => process.stdout.emit('data', Buffer.from(`${JSON.stringify({ id: message.id, result: { userAgent } })}\n`)));
       }
       return true;
     }),
     end: vi.fn(),
   });
   process.kill = vi.fn();
+  return process;
+}
+
+function fakeVersionProcess(output = 'codex-cli 0.159.2\n') {
+  const process: any = new EventEmitter();
+  process.stdout = new EventEmitter();
+  process.stderr = new EventEmitter();
+  process.kill = vi.fn();
+  queueMicrotask(() => {
+    process.stdout.emit('data', Buffer.from(output));
+    process.emit('close', 0, null);
+  });
   return process;
 }
 
@@ -52,6 +64,26 @@ describe('CodexAppServerClient', () => {
     });
     expect(messages[1]).toEqual({ method: 'initialized' });
     await client.stop();
+  });
+
+  it('records the version reported by the running app-server', async () => {
+    const process = fakeProcess('remote_cli/0.159.2 (Linux; aarch64)');
+    mockSpawn.mockReturnValue(process);
+    const client = new CodexAppServerClient();
+
+    await client.start();
+
+    expect(client.getServerVersion()).toBe('0.159.2');
+    await client.stop();
+  });
+
+  it('reads the version that a fresh Codex command would run', async () => {
+    const process = fakeVersionProcess();
+    mockSpawn.mockReturnValue(process);
+    const client = new CodexAppServerClient({ command: '/opt/codex', cwd: '/workspace' });
+
+    await expect(client.getCommandVersion()).resolves.toBe('0.159.2');
+    expect(mockSpawn).toHaveBeenCalledWith('/opt/codex', ['--version'], expect.objectContaining({ cwd: '/workspace' }));
   });
 
   it('correlates responses and forwards fragmented notifications', async () => {

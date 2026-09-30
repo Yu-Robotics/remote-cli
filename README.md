@@ -174,6 +174,8 @@ When the Router restarts or its WebSocket connection drops, running backend proc
 
 Recovery requests are serialized. Each request waits up to 15 seconds for acknowledgement; failure triggers exponential backoff starting at 30 seconds and capped at five minutes. Incoming output cannot bypass that wait. After 20 consecutive failures, recovery for that task pauses for the current connection, while later output remains suppressed. Successful recovery resets the failure count, and a new connection starts another recovery round. Other tasks can recover once the paused task is skipped.
 
+Router 1.6.92 also requires a successful recovery-notice update before acknowledging reuse of a surviving card. Failed updates remain retryable within the same recovery round without duplicating the notice. Card-update failures log the root reply ID, affected card ID and number, and Feishu error and trace codes without logging the card body. This requires only a Router upgrade and works with older recovery-capable CLIs.
+
 Tasks that finish offline report only their completion or failure status. The CLI retains at most 100 terminal records for up to 24 hours, in memory; restarting the CLI discards them. A graceful Router stop marks unfinished reply cards as interrupted while backend tasks continue. Automatic updates wait for pending results to be acknowledged, expire, or exhaust their recovery budget; paused records do not block an update. Older Router versions keep their previous reconnect behavior.
 
 After upgrading from version 1.6.23 or earlier on Linux, run `remote-cli service install` again to regenerate the systemd unit with corrected path escaping.
@@ -1083,6 +1085,10 @@ conversation. `/model` queries app-server's model catalog,
 `/compact` uses native thread compaction, `/abort` interrupts the active turn,
 and image messages are sent as Codex image inputs.
 Generated Codex images are returned to Feishu when both the CLI and Router support image forwarding.
+
+If Codex CLI is upgraded after an idle app-server has started, the next `/model`,
+`/model <name>`, or `/effort` detects the version change and recreates that
+app-server. The saved Codex conversation is resumed for the following turn.
 
 Codex app-server is the only supported Codex transport. Legacy `codex exec` configuration is migrated automatically during startup.
 Startup also checks that the installed Codex CLI exposes `codex app-server --help` and prints an upgrade command when the installed Codex CLI is too old.

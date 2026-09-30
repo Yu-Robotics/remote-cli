@@ -1312,6 +1312,8 @@ Examples:
   }
 
   private async _updateStreamingMessage(messageId: string, elements: any[], openId?: string, continuationHeaderElements: any[] = [], trailingElements: any[] = []): Promise<boolean> {
+    let updatingMessageId = messageId;
+    let updatingCardIndex = 0;
     try {
       // Get or initialize message chain
       let chain = this.messageChains.get(messageId);
@@ -1344,6 +1346,8 @@ Examples:
       };
       const patchCard = async (index: number): Promise<void> => {
         if (hashes[index] === nextHashes[index]) return;
+        updatingMessageId = chain[index];
+        updatingCardIndex = index;
         await this.sendCardRequest(payloads[index], content => this.client.im.message.patch({
           path: { message_id: chain[index] },
           data: { content },
@@ -1390,7 +1394,13 @@ Examples:
 
       return true;
     } catch (error: any) {
-      console.error('Failed to update streaming message:', error?.message || error);
+      const detail = error?.response?.data ?? error;
+      console.error('Failed to update streaming message:', {
+        rootMessageId: messageId, messageId: updatingMessageId, cardNumber: updatingCardIndex + 1,
+        code: detail?.code,
+        subCode: typeof detail?.msg === 'string' ? /ErrCode:\s*(\d+)/.exec(detail.msg)?.[1] : undefined,
+        logId: detail?.log_id, message: error?.message || 'Card update failed',
+      });
       return false;
     }
   }
