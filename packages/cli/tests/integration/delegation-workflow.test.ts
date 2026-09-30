@@ -169,6 +169,8 @@ describe('delegation in the existing thread workflow', () => {
 
   it('rejects a same-backend tool call and still lets the coordinator obtain a different backend result', async () => {
     await handler.handleMessage(message('enable', '/delegation on'));
+    expect(responseFor('enable').output).toContain('🤝 **Cross-backend delegation**');
+    expect(responseFor('enable').output).toContain('**Backend availability**');
     expect(responseFor('enable').output).toContain('Same-backend delegation is disabled');
     main.execute.mockImplementationOnce(async () => {
       const discovery = await call('remote_cli_list_backends');

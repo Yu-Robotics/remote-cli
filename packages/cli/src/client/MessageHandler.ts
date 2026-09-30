@@ -25,6 +25,7 @@ import { isZCodeAvailable } from '../executor/zcode/ZCodeCommand';
 import { DelegationManager, workspacesOverlap, type DelegationScope, type DelegatedTaskResult } from '../delegation/DelegationManager';
 import { DelegationBridge } from '../delegation/DelegationBridge';
 import { DELEGATION_INSTRUCTIONS } from '../delegation/contract';
+import { formatDelegationStatus } from '../delegation/DelegationStatusFormatter';
 
 /**
  * Detected backend information
@@ -597,16 +598,16 @@ export class MessageHandler {
       }
       const config = (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
       const backends = await this.delegation.registry.list(config);
-      this.sendResponse(messageId, threadId, { success: true, output: [
-        `Delegation: ${this.threadManager.getThread(threadId)?.delegation ? 'on' : 'off'}`,
-        `Coordinator: ${executor.configureDelegation ? backendDisplayName(this.threadPool.getBackendKey(threadId)) : 'unsupported for this backend'}`,
-        ...(this.threadPool.getBackendKey(threadId) === 'zcode'
-          ? ['ZCode delegation temporarily replaces user-configured MCP servers. Native tools and plugins remain available; /delegation off restores the normal MCP configuration.'] : []),
-        ...backends.map(item => `${item.backend}: ${item.installed ? item.version : item.reason}`),
-        'Same-backend delegation is disabled. Use the current backend directly or its native subagents, if supported.',
-        'Authentication and quota are checked when a task runs. Cross-backend delegation is unavailable while the coordinator sandbox is enabled.',
-        'Usage: /delegation on|off. Applies to this thread; workers use independent sessions.',
-      ].join('\n') });
+      const coordinatorBackend = this.threadPool.getBackendKey(threadId);
+      this.sendResponse(messageId, threadId, {
+        success: true,
+        output: formatDelegationStatus({
+          enabled: Boolean(this.threadManager.getThread(threadId)?.delegation),
+          coordinatorBackend,
+          coordinatorSupported: Boolean(executor.configureDelegation),
+          backends,
+        }),
+      });
       return true;
     }
 
