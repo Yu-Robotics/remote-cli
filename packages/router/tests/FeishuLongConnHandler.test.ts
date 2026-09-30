@@ -233,6 +233,31 @@ describe('FeishuLongConnHandler', () => {
       expect(JSON.stringify(elements)).toContain('switch_thread');
     });
 
+    it('identifies a rejected continuation and retries it on a later update without duplicating cards', async () => {
+      mockClient.im.message.patch.mockResolvedValue({});
+      mockClient.im.message.create.mockResolvedValue({ data: { message_id: 'continuation' } });
+      const elements = Array.from({ length: 160 }, (_, index) => ({ tag: 'markdown', content: `Line ${index}` }));
+      expect(await handler.updateStreamingMessage('root', elements, 'user')).toBe(true);
+      mockClient.im.message.patch.mockClear();
+      elements[159] = { tag: 'markdown', content: 'Later private output' };
+      mockClient.im.message.patch.mockRejectedValueOnce({ response: { data: {
+        code: 230099, msg: 'Failed to create card content, ext=ErrCode: 200800; ErrMsg: create universal card fail;', log_id: 'trace-1',
+      } } });
+
+      expect(await handler.updateStreamingMessage('root', elements, 'user')).toBe(false);
+      expect(mockClient.im.message.patch).toHaveBeenCalledOnce();
+      expect(console.error).toHaveBeenCalledWith('Failed to update streaming message:', expect.objectContaining({
+        rootMessageId: 'root', messageId: 'continuation', cardNumber: 2, code: 230099, subCode: '200800', logId: 'trace-1',
+      }));
+      expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain('Later private output');
+      expect(await handler.updateStreamingMessage('root', elements, 'user')).toBe(true);
+      expect(mockClient.im.message.patch).toHaveBeenCalledTimes(2);
+      expect(mockClient.im.message.create).toHaveBeenCalledOnce();
+      expect(mockClient.im.message.patch.mock.calls.every(([request]) => request.path.message_id === 'continuation')).toBe(true);
+      expect(await handler.updateStreamingMessage('root', elements, 'user')).toBe(true);
+      expect(mockClient.im.message.patch).toHaveBeenCalledTimes(2);
+    });
+
     it('keeps an independent reply formatted after a Markdown fallback', async () => {
       mockClient.im.message.patch.mockRejectedValueOnce(markdownError).mockResolvedValue({});
       expect(await handler.updateStreamingMessage('rejected', [{ tag: 'markdown', content: 'Rejected fragment' }], 'user-a')).toBe(true);

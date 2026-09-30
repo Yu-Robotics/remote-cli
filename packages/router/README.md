@@ -15,7 +15,7 @@ The router server acts as a bridge between Feishu messaging and developer machin
 - **Delegated task progress** uses the existing reply and approval cards. With a supporting local CLI, `/delegation on` enables Claude Code, Codex, Pi, AGY, OpenCode, Kimi Code, and ZCode workers within the selected thread; the Router does not run or select workers. From CLI 1.6.95, managed delegation accepts only a different backend. An unrestricted coordinator launches unrestricted workers; sandboxed coordinators have no eligible workers until cross-backend sandbox translation is supported. Native backend task/subagent tools are unchanged. Other backend approval options still apply. This policy is enforced on the local CLI and requires upgrading it. See [Cross-backend Delegation](../../README.md#cross-backend-delegation).
 - **WebSocket connections** from local clients
 - **Feishu long connection** for receiving and sending messages
-- **Task recovery** with compatible clients: resume output on a usable surviving card or create a new one, with an independent gap notice and plain-text handling of resumed fragments; failed card creation is not acknowledged as successful recovery
+- **Task recovery** with compatible clients: resume output on a usable surviving card or create a new one, with an independent gap notice and plain-text handling of resumed fragments; failed card creation or recovery-notice updates are not acknowledged as successful recovery
 - **Table-aware card splitting** and a single text fallback retry for a card rejected by Feishu's table limit or Markdown parser
 
 Router 1.6.91 extends the text fallback to confirmed Markdown parse errors
@@ -23,6 +23,12 @@ Router 1.6.91 extends the text fallback to confirmed Markdown parse errors
 text, and retains that format for later updates and thread-button refreshes.
 Other cards keep their normal formatting. Older CLIs remain compatible;
 this fallback requires only a Router upgrade.
+
+Router 1.6.92 requires successful recovery-notice delivery before acknowledging
+reuse of a surviving card. A failed update can retry within the same recovery
+round without duplicating the notice. Update-failure logs identify the root
+reply, affected card ID and number, and Feishu error and trace codes without
+logging the card body. Older recovery-capable CLIs remain compatible.
 
 Router 1.6.90 checks tool parameters before using specialized card formatting.
 Missing or incompatible fields fall back to a bounded parameter summary;

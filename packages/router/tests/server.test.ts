@@ -98,7 +98,7 @@ describe('RouterServer', () => {
       sendMessage: vi.fn().mockResolvedValue(undefined),
       sendStreamingStart: vi.fn().mockResolvedValue('execution-card'),
       markQueueCardStarted: vi.fn().mockResolvedValue(undefined),
-      updateStreamingMessage: vi.fn().mockResolvedValue(undefined),
+      updateStreamingMessage: vi.fn().mockResolvedValue(true),
       uploadImage: vi.fn().mockResolvedValue('img_generated_123'),
       finalizeStreamingMessage: vi.fn().mockResolvedValue(undefined),
       sendCommandFromCardAction: vi.fn().mockResolvedValue(undefined),
@@ -344,6 +344,33 @@ describe('RouterServer', () => {
       const elements = mockFeishuHandler.finalizeStreamingMessage.mock.calls[0][1];
       expect(JSON.stringify(elements)).toContain('kept output');
       expect(JSON.stringify(elements)).toContain('tail');
+    });
+
+    it.each(['rejected request', 'failed update'])('retries a %s when adopting a card without acknowledging success early', async failure => {
+      const { send, replies } = await connect();
+      mockFeishuHandler.setOnStartStreaming.mock.calls[0][0](resume.messageId, 'user-1', 'old-card', 'device-1', 'thread-1');
+      await send({ type: 'stream', messageId: resume.messageId, openId: 'user-1', chunk: 'kept output' });
+      mockFeishuHandler.updateStreamingMessage.mockClear();
+      if (failure === 'rejected request') {
+        mockFeishuHandler.updateStreamingMessage.mockRejectedValueOnce(new Error('Card API rejected the update'));
+      } else {
+        mockFeishuHandler.updateStreamingMessage.mockResolvedValueOnce(false);
+      }
+
+      await send(resume);
+      expect(replies().at(-1)).toMatchObject({ type: 'task_resume_ack', success: false });
+      await send(resume);
+      expect(replies().at(-1)).toMatchObject({ type: 'task_resume_ack', success: true });
+      expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenCalledTimes(2);
+      expect(mockFeishuHandler.sendStreamingStart).not.toHaveBeenCalled();
+      const [cardId, elements] = mockFeishuHandler.updateStreamingMessage.mock.calls[1];
+      expect(cardId).toBe('old-card');
+      expect(JSON.stringify(elements)).toContain('kept output');
+      expect(elements.filter(element => element.content?.includes('Connection restored'))).toHaveLength(1);
+      await send(resume);
+      expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenCalledTimes(2);
+      await send({ type: 'response', messageId: resume.messageId, openId: 'user-1', success: true });
+      expect(mockFeishuHandler.finalizeStreamingMessage.mock.calls[0][0]).toBe('old-card');
     });
 
     it('finalizes in-flight streaming cards on graceful stop', async () => {
