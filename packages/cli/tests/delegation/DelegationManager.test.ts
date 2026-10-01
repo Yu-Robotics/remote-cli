@@ -315,7 +315,7 @@ describe('cross-backend delegation', () => {
 
   it('does not treat text streaming as delegated-worker activity', async () => {
     manager = new DelegationManager(guard, factory as any, new BackendRegistry(async () => '1.0'), new DelegationStore(), {
-      idleTimeoutMs: 50, toolIdleTimeoutMs: 150,
+      idleTimeoutMs: 100, toolIdleTimeoutMs: 400,
     });
     let finish!: (result: ExecuteResult) => void;
     let options!: ExecuteOptions;
@@ -323,14 +323,23 @@ describe('cross-backend delegation', () => {
       options = receivedOptions;
       return new Promise(resolve => { finish = resolve; });
     });
-    vi.mocked(worker.abort).mockImplementation(async () => { finish({ success: false }); return true; });
+    let abortedAt = 0;
+    vi.mocked(worker.abort).mockImplementation(async () => { abortedAt = Date.now(); finish({ success: false }); return true; });
     const scope = manager.begin(parent);
     const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Wait' }, 'start');
     await vi.waitFor(() => expect(options).toBeDefined());
     expect(options).toMatchObject({ timeout: 0, inactivityTimeout: 0 });
 
-    await wait(30);
-    options.onStream?.('Still thinking');
+    // Keep streaming past the idle window. If onStream ever refreshed the idle
+    // timer, the task would outlive the window and this waitFor would time out.
+    const startedAt = Date.now();
+    const streaming = setInterval(() => options.onStream?.('Still thinking'), 40);
+    try {
+      await vi.waitFor(() => expect(worker.abort).toHaveBeenCalled());
+    } finally {
+      clearInterval(streaming);
+    }
+    expect(abortedAt - startedAt).toBeLessThan(300);
     await expect(scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result')).resolves.toMatchObject({
       state: 'timed_out', error: expect.stringContaining('without tool activity'),
     });
@@ -339,7 +348,7 @@ describe('cross-backend delegation', () => {
 
   it('extends a delegated task after tool events and restores the shorter idle limit after the tool completes', async () => {
     manager = new DelegationManager(guard, factory as any, new BackendRegistry(async () => '1.0'), new DelegationStore(), {
-      idleTimeoutMs: 50, toolIdleTimeoutMs: 150,
+      idleTimeoutMs: 100, toolIdleTimeoutMs: 1000,
     });
     let finish!: (result: ExecuteResult) => void;
     let options!: ExecuteOptions;
@@ -347,21 +356,30 @@ describe('cross-backend delegation', () => {
       options = receivedOptions;
       return new Promise(resolve => { finish = resolve; });
     });
-    vi.mocked(worker.abort).mockImplementation(async () => { finish({ success: false }); return true; });
+    let abortedAt = 0;
+    vi.mocked(worker.abort).mockImplementation(async () => { abortedAt = Date.now(); finish({ success: false }); return true; });
     const scope = manager.begin(parent);
     const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Build' }, 'start');
     await vi.waitFor(() => expect(options).toBeDefined());
 
-    await wait(30);
+    await wait(50);
     options.onToolUse?.({ id: 'build', name: 'Bash', input: { command: 'make' } });
-    await wait(60);
+    // An active tool extends the window: without the extension the task would
+    // expire ~100ms after the tool_use, well before this checkpoint.
+    await wait(250);
     expect(worker.abort).not.toHaveBeenCalled();
 
+    // Once the tool reports its result, the shorter idle window applies again.
+    // Invoke the result tool before the expiry so it waits for task.done and
+    // returns after the final record write; the abort timestamp proves the
+    // shorter window (a stale 1000ms window would blow past the 500ms bound).
+    const resultAt = Date.now();
     options.onToolResult?.({ tool_use_id: 'build', content: 'build complete', is_error: false });
     await expect(scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result')).resolves.toMatchObject({
       state: 'timed_out', error: expect.stringContaining('without tool activity'),
     });
     expect(worker.abort).toHaveBeenCalledOnce();
+    expect(abortedAt - resultAt).toBeLessThan(500);
     const record = JSON.parse(fs.readFileSync(path.join(home, '.remote-cli', 'delegation', `${task.taskId}.json`), 'utf8'));
     expect(record).toMatchObject({ lastActivityKind: 'tool_result' });
   });
