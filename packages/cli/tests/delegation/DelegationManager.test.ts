@@ -117,6 +117,42 @@ describe('cross-backend delegation', () => {
     expect(parent.onNotice).not.toHaveBeenCalled();
   });
 
+  it('buffers worker text as display-only nested progress without treating it as task activity', async () => {
+    vi.useFakeTimers();
+    const onTextProgress = vi.fn(() => true);
+    parent.onProgress = vi.fn(() => true);
+    parent.onTextProgress = onTextProgress;
+    let finish!: (result: ExecuteResult) => void;
+    let options!: ExecuteOptions;
+    vi.mocked(worker.execute).mockImplementation((_prompt, receivedOptions) => {
+      options = receivedOptions;
+      return new Promise(resolve => { finish = resolve; });
+    });
+
+    try {
+      const scope = manager.begin(parent);
+      const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Review the README' }, 'start');
+      await vi.waitFor(() => expect(options).toBeDefined());
+      options.onStream?.('First bounded worker update.');
+      await Promise.resolve();
+      expect(onTextProgress).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(2_500);
+      expect(onTextProgress).toHaveBeenCalledWith(expect.objectContaining({
+        taskId: task.taskId,
+        backend: 'codex',
+        phase: 'text',
+        latestText: 'First bounded worker update.',
+      }));
+      expect(parent.onProgress).not.toHaveBeenCalledWith(expect.objectContaining({ phase: 'text' }));
+
+      finish({ success: true, output: 'Review complete' });
+      await expect(scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result')).resolves.toMatchObject({ state: 'succeeded' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('uses the legacy Claude model when no per-backend model is saved', async () => {
     parent.backend = 'codex';
     parent.thread.model = 'legacy-claude-model';

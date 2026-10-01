@@ -147,6 +147,7 @@ export class MessageHandler {
   private automaticUpdateInProgress = false;
   private approvalCardsSupported = false;
   private delegationProgressSupported = false;
+  private delegationProgressTextSupported = false;
   private readonly pendingApprovalCards = new Map<string, { request: ApprovalRequestMessage; executor: IExecutor; delegated?: boolean }>();
   private readonly delegation: DelegationManager;
   private readonly delegationBridges = new Map<string, DelegationBridge>();
@@ -214,6 +215,8 @@ export class MessageHandler {
         if (data?.success !== true) return;
         this.approvalCardsSupported = data.capabilities?.approvalCards === true;
         this.delegationProgressSupported = data.capabilities?.delegationProgress === true;
+        this.delegationProgressTextSupported = this.delegationProgressSupported
+          && data.capabilities?.delegationProgressText === true;
         for (const pending of this.pendingApprovalCards.values()) {
           if (this.approvalCardsSupported) this.sendApprovalMessage(pending.request);
           else this.showApprovalFallback(pending.request.messageId);
@@ -1974,8 +1977,12 @@ You can also use natural language commands to control Claude Code CLI.`,
           onToolUse: tool => this.sendToolUse(messageId, threadId, tool),
           onToolResult: result => this.sendToolResult(messageId, threadId, result),
           onNotice: text => this.sendStreamChunk(messageId, threadId, text),
-          onProgress: progress => this.delegationProgressSupported
-            && this.sendDelegationProgress(messageId, threadId, progress),
+          onProgress: this.delegationProgressSupported
+            ? progress => this.sendDelegationProgress(messageId, threadId, progress)
+            : undefined,
+          onTextProgress: this.delegationProgressTextSupported
+            ? progress => this.sendDelegationProgress(messageId, threadId, progress)
+            : undefined,
           onApproval: (request, child) => this.forwardApproval(request, child, messageId, threadId, true),
           onApprovalResolved: (id, status) => this.resolveApprovalCard(id, status),
           isWorkspaceBusy: cwd => this.threadManager.listThreads().some(other => {

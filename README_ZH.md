@@ -482,7 +482,7 @@ bounded reason; the coordinator still receives the existing task result. This
 uses the existing text stream and works with older Routers. It adds no probes,
 cooldowns, retries, or changes to ordinary non-delegated sessions.
 
-CLI 和 Router 1.6.103 及以上版本还会在同一回复卡片中显示实时 worker 进度：一个可展开的嵌套 worker 面板会记录任务启动、工具开始和完成，以及等待输入状态。为控制父卡片大小，面板不会显示原始 worker 文本或完整工具输出。任一端版本较旧时，CLI 会回退到现有的启动和终态结果块。
+CLI 和 Router 1.6.105 及以上版本还会在同一回复卡片中显示实时 worker 进度：一个可展开的嵌套 worker 面板会展示当前工具、受限长度的最新可见 worker 更新、已运行时间和最近一次真实工具活动。worker 保持活跃时，卡片会低频刷新已运行时间。为控制父卡片大小，面板不会显示原始工具输出或内部推理；可见文本会经过转义和长度限制。文本快照不会延长 worker 的存活超时。最新文本能力会单独协商：不支持该能力的另一端仍显示仅含工具进度的嵌套面板；不支持嵌套进度时仍使用现有的启动和终态结果块。
 
 建议先在一个测试线程中启用。从未启用委派的线程不会注册受管理的工具、添加提示词前缀、清理后端委派配置，或检查委派工作区占用；其普通进程处理和会话输出保持原样。
 

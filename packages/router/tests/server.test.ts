@@ -779,6 +779,48 @@ describe('RouterServer', () => {
     expect(panels[0].elements[0].content).not.toContain('**Result:**');
   });
 
+  it('negotiates bounded worker text and refreshes an active panel without extending stream liveness', async () => {
+    await server.start();
+    const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
+    onStartStreaming('m1', 'u1', 'f1', 'd1');
+
+    const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
+    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
+    onConnection(mockWs, { socket: { remoteAddress: '1' } });
+    const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
+    await onMessage(Buffer.from(JSON.stringify({
+      type: 'binding_request', data: { deviceId: 'd1', capabilities: { delegationProgress: true, delegationProgressText: true } },
+    })));
+    expect(JSON.parse(mockWs.send.mock.calls[0][0]).data.capabilities).toEqual({
+      delegationProgress: true,
+      delegationProgressText: true,
+    });
+
+    const sendProgress = async (delegationProgress: any) => onMessage(Buffer.from(JSON.stringify({
+      type: 'stream', streamType: 'delegation_progress', messageId: 'm1', openId: 'u1', delegationProgress,
+    })));
+    await sendProgress({ taskId: 'worker-1', backend: 'codex', phase: 'started', objective: 'Do not render this prominently', startedAt: Date.now() });
+    await sendProgress({ taskId: 'worker-1', backend: 'codex', phase: 'text', latestText: 'Reviewing <unsafe> worker output.' });
+
+    const stream = (server as any).streamingMessages.get('m1');
+    const createdAt = stream.createdAt;
+    const patchesBeforeHeartbeat = mockFeishuHandler.updateStreamingMessage.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(mockFeishuHandler.updateStreamingMessage.mock.calls.length).toBeGreaterThan(patchesBeforeHeartbeat);
+    expect(stream.createdAt).toBe(createdAt);
+
+    const panel = mockFeishuHandler.updateStreamingMessage.mock.calls.at(-1)[1]
+      .find((element: any) => element.tag === 'collapsible_panel');
+    expect(panel.elements[0].content).toContain('Latest update');
+    expect(panel.elements[0].content).toContain('&lt;unsafe&gt;');
+    expect(panel.elements[0].content).not.toContain('Do not render this prominently');
+
+    await sendProgress({ taskId: 'worker-1', backend: 'codex', phase: 'succeeded', summary: 'Finished' });
+    const patchesAfterTerminal = mockFeishuHandler.updateStreamingMessage.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenCalledTimes(patchesAfterTerminal);
+  });
+
   it('ignores delegated worker progress from a client that did not advertise support', async () => {
     await server.start();
     const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];

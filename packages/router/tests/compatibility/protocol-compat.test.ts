@@ -92,12 +92,16 @@ describe('Router wire compatibility', () => {
     expect(JSON.stringify(vi.mocked(feishu.updateApprovalCard).mock.calls.at(-1))).toContain('Approved');
   });
 
-  it('negotiates nested delegated-worker progress only when the CLI advertises it', async () => {
+  it('negotiates nested delegated-worker text only when the CLI advertises the additive capability', async () => {
     await receive({ type: 'binding_request', messageId: 'registration', data: {
-      deviceId: 'device-1', protocolVersion: PROTOCOL_VERSION, capabilities: { delegationProgress: true },
+      deviceId: 'device-1', protocolVersion: PROTOCOL_VERSION,
+      capabilities: { delegationProgress: true, delegationProgressText: true },
     } });
 
-    expect(JSON.parse(socket.send.mock.calls[0][0]).data.capabilities).toEqual({ delegationProgress: true });
+    expect(JSON.parse(socket.send.mock.calls[0][0]).data.capabilities).toEqual({
+      delegationProgress: true,
+      delegationProgressText: true,
+    });
   });
 
   it('serves a legacy CLI alongside a current CLI without requiring new capabilities', async () => {

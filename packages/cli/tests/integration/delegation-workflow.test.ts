@@ -271,6 +271,36 @@ describe('delegation in the existing thread workflow', () => {
       .some((value: any) => value.messageId === 'parent' && value.streamType === 'tool_use')).toBe(false);
   });
 
+  it('enables delegated worker text only after the Router confirms the additive capability', async () => {
+    const manager = (handler as any).delegation as DelegationManager;
+    const originalBegin = manager.begin.bind(manager);
+    const parents: any[] = [];
+    vi.spyOn(manager, 'begin').mockImplementation((parent: any) => {
+      parents.push(parent);
+      return originalBegin(parent);
+    });
+
+    await handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: { delegationProgress: true } } } as any);
+    await handler.handleMessage(message('enable', '/delegation on'));
+    await handler.handleMessage(message('baseline', 'Use a worker'));
+    expect(parents.at(-1)?.onProgress).toEqual(expect.any(Function));
+    expect(parents.at(-1)?.onTextProgress).toBeUndefined();
+
+    await handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: {
+      delegationProgress: true,
+      delegationProgressText: true,
+    } } } as any);
+    await handler.handleMessage(message('latest', 'Use a worker again'));
+    const textProgress = parents.at(-1)?.onTextProgress;
+    expect(textProgress).toEqual(expect.any(Function));
+    expect(textProgress({ taskId: 'worker-1', backend: 'claude', phase: 'text', latestText: 'Worker update' })).toBe(true);
+    expect(socket.send.mock.calls.map(([value]: any[]) => value)).toContainEqual(expect.objectContaining({
+      messageId: 'latest',
+      streamType: 'delegation_progress',
+      delegationProgress: expect.objectContaining({ phase: 'text', latestText: 'Worker update' }),
+    }));
+  });
+
   it('resends a child approval after registration and sends the decision only to the child', async () => {
     await handler.handleMessage(message('enable', '/delegation on'));
     await handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: { approvalCards: true } } } as any);

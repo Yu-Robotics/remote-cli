@@ -17,15 +17,18 @@ interface DelegationProgressState extends DelegationProgressCardState {
   elementIndex: number;
   activeToolIds: Set<string>;
   toolNames: Map<string, string>;
+  toolStartedAt: Map<string, number>;
+  heartbeatTimer?: ReturnType<typeof setTimeout>;
   terminal: boolean;
 }
 
 const DELEGATION_PROGRESS_PHASES = new Set<DelegationProgressInfo['phase']>([
-  'started', 'tool_use', 'tool_result', 'waiting_input', 'succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted',
+  'started', 'text', 'tool_use', 'tool_result', 'waiting_input', 'succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted',
 ]);
 const DELEGATION_PROGRESS_TERMINAL_PHASES = new Set<DelegationProgressInfo['phase']>([
   'succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted',
 ]);
+const DELEGATION_PROGRESS_EVENT_LIMIT = 5;
 
 interface StreamingMessageState {
   openId: string;
@@ -73,6 +76,7 @@ export class RouterServer {
   private queueMessageOperations = new Map<string, Promise<void>>();
   private startedQueueMessages = new Map<string, number>();
   private readonly STREAMING_SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes timeout
+  private readonly DELEGATION_PROGRESS_HEARTBEAT_MS = 30 * 1000;
   // TTL for cardThreadMap entries: 7 days (allows users to reply to old cards)
   private readonly CARD_THREAD_MAP_TTL_MS = 7 * 24 * 60 * 60 * 1000;
   // Map from Feishu card message_id to threadId for parent_id-based routing.
@@ -114,6 +118,8 @@ export class RouterServer {
     // Register callback for streaming message start
     this.feishuLongConnHandler.setOnStartStreaming((messageId: string, openId: string, feishuMessageId: string | null, deviceId: string, threadId?: string, pendingNewThread?: boolean, queueCardId?: string) => {
       console.log(`[RouterServer] Registering streaming session: msgId=${messageId}, feishuMsgId=${feishuMessageId}, deviceId=${deviceId}, threadId=${threadId}, pendingNewThread=${pendingNewThread}`);
+      const previous = this.streamingMessages.get(messageId);
+      if (previous) this.clearDelegationProgressTimers(previous);
       this.streamingMessages.set(messageId, {
         openId,
         feishuMessageId,
@@ -318,6 +324,7 @@ export class RouterServer {
       let taskRecoveryEnabled = false;
       let approvalCardsEnabled = false;
       let delegationProgressEnabled = false;
+      let delegationProgressTextEnabled = false;
       let heartbeatTimeout: NodeJS.Timeout | null = null;
 
       // Reset heartbeat timeout
@@ -426,6 +433,8 @@ export class RouterServer {
                 taskRecoveryEnabled = message.data.capabilities?.taskRecovery === true;
                 approvalCardsEnabled = message.data.capabilities?.approvalCards === true;
                 delegationProgressEnabled = message.data.capabilities?.delegationProgress === true;
+                delegationProgressTextEnabled = delegationProgressEnabled
+                  && message.data.capabilities?.delegationProgressText === true;
                 // Send confirmation with version info for client-side version check
                 ws.send(JSON.stringify({
                   type: MessageType.BINDING_CONFIRM,
@@ -439,6 +448,7 @@ export class RouterServer {
                       ...(taskRecoveryEnabled ? { taskRecovery: true } : {}),
                       ...(approvalCardsEnabled ? { approvalCards: true } : {}),
                       ...(delegationProgressEnabled ? { delegationProgress: true } : {}),
+                      ...(delegationProgressTextEnabled ? { delegationProgressText: true } : {}),
                     } } : {}),
                   }
                 }));
@@ -577,7 +587,7 @@ export class RouterServer {
                     break;
                   case 'delegation_progress':
                     if (delegationProgressEnabled && message.delegationProgress) {
-                      await this.handleDelegationProgress(message.messageId, message.openId, message.delegationProgress);
+                      await this.handleDelegationProgress(message.messageId, message.openId, message.delegationProgress, delegationProgressTextEnabled);
                     }
                     break;
                   case 'redacted_thinking':
@@ -877,12 +887,13 @@ export class RouterServer {
     return Array.from(value).slice(0, limit).join('');
   }
 
-  private normalizeDelegationProgress(value: unknown): DelegationProgressInfo | undefined {
+  private normalizeDelegationProgress(value: unknown, allowText: boolean): DelegationProgressInfo | undefined {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
     const raw = value as Record<string, unknown>;
     const taskId = this.boundedDelegationProgressText(raw.taskId, 200);
     const backend = this.boundedDelegationProgressText(raw.backend, 100);
     if (!taskId || !backend || typeof raw.phase !== 'string' || !DELEGATION_PROGRESS_PHASES.has(raw.phase as DelegationProgressInfo['phase'])) return undefined;
+    if (raw.phase === 'text' && !allowText) return undefined;
 
     const toolUseRaw = raw.toolUse;
     const toolUse = toolUseRaw && typeof toolUseRaw === 'object' && !Array.isArray(toolUseRaw)
@@ -911,6 +922,7 @@ export class RouterServer {
       objective: this.boundedDelegationProgressText(raw.objective, 1000),
       toolUse,
       toolResult,
+      latestText: this.boundedDelegationProgressText(raw.latestText, 1200),
       summary: this.boundedDelegationProgressText(raw.summary, 4000),
       error: this.boundedDelegationProgressText(raw.error, 4000),
       startedAt,
@@ -919,15 +931,73 @@ export class RouterServer {
 
   private appendDelegationProgressEvent(state: DelegationProgressState, label: string, isError = false): void {
     state.events.push({ label, ...(isError ? { isError: true } : {}) });
-    if (state.events.length > 8) {
+    if (state.events.length > DELEGATION_PROGRESS_EVENT_LIMIT) {
       state.events.shift();
       state.hiddenEventCount++;
     }
   }
 
+  private clearDelegationProgressHeartbeat(state: DelegationProgressState): void {
+    if (!state.heartbeatTimer) return;
+    clearTimeout(state.heartbeatTimer);
+    state.heartbeatTimer = undefined;
+  }
+
+  private clearDelegationProgressTimers(streamData: StreamingMessageState): void {
+    for (const state of streamData.delegationProgress.values()) {
+      this.clearDelegationProgressHeartbeat(state);
+    }
+  }
+
+  private isLiveDelegationProgress(
+    messageId: string,
+    streamData: StreamingMessageState,
+    state: DelegationProgressState,
+  ): boolean {
+    return this.streamingMessages.get(messageId) === streamData
+      && !streamData.finalizing
+      && !!streamData.feishuMessageId
+      && !state.terminal
+      && streamData.delegationProgress.get(state.taskId) === state;
+  }
+
+  /** Refresh elapsed time on an active nested worker panel without extending stream liveness. */
+  private scheduleDelegationProgressHeartbeat(
+    messageId: string,
+    streamData: StreamingMessageState,
+    state: DelegationProgressState,
+  ): void {
+    if (!this.isLiveDelegationProgress(messageId, streamData, state) || state.heartbeatTimer) return;
+    const timer = setTimeout(() => {
+      void (async () => {
+        if (state.heartbeatTimer !== timer) return;
+        state.heartbeatTimer = undefined;
+        if (!this.isLiveDelegationProgress(messageId, streamData, state)) return;
+        streamData.elements[state.elementIndex] = createDelegationProgressElement(state);
+        try {
+          await this.updateStreamingText(messageId, streamData.openId, streamData);
+        } catch (error) {
+          console.error('[RouterServer] Failed to refresh delegated worker progress:', error);
+        } finally {
+          if (this.isLiveDelegationProgress(messageId, streamData, state)) {
+            this.scheduleDelegationProgressHeartbeat(messageId, streamData, state);
+          }
+        }
+      })();
+    }, this.DELEGATION_PROGRESS_HEARTBEAT_MS);
+    timer.unref?.();
+    state.heartbeatTimer = timer;
+  }
+
+  private updateCurrentDelegationTool(state: DelegationProgressState): void {
+    const activeId = [...state.activeToolIds].at(-1);
+    state.currentToolName = activeId ? state.toolNames.get(activeId) : undefined;
+    state.currentToolStartedAt = activeId ? state.toolStartedAt.get(activeId) : undefined;
+  }
+
   /** Update one bounded, nested worker panel rather than flattening child tool cards. */
-  private async handleDelegationProgress(messageId: string, openId: string, value: unknown): Promise<void> {
-    const progress = this.normalizeDelegationProgress(value);
+  private async handleDelegationProgress(messageId: string, openId: string, value: unknown, allowText = false): Promise<void> {
+    const progress = this.normalizeDelegationProgress(value, allowText);
     if (!progress) {
       console.log(`[RouterServer] Ignoring malformed delegation progress for ${messageId}`);
       return;
@@ -960,6 +1030,7 @@ export class RouterServer {
         hiddenEventCount: 0,
         activeToolIds: new Set(),
         toolNames: new Map(),
+        toolStartedAt: new Map(),
         terminal: false,
         elementIndex: streamData.elements.length + 1,
       };
@@ -978,30 +1049,56 @@ export class RouterServer {
       case 'started':
         this.appendDelegationProgressEvent(state, 'Worker session started');
         break;
+      case 'text':
+        if (progress.latestText) state.latestText = progress.latestText;
+        break;
       case 'tool_use': {
         const tool = progress.toolUse;
         const name = tool?.name || 'Tool';
+        const now = Date.now();
         if (tool?.id) {
           state.activeToolIds.add(tool.id);
           state.toolNames.set(tool.id, name);
+          state.toolStartedAt.set(tool.id, now);
         }
+        state.currentToolName = name;
+        state.currentToolStartedAt = now;
+        state.lastToolActivityAt = now;
         this.appendDelegationProgressEvent(state, `${name} started`);
         break;
       }
       case 'tool_result': {
         const result = progress.toolResult;
         const name = result?.tool_use_id ? state.toolNames.get(result.tool_use_id) ?? 'Tool' : 'Tool';
-        if (result?.tool_use_id) state.activeToolIds.delete(result.tool_use_id);
+        if (result?.tool_use_id) {
+          state.activeToolIds.delete(result.tool_use_id);
+          state.toolNames.delete(result.tool_use_id);
+          state.toolStartedAt.delete(result.tool_use_id);
+        }
+        state.lastToolActivityAt = Date.now();
+        this.updateCurrentDelegationTool(state);
         this.appendDelegationProgressEvent(state, `${name} ${result?.is_error ? 'failed' : 'completed'}`, result?.is_error === true);
         break;
       }
       case 'waiting_input':
+        state.activeToolIds.clear();
+        state.toolNames.clear();
+        state.toolStartedAt.clear();
+        state.currentToolName = undefined;
+        state.currentToolStartedAt = undefined;
+        state.latestText = undefined;
         this.appendDelegationProgressEvent(state, 'Waiting for user input');
         break;
       default:
         if (DELEGATION_PROGRESS_TERMINAL_PHASES.has(progress.phase)) {
           state.activeToolIds.clear();
+          state.toolNames.clear();
+          state.toolStartedAt.clear();
+          state.currentToolName = undefined;
+          state.currentToolStartedAt = undefined;
+          state.latestText = undefined;
           state.terminal = true;
+          this.clearDelegationProgressHeartbeat(state);
           this.appendDelegationProgressEvent(state, `Worker ${progress.phase.replace('_', ' ')}`, progress.phase !== 'succeeded');
         }
         break;
@@ -1010,7 +1107,11 @@ export class RouterServer {
     streamData.elements[state.elementIndex] = createDelegationProgressElement(state);
     streamData.createdAt = Date.now();
 
-    if (streamData.feishuMessageId) await this.updateStreamingText(messageId, openId, streamData);
+    try {
+      if (streamData.feishuMessageId) await this.updateStreamingText(messageId, openId, streamData);
+    } finally {
+      if (!state.terminal) this.scheduleDelegationProgressHeartbeat(messageId, streamData, state);
+    }
   }
 
   /**
@@ -1213,6 +1314,7 @@ export class RouterServer {
         + `**Working directory:** <raw>${escape(info.cwd)}</raw>\n**Task:** <raw>${escape(info.preview)}</raw>`;
       const cardId = await this.feishuLongConnHandler.sendStreamingStart(openId, intro, info.threadName);
       if (!cardId || !isCurrent()) return false;
+      if (previous) this.clearDelegationProgressTimers(previous);
       this.streamingMessages.set(messageId, {
         openId, deviceId, threadId, threadName: info.threadName, feishuMessageId: cardId,
         elements: [createMarkdownElement(intro)], currentTextContent: '', hasUpdated: false,
@@ -1261,6 +1363,9 @@ export class RouterServer {
         console.error('[RouterServer] Failed to create queued execution card:', error);
       }
       const fallbackCardId = previous?.feishuMessageId || previous?.queueCardId || null;
+      if (previous && this.streamingMessages.get(messageId) === previous) {
+        this.clearDelegationProgressTimers(previous);
+      }
       this.streamingMessages.set(messageId, {
         openId,
         deviceId,
@@ -1345,6 +1450,7 @@ export class RouterServer {
 
     streamData.finalizing = true;
     streamData.updatePending = false;
+    this.clearDelegationProgressTimers(streamData);
     await streamData.updateInFlight;
 
     const { feishuMessageId, openId } = streamData;
@@ -1433,6 +1539,7 @@ export class RouterServer {
         if (session.feishuMessageId) {
           this.cardThreadMap.delete(session.feishuMessageId);
         }
+        this.clearDelegationProgressTimers(session);
         this.streamingMessages.delete(messageId);
         this.lastStreamUpdateTime.delete(messageId);
         cleanedCount++;
@@ -1471,6 +1578,7 @@ export class RouterServer {
         if (session.feishuMessageId) {
           this.cardThreadMap.delete(session.feishuMessageId);
         }
+        this.clearDelegationProgressTimers(session);
         this.streamingMessages.delete(messageId);
         this.lastStreamUpdateTime.delete(messageId);
         cleanedCount++;
@@ -1506,6 +1614,7 @@ export class RouterServer {
     // so a graceful restart does not leave users with permanently unfinished
     // cards. (A hard crash still cannot do this.)
     for (const [messageId, session] of Array.from(this.streamingMessages.entries())) {
+      this.clearDelegationProgressTimers(session);
       if (session.finalizing) continue;
       try {
         await this.finalizeStreamingMessage(

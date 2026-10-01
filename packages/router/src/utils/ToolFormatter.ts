@@ -473,6 +473,12 @@ export interface DelegationProgressCardState {
   inputRequest?: string;
   summary?: string;
   error?: string;
+  /** Most recent bounded worker-visible text. Never contains raw reasoning or tool payloads. */
+  latestText?: string;
+  currentToolName?: string;
+  currentToolStartedAt?: number;
+  /** Updated only by real tool use/result callbacks, never by text or card heartbeats. */
+  lastToolActivityAt?: number;
   activeToolCount: number;
   events: DelegationProgressEvent[];
   hiddenEventCount: number;
@@ -490,6 +496,7 @@ const DELEGATION_BACKEND_LABELS: Record<string, string> = {
 
 const DELEGATION_PROGRESS_STYLES: Record<DelegationProgressPhase, { color: string; icon: string; label: string; terminal: boolean }> = {
   started: { color: 'blue', icon: '🤖', label: 'WORKER STARTED', terminal: false },
+  text: { color: 'blue', icon: '🤖', label: 'WORKER RUNNING', terminal: false },
   tool_use: { color: 'blue', icon: '⚙️', label: 'WORKER RUNNING', terminal: false },
   tool_result: { color: 'blue', icon: '⚙️', label: 'WORKER RUNNING', terminal: false },
   waiting_input: { color: 'orange', icon: '⌨️', label: 'WAITING FOR INPUT', terminal: false },
@@ -499,6 +506,8 @@ const DELEGATION_PROGRESS_STYLES: Record<DelegationProgressPhase, { color: strin
   timed_out: { color: 'orange', icon: '⏱️', label: 'WORKER TIMED OUT', terminal: true },
   interrupted: { color: 'orange', icon: '⚠️', label: 'WORKER INTERRUPTED', terminal: true },
 };
+
+const FALLBACK_DELEGATION_PROGRESS_STYLE = { color: 'grey', icon: '🤖', label: 'WORKER UPDATE', terminal: false };
 
 /** Escape untrusted worker text so it cannot become Feishu card markup. */
 function literalWorkerText(value: string, limit: number): string {
@@ -516,19 +525,43 @@ function delegationElapsed(startedAt: number): string {
   return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
 }
 
+function lastToolActivity(timestamp?: number): string {
+  if (!timestamp) return 'no tool activity yet';
+  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+  if (seconds < 10) return 'just now';
+  if (seconds < 60) return `${seconds}s ago`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  return `${Math.floor(seconds / 3600)}h ago`;
+}
+
+function delegatedCurrentActivity(state: DelegationProgressCardState, terminal: boolean): string {
+  if (terminal) return 'Task finished';
+  if (state.phase === 'waiting_input') return 'Waiting for user input';
+  if (state.currentToolName) {
+    const duration = state.currentToolStartedAt ? ` · running for ${delegationElapsed(state.currentToolStartedAt)}` : '';
+    return `${state.currentToolName}${duration}`;
+  }
+  return state.phase === 'started' ? 'Starting worker session' : 'Preparing the next step';
+}
+
 /** Render bounded worker progress inside the coordinator's card. */
 export function createDelegationProgressElement(state: DelegationProgressCardState): FeishuCardElement {
-  const style = DELEGATION_PROGRESS_STYLES[state.phase];
+  const style = DELEGATION_PROGRESS_STYLES[state.phase] ?? FALLBACK_DELEGATION_PROGRESS_STYLE;
   const backend = DELEGATION_BACKEND_LABELS[state.backend] ?? 'Agent';
   const status = state.activeToolCount > 0 && !style.terminal
     ? `${style.label} · ${state.activeToolCount} active tool${state.activeToolCount === 1 ? '' : 's'}`
     : style.label;
   const headerTitle = `<text_tag color='${style.color}'>${style.icon} ${style.label}</text_tag> · **${backend}** · Delegated task`;
-  const body = [
-    `**Task:** ${state.objective ? literalWorkerText(state.objective, 260) : '_(task details unavailable)_'}`,
-    `**Status:** ${literalWorkerText(status, 120)}`,
-    `**Elapsed:** ${delegationElapsed(state.startedAt)}`,
-  ];
+  const body: string[] = [];
+
+  if (!style.terminal) {
+    body.push(`**Current activity:** ${literalWorkerText(delegatedCurrentActivity(state, style.terminal), 260)}`);
+    if (state.latestText) body.push(`**Latest update:** ${literalWorkerText(state.latestText, 1200)}`);
+    body.push(`**Elapsed:** ${delegationElapsed(state.startedAt)} · **Last tool activity:** ${lastToolActivity(state.lastToolActivityAt)}`);
+  } else {
+    body.push(`**Status:** ${literalWorkerText(status, 120)}`);
+    body.push(`**Elapsed:** ${delegationElapsed(state.startedAt)}`);
+  }
 
   if (state.events.length > 0) {
     body.push('\n**Recent activity:**');
