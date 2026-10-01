@@ -37,7 +37,7 @@ describe('delegation status formatter', () => {
     expect(output).toContain('Same-backend delegation is disabled');
     expect(output).toContain('Authentication and quota are checked when a task starts.');
     expect(output).toContain('Cross-backend delegation is unavailable while the coordinator sandbox is enabled.');
-    expect(output).toContain('**Commands:** `/delegation on` · `/delegation off`');
+    expect(output).toContain('**Commands:** `/delegation on` · `/delegation off` · `/delegation reset [backend]`');
   });
 
   it('keeps executable output literal and marks an installed but ineligible worker as blocked', () => {

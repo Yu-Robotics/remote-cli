@@ -421,6 +421,19 @@ export class PiExecutor implements IExecutor {
     await this.recycleClient();
   }
 
+  /**
+   * `recycleClient` waits for the Pi transport's stop operation. Check every
+   * retained transport too, so delegation does not reuse a lane after an
+   * uncertain process shutdown.
+   */
+  async waitForExit(): Promise<void> {
+    const clients = [this.client, ...this.retiredClients];
+    await Promise.all(clients.map(async (client) => {
+      if (client.waitForExit) await client.waitForExit();
+      else if (client.isRunning()) throw new Error('Pi RPC process exit could not be confirmed');
+    }));
+  }
+
   isWaitingInput(): boolean {
     return this.pendingUi !== null;
   }

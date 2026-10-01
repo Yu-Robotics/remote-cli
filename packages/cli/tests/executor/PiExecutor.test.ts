@@ -182,6 +182,12 @@ describe('PiExecutor', () => {
     expect(stored).toMatchObject({ id: 'sess-pi-1', cwd: project });
   });
 
+  it('confirms a stopped transport before a delegated worker lane can be reused', async () => {
+    await executor.execute('inspect');
+    await executor.destroy();
+    await expect(executor.waitForExit()).resolves.toBeUndefined();
+  });
+
   it('allows an execution to disable Pi\'s default turn timeout', async () => {
     let resolvePrompt!: (response: PiRpcResponse) => void;
     transport.request.mockImplementation((command: Record<string, unknown>) => {

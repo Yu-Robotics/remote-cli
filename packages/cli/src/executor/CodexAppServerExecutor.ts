@@ -19,6 +19,7 @@ export interface CodexAppServerTransport {
   respondError(id: number | string, message: string, code?: number): void;
   onMessage(handler: (message: AppServerMessage) => void): () => void;
   stop(): Promise<void>;
+  waitForExit?(): Promise<void>;
   isRunning(): boolean;
   setWorkingDirectory(cwd: string): void;
   getServerVersion?(): string | null;
@@ -174,6 +175,7 @@ export class CodexAppServerExecutor implements IExecutor {
   private delegation?: DelegationConnection;
   private delegationConfigured = false;
   private readonly delegationWorker: boolean;
+  private sessionResumeFailure = false;
 
   async configureDelegation(connection?: DelegationConnection): Promise<void> {
     if (this.delegationConfigured && sameConnection(this.delegation, connection)) return;
@@ -226,6 +228,7 @@ export class CodexAppServerExecutor implements IExecutor {
   }
 
   async execute(prompt: string, options: ExecuteOptions = {}): Promise<ExecuteResult> {
+    this.sessionResumeFailure = false;
     if (this.destroyed) throw new Error('Executor has been destroyed');
     if (this.activeTurn || this.compactWaiter) {
       return { success: false, error: 'Codex thread is already running a command' };
@@ -408,6 +411,17 @@ export class CodexAppServerExecutor implements IExecutor {
     if (this.activeTurn) this.completeActive({ success: false, error: 'Executor destroyed' });
     this.completeCompact({ success: false, error: 'Executor destroyed' });
     await this.client.stop();
+  }
+
+  async waitForExit(): Promise<void> {
+    if (this.client.waitForExit) await this.client.waitForExit();
+    else if (this.client.isRunning()) throw new Error('Codex app-server process exit could not be confirmed');
+  }
+
+  consumeSessionResumeFailure(): boolean {
+    const failed = this.sessionResumeFailure;
+    this.sessionResumeFailure = false;
+    return failed;
   }
 
   isProcessRunning(): boolean {
@@ -711,6 +725,11 @@ export class CodexAppServerExecutor implements IExecutor {
           throw new Error('Codex app-server resumed an unexpected thread');
         }
       } catch (error) {
+        if (this.delegationWorker && this.isMissingStoredThreadError(error)) {
+          // `thread/resume` runs before `turn/start`, so this is the one native
+          // failure delegation may replace with a fresh isolated worker lane.
+          this.sessionResumeFailure = true;
+        }
         throw new Error(`Stored Codex thread could not be resumed: ${this.errorMessage(error)}. Use /clear to start fresh.`);
       }
     } else {
@@ -1174,5 +1193,11 @@ export class CodexAppServerExecutor implements IExecutor {
 
   private errorMessage(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
+  }
+
+  private isMissingStoredThreadError(error: unknown): boolean {
+    const message = this.errorMessage(error).toLowerCase();
+    return /(?:no|unknown|missing)\s+(?:rollout|thread|session)/.test(message)
+      || /(?:rollout|thread|session).*(?:not found|does not exist|missing)/.test(message);
   }
 }

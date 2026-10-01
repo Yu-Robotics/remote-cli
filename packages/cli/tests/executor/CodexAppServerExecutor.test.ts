@@ -23,6 +23,7 @@ class FakeTransport implements CodexAppServerTransport {
   cwd: string | null = null;
   serverVersion: string | null = null;
   commandVersion: string | null = null;
+  resumeError: Error | null = null;
 
   async start(): Promise<void> { this.running = true; }
   async stop(): Promise<void> { this.running = false; }
@@ -41,7 +42,10 @@ class FakeTransport implements CodexAppServerTransport {
     this.running = true;
     this.requests.push({ method, params });
     if (method === 'thread/start') return { thread: { id: this.nextThreadId } };
-    if (method === 'thread/resume') return { thread: { id: params.threadId } };
+    if (method === 'thread/resume') {
+      if (this.resumeError) throw this.resumeError;
+      return { thread: { id: params.threadId } };
+    }
     if (method === 'turn/start') return { turn: { id: this.nextTurnId, status: 'inProgress' } };
     if (method === 'model/list') return { data: this.models, nextCursor: null };
     if (method === 'account/rateLimits/read') return this.rateLimitsResponse;
@@ -453,6 +457,30 @@ describe('CodexAppServerExecutor', () => {
     transport.emit({ method: 'turn/completed', params: { threadId: 'legacy-id', turn: { id: 'turn-1', status: 'completed' } } });
     await promise;
     await existing.destroy();
+  });
+
+  it('reports a missing persisted delegated worker session before dispatching its objective', async () => {
+    const sessionDir = path.join(tempHome, '.remote-cli', 'codex-sessions');
+    await fs.mkdir(sessionDir, { recursive: true });
+    await fs.writeFile(path.join(sessionDir, 'delegate-lane-11111111-1111-4111-8111-111111111111.json'), JSON.stringify({ id: 'missing-thread' }));
+    transport.resumeError = new Error('No rollout found for thread missing-thread');
+    const worker = new CodexAppServerExecutor(new DirectoryGuard([projectDir]), {
+      threadId: 'delegate-lane-11111111-1111-4111-8111-111111111111',
+      initialWorkingDirectory: projectDir,
+      delegationWorker: true,
+      clientFactory: () => transport,
+    });
+    try {
+      await expect(worker.execute('inspect', {})).resolves.toMatchObject({
+        success: false,
+        error: expect.stringContaining('Stored Codex thread could not be resumed'),
+      });
+      expect(transport.requests.some(request => request.method === 'turn/start')).toBe(false);
+      expect(worker.consumeSessionResumeFailure()).toBe(true);
+      expect(worker.consumeSessionResumeFailure()).toBe(false);
+    } finally {
+      await worker.destroy();
+    }
   });
 
   it('notifies the original request when its background command exits during a later turn', async () => {

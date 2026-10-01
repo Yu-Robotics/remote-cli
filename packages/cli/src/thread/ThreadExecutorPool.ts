@@ -110,7 +110,15 @@ export class ThreadExecutorPool {
 
     await this.threadManager.clearBackendSessionPointers(threadId);
     await executor.setWorkingDirectory(cwd);
-    await this.threadManager.updateThread(threadId, { workingDirectory: cwd, sessionId: null });
+    const thread = this.threadManager.getThread(threadId);
+    if (!thread) throw new Error(`Thread not found: ${threadId}`);
+    // Persist the directory and delegation generation together. A lane can only
+    // be resumed when this authoritative thread generation still matches it.
+    await this.threadManager.updateThread(threadId, {
+      workingDirectory: cwd,
+      sessionId: null,
+      delegationWorkspaceGeneration: (thread.delegationWorkspaceGeneration ?? 0) + 1,
+    });
     return { cwd, changed: true };
   }
 

@@ -172,6 +172,22 @@ describe('PiClient process lifecycle', () => {
     expect(spawn).toHaveBeenCalledTimes(2);
   });
 
+  it('reports an unconfirmed shutdown through waitForExit', async () => {
+    const proc = Object.assign(new EventEmitter(), {
+      stdin: { end: vi.fn(), write: vi.fn(), destroyed: false, writable: true, on: vi.fn() },
+      stdout: new EventEmitter(), stderr: new EventEmitter(), exitCode: null as number | null, signalCode: null,
+      kill: vi.fn(() => true),
+    });
+    vi.mocked(spawn).mockReturnValue(proc as any);
+    const client = new PiClient({ command: 'pi', killEscalationMs: 10 });
+    await client.start();
+    await expect(client.stop()).rejects.toThrow('exit could not be confirmed');
+    await expect(client.waitForExit()).rejects.toThrow('exit could not be confirmed');
+    proc.exitCode = 0;
+    proc.emit('exit', 0, null);
+    await expect(client.waitForExit()).resolves.toBeUndefined();
+  });
+
   it('keeps a session reset blocked until the previous Pi process actually exits', async () => {
     const project = fs.mkdtempSync(path.join(os.homedir(), '.pi-reset-stop-'));
     const processes: Array<ReturnType<typeof createProcess>> = [];

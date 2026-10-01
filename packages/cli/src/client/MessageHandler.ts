@@ -25,7 +25,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { isZCodeAvailable } from '../executor/zcode/ZCodeCommand';
 import { DelegationManager, workspacesOverlap, type DelegationScope, type DelegatedTaskResult } from '../delegation/DelegationManager';
 import { DelegationBridge } from '../delegation/DelegationBridge';
-import { DELEGATION_INSTRUCTIONS } from '../delegation/contract';
+import { DELEGATION_BACKENDS, DELEGATION_INSTRUCTIONS, type DelegationBackend } from '../delegation/contract';
 import { formatDelegationStatus } from '../delegation/DelegationStatusFormatter';
 
 /**
@@ -410,7 +410,7 @@ export class MessageHandler {
     }
 
     const queueSensitiveCommand = /^\/(?:clear|new|compact|cd|model|effort|sandbox)(?:\s|$)/.test(content?.trim() ?? '')
-      || /^\/delegation\s+(?:on|off)(?:\s|$)/.test(content?.trim() ?? '')
+      || /^\/delegation\s+(?:on|off|reset)(?:\s|$)/.test(content?.trim() ?? '')
       || /^\/thread\s+delete(?:\s|$)/.test(content?.trim() ?? '');
     if (queueSensitiveCommand && this.hasThreadQueueState(resolvedThreadId)) {
       this.sendResponse(messageId, resolvedThreadId, {
@@ -435,7 +435,12 @@ export class MessageHandler {
           });
           return;
         }
-        await this.threadPool.setWorkingDirectory(resolvedThreadId, workingDirectory);
+        if (this.delegation.hasActiveTasks(resolvedThreadId)) {
+          throw new Error('Cannot change working directory while a delegated worker is running. Wait for it to finish or send /abort first.');
+        }
+        const generation = this.threadManager.getThread(resolvedThreadId)?.delegationWorkspaceGeneration ?? 0;
+        const changedDirectory = await this.threadPool.setWorkingDirectory(resolvedThreadId, workingDirectory);
+        if (changedDirectory.changed) await this.delegation.invalidateWorkspaceGeneration(resolvedThreadId, generation);
       }
 
       // Update thread activity timestamp
@@ -576,17 +581,53 @@ export class MessageHandler {
     const trimmed = content.trim();
 
     if (trimmed === '/delegation' || trimmed.startsWith('/delegation ')) {
-      const argument = trimmed.slice('/delegation'.length).trim();
-      if (argument && argument !== 'on' && argument !== 'off') {
-        this.sendResponse(messageId, threadId, { success: false, error: 'Usage: /delegation [on|off]' });
+      const argumentsList = trimmed.slice('/delegation'.length).trim().split(/\s+/).filter(Boolean);
+      const action = argumentsList[0];
+      const backendArgument = argumentsList[1];
+      if (argumentsList.length > 2 || (action && action !== 'on' && action !== 'off' && action !== 'reset')) {
+        this.sendResponse(messageId, threadId, { success: false, error: 'Usage: /delegation [on|off|reset [backend]]' });
         return true;
       }
-      if (argument === 'on' && !executor.configureDelegation) {
+      if (action === 'reset') {
+        if (backendArgument && !DELEGATION_BACKENDS.includes(backendArgument as DelegationBackend)) {
+          this.sendResponse(messageId, threadId, {
+            success: false,
+            error: `Unknown delegation backend: ${backendArgument}. Available: ${DELEGATION_BACKENDS.join(', ')}`,
+          });
+          return true;
+        }
+        if (this.delegation.hasActiveTasks(threadId)) {
+          this.sendResponse(messageId, threadId, {
+            success: false,
+            error: 'Cannot reset delegated worker context while this thread is running. Wait for it to finish or send /abort first.',
+          });
+          return true;
+        }
+        try {
+          const removed = await this.delegation.resetWorkerLanes(threadId, backendArgument as DelegationBackend | undefined);
+          const target = backendArgument ? `${backendDisplayName(backendArgument)} worker` : 'all delegated worker';
+          this.sendResponse(messageId, threadId, {
+            success: true,
+            output: `✅ Reset ${target} context${removed === 1 ? '' : 's'} (${removed} lane${removed === 1 ? '' : 's'} removed).`,
+          });
+        } catch (error) {
+          this.sendResponse(messageId, threadId, {
+            success: false,
+            error: error instanceof Error ? error.message : 'Failed to reset delegated worker context.',
+          });
+        }
+        return true;
+      }
+      if (backendArgument || (action && action !== 'on' && action !== 'off')) {
+        this.sendResponse(messageId, threadId, { success: false, error: 'Usage: /delegation [on|off|reset [backend]]' });
+        return true;
+      }
+      if (action === 'on' && !executor.configureDelegation) {
         this.sendResponse(messageId, threadId, { success: false, error: 'This executor does not support delegation tool registration.' });
         return true;
       }
-      if (argument) {
-        if (argument === 'off') {
+      if (action) {
+        if (action === 'off') {
           const thread = this.threadManager.getThread(threadId)!;
           const backend = this.threadPool.getBackendKey(threadId);
           if (thread.delegationBackends?.includes(backend) || (thread.delegation && !thread.delegationBackends)) {
@@ -597,7 +638,7 @@ export class MessageHandler {
           await this.delegationBridges.get(threadId)?.close();
           this.delegationBridges.delete(threadId);
         }
-        await this.threadManager.updateThread(threadId, { delegation: argument === 'on' });
+        await this.threadManager.updateThread(threadId, { delegation: action === 'on' });
       }
       const config = (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
       const backends = await this.delegation.registry.list(config);
@@ -743,7 +784,7 @@ Use /compact to reduce conversation context or /clear to start a fresh context.`
 - /model [name] - Show models for the active backend, or set this thread's model
 - /effort [auto|level] - Show or set effort for Codex/AGY/OpenCode/Kimi/ZCode/Pi (Claude Code is unsupported)
 - /sandbox [on|off|read-only|default|allow <directory>|remove <directory>|network on|off] - Configure this thread's sandbox (Codex, Claude Code)
-- /delegation [on|off] - Delegate tasks between installed agent backends in this thread
+- /delegation [on|off|reset [backend]] - Delegate tasks between installed agent backends; reset saved worker context when needed
 - /backend - List backends and show the current thread's effective backend
 - /backend <index> - Switch all threads and clear per-thread backend overrides
 - /backend <index> @ - Switch only the current thread
@@ -813,10 +854,15 @@ You can also use natural language commands to control Claude Code CLI.`,
       }
       const targetDir = parts.slice(1).join(' ');
       try {
+        if (this.delegation.hasActiveTasks(threadId)) {
+          throw new Error('Cannot change working directory while a delegated worker is running. Wait for it to finish or send /abort first.');
+        }
+        const generation = this.threadManager.getThread(threadId)?.delegationWorkspaceGeneration ?? 0;
         const { cwd: newCwd, changed } = await this.threadPool.setWorkingDirectory(threadId, targetDir);
+        if (changed) await this.delegation.invalidateWorkspaceGeneration(threadId, generation);
         this.sendResponse(messageId, threadId, {
           success: true,
-          output: `✅ Changed working directory to: ${newCwd}${changed ? '\nConversation context cleared for all backends in this thread.' : ''}`,
+          output: `✅ Changed working directory to: ${newCwd}${changed ? '\nConversation context cleared for all direct and delegated backends in this thread.' : ''}`,
         });
       } catch (error) {
         this.sendResponse(messageId, threadId, {
@@ -1355,12 +1401,11 @@ You can also use natural language commands to control Claude Code CLI.`,
       }
 
       try {
-        if (target.delegation || target.delegationBackends?.length) {
-          await this.delegation.cancelThread(target.id);
-          await this.delegationBridges.get(target.id)?.close();
-          this.delegationBridges.delete(target.id);
-          await this.delegation.store.deleteThread(target.id);
-        }
+        await this.delegation.cancelThread(target.id);
+        await this.delegationBridges.get(target.id)?.close();
+        this.delegationBridges.delete(target.id);
+        await this.delegation.deleteWorkerLanes(target.id);
+        await this.delegation.store.deleteThread(target.id);
         await this.threadPool.destroyThread(target.id);
         await this.threadManager.deleteThread(target.id);
         this.sendResponse(messageId, callerThreadId, {

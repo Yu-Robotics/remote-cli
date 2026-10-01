@@ -442,7 +442,7 @@ Once connected, use these commands in Feishu:
 | `/clear` | Clear conversation context for this thread |
 | `/new` | Alias for `/clear`; start a fresh conversation in this thread |
 | `/compact` | Compress conversation history to save tokens |
-| `/delegation [on|off]` | Inspect or enable delegation between installed agent backends in the current thread |
+| `/delegation [on|off|reset [backend]]` | Inspect, enable, disable, or reset isolated delegated worker context in the current thread |
 | `/model [name]` | List models for the active backend or set this thread's model |
 | `/effort [auto|level]` | Show or set per-thread reasoning effort for Codex/AGY/OpenCode/Kimi/ZCode/Pi |
 | `/sandbox [on/off/read-only/default]` | Show or configure the current Codex or Claude Code thread sandbox; use `allow/remove <directory>` and `network on/off` for access settings |
@@ -469,12 +469,21 @@ Ask Pi to inspect the relevant files, ask Codex to implement the agreed fix,
 then ask Claude Code to review it. Check a result when useful, or return after
 dispatch and let Remote CLI wait and resume the coordinator automatically.
 /delegation off
+/delegation reset
+/delegation reset codex
 ```
 
 Delegation is **off by default**. The setting is saved per thread and survives
 backend switches and conversation resets. Install, authenticate, and select a
 working model for each desired backend first. Discovery checks its configured executable;
 authentication and remaining quota are checked only when a task runs.
+
+When enabled, each `(parent thread, worker backend, workspace generation)` owns
+one isolated worker lane. A worker lane never reuses the direct conversation of
+the parent backend and continues only its own prior delegated context. The
+worker process stops after every task; a lane becomes reusable only after its
+exit is confirmed. The parent thread's saved model and reasoning effort are
+applied whenever the worker starts.
 
 `/status` shows `Delegation: on/off (current thread)` for the thread receiving
 the command. Reading this setting does not initialize delegation or start workers.
@@ -503,6 +512,13 @@ backend switch. Cleanup also runs before native slash commands can resume such a
 session. Removing tools may recycle that backend process once per executor
 instance; it preserves the saved conversation and does not repeatedly restart
 an already cleaned process. Backends never used for delegation skip this cleanup.
+
+`/clear`, `/new`, backend switches, and toggling `/delegation` leave worker
+lanes intact. `/cd` starts a new workspace generation and discards the old
+lanes. `/delegation reset` discards every lane in the current thread, while
+`/delegation reset <backend>` discards only that backend's lane. Reset and
+working-directory changes are refused while a delegated worker is active;
+`/thread delete` removes all of that thread's worker lanes.
 
 The shared Router can be upgraded before local CLIs. This feature keeps protocol
 version 1 and its existing command, tool-progress, and response formats. Older

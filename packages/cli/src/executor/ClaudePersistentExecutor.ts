@@ -182,6 +182,8 @@ export class ClaudePersistentExecutor extends EventEmitter {
   private isStarting = false;
   private isStopping = false; // Flag to indicate intentional process stop
   private isSessionError = false; // Flag to suppress auto-restart on session-not-found errors
+  private sessionResumeFailure = false;
+  private currentObjectiveDispatched = false;
   private lastStderrOutput = ''; // Last process stderr, available in 'close' handler
   private commandQueue: Array<{
     prompt: string;
@@ -262,6 +264,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
     sandbox?: ClaudeSandboxConfig,
     claudeCommand?: string,
     private readonly lifecycleHooks = true,
+    private readonly delegationWorker = false,
   ) {
     super();
     this.directoryGuard = directoryGuard;
@@ -587,6 +590,10 @@ export class ClaudePersistentExecutor extends EventEmitter {
 
         // Reject current command if any (only for unexpected exits)
         if (this.currentCommandReject && !wasIntentionalStop) {
+          if (this.delegationWorker && !this.currentObjectiveDispatched
+            && this.hasMissingSessionError(this.lastStderrOutput)) {
+            this.sessionResumeFailure = true;
+          }
           let errorMsg = this.parseErrorMessage(code, this.lastStderrOutput);
           this.currentCommandReject(new Error(errorMsg));
           this.resetCurrentCommand();
@@ -1178,6 +1185,9 @@ export class ClaudePersistentExecutor extends EventEmitter {
                   'To start a fresh session, use the /clear command.';
                 this.isSessionError = true; // Prevent auto-restart on session errors
                 this.isStopping = true; // Treat as intentional stop to suppress close-handler reject
+                if (this.delegationWorker && !this.currentObjectiveDispatched) {
+                  this.sessionResumeFailure = true;
+                }
 
                 if (this.currentCommandReject) {
                   // Normal path: command was already shifted and is being processed
@@ -1595,6 +1605,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
   private resetCurrentCommand(): void {
     this.clearApprovals('Task is no longer active');
     this.currentOutputBuffer = [];
+    this.currentObjectiveDispatched = false;
     this.textStreams.clear();
     this.currentStreamCallback = undefined;
     this.currentToolUseCallback = undefined;
@@ -1746,6 +1757,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
     const inputLine = JSON.stringify(inputMessage);
     console.log(`[ClaudePersistent] Sending command${command.isSlashCommand ? ' (slash)' : ''}: ${command.prompt.substring(0, 100)}...`);
 
+    this.currentObjectiveDispatched = true;
     this.claudeProcess.stdin?.write(inputLine + '\n');
   }
 
@@ -2050,6 +2062,17 @@ export class ClaudePersistentExecutor extends EventEmitter {
     this.removeAllListeners();
   }
 
+  async waitForExit(): Promise<void> {
+    if (!this.claudeProcess) return;
+    await new Promise<void>(resolve => this.claudeProcess!.once('close', () => resolve()));
+  }
+
+  consumeSessionResumeFailure(): boolean {
+    const failed = this.sessionResumeFailure;
+    this.sessionResumeFailure = false;
+    return failed;
+  }
+
   /**
    * Delete the per-thread session file (.json) stored in claude-sessions/.
    * Called by ThreadExecutorPool before removing this executor from the pool.
@@ -2076,5 +2099,9 @@ export class ClaudePersistentExecutor extends EventEmitter {
    */
   getSessionId(): string | null {
     return this.sessionId;
+  }
+
+  private hasMissingSessionError(value: string): boolean {
+    return value.includes('No conversation found') || value.includes('Session not found');
   }
 }

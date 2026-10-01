@@ -43,6 +43,8 @@ export interface PiTransport {
   send(message: Record<string, unknown>): void;
   onEvent(handler: (event: Record<string, any>) => void): () => void;
   stop(): Promise<void>;
+  /** Resolves only after a previously stopped process is known to have exited. */
+  waitForExit?(): Promise<void>;
   isRunning(): boolean;
   updateLaunch?(partial: Partial<PiLaunchOptions>): void;
 }

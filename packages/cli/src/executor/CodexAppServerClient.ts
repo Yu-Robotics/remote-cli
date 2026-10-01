@@ -60,6 +60,7 @@ export class CodexAppServerClient {
   private stderrTail = '';
   private stopping = false;
   private serverVersion: string | null = null;
+  private readonly pendingExits = new Set<Promise<void>>();
 
   constructor(options: CodexAppServerClientOptions = {}) {
     this.command = options.command ?? 'codex';
@@ -236,13 +237,49 @@ export class CodexAppServerClient {
       // The stream may already be closed.
     }
 
-    let exited = false;
-    proc.once('exit', () => { exited = true; });
-    proc.kill();
-    const escalation = setTimeout(() => {
-      if (!exited) proc.kill('SIGKILL');
-    }, this.killEscalationMs);
-    if (typeof escalation.unref === 'function') escalation.unref();
+    const exited = new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let escalation: ReturnType<typeof setTimeout> | undefined;
+      let giveUp: ReturnType<typeof setTimeout> | undefined;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        if (escalation) clearTimeout(escalation);
+        if (giveUp) clearTimeout(giveUp);
+        resolve();
+      };
+      const fail = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        if (escalation) clearTimeout(escalation);
+        if (giveUp) clearTimeout(giveUp);
+        reject(error);
+      };
+      proc.once('exit', finish);
+      proc.once('error', fail);
+      escalation = setTimeout(() => {
+        if (proc.exitCode === null && proc.signalCode === null) {
+          try { proc.kill('SIGKILL'); } catch { fail(new Error('Codex app-server process could not be stopped')); }
+        }
+      }, this.killEscalationMs);
+      giveUp = setTimeout(() => fail(new Error('Codex app-server process exit could not be confirmed')),
+        this.killEscalationMs + 1_000);
+      escalation.unref?.();
+      giveUp.unref?.();
+      if (proc.exitCode !== null || proc.signalCode !== null) {
+        finish();
+        return;
+      }
+      try { proc.kill(); } catch { fail(new Error('Codex app-server process could not be stopped')); }
+    });
+    this.pendingExits.add(exited);
+    try { await exited; }
+    finally { this.pendingExits.delete(exited); }
+  }
+
+  async waitForExit(): Promise<void> {
+    if (!this.pendingExits.size) return;
+    await Promise.all([...this.pendingExits]);
   }
 
   private requestRaw(method: string, params?: any, timeoutMs = this.requestTimeoutMs): Promise<any> {

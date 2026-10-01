@@ -23,6 +23,12 @@ export interface Thread {
   /** Backends that may retain managed tools and require opt-out cleanup on resume. */
   delegationBackends?: BackendKey[];
   /**
+   * Advances whenever this thread successfully changes working directory.
+   * Delegated worker lanes use it to prevent a return to an old path from
+   * reviving a conversation that belonged to an earlier workspace visit.
+   */
+  delegationWorkspaceGeneration?: number;
+  /**
    * @deprecated Legacy model field — honored for the Claude backend only.
    * Model names are backend-specific (Claude's "opus" is rejected by agy),
    * so per-backend selections live in `models`.

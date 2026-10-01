@@ -65,6 +65,12 @@ export interface IExecutor {
   destroy(): Promise<void> | void;
   /** Optional process-exit confirmation used before releasing a delegated workspace. */
   waitForExit?(): Promise<void>;
+  /**
+   * Reports and clears a backend-confirmed missing-session failure that happened
+   * before the current objective was dispatched. Delegation may safely retry it
+   * once with a fresh isolated lane; generic errors are never replayed.
+   */
+  consumeSessionResumeFailure?(): boolean;
 
   // Optional — MessageHandler uses 'method' in executor checks for these
   /** Enable tools for future turns without changing the native conversation. */

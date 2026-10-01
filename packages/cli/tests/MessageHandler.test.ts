@@ -1985,7 +1985,7 @@ describe('MessageHandler', () => {
 
       expect(ctx.mockThreadPool.setWorkingDirectory).toHaveBeenCalledWith('default-thread-id', '/new/dir');
       expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
-        expect.objectContaining({ success: true, output: expect.stringContaining('Conversation context cleared for all backends') })
+        expect.objectContaining({ success: true, output: expect.stringContaining('Conversation context cleared for all direct and delegated backends') })
       );
     });
 

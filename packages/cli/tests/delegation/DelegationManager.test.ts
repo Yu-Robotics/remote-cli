@@ -5,6 +5,7 @@ import path from 'path';
 import { DelegationManager, type DelegationParent } from '../../src/delegation/DelegationManager';
 import { BackendRegistry, type BackendAvailability } from '../../src/delegation/BackendRegistry';
 import { DelegationStore } from '../../src/delegation/DelegationStore';
+import { DelegatedWorkerSessionStore } from '../../src/delegation/DelegatedWorkerSessionStore';
 import { DELEGATION_BACKENDS } from '../../src/delegation/contract';
 import { workerConfiguration } from '../../src/delegation/WorkerPolicy';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
@@ -27,6 +28,7 @@ describe('cross-backend delegation', () => {
     worker = {
       execute: vi.fn().mockResolvedValue({ success: true, output: 'review complete' }),
       abort: vi.fn().mockResolvedValue(true), destroy: vi.fn().mockResolvedValue(undefined),
+      waitForExit: vi.fn().mockResolvedValue(undefined),
       deleteThreadData: vi.fn().mockResolvedValue(undefined), resetContext: vi.fn(),
       getCurrentWorkingDirectory: () => home, setWorkingDirectory: vi.fn(),
     };
@@ -72,14 +74,14 @@ describe('cross-backend delegation', () => {
     const started: any = await scope.invoke('remote_cli_delegate', { backend: child, objective: 'Review the patch' }, 'start');
     const result: any = await scope.invoke('remote_cli_result', { taskId: started.taskId }, 'result');
     expect(result).toMatchObject({ state: 'succeeded', output: 'review complete', backend: child });
-    expect(factory.mock.calls[0][3]).toMatch(/^delegate-/);
+    expect(factory.mock.calls[0][3]).toMatch(/^delegate-lane-/);
     expect(factory.mock.calls[0][3]).not.toBe(parent.thread.id);
     expect(factory.mock.calls[0][4]).toBe(parent.thread.models![child]);
     expect(factory.mock.calls[0][6]).toEqual({ lifecycleHooks: false, delegationWorker: true });
     if (child === 'claude' || child === 'codex') {
       expect(factory.mock.calls[0][1][child].sandbox).toEqual({ mode: 'danger-full-access' });
     }
-    expect(worker.deleteThreadData).toHaveBeenCalledWith(factory.mock.calls[0][3]);
+    expect(worker.deleteThreadData).not.toHaveBeenCalled();
     expect(parent.onToolUse).toHaveBeenCalledTimes(1);
     expect(parent.onToolResult).toHaveBeenCalledTimes(1);
     const record = JSON.parse(fs.readFileSync(path.join(home, '.remote-cli', 'delegation', `${started.taskId}.json`), 'utf8'));
@@ -133,6 +135,7 @@ describe('cross-backend delegation', () => {
     await expect(scope.invoke('remote_cli_result', { taskId: task.taskId, waitSeconds: 0 }, 'poll'))
       .resolves.toMatchObject({ state: 'running' });
     expect(scope.hasPendingResults()).toBe(true);
+    await vi.waitFor(() => expect(worker.execute).toHaveBeenCalled());
     finish({ success: true, output: 'Terminal result' });
     await vi.waitFor(() => expect(parent.onNotice).toHaveBeenCalledWith(expect.stringContaining('Completed')));
     expect(scope.hasPendingResults()).toBe(true);
@@ -168,6 +171,7 @@ describe('cross-backend delegation', () => {
     discover('1.0');
     await launch;
     expect(scope.hasPendingResults()).toBe(true);
+    await vi.waitFor(() => expect(worker.execute).toHaveBeenCalled());
     finish({ success: true, output: 'Launched before the barrier' });
     await expect(collected).resolves.toEqual([
       expect.objectContaining({ state: 'succeeded', output: 'Launched before the barrier' }),
@@ -182,6 +186,7 @@ describe('cross-backend delegation', () => {
     const response = scope.invoke('remote_cli_result', { taskId: task.taskId }, 'pending-result');
     scope.finishExecution(true);
     scope.beginExecution();
+    await vi.waitFor(() => expect(worker.execute).toHaveBeenCalled());
     finish({ success: true, output: 'Late worker result' });
     await response;
     scope.finishExecution(true);
@@ -213,10 +218,9 @@ describe('cross-backend delegation', () => {
       .resolves.toMatchObject({ output, truncated: false });
   });
 
-  it.each(['session cleanup', 'metadata pruning'])('finishes the completion barrier when %s stalls after confirmed worker exit', async stage => {
+  it('finishes the completion barrier when task metadata pruning stalls after confirmed worker exit', async () => {
     const store = new DelegationStore();
-    if (stage === 'session cleanup') vi.mocked(worker.deleteThreadData!).mockImplementation(() => new Promise(() => undefined));
-    else vi.spyOn(store, 'prune').mockImplementation(() => new Promise(() => undefined));
+    vi.spyOn(store, 'prune').mockImplementation(() => new Promise(() => undefined));
     manager = new DelegationManager(guard, factory as any, new BackendRegistry(async () => '1.0'), store, 1000, 20);
     const scope = manager.begin(parent);
     await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' }, 'start');
@@ -233,6 +237,64 @@ describe('cross-backend delegation', () => {
       .rejects.toThrow('Disk is full');
     expect(factory).not.toHaveBeenCalled();
     expect(manager.blocksWorkspace(home, 'other')).toBe(false);
+  });
+
+  it('records a terminal failure when durable worker lane storage fails', async () => {
+    const store = new DelegationStore();
+    const laneStore = new DelegatedWorkerSessionStore(path.join(home, '.remote-cli', 'delegation-workers'));
+    vi.spyOn(laneStore, 'acquire').mockRejectedValue(new Error('Lane disk is full'));
+    manager = new DelegationManager(guard, factory as any, new BackendRegistry(async () => '1.0'),
+      store, 1000, 10_000, laneStore);
+    const scope = manager.begin(parent);
+
+    await expect(scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' }, 'start'))
+      .rejects.toThrow('Lane disk is full');
+
+    const files = fs.readdirSync(path.join(home, '.remote-cli', 'delegation'));
+    expect(files).toHaveLength(1);
+    const record = JSON.parse(fs.readFileSync(path.join(home, '.remote-cli', 'delegation', files[0]), 'utf8'));
+    expect(record).toMatchObject({ state: 'failed', error: 'Lane disk is full' });
+    expect(typeof record.finishedAt).toBe('number');
+    expect(factory).not.toHaveBeenCalled();
+    expect(manager.blocksWorkspace(home, 'other')).toBe(false);
+  });
+
+  it('releases the workspace when worker construction fails before a process is created', async () => {
+    factory.mockImplementation(() => { throw new Error('Worker construction failed'); });
+    const scope = manager.begin(parent);
+    const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' }, 'start');
+    await expect(scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result')).resolves.toMatchObject({
+      state: 'failed', error: 'Worker construction failed',
+    });
+    expect(manager.blocksWorkspace(home, 'other')).toBe(false);
+    await expect(manager.laneStore.lanesForThread(parent.thread.id, 'codex')).resolves.toEqual([]);
+  });
+
+  it('discards a reserved lane when cancellation wins before worker construction', async () => {
+    const laneStore = new DelegatedWorkerSessionStore(path.join(home, '.remote-cli', 'delegation-workers'));
+    const acquireLane = laneStore.acquire.bind(laneStore);
+    let acquired!: () => void;
+    let release!: () => void;
+    const acquisitionStarted = new Promise<void>(resolve => { acquired = resolve; });
+    const releaseAcquisition = new Promise<void>(resolve => { release = resolve; });
+    vi.spyOn(laneStore, 'acquire').mockImplementation(async identity => {
+      const lane = await acquireLane(identity);
+      acquired();
+      await releaseAcquisition;
+      return lane;
+    });
+    manager = new DelegationManager(guard, factory as any, new BackendRegistry(async () => '1.0'),
+      new DelegationStore(), 1000, 10_000, laneStore);
+    const scope = manager.begin(parent);
+    const launch = scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' }, 'start');
+    await acquisitionStarted;
+    const close = scope.close();
+    release();
+    await Promise.all([launch, close]);
+
+    expect(factory).not.toHaveBeenCalled();
+    expect(manager.blocksWorkspace(home, 'other')).toBe(false);
+    await expect(laneStore.lanesForThread(parent.thread.id, 'codex')).resolves.toEqual([]);
   });
 
   it('deduplicates a replayed call and rejects a reused ID with changed arguments', async () => {
@@ -375,7 +437,7 @@ describe('cross-backend delegation', () => {
 
   it('extends a delegated task after tool events and restores the shorter idle limit after the tool completes', async () => {
     manager = new DelegationManager(guard, factory as any, new BackendRegistry(async () => '1.0'), new DelegationStore(), {
-      idleTimeoutMs: 100, toolIdleTimeoutMs: 1000,
+      idleTimeoutMs: 250, toolIdleTimeoutMs: 1500,
     });
     let finish!: (result: ExecuteResult) => void;
     let options!: ExecuteOptions;
@@ -389,11 +451,11 @@ describe('cross-backend delegation', () => {
     const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Build' }, 'start');
     await vi.waitFor(() => expect(options).toBeDefined());
 
-    await wait(50);
+    await wait(75);
     options.onToolUse?.({ id: 'build', name: 'Bash', input: { command: 'make' } });
     // An active tool extends the window: without the extension the task would
-    // expire ~100ms after the tool_use, well before this checkpoint.
-    await wait(250);
+    // expire after the ordinary idle limit, well before this checkpoint.
+    await wait(350);
     expect(worker.abort).not.toHaveBeenCalled();
 
     // Once the tool reports its result, the shorter idle window applies again.
@@ -406,14 +468,14 @@ describe('cross-backend delegation', () => {
       state: 'timed_out', error: expect.stringContaining('without tool activity'),
     });
     expect(worker.abort).toHaveBeenCalledOnce();
-    expect(abortedAt - resultAt).toBeLessThan(500);
+    expect(abortedAt - resultAt).toBeLessThan(800);
     const record = JSON.parse(fs.readFileSync(path.join(home, '.remote-cli', 'delegation', `${task.taskId}.json`), 'utf8'));
     expect(record).toMatchObject({ lastActivityKind: 'tool_result' });
   });
 
   it('does not impose a total duration cap while tool callbacks continue', async () => {
     manager = new DelegationManager(guard, factory as any, new BackendRegistry(async () => '1.0'), new DelegationStore(), {
-      idleTimeoutMs: 50, toolIdleTimeoutMs: 75,
+      idleTimeoutMs: 250, toolIdleTimeoutMs: 400,
     });
     let finish!: (result: ExecuteResult) => void;
     let options!: ExecuteOptions;
@@ -427,9 +489,9 @@ describe('cross-backend delegation', () => {
     await vi.waitFor(() => expect(options).toBeDefined());
 
     for (let index = 0; index < 7; index++) {
-      await wait(25);
+      await wait(50);
       options.onToolUse?.({ id: `tool-${index}`, name: 'Bash', input: { command: 'sleep' } });
-      await wait(10);
+      await wait(15);
       options.onToolResult?.({ tool_use_id: `tool-${index}`, content: 'done', is_error: false });
     }
     expect(worker.abort).not.toHaveBeenCalled();
@@ -621,5 +683,95 @@ describe('cross-backend delegation', () => {
     await expect(scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result')).resolves.toMatchObject({ state: 'succeeded' });
     expect(worker.destroy).toHaveBeenCalledOnce();
     expect(manager.blocksWorkspace(home, 'other')).toBe(false);
+  });
+
+
+  it('continues an isolated worker lane across sequential tasks without touching the direct thread session', async () => {
+    const scope = manager.begin(parent);
+    const first: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Inspect the first file' }, 'first');
+    await expect(scope.invoke('remote_cli_result', { taskId: first.taskId }, 'first-result')).resolves.toMatchObject({ state: 'succeeded' });
+    const laneId = factory.mock.calls[0][3];
+
+    const second: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Inspect the follow-up' }, 'second');
+    await expect(scope.invoke('remote_cli_result', { taskId: second.taskId }, 'second-result')).resolves.toMatchObject({ state: 'succeeded' });
+
+    expect(factory.mock.calls[1][3]).toBe(laneId);
+    expect(laneId).toMatch(/^delegate-lane-/);
+    expect(worker.deleteThreadData).not.toHaveBeenCalled();
+    await expect(manager.laneStore.lanesForThread(parent.thread.id, 'codex')).resolves.toEqual([
+      expect.objectContaining({ executorThreadId: laneId, state: 'ready', workspaceGeneration: 0 }),
+    ]);
+  });
+
+  it('invalidates only worker state when the parent workspace generation changes', async () => {
+    const scope = manager.begin(parent);
+    const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' }, 'start');
+    await expect(scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result')).resolves.toMatchObject({ state: 'succeeded' });
+    const laneId = factory.mock.calls[0][3];
+    const lanePointer = path.join(home, '.remote-cli', 'codex-sessions', `${laneId}.json`);
+    const directPointer = path.join(home, '.remote-cli', 'codex-sessions', `${parent.thread.id}.json`);
+    fs.mkdirSync(path.dirname(lanePointer), { recursive: true });
+    fs.writeFileSync(lanePointer, '{"id":"worker"}');
+    fs.writeFileSync(directPointer, '{"id":"direct"}');
+    await scope.close();
+
+    expect(await manager.invalidateWorkspaceGeneration(parent.thread.id, 0)).toBe(1);
+    expect(fs.existsSync(lanePointer)).toBe(false);
+    expect(fs.existsSync(directPointer)).toBe(true);
+
+    parent = { ...parent, thread: { ...parent.thread, delegationWorkspaceGeneration: 1 } };
+    const next = manager.begin(parent);
+    const nextTask: any = await next.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Inspect again' }, 'next');
+    await expect(next.invoke('remote_cli_result', { taskId: nextTask.taskId }, 'next-result')).resolves.toMatchObject({ state: 'succeeded' });
+    expect(factory.mock.calls[1][3]).not.toBe(laneId);
+  });
+
+  it('retries exactly once with a fresh lane after an executor confirms a missing native session before dispatch', async () => {
+    const first = {
+      ...worker,
+      execute: vi.fn().mockResolvedValue({ success: false, error: 'Stored native session is missing' }),
+      consumeSessionResumeFailure: vi.fn(() => true),
+      destroy: vi.fn().mockResolvedValue(undefined),
+      waitForExit: vi.fn().mockResolvedValue(undefined),
+    } as IExecutor;
+    const second = {
+      ...worker,
+      execute: vi.fn().mockResolvedValue({ success: true, output: 'Fresh lane completed' }),
+      consumeSessionResumeFailure: vi.fn(() => false),
+      destroy: vi.fn().mockResolvedValue(undefined),
+      waitForExit: vi.fn().mockResolvedValue(undefined),
+    } as IExecutor;
+    factory.mockImplementationOnce((_guard, _config, _cwd, id) => {
+      const pointer = path.join(home, '.remote-cli', 'codex-sessions', `${id}.json`);
+      fs.mkdirSync(path.dirname(pointer), { recursive: true });
+      fs.writeFileSync(pointer, '{"id":"stale"}');
+      return first;
+    }).mockImplementationOnce(() => second);
+
+    const scope = manager.begin(parent);
+    const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Retry safely' }, 'start');
+    await expect(scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result')).resolves.toMatchObject({
+      state: 'succeeded', output: 'Fresh lane completed',
+    });
+
+    const firstLaneId = factory.mock.calls[0][3];
+    const secondLaneId = factory.mock.calls[1][3];
+    expect(first.destroy).toHaveBeenCalledOnce();
+    expect(secondLaneId).not.toBe(firstLaneId);
+    expect(fs.existsSync(path.join(home, '.remote-cli', 'codex-sessions', `${firstLaneId}.json`))).toBe(false);
+    expect(second.execute).toHaveBeenCalledOnce();
+  });
+
+  it('quarantines a lane when a worker backend cannot confirm process exit', async () => {
+    const unconfirmed = { ...worker, waitForExit: undefined } as IExecutor;
+    factory.mockImplementation(() => unconfirmed);
+    const scope = manager.begin(parent);
+    const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' }, 'start');
+
+    await expect(scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result')).resolves.toMatchObject({ state: 'interrupted' });
+    expect(manager.blocksWorkspace(home, 'other')).toBe(true);
+    await expect(manager.laneStore.lanesForThread(parent.thread.id, 'codex')).resolves.toEqual([
+      expect.objectContaining({ state: 'dirty' }),
+    ]);
   });
 });

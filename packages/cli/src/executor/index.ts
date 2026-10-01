@@ -151,17 +151,17 @@ export function createExecutor(
     case 'claude-persistent':
       console.log('[ExecutorFactory] Using Claude persistent executor');
       return new ClaudePersistentExecutor(directoryGuard, initialWorkingDirectory, threadId, model,
-        executorConfig.claude?.sandbox, executorConfig.claude?.command, runtime.lifecycleHooks);
+        executorConfig.claude?.sandbox, executorConfig.claude?.command, runtime.lifecycleHooks, runtime.delegationWorker);
 
     case 'claude-spawn':
       console.warn('[ExecutorFactory] Claude spawn mode was removed; using persistent mode.');
       return new ClaudePersistentExecutor(directoryGuard, initialWorkingDirectory, threadId, model,
-        executorConfig.claude?.sandbox, executorConfig.claude?.command, runtime.lifecycleHooks);
+        executorConfig.claude?.sandbox, executorConfig.claude?.command, runtime.lifecycleHooks, runtime.delegationWorker);
 
     case 'auto':
     default:
       console.log('[ExecutorFactory] Using Claude persistent executor (auto)');
       return new ClaudePersistentExecutor(directoryGuard, initialWorkingDirectory, threadId, model,
-        executorConfig.claude?.sandbox, executorConfig.claude?.command, runtime.lifecycleHooks);
+        executorConfig.claude?.sandbox, executorConfig.claude?.command, runtime.lifecycleHooks, runtime.delegationWorker);
   }
 }

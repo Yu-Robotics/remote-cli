@@ -161,6 +161,15 @@ export class PiClient implements PiTransport {
     finally { if (this.stopPromise === stopping) this.stopPromise = null; }
   }
 
+  async waitForExit(): Promise<void> {
+    if (this.stopPromise) await this.stopPromise;
+    if (this.unconfirmedStopProc
+      && this.unconfirmedStopProc.exitCode === null
+      && this.unconfirmedStopProc.signalCode === null) {
+      throw new Error('Pi RPC process exit could not be confirmed');
+    }
+  }
+
   private async startInternal(): Promise<void> {
     assertWorkingDirectoryExists(this.options.cwd);
     this.stopping = false;

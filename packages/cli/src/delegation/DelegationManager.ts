@@ -10,6 +10,12 @@ import type { ApprovalRequestInfo, ApprovalStatus, DelegationProgressInfo, ToolU
 import { createExecutor } from '../executor';
 import { BackendRegistry } from './BackendRegistry';
 import { DelegationStore, type DelegatedTaskRecord } from './DelegationStore';
+import {
+  DelegatedWorkerSessionStore,
+  type DelegatedWorkerLane,
+  type DelegatedWorkerLaneIdentity,
+} from './DelegatedWorkerSessionStore';
+import { cleanupDelegatedWorkerLane } from './DelegatedWorkerLaneCleanup';
 import { DELEGATION_BACKENDS, type DelegationBackend, type DelegationHandler } from './contract';
 import { workerConfiguration } from './WorkerPolicy';
 import { formatDelegationNotice } from './DelegationNotice';
@@ -78,6 +84,11 @@ interface Task {
   record: DelegatedTaskRecord;
   resultDelivered: boolean;
   executor?: IExecutor;
+  lane?: DelegatedWorkerLane;
+  /** The lane was reserved but no completed turn made its native context reusable. */
+  discardLane?: boolean;
+  /** A worker may have escaped lifecycle tracking; retain its workspace lease. */
+  quarantineWorkspace?: boolean;
   done: Promise<void>;
   settle: () => void;
   stop?: Promise<void>;
@@ -153,6 +164,7 @@ async function deadline<T>(operation: () => T | Promise<T>, milliseconds: number
 export class DelegationManager {
   readonly registry: BackendRegistry;
   readonly store: DelegationStore;
+  readonly laneStore: DelegatedWorkerSessionStore;
   private running = 0;
   private workspaces = new Map<string, string>();
   private scopes = new Map<string, DelegationScope>();
@@ -163,9 +175,11 @@ export class DelegationManager {
     registry = new BackendRegistry(), store = new DelegationStore(),
     timeoutInput: TimeoutPolicyInput = DELEGATION_LIMITS,
     private readonly cleanupMs = 10_000,
+    laneStore = new DelegatedWorkerSessionStore(),
   ) {
     this.registry = registry;
     this.store = store;
+    this.laneStore = laneStore;
     this.timeouts = timeoutPolicy(timeoutInput);
   }
 
@@ -226,11 +240,37 @@ export class DelegationManager {
         startedAt: task.record.startedAt,
       });
     };
+    const destroyWorker = async (worker: IExecutor): Promise<void> => {
+      await worker.destroy();
+      if (!worker.waitForExit) {
+        throw new Error('Worker backend cannot confirm process exit');
+      }
+      await worker.waitForExit();
+    };
+    const discardLane = async (lane: DelegatedWorkerLane): Promise<boolean> => {
+      try {
+        await cleanupDelegatedWorkerLane(lane);
+        await this.laneStore.remove(lane.id);
+        return true;
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : 'Local worker lane cleanup failed';
+        await this.laneStore.markCleanupFailure(lane.id, detail).catch(() => undefined);
+        console.warn('[Delegation] Worker lane cleanup failed:', detail);
+        return false;
+      }
+    };
     const stop = (task: Task): Promise<void> => task.stop ??= (async () => {
-      if (!task.executor) return;
+      if (!task.executor) {
+        // A cancellation can race with durable lane acquisition. No worker
+        // process owns this lane yet, so it must not become a reusable empty
+        // session after the task finishes.
+        task.discardLane = true;
+        task.interrupt();
+        return;
+      }
       try {
         try { await deadline(() => task.executor!.abort(), Math.min(2000, this.cleanupMs)); } catch { /* Force cleanup still runs. */ }
-        await deadline(async () => { await task.executor!.destroy(); await task.executor!.waitForExit?.(); }, this.cleanupMs);
+        await deadline(() => destroyWorker(task.executor!), this.cleanupMs);
       } finally { task.interrupt(); }
     })();
     const clearTaskTimer = (task: Task): void => {
@@ -273,59 +313,120 @@ export class DelegationManager {
     };
     const run = async (task: Task, configuration: ExecutorConfig, objective: string): Promise<void> => {
       const backend = task.record.backend as DelegationBackend;
+      const identity: DelegatedWorkerLaneIdentity = {
+        threadId: parent.thread.id,
+        backend,
+        workingDirectory: cwd,
+        workspaceGeneration: parent.thread.delegationWorkspaceGeneration ?? 0,
+      };
+      const createWorker = async (): Promise<IExecutor> => {
+        if (!task.lane) {
+          const acquired = await this.laneStore.acquire(identity);
+          task.lane = acquired.lane;
+        }
+        let worker: IExecutor | undefined;
+        try {
+          worker = this.factory(this.guard, configuration, cwd, task.lane.executorThreadId,
+            resolveThreadModel(parent.thread, configuration), parent.thread.efforts?.[backend],
+            { lifecycleHooks: false, delegationWorker: true });
+          task.executor = worker;
+          if (fs.realpathSync(worker.getCurrentWorkingDirectory()) !== cwd) {
+            throw new Error('Worker refused the delegated workspace; refusing a fallback directory');
+          }
+          await this.laneStore.markRunning(task.lane.id);
+          return worker;
+        } catch (error) {
+          // The factory either supplied an executor that final cleanup can stop,
+          // or failed before any worker process became manager-owned. Neither
+          // case warrants a workspace quarantine by itself. Do not reuse a lane
+          // whose setup did not reach a completed delegated turn.
+          task.discardLane = true;
+          if (!worker) task.executor = undefined;
+          throw error;
+        }
+      };
+      const discardMissingSessionLane = async (): Promise<boolean> => {
+        const lane = task.lane;
+        const worker = task.executor;
+        if (!lane || !worker) return false;
+        try {
+          await deadline(() => destroyWorker(worker), this.cleanupMs);
+        } catch (error) {
+          task.quarantineWorkspace = true;
+          const detail = error instanceof Error ? error.message : 'Worker exit could not be confirmed';
+          await this.laneStore.markDirty(lane.id, detail).catch(() => undefined);
+          return false;
+        }
+        task.executor = undefined;
+        await this.laneStore.markDirty(lane.id,
+          'Native worker session was unavailable before the objective was dispatched.', true);
+        const discarded = await discardLane(lane);
+        task.lane = undefined;
+        return discarded;
+      };
       try {
         if (task.record.state !== 'running') return;
-        const childId = `delegate-${task.record.id}`;
-        task.executor = this.factory(this.guard, configuration, cwd, childId,
-          resolveThreadModel(parent.thread, configuration), parent.thread.efforts?.[backend],
-          { lifecycleHooks: false, delegationWorker: true });
-        if (fs.realpathSync(task.executor.getCurrentWorkingDirectory()) !== cwd) {
-          throw new Error('Worker refused the delegated workspace; refusing a fallback directory');
-        }
-        // Native session IDs are distinct; policy was resolved against the real
-        // parent thread before passing the synthetic child identity to the factory.
-        armIdleTimer(task);
-        const result = await Promise.race([task.interrupted, task.executor.execute(
-          `You are executing one delegated task in an independent session. Complete only this objective and return a concise result with verification and remaining issues. Do not delegate to other agents.\n\n${objective}`,
-          {
-            // The manager owns delegated-task liveness. Zero disables optional
-            // backend-local limits that would otherwise ignore tool callbacks.
-            timeout: 0,
-            inactivityTimeout: 0,
-            onStream: text => {
-              // Text streaming is intentionally not liveness activity; it can be
-              // frequent without a tool making measurable progress.
-              // Intermediate output is not retained here; only relay input prompts.
-              queueMicrotask(() => {
-                if (!closed && task.record.state === 'running' && task.executor?.isWaitingInput?.()) {
-                  const prompt = bounded(text, 4000).text;
-                  if (task.waitingInputText === prompt) return;
-                  task.waitingInputText = prompt;
-                  if (!reportProgress(task, { phase: 'waiting_input', summary: prompt, startedAt: task.record.startedAt })) {
-                    notify(() => parent.onNotice(`\n[${backend} delegated task]\n${prompt}`));
+        let result: ExecuteResult | undefined;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const worker = await createWorker();
+          // Native session IDs are distinct; policy was resolved against the real
+          // parent thread before passing the synthetic worker identity to the factory.
+          const execution = worker.execute(
+            `You are executing one delegated task in an isolated worker session. This session may contain context from earlier delegated tasks in this thread and workspace. Complete only this objective and return a concise result with verification and remaining issues. Do not delegate to other agents.
+
+${objective}`,
+            {
+              // The manager owns delegated-task liveness. Zero disables optional
+              // backend-local limits that would otherwise ignore tool callbacks.
+              timeout: 0,
+              inactivityTimeout: 0,
+              onStream: text => {
+                // Text streaming is intentionally not liveness activity; it can be
+                // frequent without a tool making measurable progress.
+                // Intermediate output is not retained here; only relay input prompts.
+                queueMicrotask(() => {
+                  if (!closed && task.record.state === 'running' && task.executor?.isWaitingInput?.()) {
+                    const prompt = bounded(text, 4000).text;
+                    if (task.waitingInputText === prompt) return;
+                    task.waitingInputText = prompt;
+                    if (!reportProgress(task, { phase: 'waiting_input', summary: prompt, startedAt: task.record.startedAt })) {
+                      notify(() => parent.onNotice(`
+[${backend} delegated task]
+${prompt}`));
+                    }
                   }
-                }
-              });
-            },
-            onToolUse: tool => {
-              if (task.record.state !== 'running') return;
-              task.waitingInputText = undefined;
-              if (tool.id) task.activeToolIds.add(tool.id);
-              noteToolActivity(task, 'tool_use');
-              reportProgress(task, { phase: 'tool_use', toolUse: tool, startedAt: task.record.startedAt });
-            },
-            onToolResult: result => {
-              if (task.record.state !== 'running') return;
-              task.waitingInputText = undefined;
-              if (result.tool_use_id) task.activeToolIds.delete(result.tool_use_id);
-              noteToolActivity(task, 'tool_result');
-              reportProgress(task, { phase: 'tool_result', toolResult: result, startedAt: task.record.startedAt });
-            },
-            onApprovalRequest: request => !closed && task.record.state === 'running' && parent.onApproval({ ...request,
-              description: `[${backend} delegated task] ${request.description}`, canRemember: false }, task.executor!),
-            onApprovalResolved: parent.onApprovalResolved,
-          })]);
-        if (task.record.state === 'running') {
+                });
+              },
+              onToolUse: tool => {
+                if (task.record.state !== 'running') return;
+                task.waitingInputText = undefined;
+                if (tool.id) task.activeToolIds.add(tool.id);
+                noteToolActivity(task, 'tool_use');
+                reportProgress(task, { phase: 'tool_use', toolUse: tool, startedAt: task.record.startedAt });
+              },
+              onToolResult: toolResult => {
+                if (task.record.state !== 'running') return;
+                task.waitingInputText = undefined;
+                if (toolResult.tool_use_id) task.activeToolIds.delete(toolResult.tool_use_id);
+                noteToolActivity(task, 'tool_result');
+                reportProgress(task, { phase: 'tool_result', toolResult, startedAt: task.record.startedAt });
+              },
+              onApprovalRequest: request => !closed && task.record.state === 'running' && parent.onApproval({ ...request,
+                description: `[${backend} delegated task] ${request.description}`, canRemember: false }, task.executor!),
+              onApprovalResolved: parent.onApprovalResolved,
+            });
+          // Start the inactivity window only once the worker has accepted the
+          // objective and can emit its first real progress callback.
+          armIdleTimer(task);
+          result = await Promise.race([task.interrupted, execution]);
+          if (!result.success && attempt === 0 && worker.consumeSessionResumeFailure?.()) {
+            clearTaskTimer(task);
+            if (await discardMissingSessionLane()) continue;
+            throw new Error('The worker session was unavailable and its process could not be safely reset.');
+          }
+          break;
+        }
+        if (task.record.state === 'running' && result) {
           const output = bounded(result.output ?? '', DELEGATION_LIMITS.resultBytes, true);
           task.record.state = result.success ? 'succeeded' : 'failed';
           task.record.output = output.text; task.record.truncated = output.truncated;
@@ -339,19 +440,45 @@ export class DelegationManager {
         this.registry.invalidate();
       } finally {
         clearTaskTimer(task);
-        let cleaned = false;
+        let released = !task.quarantineWorkspace;
         try {
           if (task.stop) await task.stop;
-          else if (task.executor) await deadline(async () => { await task.executor!.destroy(); await task.executor!.waitForExit?.(); }, this.cleanupMs);
-          cleaned = true;
+          else if (task.executor) await deadline(() => destroyWorker(task.executor!), this.cleanupMs);
+          else if (task.lane) {
+            // A scope can close after durable acquisition but before construction.
+            // No backend process was started, so discard the lane rather than
+            // reserving the workspace indefinitely.
+            task.discardLane = true;
+          }
+          if (released && task.lane && task.discardLane) {
+            const lane = task.lane;
+            await this.laneStore.markDirty(lane.id,
+              'Delegated worker setup ended before a reusable context was established.', true).catch(() => undefined);
+            await discardLane(lane);
+            task.lane = undefined;
+          }
+          if (released && task.lane) {
+            try {
+              await this.laneStore.markReady(task.lane.id);
+            } catch (error) {
+              const detail = error instanceof Error ? error.message : 'Worker lane persistence failed';
+              await this.laneStore.markDirty(task.lane.id, detail, true).catch(() => undefined);
+              await discardLane(task.lane);
+              console.warn('[Delegation] Worker lane could not be retained:', detail);
+            }
+          }
         } catch (error) {
+          released = false;
+          task.quarantineWorkspace = true;
+          if (task.lane) {
+            const detail = error instanceof Error ? error.message : 'Worker cleanup could not be confirmed';
+            await this.laneStore.markDirty(task.lane.id, detail).catch(() => undefined);
+          }
           task.record.state = 'interrupted';
           task.record.error = 'Worker cleanup could not be confirmed. This workspace is blocked until the worker is stopped and the CLI restarts.';
           console.warn('[Delegation] Worker cleanup failed:', error instanceof Error ? error.message : 'Cleanup failure');
         }
-        if (cleaned) {
-          await deadline(() => task.executor?.deleteThreadData?.(`delegate-${task.record.id}`), this.cleanupMs)
-            .catch(() => console.warn('[Delegation] Worker session cleanup did not finish'));
+        if (released) {
           this.running--; this.workspaces.delete(cwd);
         } else this.workspaces.set(cwd, `quarantined:${parent.thread.id}`);
         task.record.finishedAt = Date.now();
@@ -447,6 +574,26 @@ export class DelegationManager {
             task.settle();
             throw error;
           }
+          try {
+            const lane = await this.laneStore.acquire({
+              threadId: parent.thread.id,
+              backend,
+              workingDirectory: cwd,
+              workspaceGeneration: parent.thread.delegationWorkspaceGeneration ?? 0,
+            });
+            task.lane = lane.lane;
+          } catch (error) {
+            task.record.state = 'failed';
+            task.record.error = bounded(error instanceof Error ? error.message : 'Worker lane storage failed', 4000).text;
+            task.record.finishedAt = Date.now();
+            await this.store.write(task.record).catch(() => undefined);
+            tasks.delete(task.record.id);
+            this.running--;
+            this.workspaces.delete(cwd);
+            launches--;
+            task.settle();
+            throw error;
+          }
           if (closed) { task.record.state = 'cancelled'; }
           if (!reportProgress(task, { phase: 'started', objective: task.record.objective, startedAt: task.record.startedAt })) {
             notify(() => parent.onToolUse({ id: task.record.id, name: 'Task', input: {
@@ -508,6 +655,48 @@ export class DelegationManager {
   }
 
   waitingExecutor(threadId: string): IExecutor | undefined { return this.scopes.get(threadId)?.waitingExecutor(); }
+  hasActiveTasks(threadId: string): boolean { return this.scopes.get(threadId)?.hasTasks() ?? false; }
+
+  /** Remove lanes from an old workspace generation after a successful `/cd`. */
+  async invalidateWorkspaceGeneration(threadId: string, generation: number): Promise<number> {
+    if (this.hasActiveTasks(threadId)) {
+      throw new Error('Cannot change working directory while a delegated worker is running. Wait for it to finish or send /abort first.');
+    }
+    return this.removeWorkerLanes(await this.laneStore.invalidateGeneration(threadId, generation));
+  }
+
+  /** Forget one backend lane or all lanes for an idle parent thread. */
+  async resetWorkerLanes(threadId: string, backend?: DelegationBackend): Promise<number> {
+    if (this.hasActiveTasks(threadId)) {
+      throw new Error('Cannot reset delegated worker context while a delegated worker is running. Wait for it to finish or send /abort first.');
+    }
+    return this.removeWorkerLanes(await this.laneStore.markForReset(threadId, backend));
+  }
+
+  /** Thread deletion is executor-free so it works whether delegation is currently enabled or not. */
+  async deleteWorkerLanes(threadId: string): Promise<number> {
+    if (this.hasActiveTasks(threadId)) {
+      throw new Error('Cannot delete delegated worker context while a delegated worker is running.');
+    }
+    return this.removeWorkerLanes(await this.laneStore.markForReset(threadId));
+  }
+
+  private async removeWorkerLanes(lanes: DelegatedWorkerLane[]): Promise<number> {
+    let removed = 0;
+    for (const lane of lanes) {
+      try {
+        await cleanupDelegatedWorkerLane(lane);
+        await this.laneStore.remove(lane.id);
+        removed++;
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : 'Local worker lane cleanup failed';
+        await this.laneStore.markCleanupFailure(lane.id, detail).catch(() => undefined);
+        console.warn('[Delegation] Worker lane cleanup failed:', detail);
+      }
+    }
+    return removed;
+  }
+
   blocksWorkspace(cwd: string, threadId: string): boolean {
     if (this.workspaces.size === 0) return false;
     const canonical = fs.realpathSync(cwd);
