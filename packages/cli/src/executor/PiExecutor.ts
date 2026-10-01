@@ -48,6 +48,7 @@ interface ActiveTurn {
   settle?: () => void;
   /** Fallback ids from tool_execution_start events lacking toolCallId, consumed FIFO by matching end events. */
   pendingToolFallbackIds: string[];
+  nextToolFallbackId: number;
 }
 
 interface PendingUiRequest {
@@ -282,6 +283,7 @@ export class PiExecutor implements IExecutor {
         output: [],
         sawAgentStart: false,
         pendingToolFallbackIds: [],
+        nextToolFallbackId: 0,
       };
       if (options.timeout !== 0 && options.timeout && options.timeout > 0) {
         active.timeoutTimer = setTimeout(() => {
@@ -811,7 +813,9 @@ export class PiExecutor implements IExecutor {
 
     if (event.type === 'tool_execution_start') {
       const mapped = mapPiTool(String(event.toolName ?? 'tool'), event.args);
-      const id = String(event.toolCallId ?? mapped.name);
+      const id = event.toolCallId != null
+        ? String(event.toolCallId)
+        : `pi-fallback-${++active.nextToolFallbackId}`;
       if (event.toolCallId == null) active.pendingToolFallbackIds.push(id);
       active.options.onToolUse?.({
         id,

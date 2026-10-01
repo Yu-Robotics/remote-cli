@@ -580,7 +580,7 @@ describe('PiExecutor', () => {
     expect(onToolResult).toHaveBeenCalledTimes(1);
   });
 
-  it('pairs fallback tool ids when Pi omits toolCallId', async () => {
+  it('pairs unique fallback tool ids when Pi omits toolCallId', async () => {
     transport.request.mockImplementation(async (command: Record<string, unknown>) => {
       if (command.type === 'prompt') {
         transport.emit({ type: 'agent_start' });
@@ -590,9 +590,20 @@ describe('PiExecutor', () => {
           args: { command: 'pwd' },
         });
         transport.emit({
+          type: 'tool_execution_start',
+          toolName: 'bash',
+          args: { command: 'git status' },
+        });
+        transport.emit({
           type: 'tool_execution_end',
           toolName: 'bash',
           result: { content: [{ type: 'text', text: '/tmp' }] },
+          isError: false,
+        });
+        transport.emit({
+          type: 'tool_execution_end',
+          toolName: 'bash',
+          result: { content: [{ type: 'text', text: 'clean' }] },
           isError: false,
         });
         transport.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'done' } });
@@ -609,11 +620,11 @@ describe('PiExecutor', () => {
 
     await executor.execute('inspect', { onToolUse, onToolResult });
 
-    expect(onToolUse).toHaveBeenCalledTimes(1);
-    const [{ id }] = onToolUse.mock.calls[0];
-    expect(id).toBe('Bash');
-    expect(onToolResult).toHaveBeenCalledTimes(1);
-    expect(onToolResult.mock.calls[0][0].tool_use_id).toBe(id);
+    expect(onToolUse).toHaveBeenCalledTimes(2);
+    const ids = onToolUse.mock.calls.map(([tool]) => tool.id);
+    expect(ids).toEqual(['pi-fallback-1', 'pi-fallback-2']);
+    expect(onToolResult).toHaveBeenCalledTimes(2);
+    expect(onToolResult.mock.calls.map(([result]) => result.tool_use_id)).toEqual(ids);
   });
 
   it('aborts an in-flight turn without waiting for agent_settled', async () => {
