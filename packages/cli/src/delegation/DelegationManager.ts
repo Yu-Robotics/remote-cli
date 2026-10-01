@@ -26,6 +26,13 @@ export const DELEGATION_LIMITS = { launches: 12, concurrent: 3,
   resultBytes: 32 * 1024, continuationBytes: 64 * 1024,
   storageTimeoutMs: 10_000, calls: 500 } as const;
 
+/** Bounds and cadence for optional display-only delegated-worker text. */
+export const DELEGATION_TEXT_PROGRESS = {
+  flushMs: 2_500,
+  bufferBytes: 4 * 1024,
+  latestTextBytes: 1_200,
+} as const;
+
 export interface DelegationTimeoutPolicy {
   idleTimeoutMs: number;
   toolIdleTimeoutMs: number;
@@ -75,6 +82,8 @@ export interface DelegationParent {
   onNotice: (text: string) => void;
   /** Returns true when the client accepted a nested worker-progress update for delivery. */
   onProgress?: (progress: DelegationProgressInfo) => boolean;
+  /** Optional negotiated channel for bounded display-only worker text. */
+  onTextProgress?: (progress: DelegationProgressInfo) => boolean;
   onApproval: (request: ApprovalRequestInfo, executor: IExecutor) => boolean;
   onApprovalResolved: (id: string, status: ApprovalStatus) => void;
   isWorkspaceBusy?: (canonicalPath: string) => boolean;
@@ -93,6 +102,10 @@ interface Task {
   settle: () => void;
   stop?: Promise<void>;
   idleTimer?: ReturnType<typeof setTimeout>;
+  textTimer?: ReturnType<typeof setTimeout>;
+  textBuffer?: string;
+  lastReportedText?: string;
+  textProgressEnabled?: boolean;
   activeToolIds: Set<string>;
   waitingInputText?: string;
   interrupted: Promise<ExecuteResult>;
@@ -134,6 +147,27 @@ function bounded(text: string, limit: number, preserveEnd = false): { text: stri
   let start = preserveEnd ? buffer.length - (available - end) : buffer.length;
   while (start < buffer.length && (buffer[start] & 0xc0) === 0x80) start++;
   return { text: buffer.subarray(0, end).toString('utf8') + marker + buffer.subarray(start).toString('utf8'), truncated: true };
+}
+
+/** Keep the most recent UTF-8-safe tail without retaining a worker transcript. */
+function tailText(text: string, limit: number): string {
+  const buffer = Buffer.from(text);
+  if (buffer.length <= limit) return text;
+  let start = Math.max(0, buffer.length - Math.max(0, limit - Buffer.byteLength('…')));
+  while (start < buffer.length && (buffer[start] & 0xc0) === 0x80) start++;
+  return `…${buffer.subarray(start).toString('utf8')}`;
+}
+
+/** Prefer a completed sentence or paragraph, but always provide a bounded recent tail. */
+function latestDisplayText(text: string): string | undefined {
+  const normalized = text.replace(/\r\n?/g, '\n').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, '').trim();
+  if (!normalized) return undefined;
+  let end = 0;
+  for (const match of normalized.matchAll(/[.!?。！？](?:\s|$)|\n+/g)) {
+    end = match.index! + match[0].length;
+  }
+  const complete = end > 0 ? normalized.slice(0, end).trimEnd() : normalized;
+  return tailText(complete, DELEGATION_TEXT_PROGRESS.latestTextBytes);
 }
 
 function boundedResults(terminal: DelegatedTaskResult[]): DelegatedTaskResult[] {
@@ -231,6 +265,51 @@ export class DelegationManager {
         return false;
       }
     };
+    const reportTextProgress = (task: Task, latestText: string): boolean => {
+      try {
+        return parent.onTextProgress?.({
+          taskId: task.record.id,
+          backend: task.record.backend,
+          phase: 'text',
+          latestText,
+          startedAt: task.record.startedAt,
+        }) === true;
+      } catch {
+        console.warn('[Delegation] Display text could not be delivered');
+        return false;
+      }
+    };
+    const clearTextProgress = (task: Task, discardPending = false): void => {
+      clearTimeout(task.textTimer);
+      task.textTimer = undefined;
+      if (discardPending) task.textBuffer = undefined;
+    };
+    const flushTextProgress = (task: Task): void => {
+      if (closed || task.record.state !== 'running' || !task.textProgressEnabled) return;
+      const latestText = task.textBuffer ? latestDisplayText(task.textBuffer) : undefined;
+      if (!latestText || latestText === task.lastReportedText) return;
+      if (!reportTextProgress(task, latestText)) {
+        task.textProgressEnabled = false;
+        clearTextProgress(task, true);
+        return;
+      }
+      task.lastReportedText = latestText;
+    };
+    const scheduleTextProgress = (task: Task): void => {
+      if (closed || task.record.state !== 'running' || !task.textProgressEnabled || task.textTimer) return;
+      const timer = setTimeout(() => {
+        if (task.textTimer !== timer) return;
+        task.textTimer = undefined;
+        flushTextProgress(task);
+      }, DELEGATION_TEXT_PROGRESS.flushMs);
+      timer.unref?.();
+      task.textTimer = timer;
+    };
+    const recordDisplayText = (task: Task, text: string): void => {
+      if (!task.textProgressEnabled || !text) return;
+      task.textBuffer = tailText(`${task.textBuffer ?? ''}${text}`, DELEGATION_TEXT_PROGRESS.bufferBytes);
+      scheduleTextProgress(task);
+    };
     const reportTerminalProgress = (task: Task): boolean => {
       if (task.record.state === 'running') return false;
       return reportProgress(task, {
@@ -260,6 +339,7 @@ export class DelegationManager {
       }
     };
     const stop = (task: Task): Promise<void> => task.stop ??= (async () => {
+      clearTextProgress(task, true);
       if (!task.executor) {
         // A cancellation can race with durable lane acquisition. No worker
         // process owns this lane yet, so it must not become a reusable empty
@@ -280,6 +360,7 @@ export class DelegationManager {
     const expire = (task: Task, duration: number): void => {
       if (task.record.state !== 'running') return;
       clearTaskTimer(task);
+      clearTextProgress(task, true);
       task.record.state = 'timed_out';
       task.record.error = `Delegated task stopped after ${formatDuration(duration)} without tool activity`;
       void stop(task).catch(() => undefined);
@@ -304,6 +385,7 @@ export class DelegationManager {
     const cancel = async (task: Task): Promise<unknown> => {
       if (task.record.state === 'running') {
         clearTaskTimer(task);
+        clearTextProgress(task, true);
         task.record.state = 'cancelled';
         task.record.error = 'Cancelled; edits already made were not undone.';
         await stop(task).catch(() => undefined);
@@ -383,9 +465,11 @@ ${objective}`,
               onStream: text => {
                 // Text streaming is intentionally not liveness activity; it can be
                 // frequent without a tool making measurable progress.
-                // Intermediate output is not retained here; only relay input prompts.
+                // It is only buffered for the negotiated, display-only progress panel.
                 queueMicrotask(() => {
-                  if (!closed && task.record.state === 'running' && task.executor?.isWaitingInput?.()) {
+                  if (closed || task.record.state !== 'running') return;
+                  if (task.executor?.isWaitingInput?.()) {
+                    clearTextProgress(task, true);
                     const prompt = bounded(text, 4000).text;
                     if (task.waitingInputText === prompt) return;
                     task.waitingInputText = prompt;
@@ -394,11 +478,14 @@ ${objective}`,
 [${backend} delegated task]
 ${prompt}`));
                     }
+                    return;
                   }
+                  recordDisplayText(task, text);
                 });
               },
               onToolUse: tool => {
                 if (task.record.state !== 'running') return;
+                clearTextProgress(task, true);
                 task.waitingInputText = undefined;
                 if (tool.id) task.activeToolIds.add(tool.id);
                 noteToolActivity(task, 'tool_use');
@@ -406,6 +493,7 @@ ${prompt}`));
               },
               onToolResult: toolResult => {
                 if (task.record.state !== 'running') return;
+                clearTextProgress(task, true);
                 task.waitingInputText = undefined;
                 if (toolResult.tool_use_id) task.activeToolIds.delete(toolResult.tool_use_id);
                 noteToolActivity(task, 'tool_result');
@@ -423,6 +511,8 @@ ${prompt}`));
           result = await Promise.race([task.interrupted, execution]);
           if (!result.success && attempt === 0 && worker.consumeSessionResumeFailure?.()) {
             clearTaskTimer(task);
+            clearTextProgress(task, true);
+            task.lastReportedText = undefined;
             if (await discardMissingSessionLane()) continue;
             throw new Error('The worker session was unavailable and its process could not be safely reset.');
           }
@@ -442,6 +532,7 @@ ${prompt}`));
         this.registry.invalidate();
       } finally {
         clearTaskTimer(task);
+        clearTextProgress(task, true);
         let released = !task.quarantineWorkspace;
         try {
           if (task.stop) await task.stop;
@@ -564,6 +655,7 @@ ${prompt}`));
           const task: Task = { record: { id: randomUUID(), threadId: parent.thread.id,
             parentMessageId: parent.messageId, backend, objective: objective.slice(0, 1000),
             state: 'running', startedAt: Date.now() }, resultDelivered: false,
+            textProgressEnabled: parent.onTextProgress !== undefined,
             activeToolIds: new Set(), done: new Promise<void>(resolve => { settle = resolve; }), settle, interrupted, interrupt };
           tasks.set(task.record.id, task);
           try {

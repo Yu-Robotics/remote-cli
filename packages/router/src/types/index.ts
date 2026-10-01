@@ -219,6 +219,7 @@ export interface ToolResultInfo {
 /** Lifecycle event for a delegated worker displayed inside its coordinator card. */
 export type DelegationProgressPhase =
   | 'started'
+  | 'text'
   | 'tool_use'
   | 'tool_result'
   | 'waiting_input'
@@ -236,6 +237,8 @@ export interface DelegationProgressInfo {
   objective?: string;
   toolUse?: ToolUseInfo;
   toolResult?: ToolResultInfo;
+  /** Latest bounded displayable worker text. This is not a task result or liveness signal. */
+  latestText?: string;
   summary?: string;
   error?: string;
   startedAt?: number;
