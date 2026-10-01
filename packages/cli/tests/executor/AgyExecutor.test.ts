@@ -351,7 +351,8 @@ describe('AgyExecutor', () => {
 
   it('streams agent_response text_delta chunks and resolves accumulated output on result SUCCESS', async () => {
     const chunks: string[] = [];
-    const p = executor.execute('say hi', { onStream: (c) => chunks.push(c) });
+    const visible: string[] = [];
+    const p = executor.execute('say hi', { onStream: (c) => chunks.push(c), onDisplayText: (c) => visible.push(c) });
     await waitForSpawn();
     emitInit();
 
@@ -369,6 +370,7 @@ describe('AgyExecutor', () => {
     const result = await p;
 
     expect(chunks).toEqual(['Hello', ' world\n']);
+    expect(visible).toEqual(['Hello', ' world\n']);
     expect(result.success).toBe(true);
     expect(result.output).toBe('Hello world\n');
     expect(result.sessionAbbr).toBe('conv-aaa'.slice(0, 8));

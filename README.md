@@ -495,15 +495,15 @@ bounded reason; the coordinator still receives the existing task result. This
 uses the existing text stream and works with older Routers. It adds no probes,
 cooldowns, retries, or changes to ordinary non-delegated sessions.
 
-CLI and Router 1.6.105 and newer also show live worker progress inside that
-reply: one nested, expandable worker panel shows the current tool, a bounded
-latest visible worker update, elapsed time, and the last real tool activity.
-It refreshes elapsed time at a low frequency while the worker remains active.
-Raw tool output and internal reasoning are intentionally omitted, and visible
-text is escaped and bounded. Text snapshots never extend worker liveness
-timeouts. The latest-text capability is negotiated separately: peers without
-it keep tool-only nested progress, while peers without nested progress keep the
-existing start and terminal-result blocks.
+CLI and Router 1.6.103 and newer show tool progress in a nested worker panel.
+With CLI and Router 1.6.106 and newer, the panel also shows bounded assistant
+response text, elapsed time, and the last real tool activity. It refreshes
+elapsed time at a low frequency while the worker remains active. Raw tool
+output and reasoning are excluded from latest-text snapshots; assistant
+response text is escaped and bounded. Text snapshots never extend worker
+liveness timeouts. The latest-text capability is negotiated separately: peers
+without it keep tool-only nested progress, while peers without nested progress
+keep the existing start and terminal-result blocks.
 
 For staged rollout, enable one trial thread first. Never-enabled threads skip
 all delegation setup: no managed tool registration, prompt prefix, backend

@@ -289,8 +289,6 @@ export class DelegationManager {
       const latestText = task.textBuffer ? latestDisplayText(task.textBuffer) : undefined;
       if (!latestText || latestText === task.lastReportedText) return;
       if (!reportTextProgress(task, latestText)) {
-        task.textProgressEnabled = false;
-        clearTextProgress(task, true);
         return;
       }
       task.lastReportedText = latestText;
@@ -463,9 +461,8 @@ ${objective}`,
               timeout: 0,
               inactivityTimeout: 0,
               onStream: text => {
-                // Text streaming is intentionally not liveness activity; it can be
-                // frequent without a tool making measurable progress.
-                // It is only buffered for the negotiated, display-only progress panel.
+                // Generic streams may include reasoning or backend notices. Use
+                // this channel only to detect interactive input requests.
                 queueMicrotask(() => {
                   if (closed || task.record.state !== 'running') return;
                   if (task.executor?.isWaitingInput?.()) {
@@ -480,8 +477,12 @@ ${prompt}`));
                     }
                     return;
                   }
-                  recordDisplayText(task, text);
                 });
+              },
+              onDisplayText: text => {
+                if (!closed && task.record.state === 'running' && !task.executor?.isWaitingInput?.()) {
+                  recordDisplayText(task, text);
+                }
               },
               onToolUse: tool => {
                 if (task.record.state !== 'running') return;

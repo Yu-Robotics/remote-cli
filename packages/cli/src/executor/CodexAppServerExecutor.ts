@@ -791,6 +791,7 @@ export class CodexAppServerExecutor implements IExecutor {
         if (this.activeTurn && typeof params.delta === 'string') {
           this.activeTurn.output.push(params.delta);
           this.activeTurn.options.onStream?.(params.delta);
+          this.activeTurn.options.onDisplayText?.(params.delta);
         }
         break;
       case 'item/reasoning/summaryTextDelta':

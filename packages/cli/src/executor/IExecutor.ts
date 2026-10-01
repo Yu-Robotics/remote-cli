@@ -3,6 +3,8 @@ import type { DelegationConnection } from '../delegation/contract';
 
 export interface ExecuteOptions {
   onStream?: (chunk: string) => void;
+  /** Assistant response text only; excludes reasoning, tool output, and status messages. */
+  onDisplayText?: (chunk: string) => void;
   onToolUse?: (toolUse: ToolUseInfo) => void;
   onToolResult?: (toolResult: ToolResultInfo) => void;
   onRedactedThinking?: () => void;

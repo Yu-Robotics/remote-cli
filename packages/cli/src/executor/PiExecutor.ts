@@ -787,6 +787,7 @@ export class PiExecutor implements IExecutor {
         if (text) {
           active.output.push(text);
           active.options.onStream?.(text);
+          active.options.onDisplayText?.(text);
         }
       }
       return;
@@ -802,6 +803,7 @@ export class PiExecutor implements IExecutor {
       if (delta?.type === 'text_delta' && typeof delta.delta === 'string') {
         active.output.push(delta.delta);
         active.options.onStream?.(delta.delta);
+        active.options.onDisplayText?.(delta.delta);
       }
       return;
     }
@@ -811,6 +813,7 @@ export class PiExecutor implements IExecutor {
       if (text && active.output.join('') === '') {
         active.output.push(text);
         active.options.onStream?.(text);
+        active.options.onDisplayText?.(text);
       }
       return;
     }
@@ -820,6 +823,7 @@ export class PiExecutor implements IExecutor {
       if (text && active.output.join('') === '') {
         active.output.push(text);
         active.options.onStream?.(text);
+        active.options.onDisplayText?.(text);
       }
       return;
     }

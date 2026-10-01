@@ -39,6 +39,7 @@ interface QueuedCommand {
 
 interface ActiveCallbacks {
   onStream?: (chunk: string) => void;
+  onDisplayText?: ExecuteOptions['onDisplayText'];
   onToolUse?: ExecuteOptions['onToolUse'];
   onToolResult?: ExecuteOptions['onToolResult'];
   onPlanMode?: ExecuteOptions['onPlanMode'];
@@ -405,6 +406,7 @@ export abstract class AcpExecutor implements IExecutor {
         output += chunk;
         options.onStream?.(chunk);
       },
+      onDisplayText: options.onDisplayText,
       onToolUse: options.onToolUse,
       onToolResult: options.onToolResult,
       onPlanMode: options.onPlanMode,
@@ -513,6 +515,7 @@ export abstract class AcpExecutor implements IExecutor {
     if (this.replayingSession) return;
     if (content.type === 'text' && typeof content.text === 'string') {
       this.activeCallbacks.onStream?.(content.text);
+      if (!thinking) this.activeCallbacks.onDisplayText?.(content.text);
     } else if (!thinking && content.type === 'image' && typeof content.data === 'string' && typeof content.mimeType === 'string') {
       this.activeCallbacks.onImage?.({ type: 'image', data: content.data, mimeType: content.mimeType });
     }

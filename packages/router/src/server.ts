@@ -1043,7 +1043,7 @@ export class RouterServer {
     else state.inputRequest = undefined;
     if (progress.phase !== 'waiting_input' && progress.summary !== undefined) state.summary = progress.summary;
     if (progress.error !== undefined) state.error = progress.error;
-    state.phase = progress.phase;
+    if (progress.phase !== 'text' || state.activeToolIds.size === 0) state.phase = progress.phase;
 
     switch (progress.phase) {
       case 'started':
