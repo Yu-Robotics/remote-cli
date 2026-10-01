@@ -509,6 +509,13 @@ extend worker liveness timeouts. The latest-text capability is negotiated
 separately: peers without it keep tool-only nested progress, while peers without
 nested progress keep the existing start and terminal-result blocks.
 
+Router 1.6.108 and newer render the bounded final worker result as Markdown
+inside the existing collapsed panel, preserving headings, paragraphs, emphasis,
+lists, links, and code blocks. Worker-supplied HTML and Feishu tags are displayed
+literally; links are limited to HTTP, HTTPS, and email, and images become captions.
+The result remains a bounded preview, and cut code fences are closed for display.
+This rendering change requires only the Router upgrade and no protocol changes.
+
 For staged rollout, enable one trial thread first. Never-enabled threads skip
 all delegation setup: no managed tool registration, prompt prefix, backend
 configuration cleanup, or delegation workspace admission checks. Their ordinary

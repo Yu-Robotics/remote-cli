@@ -484,6 +484,13 @@ cooldowns, retries, or changes to ordinary non-delegated sessions.
 
 CLI 和 Router 1.6.103 及以上版本会在嵌套 worker 面板中显示工具进度。CLI 和 Router 均升级到 1.6.106 及以上版本后，面板会将受限长度的最新助手回复文本作为当前活动，同时单独展示仍在运行的工具、已运行时间和最近一次真实工具活动。工具事件到来前会先刷新待显示的助手更新，避免短暂更新丢失。CLI 和 Router 均升级到 1.6.107 及以上版本后，助手回复会以两行主内容块展示，工具和时间信息会作为辅助信息显示。worker 保持活跃时，卡片会低频刷新已运行时间。最新文本快照不包含原始工具输出或推理内容；助手回复文本会经过转义和长度限制。文本快照不会延长 worker 的存活超时。最新文本能力会单独协商：不支持该能力的另一端仍显示仅含工具进度的嵌套面板；不支持嵌套进度时仍使用现有的启动和终态结果块。
 
+Router 1.6.108 and newer render the bounded final worker result as Markdown
+inside the existing collapsed panel, preserving headings, paragraphs, emphasis,
+lists, links, and code blocks. Worker-supplied HTML and Feishu tags are displayed
+literally; links are limited to HTTP, HTTPS, and email, and images become captions.
+The result remains a bounded preview, and cut code fences are closed for display.
+This rendering change requires only the Router upgrade and no protocol changes.
+
 建议先在一个测试线程中启用。从未启用委派的线程不会注册受管理的工具、添加提示词前缀、清理后端委派配置，或检查委派工作区占用；其普通进程处理和会话输出保持原样。
 
 线程使用过委派后，`/delegation off` 会移除受管理的工具。CLI 会记录哪些后端需要清理，重启或切换后端后也能继续处理。原生斜杠命令恢复会话前同样会执行清理。移除工具时，每个执行器实例可能重启一次后端进程，但会保留已保存的对话；已经清理过的进程不会反复重启。未使用过委派的后端无需清理。

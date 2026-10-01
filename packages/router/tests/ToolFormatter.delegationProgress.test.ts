@@ -51,8 +51,32 @@ describe('delegated worker progress formatting', () => {
 
     expect(panel).toMatchObject({ tag: 'collapsible_panel', expanded: false });
     expect(panel.header.title.content).toContain('WORKER FAILED');
-    expect(content).toContain('&lt;b&gt;permission denied&lt;/b&gt;');
+    expect(panel.elements.at(-1).content).toContain('&lt;b&gt;permission denied&lt;/b&gt;');
     expect(content).toContain('2 earlier events hidden');
+  });
+
+  it('renders the terminal result as separate Markdown inside the collapsed panel', () => {
+    const panel = createDelegationProgressElement({
+      taskId: 'rich-result', backend: 'claude', phase: 'succeeded', startedAt: Date.now(),
+      summary: '## Review\n\n**Passed**\n\n- Tests pass\n- Build passes\n\n```ts\nconst ok = true;\n```',
+      activeToolCount: 0, events: [], hiddenEventCount: 0,
+    });
+    expect(panel.expanded).toBe(false);
+    expect(panel.elements[1].content).toBe('**Result:**');
+    expect(panel.elements[2].content).toContain('## Review\n\n**Passed**');
+    expect(panel.elements[2].content).toContain('- Tests pass\n- Build passes');
+    expect(panel.elements[2].content).toContain('```ts\nconst ok = true;\n```');
+    expect(panel.elements[2].content).not.toContain('<raw>');
+  });
+
+  it('keeps a cut code result separate from the literal failure reason', () => {
+    const panel = createDelegationProgressElement({
+      taskId: 'cut-result', backend: 'agy', phase: 'failed', startedAt: Date.now(),
+      summary: '```ts\n' + 'x'.repeat(1200), error: '<at id=all></at>',
+      activeToolCount: 0, events: [], hiddenEventCount: 0,
+    });
+    expect(panel.elements[2].content).toContain('\n```\n\n_Result preview truncated._');
+    expect(panel.elements[3].content).toContain('**Reason:** <raw>&lt;at id=all&gt;&lt;/at&gt;</raw>');
   });
 
   it('does not repeat an active tool as fallback activity when no response text exists', () => {

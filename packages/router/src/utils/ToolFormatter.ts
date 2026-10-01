@@ -1,6 +1,7 @@
 import { DelegationProgressPhase, ToolUseInfo, ToolResultInfo, TaskNotificationInfo } from '../types';
 import { createDiffPanels, createEditPanels, createWritePanels } from './DiffFormatter';
 import MarkdownIt from 'markdown-it';
+import { formatWorkerResultMarkdown } from './WorkerResultMarkdown';
 
 /**
  * Feishu Card 2.0 element types
@@ -577,11 +578,12 @@ export function createDelegationProgressElement(state: DelegationProgressCardSta
   if (state.phase === 'waiting_input' && state.inputRequest) {
     body.push(`\n**Input request:** ${literalWorkerText(state.inputRequest, 1000)}`);
   }
+  const elements = [createMarkdownElement(body.join('\n'))];
   if (style.terminal && state.summary) {
-    body.push(`\n**Result:** ${literalWorkerText(state.summary, 1000)}`);
+    elements.push(createMarkdownElement('**Result:**'), createMarkdownElement(formatWorkerResultMarkdown(state.summary)));
   }
   if (style.terminal && state.error) {
-    body.push(`\n**Reason:** ${literalWorkerText(state.error, 1000)}`);
+    elements.push(createMarkdownElement(`**Reason:** ${literalWorkerText(state.error, 1000)}`));
   }
 
   return {
@@ -596,7 +598,7 @@ export function createDelegationProgressElement(state: DelegationProgressCardSta
     },
     vertical_spacing: '8px',
     padding: '4px 8px',
-    elements: [createMarkdownElement(body.join('\n'))],
+    elements,
   };
 }
 

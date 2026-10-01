@@ -779,6 +779,31 @@ describe('RouterServer', () => {
     expect(panels[0].elements[0].content).not.toContain('**Result:**');
   });
 
+  it('renders terminal worker Markdown received over the existing wire protocol', async () => {
+    await server.start();
+    mockFeishuHandler.setOnStartStreaming.mock.calls[0][0]('m1', 'u1', 'f1', 'd1');
+    const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
+    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
+    onConnection(mockWs, { socket: { remoteAddress: '1' } });
+    const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
+    await onMessage(Buffer.from(JSON.stringify({
+      type: 'binding_request', data: { deviceId: 'd1', capabilities: { delegationProgress: true } },
+    })));
+    await onMessage(Buffer.from(JSON.stringify({
+      type: 'stream', streamType: 'delegation_progress', messageId: 'm1', openId: 'u1',
+      delegationProgress: {
+        taskId: 'rich-result', backend: 'claude', phase: 'succeeded',
+        summary: '## Review\n\n**Passed**\n\n- Tests pass\n\n<at id=all></at>',
+      },
+    })));
+    const panel = mockFeishuHandler.updateStreamingMessage.mock.calls.at(-1)[1]
+      .find((element: any) => element.tag === 'collapsible_panel');
+    expect(panel.expanded).toBe(false);
+    expect(panel.elements[2].content).toContain('## Review\n\n**Passed**\n\n- Tests pass');
+    expect(panel.elements[2].content).toContain('&lt;at id\\=all&gt;');
+    expect(panel.elements[2].content).not.toContain('<at');
+  });
+
   it('negotiates bounded worker text and refreshes an active panel without extending stream liveness', async () => {
     await server.start();
     const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
