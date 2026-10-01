@@ -92,6 +92,14 @@ describe('Router wire compatibility', () => {
     expect(JSON.stringify(vi.mocked(feishu.updateApprovalCard).mock.calls.at(-1))).toContain('Approved');
   });
 
+  it('negotiates nested delegated-worker progress only when the CLI advertises it', async () => {
+    await receive({ type: 'binding_request', messageId: 'registration', data: {
+      deviceId: 'device-1', protocolVersion: PROTOCOL_VERSION, capabilities: { delegationProgress: true },
+    } });
+
+    expect(JSON.parse(socket.send.mock.calls[0][0]).data.capabilities).toEqual({ delegationProgress: true });
+  });
+
   it('serves a legacy CLI alongside a current CLI without requiring new capabilities', async () => {
     await receive({ type: 'binding_request', messageId: 'legacy-registration', data: { deviceId: 'legacy-device' } });
     const currentSocket = Object.assign(new EventEmitter(), { send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN });

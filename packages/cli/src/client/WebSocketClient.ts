@@ -268,7 +268,7 @@ export class WebSocketClient {
         data: {
           deviceId: this.deviceId,
           protocolVersion: PROTOCOL_VERSION,
-          capabilities: { queueStarted: true, taskRecovery: true, approvalCards: true },
+          capabilities: { queueStarted: true, taskRecovery: true, approvalCards: true, delegationProgress: true },
         }
       }));
     }

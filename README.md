@@ -486,6 +486,12 @@ bounded reason; the coordinator still receives the existing task result. This
 uses the existing text stream and works with older Routers. It adds no probes,
 cooldowns, retries, or changes to ordinary non-delegated sessions.
 
+CLI and Router 1.6.103 and newer also show live worker progress inside that
+reply: one nested, expandable worker panel records task start, tool start and
+completion, and a waiting-for-input state. Raw worker text and full tool output
+are intentionally omitted to keep the parent card bounded. When either peer is
+older, the CLI uses the existing start and terminal-result blocks instead.
+
 For staged rollout, enable one trial thread first. Never-enabled threads skip
 all delegation setup: no managed tool registration, prompt prefix, backend
 configuration cleanup, or delegation workspace admission checks. Their ordinary
@@ -502,8 +508,9 @@ The shared Router can be upgraded before local CLIs. This feature keeps protocol
 version 1 and its existing command, tool-progress, and response formats. Older
 CLIs continue their existing workflows; delegation requires upgrading the local
 CLI and enabling it in that thread. CLI and Router package versions need not
-match to connect. Optional approval cards and task recovery remain negotiated
-per device, so newer and older CLIs can share one Router.
+match to connect. Optional approval cards, task recovery, and nested worker
+progress remain negotiated per device, so newer and older CLIs can share one
+Router.
 
 The coordinator receives registered tools through MCP or an explicitly loaded
 Pi extension. OpenCode and Kimi use ACP session MCP servers; ZCode uses its

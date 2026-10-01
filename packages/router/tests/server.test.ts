@@ -10,7 +10,7 @@ import { FeishuLongConnHandler } from '../src/feishu/FeishuLongConnHandler';
 import { ConnectionHub } from '../src/websocket/ConnectionHub';
 import { BindingManager } from '../src/binding/BindingManager';
 import { MessageType, MIN_SUPPORTED_CLI_VERSION, PROTOCOL_VERSION, ROUTER_VERSION } from '../src/types';
-import { createRedactedThinkingElement, createToolResultElement, createToolUseElement } from '../src/utils/ToolFormatter';
+import { createDelegationProgressElement, createRedactedThinkingElement, createToolResultElement, createToolUseElement } from '../src/utils/ToolFormatter';
 
 // Mock dependencies
 vi.mock('koa');
@@ -28,6 +28,8 @@ vi.mock('../src/binding/BindingManager');
 vi.mock('../src/utils/ToolFormatter', async (importActual) => ({
   createToolUseElement: vi.fn(() => []),
   createToolResultElement: vi.fn(() => []),
+  createDelegationProgressElement: vi.fn((await importActual<typeof import('../src/utils/ToolFormatter')>()).createDelegationProgressElement),
+  createDividerElement: vi.fn((await importActual<typeof import('../src/utils/ToolFormatter')>()).createDividerElement),
   createMarkdownElement: vi.fn((await importActual<typeof import('../src/utils/ToolFormatter')>()).createMarkdownElement),
   createRedactedThinkingElement: vi.fn(() => []),
   createPlanModeElement: vi.fn(() => []),
@@ -741,6 +743,59 @@ describe('RouterServer', () => {
     expect(resolveThread('unknown-card')).toBeUndefined();
     vi.setSystemTime(Date.now() + 7 * 24 * 60 * 60 * 1000 + 1);
     expect(resolveThread('f1')).toBeUndefined();
+  });
+
+  it('renders supported delegated worker progress in one nested panel', async () => {
+    await server.start();
+    const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
+    onStartStreaming('m1', 'u1', 'f1', 'd1');
+
+    const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
+    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
+    onConnection(mockWs, { socket: { remoteAddress: '1' } });
+    const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
+    await onMessage(Buffer.from(JSON.stringify({
+      type: 'binding_request', data: { deviceId: 'd1', capabilities: { delegationProgress: true } },
+    })));
+
+    const sendProgress = async (delegationProgress: any) => onMessage(Buffer.from(JSON.stringify({
+      type: 'stream', streamType: 'delegation_progress', messageId: 'm1', openId: 'u1', delegationProgress,
+    })));
+    await sendProgress({ taskId: 'worker-1', backend: 'claude', phase: 'started', objective: 'Review the README', startedAt: Date.now() });
+    await sendProgress({ taskId: 'worker-1', backend: 'claude', phase: 'tool_use', toolUse: { id: 'read-1', name: 'Read', input: {} } });
+    await sendProgress({ taskId: 'worker-1', backend: 'claude', phase: 'tool_result', toolResult: { tool_use_id: 'read-1', content: 'done', is_error: false } });
+    await sendProgress({ taskId: 'worker-1', backend: 'claude', phase: 'waiting_input', summary: 'Approve the command?' });
+    await sendProgress({ taskId: 'worker-1', backend: 'claude', phase: 'timed_out' });
+
+    expect(createDelegationProgressElement).toHaveBeenCalledTimes(6);
+    const elements = mockFeishuHandler.updateStreamingMessage.mock.calls.at(-1)[1];
+    const panels = elements.filter((element: any) => element.tag === 'collapsible_panel');
+    expect(panels).toHaveLength(1);
+    expect(panels[0]).toMatchObject({ expanded: false });
+    expect(panels[0].header.title.content).toContain('WORKER TIMED OUT');
+    expect(panels[0].elements[0].content).toContain('Read started');
+    expect(panels[0].elements[0].content).toContain('Read completed');
+    expect(panels[0].elements[0].content).not.toContain('Approve the command?');
+    expect(panels[0].elements[0].content).not.toContain('**Result:**');
+  });
+
+  it('ignores delegated worker progress from a client that did not advertise support', async () => {
+    await server.start();
+    const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
+    onStartStreaming('m1', 'u1', 'f1', 'd1');
+
+    const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
+    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
+    onConnection(mockWs, { socket: { remoteAddress: '1' } });
+    const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
+    await onMessage(Buffer.from(JSON.stringify({ type: 'binding_request', data: { deviceId: 'd1' } })));
+    await onMessage(Buffer.from(JSON.stringify({
+      type: 'stream', streamType: 'delegation_progress', messageId: 'm1', openId: 'u1',
+      delegationProgress: { taskId: 'worker-1', backend: 'claude', phase: 'started' },
+    })));
+
+    expect(createDelegationProgressElement).not.toHaveBeenCalled();
+    expect(mockFeishuHandler.updateStreamingMessage).not.toHaveBeenCalled();
   });
 
   it('should handle text chunk streaming with throttled updates', async () => {

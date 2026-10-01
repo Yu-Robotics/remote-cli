@@ -1,4 +1,4 @@
-import { ToolUseInfo, ToolResultInfo, TaskNotificationInfo } from '../types';
+import { DelegationProgressPhase, ToolUseInfo, ToolResultInfo, TaskNotificationInfo } from '../types';
 import { createDiffPanels, createEditPanels, createWritePanels } from './DiffFormatter';
 import MarkdownIt from 'markdown-it';
 
@@ -457,6 +457,108 @@ export function createToolResultElement(resultInfo: ToolResultInfo): FeishuCardE
   };
 
   return [collapsiblePanel];
+}
+
+export interface DelegationProgressEvent {
+  label: string;
+  isError?: boolean;
+}
+
+export interface DelegationProgressCardState {
+  taskId: string;
+  backend: string;
+  phase: DelegationProgressPhase;
+  startedAt: number;
+  objective?: string;
+  inputRequest?: string;
+  summary?: string;
+  error?: string;
+  activeToolCount: number;
+  events: DelegationProgressEvent[];
+  hiddenEventCount: number;
+}
+
+const DELEGATION_BACKEND_LABELS: Record<string, string> = {
+  claude: 'Claude Code',
+  codex: 'Codex CLI',
+  pi: 'Pi',
+  agy: 'AGY CLI',
+  opencode: 'OpenCode',
+  kimi: 'Kimi Code',
+  zcode: 'ZCode',
+};
+
+const DELEGATION_PROGRESS_STYLES: Record<DelegationProgressPhase, { color: string; icon: string; label: string; terminal: boolean }> = {
+  started: { color: 'blue', icon: '🤖', label: 'WORKER STARTED', terminal: false },
+  tool_use: { color: 'blue', icon: '⚙️', label: 'WORKER RUNNING', terminal: false },
+  tool_result: { color: 'blue', icon: '⚙️', label: 'WORKER RUNNING', terminal: false },
+  waiting_input: { color: 'orange', icon: '⌨️', label: 'WAITING FOR INPUT', terminal: false },
+  succeeded: { color: 'green', icon: '✅', label: 'WORKER COMPLETED', terminal: true },
+  failed: { color: 'red', icon: '❌', label: 'WORKER FAILED', terminal: true },
+  cancelled: { color: 'neutral', icon: '⏹️', label: 'WORKER CANCELLED', terminal: true },
+  timed_out: { color: 'orange', icon: '⏱️', label: 'WORKER TIMED OUT', terminal: true },
+  interrupted: { color: 'orange', icon: '⚠️', label: 'WORKER INTERRUPTED', terminal: true },
+};
+
+/** Escape untrusted worker text so it cannot become Feishu card markup. */
+function literalWorkerText(value: string, limit: number): string {
+  const characters = Array.from(value.replace(/\s+/g, ' ').replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim());
+  const shortened = characters.length > limit
+    ? `${characters.slice(0, Math.max(0, limit - 1)).join('')}…`
+    : characters.join('');
+  return `<raw>${shortened.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</raw>`;
+}
+
+function delegationElapsed(startedAt: number): string {
+  const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+}
+
+/** Render bounded worker progress inside the coordinator's card. */
+export function createDelegationProgressElement(state: DelegationProgressCardState): FeishuCardElement {
+  const style = DELEGATION_PROGRESS_STYLES[state.phase];
+  const backend = DELEGATION_BACKEND_LABELS[state.backend] ?? 'Agent';
+  const status = state.activeToolCount > 0 && !style.terminal
+    ? `${style.label} · ${state.activeToolCount} active tool${state.activeToolCount === 1 ? '' : 's'}`
+    : style.label;
+  const headerTitle = `<text_tag color='${style.color}'>${style.icon} ${style.label}</text_tag> · **${backend}** · Delegated task`;
+  const body = [
+    `**Task:** ${state.objective ? literalWorkerText(state.objective, 260) : '_(task details unavailable)_'}`,
+    `**Status:** ${literalWorkerText(status, 120)}`,
+    `**Elapsed:** ${delegationElapsed(state.startedAt)}`,
+  ];
+
+  if (state.events.length > 0) {
+    body.push('\n**Recent activity:**');
+    body.push(...state.events.map(event => `- ${event.isError ? '❌' : '•'} ${literalWorkerText(event.label, 220)}`));
+    if (state.hiddenEventCount > 0) body.push(`- _${state.hiddenEventCount} earlier event${state.hiddenEventCount === 1 ? '' : 's'} hidden_`);
+  }
+  if (state.phase === 'waiting_input' && state.inputRequest) {
+    body.push(`\n**Input request:** ${literalWorkerText(state.inputRequest, 1000)}`);
+  }
+  if (style.terminal && state.summary) {
+    body.push(`\n**Result:** ${literalWorkerText(state.summary, 1000)}`);
+  }
+  if (style.terminal && state.error) {
+    body.push(`\n**Reason:** ${literalWorkerText(state.error, 1000)}`);
+  }
+
+  return {
+    tag: 'collapsible_panel',
+    expanded: !style.terminal,
+    header: {
+      title: { tag: 'markdown', content: headerTitle },
+      vertical_align: 'center',
+      icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', size: '14px 14px' },
+      icon_position: 'right',
+      icon_expanded_angle: -180,
+    },
+    vertical_spacing: '8px',
+    padding: '4px 8px',
+    elements: [createMarkdownElement(body.join('\n'))],
+  };
 }
 
 /**

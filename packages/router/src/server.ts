@@ -10,8 +10,22 @@ import { JsonStore } from './storage/JsonStore';
 import { FeishuLongConnHandler } from './feishu/FeishuLongConnHandler';
 import { ConnectionHub } from './websocket/ConnectionHub';
 import { BindingManager } from './binding/BindingManager';
-import { MessageType, ToolUseInfo, ToolResultInfo, TaskNotificationInfo, PROTOCOL_VERSION, MIN_SUPPORTED_CLI_VERSION, ROUTER_VERSION, ThreadSummary, QueueConfirmationInfo, QueueStartedInfo, TaskResumeInfo, ImageBlock } from './types';
-import { FeishuCardElement, createToolUseElement, createToolResultElement, createMarkdownElement, createRedactedThinkingElement, createPlanModeElement, createTaskNotificationElement, createImageElement } from './utils/ToolFormatter';
+import { MessageType, ToolUseInfo, ToolResultInfo, DelegationProgressInfo, TaskNotificationInfo, PROTOCOL_VERSION, MIN_SUPPORTED_CLI_VERSION, ROUTER_VERSION, ThreadSummary, QueueConfirmationInfo, QueueStartedInfo, TaskResumeInfo, ImageBlock } from './types';
+import { DelegationProgressCardState, FeishuCardElement, createDelegationProgressElement, createDividerElement, createToolUseElement, createToolResultElement, createMarkdownElement, createRedactedThinkingElement, createPlanModeElement, createTaskNotificationElement, createImageElement } from './utils/ToolFormatter';
+
+interface DelegationProgressState extends DelegationProgressCardState {
+  elementIndex: number;
+  activeToolIds: Set<string>;
+  toolNames: Map<string, string>;
+  terminal: boolean;
+}
+
+const DELEGATION_PROGRESS_PHASES = new Set<DelegationProgressInfo['phase']>([
+  'started', 'tool_use', 'tool_result', 'waiting_input', 'succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted',
+]);
+const DELEGATION_PROGRESS_TERMINAL_PHASES = new Set<DelegationProgressInfo['phase']>([
+  'succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted',
+]);
 
 interface StreamingMessageState {
   openId: string;
@@ -35,6 +49,7 @@ interface StreamingMessageState {
   updatePending: boolean;
   finalizing: boolean;
   lastRenderedTextLength: number;
+  delegationProgress: Map<string, DelegationProgressState>;
 }
 
 /**
@@ -113,6 +128,7 @@ export class RouterServer {
         updatePending: false,
         finalizing: false,
         lastRenderedTextLength: 0,
+        delegationProgress: new Map(),
       });
       // Populate cardThreadMap for parent_id-based routing
       if (feishuMessageId && threadId) {
@@ -301,6 +317,7 @@ export class RouterServer {
       let deviceId: string | null = null;
       let taskRecoveryEnabled = false;
       let approvalCardsEnabled = false;
+      let delegationProgressEnabled = false;
       let heartbeatTimeout: NodeJS.Timeout | null = null;
 
       // Reset heartbeat timeout
@@ -408,6 +425,7 @@ export class RouterServer {
 
                 taskRecoveryEnabled = message.data.capabilities?.taskRecovery === true;
                 approvalCardsEnabled = message.data.capabilities?.approvalCards === true;
+                delegationProgressEnabled = message.data.capabilities?.delegationProgress === true;
                 // Send confirmation with version info for client-side version check
                 ws.send(JSON.stringify({
                   type: MessageType.BINDING_CONFIRM,
@@ -417,9 +435,10 @@ export class RouterServer {
                     success: true,
                     routerVersion: ROUTER_VERSION,
                     minCliVersion: MIN_SUPPORTED_CLI_VERSION,
-                    ...((taskRecoveryEnabled || approvalCardsEnabled) ? { capabilities: {
+                    ...((taskRecoveryEnabled || approvalCardsEnabled || delegationProgressEnabled) ? { capabilities: {
                       ...(taskRecoveryEnabled ? { taskRecovery: true } : {}),
                       ...(approvalCardsEnabled ? { approvalCards: true } : {}),
+                      ...(delegationProgressEnabled ? { delegationProgress: true } : {}),
                     } } : {}),
                   }
                 }));
@@ -554,6 +573,11 @@ export class RouterServer {
                   case 'tool_result':
                     if (message.toolResult) {
                       await this.handleToolResult(message.messageId, message.openId, message.toolResult);
+                    }
+                    break;
+                  case 'delegation_progress':
+                    if (delegationProgressEnabled && message.delegationProgress) {
+                      await this.handleDelegationProgress(message.messageId, message.openId, message.delegationProgress);
                     }
                     break;
                   case 'redacted_thinking':
@@ -848,6 +872,147 @@ export class RouterServer {
     }
   }
 
+  private boundedDelegationProgressText(value: unknown, limit: number): string | undefined {
+    if (typeof value !== 'string') return undefined;
+    return Array.from(value).slice(0, limit).join('');
+  }
+
+  private normalizeDelegationProgress(value: unknown): DelegationProgressInfo | undefined {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const raw = value as Record<string, unknown>;
+    const taskId = this.boundedDelegationProgressText(raw.taskId, 200);
+    const backend = this.boundedDelegationProgressText(raw.backend, 100);
+    if (!taskId || !backend || typeof raw.phase !== 'string' || !DELEGATION_PROGRESS_PHASES.has(raw.phase as DelegationProgressInfo['phase'])) return undefined;
+
+    const toolUseRaw = raw.toolUse;
+    const toolUse = toolUseRaw && typeof toolUseRaw === 'object' && !Array.isArray(toolUseRaw)
+      ? (() => {
+        const tool = toolUseRaw as Record<string, unknown>;
+        const name = this.boundedDelegationProgressText(tool.name, 120);
+        if (!name) return undefined;
+        return { name, id: this.boundedDelegationProgressText(tool.id, 200) ?? '', input: {} };
+      })()
+      : undefined;
+    const toolResultRaw = raw.toolResult;
+    const toolResult = toolResultRaw && typeof toolResultRaw === 'object' && !Array.isArray(toolResultRaw)
+      ? (() => {
+        const result = toolResultRaw as Record<string, unknown>;
+        const toolUseId = this.boundedDelegationProgressText(result.tool_use_id, 200);
+        if (!toolUseId) return undefined;
+        return { tool_use_id: toolUseId, content: '', is_error: result.is_error === true };
+      })()
+      : undefined;
+    const startedAt = typeof raw.startedAt === 'number' && Number.isFinite(raw.startedAt) && raw.startedAt >= 0
+      ? raw.startedAt : undefined;
+    return {
+      taskId,
+      backend,
+      phase: raw.phase as DelegationProgressInfo['phase'],
+      objective: this.boundedDelegationProgressText(raw.objective, 1000),
+      toolUse,
+      toolResult,
+      summary: this.boundedDelegationProgressText(raw.summary, 4000),
+      error: this.boundedDelegationProgressText(raw.error, 4000),
+      startedAt,
+    };
+  }
+
+  private appendDelegationProgressEvent(state: DelegationProgressState, label: string, isError = false): void {
+    state.events.push({ label, ...(isError ? { isError: true } : {}) });
+    if (state.events.length > 8) {
+      state.events.shift();
+      state.hiddenEventCount++;
+    }
+  }
+
+  /** Update one bounded, nested worker panel rather than flattening child tool cards. */
+  private async handleDelegationProgress(messageId: string, openId: string, value: unknown): Promise<void> {
+    const progress = this.normalizeDelegationProgress(value);
+    if (!progress) {
+      console.log(`[RouterServer] Ignoring malformed delegation progress for ${messageId}`);
+      return;
+    }
+    const streamData = this.streamingMessages.get(messageId);
+    if (!streamData || streamData.finalizing) return;
+
+    let state = streamData.delegationProgress.get(progress.taskId);
+    if (state?.backend !== undefined && state.backend !== progress.backend) {
+      console.log(`[RouterServer] Ignoring delegated progress with inconsistent backend for ${progress.taskId}`);
+      return;
+    }
+    if (state?.terminal) return;
+
+    if (!state) {
+      if (streamData.currentTextContent.trim()) {
+        streamData.elements.push(...this.renderCurrentText(streamData));
+        streamData.currentTextContent = '';
+        streamData.recoveryPlainText = false;
+        streamData.lastRenderedTextLength = 0;
+      }
+      state = {
+        taskId: progress.taskId,
+        backend: progress.backend,
+        phase: 'started',
+        startedAt: progress.startedAt ?? Date.now(),
+        objective: progress.objective,
+        activeToolCount: 0,
+        events: [],
+        hiddenEventCount: 0,
+        activeToolIds: new Set(),
+        toolNames: new Map(),
+        terminal: false,
+        elementIndex: streamData.elements.length + 1,
+      };
+      streamData.delegationProgress.set(progress.taskId, state);
+      streamData.elements.push(createDividerElement(), createDelegationProgressElement(state));
+    }
+
+    if (!state.objective && progress.objective) state.objective = progress.objective;
+    if (progress.phase === 'waiting_input') state.inputRequest = progress.summary;
+    else state.inputRequest = undefined;
+    if (progress.phase !== 'waiting_input' && progress.summary !== undefined) state.summary = progress.summary;
+    if (progress.error !== undefined) state.error = progress.error;
+    state.phase = progress.phase;
+
+    switch (progress.phase) {
+      case 'started':
+        this.appendDelegationProgressEvent(state, 'Worker session started');
+        break;
+      case 'tool_use': {
+        const tool = progress.toolUse;
+        const name = tool?.name || 'Tool';
+        if (tool?.id) {
+          state.activeToolIds.add(tool.id);
+          state.toolNames.set(tool.id, name);
+        }
+        this.appendDelegationProgressEvent(state, `${name} started`);
+        break;
+      }
+      case 'tool_result': {
+        const result = progress.toolResult;
+        const name = result?.tool_use_id ? state.toolNames.get(result.tool_use_id) ?? 'Tool' : 'Tool';
+        if (result?.tool_use_id) state.activeToolIds.delete(result.tool_use_id);
+        this.appendDelegationProgressEvent(state, `${name} ${result?.is_error ? 'failed' : 'completed'}`, result?.is_error === true);
+        break;
+      }
+      case 'waiting_input':
+        this.appendDelegationProgressEvent(state, 'Waiting for user input');
+        break;
+      default:
+        if (DELEGATION_PROGRESS_TERMINAL_PHASES.has(progress.phase)) {
+          state.activeToolIds.clear();
+          state.terminal = true;
+          this.appendDelegationProgressEvent(state, `Worker ${progress.phase.replace('_', ' ')}`, progress.phase !== 'succeeded');
+        }
+        break;
+    }
+    state.activeToolCount = state.activeToolIds.size;
+    streamData.elements[state.elementIndex] = createDelegationProgressElement(state);
+    streamData.createdAt = Date.now();
+
+    if (streamData.feishuMessageId) await this.updateStreamingText(messageId, openId, streamData);
+  }
+
   /**
    * Handle redacted thinking event
    * This occurs when AI reasoning is filtered by safety systems (Claude 3.7 Sonnet, Gemini)
@@ -1052,6 +1217,7 @@ export class RouterServer {
         openId, deviceId, threadId, threadName: info.threadName, feishuMessageId: cardId,
         elements: [createMarkdownElement(intro)], currentTextContent: '', hasUpdated: false,
         createdAt: Date.now(), updatePending: false, finalizing: false, lastRenderedTextLength: 0,
+        delegationProgress: new Map(),
         recoveryId: info.recoveryId, recoveryPlainText: true, recoveryCwd: info.cwd,
       });
       this.cardThreadMap.set(cardId, { threadId, deviceId, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS });
@@ -1108,6 +1274,7 @@ export class RouterServer {
         updatePending: false,
         finalizing: false,
         lastRenderedTextLength: 0,
+        delegationProgress: new Map(),
         queueStarted: info,
         threads: Array.isArray(message.threads) ? message.threads : undefined,
       });

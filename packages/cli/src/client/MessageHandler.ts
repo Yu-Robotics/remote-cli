@@ -1,7 +1,7 @@
 import type { ApprovalRequestInfo, ApprovalRequestMessage, ApprovalResponseMessage, ApprovalResolvedMessage, ApprovalStatus } from '../types';
 import { WebSocketClient } from './WebSocketClient';
 import { DirectoryGuard } from '../security/DirectoryGuard';
-import { IncomingMessage, OutgoingMessage, StructuredContent, ToolUseInfo, ToolResultInfo, Attachment, ImageBlock, QueueConfirmationInfo, TaskNotificationInfo } from '../types';
+import { IncomingMessage, OutgoingMessage, StructuredContent, ToolUseInfo, ToolResultInfo, DelegationProgressInfo, Attachment, ImageBlock, QueueConfirmationInfo, TaskNotificationInfo } from '../types';
 import { ThreadExecutorPool } from '../thread/ThreadExecutorPool';
 import { ThreadManager } from '../thread/ThreadManager';
 import { DEFAULT_THREAD_NAME } from '../thread/types';
@@ -146,6 +146,7 @@ export class MessageHandler {
   private readonly abortOperations = new Map<string, Promise<void>>();
   private automaticUpdateInProgress = false;
   private approvalCardsSupported = false;
+  private delegationProgressSupported = false;
   private readonly pendingApprovalCards = new Map<string, { request: ApprovalRequestMessage; executor: IExecutor; delegated?: boolean }>();
   private readonly delegation: DelegationManager;
   private readonly delegationBridges = new Map<string, DelegationBridge>();
@@ -202,6 +203,7 @@ export class MessageHandler {
         const data = (message as any).data;
         if (data?.success !== true) return;
         this.approvalCardsSupported = data.capabilities?.approvalCards === true;
+        this.delegationProgressSupported = data.capabilities?.delegationProgress === true;
         for (const pending of this.pendingApprovalCards.values()) {
           if (this.approvalCardsSupported) this.sendApprovalMessage(pending.request);
           else this.showApprovalFallback(pending.request.messageId);
@@ -1911,6 +1913,8 @@ You can also use natural language commands to control Claude Code CLI.`,
           onToolUse: tool => this.sendToolUse(messageId, threadId, tool),
           onToolResult: result => this.sendToolResult(messageId, threadId, result),
           onNotice: text => this.sendStreamChunk(messageId, threadId, text),
+          onProgress: progress => this.delegationProgressSupported
+            && this.sendDelegationProgress(messageId, threadId, progress),
           onApproval: (request, child) => this.forwardApproval(request, child, messageId, threadId, true),
           onApprovalResolved: (id, status) => this.resolveApprovalCard(id, status),
           isWorkspaceBusy: cwd => this.threadManager.listThreads().some(other => {
@@ -2236,6 +2240,28 @@ You can also use natural language commands to control Claude Code CLI.`,
       });
     } catch (error) {
       console.error('Failed to send tool result:', error);
+    }
+  }
+
+  private sendDelegationProgress(
+    messageId: string,
+    threadId: string | undefined,
+    delegationProgress: DelegationProgressInfo,
+  ): boolean {
+    try {
+      this.wsClient.send({
+        type: 'stream',
+        messageId,
+        streamType: 'delegation_progress',
+        delegationProgress,
+        openId: this.getMessageOpenId(messageId),
+        threadId,
+        timestamp: Date.now(),
+      });
+      return true;
+    } catch (error) {
+      console.error('Failed to send delegated worker progress:', error);
+      return false;
     }
   }
 

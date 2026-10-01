@@ -219,6 +219,34 @@ describe('delegation in the existing thread workflow', () => {
     expect(main.execute).toHaveBeenLastCalledWith('Ordinary request', expect.anything());
   });
 
+  it('sends child tool progress as nested updates when the Router advertises support', async () => {
+    await handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: { delegationProgress: true } } } as any);
+    await handler.handleMessage(message('enable', '/delegation on'));
+    worker.execute.mockImplementationOnce(async (_prompt: string, options: ExecuteOptions) => {
+      options.onToolUse?.({ id: 'inspect-1', name: 'Read', input: { file_path: 'README.md' } });
+      options.onToolResult?.({ tool_use_id: 'inspect-1', content: 'complete', is_error: false });
+      return { success: true, output: 'Nested review complete' };
+    });
+    main.execute.mockImplementationOnce(async () => {
+      const task = await call('remote_cli_delegate', { backend: 'claude', objective: 'Review the README' });
+      await call('remote_cli_result', { taskId: task.taskId });
+      return { success: true, output: 'Coordinator conclusion' };
+    });
+
+    await handler.handleMessage(message('parent', 'Review this'));
+
+    const progress = socket.send.mock.calls.map(([value]: any[]) => value)
+      .filter((value: any) => value.messageId === 'parent' && value.streamType === 'delegation_progress');
+    expect(progress.map((value: any) => value.delegationProgress.phase)).toEqual([
+      'started', 'tool_use', 'tool_result', 'succeeded',
+    ]);
+    expect(progress.at(-1)?.delegationProgress).toMatchObject({
+      backend: 'claude', summary: 'Nested review complete',
+    });
+    expect(socket.send.mock.calls.map(([value]: any[]) => value)
+      .some((value: any) => value.messageId === 'parent' && value.streamType === 'tool_use')).toBe(false);
+  });
+
   it('resends a child approval after registration and sends the decision only to the child', async () => {
     await handler.handleMessage(message('enable', '/delegation on'));
     await handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: { approvalCards: true } } } as any);

@@ -34,6 +34,31 @@ export interface ToolResultInfo {
   diff?: string;
 }
 
+/** Lifecycle event for a delegated worker displayed inside its coordinator card. */
+export type DelegationProgressPhase =
+  | 'started'
+  | 'tool_use'
+  | 'tool_result'
+  | 'waiting_input'
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled'
+  | 'timed_out'
+  | 'interrupted';
+
+/** Bounded delegated-worker progress associated with the coordinator's streaming card. */
+export interface DelegationProgressInfo {
+  taskId: string;
+  backend: string;
+  phase: DelegationProgressPhase;
+  objective?: string;
+  toolUse?: ToolUseInfo;
+  toolResult?: ToolResultInfo;
+  summary?: string;
+  error?: string;
+  startedAt?: number;
+}
+
 /**
  * Content block types for structured streaming messages
  */
@@ -160,7 +185,7 @@ export interface IncomingMessage {
 /**
  * Stream message types
  */
-export type StreamType = 'text' | 'tool_use' | 'tool_result' | 'redacted_thinking' | 'plan_mode' | 'image';
+export type StreamType = 'text' | 'tool_use' | 'tool_result' | 'redacted_thinking' | 'plan_mode' | 'image' | 'delegation_progress';
 
 /**
  * Background task notification payload shared by executor backends
@@ -214,6 +239,8 @@ export interface OutgoingMessage {
   toolUse?: ToolUseInfo;
   /** Tool result info (when streamType === 'tool_result') */
   toolResult?: ToolResultInfo;
+  /** Delegated-worker lifecycle update (when streamType === 'delegation_progress'). */
+  delegationProgress?: DelegationProgressInfo;
   /** Plan content (when streamType === 'plan_mode') */
   planContent?: string;
   /** Generated image content (when streamType === 'image') */
