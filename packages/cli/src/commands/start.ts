@@ -217,6 +217,7 @@ export async function startCommand(
     const wsClient = new WebSocketClient(wsUrl, deviceId);
 
     const messageHandler = new MessageHandler(wsClient, threadPool, threadManager, directoryGuard, config);
+    await messageHandler.reconcilePendingDelegatedWorkers();
     const automaticUpdater = new AutomaticUpdater(CLI_VERSION, messageHandler, {
       restartAfterUpdate: options.nonInteractive === true,
       beforeRestart: async () => {

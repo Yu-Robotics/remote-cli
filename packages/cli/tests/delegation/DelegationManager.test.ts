@@ -92,8 +92,8 @@ describe('cross-backend delegation', () => {
     const onProgress = vi.fn(() => true);
     parent.onProgress = onProgress;
     vi.mocked(worker.execute).mockImplementationOnce(async (_prompt, options) => {
-      options.onToolUse?.({ id: 'read-1', name: 'Read', input: { file_path: 'README.md' } });
-      options.onToolResult?.({ tool_use_id: 'read-1', content: 'read complete', is_error: false });
+      options.onToolUse?.({ id: 'read-1', name: 'Read', input: { file_path: 'README.md', payload: 'x'.repeat(100_000) } });
+      options.onToolResult?.({ tool_use_id: 'read-1', content: 'x'.repeat(100_000), is_error: false });
       return { success: true, output: 'Review complete' };
     });
 
@@ -104,6 +104,8 @@ describe('cross-backend delegation', () => {
     expect(onProgress.mock.calls.map(([progress]) => progress.phase)).toEqual([
       'started', 'tool_use', 'tool_result', 'succeeded',
     ]);
+    expect(onProgress.mock.calls[1][0].toolUse).toEqual({ id: 'read-1', name: 'Read', input: {} });
+    expect(onProgress.mock.calls[2][0].toolResult).toEqual({ tool_use_id: 'read-1', content: '', is_error: false });
     expect(onProgress).toHaveBeenLastCalledWith(expect.objectContaining({
       taskId: task.taskId,
       backend: 'codex',
@@ -715,7 +717,7 @@ describe('cross-backend delegation', () => {
     fs.writeFileSync(directPointer, '{"id":"direct"}');
     await scope.close();
 
-    expect(await manager.invalidateWorkspaceGeneration(parent.thread.id, 0)).toBe(1);
+    expect(await manager.invalidateWorkspaceGeneration(parent.thread.id, 1)).toEqual({ removed: 1, failed: 0 });
     expect(fs.existsSync(lanePointer)).toBe(false);
     expect(fs.existsSync(directPointer)).toBe(true);
 
@@ -772,6 +774,65 @@ describe('cross-backend delegation', () => {
     expect(manager.blocksWorkspace(home, 'other')).toBe(true);
     await expect(manager.laneStore.lanesForThread(parent.thread.id, 'codex')).resolves.toEqual([
       expect.objectContaining({ state: 'dirty' }),
+    ]);
+  });
+
+  it('reports cleanup failure and keeps the lane retryable when deleting worker data', async () => {
+    const acquired = await manager.laneStore.acquire({
+      threadId: parent.thread.id, backend: 'codex', workingDirectory: home, workspaceGeneration: 0,
+    });
+    await manager.laneStore.markReady(acquired.lane.id);
+    const pointer = path.join(home, '.remote-cli', 'codex-sessions', `${acquired.lane.executorThreadId}.json`);
+    fs.mkdirSync(pointer, { recursive: true });
+
+    await expect(manager.deleteWorkerLanes(parent.thread.id)).rejects.toThrow('cleanup failed for 1 of 1');
+    await expect(manager.laneStore.cleanupCandidates()).resolves.toEqual([
+      expect.objectContaining({ id: acquired.lane.id, cleanupPending: true, cleanupAttempts: 1 }),
+    ]);
+  });
+
+  it('retries pending lane cleanup on reconciliation without reusing the native pointer', async () => {
+    const acquired = await manager.laneStore.acquire({
+      threadId: parent.thread.id, backend: 'codex', workingDirectory: home, workspaceGeneration: 0,
+    });
+    await manager.laneStore.markReady(acquired.lane.id);
+    await manager.laneStore.markCleanupFailure(acquired.lane.id, 'Previous cleanup failed');
+    const pointer = path.join(home, '.remote-cli', 'codex-sessions', `${acquired.lane.executorThreadId}.json`);
+    fs.mkdirSync(path.dirname(pointer), { recursive: true });
+    fs.writeFileSync(pointer, '{}');
+
+    const restored = new DelegationManager(guard, factory as any, new BackendRegistry(async () => 'test 1.0'));
+    await expect(restored.reconcilePendingWorkerLanes()).resolves.toEqual({ removed: 1, failed: 0 });
+    expect(fs.existsSync(pointer)).toBe(false);
+    await expect(restored.laneStore.lanesForThread(parent.thread.id)).resolves.toEqual([]);
+  });
+
+  it('keeps startup reconciliation available when a pending lane still cannot be removed', async () => {
+    const acquired = await manager.laneStore.acquire({
+      threadId: parent.thread.id, backend: 'codex', workingDirectory: home, workspaceGeneration: 0,
+    });
+    await manager.laneStore.markCleanupFailure(acquired.lane.id, 'Previous cleanup failed');
+    const pointer = path.join(home, '.remote-cli', 'codex-sessions', `${acquired.lane.executorThreadId}.json`);
+    fs.mkdirSync(pointer, { recursive: true });
+
+    const restored = new DelegationManager(guard, factory as any, new BackendRegistry(async () => 'test 1.0'));
+    await expect(restored.reconcilePendingWorkerLanes()).resolves.toEqual({ removed: 0, failed: 1 });
+    await expect(restored.laneStore.cleanupCandidates()).resolves.toEqual([
+      expect.objectContaining({ id: acquired.lane.id, cleanupPending: true, cleanupAttempts: 2 }),
+    ]);
+  });
+
+  it('reports failed old-lane cleanup without undoing a workspace change', async () => {
+    const acquired = await manager.laneStore.acquire({
+      threadId: parent.thread.id, backend: 'codex', workingDirectory: home, workspaceGeneration: 0,
+    });
+    await manager.laneStore.markReady(acquired.lane.id);
+    const pointer = path.join(home, '.remote-cli', 'codex-sessions', `${acquired.lane.executorThreadId}.json`);
+    fs.mkdirSync(pointer, { recursive: true });
+
+    await expect(manager.invalidateWorkspaceGeneration(parent.thread.id, 1)).resolves.toEqual({ removed: 0, failed: 1 });
+    await expect(manager.laneStore.cleanupCandidates()).resolves.toEqual([
+      expect.objectContaining({ id: acquired.lane.id, cleanupPending: true }),
     ]);
   });
 });

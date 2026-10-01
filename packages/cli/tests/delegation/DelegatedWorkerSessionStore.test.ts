@@ -60,7 +60,19 @@ describe('DelegatedWorkerSessionStore', () => {
     expect(lanes.find(lane => lane.id === first.lane.id)).toMatchObject({ state: 'dirty', cleanupPending: false });
   });
 
-  it('marks only the old workspace generation for cleanup', async () => {
+  it('retains a failed cleanup request across a CLI restart', async () => {
+    const firstStore = new DelegatedWorkerSessionStore(directory);
+    const first = await firstStore.acquire(identity(workspace));
+    await firstStore.markReady(first.lane.id);
+    await firstStore.markCleanupFailure(first.lane.id, 'Permission denied');
+
+    const restored = new DelegatedWorkerSessionStore(directory);
+    expect(await restored.cleanupCandidates()).toEqual([
+      expect.objectContaining({ id: first.lane.id, state: 'dirty', cleanupPending: true, cleanupAttempts: 1 }),
+    ]);
+  });
+
+  it('marks every older workspace generation for cleanup', async () => {
     const store = new DelegatedWorkerSessionStore(directory);
     const oldLane = await store.acquire(identity(workspace, 0));
     await store.markRunning(oldLane.lane.id);
@@ -68,11 +80,16 @@ describe('DelegatedWorkerSessionStore', () => {
     const currentLane = await store.acquire(identity(workspace, 1));
     await store.markRunning(currentLane.lane.id);
     await store.markReady(currentLane.lane.id);
+    const latestLane = await store.acquire(identity(workspace, 2));
+    await store.markReady(latestLane.lane.id);
 
-    const invalidated = await store.invalidateGeneration('parent-thread', 0);
+    const invalidated = await store.invalidateGeneration('parent-thread', 2);
 
-    expect(invalidated).toEqual([expect.objectContaining({ id: oldLane.lane.id, state: 'dirty', cleanupPending: true })]);
+    expect(invalidated).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: oldLane.lane.id, state: 'dirty', cleanupPending: true }),
+      expect.objectContaining({ id: currentLane.lane.id, state: 'dirty', cleanupPending: true }),
+    ]));
     const lanes = await store.lanesForThread('parent-thread');
-    expect(lanes.find(lane => lane.id === currentLane.lane.id)).toMatchObject({ state: 'ready' });
+    expect(lanes.find(lane => lane.id === latestLane.lane.id)).toMatchObject({ state: 'ready' });
   });
 });

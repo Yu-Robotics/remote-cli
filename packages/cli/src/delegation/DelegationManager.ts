@@ -402,14 +402,16 @@ ${prompt}`));
                 task.waitingInputText = undefined;
                 if (tool.id) task.activeToolIds.add(tool.id);
                 noteToolActivity(task, 'tool_use');
-                reportProgress(task, { phase: 'tool_use', toolUse: tool, startedAt: task.record.startedAt });
+                reportProgress(task, { phase: 'tool_use', toolUse: { id: tool.id, name: tool.name, input: {} }, startedAt: task.record.startedAt });
               },
               onToolResult: toolResult => {
                 if (task.record.state !== 'running') return;
                 task.waitingInputText = undefined;
                 if (toolResult.tool_use_id) task.activeToolIds.delete(toolResult.tool_use_id);
                 noteToolActivity(task, 'tool_result');
-                reportProgress(task, { phase: 'tool_result', toolResult, startedAt: task.record.startedAt });
+                reportProgress(task, { phase: 'tool_result', toolResult: {
+                  tool_use_id: toolResult.tool_use_id, content: '', is_error: toolResult.is_error,
+                }, startedAt: task.record.startedAt });
               },
               onApprovalRequest: request => !closed && task.record.state === 'running' && parent.onApproval({ ...request,
                 description: `[${backend} delegated task] ${request.description}`, canRemember: false }, task.executor!),
@@ -657,12 +659,17 @@ ${prompt}`));
   waitingExecutor(threadId: string): IExecutor | undefined { return this.scopes.get(threadId)?.waitingExecutor(); }
   hasActiveTasks(threadId: string): boolean { return this.scopes.get(threadId)?.hasTasks() ?? false; }
 
-  /** Remove lanes from an old workspace generation after a successful `/cd`. */
-  async invalidateWorkspaceGeneration(threadId: string, generation: number): Promise<number> {
+  /** Retry previously confirmed cleanup requests without touching uncertain interrupted workers. */
+  async reconcilePendingWorkerLanes(): Promise<{ removed: number; failed: number }> {
+    return this.removeWorkerLanes(await this.laneStore.cleanupCandidates(), true);
+  }
+
+  /** Remove all lanes older than the new workspace generation after a successful `/cd`. */
+  async invalidateWorkspaceGeneration(threadId: string, currentGeneration: number): Promise<{ removed: number; failed: number }> {
     if (this.hasActiveTasks(threadId)) {
       throw new Error('Cannot change working directory while a delegated worker is running. Wait for it to finish or send /abort first.');
     }
-    return this.removeWorkerLanes(await this.laneStore.invalidateGeneration(threadId, generation));
+    return this.removeWorkerLanes(await this.laneStore.invalidateGeneration(threadId, currentGeneration), true);
   }
 
   /** Forget one backend lane or all lanes for an idle parent thread. */
@@ -670,7 +677,8 @@ ${prompt}`));
     if (this.hasActiveTasks(threadId)) {
       throw new Error('Cannot reset delegated worker context while a delegated worker is running. Wait for it to finish or send /abort first.');
     }
-    return this.removeWorkerLanes(await this.laneStore.markForReset(threadId, backend));
+    const result = await this.removeWorkerLanes(await this.laneStore.markForReset(threadId, backend));
+    return result.removed;
   }
 
   /** Thread deletion is executor-free so it works whether delegation is currently enabled or not. */
@@ -678,23 +686,29 @@ ${prompt}`));
     if (this.hasActiveTasks(threadId)) {
       throw new Error('Cannot delete delegated worker context while a delegated worker is running.');
     }
-    return this.removeWorkerLanes(await this.laneStore.markForReset(threadId));
+    const result = await this.removeWorkerLanes(await this.laneStore.markForReset(threadId));
+    return result.removed;
   }
 
-  private async removeWorkerLanes(lanes: DelegatedWorkerLane[]): Promise<number> {
+  private async removeWorkerLanes(lanes: DelegatedWorkerLane[], tolerateFailures = false): Promise<{ removed: number; failed: number }> {
     let removed = 0;
+    let failed = 0;
     for (const lane of lanes) {
       try {
         await cleanupDelegatedWorkerLane(lane);
         await this.laneStore.remove(lane.id);
         removed++;
       } catch (error) {
+        failed++;
         const detail = error instanceof Error ? error.message : 'Local worker lane cleanup failed';
         await this.laneStore.markCleanupFailure(lane.id, detail).catch(() => undefined);
         console.warn('[Delegation] Worker lane cleanup failed:', detail);
       }
     }
-    return removed;
+    if (failed && !tolerateFailures) {
+      throw new Error(`Delegated worker cleanup failed for ${failed} of ${lanes.length} lane(s). ${removed} lane(s) were removed; retry after checking filesystem permissions.`);
+    }
+    return { removed, failed };
   }
 
   blocksWorkspace(cwd: string, threadId: string): boolean {

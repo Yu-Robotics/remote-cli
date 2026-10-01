@@ -519,6 +519,13 @@ lanes. `/delegation reset` discards every lane in the current thread, while
 `/delegation reset <backend>` discards only that backend's lane. Reset and
 working-directory changes are refused while a delegated worker is active;
 `/thread delete` removes all of that thread's worker lanes.
+If lane cleanup fails, reset or thread deletion reports an error and retains the
+pending lane record for retry. The CLI retries explicitly pending cleanup on
+startup; it does not automatically delete a lane from a worker whose process
+exit could not be confirmed. Check that the worker has stopped before retrying
+cleanup in that case.
+If cleanup fails after `/cd`, the directory change still succeeds and the
+response reports the pending lane cleanup separately.
 
 The shared Router can be upgraded before local CLIs. This feature keeps protocol
 version 1 and its existing command, tool-progress, and response formats. Older

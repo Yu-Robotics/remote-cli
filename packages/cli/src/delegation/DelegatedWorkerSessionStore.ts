@@ -185,12 +185,12 @@ export class DelegatedWorkerSessionStore {
     return [...this.lanes.values()].filter(lane => lane.state === 'dirty' && lane.cleanupPending).map(clone);
   }
 
-  async invalidateGeneration(threadId: string, generation: number): Promise<DelegatedWorkerLane[]> {
+  async invalidateGeneration(threadId: string, currentGeneration: number): Promise<DelegatedWorkerLane[]> {
     await this.initialize();
     return this.mutate(async () => {
       const changed: DelegatedWorkerLane[] = [];
       for (const lane of this.lanes.values()) {
-        if (lane.threadId !== threadId || lane.workspaceGeneration !== generation) continue;
+        if (lane.threadId !== threadId || lane.workspaceGeneration >= currentGeneration) continue;
         const next: DelegatedWorkerLane = { ...lane, state: 'dirty', cleanupPending: true,
           cleanupError: 'Working directory changed; delegated worker context was invalidated.', updatedAt: Date.now() };
         await this.writeAndRemember(next);
@@ -253,7 +253,7 @@ export class DelegatedWorkerSessionStore {
         // A process may have died between any write and terminal confirmation.
         // Only a ready lane is resumable after a CLI restart.
         if (lane.state !== 'ready') {
-          const dirty: DelegatedWorkerLane = { ...lane, state: 'dirty', cleanupPending: false,
+          const dirty: DelegatedWorkerLane = { ...lane, state: 'dirty', cleanupPending: lane.cleanupPending === true,
             cleanupError: lane.cleanupError ?? 'The CLI stopped before worker cleanup was confirmed.', updatedAt: Date.now() };
           await this.writeRecord(dirty);
           this.lanes.set(dirty.id, dirty);
