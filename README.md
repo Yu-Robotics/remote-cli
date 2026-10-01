@@ -500,12 +500,14 @@ With CLI and Router 1.6.106 and newer, the panel uses the latest bounded
 assistant response text as its current activity, shows a concurrently active
 tool separately, and includes elapsed time and the last real tool activity. A
 display update is flushed before a following tool event so a brief update is
-not lost. It refreshes elapsed time at a low frequency while the worker remains
-active. Raw tool output and reasoning are excluded from latest-text snapshots;
-assistant response text is escaped and bounded. Text snapshots never extend
-worker liveness timeouts. The latest-text capability is negotiated separately:
-peers without it keep tool-only nested progress, while peers without nested
-progress keep the existing start and terminal-result blocks.
+not lost. CLI and Router 1.6.107 and newer present that response as a primary
+two-line activity block, with the active tool and timing shown as secondary
+information. It refreshes elapsed time at a low frequency while the worker
+remains active. Raw tool output and reasoning are excluded from latest-text
+snapshots; assistant response text is escaped and bounded. Text snapshots never
+extend worker liveness timeouts. The latest-text capability is negotiated
+separately: peers without it keep tool-only nested progress, while peers without
+nested progress keep the existing start and terminal-result blocks.
 
 For staged rollout, enable one trial thread first. Never-enabled threads skip
 all delegation setup: no managed tool registration, prompt prefix, backend

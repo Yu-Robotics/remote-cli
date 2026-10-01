@@ -508,6 +508,7 @@ const DELEGATION_PROGRESS_STYLES: Record<DelegationProgressPhase, { color: strin
 };
 
 const FALLBACK_DELEGATION_PROGRESS_STYLE = { color: 'grey', icon: '🤖', label: 'WORKER UPDATE', terminal: false };
+const DELEGATION_CURRENT_ACTIVITY_LIMIT = 800;
 
 /** Escape untrusted worker text so it cannot become Feishu card markup. */
 function literalWorkerText(value: string, limit: number): string {
@@ -534,14 +535,8 @@ function lastToolActivity(timestamp?: number): string {
   return `${Math.floor(seconds / 3600)}h ago`;
 }
 
-function delegatedCurrentActivity(state: DelegationProgressCardState, terminal: boolean): string {
-  if (terminal) return 'Task finished';
+function delegatedCurrentActivity(state: DelegationProgressCardState): string {
   if (state.phase === 'waiting_input') return 'Waiting for user input';
-  if (state.latestText) return state.latestText;
-  if (state.currentToolName) {
-    const duration = state.currentToolStartedAt ? ` · running for ${delegationElapsed(state.currentToolStartedAt)}` : '';
-    return `${state.currentToolName}${duration}`;
-  }
   return state.phase === 'started' ? 'Starting worker session' : 'Preparing the next step';
 }
 
@@ -556,13 +551,19 @@ export function createDelegationProgressElement(state: DelegationProgressCardSta
   const body: string[] = [];
 
   if (!style.terminal) {
-    const currentActivityLimit = state.latestText ? 1_200 : 260;
-    body.push(`**Current activity:** ${literalWorkerText(delegatedCurrentActivity(state, style.terminal), currentActivityLimit)}`);
-    if (state.latestText && state.currentToolName) {
-      const duration = state.currentToolStartedAt ? ` · running for ${delegationElapsed(state.currentToolStartedAt)}` : '';
-      body.push(`**Current tool:** ${literalWorkerText(`${state.currentToolName}${duration}`, 260)}`);
+    if (state.latestText) {
+      body.push('**📝 Current activity**');
+      body.push(literalWorkerText(state.latestText, DELEGATION_CURRENT_ACTIVITY_LIMIT));
+      if (state.currentToolName) body.push('');
+    } else if (!state.currentToolName) {
+      body.push('**📝 Current activity**');
+      body.push(literalWorkerText(delegatedCurrentActivity(state), 260));
     }
-    body.push(`**Elapsed:** ${delegationElapsed(state.startedAt)} · **Last tool activity:** ${lastToolActivity(state.lastToolActivityAt)}`);
+    if (state.currentToolName) {
+      const duration = state.currentToolStartedAt ? ` · running for ${delegationElapsed(state.currentToolStartedAt)}` : '';
+      body.push(`**⚙️ Current tool** · ${literalWorkerText(`${state.currentToolName}${duration}`, 260)}`);
+    }
+    body.push(`_Elapsed ${delegationElapsed(state.startedAt)} · Last tool activity ${lastToolActivity(state.lastToolActivityAt)}_`);
   } else {
     body.push(`**Status:** ${literalWorkerText(status, 120)}`);
     body.push(`**Elapsed:** ${delegationElapsed(state.startedAt)}`);
