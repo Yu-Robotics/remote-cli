@@ -598,12 +598,13 @@ describe('delegation in the existing thread workflow', () => {
       return { success: true };
     }).mockImplementationOnce(async (prompt: string, options: ExecuteOptions) => {
       expect(prompt).toContain(state);
-      expect(prompt).toContain(state === 'failed' ? 'Quota exhausted' : 'Delegated task timed out');
+      expect(prompt).toContain(state === 'failed' ? 'Quota exhausted' : 'without tool activity');
       const notices = socket.send.mock.calls.map(([value]: any[]) => value)
         .filter((value: any) => value.messageId === 'parent' && value.streamType === 'text')
         .map((value: any) => value.chunk).join('');
       expect(notices).toContain('Claude Code · Delegated task');
-      expect(notices).toContain(`**Reason:** <raw>${state === 'failed' ? 'Quota exhausted' : 'Delegated task timed out'}</raw>`);
+      if (state === 'failed') expect(notices).toContain('**Reason:** <raw>Quota exhausted</raw>');
+      else expect(notices).toContain('**Reason:** <raw>Delegated task stopped after');
       options.onStream?.('The worker could not finish the request.');
       return { success: true };
     });

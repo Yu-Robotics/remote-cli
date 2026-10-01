@@ -280,11 +280,11 @@ export class PiExecutor implements IExecutor {
         output: [],
         sawAgentStart: false,
       };
-      if (options.timeout && options.timeout > 0) {
+      if (options.timeout !== 0 && options.timeout && options.timeout > 0) {
         active.timeoutTimer = setTimeout(() => {
           void this.failActive(active, `Command timed out after ${options.timeout}ms`);
         }, options.timeout);
-      } else {
+      } else if (options.timeout !== 0) {
         active.timeoutTimer = setTimeout(() => {
           void this.failActive(active, `Command timed out after ${DEFAULT_TURN_TIMEOUT_MS}ms`);
         }, DEFAULT_TURN_TIMEOUT_MS);

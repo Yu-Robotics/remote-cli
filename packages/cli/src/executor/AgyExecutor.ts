@@ -110,6 +110,7 @@ interface ActiveCommand {
   options: ExecuteOptions;
   resolve: (result: ExecuteResult) => void;
   timeoutTimer?: ReturnType<typeof setTimeout>;
+  inactivityTimeoutMs?: number;
 }
 
 /**
@@ -563,7 +564,7 @@ export class AgyExecutor implements IExecutor {
         return;
       }
 
-      const active: ActiveCommand = { options, resolve };
+      const active: ActiveCommand = { options, resolve, inactivityTimeoutMs: options.inactivityTimeout };
       if (options.timeout && options.timeout > 0) {
         active.timeoutTimer = setTimeout(() => {
           console.warn(`[AgyExecutor] Command timed out after ${options.timeout}ms, killing process`);
@@ -625,10 +626,12 @@ export class AgyExecutor implements IExecutor {
    */
   private armInactivityTimer(): void {
     this.clearInactivityTimer();
+    const inactivityTimeoutMs = this.activeCommand?.inactivityTimeoutMs ?? this.inactivityTimeoutMs;
+    if (!Number.isFinite(inactivityTimeoutMs) || inactivityTimeoutMs <= 0) return;
     this.inactivityTimer = setTimeout(() => {
-      console.warn(`[AgyExecutor] No output for ${this.inactivityTimeoutMs}ms, killing process`);
-      this.killProcess(`No output from agy for ${this.inactivityTimeoutMs}ms (inactivity timeout)`);
-    }, this.inactivityTimeoutMs);
+      console.warn(`[AgyExecutor] No output for ${inactivityTimeoutMs}ms, killing process`);
+      this.killProcess(`No output from agy for ${inactivityTimeoutMs}ms (inactivity timeout)`);
+    }, inactivityTimeoutMs);
   }
 
   private clearInactivityTimer(): void {

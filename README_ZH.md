@@ -462,7 +462,7 @@ create extra thread buttons.
 ```text
 /delegation
 /delegation on
-先让 Pi 检查相关文件，再让 Codex 实现商定的修复，最后让 Claude Code 审查。每一步都等待结果后再继续。
+先让 Pi 检查相关文件，再让 Codex 实现商定的修复，最后让 Claude Code 审查。需要时可查询结果，也可在分发后直接返回，由 Remote CLI 自动等待并恢复协调者。
 /delegation off
 ```
 
@@ -514,15 +514,7 @@ a new worker is not replayed after failure. Abort and shutdown suppress the
 failure-result fallback as well as further continuation.
 Cancellation does not undo existing edits.
 
-There is one active worker per parent and at most three per CLI process in
-non-overlapping workspaces. A turn can start at most 12 tasks; each worker has a
-30-minute limit. From CLI 1.6.95, intermediate text and tool-result volume does
-not abort workers; the delegation manager does not retain those intermediate
-outputs. Each returned result is limited to 32 KiB. Oversized result text keeps
-its beginning and end, marks the omitted middle, and sets `truncated: true`
-without changing the worker's success or failure status. Combined continuations
-use the same truncation policy within their 64 KiB budget. These limits bound
-retained delegation results, not the backend's own output buffers.
+每个父任务最多有一个活跃 worker，每个 CLI 进程在不重叠的工作区中最多有三个。一次任务最多启动 12 个 worker。从 CLI 1.6.100 起，如果 15 分钟没有 worker 的工具回调，任务会停止。当一个或多个 worker 工具处于活跃状态时，这个无回调时限延长到 45 分钟；所有活跃工具都返回结果后，时限恢复为 15 分钟。只有 `tool_use` 和 `tool_result` 回调会刷新这些时限，文本流不会。不存在固定总时长上限：持续的工具回调会让 worker 继续运行；如遇异常任务，仍可使用 `/abort` 停止。从 CLI 1.6.95 起，中间文本和工具结果的体积不会中止 worker；委派管理器不保留这些中间输出。每个返回结果限制为 32 KiB。超大的结果文本保留开头和结尾、标记中间省略部分，并设置 `truncated: true`，但不会改变 worker 的成功或失败状态。组合 continuation 在其 64 KiB 预算内使用相同截断策略。这些限制约束的是保留的委派结果，而非后端自身的输出缓冲区。
 Managed tasks using overlapping workspace directories are serialized. These
 reservations restrict delegation-enabled threads and workers; opted-out ordinary
 threads retain access to their workspace. This does not lock files against those

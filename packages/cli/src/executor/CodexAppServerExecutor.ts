@@ -50,6 +50,7 @@ interface ActiveTurn {
   emittedTools: Set<string>;
   temporaryFiles: string[];
   timeoutTimer?: ReturnType<typeof setTimeout>;
+  inactivityTimeoutMs?: number;
 }
 
 interface CompactWaiter {
@@ -251,6 +252,7 @@ export class CodexAppServerExecutor implements IExecutor {
           sideEffectsStarted: false,
           emittedTools: new Set(),
           temporaryFiles,
+          inactivityTimeoutMs: options.inactivityTimeout,
         };
         if (options.timeout && options.timeout > 0) {
           active.timeoutTimer = setTimeout(() => {
@@ -1083,9 +1085,11 @@ export class CodexAppServerExecutor implements IExecutor {
   private armInactivityTimer(): void {
     this.clearInactivityTimer();
     if (!this.activeTurn) return;
+    const inactivityTimeoutMs = this.activeTurn.inactivityTimeoutMs ?? this.inactivityTimeoutMs;
+    if (!Number.isFinite(inactivityTimeoutMs) || inactivityTimeoutMs <= 0) return;
     this.inactivityTimer = setTimeout(() => {
-      void this.failAndRestart(`No output from Codex for ${this.inactivityTimeoutMs}ms (inactivity timeout)`);
-    }, this.inactivityTimeoutMs);
+      void this.failAndRestart(`No output from Codex for ${inactivityTimeoutMs}ms (inactivity timeout)`);
+    }, inactivityTimeoutMs);
   }
 
   private clearInactivityTimer(): void {

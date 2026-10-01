@@ -8,7 +8,9 @@ import { DelegationStore } from '../../src/delegation/DelegationStore';
 import { DELEGATION_BACKENDS } from '../../src/delegation/contract';
 import { workerConfiguration } from '../../src/delegation/WorkerPolicy';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
-import type { ExecuteResult, IExecutor } from '../../src/executor/IExecutor';
+import type { ExecuteOptions, ExecuteResult, IExecutor } from '../../src/executor/IExecutor';
+
+const wait = (milliseconds: number) => new Promise<void>(resolve => setTimeout(resolve, milliseconds));
 
 describe('cross-backend delegation', () => {
   let home: string;
@@ -309,6 +311,90 @@ describe('cross-backend delegation', () => {
     await expect(scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result')).resolves.toMatchObject({ state: 'timed_out' });
     expect(worker.destroy).toHaveBeenCalled();
     expect(parent.onNotice).toHaveBeenCalledWith(expect.stringContaining('Timed out'));
+  });
+
+  it('does not treat text streaming as delegated-worker activity', async () => {
+    manager = new DelegationManager(guard, factory as any, new BackendRegistry(async () => '1.0'), new DelegationStore(), {
+      idleTimeoutMs: 50, toolIdleTimeoutMs: 150,
+    });
+    let finish!: (result: ExecuteResult) => void;
+    let options!: ExecuteOptions;
+    vi.mocked(worker.execute).mockImplementation((_prompt, receivedOptions) => {
+      options = receivedOptions;
+      return new Promise(resolve => { finish = resolve; });
+    });
+    vi.mocked(worker.abort).mockImplementation(async () => { finish({ success: false }); return true; });
+    const scope = manager.begin(parent);
+    const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Wait' }, 'start');
+    await vi.waitFor(() => expect(options).toBeDefined());
+    expect(options).toMatchObject({ timeout: 0, inactivityTimeout: 0 });
+
+    await wait(30);
+    options.onStream?.('Still thinking');
+    await expect(scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result')).resolves.toMatchObject({
+      state: 'timed_out', error: expect.stringContaining('without tool activity'),
+    });
+    expect(worker.abort).toHaveBeenCalledOnce();
+  });
+
+  it('extends a delegated task after tool events and restores the shorter idle limit after the tool completes', async () => {
+    manager = new DelegationManager(guard, factory as any, new BackendRegistry(async () => '1.0'), new DelegationStore(), {
+      idleTimeoutMs: 50, toolIdleTimeoutMs: 150,
+    });
+    let finish!: (result: ExecuteResult) => void;
+    let options!: ExecuteOptions;
+    vi.mocked(worker.execute).mockImplementation((_prompt, receivedOptions) => {
+      options = receivedOptions;
+      return new Promise(resolve => { finish = resolve; });
+    });
+    vi.mocked(worker.abort).mockImplementation(async () => { finish({ success: false }); return true; });
+    const scope = manager.begin(parent);
+    const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Build' }, 'start');
+    await vi.waitFor(() => expect(options).toBeDefined());
+
+    await wait(30);
+    options.onToolUse?.({ id: 'build', name: 'Bash', input: { command: 'make' } });
+    await wait(60);
+    expect(worker.abort).not.toHaveBeenCalled();
+
+    options.onToolResult?.({ tool_use_id: 'build', content: 'build complete', is_error: false });
+    await expect(scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result')).resolves.toMatchObject({
+      state: 'timed_out', error: expect.stringContaining('without tool activity'),
+    });
+    expect(worker.abort).toHaveBeenCalledOnce();
+    const record = JSON.parse(fs.readFileSync(path.join(home, '.remote-cli', 'delegation', `${task.taskId}.json`), 'utf8'));
+    expect(record).toMatchObject({ lastActivityKind: 'tool_result' });
+  });
+
+  it('does not impose a total duration cap while tool callbacks continue', async () => {
+    manager = new DelegationManager(guard, factory as any, new BackendRegistry(async () => '1.0'), new DelegationStore(), {
+      idleTimeoutMs: 50, toolIdleTimeoutMs: 75,
+    });
+    let finish!: (result: ExecuteResult) => void;
+    let options!: ExecuteOptions;
+    vi.mocked(worker.execute).mockImplementation((_prompt, receivedOptions) => {
+      options = receivedOptions;
+      return new Promise(resolve => { finish = resolve; });
+    });
+    vi.mocked(worker.abort).mockImplementation(async () => { finish({ success: false }); return true; });
+    const scope = manager.begin(parent);
+    const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Keep working' }, 'start');
+    await vi.waitFor(() => expect(options).toBeDefined());
+
+    for (let index = 0; index < 7; index++) {
+      await wait(25);
+      options.onToolUse?.({ id: `tool-${index}`, name: 'Bash', input: { command: 'sleep' } });
+      await wait(10);
+      options.onToolResult?.({ tool_use_id: `tool-${index}`, content: 'done', is_error: false });
+    }
+    expect(worker.abort).not.toHaveBeenCalled();
+    finish({ success: true, output: 'Finished after sustained tool activity' });
+    await expect(scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result')).resolves.toMatchObject({
+      state: 'succeeded', output: 'Finished after sustained tool activity',
+    });
+    const record = JSON.parse(fs.readFileSync(path.join(home, '.remote-cli', 'delegation', `${task.taskId}.json`), 'utf8'));
+    expect(record).toMatchObject({ lastActivityKind: 'tool_result' });
+    expect(record.lastActivityAt).toEqual(expect.any(Number));
   });
 
   it.each(['claude', 'codex'] as const)('keeps an unrestricted coordinator\'s %s worker unsandboxed despite target settings', async backend => {

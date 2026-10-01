@@ -182,6 +182,24 @@ describe('PiExecutor', () => {
     expect(stored).toMatchObject({ id: 'sess-pi-1', cwd: project });
   });
 
+  it('allows an execution to disable Pi\'s default turn timeout', async () => {
+    let resolvePrompt!: (response: PiRpcResponse) => void;
+    transport.request.mockImplementation((command: Record<string, unknown>) => {
+      if (command.type === 'prompt') {
+        return new Promise<PiRpcResponse>((resolve) => { resolvePrompt = resolve; });
+      }
+      return Promise.resolve({ type: 'response', command: String(command.type), success: true });
+    });
+
+    const pending = executor.execute('long delegated task', { timeout: 0 });
+    await vi.waitFor(() => expect(resolvePrompt).toBeTypeOf('function'));
+    expect((executor as any).activeTurn.timeoutTimer).toBeUndefined();
+
+    await executor.abort();
+    resolvePrompt({ type: 'response', command: 'prompt', success: true });
+    await expect(pending).resolves.toMatchObject({ success: false, error: 'Aborted' });
+  });
+
   it('reports a deleted working directory before starting Pi', async () => {
     await fs.rm(project, { recursive: true, force: true });
 

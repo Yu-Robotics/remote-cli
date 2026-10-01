@@ -15,9 +15,40 @@ import { workerConfiguration } from './WorkerPolicy';
 import { formatDelegationNotice } from './DelegationNotice';
 import { assertWorkingDirectoryExists } from '../utils/WorkingDirectory';
 
-export const DELEGATION_LIMITS = { launches: 12, concurrent: 3, timeoutMs: 30 * 60_000,
+export const DELEGATION_LIMITS = { launches: 12, concurrent: 3,
+  idleTimeoutMs: 15 * 60_000, toolIdleTimeoutMs: 45 * 60_000,
   resultBytes: 32 * 1024, continuationBytes: 64 * 1024,
   storageTimeoutMs: 10_000, calls: 500 } as const;
+
+export interface DelegationTimeoutPolicy {
+  idleTimeoutMs: number;
+  toolIdleTimeoutMs: number;
+}
+
+type TimeoutPolicyInput = DelegationTimeoutPolicy | number;
+type DelegationActivityKind = 'tool_use' | 'tool_result';
+
+function validDuration(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function timeoutPolicy(input: TimeoutPolicyInput): DelegationTimeoutPolicy {
+  if (typeof input === 'number') {
+    const duration = validDuration(input, DELEGATION_LIMITS.idleTimeoutMs);
+    return { idleTimeoutMs: duration, toolIdleTimeoutMs: duration };
+  }
+  return {
+    idleTimeoutMs: validDuration(input.idleTimeoutMs, DELEGATION_LIMITS.idleTimeoutMs),
+    toolIdleTimeoutMs: validDuration(input.toolIdleTimeoutMs, DELEGATION_LIMITS.toolIdleTimeoutMs),
+  };
+}
+
+function formatDuration(milliseconds: number): string {
+  if (milliseconds % 3_600_000 === 0) return `${milliseconds / 3_600_000} hour${milliseconds === 3_600_000 ? '' : 's'}`;
+  if (milliseconds % 60_000 === 0) return `${milliseconds / 60_000} minute${milliseconds === 60_000 ? '' : 's'}`;
+  const seconds = Math.ceil(milliseconds / 1000);
+  return `${seconds} second${seconds === 1 ? '' : 's'}`;
+}
 
 export function workspacesOverlap(first: string, second: string): boolean {
   const contains = (root: string, candidate: string) => {
@@ -48,7 +79,8 @@ interface Task {
   done: Promise<void>;
   settle: () => void;
   stop?: Promise<void>;
-  timer?: ReturnType<typeof setTimeout>;
+  idleTimer?: ReturnType<typeof setTimeout>;
+  activeToolIds: Set<string>;
   interrupted: Promise<ExecuteResult>;
   interrupt: () => void;
 }
@@ -121,13 +153,18 @@ export class DelegationManager {
   private running = 0;
   private workspaces = new Map<string, string>();
   private scopes = new Map<string, DelegationScope>();
+  private readonly timeouts: DelegationTimeoutPolicy;
 
   constructor(private readonly guard: DirectoryGuard,
     private readonly factory: typeof createExecutor = createExecutor,
     registry = new BackendRegistry(), store = new DelegationStore(),
-    private readonly timeoutMs = DELEGATION_LIMITS.timeoutMs,
+    timeoutInput: TimeoutPolicyInput = DELEGATION_LIMITS,
     private readonly cleanupMs = 10_000,
-  ) { this.registry = registry; this.store = store; }
+  ) {
+    this.registry = registry;
+    this.store = store;
+    this.timeouts = timeoutPolicy(timeoutInput);
+  }
 
   begin(parent: DelegationParent): DelegationScope {
     if (this.scopes.has(parent.thread.id)) throw new Error('This thread already owns a delegation turn');
@@ -173,8 +210,37 @@ export class DelegationManager {
         await deadline(async () => { await task.executor!.destroy(); await task.executor!.waitForExit?.(); }, this.cleanupMs);
       } finally { task.interrupt(); }
     })();
+    const clearTaskTimer = (task: Task): void => {
+      clearTimeout(task.idleTimer);
+      task.idleTimer = undefined;
+    };
+    const expire = (task: Task, duration: number): void => {
+      if (task.record.state !== 'running') return;
+      clearTaskTimer(task);
+      task.record.state = 'timed_out';
+      task.record.error = `Delegated task stopped after ${formatDuration(duration)} without tool activity`;
+      void stop(task).catch(() => undefined);
+    };
+    const armIdleTimer = (task: Task): void => {
+      clearTimeout(task.idleTimer);
+      if (task.record.state !== 'running') return;
+      const duration = task.activeToolIds.size > 0
+        ? this.timeouts.toolIdleTimeoutMs : this.timeouts.idleTimeoutMs;
+      const timer = setTimeout(() => {
+        if (task.idleTimer !== timer) return;
+        expire(task, duration);
+      }, duration);
+      task.idleTimer = timer;
+    };
+    const noteToolActivity = (task: Task, kind: DelegationActivityKind): void => {
+      if (task.record.state !== 'running') return;
+      task.record.lastActivityAt = Date.now();
+      task.record.lastActivityKind = kind;
+      armIdleTimer(task);
+    };
     const cancel = async (task: Task): Promise<unknown> => {
       if (task.record.state === 'running') {
+        clearTaskTimer(task);
         task.record.state = 'cancelled';
         task.record.error = 'Cancelled; edits already made were not undone.';
         await stop(task).catch(() => undefined);
@@ -195,22 +261,31 @@ export class DelegationManager {
         }
         // Native session IDs are distinct; policy was resolved against the real
         // parent thread before passing the synthetic child identity to the factory.
-        task.timer = setTimeout(() => {
-          if (task.record.state !== 'running') return;
-          task.record.state = 'timed_out'; task.record.error = 'Delegated task timed out';
-          void stop(task).catch(() => undefined);
-        }, this.timeoutMs);
+        armIdleTimer(task);
         const result = await Promise.race([task.interrupted, task.executor.execute(
           `You are executing one delegated task in an independent session. Complete only this objective and return a concise result with verification and remaining issues. Do not delegate to other agents.\n\n${objective}`,
           {
-            timeout: this.timeoutMs,
+            // The manager owns delegated-task liveness. Zero disables optional
+            // backend-local limits that would otherwise ignore tool callbacks.
+            timeout: 0,
+            inactivityTimeout: 0,
             onStream: text => {
+              // Text streaming is intentionally not liveness activity; it can be
+              // frequent without a tool making measurable progress.
               // Intermediate output is not retained here; only relay input prompts.
               queueMicrotask(() => {
                 if (!closed && task.record.state === 'running' && task.executor?.isWaitingInput?.()) {
                   notify(() => parent.onNotice(`\n[${backend} delegated task]\n${bounded(text, 4000).text}`));
                 }
               });
+            },
+            onToolUse: tool => {
+              if (tool.id) task.activeToolIds.add(tool.id);
+              noteToolActivity(task, 'tool_use');
+            },
+            onToolResult: result => {
+              if (result.tool_use_id) task.activeToolIds.delete(result.tool_use_id);
+              noteToolActivity(task, 'tool_result');
             },
             onApprovalRequest: request => !closed && task.record.state === 'running' && parent.onApproval({ ...request,
               description: `[${backend} delegated task] ${request.description}`, canRemember: false }, task.executor!),
@@ -229,7 +304,7 @@ export class DelegationManager {
         }
         this.registry.invalidate();
       } finally {
-        clearTimeout(task.timer);
+        clearTaskTimer(task);
         let cleaned = false;
         try {
           if (task.stop) await task.stop;
@@ -324,7 +399,7 @@ export class DelegationManager {
           const task: Task = { record: { id: randomUUID(), threadId: parent.thread.id,
             parentMessageId: parent.messageId, backend, objective: objective.slice(0, 1000),
             state: 'running', startedAt: Date.now() }, resultDelivered: false,
-            done: new Promise<void>(resolve => { settle = resolve; }), settle, interrupted, interrupt };
+            activeToolIds: new Set(), done: new Promise<void>(resolve => { settle = resolve; }), settle, interrupted, interrupt };
           tasks.set(task.record.id, task);
           try {
             await deadline(() => this.store.write(task.record), DELEGATION_LIMITS.storageTimeoutMs, 'Initial task record write timed out');
