@@ -1730,6 +1730,19 @@ describe('MessageHandler', () => {
       expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ success: true }));
     });
 
+    it('keeps a thread when delegated worker cleanup fails', async () => {
+      const targetThread = { id: 'target-id', name: 'my-feat', workingDirectory: '/tmp', sessionId: null, createdAt: 0, lastActiveAt: 0 };
+      ctx.mockThreadManager.getThreadByName = vi.fn().mockReturnValue(targetThread);
+      ctx.mockThreadPool.isThreadBusy = vi.fn().mockReturnValue(false);
+      vi.spyOn((ctx.handler as any).delegation, 'deleteWorkerLanes').mockRejectedValue(new Error('Delegated worker cleanup failed'));
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-td-cleanup', content: '/thread delete my-feat', timestamp: Date.now() });
+
+      expect(ctx.mockThreadPool.destroyThread).not.toHaveBeenCalled();
+      expect(ctx.mockThreadManager.deleteThread).not.toHaveBeenCalled();
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ success: false, error: 'Delegated worker cleanup failed' }));
+    });
+
     it('should refuse delete on running thread', async () => {
       const targetThread = { id: 'target-id', name: 'busy', workingDirectory: '/tmp', sessionId: null, createdAt: 0, lastActiveAt: 0 };
       ctx.mockThreadManager.getThreadByName = vi.fn().mockReturnValue(targetThread);
@@ -1978,6 +1991,17 @@ describe('MessageHandler', () => {
   });
 
   describe('/cd command', () => {
+    it('reports a successful directory change with pending lane cleanup separately', async () => {
+      vi.mocked(ctx.mockThreadPool.setWorkingDirectory).mockResolvedValueOnce({ cwd: '/new/dir', changed: true });
+      vi.spyOn((ctx.handler as any).delegation, 'invalidateWorkspaceGeneration').mockResolvedValue({ removed: 0, failed: 1 });
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'cd-pending', content: '/cd /new/dir', timestamp: Date.now() });
+
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+        messageId: 'cd-pending', success: true, output: expect.stringContaining('1 delegated worker lane(s) could not be cleaned up'),
+      }));
+    });
+
     it('reports the directory change and conversation reset returned by the pool', async () => {
       vi.mocked(ctx.mockThreadPool.setWorkingDirectory).mockResolvedValueOnce({ cwd: '/new/dir', changed: true });
 

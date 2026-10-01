@@ -62,6 +62,7 @@ vi.mock('../../src/thread/ThreadExecutorPool', () => ({
 vi.mock('../../src/client/MessageHandler', () => ({
   MessageHandler: vi.fn().mockImplementation(() => ({
     handleMessage: vi.fn().mockResolvedValue(undefined),
+    reconcilePendingDelegatedWorkers: vi.fn().mockResolvedValue(undefined),
   })),
 }));
 

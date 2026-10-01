@@ -173,6 +173,16 @@ export class MessageHandler {
     this.machineCommands = new MachineCommands(config);
   }
 
+  async reconcilePendingDelegatedWorkers(): Promise<void> {
+    try {
+      const result = await this.delegation.reconcilePendingWorkerLanes();
+      if (result.failed) console.warn(`[Delegation] ${result.failed} pending worker lane(s) still need cleanup`);
+    } catch (error) {
+      console.warn('[Delegation] Pending worker lane reconciliation could not complete:',
+        error instanceof Error ? error.message : 'Storage failure');
+    }
+  }
+
   /**
    * Handle message (supports new IncomingMessage format)
    */
@@ -440,7 +450,11 @@ export class MessageHandler {
         }
         const generation = this.threadManager.getThread(resolvedThreadId)?.delegationWorkspaceGeneration ?? 0;
         const changedDirectory = await this.threadPool.setWorkingDirectory(resolvedThreadId, workingDirectory);
-        if (changedDirectory.changed) await this.delegation.invalidateWorkspaceGeneration(resolvedThreadId, generation);
+        if (changedDirectory.changed) {
+          const cleanup = await this.delegation.invalidateWorkspaceGeneration(resolvedThreadId, generation + 1);
+          if (cleanup.failed) this.sendStreamChunk(messageId, resolvedThreadId,
+            `Working directory changed, but ${cleanup.failed} delegated worker lane(s) could not be cleaned up. Retry with /delegation reset after checking filesystem permissions.\n`);
+        }
       }
 
       // Update thread activity timestamp
@@ -859,10 +873,12 @@ You can also use natural language commands to control Claude Code CLI.`,
         }
         const generation = this.threadManager.getThread(threadId)?.delegationWorkspaceGeneration ?? 0;
         const { cwd: newCwd, changed } = await this.threadPool.setWorkingDirectory(threadId, targetDir);
-        if (changed) await this.delegation.invalidateWorkspaceGeneration(threadId, generation);
+        const cleanup = changed
+          ? await this.delegation.invalidateWorkspaceGeneration(threadId, generation + 1)
+          : { removed: 0, failed: 0 };
         this.sendResponse(messageId, threadId, {
           success: true,
-          output: `✅ Changed working directory to: ${newCwd}${changed ? '\nConversation context cleared for all direct and delegated backends in this thread.' : ''}`,
+          output: `✅ Changed working directory to: ${newCwd}${changed ? '\nConversation context cleared for all direct and delegated backends in this thread.' : ''}${cleanup.failed ? `\n⚠️ ${cleanup.failed} delegated worker lane(s) could not be cleaned up. Retry with /delegation reset after checking filesystem permissions.` : ''}`,
         });
       } catch (error) {
         this.sendResponse(messageId, threadId, {
