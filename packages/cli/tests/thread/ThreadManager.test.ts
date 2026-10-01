@@ -29,6 +29,7 @@ describe('ThreadManager', () => {
       const threads = manager.listThreads();
       expect(threads).toHaveLength(1);
       expect(threads[0].name).toBe(DEFAULT_THREAD_NAME);
+      expect(threads[0].delegationWorkspaceGeneration).toBe(0);
     });
 
     it('persists threads to disk and loads on re-initialize', async () => {
@@ -54,6 +55,7 @@ describe('ThreadManager', () => {
       expect(thread.workingDirectory).toBe(tmpDir);
       expect(thread.id).toBeTruthy();
       expect(thread.sessionId).toBeNull();
+      expect(thread.delegationWorkspaceGeneration).toBe(0);
     });
 
     it('creates thread with unique UUIDs', async () => {

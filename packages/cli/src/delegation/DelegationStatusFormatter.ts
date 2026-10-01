@@ -87,7 +87,7 @@ export function formatDelegationStatus({
     '> **When checked:** Authentication and quota are checked when a task starts.',
     '> **Sandbox:** Cross-backend delegation is unavailable while the coordinator sandbox is enabled.',
     '',
-    '**Commands:** `/delegation on` · `/delegation off`',
-    'Applies to this thread. Workers use independent sessions.',
+    '**Commands:** `/delegation on` · `/delegation off` · `/delegation reset [backend]`',
+    'Applies to this thread. Worker sessions are isolated from direct conversations and continue across delegated tasks in the same workspace.',
   ].join('\n');
 }

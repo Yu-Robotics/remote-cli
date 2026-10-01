@@ -44,7 +44,7 @@ describe('delegation in the existing thread workflow', () => {
       abort: vi.fn(async () => true), destroy: vi.fn(async () => undefined), resetContext: vi.fn(),
       setWorkingDirectory: vi.fn(async () => undefined), getCurrentWorkingDirectory: () => home };
     worker = { execute: vi.fn(async () => ({ success: true, output: 'child answer' })),
-      abort: vi.fn(async () => true), destroy: vi.fn(async () => undefined), deleteThreadData: vi.fn(async () => undefined),
+      abort: vi.fn(async () => true), destroy: vi.fn(async () => undefined), waitForExit: vi.fn(async () => undefined), deleteThreadData: vi.fn(async () => undefined),
       resetContext: vi.fn(), setWorkingDirectory: vi.fn(), getCurrentWorkingDirectory: () => home };
     const guard = new DirectoryGuard([home]);
     const config: any = { get: vi.fn(key => key === 'executor' ? { type: 'codex' } : undefined),
@@ -111,6 +111,30 @@ describe('delegation in the existing thread workflow', () => {
     const saved = await ThreadManager.initialize(home);
     expect(saved.getDefaultThread().delegation).toBeUndefined();
     expect(saved.getThread(delegatedThread.id)?.delegation).toBe(true);
+  });
+
+  it('resets persisted worker lanes without enabling delegation or changing the direct conversation', async () => {
+    const thread = threads.getDefaultThread();
+    const delegated = (handler as any).delegation as DelegationManager;
+    const acquired = await delegated.laneStore.acquire({
+      threadId: thread.id,
+      backend: 'codex',
+      workingDirectory: home,
+      workspaceGeneration: thread.delegationWorkspaceGeneration ?? 0,
+    });
+    await delegated.laneStore.markRunning(acquired.lane.id);
+    await delegated.laneStore.markReady(acquired.lane.id);
+    const pointer = path.join(home, '.remote-cli', 'codex-sessions', `${acquired.lane.executorThreadId}.json`);
+    await fs.promises.mkdir(path.dirname(pointer), { recursive: true });
+    await fs.promises.writeFile(pointer, '{"id":"worker"}');
+
+    await handler.handleMessage(message('reset', '/delegation reset codex'));
+
+    expect(responseFor('reset')).toMatchObject({ success: true, output: expect.stringContaining('1 lane removed') });
+    await expect(delegated.laneStore.lanesForThread(thread.id, 'codex')).resolves.toEqual([]);
+    expect(fs.existsSync(pointer)).toBe(false);
+    expect(threads.getDefaultThread().delegation).not.toBe(true);
+    expect(main.configureDelegation).not.toHaveBeenCalled();
   });
 
   it('restores owned cleanup across a CLI restart without touching an unused backend', async () => {

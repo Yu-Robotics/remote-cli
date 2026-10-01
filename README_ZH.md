@@ -439,7 +439,7 @@ remote-cli stop
 | `/clear` | 清除当前线程的对话上下文 |
 | `/new` | `/clear` 的别名；在当前线程中开始全新对话 |
 | `/compact` | 压缩对话历史以节省 Token |
-| `/delegation [on|off]` | 查看或启用当前线程中已安装 agent 后端之间的任务委派 |
+| `/delegation [on|off|reset [backend]]` | 查看、启用、关闭或重置当前线程中隔离的委派 worker 上下文 |
 | `/model [name]` | 列出当前 backend 的模型，或设置当前线程的模型 |
 | `/effort [auto|level]` | 查看或设置 Codex/AGY/OpenCode/Kimi/ZCode/Pi 的线程思考等级 |
 | `/sandbox [on/off/read-only/default]` | 查看或配置当前 Codex 或 Claude Code 线程的沙箱；用 `allow/remove <目录>` 和 `network on/off` 调整访问设置 |
@@ -464,9 +464,13 @@ create extra thread buttons.
 /delegation on
 先让 Pi 检查相关文件，再让 Codex 实现商定的修复，最后让 Claude Code 审查。需要时可查询结果，也可在分发后直接返回，由 Remote CLI 自动等待并恢复协调者。
 /delegation off
+/delegation reset
+/delegation reset codex
 ```
 
 委派**默认关闭**。开关按线程保存，切换后端或清除对话上下文后仍然有效。请先安装所需后端、完成认证并选择可用模型。后端发现只检查配置的可执行文件；认证状态和剩余额度要到任务运行时才能确定。
+
+启用后，每个`（父线程、worker 后端、工作区代次）`都会拥有一个隔离的 worker 通道。worker 通道绝不会复用父后端的直接会话，只会延续自身之前的委派上下文。每项任务结束后 worker 进程都会停止；只有确认进程退出后，该通道才可以再次复用。每次启动 worker 时，都会应用父线程保存的模型和思考等级。
 
 `/status` shows `Delegation: on/off (current thread)` for the thread receiving
 the command. Reading this setting does not initialize delegation or start workers.
@@ -483,6 +487,8 @@ CLI 和 Router 1.6.103 及以上版本还会在同一回复卡片中显示实时
 建议先在一个测试线程中启用。从未启用委派的线程不会注册受管理的工具、添加提示词前缀、清理后端委派配置，或检查委派工作区占用；其普通进程处理和会话输出保持原样。
 
 线程使用过委派后，`/delegation off` 会移除受管理的工具。CLI 会记录哪些后端需要清理，重启或切换后端后也能继续处理。原生斜杠命令恢复会话前同样会执行清理。移除工具时，每个执行器实例可能重启一次后端进程，但会保留已保存的对话；已经清理过的进程不会反复重启。未使用过委派的后端无需清理。
+
+`/clear`、`/new`、切换后端和开关`/delegation`都不会丢弃 worker 通道。`/cd`会创建新的工作区代次，并丢弃旧通道。`/delegation reset`会丢弃当前线程的全部通道，`/delegation reset <backend>`只丢弃该后端的通道。委派 worker 运行时，重置和切换工作目录都会被拒绝；`/thread delete`会移除该线程的全部 worker 通道。
 
 共享 Router 可以先于本机 CLI 升级。本功能仍使用协议版本 1，保持原有命令、工具进度和回复格式。旧版 CLI 可继续原有流程；使用委派需要升级本机 CLI，并在目标线程中启用。CLI 与 Router 的包版本无需一致即可连接。审批卡片、任务恢复和嵌套 worker 进度等可选能力按设备分别协商，因此新旧 CLI 可以共用同一个 Router。
 

@@ -512,13 +512,25 @@ Resume-failure behavior with a stale id (verified live): agy warns `conversation
 
 ## Cross-Backend Delegation
 
-Delegation is an opt-in per-thread feature (`/delegation on|off`). The selected
-backend remains the coordinator and owns the user-facing answer. Claude Code,
-Codex, Pi, AGY, OpenCode, Kimi, and ZCode can use registered local tools to
-start independent worker sessions on a different backend. Same-backend managed
-delegation is rejected; native backend task/subagent tools remain unchanged.
-Workers do not inherit
-the coordinator transcript or become user-facing threads.
+Delegation is an opt-in per-thread feature (`/delegation on|off|reset [backend]`).
+The selected backend remains the coordinator and owns the user-facing answer.
+Claude Code, Codex, Pi, AGY, OpenCode, Kimi, and ZCode can use registered local
+tools to start independent worker sessions on a different backend. Same-backend
+managed delegation is rejected; native backend task/subagent tools remain
+unchanged. Workers do not inherit the coordinator transcript or become
+user-facing threads.
+
+`DelegatedWorkerSessionStore` owns durable isolated worker lanes keyed by
+`(parent thread ID, target backend, workspace generation)`. Each lane receives
+a synthetic `delegate-lane-<uuid>` executor ID, so it cannot read, overwrite,
+or delete the parent backend's direct conversation pointer. A lane retains only
+its own earlier delegated context and its worker process is destroyed after each
+task. It becomes reusable only after process exit is confirmed. `/clear`,
+`/new`, backend switches, and `/delegation off/on` preserve lanes; `/cd`
+increments the persisted workspace generation and invalidates old lanes.
+`/delegation reset [backend]` removes idle lane state without starting a backend;
+`/thread delete` removes all lane state. Never migrate or adopt an old direct
+session pointer into a worker lane.
 
 `MessageHandler` creates a `DelegationScope` for an enabled coordinator turn and
 activates its `DelegationBridge`. The bridge accepts only authenticated loopback

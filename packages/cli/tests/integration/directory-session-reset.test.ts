@@ -75,7 +75,11 @@ describe('Directory changes and backend session isolation', () => {
 
     expect(await pool.setWorkingDirectory(threadId, '../other')).toEqual({ cwd: other, changed: true });
     expect(executor.getSessionId?.()).toBeNull();
-    expect(manager.getThread(threadId)).toMatchObject({ workingDirectory: other, sessionId: null });
+    expect(manager.getThread(threadId)).toMatchObject({
+      workingDirectory: other,
+      sessionId: null,
+      delegationWorkspaceGeneration: 1,
+    });
     for (const key of backends) await expect(fs.access(pointerPath(key))).rejects.toMatchObject({ code: 'ENOENT' });
 
     await pool.destroyAll({ deleteData: false });
@@ -116,7 +120,12 @@ describe('Directory changes and backend session isolation', () => {
       await fs.writeFile(file, savedData);
     }
     await pool.setWorkingDirectory(threadId, other);
-    expect(manager.getThread(threadId)).toEqual({ ...preferences, workingDirectory: other, sessionId: null });
+    expect(manager.getThread(threadId)).toEqual({
+      ...preferences,
+      workingDirectory: other,
+      sessionId: null,
+      delegationWorkspaceGeneration: (preferences.delegationWorkspaceGeneration ?? 0) + 1,
+    });
     expect(manager.getThread(sibling.id)?.workingDirectory).toBe(project);
     for (const backend of backends) {
       expect(JSON.parse(await fs.readFile(pointerPath(backend, sibling.id), 'utf8')).id).toBe(`old-${backend}`);

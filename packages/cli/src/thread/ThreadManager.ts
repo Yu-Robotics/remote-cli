@@ -65,6 +65,7 @@ export class ThreadManager {
         name: DEFAULT_THREAD_NAME,
         sessionId,
         workingDirectory: process.cwd(),
+        delegationWorkspaceGeneration: 0,
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
       };
@@ -111,6 +112,7 @@ export class ThreadManager {
       name,
       sessionId: null,
       workingDirectory,
+      delegationWorkspaceGeneration: 0,
       createdAt: Date.now(),
       lastActiveAt: Date.now(),
       ...(backend ? { backend } : {}),
@@ -150,7 +152,7 @@ export class ThreadManager {
    */
   async updateThread(
     id: string,
-    updates: Partial<Pick<Thread, 'sessionId' | 'workingDirectory' | 'lastActiveAt' | 'model' | 'models' | 'efforts' | 'backend' | 'delegation' | 'delegationBackends'>>
+    updates: Partial<Pick<Thread, 'sessionId' | 'workingDirectory' | 'lastActiveAt' | 'model' | 'models' | 'efforts' | 'backend' | 'delegation' | 'delegationBackends' | 'delegationWorkspaceGeneration'>>
   ): Promise<Thread> {
     const thread = this.store.threads[id];
     if (!thread) throw new Error(`Thread not found: ${id}`);
