@@ -175,6 +175,23 @@ describe('ClaudePersistentExecutor', () => {
       expect(completed).toHaveBeenCalledWith(expect.objectContaining({ success: true, output: 'Hello world' }));
     });
 
+    it('sends only assistant response text to the display-only callback', async () => {
+      const onStream = vi.fn();
+      const onDisplayText = vi.fn();
+      const result = executor.execute('Inspect', { onStream, onDisplayText });
+      await vi.advanceTimersByTimeAsync(1000);
+
+      emit({ type: 'thinking', content: 'Private legacy thinking' });
+      beginText('message-1');
+      stream({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'Private stream thinking' } });
+      delta('Public answer');
+      emit({ type: 'result', subtype: 'success' });
+
+      await result;
+      expect(onStream).toHaveBeenCalledWith('Private legacy thinking');
+      expect(onDisplayText.mock.calls.map(([text]) => text)).toEqual(['Public answer']);
+    });
+
     it('keeps interleaved messages distinct and preserves text without streaming events', async () => {
       const onStream = vi.fn();
       const result = executor.execute('Review the changes', { onStream });

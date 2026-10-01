@@ -158,12 +158,14 @@ describe('PiExecutor', () => {
 
   it('streams text, tools, and image input while persisting the Pi session', async () => {
     const chunks: string[] = [];
+    const visible: string[] = [];
     const onToolUse = vi.fn();
     const onToolResult = vi.fn();
 
     const result = await executor.execute('inspect', {
       attachments: [{ type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' }],
       onStream: (chunk) => chunks.push(chunk),
+      onDisplayText: (chunk) => visible.push(chunk),
       onToolUse,
       onToolResult,
     });
@@ -171,6 +173,7 @@ describe('PiExecutor', () => {
     expect(result).toMatchObject({ success: true, output: 'done', sessionAbbr: 'sess-pi-' });
     expect(transport.launch.approveProject).toBe(true);
     expect(chunks).toEqual(['done']);
+    expect(visible).toEqual(['done']);
     expect(transport.request).toHaveBeenCalledWith(expect.objectContaining({
       type: 'prompt',
       message: 'inspect',

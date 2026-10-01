@@ -431,15 +431,21 @@ describe('CodexAppServerExecutor', () => {
 
   it('starts a thread, streams one copy of agent text, and persists the thread id', async () => {
     const chunks: string[] = [];
-    const resultPromise = executor.execute('hello', { onStream: (chunk) => chunks.push(chunk) });
+    const visible: string[] = [];
+    const resultPromise = executor.execute('hello', {
+      onStream: (chunk) => chunks.push(chunk),
+      onDisplayText: (chunk) => visible.push(chunk),
+    });
     await vi.waitFor(() => expect(transport.requests.some((request) => request.method === 'turn/start')).toBe(true));
 
     transport.emit({ method: 'item/agentMessage/delta', params: { threadId: 'codex-thread-1', turnId: 'turn-1', itemId: 'a', delta: 'hello back' } });
+    transport.emit({ method: 'item/reasoning/summaryTextDelta', params: { threadId: 'codex-thread-1', turnId: 'turn-1', delta: 'Reasoning summary' } });
     transport.emit({ method: 'item/completed', params: { threadId: 'codex-thread-1', turnId: 'turn-1', item: { type: 'agentMessage', id: 'a', text: 'hello back' } } });
     transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
 
     await expect(resultPromise).resolves.toMatchObject({ success: true, output: 'hello back' });
-    expect(chunks).toEqual(['hello back']);
+    expect(chunks).toEqual(['hello back', 'Reasoning summary']);
+    expect(visible).toEqual(['hello back']);
     const session = JSON.parse(await fs.readFile(path.join(tempHome, '.remote-cli', 'codex-sessions', 'remote-thread.json'), 'utf8'));
     expect(session.id).toBe('codex-thread-1');
   });

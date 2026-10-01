@@ -2,7 +2,7 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { DelegationManager, type DelegationParent } from '../../src/delegation/DelegationManager';
+import { DELEGATION_TEXT_PROGRESS, DelegationManager, type DelegationParent } from '../../src/delegation/DelegationManager';
 import { BackendRegistry, type BackendAvailability } from '../../src/delegation/BackendRegistry';
 import { DelegationStore } from '../../src/delegation/DelegationStore';
 import { DelegatedWorkerSessionStore } from '../../src/delegation/DelegatedWorkerSessionStore';
@@ -133,7 +133,8 @@ describe('cross-backend delegation', () => {
       const scope = manager.begin(parent);
       const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Review the README' }, 'start');
       await vi.waitFor(() => expect(options).toBeDefined());
-      options.onStream?.('First bounded worker update.');
+      options.onStream?.('Private reasoning must not appear.');
+      options.onDisplayText?.('First bounded worker update.');
       await Promise.resolve();
       expect(onTextProgress).not.toHaveBeenCalled();
 
@@ -144,10 +145,75 @@ describe('cross-backend delegation', () => {
         phase: 'text',
         latestText: 'First bounded worker update.',
       }));
+      expect(JSON.stringify(onTextProgress.mock.calls)).not.toContain('Private reasoning');
       expect(parent.onProgress).not.toHaveBeenCalledWith(expect.objectContaining({ phase: 'text' }));
 
       finish({ success: true, output: 'Review complete' });
       await expect(scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result')).resolves.toMatchObject({ state: 'succeeded' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not resurrect text emitted before a tool starts in the same event turn', async () => {
+    vi.useFakeTimers();
+    const onTextProgress = vi.fn(() => true);
+    parent.onProgress = vi.fn(() => true);
+    parent.onTextProgress = onTextProgress;
+    let finish!: (result: ExecuteResult) => void;
+    let options!: ExecuteOptions;
+    vi.mocked(worker.execute).mockImplementation((_prompt, receivedOptions) => {
+      options = receivedOptions;
+      return new Promise(resolve => { finish = resolve; });
+    });
+
+    try {
+      const scope = manager.begin(parent);
+      const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' }, 'start');
+      await vi.waitFor(() => expect(options).toBeDefined());
+      options.onStream?.('Old generic stream.');
+      options.onDisplayText?.('Old assistant text.');
+      options.onToolUse?.({ id: 'tool-1', name: 'Read', input: {} });
+      await vi.advanceTimersByTimeAsync(DELEGATION_TEXT_PROGRESS.flushMs);
+      expect(onTextProgress).not.toHaveBeenCalled();
+
+      options.onToolResult?.({ tool_use_id: 'tool-1', content: '', is_error: false });
+      options.onDisplayText?.('Fresh assistant text.');
+      await vi.advanceTimersByTimeAsync(DELEGATION_TEXT_PROGRESS.flushMs);
+      expect(onTextProgress).toHaveBeenCalledWith(expect.objectContaining({ latestText: 'Fresh assistant text.' }));
+
+      finish({ success: true, output: 'Done' });
+      await scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('retries later display text after a transient delivery failure', async () => {
+    vi.useFakeTimers();
+    const onTextProgress = vi.fn().mockReturnValueOnce(false).mockReturnValue(true);
+    parent.onProgress = vi.fn(() => true);
+    parent.onTextProgress = onTextProgress;
+    let finish!: (result: ExecuteResult) => void;
+    let options!: ExecuteOptions;
+    vi.mocked(worker.execute).mockImplementation((_prompt, receivedOptions) => {
+      options = receivedOptions;
+      return new Promise(resolve => { finish = resolve; });
+    });
+
+    try {
+      const scope = manager.begin(parent);
+      const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' }, 'start');
+      await vi.waitFor(() => expect(options).toBeDefined());
+      options.onDisplayText?.('First update.');
+      await vi.advanceTimersByTimeAsync(DELEGATION_TEXT_PROGRESS.flushMs);
+      options.onDisplayText?.(' Second update.');
+      await vi.advanceTimersByTimeAsync(DELEGATION_TEXT_PROGRESS.flushMs);
+      expect(onTextProgress).toHaveBeenCalledTimes(2);
+      expect(onTextProgress).toHaveBeenLastCalledWith(expect.objectContaining({ latestText: 'First update. Second update.' }));
+
+      finish({ success: true, output: 'Done' });
+      await scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result');
     } finally {
       vi.useRealTimers();
     }

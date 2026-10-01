@@ -125,6 +125,8 @@ interface ClaudeOutputMessage {
 export interface PersistentClaudeOptions {
   /** Stream output callback (for backward compatibility) */
   onStream?: (chunk: string) => void;
+  /** Assistant response text only; excludes thinking and process notices. */
+  onDisplayText?: (chunk: string) => void;
   /** Structured content callback (for rich formatting) */
   onStructuredContent?: (content: StructuredContent) => void;
   /** Tool use callback (for rich formatting) */
@@ -199,6 +201,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
   // Main-agent and subagent streams have independent message IDs and block indices.
   private textStreams = new Map<string, { messageId: string; blocks: Map<number, string> }>();
   private currentStreamCallback?: (chunk: string) => void;
+  private currentDisplayTextCallback?: (chunk: string) => void;
   private currentToolUseCallback?: (toolUse: ToolUseInfo) => void;
   private currentToolResultCallback?: (toolResult: ToolResultInfo) => void;
   private currentRedactedThinkingCallback?: () => void;
@@ -1026,6 +1029,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
     this.currentOutputBuffer.push(text);
     if (this.isInPlanMode) this.planModeBuffer.push(text);
     this.currentStreamCallback?.(text);
+    this.currentDisplayTextCallback?.(text);
   }
 
   private handleStreamEvent(message: ClaudeOutputMessage): void {
@@ -1292,6 +1296,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
             if (this.currentStreamCallback) {
               this.currentStreamCallback(message.content);
             }
+            this.currentDisplayTextCallback?.(message.content);
             this.startInputDetectionTimer(message.content);
           }
 
@@ -1608,6 +1613,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
     this.currentObjectiveDispatched = false;
     this.textStreams.clear();
     this.currentStreamCallback = undefined;
+    this.currentDisplayTextCallback = undefined;
     this.currentToolUseCallback = undefined;
     this.currentToolResultCallback = undefined;
     this.currentRedactedThinkingCallback = undefined;
@@ -1669,6 +1675,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
 
     this.isProcessing = true;
     this.currentStreamCallback = command.options.onStream;
+    this.currentDisplayTextCallback = command.options.onDisplayText;
     this.currentStructuredCallback = command.options.onStructuredContent;
     this.currentToolUseCallback = command.options.onToolUse;
     this.currentToolResultCallback = command.options.onToolResult;

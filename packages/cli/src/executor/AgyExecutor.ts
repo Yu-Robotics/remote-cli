@@ -825,6 +825,7 @@ export class AgyExecutor implements IExecutor {
       if (typeof delta === 'string' && delta.length > 0) {
         this.currentOutputBuffer.push(delta);
         options.onStream?.(delta);
+        options.onDisplayText?.(delta);
       }
       return;
     }

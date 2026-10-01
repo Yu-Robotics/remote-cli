@@ -801,8 +801,11 @@ describe('RouterServer', () => {
     })));
     await sendProgress({ taskId: 'worker-1', backend: 'codex', phase: 'started', objective: 'Do not render this prominently', startedAt: Date.now() });
     await sendProgress({ taskId: 'worker-1', backend: 'codex', phase: 'text', latestText: 'Reviewing <unsafe> worker output.' });
+    await sendProgress({ taskId: 'worker-1', backend: 'codex', phase: 'tool_use', toolUse: { id: 'read-1', name: 'Read', input: {} } });
+    await sendProgress({ taskId: 'worker-1', backend: 'codex', phase: 'text', latestText: 'Reviewing <unsafe> worker output.' });
 
     const stream = (server as any).streamingMessages.get('m1');
+    expect(stream.delegationProgress.get('worker-1').phase).toBe('tool_use');
     const createdAt = stream.createdAt;
     const patchesBeforeHeartbeat = mockFeishuHandler.updateStreamingMessage.mock.calls.length;
     await vi.advanceTimersByTimeAsync(30_000);
@@ -813,6 +816,7 @@ describe('RouterServer', () => {
       .find((element: any) => element.tag === 'collapsible_panel');
     expect(panel.elements[0].content).toContain('Latest update');
     expect(panel.elements[0].content).toContain('&lt;unsafe&gt;');
+    expect(panel.header.title.content).toContain('⚙️');
     expect(panel.elements[0].content).not.toContain('Do not render this prominently');
 
     await sendProgress({ taskId: 'worker-1', backend: 'codex', phase: 'succeeded', summary: 'Finished' });
