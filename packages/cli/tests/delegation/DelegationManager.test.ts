@@ -155,10 +155,17 @@ describe('cross-backend delegation', () => {
     }
   });
 
-  it('does not resurrect text emitted before a tool starts in the same event turn', async () => {
+  it('flushes display text before a following tool event in the same event turn', async () => {
     vi.useFakeTimers();
-    const onTextProgress = vi.fn(() => true);
-    parent.onProgress = vi.fn(() => true);
+    const progressOrder: string[] = [];
+    const onTextProgress = vi.fn(() => {
+      progressOrder.push('text');
+      return true;
+    });
+    parent.onProgress = vi.fn(progress => {
+      progressOrder.push(progress.phase);
+      return true;
+    });
     parent.onTextProgress = onTextProgress;
     let finish!: (result: ExecuteResult) => void;
     let options!: ExecuteOptions;
@@ -171,16 +178,35 @@ describe('cross-backend delegation', () => {
       const scope = manager.begin(parent);
       const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' }, 'start');
       await vi.waitFor(() => expect(options).toBeDefined());
-      options.onStream?.('Old generic stream.');
-      options.onDisplayText?.('Old assistant text.');
-      options.onToolUse?.({ id: 'tool-1', name: 'Read', input: {} });
-      await vi.advanceTimersByTimeAsync(DELEGATION_TEXT_PROGRESS.flushMs);
-      expect(onTextProgress).not.toHaveBeenCalled();
+      progressOrder.length = 0;
+      onTextProgress.mockClear();
+      vi.mocked(parent.onProgress).mockClear();
 
+      options.onStream?.('Private reasoning must not appear.');
+      options.onDisplayText?.('First bounded worker update.');
+      options.onToolUse?.({ id: 'tool-1', name: 'Read', input: {} });
+      expect(onTextProgress).toHaveBeenCalledWith(expect.objectContaining({
+        taskId: task.taskId,
+        phase: 'text',
+        latestText: 'First bounded worker update.',
+      }));
+      expect(parent.onProgress).toHaveBeenCalledWith(expect.objectContaining({ phase: 'tool_use' }));
+      expect(progressOrder).toEqual(['text', 'tool_use']);
+      await Promise.resolve();
+      expect(JSON.stringify(onTextProgress.mock.calls)).not.toContain('Private reasoning');
+
+      progressOrder.length = 0;
+      onTextProgress.mockClear();
+      vi.mocked(parent.onProgress).mockClear();
+      options.onDisplayText?.('Second bounded worker update.');
       options.onToolResult?.({ tool_use_id: 'tool-1', content: '', is_error: false });
-      options.onDisplayText?.('Fresh assistant text.');
-      await vi.advanceTimersByTimeAsync(DELEGATION_TEXT_PROGRESS.flushMs);
-      expect(onTextProgress).toHaveBeenCalledWith(expect.objectContaining({ latestText: 'Fresh assistant text.' }));
+      expect(onTextProgress).toHaveBeenLastCalledWith(expect.objectContaining({
+        taskId: task.taskId,
+        phase: 'text',
+        latestText: 'Second bounded worker update.',
+      }));
+      expect(parent.onProgress).toHaveBeenCalledWith(expect.objectContaining({ phase: 'tool_result' }));
+      expect(progressOrder).toEqual(['text', 'tool_result']);
 
       finish({ success: true, output: 'Done' });
       await scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result');

@@ -537,6 +537,7 @@ function lastToolActivity(timestamp?: number): string {
 function delegatedCurrentActivity(state: DelegationProgressCardState, terminal: boolean): string {
   if (terminal) return 'Task finished';
   if (state.phase === 'waiting_input') return 'Waiting for user input';
+  if (state.latestText) return state.latestText;
   if (state.currentToolName) {
     const duration = state.currentToolStartedAt ? ` · running for ${delegationElapsed(state.currentToolStartedAt)}` : '';
     return `${state.currentToolName}${duration}`;
@@ -555,8 +556,12 @@ export function createDelegationProgressElement(state: DelegationProgressCardSta
   const body: string[] = [];
 
   if (!style.terminal) {
-    body.push(`**Current activity:** ${literalWorkerText(delegatedCurrentActivity(state, style.terminal), 260)}`);
-    if (state.latestText) body.push(`**Latest update:** ${literalWorkerText(state.latestText, 1200)}`);
+    const currentActivityLimit = state.latestText ? 1_200 : 260;
+    body.push(`**Current activity:** ${literalWorkerText(delegatedCurrentActivity(state, style.terminal), currentActivityLimit)}`);
+    if (state.latestText && state.currentToolName) {
+      const duration = state.currentToolStartedAt ? ` · running for ${delegationElapsed(state.currentToolStartedAt)}` : '';
+      body.push(`**Current tool:** ${literalWorkerText(`${state.currentToolName}${duration}`, 260)}`);
+    }
     body.push(`**Elapsed:** ${delegationElapsed(state.startedAt)} · **Last tool activity:** ${lastToolActivity(state.lastToolActivityAt)}`);
   } else {
     body.push(`**Status:** ${literalWorkerText(status, 120)}`);
@@ -565,7 +570,7 @@ export function createDelegationProgressElement(state: DelegationProgressCardSta
 
   if (state.events.length > 0) {
     body.push('\n**Recent activity:**');
-    body.push(...state.events.map(event => `- ${event.isError ? '❌' : '•'} ${literalWorkerText(event.label, 220)}`));
+    body.push(...state.events.map(event => `- ${event.isError ? '❌ ' : ''}${literalWorkerText(event.label, 220)}`));
     if (state.hiddenEventCount > 0) body.push(`- _${state.hiddenEventCount} earlier event${state.hiddenEventCount === 1 ? '' : 's'} hidden_`);
   }
   if (state.phase === 'waiting_input' && state.inputRequest) {

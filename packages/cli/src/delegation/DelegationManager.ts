@@ -486,6 +486,9 @@ ${prompt}`));
               },
               onToolUse: tool => {
                 if (task.record.state !== 'running') return;
+                // Display text is delivered synchronously by executors, so flush
+                // a just-emitted assistant update before showing this tool.
+                flushTextProgress(task);
                 clearTextProgress(task, true);
                 task.waitingInputText = undefined;
                 if (tool.id) task.activeToolIds.add(tool.id);
@@ -494,6 +497,8 @@ ${prompt}`));
               },
               onToolResult: toolResult => {
                 if (task.record.state !== 'running') return;
+                // A visible assistant update may immediately precede a result.
+                flushTextProgress(task);
                 clearTextProgress(task, true);
                 task.waitingInputText = undefined;
                 if (toolResult.tool_use_id) task.activeToolIds.delete(toolResult.tool_use_id);
