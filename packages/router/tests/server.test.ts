@@ -814,7 +814,7 @@ describe('RouterServer', () => {
 
     const panel = mockFeishuHandler.updateStreamingMessage.mock.calls.at(-1)[1]
       .find((element: any) => element.tag === 'collapsible_panel');
-    expect(panel.elements[0].content).toContain('Latest update');
+    expect(panel.elements[0].content).toContain('Current activity');
     expect(panel.elements[0].content).toContain('&lt;unsafe&gt;');
     expect(panel.header.title.content).toContain('⚙️');
     expect(panel.elements[0].content).not.toContain('Do not render this prominently');

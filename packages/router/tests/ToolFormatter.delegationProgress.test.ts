@@ -23,10 +23,12 @@ describe('delegated worker progress formatting', () => {
     expect(panel).toMatchObject({ tag: 'collapsible_panel', expanded: true });
     expect(panel.header.title.content).toContain('WORKER RUNNING');
     expect(panel.header.title.content).toContain('Claude Code');
-    expect(panel.elements[0].content).toContain('Current activity');
-    expect(panel.elements[0].content).toContain('Reading the project structure now.');
+    expect(panel.elements[0].content).toContain('**Current activity:** <raw>Reading the project structure now.</raw>');
+    expect(panel.elements[0].content).toContain('**Current tool:** <raw>Read');
+    expect(panel.elements[0].content).not.toContain('Latest update');
     expect(panel.elements[0].content).toContain('Last tool activity');
-    expect(panel.elements[0].content).toContain('Read started');
+    expect(panel.elements[0].content).toContain('- <raw>Read started</raw>');
+    expect(panel.elements[0].content).not.toContain('• <raw>Read started</raw>');
   });
 
   it('collapses terminal progress and renders worker text literally', () => {
@@ -68,7 +70,7 @@ describe('delegated worker progress formatting', () => {
     const panel = createDelegationProgressElement(state);
     const content = panel.elements[0].content;
 
-    expect(content).toContain('Latest update');
+    expect(content).toContain('Current activity');
     expect(content).toContain('&lt;raw&gt;untrusted&lt;/raw&gt;');
     expect(content).not.toContain('Sensitive internal task prompt');
   });
