@@ -46,6 +46,8 @@ interface ActiveTurn {
   sawAgentStart: boolean;
   timeoutTimer?: ReturnType<typeof setTimeout>;
   settle?: () => void;
+  /** Fallback ids from tool_execution_start events lacking toolCallId, consumed FIFO by matching end events. */
+  pendingToolFallbackIds: string[];
 }
 
 interface PendingUiRequest {
@@ -279,6 +281,7 @@ export class PiExecutor implements IExecutor {
         resolve,
         output: [],
         sawAgentStart: false,
+        pendingToolFallbackIds: [],
       };
       if (options.timeout !== 0 && options.timeout && options.timeout > 0) {
         active.timeoutTimer = setTimeout(() => {
@@ -808,8 +811,10 @@ export class PiExecutor implements IExecutor {
 
     if (event.type === 'tool_execution_start') {
       const mapped = mapPiTool(String(event.toolName ?? 'tool'), event.args);
+      const id = String(event.toolCallId ?? mapped.name);
+      if (event.toolCallId == null) active.pendingToolFallbackIds.push(id);
       active.options.onToolUse?.({
-        id: String(event.toolCallId ?? mapped.name),
+        id,
         name: mapped.name,
         input: mapped.input,
       });
@@ -817,8 +822,14 @@ export class PiExecutor implements IExecutor {
     }
 
     if (event.type === 'tool_execution_end') {
+      // End events must reuse the id emitted at start; without toolCallId, pair
+      // with the oldest unmatched fallback id so consumers tracking tool ids by
+      // start/end pairs (e.g. delegation activity tracking) stay balanced.
+      const toolUseId = event.toolCallId != null
+        ? String(event.toolCallId)
+        : active.pendingToolFallbackIds.shift() ?? mapPiTool(String(event.toolName ?? 'tool'), undefined).name;
       active.options.onToolResult?.({
-        tool_use_id: String(event.toolCallId ?? ''),
+        tool_use_id: toolUseId,
         content: toolResultText(event.result),
         is_error: Boolean(event.isError),
       });
