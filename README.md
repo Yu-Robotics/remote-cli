@@ -466,7 +466,8 @@ create extra thread buttons.
 /delegation
 /delegation on
 Ask Pi to inspect the relevant files, ask Codex to implement the agreed fix,
-then ask Claude Code to review it. Wait for each result before continuing.
+then ask Claude Code to review it. Check a result when useful, or return after
+dispatch and let Remote CLI wait and resume the coordinator automatically.
 /delegation off
 ```
 
@@ -546,9 +547,15 @@ failure-result fallback as well as further continuation.
 Cancellation does not undo existing edits.
 
 There is one active worker per parent and at most three per CLI process in
-non-overlapping workspaces. A turn can start at most 12 tasks; each worker has a
-30-minute limit. From CLI 1.6.95, intermediate text and tool-result volume does
-not abort workers; the delegation manager does not retain those intermediate
+non-overlapping workspaces. A turn can start at most 12 tasks. From CLI 1.6.100,
+a task stops after 15 minutes without a worker tool callback. While one or more
+worker tools are active, that callback-silence window is 45 minutes; it returns
+to 15 minutes after all active tools report results. Only `tool_use` and
+`tool_result` callbacks refresh these windows; text streaming does not. There is
+no fixed total duration cap: continued tool callbacks let a worker continue, and
+`/abort` remains available to stop a pathological task. From CLI 1.6.95,
+intermediate text and tool-result volume does not abort workers; the delegation
+manager does not retain those intermediate
 outputs. Each returned result is limited to 32 KiB. Oversized result text keeps
 its beginning and end, marks the omitted middle, and sets `truncated: true`
 without changing the worker's success or failure status. Combined continuations

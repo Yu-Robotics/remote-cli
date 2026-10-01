@@ -13,7 +13,10 @@ export interface ExecuteOptions {
   /** Return true when an interactive card replaces the text approval prompt. */
   onApprovalRequest?: (request: ApprovalRequestInfo) => boolean;
   onApprovalResolved?: (requestId: string, status: ApprovalStatus) => void;
+  /** Optional hard execution limit in milliseconds. Set to 0 to disable a backend default. */
   timeout?: number;
+  /** Optional backend-native inactivity limit in milliseconds. Set to 0 to disable it. */
+  inactivityTimeout?: number;
   /** Optional attachments (e.g. images) */
   attachments?: Attachment[];
 }

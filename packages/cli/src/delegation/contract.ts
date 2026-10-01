@@ -24,7 +24,7 @@ export const DELEGATION_TOOLS = [
   {
     name: 'remote_cli_delegate',
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
-    description: 'Start one bounded task on a different backend in this workspace. Same-backend delegation is rejected; use the current backend directly or its native subagents, if supported. Pass self-contained context and acceptance criteria; the worker does not inherit this conversation. Use inherit, including research tasks; put no-write requirements in the objective instead of enabling an extra sandbox. Do not edit files concurrently with a writing worker. Wait using remote_cli_result before finishing. Workers cannot delegate again.',
+    description: 'Start one managed task on a different backend in this workspace. Same-backend delegation is rejected; use the current backend directly or its native subagents, if supported. Pass self-contained context and acceptance criteria; the worker does not inherit this conversation. Use inherit, including research tasks; put no-write requirements in the objective instead of enabling an extra sandbox. Do not edit files concurrently with a writing worker. Use remote_cli_result for an explicit status check when useful; if you return after starting a worker, Remote CLI waits for terminal results and resumes this coordinator automatically. Workers cannot delegate again.',
     inputSchema: object({
       backend: { type: 'string', enum: DELEGATION_BACKENDS },
       objective: { type: 'string', minLength: 1, maxLength: 24000 },
@@ -48,7 +48,7 @@ export const DELEGATION_TOOLS = [
   },
 ] as const;
 
-export const DELEGATION_INSTRUCTIONS = 'Remote CLI delegation is enabled for this turn. Use remote_cli_list_backends to discover workers. Delegate bounded tasks only to a different backend, provide context, and await remote_cli_result before completing. Use the default inherit mode, including for research; put no-write requirements in the objective. Sandboxed coordinators cannot delegate across backends, and unrestricted coordinators must not request read_only. The current thread and backend remain responsible for the answer. Do not perform concurrent writes while a delegated worker may be writing. Do not delegate recursively or assume worker memory is shared.';
+export const DELEGATION_INSTRUCTIONS = 'Remote CLI delegation is enabled for this turn. Use remote_cli_list_backends to discover workers. Delegate managed tasks only to a different backend and provide context. Use remote_cli_result for an explicit status check when useful; if you return after starting a worker, Remote CLI waits for terminal results and resumes this coordinator automatically. Use the default inherit mode, including for research; put no-write requirements in the objective. Sandboxed coordinators cannot delegate across backends, and unrestricted coordinators must not request read_only. The current thread and backend remain responsible for the answer. Do not perform concurrent writes while a delegated worker may be writing. Do not delegate recursively or assume worker memory is shared.';
 
 export function sameConnection(a?: DelegationConnection, b?: DelegationConnection): boolean {
   return a?.url === b?.url && a?.token === b?.token;

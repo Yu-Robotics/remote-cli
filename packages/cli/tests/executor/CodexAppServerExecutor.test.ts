@@ -125,6 +125,25 @@ describe('CodexAppServerExecutor', () => {
     } finally { await other.destroy(); }
   });
 
+  it('allows an execution to disable the executor inactivity timeout', async () => {
+    await executor.destroy();
+    executor = new CodexAppServerExecutor(new DirectoryGuard([projectDir]), {
+      threadId: 'remote-thread',
+      initialWorkingDirectory: projectDir,
+      clientFactory: () => transport,
+      inactivityTimeoutMs: 100,
+      compactTimeoutMs: 60_000,
+    });
+
+    const pending = executor.execute('long delegated task', { inactivityTimeout: 0 });
+    await vi.waitFor(() => expect(transport.requests.some(request => request.method === 'turn/start')).toBe(true));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    expect(transport.isRunning()).toBe(true);
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await expect(pending).resolves.toMatchObject({ success: true });
+  });
+
   it('preserves all backend bindings when a directory change reaches an internally busy executor', async () => {
     await executor.destroy();
     const manager = await ThreadManager.initialize(tempHome);

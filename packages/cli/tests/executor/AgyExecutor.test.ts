@@ -1099,6 +1099,24 @@ describe('AgyExecutor', () => {
     expect(result.output).toBe('chunk0 chunk1 chunk2 ');
   });
 
+  it('allows an execution to disable the executor inactivity timeout', async () => {
+    await executor.destroy();
+    executor = new AgyExecutor(directoryGuard, {
+      initialWorkingDirectory: '~/test-project',
+      threadId: 'thread-1',
+      inactivityTimeoutMs: 100,
+    });
+
+    const pending = executor.execute('long delegated task', { inactivityTimeout: 0 });
+    await waitForSpawn();
+    emitInit();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    expect(proc.kill).not.toHaveBeenCalled();
+    emitResult();
+    await expect(pending).resolves.toMatchObject({ success: true });
+  });
+
   it('escalates to SIGKILL when the process ignores SIGTERM', async () => {
     await executor.destroy();
     executor = new AgyExecutor(directoryGuard, {

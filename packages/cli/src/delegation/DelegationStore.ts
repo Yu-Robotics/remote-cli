@@ -11,6 +11,9 @@ export interface DelegatedTaskRecord {
   objective: string;
   state: 'running' | 'succeeded' | 'failed' | 'cancelled' | 'timed_out' | 'interrupted';
   startedAt: number;
+  /** Last callback from a worker tool; text streaming does not update this value. */
+  lastActivityAt?: number;
+  lastActivityKind?: 'tool_use' | 'tool_result';
   finishedAt?: number;
   output?: string;
   error?: string;
