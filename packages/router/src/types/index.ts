@@ -216,6 +216,31 @@ export interface ToolResultInfo {
   diff?: string;
 }
 
+/** Lifecycle event for a delegated worker displayed inside its coordinator card. */
+export type DelegationProgressPhase =
+  | 'started'
+  | 'tool_use'
+  | 'tool_result'
+  | 'waiting_input'
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled'
+  | 'timed_out'
+  | 'interrupted';
+
+/** Bounded delegated-worker progress associated with the coordinator's streaming card. */
+export interface DelegationProgressInfo {
+  taskId: string;
+  backend: string;
+  phase: DelegationProgressPhase;
+  objective?: string;
+  toolUse?: ToolUseInfo;
+  toolResult?: ToolResultInfo;
+  summary?: string;
+  error?: string;
+  startedAt?: number;
+}
+
 // Tool use content block
 export interface ToolUseBlock extends ContentBlock {
   type: 'tool_use';

@@ -6,7 +6,7 @@ import type { BackendKey, ExecutorConfig } from '../types/config';
 import type { Thread } from '../thread/types';
 import { resolveThreadModel } from '../thread/ThreadExecutorPool';
 import type { IExecutor, ExecuteResult } from '../executor/IExecutor';
-import type { ApprovalRequestInfo, ApprovalStatus, ToolUseInfo, ToolResultInfo } from '../types';
+import type { ApprovalRequestInfo, ApprovalStatus, DelegationProgressInfo, ToolUseInfo, ToolResultInfo } from '../types';
 import { createExecutor } from '../executor';
 import { BackendRegistry } from './BackendRegistry';
 import { DelegationStore, type DelegatedTaskRecord } from './DelegationStore';
@@ -67,6 +67,8 @@ export interface DelegationParent {
   onToolUse: (tool: ToolUseInfo) => void;
   onToolResult: (result: ToolResultInfo) => void;
   onNotice: (text: string) => void;
+  /** Returns true when the client accepted a nested worker-progress update for delivery. */
+  onProgress?: (progress: DelegationProgressInfo) => boolean;
   onApproval: (request: ApprovalRequestInfo, executor: IExecutor) => boolean;
   onApprovalResolved: (id: string, status: ApprovalStatus) => void;
   isWorkspaceBusy?: (canonicalPath: string) => boolean;
@@ -81,6 +83,7 @@ interface Task {
   stop?: Promise<void>;
   idleTimer?: ReturnType<typeof setTimeout>;
   activeToolIds: Set<string>;
+  waitingInputText?: string;
   interrupted: Promise<ExecuteResult>;
   interrupt: () => void;
 }
@@ -203,6 +206,26 @@ export class DelegationManager {
     const notify = (send: () => void) => {
       try { send(); } catch { console.warn('[Delegation] Progress could not be delivered'); }
     };
+    const reportProgress = (
+      task: Task,
+      progress: Omit<DelegationProgressInfo, 'taskId' | 'backend'>,
+    ): boolean => {
+      try {
+        return parent.onProgress?.({ taskId: task.record.id, backend: task.record.backend, ...progress }) === true;
+      } catch {
+        console.warn('[Delegation] Progress could not be delivered');
+        return false;
+      }
+    };
+    const reportTerminalProgress = (task: Task): boolean => {
+      if (task.record.state === 'running') return false;
+      return reportProgress(task, {
+        phase: task.record.state,
+        summary: task.record.output ? bounded(task.record.output, 1000, true).text : undefined,
+        error: task.record.error ? bounded(task.record.error, 1000).text : undefined,
+        startedAt: task.record.startedAt,
+      });
+    };
     const stop = (task: Task): Promise<void> => task.stop ??= (async () => {
       if (!task.executor) return;
       try {
@@ -275,17 +298,28 @@ export class DelegationManager {
               // Intermediate output is not retained here; only relay input prompts.
               queueMicrotask(() => {
                 if (!closed && task.record.state === 'running' && task.executor?.isWaitingInput?.()) {
-                  notify(() => parent.onNotice(`\n[${backend} delegated task]\n${bounded(text, 4000).text}`));
+                  const prompt = bounded(text, 4000).text;
+                  if (task.waitingInputText === prompt) return;
+                  task.waitingInputText = prompt;
+                  if (!reportProgress(task, { phase: 'waiting_input', summary: prompt, startedAt: task.record.startedAt })) {
+                    notify(() => parent.onNotice(`\n[${backend} delegated task]\n${prompt}`));
+                  }
                 }
               });
             },
             onToolUse: tool => {
+              if (task.record.state !== 'running') return;
+              task.waitingInputText = undefined;
               if (tool.id) task.activeToolIds.add(tool.id);
               noteToolActivity(task, 'tool_use');
+              reportProgress(task, { phase: 'tool_use', toolUse: tool, startedAt: task.record.startedAt });
             },
             onToolResult: result => {
+              if (task.record.state !== 'running') return;
+              task.waitingInputText = undefined;
               if (result.tool_use_id) task.activeToolIds.delete(result.tool_use_id);
               noteToolActivity(task, 'tool_result');
+              reportProgress(task, { phase: 'tool_result', toolResult: result, startedAt: task.record.startedAt });
             },
             onApprovalRequest: request => !closed && task.record.state === 'running' && parent.onApproval({ ...request,
               description: `[${backend} delegated task] ${request.description}`, canRemember: false }, task.executor!),
@@ -323,8 +357,10 @@ export class DelegationManager {
         task.record.finishedAt = Date.now();
         await deadline(async () => { await save(task); await this.store.prune(); }, this.cleanupMs)
           .catch(() => console.warn('[Delegation] Final task metadata could not be saved or pruned'));
-        notify(() => parent.onToolResult({ tool_use_id: task.record.id, content: JSON.stringify(view(task)), is_error: task.record.state !== 'succeeded' }));
-        notify(() => parent.onNotice(formatDelegationNotice(task.record)));
+        if (!reportTerminalProgress(task)) {
+          notify(() => parent.onToolResult({ tool_use_id: task.record.id, content: JSON.stringify(view(task)), is_error: task.record.state !== 'succeeded' }));
+          notify(() => parent.onNotice(formatDelegationNotice(task.record)));
+        }
         task.settle();
       }
     };
@@ -412,9 +448,11 @@ export class DelegationManager {
             throw error;
           }
           if (closed) { task.record.state = 'cancelled'; }
-          notify(() => parent.onToolUse({ id: task.record.id, name: 'Task', input: {
-              description: `${backend}: ${objective.slice(0, 120)}`, prompt: objective.slice(0, 1000), subagent_type: backend,
-          } }));
+          if (!reportProgress(task, { phase: 'started', objective: task.record.objective, startedAt: task.record.startedAt })) {
+            notify(() => parent.onToolUse({ id: task.record.id, name: 'Task', input: {
+                description: `${backend}: ${objective.slice(0, 120)}`, prompt: objective.slice(0, 1000), subagent_type: backend,
+            } }));
+          }
           void run(task, configuration, objective).catch(() => undefined);
           return receive(task, requestedDuring);
         } finally { starting = false; }

@@ -478,11 +478,13 @@ bounded reason; the coordinator still receives the existing task result. This
 uses the existing text stream and works with older Routers. It adds no probes,
 cooldowns, retries, or changes to ordinary non-delegated sessions.
 
+CLI 和 Router 1.6.103 及以上版本还会在同一回复卡片中显示实时 worker 进度：一个可展开的嵌套 worker 面板会记录任务启动、工具开始和完成，以及等待输入状态。为控制父卡片大小，面板不会显示原始 worker 文本或完整工具输出。任一端版本较旧时，CLI 会回退到现有的启动和终态结果块。
+
 建议先在一个测试线程中启用。从未启用委派的线程不会注册受管理的工具、添加提示词前缀、清理后端委派配置，或检查委派工作区占用；其普通进程处理和会话输出保持原样。
 
 线程使用过委派后，`/delegation off` 会移除受管理的工具。CLI 会记录哪些后端需要清理，重启或切换后端后也能继续处理。原生斜杠命令恢复会话前同样会执行清理。移除工具时，每个执行器实例可能重启一次后端进程，但会保留已保存的对话；已经清理过的进程不会反复重启。未使用过委派的后端无需清理。
 
-共享 Router 可以先于本机 CLI 升级。本功能仍使用协议版本 1，保持原有命令、工具进度和回复格式。旧版 CLI 可继续原有流程；使用委派需要升级本机 CLI，并在目标线程中启用。CLI 与 Router 的包版本无需一致即可连接。审批卡片和任务恢复等可选能力按设备分别协商，因此新旧 CLI 可以共用同一个 Router。
+共享 Router 可以先于本机 CLI 升级。本功能仍使用协议版本 1，保持原有命令、工具进度和回复格式。旧版 CLI 可继续原有流程；使用委派需要升级本机 CLI，并在目标线程中启用。CLI 与 Router 的包版本无需一致即可连接。审批卡片、任务恢复和嵌套 worker 进度等可选能力按设备分别协商，因此新旧 CLI 可以共用同一个 Router。
 
 协调者通过 MCP 或显式加载的 Pi 扩展获得委派工具。OpenCode 和 Kimi 使用 ACP 会话的 MCP 服务；ZCode 使用原生 app-server 会话 MCP 服务。AGY 使用按线程隔离的 MCP 配置，关闭委派时恢复原配置；桥接凭据只通过进程环境变量传递。无需安装 skill 或修改后端的全局配置。启用委派期间，ZCode 的会话 MCP 覆盖会替换用户自定义的 MCP 服务；原生工具和插件工具仍可用，关闭委派后会恢复正常 MCP 配置。每个执行者在父线程的工作目录中使用独立对话，只接收一项自包含任务。协调者需要提供必要上下文；历史消息和图片附件不会自动复制过去。
 

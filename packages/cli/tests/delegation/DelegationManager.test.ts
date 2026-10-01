@@ -86,6 +86,33 @@ describe('cross-backend delegation', () => {
     expect(record).toMatchObject({ threadId: 'owner', parentMessageId: 'message-1', state: 'succeeded' });
   });
 
+  it('emits bounded nested progress instead of flat child tool cards when the parent supports it', async () => {
+    const onProgress = vi.fn(() => true);
+    parent.onProgress = onProgress;
+    vi.mocked(worker.execute).mockImplementationOnce(async (_prompt, options) => {
+      options.onToolUse?.({ id: 'read-1', name: 'Read', input: { file_path: 'README.md' } });
+      options.onToolResult?.({ tool_use_id: 'read-1', content: 'read complete', is_error: false });
+      return { success: true, output: 'Review complete' };
+    });
+
+    const scope = manager.begin(parent);
+    const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Review the README' }, 'start');
+    await expect(scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result')).resolves.toMatchObject({ state: 'succeeded' });
+
+    expect(onProgress.mock.calls.map(([progress]) => progress.phase)).toEqual([
+      'started', 'tool_use', 'tool_result', 'succeeded',
+    ]);
+    expect(onProgress).toHaveBeenLastCalledWith(expect.objectContaining({
+      taskId: task.taskId,
+      backend: 'codex',
+      phase: 'succeeded',
+      summary: 'Review complete',
+    }));
+    expect(parent.onToolUse).not.toHaveBeenCalled();
+    expect(parent.onToolResult).not.toHaveBeenCalled();
+    expect(parent.onNotice).not.toHaveBeenCalled();
+  });
+
   it('uses the legacy Claude model when no per-backend model is saved', async () => {
     parent.backend = 'codex';
     parent.thread.model = 'legacy-claude-model';
