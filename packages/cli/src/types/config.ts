@@ -130,8 +130,17 @@ export interface PiExecutorConfig {
 /**
  * Executor configuration — controls which AI CLI backend is used
  */
+/** DeepSeek Harness ACP configuration. Extra session-log uploads are always disabled by this adapter. */
+export interface DshExecutorConfig {
+  /** Opaque model ID returned by /model. Unset uses the DSH ACP profile default. */
+  model?: string;
+  autoApprove?: boolean;
+  /** Override the DSH executable. Default: dsh. */
+  command?: string;
+}
+
 export interface ExecutorConfig {
-  type: 'auto' | 'claude-persistent' | 'agy' | 'codex' | 'opencode' | 'kimi' | 'zcode' | 'pi';
+  type: 'auto' | 'claude-persistent' | 'agy' | 'codex' | 'opencode' | 'kimi' | 'zcode' | 'pi' | 'dsh';
   claude?: ClaudeExecutorConfig;
   agy?: AgyExecutorConfig;
   codex?: CodexExecutorConfig;
@@ -139,12 +148,13 @@ export interface ExecutorConfig {
   kimi?: KimiExecutorConfig;
   zcode?: ZCodeExecutorConfig;
   pi?: PiExecutorConfig;
+  dsh?: DshExecutorConfig;
 }
 
 /**
  * Canonical backend keys for per-backend thread settings (e.g. Thread.models).
  */
-export type BackendKey = 'claude' | 'agy' | 'codex' | 'opencode' | 'kimi' | 'zcode' | 'pi';
+export type BackendKey = 'claude' | 'agy' | 'codex' | 'opencode' | 'kimi' | 'zcode' | 'pi' | 'dsh';
 
 /**
  * Map an executor config type to its canonical backend key.
@@ -157,6 +167,7 @@ export function backendKeyOf(type: ExecutorConfig['type'] | string): BackendKey 
   if (type === 'kimi') return 'kimi';
   if (type === 'zcode') return 'zcode';
   if (type === 'pi') return 'pi';
+  if (type === 'dsh') return 'dsh';
   return 'claude';
 }
 

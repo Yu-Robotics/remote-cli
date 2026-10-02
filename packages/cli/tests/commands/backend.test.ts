@@ -123,6 +123,35 @@ describe('/backend command', () => {
   // ── list mode ────────────────────────────────────────────────────────────────
 
   describe('list mode (/backend with no args)', () => {
+    it('reports the DSH summary/reset compact boundary', async () => {
+      mockThreadPool.getBackendKey.mockReturnValue('dsh');
+      mockExecutor.compactWhenFull = vi.fn().mockResolvedValue({ success: true, output: 'Summarized and reset; native DSH history retained.' });
+      await send('/compact');
+      expect(sentResponse().output).toBe('Summarized and reset; native DSH history retained.');
+    });
+
+    it('appends DSH without changing existing backend ordering and honors its custom command', async () => {
+      mockInstalled('claude', 'agy', '/test/dsh');
+      mockConfig.get.mockReturnValue({ type: 'auto', dsh: { command: '/test/dsh' } });
+      await send('/backend');
+      const output = sentResponse().output;
+      expect(output).toContain('DeepSeek Harness (DSH)');
+      expect(output.indexOf('Claude Code')).toBeLessThan(output.indexOf('AGY CLI'));
+      expect(output.indexOf('AGY CLI')).toBeLessThan(output.indexOf('DeepSeek Harness'));
+      expect(execFile).toHaveBeenCalledWith('/test/dsh', ['--version'], expect.anything(), expect.any(Function));
+    });
+
+    it('switches a thread to DSH and rejects unsupported native skills without Claude fallback', async () => {
+      mockInstalled('claude', 'dsh');
+      await send('/backend 2 @');
+      expect(mockThreadPool.switchThreadBackend).toHaveBeenCalledWith('default-id', 'dsh');
+      mockThreadPool.getBackendKey.mockReturnValue('dsh');
+      mockWsClient.send.mockClear();
+      await send('/skills');
+      expect(sentResponse()).toMatchObject({ success: false, error: expect.stringContaining('DSH') });
+      expect(mockExecutor.execute).not.toHaveBeenCalled();
+    });
+
     it('shows installed backends with active marker', async () => {
       mockInstalled('claude', 'agy');
       mockConfig.get.mockReturnValue({ type: 'auto' });

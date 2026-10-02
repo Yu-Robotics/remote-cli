@@ -28,6 +28,10 @@ export interface AcpExecutorOptions {
   /** Override session pointer storage for isolated tests. */
   sessionBaseDir?: string;
   clientFactory?: (callbacks: AcpEventCallbacks, cwd: string) => AcpTransport;
+  /** Opt-in for transports that must not replace a session after arbitrary resume failures. */
+  preserveSessionOnResumeError?: boolean;
+  /** Opt-in to track and cancel a transport even before session initialization finishes. */
+  managedLifecycle?: boolean;
 }
 
 interface QueuedCommand {
@@ -130,7 +134,7 @@ export abstract class AcpExecutor implements IExecutor {
   private pendingPermission: PendingPermission | null = null;
   private activeToolCalls = new Map<string, AcpToolCallUpdate>();
 
-  protected constructor(directoryGuard: DirectoryGuard, options: AcpExecutorOptions) {
+  protected constructor(directoryGuard: DirectoryGuard, private readonly options: AcpExecutorOptions) {
     this.directoryGuard = directoryGuard;
     this.model = options.model;
     this.effort = options.effort;
@@ -204,7 +208,13 @@ export abstract class AcpExecutor implements IExecutor {
   }
 
   async abort(): Promise<boolean> {
-    if (!this.client || !this.sessionId || !this.isProcessing) return false;
+    if (!this.client || !this.sessionId || !this.isProcessing) {
+      if (this.options.managedLifecycle && this.isProcessing) {
+        this.destroyClient();
+        return true;
+      }
+      return false;
+    }
     this.cancelPendingPermission();
     this.client.sendCancel(this.sessionId);
     this.clearAbortTimer();
@@ -443,7 +453,7 @@ export abstract class AcpExecutor implements IExecutor {
         } catch (error) {
           const missingSession = /\bsession (?:not found|does not exist|no longer exists|is missing)\b/i
             .test(error instanceof Error ? error.message : String(error));
-          if (this.delegationConnection && !missingSession) throw error;
+          if ((this.delegationConnection || this.options.preserveSessionOnResumeError) && !missingSession) throw error;
           console.warn(`[${this.backendLabel}Executor] Stored session could not be loaded; starting fresh`, error);
           this.clearSessionPointer();
         } finally { this.replayingSession = false; }
@@ -575,7 +585,7 @@ export abstract class AcpExecutor implements IExecutor {
   }
 
   private isDelegationManaged(): boolean {
-    return this.delegationWorker || this.delegationConnection !== undefined;
+    return this.options.managedLifecycle === true || this.delegationWorker || this.delegationConnection !== undefined;
   }
 
   private clearAbortTimer(): void {

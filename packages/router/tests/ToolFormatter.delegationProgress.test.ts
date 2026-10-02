@@ -10,6 +10,10 @@ const render = (changes: Partial<DelegationProgressCardState> = {}) => createDel
 const identity = (elements: any[]) => elements[0].columns[0].elements[0];
 
 describe('delegated worker progress formatting', () => {
+  it('identifies DSH workers without exposing the raw backend key', () => {
+    expect(identity(render({ backend: 'dsh' })).content).toContain('**DSH**');
+  });
+
   afterEach(() => vi.useRealTimers());
 
   it.each(['started', 'text', 'tool_use', 'tool_result', 'waiting_input', 'succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted'] as const)

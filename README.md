@@ -454,7 +454,7 @@ Once connected, use these commands in Feishu:
 
 ### Cross-backend Delegation
 
-Claude Code, Codex, Pi, AGY, OpenCode, Kimi Code, and ZCode can each coordinate
+Claude Code, Codex, Pi, AGY, OpenCode, Kimi Code, ZCode, and DSH can each coordinate
 independent tasks on other installed backends. From CLI 1.6.95, managed
 same-backend delegation is rejected before a worker starts, and discovery marks
 the current backend unavailable as a worker. Use the current backend directly
@@ -831,7 +831,9 @@ Slash commands that remote-cli does not handle itself are forwarded to the activ
 - **ZCode**: slash commands use the persistent official app-server session; remote-cli maps `/skills` to ZCode's `/skill` and handles `/model`, `/effort`, `/compact`, and `/abort` directly
 - **Pi**: extension commands, prompt templates, and `/skill:name` skills advertised by RPC `get_commands` are sent through the persistent `pi --mode rpc` session; `/skills` lists Pi skills. Built-in TUI-only commands are rejected. remote-cli still handles `/model`, `/effort`, `/compact`, and `/abort` itself
 
-The built-in commands (`/help`, `/status`, `/context`, `/skills`, `/clear`, `/new`, `/compact`, `/model`, `/cd`, `/thread`, `/backend`, `/abort`) work across all backends. `/new` is an exact alias for `/clear`: it keeps the current remote-cli thread, working directory, backend, model, and effort settings while starting a fresh backend conversation. `/effort` controls the per-thread reasoning effort for Codex, AGY, OpenCode, Kimi Code, ZCode, and Pi; Claude Code support is not implemented yet.
+- **DSH**: no native interactive slash passthrough; remote-cli handles its shared commands. See [Using DeepSeek Harness (DSH)](#using-deepseek-harness-dsh) for image, compaction, and privacy boundaries.
+
+The built-in commands (`/help`, `/status`, `/context`, `/clear`, `/new`, `/compact`, `/model`, `/cd`, `/thread`, `/backend`, `/abort`) work across all backends. `/skills` availability is backend-specific; DSH returns an explicit unsupported response. `/new` is an exact alias for `/clear`: it keeps the current remote-cli thread, working directory, backend, model, and effort settings while starting a fresh backend conversation. `/effort` controls the per-thread reasoning effort for Codex, AGY, OpenCode, Kimi Code, ZCode, Pi, and DSH; Claude Code support is not implemented yet.
 `/status` always reports the current remote-cli thread and runtime state. When available, it appends the active account's native plan usage for Codex (app-server rate limits), AGY (`/usage` plus `/credits`), or Kimi Code (the authenticated local Kimi server's account-usage endpoint). Each backend keeps its own fields and wording. An unavailable, unauthenticated, unsupported, or failed usage query is omitted without failing the normal status response. The short-lived Kimi server binds only to loopback and is stopped after the query.
 `/context` works across all backends and reports the active session, model, working directory, and queue state. Pi additionally reports the official RPC session totals and current context-window usage; other backends retain the transport-availability message when exact usage is unavailable. `/skills` uses the native informational command for Claude, AGY, OpenCode, and Kimi Code, maps to ZCode's native `/skill` command, lists Pi skills via RPC, and discovers local `SKILL.md` files for Codex under `.agents/skills` and `~/.codex/skills`.
 
@@ -1070,7 +1072,7 @@ MIT License - see [LICENSE](LICENSE) file for details.
 }
 ```
 
-- `executor.type`: Global default backend. Options are `auto` (Claude Persistent), `claude-persistent`, `agy`, `codex`, `opencode`, `kimi`, `zcode`, `pi`. Per-thread overrides are managed with `/backend <index> @`.
+- `executor.type`: Global default backend. Options are `auto` (Claude Persistent), `claude-persistent`, `agy`, `codex`, `opencode`, `kimi`, `zcode`, `pi`, `dsh`. Per-thread overrides are managed with `/backend <index> @`.
 - `executor.agy`: 
     - `model`: Model slug from `agy models` (e.g. `gemini-3.8-flash-low`). Unset = agy default. Invalid slugs are rejected by agy with a clear error.
     - `autoApprove`: Automatically approve tool permissions via `--dangerously-skip-permissions` (default true).
@@ -1092,6 +1094,10 @@ MIT License - see [LICENSE](LICENSE) file for details.
     - `provider`: Optional provider when `model` is a bare id (for example `google`).
     - `autoApprove`: Pass `--approve` to Pi so non-interactive RPC runs trust project-local resources (default true). When false, remote-cli passes `--no-approve`. Pi extension UI dialogs are always relayed through the mobile input flow.
     - `command`: Pi binary to invoke (default `pi`).
+- `executor.dsh`:
+    - `model`: Opaque native model ID from `/model`. Unset = DSH session default.
+    - `autoApprove`: Automatically allow ACP tool requests (default true); false relays them through mobile text input. Permission errors deny the request.
+    - `command`: DSH binary to invoke (default `dsh`). Privacy controls apply only to remote-cli-launched DSH processes.
 - `executor.codex`:
     - `model`: Model selected for Codex turns. Unset = codex default. Use `/model` in Feishu to query the authenticated account's available models.
     - `autoApprove`: Use `approvalPolicy: never` with full access (default true). When false, app-server approval requests are relayed through the existing mobile input flow.
@@ -1182,6 +1188,27 @@ remote-cli config set executor.pi.model google/gemini-3-flash
 ```
 
 The current Pi package requires Node.js 22.19.0 or newer. The Pi backend runs one persistent `pi --mode rpc` process per active thread. Session files are stored under `~/.remote-cli/pi-sessions/` so Feishu threads do not reuse interactive `~/.pi` sessions. `/model` uses RPC `get_available_models` / `set_model`, `/effort` maps to Pi thinking levels (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`), `/compact` uses native RPC compaction, `/abort` sends RPC `abort`, `/context` uses RPC `get_session_stats`, and image messages are sent as Pi image content. Automatic provider retries are shown as progress without becoming part of the final model response. Changing the working directory starts a fresh Pi session because Pi stores the working directory in the session header. `autoApprove: true` trusts project-local Pi resources through the official `--approve` flag; extension UI dialogs are still relayed to the user, including labels and descriptions from compatible structured select options. Authenticate with interactive `pi` before selecting the backend.
+
+#### Using DeepSeek Harness (DSH)
+
+```bash
+npm install --global @deepseek-ai/dsh
+dsh web  # Complete provider setup in DSH before selecting this backend.
+remote-cli config set executor.type dsh
+```
+
+You can also select **DeepSeek Harness (DSH)** from `/backend`; append `@` to switch only the current thread. Installation detection uses `dsh --version` (or `executor.dsh.command`); it does not prove authentication or remaining quota. Tested against DSH `0.2.0-rc.2`. Its ACP server must advertise protocol v1 and `session/resume`.
+
+remote-cli starts a dedicated ACP process per active thread. `/model` lists the native opaque catalog IDs, `/effort` controls `reasoning_effort` (`auto` restores the provider default), and `/abort` cancels through ACP with process cleanup if cancellation stalls. Session pointers live under `~/.remote-cli/dsh-sessions/`; they survive backend switches and restarts while the working directory stays the same. Temporary resume failures preserve the pointer instead of silently creating a new conversation. Tool activity, text permission prompts, file-derived text, and cross-backend delegation use the existing remote-cli flows. DSH can be either coordinator or worker; worker sessions use separate lane IDs. Thinking chunks are never included in answer text or delegated results.
+
+DSH-specific boundaries:
+
+- ACP emits committed answer blocks, not necessarily token-by-token streaming. `/context` reports validated context occupancy when provided, not invented billing or account quota.
+- Images are sent only when the ACP initialization advertises image support. The tested default profile is text-only; an unsupported mixed text/image prompt is rejected as a whole. Capability advertisement is connection-level, not a guarantee for every catalog model; DSH performs final admission for the selected model.
+- `/compact` summarizes the conversation, saves a private handoff, and starts fresh. The handoff survives a restart and is consumed by the next successful turn. This is not native transcript compaction. `/clear`, directory changes, and thread deletion remove remote-cli pointers/handoffs, not DSH's native persisted history.
+- Interactive slash commands (including native `/skills`), plan mode, and ACP elicitation are not exposed by this DSH release. Unsupported commands return an explicit error; they never fall back to another backend. There is no new DSH OS sandbox or interactive approval-card implementation.
+
+Every remote-cli-launched DSH process gets a private temporary config overlay setting `session-log-deepseek.config.enabled=false` and `session-telemetry-otel.config.mode=DISABLED`, plus `DSH_TELEMETRY_DISABLED=1`. These disable the official extra session-log upload and OTel telemetry paths independently; the environment flag alone does not disable session-log attachment. The overlay is removed after process exit. Existing DSH profiles, credentials, and other backends are not edited. Normal model requests still send the task context to the selected provider, and DSH still stores local history; this is not an offline mode or a guarantee about user-installed third-party plugins.
 
 #### Using Codex CLI (OpenAI)
 

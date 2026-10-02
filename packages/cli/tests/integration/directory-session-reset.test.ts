@@ -16,7 +16,7 @@ vi.mock('os', async () => {
   return { ...actual, homedir, default: { ...actual, homedir } };
 });
 
-const backends: BackendKey[] = ['claude', 'codex', 'agy', 'opencode', 'kimi', 'zcode', 'pi'];
+const backends: BackendKey[] = ['claude', 'codex', 'agy', 'opencode', 'kimi', 'zcode', 'pi', 'dsh'];
 const configFor = (backend: BackendKey): ExecutorConfig => ({
   type: backend === 'claude' ? 'claude-persistent' : backend,
 });

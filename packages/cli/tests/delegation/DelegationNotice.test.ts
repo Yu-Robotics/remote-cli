@@ -9,6 +9,10 @@ const task: DelegatedTaskRecord = {
 };
 
 describe('delegation result notices', () => {
+  it('identifies the DSH worker', () => {
+    expect(formatDelegationNotice({ ...task, backend: 'dsh' })).toContain('DSH · Delegated task');
+  });
+
   it('identifies the worker and task without duplicating its answer', () => {
     const notice = formatDelegationNotice(task);
     expect(notice).toContain('Claude Code · Delegated task');

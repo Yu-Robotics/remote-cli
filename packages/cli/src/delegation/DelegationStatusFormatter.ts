@@ -10,6 +10,7 @@ const BACKEND_LABELS: Record<DelegationBackend, string> = {
   opencode: 'OpenCode CLI',
   kimi: 'Kimi Code CLI',
   zcode: 'ZCode',
+  dsh: 'DeepSeek Harness',
 };
 
 interface DelegationStatusOptions {

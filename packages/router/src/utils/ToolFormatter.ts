@@ -500,6 +500,7 @@ const DELEGATION_BACKEND_LABELS: Record<string, string> = {
   opencode: 'OpenCode',
   kimi: 'Kimi Code',
   zcode: 'ZCode',
+  dsh: 'DSH',
 };
 
 const DELEGATION_PROGRESS_STYLES: Record<DelegationProgressPhase, { color: string; label: string; terminal: boolean }> = {

@@ -16,6 +16,11 @@ function availability(overrides: Partial<BackendAvailability>): BackendAvailabil
 }
 
 describe('delegation status formatter', () => {
+  it('labels the DSH coordinator', () => {
+    expect(formatDelegationStatus({ enabled: true, coordinatorBackend: 'dsh', coordinatorSupported: true,
+      backends: [availability({ backend: 'dsh' })] })).toContain('**Coordinator:** DeepSeek Harness');
+  });
+
   it('groups the enabled state, coordinator, backend availability, and operating rules', () => {
     const output = formatDelegationStatus({
       enabled: true,

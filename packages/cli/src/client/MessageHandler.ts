@@ -37,13 +37,13 @@ import { formatDelegationStatus } from '../delegation/DelegationStatusFormatter'
  * Detected backend information
  */
 interface BackendInfo {
-  id: 'auto' | 'agy' | 'codex' | 'opencode' | 'kimi' | 'zcode' | 'pi';
+  id: 'auto' | 'agy' | 'codex' | 'opencode' | 'kimi' | 'zcode' | 'pi' | 'dsh';
   label: string;
   installed: boolean;
 }
 
-const EFFORT_BACKENDS = new Set(['codex', 'agy', 'opencode', 'kimi', 'zcode', 'pi']);
-const NATIVE_MODEL_LIST_BACKENDS = new Set(['codex', 'opencode', 'kimi', 'zcode', 'pi']);
+const EFFORT_BACKENDS = new Set(['codex', 'agy', 'opencode', 'kimi', 'zcode', 'pi', 'dsh']);
+const NATIVE_MODEL_LIST_BACKENDS = new Set(['codex', 'opencode', 'kimi', 'zcode', 'pi', 'dsh']);
 const SLASH_SESSION_BACKENDS = new Set(['opencode', 'kimi', 'zcode', 'pi']);
 const NATIVE_SKILLS_BACKENDS = new Set(['claude', 'agy', 'opencode', 'kimi', 'zcode', 'pi']);
 
@@ -55,6 +55,7 @@ function backendDisplayName(key: string): string {
     case 'kimi': return 'Kimi Code CLI';
     case 'zcode': return 'ZCode';
     case 'pi': return 'Pi';
+    case 'dsh': return 'DeepSeek Harness';
     default: return 'Claude Code';
   }
 }
@@ -826,7 +827,7 @@ Use /compact to reduce conversation context or /clear to start a fresh context.`
 
     if (trimmed === '/skills') {
       const backend = this.threadPool.getBackendKey(threadId);
-      if (NATIVE_SKILLS_BACKENDS.has(backend)) {
+      if (NATIVE_SKILLS_BACKENDS.has(backend) || backend === 'dsh') {
         await this.executeSlashCommand(messageId, threadId, trimmed, executor);
       } else {
         const skills = await this.listLocalSkills(executor.getCurrentWorkingDirectory(), 'codex');
@@ -907,7 +908,8 @@ You can also use natural language commands to control Claude Code CLI.`,
         this.sendStreamChunk(messageId, threadId, chunk);
       });
       this.sendResponse(messageId, threadId, result.success
-        ? { success: true, output: '✅ Conversation history compressed' }
+        ? { success: true, output: this.threadPool.getBackendKey(threadId) === 'dsh'
+          ? result.output ?? 'DSH context summarized and reset.' : '✅ Conversation history compressed' }
         : { success: false, error: result.error || 'Compaction failed' }
       );
       return true;
@@ -983,6 +985,8 @@ You can also use natural language commands to control Claude Code CLI.`,
             ? thread?.models?.opencode ?? executorConfig.opencode?.model
             : key === 'kimi'
               ? thread?.models?.kimi ?? executorConfig.kimi?.model
+              : key === 'dsh'
+                ? thread?.models?.dsh ?? executorConfig.dsh?.model
               : key === 'pi'
                 ? thread?.models?.pi ?? executorConfig.pi?.model
                 : thread?.models?.zcode ?? executorConfig.zcode?.model;
@@ -1839,7 +1843,7 @@ You can also use natural language commands to control Claude Code CLI.`,
   /**
    * Which backend slash commands should be forwarded to for a thread.
    */
-  private resolveSlashBackend(threadId: string): 'claude' | 'agy' | 'codex' | 'opencode' | 'kimi' | 'zcode' | 'pi' {
+  private resolveSlashBackend(threadId: string): 'claude' | 'agy' | 'codex' | 'opencode' | 'kimi' | 'zcode' | 'pi' | 'dsh' {
     return this.threadPool.getBackendKey(threadId);
   }
 
@@ -1864,6 +1868,12 @@ You can also use natural language commands to control Claude Code CLI.`,
     executor: IExecutor
   ): Promise<void> {
     const backend = this.resolveSlashBackend(threadId);
+
+    if (backend === 'dsh') {
+      this.sendResponse(messageId, threadId, { success: false,
+        error: 'DSH ACP does not expose interactive slash commands. Use remote-cli built-ins (/clear, /compact, /model, /effort, /cd, /thread, /backend, /delegation, /abort, /status, /help) or describe the task in plain text.' });
+      return;
+    }
 
     if (SLASH_SESSION_BACKENDS.has(backend)) {
       // ZCode names its native skill-list command /skill, while remote-cli
@@ -2543,13 +2553,14 @@ You can also use natural language commands to control Claude Code CLI.`,
 
   private async detectBackends(): Promise<BackendInfo[]> {
     const executorConfig = (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
-    const [claudeInstalled, codexInstalled, openCodeInstalled, kimiInstalled, piInstalled, agyInstalled] = await Promise.all([
+    const [claudeInstalled, codexInstalled, openCodeInstalled, kimiInstalled, piInstalled, agyInstalled, dshInstalled] = await Promise.all([
       this.checkCommand('claude', ['--version']),
       this.checkCommand('codex', ['--version']),
       this.checkCommand('opencode', ['--version']),
       this.checkCommand('kimi', ['--version']),
       this.checkCommand(executorConfig.pi?.command ?? 'pi', ['--version']),
       this.checkCommand('agy', ['--version']),
+      this.checkCommand(executorConfig.dsh?.command ?? 'dsh', ['--version']),
     ]);
     return [
       { id: 'auto', label: 'Claude Code', installed: claudeInstalled },
@@ -2559,6 +2570,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       { id: 'zcode', label: 'ZCode', installed: isZCodeAvailable(executorConfig.zcode?.command) },
       { id: 'pi', label: 'Pi', installed: piInstalled },
       { id: 'agy',  label: 'AGY CLI (Antigravity)', installed: agyInstalled },
+      { id: 'dsh', label: 'DeepSeek Harness (DSH)', installed: dshInstalled },
     ];
   }
 

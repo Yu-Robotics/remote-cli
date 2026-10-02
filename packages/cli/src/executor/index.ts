@@ -6,6 +6,7 @@ import { OpenCodeExecutor } from './OpenCodeExecutor';
 import { KimiExecutor } from './KimiExecutor';
 import { ZCodeExecutor } from './ZCodeExecutor';
 import { PiExecutor } from './PiExecutor';
+import { DshExecutor } from './DshExecutor';
 import type { IExecutor } from './IExecutor';
 import type { ExecutorConfig } from '../types/config';
 
@@ -21,6 +22,7 @@ export { OpenCodeExecutor } from './OpenCodeExecutor';
 export { KimiExecutor } from './KimiExecutor';
 export { ZCodeExecutor } from './ZCodeExecutor';
 export { PiExecutor } from './PiExecutor';
+export { DshExecutor } from './DshExecutor';
 export type { ExecutorModelInfo, IExecutor } from './IExecutor';
 
 /**
@@ -144,6 +146,18 @@ export function createExecutor(
         autoApprove: executorConfig.pi?.autoApprove ?? true,
         initialWorkingDirectory,
         piCommand: executorConfig.pi?.command,
+        delegationWorker: runtime.delegationWorker,
+        threadId,
+      });
+
+    case 'dsh':
+      console.log('[ExecutorFactory] Using DeepSeek Harness ACP executor');
+      return new DshExecutor(directoryGuard, {
+        model: model ?? executorConfig.dsh?.model,
+        effort,
+        autoApprove: executorConfig.dsh?.autoApprove ?? true,
+        initialWorkingDirectory,
+        dshCommand: executorConfig.dsh?.command,
         delegationWorker: runtime.delegationWorker,
         threadId,
       });

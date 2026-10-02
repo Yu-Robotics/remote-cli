@@ -1717,6 +1717,7 @@ Examples:
       case 'kimi': return 'Kimi';
       case 'zcode': return 'ZCode';
       case 'pi': return 'Pi';
+      case 'dsh': return 'DSH';
     }
   }
 

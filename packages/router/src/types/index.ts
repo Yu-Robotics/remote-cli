@@ -151,7 +151,7 @@ export interface ThreadSummary {
   id: string;
   name: string;
   status: 'idle' | 'running' | 'error';
-  backend?: 'claude' | 'agy' | 'codex' | 'opencode' | 'kimi' | 'zcode' | 'pi';
+  backend?: 'claude' | 'agy' | 'codex' | 'opencode' | 'kimi' | 'zcode' | 'pi' | 'dsh';
   /** Last path component of the thread's current working directory. */
   workspaceName?: string;
 }

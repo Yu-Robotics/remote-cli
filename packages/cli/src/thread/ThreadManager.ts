@@ -199,6 +199,10 @@ export class ThreadManager {
     await fs.rm(path.join(dataDir, 'codex-sandbox', `${id}.json`), { force: true });
     await fs.rm(path.join(agyDataDir, 'agy-sessions', `${id}.json`), { force: true });
     await fs.rm(path.join(agyDataDir, 'agy-homes', id), { recursive: true, force: true });
+    for (const root of new Set([dataDir, agyDataDir])) {
+      await fs.rm(path.join(root, 'dsh-sessions', `${id}.json`), { force: true });
+      await fs.rm(path.join(root, 'dsh-sessions', `${id}.handoff.json`), { force: true });
+    }
     delete this.store.threads[id];
     await this.persist();
   }
@@ -225,7 +229,7 @@ export class ThreadManager {
       throw new Error('Invalid thread ID for session cleanup');
     }
     const roots = new Set([path.dirname(this.storePath), path.join(os.homedir(), '.remote-cli')]);
-    const namespaces = ['claude', 'codex', 'agy', 'opencode', 'kimi', 'zcode', 'pi'];
+    const namespaces = ['claude', 'codex', 'agy', 'opencode', 'kimi', 'zcode', 'pi', 'dsh'];
     const pointers: string[] = [];
     for (const root of roots) {
       for (const backend of namespaces) {
@@ -238,6 +242,15 @@ export class ThreadManager {
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
         }
+      }
+      const handoff = path.join(root, 'dsh-sessions', `${threadId}.handoff.json`);
+      try {
+        const stat = await fs.lstat(handoff);
+        if (!stat.isFile() && !stat.isSymbolicLink()) throw new Error(`DSH handoff is not a file: ${handoff}`);
+        await fs.access(path.dirname(handoff), constants.W_OK | constants.X_OK);
+        pointers.push(handoff);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       }
     }
     // Validate every location before deleting any binding; predictable failures

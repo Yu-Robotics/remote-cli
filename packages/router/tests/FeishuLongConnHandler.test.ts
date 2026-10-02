@@ -1293,6 +1293,7 @@ describe('FeishuLongConnHandler', () => {
       ['kimi', 'Kimi'],
       ['zcode', 'ZCode'],
       ['pi', 'Pi'],
+      ['dsh', 'DSH'],
     ])('shows the %s backend label in thread switch buttons', (backend, label) => {
       const elements = (handler as any).createThreadSwitchElements([
         { id: 'thread-1', name: 'Thread 1', status: 'idle', backend },

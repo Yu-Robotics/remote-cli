@@ -6,6 +6,7 @@ import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 import { KimiExecutor } from '../../src/executor/KimiExecutor';
 import { OpenCodeExecutor } from '../../src/executor/OpenCodeExecutor';
 import { ZCodeExecutor } from '../../src/executor/ZCodeExecutor';
+import { DshExecutor } from '../../src/executor/DshExecutor';
 import type { AcpEventCallbacks, AcpTransport } from '../../src/executor/acp/AcpClient';
 import type { AcpContentBlock, AcpSessionResult } from '../../src/executor/acp/AcpTypes';
 
@@ -23,9 +24,10 @@ class FakeTransport implements AcpTransport {
 
 describe.each([
   ['Kimi', KimiExecutor], ['OpenCode', OpenCodeExecutor], ['ZCode', ZCodeExecutor],
+  ['DSH', DshExecutor],
 ] as const)('%s thought isolation', (_backend, Executor) => {
   let directory: string;
-  let executor: KimiExecutor | OpenCodeExecutor | ZCodeExecutor;
+  let executor: KimiExecutor | OpenCodeExecutor | ZCodeExecutor | DshExecutor;
   let callbacks: AcpEventCallbacks;
   let transport: FakeTransport;
 
@@ -112,10 +114,11 @@ describe.each([
       return { stopReason: 'end_turn' };
     });
     const stream = vi.fn();
+    const suppressReplay = managed || _backend === 'DSH';
     await expect(executor.execute('next turn', { onStream: stream }))
-      .resolves.toMatchObject({ success: true, output: managed ? 'Fresh answer' : 'Historical answerFresh answer' });
+      .resolves.toMatchObject({ success: true, output: suppressReplay ? 'Fresh answer' : 'Historical answerFresh answer' });
     expect(transport.loadSession).toHaveBeenCalled();
-    expect(stream.mock.calls.flat()).toEqual(managed ? ['Fresh answer'] : ['Historical answer', 'Fresh answer']);
+    expect(stream.mock.calls.flat()).toEqual(suppressReplay ? ['Fresh answer'] : ['Historical answer', 'Fresh answer']);
   });
 
   it.each([false, true])('preserves interactive input with question=%s', async question => {

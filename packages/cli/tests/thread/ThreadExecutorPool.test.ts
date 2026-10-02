@@ -520,6 +520,14 @@ describe('ThreadExecutorPool', () => {
       );
     });
 
+    it('passes DSH model and effort overrides to the factory', async () => {
+      const thread = await manager.createThread('dsh-settings', tmpDir);
+      await manager.updateThread(thread.id, { models: { dsh: 'opaque-model' }, efforts: { dsh: 'high' } });
+      poolFor('dsh').getExecutor(thread.id);
+      expect(mockExecutorFactory).toHaveBeenCalledWith(expect.anything(),
+        expect.objectContaining({ type: 'dsh' }), tmpDir, thread.id, 'opaque-model', 'high');
+    });
+
     it('passes Pi model and effort overrides to the factory', async () => {
       const piThread = await manager.createThread('pi-settings', tmpDir);
       await manager.updateThread(piThread.id, {

@@ -47,6 +47,10 @@ async function cleanupAtHome(lane: DelegatedWorkerLane, home: string): Promise<v
     case 'zcode':
       await unlinkFile(pointer(lane.backend));
       return;
+    case 'dsh':
+      await unlinkFile(pointer('dsh'));
+      await unlinkFile(path.join(root, 'dsh-sessions', `${id}.handoff.json`));
+      return;
     case 'pi': {
       const pointerPath = pointer('pi');
       let sessionFile: string | undefined;
