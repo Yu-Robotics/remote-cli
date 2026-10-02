@@ -550,12 +550,12 @@ export function createDelegationProgressElement(state: DelegationProgressCardSta
     : style.label;
   const headerTitle = `<text_tag color='${style.color}'>${style.icon} ${style.label}</text_tag> · **${backend}** · Delegated task`;
   const body: string[] = [];
+  const activityElements: FeishuCardElement[] = [];
 
   if (!style.terminal) {
     if (state.latestText) {
-      body.push('**📝 Current activity**');
-      body.push(literalWorkerText(state.latestText, DELEGATION_CURRENT_ACTIVITY_LIMIT));
-      if (state.currentToolName) body.push('');
+      activityElements.push(createMarkdownElement('**📝 Current activity**'),
+        createMarkdownElement(formatWorkerResultMarkdown(state.latestText, DELEGATION_CURRENT_ACTIVITY_LIMIT, 'activity')));
     } else if (!state.currentToolName) {
       body.push('**📝 Current activity**');
       body.push(literalWorkerText(delegatedCurrentActivity(state), 260));
@@ -571,14 +571,14 @@ export function createDelegationProgressElement(state: DelegationProgressCardSta
   }
 
   if (state.events.length > 0) {
-    body.push('\n**Recent activity:**');
+    body.push('\n**📋 Recent activity:**');
     body.push(...state.events.map(event => `- ${event.isError ? '❌ ' : ''}${literalWorkerText(event.label, 220)}`));
     if (state.hiddenEventCount > 0) body.push(`- _${state.hiddenEventCount} earlier event${state.hiddenEventCount === 1 ? '' : 's'} hidden_`);
   }
   if (state.phase === 'waiting_input' && state.inputRequest) {
     body.push(`\n**Input request:** ${literalWorkerText(state.inputRequest, 1000)}`);
   }
-  const elements = [createMarkdownElement(body.join('\n'))];
+  const elements = [...activityElements, createMarkdownElement(body.join('\n'))];
   if (style.terminal && state.summary) {
     elements.push(createMarkdownElement('**Result:**'), createMarkdownElement(formatWorkerResultMarkdown(state.summary)));
   }

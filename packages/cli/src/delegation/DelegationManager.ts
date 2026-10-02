@@ -158,16 +158,11 @@ function tailText(text: string, limit: number): string {
   return `…${buffer.subarray(start).toString('utf8')}`;
 }
 
-/** Prefer a completed sentence or paragraph, but always provide a bounded recent tail. */
+/** Include partial sentences so display snapshots keep up with assistant text deltas. */
 function latestDisplayText(text: string): string | undefined {
   const normalized = text.replace(/\r\n?/g, '\n').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, '').trim();
   if (!normalized) return undefined;
-  let end = 0;
-  for (const match of normalized.matchAll(/[.!?。！？](?:\s|$)|\n+/g)) {
-    end = match.index! + match[0].length;
-  }
-  const complete = end > 0 ? normalized.slice(0, end).trimEnd() : normalized;
-  return tailText(complete, DELEGATION_TEXT_PROGRESS.latestTextBytes);
+  return tailText(normalized, DELEGATION_TEXT_PROGRESS.latestTextBytes);
 }
 
 function boundedResults(terminal: DelegatedTaskResult[]): DelegatedTaskResult[] {

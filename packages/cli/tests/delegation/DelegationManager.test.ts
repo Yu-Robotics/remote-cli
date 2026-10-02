@@ -148,6 +148,17 @@ describe('cross-backend delegation', () => {
       expect(JSON.stringify(onTextProgress.mock.calls)).not.toContain('Private reasoning');
       expect(parent.onProgress).not.toHaveBeenCalledWith(expect.objectContaining({ phase: 'text' }));
 
+      options.onDisplayText?.('\n\n## Checking evidence\n- Still reading');
+      await vi.advanceTimersByTimeAsync(2_500);
+      expect(onTextProgress).toHaveBeenLastCalledWith(expect.objectContaining({
+        latestText: 'First bounded worker update.\n\n## Checking evidence\n- Still reading',
+      }));
+      options.onDisplayText?.(' the next file');
+      await vi.advanceTimersByTimeAsync(2_500);
+      expect(onTextProgress).toHaveBeenLastCalledWith(expect.objectContaining({
+        latestText: 'First bounded worker update.\n\n## Checking evidence\n- Still reading the next file',
+      }));
+
       finish({ success: true, output: 'Review complete' });
       await expect(scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result')).resolves.toMatchObject({ state: 'succeeded' });
     } finally {
