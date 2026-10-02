@@ -501,6 +501,23 @@ worker liveness timeouts. The Markdown and icon updates require the Router;
 the unfinished-text update requires the CLI. The wire protocol is unchanged.
 The CLI also prefixes the result-arrival notice with a puzzle piece emoji (🧩).
 
+Router 1.6.110 presents each worker as a stable task section: a purple native
+robot icon and AI badge identify the worker, while a separate label shows its
+status. Latest updates, result excerpts, failure reasons, and input requests
+stay visible; only activity details default to collapsed. Tool start/result
+events share one log entry, and tool issue counts remain visible even after
+older entries leave the bounded log. The last-update indicator includes actual
+text and tool events, never timer refreshes. Missing terminal output retains
+the last activity with an explicit non-result label.
+
+The same safe Markdown renderer handles activity, results, and prompts, including
+small tables. Tables share the existing whole-card budget; cut or oversized
+tables fall back to readable text without adding missing data. Activity previews
+retain the latest words, including the full negotiated text snapshot. Result
+excerpts remain bounded, not full transcripts. These presentation changes need
+only the Router upgrade, with no new CLI payloads or formatting instructions;
+older clients retain their negotiated tool-only or legacy progress behavior.
+
 建议先在一个测试线程中启用。从未启用委派的线程不会注册受管理的工具、添加提示词前缀、清理后端委派配置，或检查委派工作区占用；其普通进程处理和会话输出保持原样。
 
 线程使用过委派后，`/delegation off` 会移除受管理的工具。CLI 会记录哪些后端需要清理，重启或切换后端后也能继续处理。原生斜杠命令恢复会话前同样会执行清理。移除工具时，每个执行器实例可能重启一次后端进程，但会保留已保存的对话；已经清理过的进程不会反复重启。未使用过委派的后端无需清理。

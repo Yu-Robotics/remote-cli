@@ -4,6 +4,8 @@ import { BindingManager } from '../src/binding/BindingManager';
 import { ConnectionHub } from '../src/websocket/ConnectionHub';
 import * as lark from '@larksuiteoapi/node-sdk';
 import * as fs from 'fs/promises';
+import { createDelegationProgressElements } from '../src/utils/ToolFormatter';
+import { countCardTables } from '../src/utils/CardTables';
 
 // Mock dependencies
 vi.mock('../src/binding/BindingManager');
@@ -804,6 +806,35 @@ describe('FeishuLongConnHandler', () => {
   });
 
   describe('splitElementsIntoChunks', () => {
+    it('packs each worker header, visible body, metadata and diagnostics together', () => {
+      const table = '| A | B |\n| --- | --- |\n| 1 | 2 |\n';
+      const worker = (ordinal: number) => createDelegationProgressElements({
+        taskId: `worker-${ordinal}`, ordinal, backend: 'claude', phase: 'succeeded', startedAt: Date.now(),
+        summary: (table + '\n').repeat(3), activeToolCount: 0, events: [], hiddenEventCount: 0,
+      });
+      const workers = [worker(1), worker(2), worker(3)];
+      const elements = [{ tag: 'markdown', content: 'Coordinator introduction\n\n' + table }, ...workers.flat(),
+        { tag: 'markdown', content: 'Coordinator conclusion' }];
+      const chunks = (handler as any).splitElementsIntoChunks(elements);
+      expect(chunks.length).toBeGreaterThan(1);
+      for (const group of workers) {
+        const card = chunks.find((chunk: any[]) => chunk.some(element => element.element_id === group[0].element_id));
+        expect(card.filter((element: any) => group.some(item => item.element_id === element.element_id))).toEqual(group);
+      }
+      for (const card of chunks) expect(countCardTables(card)).toBeLessThanOrEqual(3);
+      expect(JSON.stringify(chunks)).toContain('Coordinator conclusion');
+    });
+
+    it('reserves native worker layout nodes before splitting at an element limit', () => {
+      const group = createDelegationProgressElements({ taskId: 'worker', ordinal: 1, backend: 'agy', phase: 'text',
+        startedAt: Date.now(), latestText: 'Current output', activeToolCount: 0, events: [], hiddenEventCount: 0 });
+      const prefix = Array.from({ length: 144 }, () => ({ tag: 'markdown', content: 'Existing content' }));
+      const chunks = (handler as any).splitElementsIntoChunks([...prefix, ...group]);
+      expect(chunks.length).toBeGreaterThan(1);
+      const card = chunks.find((chunk: any[]) => chunk.some(element => element.element_id === 'delegated_worker_1_header'));
+      expect(card.filter((element: any) => element.element_id?.startsWith('delegated_worker_1_'))).toEqual(group);
+    });
+
     it('should return single chunk for small number of elements', () => {
       const elements = [
         { tag: 'markdown', content: 'Hello' },

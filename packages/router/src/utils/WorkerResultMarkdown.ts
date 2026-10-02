@@ -1,6 +1,6 @@
 import MarkdownIt from 'markdown-it';
 
-const parser = new MarkdownIt({ html: false, linkify: false }).disable('table');
+const parser = new MarkdownIt({ html: false, linkify: false });
 type Token = ReturnType<typeof parser.parse>[number];
 
 function literal(text: string): string {
@@ -58,7 +58,7 @@ function inline(tokens: Token[]): string {
 }
 
 /** Serialize parsed Markdown, never worker-supplied Feishu tags, into card text. */
-function blocks(tokens: Token[]): string {
+function blocks(tokens: Token[], sourceLines: string[] = [], cutEnd = false): string {
   const parts: string[] = [];
   let compact = false;
   for (let index = 0; index < tokens.length; index++) {
@@ -66,7 +66,7 @@ function blocks(tokens: Token[]): string {
     if (token.type === 'paragraph_open' || token.type === 'heading_open' || token.type === 'blockquote_open') {
       if (token.type === 'paragraph_open' && token.hidden) compact = true;
       const end = closingIndex(tokens, index);
-      const content = blocks(tokens.slice(index + 1, end));
+      const content = blocks(tokens.slice(index + 1, end), sourceLines, cutEnd);
       parts.push(token.type === 'heading_open' ? `${'#'.repeat(Number(token.tag.slice(1)))} ${content}`
         : token.type === 'blockquote_open' ? content.split('\n').map(line => `> ${line}`).join('\n') : content);
       index = end;
@@ -78,11 +78,35 @@ function blocks(tokens: Token[]): string {
         if (tokens[item].type !== 'list_item_open') continue;
         const itemEnd = closingIndex(tokens, item);
         const prefix = token.type === 'ordered_list_open' ? `${number++}. ` : '- ';
-        const content = blocks(tokens.slice(item + 1, itemEnd));
+        const content = blocks(tokens.slice(item + 1, itemEnd), sourceLines, cutEnd);
         items.push(prefix + content.replace(/\n/g, `\n${' '.repeat(prefix.length)}`));
         item = itemEnd;
       }
       parts.push(items.join('\n'));
+      index = end;
+    } else if (token.type === 'table_open') {
+      const end = closingIndex(tokens, index);
+      const rows: string[][] = [];
+      for (let row = index + 1; row < end; row++) {
+        if (tokens[row].type !== 'tr_open') continue;
+        const rowEnd = closingIndex(tokens, row);
+        const cells: string[] = [];
+        for (let cell = row + 1; cell < rowEnd; cell++) {
+          if (tokens[cell].type === 'inline') cells.push(inline(tokens[cell].children ?? []).replace(/\n/g, ' ')
+            .replace(/(^|[^\\])((?:\\\\)*)\|/g, '$1$2\\|'));
+        }
+        rows.push(cells);
+        row = rowEnd;
+      }
+      const source = sourceLines.slice(token.map?.[0], token.map?.[1]).join('\n');
+      // Keep cut or oversized tables readable without inventing missing cells.
+      if ((cutEnd && token.map?.[1] === sourceLines.length) || rows.length > 13 || rows[0]?.length > 6) {
+        const fence = backticks(source, 3);
+        parts.push(`${fence}\n${source}\n${fence}`);
+      } else if (rows.length) {
+        const line = (cells: string[]) => `| ${cells.join(' | ')} |`;
+        parts.push([line(rows[0]), line(rows[0].map(() => '---')), ...rows.slice(1).map(line)].join('\n'));
+      }
       index = end;
     } else if (token.type === 'inline') {
       parts.push(inline(token.children ?? []));
@@ -103,8 +127,26 @@ function blocks(tokens: Token[]): string {
 export function formatWorkerResultMarkdown(value: string, limit = 1000, preview: 'result' | 'activity' = 'result'): string {
   const characters = Array.from(value.replace(/\r\n?/g, '\n')
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, ''));
-  const content = blocks(parser.parse(characters.slice(0, limit).join(''), {}));
+  const truncated = characters.length > limit;
+  let source = characters.slice(0, limit).join('');
+  if (truncated && preview === 'activity') {
+    const prefix = characters.slice(0, -limit).join('');
+    source = characters.slice(-limit).join('');
+    const cutLine = prefix.split('\n').length - 1;
+    const context = parser.parse(characters.join(''), {}).find(token =>
+      token.map && token.map[0] < cutLine && token.map[1] > cutLine
+      && (token.type === 'fence' || token.type === 'table_open'));
+    if (context?.type === 'fence') source = `${context.markup}${context.info}\n${source}`;
+    // A table tail has lost its header; display the fragment literally.
+    if (context?.type === 'table_open') {
+      const fence = backticks(source, 3);
+      source = `${fence}\n${source}\n${fence}`;
+    }
+  }
+  const content = blocks(parser.parse(source, {}), source.split('\n'), truncated && preview === 'result');
   const empty = preview === 'activity' ? '_No activity text yet._' : '_No text result._';
-  const truncated = preview === 'activity' ? '_Activity preview truncated._' : '_Result preview truncated._';
-  return (content.trim() ? content : empty) + (characters.length > limit ? `\n\n${truncated}` : '');
+  const notice = preview === 'activity' ? '_Earlier activity omitted._' : '_Result preview truncated._';
+  return (preview === 'activity' && truncated ? `${notice}\n\n` : '')
+    + (content.trim() ? content : empty)
+    + (preview === 'result' && truncated ? `\n\n${notice}` : '');
 }

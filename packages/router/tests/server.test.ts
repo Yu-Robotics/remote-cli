@@ -10,7 +10,7 @@ import { FeishuLongConnHandler } from '../src/feishu/FeishuLongConnHandler';
 import { ConnectionHub } from '../src/websocket/ConnectionHub';
 import { BindingManager } from '../src/binding/BindingManager';
 import { MessageType, MIN_SUPPORTED_CLI_VERSION, PROTOCOL_VERSION, ROUTER_VERSION } from '../src/types';
-import { createDelegationProgressElement, createRedactedThinkingElement, createToolResultElement, createToolUseElement } from '../src/utils/ToolFormatter';
+import { createDelegationProgressElements, createRedactedThinkingElement, createToolResultElement, createToolUseElement } from '../src/utils/ToolFormatter';
 
 // Mock dependencies
 vi.mock('koa');
@@ -28,7 +28,8 @@ vi.mock('../src/binding/BindingManager');
 vi.mock('../src/utils/ToolFormatter', async (importActual) => ({
   createToolUseElement: vi.fn(() => []),
   createToolResultElement: vi.fn(() => []),
-  createDelegationProgressElement: vi.fn((await importActual<typeof import('../src/utils/ToolFormatter')>()).createDelegationProgressElement),
+  DELEGATION_PROGRESS_ELEMENT_COUNT: 4,
+  createDelegationProgressElements: vi.fn((await importActual<typeof import('../src/utils/ToolFormatter')>()).createDelegationProgressElements),
   createDividerElement: vi.fn((await importActual<typeof import('../src/utils/ToolFormatter')>()).createDividerElement),
   createMarkdownElement: vi.fn((await importActual<typeof import('../src/utils/ToolFormatter')>()).createMarkdownElement),
   createRedactedThinkingElement: vi.fn(() => []),
@@ -745,7 +746,7 @@ describe('RouterServer', () => {
     expect(resolveThread('f1')).toBeUndefined();
   });
 
-  it('renders supported delegated worker progress in one nested panel', async () => {
+  it('renders supported worker progress as stable visible content and folded diagnostics', async () => {
     await server.start();
     const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
     onStartStreaming('m1', 'u1', 'f1', 'd1');
@@ -767,13 +768,14 @@ describe('RouterServer', () => {
     await sendProgress({ taskId: 'worker-1', backend: 'claude', phase: 'waiting_input', summary: 'Approve the command?' });
     await sendProgress({ taskId: 'worker-1', backend: 'claude', phase: 'timed_out' });
 
-    expect(createDelegationProgressElement).toHaveBeenCalledTimes(6);
+    expect(createDelegationProgressElements).toHaveBeenCalledTimes(6);
     const elements = mockFeishuHandler.updateStreamingMessage.mock.calls.at(-1)[1];
     const panels = elements.filter((element: any) => element.tag === 'collapsible_panel');
     expect(panels).toHaveLength(1);
     expect(panels[0]).toMatchObject({ expanded: false });
-    expect(panels[0].header.title.content).toContain('WORKER TIMED OUT');
-    expect(panels[0].elements[0].content).toContain('Read started');
+    expect(JSON.stringify(elements.find((element: any) => element.element_id === 'delegated_worker_1_header'))).toContain('Timed out');
+    expect(panels[0].header.title.content).toContain('Activity details');
+    expect(panels[0].elements[0].content).not.toContain('Read running');
     expect(panels[0].elements[0].content).toContain('Read completed');
     expect(panels[0].elements[0].content).not.toContain('Approve the command?');
     expect(panels[0].elements[0].content).not.toContain('**Result:**');
@@ -796,12 +798,12 @@ describe('RouterServer', () => {
         summary: '## Review\n\n**Passed**\n\n- Tests pass\n\n<at id=all></at>',
       },
     })));
-    const panel = mockFeishuHandler.updateStreamingMessage.mock.calls.at(-1)[1]
-      .find((element: any) => element.tag === 'collapsible_panel');
-    expect(panel.expanded).toBe(false);
-    expect(panel.elements[2].content).toContain('## Review\n\n**Passed**\n\n- Tests pass');
-    expect(panel.elements[2].content).toContain('&lt;at id\\=all&gt;');
-    expect(panel.elements[2].content).not.toContain('<at');
+    const body = mockFeishuHandler.updateStreamingMessage.mock.calls.at(-1)[1]
+      .find((element: any) => element.element_id === 'delegated_worker_1_body');
+    expect(body.tag).toBe('markdown');
+    expect(body.content).toContain('## Review\n\n**Passed**\n\n- Tests pass');
+    expect(body.content).toContain('&lt;at id\\=all&gt;');
+    expect(body.content).not.toContain('<at');
   });
 
   it('negotiates bounded worker text and refreshes an active panel without extending stream liveness', async () => {
@@ -837,18 +839,79 @@ describe('RouterServer', () => {
     expect(mockFeishuHandler.updateStreamingMessage.mock.calls.length).toBeGreaterThan(patchesBeforeHeartbeat);
     expect(stream.createdAt).toBe(createdAt);
 
-    const panel = mockFeishuHandler.updateStreamingMessage.mock.calls.at(-1)[1]
-      .find((element: any) => element.tag === 'collapsible_panel');
-    expect(panel.elements[0].content).toContain('Current activity');
-    expect(panel.elements[1].content).toContain('&lt;unsafe&gt;');
-    expect(panel.elements[1].content).toContain('## Review\n\n**Checking**');
-    expect(panel.header.title.content).toContain('⚙️');
-    expect(panel.elements[0].content).not.toContain('Do not render this prominently');
+    const body = mockFeishuHandler.updateStreamingMessage.mock.calls.at(-1)[1]
+      .find((element: any) => element.element_id === 'delegated_worker_1_body');
+    expect(body.content).toContain('Latest update');
+    expect(body.content).toContain('&lt;unsafe&gt;');
+    expect(body.content).toContain('## Review\n\n**Checking**');
+    expect(body.content).not.toContain('Do not render this prominently');
 
     await sendProgress({ taskId: 'worker-1', backend: 'codex', phase: 'succeeded', summary: 'Finished' });
     const patchesAfterTerminal = mockFeishuHandler.updateStreamingMessage.mock.calls.length;
     await vi.advanceTimersByTimeAsync(30_000);
     expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenCalledTimes(patchesAfterTerminal);
+  });
+
+  it('keeps two interleaved worker sections and coordinator text stable across heartbeat and terminal updates', async () => {
+    await server.start();
+    mockFeishuHandler.setOnStartStreaming.mock.calls[0][0]('m1', 'u1', 'f1', 'd1');
+    const stream = (server as any).streamingMessages.get('m1');
+    const send = (taskId: string, phase: string, fields: any = {}) => (server as any).handleDelegationProgress(
+      'm1', 'u1', { taskId, backend: 'claude', phase, ...fields }, true);
+    await send('first', 'started');
+    stream.currentTextContent = 'Coordinator text between workers.';
+    await send('second', 'started');
+    const indices = [...stream.delegationProgress.values()].map((worker: any) => worker.elementIndex);
+    const length = stream.elements.length;
+    await send('first', 'tool_use', { toolUse: { id: 'read', name: 'Read', input: { secret: 'private' } } });
+    const worker = stream.delegationProgress.get('first');
+    const lastToolActivityAt = worker.lastToolActivityAt;
+    await vi.advanceTimersByTimeAsync(1000);
+    await send('first', 'text', { latestText: '**First latest**' });
+    await send('second', 'text', { latestText: '**Second latest**' });
+    expect(worker.lastActivityAt).toBeGreaterThan(lastToolActivityAt);
+    const lastActivityAt = worker.lastActivityAt;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(worker.lastActivityAt).toBe(lastActivityAt);
+    expect(worker.lastToolActivityAt).toBe(lastToolActivityAt);
+    await send('first', 'failed', { error: '**Worker failed**' });
+    await send('second', 'succeeded', { summary: '**Second result**' });
+    const finalBody = (ordinal: number) => stream.elements.find((element: any) => element.element_id === `delegated_worker_${ordinal}_body`);
+    expect(finalBody(1).content).toContain('**Worker failed**');
+    expect(finalBody(1).content).toContain('**First latest**');
+    expect(finalBody(1).content).toContain('not a final result');
+    expect(finalBody(2).content).toContain('**Second result**');
+    expect(finalBody(2).content).not.toContain('Second latest');
+    expect(JSON.stringify(stream.elements)).toContain('Coordinator text between workers');
+    expect(JSON.stringify(stream.elements)).not.toContain('private');
+    expect(stream.elements).toHaveLength(length);
+    expect([...stream.delegationProgress.values()].map((item: any) => item.elementIndex)).toEqual(indices);
+    const finalJson = JSON.stringify(stream.elements);
+    await vi.advanceTimersByTimeAsync(30_000);
+    await send('first', 'text', { latestText: 'Late text must not replace the terminal result' });
+    expect(JSON.stringify(stream.elements)).toBe(finalJson);
+  });
+
+  it('coalesces tool outcomes and keeps tool issues visible after their log entries are evicted', async () => {
+    await server.start();
+    mockFeishuHandler.setOnStartStreaming.mock.calls[0][0]('m1', 'u1', 'f1', 'd1');
+    const send = (phase: string, fields: any = {}) => (server as any).handleDelegationProgress(
+      'm1', 'u1', { taskId: 'worker', backend: 'agy', phase, ...fields }, true);
+    await send('started');
+    for (let index = 0; index < 8; index++) {
+      await send('tool_use', { toolUse: { id: `tool-${index}`, name: 'Bash' } });
+      await send('tool_result', { toolResult: { tool_use_id: `tool-${index}`, is_error: index === 0, content: 'Private tool output' } });
+    }
+    const stream = (server as any).streamingMessages.get('m1');
+    const worker = stream.delegationProgress.get('worker');
+    expect(worker.events).toHaveLength(5);
+    expect(worker.events.every((event: any) => event.label.startsWith('Bash completed'))).toBe(true);
+    expect(worker.hiddenEventCount).toBe(4);
+    expect(worker.toolErrorCount).toBe(1);
+    expect(worker.activeToolCount).toBe(0);
+    expect(stream.elements.find((element: any) => element.element_id === 'delegated_worker_1_meta').content).toContain('1 tool issue');
+    expect(stream.elements.find((element: any) => element.element_id === 'delegated_worker_1_meta').content).toContain('earlier details omitted');
+    expect(JSON.stringify(stream.elements)).not.toContain('Private tool output');
   });
 
   it('ignores delegated worker progress from a client that did not advertise support', async () => {
@@ -866,7 +929,7 @@ describe('RouterServer', () => {
       delegationProgress: { taskId: 'worker-1', backend: 'claude', phase: 'started' },
     })));
 
-    expect(createDelegationProgressElement).not.toHaveBeenCalled();
+    expect(createDelegationProgressElements).not.toHaveBeenCalled();
     expect(mockFeishuHandler.updateStreamingMessage).not.toHaveBeenCalled();
   });
 
