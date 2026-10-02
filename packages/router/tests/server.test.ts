@@ -59,6 +59,8 @@ describe('RouterServer', () => {
     config = {
       getConfigPath: () => '/virtual-router-tests/config.json',
       get: vi.fn((section, key) => {
+        // These card/routing unit tests must not initialize real attachment storage.
+        if (section === 'files') return { enabled: false };
         if (section === 'server' && key === 'port') return 3000;
         if (section === 'server' && key === 'host') return 'localhost';
         if (section === 'websocket' && key === 'heartbeatInterval') return 30000;

@@ -116,7 +116,7 @@ export class RouterServer {
     const fileConfig = config.get('files');
     this.fileTransfers = new FileTransfers(
       path.join(path.dirname(config.getConfigPath() || path.join(os.homedir(), '.remote-cli-router', 'config.json')), 'attachments'),
-      fileConfig?.publicUrl, fileConfig?.maxBytes, {
+      fileConfig?.enabled, fileConfig?.maxBytes, {
         session: deviceId => this.connectionHub.getFileSession(deviceId),
         owns: async (openId, deviceId) => (await this.bindingManager.getDeviceBinding(deviceId))?.openId === openId,
         send: (deviceId, message) => this.connectionHub.sendToDevice(deviceId, message),
@@ -323,7 +323,7 @@ export class RouterServer {
       try {
         const { devicePublicKey, nonce, signature } = ctx.request.body as any;
         if (devicePublicKey && !this.fileTransfers.enabled) {
-          ctx.status = 400; ctx.body = { success: false, error: 'Set files.publicUrl to the Router HTTPS origin before enrolling file-enabled devices.' }; return;
+          ctx.status = 400; ctx.body = { success: false, error: 'File reception is disabled by the Router administrator (files.enabled=false).' }; return;
         }
         if (devicePublicKey !== undefined && (!DeviceAuth.validKey(devicePublicKey)
           || !DeviceAuth.verifyProof(devicePublicKey, deviceId, nonce, signature))) {

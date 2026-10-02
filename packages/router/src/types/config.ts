@@ -4,8 +4,8 @@
 
 export interface RouterConfig {
   files?: {
-    /** Same public origin as the WebSocket endpoint; HTTPS except on loopback. */
-    publicUrl: string;
+    /** Defaults to true. Downloads still require an owner-approved CLI identity. */
+    enabled?: boolean;
     maxBytes?: number;
   };
   server: ServerConfig;
@@ -41,6 +41,9 @@ export interface SecurityConfig {
  * Default configuration values
  */
 export const DEFAULT_CONFIG = {
+  files: {
+    enabled: true,
+  },
   server: {
     port: 3000,
     host: '0.0.0.0',

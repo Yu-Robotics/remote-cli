@@ -13,6 +13,11 @@ describe('device identities', () => {
   it.each(['https://router.test', 'wss://router.test/ws', 'http://127.0.0.1:1234', 'ws://localhost:3000/ws', 'http://[::1]:123'])('accepts a safe origin: %s', url => {
     expect(fileOrigin(url)).toMatch(/^https?:\/\//);
   });
+  it('derives the HTTPS origin from the existing WSS address and preserves its port', () => {
+    expect(fileOrigin('wss://router.test:8443/ws')).toBe('https://router.test:8443');
+    expect(fileOrigin('wss://router.test/ws')).toBe('https://router.test');
+    expect(fileOrigin('ws://127.0.0.1:3000/ws')).toBe('http://127.0.0.1:3000');
+  });
   it.each(['http://router.test', 'ws://10.0.0.1/ws', 'file:///tmp/file', 'https://user:password@router.test', 'https://router.test/?token=secret', 'https://router.test/#token'])('rejects unsafe origin: %s', url => {
     expect(() => fileOrigin(url)).toThrow();
   });

@@ -685,13 +685,15 @@ filtering image references, preserving actual fenced and indented code examples.
 
 ### File Attachments
 
-File reception requires **both CLI and Router 1.6.113 or newer**, TLS, and explicit device enrollment. Upgrading alone does not enable downloads.
+File reception is **enabled by default on Router 1.6.114 or newer** and requires **CLI 1.6.113 or newer**, TLS, and explicit device enrollment. The Router default does not authorize an unenrolled CLI to download files.
 
-1. Configure the Router's JSON configuration with a `files` section:
+1. Reuse the CLI's existing WSS Router address. The CLI derives the same-origin HTTPS download address automatically, and the Router sends only relative `/api/files/` paths; no separate public URL is needed. Expose `/api/files/` through the existing authenticated Router application, without proxy caching. HTTP is allowed only for local development on `localhost`, `127.0.0.1`, or `[::1]`. Ensure the bot has permission to download message resources.
+
+   The Router's JSON configuration may optionally include a `files` section:
    ```json
-   { "files": { "publicUrl": "https://router.example.com", "maxBytes": 20971520 } }
+   { "files": { "enabled": true, "maxBytes": 20971520 } }
    ```
-   Use the same origin as the CLI's WSS address. Expose `/api/files/` through the existing authenticated Router application, without proxy caching. HTTP is allowed only for local development on `localhost`, `127.0.0.1`, or `[::1]`. The maximum is **20 MiB per file (20,971,520 bytes)**; `maxBytes` may lower, but never raise, it. Ensure the bot has permission to download message resources.
+   Omitting `files` or `files.enabled` enables reception. Set `files.enabled` to `false` and restart the Router to disable file reception and new file-device enrollment; ordinary text/images and device authentication remain available. Existing `files.publicUrl` values are ignored, with no configuration migration required. The default and hard maximum are **20 MiB per file (20,971,520 bytes)**; `maxBytes` may lower, but never raise, it.
 2. Restart the upgraded Router using your normal deployment procedure. On the intended CLI machine, run `remote-cli files enable`, approve the printed `/bind CODE` in Feishu, then reconnect/restart the upgraded CLI yourself. This provisions a per-Router Ed25519 identity, not an API key shared with the model. Lost keys require `remote-cli files enable --rotate` and another owner approval.
 3. Upload a file, then send instructions in the same thread, such as “Summarize this report”. You may send the instructions while downloading: execution waits for verified storage and bounded extraction. Replying to the original file or its status card selects that exact file, device, and thread. A file upload alone does **not** start a model task.
 

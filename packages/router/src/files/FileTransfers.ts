@@ -54,16 +54,10 @@ export class FileTransfers {
   readonly maxBytes: number;
   readonly enabled: boolean;
 
-  constructor(private readonly root: string, publicUrl: string | undefined, maxBytes: number | undefined, private readonly deps: FileTransferDependencies) {
+  constructor(private readonly root: string, enabled: boolean | undefined, maxBytes: number | undefined, private readonly deps: FileTransferDependencies) {
+    if (enabled !== undefined && typeof enabled !== 'boolean') throw new Error('files.enabled must be a boolean.');
+    this.enabled = enabled ?? true;
     this.maxBytes = fileLimit(maxBytes);
-    this.enabled = false;
-    if (publicUrl) {
-      const url = new URL(publicUrl);
-      const local = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
-      if (url.username || url.password || url.search || url.hash || url.pathname !== '/'
-        || (url.protocol !== 'https:' && !(local && url.protocol === 'http:'))) throw new Error('files.publicUrl must be the HTTPS Router origin (HTTP is allowed only on loopback).');
-      this.enabled = true;
-    }
   }
 
   private directory(id: string): string { return path.join(this.root, id); }
@@ -131,7 +125,7 @@ export class FileTransfers {
 
   private async receiveFile(input: FileInput): Promise<void> {
     if (this.stopped) throw new Error('Router file reception stopped.');
-    if (!this.enabled) throw new Error('File reception is not configured. Set files.publicUrl to the Router HTTPS origin first.');
+    if (!this.enabled) throw new Error('File reception is disabled by the Router administrator (files.enabled=false).');
     const session = this.deps.session(input.deviceId);
     if (!session || session.openId !== input.openId || !await this.deps.owns(input.openId, input.deviceId)) {
       throw new Error('Files require an upgraded, authenticated CLI. Run remote-cli files enable locally, approve its /bind code, and reconnect. Text and images remain available to legacy devices.');
@@ -273,6 +267,7 @@ export class FileTransfers {
 
   async serve(ctx: Context, id: string): Promise<void> {
     ctx.set('Cache-Control', 'no-store');
+    if (!this.enabled) { ctx.status = 403; return; }
     const file = this.files.get(id);
     const token = ctx.get('authorization').replace(/^Bearer /, '');
     if (!FILE_ID.test(id) || !FILE_ID.test(token) || !file?.token || token.length !== file.token.length

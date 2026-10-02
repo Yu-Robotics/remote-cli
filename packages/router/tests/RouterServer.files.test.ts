@@ -18,12 +18,9 @@ describe('authenticated file registration on real WebSockets', () => {
   let root: string; let server: RouterServer; let origin: string; let sockets: WebSocket[];
   const keys = () => generateKeyPairSync('ed25519', { publicKeyEncoding: { type: 'spki', format: 'pem' }, privateKeyEncoding: { type: 'pkcs8', format: 'pem' } });
   const proof = (key: string, nonce: string) => sign(null, Buffer.from(`remote-cli-device-v1\ndevice\n${nonce}`), key).toString('base64');
-  beforeEach(async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => {});
-    vi.spyOn(console, 'error').mockImplementation(() => {});
-    root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'router-file-auth-'))); sockets = [];
+  async function startServer(files?: Record<string, unknown>) {
     const config: any = { getConfigPath: () => path.join(root, 'config.json'), get: (section: string, key?: string) => {
-      if (section === 'files') return { publicUrl: 'http://127.0.0.1' };
+      if (section === 'files') return files;
       if (section === 'server') return key === 'port' ? 0 : key === 'host' ? '127.0.0.1' : 'test';
       if (section === 'websocket') return 30_000;
       return 'fixture';
@@ -35,6 +32,12 @@ describe('authenticated file registration on real WebSockets', () => {
     const http = (server as any).httpServer;
     if (!http.listening) await once(http, 'listening');
     origin = `http://127.0.0.1:${http.address().port}`;
+  }
+  beforeEach(async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'router-file-auth-'))); sockets = [];
+    await startServer();
   });
   afterEach(async () => {
     for (const socket of sockets) socket.terminate();
@@ -49,6 +52,37 @@ describe('authenticated file registration on real WebSockets', () => {
     const next = async (type: string) => { await vi.waitFor(() => expect(messages.some(m => m.type === type)).toBe(true)); return messages.find(m => m.type === type); };
     return { ws, messages, send, next };
   }
+  it.each([undefined, {}, { enabled: true }, { publicUrl: 'https://legacy-router.test' }])('allows explicit owner enrollment with default reception and no required URL: %j', async files => {
+    await server.stop(); await startServer(files);
+    const pair = keys(); const nonce = 'a'.repeat(64);
+    const response = await fetch(origin + '/api/bind/request', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ deviceId: 'device', devicePublicKey: pair.publicKey, nonce, signature: proof(pair.privateKey, nonce) }) });
+    expect(response.status).toBe(200);
+    const data: any = await response.json();
+    expect(data.deviceAuth).toBe(true);
+    expect((server as any).deviceAuth.isCurrent('device', { openId: 'owner', publicKey: pair.publicKey })).toBe(false);
+  });
+  it('rejects file enrollment when disabled even if an obsolete public URL remains', async () => {
+    await server.stop(); await startServer({ enabled: false, publicUrl: 'https://legacy-router.test' });
+    const pair = keys(); const nonce = 'a'.repeat(64);
+    const response = await fetch(origin + '/api/bind/request', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ deviceId: 'device', devicePublicKey: pair.publicKey, nonce, signature: proof(pair.privateKey, nonce) }) });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ success: false, error: expect.stringContaining('files.enabled=false') });
+    const legacy = await fetch(origin + '/api/bind/request', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ deviceId: 'legacy-device' }) });
+    expect(legacy.status).toBe(200);
+    const client = await connect(); client.send();
+    expect((await client.next('binding_confirm')).data.capabilities?.fileTransferV1).not.toBe(true);
+    expect((server as any).connectionHub.isDeviceOnline('device')).toBe(true);
+  });
+  it('keeps owner-approved device authentication but withholds file capability when disabled', async () => {
+    await server.stop(); await startServer({ enabled: false });
+    const pair = keys();
+    await (server as any).feishuLongConnHandler.onApproveDeviceKey('owner', 'device', pair.publicKey);
+    const client = await connect(); client.send();
+    client.send(proof(pair.privateKey, (await client.next('device_challenge')).data.nonce));
+    expect((await client.next('binding_confirm')).data.capabilities?.fileTransferV1).not.toBe(true);
+    expect((server as any).connectionHub.isDeviceOnline('device')).toBe(true);
+    expect((server as any).connectionHub.getFileSession('device')).toBeUndefined();
+  });
   it('keeps legacy registration but never grants files to self-claimed IDs', async () => {
     const client = await connect(); client.send();
     const response = await client.next('binding_confirm');
