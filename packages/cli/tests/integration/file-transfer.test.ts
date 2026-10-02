@@ -45,8 +45,8 @@ describe('file data plane and staged instruction integration', () => {
       send: (message: object) => { wire.push(message); void router.handleStatus('device', message).catch(error => asynchronousErrors.push(error)); },
       extract: vi.fn(async () => ({ status: 'parsed' as const, text: 'bounded extraction', detail: 'UTF-8 text extracted.' })),
     };
-    inbox = new FileInbox(path.join(root, 'cli-files'), origin, dependencies);
-    router = new FileTransfers(path.join(root, 'router-files'), origin, undefined, {
+    inbox = new FileInbox(path.join(root, 'cli-files'), origin.replace('http:', 'ws:') + '/ws', dependencies);
+    router = new FileTransfers(path.join(root, 'router-files'), undefined, undefined, {
       session: () => session, owns: async () => ownership,
       download: async () => { downloads++; return source(); },
       send: async (_device, message: any) => {
@@ -83,6 +83,19 @@ describe('file data plane and staged instruction integration', () => {
       }).once('error', reject);
     });
   }
+
+  it('downloads through the existing WebSocket origin without a separate Router URL', async () => {
+    expect(router.enabled).toBe(true);
+    const id = await upload(); await ready(id);
+    const offer = wire.find(message => message.type === 'file_available' && message.fileId === id);
+    expect(offer.downloadPath).toBe(`/api/files/${id}`);
+    expect(offer).not.toHaveProperty('publicUrl');
+    expect(offer).not.toHaveProperty('downloadUrl');
+    inbox.claim('origin-check', 'thread-1', 'owner');
+    const prepared = await inbox.prepare('origin-check');
+    expect(prepared).toContain('original.txt');
+    expect(downloads).toBe(1);
+  });
 
   it('stages files without invoking a model and later supplies bounded metadata, not binary/text blobs', async () => {
     const id = await upload(); await ready(id);

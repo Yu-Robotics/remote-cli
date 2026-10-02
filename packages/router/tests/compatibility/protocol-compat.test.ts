@@ -31,7 +31,10 @@ describe('Router wire compatibility', () => {
     } as unknown as Server);
     wss = Object.assign(new EventEmitter(), { close: vi.fn() });
     vi.mocked(WebSocketServer).mockImplementation(() => wss as unknown as WebSocketServer);
-    const config = { getConfigPath: () => '/virtual-router-compat/config.json', get: (_section: string, key: string) => key === 'heartbeatInterval' ? 30000 : 'test' };
+    const config = {
+      getConfigPath: () => '/virtual-router-compat/config.json',
+      get: (section: string, key: string) => section === 'files' ? { enabled: false } : key === 'heartbeatInterval' ? 30000 : 'test',
+    };
     server = new RouterServer(config as unknown as ConfigManager, {} as JsonStore);
     await server.start();
 

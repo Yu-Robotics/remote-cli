@@ -67,6 +67,7 @@ describe('ConfigManager', () => {
       expect(all.server.host).toBe(DEFAULT_CONFIG.server.host);
       expect(all.feishu.appId).toBe('');
       expect(all.websocket.heartbeatInterval).toBe(DEFAULT_CONFIG.websocket.heartbeatInterval);
+      expect(all.files).toEqual({ enabled: true });
     });
 
     it('should load existing configuration from disk', async () => {

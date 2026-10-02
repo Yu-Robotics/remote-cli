@@ -15,7 +15,7 @@ describe('Router transfer deadlines and quotas', () => {
     root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'router-transfer-')));
     notices = []; messages = []; sequence = 0; session = { id: 'session', openId: 'owner' };
     download = vi.fn(async () => Readable.from([Buffer.from('data')]));
-    router = new FileTransfers(root, 'http://127.0.0.1', undefined, {
+    router = new FileTransfers(root, undefined, undefined, {
       session: () => session, owns: async () => true, download,
       send: async (device, message: any) => {
         messages.push(message);
@@ -28,6 +28,30 @@ describe('Router transfer deadlines and quotas', () => {
   afterEach(async () => { vi.useRealTimers(); await router.destroy(); await fs.rm(root, { recursive: true, force: true }); });
   const upload = () => router.receive({ openId: 'owner', deviceId: 'device', messageId: `message_${++sequence}`, fileKey: 'key', name: 'file.txt' });
   async function offer() { await upload(); await vi.waitFor(() => expect(messages.some(m => m.type === 'file_available')).toBe(true)); return messages.find(m => m.type === 'file_available'); }
+  it.each([undefined, true])('enables reception without a public URL when enabled is %s', enabled => {
+    const transfer = new FileTransfers(root, enabled, undefined, {} as any);
+    expect(transfer.enabled).toBe(true);
+    expect(transfer.maxBytes).toBe(20 * 1024 * 1024);
+  });
+  it.each(['false', 'true', 0, 1, null])('rejects a non-boolean switch instead of silently enabling files: %s', enabled => {
+    expect(() => new FileTransfers(root, enabled as any, undefined, {} as any)).toThrow('files.enabled must be a boolean');
+  });
+  it('does not initialize storage or admit a file when explicitly disabled', async () => {
+    const directory = path.join(root, 'disabled');
+    const send = vi.fn(); const notify = vi.fn();
+    const disabled = new FileTransfers(directory, false, undefined, { session: () => session, owns: async () => true, download, send, notify });
+    expect(disabled.enabled).toBe(false);
+    await disabled.initialize();
+    await expect(disabled.receive({ openId: 'owner', deviceId: 'device', messageId: 'disabled', fileKey: 'key', name: 'file.txt' })).rejects.toThrow('files.enabled=false');
+    expect(download).not.toHaveBeenCalled(); expect(send).not.toHaveBeenCalled(); expect(notify).not.toHaveBeenCalled();
+    const context = { set: vi.fn(), get: vi.fn(), status: 0 };
+    await disabled.serve(context as any, 'a'.repeat(64));
+    expect(context.status).toBe(403);
+    expect(context.set).toHaveBeenCalledWith('Cache-Control', 'no-store');
+    expect(context.get).not.toHaveBeenCalled();
+    await expect(fs.access(directory)).rejects.toMatchObject({ code: 'ENOENT' });
+    await disabled.destroy();
+  });
   it('holds the per-device slot until a verified saved acknowledgement, not just HTTP offer', async () => {
     const first = await offer(); await upload(); expect(download).toHaveBeenCalledTimes(1);
     await router.handleStatus('device', { ...first, status: 'saved', sha256: 'bad' }); expect(download).toHaveBeenCalledTimes(1);
@@ -78,17 +102,16 @@ describe('Router transfer deadlines and quotas', () => {
     file.record.expiresAt = Date.now() - 1; await (router as any).cleanup();
     expect((router as any).files.has(first.fileId)).toBe(false);
   });
-  it('has explicit Router quota feedback and rejects insecure configuration', async () => {
+  it('has explicit Router quota feedback and keeps the 20 MiB hard limit', async () => {
     await offer();
     for (let i = 0; i < 19; i++) await upload();
     await expect(upload()).rejects.toThrow('quota');
-    expect(() => new FileTransfers(root, 'http://public.test', undefined, {} as any)).toThrow('HTTPS');
-    expect(() => new FileTransfers(root, 'https://user:password@public.test', undefined, {} as any)).toThrow('HTTPS');
-    expect(() => new FileTransfers(root, 'https://public.test', 21 * 1024 * 1024, {} as any)).toThrow('20 MiB');
+    expect(() => new FileTransfers(root, undefined, 21 * 1024 * 1024, {} as any)).toThrow('20 MiB');
+    expect(new FileTransfers(root, true, 1024, {} as any).maxBytes).toBe(1024);
   });
   it('restores completed routing metadata but never replays interrupted downloads', async () => {
     const first = await offer(); await router.destroy();
-    router = new FileTransfers(root, 'http://127.0.0.1', undefined, { session: () => session, owns: async () => true, send: vi.fn(), download, notify: async () => undefined });
+    router = new FileTransfers(root, undefined, undefined, { session: () => session, owns: async () => true, send: vi.fn(), download, notify: async () => undefined });
     await router.initialize();
     expect((router as any).files.get(first.fileId).record.state).toBe('failed');
     expect(download).toHaveBeenCalledTimes(1);

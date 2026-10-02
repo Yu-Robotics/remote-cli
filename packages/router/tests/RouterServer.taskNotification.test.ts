@@ -83,6 +83,7 @@ describe('RouterServer - task_notification', () => {
     config = {
       getConfigPath: () => '/virtual-router-notifications/config.json',
       get: vi.fn((section: string, key: string) => {
+        if (section === 'files') return { enabled: false };
         if (section === 'server' && key === 'port') return 3000;
         if (section === 'server' && key === 'host') return 'localhost';
         if (section === 'websocket' && key === 'heartbeatInterval') return 30000;
