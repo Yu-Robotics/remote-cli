@@ -3,6 +3,11 @@
  */
 
 export interface RouterConfig {
+  files?: {
+    /** Same public origin as the WebSocket endpoint; HTTPS except on loopback. */
+    publicUrl: string;
+    maxBytes?: number;
+  };
   server: ServerConfig;
   feishu: FeishuConfig;
   websocket: WebSocketConfig;

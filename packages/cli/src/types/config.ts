@@ -164,6 +164,7 @@ export function backendKeyOf(type: ExecutorConfig['type'] | string): BackendKey 
  * Complete configuration
  */
 export interface Config {
+  files?: { retentionDays?: number };
   deviceId?: string;
   openId?: string;
   serverUrl?: string;

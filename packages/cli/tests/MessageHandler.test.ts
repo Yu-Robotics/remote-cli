@@ -162,7 +162,84 @@ describe('MessageHandler', () => {
     expect(ctx.mockWsClient.send).not.toHaveBeenCalled();
   });
 
+  describe('streaming card context', () => {
+    async function negotiate(capabilities?: Record<string, boolean>) {
+      await ctx.handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities } } as any);
+    }
+
+    it('sends the actual thread and directory before backend startup, even without text output', async () => {
+      await negotiate({ streamingContext: true });
+      ctx.mockExecutor.execute.mockImplementation(async () => {
+        expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+          type: 'stream_context', messageId: 'early-context', openId: 'owner',
+          threadId: 'default-thread-id', threadName: 'default', cwd: ctx.workingDirectory,
+        }));
+        expect(ctx.mockWsClient.send.mock.calls.some(([message]) => message.type === 'stream')).toBe(false);
+        return { success: true, output: 'Done' };
+      });
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'early-context', openId: 'owner', content: 'hello', timestamp: Date.now() });
+      expect(ctx.mockExecutor.execute).toHaveBeenCalled();
+    });
+
+    it('does not send the new message to old Routers, including after reconnect', async () => {
+      ctx.mockExecutor.execute.mockResolvedValue({ success: true });
+      await negotiate({ streamingContext: true });
+      await negotiate();
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'legacy-context', openId: 'owner', content: 'hello', timestamp: Date.now() });
+      expect(ctx.mockWsClient.send.mock.calls.some(([message]) => message.type === 'stream_context')).toBe(false);
+    });
+
+    it('uses the explicitly selected thread, not the default thread', async () => {
+      await negotiate({ streamingContext: true });
+      const original = ctx.mockThreadManager.getDefaultThread();
+      vi.mocked(ctx.mockThreadManager.getThread).mockImplementation(id => id === 'second-thread-id'
+        ? { ...original, id, name: 'thread-9' } : original);
+      ctx.mockExecutor.execute.mockResolvedValue({ success: true });
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'second-context', threadId: 'second-thread-id', openId: 'owner', content: 'hello', timestamp: Date.now() });
+      const contexts = ctx.mockWsClient.send.mock.calls.map(([message]) => message).filter(message => message.type === 'stream_context');
+      expect(contexts.length).toBeGreaterThan(0);
+      expect(contexts.every(message => message.threadId === 'second-thread-id' && message.threadName === 'thread-9')).toBe(true);
+    });
+  });
+
   describe('multimodal prompts', () => {
+    it('reports staging setup errors without crashing registration or invoking a backend', async () => {
+      ctx.mockConfig.get.mockImplementation((key: string) => key === 'serverUrl' ? 'wss://router.test/ws' : key === 'files.retentionDays' ? 0 : undefined);
+      await ctx.handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: { fileTransferV1: true } } } as any);
+      await ctx.handler.handleMessage({ type: 'file_pending', fileId: 'a'.repeat(64), openId: 'owner' } as any);
+      expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'file_status', status: 'failed', detail: expect.stringContaining('staging is unavailable') }));
+    });
+    it.each(['claude', 'codex', 'agy', 'opencode', 'kimi', 'zcode', 'pi'])('prepares file paths through the shared %s execution path and preserves image attachments', async backend => {
+      ctx.mockConfig.get.mockImplementation((key: string) => key === 'executor' ? { type: backend } : undefined);
+      const files = { mark: () => 1, initialize: vi.fn(), claim: vi.fn(), hasClaim: () => true,
+        prepare: vi.fn().mockResolvedValue('\nUser-provided attachments: originalFile=/private/report.pdf'), release: vi.fn(), destroy: vi.fn() };
+      (ctx.handler as any).fileInbox = files;
+      ctx.mockExecutor.execute.mockResolvedValue({ success: true, output: 'Read the report' });
+      const attachments = [{ type: 'image', data: 'image-data', mimeType: 'image/png' }];
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'with-files', openId: 'owner', content: 'Compare these', attachments, timestamp: Date.now() } as any);
+      expect(files.claim).toHaveBeenCalledWith('with-files', 'default-thread-id', 'owner', undefined, 1);
+      expect(ctx.mockExecutor.execute).toHaveBeenCalledWith(expect.stringContaining('originalFile=/private/report.pdf'), expect.objectContaining({ attachments }));
+      expect(files.release).toHaveBeenCalledWith('with-files', false);
+    });
+    it('waits for referenced files and never executes a task after download failure', async () => {
+      let reject!: (error: Error) => void;
+      const pending = new Promise<string>((_resolve, fail) => { reject = fail; });
+      const files = { mark: () => 1, initialize: vi.fn(), claim: vi.fn(), hasClaim: () => true,
+        prepare: vi.fn(() => pending), release: vi.fn(), destroy: vi.fn() };
+      (ctx.handler as any).fileInbox = files;
+      const task = ctx.handler.handleMessage({ type: 'command', messageId: 'waiting-file', openId: 'owner', content: 'Summarize', timestamp: Date.now() });
+      await vi.waitFor(() => expect(files.prepare).toHaveBeenCalled());
+      expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
+      reject(new Error('Attachment unavailable: download timed out.')); await task;
+      expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'response', success: false, error: expect.stringContaining('download timed out') }));
+    });
+    it('rejects explicit file references when the optional capability was not negotiated', async () => {
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'old-peer', content: 'Read', openId: 'owner', fileIds: ['a'.repeat(64)], timestamp: Date.now() } as any);
+      expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ success: false, error: expect.stringContaining('not negotiated') }));
+    });
     it('should pass attachments to executor.execute', async () => {
       ctx.mockExecutor.execute.mockResolvedValue({ success: true, output: 'Saw the image' });
 

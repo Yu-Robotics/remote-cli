@@ -7,11 +7,27 @@ import { stopCommand } from './commands/stop';
 import { statusCommand } from './commands/status';
 import { configCommand, ConfigAction } from './commands/config';
 import { serviceCommand, ServiceAction } from './commands/service';
+import { enableFiles } from './commands/files';
 import chalk from 'chalk';
 import path from 'path';
 import fs from 'fs';
 
 const program = new Command();
+
+program.command('files').description('Secure file reception')
+  .command('enable')
+  .description('Request owner approval for file reception (requires an upgraded Router and TLS)')
+  .option('--rotate', 'Replace this Router/device key; approve the new code before reconnecting')
+  .action(async (options) => {
+    try {
+      const result = await enableFiles(options.rotate === true);
+      console.log(`Approve this device key in Feishu: /bind ${result.bindingCode}`);
+      console.log('After approval, restart the CLI if it was already running. Never share the binding code.');
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : 'File enrollment failed.');
+      process.exitCode = 1;
+    }
+  });
 
 // Read package.json for version
 const packageJsonPath = path.join(__dirname, '../package.json');

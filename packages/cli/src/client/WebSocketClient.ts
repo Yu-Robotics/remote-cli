@@ -2,11 +2,13 @@ import WebSocket from 'ws';
 import { v4 as uuidv4 } from 'uuid';
 import { PROTOCOL_VERSION, CLI_VERSION } from '../types';
 import { TaskRecovery, type RecoverableTask } from './TaskRecovery';
+import { DeviceIdentity, signDeviceProof } from '../files/DeviceIdentity';
 
 /**
  * WebSocket client configuration
  */
 export interface WebSocketClientOptions {
+  identityLoader?: () => Promise<DeviceIdentity | undefined>;
   /** Reconnect interval (milliseconds), default 5000 */
   reconnectInterval?: number;
   /** Heartbeat interval (milliseconds), default 15000 */
@@ -38,6 +40,8 @@ export class WebSocketClient {
   private manualDisconnect = false;
   private connected = false;
   private lastReceivedAt = 0;
+  private identity?: DeviceIdentity;
+  private readonly identityLoader?: () => Promise<DeviceIdentity | undefined>;
   private readonly taskRecovery = new TaskRecovery(message => this.sendRaw(message));
   private messageHandlers: Array<(message: any) => void> = [];
   private errorHandlers: Array<(error: Error) => void> = [];
@@ -47,6 +51,7 @@ export class WebSocketClient {
   constructor(serverUrl: string, deviceId: string, options: WebSocketClientOptions = {}) {
     this.serverUrl = serverUrl;
     this.deviceId = deviceId;
+    this.identityLoader = options.identityLoader;
     this.reconnectInterval = options.reconnectInterval ?? 5000;
     this.heartbeatInterval = options.heartbeatInterval ?? 15000;
   }
@@ -67,7 +72,7 @@ export class WebSocketClient {
           this.connected = true;
           this.lastReceivedAt = Date.now();
           this.startHeartbeat();
-          this.sendRegistration();
+          void this.registerSocket(socket);
           this.connectHandlers.forEach(handler => handler());
           resolve();
         };
@@ -98,6 +103,16 @@ export class WebSocketClient {
           try {
             const message = JSON.parse(data.toString());
             this.lastReceivedAt = Date.now();
+            if (message.type === 'device_challenge') {
+              if (this.identity && /^[a-f0-9]{64}$/.test(message.data?.nonce ?? '')) {
+                this.sendRegistration(signDeviceProof(this.identity, this.deviceId, message.data.nonce));
+              } else {
+                this.errorHandlers.forEach(handler => handler(new Error('This device requires authentication. Run remote-cli files enable and approve its binding code.')));
+                this.manualDisconnect = true;
+                socket.close();
+              }
+              return;
+            }
             if (message.type === 'binding_confirm' && message.data?.success === true) {
               this.taskRecovery.registered(message.data?.capabilities?.taskRecovery === true);
             }
@@ -109,7 +124,7 @@ export class WebSocketClient {
             // Stop reconnecting if the router rejects this CLI version
             if (
               message.type === 'error' &&
-              message.data?.code === 'PROTOCOL_VERSION_INCOMPATIBLE'
+              ['PROTOCOL_VERSION_INCOMPATIBLE', 'DEVICE_AUTH_REQUIRED'].includes(message.data?.code)
             ) {
               console.error(`\n[remote-cli] ${message.data.message}`);
               console.error('[remote-cli] Reconnection paused until this process restarts with a compatible CLI version.\n');
@@ -259,7 +274,19 @@ export class WebSocketClient {
   /**
    * Send device registration message
    */
-  private sendRegistration(): void {
+  private async registerSocket(socket: WebSocket): Promise<void> {
+    try {
+      const identity = this.identityLoader ? await this.identityLoader() : undefined;
+      if (this.ws === socket && this.connected) { this.identity = identity; this.sendRegistration(); }
+    } catch (error) {
+      if (this.ws !== socket || !this.connected) return;
+      this.manualDisconnect = true;
+      this.errorHandlers.forEach(handler => handler(error instanceof Error ? error : new Error('Device identity could not be loaded.')));
+      socket.close();
+    }
+  }
+
+  private sendRegistration(signature?: string): void {
     if (this.ws && this.connected) {
       this.ws.send(JSON.stringify({
         type: 'binding_request',
@@ -268,12 +295,15 @@ export class WebSocketClient {
         data: {
           deviceId: this.deviceId,
           protocolVersion: PROTOCOL_VERSION,
+          ...(signature ? { deviceSignature: signature } : {}),
           capabilities: {
             queueStarted: true,
             taskRecovery: true,
             approvalCards: true,
             delegationProgress: true,
             delegationProgressText: true,
+            streamingContext: true,
+            ...(this.identity ? { fileTransferV1: true } : {}),
           },
         }
       }));

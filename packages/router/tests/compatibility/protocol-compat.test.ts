@@ -31,7 +31,7 @@ describe('Router wire compatibility', () => {
     } as unknown as Server);
     wss = Object.assign(new EventEmitter(), { close: vi.fn() });
     vi.mocked(WebSocketServer).mockImplementation(() => wss as unknown as WebSocketServer);
-    const config = { get: (_section: string, key: string) => key === 'heartbeatInterval' ? 30000 : 'test' };
+    const config = { getConfigPath: () => '/virtual-router-compat/config.json', get: (_section: string, key: string) => key === 'heartbeatInterval' ? 30000 : 'test' };
     server = new RouterServer(config as unknown as ConfigManager, {} as JsonStore);
     await server.start();
 
@@ -69,6 +69,20 @@ describe('Router wire compatibility', () => {
     expect(hub.isDeviceOnline('device-1')).toBe(true);
     expect(hub.supportsQueueStarted('device-1')).toBe(supportsQueueStarted);
     expect(socket.close).not.toHaveBeenCalled();
+  });
+
+  it('opts into early streaming context without changing the protocol baseline', async () => {
+    await receive({ type: 'binding_request', messageId: 'registration', data: {
+      deviceId: 'device-1', protocolVersion: 1, capabilities: { streamingContext: true },
+    } });
+    expect(JSON.parse(socket.send.mock.calls[0][0])).toMatchObject({
+      type: 'binding_confirm', data: { success: true, minCliVersion: 1, capabilities: { streamingContext: true } },
+    });
+    const feishu = vi.mocked(FeishuLongConnHandler).mock.instances[0];
+    vi.mocked(feishu.setOnStartStreaming).mock.calls[0][0]('early', 'owner', 'card', 'device-1');
+    await receive({ type: 'stream_context', messageId: 'early', openId: 'owner',
+      threadId: 'thread-id', threadName: 'thread-9', cwd: '/project' });
+    expect(feishu.updateStreamingMessage).toHaveBeenCalledWith('card', expect.any(Array), 'owner', 'thread-9', '/project');
   });
 
   it('negotiates additive approval cards and routes a button response to the original request', async () => {

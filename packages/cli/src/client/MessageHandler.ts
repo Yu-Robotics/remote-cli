@@ -1,5 +1,10 @@
 import type { ApprovalRequestInfo, ApprovalRequestMessage, ApprovalResponseMessage, ApprovalResolvedMessage, ApprovalStatus } from '../types';
 import { WebSocketClient } from './WebSocketClient';
+import { FileInbox } from '../files/FileInbox';
+import { fileOrigin } from '../files/DeviceIdentity';
+import { createHash } from 'crypto';
+import { extractDocument } from '../files/DocumentExtractor';
+import path from 'path';
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import { IncomingMessage, OutgoingMessage, StructuredContent, ToolUseInfo, ToolResultInfo, DelegationProgressInfo, Attachment, ImageBlock, QueueConfirmationInfo, TaskNotificationInfo } from '../types';
 import { ThreadExecutorPool } from '../thread/ThreadExecutorPool';
@@ -146,11 +151,13 @@ export class MessageHandler {
   private readonly abortOperations = new Map<string, Promise<void>>();
   private automaticUpdateInProgress = false;
   private approvalCardsSupported = false;
+  private streamingContextSupported = false;
   private delegationProgressSupported = false;
   private delegationProgressTextSupported = false;
   private readonly pendingApprovalCards = new Map<string, { request: ApprovalRequestMessage; executor: IExecutor; delegated?: boolean }>();
   private readonly delegation: DelegationManager;
   private readonly delegationBridges = new Map<string, DelegationBridge>();
+  private fileInbox?: FileInbox;
 
   constructor(
     wsClient: WebSocketClient,
@@ -164,6 +171,7 @@ export class MessageHandler {
     this.threadManager = threadManager;
     this.directoryGuard = directoryGuard;
     this.config = config;
+    this.wsClient.onClose?.(() => this.fileInbox?.disconnect());
     this.delegation = new DelegationManager(directoryGuard);
 
     this.notificationAdapter = new FeishuNotificationAdapter(wsClient);
@@ -204,7 +212,19 @@ export class MessageHandler {
         return;
 
       case 'command':
-        await this.handleCommandMessage(message as IncomingMessage);
+        await this.handleCommandMessage(message as IncomingMessage, this.fileInbox?.mark());
+        return;
+
+      case 'file_pending':
+        if (this.fileInbox) await this.fileInbox.accept(message);
+        else this.wsClient.send({ type: 'file_status', fileId: (message as any).fileId, status: 'failed',
+          detail: 'Local file staging is unavailable. Check secure enrollment, files.retentionDays and storage permissions.' });
+        return;
+      case 'file_available':
+        this.fileInbox?.available(message);
+        return;
+      case 'file_failed':
+        await this.fileInbox?.failed((message as any).fileId, (message as any).detail);
         return;
 
       case 'heartbeat':
@@ -213,7 +233,22 @@ export class MessageHandler {
       case 'binding_confirm': {
         const data = (message as any).data;
         if (data?.success !== true) return;
+        if (data.capabilities?.fileTransferV1 === true && !this.fileInbox) {
+          try {
+            const fileServer = this.config.get('serverUrl') as string;
+            const fileNamespace = createHash('sha256').update(fileOrigin(fileServer)).digest('hex');
+            this.fileInbox = new FileInbox(path.join(this.config.getConfigDir(), 'attachments', fileNamespace), fileServer, {
+              thread: id => id ? this.threadManager.getThread(id) : this.threadManager.getDefaultThread(),
+              send: value => this.wsClient.send(value), extract: extractDocument,
+            }, this.config.get('files.retentionDays') as number | undefined);
+            await this.fileInbox.initialize();
+          } catch {
+            await this.fileInbox?.destroy(); this.fileInbox = undefined;
+            console.error('[Files] Local staging is unavailable. File requests will fail without running a model.');
+          }
+        }
         this.approvalCardsSupported = data.capabilities?.approvalCards === true;
+        this.streamingContextSupported = data.capabilities?.streamingContext === true;
         this.delegationProgressSupported = data.capabilities?.delegationProgress === true;
         this.delegationProgressTextSupported = this.delegationProgressSupported
           && data.capabilities?.delegationProgressText === true;
@@ -265,7 +300,7 @@ export class MessageHandler {
   /**
    * Handle command message — route to the correct thread executor.
    */
-  private async handleCommandMessage(message: IncomingMessage): Promise<void> {
+  private async handleCommandMessage(message: IncomingMessage, fileOrder?: number): Promise<void> {
     const { messageId, content, attachments, workingDirectory, openId, isSlashCommand, threadId } = message;
 
     this.currentOpenId = openId;
@@ -296,6 +331,7 @@ export class MessageHandler {
     }
 
     const executor = this.threadPool.getExecutor(resolvedThreadId);
+    this.sendStreamContext(messageId, resolvedThreadId, executor);
 
     // Handle /abort for this specific thread (bypasses busy check)
     if (content?.trim() === '/abort') {
@@ -374,11 +410,23 @@ export class MessageHandler {
       }
     }
 
+    const ordinaryMessage = !isSlashCommand && !content?.trim().startsWith('/');
+    if (ordinaryMessage) {
+      try {
+        if (message.fileIds?.length && !this.fileInbox) throw new Error('File support was not negotiated. Upgrade and enroll this CLI first.');
+        if (this.fileInbox) {
+          await this.fileInbox.initialize();
+          this.fileInbox.claim(messageId, resolvedThreadId, openId, message.fileIds, fileOrder);
+        }
+      } catch (error) {
+        this.sendResponse(messageId, resolvedThreadId, { success: false, error: error instanceof Error ? error.message : 'Attachment is unavailable.' });
+        return;
+      }
+    }
     const threadBusy = this.threadPool.isThreadBusy(resolvedThreadId);
     const queuedCount = this.threadQueues.get(resolvedThreadId)?.length ?? 0;
     if (!threadBusy && !this.hasThreadQueueState(resolvedThreadId)) this.pausedQueues.delete(resolvedThreadId);
     const queuePaused = this.pausedQueues.has(resolvedThreadId);
-    const ordinaryMessage = !isSlashCommand && !content?.trim().startsWith('/');
     // An idle executor can still have a paused queue. New work must not overtake it.
     if (threadBusy || (ordinaryMessage && (queuedCount > 0 || queuePaused))) {
       // Allow pending replace even when busy
@@ -508,6 +556,7 @@ export class MessageHandler {
     threadId: string,
     executor: IExecutor
   ): Promise<void> {
+    this.fileInbox?.cancelThread(threadId);
     const existingAbort = this.abortOperations.get(threadId);
     if (existingAbort) {
       await existingAbort;
@@ -596,6 +645,12 @@ export class MessageHandler {
     executor: IExecutor
   ): Promise<boolean> {
     const trimmed = content.trim();
+    if (trimmed === '/files' || trimmed === '/files clear') {
+      this.sendResponse(messageId, threadId, { success: true, output: this.fileInbox
+        ? await this.fileInbox.list(threadId, this.getMessageOpenId(messageId), trimmed === '/files clear')
+        : 'File reception is unavailable. Upgrade both peers, configure Router TLS, run remote-cli files enable locally, approve its binding code, and reconnect.' });
+      return true;
+    }
 
     if (trimmed === '/delegation' || trimmed.startsWith('/delegation ')) {
       const argumentsList = trimmed.slice('/delegation'.length).trim().split(/\s+/).filter(Boolean);
@@ -1053,7 +1108,10 @@ You can also use natural language commands to control Claude Code CLI.`,
     });
     setTimeout(() => {
       const pending = this.pendingQueueConfirmations.get(id);
-      if (pending && pending.info.expiresAt <= Date.now()) this.pendingQueueConfirmations.delete(id);
+      if (pending && pending.info.expiresAt <= Date.now()) {
+        this.fileInbox?.release(pending.command.messageId);
+        this.pendingQueueConfirmations.delete(id);
+      }
     }, QUEUE_CONFIRMATION_TTL_MS).unref?.();
     return info;
   }
@@ -1061,15 +1119,20 @@ You can also use natural language commands to control Claude Code CLI.`,
   private removeExpiredQueueConfirmations(): void {
     const now = Date.now();
     for (const [id, pending] of this.pendingQueueConfirmations) {
-      if (pending.info.expiresAt <= now) this.pendingQueueConfirmations.delete(id);
+      if (pending.info.expiresAt <= now) {
+        this.fileInbox?.release(pending.command.messageId);
+        this.pendingQueueConfirmations.delete(id);
+      }
     }
   }
 
   private clearThreadQueue(threadId: string): number {
     let cleared = this.threadQueues.get(threadId)?.length ?? 0;
+    for (const command of this.threadQueues.get(threadId) ?? []) this.fileInbox?.release(command.messageId);
     this.threadQueues.delete(threadId);
     for (const [id, pending] of this.pendingQueueConfirmations) {
       if (pending.info.threadId === threadId) {
+        this.fileInbox?.release(pending.command.messageId);
         this.pendingQueueConfirmations.delete(id);
         cleared += 1;
       }
@@ -1099,6 +1162,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       if (!pending || pending.info.threadId !== threadId || pending.info.expiresAt <= Date.now()
         || pending.info.backend !== this.threadPool.getBackendKey(threadId) || pending.info.cwd !== currentCwd
         || (pending.command.openId && pending.command.openId !== this.getMessageOpenId(messageId))) {
+        if (pending) this.fileInbox?.release(pending.command.messageId);
         this.pendingQueueConfirmations.delete(id);
         this.sendResponse(messageId, threadId, { success: false, error: 'Queue confirmation is no longer valid. The message was not queued.' });
         return;
@@ -1106,9 +1170,11 @@ You can also use natural language commands to control Claude Code CLI.`,
       this.pendingQueueConfirmations.delete(id);
       const queue = this.threadQueues.get(threadId) ?? [];
       if (queue.length >= MAX_THREAD_QUEUE_LENGTH) {
+        this.fileInbox?.release(pending.command.messageId);
         this.sendResponse(messageId, threadId, { success: false, error: `This thread queue is full (${MAX_THREAD_QUEUE_LENGTH} messages).` });
         return;
       }
+      this.fileInbox?.moveClaim(pending.command.messageId, parts[3] || pending.command.messageId);
       queue.push({ ...pending.command, messageId: parts[3] || pending.command.messageId });
       this.threadQueues.set(threadId, queue);
       console.log(`[MessageHandler] Queued message ${parts[3] || pending.command.messageId} in thread ${threadId}: position=${queue.length}, paused=${this.pausedQueues.has(threadId)}`);
@@ -1123,6 +1189,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     if (action === 'cancel' && id) {
       const pending = this.pendingQueueConfirmations.get(id);
       if (pending?.info.threadId === threadId) {
+        this.fileInbox?.release(pending.command.messageId);
         this.pendingQueueConfirmations.delete(id);
         this.sendResponse(messageId, threadId, { success: true, output: '❌ Message was not queued.' });
       } else {
@@ -1427,6 +1494,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         await this.delegation.store.deleteThread(target.id);
         await this.threadPool.destroyThread(target.id);
         await this.threadManager.deleteThread(target.id);
+        await this.fileInbox?.deleteThread(target.id);
         this.sendResponse(messageId, callerThreadId, {
           success: true,
           output: `✅ Thread "${name}" deleted.`,
@@ -1933,6 +2001,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     attachments?: Attachment[],
     fromQueue = false,
   ): Promise<boolean> {
+    this.sendStreamContext(messageId, threadId, executor);
     let delegationScope: DelegationScope | undefined;
     let delegationBridge: DelegationBridge | undefined;
     const complete = async (success: boolean, error?: string): Promise<boolean> => {
@@ -1960,6 +2029,11 @@ You can also use natural language commands to control Claude Code CLI.`,
       return success;
     };
     try {
+      if (this.fileInbox?.hasClaim(messageId)) {
+        this.sendStreamChunk(messageId, threadId, '📎 Waiting for attached files to be ready...\n');
+        content += await this.fileInbox.prepare(messageId);
+        if (this.isDestroyed || this.abortOperations.has(threadId)) throw new Error('Attachment task cancelled.');
+      }
       const openId = this.getMessageOpenId(messageId);
       const thread = this.threadManager.getThread(threadId);
       if (thread?.delegation && executor.configureDelegation) {
@@ -2263,6 +2337,22 @@ You can also use natural language commands to control Claude Code CLI.`,
     }
   }
 
+  /** Publish routing metadata before backend startup or the first output token. */
+  private sendStreamContext(messageId: string, threadId: string, executor: IExecutor): void {
+    if (!this.streamingContextSupported) return;
+    const thread = this.threadManager.getThread(threadId);
+    const openId = this.getMessageOpenId(messageId);
+    if (!thread || !openId) return;
+    try {
+      this.wsClient.send({
+        type: 'stream_context', messageId, openId, threadId,
+        threadName: thread.name, cwd: executor.getCurrentWorkingDirectory(), timestamp: Date.now(),
+      });
+    } catch (error) {
+      console.error('Failed to send stream context:', error);
+    }
+  }
+
   private sendStreamChunk(messageId: string, threadId: string | undefined, chunk: string): void {
     try {
       this.wsClient.send({
@@ -2411,6 +2501,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       queueConfirmation?: QueueConfirmationInfo;
     }
   ): void {
+    if (!result.queueConfirmation) this.fileInbox?.release(messageId, !result.success);
     try {
       // Resolve CWD from thread executor if possible
       let cwd: string | undefined;
@@ -2590,6 +2681,7 @@ You can also use natural language commands to control Claude Code CLI.`,
    */
   async destroy(): Promise<void> {
     this.isDestroyed = true;
+    await this.fileInbox?.destroy();
     this.notificationAdapter.unregister();
     try {
       await this.delegation.destroy();

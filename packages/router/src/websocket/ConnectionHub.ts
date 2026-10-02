@@ -10,6 +10,21 @@ export class ConnectionHub {
   // Store deviceId -> last active time mapping
   private lastActiveMap: Map<string, number>;
   private queueStartedDevices = new Set<string>();
+  private fileSessions = new Map<string, { id: string; openId: string }>();
+
+  setFileSession(deviceId: string, session: { id: string; openId: string }): void {
+    this.fileSessions.set(deviceId, session);
+  }
+
+  getFileSession(deviceId: string): { id: string; openId: string } | undefined {
+    return this.fileSessions.get(deviceId);
+  }
+
+  disconnectDevice(deviceId: string): void {
+    const ws = this.connections.get(deviceId);
+    this.unregisterConnection(deviceId);
+    ws?.close();
+  }
 
   constructor() {
     this.connections = new Map();
@@ -22,6 +37,7 @@ export class ConnectionHub {
    * @param ws WebSocket connection
    */
   registerConnection(deviceId: string, ws: WebSocket, capabilities?: { queueStarted?: boolean }): void {
+    this.fileSessions.delete(deviceId);
     const oldWs = this.connections.get(deviceId);
     // Replace the mapping first so the old socket cannot unregister its replacement.
     this.connections.set(deviceId, ws);
@@ -54,6 +70,7 @@ export class ConnectionHub {
   unregisterConnection(deviceId: string, ws?: WebSocket): boolean {
     if (ws && !this.isCurrentConnection(deviceId, ws)) return false;
     this.connections.delete(deviceId);
+    this.fileSessions.delete(deviceId);
     this.lastActiveMap.delete(deviceId);
     this.queueStartedDevices.delete(deviceId);
     return true;

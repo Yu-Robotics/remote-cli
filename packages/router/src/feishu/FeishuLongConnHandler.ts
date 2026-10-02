@@ -8,6 +8,8 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { createHash } from 'crypto';
+import { Readable } from 'stream';
+import type { FileInput } from '../files/FileTransfers';
 import { CARD_TABLE_LIMIT, countCardTables, isCardMarkdownParseError, isCardTableLimitError, limitCardTables, plainTextCard, prepareTableElements } from '../utils/CardTables';
 
 /**
@@ -85,12 +87,12 @@ export class FeishuLongConnHandler {
    * pendingNewThread=true signals that this command will create a new thread,
    * so the server should update activeThreadMap when the response arrives.
    */
-  private onStartStreaming?: (messageId: string, openId: string, feishuMessageId: string | null, deviceId: string, threadId?: string, pendingNewThread?: boolean, queueCardId?: string) => void;
+  private onStartStreaming?: (messageId: string, openId: string, feishuMessageId: string | null, deviceId: string, threadId?: string, pendingNewThread?: boolean, queueCardId?: string, threadName?: string) => void;
 
   /**
    * Set streaming start callback
    */
-  setOnStartStreaming(callback: (messageId: string, openId: string, feishuMessageId: string | null, deviceId: string, threadId?: string, pendingNewThread?: boolean, queueCardId?: string) => void): void {
+  setOnStartStreaming(callback: (messageId: string, openId: string, feishuMessageId: string | null, deviceId: string, threadId?: string, pendingNewThread?: boolean, queueCardId?: string, threadName?: string) => void): void {
     this.onStartStreaming = callback;
   }
 
@@ -126,6 +128,11 @@ export class FeishuLongConnHandler {
    * RouterServer uses this to clear stale thread state tied to the old device.
    */
   onDeviceSwitch?: (openId: string, oldDeviceId: string | undefined) => void;
+  onApproveDeviceKey?: (openId: string, deviceId: string, publicKey: string) => Promise<void>;
+  onRevokeDevice?: (deviceId: string) => Promise<void>;
+  onFileMessage?: (input: FileInput) => Promise<void>;
+  onResolveFile?: (openId: string, sourceOrCardId: string) => { id: string; deviceId: string; threadId: string } | undefined;
+  private readonly fileAdmissions = new Map<string, Promise<void>>();
 
   /**
    * Callback to resolve the user's currently active thread (for new top-level messages
@@ -148,8 +155,8 @@ export class FeishuLongConnHandler {
       const message = data.message;
       const sender = data.sender;
 
-      // Only handle text, post (rich text), and image messages
-      if (message.message_type !== 'text' && message.message_type !== 'post' && message.message_type !== 'image') {
+      // Admission is ordered with later text; bulk downloads remain asynchronous.
+      if (message.message_type !== 'text' && message.message_type !== 'post' && message.message_type !== 'image' && message.message_type !== 'file') {
         console.log(`[FeishuHandler] Skipping message type: ${message.message_type}`);
         return;
       }
@@ -159,6 +166,36 @@ export class FeishuLongConnHandler {
 
       // Extract parent_id for reply-based thread routing
       const parentId: string | undefined = message.parent_id || undefined;
+      let fileReference = parentId ? this.onResolveFile?.(openId, parentId) : undefined;
+      if (message.message_type === 'file') {
+        const resolved = parentId ? this.onResolveThread?.(parentId) : this.onResolveActiveThread?.(openId);
+        const selectedThread = fileReference?.threadId ?? resolved?.threadId;
+        const referencedDevice = fileReference?.deviceId ?? (resolved && 'deviceId' in resolved ? resolved.deviceId : undefined);
+        const selectedDevice = referencedDevice
+          ? this.bindingManager.getUserDevices(openId).then(devices => devices.find(device => device.deviceId === referencedDevice))
+          : this.bindingManager.getActiveDevice(openId);
+        const previous = this.fileAdmissions.get(openId) ?? Promise.resolve();
+        const admission = previous.catch(() => {}).then(async () => {
+          try {
+            const file = JSON.parse(message.content);
+            const device = await selectedDevice;
+            if (!device || !this.onFileMessage) throw new Error('File reception requires an upgraded Router and an active, authenticated CLI.');
+            if (typeof file.file_key !== 'string' || !/^[a-zA-Z0-9_-]{1,512}$/.test(file.file_key)
+              || typeof messageId !== 'string' || !/^[a-zA-Z0-9_-]{1,200}$/.test(messageId)) throw new Error('Invalid file attachment.');
+            await this.onFileMessage({ openId, deviceId: device.deviceId, threadId: selectedThread,
+              messageId, fileKey: file.file_key, name: file.file_name });
+          } catch (error) {
+            await this.replyToMessage(messageId, `📎 File not received: ${error instanceof Error ? error.message : 'Please try again.'}`);
+          }
+        });
+        this.fileAdmissions.set(openId, admission);
+        try { await admission; } finally { if (this.fileAdmissions.get(openId) === admission) this.fileAdmissions.delete(openId); }
+        return;
+      }
+      // Abort must remain responsive while file admission/download is pending.
+      if (this.parseMessageContent(message).trim() !== '/abort') await this.fileAdmissions.get(openId)?.catch(() => {});
+      // The file may have been admitted while this reply was waiting above.
+      if (parentId) fileReference = this.onResolveFile?.(openId, parentId);
 
       let content = '';
       let attachments: Attachment[] | undefined;
@@ -216,7 +253,8 @@ export class FeishuLongConnHandler {
         const resolved = parentId
           ? { threadId: this.onResolveThread?.(parentId)?.threadId, threadName: undefined }
           : this.onResolveActiveThread?.(openId);
-        await this.handleRegularCommand(openId, messageId, content, resolved?.threadId, false, resolved?.threadName, attachments);
+        await this.handleRegularCommand(openId, messageId, content, fileReference?.threadId ?? resolved?.threadId, false, resolved?.threadName, attachments,
+          ...(fileReference ? [fileReference] : []));
         console.log(`[FeishuHandler] Finished handling regular command, msgId=${messageId}`);
       }
     } catch (error) {
@@ -376,7 +414,7 @@ export class FeishuLongConnHandler {
       const feishuMessageId = await this.sendStreamingStart(openId, `🤔 Executing ${command}...`, threadName);
       console.log(`[FeishuHandler] Created card ${feishuMessageId} for slash command ${commandMessageId}`);
       if (this.onStartStreaming) {
-        this.onStartStreaming(commandMessageId, openId, feishuMessageId, activeDevice.deviceId, threadId);
+        this.onStartStreaming(commandMessageId, openId, feishuMessageId, activeDevice.deviceId, threadId, false, undefined, threadName);
       }
 
       // Send slash command to device - the client will execute it locally
@@ -415,7 +453,7 @@ export class FeishuLongConnHandler {
       const existingDevices = await this.bindingManager.getUserDevices(openId);
       const alreadyBound = existingDevices.some(d => d.deviceId === bindingCode.deviceId);
 
-      if (alreadyBound) {
+      if (alreadyBound && !bindingCode.devicePublicKey) {
         await this.replyToMessage(messageId, '❌ This device is already bound to your account');
         return;
       }
@@ -423,6 +461,13 @@ export class FeishuLongConnHandler {
       // Bind user
       const deviceName = 'Device'; // Will be updated by client later
       await this.bindingManager.bindUser(openId, bindingCode.deviceId, deviceName);
+      if (bindingCode.devicePublicKey) {
+        if (!this.onApproveDeviceKey) throw new Error('Secure device enrollment is unavailable.');
+        await this.onApproveDeviceKey(openId, bindingCode.deviceId, bindingCode.devicePublicKey);
+        await this.bindingManager.consumeBindingCode(code);
+        await this.replyToMessage(messageId, '🔐 Device key approved. Reconnect the upgraded CLI to receive files (up to 20 MiB). Older credentialless CLIs cannot connect as this device.');
+        return;
+      }
 
       const isFirstDevice = existingDevices.length === 0;
       const statusNote = isFirstDevice
@@ -455,6 +500,7 @@ export class FeishuLongConnHandler {
       const deviceCount = binding.devices.length;
 
       // Unbind all devices
+      for (const device of binding.devices) await this.onRevokeDevice?.(device.deviceId);
       await this.bindingManager.unbindUser(openId);
       await this.replyToMessage(
         messageId,
@@ -658,6 +704,7 @@ export class FeishuLongConnHandler {
       }
 
       const wasActive = device.isActive;
+      await this.onRevokeDevice?.(deviceId);
       const result = await this.bindingManager.unbindDevice(openId, deviceId);
 
       if (!result) {
@@ -708,6 +755,7 @@ Backend and session commands (sent to active device):
 /skills - List available skills for the active backend
 /abort - Abort the currently executing command
 /queue - Inspect or manage confirmed messages for busy threads
+/files [clear] - List staged attachments or remove unused local copies
 /model [name] - Show models or set this thread's model
 /effort [auto|low|medium|high] - Show or set Codex/AGY reasoning effort
 /delegation [on|off] - Delegate between installed agent backends in the current thread
@@ -741,7 +789,7 @@ Examples:
   /**
    * Handle regular command (non-slash commands)
    */
-  private async handleRegularCommand(openId: string, messageId: string, content: string, threadId?: string, pendingNewThread = false, threadName?: string, attachments?: Attachment[]): Promise<void> {
+  private async handleRegularCommand(openId: string, messageId: string, content: string, threadId?: string, pendingNewThread = false, threadName?: string, attachments?: Attachment[], fileReference?: { id: string; deviceId: string }): Promise<void> {
     try {
       // Find user binding
       const binding = await this.bindingManager.getUserBinding(openId);
@@ -754,7 +802,9 @@ Examples:
       }
 
       // Get active device
-      const activeDevice = await this.bindingManager.getActiveDevice(openId);
+      const activeDevice = fileReference
+        ? (await this.bindingManager.getUserDevices(openId)).find(device => device.deviceId === fileReference.deviceId)
+        : await this.bindingManager.getActiveDevice(openId);
       if (!activeDevice) {
         await this.replyToMessage(
           messageId,
@@ -787,7 +837,7 @@ Examples:
       const feishuMessageId = await this.sendStreamingStart(openId, attachments ? '🖼️ Processing image...' : '🤔 Processing...', threadName);
       console.log(`[FeishuHandler] Created card ${feishuMessageId} for command ${commandMessageId}`);
       if (this.onStartStreaming) {
-        this.onStartStreaming(commandMessageId, openId, feishuMessageId, activeDevice.deviceId, threadId, pendingNewThread);
+        this.onStartStreaming(commandMessageId, openId, feishuMessageId, activeDevice.deviceId, threadId, pendingNewThread, undefined, threadName);
       }
 
       // Send command to device
@@ -797,6 +847,7 @@ Examples:
         timestamp: Date.now(),
         content,
         attachments,
+        ...(fileReference ? { fileIds: [fileReference.id] } : {}),
         openId,
         threadId, // Forward threadId to CLI for per-thread routing
       });
@@ -848,6 +899,36 @@ Examples:
       if (temporaryDirectory) {
         await fs.promises.rm(temporaryDirectory, { recursive: true, force: true }).catch(() => undefined);
       }
+    }
+  }
+
+  /** A per-transfer SDK instance bounds token lookup and pre-body requests too. */
+  async downloadFileResource(messageId: string, fileKey: string, signal: AbortSignal): Promise<Readable> {
+    const httpInstance = Object.create(lark.defaultHttpInstance);
+    httpInstance.request = (options: any) => lark.defaultHttpInstance.request({ ...options, timeout: 20_000, signal, maxRedirects: 0 });
+    for (const method of ['get', 'delete', 'head', 'options']) {
+      httpInstance[method] = (url: string, options: any = {}) => httpInstance.request({ ...options, method, url });
+    }
+    for (const method of ['post', 'put', 'patch']) {
+      httpInstance[method] = (url: string, data: any, options: any = {}) => httpInstance.request({ ...options, method, url, data });
+    }
+    const silent = () => {};
+    const client = new lark.Client({ appId: this.appId, appSecret: this.appSecret, domain: lark.Domain.Feishu,
+      appType: lark.AppType.SelfBuild, httpInstance,
+      // SDK errors may contain authorization headers; never print them.
+      logger: { error: silent, warn: silent, info: silent, debug: silent, trace: silent },
+    });
+    try {
+      const resource = await client.im.messageResource.get({ path: { message_id: messageId, file_key: fileKey }, params: { type: 'file' } });
+      const stream = resource.getReadableStream();
+      if (signal.aborted) { stream.destroy(); throw new Error('File download cancelled.'); }
+      return stream;
+    } catch (cause: any) {
+      const error = new Error(signal.aborted ? 'File download cancelled.' : 'Feishu file download failed or timed out. Check bot access to this chat and retry.');
+      const code = ['ECONNRESET', 'ETIMEDOUT', 'ECONNABORTED', 'EPIPE', 'EAI_AGAIN'].includes(cause?.code) ? cause.code
+        : [429, 502, 503, 504].includes(cause?.response?.status) ? 'RETRY' : undefined;
+      if (!signal.aborted && code) Object.assign(error, { code });
+      throw error;
     }
   }
 
@@ -904,14 +985,10 @@ Examples:
    * Send streaming message with card update support
    * Returns message_id for updating
    */
-  async sendStreamingStart(openId: string, initialText: string = '🤔 Thinking...', threadName?: string): Promise<string | null> {
+  async sendStreamingStart(openId: string, initialText: string = '🤔 Thinking...', threadName?: string, cwd?: string): Promise<string | null> {
     console.log(`[FeishuHandler] Creating interactive card v2 for ${openId}`);
     try {
-      const elements: any[] = [];
-      if (threadName) {
-        elements.push({ tag: 'markdown', content: `🧵 **${threadName}**` });
-        elements.push({ tag: 'hr' });
-      }
+      const elements = this.createResponseHeaderElements(threadName || 'Resolving thread...', cwd);
       elements.push({ tag: 'markdown', content: initialText });
 
       const result = await this.client.im.message.create({
@@ -1311,9 +1388,9 @@ Examples:
    * @param openId User's open_id for creating continuation messages
    * @param threadName Thread name shown in continuation card headers
    */
-  async updateStreamingMessage(messageId: string, elements: any[], openId?: string, threadName?: string): Promise<boolean> {
-    const continuationHeaderElements = this.createResponseHeaderElements(threadName);
-    return this.withMessageLock(messageId, () => this._updateStreamingMessage(messageId, elements, openId, continuationHeaderElements));
+  async updateStreamingMessage(messageId: string, elements: any[], openId?: string, threadName?: string, cwd?: string): Promise<boolean> {
+    const headerElements = this.createResponseHeaderElements(threadName || 'Resolving thread...', cwd);
+    return this.withMessageLock(messageId, () => this._updateStreamingMessage(messageId, [...headerElements, ...elements], openId, headerElements));
   }
 
   private async _updateStreamingMessage(messageId: string, elements: any[], openId?: string, continuationHeaderElements: any[] = [], trailingElements: any[] = []): Promise<boolean> {
@@ -1432,7 +1509,7 @@ Examples:
         noteContent += ` · Session: ${sessionAbbr}`;
       }
 
-      const headerElements = this.createResponseHeaderElements(threadName, cwd);
+      const headerElements = this.createResponseHeaderElements(threadName || 'Resolving thread...', cwd);
       const finalElements: any[] = [...headerElements];
       finalElements.push(...elements, { tag: 'markdown', content: noteContent });
 
@@ -1564,7 +1641,9 @@ Examples:
       headerParts.push(`🧵 **${threadName}**`);
     }
     if (cwd) {
-      const formattedCwd = cwd.replace(process.env.HOME || '/Users', '~');
+      const home = process.env.HOME;
+      const formattedCwd = home && (cwd === home || cwd.startsWith(`${home}/`))
+        ? `~${cwd.slice(home.length)}` : cwd;
       headerParts.push(`📂 \`${formattedCwd}\``);
     }
     return headerParts.length > 0

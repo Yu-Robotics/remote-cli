@@ -156,7 +156,8 @@ describe('start command', () => {
 
       expect(WebSocketClient).toHaveBeenCalledWith(
         'wss://test-server.com/ws',
-        'dev_test_12345'
+        'dev_test_12345',
+        { identityLoader: expect.any(Function) }
       );
       expect(mockWsClient.connect).toHaveBeenCalled();
     });
