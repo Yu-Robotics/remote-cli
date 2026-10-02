@@ -25,7 +25,8 @@ const finish = () => {
   write({ method: 'session/event', params: { sessionId: 'sess-1', seq: 4, type: 'model.streaming', payload: { kind: 'tool_call', toolCallId: 'call-1', toolName: 'Bash', input: { command: 'pwd' } } } });
   write({ method: 'session/event', params: { sessionId: 'sess-1', seq: 5, type: 'tool.updated', payload: { kind: 'scheduled', toolCallId: 'call-1', toolName: 'Bash' } } });
   write({ method: 'session/event', params: { sessionId: 'sess-1', seq: 6, type: 'tool.updated', payload: { kind: 'result', toolCallId: 'call-1', result: '/workspace' } } });
-  write({ method: 'session/event', params: { sessionId: 'sess-1', seq: 7, type: 'turn.completed', payload: { turnId: 'turn-1', resultType: 'success' } } });
+  write({ method: 'session/event', params: { sessionId: 'sess-1', seq: 7, type: 'model.streaming', payload: { kind: 'reasoning_delta', delta: 'Private native thought', turnId: 'turn-1' } } });
+  write({ method: 'session/event', params: { sessionId: 'sess-1', seq: 8, type: 'turn.completed', payload: { turnId: 'turn-1', resultType: 'success' } } });
 };
 rl.on('line', (line) => {
   const message = JSON.parse(line);
@@ -74,6 +75,7 @@ describe('ZCodeClient', () => {
     await fs.writeFile(fixturePath, fixture);
     callbacks = {
       onTextChunk: vi.fn(),
+      onThoughtChunk: vi.fn(),
       onToolCall: vi.fn(),
       onToolResult: vi.fn(),
       onPermissionRequest: vi.fn().mockImplementation(async () => {
@@ -110,6 +112,8 @@ describe('ZCodeClient', () => {
     ]));
     expect(callbacks.onPermissionRequest).toHaveBeenCalledTimes(1);
     expect(callbacks.onTextChunk).toHaveBeenCalledWith({ type: 'text', text: 'images=1' });
+    expect(callbacks.onThoughtChunk).toHaveBeenCalledWith({ type: 'text', text: 'Private native thought' });
+    expect(callbacks.onTextChunk).not.toHaveBeenCalledWith({ type: 'text', text: 'Private native thought' });
     expect(callbacks.onToolCall).toHaveBeenCalledWith(expect.objectContaining({
       toolCallId: 'call-1', rawInput: { command: 'pwd' }, kind: 'execute',
     }));

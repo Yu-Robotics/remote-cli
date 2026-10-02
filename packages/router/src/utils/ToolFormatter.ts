@@ -494,9 +494,9 @@ export interface DelegationProgressCardState {
 
 const DELEGATION_BACKEND_LABELS: Record<string, string> = {
   claude: 'Claude Code',
-  codex: 'Codex CLI',
+  codex: 'Codex',
   pi: 'Pi',
-  agy: 'AGY CLI',
+  agy: 'AGY',
   opencode: 'OpenCode',
   kimi: 'Kimi Code',
   zcode: 'ZCode',
@@ -547,8 +547,7 @@ function lastWorkerActivity(timestamp?: number): string {
 
 function delegatedCurrentActivity(state: DelegationProgressCardState): string {
   if (state.phase === 'waiting_input') return 'Waiting for user input';
-  if (state.currentToolName) return 'Tool running; waiting for the next update.';
-  return state.phase === 'started' ? 'Starting worker session…' : 'Waiting for the next update…';
+  return state.phase === 'started' ? 'Starting…' : 'Waiting for output…';
 }
 
 /** Four stable sibling slots: identity, visible content, metadata, folded diagnostics. */
@@ -556,6 +555,9 @@ export function createDelegationProgressElements(state: DelegationProgressCardSt
   const style = DELEGATION_PROGRESS_STYLES[state.phase] ?? FALLBACK_DELEGATION_PROGRESS_STYLE;
   const backend = DELEGATION_BACKEND_LABELS[state.backend] ?? 'Agent';
   const ordinal = Number.isSafeInteger(state.ordinal) && state.ordinal > 0 ? state.ordinal : 1;
+  const currentTool = state.currentToolName && !style.terminal
+    ? `${literalWorkerText(state.currentToolName, 120)}${state.activeToolCount > 1 ? ` · ${state.activeToolCount} tools active` : ''}`
+    : undefined;
   const primary: string[] = [];
   if (state.phase === 'waiting_input') {
     primary.push("**<font color='orange'>Your input is needed</font>**",
@@ -570,47 +572,47 @@ export function createDelegationProgressElements(state: DelegationProgressCardSt
     primary.push(style.terminal ? '**Last activity · not a final result**' : '**Latest update**',
       formatWorkerResultMarkdown(state.latestText, DELEGATION_CURRENT_ACTIVITY_LIMIT, 'activity'));
   } else if (!primary.length) {
-    primary.push(style.terminal ? '_No result text was received._' : `_${delegatedCurrentActivity(state)}_`);
+    primary.push(style.terminal ? '_No result text was received._' : currentTool || delegatedCurrentActivity(state));
   }
-  const metadata = [`Elapsed ${delegationElapsed(state.startedAt, state.finishedAt)}`];
-  if (!style.terminal) metadata.push(`Last update: ${lastWorkerActivity(state.lastActivityAt)}`);
-  if (state.currentToolName && !style.terminal) {
-    const duration = state.currentToolStartedAt !== undefined ? ` · ${delegationElapsed(state.currentToolStartedAt)}` : '';
-    metadata.push(`Current tool: ${literalWorkerText(state.currentToolName, 120)}${duration}`
-      + (state.activeToolCount > 1 ? ` · ${state.activeToolCount} tools active` : ''));
-  }
+  const updated = !style.terminal && state.lastActivityAt !== undefined
+    ? ` · Updated ${lastWorkerActivity(state.lastActivityAt)}` : '';
+  const metadata = [`${delegationElapsed(state.startedAt, state.finishedAt)}${updated}`];
+  if (currentTool && state.latestText && state.phase !== 'waiting_input') metadata.push(currentTool);
   if (state.toolErrorCount) {
     const location = state.events.some(event => event.isError) ? 'see activity details' : 'earlier details omitted';
     metadata.push(`<font color='orange'>${state.toolErrorCount} tool issue${state.toolErrorCount === 1 ? '' : 's'} · ${location}</font>`);
   }
   const activity = state.events.map(event => `- ${event.isError ? "<text_tag color='red'>Failed</text_tag> " : ''}${literalWorkerText(event.label, 220)}`);
   if (state.hiddenEventCount > 0) activity.push(`\n_${state.hiddenEventCount} earlier activities omitted._`);
+  const toolDetails = currentTool
+    ? `Current tool: ${currentTool}${state.currentToolStartedAt !== undefined ? ` · ${delegationElapsed(state.currentToolStartedAt)}` : ''}`
+    : undefined;
   const elements: FeishuCardElement[] = [
     {
-      tag: 'column_set', flex_mode: 'stretch', horizontal_spacing: '8px',
+      // Stretch stacks these columns on phones; keep the status beside the identity.
+      tag: 'column_set', flex_mode: 'none', horizontal_spacing: '8px',
       columns: [
-        { tag: 'column', width: 'weighted', weight: 3, elements: [
-          // Verified in Feishu's icon catalog; the AI badge also identifies clients that omit icons.
-          { tag: 'markdown', content: `<text_tag color='purple'>AI</text_tag> **${backend}**\n<font color='grey'>Worker #${ordinal}</font>`,
+        { tag: 'column', width: 'weighted', weight: 1, vertical_align: 'center', elements: [
+          { tag: 'markdown', content: `**${backend}** <font color='grey'>· #${ordinal}</font>`,
             icon: { tag: 'standard_icon', token: 'robot_outlined', color: 'purple' } },
         ] },
-        { tag: 'column', width: 'weighted', weight: 2, elements: [
+        { tag: 'column', width: 'auto', vertical_align: 'center', elements: [
           { tag: 'markdown', content: `<text_tag color='${style.color}'>${style.label}</text_tag>`, text_align: 'right' },
         ] },
       ],
     },
     limitCardTables(createMarkdownElement(primary.join('\n\n'))),
-    { tag: 'markdown', content: metadata.join(' · '), text_size: 'notation' },
+    { tag: 'markdown', content: metadata.join('\n'), text_size: 'notation' },
     {
       tag: 'collapsible_panel', expanded: false,
       header: {
-        title: { tag: 'markdown', content: `Activity details · Worker #${ordinal}` },
+        title: { tag: 'markdown', content: 'Activity details' },
         vertical_align: 'center',
         icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', size: '14px 14px' },
         icon_position: 'right', icon_expanded_angle: -180,
       },
       vertical_spacing: '8px', padding: '4px 8px',
-      elements: [{ tag: 'markdown', content: activity.join('\n') || '_No tool activity yet._', text_size: 'notation' }],
+      elements: [{ tag: 'markdown', content: [toolDetails, activity.join('\n') || '_No tool activity yet._'].filter(Boolean).join('\n\n'), text_size: 'notation' }],
     },
   ];
   for (const [index, suffix] of ['header', 'body', 'meta', 'details'].entries()) {

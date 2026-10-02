@@ -512,11 +512,13 @@ export abstract class AcpExecutor implements IExecutor {
   }
 
   private handleContent(content: AcpContentBlock, thinking: boolean): void {
-    if (this.replayingSession) return;
+    // The generic stream is also accumulated into final and delegated results.
+    // Thought events must never enter either user-facing output channel.
+    if (this.replayingSession || thinking) return;
     if (content.type === 'text' && typeof content.text === 'string') {
       this.activeCallbacks.onStream?.(content.text);
-      if (!thinking) this.activeCallbacks.onDisplayText?.(content.text);
-    } else if (!thinking && content.type === 'image' && typeof content.data === 'string' && typeof content.mimeType === 'string') {
+      this.activeCallbacks.onDisplayText?.(content.text);
+    } else if (content.type === 'image' && typeof content.data === 'string' && typeof content.mimeType === 'string') {
       this.activeCallbacks.onImage?.({ type: 'image', data: content.data, mimeType: content.mimeType });
     }
   }

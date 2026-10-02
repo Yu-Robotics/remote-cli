@@ -20,12 +20,17 @@ describe('delegated worker progress formatting', () => {
         'delegated_worker_2_header', 'delegated_worker_2_body', 'delegated_worker_2_meta', 'delegated_worker_2_details',
       ]);
       expect(identity(elements).icon).toEqual({ tag: 'standard_icon', token: 'robot_outlined', color: 'purple' });
-      expect(identity(elements).content).toContain("<text_tag color='purple'>AI</text_tag>");
+      expect(elements[0]).toMatchObject({ tag: 'column_set', flex_mode: 'none' });
+      expect(elements[0].columns[0]).toMatchObject({ width: 'weighted', weight: 1, vertical_align: 'center' });
+      expect(elements[0].columns[1]).toMatchObject({ width: 'auto', vertical_align: 'center' });
+      expect(identity(elements).content).not.toContain('<text_tag');
       expect(identity(elements).content).toContain('**Claude Code**');
-      expect(identity(elements).content).toContain('Worker #2');
+      expect(identity(elements).content).toContain('· #2');
+      expect(identity(elements).content).not.toContain('\n');
       expect(elements[0].columns[1].elements[0].content).not.toContain('🤖');
       expect(elements[1].tag).toBe('markdown');
       expect(elements[3]).toMatchObject({ tag: 'collapsible_panel', expanded: false });
+      expect(elements[3].header.title.content).toBe('Activity details');
       expect(elements[3].elements.every((element: any) => element.tag !== 'collapsible_panel')).toBe(true);
     });
 
@@ -37,8 +42,9 @@ describe('delegated worker progress formatting', () => {
     expect(elements[1].content).toContain('**Latest update**\n\n## Review\n\n**Checking**');
     expect(elements[1].content).toContain('const pending = true;');
     expect(elements[2]).toMatchObject({ tag: 'markdown', text_size: 'notation' });
-    expect(elements[2].content).toContain('Current tool: <raw>Read</raw> · 2s · 2 tools active');
-    expect(elements[2].content).toContain('Last update: just now');
+    expect(elements[2].content).toContain('\n<raw>Read</raw> · 2 tools active');
+    expect(elements[2].content).toContain('Updated just now');
+    expect(elements[3].elements[0].content).toContain('Current tool: <raw>Read</raw> · 2 tools active · 2s');
     expect(elements[3].elements[0].content).toContain('Read running');
     expect(JSON.stringify(elements)).not.toContain('Sensitive internal task prompt');
   });
@@ -88,10 +94,24 @@ describe('delegated worker progress formatting', () => {
   });
 
   it('shows factual starting and tool-only fallback text', () => {
-    expect(render({ phase: 'started' })[1].content).toContain('Starting worker session');
-    expect(render()[1].content).toContain('Waiting for the next update');
-    expect(render({ currentToolName: 'Bash', activeToolCount: 1 })[1].content).toContain('Tool running');
-    expect(render()[2].content).toContain('Last update: waiting for output');
+    expect(render({ phase: 'started' })[1].content).toBe('Starting…');
+    expect(render()[1].content).toBe('Waiting for output…');
+    expect(render({ currentToolName: 'Bash', activeToolCount: 1 })[1].content).toBe('<raw>Bash</raw>');
+    expect(render()[2].content).not.toContain('Updated');
+  });
+
+  it('keeps a tool-only mobile worker compact without duplicate identity or tool metadata', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(175_000);
+    const elements = render({ backend: 'agy', ordinal: 1, phase: 'tool_use', startedAt: 0,
+      lastActivityAt: Date.now(), currentToolName: 'Read', currentToolStartedAt: Date.now(), activeToolCount: 2 });
+    expect(identity(elements).content).toBe("**AGY** <font color='grey'>· #1</font>");
+    expect(elements[1].content).toBe('<raw>Read</raw> · 2 tools active');
+    expect(elements[2].content).toBe('2m 55s · Updated just now');
+    expect(JSON.stringify(elements)).not.toContain('Worker #');
+    expect(JSON.stringify(elements)).not.toContain('AGY CLI');
+    expect(identity(render({ backend: 'codex' })).content).toContain('**Codex**');
+    expect(elements[3].elements[0].content).toContain('0s');
   });
 
   it('keeps tool metadata literal and never exposes task objectives', () => {
@@ -112,8 +132,8 @@ describe('delegated worker progress formatting', () => {
   it('freezes terminal elapsed time and gives readable long-running metadata', () => {
     vi.useFakeTimers();
     vi.setSystemTime(10_000_000);
-    expect(render({ phase: 'succeeded', startedAt: 0, finishedAt: 65_000 })[2].content).toBe('Elapsed 1m 5s');
-    expect(render({ startedAt: 0, lastActivityAt: 0 })[2].content).toContain('Elapsed 2h 46m');
+    expect(render({ phase: 'succeeded', startedAt: 0, finishedAt: 65_000 })[2].content).toBe('1m 5s');
+    expect(render({ startedAt: 0, lastActivityAt: 0 })[2].content).toContain('2h 46m');
     expect(render({ lastActivityAt: Date.now() - 40_000 })[2].content).toContain('40s ago');
     expect(render({ lastActivityAt: Date.now() - 120_000 })[2].content).toContain('2m ago');
     expect(render({ lastActivityAt: Date.now() - 7_200_000 })[2].content).toContain('2h ago');
@@ -123,7 +143,7 @@ describe('delegated worker progress formatting', () => {
     const elements = render({ ordinal: NaN, backend: '<at id=all></at>', phase: 'unknown' as any,
       events: [{ label: 'x'.repeat(300) }], toolErrorCount: 2 });
     expect(identity(elements).content).toContain('Agent');
-    expect(identity(elements).content).toContain('Worker #1');
+    expect(identity(elements).content).toContain('· #1');
     expect(elements[3].elements[0].content).toContain('…');
     expect(elements[2].content).toContain('2 tool issues');
     expect(elements[0].columns[1].elements[0].content).toContain('Updating');
