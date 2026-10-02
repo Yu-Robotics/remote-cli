@@ -4,7 +4,7 @@ import { stripAnsi } from '../utils/stripAnsi';
 
 const BACKEND_LABELS: Record<DelegationBackend, string> = {
   claude: 'Claude Code', codex: 'Codex', pi: 'Pi', agy: 'AGY',
-  opencode: 'OpenCode', kimi: 'Kimi Code', zcode: 'ZCode',
+  opencode: 'OpenCode', kimi: 'Kimi Code', zcode: 'ZCode', dsh: 'DSH',
 };
 
 const TERMINAL_STYLES = {

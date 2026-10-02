@@ -25,6 +25,17 @@ describe('ThreadManager', () => {
   });
 
   describe('initialization', () => {
+    it('cleans DSH pointers and compact summaries without removing another thread', async () => {
+      const thread = await manager.createThread('dsh-delete', tmpDir, 'dsh');
+      const directory = path.join(tmpDir, '.remote-cli', 'dsh-sessions');
+      await fs.mkdir(directory);
+      for (const name of [`${thread.id}.json`, `${thread.id}.handoff.json`, 'other.json']) {
+        await fs.writeFile(path.join(directory, name), '{}');
+      }
+      await manager.deleteThread(thread.id);
+      expect(await fs.readdir(directory)).toEqual(['other.json']);
+    });
+
     it('creates a default thread on first init', async () => {
       const threads = manager.listThreads();
       expect(threads).toHaveLength(1);

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DelegationBridge } from '../../src/delegation/DelegationBridge';
 import { BackendRegistry } from '../../src/delegation/BackendRegistry';
+import { DELEGATION_BACKENDS } from '../../src/delegation/contract';
 
 describe('delegation transport and discovery', () => {
   const bridges: DelegationBridge[] = [];
@@ -41,18 +42,19 @@ describe('delegation transport and discovery', () => {
   it('honors configured commands without inferring authentication from installation', async () => {
     const probe = vi.fn(async (command: string) => { if (command === 'pi') throw new Error('missing'); return '1.0'; });
     const registry = new BackendRegistry(probe);
-    const config = { type: 'codex' as const, codex: { command: '/custom/codex' } };
+    const config = { type: 'codex' as const, codex: { command: '/custom/codex' }, dsh: { command: '/custom/dsh' } };
     const backends = await registry.list(config);
     expect(probe).toHaveBeenCalledWith('/custom/codex');
+    expect(probe).toHaveBeenCalledWith('/custom/dsh');
     expect(backends.find(item => item.backend === 'codex')).toMatchObject({ installed: true, authentication: 'unknown' });
     expect(backends.find(item => item.backend === 'pi')).toMatchObject({ installed: false, worker: false });
-    for (const backend of ['agy', 'opencode', 'kimi', 'zcode']) {
+    for (const backend of ['agy', 'opencode', 'kimi', 'zcode', 'dsh']) {
       expect(backends.find(item => item.backend === backend)).toMatchObject({ installed: true, coordinator: true, worker: true, readOnly: false });
     }
     await registry.list(config);
-    expect(probe).toHaveBeenCalledTimes(7);
+    expect(probe).toHaveBeenCalledTimes(DELEGATION_BACKENDS.length);
     registry.invalidate(); await registry.list(config);
-    expect(probe).toHaveBeenCalledTimes(14);
+    expect(probe).toHaveBeenCalledTimes(DELEGATION_BACKENDS.length * 2);
   });
 
   it('checks real executable presence without starting an interactive model session', async () => {

@@ -55,6 +55,12 @@ export interface AcpTransport {
   waitForExit?(): Promise<void>;
 }
 
+/** Optional launch policy for specialized transports; existing ACP launches are unchanged. */
+export interface AcpLaunchOptions {
+  env?: NodeJS.ProcessEnv;
+  onStderr?: (message: string) => void;
+}
+
 export class AcpClient implements AcpTransport {
   private readonly child: ChildProcess;
   private readonly callbacks: AcpEventCallbacks;
@@ -66,13 +72,13 @@ export class AcpClient implements AcpTransport {
   private killTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly exited: Promise<void>;
 
-  constructor(command: string, args: string[], cwd: string, callbacks: AcpEventCallbacks, private readonly managedProcess = false) {
+  constructor(command: string, args: string[], cwd: string, callbacks: AcpEventCallbacks, private readonly managedProcess = false, launch: AcpLaunchOptions = {}) {
     this.callbacks = callbacks;
     assertWorkingDirectoryExists(cwd);
     this.child = spawn(command, args, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: process.env,
+      env: launch.env ?? process.env,
       ...(managedProcess && process.platform !== 'win32' ? { detached: true } : {}),
     });
     this.exited = new Promise(resolve => this.child.once('close', () => resolve()));
@@ -82,7 +88,8 @@ export class AcpClient implements AcpTransport {
     this.child.stderr?.on('data', (chunk: Buffer) => {
       const message = chunk.toString().trimEnd();
       if (message && !message.includes('EPIPE') && !message.includes('write EPIPE')) {
-        console.error(`[AcpClient stderr] ${message}`);
+        if (launch.onStderr) launch.onStderr(message);
+        else console.error(`[AcpClient stderr] ${message}`);
       }
     });
 
@@ -156,7 +163,7 @@ export class AcpClient implements AcpTransport {
     this.child.kill(signal);
   }
 
-  private sendRequest(method: string, params: unknown): Promise<unknown> {
+  protected sendRequest(method: string, params: unknown): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const id = this.nextId++;
       this.pendingRequests.set(id, { resolve, reject });
@@ -168,7 +175,7 @@ export class AcpClient implements AcpTransport {
     this.writeLine({ jsonrpc: '2.0', method, params } satisfies AcpJsonRpcNotification);
   }
 
-  private sendResponse(id: number, result: unknown): void {
+  protected sendResponse(id: number, result: unknown): void {
     this.writeLine({ jsonrpc: '2.0', id, result } satisfies AcpJsonRpcSuccessResponse);
   }
 
@@ -253,7 +260,7 @@ export class AcpClient implements AcpTransport {
     });
   }
 
-  private async handlePermissionRequest(
+  protected async handlePermissionRequest(
     id: number,
     params: { toolCall?: { title?: string }; options?: AcpPermissionOption[] }
   ): Promise<void> {

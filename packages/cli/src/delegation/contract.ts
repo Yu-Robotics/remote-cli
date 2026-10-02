@@ -7,7 +7,7 @@ export interface DelegationConnection {
 }
 
 export type DelegationHandler = (name: string, args: Record<string, unknown>, callId: string) => Promise<unknown>;
-export const DELEGATION_BACKENDS = ['claude', 'codex', 'pi', 'agy', 'opencode', 'kimi', 'zcode'] as const;
+export const DELEGATION_BACKENDS = ['claude', 'codex', 'pi', 'agy', 'opencode', 'kimi', 'zcode', 'dsh'] as const;
 export type DelegationBackend = typeof DELEGATION_BACKENDS[number];
 
 const object = (properties: Record<string, unknown>, required: string[] = []) => ({

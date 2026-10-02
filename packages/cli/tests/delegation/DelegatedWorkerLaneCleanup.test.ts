@@ -54,6 +54,20 @@ describe('cleanupDelegatedWorkerLane', () => {
     await expect(fs.readFile(directPointer, 'utf8')).resolves.toContain('direct');
   });
 
+  it('removes only a DSH worker pointer and pending compact summary', async () => {
+    const worker = lane('dsh');
+    const directory = path.join(home, '.remote-cli', 'dsh-sessions');
+    await fs.mkdir(directory, { recursive: true });
+    const pointer = path.join(directory, `${worker.executorThreadId}.json`);
+    const summary = path.join(directory, `${worker.executorThreadId}.handoff.json`);
+    const direct = path.join(directory, 'direct-thread.json');
+    await Promise.all([pointer, summary, direct].map(file => fs.writeFile(file, '{}')));
+    await cleanupDelegatedWorkerLane(worker, home);
+    await expect(fs.stat(pointer)).rejects.toThrow();
+    await expect(fs.stat(summary)).rejects.toThrow();
+    expect(await fs.readFile(direct, 'utf8')).toBe('{}');
+  });
+
   it('removes a Pi lane session file only when it is inside the lane-owned store', async () => {
     const worker = lane('pi');
     const root = path.join(home, '.remote-cli');
