@@ -23,13 +23,16 @@ describe('delegated worker progress formatting', () => {
     expect(panel).toMatchObject({ tag: 'collapsible_panel', expanded: true });
     expect(panel.header.title.content).toContain('WORKER RUNNING');
     expect(panel.header.title.content).toContain('Claude Code');
-    expect(panel.elements[0].content).toContain('**📝 Current activity**\n<raw>Reading the project structure now.</raw>');
-    expect(panel.elements[0].content).toContain('**⚙️ Current tool** · <raw>Read');
-    expect(panel.elements[0].content).not.toContain('Latest update');
-    expect(panel.elements[0].content).toContain('_Elapsed');
-    expect(panel.elements[0].content).toContain('Last tool activity');
-    expect(panel.elements[0].content).toContain('- <raw>Read started</raw>');
-    expect(panel.elements[0].content).not.toContain('• <raw>Read started</raw>');
+    expect(panel.elements[0].content).toBe('**📝 Current activity**');
+    expect(panel.elements[1].content).toBe('Reading the project structure now\\.');
+    const metadata = panel.elements[2].content;
+    expect(metadata).toContain('**⚙️ Current tool** · <raw>Read');
+    expect(metadata).not.toContain('Latest update');
+    expect(metadata).toContain('_Elapsed');
+    expect(metadata).toContain('Last tool activity');
+    expect(metadata).toContain('**📋 Recent activity:**');
+    expect(metadata).toContain('- <raw>Read started</raw>');
+    expect(metadata).not.toContain('• <raw>Read started</raw>');
   });
 
   it('collapses terminal progress and renders worker text literally', () => {
@@ -130,10 +133,22 @@ describe('delegated worker progress formatting', () => {
     };
 
     const panel = createDelegationProgressElement(state);
-    const content = panel.elements[0].content;
+    const content = panel.elements.map((element: any) => element.content).join('\n');
 
     expect(content).toContain('📝 Current activity');
     expect(content).toContain('&lt;raw&gt;untrusted&lt;/raw&gt;');
     expect(content).not.toContain('Sensitive internal task prompt');
+  });
+
+  it('preserves activity Markdown and closes a streaming code fence before tool metadata', () => {
+    const panel = createDelegationProgressElement({
+      taskId: 'streaming-markdown', backend: 'agy', phase: 'tool_use', startedAt: Date.now(),
+      latestText: '# Review\n\n**Checking**\n\n- Evidence\n\n```ts\nconst pending = true;',
+      currentToolName: 'Read', activeToolCount: 1, events: [{ label: 'Read started' }], hiddenEventCount: 0,
+    });
+    expect(panel.elements[1].content).toContain('# Review\n\n**Checking**\n\n- Evidence');
+    expect(panel.elements[1].content).toContain('```ts\nconst pending = true;\n```');
+    expect(panel.elements[2].content).toContain('**⚙️ Current tool**');
+    expect(panel.elements[2].content).toContain('**📋 Recent activity:**');
   });
 });

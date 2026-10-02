@@ -72,6 +72,12 @@ describe('worker result Markdown', () => {
     expect(formatWorkerResultMarkdown(' \n\t\u0000')).toBe('_No text result._');
   });
 
+  it('labels bounded streaming activity previews independently of final results', () => {
+    expect(formatWorkerResultMarkdown('x'.repeat(801), 800, 'activity'))
+      .toBe('x'.repeat(800) + '\n\n_Activity preview truncated._');
+    expect(formatWorkerResultMarkdown(' ', 800, 'activity')).toBe('_No activity text yet._');
+  });
+
   it.each(['`value`', '``a`b``', '`` `value` ``', '` `', '```ts\nconst x = `<at id=all>`;\n```', '    indented code\n'])('preserves code contents for %s', source => {
     expect(render(source)).toBe(parser.render(source));
   });

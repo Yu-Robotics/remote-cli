@@ -468,6 +468,9 @@ describe('delegation in the existing thread workflow', () => {
     expect(responseFor('parent').success).toBe(true);
     const output = socket.send.mock.calls.map(([value]: any[]) => value).filter((value: any) => value.messageId === 'parent');
     expect(JSON.stringify(output)).toContain('Starting the review.');
+    expect(output).toContainEqual(expect.objectContaining({
+      streamType: 'text', chunk: '\n🧩 Delegated results received. Preparing the reply...\n',
+    }));
     expect(JSON.stringify(output)).toContain('The review is complete.');
     expect(JSON.stringify(output)).not.toMatch(/Still waiting|stale waiting|c3RhbGU=/);
     expect(output.some((value: any) => value.streamType === 'image')).toBe(false);

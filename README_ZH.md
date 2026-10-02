@@ -491,6 +491,16 @@ literally; links are limited to HTTP, HTTPS, and email, and images become captio
 The result remains a bounded preview, and cut code fences are closed for display.
 This rendering change requires only the Router upgrade and no protocol changes.
 
+Router 1.6.109 also renders Current activity as bounded Markdown, separate from
+tool and timing metadata, and labels Recent activity with a clipboard icon.
+CLI 1.6.109 includes unfinished sentences and lines in its latest assistant-text
+snapshots, coalesced at the existing 2.5-second cadence instead of waiting for
+a completed sentence. Only actual assistant response text appears; waiting for
+the backend to emit text still shows a fallback, and snapshots do not extend
+worker liveness timeouts. The Markdown and icon updates require the Router;
+the unfinished-text update requires the CLI. The wire protocol is unchanged.
+The CLI also prefixes the result-arrival notice with a puzzle piece emoji (🧩).
+
 建议先在一个测试线程中启用。从未启用委派的线程不会注册受管理的工具、添加提示词前缀、清理后端委派配置，或检查委派工作区占用；其普通进程处理和会话输出保持原样。
 
 线程使用过委派后，`/delegation off` 会移除受管理的工具。CLI 会记录哪些后端需要清理，重启或切换后端后也能继续处理。原生斜杠命令恢复会话前同样会执行清理。移除工具时，每个执行器实例可能重启一次后端进程，但会保留已保存的对话；已经清理过的进程不会反复重启。未使用过委派的后端无需清理。

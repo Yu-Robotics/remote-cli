@@ -516,6 +516,16 @@ literally; links are limited to HTTP, HTTPS, and email, and images become captio
 The result remains a bounded preview, and cut code fences are closed for display.
 This rendering change requires only the Router upgrade and no protocol changes.
 
+Router 1.6.109 also renders Current activity as bounded Markdown, separate from
+tool and timing metadata, and labels Recent activity with a clipboard icon.
+CLI 1.6.109 includes unfinished sentences and lines in its latest assistant-text
+snapshots, coalesced at the existing 2.5-second cadence instead of waiting for
+a completed sentence. Only actual assistant response text appears; waiting for
+the backend to emit text still shows a fallback, and snapshots do not extend
+worker liveness timeouts. The Markdown and icon updates require the Router;
+the unfinished-text update requires the CLI. The wire protocol is unchanged.
+The CLI also prefixes the result-arrival notice with a puzzle piece emoji (🧩).
+
 For staged rollout, enable one trial thread first. Never-enabled threads skip
 all delegation setup: no managed tool registration, prompt prefix, backend
 configuration cleanup, or delegation workspace admission checks. Their ordinary

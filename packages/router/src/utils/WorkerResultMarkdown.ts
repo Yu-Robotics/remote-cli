@@ -99,11 +99,12 @@ function blocks(tokens: Token[]): string {
   return parts.join(compact ? '\n' : '\n\n');
 }
 
-/** Keep the existing bounded preview while preserving layout and closing cut fences. */
-export function formatWorkerResultMarkdown(value: string, limit = 1000): string {
+/** Keep bounded result and activity previews while preserving layout and closing cut fences. */
+export function formatWorkerResultMarkdown(value: string, limit = 1000, preview: 'result' | 'activity' = 'result'): string {
   const characters = Array.from(value.replace(/\r\n?/g, '\n')
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, ''));
   const content = blocks(parser.parse(characters.slice(0, limit).join(''), {}));
-  return (content.trim() ? content : '_No text result._')
-    + (characters.length > limit ? '\n\n_Result preview truncated._' : '');
+  const empty = preview === 'activity' ? '_No activity text yet._' : '_No text result._';
+  const truncated = preview === 'activity' ? '_Activity preview truncated._' : '_Result preview truncated._';
+  return (content.trim() ? content : empty) + (characters.length > limit ? `\n\n${truncated}` : '');
 }
