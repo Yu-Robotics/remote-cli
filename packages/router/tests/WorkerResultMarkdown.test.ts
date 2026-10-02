@@ -74,7 +74,7 @@ describe('worker result Markdown', () => {
 
   it('labels bounded streaming activity previews independently of final results', () => {
     expect(formatWorkerResultMarkdown('x'.repeat(801), 800, 'activity'))
-      .toBe('x'.repeat(800) + '\n\n_Activity preview truncated._');
+      .toBe('_Earlier activity omitted._\n\n' + 'x'.repeat(800));
     expect(formatWorkerResultMarkdown(' ', 800, 'activity')).toBe('_No activity text yet._');
   });
 
@@ -96,5 +96,43 @@ describe('worker result Markdown', () => {
   it('bounds Unicode by code point without leaving a broken surrogate', () => {
     const result = formatWorkerResultMarkdown('🙂'.repeat(1001));
     expect(result).toBe('🙂'.repeat(1000) + '\n\n_Result preview truncated._');
+  });
+
+  it('keeps the newest activity and reconstructs a cut code-fence context', () => {
+    const source = 'Old paragraph\n\n```ts\n' + 'const old = 1;\n'.repeat(60) + 'const latest = true;';
+    const result = formatWorkerResultMarkdown(source, 120, 'activity');
+    expect(result).toContain('const latest = true;\n```');
+    expect(result).toContain('```ts\n');
+    expect(result).not.toContain('Old paragraph');
+    expect(formatWorkerResultMarkdown('🙂'.repeat(90) + 'LATEST', 12, 'activity')).toContain('🙂'.repeat(6) + 'LATEST');
+    expect(result).not.toContain('\uFFFD');
+  });
+
+  it('serializes bounded tables while preserving cell emphasis and escaping unsafe tags', () => {
+    const source = '| Name | Status |\n| --- | --- |\n| **Build** | *Passed* |\n| <at id=all></at> | `a\\|b` |';
+    const result = formatWorkerResultMarkdown(source);
+    expect(result).toContain('| **Build** | *Passed* |');
+    expect(result).toContain('`a\\|b`');
+    expect(result).not.toContain('<at');
+    expect(parser.render(result)).toContain('<table>');
+    expect(parser.render(result)).toContain('<code>a|b</code>');
+  });
+
+  it('renders a cut table literally instead of pretending it has complete rows', () => {
+    const source = '| Name | Status |\n| --- | --- |\n| Build | Passed |\n| Test | ' + 'x'.repeat(100);
+    const result = formatWorkerResultMarkdown(source, 70);
+    expect(result).toContain('```\n| Name | Status |');
+    expect(result).toContain('\n```\n\n_Result preview truncated._');
+    expect(parser.render(result)).not.toContain('<table>');
+    const tail = formatWorkerResultMarkdown(source, 60, 'activity');
+    expect(tail).toContain('_Earlier activity omitted._');
+    expect(parser.render(tail)).not.toContain('<table>');
+  });
+
+  it('keeps oversized tables as readable text without dropping columns or rows', () => {
+    const source = '| A | B | C | D | E | F | G |\n| - | - | - | - | - | - | - |\n| 1 | 2 | 3 | 4 | 5 | 6 | 7 |';
+    expect(formatWorkerResultMarkdown(source)).toBe('```\n' + source + '\n```');
+    const tall = '| A |\n| --- |\n' + '| value |\n'.repeat(14);
+    expect(parser.render(formatWorkerResultMarkdown(tall))).not.toContain('<table>');
   });
 });

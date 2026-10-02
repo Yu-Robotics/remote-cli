@@ -1054,12 +1054,17 @@ Examples:
       const elementTaggedNodes = this.countTaggedNodes(element);
       const elementTables = countCardTables(element);
 
-      // Keep the switch panel caption and all button rows on the same card.
-      const groupSize = element === trailingElements[0]
-        ? trailingElements.reduce((sum, item) => sum + JSON.stringify(item).length, 0) : elementSize;
-      const groupTaggedNodes = element === trailingElements[0]
-        ? trailingElements.reduce((sum, item) => sum + this.countTaggedNodes(item), 0) : elementTaggedNodes;
-      const groupTables = element === trailingElements[0] ? countCardTables(trailingElements) : elementTables;
+      // Keep worker identity, visible content and diagnostics together when packing cards.
+      const workerPrefix = /^delegated_worker_\d+_header$/.test(element.element_id ?? '')
+        ? element.element_id.slice(0, -'header'.length) : undefined;
+      const workerGroup = workerPrefix ? elements.slice(i, i + 4) : [];
+      const isWorkerGroup = workerGroup.length === 4 && ['header', 'body', 'meta', 'details']
+        .every((suffix, index) => workerGroup[index].element_id === `${workerPrefix}${suffix}`);
+      // The switch panel caption and all its button rows also travel together.
+      const group = isWorkerGroup ? workerGroup : element === trailingElements[0] ? trailingElements : [element];
+      const groupSize = group.reduce((sum, item) => sum + JSON.stringify(item).length, 0);
+      const groupTaggedNodes = group.reduce((sum, item) => sum + this.countTaggedNodes(item), 0);
+      const groupTables = countCardTables(group);
 
       // Check if adding this element would exceed limits
       // Reserve space for continuation indicators

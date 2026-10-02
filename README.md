@@ -526,6 +526,23 @@ worker liveness timeouts. The Markdown and icon updates require the Router;
 the unfinished-text update requires the CLI. The wire protocol is unchanged.
 The CLI also prefixes the result-arrival notice with a puzzle piece emoji (🧩).
 
+Router 1.6.110 presents each worker as a stable task section: a purple native
+robot icon and AI badge identify the worker, while a separate label shows its
+status. Latest updates, result excerpts, failure reasons, and input requests
+stay visible; only activity details default to collapsed. Tool start/result
+events share one log entry, and tool issue counts remain visible even after
+older entries leave the bounded log. The last-update indicator includes actual
+text and tool events, never timer refreshes. Missing terminal output retains
+the last activity with an explicit non-result label.
+
+The same safe Markdown renderer handles activity, results, and prompts, including
+small tables. Tables share the existing whole-card budget; cut or oversized
+tables fall back to readable text without adding missing data. Activity previews
+retain the latest words, including the full negotiated text snapshot. Result
+excerpts remain bounded, not full transcripts. These presentation changes need
+only the Router upgrade, with no new CLI payloads or formatting instructions;
+older clients retain their negotiated tool-only or legacy progress behavior.
+
 For staged rollout, enable one trial thread first. Never-enabled threads skip
 all delegation setup: no managed tool registration, prompt prefix, backend
 configuration cleanup, or delegation workspace admission checks. Their ordinary

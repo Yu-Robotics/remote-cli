@@ -11,9 +11,10 @@ import { FeishuLongConnHandler } from './feishu/FeishuLongConnHandler';
 import { ConnectionHub } from './websocket/ConnectionHub';
 import { BindingManager } from './binding/BindingManager';
 import { MessageType, ToolUseInfo, ToolResultInfo, DelegationProgressInfo, TaskNotificationInfo, PROTOCOL_VERSION, MIN_SUPPORTED_CLI_VERSION, ROUTER_VERSION, ThreadSummary, QueueConfirmationInfo, QueueStartedInfo, TaskResumeInfo, ImageBlock } from './types';
-import { DelegationProgressCardState, FeishuCardElement, createDelegationProgressElement, createDividerElement, createToolUseElement, createToolResultElement, createMarkdownElement, createRedactedThinkingElement, createPlanModeElement, createTaskNotificationElement, createImageElement } from './utils/ToolFormatter';
+import { DELEGATION_PROGRESS_ELEMENT_COUNT, DelegationProgressCardState, FeishuCardElement, createDelegationProgressElements, createDividerElement, createToolUseElement, createToolResultElement, createMarkdownElement, createRedactedThinkingElement, createPlanModeElement, createTaskNotificationElement, createImageElement } from './utils/ToolFormatter';
 
 interface DelegationProgressState extends DelegationProgressCardState {
+  /** First slot of the fixed-size worker section; later sections never shift. */
   elementIndex: number;
   activeToolIds: Set<string>;
   toolNames: Map<string, string>;
@@ -929,12 +930,22 @@ export class RouterServer {
     };
   }
 
-  private appendDelegationProgressEvent(state: DelegationProgressState, label: string, isError = false): void {
-    state.events.push({ label, ...(isError ? { isError: true } : {}) });
+  private appendDelegationProgressEvent(state: DelegationProgressState, label: string, isError = false, toolId?: string): void {
+    const existing = toolId ? state.events.find(event => event.toolId === toolId) : undefined;
+    if (existing) {
+      existing.label = label;
+      existing.isError = isError;
+      return;
+    }
+    state.events.push({ label, ...(isError ? { isError: true } : {}), ...(toolId ? { toolId } : {}) });
     if (state.events.length > DELEGATION_PROGRESS_EVENT_LIMIT) {
       state.events.shift();
       state.hiddenEventCount++;
     }
+  }
+
+  private renderDelegationProgress(streamData: StreamingMessageState, state: DelegationProgressState): void {
+    streamData.elements.splice(state.elementIndex, DELEGATION_PROGRESS_ELEMENT_COUNT, ...createDelegationProgressElements(state));
   }
 
   private clearDelegationProgressHeartbeat(state: DelegationProgressState): void {
@@ -973,7 +984,7 @@ export class RouterServer {
         if (state.heartbeatTimer !== timer) return;
         state.heartbeatTimer = undefined;
         if (!this.isLiveDelegationProgress(messageId, streamData, state)) return;
-        streamData.elements[state.elementIndex] = createDelegationProgressElement(state);
+        this.renderDelegationProgress(streamData, state);
         try {
           await this.updateStreamingText(messageId, streamData.openId, streamData);
         } catch (error) {
@@ -1024,6 +1035,7 @@ export class RouterServer {
         backend: progress.backend,
         phase: 'started',
         startedAt: progress.startedAt ?? Date.now(),
+        ordinal: streamData.delegationProgress.size + 1,
         objective: progress.objective,
         activeToolCount: 0,
         events: [],
@@ -1035,7 +1047,7 @@ export class RouterServer {
         elementIndex: streamData.elements.length + 1,
       };
       streamData.delegationProgress.set(progress.taskId, state);
-      streamData.elements.push(createDividerElement(), createDelegationProgressElement(state));
+      streamData.elements.push(createDividerElement(), ...createDelegationProgressElements(state));
     }
 
     if (!state.objective && progress.objective) state.objective = progress.objective;
@@ -1044,6 +1056,7 @@ export class RouterServer {
     if (progress.phase !== 'waiting_input' && progress.summary !== undefined) state.summary = progress.summary;
     if (progress.error !== undefined) state.error = progress.error;
     if (progress.phase !== 'text' || state.activeToolIds.size === 0) state.phase = progress.phase;
+    if (progress.phase !== 'text' || progress.latestText) state.lastActivityAt = Date.now();
 
     switch (progress.phase) {
       case 'started':
@@ -1064,12 +1077,17 @@ export class RouterServer {
         state.currentToolName = name;
         state.currentToolStartedAt = now;
         state.lastToolActivityAt = now;
-        this.appendDelegationProgressEvent(state, `${name} started`);
+        this.appendDelegationProgressEvent(state, `${name} running`, false, tool?.id);
         break;
       }
       case 'tool_result': {
         const result = progress.toolResult;
         const name = result?.tool_use_id ? state.toolNames.get(result.tool_use_id) ?? 'Tool' : 'Tool';
+        const startedAt = result?.tool_use_id ? state.toolStartedAt.get(result.tool_use_id) : undefined;
+        const elapsed = startedAt === undefined ? '' : ` · ${Math.max(0, Math.floor((Date.now() - startedAt) / 1000))}s`;
+        if (result?.is_error && !state.events.some(event => event.toolId === result.tool_use_id && event.isError)) {
+          state.toolErrorCount = (state.toolErrorCount ?? 0) + 1;
+        }
         if (result?.tool_use_id) {
           state.activeToolIds.delete(result.tool_use_id);
           state.toolNames.delete(result.tool_use_id);
@@ -1077,7 +1095,7 @@ export class RouterServer {
         }
         state.lastToolActivityAt = Date.now();
         this.updateCurrentDelegationTool(state);
-        this.appendDelegationProgressEvent(state, `${name} ${result?.is_error ? 'failed' : 'completed'}`, result?.is_error === true);
+        this.appendDelegationProgressEvent(state, `${name} ${result?.is_error ? 'failed' : 'completed'}${elapsed}`, result?.is_error === true, result?.tool_use_id);
         break;
       }
       case 'waiting_input':
@@ -1086,7 +1104,6 @@ export class RouterServer {
         state.toolStartedAt.clear();
         state.currentToolName = undefined;
         state.currentToolStartedAt = undefined;
-        state.latestText = undefined;
         this.appendDelegationProgressEvent(state, 'Waiting for user input');
         break;
       default:
@@ -1096,7 +1113,7 @@ export class RouterServer {
           state.toolStartedAt.clear();
           state.currentToolName = undefined;
           state.currentToolStartedAt = undefined;
-          state.latestText = undefined;
+          state.finishedAt = Date.now();
           state.terminal = true;
           this.clearDelegationProgressHeartbeat(state);
           this.appendDelegationProgressEvent(state, `Worker ${progress.phase.replace('_', ' ')}`, progress.phase !== 'succeeded');
@@ -1104,7 +1121,7 @@ export class RouterServer {
         break;
     }
     state.activeToolCount = state.activeToolIds.size;
-    streamData.elements[state.elementIndex] = createDelegationProgressElement(state);
+    this.renderDelegationProgress(streamData, state);
     streamData.createdAt = Date.now();
 
     try {

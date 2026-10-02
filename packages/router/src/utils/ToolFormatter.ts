@@ -2,6 +2,7 @@ import { DelegationProgressPhase, ToolUseInfo, ToolResultInfo, TaskNotificationI
 import { createDiffPanels, createEditPanels, createWritePanels } from './DiffFormatter';
 import MarkdownIt from 'markdown-it';
 import { formatWorkerResultMarkdown } from './WorkerResultMarkdown';
+import { limitCardTables } from './CardTables';
 
 /**
  * Feishu Card 2.0 element types
@@ -463,6 +464,7 @@ export function createToolResultElement(resultInfo: ToolResultInfo): FeishuCardE
 export interface DelegationProgressEvent {
   label: string;
   isError?: boolean;
+  toolId?: string;
 }
 
 export interface DelegationProgressCardState {
@@ -470,6 +472,8 @@ export interface DelegationProgressCardState {
   backend: string;
   phase: DelegationProgressPhase;
   startedAt: number;
+  ordinal: number;
+  finishedAt?: number;
   objective?: string;
   inputRequest?: string;
   summary?: string;
@@ -480,6 +484,9 @@ export interface DelegationProgressCardState {
   currentToolStartedAt?: number;
   /** Updated only by real tool use/result callbacks, never by text or card heartbeats. */
   lastToolActivityAt?: number;
+  /** Receipt of real progress, not a render-time heartbeat or a liveness deadline. */
+  lastActivityAt?: number;
+  toolErrorCount?: number;
   activeToolCount: number;
   events: DelegationProgressEvent[];
   hiddenEventCount: number;
@@ -495,21 +502,23 @@ const DELEGATION_BACKEND_LABELS: Record<string, string> = {
   zcode: 'ZCode',
 };
 
-const DELEGATION_PROGRESS_STYLES: Record<DelegationProgressPhase, { color: string; icon: string; label: string; terminal: boolean }> = {
-  started: { color: 'blue', icon: '🤖', label: 'WORKER STARTED', terminal: false },
-  text: { color: 'blue', icon: '🤖', label: 'WORKER RUNNING', terminal: false },
-  tool_use: { color: 'blue', icon: '⚙️', label: 'WORKER RUNNING', terminal: false },
-  tool_result: { color: 'blue', icon: '⚙️', label: 'WORKER RUNNING', terminal: false },
-  waiting_input: { color: 'orange', icon: '⌨️', label: 'WAITING FOR INPUT', terminal: false },
-  succeeded: { color: 'green', icon: '✅', label: 'WORKER COMPLETED', terminal: true },
-  failed: { color: 'red', icon: '❌', label: 'WORKER FAILED', terminal: true },
-  cancelled: { color: 'neutral', icon: '⏹️', label: 'WORKER CANCELLED', terminal: true },
-  timed_out: { color: 'orange', icon: '⏱️', label: 'WORKER TIMED OUT', terminal: true },
-  interrupted: { color: 'orange', icon: '⚠️', label: 'WORKER INTERRUPTED', terminal: true },
+const DELEGATION_PROGRESS_STYLES: Record<DelegationProgressPhase, { color: string; label: string; terminal: boolean }> = {
+  started: { color: 'blue', label: 'Starting', terminal: false },
+  text: { color: 'blue', label: 'Running', terminal: false },
+  tool_use: { color: 'blue', label: 'Running', terminal: false },
+  tool_result: { color: 'blue', label: 'Running', terminal: false },
+  waiting_input: { color: 'orange', label: 'Input needed', terminal: false },
+  succeeded: { color: 'green', label: 'Completed', terminal: true },
+  failed: { color: 'red', label: 'Failed', terminal: true },
+  cancelled: { color: 'neutral', label: 'Cancelled', terminal: true },
+  timed_out: { color: 'orange', label: 'Timed out', terminal: true },
+  interrupted: { color: 'orange', label: 'Interrupted', terminal: true },
 };
 
-const FALLBACK_DELEGATION_PROGRESS_STYLE = { color: 'grey', icon: '🤖', label: 'WORKER UPDATE', terminal: false };
-const DELEGATION_CURRENT_ACTIVITY_LIMIT = 800;
+const FALLBACK_DELEGATION_PROGRESS_STYLE = { color: 'grey', label: 'Updating', terminal: false };
+// Accept the entire negotiated 1200-byte snapshot, including its latest words.
+const DELEGATION_CURRENT_ACTIVITY_LIMIT = 1200;
+export const DELEGATION_PROGRESS_ELEMENT_COUNT = 4;
 
 /** Escape untrusted worker text so it cannot become Feishu card markup. */
 function literalWorkerText(value: string, limit: number): string {
@@ -520,15 +529,15 @@ function literalWorkerText(value: string, limit: number): string {
   return `<raw>${shortened.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</raw>`;
 }
 
-function delegationElapsed(startedAt: number): string {
-  const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+function delegationElapsed(startedAt: number, endedAt = Date.now()): string {
+  const seconds = Math.max(0, Math.floor((endedAt - startedAt) / 1000));
   if (seconds < 60) return `${seconds}s`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
   return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
 }
 
-function lastToolActivity(timestamp?: number): string {
-  if (!timestamp) return 'no tool activity yet';
+function lastWorkerActivity(timestamp?: number): string {
+  if (timestamp === undefined) return 'waiting for output';
   const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
   if (seconds < 10) return 'just now';
   if (seconds < 60) return `${seconds}s ago`;
@@ -538,68 +547,76 @@ function lastToolActivity(timestamp?: number): string {
 
 function delegatedCurrentActivity(state: DelegationProgressCardState): string {
   if (state.phase === 'waiting_input') return 'Waiting for user input';
-  return state.phase === 'started' ? 'Starting worker session' : 'Preparing the next step';
+  if (state.currentToolName) return 'Tool running; waiting for the next update.';
+  return state.phase === 'started' ? 'Starting worker session…' : 'Waiting for the next update…';
 }
 
-/** Render bounded worker progress inside the coordinator's card. */
-export function createDelegationProgressElement(state: DelegationProgressCardState): FeishuCardElement {
+/** Four stable sibling slots: identity, visible content, metadata, folded diagnostics. */
+export function createDelegationProgressElements(state: DelegationProgressCardState): FeishuCardElement[] {
   const style = DELEGATION_PROGRESS_STYLES[state.phase] ?? FALLBACK_DELEGATION_PROGRESS_STYLE;
   const backend = DELEGATION_BACKEND_LABELS[state.backend] ?? 'Agent';
-  const status = state.activeToolCount > 0 && !style.terminal
-    ? `${style.label} · ${state.activeToolCount} active tool${state.activeToolCount === 1 ? '' : 's'}`
-    : style.label;
-  const headerTitle = `<text_tag color='${style.color}'>${style.icon} ${style.label}</text_tag> · **${backend}** · Delegated task`;
-  const body: string[] = [];
-  const activityElements: FeishuCardElement[] = [];
-
-  if (!style.terminal) {
-    if (state.latestText) {
-      activityElements.push(createMarkdownElement('**📝 Current activity**'),
-        createMarkdownElement(formatWorkerResultMarkdown(state.latestText, DELEGATION_CURRENT_ACTIVITY_LIMIT, 'activity')));
-    } else if (!state.currentToolName) {
-      body.push('**📝 Current activity**');
-      body.push(literalWorkerText(delegatedCurrentActivity(state), 260));
-    }
-    if (state.currentToolName) {
-      const duration = state.currentToolStartedAt ? ` · running for ${delegationElapsed(state.currentToolStartedAt)}` : '';
-      body.push(`**⚙️ Current tool** · ${literalWorkerText(`${state.currentToolName}${duration}`, 260)}`);
-    }
-    body.push(`_Elapsed ${delegationElapsed(state.startedAt)} · Last tool activity ${lastToolActivity(state.lastToolActivityAt)}_`);
-  } else {
-    body.push(`**Status:** ${literalWorkerText(status, 120)}`);
-    body.push(`**Elapsed:** ${delegationElapsed(state.startedAt)}`);
-  }
-
-  if (state.events.length > 0) {
-    body.push('\n**📋 Recent activity:**');
-    body.push(...state.events.map(event => `- ${event.isError ? '❌ ' : ''}${literalWorkerText(event.label, 220)}`));
-    if (state.hiddenEventCount > 0) body.push(`- _${state.hiddenEventCount} earlier event${state.hiddenEventCount === 1 ? '' : 's'} hidden_`);
-  }
-  if (state.phase === 'waiting_input' && state.inputRequest) {
-    body.push(`\n**Input request:** ${literalWorkerText(state.inputRequest, 1000)}`);
-  }
-  const elements = [...activityElements, createMarkdownElement(body.join('\n'))];
-  if (style.terminal && state.summary) {
-    elements.push(createMarkdownElement('**Result:**'), createMarkdownElement(formatWorkerResultMarkdown(state.summary)));
+  const ordinal = Number.isSafeInteger(state.ordinal) && state.ordinal > 0 ? state.ordinal : 1;
+  const primary: string[] = [];
+  if (state.phase === 'waiting_input') {
+    primary.push("**<font color='orange'>Your input is needed</font>**",
+      state.inputRequest ? formatWorkerResultMarkdown(state.inputRequest) : '_Check the input or approval request._');
   }
   if (style.terminal && state.error) {
-    elements.push(createMarkdownElement(`**Reason:** ${literalWorkerText(state.error, 1000)}`));
+    primary.push("**<font color='red'>Reason</font>**", formatWorkerResultMarkdown(state.error));
   }
-
-  return {
-    tag: 'collapsible_panel',
-    expanded: !style.terminal,
-    header: {
-      title: { tag: 'markdown', content: headerTitle },
-      vertical_align: 'center',
-      icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', size: '14px 14px' },
-      icon_position: 'right',
-      icon_expanded_angle: -180,
+  if (style.terminal && state.summary) {
+    primary.push('**Result excerpt**', formatWorkerResultMarkdown(state.summary));
+  } else if (state.latestText && state.phase !== 'waiting_input') {
+    primary.push(style.terminal ? '**Last activity · not a final result**' : '**Latest update**',
+      formatWorkerResultMarkdown(state.latestText, DELEGATION_CURRENT_ACTIVITY_LIMIT, 'activity'));
+  } else if (!primary.length) {
+    primary.push(style.terminal ? '_No result text was received._' : `_${delegatedCurrentActivity(state)}_`);
+  }
+  const metadata = [`Elapsed ${delegationElapsed(state.startedAt, state.finishedAt)}`];
+  if (!style.terminal) metadata.push(`Last update: ${lastWorkerActivity(state.lastActivityAt)}`);
+  if (state.currentToolName && !style.terminal) {
+    const duration = state.currentToolStartedAt !== undefined ? ` · ${delegationElapsed(state.currentToolStartedAt)}` : '';
+    metadata.push(`Current tool: ${literalWorkerText(state.currentToolName, 120)}${duration}`
+      + (state.activeToolCount > 1 ? ` · ${state.activeToolCount} tools active` : ''));
+  }
+  if (state.toolErrorCount) {
+    const location = state.events.some(event => event.isError) ? 'see activity details' : 'earlier details omitted';
+    metadata.push(`<font color='orange'>${state.toolErrorCount} tool issue${state.toolErrorCount === 1 ? '' : 's'} · ${location}</font>`);
+  }
+  const activity = state.events.map(event => `- ${event.isError ? "<text_tag color='red'>Failed</text_tag> " : ''}${literalWorkerText(event.label, 220)}`);
+  if (state.hiddenEventCount > 0) activity.push(`\n_${state.hiddenEventCount} earlier activities omitted._`);
+  const elements: FeishuCardElement[] = [
+    {
+      tag: 'column_set', flex_mode: 'stretch', horizontal_spacing: '8px',
+      columns: [
+        { tag: 'column', width: 'weighted', weight: 3, elements: [
+          // Verified in Feishu's icon catalog; the AI badge also identifies clients that omit icons.
+          { tag: 'markdown', content: `<text_tag color='purple'>AI</text_tag> **${backend}**\n<font color='grey'>Worker #${ordinal}</font>`,
+            icon: { tag: 'standard_icon', token: 'robot_outlined', color: 'purple' } },
+        ] },
+        { tag: 'column', width: 'weighted', weight: 2, elements: [
+          { tag: 'markdown', content: `<text_tag color='${style.color}'>${style.label}</text_tag>`, text_align: 'right' },
+        ] },
+      ],
     },
-    vertical_spacing: '8px',
-    padding: '4px 8px',
-    elements,
-  };
+    limitCardTables(createMarkdownElement(primary.join('\n\n'))),
+    { tag: 'markdown', content: metadata.join(' · '), text_size: 'notation' },
+    {
+      tag: 'collapsible_panel', expanded: false,
+      header: {
+        title: { tag: 'markdown', content: `Activity details · Worker #${ordinal}` },
+        vertical_align: 'center',
+        icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', size: '14px 14px' },
+        icon_position: 'right', icon_expanded_angle: -180,
+      },
+      vertical_spacing: '8px', padding: '4px 8px',
+      elements: [{ tag: 'markdown', content: activity.join('\n') || '_No tool activity yet._', text_size: 'notation' }],
+    },
+  ];
+  for (const [index, suffix] of ['header', 'body', 'meta', 'details'].entries()) {
+    elements[index].element_id = `delegated_worker_${ordinal}_${suffix}`;
+  }
+  return elements;
 }
 
 /**
