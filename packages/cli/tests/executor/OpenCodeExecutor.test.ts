@@ -81,7 +81,7 @@ describe('OpenCodeExecutor', () => {
     expect(stored.id).toBe('ses-new');
   });
 
-  it('keeps ACP thought chunks out of display-only worker text', async () => {
+  it('keeps ACP thought chunks out of all visible text and final output', async () => {
     transport.prompt.mockImplementationOnce(async () => {
       callbacks.onThoughtChunk?.({ type: 'text', text: 'Private thought' });
       callbacks.onTextChunk?.({ type: 'text', text: 'Public answer' });
@@ -90,10 +90,11 @@ describe('OpenCodeExecutor', () => {
     const stream = vi.fn();
     const display = vi.fn();
 
-    await executor.execute('hi', { onStream: stream, onDisplayText: display });
+    const result = await executor.execute('hi', { onStream: stream, onDisplayText: display });
 
-    expect(stream.mock.calls.map(([text]) => text)).toEqual(['Private thought', 'Public answer']);
+    expect(stream.mock.calls.map(([text]) => text)).toEqual(['Public answer']);
     expect(display.mock.calls.map(([text]) => text)).toEqual(['Public answer']);
+    expect(result.output).toBe('Public answer');
   });
 
   it('reports a deleted working directory before creating an ACP session', async () => {

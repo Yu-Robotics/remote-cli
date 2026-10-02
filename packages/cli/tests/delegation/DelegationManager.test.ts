@@ -10,6 +10,10 @@ import { DELEGATION_BACKENDS } from '../../src/delegation/contract';
 import { workerConfiguration } from '../../src/delegation/WorkerPolicy';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 import type { ExecuteOptions, ExecuteResult, IExecutor } from '../../src/executor/IExecutor';
+import { KimiExecutor } from '../../src/executor/KimiExecutor';
+import { OpenCodeExecutor } from '../../src/executor/OpenCodeExecutor';
+import { ZCodeExecutor } from '../../src/executor/ZCodeExecutor';
+import type { AcpEventCallbacks, AcpTransport } from '../../src/executor/acp/AcpClient';
 
 const wait = (milliseconds: number) => new Promise<void>(resolve => setTimeout(resolve, milliseconds));
 
@@ -42,6 +46,42 @@ describe('cross-backend delegation', () => {
   });
 
   afterEach(async () => { await manager.destroy(); vi.restoreAllMocks(); fs.rmSync(home, { recursive: true, force: true }); });
+
+  it.each([
+    ['kimi', KimiExecutor], ['opencode', OpenCodeExecutor], ['zcode', ZCodeExecutor],
+  ] as const)('keeps %s thoughts out of worker final results and terminal card summaries', async (backend, Executor) => {
+    parent.onProgress = vi.fn(() => true);
+    parent.onTextProgress = vi.fn(() => true);
+    factory.mockImplementation((_guard: DirectoryGuard, _config: unknown, cwd: string, threadId: string) => {
+      let callbacks: AcpEventCallbacks;
+      const transport: AcpTransport = {
+        initialize: async () => ({}),
+        newSession: async () => ({ sessionId: 'worker-output', configOptions: [] }),
+        loadSession: async () => ({ configOptions: [] }),
+        setConfigOption: async () => ({ configOptions: [] }),
+        deleteSession: async () => {}, sendCancel: () => {}, destroy: () => {}, waitForExit: async () => {},
+        prompt: async () => {
+          callbacks.onThoughtChunk?.({ type: 'text', text: 'PRIVATE_WORKER_REASONING' });
+          callbacks.onTextChunk?.({ type: 'text', text: 'Public review result' });
+          return { stopReason: 'end_turn' };
+        },
+      };
+      return new Executor(guard, {
+        initialWorkingDirectory: cwd, threadId, delegationWorker: true, sessionBaseDir: path.join(home, 'worker-sessions'),
+        clientFactory: next => { callbacks = next; return transport; },
+      });
+    });
+    const scope = manager.begin(parent);
+    const task: any = await scope.invoke('remote_cli_delegate', { backend, objective: 'Review docs' }, 'start');
+    const result = await scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result');
+    expect(result).toMatchObject({ state: 'succeeded', output: 'Public review result' });
+    expect(parent.onProgress).toHaveBeenLastCalledWith(expect.objectContaining({
+      phase: 'succeeded', summary: 'Public review result',
+    }));
+    expect(JSON.stringify(result)).not.toContain('PRIVATE_WORKER_REASONING');
+    expect(JSON.stringify(vi.mocked(parent.onProgress).mock.calls)).not.toContain('PRIVATE_WORKER_REASONING');
+    expect(JSON.stringify(vi.mocked(parent.onTextProgress).mock.calls)).not.toContain('PRIVATE_WORKER_REASONING');
+  });
 
   it.each(DELEGATION_BACKENDS)('rejects same-backend %s delegation before creating a worker or reserving the workspace', async backend => {
     parent.backend = backend;

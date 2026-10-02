@@ -526,9 +526,11 @@ worker liveness timeouts. The Markdown and icon updates require the Router;
 the unfinished-text update requires the CLI. The wire protocol is unchanged.
 The CLI also prefixes the result-arrival notice with a puzzle piece emoji (🧩).
 
-Router 1.6.110 presents each worker as a stable task section: a purple native
-robot icon and AI badge identify the worker, while a separate label shows its
-status. Latest updates, result excerpts, failure reasons, and input requests
+Router 1.6.111 keeps each worker's purple robot icon, compact backend name,
+number, and status on one header row on mobile, without a duplicate AI badge.
+Tool-only activity shows the tool directly; timing stays concise, and detailed
+tool timing remains inside the activity fold. Latest updates, result excerpts,
+failure reasons, and input requests
 stay visible; only activity details default to collapsed. Tool start/result
 events share one log entry, and tool issue counts remain visible even after
 older entries leave the bounded log. The last-update indicator includes actual
@@ -542,6 +544,15 @@ retain the latest words, including the full negotiated text snapshot. Result
 excerpts remain bounded, not full transcripts. These presentation changes need
 only the Router upgrade, with no new CLI payloads or formatting instructions;
 older clients retain their negotiated tool-only or legacy progress behavior.
+
+CLI 1.6.111 excludes protocol-tagged thoughts from ordinary streaming text,
+final output, and delegated result summaries for Kimi Code, OpenCode, and ZCode.
+ZCode uses its native app-server adapter, not ACP on the wire. Existing model
+thinking and effort settings are unchanged; ordinary response text,
+permission prompts, questions, images, plans, and tool events remain available.
+This requires a CLI upgrade and does not change the wire protocol. Codex
+reasoning summaries, Claude's legacy thinking events, and tool-update deduplication
+are separate behaviors and are unchanged by this release.
 
 For staged rollout, enable one trial thread first. Never-enabled threads skip
 all delegation setup: no managed tool registration, prompt prefix, backend
