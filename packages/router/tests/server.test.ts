@@ -57,6 +57,7 @@ describe('RouterServer', () => {
 
     // Setup mocks
     config = {
+      getConfigPath: () => '/virtual-router-tests/config.json',
       get: vi.fn((section, key) => {
         if (section === 'server' && key === 'port') return 3000;
         if (section === 'server' && key === 'host') return 'localhost';
@@ -148,7 +149,7 @@ describe('RouterServer', () => {
     async function connect() {
       await server.start();
       const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
-      const ws = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
+      const ws = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
       onConnection(ws, { socket: { remoteAddress: '1' } });
       const onMessage = ws.on.mock.calls.find(call => call[0] === 'message')[1];
       const send = (message: any) => onMessage(Buffer.from(JSON.stringify(message)));
@@ -407,6 +408,100 @@ describe('RouterServer', () => {
     });
   });
 
+  describe('early streaming headers', () => {
+    const context = {
+      type: 'stream_context', messageId: 'early-1', openId: 'user-1',
+      threadId: 'thread-1', threadName: 'thread-9', cwd: '/workspace/project',
+    };
+
+    async function connect(capabilities = { streamingContext: true }) {
+      await server.start();
+      const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
+      const ws = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
+      onConnection(ws, { socket: { remoteAddress: '1' } });
+      const onMessage = ws.on.mock.calls.find(call => call[0] === 'message')[1];
+      const send = (message: any) => onMessage(Buffer.from(JSON.stringify(message)));
+      await send({ type: 'binding_request', data: { deviceId: 'device-1', capabilities } });
+      const start = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
+      start('early-1', 'user-1', 'early-card', 'device-1');
+      return { send, start, ws };
+    }
+
+    it('resolves the header before text arrives and preserves it on text and tool updates', async () => {
+      const { send, ws } = await connect();
+      expect(JSON.parse(ws.send.mock.calls[0][0]).data.capabilities).toEqual({ streamingContext: true });
+      await send(context);
+      expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenLastCalledWith(
+        'early-card', expect.any(Array), 'user-1', 'thread-9', '/workspace/project',
+      );
+      expect(mockFeishuHandler.setOnResolveThread.mock.calls[0][0]('early-card')).toMatchObject({ threadId: 'thread-1' });
+      await send(context);
+      expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenCalledTimes(1);
+      // A header-only patch must not throttle the first short text token.
+      await send({ type: 'stream', messageId: 'early-1', openId: 'user-1', chunk: 'Hi' });
+      expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenCalledTimes(2);
+      await send({ type: 'stream', messageId: 'early-1', openId: 'user-1', streamType: 'tool_use', toolUse: { name: 'Read', id: 'read-1', input: {} } });
+      for (const args of mockFeishuHandler.updateStreamingMessage.mock.calls) {
+        expect(args.slice(3)).toEqual(['thread-9', '/workspace/project']);
+      }
+      await send({ type: 'response', messageId: 'early-1', openId: 'user-1', threadId: 'thread-1', success: true });
+      expect(mockFeishuHandler.finalizeStreamingMessage.mock.calls.at(-1).slice(4, 6)).toEqual(['/workspace/project', 'thread-9']);
+      expect(JSON.stringify(mockFeishuHandler.finalizeStreamingMessage.mock.calls)).not.toContain('Processing...');
+    });
+
+    it('rejects unnegotiated metadata from old peers', async () => {
+      const { send, ws } = await connect({ streamingContext: false });
+      expect(JSON.parse(ws.send.mock.calls[0][0]).data.capabilities).toBeUndefined();
+      await send(context);
+      expect(mockFeishuHandler.updateStreamingMessage).not.toHaveBeenCalled();
+    });
+
+    it('keeps thread metadata isolated and rejects malformed or mismatched context', async () => {
+      const { send, start } = await connect();
+      start('other-1', 'user-1', 'other-card', 'device-1', 'thread-2', false, undefined, 'thread-2');
+      start('foreign-1', 'user-1', 'foreign-card', 'device-2');
+      for (const invalid of [
+        { ...context, openId: 'other-user' }, { ...context, messageId: 'foreign-1' },
+        { ...context, messageId: 'other-1' }, { ...context, messageId: 'unknown' },
+        { ...context, threadName: 'x'.repeat(101) }, { ...context, threadName: ' ' },
+        { ...context, cwd: 'x'.repeat(4097) }, { ...context, cwd: null },
+      ]) await send(invalid);
+      expect(mockFeishuHandler.updateStreamingMessage).not.toHaveBeenCalled();
+      await send(context);
+      await send({ type: 'stream', messageId: 'other-1', openId: 'user-1', chunk: 'Other reply' });
+      expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenLastCalledWith(
+        'other-card', expect.any(Array), 'user-1', 'thread-2', undefined,
+      );
+    });
+
+    it('waits for an in-flight header patch before finalization and ignores late metadata', async () => {
+      const { send } = await connect();
+      let release!: (value: boolean) => void;
+      mockFeishuHandler.updateStreamingMessage.mockReturnValueOnce(new Promise(resolve => { release = resolve; }));
+      const patch = send(context);
+      await Promise.resolve();
+      const finish = send({ type: 'response', messageId: 'early-1', openId: 'user-1', threadId: 'thread-1', success: true, output: 'Done' });
+      await Promise.resolve();
+      expect(mockFeishuHandler.finalizeStreamingMessage).not.toHaveBeenCalled();
+      await send({ ...context, threadName: 'Too late' });
+      release(true);
+      await Promise.all([patch, finish]);
+      expect(mockFeishuHandler.finalizeStreamingMessage.mock.calls.at(-1)[5]).toBe('thread-9');
+      await send(context);
+      expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('uses the final created or renamed thread instead of retaining the earlier caller header', async () => {
+      const { send, start } = await connect();
+      start('early-1', 'user-1', 'early-card', 'device-1', undefined, true);
+      await send(context);
+      await send({ type: 'response', messageId: 'early-1', openId: 'user-1', threadId: 'new-thread', success: true,
+        threads: [{ id: 'new-thread', name: 'thread-10', status: 'idle' }] });
+      expect(mockFeishuHandler.finalizeStreamingMessage.mock.calls.at(-1)[5]).toBe('thread-10');
+      expect(mockFeishuHandler.setOnResolveThread.mock.calls[0][0]('early-card')).toMatchObject({ threadId: 'new-thread' });
+    });
+  });
+
   describe('queued execution cards', () => {
     const started = {
       type: 'queue_started', messageId: 'queued-1', openId: 'user-1', threadId: 'thread-1',
@@ -420,7 +515,7 @@ describe('RouterServer', () => {
     async function connect() {
       await server.start();
       const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
-      const ws = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
+      const ws = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
       onConnection(ws, { socket: { remoteAddress: '1' } });
       const onMessage = ws.on.mock.calls.find(call => call[0] === 'message')[1];
       const send = (message: any) => onMessage(Buffer.from(JSON.stringify(message)));
@@ -467,7 +562,7 @@ describe('RouterServer', () => {
       const finished = send({ type: 'response', messageId: 'queued-1', openId: 'user-1', success: true });
       await send({ type: 'stream', messageId: 'other-task', openId: 'user-1', chunk: 'Independent output' });
       expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenCalledWith(
-        'other-card', expect.any(Array), 'user-1', undefined,
+        'other-card', expect.any(Array), 'user-1', undefined, undefined,
       );
       expect(mockFeishuHandler.finalizeStreamingMessage).not.toHaveBeenCalled();
       release('execution-card');
@@ -581,7 +676,7 @@ describe('RouterServer', () => {
       await send(started);
       await send({ type: 'stream', messageId: 'queued-1', openId: 'user-1', chunk: 'Visible output' });
       expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenCalledWith(
-        'receipt-card', expect.any(Array), 'user-1', 'thread-2',
+        'receipt-card', expect.any(Array), 'user-1', 'thread-2', '/workspace/project',
       );
       expect(mockFeishuHandler.markQueueCardStarted).not.toHaveBeenCalled();
     });
@@ -723,10 +818,12 @@ describe('RouterServer', () => {
     onStartStreaming('m1', 'u1', 'f1', 'd1', undefined, pendingNewThread);
 
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
-    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
+    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
     onConnection(mockWs, { socket: { remoteAddress: '1' } });
     
     const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
+    await onMessage(Buffer.from(JSON.stringify({ type: MessageType.BINDING_REQUEST, data: { deviceId: 'd1' } })));
+    mockWs.send.mockClear();
     await onMessage(Buffer.from(JSON.stringify({
       type: MessageType.RESPONSE,
       messageId: 'm1',
@@ -752,7 +849,7 @@ describe('RouterServer', () => {
     onStartStreaming('m1', 'u1', 'f1', 'd1');
 
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
-    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
+    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
     onConnection(mockWs, { socket: { remoteAddress: '1' } });
     const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
     await onMessage(Buffer.from(JSON.stringify({
@@ -785,7 +882,7 @@ describe('RouterServer', () => {
     await server.start();
     mockFeishuHandler.setOnStartStreaming.mock.calls[0][0]('m1', 'u1', 'f1', 'd1');
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
-    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
+    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
     onConnection(mockWs, { socket: { remoteAddress: '1' } });
     const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
     await onMessage(Buffer.from(JSON.stringify({
@@ -812,7 +909,7 @@ describe('RouterServer', () => {
     onStartStreaming('m1', 'u1', 'f1', 'd1');
 
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
-    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
+    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
     onConnection(mockWs, { socket: { remoteAddress: '1' } });
     const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
     await onMessage(Buffer.from(JSON.stringify({
@@ -920,9 +1017,11 @@ describe('RouterServer', () => {
     onStartStreaming('m1', 'u1', 'f1', 'd1');
 
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
-    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
+    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
     onConnection(mockWs, { socket: { remoteAddress: '1' } });
     const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
+    await onMessage(Buffer.from(JSON.stringify({ type: MessageType.BINDING_REQUEST, data: { deviceId: 'd1' } })));
+    mockWs.send.mockClear();
     await onMessage(Buffer.from(JSON.stringify({ type: 'binding_request', data: { deviceId: 'd1' } })));
     await onMessage(Buffer.from(JSON.stringify({
       type: 'stream', streamType: 'delegation_progress', messageId: 'm1', openId: 'u1',
@@ -939,10 +1038,12 @@ describe('RouterServer', () => {
     onStartStreaming('m1', 'u1', 'f1', 'd1');
 
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
-    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
+    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
     onConnection(mockWs, { socket: { remoteAddress: '1' } });
     
     const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
+    await onMessage(Buffer.from(JSON.stringify({ type: MessageType.BINDING_REQUEST, data: { deviceId: 'd1' } })));
+    mockWs.send.mockClear();
     
     // First chunk - immediate update
     await onMessage(Buffer.from(JSON.stringify({
@@ -975,9 +1076,11 @@ describe('RouterServer', () => {
       .mockResolvedValue(undefined);
 
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
-    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
+    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
     onConnection(mockWs, { socket: { remoteAddress: '1' } });
     const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
+    await onMessage(Buffer.from(JSON.stringify({ type: MessageType.BINDING_REQUEST, data: { deviceId: 'd1' } })));
+    mockWs.send.mockClear();
     if (queued) {
       await onMessage(Buffer.from(JSON.stringify({ type: 'binding_request', data: { deviceId: 'd1' } })));
       await onMessage(Buffer.from(JSON.stringify({
@@ -1016,10 +1119,12 @@ describe('RouterServer', () => {
     onStartStreaming('m1', 'u1', 'f1', 'd1');
 
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
-    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
+    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
     onConnection(mockWs, { socket: { remoteAddress: '1' } });
     
     const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
+    await onMessage(Buffer.from(JSON.stringify({ type: MessageType.BINDING_REQUEST, data: { deviceId: 'd1' } })));
+    mockWs.send.mockClear();
     await onMessage(Buffer.from(JSON.stringify({
       type: MessageType.RESPONSE,
       messageId: 'm1',
@@ -1047,10 +1152,12 @@ describe('RouterServer', () => {
     onStartStreaming('m1', 'u1', null, 'd1'); // No feishuMessageId
 
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
-    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
+    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
     onConnection(mockWs, { socket: { remoteAddress: '1' } });
     
     const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
+    await onMessage(Buffer.from(JSON.stringify({ type: MessageType.BINDING_REQUEST, data: { deviceId: 'd1' } })));
+    mockWs.send.mockClear();
     await onMessage(Buffer.from(JSON.stringify({
       type: MessageType.RESPONSE,
       messageId: 'm1',
@@ -1065,10 +1172,12 @@ describe('RouterServer', () => {
   it('should handle response when no streaming session exists', async () => {
     await server.start();
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
-    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
+    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
     onConnection(mockWs, { socket: { remoteAddress: '1' } });
     
     const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
+    await onMessage(Buffer.from(JSON.stringify({ type: MessageType.BINDING_REQUEST, data: { deviceId: 'd1' } })));
+    mockWs.send.mockClear();
     
     // Case 1: Success
     await onMessage(Buffer.from(JSON.stringify({
@@ -1191,7 +1300,7 @@ describe('RouterServer', () => {
   it('should handle WebSocket HEARTBEAT', async () => {
     await server.start();
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
-    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
+    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
     onConnection(mockWs, { socket: { remoteAddress: '1' } });
     
     // First bind to set deviceId
@@ -1214,10 +1323,12 @@ describe('RouterServer', () => {
   it('should handle WebSocket RESPONSE', async () => {
     await server.start();
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
-    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
+    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
     onConnection(mockWs, { socket: { remoteAddress: '1' } });
     
     const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
+    await onMessage(Buffer.from(JSON.stringify({ type: MessageType.BINDING_REQUEST, data: { deviceId: 'd1' } })));
+    mockWs.send.mockClear();
     await onMessage(Buffer.from(JSON.stringify({
       type: MessageType.RESPONSE,
       messageId: 'm1',
@@ -1232,7 +1343,7 @@ describe('RouterServer', () => {
   it('should handle WebSocket stream text', async () => {
     await server.start();
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
-    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
+    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
     onConnection(mockWs, { socket: { remoteAddress: '1' } });
     
     // First register streaming session via callback
@@ -1240,6 +1351,8 @@ describe('RouterServer', () => {
     onStartStreaming('m1', 'u1', 'f1', 'd1');
 
     const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
+    await onMessage(Buffer.from(JSON.stringify({ type: MessageType.BINDING_REQUEST, data: { deviceId: 'd1' } })));
+    mockWs.send.mockClear();
     await onMessage(Buffer.from(JSON.stringify({
       type: 'stream',
       streamType: 'text',
@@ -1260,13 +1373,15 @@ describe('RouterServer', () => {
     vi.mocked(createToolResultElement).mockImplementationOnce(formatter.createToolResultElement);
     await server.start();
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
-    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
+    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
     onConnection(mockWs, { socket: { remoteAddress: '1' } });
     
     const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
     onStartStreaming('m1', 'u1', 'f1', 'd1');
 
     const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
+    await onMessage(Buffer.from(JSON.stringify({ type: MessageType.BINDING_REQUEST, data: { deviceId: 'd1' } })));
+    mockWs.send.mockClear();
     await onMessage(Buffer.from(JSON.stringify({
       type: 'stream',
       streamType: 'tool_use',
@@ -1300,13 +1415,15 @@ describe('RouterServer', () => {
   it('should handle WebSocket stream tool_result', async () => {
     await server.start();
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
-    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
+    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
     onConnection(mockWs, { socket: { remoteAddress: '1' } });
     
     const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
     onStartStreaming('m1', 'u1', 'f1', 'd1');
 
     const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
+    await onMessage(Buffer.from(JSON.stringify({ type: MessageType.BINDING_REQUEST, data: { deviceId: 'd1' } })));
+    mockWs.send.mockClear();
     await onMessage(Buffer.from(JSON.stringify({
       type: 'stream',
       streamType: 'tool_result',
@@ -1321,13 +1438,15 @@ describe('RouterServer', () => {
   it('renders a redaction notice after preceding text without exposing encrypted content', async () => {
     await server.start();
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
-    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
+    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
     onConnection(mockWs, { socket: { remoteAddress: '1' } });
     
     const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
     onStartStreaming('m1', 'u1', 'f1', 'd1');
 
     const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
+    await onMessage(Buffer.from(JSON.stringify({ type: MessageType.BINDING_REQUEST, data: { deviceId: 'd1' } })));
+    mockWs.send.mockClear();
     const notice = { tag: 'markdown', content: 'Some reasoning was filtered' };
     vi.mocked(createRedactedThinkingElement).mockReturnValueOnce([notice]);
     await onMessage(Buffer.from(JSON.stringify({
@@ -1342,7 +1461,7 @@ describe('RouterServer', () => {
     })));
 
     expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenLastCalledWith(
-      'f1', [{ tag: 'markdown', content: 'Visible answer' }, notice], 'u1', undefined,
+      'f1', [{ tag: 'markdown', content: 'Visible answer' }, notice], 'u1', undefined, undefined,
     );
     expect(JSON.stringify(mockFeishuHandler.updateStreamingMessage.mock.calls)).not.toContain('ENCRYPTED_REASONING');
   });
@@ -1350,13 +1469,15 @@ describe('RouterServer', () => {
   it('should handle WebSocket stream plan_mode', async () => {
     await server.start();
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
-    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
+    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
     onConnection(mockWs, { socket: { remoteAddress: '1' } });
     
     const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
     onStartStreaming('m1', 'u1', 'f1', 'd1');
 
     const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
+    await onMessage(Buffer.from(JSON.stringify({ type: MessageType.BINDING_REQUEST, data: { deviceId: 'd1' } })));
+    mockWs.send.mockClear();
     await onMessage(Buffer.from(JSON.stringify({
       type: 'stream',
       streamType: 'plan_mode',
@@ -1371,13 +1492,15 @@ describe('RouterServer', () => {
   it('should upload and render WebSocket stream images', async () => {
     await server.start();
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
-    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
+    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
     onConnection(mockWs, { socket: { remoteAddress: '1' } });
 
     const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
     onStartStreaming('m1', 'u1', 'f1', 'd1');
 
     const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
+    await onMessage(Buffer.from(JSON.stringify({ type: MessageType.BINDING_REQUEST, data: { deviceId: 'd1' } })));
+    mockWs.send.mockClear();
     await onMessage(Buffer.from(JSON.stringify({
       type: 'stream',
       streamType: 'image',
@@ -1393,13 +1516,15 @@ describe('RouterServer', () => {
   it('should handle finalize streaming message on response', async () => {
     await server.start();
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
-    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
+    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
     onConnection(mockWs, { socket: { remoteAddress: '1' } });
     
     const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
     onStartStreaming('m1', 'u1', 'f1', 'd1');
 
     const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
+    await onMessage(Buffer.from(JSON.stringify({ type: MessageType.BINDING_REQUEST, data: { deviceId: 'd1' } })));
+    mockWs.send.mockClear();
     await onMessage(Buffer.from(JSON.stringify({
       type: MessageType.RESPONSE,
       messageId: 'm1',
@@ -1414,10 +1539,12 @@ describe('RouterServer', () => {
   it('should handle WebSocket NOTIFICATION', async () => {
     await server.start();
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
-    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
+    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
     onConnection(mockWs, { socket: { remoteAddress: '1' } });
     
     const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
+    await onMessage(Buffer.from(JSON.stringify({ type: MessageType.BINDING_REQUEST, data: { deviceId: 'd1' } })));
+    mockWs.send.mockClear();
     await onMessage(Buffer.from(JSON.stringify({
       type: MessageType.NOTIFICATION,
       openId: 'u1',
@@ -1431,7 +1558,7 @@ describe('RouterServer', () => {
   it('should handle WebSocket close', async () => {
     await server.start();
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
-    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
+    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
     onConnection(mockWs, { socket: { remoteAddress: '1' } });
     
     // Bind to set deviceId
@@ -1487,10 +1614,12 @@ describe('RouterServer', () => {
     onStartStreaming('m1', 'u1', 'f1', 'd1');
 
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
-    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
+    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
     onConnection(mockWs, { socket: { remoteAddress: '1' } });
     
     const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
+    await onMessage(Buffer.from(JSON.stringify({ type: MessageType.BINDING_REQUEST, data: { deviceId: 'd1' } })));
+    mockWs.send.mockClear();
     
     // First chunk - immediate update (1 char)
     await onMessage(Buffer.from(JSON.stringify({

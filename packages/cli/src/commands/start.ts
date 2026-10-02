@@ -1,5 +1,6 @@
 import { ConfigManager } from '../config/ConfigManager';
 import { WebSocketClient } from '../client/WebSocketClient';
+import { loadIdentity } from '../files/DeviceIdentity';
 import { MessageHandler } from '../client/MessageHandler';
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import { HooksConfigurator } from '../security/HooksConfigurator';
@@ -214,7 +215,9 @@ export async function startCommand(
 
     // Create WebSocket URL
     const wsUrl = serverUrl.replace(/^http/, 'ws') + '/ws';
-    const wsClient = new WebSocketClient(wsUrl, deviceId);
+    const wsClient = new WebSocketClient(wsUrl, deviceId, {
+      identityLoader: () => loadIdentity(config.getConfigDir(), wsUrl, deviceId),
+    });
 
     const messageHandler = new MessageHandler(wsClient, threadPool, threadManager, directoryGuard, config);
     await messageHandler.reconcilePendingDelegatedWorkers();

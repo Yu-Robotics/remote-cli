@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { WebSocketClient } from '../src/client/WebSocketClient';
 import WebSocket from 'ws';
+import { generateKeyPairSync, verify } from 'crypto';
 
 // Mock WebSocket
 vi.mock('ws');
@@ -39,6 +40,25 @@ describe('WebSocketClient', () => {
   });
 
   describe('connection management', () => {
+    it('signs fresh Router challenges without exposing the private key', async () => {
+      const identity = generateKeyPairSync('ed25519', { publicKeyEncoding: { type: 'spki', format: 'pem' }, privateKeyEncoding: { type: 'pkcs8', format: 'pem' } });
+      client = new WebSocketClient(serverUrl, deviceId, { identityLoader: async () => identity });
+      const connected = client.connect(); mockWs.on.mock.calls.find((c: any) => c[0] === 'open')[1](); await connected;
+      await vi.waitFor(() => expect(mockWs.send).toHaveBeenCalled());
+      expect(JSON.parse(mockWs.send.mock.calls[0][0]).data.capabilities.fileTransferV1).toBe(true);
+      const nonce = 'a'.repeat(64);
+      mockWs.on.mock.calls.find((c: any) => c[0] === 'message')[1](Buffer.from(JSON.stringify({ type: 'device_challenge', data: { nonce } })));
+      const proof = JSON.parse(mockWs.send.mock.calls.at(-1)[0]);
+      expect(verify(null, Buffer.from(`remote-cli-device-v1\n${deviceId}\n${nonce}`), identity.publicKey, Buffer.from(proof.data.deviceSignature, 'base64'))).toBe(true);
+      expect(JSON.stringify(mockWs.send.mock.calls)).not.toContain('PRIVATE');
+    });
+    it('fails closed when credentials cannot be loaded', async () => {
+      client = new WebSocketClient(serverUrl, deviceId, { identityLoader: async () => { throw new Error('Unsafe identity'); } });
+      const error = vi.fn(); client.onError(error);
+      const connected = client.connect(); mockWs.on.mock.calls.find((c: any) => c[0] === 'open')[1](); await connected;
+      await vi.waitFor(() => expect(error).toHaveBeenCalled());
+      expect(mockWs.send).not.toHaveBeenCalled(); expect(mockWs.close).toHaveBeenCalled();
+    });
     it('should create WebSocket connection on connect', async () => {
       const connectPromise = client.connect();
 

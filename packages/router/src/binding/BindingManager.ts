@@ -1,5 +1,6 @@
 import { DeviceBinding, UserBinding } from '../types';
 import { JsonStore } from '../storage/JsonStore';
+import { randomInt } from 'crypto';
 
 /**
  * Binding Manager
@@ -19,13 +20,14 @@ export class BindingManager {
    * @param deviceName Device name
    * @returns Binding code object
    */
-  async generateBindingCode(deviceId: string, deviceName: string): Promise<import('../types').BindingCode> {
+  async generateBindingCode(deviceId: string, deviceName: string, devicePublicKey?: string): Promise<import('../types').BindingCode> {
     // Generate binding code in format XXX-XXX-XXX
     const code = this.generateRandomCode();
     const now = Date.now();
     const bindingCode = {
       code,
       deviceId,
+      ...(devicePublicKey ? { devicePublicKey } : {}),
       createdAt: now,
       expiresAt: now + 5 * 60 * 1000 // Expires after 5 minutes
     };
@@ -43,6 +45,10 @@ export class BindingManager {
    */
   async verifyBindingCode(code: string): Promise<import('../types').BindingCode | null> {
     return this.store.getBindingCode(code);
+  }
+
+  async consumeBindingCode(code: string): Promise<void> {
+    await this.store.deleteBindingCode(code);
   }
 
   /**
@@ -233,7 +239,7 @@ export class BindingManager {
     for (let i = 0; i < 3; i++) {
       let segment = '';
       for (let j = 0; j < 3; j++) {
-        segment += chars.charAt(Math.floor(Math.random() * chars.length));
+        segment += chars.charAt(randomInt(chars.length));
       }
       segments.push(segment);
     }

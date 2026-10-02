@@ -1,5 +1,6 @@
 import { ConfigManager } from '../config/ConfigManager';
 import { WebSocketClient } from '../client/WebSocketClient';
+import { loadIdentity } from '../files/DeviceIdentity';
 
 /**
  * Status command options
@@ -75,7 +76,9 @@ export async function statusCommand(
     if (service?.running) {
       try {
         const wsUrl = serverUrl?.replace(/^http/, 'ws') + '/ws';
-        const wsClient = new WebSocketClient(wsUrl || '', deviceId || '');
+        const wsClient = new WebSocketClient(wsUrl || '', deviceId || '', {
+          identityLoader: () => loadIdentity(config.getConfigDir(), wsUrl || '', deviceId || ''),
+        });
         connected = wsClient.isConnected();
       } catch {
         connected = false;

@@ -45,7 +45,7 @@ describe('RouterServer - task_notification', () => {
   const connectAndBind = async (deviceId: string) => {
     await server.start();
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
-    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn() };
+    const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
     onConnection(mockWs, { socket: { remoteAddress: '1' } });
 
     const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
@@ -81,6 +81,7 @@ describe('RouterServer - task_notification', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     config = {
+      getConfigPath: () => '/virtual-router-notifications/config.json',
       get: vi.fn((section: string, key: string) => {
         if (section === 'server' && key === 'port') return 3000;
         if (section === 'server' && key === 'host') return 'localhost';

@@ -1,4 +1,9 @@
 import { ApprovalCards } from './feishu/ApprovalCards';
+import { DeviceAuth } from './files/DeviceAuth';
+import { FileTransfers } from './files/FileTransfers';
+import path from 'path';
+import os from 'os';
+import { randomUUID } from 'crypto';
 import type { ApprovalAction } from './types';
 import Koa from 'koa';
 import bodyParser from 'koa-bodyparser';
@@ -41,6 +46,7 @@ interface StreamingMessageState {
   deviceId: string;
   threadId?: string;
   threadName?: string;
+  cwd?: string;
   threads?: ThreadSummary[];
   pendingNewThread?: boolean;
   queueCardId?: string;
@@ -87,6 +93,8 @@ export class RouterServer {
   // Map from openId to the user's currently active thread (set by card button click).
   // New top-level messages (no parent_id) are routed to this thread.
   private activeThreadMap = new Map<string, { threadId: string; threadName: string }>();
+  private readonly deviceAuth: DeviceAuth;
+  private readonly fileTransfers: FileTransfers;
 
   constructor(config: ConfigManager, store: JsonStore) {
     this.config = config;
@@ -94,6 +102,7 @@ export class RouterServer {
     this.app = new Koa();
     this.connectionHub = new ConnectionHub();
     this.bindingManager = new BindingManager(store);
+    this.deviceAuth = new DeviceAuth(path.join(path.dirname(config.getConfigPath() || path.join(os.homedir(), '.remote-cli-router', 'config.json')), 'device-auth.json'));
 
     // Initialize FeishuLongConnHandler (WebSocket mode)
     this.feishuLongConnHandler = new FeishuLongConnHandler({
@@ -104,6 +113,42 @@ export class RouterServer {
 
     // Share ConnectionHub with Feishu handler
     this.feishuLongConnHandler.setConnectionHub(this.connectionHub);
+    const fileConfig = config.get('files');
+    this.fileTransfers = new FileTransfers(
+      path.join(path.dirname(config.getConfigPath() || path.join(os.homedir(), '.remote-cli-router', 'config.json')), 'attachments'),
+      fileConfig?.publicUrl, fileConfig?.maxBytes, {
+        session: deviceId => this.connectionHub.getFileSession(deviceId),
+        owns: async (openId, deviceId) => (await this.bindingManager.getDeviceBinding(deviceId))?.openId === openId,
+        send: (deviceId, message) => this.connectionHub.sendToDevice(deviceId, message),
+        download: (messageId, fileKey, signal) => this.feishuLongConnHandler.downloadFileResource(messageId, fileKey, signal),
+        notify: async record => {
+          const failed = record.state === 'failed';
+          const ready = ['saved', 'parsed', 'partial', 'unsupported'].includes(record.state);
+          const header = { title: { tag: 'plain_text', content: `📎 File · ${record.state}` }, template: failed ? 'red' : ready ? 'green' : 'blue' };
+          const details = [record.name, record.size === undefined ? 'Limit: 20 MiB' : `${(record.size / 1024 / 1024).toFixed(2)} MiB`,
+            `Device: ${record.deviceId}`,
+            record.threadId ? `Thread: ${record.threadId}` : 'Waiting for thread admission', record.detail,
+            ready ? 'Send your instructions in this thread, or reply to this card. Saving a file does not start a model task.' : undefined].filter(Boolean).join('\n');
+          const elements = [{ tag: 'div', text: { tag: 'plain_text', content: details } }];
+          if (record.cardId) {
+            await this.feishuLongConnHandler.updateApprovalCard(record.cardId, elements, header); return record.cardId;
+          }
+          return await this.feishuLongConnHandler.sendTaskNotificationCard(record.openId, elements, header) ?? undefined;
+        },
+      });
+    this.feishuLongConnHandler.onFileMessage = input => this.fileTransfers.receive(input);
+    this.feishuLongConnHandler.onResolveFile = (openId, sourceId) => this.fileTransfers.resolve(openId, sourceId);
+    this.feishuLongConnHandler.onApproveDeviceKey = async (openId, deviceId, publicKey) => {
+      if ((await this.bindingManager.getDeviceBinding(deviceId))?.openId !== openId) throw new Error('Device ownership changed.');
+      await this.deviceAuth.enroll(deviceId, openId, publicKey);
+      this.connectionHub.disconnectDevice(deviceId);
+      this.fileTransfers.disconnect(deviceId);
+    };
+    this.feishuLongConnHandler.onRevokeDevice = async deviceId => {
+      await this.deviceAuth.revoke(deviceId);
+      this.connectionHub.disconnectDevice(deviceId);
+      this.fileTransfers.disconnect(deviceId);
+    };
     this.approvalCards = new ApprovalCards({
       ownsDevice: async (openId, deviceId) => (await this.bindingManager.getDeviceBinding(deviceId))?.openId === openId,
       sendToDevice: (deviceId, message) => this.connectionHub.sendToDevice(deviceId, message),
@@ -117,7 +162,7 @@ export class RouterServer {
       this.approvalCards.click(openId, requestId, cardId, decision as ApprovalAction);
 
     // Register callback for streaming message start
-    this.feishuLongConnHandler.setOnStartStreaming((messageId: string, openId: string, feishuMessageId: string | null, deviceId: string, threadId?: string, pendingNewThread?: boolean, queueCardId?: string) => {
+    this.feishuLongConnHandler.setOnStartStreaming((messageId: string, openId: string, feishuMessageId: string | null, deviceId: string, threadId?: string, pendingNewThread?: boolean, queueCardId?: string, threadName?: string) => {
       console.log(`[RouterServer] Registering streaming session: msgId=${messageId}, feishuMsgId=${feishuMessageId}, deviceId=${deviceId}, threadId=${threadId}, pendingNewThread=${pendingNewThread}`);
       const previous = this.streamingMessages.get(messageId);
       if (previous) this.clearDelegationProgressTimers(previous);
@@ -130,6 +175,7 @@ export class RouterServer {
         createdAt: Date.now(),
         deviceId,
         threadId,
+        threadName,
         pendingNewThread,
         queueCardId,
         updatePending: false,
@@ -254,6 +300,8 @@ export class RouterServer {
       };
     });
 
+    router.get('/api/files/:id', async ctx => { await this.fileTransfers.serve(ctx, ctx.params.id); });
+
     // Binding code request endpoint
     router.post('/api/bind/request', async (ctx) => {
       const { deviceId, deviceName, platform } = ctx.request.body as {
@@ -263,7 +311,7 @@ export class RouterServer {
       };
 
       // Validate required fields
-      if (!deviceId) {
+      if (typeof deviceId !== 'string' || !/^[a-zA-Z0-9_-]{1,200}$/.test(deviceId)) {
         ctx.status = 400;
         ctx.body = {
           success: false,
@@ -273,15 +321,27 @@ export class RouterServer {
       }
 
       try {
+        const { devicePublicKey, nonce, signature } = ctx.request.body as any;
+        if (devicePublicKey && !this.fileTransfers.enabled) {
+          ctx.status = 400; ctx.body = { success: false, error: 'Set files.publicUrl to the Router HTTPS origin before enrolling file-enabled devices.' }; return;
+        }
+        if (devicePublicKey !== undefined && (!DeviceAuth.validKey(devicePublicKey)
+          || !DeviceAuth.verifyProof(devicePublicKey, deviceId, nonce, signature))) {
+          ctx.status = 400;
+          ctx.body = { success: false, error: 'Invalid device enrollment proof.' };
+          return;
+        }
         // Generate binding code
         const bindingCode = await this.bindingManager.generateBindingCode(
           deviceId,
-          deviceName || 'Unknown Device'
+          deviceName || 'Unknown Device',
+          ...(devicePublicKey ? [devicePublicKey] as [string] : [])
         );
 
         ctx.body = {
           success: true,
           bindingCode: bindingCode.code,
+          ...(devicePublicKey ? { deviceAuth: true } : {}),
           expiresAt: bindingCode.expiresAt,
           expiresIn: Math.floor((bindingCode.expiresAt - Date.now()) / 1000) // seconds
         };
@@ -326,6 +386,9 @@ export class RouterServer {
       let approvalCardsEnabled = false;
       let delegationProgressEnabled = false;
       let delegationProgressTextEnabled = false;
+      let streamingContextEnabled = false;
+      let authenticationPending = false;
+      let challengeTimer: NodeJS.Timeout | undefined;
       let heartbeatTimeout: NodeJS.Timeout | null = null;
 
       // Reset heartbeat timeout
@@ -348,11 +411,18 @@ export class RouterServer {
         try {
           const message = JSON.parse(data.toString());
 
+          if (!deviceId && message.type !== MessageType.BINDING_REQUEST && message.type !== MessageType.HEARTBEAT) return;
+
           if (deviceId && message.type !== MessageType.BINDING_REQUEST
             && !this.connectionHub.isCurrentConnection(deviceId, ws)) return;
 
           // Update heartbeat on any message
           resetHeartbeat();
+
+          if (message.type === 'file_status') {
+            if (deviceId) await this.fileTransfers.handleStatus(deviceId, message);
+            return;
+          }
 
           if (message.type === 'approval_request' || message.type === 'approval_resolved') {
             if (!approvalCardsEnabled || !deviceId) return;
@@ -402,8 +472,38 @@ export class RouterServer {
 
             case MessageType.BINDING_REQUEST:
               // Device sends binding request with deviceId and optional protocolVersion
-              deviceId = message.data.deviceId;
-              if (deviceId) {
+              if (authenticationPending || deviceId) break;
+              if (typeof message.data?.deviceId === 'string' && /^[a-zA-Z0-9_-]{1,200}$/.test(message.data.deviceId)) {
+                authenticationPending = true;
+                const requestedId: string = message.data.deviceId;
+                let authenticatedOwner: string | undefined;
+                try {
+                  const enrolled = await this.deviceAuth.get(requestedId);
+                  if (enrolled) {
+                    if (!message.data.deviceSignature && !enrolled.revoked) {
+                      const nonce = this.deviceAuth.challenge(ws, requestedId);
+                      ws.send(JSON.stringify({ type: 'device_challenge', data: { nonce } }));
+                      if (challengeTimer) clearTimeout(challengeTimer);
+                      challengeTimer = setTimeout(() => ws.close(), 15_000);
+                      break;
+                    }
+                    const proof = await this.deviceAuth.verify(ws, requestedId, message.data.deviceSignature);
+                    if (!proof || (await this.bindingManager.getDeviceBinding(requestedId))?.openId !== proof.openId
+                      || !this.deviceAuth.isCurrent(requestedId, proof)) {
+                      ws.send(JSON.stringify({ type: 'error', data: { code: 'DEVICE_AUTH_REQUIRED', message: 'Device authentication failed. Approve a new key using remote-cli files enable --rotate.' } }));
+                      ws.close();
+                      break;
+                    }
+                    authenticatedOwner = proof.openId;
+                  }
+                  if (ws.readyState !== WebSocket.OPEN) break;
+                } catch {
+                  ws.send(JSON.stringify({ type: 'error', data: { code: 'DEVICE_AUTH_REQUIRED', message: 'Device authentication is unavailable. Ask the Router administrator to check the authentication store.' } }));
+                  ws.close();
+                  break;
+                } finally { authenticationPending = false; }
+                if (challengeTimer) clearTimeout(challengeTimer);
+                deviceId = requestedId;
                 // Version check: missing protocolVersion defaults to 1 (current baseline)
                 const clientVersion: number = message.data?.protocolVersion ?? 1;
                 if (clientVersion < MIN_SUPPORTED_CLI_VERSION) {
@@ -430,9 +530,13 @@ export class RouterServer {
                   this.connectionHub.registerConnection(deviceId, ws);
                 }
                 console.log(`Device registered: ${deviceId} (protocol v${clientVersion})`);
+                const filesEnabled = Boolean(this.fileTransfers.enabled && authenticatedOwner && message.data.capabilities?.fileTransferV1 === true);
+                if (filesEnabled) this.connectionHub.setFileSession(deviceId, { id: randomUUID(), openId: authenticatedOwner! });
+                this.fileTransfers.disconnect(deviceId);
 
                 taskRecoveryEnabled = message.data.capabilities?.taskRecovery === true;
                 approvalCardsEnabled = message.data.capabilities?.approvalCards === true;
+                streamingContextEnabled = message.data.capabilities?.streamingContext === true;
                 delegationProgressEnabled = message.data.capabilities?.delegationProgress === true;
                 delegationProgressTextEnabled = delegationProgressEnabled
                   && message.data.capabilities?.delegationProgressText === true;
@@ -445,11 +549,13 @@ export class RouterServer {
                     success: true,
                     routerVersion: ROUTER_VERSION,
                     minCliVersion: MIN_SUPPORTED_CLI_VERSION,
-                    ...((taskRecoveryEnabled || approvalCardsEnabled || delegationProgressEnabled) ? { capabilities: {
+                    ...((taskRecoveryEnabled || approvalCardsEnabled || delegationProgressEnabled || streamingContextEnabled || filesEnabled) ? { capabilities: {
+                      ...(filesEnabled ? { fileTransferV1: true } : {}),
                       ...(taskRecoveryEnabled ? { taskRecovery: true } : {}),
                       ...(approvalCardsEnabled ? { approvalCards: true } : {}),
                       ...(delegationProgressEnabled ? { delegationProgress: true } : {}),
                       ...(delegationProgressTextEnabled ? { delegationProgressText: true } : {}),
+                      ...(streamingContextEnabled ? { streamingContext: true } : {}),
                     } } : {}),
                   }
                 }));
@@ -480,7 +586,8 @@ export class RouterServer {
               const responseMessageId = message.messageId;
               const sessionAbbr = message.sessionAbbr || message.data?.sessionAbbr;
               const cwd = message.cwd || message.data?.cwd || this.streamingMessages.get(message.messageId)?.queueStarted?.cwd
-                || this.streamingMessages.get(message.messageId)?.recoveryCwd;
+                || this.streamingMessages.get(message.messageId)?.recoveryCwd
+                || this.streamingMessages.get(message.messageId)?.cwd;
               const responseThreadId = message.threadId || message.data?.threadId;
               const responseThreads: ThreadSummary[] | undefined = message.threads || message.data?.threads;
               const queueConfirmation: QueueConfirmationInfo | undefined = message.queueConfirmation || message.data?.queueConfirmation;
@@ -490,12 +597,12 @@ export class RouterServer {
               if (responseThreadId && responseMessageId) {
                 const session = this.streamingMessages.get(responseMessageId);
                 if (session) {
-                  if (session.feishuMessageId && !session.threadId) {
+                  if (session.feishuMessageId && session.threadId !== responseThreadId) {
                     session.threadId = responseThreadId;
                     this.cardThreadMap.set(session.feishuMessageId, { threadId: responseThreadId, deviceId: session.deviceId, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS });
                   }
                   // Resolve thread name from the threads summary array
-                  if (!session.threadName && responseThreads) {
+                  if (responseThreads) {
                     const match = responseThreads.find(t => t.id === responseThreadId);
                     if (match) session.threadName = match.name;
                   }
@@ -556,6 +663,10 @@ export class RouterServer {
                   ws.send(JSON.stringify({ type: 'task_result_ack', messageId: responseMessageId, timestamp: Date.now() }));
                 }
               }
+              break;
+
+            case 'stream_context':
+              if (streamingContextEnabled) await this.handleStreamContext(message, deviceId);
               break;
 
             case 'stream':
@@ -650,8 +761,10 @@ export class RouterServer {
 
       // Handle connection close
       ws.on('close', () => {
+        if (challengeTimer) clearTimeout(challengeTimer);
         if (heartbeatTimeout) clearTimeout(heartbeatTimeout);
         if (deviceId && this.connectionHub.unregisterConnection(deviceId, ws)) {
+          this.fileTransfers.disconnect(deviceId);
           // Clean up any streaming sessions for this device
           this.approvalCards.disconnect(deviceId);
           this.cleanupStreamingSessionsForDevice(deviceId);
@@ -672,6 +785,7 @@ export class RouterServer {
    * Start the server
    */
   async start(): Promise<void> {
+    await this.fileTransfers.initialize();
     const port = this.config.get('server', 'port');
     const host = this.config.get('server', 'host');
 
@@ -710,9 +824,28 @@ export class RouterServer {
   private readonly STREAM_UPDATE_INTERVAL_MS = 500; // Update at least every 500ms
   private readonly STREAM_UPDATE_MIN_LENGTH = 10;   // Update every 10 characters
 
-  /**
-   * Handle streaming chunk from device
-   */
+  /** Resolve the card header without waiting for backend text or completion. */
+  private async handleStreamContext(message: any, deviceId: string | null): Promise<void> {
+    const { messageId, openId, threadId, threadName, cwd } = message;
+    if (!deviceId || typeof messageId !== 'string' || typeof openId !== 'string'
+      || typeof threadId !== 'string' || !threadId || threadId.length > 200
+      || typeof threadName !== 'string' || !threadName.trim() || threadName.length > 100
+      || typeof cwd !== 'string' || cwd.length > 4096) return;
+    const stream = this.streamingMessages.get(messageId);
+    if (!stream || stream.finalizing || stream.deviceId !== deviceId || stream.openId !== openId
+      || (stream.threadId && stream.threadId !== threadId)) return;
+    if (stream.threadId === threadId && stream.threadName === threadName && stream.cwd === cwd) return;
+    stream.threadId = threadId;
+    stream.threadName = threadName;
+    stream.cwd = cwd;
+    if (stream.feishuMessageId) {
+      this.cardThreadMap.set(stream.feishuMessageId, {
+        threadId, deviceId, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS,
+      });
+      await this.updateStreamingText(messageId, openId, stream);
+    }
+  }
+
   /**
    * Handle text streaming chunk
    */
@@ -796,13 +929,16 @@ export class RouterServer {
       }
 
       streamData.lastRenderedTextLength = streamData.currentTextContent.length;
-      streamData.hasUpdated = true;
+      // A metadata-only patch must not delay the first actual text token.
+      if (elements.length > 0) streamData.hasUpdated = true;
+      else elements.push(createMarkdownElement('🤔 Processing...'));
       this.lastStreamUpdateTime.set(messageId, Date.now());
       await this.feishuLongConnHandler.updateStreamingMessage(
         streamData.feishuMessageId,
         elements,
         openId,
-        streamData.threadName
+        streamData.threadName,
+        streamData.cwd
       );
     } while (streamData.updatePending);
   }
@@ -839,7 +975,8 @@ export class RouterServer {
         streamData.feishuMessageId,
         streamData.elements,
         openId,
-        streamData.threadName
+        streamData.threadName,
+        streamData.cwd
       );
       streamData.hasUpdated = true;
     }
@@ -877,7 +1014,8 @@ export class RouterServer {
         streamData.feishuMessageId,
         streamData.elements,
         openId,
-        streamData.threadName
+        streamData.threadName,
+        streamData.cwd
       );
       streamData.hasUpdated = true;
     }
@@ -1164,7 +1302,8 @@ export class RouterServer {
         streamData.feishuMessageId,
         streamData.elements,
         openId,
-        streamData.threadName
+        streamData.threadName,
+        streamData.cwd
       );
       streamData.hasUpdated = true;
     }
@@ -1201,7 +1340,8 @@ export class RouterServer {
         streamData.feishuMessageId,
         streamData.elements,
         openId,
-        streamData.threadName
+        streamData.threadName,
+        streamData.cwd
       );
       streamData.hasUpdated = true;
     }
@@ -1234,7 +1374,8 @@ export class RouterServer {
         streamData.feishuMessageId,
         streamData.elements,
         openId,
-        streamData.threadName
+        streamData.threadName,
+        streamData.cwd
       );
       streamData.hasUpdated = true;
     }
@@ -1303,6 +1444,7 @@ export class RouterServer {
         previous.recoveryId = info.recoveryId;
         previous.recoveryCardPending = true;
         previous.recoveryCwd = info.cwd;
+        previous.cwd = info.cwd;
         previous.threadId = previous.threadId ?? threadId;
         previous.threadName = previous.threadName ?? info.threadName;
         previous.createdAt = Date.now();
@@ -1312,7 +1454,7 @@ export class RouterServer {
         if (previous.currentTextContent.trim()) elements.push(...this.renderCurrentText(previous));
         const textLength = previous.currentTextContent.length;
         const updated = await this.feishuLongConnHandler.updateStreamingMessage(
-          previous.feishuMessageId!, elements, openId, previous.threadName
+          previous.feishuMessageId!, elements, openId, previous.threadName, previous.cwd
         );
         if (!updated || !isCurrent() || this.streamingMessages.get(messageId) !== previous) return false;
         // Keep the staged recovery notice on failure so the same round can retry
@@ -1329,11 +1471,11 @@ export class RouterServer {
         + `Output before this card, including output during disconnection, was not retained.\n\n`
         + `**Thread:** <raw>${escape(info.threadName)}</raw> · **Backend:** <raw>${escape(info.backend)}</raw>\n`
         + `**Working directory:** <raw>${escape(info.cwd)}</raw>\n**Task:** <raw>${escape(info.preview)}</raw>`;
-      const cardId = await this.feishuLongConnHandler.sendStreamingStart(openId, intro, info.threadName);
+      const cardId = await this.feishuLongConnHandler.sendStreamingStart(openId, intro, info.threadName, info.cwd);
       if (!cardId || !isCurrent()) return false;
       if (previous) this.clearDelegationProgressTimers(previous);
       this.streamingMessages.set(messageId, {
-        openId, deviceId, threadId, threadName: info.threadName, feishuMessageId: cardId,
+        openId, deviceId, threadId, threadName: info.threadName, cwd: info.cwd, feishuMessageId: cardId,
         elements: [createMarkdownElement(intro)], currentTextContent: '', hasUpdated: false,
         createdAt: Date.now(), updatePending: false, finalizing: false, lastRenderedTextLength: 0,
         delegationProgress: new Map(),
@@ -1375,7 +1517,7 @@ export class RouterServer {
 **Remaining in queue:** ${info.remainingCount}`;
       let cardId: string | null = null;
       try {
-        cardId = await this.feishuLongConnHandler.sendStreamingStart(openId, intro, info.threadName);
+        cardId = await this.feishuLongConnHandler.sendStreamingStart(openId, intro, info.threadName, info.cwd);
       } catch (error) {
         console.error('[RouterServer] Failed to create queued execution card:', error);
       }
@@ -1388,6 +1530,7 @@ export class RouterServer {
         deviceId,
         threadId,
         threadName: info.threadName,
+        cwd: info.cwd,
         feishuMessageId: cardId || fallbackCardId,
         elements: [createMarkdownElement(intro)],
         currentTextContent: '',
@@ -1620,6 +1763,7 @@ export class RouterServer {
   async stop(): Promise<void> {
     console.log('Stopping router server...');
     this.approvalCards.destroy();
+    await this.fileTransfers.destroy();
 
     // Stop cleanup interval
     if (this.cleanupInterval) {

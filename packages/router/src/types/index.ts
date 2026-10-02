@@ -26,6 +26,7 @@ export const ROUTER_VERSION = version;
 
 // Binding code (valid for 5 minutes)
 export interface BindingCode {
+  devicePublicKey?: string;
   code: string;           // "ABC-123-XYZ"
   deviceId: string;       // "dev_mac_xxx"
   createdAt: number;      // Creation timestamp
@@ -110,6 +111,8 @@ export interface WSMessage {
 // Command message
 export interface CommandMessage extends WSMessage {
   type: MessageType.COMMAND;
+  /** Optional references on the actual top-level command envelope. */
+  fileIds?: string[];
   data: {
     openId: string;
     content: string;

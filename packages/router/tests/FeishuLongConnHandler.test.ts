@@ -85,6 +85,51 @@ describe('FeishuLongConnHandler', () => {
   });
 
   describe('sendMessage', () => {
+    it('stages files without model execution and resolves replies after admission completes', async () => {
+      const forwarded = vi.spyOn(handler as any, 'handleRegularCommand').mockResolvedValue(undefined);
+      let complete!: () => void; let ready = false;
+      handler.onFileMessage = vi.fn(() => new Promise(resolve => { complete = () => { ready = true; resolve(); }; }));
+      handler.onResolveFile = () => ready ? { id: 'a'.repeat(64), deviceId: 'original', threadId: 'thread-1' } : undefined;
+      mockBindingManager.getActiveDevice.mockResolvedValue({ deviceId: 'original' });
+      const event = (type: string, id: string, content: object, parent_id?: string) => ({ sender: { sender_id: { open_id: 'owner' } }, message: { message_type: type, message_id: id, content: JSON.stringify(content), parent_id } });
+      const file = (handler as any).handleMessageEvent(event('file', 'file_message', { file_key: 'file_key', file_name: 'report.pdf' }));
+      await vi.waitFor(() => expect(handler.onFileMessage).toHaveBeenCalled());
+      const reply = (handler as any).handleMessageEvent(event('text', 'reply', { text: 'Summarize this' }, 'file_message'));
+      expect(forwarded).not.toHaveBeenCalled(); complete(); await Promise.all([file, reply]);
+      expect(forwarded).toHaveBeenCalledOnce();
+      expect(forwarded.mock.calls[0][3]).toBe('thread-1');
+      expect(forwarded.mock.calls[0].at(-1)).toMatchObject({ deviceId: 'original', id: 'a'.repeat(64) });
+    });
+    it('does not let failed admission feedback poison subsequent files or abort commands', async () => {
+      mockBindingManager.getActiveDevice.mockResolvedValue({ deviceId: 'device' });
+      const reply = vi.spyOn(handler as any, 'replyToMessage').mockRejectedValue(new Error('Feishu unavailable'));
+      handler.onFileMessage = vi.fn().mockRejectedValueOnce(new Error('quota')).mockResolvedValue(undefined);
+      const event = (id: string) => ({ sender: { sender_id: { open_id: 'owner' } }, message: { message_type: 'file', message_id: id, content: JSON.stringify({ file_key: 'key', file_name: 'data.txt' }) } });
+      await Promise.all([(handler as any).handleMessageEvent(event('file_1')), (handler as any).handleMessageEvent(event('file_2'))]);
+      expect(handler.onFileMessage).toHaveBeenCalledTimes(2); expect(reply).toHaveBeenCalled();
+    });
+    it('pins a file uploaded as a reply to the original owned device, not the active device', async () => {
+      handler.onResolveFile = () => ({ id: 'a'.repeat(64), deviceId: 'original', threadId: 'thread-1' });
+      handler.onFileMessage = vi.fn();
+      mockBindingManager.getActiveDevice.mockResolvedValue({ deviceId: 'other' });
+      mockBindingManager.getUserDevices.mockResolvedValue([{ deviceId: 'original' }, { deviceId: 'other' }]);
+      await (handler as any).handleMessageEvent({ sender: { sender_id: { open_id: 'owner' } }, message: {
+        message_type: 'file', message_id: 'file_new', parent_id: 'old_file', content: JSON.stringify({ file_key: 'key', file_name: 'next.txt' }),
+      } });
+      expect(handler.onFileMessage).toHaveBeenCalledWith(expect.objectContaining({ deviceId: 'original', threadId: 'thread-1' }));
+    });
+    it('approves enrollment only for the public key in the verified binding code and consumes it', async () => {
+      mockBindingManager.verifyBindingCode.mockResolvedValue({ deviceId: 'device', devicePublicKey: 'test-key' });
+      mockBindingManager.getUserDevices.mockResolvedValue([{ deviceId: 'device' }]);
+      mockBindingManager.consumeBindingCode = vi.fn(); handler.onApproveDeviceKey = vi.fn();
+      await (handler as any).handleBindCommand('owner', 'source', '123456');
+      expect(handler.onApproveDeviceKey).toHaveBeenCalledWith('owner', 'device', 'test-key');
+      expect(mockBindingManager.consumeBindingCode).toHaveBeenCalledWith('123456');
+      mockBindingManager.bindUser.mockRejectedValue(new Error('other owner'));
+      vi.mocked(handler.onApproveDeviceKey).mockClear();
+      await (handler as any).handleBindCommand('stranger', 'source', '123456');
+      expect(handler.onApproveDeviceKey).not.toHaveBeenCalled();
+    });
     it('should send text message successfully', async () => {
       mockClient.im.message.create.mockResolvedValue({ data: { message_id: 'msg_123' } });
 
@@ -111,6 +156,34 @@ describe('FeishuLongConnHandler', () => {
   });
 
   describe('sendStreamingStart', () => {
+    it('only abbreviates a home directory at a complete leading path boundary', async () => {
+      mockClient.im.message.create.mockResolvedValue({ data: { message_id: 'initial' } });
+      const home = process.env.HOME;
+      if (!home) return;
+      const cases = [
+        [home, '~'], [`${home}/project`, '~/project'],
+        [`${home}-other/project`, `${home}-other/project`],
+        [`/archive${home}/project`, `/archive${home}/project`],
+      ];
+      for (const [cwd, display] of cases) {
+        await handler.sendStreamingStart('owner', 'Processing...', 'thread-9', cwd);
+        const elements = JSON.parse(mockClient.im.message.create.mock.calls.at(-1)[0].data.content).body.elements;
+        expect(elements[0].content).toBe(`🧵 **thread-9**  ·  📂 \`${display}\``);
+      }
+    });
+
+    it('shows a header at creation, including an honest placeholder before the CLI resolves the thread', async () => {
+      mockClient.im.message.create.mockResolvedValue({ data: { message_id: 'initial' } });
+      await handler.sendStreamingStart('owner');
+      expect(JSON.parse(mockClient.im.message.create.mock.calls[0][0].data.content).body.elements.slice(0, 2)).toEqual([
+        { tag: 'markdown', content: '🧵 **Resolving thread...**' }, { tag: 'hr' },
+      ]);
+      await handler.sendStreamingStart('owner', 'Processing...', 'thread-9', '/workspace/project');
+      expect(JSON.parse(mockClient.im.message.create.mock.calls[1][0].data.content).body.elements.slice(0, 2)).toEqual([
+        { tag: 'markdown', content: '🧵 **thread-9**  ·  📂 `/workspace/project`' }, { tag: 'hr' },
+      ]);
+    });
+
     it('should create interactive card', async () => {
       mockClient.im.message.create.mockResolvedValue({
         data: { message_id: 'msg_card_123' }
@@ -139,6 +212,21 @@ describe('FeishuLongConnHandler', () => {
   });
 
   describe('updateStreamingMessage', () => {
+    it('keeps one header on every streaming patch and does not duplicate it at completion', async () => {
+      mockClient.im.message.patch.mockResolvedValue({});
+      const output = [{ tag: 'markdown', content: 'Partial answer' }];
+      await handler.updateStreamingMessage('card', output, 'owner', 'thread-9', '/workspace/project');
+      await handler.updateStreamingMessage('card', [...output, { tag: 'markdown', content: 'Tool finished' }], 'owner', 'thread-9', '/workspace/project');
+      await handler.finalizeStreamingMessage('card', output, undefined, 'owner', '/workspace/project', 'thread-9');
+      expect(mockClient.im.message.patch).toHaveBeenCalledTimes(3);
+      for (const [{ data }] of mockClient.im.message.patch.mock.calls) {
+        const elements = JSON.parse(data.content).body.elements;
+        expect(elements[0]).toEqual({ tag: 'markdown', content: '🧵 **thread-9**  ·  📂 `/workspace/project`' });
+        expect(elements.filter(element => element.content?.includes('🧵'))).toHaveLength(1);
+      }
+      expect(output).toEqual([{ tag: 'markdown', content: 'Partial answer' }]);
+    });
+
     const tableError = { response: { data: { code: 230099,
       msg: 'Failed to create card content, ext=ErrCode: 11310; ErrMsg: card table number over limit; ErrorValue: table;' } } };
     const markdownError = { response: { data: { code: 230099,
@@ -182,7 +270,8 @@ describe('FeishuLongConnHandler', () => {
       expect(await handler.updateStreamingMessage('root', elements, 'user')).toBe(true);
       expect(mockClient.im.message.patch).toHaveBeenCalledTimes(2);
       const fallback = JSON.parse(mockClient.im.message.patch.mock.calls[1][0].data.content);
-      expect(fallback.body.elements[0].content).toContain('```text\nA renderer-specific table fragment');
+      expect(fallback.body.elements[0].content).toContain('Resolving thread...');
+      expect(fallback.body.elements.some(element => element.content?.includes('```text\nA renderer-specific table fragment'))).toBe(true);
       expect(await handler.updateStreamingMessage('root', elements, 'user')).toBe(true);
       expect(mockClient.im.message.patch).toHaveBeenCalledTimes(2);
       expect(await handler.updateStreamingMessage('root', [{ tag: 'markdown', content: 'Later output' }], 'user')).toBe(true);
@@ -201,7 +290,8 @@ describe('FeishuLongConnHandler', () => {
       expect(mockClient.im.message.create).toHaveBeenCalledTimes(2);
       expect(mockClient.im.message.patch).toHaveBeenCalledOnce();
       const root = JSON.parse(mockClient.im.message.patch.mock.calls[0][0].data.content);
-      expect(root.body.elements[0].content).toBe('Line 0');
+      expect(root.body.elements[0].content).toBe('🧵 **Resolving thread...**');
+      expect(root.body.elements[2].content).toBe('Line 0');
       const continuation = JSON.parse(mockClient.im.message.create.mock.calls[1][0].data.content);
       expect(continuation.body.elements.some(element => element.content?.startsWith('```text\n'))).toBe(true);
     });
@@ -217,7 +307,7 @@ describe('FeishuLongConnHandler', () => {
       expect(await handler.updateStreamingMessage('root', elements, 'user')).toBe(true);
       expect(mockClient.im.message.patch).toHaveBeenCalledTimes(4);
       const recovered = JSON.parse(mockClient.im.message.patch.mock.calls[3][0].data.content);
-      expect(recovered.body.elements[0].content).toBe('```text\nRejected content\n```');
+      expect(recovered.body.elements.some(element => element.content === '```text\nRejected content\n```')).toBe(true);
       expect(await handler.updateStreamingMessage('root', elements, 'user')).toBe(true);
       expect(mockClient.im.message.patch).toHaveBeenCalledTimes(4);
     });
@@ -267,7 +357,9 @@ describe('FeishuLongConnHandler', () => {
       expect(await handler.updateStreamingMessage('healthy', normal, 'user-b')).toBe(true);
       const request = mockClient.im.message.patch.mock.calls.at(-1)[0];
       expect(request.path.message_id).toBe('healthy');
-      expect(JSON.parse(request.data.content).body.elements).toEqual(normal);
+      expect(JSON.parse(request.data.content).body.elements).toEqual([
+        { tag: 'markdown', content: '🧵 **Resolving thread...**' }, { tag: 'hr' }, ...normal,
+      ]);
     });
 
     it('should update message within limit', async () => {
@@ -284,6 +376,8 @@ describe('FeishuLongConnHandler', () => {
             schema: '2.0',
             body: {
               elements: [
+                { tag: 'markdown', content: '🧵 **Resolving thread...**' },
+                { tag: 'hr' },
                 {
                   tag: 'markdown',
                   content: 'Short content'
@@ -366,6 +460,8 @@ describe('FeishuLongConnHandler', () => {
             schema: '2.0',
             body: {
               elements: [
+                { tag: 'markdown', content: '🧵 **Resolving thread...**' },
+                { tag: 'hr' },
                 {
                   tag: 'markdown',
                   content: 'Final content'
@@ -542,7 +638,7 @@ describe('FeishuLongConnHandler', () => {
   describe('streaming card update cost', () => {
     it.each([
       { elements: 160, cards: 2 },
-      { elements: 7400, cards: 50 },
+      { elements: 7250, cards: 50 },
     ])('patches only the changed tail in a $cards-card reply', async ({ elements: count, cards }) => {
       let nextCard = 0;
       mockClient.im.message.patch.mockResolvedValue({});
@@ -1041,12 +1137,15 @@ describe('FeishuLongConnHandler', () => {
         data: { message_id: 'msg_continuation_1' },
       });
 
-      const result = await handler.updateStreamingMessage(messageId, elements, openId, 'thread-2');
+      const result = await handler.updateStreamingMessage(messageId, elements, openId, 'thread-2', '/workspace/project');
 
       expect(result).toBe(true);
 
       // Should update the original message
       expect(mockClient.im.message.patch).toHaveBeenCalled();
+      expect(JSON.parse(mockClient.im.message.patch.mock.calls[0][0].data.content).body.elements[0]).toEqual({
+        tag: 'markdown', content: '🧵 **thread-2**  ·  📂 `/workspace/project`',
+      });
 
       // Should create at least one continuation card
       expect(mockClient.im.message.create).toHaveBeenCalled();
@@ -1054,7 +1153,7 @@ describe('FeishuLongConnHandler', () => {
       const createRequest = mockClient.im.message.create.mock.calls[0][0];
       const continuationElements = JSON.parse(createRequest.data.content).body.elements;
       expect(continuationElements.slice(0, 3)).toEqual([
-        { tag: 'markdown', content: '🧵 **thread-2**' },
+        { tag: 'markdown', content: '🧵 **thread-2**  ·  📂 `/workspace/project`' },
         { tag: 'hr' },
         expect.objectContaining({ content: expect.stringContaining('Continued from previous message') }),
       ]);
@@ -1823,16 +1922,16 @@ describe('FeishuLongConnHandler', () => {
       );
     });
 
-    it('should ignore non-text/post messages', async () => {
+    it('should ignore unsupported folder messages', async () => {
       const logSpy = vi.spyOn(console, 'log');
       const data = {
-        message: { message_type: 'file', content: '{}' },
+        message: { message_type: 'folder', content: '{}' },
         sender: { sender_id: { open_id: 'ou_123' } }
       };
 
       await (handler as any).handleMessageEvent(data);
 
-      expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Skipping message type: file'));
+      expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Skipping message type: folder'));
     });
 
     it('should ignore empty content messages', async () => {
@@ -1907,7 +2006,8 @@ describe('FeishuLongConnHandler', () => {
         type: 'command', openId: 'ou_123', content: 'Continue this task', threadId: expectedThreadId,
       }));
       const command = mockConnectionHub.sendToDevice.mock.calls[0][1];
-      expect(onStartStreaming).toHaveBeenCalledWith(command.messageId, 'ou_123', 'reply-card', 'dev_1', expectedThreadId, false);
+      expect(onStartStreaming).toHaveBeenCalledWith(command.messageId, 'ou_123', 'reply-card', 'dev_1', expectedThreadId, false,
+        undefined, !parentId && activeThreadId ? 'Selected' : undefined);
     });
 
     it('should handle errors in handleMessageEvent', async () => {

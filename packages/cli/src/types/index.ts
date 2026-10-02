@@ -176,6 +176,8 @@ export interface IncomingMessage {
   content?: string;
   /** Optional attachments (e.g. images) */
   attachments?: Attachment[];
+  /** References to staged files; file bytes never travel in this envelope. */
+  fileIds?: string[];
   workingDirectory?: string;
   openId?: string;
   timestamp: number;
@@ -221,7 +223,7 @@ export interface TaskResumeInfo {
 
 /** Outgoing message to router server. */
 export interface OutgoingMessage {
-  type: 'result' | 'progress' | 'status' | 'pong' | 'structured' | 'stream' | 'response' | 'task_notification' | 'queue_started' | 'task_resume';
+  type: 'result' | 'progress' | 'status' | 'pong' | 'structured' | 'stream' | 'response' | 'task_notification' | 'queue_started' | 'task_resume' | 'stream_context';
   messageId: string;
   success?: boolean;
   /** Plain text output (for backward compatibility) */
@@ -252,7 +254,7 @@ export interface OutgoingMessage {
   taskNotification?: TaskNotificationInfo;
   /** Thread ID that produced this output (optional — for multi-thread routing) */
   threadId?: string;
-  /** Thread display name (optional — for background task notification cards) */
+  /** Thread display name for task notifications and negotiated stream_context messages. */
   threadName?: string;
   /** Runtime thread summaries (for card display) */
   threads?: ThreadSummary[];
@@ -262,7 +264,7 @@ export interface OutgoingMessage {
   queueStarted?: QueueStartedInfo;
   /** Bounded task metadata; never contains buffered stream output. */
   taskResume?: TaskResumeInfo;
-  /** Current working directory (for response messages) */
+  /** Current working directory for responses and negotiated stream_context messages. */
   cwd?: string;
   /** Session abbreviation */
   sessionAbbr?: string;

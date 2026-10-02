@@ -706,6 +706,8 @@ Start multiple independent sessions simultaneously.
 
 *Tip: Reply directly to a card message from a specific thread to continue the conversation in that thread.*
 
+Streaming response cards and every continuation card keep their thread heading visible while text and tools are still arriving. With both CLI and Router 1.6.113 or newer, the CLI sends the actual thread name and working directory before backend output starts. A newly created card may briefly show `Resolving thread...` until the CLI confirms the context. This uses an optional negotiated capability: older peers remain compatible, but an older CLI may only supply the thread name in its final response.
+
 ### Backend Switching
 
 Backend selection supports both global and per-thread modes:
@@ -747,7 +749,7 @@ Codex watches native command completion events and sub-agent terminal states. Co
 
 ### Image Input
 
-You can send a standalone image or a rich-text message containing both text and images to the Feishu bot. remote-cli downloads the image resources and forwards the text and images together to the active Claude Persistent, Codex App Server, OpenCode ACP, Kimi Code ACP, ZCode app-server, or Pi RPC backend. AGY currently accepts text only and will not process image attachments. Ordinary file attachments are not supported yet.
+You can send a standalone image or a rich-text message containing both text and images to the Feishu bot. remote-cli downloads the image resources and forwards the text and images together to the active Claude Persistent, Codex App Server, OpenCode ACP, Kimi Code ACP, ZCode app-server, or Pi RPC backend. AGY currently accepts text only and will not process image attachments. For ordinary documents, see [File Attachments](#file-attachments).
 
 Codex App Server generated images are also forwarded back to Feishu. Codex emits the generated image through its app-server protocol; the CLI sends it to Router, Router uploads it to Feishu, and the image is rendered in the existing Card 2.0 response. This requires both CLI and Router versions with image forwarding support. Upgrading only Router is backward-compatible, but an older CLI will not generate or send image events; upgrading only CLI is also safe, but an older Router will ignore the optional image stream and still show the text response.
 
@@ -762,6 +764,30 @@ or final rendering. Code examples and inline references to Feishu `img_` keys
 are preserved. An older CLI without image forwarding can still show the caption.
 Router 1.6.89 and newer recognize Markdown list and quote boundaries when
 filtering image references, preserving actual fenced and indented code examples.
+
+### File Attachments
+
+File reception requires **both CLI and Router 1.6.113 or newer**, TLS, and explicit device enrollment. Upgrading alone does not enable downloads.
+
+1. Configure the Router's JSON configuration with a `files` section:
+   ```json
+   { "files": { "publicUrl": "https://router.example.com", "maxBytes": 20971520 } }
+   ```
+   Use the same origin as the CLI's WSS address. Expose `/api/files/` through the existing authenticated Router application, without proxy caching. HTTP is allowed only for local development on `localhost`, `127.0.0.1`, or `[::1]`. The maximum is **20 MiB per file (20,971,520 bytes)**; `maxBytes` may lower, but never raise, it. Ensure the bot has permission to download message resources.
+2. Restart the upgraded Router using your normal deployment procedure. On the intended CLI machine, run `remote-cli files enable`, approve the printed `/bind CODE` in Feishu, then reconnect/restart the upgraded CLI yourself. This provisions a per-Router Ed25519 identity, not an API key shared with the model. Lost keys require `remote-cli files enable --rotate` and another owner approval.
+3. Upload a file, then send instructions in the same thread, such as “Summarize this report”. You may send the instructions while downloading: execution waits for verified storage and bounded extraction. Replying to the original file or its status card selects that exact file, device, and thread. A file upload alone does **not** start a model task.
+
+Feishu delivers ordinary files as separate messages, not as an inline image-like caption. Send the file first, then text (or a text-and-image message), or reply to its card. Observed preceding files are staged for the next normal command. Already-running tasks do not gain later uploads. Switching device or thread does not redirect admitted transfers. Changing working directory invalidates old references. Queued tasks pin their files; cancelling restores unused attachments. Failed or missing referenced files stop that task with an error rather than silently running without them.
+
+`/files` lists this thread's local attachments; `/files clear` removes unused terminal copies. Active downloads and queued/running references are preserved. Deleting a thread removes its attachment copies. Removal cannot be undone; re-upload to restore.
+
+The data plane is **Feishu → Router private spool → same-Router HTTPS → CLI private staging**. WebSocket messages contain only identifiers, size, SHA-256 and short-lived authorization metadata, never the file body or base64. Downloads enforce actual byte limits, hashes, redirects refusal, idle/total deadlines and bounded concurrency (4 Router transfers total, 1 per device through verified receipt). Oversize, quota, permission, offline-device, timeout and extraction errors produce explicit status feedback. Interrupted transfers are not replayed across reconnects.
+
+Text/code, CSV, JSON, YAML, text-based PDF, DOCX main-body text and XLSX cells receive bounded text previews. PDF output includes page numbers; spreadsheets include sheet names and cell addresses. Limits include 30 seconds per extraction, 2 MiB preview text, 100 PDF pages, 50 sheets / 10,000 cells, and 40 MiB expanded Office XML. Parser workers keep extraction off the control event loop; they are not an OS sandbox. Macros/formulas are not executed. OCR, password-protected documents, legacy `.doc`/`.xls`, and general archive extraction are not included. “Original saved”, “parsed”, “partial”, and “unsupported” are distinct: a successful download does not imply complete understanding.
+
+All seven backends receive local original/preview paths through the shared command path; they still need their normal tools and native permissions to read them. Contents are untrusted user data, not instructions. Files live under private opaque directories outside the project, not under supplied filenames. CLI storage is bounded to 200 MiB / 100 records including reserved previews, with 7-day expiry (CLI configuration: `files.retentionDays`, integer 1–30, applied to new uploads); Router spool is bounded to 400 MiB / 100 records / 20 per device, with 24-hour expiry (failed records expire after 15 minutes). Expired unpinned records are cleaned on startup and subsequent file activity; no background deletion happens while the service is stopped. Limits can reject another upload before expiry; `/files clear` only clears CLI copies, not Router spool records.
+
+**Compatibility:** a new Router keeps normal text/images working for old, unenrolled CLIs and rejects files with an upgrade/enrollment explanation. A new CLI with an old Router retains ordinary behavior but cannot receive files (old Routers may ignore file messages). Once an owner enrolls a device ID, credentialless older CLIs can no longer register as that ID: there is deliberately no authentication downgrade. Unbinding revokes the key and existing downloads. No backend credentials, global permissions, or sandbox rules are relaxed.
 
 ### Models and Reasoning Effort
 
