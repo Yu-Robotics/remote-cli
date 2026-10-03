@@ -21,16 +21,22 @@ describe('ZCodeCommand', () => {
     await fs.rm(temporaryDirectory, { recursive: true, force: true });
   });
 
-  it('preserves native empty-command discovery without falling back for a nonempty invalid override', async () => {
-    const native = path.join(temporaryDirectory, 'zcode');
-    const envEntry = path.join(temporaryDirectory, 'environment-zcode.cjs');
+  it.each(['direct', 'aliased'] as const)('preserves native empty-command discovery with %s paths without falling back for a nonempty invalid override', async (pathKind) => {
+    const commandDirectory = path.join(temporaryDirectory, 'commands');
+    await fs.mkdir(commandDirectory);
+    const discoveryDirectory = pathKind === 'aliased' ? path.join(temporaryDirectory, 'commands-alias') : commandDirectory;
+    if (pathKind === 'aliased') {
+      await fs.symlink(commandDirectory, discoveryDirectory, process.platform === 'win32' ? 'junction' : 'dir');
+    }
+    const native = path.join(discoveryDirectory, 'zcode');
+    const envEntry = path.join(discoveryDirectory, 'environment-zcode.cjs');
     await fs.writeFile(native, '#!/usr/bin/env node\n', { mode: 0o755 });
     await fs.writeFile(envEntry, '// Synthetic environment entry.\n');
-    vi.stubEnv('PATH', temporaryDirectory);
+    vi.stubEnv('PATH', discoveryDirectory);
     vi.stubEnv('ZCODE_BIN', envEntry);
-    expect(findZCodeEntry(getBackendCommand('zcode'))).toBe(await fs.realpath(envEntry));
-    expect(findZCodeEntry(getBackendCommand('zcode', { type: 'zcode', zcode: { command: '' } }))).toBe(await fs.realpath(native));
-    expect(findZCodeEntry(getBackendCommand('zcode', { type: 'zcode', zcode: { command: path.join(temporaryDirectory, 'missing') } }))).toBeNull();
+    expect(findZCodeEntry(getBackendCommand('zcode'))).toBe(envEntry);
+    expect(findZCodeEntry(getBackendCommand('zcode', { type: 'zcode', zcode: { command: '' } }))).toBe(native);
+    expect(findZCodeEntry(getBackendCommand('zcode', { type: 'zcode', zcode: { command: path.join(discoveryDirectory, 'missing') } }))).toBeNull();
   });
 
   it('launches the official bundled script through Node with provider config paths', async () => {
