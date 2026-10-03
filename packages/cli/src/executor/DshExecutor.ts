@@ -8,6 +8,7 @@ import type { AcpEventCallbacks, AcpTransport } from './acp/AcpClient';
 import type { ExecuteOptions, ExecuteResult, ExecutorContextUsage, ExecutorModelInfo } from './IExecutor';
 import { COMPACT_HANDOFF_PROMPT, seedPromptWithHandoff } from './compactHandoff';
 import { DshAcpClient } from './dsh/DshAcpClient';
+import { queryDshAccountUsage } from './dsh/DshAccountUsage';
 
 export interface DshExecutorOptions {
   model?: string;
@@ -19,6 +20,7 @@ export interface DshExecutorOptions {
   delegationWorker?: boolean;
   sessionBaseDir?: string;
   clientFactory?: (callbacks: AcpEventCallbacks, cwd: string) => AcpTransport;
+  accountUsageQuery?: (command: string, cwd: string) => Promise<string | null>;
 }
 
 interface Handoff { text: string; cwd: string; sourceSessionId: string | null }
@@ -37,6 +39,8 @@ const COMPACT_CONTEXT_UNAVAILABLE = 'The saved DSH context cannot be resumed ove
 export class DshExecutor extends AcpExecutor {
   private readonly state: DshState;
   private readonly handoffFile: string;
+  private readonly dshCommand: string;
+  private readonly accountUsageQuery: NonNullable<DshExecutorOptions['accountUsageQuery']>;
 
   constructor(guard: DirectoryGuard, options: DshExecutorOptions = {}) {
     // Do not silently launch a DSH task in a different workspace when admission fails.
@@ -114,6 +118,8 @@ export class DshExecutor extends AcpExecutor {
     });
     this.state = state;
     this.handoffFile = handoffFile;
+    this.dshCommand = options.dshCommand ?? 'dsh';
+    this.accountUsageQuery = options.accountUsageQuery ?? queryDshAccountUsage;
     try {
       const stat = fs.lstatSync(handoffFile);
       if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 300_000) throw new Error('Invalid DSH handoff file');
@@ -139,6 +145,9 @@ export class DshExecutor extends AcpExecutor {
 
   isBusy(): boolean { return this.state?.compacting === true || super.isBusy(); }
   getContextUsage(): ExecutorContextUsage | null { return this.state.usage; }
+  getAccountUsage(): Promise<string | null> {
+    return this.accountUsageQuery(this.dshCommand, this.getCurrentWorkingDirectory());
+  }
 
   async listModels(): Promise<ExecutorModelInfo[]> {
     return (await super.listModels()).map(model => ({ ...model,

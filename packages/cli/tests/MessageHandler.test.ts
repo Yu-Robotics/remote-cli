@@ -634,6 +634,22 @@ describe('MessageHandler', () => {
       expect(response.output).not.toContain('Plan usage');
     });
 
+    it('shows DSH wallet balances without invoking a model turn', async () => {
+      ctx.mockConfig.get.mockReturnValue({ type: 'dsh' });
+      ctx.mockThreadPool.getBackendKey.mockReturnValue('dsh');
+      ctx.mockExecutor.getAccountUsage = vi.fn().mockResolvedValue('- Recharge balance: CNY 12.34000001\n- Bonus balance: USD 0');
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-dsh-balance', content: '/status', timestamp: Date.now() });
+
+      const response = vi.mocked(ctx.mockWsClient.send).mock.calls.at(-1)?.[0];
+      expect(response).toMatchObject({ success: true });
+      expect(response.output).toContain('Backend: dsh');
+      expect(response.output).toContain('Recharge balance: CNY 12.34000001');
+      expect(response.output).toContain('Bonus balance: USD 0');
+      expect(ctx.mockExecutor.getAccountUsage).toHaveBeenCalledOnce();
+      expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
+    });
+
     it('should show context diagnostics without invoking the executor', async () => {
       ctx.mockExecutor.getSessionId = vi.fn(() => 'session-123');
 
