@@ -551,6 +551,32 @@ function delegatedCurrentActivity(state: DelegationProgressCardState): string {
   return state.phase === 'started' ? 'Starting…' : 'Waiting for output…';
 }
 
+interface DelegationContentSection {
+  content: string;
+  label?: string;
+  labelColor?: string;
+}
+
+/** Keep fixed progress labels visually separate from untrusted worker Markdown. */
+function createDelegationContentBody(sections: DelegationContentSection[]): FeishuCardElement {
+  const elements = sections.flatMap(section => {
+    const content = createMarkdownElement(section.content);
+    if (!section.label) return [content];
+    return [
+      {
+        tag: 'markdown',
+        content: `<font color='${section.labelColor ?? 'grey'}'>${section.label}</font>`,
+        text_size: 'notation',
+      },
+      content,
+    ];
+  });
+  return limitCardTables({
+    tag: 'column_set', flex_mode: 'none',
+    columns: [{ tag: 'column', width: 'weighted', weight: 1, elements }],
+  });
+}
+
 /** Four stable sibling slots: identity, visible content, metadata, folded diagnostics. */
 export function createDelegationProgressElements(state: DelegationProgressCardState): FeishuCardElement[] {
   const style = DELEGATION_PROGRESS_STYLES[state.phase] ?? FALLBACK_DELEGATION_PROGRESS_STYLE;
@@ -559,21 +585,25 @@ export function createDelegationProgressElements(state: DelegationProgressCardSt
   const currentTool = state.currentToolName && !style.terminal
     ? `${literalWorkerText(state.currentToolName, 120)}${state.activeToolCount > 1 ? ` · ${state.activeToolCount} tools active` : ''}`
     : undefined;
-  const primary: string[] = [];
+  const primary: DelegationContentSection[] = [];
   if (state.phase === 'waiting_input') {
-    primary.push("**<font color='orange'>Your input is needed</font>**",
-      state.inputRequest ? formatWorkerResultMarkdown(state.inputRequest) : '_Check the input or approval request._');
+    primary.push({
+      label: 'Your input is needed', labelColor: 'orange',
+      content: state.inputRequest ? formatWorkerResultMarkdown(state.inputRequest) : '_Check the input or approval request._',
+    });
   }
   if (style.terminal && state.error) {
-    primary.push("**<font color='red'>Reason</font>**", formatWorkerResultMarkdown(state.error));
+    primary.push({ label: 'Reason', labelColor: 'red', content: formatWorkerResultMarkdown(state.error) });
   }
   if (style.terminal && state.summary) {
-    primary.push('**Result excerpt**', formatWorkerResultMarkdown(state.summary));
+    primary.push({ label: 'Result excerpt', content: formatWorkerResultMarkdown(state.summary) });
   } else if (state.latestText && state.phase !== 'waiting_input') {
-    primary.push(style.terminal ? '**Last activity · not a final result**' : '**Latest update**',
-      formatWorkerResultMarkdown(state.latestText, DELEGATION_CURRENT_ACTIVITY_LIMIT, 'activity'));
+    primary.push({
+      label: style.terminal ? 'Last activity · not a final result' : 'Latest update',
+      content: formatWorkerResultMarkdown(state.latestText, DELEGATION_CURRENT_ACTIVITY_LIMIT, 'activity'),
+    });
   } else if (!primary.length) {
-    primary.push(style.terminal ? '_No result text was received._' : currentTool || delegatedCurrentActivity(state));
+    primary.push({ content: style.terminal ? '_No result text was received._' : currentTool || delegatedCurrentActivity(state) });
   }
   const updated = !style.terminal && state.lastActivityAt !== undefined
     ? ` · Updated ${lastWorkerActivity(state.lastActivityAt)}` : '';
@@ -602,7 +632,7 @@ export function createDelegationProgressElements(state: DelegationProgressCardSt
         ] },
       ],
     },
-    limitCardTables(createMarkdownElement(primary.join('\n\n'))),
+    createDelegationContentBody(primary),
     { tag: 'markdown', content: metadata.join('\n'), text_size: 'notation' },
     {
       tag: 'collapsible_panel', expanded: false,

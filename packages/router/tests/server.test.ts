@@ -25,6 +25,8 @@ vi.mock('../src/storage/JsonStore');
 vi.mock('../src/feishu/FeishuLongConnHandler');
 vi.mock('../src/websocket/ConnectionHub');
 vi.mock('../src/binding/BindingManager');
+const delegationBodyContent = (body: any) => body.columns[0].elements.map((element: any) => element.content ?? '').join('\n');
+
 vi.mock('../src/utils/ToolFormatter', async (importActual) => ({
   createToolUseElement: vi.fn(() => []),
   createToolResultElement: vi.fn(() => []),
@@ -899,10 +901,14 @@ describe('RouterServer', () => {
     })));
     const body = mockFeishuHandler.updateStreamingMessage.mock.calls.at(-1)[1]
       .find((element: any) => element.element_id === 'delegated_worker_1_body');
-    expect(body.tag).toBe('markdown');
-    expect(body.content).toContain('## Review\n\n**Passed**\n\n- Tests pass');
-    expect(body.content).toContain('&lt;at id\\=all&gt;');
-    expect(body.content).not.toContain('<at');
+    expect(body.tag).toBe('column_set');
+    expect(body.columns[0]).toMatchObject({ width: 'weighted', weight: 1 });
+    expect(body.columns[0].elements[0]).toEqual({
+      tag: 'markdown', content: "<font color='grey'>Result excerpt</font>", text_size: 'notation',
+    });
+    expect(body.columns[0].elements[1].content).toContain('## Review\n\n**Passed**\n\n- Tests pass');
+    expect(body.columns[0].elements[1].content).toContain('&lt;at id\\=all&gt;');
+    expect(delegationBodyContent(body)).not.toContain('<at');
   });
 
   it('negotiates bounded worker text and refreshes an active panel without extending stream liveness', async () => {
@@ -940,10 +946,10 @@ describe('RouterServer', () => {
 
     const body = mockFeishuHandler.updateStreamingMessage.mock.calls.at(-1)[1]
       .find((element: any) => element.element_id === 'delegated_worker_1_body');
-    expect(body.content).toContain('Latest update');
-    expect(body.content).toContain('&lt;unsafe&gt;');
-    expect(body.content).toContain('## Review\n\n**Checking**');
-    expect(body.content).not.toContain('Do not render this prominently');
+    expect(body.columns[0].elements[0].content).toContain('Latest update');
+    expect(body.columns[0].elements[1].content).toContain('&lt;unsafe&gt;');
+    expect(body.columns[0].elements[1].content).toContain('## Review\n\n**Checking**');
+    expect(delegationBodyContent(body)).not.toContain('Do not render this prominently');
 
     await sendProgress({ taskId: 'worker-1', backend: 'codex', phase: 'succeeded', summary: 'Finished' });
     const patchesAfterTerminal = mockFeishuHandler.updateStreamingMessage.mock.calls.length;
@@ -976,11 +982,11 @@ describe('RouterServer', () => {
     await send('first', 'failed', { error: '**Worker failed**' });
     await send('second', 'succeeded', { summary: '**Second result**' });
     const finalBody = (ordinal: number) => stream.elements.find((element: any) => element.element_id === `delegated_worker_${ordinal}_body`);
-    expect(finalBody(1).content).toContain('**Worker failed**');
-    expect(finalBody(1).content).toContain('**First latest**');
-    expect(finalBody(1).content).toContain('not a final result');
-    expect(finalBody(2).content).toContain('**Second result**');
-    expect(finalBody(2).content).not.toContain('Second latest');
+    expect(delegationBodyContent(finalBody(1))).toContain('**Worker failed**');
+    expect(delegationBodyContent(finalBody(1))).toContain('**First latest**');
+    expect(delegationBodyContent(finalBody(1))).toContain('not a final result');
+    expect(delegationBodyContent(finalBody(2))).toContain('**Second result**');
+    expect(delegationBodyContent(finalBody(2))).not.toContain('Second latest');
     expect(JSON.stringify(stream.elements)).toContain('Coordinator text between workers');
     expect(JSON.stringify(stream.elements)).not.toContain('private');
     expect(stream.elements).toHaveLength(length);
