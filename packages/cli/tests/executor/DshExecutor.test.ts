@@ -95,6 +95,17 @@ describe('DshExecutor', () => {
     expect(transports).toHaveLength(0);
   });
 
+  it('queries account balance independently of the ACP session using the configured command and directory', async () => {
+    const accountUsageQuery = vi.fn().mockResolvedValue('- Recharge balance: USD 12.34');
+    executor = create({ dshCommand: 'custom-dsh', accountUsageQuery });
+    expect(await executor.getAccountUsage()).toBe('- Recharge balance: USD 12.34');
+    expect(accountUsageQuery).toHaveBeenCalledTimes(1);
+    expect(accountUsageQuery).toHaveBeenCalledWith('custom-dsh', directory);
+    expect(transports).toHaveLength(0);
+    expect(fs.existsSync(pointer())).toBe(false);
+    expect(executor.getContextUsage()).toBeNull();
+  });
+
   it.each(['abort', 'resetContext', 'destroy'] as const)('stops a DSH transport still initializing on %s', async action => {
     let reject!: (error: Error) => void;
     customize = t => {

@@ -156,6 +156,8 @@ conversations.
 `/status` shows `Delegation: on/off (current thread)` for the thread receiving
 the command. Reading this setting does not initialize delegation or start workers.
 
+From CLI 1.6.118, `/status` shows DSH's official recharge and bonus wallet balances when available. Native official-account sign-in is required; API-key-only or custom-provider setup does not supply these wallets. Amounts retain their native decimal precision and currency; balances are not token usage or plan quota. The query does not create or change an ACP conversation. Its owned process uses the same log-upload and telemetry suppression as the DSH executor, is stopped after the query, and omits the balance section on failure or timeout. No other backend or Router protocol changes are required.
+
 CLI 1.6.94 and newer show each finished worker as a result block in the existing
 reply card, with a colored status label, backend name, short task description,
 and elapsed time. Failed, timed-out, cancelled, and interrupted tasks include a

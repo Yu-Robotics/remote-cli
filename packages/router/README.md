@@ -151,6 +151,8 @@ CLI 1.6.93 makes `/cd` to a different directory start fresh conversations for al
 
 With CLI 1.6.84 or newer, `/status` also shows `Delegation: on/off (current thread)`.
 The CLI reads this saved setting without initializing delegation or starting workers.
+
+From CLI 1.6.118, `/status` shows DSH's official recharge and bonus wallet balances when available. Native official-account sign-in is required; API-key-only or custom-provider setup does not supply these wallets. Amounts retain their native decimal precision and currency; balances are not token usage or plan quota. The query does not create or change an ACP conversation. Its owned process uses the same log-upload and telemetry suppression as the DSH executor, is stopped after the query, and omits the balance section on failure or timeout. No other backend or Router protocol changes are required.
 Older CLIs keep their existing status output.
 
 ## Architecture
