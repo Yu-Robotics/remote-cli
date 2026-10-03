@@ -337,15 +337,20 @@ configuration change. Deployment and package publication have not been authorize
 
 Keep the existing thread, backend, workspace, and native conversation. The
 selected backend remains responsible for the final answer. Claude Code, Codex,
-Pi, AGY, OpenCode, Kimi Code, and ZCode can discover local workers, assign a task, await its
+Pi, AGY, OpenCode, Kimi Code, ZCode, and DSH can discover local workers, assign a task, await its
 result, and continue that conversation. Managed workers must use a different
 backend. Same-backend requests are rejected before launch; native backend
 task/subagent tools remain backend-owned.
 
 - `/delegation` reports the per-thread setting and executable discovery.
 - `/delegation on|off` changes future turns while the thread is idle. The setting
-  defaults to off, is persisted in thread metadata, and survives context resets
-  and backend switches. Queued work must be cleared before changing its policy.
+  defaults to on from CLI 1.6.121 for new and legacy threads without a preference.
+  Explicit saved opt-outs stay off. Resolve the default when reading, without
+  rewriting old metadata or resetting conversations. Explicit choices persist
+  through context resets, backend switches, and restarts. Default-on exposes
+  tools without automatically launching workers. Queued work must be cleared
+  before changing its policy. Earlier phase notes retain their historical
+  opt-in validation context; this contract describes the current default.
 - Unsupported coordinators keep their normal execution behavior; `/delegation`
   reports their lack of support, and enabling is rejected.
 - Workers receive only a self-contained objective supplied by the coordinator.

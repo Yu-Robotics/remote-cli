@@ -476,7 +476,18 @@ create extra thread buttons.
 /delegation reset codex
 ```
 
-委派**默认关闭**。开关按线程保存，切换后端或清除对话上下文后仍然有效。请先安装所需后端、完成认证并选择可用模型。后端发现只检查配置的可执行文件；认证状态和剩余额度要到任务运行时才能确定。
+From CLI 1.6.121, delegation is **on by default** for new and existing threads
+without a saved preference. A saved `false` remains off; `/delegation off`
+explicitly opts out and `/delegation on` enables it again. No historical thread
+migration or conversation reset is required. The preference survives backend
+switches, conversation resets, and CLI restarts. Default-on makes delegation
+tools available; it does not automatically start workers. Explicitly disabled
+threads skip managed tools, prompt changes, and delegation admission checks.
+Install, authenticate, and select a working model for each desired backend
+first. Discovery checks its configured executable; authentication and remaining
+quota are checked only when a task runs. Upgrade and restart the local CLI to
+obtain the new default. Existing Routers remain compatible; upgrading only the
+Router leaves an older CLI's default unchanged.
 
 启用后，每个`（父线程、worker 后端、工作区代次）`都会拥有一个隔离的 worker 通道。worker 通道绝不会复用父后端的直接会话，只会延续自身之前的委派上下文。每项任务结束后 worker 进程都会停止；只有确认进程退出后，该通道才可以再次复用。每次启动 worker 时，都会应用父线程保存的模型和思考等级。
 
@@ -537,7 +548,12 @@ This requires a CLI upgrade and does not change the wire protocol. Codex
 reasoning summaries, Claude's legacy thinking events, and tool-update deduplication
 are separate behaviors and are unchanged by this release.
 
-建议先在一个测试线程中启用。从未启用委派的线程不会注册受管理的工具、添加提示词前缀、清理后端委派配置，或检查委派工作区占用；其普通进程处理和会话输出保持原样。
+Use `/delegation off` for threads that should keep ordinary execution without
+managed tool registration, prompt prefixes, or delegation workspace admission
+checks. Their ordinary process handling and session output remain unchanged,
+apart from removing previously owned tools. Disabling an implicit default
+before any tools have been registered does not reconfigure unused native
+sessions.
 
 线程使用过委派后，`/delegation off` 会移除受管理的工具。CLI 会记录哪些后端需要清理，重启或切换后端后也能继续处理。原生斜杠命令恢复会话前同样会执行清理。移除工具时，每个执行器实例可能重启一次后端进程，但会保留已保存的对话；已经清理过的进程不会反复重启。未使用过委派的后端无需清理。
 

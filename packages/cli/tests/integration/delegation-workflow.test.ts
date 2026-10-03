@@ -4,6 +4,7 @@ import os from 'os';
 import path from 'path';
 import { MessageHandler } from '../../src/client/MessageHandler';
 import { ThreadManager } from '../../src/thread/ThreadManager';
+import { isDelegationEnabled } from '../../src/thread/DelegationSettings';
 import { ThreadExecutorPool } from '../../src/thread/ThreadExecutorPool';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 import { DelegationManager } from '../../src/delegation/DelegationManager';
@@ -61,7 +62,57 @@ describe('delegation in the existing thread workflow', () => {
   const message = (id: string, content: string) => ({ type: 'command' as const, messageId: id, content, openId: 'owner', timestamp: Date.now() });
   const responseFor = (id: string) => socket.send.mock.calls.map(([value]: any[]) => value).reverse().find((value: any) => value.type === 'response' && value.messageId === id);
 
-  it('keeps never-enabled requests and an explicit off command independent of delegation setup', async () => {
+  it('makes default-on tools available on new and restored threads without automatically launching workers', async () => {
+    const newThread = await threads.createThread('new-thread', home);
+    const fresh = { ...main, execute: vi.fn(async () => ({ success: true })), configureDelegation: vi.fn() };
+    otherExecutors.set(newThread.id, fresh);
+    // Reload an existing thread whose stored metadata has never contained this preference.
+    await handler.destroy();
+    threads = await ThreadManager.initialize(home);
+    const guard = new DirectoryGuard([home]);
+    const config: any = { get: () => ({ type: 'codex' }), getAll: () => ({}), has: () => true, getConfigDir: () => home };
+    pool = new ThreadExecutorPool(threads, guard, { type: 'codex' }, (_guard, _config, _cwd, id) => otherExecutors.get(id!) ?? main);
+    handler = new MessageHandler(socket, pool, threads, guard, config);
+    (handler as any).delegation = new DelegationManager(guard, () => worker, new BackendRegistry(async () => 'test 1.0'));
+    main.execute.mockImplementationOnce(async () => {
+      const discovery = await call('remote_cli_list_backends');
+      expect(discovery.backends.some((backend: any) => backend.backend === 'dsh' && backend.worker)).toBe(true);
+      return { success: true };
+    });
+
+    await handler.handleMessage(message('restored-default', 'Continue my saved conversation'));
+    await handler.handleMessage({ ...message('new-default', 'Ordinary new-thread work'), threadId: newThread.id });
+
+    for (const executor of [main, fresh]) {
+      expect(executor.configureDelegation).toHaveBeenCalledWith(expect.objectContaining({ url: expect.any(String), token: expect.any(String) }));
+      expect(executor.execute).toHaveBeenCalledWith(expect.stringContaining('Remote CLI delegation is enabled'), expect.anything());
+    }
+    expect(responseFor('restored-default')?.success).toBe(true);
+    expect(responseFor('new-default')?.success).toBe(true);
+    expect(worker.execute).not.toHaveBeenCalled();
+    const saved = await ThreadManager.initialize(home);
+    for (const thread of [saved.getDefaultThread(), saved.getThread(newThread.id)!]) {
+      expect(thread.delegation).toBeUndefined();
+      expect(thread.delegationBackends).toEqual(['codex']);
+      expect(isDelegationEnabled(thread)).toBe(true);
+    }
+  });
+
+  it('allows opting out before the first turn without reconfiguring unused native sessions', async () => {
+    main.configureDelegation.mockRejectedValue(new Error('Unused native sessions must not be reconfigured'));
+    await handler.handleMessage(message('disable', '/delegation off'));
+    await handler.handleMessage(message('ordinary', 'Continue normally'));
+    expect(responseFor('disable')?.success).toBe(true);
+    expect(responseFor('ordinary')?.success).toBe(true);
+    expect(main.execute).toHaveBeenCalledWith('Continue normally', expect.anything());
+    expect(main.configureDelegation).not.toHaveBeenCalled();
+    expect(worker.execute).not.toHaveBeenCalled();
+    expect(threads.getDefaultThread().delegationBackends).toBeUndefined();
+    expect((await ThreadManager.initialize(home)).getDefaultThread().delegation).toBe(false);
+  });
+
+  it('keeps explicitly disabled requests independent of delegation setup', async () => {
+    await threads.updateThread(threads.getDefaultThread().id, { delegation: false });
     main.configureDelegation.mockRejectedValue(new Error('Delegation setup must not run'));
     main.listModels = vi.fn(async () => []);
     main.execute.mockImplementation(async (prompt: string, options: ExecuteOptions) => {
@@ -86,6 +137,8 @@ describe('delegation in the existing thread workflow', () => {
   it('reports each thread delegation setting without initializing delegation', async () => {
     const delegatedThread = await threads.createThread('delegated', home);
     await threads.updateThread(delegatedThread.id, { delegation: true });
+    const disabledThread = await threads.createThread('disabled', home);
+    await threads.updateThread(disabledThread.id, { delegation: false });
     const delegated = { ...main, execute: vi.fn(), configureDelegation: vi.fn() };
     otherExecutors.set(delegatedThread.id, delegated);
     const discover = vi.spyOn(BackendRegistry.prototype, 'list');
@@ -93,13 +146,15 @@ describe('delegation in the existing thread workflow', () => {
 
     await handler.handleMessage(message('default-status', '/status'));
     await handler.handleMessage({ ...message('delegated-status', '/status'), threadId: delegatedThread.id });
+    await handler.handleMessage({ ...message('disabled-status', '/status'), threadId: disabledThread.id });
 
     expect(responseFor('default-status')).toMatchObject({ success: true });
     expect(responseFor('default-status').output).toContain('Thread: default');
-    expect(responseFor('default-status').output).toContain('Delegation: off (current thread)');
+    expect(responseFor('default-status').output).toContain('Delegation: on (current thread)');
     expect(responseFor('delegated-status')).toMatchObject({ success: true });
     expect(responseFor('delegated-status').output).toContain('Thread: delegated');
     expect(responseFor('delegated-status').output).toContain('Delegation: on (current thread)');
+    expect(responseFor('disabled-status').output).toContain('Delegation: off (current thread)');
     expect(discover).not.toHaveBeenCalled();
     expect(begin).not.toHaveBeenCalled();
     expect(main.configureDelegation).not.toHaveBeenCalled();
@@ -111,9 +166,10 @@ describe('delegation in the existing thread workflow', () => {
     const saved = await ThreadManager.initialize(home);
     expect(saved.getDefaultThread().delegation).toBeUndefined();
     expect(saved.getThread(delegatedThread.id)?.delegation).toBe(true);
+    expect(saved.getThread(disabledThread.id)?.delegation).toBe(false);
   });
 
-  it('resets persisted worker lanes without enabling delegation or changing the direct conversation', async () => {
+  it('resets persisted worker lanes without changing the preference or direct conversation', async () => {
     const thread = threads.getDefaultThread();
     const delegated = (handler as any).delegation as DelegationManager;
     const acquired = await delegated.laneStore.acquire({
@@ -133,7 +189,8 @@ describe('delegation in the existing thread workflow', () => {
     expect(responseFor('reset')).toMatchObject({ success: true, output: expect.stringContaining('1 lane removed') });
     await expect(delegated.laneStore.lanesForThread(thread.id, 'codex')).resolves.toEqual([]);
     expect(fs.existsSync(pointer)).toBe(false);
-    expect(threads.getDefaultThread().delegation).not.toBe(true);
+    expect(threads.getDefaultThread().delegation).toBeUndefined();
+    expect(isDelegationEnabled(threads.getDefaultThread())).toBe(true);
     expect(main.configureDelegation).not.toHaveBeenCalled();
   });
 
@@ -169,6 +226,7 @@ describe('delegation in the existing thread workflow', () => {
   it('lets an opted-out thread execute in a workspace held by a delegated worker', async () => {
     await handler.handleMessage(message('enable', '/delegation on'));
     const ordinaryThread = await threads.createThread('ordinary', home);
+    await threads.updateThread(ordinaryThread.id, { delegation: false });
     const ordinary = { ...main, execute: vi.fn(async () => ({ success: true })), configureDelegation: vi.fn() };
     otherExecutors.set(ordinaryThread.id, ordinary);
     let finish!: (result: ExecuteResult) => void;
@@ -374,8 +432,8 @@ describe('delegation in the existing thread workflow', () => {
     expect(socket.send.mock.calls.some(([value]: any[]) => value.type === 'approval_request' || value.type === 'approval_resolved')).toBe(false);
   });
 
-  it('cancels children before acknowledging abort and permits the next ordinary task', async () => {
-    await handler.handleMessage(message('enable', '/delegation on'));
+  it('cancels default-enabled children before acknowledging abort and permits the next task', async () => {
+    expect(threads.getDefaultThread().delegation).toBeUndefined();
     let finishWorker!: (result: ExecuteResult) => void;
     let finishMain!: (result: ExecuteResult) => void;
     worker.execute.mockImplementationOnce(() => new Promise(resolve => { finishWorker = resolve; }));
@@ -731,9 +789,12 @@ describe('delegation in the existing thread workflow', () => {
     delete main.configureDelegation;
     await handler.handleMessage(message('enable', '/delegation on'));
     expect(responseFor('enable')).toMatchObject({ success: false, error: expect.stringContaining('does not support delegation') });
-    expect(threads.getDefaultThread().delegation).not.toBe(true);
+    expect(threads.getDefaultThread().delegation).toBeUndefined();
     await handler.handleMessage(message('ordinary', 'Ordinary work'));
     expect(main.execute).toHaveBeenLastCalledWith('Ordinary work', expect.anything());
     expect(worker.execute).not.toHaveBeenCalled();
+    await handler.handleMessage(message('disable', '/delegation off'));
+    expect(responseFor('disable')?.success).toBe(true);
+    expect(threads.getDefaultThread().delegation).toBe(false);
   });
 });

@@ -141,19 +141,25 @@ Linux users upgrading from version 1.6.23 or earlier should run `remote-cli serv
 
 ### Threads & Machines
 
-Use `/delegation on` in an existing thread to let its selected backend assign
-bounded tasks to other installed, authenticated backends. Claude Code, Codex,
-Pi, AGY, OpenCode, Kimi Code, and ZCode can coordinate or work. From CLI 1.6.95,
+From CLI 1.6.121, new and existing threads without a saved preference enable
+delegation by default. Their selected backend can assign bounded tasks to other
+installed, authenticated backends. Claude Code, Codex, Pi, AGY, OpenCode, Kimi
+Code, ZCode, and DSH can coordinate or work. From CLI 1.6.95,
 same-backend delegation is rejected before launching a worker; discovery marks
 the current backend unavailable as a worker. Use the current backend directly
 or its native subagents, if supported. Workers return results to the original conversation and use
 its working directory; they do not create extra thread buttons. `/delegation`
-shows discovery and restrictions; `/delegation off` disables the feature. The
-setting is off by default and persists per thread. Start with one trial thread;
-never-enabled threads skip managed tools, prompt changes, and delegation
-configuration. Turning it off cleans only backends used for delegation, including
-when resumed after a CLI restart or a backend switch, while preserving their
-conversations.
+shows discovery and restrictions; `/delegation off` explicitly disables the
+feature and `/delegation on` enables it again. Saved opt-outs remain off across
+upgrades, context resets, backend switches, and CLI restarts. No historical
+thread migration or conversation reset is required. Default-on makes tools
+available without automatically starting workers. Explicitly disabled threads
+skip managed tools, prompt changes, and delegation admission checks. Turning it
+off cleans only backends used for delegation, including when resumed after a
+CLI restart or backend switch, while preserving conversations. An implicit
+default alone does not reconfigure unused native sessions during opt-out.
+Upgrade and restart the local CLI to obtain the new default; existing Routers
+remain compatible, and older CLIs retain their own default.
 
 `/status` shows `Delegation: on/off (current thread)` for the thread receiving
 the command. Reading this setting does not initialize delegation or start workers.

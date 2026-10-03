@@ -10,6 +10,7 @@ import { IncomingMessage, OutgoingMessage, StructuredContent, ToolUseInfo, ToolR
 import { ThreadExecutorPool } from '../thread/ThreadExecutorPool';
 import { ThreadManager } from '../thread/ThreadManager';
 import { DEFAULT_THREAD_NAME } from '../thread/types';
+import { isDelegationEnabled } from '../thread/DelegationSettings';
 import type { ExecuteOptions, ExecuteResult, ExecutorContextUsage, IExecutor } from '../executor/IExecutor';
 import { createExecutor } from '../executor';
 import { FeishuNotificationAdapter } from '../hooks';
@@ -576,7 +577,7 @@ export class MessageHandler {
     const activeOperation = this.activeThreadOperations.get(threadId);
     let aborted = false;
     const operation = (async () => {
-      if (this.threadManager.getThread(threadId)?.delegation) await this.delegation.cancelThread(threadId);
+      if (isDelegationEnabled(this.threadManager.getThread(threadId))) await this.delegation.cancelThread(threadId);
       aborted = await executor.abort();
       if (activeOperation) await activeOperation.done;
     })();
@@ -706,7 +707,8 @@ export class MessageHandler {
         if (action === 'off') {
           const thread = this.threadManager.getThread(threadId)!;
           const backend = this.threadPool.getBackendKey(threadId);
-          if (thread.delegationBackends?.includes(backend) || (thread.delegation && !thread.delegationBackends)) {
+          // An implicit default does not imply that native tools were ever registered.
+          if (thread.delegationBackends?.includes(backend) || (thread.delegation === true && !thread.delegationBackends)) {
             await executor.configureDelegation?.(undefined);
             // Preserve cleanup ownership across process recreation and backend switches.
             if (!thread.delegationBackends) await this.threadManager.updateThread(threadId, { delegationBackends: [backend] });
@@ -722,7 +724,7 @@ export class MessageHandler {
       this.sendResponse(messageId, threadId, {
         success: true,
         output: formatDelegationStatus({
-          enabled: Boolean(this.threadManager.getThread(threadId)?.delegation),
+          enabled: isDelegationEnabled(this.threadManager.getThread(threadId)),
           coordinatorBackend,
           coordinatorSupported: Boolean(executor.configureDelegation),
           backends,
@@ -733,7 +735,7 @@ export class MessageHandler {
 
     if (trimmed.startsWith('/')) {
       const thread = this.threadManager.getThread(threadId);
-      if (!thread?.delegation && thread?.delegationBackends?.includes(this.threadPool.getBackendKey(threadId))) {
+      if (!isDelegationEnabled(thread) && thread?.delegationBackends?.includes(this.threadPool.getBackendKey(threadId))) {
         // Native slash commands can resume a session before the next ordinary turn.
         await executor.configureDelegation?.(undefined);
       }
@@ -787,7 +789,7 @@ export class MessageHandler {
         output: `📊 Status:
 - Thread: ${thread?.name ?? threadId}
 - Backend: ${backend}
-- Delegation: ${thread?.delegation ? 'on' : 'off'} (current thread)
+- Delegation: ${isDelegationEnabled(thread) ? 'on' : 'off'} (current thread)
 - Model: ${model ?? 'backend default'}
 - Reasoning effort: ${effort}
 - Working Directory: ${cwd}
@@ -2052,7 +2054,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       }
       const openId = this.getMessageOpenId(messageId);
       const thread = this.threadManager.getThread(threadId);
-      if (thread?.delegation && executor.configureDelegation) {
+      if (thread && isDelegationEnabled(thread) && executor.configureDelegation) {
         if (this.delegation.blocksWorkspace(executor.getCurrentWorkingDirectory(), threadId)) {
           throw new Error('A delegated worker holds this workspace. Wait for it to finish; if worker cleanup failed, stop the worker and restart the CLI.');
         }
