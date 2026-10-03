@@ -155,6 +155,8 @@ With CLI 1.6.84 or newer, `/status` also shows `Delegation: on/off (current thre
 The CLI reads this saved setting without initializing delegation or starting workers.
 
 From CLI 1.6.118, `/status` shows DSH's official recharge and bonus wallet balances when available. Native official-account sign-in is required; API-key-only or custom-provider setup does not supply these wallets. Amounts retain their native decimal precision and currency; balances are not token usage or plan quota. The query does not create or change an ACP conversation. Its owned process uses the same log-upload and telemetry suppression as the DSH executor, is stopped after the query, and omits the balance section on failure or timeout. No other backend or Router protocol changes are required.
+From CLI 1.6.120, Claude SDK `[claude-code:unrecognized_model]` records with a valid `{model, query_source: "sdk"}` payload are omitted from Feishu streaming/results and Claude slash-command error details. Model names are not hard-coded. Other diagnostics, malformed or unexpected records, actual errors, exit status, and assistant reply text are retained. The persistent Claude process's raw stderr remains in local CLI logs; this presentation filter does not disable Claude Code telemetry or change the configured model, other backends, or the Router protocol.
+
 Older CLIs keep their existing status output.
 
 ## Architecture
