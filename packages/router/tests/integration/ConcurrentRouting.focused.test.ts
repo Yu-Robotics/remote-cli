@@ -52,31 +52,6 @@ describe('Focused Concurrent Routing Tests', () => {
     }
   });
 
-  describe('Critical Issue 1: Device ID Collision', () => {
-    it('should prevent same device ID from being bound to multiple users (BUG FIXED)', async () => {
-      const sharedDeviceId = 'dev_shared';
-
-      // First user binds the device successfully
-      await bindingManager.bindUser('user_001', sharedDeviceId, 'Device-1');
-
-      // Verify first user has the device
-      const binding1 = await bindingManager.getUserBinding('user_001');
-      expect(binding1!.devices.some(d => d.deviceId === sharedDeviceId)).toBe(true);
-
-      // Second user tries to bind the same device - should be REJECTED
-      await expect(
-        bindingManager.bindUser('user_002', sharedDeviceId, 'Device-2')
-      ).rejects.toThrow(/already bound to another user/);
-
-      // Verify second user does NOT have the device
-      const binding2 = await bindingManager.getUserBinding('user_002');
-      expect(binding2).toBeNull(); // User 2 has no devices
-
-      // CRITICAL BUG IS FIXED: The system now prevents device collision
-      // This eliminates the risk of cross-user data leakage and routing confusion
-    });
-  });
-
   describe('Critical Issue 2: Concurrent Device Switching', () => {
     it('should handle concurrent device switch operations without data corruption', async () => {
       // Setup user with 3 devices

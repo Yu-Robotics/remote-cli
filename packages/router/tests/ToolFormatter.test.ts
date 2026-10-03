@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest';
 import {
-  getToolEmoji,
   extractToolContext,
   createDividerElement,
   createMarkdownElement,
@@ -17,20 +16,6 @@ function renderedDiff(elements: ReturnType<typeof createToolUseElement>): string
 }
 
 describe('ToolFormatter', () => {
-  describe('getToolEmoji', () => {
-    it('should return correct emoji for known tools', () => {
-      expect(getToolEmoji('Bash')).toBe('⚡');
-      expect(getToolEmoji('Read')).toBe('📖');
-      expect(getToolEmoji('Write')).toBe('✍️');
-      expect(getToolEmoji('Edit')).toBe('✏️');
-      expect(getToolEmoji('Grep')).toBe('🔍');
-    });
-
-    it('should return default emoji for unknown tools', () => {
-      expect(getToolEmoji('UnknownTool')).toBe('🔧');
-    });
-  });
-
   describe('formatFilePath', () => {
     it('should replace home directory with ~', () => {
       const homeDir = process.env.HOME || '/Users';
@@ -225,13 +210,14 @@ describe('ToolFormatter', () => {
       expect(custom[1].elements[0].content).toContain('**new_string:** after');
     });
 
-    it('should create tool use elements', () => {
+    it.each([
+      { name: 'Read', input: { file_path: '/project/file.ts' }, context: '/project/file.ts' },
+      { name: 'Bash', input: { command: 'echo hello' }, context: 'echo hello' },
+    ])('renders the $name tool identity and parameters in a collapsible card', ({ name, input, context }) => {
       const toolUse: ToolUseInfo = {
-        name: 'Read',
+        name,
         id: 'tool_abc123',
-        input: {
-          file_path: '/Users/test/file.ts',
-        },
+        input,
       };
 
       const elements = createToolUseElement(toolUse);
@@ -241,23 +227,12 @@ describe('ToolFormatter', () => {
       // Second element is now a collapsible_panel
       expect(elements[1].tag).toBe('collapsible_panel');
       expect(elements[1].header.title.content).toContain('TOOL USE');
-      expect(elements[1].header.title.content).toContain('Read');
+      expect(elements[1].header.title.content).toContain(name);
       expect(elements[1].header.title.content).toContain('tool_abc'); // Truncated ID (8 chars)
       // Content should be in the panel's elements
-      expect(elements[1].elements[0].content).toContain('File:');
+      expect(elements[1].elements[0].content).toContain(context);
     });
 
-    it('should include emoji in tool use element', () => {
-      const toolUse: ToolUseInfo = {
-        name: 'Bash',
-        id: 'tool_xyz',
-        input: { command: 'echo hello' },
-      };
-
-      const elements = createToolUseElement(toolUse);
-      // Emoji should be in the header title
-      expect(elements[1].header.title.content).toContain('⚡'); // Bash emoji
-    });
   });
 
   describe('createToolResultElement', () => {
@@ -276,7 +251,6 @@ describe('ToolFormatter', () => {
       expect(elements[0].expanded).toBe(false);
       // Header should contain status and tool ID
       expect(elements[0].header.title.content).toContain('SUCCESS');
-      expect(elements[0].header.title.content).toContain('✅');
       expect(elements[0].header.title.content).toContain('tool_abc'); // Truncated ID (8 chars)
       // Content should be in the panel's elements
       expect(elements[0].elements[0].content).toContain('Command succeeded');
@@ -297,7 +271,6 @@ describe('ToolFormatter', () => {
       expect(elements[0].expanded).toBe(false);
       // Header should contain error status and tool ID
       expect(elements[0].header.title.content).toContain('ERROR');
-      expect(elements[0].header.title.content).toContain('❌');
       // Content should be in the panel's elements
       expect(elements[0].elements[0].content).toContain('Command failed');
     });

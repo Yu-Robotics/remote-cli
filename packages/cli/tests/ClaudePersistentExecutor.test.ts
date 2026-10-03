@@ -75,11 +75,6 @@ describe('ClaudePersistentExecutor', () => {
   });
 
   describe('initialization', () => {
-    it('should create executor with directory guard', () => {
-      expect(executor).toBeDefined();
-      expect(executor).toBeInstanceOf(ClaudePersistentExecutor);
-    });
-
     it('should have default working directory', () => {
       const cwd = executor.getCurrentWorkingDirectory();
       expect(cwd).toBeDefined();

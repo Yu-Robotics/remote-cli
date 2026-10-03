@@ -6,110 +6,55 @@ const PKG_ROOT = path.resolve(__dirname, '..');
 const pkg = JSON.parse(readFileSync(path.join(PKG_ROOT, 'package.json'), 'utf-8'));
 
 describe('Router package publish configuration', () => {
-  describe('package.json required fields', () => {
-    it('should have a scoped package name', () => {
-      expect(pkg.name).toBe('@yu_robotics/remote-cli-router');
-    });
-
-    it('should have a valid version', () => {
-      expect(pkg.version).toMatch(/^\d+\.\d+\.\d+/);
-    });
-
-    it('should have a description', () => {
-      expect(pkg.description).toBeTruthy();
-    });
-
-    it('should have main pointing to dist', () => {
-      expect(pkg.main).toBe('dist/cli.js');
-    });
-
-    it('should have types pointing to dist', () => {
-      expect(pkg.types).toBe('dist/cli.d.ts');
-    });
-
-    it('should have a bin entry', () => {
-      expect(pkg.bin).toBeDefined();
-      expect(pkg.bin['remote-cli-router']).toBe('./bin/remote-cli-router.js');
-    });
-
-    it('should have a license', () => {
-      expect(pkg.license).toBe('MIT');
-    });
+  it('declares a public package identity and license', () => {
+    expect(pkg.name).toBe('@yu_robotics/remote-cli-router');
+    expect(pkg.version).toMatch(/^\d+\.\d+\.\d+/);
+    expect(pkg.description).toBeTruthy();
+    expect(pkg.license).toBe('MIT');
+    expect(pkg.private).toBeUndefined();
   });
 
-  describe('publish-specific fields', () => {
-    it('should have files field to control package contents', () => {
-      expect(pkg.files).toBeDefined();
-      expect(pkg.files).toContain('dist');
-      expect(pkg.files).toContain('bin');
-    });
-
-    it('should not include src or tests in files', () => {
-      expect(pkg.files).not.toContain('src');
-      expect(pkg.files).not.toContain('tests');
-    });
-
-    it('should have publishConfig with public access', () => {
-      expect(pkg.publishConfig).toBeDefined();
-      expect(pkg.publishConfig.access).toBe('public');
-    });
-
-    it('should have prepublishOnly script', () => {
-      expect(pkg.scripts.prepublishOnly).toBeDefined();
-      expect(pkg.scripts.prepublishOnly).toContain('build');
-      expect(pkg.scripts.prepublishOnly).toContain('test');
-    });
-
-    it('should have engines field', () => {
-      expect(pkg.engines).toBeDefined();
-      expect(pkg.engines.node).toBeTruthy();
-    });
+  it('exposes built JavaScript, type declarations, and the Router binary', () => {
+    expect(pkg.main).toBe('dist/cli.js');
+    expect(pkg.types).toBe('dist/cli.d.ts');
+    expect(pkg.bin).toBeDefined();
+    expect(pkg.bin['remote-cli-router']).toBe('./bin/remote-cli-router.js');
   });
 
-  describe('package metadata', () => {
-    it('should have repository info', () => {
-      expect(pkg.repository).toBeDefined();
-      expect(pkg.repository.type).toBe('git');
-      expect(pkg.repository.url).toBeTruthy();
-      expect(pkg.repository.directory).toBe('packages/router');
-    });
-
-    it('should have author', () => {
-      expect(pkg.author).toBeTruthy();
-    });
-
-    it('should have keywords', () => {
-      expect(pkg.keywords).toBeDefined();
-      expect(pkg.keywords.length).toBeGreaterThan(0);
-    });
-
-    it('should have homepage', () => {
-      expect(pkg.homepage).toBeTruthy();
-    });
-
-    it('should have bugs url', () => {
-      expect(pkg.bugs).toBeDefined();
-      expect(pkg.bugs.url).toBeTruthy();
-    });
+  it('publishes only distribution assets with public access', () => {
+    expect(pkg.files).toBeDefined();
+    expect(pkg.files).toContain('dist');
+    expect(pkg.files).toContain('bin');
+    expect(pkg.files).not.toContain('src');
+    expect(pkg.files).not.toContain('tests');
+    expect(pkg.publishConfig).toBeDefined();
+    expect(pkg.publishConfig.access).toBe('public');
   });
 
-  describe('required files exist', () => {
-    it('should have LICENSE file', () => {
-      expect(existsSync(path.join(PKG_ROOT, 'LICENSE'))).toBe(true);
-    });
-
-    it('should have README.md file', () => {
-      expect(existsSync(path.join(PKG_ROOT, 'README.md'))).toBe(true);
-    });
-
-    it('should have bin/remote-cli-router.js file', () => {
-      expect(existsSync(path.join(PKG_ROOT, 'bin', 'remote-cli-router.js'))).toBe(true);
-    });
+  it('requires build and test scripts and a Node engine declaration', () => {
+    expect(pkg.scripts.prepublishOnly).toBeDefined();
+    expect(pkg.scripts.prepublishOnly).toContain('build');
+    expect(pkg.scripts.prepublishOnly).toContain('test');
+    expect(pkg.engines).toBeDefined();
+    expect(pkg.engines.node).toBeTruthy();
   });
 
-  describe('not marked as private', () => {
-    it('should not have private flag', () => {
-      expect(pkg.private).toBeUndefined();
-    });
+  it('provides repository attribution and package discovery metadata', () => {
+    expect(pkg.repository).toBeDefined();
+    expect(pkg.repository.type).toBe('git');
+    expect(pkg.repository.url).toBeTruthy();
+    expect(pkg.repository.directory).toBe('packages/router');
+    expect(pkg.author).toBeTruthy();
+    expect(pkg.keywords).toBeDefined();
+    expect(pkg.keywords.length).toBeGreaterThan(0);
+    expect(pkg.homepage).toBeTruthy();
+    expect(pkg.bugs).toBeDefined();
+    expect(pkg.bugs.url).toBeTruthy();
+  });
+
+  it('ships the license, README, and executable entrypoint', () => {
+    expect(existsSync(path.join(PKG_ROOT, 'LICENSE'))).toBe(true);
+    expect(existsSync(path.join(PKG_ROOT, 'README.md'))).toBe(true);
+    expect(existsSync(path.join(PKG_ROOT, 'bin', 'remote-cli-router.js'))).toBe(true);
   });
 });

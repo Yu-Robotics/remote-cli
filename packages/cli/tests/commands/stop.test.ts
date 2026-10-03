@@ -52,11 +52,14 @@ describe('stop command', () => {
   });
 
   describe('service shutdown', () => {
-    it('should stop running service', async () => {
+    it('should stop running service and preserve device configuration', async () => {
       const result = await stopCommand();
 
       expect(result.success).toBe(true);
       expect(mockConfig.set).toHaveBeenCalledWith('service.running', false);
+      expect(mockConfig.set).toHaveBeenCalledWith('service.stoppedAt', expect.any(Number));
+      expect(mockConfig.set).not.toHaveBeenCalledWith('deviceId', undefined);
+      expect(mockConfig.set).not.toHaveBeenCalledWith('serverUrl', undefined);
     });
 
     it('should stop an installed user service even when config state is stale', async () => {
@@ -105,36 +108,19 @@ describe('stop command', () => {
     });
   });
 
-  describe('graceful shutdown', () => {
-    it('should wait for pending tasks to complete', async () => {
+  describe('shutdown options', () => {
+    it('should return the graceful option after a successful stop', async () => {
       const result = await stopCommand({ graceful: true });
 
       expect(result.success).toBe(true);
       expect(result.graceful).toBe(true);
     });
 
-    it('should force stop immediately when specified', async () => {
+    it('should return the force option after a successful stop', async () => {
       const result = await stopCommand({ force: true });
 
       expect(result.success).toBe(true);
       expect(result.force).toBe(true);
-    });
-  });
-
-  describe('cleanup', () => {
-    it('should cleanup service state on stop', async () => {
-      await stopCommand();
-
-      expect(mockConfig.set).toHaveBeenCalledWith('service.running', false);
-      expect(mockConfig.set).toHaveBeenCalledWith('service.stoppedAt', expect.any(Number));
-    });
-
-    it('should preserve configuration after stop', async () => {
-      await stopCommand();
-
-      // Should not delete deviceId or serverUrl
-      expect(mockConfig.set).not.toHaveBeenCalledWith('deviceId', undefined);
-      expect(mockConfig.set).not.toHaveBeenCalledWith('serverUrl', undefined);
     });
   });
 

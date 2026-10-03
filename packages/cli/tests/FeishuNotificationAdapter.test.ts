@@ -238,37 +238,31 @@ describe('FeishuNotificationAdapter', () => {
       adapter.setCurrentOpenId('user-123');
     });
 
-    it('should send notification for authorization required', async () => {
+    it.each([
+      ['low', true, { filePath: '/test/file.txt' }],
+      ['medium', false, { command: 'npm test' }],
+      ['high', false, {}], ['critical', false, {}],
+    ] as const)('reports %s risk and preserves its authorization policy', async (riskLevel, granted, details) => {
       const decision = await claudeCodeHooks.requestAuthorization({
         actionType: 'file_access',
-        description: 'Read file',
-        details: { filePath: '/test/file.txt' },
-        riskLevel: 'low',
+        description: 'Review file',
+        details,
+        riskLevel,
         timestamp: Date.now(),
       });
-
-      // Check that notification was sent
       expect(mockWsClient.send).toHaveBeenCalledWith(
         expect.objectContaining({
           type: 'notification',
           title: expect.stringContaining('Authorization'),
+          openId: 'user-123',
+          message: expect.stringContaining(riskLevel.toUpperCase()),
         })
       );
-
-      // Low risk should be auto-granted
-      expect(decision.granted).toBe(true);
-    });
-
-    it('should deny medium risk operations', async () => {
-      const decision = await claudeCodeHooks.requestAuthorization({
-        actionType: 'command_execution',
-        description: 'Run command',
-        details: { command: 'rm -rf /' },
-        riskLevel: 'medium',
-        timestamp: Date.now(),
-      });
-
-      expect(decision.granted).toBe(false);
+      const notice = mockWsClient.send.mock.calls.find((call: any[]) => call[0].title?.includes('Authorization Required'))[0];
+      expect(notice.message).toContain('Review file');
+      for (const detail of Object.values(details)) expect(notice.message).toContain(detail);
+      expect(decision.granted).toBe(granted);
+      if (granted) expect(decision.remember).toBe(true);
     });
 
     it('should handle authorization granted event', () => {
@@ -316,40 +310,15 @@ describe('FeishuNotificationAdapter', () => {
       adapter.setCurrentOpenId('user-123');
     });
 
-    it('should send notification for 0% progress', () => {
+    it.each([0, 25, 50, 75, 100])('sends the progress value and message at the %s%% milestone', progress => {
       claudeCodeHooks.emit(HookEventType.PROGRESS_UPDATE, {
-        progress: 0,
-        message: 'Starting...',
+        progress, message: 'Current task progress',
       });
-
-      expect(mockWsClient.send).toHaveBeenCalled();
-    });
-
-    it('should send notification for 25% progress', () => {
-      claudeCodeHooks.emit(HookEventType.PROGRESS_UPDATE, {
-        progress: 25,
-        message: '25% done',
-      });
-
-      expect(mockWsClient.send).toHaveBeenCalled();
-    });
-
-    it('should send notification for 50% progress', () => {
-      claudeCodeHooks.emit(HookEventType.PROGRESS_UPDATE, {
-        progress: 50,
-        message: 'Halfway',
-      });
-
-      expect(mockWsClient.send).toHaveBeenCalled();
-    });
-
-    it('should send notification for 100% progress', () => {
-      claudeCodeHooks.emit(HookEventType.PROGRESS_UPDATE, {
-        progress: 100,
-        message: 'Complete',
-      });
-
-      expect(mockWsClient.send).toHaveBeenCalled();
+      expect(mockWsClient.send).toHaveBeenCalledTimes(1);
+      expect(mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'notification', openId: 'user-123', message: expect.stringContaining(`${progress}%`),
+      }));
+      expect(mockWsClient.send.mock.calls[0][0].message).toContain('Current task progress');
     });
 
     it('should not send notification for non-milestone progress', () => {
@@ -436,72 +405,6 @@ describe('FeishuNotificationAdapter', () => {
     });
   });
 
-  describe('risk level emoji', () => {
-    beforeEach(() => {
-      adapter.register();
-      adapter.setCurrentOpenId('user-123');
-    });
-
-    it('should use green emoji for low risk', async () => {
-      await claudeCodeHooks.requestAuthorization({
-        actionType: 'file_access',
-        description: 'Read file',
-        details: {},
-        riskLevel: 'low',
-        timestamp: Date.now(),
-      });
-
-      const call = mockWsClient.send.mock.calls.find(
-        (c: any[]) => c[0].title?.includes('Authorization Required')
-      );
-      expect(call?.[0].message).toContain('🟢');
-    });
-
-    it('should use yellow emoji for medium risk', async () => {
-      await claudeCodeHooks.requestAuthorization({
-        actionType: 'command_execution',
-        description: 'Run command',
-        details: {},
-        riskLevel: 'medium',
-        timestamp: Date.now(),
-      });
-
-      const call = mockWsClient.send.mock.calls.find(
-        (c: any[]) => c[0].title?.includes('Authorization Required')
-      );
-      expect(call?.[0].message).toContain('🟡');
-    });
-
-    it('should use orange emoji for high risk', async () => {
-      await claudeCodeHooks.requestAuthorization({
-        actionType: 'sensitive_operation',
-        description: 'Delete file',
-        details: {},
-        riskLevel: 'high',
-        timestamp: Date.now(),
-      });
-
-      const call = mockWsClient.send.mock.calls.find(
-        (c: any[]) => c[0].title?.includes('Authorization Required')
-      );
-      expect(call?.[0].message).toContain('🟠');
-    });
-
-    it('should use red emoji for critical risk', async () => {
-      await claudeCodeHooks.requestAuthorization({
-        actionType: 'sensitive_operation',
-        description: 'Drop database',
-        details: {},
-        riskLevel: 'critical',
-        timestamp: Date.now(),
-      });
-
-      const call = mockWsClient.send.mock.calls.find(
-        (c: any[]) => c[0].title?.includes('Authorization Required')
-      );
-      expect(call?.[0].message).toContain('🔴');
-    });
-  });
 
   describe('background task notifications (task_notification)', () => {
     it('uses an explicit executor recipient and honors disabled notifications', () => {

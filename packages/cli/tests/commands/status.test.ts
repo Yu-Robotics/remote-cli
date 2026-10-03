@@ -54,25 +54,9 @@ describe('status command', () => {
       expect(result.status.connected).toBe(true);
       expect(result.status.running).toBe(true);
       expect(result.status.bound).toBe(true);
-    });
-
-    it('should show allowed directories', async () => {
-      const result = await statusCommand();
-
       expect(result.status.allowedDirectories).toEqual(['~/projects', '~/work']);
-    });
-
-    it('should show service uptime', async () => {
-      const result = await statusCommand();
-
       expect(result.status.uptime).toBeGreaterThan(0);
-    });
-
-    it('should show binding status', async () => {
-      const result = await statusCommand();
-
       expect(result.status.openId).toBe('ou_test_user_123');
-      expect(result.status.bound).toBe(true);
     });
   });
 
