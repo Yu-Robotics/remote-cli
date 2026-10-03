@@ -175,6 +175,8 @@ export function backendKeyOf(type: ExecutorConfig['type'] | string): BackendKey 
  * Complete configuration
  */
 export interface Config {
+  /** Independent maintenance features; absent values enable notices and status-only inspection. */
+  maintenance?: { updateNotice?: boolean; subscriptionInspection?: boolean };
   files?: { retentionDays?: number };
   deviceId?: string;
   openId?: string;

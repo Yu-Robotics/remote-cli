@@ -10,6 +10,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.123] - 2026-10-03
+
+### Added
+- Standalone CLI upgrade notices with cumulative bundled release notes, offline delivery, and a silent baseline on first adoption.
+- Hourly, status-only Codex weekly-quota inspection and explicit maintenance reminders, without changing user threads or other backends.
+- Notification-only weekly-quota snapshots with backend-specific explanations and normal-task guidance, without verification steps, activation requests, or claims that a quota reset occurred. Dismissal remains optional.
+
+## [1.6.122] - 2026-10-03
+
+### Fixed
+- Render delegated-result labels separately from worker Markdown while preserving rich content, stable update slots, and card-wide table limits.
+
 ## [1.6.60] - 2026-09-25
 
 ### Added

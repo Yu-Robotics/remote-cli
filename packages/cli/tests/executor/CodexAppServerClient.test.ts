@@ -76,6 +76,18 @@ describe('CodexAppServerClient', () => {
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
+  it('applies launch isolation only to opted-in maintenance clients and leaves ordinary clients unchanged', async () => {
+    const child = fakeProcess(); mockSpawn.mockReturnValue(child);
+    const env = { PATH: '/usr/bin', CODEX_HOME: '/temporary-fixture' };
+    const isolated = new CodexAppServerClient({ launchArgs: ['-c', 'analytics.enabled=false'], env });
+    await isolated.start();
+    expect(mockSpawn).toHaveBeenLastCalledWith('codex', ['app-server', '--stdio', '-c', 'analytics.enabled=false'], expect.objectContaining({ env }));
+    await isolated.stop();
+    mockSpawn.mockReturnValue(fakeProcess()); const ordinary = new CodexAppServerClient(); await ordinary.start();
+    expect(mockSpawn).toHaveBeenLastCalledWith('codex', ['app-server', '--stdio'], expect.objectContaining({ env: { ...process.env } }));
+    await ordinary.stop();
+  });
+
   it('still reports a genuinely missing Codex executable as not installed', async () => {
     // The directory exists, so the guard passes and the spawn ENOENT must keep
     // its own meaning: the two causes must not collapse into one message.

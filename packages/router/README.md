@@ -4,6 +4,12 @@ Router server for [remote-cli](https://www.npmjs.com/package/@yu_robotics/remote
 
 Backend executable discovery is local-client behavior. CLI 1.6.119 supplements Linux/macOS startup PATH and honors configured backend commands across detection and execution, preserving ZCode's native unset/empty-command lookup. Upgrade and restart the client to obtain this fix; upgrading only the Router does not repair an older client's environment. Valid client services need no reinstallation. The Router runtime, wire protocol, and existing compatibility requirements are unchanged. See [Backend Executable Discovery](../../README.md#backend-executable-discovery).
 
+## Maintenance Notices
+
+Router and CLI 1.6.123 negotiate optional upgrade-notice and subscription-inspection capabilities without changing protocol version 1 or old-client traffic. Upgrade cards show cumulative bundled release-note ranges; first feature adoption is silent. The Router resolves the original device owner and acknowledges only after successful delivery and a private durable receipt. Receipt retention is 30 days and 1,000 entries; deduplication cannot guarantee exactly-once delivery across a Feishu-success/storage-write crash. View more requests the same bundled range from the connected compatible CLI, without external changelog fetches or persistent paging sessions.
+
+Codex inspection and account state belong to the local CLI, not the Router. Its experimental native login API may change; unavailable inspection does not affect messaging. Subscription reminders are independent, notification-only cards, never user-thread output or routing controls. Backend-specific copy is selected by an optional backend identifier; legacy messages without it retain Codex handling, and unsupported identifiers are rejected. Codex explains possible reset-countdown drift and tells the user to send a normal task to start the next usage window, without verification steps. Its 100% weekly availability is a snapshot from the qualifying checks, not a live balance, confirmation that a reset occurred, or a guarantee about when a usage window starts. The only optional button is Dismiss. There is no Send Hi button or automatic activation, and reminder actions never send model requests. Older peers remain usable. See [Maintenance Notices](../../README.md#maintenance-notices) for first-start, offline, privacy, and opt-out behavior.
+
 ## Overview
 
 The router server acts as a bridge between Feishu messaging and developer machines running the remote-cli client. It handles:

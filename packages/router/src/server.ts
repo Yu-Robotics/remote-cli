@@ -1,4 +1,6 @@
 import { ApprovalCards } from './feishu/ApprovalCards';
+import { MaintenanceCards } from './maintenance/MaintenanceCards';
+import { NoticeReceipts } from './maintenance/NoticeReceipts';
 import { DeviceAuth } from './files/DeviceAuth';
 import { FileTransfers } from './files/FileTransfers';
 import path from 'path';
@@ -76,6 +78,8 @@ export class RouterServer {
   private connectionHub: ConnectionHub;
   private bindingManager: BindingManager;
   private approvalCards: ApprovalCards;
+  private readonly maintenanceCards: MaintenanceCards;
+  private readonly maintenanceConnections = new Map<string, { updateNotice: boolean; current: () => boolean }>();
   private cleanupInterval: NodeJS.Timeout | null = null;
   // Track streaming messages and coalesced Feishu card update state.
   private streamingMessages = new Map<string, StreamingMessageState>();
@@ -160,6 +164,19 @@ export class RouterServer {
     });
     this.feishuLongConnHandler.onApprovalAction = (openId, requestId, cardId, decision) =>
       this.approvalCards.click(openId, requestId, cardId, decision as ApprovalAction);
+    this.maintenanceCards = new MaintenanceCards(new NoticeReceipts(path.join(
+      path.dirname(config.getConfigPath() || path.join(os.homedir(), '.remote-cli-router', 'config.json')), 'notice-receipts.json')), {
+      owner: async deviceId => (await this.bindingManager.getDeviceBinding(deviceId))?.openId,
+      send: (deviceId, message) => this.connectionHub.sendToDevice(deviceId, message),
+      create: (openId, elements, header) => this.feishuLongConnHandler.sendTaskNotificationCard(openId, elements, header),
+      update: (cardId, elements, header) => this.feishuLongConnHandler.updateApprovalCard(cardId, elements, header),
+    });
+    this.feishuLongConnHandler.onMaintenanceAction = (openId, id, cardId, action, offset) => action === 'view'
+      ? this.maintenanceCards.view(openId, id, cardId, offset!, deviceId => {
+        const connection = this.maintenanceConnections.get(deviceId);
+        return connection?.updateNotice ? connection.current : undefined;
+      })
+      : this.maintenanceCards.reply(openId, id, cardId, action);
 
     // Register callback for streaming message start
     this.feishuLongConnHandler.setOnStartStreaming((messageId: string, openId: string, feishuMessageId: string | null, deviceId: string, threadId?: string, pendingNewThread?: boolean, queueCardId?: string, threadName?: string) => {
@@ -387,6 +404,8 @@ export class RouterServer {
       let delegationProgressEnabled = false;
       let delegationProgressTextEnabled = false;
       let streamingContextEnabled = false;
+      let updateNoticeEnabled = false;
+      let subscriptionInspectionEnabled = false;
       let authenticationPending = false;
       let challengeTimer: NodeJS.Timeout | undefined;
       let heartbeatTimeout: NodeJS.Timeout | null = null;
@@ -421,6 +440,15 @@ export class RouterServer {
 
           if (message.type === 'file_status') {
             if (deviceId) await this.fileTransfers.handleStatus(deviceId, message);
+            return;
+          }
+
+          if (['update_notice', 'update_notice_page', 'subscription_reminder'].includes(message.type)) {
+            if (!deviceId) return;
+            const current = () => this.connectionHub.isCurrentConnection(deviceId!, ws);
+            if (message.type === 'update_notice' && updateNoticeEnabled) await this.maintenanceCards.receiveNotice(message, deviceId, current);
+            if (message.type === 'update_notice_page' && updateNoticeEnabled) await this.maintenanceCards.receivePage(message, deviceId);
+            if (message.type === 'subscription_reminder' && subscriptionInspectionEnabled) await this.maintenanceCards.receiveReminder(message, deviceId, current);
             return;
           }
 
@@ -524,6 +552,7 @@ export class RouterServer {
                 }
 
                 this.approvalCards.disconnect(deviceId);
+                this.maintenanceCards.disconnect(deviceId);
                 if (message.data.capabilities?.queueStarted === true) {
                   this.connectionHub.registerConnection(deviceId, ws, { queueStarted: true });
                 } else {
@@ -536,6 +565,10 @@ export class RouterServer {
 
                 taskRecoveryEnabled = message.data.capabilities?.taskRecovery === true;
                 approvalCardsEnabled = message.data.capabilities?.approvalCards === true;
+                updateNoticeEnabled = message.data.capabilities?.updateNotice === true;
+                subscriptionInspectionEnabled = message.data.capabilities?.subscriptionInspection === true;
+                this.maintenanceConnections.set(deviceId, { updateNotice: updateNoticeEnabled,
+                  current: () => ws.readyState === WebSocket.OPEN && this.connectionHub.isCurrentConnection(requestedId, ws) });
                 streamingContextEnabled = message.data.capabilities?.streamingContext === true;
                 delegationProgressEnabled = message.data.capabilities?.delegationProgress === true;
                 delegationProgressTextEnabled = delegationProgressEnabled
@@ -549,7 +582,9 @@ export class RouterServer {
                     success: true,
                     routerVersion: ROUTER_VERSION,
                     minCliVersion: MIN_SUPPORTED_CLI_VERSION,
-                    ...((taskRecoveryEnabled || approvalCardsEnabled || delegationProgressEnabled || streamingContextEnabled || filesEnabled) ? { capabilities: {
+                    ...((taskRecoveryEnabled || approvalCardsEnabled || delegationProgressEnabled || streamingContextEnabled || filesEnabled || updateNoticeEnabled || subscriptionInspectionEnabled) ? { capabilities: {
+                      ...(updateNoticeEnabled ? { updateNotice: true } : {}),
+                      ...(subscriptionInspectionEnabled ? { subscriptionInspection: true } : {}),
                       ...(filesEnabled ? { fileTransferV1: true } : {}),
                       ...(taskRecoveryEnabled ? { taskRecovery: true } : {}),
                       ...(approvalCardsEnabled ? { approvalCards: true } : {}),
@@ -767,6 +802,8 @@ export class RouterServer {
           this.fileTransfers.disconnect(deviceId);
           // Clean up any streaming sessions for this device
           this.approvalCards.disconnect(deviceId);
+          this.maintenanceCards.disconnect(deviceId);
+          this.maintenanceConnections.delete(deviceId);
           this.cleanupStreamingSessionsForDevice(deviceId);
           console.log('Device disconnected:', deviceId);
         }
@@ -1765,6 +1802,8 @@ export class RouterServer {
   async stop(): Promise<void> {
     console.log('Stopping router server...');
     this.approvalCards.destroy();
+    this.maintenanceCards.destroy();
+    this.maintenanceConnections.clear();
     await this.fileTransfers.destroy();
 
     // Stop cleanup interval

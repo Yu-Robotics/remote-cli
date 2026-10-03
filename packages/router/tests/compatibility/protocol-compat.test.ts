@@ -87,6 +87,29 @@ describe('Router wire compatibility', () => {
       threadId: 'thread-id', threadName: 'thread-9', cwd: '/project' });
     expect(feishu.updateStreamingMessage).toHaveBeenCalledWith('card', expect.any(Array), 'owner', 'thread-9', '/project');
   });
+  it('negotiates standalone maintenance messages only for opted-in registered current devices', async () => {
+    const maintenance = (server as any).maintenanceCards;
+    const notice = vi.spyOn(maintenance, 'receiveNotice').mockResolvedValue(undefined);
+    const reminder = vi.spyOn(maintenance, 'receiveReminder').mockResolvedValue(undefined);
+    await receive({ type: 'update_notice', noticeKey: 'unregistered' }); expect(notice).not.toHaveBeenCalled();
+    await receive({ type: 'binding_request', data: { deviceId: 'device-1', protocolVersion: 1,
+      capabilities: { updateNotice: true, subscriptionInspection: true } } });
+    expect(JSON.parse(socket.send.mock.calls[0][0])).toMatchObject({ type: 'binding_confirm',
+      data: { minCliVersion: 1, capabilities: { updateNotice: true, subscriptionInspection: true } } });
+    await receive({ type: 'update_notice', noticeKey: 'fixture' });
+    await receive({ type: 'subscription_reminder', reminder: {} });
+    expect(notice).toHaveBeenCalledWith(expect.any(Object), 'device-1', expect.any(Function));
+    expect(reminder).toHaveBeenCalledTimes(1);
+    expect((server as any).streamingMessages.size).toBe(0);
+    expect((server as any).cardThreadMap.size).toBe(0); expect((server as any).activeThreadMap.size).toBe(0);
+  });
+  it('does not send maintenance messages or capabilities to a legacy client', async () => {
+    const maintenance = (server as any).maintenanceCards;
+    const notice = vi.spyOn(maintenance, 'receiveNotice').mockResolvedValue(undefined);
+    await receive({ type: 'binding_request', data: { deviceId: 'device-1' } });
+    expect(JSON.parse(socket.send.mock.calls[0][0]).data.capabilities).toBeUndefined();
+    await receive({ type: 'update_notice', noticeKey: 'fixture' }); expect(notice).not.toHaveBeenCalled();
+  });
 
   it('negotiates additive approval cards and routes a button response to the original request', async () => {
     await receive({ type: 'binding_request', messageId: 'registration', data: {

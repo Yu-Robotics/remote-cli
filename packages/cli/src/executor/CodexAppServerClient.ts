@@ -7,6 +7,9 @@ export interface CodexAppServerClientOptions {
   cwd?: string;
   requestTimeoutMs?: number;
   killEscalationMs?: number;
+  /** Process-local overrides for an independent maintenance client; normal clients omit these. */
+  launchArgs?: string[];
+  env?: NodeJS.ProcessEnv;
 }
 
 export interface AppServerMessage {
@@ -50,6 +53,8 @@ export class CodexAppServerClient {
   private cwd?: string;
   private readonly requestTimeoutMs: number;
   private readonly killEscalationMs: number;
+  private readonly launchArgs: string[];
+  private readonly env?: NodeJS.ProcessEnv;
   private proc: ChildProcess | null = null;
   private startPromise: Promise<void> | null = null;
   private nextRequestId = 1;
@@ -67,6 +72,8 @@ export class CodexAppServerClient {
     this.cwd = options.cwd;
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.killEscalationMs = options.killEscalationMs ?? DEFAULT_KILL_ESCALATION_MS;
+    this.launchArgs = options.launchArgs ?? [];
+    this.env = options.env;
   }
 
   setWorkingDirectory(cwd: string): void {
@@ -147,9 +154,9 @@ export class CodexAppServerClient {
 
     let proc: ChildProcess;
     try {
-      proc = spawn(this.command, ['app-server', '--stdio'], {
+      proc = spawn(this.command, ['app-server', '--stdio', ...this.launchArgs], {
         cwd: this.cwd,
-        env: { ...process.env },
+        env: this.env ?? { ...process.env },
         stdio: ['pipe', 'pipe', 'pipe'],
       });
     } catch (error) {
