@@ -163,7 +163,13 @@ describe('RouterServer - task_notification', () => {
     const [openId, elements] = mockFeishuHandler.sendTaskNotificationCard.mock.calls[0];
     expect(openId).toBe('user-1');
     const cardJson = JSON.stringify(elements);
-    expect(cardJson).toContain('TASK COMPLETED');
+    const visible = elements.filter((element: any) => element.tag === 'markdown')
+      .map((element: any) => element.content).join('\n');
+    expect(visible).toMatch(/background task.*completed/i);
+    expect(visible).toContain('b4a2f1c9');
+    expect(visible).toContain('thread-1');
+    expect(elements.find((element: any) => element.tag === 'collapsible_panel')).toMatchObject({ expanded: false });
+    expect(visible).not.toContain('Build finished successfully');
     expect(cardJson).toContain('Build finished successfully');
 
     // The new card is registered for reply-to-continue-thread routing
@@ -217,14 +223,17 @@ describe('RouterServer - task_notification', () => {
     expect(mockFeishuHandler.sendTaskNotificationCard).not.toHaveBeenCalled();
   });
 
-  it('should include the thread name in the card when provided', async () => {
+  it.each([
+    ['refactor-login', 'refactor-login'], ['   ', 'thread-1'],
+  ])('shows readable thread context for name %j', async (threadName, expectedLabel) => {
     const onMessage = await connectAndBind('device-1');
 
-    await sendTaskNotification(onMessage, { threadName: 'refactor-login' });
+    await sendTaskNotification(onMessage, { threadName });
 
     expect(mockFeishuHandler.sendTaskNotificationCard).toHaveBeenCalledTimes(1);
     const [, elements] = mockFeishuHandler.sendTaskNotificationCard.mock.calls[0];
-    expect(JSON.stringify(elements)).toContain('refactor-login');
+    expect(elements.filter((element: any) => element.tag === 'markdown')
+      .map((element: any) => element.content).join('\n')).toContain(expectedLabel);
   });
 
   it('should silently drop payloads missing taskId without throwing', async () => {
@@ -256,6 +265,6 @@ describe('RouterServer - task_notification', () => {
 
     expect(mockFeishuHandler.sendTaskNotificationCard).toHaveBeenCalledTimes(1);
     const [, elements] = mockFeishuHandler.sendTaskNotificationCard.mock.calls[0];
-    expect(JSON.stringify(elements)).toContain('TASK ENDED');
+    expect(JSON.stringify(elements)).toContain('Ended');
   });
 });

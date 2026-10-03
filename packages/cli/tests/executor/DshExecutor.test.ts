@@ -117,10 +117,18 @@ describe('DshExecutor', () => {
     expect(transports).toHaveLength(0);
   });
 
-  it('does not replace a saved conversation after a temporary resume failure', async () => {
+  it.each([
+    'Provider unavailable',
+    'Authentication required',
+    'Network connection failed',
+    'Rate limit exceeded',
+    'DSH session/resume timed out',
+    'ACP error -32000: session is not resumable: session-0',
+    'Provider response mentioned session is not resumable: session-0',
+  ])('does not replace a saved conversation after an unclassified resume failure: %s', async message => {
     await executor.execute('hi'); await executor.destroy();
     const saved = fs.readFileSync(pointer(), 'utf8');
-    customize = t => t.loadSession.mockRejectedValue(new Error('Provider unavailable'));
+    customize = t => t.loadSession.mockRejectedValue(new Error(message));
     executor = create();
     expect(await executor.execute('again')).toMatchObject({ success: false });
     expect(current().newSession).not.toHaveBeenCalled();
@@ -137,6 +145,93 @@ describe('DshExecutor', () => {
     executor = create();
     expect(await executor.execute('again')).toMatchObject({ success: true });
     expect(current().newSession).toHaveBeenCalled();
+  });
+
+  it.each([
+    'session is not resumable: session-0',
+    'ACP error -32602: session is not resumable: session-0',
+  ])('recovers a permanently non-resumable DSH session with a visible notice: %s', async message => {
+    await executor.execute('hi'); await executor.destroy();
+    const native = path.join(directory, 'native-history'); fs.writeFileSync(native, 'retain');
+    customize = t => t.loadSession.mockRejectedValue(new Error(message));
+    executor = create();
+    const stream = vi.fn(); const display = vi.fn();
+    const result = await executor.execute('again', { onStream: stream, onDisplayText: display });
+    expect(result).toMatchObject({ success: true, output: expect.stringContaining('saved DSH context cannot be resumed') });
+    expect(stream).toHaveBeenCalledWith(expect.stringContaining('new session'));
+    expect(display).toHaveBeenCalledWith(expect.stringContaining('native DSH history'));
+    expect(result.output).not.toContain('private reasoning');
+    expect(current().newSession).toHaveBeenCalledWith(directory);
+    expect(current().deleteSession).not.toHaveBeenCalled();
+    expect(JSON.parse(fs.readFileSync(pointer(), 'utf8')).id).toBe('session-1');
+    expect(fs.readFileSync(native, 'utf8')).toBe('retain');
+    expect(current().prompt.mock.calls[0][1]).toEqual([{ type: 'text', text: 'again' }]);
+    expect(await executor.execute('next')).toMatchObject({ success: true, output: 'public answer' });
+  });
+
+  it.each(['session cwd does not match', 'ACP error -32602: session cwd does not match'])
+    ('preserves a mismatched-directory session and gives explicit reset guidance: %s', async prefix => {
+      await executor.execute('hi'); await executor.destroy();
+      const saved = fs.readFileSync(pointer(), 'utf8');
+      customize = t => t.loadSession.mockRejectedValue(new Error(`${prefix}: /tmp/example-workspace`));
+      executor = create();
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const result = await executor.execute('again');
+        expect(result).toMatchObject({ success: false, error: expect.stringContaining('different working directory') });
+        expect(result.error).toContain('/clear');
+        expect(result.error).toContain('/cd');
+        expect(result.error).toContain('start fresh');
+        expect(current().newSession).not.toHaveBeenCalled();
+        expect(current().prompt).not.toHaveBeenCalled();
+        expect(fs.readFileSync(pointer(), 'utf8')).toBe(saved);
+        expect(executor.getCurrentWorkingDirectory()).toBe(directory);
+      }
+    });
+
+  it('retains the recovery notice across image rejection and catalog calls', async () => {
+    await executor.execute('hi'); await executor.destroy();
+    customize = t => t.loadSession.mockRejectedValue(new Error('session is not resumable: session-0'));
+    executor = create();
+    await executor.listModels();
+    expect(await executor.execute('image', { attachments: [{ type: 'image', data: 'AA==', mimeType: 'image/png' }] }))
+      .toMatchObject({ success: false });
+    expect(current().prompt).not.toHaveBeenCalled();
+    expect(await executor.execute('text')).toMatchObject({ success: true, output: expect.stringContaining('new session') });
+  });
+
+  it.each(['clear', 'directory'] as const)('discards a pending recovery notice after an explicit %s change', async action => {
+    await executor.execute('hi'); await executor.destroy();
+    customize = t => t.loadSession.mockRejectedValue(new Error('session is not resumable: session-0'));
+    executor = create(); await executor.listModels();
+    if (action === 'clear') executor.resetContext();
+    else {
+      const other = path.join(directory, 'other'); fs.mkdirSync(other);
+      await executor.setWorkingDirectory(other);
+    }
+    expect(await executor.execute('hi')).toMatchObject({ success: true, output: 'public answer' });
+  });
+
+  it('does not invent a compact summary after losing the original DSH session', async () => {
+    await executor.execute('hi'); await executor.destroy();
+    const saved = fs.readFileSync(pointer(), 'utf8');
+    customize = t => t.loadSession.mockRejectedValue(new Error('session is not resumable: session-0'));
+    executor = create();
+    expect(await executor.compactWhenFull()).toMatchObject({ success: false, error: expect.stringContaining('cannot be resumed') });
+    expect(current().newSession).not.toHaveBeenCalled();
+    expect(current().prompt).not.toHaveBeenCalled();
+    expect(fs.readFileSync(pointer(), 'utf8')).toBe(saved);
+    expect(fs.existsSync(handoff())).toBe(false);
+    expect(await executor.execute('normal task')).toMatchObject({ success: true });
+  });
+
+  it('does not compact a new session while a recovery notice is still pending', async () => {
+    await executor.execute('hi'); await executor.destroy();
+    customize = t => t.loadSession.mockRejectedValue(new Error('session is not resumable: session-0'));
+    executor = create(); await executor.listModels();
+    expect(await executor.compactWhenFull()).toMatchObject({ success: false, error: expect.stringContaining('cannot be resumed') });
+    expect(current().prompt).not.toHaveBeenCalled();
+    expect(fs.existsSync(handoff())).toBe(false);
+    expect(await executor.execute('normal task')).toMatchObject({ success: true });
   });
 
   it('uses opaque model IDs, native effort values and conservative image metadata', async () => {

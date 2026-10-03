@@ -26,9 +26,12 @@ interface DshState {
   images: boolean;
   usage: ExecutorContextUsage | null;
   handoff?: Handoff;
+  recoveryNotice: boolean;
   compacting: boolean;
   generation: number;
 }
+
+const COMPACT_CONTEXT_UNAVAILABLE = 'The saved DSH context cannot be resumed over ACP. No compact summary was created. Send a normal task to start fresh, or use /clear.';
 
 /** DSH-specific compatibility policy; other ACP executors keep their existing defaults. */
 export class DshExecutor extends AcpExecutor {
@@ -38,7 +41,7 @@ export class DshExecutor extends AcpExecutor {
   constructor(guard: DirectoryGuard, options: DshExecutorOptions = {}) {
     // Do not silently launch a DSH task in a different workspace when admission fails.
     if (options.initialWorkingDirectory) guard.resolveWorkingDirectory(options.initialWorkingDirectory, process.cwd());
-    const state: DshState = { images: false, usage: null, compacting: false, generation: 0 };
+    const state: DshState = { images: false, usage: null, recoveryNotice: false, compacting: false, generation: 0 };
     const directory = options.sessionBaseDir ?? path.join(os.homedir(), '.remote-cli', 'dsh-sessions');
     const handoffFile = path.join(directory, `${options.threadId ?? 'default'}.handoff.json`);
     const clearHandoff = () => {
@@ -70,7 +73,22 @@ export class DshExecutor extends AcpExecutor {
             return result;
           },
           newSession: (...args) => transport.newSession(...args),
-          loadSession: (...args) => transport.loadSession(...args),
+          loadSession: async (...args) => {
+            try { return await transport.loadSession(...args); }
+            catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              // Match only DSH's known permanent error, not provider text or arbitrary RPC failures.
+              if (/^(?:ACP error -32602:\s*)?session is not resumable(?:\s*:|$)/i.test(message)) {
+                if (state.compacting) throw new Error(COMPACT_CONTEXT_UNAVAILABLE);
+                state.recoveryNotice = true;
+                throw new Error('Session not found: the saved DSH context cannot be resumed over ACP.');
+              }
+              if (/^(?:ACP error -32602:\s*)?session cwd does not match(?:\s*:|$)/i.test(message)) {
+                throw new Error('The saved DSH session belongs to a different working directory. No context was reset. Use /clear to start fresh in the current directory, or /cd <directory> to change directories and start fresh. Changing directories does not automatically resume the original conversation.');
+              }
+              throw error;
+            }
+          },
           setConfigOption: (id, key, value) => transport.setConfigOption(id, key,
             key === 'reasoning_effort' && value === 'auto' ? '' : value),
           deleteSession: id => transport.deleteSession(id),
@@ -80,6 +98,10 @@ export class DshExecutor extends AcpExecutor {
           prompt: async (id, blocks) => {
             if (!state.images && blocks.some(block => block.type === 'image')) {
               throw new Error('This DSH ACP profile/model does not support image input. No part of this prompt was submitted.');
+            }
+            if (state.recoveryNotice) {
+              callbacks.onTextChunk?.({ type: 'text', text: '⚠️ The saved DSH context cannot be resumed over ACP. Continuing in a new session; remote-cli did not delete native DSH history.\n\n' });
+              state.recoveryNotice = false;
             }
             const handoff = state.handoff;
             const result = await transport.prompt(id, handoff
@@ -132,6 +154,7 @@ export class DshExecutor extends AcpExecutor {
     fs.rmSync(this.handoffFile, { force: true });
     this.state.handoff = undefined;
     this.state.usage = null;
+    this.state.recoveryNotice = false;
     super.resetContext();
   }
 
@@ -143,11 +166,13 @@ export class DshExecutor extends AcpExecutor {
       fs.rmSync(this.handoffFile, { force: true });
       this.state.handoff = undefined;
       this.state.usage = null;
+      this.state.recoveryNotice = false;
     }
   }
 
   async compactWhenFull(onStream?: (chunk: string) => void): Promise<ExecuteResult> {
     if (this.isBusy()) return { success: false, error: 'DSH is busy. Wait before compacting.' };
+    if (this.state.recoveryNotice) return { success: false, error: COMPACT_CONTEXT_UNAVAILABLE };
     if (this.state.handoff) return { success: true, output: 'A compact summary is already saved for the next DSH turn.' };
     this.state.compacting = true;
     const generation = this.state.generation;

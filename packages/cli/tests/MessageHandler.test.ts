@@ -326,13 +326,6 @@ describe('MessageHandler', () => {
     });
   });
 
-  describe('initialization', () => {
-    it('should create handler with dependencies', () => {
-      expect(ctx.handler).toBeDefined();
-      expect(ctx.handler).toBeInstanceOf(MessageHandler);
-    });
-  });
-
   describe('automatic update readiness', () => {
     it('resumes command execution after a manual-mode update without restarting', async () => {
       let finishInstall!: () => void;
@@ -719,6 +712,7 @@ describe('MessageHandler', () => {
       expect(helpResponse.output).toContain('/context - Show current session context');
       expect(helpResponse.output).toContain('/skills - List available skills');
       expect(helpResponse.output).toContain('/clear, /new - Start a fresh conversation');
+      expect(helpResponse.output).toContain('/effort [auto|level] - Show or set effort for Codex/AGY/OpenCode/Kimi/ZCode/Pi/DSH');
       expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
     });
   });

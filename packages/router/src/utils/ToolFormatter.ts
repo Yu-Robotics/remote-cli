@@ -642,38 +642,56 @@ export function createRedactedThinkingElement(): FeishuCardElement[] {
  * Rendered as a standalone card when a Claude Code 2.x background task
  * reaches a terminal state (completed/failed/stopped). The card is not part
  * of any streaming session — it is sent as a one-shot interactive message.
- * Expanded by default: this is the final result of the task, not noise.
+ * Keep task identity and status visible while collapsing detailed results.
  */
 export function createTaskNotificationElement(info: TaskNotificationInfo, threadName?: string): FeishuCardElement[] {
   const { taskId, status, summary, outputFile } = info;
+  const summaryLimit = 1500;
+  // Bound UTF-16 input with a truncation signal, without retaining a split surrogate pair.
+  const summarySource = summary.slice(0, (summaryLimit + 1) * 2).replace(/[\uD800-\uDBFF]$/, '');
 
-  const statusConfig: Record<string, { color: string; emoji: string; text: string }> = {
-    completed: { color: 'green', emoji: '✅', text: 'TASK COMPLETED' },
-    failed: { color: 'red', emoji: '❌', text: 'TASK FAILED' },
-    stopped: { color: 'orange', emoji: '⏹️', text: 'TASK STOPPED' },
+  const statusConfig: Record<string, { color: string; text: string }> = {
+    completed: { color: 'green', text: 'Completed' },
+    failed: { color: 'red', text: 'Failed' },
+    stopped: { color: 'orange', text: 'Stopped' },
   };
   // Unknown future statuses get a neutral label instead of being mislabeled
-  const { color, emoji, text } = statusConfig[status] || { color: 'grey', emoji: '⚪', text: 'TASK ENDED' };
+  const { color, text } = typeof status === 'string' && Object.prototype.hasOwnProperty.call(statusConfig, status)
+    ? statusConfig[status] : { color: 'grey', text: 'Ended' };
 
-  let headerTitle = `<text_tag color='${color}'>${emoji} ${text}</text_tag>`;
-  if (threadName) {
-    headerTitle += ` · **${threadName}**`;
+  const elements: FeishuCardElement[] = [
+    createMarkdownElement(`**🛰️ Background task** <text_tag color='${color}'>${text}</text_tag>`),
+    { tag: 'markdown', text_size: 'notation',
+      content: `${threadName ? `🧵 ${literalWorkerText(threadName, 60)} · ` : ''}Task ${literalWorkerText(taskId, 16)}` },
+  ];
+
+  if (status === 'failed') {
+    // Bound parsing work, then remove Markdown structure from the visible preview.
+    const preview = cardMarkdownParser.parse(summarySource, {}).flatMap(token => {
+      if (token.type === 'inline') return [(token.children ?? []).map(child => {
+        if (child.type === 'softbreak' || child.type === 'hardbreak') return ' ';
+        return ['text', 'code_inline', 'image', 'html_inline'].includes(child.type) ? child.content : '';
+      }).join('')];
+      return token.type === 'fence' || token.type === 'code_block' ? [token.content] : [];
+    }).join(' ').trim();
+    elements.push({ ...createMarkdownElement(`**Failure summary:** ${literalWorkerText(
+      preview || 'No failure summary available in this preview. Open details for any output.', 120,
+    )}`), text_size: 'notation' });
   }
-  headerTitle += ` · \`${truncate(taskId, 16)}\``;
 
   const bodyLines: string[] = [];
-  bodyLines.push(summary.trim() ? truncate(summary, 1500) : '_(no summary)_');
-  if (outputFile) {
-    bodyLines.push(`\n**Output:** \`${truncate(outputFile, 200)}\``);
+  bodyLines.push(summary.trim() ? formatWorkerResultMarkdown(summarySource, summaryLimit) : '_(no summary)_');
+  if (typeof outputFile === 'string' && outputFile) {
+    bodyLines.push(`\n**Output:** ${literalWorkerText(outputFile, 200)}`);
   }
 
   const collapsiblePanel: FeishuCardElement = {
     tag: 'collapsible_panel',
-    expanded: true,
+    expanded: false,
     header: {
       title: {
         tag: 'markdown',
-        content: headerTitle,
+        content: 'View details',
       },
       vertical_align: 'center',
       icon: {
@@ -687,14 +705,14 @@ export function createTaskNotificationElement(info: TaskNotificationInfo, thread
     vertical_spacing: '8px',
     padding: '4px 8px',
     elements: [
-      createMarkdownElement(bodyLines.join('\n')),
+      limitCardTables(createMarkdownElement(bodyLines.join('\n'))),
     ],
   };
 
-  return [
-    collapsiblePanel,
-    createMarkdownElement('💬 *Reply to this card to continue working in this thread.*'),
-  ];
+  elements.push(collapsiblePanel, {
+    ...createMarkdownElement('💬 *Reply to this card to continue working in this thread.*'), text_size: 'notation',
+  });
+  return elements;
 }
 
 /**

@@ -441,7 +441,7 @@ remote-cli stop
 | `/compact` | 压缩对话历史以节省 Token |
 | `/delegation [on|off|reset [backend]]` | 查看、启用、关闭或重置当前线程中隔离的委派 worker 上下文 |
 | `/model [name]` | 列出当前 backend 的模型，或设置当前线程的模型 |
-| `/effort [auto|level]` | 查看或设置 Codex/AGY/OpenCode/Kimi/ZCode/Pi 的线程思考等级 |
+| `/effort [auto|level]` | Show or set per-thread reasoning effort for Codex/AGY/OpenCode/Kimi/ZCode/Pi/DSH |
 | `/sandbox [on/off/read-only/default]` | 查看或配置当前 Codex 或 Claude Code 线程的沙箱；用 `allow/remove <目录>` 和 `network on/off` 调整访问设置 |
 | `/cd <dir>` | Change directory; a different directory starts fresh conversations for this thread |
 | `/backend` | 列出后端并显示当前线程实际使用的后端 |
@@ -662,6 +662,8 @@ This changes display only. It does not merge tool calls with their results or al
 ### Background Task Notifications
 
 Claude Code and Codex can send a standalone task card when a background task finishes, even after the original reply has completed. Both use the same completed, failed, and stopped card styles, show the originating thread, and let you reply to the card to continue that thread. Foreground commands stay in their original response; duplicate completion events do not create duplicate Codex task cards.
+
+Router 1.6.117 and newer explicitly label standalone background-task notifications **Background task**. The status, originating thread name (or thread ID when no name is provided), and abbreviated task ID remain visible, while **View details** is collapsed by default and contains the rich Markdown result and optional output path. Failed tasks also show a short, literal failure summary outside the panel. This changes only the Router presentation: the CLI protocol, foreground replies, delegated-worker cards, and reply-to-thread routing remain unchanged.
 
 Codex watches native command completion events and sub-agent terminal states. Command cards include the command, exit code when available, and an output excerpt; sub-agent cards use the reported result. It does not run another model turn to generate these cards. Native command notifications were verified with Codex 0.154.0; sub-agent event availability depends on the installed Codex version. Tracking lasts for the current executor process: clearing a conversation, switching its backend, or restarting/disconnecting the Codex process discards its watchers. This does not add durable background-task recovery or change AGY support.
 
@@ -1118,6 +1120,8 @@ remote-cli config set executor.type dsh
 You can also select **DeepSeek Harness (DSH)** from `/backend`; append `@` to switch only the current thread. Installation detection uses `dsh --version` (or `executor.dsh.command`); it does not prove authentication or remaining quota. Tested against DSH `0.2.0-rc.2`. Its ACP server must advertise protocol v1 and `session/resume`.
 
 remote-cli starts a dedicated ACP process per active thread. `/model` lists the native opaque catalog IDs, `/effort` controls `reasoning_effort` (`auto` restores the provider default), and `/abort` cancels through ACP with process cleanup if cancellation stalls. Session pointers live under `~/.remote-cli/dsh-sessions/`; they survive backend switches and restarts while the working directory stays the same. Temporary resume failures preserve the pointer instead of silently creating a new conversation. Tool activity, text permission prompts, file-derived text, and cross-backend delegation use the existing remote-cli flows. DSH can be either coordinator or worker; worker sessions use separate lane IDs. Thinking chunks are never included in answer text or delegated results.
+
+When DSH explicitly reports that a saved session is not resumable over ACP, remote-cli starts a fresh session and displays a recovery notice without deleting native history. Provider, authentication, network, rate-limit, and timeout failures preserve the saved pointer. A working-directory mismatch also preserves it and returns explicit manual reset guidance; changing directories starts fresh rather than automatically resuming the original conversation. `/compact` refuses to summarize a fresh session as though it contained the unavailable original context.
 
 DSH-specific boundaries:
 

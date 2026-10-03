@@ -16,6 +16,8 @@ Remote control Claude Code, AGY CLI, Codex CLI, OpenCode CLI, Kimi Code CLI, ZCo
 - **Automatic Updates**: Install the newer Router's exact version when idle. Manual clients keep running and use the update on their next start; supervised non-interactive clients exit for an immediate restart.
 - **Task Recovery**: With a compatible Router, running tasks resume output on a usable surviving card or a new card with an output-gap notice. Recovery retries use bounded backoff; disconnected output is not buffered or replayed, even after recovery is paused.
 
+Router 1.6.117 and newer explicitly label standalone background-task notifications **Background task**. The status, originating thread name (or thread ID when no name is provided), and abbreviated task ID remain visible, while **View details** is collapsed by default and contains the rich Markdown result and optional output path. Failed tasks also show a short, literal failure summary outside the panel. This changes only the Router presentation: the CLI protocol, foreground replies, delegated-worker cards, and reply-to-thread routing remain unchanged.
+
 ## Prerequisites
 
 - **Node.js** >= 18.0.0
