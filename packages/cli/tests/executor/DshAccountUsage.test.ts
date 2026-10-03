@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DSH_ACCOUNT_USAGE_PREFIX, formatDshAccountBalance, queryDshAccountUsage } from '../../src/executor/dsh/DshAccountUsage';
+import { buildBackendPath } from '../../src/utils/BackendEnvironment';
 
 const snapshot = {
   status: 'ready',
@@ -47,12 +48,15 @@ describe('DSH account balance', () => {
   });
 
   it('uses an owned privacy overlay and terminates the query without starting an ACP turn', async () => {
+    const composed = buildBackendPath({ platform: 'linux', homeDir: '/home/example', nodePath: '/opt/node/bin/node', pathValue: '/opt/legacy/bin' });
+    vi.stubEnv('PATH', composed);
     vi.stubEnv('DSH_TELEMETRY_DISABLED', '');
     const f = fixture(); const result = f.run();
     const [, args, options] = f.spawnProcess.mock.calls[0] as any;
     expect(args.slice(0, 3)).toEqual(['--profile', 'acp', '--patch']);
     expect(options).toMatchObject({ cwd: '/example/workspace', stdio: ['pipe', 'pipe', 'ignore'] });
     expect(options.env.DSH_TELEMETRY_DISABLED).toBe('1');
+    expect(options.env.PATH).toBe(composed);
     expect(process.env.DSH_TELEMETRY_DISABLED).toBe('');
     const overlay = fs.readFileSync(f.patch(), 'utf8');
     expect(overlay).toContain('session-log-deepseek\n  config:\n    enabled: false');

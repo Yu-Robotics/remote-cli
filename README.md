@@ -180,6 +180,14 @@ Tasks that finish offline report only their completion or failure status. The CL
 
 After upgrading from version 1.6.23 or earlier on Linux, run `remote-cli service install` again to regenerate the systemd unit with corrected path escaping.
 
+### Backend Executable Discovery
+
+CLI 1.6.119 enriches its own `PATH` at startup on Linux and macOS before backend checks or child processes. Inherited entries keep their precedence, followed by the running Node directory, a verified npm global installation bin, conventional user bins (`~/.local/bin`, `~/.kimi-code/bin`, `~/.npm-global/bin`, `~/.bun/bin`, `~/.opencode/bin`), and platform system/Homebrew bins. Directories need not exist yet: installing a backend there later can be detected by a fresh `/backend`; delegation discovery retains its existing 30-second cache.
+
+Upgrade and restart the CLI process once to activate this behavior; reconnecting alone does not activate an installed update in an old running process. Valid existing systemd units and LaunchAgents do not need reinstallation and are never rewritten automatically. New service installations use the same PATH builder. A removed Node executable or broken CLI `ExecStart` path still requires repairing the service. Upgrading only the Router does not fix an old client's PATH; the wire protocol and existing compatibility requirements are unchanged.
+
+Startup does not source shell profiles, invoke npm to discover prefixes, scan runtime versions, install tools, or newly add version-manager shims. Already inherited shim directories stay unchanged. For custom installation locations, set `executor.<backend>.command` to an absolute executable path, preferably the real binary. Startup checks, `/backend`, delegation, and auxiliary Claude queries honor that setting without silently substituting another executable. ZCode retains its native unset/empty-command lookup behavior; a nonempty invalid override does not fall back. A successful version probe does not prove authentication or remaining quota.
+
 ## Router Server Deployment
 
 > **Note**: Most users don't need to deploy the router server. Your team administrator should deploy one router server for the entire team to share.

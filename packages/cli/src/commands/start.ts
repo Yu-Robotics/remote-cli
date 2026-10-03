@@ -14,6 +14,9 @@ import ora, { type Ora } from 'ora';
 import { AutomaticUpdater } from '../update/AutomaticUpdater';
 import { isValidVersion } from '../utils/version';
 import { isZCodeAvailable } from '../executor/zcode/ZCodeCommand';
+import { initializeBackendEnvironment } from '../utils/BackendEnvironment';
+import { backendProbeFailure, getBackendCommand } from '../utils/BackendCommand';
+import { backendKeyOf } from '../types/config';
 
 export { isNewerVersion } from '../utils/version';
 
@@ -49,13 +52,7 @@ export async function checkBackendAvailability(type: string, spinner: Ora, execu
   const isZCode = type === 'zcode';
   const isPi = type === 'pi';
   const isDsh = type === 'dsh';
-  const cmd = isAgy ? (executorConfig?.agy?.command ?? 'agy')
-    : isCodex ? (executorConfig?.codex?.command ?? 'codex')
-      : isOpenCode ? (executorConfig?.opencode?.command ?? 'opencode')
-        : isKimi ? (executorConfig?.kimi?.command ?? 'kimi')
-          : isPi ? (executorConfig?.pi?.command ?? 'pi')
-            : isDsh ? (executorConfig?.dsh?.command ?? 'dsh')
-              : 'claude';
+  const cmd = getBackendCommand(backendKeyOf(type), executorConfig);
   const label = isAgy ? 'AGY CLI (Antigravity)'
     : isCodex ? 'Codex CLI (OpenAI)'
       : isOpenCode ? 'OpenCode CLI'
@@ -65,17 +62,28 @@ export async function checkBackendAvailability(type: string, spinner: Ora, execu
         : isDsh ? 'DeepSeek Harness'
         : 'Claude Code';
 
+  let reason = 'Executable could not be located.';
   const canRun = (args: string[]) => new Promise<boolean>((resolve) => {
-    execFile(cmd, args, { timeout: 5000 }, (err) => resolve(!err));
+    if (cmd === undefined) { resolve(false); return; }
+    try {
+      execFile(cmd, args, { timeout: 5000 }, (err) => {
+        if (err) reason = backendProbeFailure(err);
+        resolve(!err);
+      });
+    } catch (error) {
+      reason = backendProbeFailure(error);
+      resolve(false);
+    }
   });
   const available = isZCode
-    ? isZCodeAvailable(executorConfig?.zcode?.command)
+    ? isZCodeAvailable(cmd)
     : await canRun(['--version']);
 
   if (!available) {
-    spinner.warn(`${label} not found on PATH`);
+    spinner.warn(`${label} unavailable`);
     console.log('');
-    console.log(`⚠️  The selected backend "${type}" (${label}) is not installed.`);
+    console.log(`⚠️  The selected backend "${type}" (${label}) is unavailable. ${reason}`);
+    console.log(`Check executor.${backendKeyOf(type)}.command; an absolute executable path is recommended.`);
     console.log('Users will receive an error message via Feishu when they send commands.');
     console.log('You can switch backends with the /backend command in Feishu chat.');
     console.log('');
@@ -159,6 +167,8 @@ export async function startCommand(
         error: 'Configuration error: allowedDirectories is missing',
       };
     }
+
+    initializeBackendEnvironment();
 
     spinner.text = 'Checking server version...';
     const serverVersion = await getServerVersion(serverUrl);

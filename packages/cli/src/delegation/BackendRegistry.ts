@@ -2,6 +2,7 @@ import { execFile } from 'child_process';
 import type { ExecutorConfig } from '../types/config';
 import { DELEGATION_BACKENDS, type DelegationBackend } from './contract';
 import { resolveZCodeLaunch } from '../executor/zcode/ZCodeCommand';
+import { backendProbeFailure, getBackendCommand } from '../utils/BackendCommand';
 
 export interface BackendAvailability {
   backend: DelegationBackend;
@@ -19,10 +20,12 @@ export class BackendRegistry {
   private cache = new Map<string, { at: number; value: Promise<BackendAvailability> }>();
 
   constructor(private readonly probe = (command: string, args = ['--version'], env?: NodeJS.ProcessEnv): Promise<string> => new Promise((resolve, reject) => {
-    execFile(command, args, { env, timeout: 5_000, maxBuffer: 16 * 1024 }, (error, stdout) => {
-      if (error) reject(new Error('Executable is missing or its version probe failed'));
-      else resolve(stdout.trim().slice(0, 160));
-    });
+    try {
+      execFile(command, args, { env, timeout: 5_000, maxBuffer: 16 * 1024 }, (error, stdout) => {
+        if (error) reject(new Error(backendProbeFailure(error)));
+        else resolve(stdout.trim().slice(0, 160));
+      });
+    } catch (error) { reject(new Error(backendProbeFailure(error))); }
   })) {}
 
   async list(config: ExecutorConfig): Promise<BackendAvailability[]> {
@@ -30,8 +33,9 @@ export class BackendRegistry {
   }
 
   async get(backend: DelegationBackend, config: ExecutorConfig): Promise<BackendAvailability> {
-    const launch = backend === 'zcode' ? resolveZCodeLaunch(config.zcode?.command) : undefined;
-    const command = launch?.command ?? config[backend]?.command ?? backend;
+    const configuredCommand = getBackendCommand(backend, config);
+    const launch = backend === 'zcode' ? resolveZCodeLaunch(configuredCommand) : undefined;
+    const command = launch?.command ?? configuredCommand ?? backend;
     const args = launch ? [...launch.args.slice(0, launch.args.indexOf('app-server')), '--version'] : undefined;
     const key = `${backend}\0${command}\0${JSON.stringify(args)}`;
     const cached = this.cache.get(key);

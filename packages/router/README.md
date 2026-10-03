@@ -2,6 +2,8 @@
 
 Router server for [remote-cli](https://www.npmjs.com/package/@yu_robotics/remote-cli) — manages message forwarding between Feishu (Lark) and local CLI clients via WebSocket.
 
+Backend executable discovery is local-client behavior. CLI 1.6.119 supplements Linux/macOS startup PATH and honors configured backend commands across detection and execution, preserving ZCode's native unset/empty-command lookup. Upgrade and restart the client to obtain this fix; upgrading only the Router does not repair an older client's environment. Valid client services need no reinstallation. The Router runtime, wire protocol, and existing compatibility requirements are unchanged. See [Backend Executable Discovery](../../README.md#backend-executable-discovery).
+
 ## Overview
 
 The router server acts as a bridge between Feishu messaging and developer machines running the remote-cli client. It handles:

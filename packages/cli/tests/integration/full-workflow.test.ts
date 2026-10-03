@@ -36,9 +36,11 @@ describe('Integration: Full Workflow', () => {
   let mockWsClient: any;
   let tempConfigDir: string;
   let originalConfigDir: string;
+  let originalPath: string | undefined;
   let testCounter = 0;
 
   beforeEach(() => {
+    originalPath = process.env.PATH;
     vi.clearAllMocks();
 
     // Setup mock axios
@@ -73,6 +75,8 @@ describe('Integration: Full Workflow', () => {
       fs.rmSync(tempConfigDir, { recursive: true, force: true });
     }
     process.env.HOME = originalConfigDir;
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
     vi.clearAllMocks();
   });
 

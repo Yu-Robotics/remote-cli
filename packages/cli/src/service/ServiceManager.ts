@@ -2,6 +2,7 @@ import { execFile } from 'child_process';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
+import { getBackendPath } from '../utils/BackendEnvironment';
 
 export type ServicePlatform = 'linux' | 'darwin';
 
@@ -88,11 +89,12 @@ export function getServicePlatform(platform = process.platform): ServicePlatform
 export function getServiceContext(overrides: Partial<ServiceContext> = {}): ServiceContext {
   const homeDir = overrides.homeDir ?? os.homedir();
   const cliEntryPath = overrides.cliEntryPath ?? path.resolve(process.argv[1] || path.join(__dirname, '../../bin/remote-cli.js'));
+  const nodePath = overrides.nodePath ?? process.execPath;
   return {
     homeDir,
-    nodePath: overrides.nodePath ?? process.execPath,
+    nodePath,
     cliEntryPath,
-    pathValue: overrides.pathValue ?? process.env.PATH ?? '',
+    pathValue: overrides.pathValue ?? getBackendPath({ homeDir, nodePath, cliEntryPath }),
     logDirectory: overrides.logDirectory ?? path.join(homeDir, '.remote-cli', 'logs'),
   };
 }

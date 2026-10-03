@@ -1,6 +1,9 @@
 import { EventEmitter } from 'events';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { queryKimiAccountUsage } from '../../src/executor/kimi/KimiAccountUsage';
+import { buildBackendPath } from '../../src/utils/BackendEnvironment';
+
+afterEach(() => vi.unstubAllEnvs());
 
 function fakeProcess() {
   const child: any = new EventEmitter();
@@ -16,6 +19,8 @@ function fakeProcess() {
 
 describe('KimiAccountUsage', () => {
   it('queries the loopback Kimi endpoint and formats plan-specific fields', async () => {
+    const composed = buildBackendPath({ platform: 'linux', homeDir: '/home/example', nodePath: '/opt/node/bin/node', pathValue: '/opt/legacy/bin' });
+    vi.stubEnv('PATH', composed);
     const child = fakeProcess();
     const spawnProcess = vi.fn(() => child) as any;
     const fetchImpl = vi.fn().mockResolvedValue({
@@ -58,7 +63,7 @@ describe('KimiAccountUsage', () => {
     expect(spawnProcess).toHaveBeenCalledWith(
       'kimi-custom',
       ['web', '--no-open', '--port', '0', '--log-level', 'silent'],
-      expect.objectContaining({ cwd: '/project' })
+      expect.objectContaining({ cwd: '/project', env: expect.objectContaining({ PATH: composed }) })
     );
     expect(fetchImpl).toHaveBeenCalledWith(
       'http://127.0.0.1:41234/api/v1/oauth/usage?provider=managed%3Akimi-code',

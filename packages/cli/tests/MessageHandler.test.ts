@@ -1031,6 +1031,18 @@ describe('MessageHandler', () => {
       return { child, done: p };
     }
 
+    it('uses the configured Claude executable for model listing and slash passthrough', async () => {
+      useBackend({ type: 'auto', claude: { command: '/opt/example tools/claude' } });
+      const { child, done } = await runBareModel();
+      expect(mockSpawn).toHaveBeenLastCalledWith('/opt/example tools/claude', ['/model', '--print'], expect.anything());
+      child.emit('exit', 0);
+      await done;
+      const passthrough = vi.spyOn(ctx.handler as any, 'spawnPassthroughCommand').mockResolvedValue(undefined);
+      await (ctx.handler as any).executeSlashCommand('slash-fixture', 'default-thread-id', '/usage', ctx.mockExecutor);
+      expect(passthrough).toHaveBeenCalledWith('slash-fixture', 'default-thread-id', '/opt/example tools/claude', ['/usage', '--print'], ctx.mockExecutor, 'Claude CLI', { CLAUDECODE: '' });
+      passthrough.mockRestore();
+    });
+
     it('claude: lists models via claude --print /model and shows the current selection', async () => {
       useBackend(undefined, { models: { claude: 'opus' } });
       const { child, done } = await runBareModel();

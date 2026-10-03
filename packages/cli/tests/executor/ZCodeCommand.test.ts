@@ -1,8 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
 import { findZCodeEntry, isZCodeAvailable, resolveZCodeLaunch } from '../../src/executor/zcode/ZCodeCommand';
+import { getBackendCommand } from '../../src/utils/BackendCommand';
 
 describe('ZCodeCommand', () => {
   let temporaryDirectory: string;
@@ -14,9 +15,22 @@ describe('ZCodeCommand', () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     if (originalZCodeHome === undefined) delete process.env.ZCODE_HOME;
     else process.env.ZCODE_HOME = originalZCodeHome;
     await fs.rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  it('preserves native empty-command discovery without falling back for a nonempty invalid override', async () => {
+    const native = path.join(temporaryDirectory, 'zcode');
+    const envEntry = path.join(temporaryDirectory, 'environment-zcode.cjs');
+    await fs.writeFile(native, '#!/usr/bin/env node\n', { mode: 0o755 });
+    await fs.writeFile(envEntry, '// Synthetic environment entry.\n');
+    vi.stubEnv('PATH', temporaryDirectory);
+    vi.stubEnv('ZCODE_BIN', envEntry);
+    expect(findZCodeEntry(getBackendCommand('zcode'))).toBe(await fs.realpath(envEntry));
+    expect(findZCodeEntry(getBackendCommand('zcode', { type: 'zcode', zcode: { command: '' } }))).toBe(await fs.realpath(native));
+    expect(findZCodeEntry(getBackendCommand('zcode', { type: 'zcode', zcode: { command: path.join(temporaryDirectory, 'missing') } }))).toBeNull();
   });
 
   it('launches the official bundled script through Node with provider config paths', async () => {
