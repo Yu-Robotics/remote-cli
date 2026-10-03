@@ -21,6 +21,19 @@ This is a **strictly enforced** rule - any pull request containing Chinese text 
 - **Code submissions**: All code, comments, documentation, and commit messages MUST be in English
 - **Consistency**: Maintain the same language within a conversation context for better understanding
 
+## Privacy and Secret Review Requirement
+
+**CRITICAL: Before every commit, inspect the exact staged changes and all newly added artifacts for secrets and private information. Before every push, inspect the entire outgoing commit range, not only the final working tree. Do not publish until findings are resolved or confirmed to be non-sensitive fixtures.**
+
+- Never commit credentials, API keys, access or refresh tokens, passwords, private keys, session cookies, authenticated URLs, webhook secrets, or unredacted logs and transcripts.
+- Treat real deployment IP addresses, internal hostnames and endpoints, device and user identifiers, personal email addresses, home-directory paths, and customer or organization data as private unless explicitly approved for publication. Public project URLs, public attribution, and intentional Git author identity require classification, not automatic deletion.
+- Use synthetic fixtures, `example.com`, reserved documentation IP addresses, and generic paths in tests and examples. Loopback addresses are not private deployment addresses. Do not copy real values into fixtures or allowlists.
+- Check documentation, configuration examples, scripts, commit messages, generated files, screenshots, attachments, and binary metadata as well as source code. Secret scanners do not replace manual review for IP addresses and other identifying information.
+- Report findings using type, file, line, and commit identifiers; never echo complete secret values or add them to audit reports, logs, review comments, or new commits. Do not upload repository contents or candidate secrets to external scanning services, and do not test discovered credentials against live services.
+- Removing a value from the latest tree does not remove it from Git history. When auditing history, include all available branch and tag histories and clearly state unavailable refs, binary/OCR limitations, and other coverage gaps.
+- Exposed credentials require revocation or rotation by their owner. History rewriting, force-pushing, deleting refs or artifacts, and changing deployed credentials require explicit user authorization; never perform them as an automatic cleanup step.
+- Record the checks performed and unresolved limitations at handoff. Do not claim that a scanner result proves the repository contains no private information.
+
 ## README Synchronization Requirement
 
 **CRITICAL: When modifying any README file, you MUST update ALL README files to maintain consistency.**
