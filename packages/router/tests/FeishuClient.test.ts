@@ -147,6 +147,7 @@ describe('FeishuClient', () => {
       const result = await client.sendTextMessage('ou_user_123', 'Hello World');
 
       expect(result).toBe(true);
+      expect(mockedAxios.post).toHaveBeenCalledTimes(2);
       expect(mockedAxios.post).toHaveBeenCalledWith(
         '/im/v1/messages',
         {
@@ -401,30 +402,4 @@ describe('FeishuClient', () => {
     });
   });
 
-  describe('error handling and resilience', () => {
-    it('should work when token is valid', async () => {
-      mockedAxios.post = vi.fn()
-        // First token fetch
-        .mockResolvedValueOnce({
-          data: {
-            code: 0,
-            tenant_access_token: 'test_token',
-            expire: 7200
-          }
-        })
-        // Send message succeeds
-        .mockResolvedValueOnce({
-          data: {
-            code: 0,
-            msg: 'success'
-          }
-        });
-
-      const result = await client.sendTextMessage('ou_user_123', 'Test');
-
-      expect(result).toBe(true);
-      // Token fetch + send message = 2 calls
-      expect(mockedAxios.post).toHaveBeenCalledTimes(2);
-    });
-  });
 });

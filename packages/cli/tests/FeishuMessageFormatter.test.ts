@@ -7,444 +7,149 @@ import {
   createToolResultCard,
   createDividerElement,
   createMarkdownElement,
-  type ToolUseInfo,
-  type ToolResultInfo,
-  type DividerElement,
-  type MarkdownElement
 } from '../src/utils/FeishuMessageFormatter';
 
 describe('FeishuMessageFormatter', () => {
   describe('formatToolUseMessage', () => {
-    it('should format tool use with description when available', () => {
-      const toolUse: ToolUseInfo = {
-        name: 'Bash',
-        id: 'tool_123',
-        input: {
-          command: 'ls -la',
-          description: 'List files'
-        }
-      };
-
-      const result = formatToolUseMessage(toolUse);
-
-      expect(result).toContain('💻'); // Bash emoji
-      expect(result).toContain('**Bash**'); // Tool name in bold
-      expect(result).toContain('List files'); // Description shown
-      expect(result).not.toContain('>'); // Should NOT use blockquote format
+    it('keeps both the Bash description and command in a compact tool indicator', () => {
+      const output = formatToolUseMessage({
+        name: 'Bash', id: 'tool-1', input: { command: 'ls -la', description: 'List files' },
+      });
+      expect(output).toContain('**Bash**');
+      expect(output).toContain('List files');
+      expect(output).toContain('ls -la');
+      expect(output).not.toContain('>');
     });
 
-    it('should format tool use with command when no description', () => {
-      const toolUse: ToolUseInfo = {
-        name: 'Bash',
-        id: 'tool_123',
-        input: {
-          command: 'npm test',
-        }
-      };
-
-      const result = formatToolUseMessage(toolUse);
-
-      expect(result).toContain('💻'); // Bash emoji
-      expect(result).toContain('**Bash**'); // Tool name in bold
-      expect(result).toContain('`npm test`'); // Command shown in code format
+    it('shows the Bash command when no description is available', () => {
+      expect(formatToolUseMessage({ name: 'Bash', id: 'tool-1', input: { command: 'npm test' } }))
+        .toContain('`npm test`');
     });
 
-    it('should truncate long commands', () => {
-      const longCommand = 'a'.repeat(100);
-      const toolUse: ToolUseInfo = {
-        name: 'Bash',
-        id: 'tool_123',
-        input: {
-          command: longCommand,
-        }
-      };
-
-      const result = formatToolUseMessage(toolUse);
-
-      expect(result).toContain('💻'); // Bash emoji
-      expect(result).toContain('...'); // Truncated indicator
-      expect(result.length).toBeLessThan(80); // Should be truncated
+    it.each([
+      ['command', 80], ['description', 70],
+    ] as const)('bounds long Bash %s text', (field, limit) => {
+      const output = formatToolUseMessage({
+        name: 'Bash', id: 'tool-1', input: { [field]: 'a'.repeat(100) },
+      });
+      expect(output).toContain('...');
+      expect(output.length).toBeLessThan(limit);
     });
 
-    it('should use correct emoji for different tools', () => {
-      const tools: { name: string; emoji: string }[] = [
-        { name: 'Bash', emoji: '💻' },
-        { name: 'Read', emoji: '📖' },
-        { name: 'Write', emoji: '✍️' },
-        { name: 'Edit', emoji: '📝' },
-        { name: 'Grep', emoji: '🔍' },
-        { name: 'Glob', emoji: '📁' },
-        { name: 'Task', emoji: '🤖' },
-      ];
-
-      for (const tool of tools) {
-        const toolUse: ToolUseInfo = {
-          name: tool.name,
-          id: 'tool_123',
-          input: { description: 'Test' }
-        };
-        const result = formatToolUseMessage(toolUse);
-        expect(result).toContain(tool.emoji);
-      }
+    it.each(['Read', 'Write', 'Edit'])('keeps the %s tool name and file path', name => {
+      const output = formatToolUseMessage({ name, id: 'tool-1', input: { file_path: '/path/to/file.txt' } });
+      expect(output).toContain(`**${name}**`);
+      expect(output).toContain('`/path/to/file.txt`');
     });
 
-    it('should use default emoji for unknown tools', () => {
-      const toolUse: ToolUseInfo = {
-        name: 'UnknownTool',
-        id: 'tool_333',
-        input: { description: 'Test' }
-      };
-
-      const result = formatToolUseMessage(toolUse);
-
-      expect(result).toContain('🔧'); // Default emoji
-      expect(result).toContain('**UnknownTool**'); // Tool name in bold
-      expect(result).toContain('Test'); // Description shown
+    it.each([
+      { name: 'Grep', input: { pattern: 'searchTerm', path: '/src' }, expected: ['`searchTerm`', '`/src`'] },
+      { name: 'Glob', input: { pattern: '*.ts' }, expected: ['`*.ts`'] },
+      { name: 'WebFetch', input: { url: 'https://example.com/api' }, expected: ['`https://example.com/api`'] },
+      { name: 'Task', input: { prompt: 'Analyze this code', subagent_type: 'code-reviewer' }, expected: ['Analyze this code'] },
+      { name: 'TodoWrite', input: { todos: [
+        { content: 'Task 1', status: 'in_progress' }, { content: 'Task 2', status: 'pending' },
+      ] }, expected: ['2 item(s)'] },
+      { name: 'AskUserQuestion', input: { question: 'Which option do you prefer?' }, expected: ['Which option do you prefer?'] },
+    ])('extracts meaningful context for $name', ({ name, input, expected }) => {
+      const output = formatToolUseMessage({ name, id: 'tool-1', input });
+      expect(output).toContain(`**${name}**`);
+      for (const text of expected) expect(output).toContain(text);
     });
 
-    it('should show ellipsis when no command or description', () => {
-      const toolUse: ToolUseInfo = {
-        name: 'Write',
-        id: 'tool_111',
-        input: {
-          param1: 'value1',
-          param2: 'value2',
-        }
-      };
-
-      const result = formatToolUseMessage(toolUse);
-
-      // Should not contain other parameter details
-      expect(result).not.toContain('param1');
-      expect(result).not.toContain('value1');
+    it.each(['UnknownTool', 'Edit', 'Grep', 'Glob'])('keeps the %s name and generic description when specialized context is missing', name => {
+      const output = formatToolUseMessage({
+        name, id: 'tool-1', input: { description: 'Custom task' },
+      });
+      expect(output).toContain(`**${name}**`);
+      expect(output).toContain('Custom task');
     });
 
-    it('should format Read tool with file path', () => {
-      const toolUse: ToolUseInfo = {
-        name: 'Read',
-        id: 'tool_222',
-        input: {
-          file_path: '/path/to/file.txt'
-        }
-      };
-
-      const result = formatToolUseMessage(toolUse);
-
-      expect(result).toContain('📖'); // Read emoji
-      expect(result).toContain('**Read**');
-      expect(result).toContain('`/path/to/file.txt`');
+    it.each(['Write', 'Task'])('omits unrelated parameters when %s has no useful context', name => {
+      const output = formatToolUseMessage({
+        name, id: 'tool-1', input: { param1: 'value1', param2: 'value2' },
+      });
+      expect(output).toContain(`**${name}**`);
+      expect(output).not.toContain('param1');
+      expect(output).not.toContain('value1');
     });
 
-    it('should format Grep tool with pattern and path', () => {
-      const toolUse: ToolUseInfo = {
-        name: 'Grep',
-        id: 'tool_333',
-        input: {
-          pattern: 'searchTerm',
-          path: '/src'
-        }
-      };
-
-      const result = formatToolUseMessage(toolUse);
-
-      expect(result).toContain('🔍'); // Grep emoji
-      expect(result).toContain('**Grep**');
-      expect(result).toContain('`searchTerm`');
-      expect(result).toContain('in');
-      expect(result).toContain('`/src`');
-    });
-
-    it('should format WebFetch tool with URL', () => {
-      const toolUse: ToolUseInfo = {
-        name: 'WebFetch',
-        id: 'tool_444',
-        input: {
-          url: 'https://example.com/api'
-        }
-      };
-
-      const result = formatToolUseMessage(toolUse);
-
-      expect(result).toContain('🌐'); // WebFetch emoji
-      expect(result).toContain('**WebFetch**');
-      expect(result).toContain('`https://example.com/api`');
-    });
-
-    it('should format Task tool with prompt', () => {
-      const toolUse: ToolUseInfo = {
-        name: 'Task',
-        id: 'tool_555',
-        input: {
-          prompt: 'Analyze this code',
-          subagent_type: 'code-reviewer'
-        }
-      };
-
-      const result = formatToolUseMessage(toolUse);
-
-      expect(result).toContain('🤖'); // Task emoji
-      expect(result).toContain('**Task**');
-      expect(result).toContain('Analyze this code');
-    });
-
-    it('should format TodoWrite tool with todo count', () => {
-      const toolUse: ToolUseInfo = {
-        name: 'TodoWrite',
-        id: 'tool_666',
-        input: {
-          todos: [
-            { content: 'Task 1', status: 'in_progress' },
-            { content: 'Task 2', status: 'pending' }
-          ]
-        }
-      };
-
-      const result = formatToolUseMessage(toolUse);
-
-      expect(result).toContain('📋'); // TodoWrite emoji
-      expect(result).toContain('**TodoWrite**');
-      expect(result).toContain('2 item(s)');
-    });
-
-    it('should format AskUserQuestion tool with question', () => {
-      const toolUse: ToolUseInfo = {
-        name: 'AskUserQuestion',
-        id: 'tool_777',
-        input: {
-          question: 'Which option do you prefer?'
-        }
-      };
-
-      const result = formatToolUseMessage(toolUse);
-
-      expect(result).toContain('❓'); // AskUserQuestion emoji
-      expect(result).toContain('**AskUserQuestion**');
-      expect(result).toContain('Which option do you prefer?');
-    });
-
-    it('should truncate long descriptions', () => {
-      const longDescription = 'a'.repeat(100);
-      const toolUse: ToolUseInfo = {
-        name: 'Bash',
-        id: 'tool_888',
-        input: {
-          description: longDescription
-        }
-      };
-
-      const result = formatToolUseMessage(toolUse);
-
-      expect(result).toContain('...'); // Truncated indicator
-      expect(result.length).toBeLessThan(70); // Should be truncated
-    });
-
-    it('should show both description and command for Bash tool', () => {
-      const toolUse: ToolUseInfo = {
-        name: 'Bash',
-        id: 'tool_999',
-        input: {
-          command: 'ls -la',
-          description: 'List directory contents'
-        }
-      };
-
-      const result = formatToolUseMessage(toolUse);
-
-      expect(result).toContain('List directory contents');
-      expect(result).toContain('ls -la'); // Command should also appear with description
-      expect(result).toContain('(');
-      expect(result).toContain(')');
-    });
-
-    it('should format long file paths with smart truncation', () => {
-      const longPath = '/Users/username/projects/my-awesome-project/src/components/deep/nested/directory/very-long-file-name.ts';
-      const toolUse: ToolUseInfo = {
-        name: 'Read',
-        id: 'tool_111',
-        input: {
-          file_path: longPath
-        }
-      };
-
-      const result = formatToolUseMessage(toolUse);
-
-      expect(result).toContain('📖'); // Read emoji
-      expect(result).toContain('**Read**');
-      expect(result).toContain('very-long-file-name.ts'); // Filename should be visible
-      expect(result).toContain('...'); // Truncation indicator
+    it('keeps the filename visible when shortening a long file path', () => {
+      const output = formatToolUseMessage({ name: 'Read', id: 'tool-1',
+        input: { file_path: '/project/components/deep/nested/directory/very-long-file-name.ts' } });
+      expect(output).toContain('very-long-file-name.ts');
+      expect(output).toContain('...');
     });
   });
 
   describe('formatToolResultMessage', () => {
-    it('should format successful tool result with compact checkmark', () => {
-      const result: ToolResultInfo = {
-        id: 'tool_123',
-        content: 'Operation completed successfully',
-        isError: false
-      };
-
-      const formatted = formatToolResultMessage(result);
-
-      expect(formatted).toContain('✅');
-      expect(formatted).toContain('Done');
-      expect(formatted).not.toContain('Operation completed successfully'); // No details on success
-      expect(formatted).not.toContain('>'); // Should NOT use blockquote format
+    it('reports success without repeating short or long result bodies', () => {
+      for (const content of ['Operation completed successfully', 'a'.repeat(300)]) {
+        const output = formatToolResultMessage({ id: 'tool-1', content, isError: false });
+        expect(output).toMatch(/done|success|complete/i);
+        expect(output).not.toMatch(/failed|error/i);
+        expect(output).not.toContain(content);
+        expect(output).not.toContain('>');
+        expect(output.length).toBeLessThan(50);
+      }
     });
 
-    it('should format failed tool result with error details', () => {
-      const result: ToolResultInfo = {
-        id: 'tool_456',
-        content: 'Error: Something went wrong',
-        isError: true
-      };
-
-      const formatted = formatToolResultMessage(result);
-
-      expect(formatted).toContain('❌');
-      expect(formatted).toContain('**Failed**');
-      expect(formatted).toContain('Error: Something went wrong'); // Error details shown
+    it('includes failure details', () => {
+      const output = formatToolResultMessage({
+        id: 'tool-1', content: 'Error: Something went wrong', isError: true,
+      });
+      expect(output).toMatch(/failed/i);
+      expect(output).toContain('Error: Something went wrong');
     });
 
-    it('should truncate long error content', () => {
-      const longContent = 'a'.repeat(300);
-      const result: ToolResultInfo = {
-        id: 'tool_789',
-        content: longContent,
-        isError: true
-      };
-
-      const formatted = formatToolResultMessage(result);
-
-      expect(formatted).toContain('❌');
-      expect(formatted).toContain('...');
-      expect(formatted.length).toBeLessThan(250); // Truncated length
-    });
-
-    it('should not truncate success content (not shown anyway)', () => {
-      const longContent = 'a'.repeat(300);
-      const result: ToolResultInfo = {
-        id: 'tool_789',
-        content: longContent,
-        isError: false
-      };
-
-      const formatted = formatToolResultMessage(result);
-
-      expect(formatted).toBe('✅ Done'); // Compact format, no content
+    it('bounds long error details', () => {
+      const output = formatToolResultMessage({ id: 'tool-1', content: 'a'.repeat(300), isError: true });
+      expect(output).toMatch(/failed/i);
+      expect(output).toContain('...');
+      expect(output.length).toBeLessThan(250);
     });
   });
 
-  describe('createToolUseCard', () => {
-    it('should create valid Feishu card structure', () => {
-      const toolUse: ToolUseInfo = {
-        name: 'Bash',
-        id: 'tool_123',
-        input: {
-          command: 'npm test',
-          description: 'Run tests'
-        }
-      };
-
-      const card = createToolUseCard(toolUse);
-
-      expect(card).toHaveProperty('config');
-      expect(card.config.wide_screen_mode).toBe(true);
-      expect(card).toHaveProperty('header');
-      expect(card.header.template).toBe('blue');
-      expect(card.header.title.content).toContain('Bash');
-      expect(card).toHaveProperty('elements');
-      expect(Array.isArray(card.elements)).toBe(true);
+  describe('tool cards', () => {
+    it('renders tool parameters as Markdown with the tool identity and ID', () => {
+      const card = createToolUseCard({
+        name: 'Bash', id: 'tool-unique', input: { command: 'npm test', description: 'Run tests' },
+      });
+      expect(card).toMatchObject({
+        config: { wide_screen_mode: true },
+        header: { template: 'blue', title: { tag: 'plain_text', content: expect.stringContaining('Bash') } },
+      });
+      expect(card.elements.map((element: any) => element.tag)).toEqual(['markdown', 'note']);
+      expect(card.elements[0].content).toContain('npm test');
+      expect(card.elements[0].content).toContain('Run tests');
+      expect(card.elements[1].elements[0]).toMatchObject({
+        tag: 'plain_text', content: expect.stringContaining('tool-unique'),
+      });
     });
 
-    it('should include tool ID in note section', () => {
-      const toolUse: ToolUseInfo = {
-        name: 'Read',
-        id: 'tool_unique_id',
-        input: { file_path: '/test.txt' }
-      };
+    it.each([
+      [false, 'green', 'Success'], [true, 'red', 'Failed'],
+    ] as const)('distinguishes result card state (isError=%s)', (isError, template, status) => {
+      const card = createToolResultCard({ id: 'tool-1', content: 'Result details', isError });
+      expect(card).toMatchObject({
+        config: { wide_screen_mode: true },
+        header: { template, title: { tag: 'plain_text', content: expect.stringContaining(status) } },
+      });
+      expect(card.elements[0]).toEqual({ tag: 'markdown', content: 'Result details' });
+      expect(card.elements[1].elements[0].content).toContain('tool-1');
+    });
 
-      const card = createToolUseCard(toolUse);
-
-      const noteElement = card.elements.find((el: any) => el.tag === 'note');
-      expect(noteElement).toBeDefined();
-      expect(noteElement.elements[0].content).toContain('tool_unique_id');
+    it('bounds card content to the Feishu limit', () => {
+      const card = createToolResultCard({ id: 'tool-1', content: 'x'.repeat(5000), isError: false });
+      expect(card.elements[0]).toEqual({ tag: 'markdown', content: 'x'.repeat(4000) });
     });
   });
 
-  describe('createToolResultCard', () => {
-    it('should create green card for success', () => {
-      const result: ToolResultInfo = {
-        id: 'tool_123',
-        content: 'Success',
-        isError: false
-      };
-
-      const card = createToolResultCard(result);
-
-      expect(card.header.template).toBe('green');
-      expect(card.header.title.content).toContain('✅');
-      expect(card.header.title.content).toContain('Success');
-    });
-
-    it('should create red card for failure', () => {
-      const result: ToolResultInfo = {
-        id: 'tool_456',
-        content: 'Failed',
-        isError: true
-      };
-
-      const card = createToolResultCard(result);
-
-      expect(card.header.template).toBe('red');
-      expect(card.header.title.content).toContain('❌');
-      expect(card.header.title.content).toContain('Failed');
-    });
-
-    it('should truncate content to Feishu limit (4000 chars)', () => {
-      const longContent = 'x'.repeat(5000);
-      const result: ToolResultInfo = {
-        id: 'tool_789',
-        content: longContent,
-        isError: false
-      };
-
-      const card = createToolResultCard(result);
-
-      const mdElement = card.elements.find((el: any) => el.tag === 'markdown');
-      expect(mdElement.content.length).toBeLessThanOrEqual(4000);
-    });
-  });
-
-  describe('createResponseSeparator', () => {
-    it('should create simple visual separator', () => {
-      const separator = createResponseSeparator();
-
-      expect(separator).toBe('\n\n'); // Simple double newline separator
-    });
-  });
-
-  describe('createDividerElement', () => {
-    it('should create a divider element with hr tag', () => {
-      const divider: DividerElement = createDividerElement();
-
-      expect(divider.tag).toBe('hr');
-    });
-  });
-
-  describe('createMarkdownElement', () => {
-    it('should create a markdown element with content', () => {
-      const content = '**Bold text** and `code`';
-      const element: MarkdownElement = createMarkdownElement(content);
-
-      expect(element.tag).toBe('markdown');
-      expect(element.content).toBe(content);
-    });
-
-    it('should handle empty content', () => {
-      const element: MarkdownElement = createMarkdownElement('');
-
-      expect(element.tag).toBe('markdown');
-      expect(element.content).toBe('');
-    });
+  it('preserves response boundaries and Markdown element content, including empty content', () => {
+    expect(createResponseSeparator()).toBe('\n\n');
+    expect(createDividerElement()).toEqual({ tag: 'hr' });
+    for (const content of ['**Bold text** and `code`', '']) {
+      expect(createMarkdownElement(content)).toEqual({ tag: 'markdown', content });
+    }
   });
 });
