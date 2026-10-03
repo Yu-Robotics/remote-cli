@@ -299,13 +299,13 @@ This summary was reconstructed from repository commits. It records merged code c
 - Claude Code integration via Agent SDK
 - Comprehensive test suite (80%+ coverage)
 
-[Unreleased]: https://github.com/Yu-Robotics/remote-cli/commits/main
-[1.6.53]: https://github.com/Yu-Robotics/remote-cli/commits/main
-[1.6.51]: https://github.com/Yu-Robotics/remote-cli/commits/main
-[1.6.30]: https://github.com/Yu-Robotics/remote-cli/commits/main
-[1.6.29]: https://github.com/Yu-Robotics/remote-cli/commits/main
-[1.6.28]: https://github.com/Yu-Robotics/remote-cli/commits/main
-[1.6.27]: https://github.com/Yu-Robotics/remote-cli/commits/main
+[Unreleased]: https://github.com/Yu-Robotics/remote-cli/compare/7822b5a857c134fb5790e84be69526a81891bec9...main
+[1.6.53]: https://github.com/Yu-Robotics/remote-cli/commit/7822b5a857c134fb5790e84be69526a81891bec9
+[1.6.51]: https://github.com/Yu-Robotics/remote-cli/commit/2db07de81b88c866d29def2ad6b9b44b8a44fe51
+[1.6.30]: https://github.com/Yu-Robotics/remote-cli/commit/29a5d4a9b787f77e15a68d3f21b6da492c934f01
+[1.6.29]: https://github.com/Yu-Robotics/remote-cli/commit/f7173bc6240cfd5fd68cccfc17390bac23681591
+[1.6.28]: https://github.com/Yu-Robotics/remote-cli/commit/786943a43d7970ebe01847576664c4bfa46e9398
+[1.6.27]: https://github.com/Yu-Robotics/remote-cli/commit/5141df2879d785842cd47d241e16d4d26406433a
 [1.6.21]: https://github.com/Yu-Robotics/remote-cli/compare/v1.6.20...v1.6.21
 [1.6.14]: https://github.com/Yu-Robotics/remote-cli/compare/v1.6.12...v1.6.14
 [1.6.12]: https://github.com/Yu-Robotics/remote-cli/compare/v1.6.11...v1.6.12
