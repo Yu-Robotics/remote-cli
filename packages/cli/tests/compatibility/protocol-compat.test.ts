@@ -37,7 +37,7 @@ describe('CLI wire compatibility', () => {
       type: 'binding_request',
       messageId: expect.any(String),
       timestamp: expect.any(Number),
-      data: { deviceId: 'device-1', protocolVersion: PROTOCOL_VERSION, capabilities: { queueStarted: true, taskRecovery: true, approvalCards: true, delegationProgress: true, delegationProgressText: true, streamingContext: true } },
+      data: { deviceId: 'device-1', protocolVersion: PROTOCOL_VERSION, capabilities: { queueStarted: true, taskRecovery: true, approvalCards: true, delegationProgress: true, delegationProgressText: true, streamingContext: true, updateNotice: true, subscriptionInspection: true } },
     });
   });
 
@@ -46,6 +46,17 @@ describe('CLI wire compatibility', () => {
     expect(JSON.parse(socket.send.mock.calls.at(-1)![0])).toEqual({
       type: 'heartbeat', timestamp: expect.any(Number),
     });
+  });
+  it('omits disabled maintenance capabilities without changing normal legacy traffic', async () => {
+    const disabled = new WebSocketClient('ws://localhost:3000', 'device-1', {
+      maintenanceCapabilities: { updateNotice: false, subscriptionInspection: false },
+    });
+    const connecting = disabled.connect(); socket.emit('open'); await connecting;
+    const registration = JSON.parse(socket.send.mock.calls.at(-1)![0]);
+    expect(registration.data.capabilities.updateNotice).toBeUndefined();
+    expect(registration.data.capabilities.subscriptionInspection).toBeUndefined();
+    expect(registration.data.capabilities.queueStarted).toBe(true);
+    disabled.disconnect();
   });
 
   it.each([

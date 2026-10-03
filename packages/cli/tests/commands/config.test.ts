@@ -143,6 +143,15 @@ describe('config command', () => {
   });
 
   describe('set configuration', () => {
+    it.each(['maintenance.updateNotice', 'maintenance.subscriptionInspection'])('stores %s as a boolean so the documented opt-out works', async key => {
+      expect(await configCommand({ action: 'set', key, value: 'false' })).toMatchObject({ success: true, value: false });
+      expect(mockConfig.set).toHaveBeenLastCalledWith(key, false);
+      expect(await configCommand({ action: 'set', key, value: 'true' })).toMatchObject({ success: true, value: true });
+      expect(mockConfig.set).toHaveBeenLastCalledWith(key, true);
+      mockConfig.set.mockClear();
+      expect(await configCommand({ action: 'set', key, value: 'off' })).toMatchObject({ success: false });
+      expect(mockConfig.set).not.toHaveBeenCalled();
+    });
     it('should set server URL', async () => {
       const result = await configCommand({
         action: 'set',

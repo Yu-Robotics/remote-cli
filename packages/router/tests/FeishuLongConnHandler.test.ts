@@ -2496,6 +2496,27 @@ describe('FeishuLongConnHandler', () => {
   });
 
   describe('handleCardAction', () => {
+    it('routes maintenance actions with the original operator and card without selecting a thread', async () => {
+      const action = vi.fn().mockResolvedValue('Maintenance action accepted.');
+      handler.onMaintenanceAction = action;
+      handler.onCardSwitchThread = vi.fn();
+      const event = { operator: { open_id: 'owner' }, context: { open_message_id: 'card-1' },
+        action: { value: JSON.stringify({ action: 'maintenance_view', id: 'notice-1', offset: 10 }) } };
+      expect(await handler.handleCardAction(event)).toEqual({ toast: { type: 'info', content: 'Maintenance action accepted.' } });
+      expect(action).toHaveBeenLastCalledWith('owner', 'notice-1', 'card-1', 'view', 10);
+      await handler.handleCardAction({ ...event, action: { value: { action: 'maintenance_reply', id: 'reminder-1', decision: 'dismiss' } } });
+      expect(action).toHaveBeenLastCalledWith('owner', 'reminder-1', 'card-1', 'dismiss', undefined);
+      expect(handler.onCardSwitchThread).not.toHaveBeenCalled();
+
+      action.mockClear();
+      expect(await handler.handleCardAction({ ...event, context: {} })).toMatchObject({ toast: { type: 'error' } });
+      expect(action).not.toHaveBeenCalled();
+      action.mockRejectedValueOnce(new Error('Maintenance card expired.'));
+      expect(await handler.handleCardAction(event)).toEqual({ toast: { type: 'error', content: 'Maintenance card expired.' } });
+      action.mockRejectedValueOnce('untrusted error');
+      expect(await handler.handleCardAction(event)).toEqual({ toast: { type: 'error', content: 'Maintenance action failed.' } });
+    });
+
     it('passes approval clicks with the operator and source card, including errors for expired requests', async () => {
       handler.onApprovalAction = vi.fn().mockResolvedValue('Waiting for CLI confirmation.');
       const event = { operator: { open_id: 'owner' }, context: { open_message_id: 'card-1' },

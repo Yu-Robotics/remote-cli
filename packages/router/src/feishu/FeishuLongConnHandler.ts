@@ -121,6 +121,7 @@ export class FeishuLongConnHandler {
   onCardNewThread?: (openId: string) => Promise<void>;
   /** Callback invoked when a user confirms or cancels a queued command. */
   onApprovalAction?: (openId: string, requestId: string, cardId: string, decision: string) => Promise<string>;
+  onMaintenanceAction?: (openId: string, id: string, cardId: string, action: string, offset?: number) => Promise<string>;
   onQueueAction?: (openId: string, action: 'confirm' | 'cancel', queueId: string, threadId: string, cardMessageId?: string) => Promise<'sent' | 'already_processed'>;
 
   /**
@@ -1753,11 +1754,23 @@ Examples:
     const actionValue = data?.action?.value;
     if (!openId || !actionValue) return;
 
-    let parsed: { action: string; threadId?: string; threadName?: string; queueId?: string; requestId?: string; decision?: string };
+    let parsed: { action: string; threadId?: string; threadName?: string; queueId?: string; requestId?: string; decision?: string; id?: string; offset?: number };
     try {
       parsed = typeof actionValue === 'string' ? JSON.parse(actionValue) : actionValue;
     } catch {
       return;
+    }
+
+    if (parsed.action === 'maintenance_view' || parsed.action === 'maintenance_reply') {
+      const cardId = data?.context?.open_message_id;
+      if (!parsed.id || !cardId || !this.onMaintenanceAction) return { toast: { type: 'error', content: 'This maintenance card is no longer available.' } };
+      try {
+        const content = await this.onMaintenanceAction(openId, parsed.id, cardId,
+          parsed.action === 'maintenance_view' ? 'view' : parsed.decision ?? '', parsed.offset);
+        return { toast: { type: 'info', content } };
+      } catch (error) {
+        return { toast: { type: 'error', content: error instanceof Error ? error.message : 'Maintenance action failed.' } };
+      }
     }
 
     if (parsed.action === 'approval_reply') {

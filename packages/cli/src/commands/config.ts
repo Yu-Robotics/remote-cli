@@ -203,6 +203,13 @@ async function handleSetConfig(
     }
   }
 
+  if (key === 'maintenance.updateNotice' || key === 'maintenance.subscriptionInspection') {
+    if (value !== 'true' && value !== 'false') return { success: false, error: 'Maintenance options require true or false.' };
+    const enabled = value === 'true';
+    await config.set(key, enabled);
+    return { success: true, value: enabled };
+  }
+
   await config.set(key, value);
 
   return {

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { startCommand, checkBackendAvailability, getServerVersion, isNewerVersion } from '../../src/commands/start';
 import { ConfigManager } from '../../src/config/ConfigManager';
 import { WebSocketClient } from '../../src/client/WebSocketClient';
+import { MaintenanceClient } from '../../src/maintenance/MaintenanceClient';
 import { CLI_VERSION } from '../../src/types';
 import axios from 'axios';
 import { execFile } from 'child_process';
@@ -28,6 +29,9 @@ const zCodeCommandMocks = vi.hoisted(() => ({
 
 vi.mock('../../src/config/ConfigManager');
 vi.mock('../../src/client/WebSocketClient');
+vi.mock('../../src/maintenance/MaintenanceClient', () => ({
+  MaintenanceClient: vi.fn().mockImplementation(() => ({ started: vi.fn().mockResolvedValue(undefined), handle: vi.fn().mockResolvedValue(false), stop: vi.fn().mockResolvedValue(undefined) })),
+}));
 vi.mock('child_process', () => ({ execFile: vi.fn() }));
 vi.mock('../../src/update/AutomaticUpdater', () => ({
   AutomaticUpdater: vi.fn().mockImplementation(() => automaticUpdaterMocks),
@@ -173,9 +177,21 @@ describe('start command', () => {
       expect(WebSocketClient).toHaveBeenCalledWith(
         'wss://test-server.com/ws',
         'dev_test_12345',
-        { identityLoader: expect.any(Function) }
+        { identityLoader: expect.any(Function), maintenanceCapabilities: { updateNotice: true, subscriptionInspection: true } }
       );
       expect(mockWsClient.connect).toHaveBeenCalled();
+    });
+
+    it('passes local maintenance opt-outs to both registration and the independent lifecycle', async () => {
+      const configuration = mockConfig.getAll();
+      configuration.maintenance = { updateNotice: false, subscriptionInspection: false };
+      mockConfig.getAll.mockReturnValue(configuration);
+      expect((await startCommand({ daemon: false })).success).toBe(true);
+      expect(WebSocketClient).toHaveBeenCalledWith('wss://test-server.com/ws', 'dev_test_12345', {
+        identityLoader: expect.any(Function), maintenanceCapabilities: configuration.maintenance,
+      });
+      expect(MaintenanceClient).toHaveBeenCalledWith(mockWsClient, '/tmp/.remote-cli', 'https://test-server.com',
+        'dev_test_12345', expect.any(Function), configuration.maintenance);
     });
 
     it('should fail if not initialized', async () => {

@@ -180,6 +180,29 @@ Tasks that finish offline report only their completion or failure status. The CL
 
 After upgrading from version 1.6.23 or earlier on Linux, run `remote-cli service install` again to regenerate the systemd unit with corrected path escaping.
 
+### Maintenance Notices
+
+CLI and Router 1.6.123 add independent maintenance cards. First adoption silently records the currently running CLI version: it does not send a notice or replay historical changelogs. Later successful starts on a newer version show the bundled release notes for `(notification baseline, running version]`, combining skipped/offline upgrades into one range. Installation, `--version`, reconnection, reinstall, and downgrade alone do not trigger a notice. Downgrades preserve the notification baseline.
+
+Release notes are bundled at build time from `CHANGELOG.md`, starting with this feature's introduction; older history need not be reconstructed. Every subsequent release must have a nonempty entry or the CLI build fails. Cards show compact version transitions with collapsed Markdown sections and **View more** on longer ranges. Missing notes are reported separately from display paging; no online changelog fetch, Git command, or model summary is used.
+
+Delivery requires negotiated capabilities and the original device binding. Pending notices remain local until the Router acknowledges a successful card delivery and durable receipt. Receipts are private, bounded to 1,000 entries and 30 days. Deduplication is best effort: a crash between Feishu delivery and receipt persistence, or receipt expiry, can produce a duplicate. Maintenance cards never select a thread or change task/reply routing. Old peers retain normal messaging; an old Router leaves notices pending.
+
+The CLI also checks enabled backend subscription adapters at startup and every hour. Only Codex is implemented; other backend slots do not start processes or call providers. A separate status-only Codex process uses existing file-backed ChatGPT credentials ephemerally, without inheriting user Codex/project configuration or API-key/custom-provider environment variables. It never refreshes or writes credentials, creates a thread, or sends a model prompt. Missing/expired credentials, keyring-only login, an unsupported native API, and failed probes are unavailable evidence, not zero usage. Normal `/status` behavior is unchanged.
+
+The probe uses an experimental, unstable app-server login API to supply the locally stored token only in memory. OpenAI may change or remove this API; inspection then becomes unavailable without a model fallback or an interruption to normal messaging. Reverify native API compatibility when updating the supported Codex version.
+
+Codex reminders use a conservative heuristic: two independent observations, 58-62 minutes apart, must both show zero weekly usage and approximately seven days remaining (within two minutes). The absolute reset deadline must advance by the actual sample interval, within two minutes; merely seeing 100% available twice or a later deadline is insufficient. This is notification eligibility, not a confirmed provider activation or reset policy. Observations, account identity, and suppression stay in process memory; startup needs a new two-sample baseline.
+
+Cards use backend-specific explanations. Codex shows **Weekly quota available: 100%** and says: "Without new Codex usage, the reset countdown may keep moving forward. Send Codex a normal task to start the next usage window." The guidance explains why to use Codex and how, without verification steps. Availability is a snapshot from the qualifying checks, not a live balance, a claim that a reset just occurred, or a guarantee that one request starts a usage window. The only optional button is **Dismiss**, for this CLI session; a delivered reminder is not repeated while the condition persists. There is no Send Hi button or automatic activation, and neither inspection nor reminder actions send model requests. Legacy reminders without a backend identifier retain Codex handling; unsupported backend identifiers are rejected instead of inheriting Codex wording.
+
+Both features default to enabled. To opt out locally, run either command and restart the CLI:
+
+```bash
+remote-cli config set maintenance.updateNotice false
+remote-cli config set maintenance.subscriptionInspection false
+```
+
 ### Backend Executable Discovery
 
 CLI 1.6.119 enriches its own `PATH` at startup on Linux and macOS before backend checks or child processes. Inherited entries keep their precedence, followed by the running Node directory, a verified npm global installation bin, conventional user bins (`~/.local/bin`, `~/.kimi-code/bin`, `~/.npm-global/bin`, `~/.bun/bin`, `~/.opencode/bin`), and platform system/Homebrew bins. Directories need not exist yet: installing a backend there later can be detected by a fresh `/backend`; delegation discovery retains its existing 30-second cache.

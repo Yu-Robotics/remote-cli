@@ -13,6 +13,8 @@ export interface WebSocketClientOptions {
   reconnectInterval?: number;
   /** Heartbeat interval (milliseconds), default 15000 */
   heartbeatInterval?: number;
+  /** Maintenance features can opt out independently without changing the wire baseline. */
+  maintenanceCapabilities?: { updateNotice: boolean; subscriptionInspection: boolean };
 }
 
 /**
@@ -42,6 +44,7 @@ export class WebSocketClient {
   private lastReceivedAt = 0;
   private identity?: DeviceIdentity;
   private readonly identityLoader?: () => Promise<DeviceIdentity | undefined>;
+  private readonly maintenanceCapabilities: { updateNotice: boolean; subscriptionInspection: boolean };
   private readonly taskRecovery = new TaskRecovery(message => this.sendRaw(message));
   private messageHandlers: Array<(message: any) => void> = [];
   private errorHandlers: Array<(error: Error) => void> = [];
@@ -52,6 +55,7 @@ export class WebSocketClient {
     this.serverUrl = serverUrl;
     this.deviceId = deviceId;
     this.identityLoader = options.identityLoader;
+    this.maintenanceCapabilities = options.maintenanceCapabilities ?? { updateNotice: true, subscriptionInspection: true };
     this.reconnectInterval = options.reconnectInterval ?? 5000;
     this.heartbeatInterval = options.heartbeatInterval ?? 15000;
   }
@@ -303,6 +307,8 @@ export class WebSocketClient {
             delegationProgress: true,
             delegationProgressText: true,
             streamingContext: true,
+            ...(this.maintenanceCapabilities.updateNotice ? { updateNotice: true } : {}),
+            ...(this.maintenanceCapabilities.subscriptionInspection ? { subscriptionInspection: true } : {}),
             ...(this.identity ? { fileTransferV1: true } : {}),
           },
         }

@@ -17,6 +17,7 @@ import { isZCodeAvailable } from '../executor/zcode/ZCodeCommand';
 import { initializeBackendEnvironment } from '../utils/BackendEnvironment';
 import { backendProbeFailure, getBackendCommand } from '../utils/BackendCommand';
 import { backendKeyOf } from '../types/config';
+import { MaintenanceClient } from '../maintenance/MaintenanceClient';
 
 export { isNewerVersion } from '../utils/version';
 
@@ -126,6 +127,7 @@ export async function startCommand(
   options: StartCommandOptions
 ): Promise<StartCommandResult> {
   const spinner = ora('Starting remote CLI service...').start();
+  let maintenance: MaintenanceClient | undefined;
 
   try {
     const config = await ConfigManager.initialize();
@@ -229,14 +231,19 @@ export async function startCommand(
     // Create WebSocket URL
     const wsUrl = serverUrl.replace(/^http/, 'ws') + '/ws';
     const wsClient = new WebSocketClient(wsUrl, deviceId, {
+      maintenanceCapabilities: { updateNotice: allConfig.maintenance?.updateNotice !== false,
+        subscriptionInspection: allConfig.maintenance?.subscriptionInspection !== false },
       identityLoader: () => loadIdentity(config.getConfigDir(), wsUrl, deviceId),
     });
 
     const messageHandler = new MessageHandler(wsClient, threadPool, threadManager, directoryGuard, config);
     await messageHandler.reconcilePendingDelegatedWorkers();
+    maintenance = new MaintenanceClient(wsClient, config.getConfigDir(), serverUrl, deviceId,
+      () => config.get('executor') as ExecutorConfig | undefined, allConfig.maintenance);
     const automaticUpdater = new AutomaticUpdater(CLI_VERSION, messageHandler, {
       restartAfterUpdate: options.nonInteractive === true,
       beforeRestart: async () => {
+        await maintenance?.stop();
         wsClient.disconnect();
         await messageHandler.destroy();
       },
@@ -256,6 +263,7 @@ export async function startCommand(
     });
 
     wsClient.on('message', async (message) => {
+      if (await maintenance?.handle(message)) return;
       if (message.type === 'binding_confirm' && message.data?.routerVersion) {
         void automaticUpdater.handleRouterVersion(message.data.routerVersion);
       }
@@ -270,6 +278,7 @@ export async function startCommand(
     try {
       await wsClient.connect();
     } catch (error) {
+      await maintenance?.stop();
       spinner.fail('Connection failed');
       return {
         success: false,
@@ -283,6 +292,7 @@ export async function startCommand(
     if (options.daemon) {
       await config.set('service.pid', process.pid);
     }
+    await maintenance.started(CLI_VERSION);
 
     spinner.succeed(
       options.daemon
@@ -300,6 +310,7 @@ export async function startCommand(
       daemonMode: options.daemon,
     };
   } catch (error) {
+    await maintenance?.stop();
     spinner.fail('Failed to start service');
     return {
       success: false,

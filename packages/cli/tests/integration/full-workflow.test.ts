@@ -18,6 +18,9 @@ import { WebSocketClient } from '../../src/client/WebSocketClient';
 // Mock dependencies
 vi.mock('axios');
 vi.mock('../../src/client/WebSocketClient');
+vi.mock('../../src/maintenance/MaintenanceClient', () => ({
+  MaintenanceClient: vi.fn(() => ({ started: vi.fn().mockResolvedValue(undefined), handle: vi.fn().mockResolvedValue(false), stop: vi.fn().mockResolvedValue(undefined) })),
+}));
 vi.mock('node-machine-id', () => ({
   machineId: vi.fn().mockResolvedValue('test-machine-id-1234567890'),
 }));

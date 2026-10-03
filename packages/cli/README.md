@@ -18,6 +18,16 @@ Remote control Claude Code, AGY CLI, Codex CLI, OpenCode CLI, Kimi Code CLI, ZCo
 
 Router 1.6.117 and newer explicitly label standalone background-task notifications **Background task**. The status, originating thread name (or thread ID when no name is provided), and abbreviated task ID remain visible, while **View details** is collapsed by default and contains the rich Markdown result and optional output path. Failed tasks also show a short, literal failure summary outside the panel. This changes only the Router presentation: the CLI protocol, foreground replies, delegated-worker cards, and reply-to-thread routing remain unchanged.
 
+## Maintenance Notices
+
+From CLI and Router 1.6.123, the first feature-enabled start records a silent version baseline, without sending historical changelogs. Later successful newer starts deliver cumulative bundled release notes, including skipped/offline upgrades, in standalone cards with collapsed Markdown and View more. Downgrades keep the notification baseline; old Routers leave notices pending without changing normal messaging.
+
+Startup and hourly Codex-only status inspection runs independently of user threads and other backends. It uses native file-backed ChatGPT tokens ephemerally, never refreshes/writes credentials, and never creates a thread or sends a prompt. Keyring-only or expired login and unavailable APIs are not treated as zero usage. Reminders require two zero-usage samples 58-62 minutes apart, each with approximately seven days remaining, and a reset deadline that advances with elapsed time (two-minute tolerances). This is a notification heuristic, not a confirmed provider activation or reset policy. Account observations remain in memory. Reminders carry a backend identifier for backend-specific copy; Codex explains possible reset-countdown drift and tells the user to send a normal task to start the next usage window, without verification steps. Cards show 100% weekly availability at the qualifying checks, not a live balance or a guarantee about when a usage window starts. Optional Dismiss never sends requests. No Send Hi button or automatic activation is offered.
+
+Token handoff uses an experimental, unstable app-server login API that OpenAI may change or remove. Unsupported versions make inspection unavailable without affecting messaging or falling back to a model request. Reverify this API when updating the supported Codex version.
+
+Both features default to enabled. Set `maintenance.updateNotice` or `maintenance.subscriptionInspection` to `false` using `remote-cli config set` and restart to opt out. See [Maintenance Notices](../../README.md#maintenance-notices) for delivery, privacy, retention, and compatibility limits.
+
 ## Prerequisites
 
 - **Node.js** >= 18.0.0
