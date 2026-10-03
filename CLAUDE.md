@@ -525,9 +525,14 @@ Resume-failure behavior with a stale id (verified live): agy warns `conversation
 
 ## Cross-Backend Delegation
 
-Delegation is an opt-in per-thread feature (`/delegation on|off|reset [backend]`).
+From CLI 1.6.121, delegation defaults to on for new and existing threads without
+a saved preference (`/delegation on|off|reset [backend]`). Resolve this with
+`isDelegationEnabled()`; never migrate historical thread metadata to implement
+the default. Explicit `delegation: false` opts out and survives upgrades,
+context resets, backend switches, and restarts. Missing threads stay disabled.
+Default-on exposes tools but does not automatically start workers.
 The selected backend remains the coordinator and owns the user-facing answer.
-Claude Code, Codex, Pi, AGY, OpenCode, Kimi, and ZCode can use registered local
+Claude Code, Codex, Pi, AGY, OpenCode, Kimi, ZCode, and DSH can use registered local
 tools to start independent worker sessions on a different backend. Same-backend
 managed delegation is rejected; native backend task/subagent tools remain
 unchanged. Workers do not inherit the coordinator transcript or become
@@ -575,9 +580,12 @@ abort and shutdown suppress this fallback and further continuation. There is no
 automatic cross-request result recovery.
 
 The Router receives existing task, tool, approval, and response events; the
-wire protocol remains version 1. Never-enabled threads bypass delegation setup
-and admission checks. Managed worker cleanup must be confirmed before releasing
-its workspace reservation. See `DELEGATION_PLAN.md` for the product contract,
+wire protocol remains version 1. Explicitly disabled threads bypass delegation
+setup and admission checks, apart from clearing tools on backends recorded as
+owned. An implicit default does not prove that a native session registered
+tools; preserve the legacy explicit-on cleanup fallback without treating all
+unset preferences as previously owned. Managed worker cleanup must be confirmed
+before releasing its workspace reservation. See `DELEGATION_PLAN.md` for the product contract,
 limits, and validation matrix.
 
 ## Common Pitfalls

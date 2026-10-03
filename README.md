@@ -481,10 +481,18 @@ dispatch and let Remote CLI wait and resume the coordinator automatically.
 /delegation reset codex
 ```
 
-Delegation is **off by default**. The setting is saved per thread and survives
-backend switches and conversation resets. Install, authenticate, and select a
-working model for each desired backend first. Discovery checks its configured executable;
-authentication and remaining quota are checked only when a task runs.
+From CLI 1.6.121, delegation is **on by default** for new and existing threads
+without a saved preference. A saved `false` remains off; `/delegation off`
+explicitly opts out and `/delegation on` enables it again. No historical thread
+migration or conversation reset is required. The preference survives backend
+switches, conversation resets, and CLI restarts. Default-on makes delegation
+tools available; it does not automatically start workers. Explicitly disabled
+threads skip managed tools, prompt changes, and delegation admission checks.
+Install, authenticate, and select a working model for each desired backend
+first. Discovery checks its configured executable; authentication and remaining
+quota are checked only when a task runs. Upgrade and restart the local CLI to
+obtain the new default. Existing Routers remain compatible; upgrading only the
+Router leaves an older CLI's default unchanged.
 
 When enabled, each `(parent thread, worker backend, workspace generation)` owns
 one isolated worker lane. A worker lane never reuses the direct conversation of
@@ -562,10 +570,12 @@ This requires a CLI upgrade and does not change the wire protocol. Codex
 reasoning summaries, Claude's legacy thinking events, and tool-update deduplication
 are separate behaviors and are unchanged by this release.
 
-For staged rollout, enable one trial thread first. Never-enabled threads skip
-all delegation setup: no managed tool registration, prompt prefix, backend
-configuration cleanup, or delegation workspace admission checks. Their ordinary
-process handling and session output remain unchanged.
+Use `/delegation off` for threads that should keep ordinary execution without
+managed tool registration, prompt prefixes, or delegation workspace admission
+checks. Their ordinary process handling and session output remain unchanged,
+apart from removing previously owned tools. Disabling an implicit default
+before any tools have been registered does not reconfigure unused native
+sessions.
 
 After a thread has used delegation, `/delegation off` removes its managed tools.
 The CLI records which backends need cleanup, including after a restart or a

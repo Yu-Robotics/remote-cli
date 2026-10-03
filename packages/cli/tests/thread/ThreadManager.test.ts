@@ -4,6 +4,7 @@ import os from 'os';
 import path from 'path';
 import { ThreadManager } from '../../src/thread/ThreadManager';
 import { DEFAULT_THREAD_NAME, MAX_THREADS } from '../../src/thread/types';
+import { isDelegationEnabled } from '../../src/thread/DelegationSettings';
 
 // Mock os.homedir() so tests don't write to real home directory
 const originalHomedir = os.homedir();
@@ -12,16 +13,19 @@ vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || originalHom
 describe('ThreadManager', () => {
   let tmpDir: string;
   let manager: ThreadManager;
+  let previousHome: string | undefined;
 
   beforeEach(async () => {
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'thread-manager-test-'));
+    previousHome = process.env.HOME;
     process.env.HOME = tmpDir;
     manager = await ThreadManager.initialize(tmpDir);
   });
 
   afterEach(async () => {
     await fs.rm(tmpDir, { recursive: true, force: true });
-    delete process.env.HOME;
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
   });
 
   describe('initialization', () => {
@@ -41,6 +45,48 @@ describe('ThreadManager', () => {
       expect(threads).toHaveLength(1);
       expect(threads[0].name).toBe(DEFAULT_THREAD_NAME);
       expect(threads[0].delegationWorkspaceGeneration).toBe(0);
+    });
+
+    it('enables delegation on new threads without materializing a preference', async () => {
+      const created = await manager.createThread('default-on', tmpDir);
+      const saved = await ThreadManager.initialize(tmpDir);
+      for (const thread of [saved.getDefaultThread(), saved.getThread(created.id)!]) {
+        expect(isDelegationEnabled(thread)).toBe(true);
+        expect(thread).not.toHaveProperty('delegation');
+      }
+    });
+
+    it('reads legacy preferences without rewriting metadata or conversation bindings', async () => {
+      const disabled = await manager.createThread('disabled', tmpDir, 'dsh');
+      const enabled = await manager.createThread('enabled', tmpDir, 'claude');
+      const legacy = { ...manager.getDefaultThread(), sessionId: 'saved-parent-session',
+        models: { dsh: 'provider/model' }, efforts: { dsh: 'high' } };
+      delete legacy.delegationWorkspaceGeneration;
+      const store = { threads: {
+        [legacy.id]: legacy,
+        [disabled.id]: { ...disabled, delegation: false, sessionId: 'saved-disabled-session' },
+        [enabled.id]: { ...enabled, delegation: true },
+      } };
+      const storePath = path.join(tmpDir, '.remote-cli', 'threads.json');
+      const before = JSON.stringify(store, null, 2);
+      await fs.writeFile(storePath, before);
+
+      const loaded = await ThreadManager.initialize(tmpDir);
+      expect(isDelegationEnabled(loaded.getDefaultThread())).toBe(true);
+      expect(isDelegationEnabled(loaded.getThread(disabled.id))).toBe(false);
+      expect(isDelegationEnabled(loaded.getThread(enabled.id))).toBe(true);
+      expect(Object.fromEntries(loaded.listThreads().map(thread => [thread.id, thread]))).toEqual(store.threads);
+      expect(await fs.readFile(storePath, 'utf8')).toBe(before);
+    });
+
+    it('retains an explicit opt-out through metadata updates and reloads', async () => {
+      const thread = manager.getDefaultThread();
+      await manager.updateThread(thread.id, { delegation: false, backend: 'dsh' });
+      await manager.updateThread(thread.id, { sessionId: null, models: { dsh: 'provider/model' }, lastActiveAt: 42 });
+      await manager.clearBackendOverrides();
+      const saved = await ThreadManager.initialize(tmpDir);
+      expect(saved.getDefaultThread().delegation).toBe(false);
+      expect(isDelegationEnabled(saved.getDefaultThread())).toBe(false);
     });
 
     it('persists threads to disk and loads on re-initialize', async () => {

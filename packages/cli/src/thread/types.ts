@@ -18,7 +18,7 @@ export interface Thread {
   lastActiveAt: number;
   /** Optional backend override. Unset means use the global executor backend. */
   backend?: BackendKey;
-  /** Optional cross-backend tool delegation for this thread. Defaults to false. */
+  /** Cross-backend tool delegation preference. Unset defaults to true; false opts out. */
   delegation?: boolean;
   /** Backends that may retain managed tools and require opt-out cleanup on resume. */
   delegationBackends?: BackendKey[];

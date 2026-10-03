@@ -14,7 +14,7 @@ The router server acts as a bridge between Feishu messaging and developer machin
 - **Image message forwarding** for Feishu images to supported backends, plus Codex native image output and local image files returned by any backend
 - **Client service management** is handled by the local CLI; the Router remains a separate long-running server process
 - **Queued task cards** appear at execution time for capable clients, with the thread, workspace, task preview, and remaining queue count; older clients retain waiting cards
-- **Delegated task progress** uses the existing reply and approval cards. With a supporting local CLI, `/delegation on` enables Claude Code, Codex, Pi, AGY, OpenCode, Kimi Code, and ZCode workers within the selected thread; the Router does not run or select workers. From CLI 1.6.95, managed delegation accepts only a different backend. An unrestricted coordinator launches unrestricted workers; sandboxed coordinators have no eligible workers until cross-backend sandbox translation is supported. Native backend task/subagent tools are unchanged. Other backend approval options still apply. This policy is enforced on the local CLI and requires upgrading it. See [Cross-backend Delegation](../../README.md#cross-backend-delegation).
+- **Delegated task progress** uses the existing reply and approval cards. With a supporting local CLI, Claude Code, Codex, Pi, AGY, OpenCode, Kimi Code, ZCode, and DSH can work within the selected thread; the Router does not run or select workers. From CLI 1.6.95, managed delegation accepts only a different backend. An unrestricted coordinator launches unrestricted workers; sandboxed coordinators have no eligible workers until cross-backend sandbox translation is supported. Native backend task/subagent tools are unchanged. Other backend approval options still apply. This policy is enforced on the local CLI and requires upgrading it. See [Cross-backend Delegation](../../README.md#cross-backend-delegation).
 - **WebSocket connections** from local clients
 - **Feishu long connection** for receiving and sending messages
 - **Task recovery** with compatible clients: resume output on a usable surviving card or create a new one, with an independent gap notice and plain-text handling of resumed fragments; failed card creation or recovery-notice updates are not acknowledged as successful recovery
@@ -152,7 +152,14 @@ The Feishu command reference includes the cross-backend `/status`, `/context`, a
 CLI 1.6.93 makes `/cd` to a different directory start fresh conversations for all backends in that thread, including inactive ones. Returning to the old directory does not restore its old conversations. Same-directory `/cd` and backend-only switches preserve context. Thread settings and native history files remain intact. The CLI enforces this behavior without a protocol change; upgrading only the Router does not change an older CLI's directory behavior.
 
 With CLI 1.6.84 or newer, `/status` also shows `Delegation: on/off (current thread)`.
-The CLI reads this saved setting without initializing delegation or starting workers.
+The CLI reads this effective setting without initializing delegation or starting workers.
+
+From CLI 1.6.121, new and existing threads without a saved delegation preference
+default to on. Explicit `/delegation off` choices remain off across upgrades,
+context resets, backend switches, and restarts; `/delegation on` re-enables it.
+There is no historical thread migration or automatic worker launch. Upgrade
+and restart the local CLI, not just the Router, to obtain the new default.
+The Router protocol is unchanged, and older CLIs retain their existing default.
 
 From CLI 1.6.118, `/status` shows DSH's official recharge and bonus wallet balances when available. Native official-account sign-in is required; API-key-only or custom-provider setup does not supply these wallets. Amounts retain their native decimal precision and currency; balances are not token usage or plan quota. The query does not create or change an ACP conversation. Its owned process uses the same log-upload and telemetry suppression as the DSH executor, is stopped after the query, and omits the balance section on failure or timeout. No other backend or Router protocol changes are required.
 From CLI 1.6.120, Claude SDK `[claude-code:unrecognized_model]` records with a valid `{model, query_source: "sdk"}` payload are omitted from Feishu streaming/results and Claude slash-command error details. Model names are not hard-coded. Other diagnostics, malformed or unexpected records, actual errors, exit status, and assistant reply text are retained. The persistent Claude process's raw stderr remains in local CLI logs; this presentation filter does not disable Claude Code telemetry or change the configured model, other backends, or the Router protocol.
