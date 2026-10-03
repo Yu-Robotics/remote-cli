@@ -145,6 +145,75 @@ describe('ClaudePersistentExecutor', () => {
       vi.useRealTimers();
     });
 
+    const modelDiagnostic = '[claude-code:unrecognized_model] {"model":"Kimi Code - Coding Plan/kimi-for-coding","query_source":"sdk"}';
+
+    it('omits fragmented SDK model diagnostics from streaming and results while retaining local logs', async () => {
+      const onStream = vi.fn();
+      const result = executor.execute('Answer normally', { onStream });
+      await vi.advanceTimersByTimeAsync(1000);
+      mockChildProcess.stderr.emit('data', Buffer.from(modelDiagnostic.slice(0, 20)));
+      mockChildProcess.stderr.emit('data', Buffer.from(modelDiagnostic.slice(20)));
+      mockChildProcess.stderr.emit('data', Buffer.from('\nNative retry warning\n'));
+      expect(onStream.mock.calls.map(([text]) => text).join('')).toBe('Native retry warning\n');
+      expect(vi.mocked(console.error).mock.calls.flat().join('')).toContain(modelDiagnostic.slice(20));
+      assistant('answer', [{ type: 'text', text: 'Answer' }]);
+      emit({ type: 'result', subtype: 'success' });
+      expect(await result).toMatchObject({ success: true, output: 'Native retry warning\nAnswer' });
+    });
+
+    it('does not filter diagnostic-looking text from the actual assistant answer', async () => {
+      const onStream = vi.fn();
+      const result = executor.execute('Explain this diagnostic', { onStream });
+      await vi.advanceTimersByTimeAsync(1000);
+      assistant('answer', [{ type: 'text', text: modelDiagnostic }]);
+      emit({ type: 'result', subtype: 'success' });
+      expect(await result).toMatchObject({ success: true, output: modelDiagnostic });
+      expect(onStream).toHaveBeenCalledWith(modelDiagnostic);
+    });
+
+    it.each(['error', 'result'])('preserves an API failure returned as a stdout %s event', async type => {
+      const onStream = vi.fn();
+      const result = executor.execute('Make a request', { onStream }).catch(error => error);
+      await vi.advanceTimersByTimeAsync(1000);
+      const apiError = 'API Error: 429 {"error":{"type":"rate_limit_error","message":"Quota exhausted"}}';
+      mockChildProcess.stderr.emit('data', Buffer.from(`${modelDiagnostic}\n${apiError}\n`));
+      emit(type === 'error' ? { type, content: apiError }
+        : { type, subtype: 'error_during_execution', is_error: true, result: apiError });
+      const error = await result;
+      expect(error).toBeInstanceOf(Error);
+      expect(error.message).toBe(apiError);
+      expect(onStream.mock.calls.map(([text]) => text).join('')).toContain(apiError);
+      expect(onStream.mock.calls.map(([text]) => text).join('')).not.toContain('unrecognized_model');
+    });
+
+    it('keeps a failed process failed and preserves the real startup error without the diagnostic', async () => {
+      const onStream = vi.fn();
+      const result = executor.execute('Fail safely', { onStream }).catch(error => error);
+      await vi.advanceTimersByTimeAsync(1000);
+      mockChildProcess.stderr.emit('data', Buffer.from(`${modelDiagnostic}\nError: request failed\n`));
+      mockChildProcess.stderr.emit('data', Buffer.from(modelDiagnostic));
+      mockChildProcess.emit('exit', 1, null);
+      mockChildProcess.emit('close', 1, null);
+      const error = await result;
+      expect(error).toBeInstanceOf(Error);
+      expect(error.message).toContain('Error: request failed');
+      expect(error.message).not.toContain('unrecognized_model');
+      expect(onStream.mock.calls.map(([text]) => text).join('')).toBe('Error: request failed\n');
+    });
+
+    it('flushes a meaningful unterminated stderr tail after exit before closing the command', async () => {
+      const onStream = vi.fn();
+      const result = executor.execute('Fail safely', { onStream }).catch(error => error);
+      await vi.advanceTimersByTimeAsync(1000);
+      const meaningful = '[claude-code:unrecognized_model] {invalid JSON';
+      mockChildProcess.stderr.emit('data', Buffer.from(meaningful));
+      mockChildProcess.emit('exit', 1, null);
+      mockChildProcess.stderr.emit('end');
+      mockChildProcess.emit('close', 1, null);
+      expect((await result).message).toContain(meaningful);
+      expect(onStream.mock.calls.map(([text]) => text).join('')).toBe(meaningful);
+    });
+
     it.each(['before', 'after'])('streams text before completion and deduplicates a final block received %s stream end', async (order) => {
       const onStream = vi.fn();
       const completed = vi.fn();

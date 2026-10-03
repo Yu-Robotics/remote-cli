@@ -33,6 +33,7 @@ import { DelegationBridge } from '../delegation/DelegationBridge';
 import { DELEGATION_BACKENDS, DELEGATION_INSTRUCTIONS, type DelegationBackend } from '../delegation/contract';
 import { formatDelegationStatus } from '../delegation/DelegationStatusFormatter';
 import { backendProbeFailure, getBackendCommand } from '../utils/BackendCommand';
+import { filterClaudeStderr } from '../executor/claude/ClaudeStderrFilter';
 
 /**
  * Detected backend information
@@ -1920,11 +1921,11 @@ You can also use natural language commands to control Claude Code CLI.`,
       }
       const executorConfig = (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
       const agyCommand = getBackendCommand('agy', executorConfig);
-      return this.spawnPassthroughCommand(messageId, threadId, agyCommand, ['-p', command], executor, 'AGY CLI');
+      return this.spawnPassthroughCommand(messageId, threadId, agyCommand, ['-p', command], executor, 'agy');
     }
 
     const executorConfig = (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
-    return this.spawnPassthroughCommand(messageId, threadId, getBackendCommand('claude', executorConfig), [command, '--print'], executor, 'Claude CLI', { CLAUDECODE: '' });
+    return this.spawnPassthroughCommand(messageId, threadId, getBackendCommand('claude', executorConfig), [command, '--print'], executor, 'claude', { CLAUDECODE: '' });
   }
 
   /**
@@ -1937,10 +1938,11 @@ You can also use natural language commands to control Claude Code CLI.`,
     bin: string,
     args: string[],
     executor: IExecutor,
-    label: string,
+    backend: 'claude' | 'agy',
     extraEnv: Record<string, string> = {}
   ): Promise<void> {
     return new Promise((resolve) => {
+      const label = backend === 'agy' ? 'AGY CLI' : 'Claude CLI';
       const chunks: string[] = [];
       const errorChunks: string[] = [];
 
@@ -1983,7 +1985,8 @@ You can also use natural language commands to control Claude Code CLI.`,
             output: output.trim() || '✅ Command executed successfully',
           });
         } else {
-          const errorOutput = errorChunks.join('') || chunks.join('');
+          const stderr = errorChunks.join('');
+          const errorOutput = (backend === 'claude' ? filterClaudeStderr(stderr) : stderr) || chunks.join('');
           this.sendResponse(messageId, threadId, {
             success: false,
             error: errorOutput.trim() || `Command failed with exit code ${code}`,

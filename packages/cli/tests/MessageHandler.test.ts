@@ -1039,7 +1039,7 @@ describe('MessageHandler', () => {
       await done;
       const passthrough = vi.spyOn(ctx.handler as any, 'spawnPassthroughCommand').mockResolvedValue(undefined);
       await (ctx.handler as any).executeSlashCommand('slash-fixture', 'default-thread-id', '/usage', ctx.mockExecutor);
-      expect(passthrough).toHaveBeenCalledWith('slash-fixture', 'default-thread-id', '/opt/example tools/claude', ['/usage', '--print'], ctx.mockExecutor, 'Claude CLI', { CLAUDECODE: '' });
+      expect(passthrough).toHaveBeenCalledWith('slash-fixture', 'default-thread-id', '/opt/example tools/claude', ['/usage', '--print'], ctx.mockExecutor, 'claude', { CLAUDECODE: '' });
       passthrough.mockRestore();
     });
 
@@ -2322,6 +2322,31 @@ describe('MessageHandler', () => {
       expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
         expect.objectContaining({ success: false, error: expect.stringContaining('no credits info found') })
       );
+    });
+
+    it.each(['auto', 'agy'])('filters SDK model diagnostics only for Claude slash failures: %s', async type => {
+      useBackend({ type });
+      const { child, done } = await runSlash(type === 'agy' ? '/credits' : '/doctor');
+      const diagnostic = '[claude-code:unrecognized_model] {"model":"Kimi Code - Coding Plan/kimi-for-coding","query_source":"sdk"}\n';
+      child.stderr.emit('data', Buffer.from(diagnostic.slice(0, 15)));
+      child.stderr.emit('data', Buffer.from(`${diagnostic.slice(15)}Error: request failed`));
+      child.emit('exit', 1);
+      await done;
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+        success: false,
+        error: type === 'agy' ? `${diagnostic}Error: request failed` : 'Error: request failed',
+      }));
+    });
+
+    it('does not turn a failed Claude slash command into success when its only stderr was a diagnostic', async () => {
+      useBackend({ type: 'auto' });
+      const { child, done } = await runSlash('/doctor');
+      child.stderr.emit('data', Buffer.from('[claude-code:unrecognized_model] {"model":"custom-provider/model","query_source":"sdk"}'));
+      child.emit('exit', 1);
+      await done;
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+        success: false, error: 'Command failed with exit code 1',
+      }));
     });
 
     it('should report a spawn failure with the backend label', async () => {

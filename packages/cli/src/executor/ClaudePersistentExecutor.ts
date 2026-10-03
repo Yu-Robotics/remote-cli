@@ -13,6 +13,7 @@ import { randomUUID } from 'crypto';
 import { EventEmitter } from 'events';
 import { DELEGATION_TOOLS, delegationMcpConfig, sameConnection, type DelegationConnection } from '../delegation/contract';
 import { assertWorkingDirectoryExists } from '../utils/WorkingDirectory';
+import { ClaudeStderrFilter } from './claude/ClaudeStderrFilter';
 
 /**
  * Claude stream JSON input message
@@ -525,6 +526,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
       // Buffer for collecting stderr on startup (for error reporting)
       let stderrBuffer: string[] = [];
       let isStartupPhase = true;
+      const stderrFilter = new ClaudeStderrFilter();
 
       // Handle stdout (JSON stream)
       let buffer = '';
@@ -542,10 +544,8 @@ export class ClaudePersistentExecutor extends EventEmitter {
         }
       });
 
-      // Handle stderr
-      child.stderr?.on('data', (data: Buffer) => {
-        const text = data.toString();
-
+      const forwardStderr = (text: string) => {
+        if (!text) return;
         // Collect stderr during startup for error reporting
         if (isStartupPhase) {
           stderrBuffer.push(text);
@@ -555,14 +555,23 @@ export class ClaudePersistentExecutor extends EventEmitter {
           }
         }
 
-        console.error('[ClaudePersistent stderr]', text);
-
         // Forward to current stream callback if available
         if (this.currentStreamCallback) {
           this.currentStreamCallback(text);
         }
         this.currentOutputBuffer.push(text);
+      };
+      const flushStderr = () => {
+        const remainder = stderrFilter.flush();
+        if (!isStartupPhase) this.lastStderrOutput += remainder;
+        forwardStderr(remainder);
+      };
+      child.stderr?.on('data', (data: Buffer) => {
+        // Keep the native diagnostic in local logs, not user-facing output.
+        console.error('[ClaudePersistent stderr]', data.toString());
+        forwardStderr(stderrFilter.write(data));
       });
+      child.stderr?.on('end', flushStderr);
 
       // Handle process exit
       child.on('exit', (code, signal) => {
@@ -584,6 +593,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
       // Use 'close' event (fires after all I/O streams are closed, i.e. after all stdout
       // data events have been processed) instead of 'exit' for command completion logic.
       child.on('close', (code, signal) => {
+        flushStderr();
         this.clearApprovals('Claude process exited');
         this.claudeProcess = null;
 
