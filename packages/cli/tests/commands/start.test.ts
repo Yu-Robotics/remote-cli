@@ -146,14 +146,6 @@ describe('start command', () => {
       });
 
       expect(result.success).toBe(true);
-      expect(mockWsClient.connect).toHaveBeenCalled();
-    });
-
-    it('should connect to WebSocket server', async () => {
-      await startCommand({
-        daemon: false,
-      });
-
       expect(WebSocketClient).toHaveBeenCalledWith(
         'wss://test-server.com/ws',
         'dev_test_12345',
@@ -207,6 +199,25 @@ describe('start command', () => {
 
       expect(execFile).toHaveBeenCalledWith('/opt/pi', ['--version'], { timeout: 5000 }, expect.any(Function));
       expect(spinner.warn).not.toHaveBeenCalled();
+    });
+
+    it.each([undefined, '/opt/example-tools/dsh'])('checks the DSH binary rather than Claude: %s', async command => {
+      await checkBackendAvailability('dsh', spinner, { type: 'dsh', dsh: { command } });
+      expect(execFile).toHaveBeenCalledTimes(1);
+      expect(execFile).toHaveBeenCalledWith(command ?? 'dsh', ['--version'], { timeout: 5000 }, expect.any(Function));
+      expect(spinner.warn).not.toHaveBeenCalled();
+    });
+
+    it('reports a missing DSH binary without blocking startup', async () => {
+      const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+      vi.mocked(execFile).mockImplementation(((_command: string, _args: string[], _options: object, callback: Function) => {
+        callback(new Error('not found'));
+      }) as any);
+      await checkBackendAvailability('dsh', spinner, { type: 'dsh' });
+      expect(spinner.warn).toHaveBeenCalledWith('DeepSeek Harness not found on PATH');
+      expect(spinner.start).toHaveBeenCalledWith('Continuing...');
+      expect(console.log).toHaveBeenCalledWith(expect.stringContaining('(DeepSeek Harness)'));
+      log.mockRestore();
     });
 
     it('uses official ZCode discovery for the ZCode backend', async () => {
@@ -352,32 +363,16 @@ describe('start command', () => {
 // isNewerVersion unit tests
 // ---------------------------------------------------------------------------
 describe('isNewerVersion', () => {
-  it('returns true when remote major is greater', () => {
-    expect(isNewerVersion('2.0.0', '1.9.9')).toBe(true);
-  });
-
-  it('returns true when remote minor is greater', () => {
-    expect(isNewerVersion('1.2.0', '1.1.9')).toBe(true);
-  });
-
-  it('returns true when remote patch is greater', () => {
-    expect(isNewerVersion('1.0.12', '1.0.11')).toBe(true);
-  });
-
-  it('returns false when versions are equal', () => {
-    expect(isNewerVersion('1.0.11', '1.0.11')).toBe(false);
-  });
-
-  it('returns false when remote is older (major)', () => {
-    expect(isNewerVersion('0.9.0', '1.0.0')).toBe(false);
-  });
-
-  it('returns false when remote is older (minor)', () => {
-    expect(isNewerVersion('1.0.9', '1.1.0')).toBe(false);
-  });
-
-  it('returns false when remote is older (patch)', () => {
-    expect(isNewerVersion('1.0.10', '1.0.11')).toBe(false);
+  it.each([
+    { scenario: 'remote major is greater', remote: '2.0.0', local: '1.9.9', expected: true },
+    { scenario: 'remote minor is greater', remote: '1.2.0', local: '1.1.9', expected: true },
+    { scenario: 'remote patch is greater', remote: '1.0.12', local: '1.0.11', expected: true },
+    { scenario: 'versions are equal', remote: '1.0.11', local: '1.0.11', expected: false },
+    { scenario: 'remote major is older', remote: '0.9.0', local: '1.0.0', expected: false },
+    { scenario: 'remote minor is older', remote: '1.0.9', local: '1.1.0', expected: false },
+    { scenario: 'remote patch is older', remote: '1.0.10', local: '1.0.11', expected: false },
+  ])('compares versions when $scenario', ({ remote, local, expected }) => {
+    expect(isNewerVersion(remote, local)).toBe(expected);
   });
 });
 

@@ -66,6 +66,8 @@ failure; no new wire capability is required. Abort/shutdown suppress this fallba
 It does not provide automatic recovery on a later request or guarantee delivery
 across disconnects/restarts.
 
+Router 1.6.117 and newer explicitly label standalone background-task notifications **Background task**. The status, originating thread name (or thread ID when no name is provided), and abbreviated task ID remain visible, while **View details** is collapsed by default and contains the rich Markdown result and optional output path. Failed tasks also show a short, literal failure summary outside the panel. This changes only the Router presentation: the CLI protocol, foreground replies, delegated-worker cards, and reply-to-thread routing remain unchanged.
+
 ## Prerequisites
 
 Image uploads require the bot application's `im:resource` permission. Publish

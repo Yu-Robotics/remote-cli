@@ -855,7 +855,7 @@ Use /compact to reduce conversation context or /clear to start a fresh context.`
 - /compact - Compress conversation history to reduce context size
 - /cd <directory> - Change working directory for this thread
 - /model [name] - Show models for the active backend, or set this thread's model
-- /effort [auto|level] - Show or set effort for Codex/AGY/OpenCode/Kimi/ZCode/Pi (Claude Code is unsupported)
+- /effort [auto|level] - Show or set effort for Codex/AGY/OpenCode/Kimi/ZCode/Pi/DSH (Claude Code is unsupported)
 - /sandbox [on|off|read-only|default|allow <directory>|remove <directory>|network on|off] - Configure this thread's sandbox (Codex, Claude Code)
 - /delegation [on|off|reset [backend]] - Delegate tasks between installed agent backends; reset saved worker context when needed
 - /backend - List backends and show the current thread's effective backend

@@ -1592,7 +1592,9 @@ export class RouterServer {
 
     console.log(`[RouterServer] Task notification for ${openId}: task=${info.taskId} status=${info.status} thread=${threadId || 'default'}`);
 
-    const elements = createTaskNotificationElement(info, typeof threadName === 'string' ? threadName : undefined);
+    const threadLabel = typeof threadName === 'string' && threadName.trim()
+      ? threadName : typeof threadId === 'string' && threadId.trim() ? threadId : undefined;
+    const elements = createTaskNotificationElement(info, threadLabel);
     const feishuMessageId = await this.feishuLongConnHandler.sendTaskNotificationCard(openId, elements);
 
     if (feishuMessageId && threadId && deviceId) {
