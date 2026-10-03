@@ -2,12 +2,14 @@ import { promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { LinuxServiceManager, MacServiceManager, ServiceCommandRunner, ServiceContext } from '../src/service/ServiceManager';
+import { getServiceContext, LinuxServiceManager, MacServiceManager, ServiceCommandRunner, ServiceContext } from '../src/service/ServiceManager';
+import { getBackendPath } from '../src/utils/BackendEnvironment';
 
 describe('ServiceManager', () => {
   let homeDir: string;
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     if (homeDir) await fs.rm(homeDir, { recursive: true, force: true });
   });
 
@@ -20,6 +22,14 @@ describe('ServiceManager', () => {
       logDirectory: path.join(homeDir, '.remote-cli', 'logs'),
     };
   }
+
+  it('composes default service PATH with the runtime builder but preserves explicit overrides', () => {
+    vi.stubEnv('PATH', '/opt/legacy/bin');
+    const input = { homeDir: '/home/example', nodePath: '/opt/node/bin/node', cliEntryPath: '/nonexistent/example-cli.js' };
+    expect(getServiceContext(input).pathValue).toBe(getBackendPath(input));
+    expect(getServiceContext({ ...input, pathValue: '/opt/explicit bin' }).pathValue).toBe('/opt/explicit bin');
+    expect(getServiceContext({ ...input, pathValue: '' }).pathValue).toBe('');
+  });
 
   it('installs and reports a Linux user service', async () => {
     homeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'remote-cli-service-linux-'));

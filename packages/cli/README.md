@@ -91,6 +91,8 @@ Help me fix TypeScript errors in ~/projects/my-app
 
 Manual starts automatically install updates when tasks and queues are idle, without exiting the running client. Updates take effect on the next start. Use `remote-cli service install` for automatic startup and supervised restarts after updates. If the Router rejects the running protocol, restart the manual client after installation to reconnect. See [Automatic Client Startup](../../README.md#automatic-client-startup) for update behavior and recovery.
 
+From CLI 1.6.119, Linux and macOS startup append deterministic backend installation directories to the inherited `PATH`, preserving existing executable and Node precedence. Valid old systemd units and LaunchAgents need only a restarted upgraded client, not reinstallation; broken Node or CLI startup paths still require repair. Later installs into covered directories are visible to a fresh `/backend`, with up to 30 seconds of delegation discovery caching. Custom locations use `executor.<backend>.command`, preferably an absolute real executable; ZCode preserves native unset/empty-command discovery. No shell profiles, runtime-version scans, or new version-manager shim directories are used. See [Backend Executable Discovery](../../README.md#backend-executable-discovery).
+
 ## Commands
 
 | Command | Description |

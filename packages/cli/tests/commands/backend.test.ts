@@ -123,6 +123,39 @@ describe('/backend command', () => {
   // ── list mode ────────────────────────────────────────────────────────────────
 
   describe('list mode (/backend with no args)', () => {
+    it('uses every configured command and preserves ZCode optional discovery', async () => {
+      const backends = ['claude', 'codex', 'opencode', 'kimi', 'pi', 'agy', 'dsh'];
+      const config = { type: 'auto', ...Object.fromEntries(backends.map(backend => [backend, { command: `/opt/example tools/${backend}` }])) };
+      mockConfig.get.mockReturnValue(config);
+      mockInstalled(...backends.map(backend => config[backend].command));
+      await send('/backend');
+      expect(sentResponse().success).toBe(true);
+      expect(execFile).toHaveBeenCalledTimes(backends.length);
+      for (const backend of backends) expect(execFile).toHaveBeenCalledWith(config[backend].command, ['--version'], expect.anything(), expect.any(Function));
+      expect(mockZCodeAvailable).toHaveBeenCalledWith(undefined);
+    });
+
+    it('does not fall back to an installed default when a configured command fails', async () => {
+      mockConfig.get.mockReturnValue({ type: 'auto', claude: { command: '/nonexistent/example-claude' } });
+      mockInstalled('claude');
+      await send('/backend');
+      expect(sentResponse().success).toBe(false);
+      expect(execFile).not.toHaveBeenCalledWith('claude', expect.anything(), expect.anything(), expect.anything());
+      expect(sentResponse().error).toContain('executor.<backend>.command');
+    });
+
+    it.each(['', '/opt/fixture\u0000command'])('isolates an invalid executable configuration from other backends: %j', async command => {
+      mockConfig.get.mockReturnValue({ type: 'auto', claude: { command } });
+      vi.mocked(execFile).mockImplementation(((binary: string, _args: string[], _options: object, callback: Function) => {
+        if (binary === command) throw new Error('sensitive fixture diagnostic');
+        callback(binary === 'codex' ? null : new Error('missing'));
+      }) as any);
+      await send('/backend');
+      expect(sentResponse()).toMatchObject({ success: true, output: expect.stringContaining('Codex CLI') });
+      expect(sentResponse().output).not.toContain('Claude Code');
+      expect(sentResponse().output).not.toContain('sensitive fixture');
+    });
+
     it('reports the DSH summary/reset compact boundary', async () => {
       mockThreadPool.getBackendKey.mockReturnValue('dsh');
       mockExecutor.compactWhenFull = vi.fn().mockResolvedValue({ success: true, output: 'Summarized and reset; native DSH history retained.' });
@@ -194,7 +227,7 @@ describe('/backend command', () => {
 
       const res = sentResponse();
       expect(res.success).toBe(false);
-      expect(res.error).toContain('No supported AI backends found');
+      expect(res.error).toContain('No supported AI backends passed their executable checks');
     });
 
     it('marks Claude Code as active when executor.type is auto', async () => {

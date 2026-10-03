@@ -6,6 +6,13 @@ import { CLI_VERSION } from '../../src/types';
 import axios from 'axios';
 import { execFile } from 'child_process';
 import { AutomaticUpdater } from '../../src/update/AutomaticUpdater';
+import os from 'os';
+
+const initialPath = process.env.PATH;
+afterEach(() => {
+  if (initialPath === undefined) delete process.env.PATH;
+  else process.env.PATH = initialPath;
+});
 
 const automaticUpdaterMocks = vi.hoisted(() => ({
   handleRouterVersion: vi.fn(),
@@ -99,8 +106,10 @@ function mockAxiosVersionSame() {
 describe('start command', () => {
   let mockConfig: any;
   let mockWsClient: any;
+  let originalPath: string | undefined;
 
   beforeEach(async () => {
+    originalPath = process.env.PATH;
     vi.clearAllMocks();
     zCodeCommandMocks.isZCodeAvailable.mockReturnValue(false);
     vi.mocked(execFile).mockImplementation(((_command: string, _args: string[], _options: object, callback: Function) => {
@@ -136,10 +145,25 @@ describe('start command', () => {
   });
 
   afterEach(() => {
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
     vi.clearAllMocks();
   });
 
   describe('service startup', () => {
+    it.skipIf(process.platform === 'win32')('enriches the live environment before the first startup probe', async () => {
+      process.env.PATH = '/opt/legacy/bin';
+      const home = vi.spyOn(os, 'homedir').mockReturnValue('/tmp/backend-start-example');
+      try {
+        vi.mocked(axios.get).mockImplementationOnce(async () => {
+          expect(process.env.PATH?.split(':')[0]).toBe('/opt/legacy/bin');
+          expect(process.env.PATH?.split(':')).toContain('/tmp/backend-start-example/.kimi-code/bin');
+          return { data: { success: true, version: CLI_VERSION } };
+        });
+        expect((await startCommand({})).success).toBe(true);
+      } finally { home.mockRestore(); }
+    });
+
     it('should start service with valid configuration', async () => {
       const result = await startCommand({
         daemon: false,
@@ -172,6 +196,24 @@ describe('start command', () => {
       warn: vi.fn().mockReturnThis(),
       start: vi.fn().mockReturnThis(),
     } as any;
+
+    it.each(['auto', 'claude-persistent', 'codex', 'opencode', 'kimi', 'agy', 'pi', 'dsh'])('uses the configured executable at startup: %s', async type => {
+      const backend = type === 'auto' || type === 'claude-persistent' ? 'claude' : type;
+      const command = `/opt/example tools/${backend}`;
+      await checkBackendAvailability(type, spinner, { type, [backend]: { command } } as any);
+      expect(execFile).toHaveBeenCalledWith(command, ['--version'], { timeout: 5000 }, expect.any(Function));
+    });
+
+    it.each(['', '/opt/fixture\u0000command'])('contains synchronous probe failures without blocking service startup: %j', async command => {
+      const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        vi.mocked(execFile).mockImplementation(() => { throw new Error('sensitive fixture diagnostic'); });
+        await expect(checkBackendAvailability('auto', spinner, { type: 'auto', claude: { command } })).resolves.toBeUndefined();
+        expect(spinner.warn).toHaveBeenCalledWith('Claude Code unavailable');
+        expect(spinner.start).toHaveBeenCalledWith('Continuing...');
+        expect(log.mock.calls.flat().join('\n')).not.toContain('sensitive fixture');
+      } finally { log.mockRestore(); }
+    });
 
     it('checks Codex app-server support after finding the binary', async () => {
       await checkBackendAvailability('codex', spinner);
@@ -214,7 +256,7 @@ describe('start command', () => {
         callback(new Error('not found'));
       }) as any);
       await checkBackendAvailability('dsh', spinner, { type: 'dsh' });
-      expect(spinner.warn).toHaveBeenCalledWith('DeepSeek Harness not found on PATH');
+      expect(spinner.warn).toHaveBeenCalledWith('DeepSeek Harness unavailable');
       expect(spinner.start).toHaveBeenCalledWith('Continuing...');
       expect(console.log).toHaveBeenCalledWith(expect.stringContaining('(DeepSeek Harness)'));
       log.mockRestore();

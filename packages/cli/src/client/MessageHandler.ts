@@ -32,6 +32,7 @@ import { DelegationManager, workspacesOverlap, type DelegationScope, type Delega
 import { DelegationBridge } from '../delegation/DelegationBridge';
 import { DELEGATION_BACKENDS, DELEGATION_INSTRUCTIONS, type DelegationBackend } from '../delegation/contract';
 import { formatDelegationStatus } from '../delegation/DelegationStatusFormatter';
+import { backendProbeFailure, getBackendCommand } from '../utils/BackendCommand';
 
 /**
  * Detected backend information
@@ -40,6 +41,7 @@ interface BackendInfo {
   id: 'auto' | 'agy' | 'codex' | 'opencode' | 'kimi' | 'zcode' | 'pi' | 'dsh';
   label: string;
   installed: boolean;
+  reason?: string;
 }
 
 const EFFORT_BACKENDS = new Set(['codex', 'agy', 'opencode', 'kimi', 'zcode', 'pi', 'dsh']);
@@ -1358,7 +1360,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         lines.push('', `Model listing is unavailable in this ${backendLabel} transport.`);
       }
     } else {
-      const bin = key === 'agy' ? (executorConfig.agy?.command ?? 'agy') : 'claude';
+      const bin = getBackendCommand(key === 'agy' ? 'agy' : 'claude', executorConfig);
       const args = key === 'agy' ? ['models'] : ['/model', '--print'];
       const listing = await this.runListingCommand(bin, args);
       if (listing) {
@@ -1917,11 +1919,12 @@ You can also use natural language commands to control Claude Code CLI.`,
         return;
       }
       const executorConfig = (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
-      const agyCommand = executorConfig.agy?.command ?? 'agy';
+      const agyCommand = getBackendCommand('agy', executorConfig);
       return this.spawnPassthroughCommand(messageId, threadId, agyCommand, ['-p', command], executor, 'AGY CLI');
     }
 
-    return this.spawnPassthroughCommand(messageId, threadId, 'claude', [command, '--print'], executor, 'Claude CLI', { CLAUDECODE: '' });
+    const executorConfig = (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
+    return this.spawnPassthroughCommand(messageId, threadId, getBackendCommand('claude', executorConfig), [command, '--print'], executor, 'Claude CLI', { CLAUDECODE: '' });
   }
 
   /**
@@ -2545,32 +2548,36 @@ You can also use natural language commands to control Claude Code CLI.`,
 
   // ── Backend switching ─────────────────────────────────────────────────────
 
-  private checkCommand(cmd: string, args: string[]): Promise<boolean> {
+  private checkCommand(cmd: string, args: string[]): Promise<Pick<BackendInfo, 'installed' | 'reason'>> {
     return new Promise((resolve) => {
-      execFile(cmd, args, { timeout: 5000 }, (err) => resolve(!err));
+      try {
+        execFile(cmd, args, { timeout: 5000 }, (err) => resolve({ installed: !err, ...(err ? { reason: backendProbeFailure(err) } : {}) }));
+      } catch (error) {
+        resolve({ installed: false, reason: backendProbeFailure(error) });
+      }
     });
   }
 
   private async detectBackends(): Promise<BackendInfo[]> {
     const executorConfig = (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
     const [claudeInstalled, codexInstalled, openCodeInstalled, kimiInstalled, piInstalled, agyInstalled, dshInstalled] = await Promise.all([
-      this.checkCommand('claude', ['--version']),
-      this.checkCommand('codex', ['--version']),
-      this.checkCommand('opencode', ['--version']),
-      this.checkCommand('kimi', ['--version']),
-      this.checkCommand(executorConfig.pi?.command ?? 'pi', ['--version']),
-      this.checkCommand('agy', ['--version']),
-      this.checkCommand(executorConfig.dsh?.command ?? 'dsh', ['--version']),
+      this.checkCommand(getBackendCommand('claude', executorConfig), ['--version']),
+      this.checkCommand(getBackendCommand('codex', executorConfig), ['--version']),
+      this.checkCommand(getBackendCommand('opencode', executorConfig), ['--version']),
+      this.checkCommand(getBackendCommand('kimi', executorConfig), ['--version']),
+      this.checkCommand(getBackendCommand('pi', executorConfig), ['--version']),
+      this.checkCommand(getBackendCommand('agy', executorConfig), ['--version']),
+      this.checkCommand(getBackendCommand('dsh', executorConfig), ['--version']),
     ]);
     return [
-      { id: 'auto', label: 'Claude Code', installed: claudeInstalled },
-      { id: 'codex', label: 'Codex CLI (OpenAI)', installed: codexInstalled },
-      { id: 'opencode', label: 'OpenCode CLI', installed: openCodeInstalled },
-      { id: 'kimi', label: 'Kimi Code CLI', installed: kimiInstalled },
-      { id: 'zcode', label: 'ZCode', installed: isZCodeAvailable(executorConfig.zcode?.command) },
-      { id: 'pi', label: 'Pi', installed: piInstalled },
-      { id: 'agy',  label: 'AGY CLI (Antigravity)', installed: agyInstalled },
-      { id: 'dsh', label: 'DeepSeek Harness (DSH)', installed: dshInstalled },
+      { id: 'auto', label: 'Claude Code', ...claudeInstalled },
+      { id: 'codex', label: 'Codex CLI (OpenAI)', ...codexInstalled },
+      { id: 'opencode', label: 'OpenCode CLI', ...openCodeInstalled },
+      { id: 'kimi', label: 'Kimi Code CLI', ...kimiInstalled },
+      { id: 'zcode', label: 'ZCode', installed: isZCodeAvailable(getBackendCommand('zcode', executorConfig)) },
+      { id: 'pi', label: 'Pi', ...piInstalled },
+      { id: 'agy', label: 'AGY CLI (Antigravity)', ...agyInstalled },
+      { id: 'dsh', label: 'DeepSeek Harness (DSH)', ...dshInstalled },
     ];
   }
 
@@ -2592,7 +2599,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       if (installed.length === 0) {
         this.sendResponse(messageId, threadId, {
           success: false,
-          error: 'No supported AI backends found.\n\nMake sure Claude Code is installed: npm install -g @anthropic-ai/claude-code',
+          error: `No supported AI backends passed their executable checks.\n\n${backends.map(b => `${b.label}: ${b.reason ?? 'Executable could not be located.'}`).join('\n')}\n\nCheck executor.<backend>.command; an absolute executable path is recommended.`,
         });
         return;
       }
