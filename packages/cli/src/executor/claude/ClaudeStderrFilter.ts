@@ -1,6 +1,7 @@
 import { StringDecoder } from 'string_decoder';
 
 const PREFIX = '[claude-code:unrecognized_model]';
+const MODEL_DIAGNOSTIC_SOURCES = new Set(['sdk', 'generate_session_title']);
 const MAX_PENDING_LENGTH = 8192;
 
 function isModelDiagnostic(line: string): boolean {
@@ -8,11 +9,11 @@ function isModelDiagnostic(line: string): boolean {
   try {
     const value = JSON.parse(line.slice(PREFIX.length).trim());
     return value !== null && typeof value === 'object' && Object.keys(value).length === 2
-      && typeof value.model === 'string' && value.model.trim().length > 0 && value.query_source === 'sdk';
+      && typeof value.model === 'string' && value.model.trim().length > 0 && MODEL_DIAGNOSTIC_SOURCES.has(value.query_source);
   } catch { return false; }
 }
 
-/** Suppress only the SDK model-recognition diagnostic, never general stderr. */
+/** Suppress only known model-recognition diagnostics, never general stderr. */
 export class ClaudeStderrFilter {
   private readonly decoder = new StringDecoder('utf8');
   private pending = '';

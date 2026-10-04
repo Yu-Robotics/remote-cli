@@ -145,38 +145,39 @@ describe('ClaudePersistentExecutor', () => {
       vi.useRealTimers();
     });
 
-    const modelDiagnostic = '[claude-code:unrecognized_model] {"model":"Kimi Code - Coding Plan/kimi-for-coding","query_source":"sdk"}';
+    const modelDiagnostics = ['sdk', 'generate_session_title'].map(source => ({ source,
+      diagnostic: `[claude-code:unrecognized_model] ${JSON.stringify({ model: 'custom-provider/model', query_source: source })}` }));
 
-    it('omits fragmented SDK model diagnostics from streaming and results while retaining local logs', async () => {
+    it.each(modelDiagnostics)('omits fragmented $source diagnostics from streaming and results while retaining local logs', async ({ diagnostic }) => {
       const onStream = vi.fn();
       const result = executor.execute('Answer normally', { onStream });
       await vi.advanceTimersByTimeAsync(1000);
-      mockChildProcess.stderr.emit('data', Buffer.from(modelDiagnostic.slice(0, 20)));
-      mockChildProcess.stderr.emit('data', Buffer.from(modelDiagnostic.slice(20)));
+      mockChildProcess.stderr.emit('data', Buffer.from(diagnostic.slice(0, 20)));
+      mockChildProcess.stderr.emit('data', Buffer.from(diagnostic.slice(20)));
       mockChildProcess.stderr.emit('data', Buffer.from('\nNative retry warning\n'));
       expect(onStream.mock.calls.map(([text]) => text).join('')).toBe('Native retry warning\n');
-      expect(vi.mocked(console.error).mock.calls.flat().join('')).toContain(modelDiagnostic.slice(20));
+      expect(vi.mocked(console.error).mock.calls.flat().join('')).toContain(diagnostic.slice(20));
       assistant('answer', [{ type: 'text', text: 'Answer' }]);
       emit({ type: 'result', subtype: 'success' });
       expect(await result).toMatchObject({ success: true, output: 'Native retry warning\nAnswer' });
     });
 
-    it('does not filter diagnostic-looking text from the actual assistant answer', async () => {
+    it.each(modelDiagnostics)('does not filter $source diagnostic text from the actual assistant answer', async ({ diagnostic }) => {
       const onStream = vi.fn();
       const result = executor.execute('Explain this diagnostic', { onStream });
       await vi.advanceTimersByTimeAsync(1000);
-      assistant('answer', [{ type: 'text', text: modelDiagnostic }]);
+      assistant('answer', [{ type: 'text', text: diagnostic }]);
       emit({ type: 'result', subtype: 'success' });
-      expect(await result).toMatchObject({ success: true, output: modelDiagnostic });
-      expect(onStream).toHaveBeenCalledWith(modelDiagnostic);
+      expect(await result).toMatchObject({ success: true, output: diagnostic });
+      expect(onStream).toHaveBeenCalledWith(diagnostic);
     });
 
-    it.each(['error', 'result'])('preserves an API failure returned as a stdout %s event', async type => {
+    it.each(modelDiagnostics.flatMap(record => ['error', 'result'].map(type => ({ ...record, type }))))('preserves a stdout $type API failure beside a $source diagnostic', async ({ type, diagnostic }) => {
       const onStream = vi.fn();
       const result = executor.execute('Make a request', { onStream }).catch(error => error);
       await vi.advanceTimersByTimeAsync(1000);
       const apiError = 'API Error: 429 {"error":{"type":"rate_limit_error","message":"Quota exhausted"}}';
-      mockChildProcess.stderr.emit('data', Buffer.from(`${modelDiagnostic}\n${apiError}\n`));
+      mockChildProcess.stderr.emit('data', Buffer.from(`${diagnostic}\n${apiError}\n`));
       emit(type === 'error' ? { type, content: apiError }
         : { type, subtype: 'error_during_execution', is_error: true, result: apiError });
       const error = await result;
@@ -186,12 +187,12 @@ describe('ClaudePersistentExecutor', () => {
       expect(onStream.mock.calls.map(([text]) => text).join('')).not.toContain('unrecognized_model');
     });
 
-    it('keeps a failed process failed and preserves the real startup error without the diagnostic', async () => {
+    it.each(modelDiagnostics)('keeps a failed process failed and preserves startup errors beside a $source diagnostic', async ({ diagnostic }) => {
       const onStream = vi.fn();
       const result = executor.execute('Fail safely', { onStream }).catch(error => error);
       await vi.advanceTimersByTimeAsync(1000);
-      mockChildProcess.stderr.emit('data', Buffer.from(`${modelDiagnostic}\nError: request failed\n`));
-      mockChildProcess.stderr.emit('data', Buffer.from(modelDiagnostic));
+      mockChildProcess.stderr.emit('data', Buffer.from(`${diagnostic}\nError: request failed\n`));
+      mockChildProcess.stderr.emit('data', Buffer.from(diagnostic));
       mockChildProcess.emit('exit', 1, null);
       mockChildProcess.emit('close', 1, null);
       const error = await result;
