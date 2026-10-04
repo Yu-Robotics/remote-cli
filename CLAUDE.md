@@ -573,7 +573,20 @@ sandbox settings. Sandboxed coordinators have no eligible workers until
 cross-backend sandbox translation is supported; `read_only` remains a recognized
 but unavailable compatibility value. Discovery and launch use the same policy.
 `DelegationStore`
-keeps bounded diagnostic task records and marks interrupted runs after restart.
+keeps bounded diagnostic task records and marks queued/running work interrupted
+after restart without replaying it. From CLI 1.6.129, one request may accept
+multiple independent tasks. The manager dispatches them serially in FIFO order,
+keeps its workspace reservation until the queue drains, and confirms worker exit
+and lane readiness before starting the next task. Queued tasks have no execution
+timestamp or progress card and can be cancelled without constructing an executor.
+Their status is local tool JSON and existing notice text, never a new Router phase.
+The cumulative 12 accepted-task limit spans coordinator continuations; failures
+and cancellations do not refund it. Queue waits expire one hour after admission.
+Other roots with conflicting workspaces or no initial global execution slot are
+rejected, not queued. Never enable same-root parallelism or peer tools implicitly.
+Sibling results are not explicitly forwarded; native lane reuse still retains
+that lane's own earlier task context. Uncertain setup/cleanup retains its occupied
+global slot until restart as well as quarantining the workspace.
 
 Worker completion and terminal-result delivery are separate states. While results
 are missing from the active execution, `MessageHandler` suppresses coordinator prose/plans/images while

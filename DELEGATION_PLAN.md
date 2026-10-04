@@ -1,5 +1,47 @@
 # Cross-Backend Delegation Plan
 
+## Phase 1: multiple accepted tasks with serial dispatch
+
+Contract for CLI 1.6.129. This is a scheduling foundation, not simultaneous
+multi-agent execution or worker-to-worker communication.
+
+1. Accept independent objectives on different backends under the existing
+   request scope. Keep one task ID, status, bounded result, and cancellation
+   handle per task. Do not infer dependencies or explicitly forward sibling
+   results; a reused same-backend lane still retains its own previous context.
+2. Serialize admission and dispatch in FIFO order. Keep the canonical workspace
+   lease owned by the request, separately from execution slots. One worker per
+   request and three occupied starting/running slots per CLI remain the limits.
+   Other overlapping requests, busy direct threads, and new requests without an
+   initial slot fail admission rather than joining a global waiting queue.
+3. Persist `queued` with `acceptedAt`; set `startedAt` only at dispatch. Queue
+   waits expire one hour after admission independently of native activity limits.
+   Count 12 accepted tasks cumulatively across coordinator continuations, including
+   failures/cancellations; only wholly unaccepted setup rolls back reservations.
+4. Revalidate canonical cwd, generation, and ownership before starting. Wait for
+   native exit and reusable lane metadata before advancing. Normal failure leaves
+   independent siblings runnable; uncertain cleanup quarantines the workspace
+   and reports all remaining tasks as interrupted without starting them. An
+   uncertain setup or cleanup retains its occupied global slot until restart.
+5. Fence admission/dispatch before close or abort. Cancel queued tasks without
+   creating, aborting, or destroying a backend. Collect in-flight admissions and
+   all accepted task results before continuation; acknowledge results only after
+   a successful coordinator execution. Restart reconciles queued/running records
+   as interrupted diagnostics without replay or cross-request delivery.
+6. Use existing notices for queue status. Emit the existing `started` progress
+   phase only at dispatch; never send an unknown `queued` phase to a Router.
+   Preserve existing peer compatibility, worker policy, and native executor code.
+
+Implementation targets are `DelegationManager`, `DelegationStore`, shared tool
+descriptions, and never-started result notices. Regression coverage must exercise
+FIFO/failure isolation, independent cancellation, cumulative quotas, concurrent
+admission/idempotency, queue deadlines, ownership/generation/cwd validation,
+close/setup/exit races, lane readiness, restart/pruning, completion barriers, and
+old-peer notice fallback. Synchronize release manifests, both release documents,
+all READMEs, and repository guidance; validate builds and both package suites.
+Live provider behavior and simultaneous-worker benchmarks are not established
+by mocked scheduler tests. Peer messaging and actual parallelism are later work.
+
 ## Follow-up: durable isolated delegated worker lanes
 
 Status: implemented and validated, 2026-10-01. Version 1.6.104.
@@ -420,7 +462,7 @@ integration, or replacement of normal thread interactions.
 | Tool | Behavior |
 | --- | --- |
 | `remote_cli_list_backends` | Return installed backends, versions and applicable restrictions |
-| `remote_cli_delegate` | Start one task on a different backend with an objective and `inherit` mode; `read_only` is recognized but rejected |
+| `remote_cli_delegate` | Accept an independent task on a different backend; same-request followers queue for serial dispatch; `inherit` is the default and `read_only` is rejected |
 | `remote_cli_result` | Return an owned task's state and final result; wait up to 25 seconds |
 | `remote_cli_cancel` | Stop an owned worker; existing filesystem changes are not rolled back |
 
@@ -506,9 +548,10 @@ See [Codex configuration reference](https://developers.openai.com/codex/config-r
 | --- | --- |
 | Active workers per parent | 1 |
 | Active workers per CLI process | 3, in non-overlapping workspaces |
-| Launches per parent turn | 12 |
+| Accepted tasks per parent request | 12 cumulative across continuations, including failures/cancellations |
 | Managed delegation tool calls per turn | 500 |
-| Worker duration | 30 minutes |
+| Queued-task wait | One hour after admission, independent per task |
+| Worker liveness | 15 minutes without tool callbacks; 45 minutes while tools are active; no fixed total duration cap |
 | Final result | 32 KiB, preserving beginning and end with a UTF-8-safe truncation marker |
 | Automatic continuation results | 64 KiB combined JSON, preserving all task IDs and terminal states |
 | Intermediate text/tool-result output | Not retained by the delegation manager; volume alone does not stop the worker |

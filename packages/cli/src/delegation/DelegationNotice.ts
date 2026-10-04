@@ -25,6 +25,7 @@ function literal(text: string, limit: number): string {
 }
 
 function elapsed(record: DelegatedTaskRecord): string {
+  if (record.startedAt === undefined) return 'Not started';
   const seconds = Math.max(0, Math.floor(((record.finishedAt ?? record.startedAt) - record.startedAt) / 1000));
   if (seconds < 60) return `${seconds}s`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;

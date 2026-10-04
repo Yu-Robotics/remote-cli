@@ -681,7 +681,22 @@ failure-result fallback as well as further continuation.
 Cancellation does not undo existing edits.
 
 There is one active worker per parent and at most three per CLI process in
-non-overlapping workspaces. A turn can start at most 12 tasks. From CLI 1.6.100,
+non-overlapping workspaces. From CLI 1.6.129, one request may accept multiple
+independent tasks before collecting results; followers report `queued` and run
+in FIFO order, not concurrently. Each accepted task has its own result and
+cancellation; failure or cancellation normally leaves siblings runnable.
+The cumulative limit is 12 accepted tasks across all coordinator continuations
+of that request, including failures and cancellations. A queued task expires
+one hour after admission without extending any other task's deadline. Queue
+status uses existing notice text; a worker progress card starts only at actual
+dispatch. The workspace remains reserved until the queue and active worker
+are finished. Other requests with overlapping workspaces or no initial global
+execution slot are rejected, not placed in a cross-request queue.
+This local CLI change works with existing Routers and does not add peer messaging
+or change native backend behavior. Sibling results are not explicitly forwarded;
+a reused same-backend lane retains its own earlier task context. An uncertain
+setup or cleanup retains its occupied global slot until the CLI restarts.
+From CLI 1.6.100,
 a task stops after 15 minutes without a worker tool callback. While one or more
 worker tools are active, that callback-silence window is 45 minutes; it returns
 to 15 minutes after all active tools report results. Only `tool_use` and
@@ -695,7 +710,7 @@ its beginning and end, marks the omitted middle, and sets `truncated: true`
 without changing the worker's success or failure status. Combined continuations
 use the same truncation policy within their 64 KiB budget. These limits bound
 retained delegation results, not the backend's own output buffers.
-Managed tasks using overlapping workspace directories are serialized. These
+Managed tasks within one request are serialized; other overlapping requests are rejected. These
 reservations restrict delegation-enabled threads and workers; opted-out ordinary
 threads retain access to their workspace. This does not lock files against those
 threads, the coordinator's native parallel tools, or external editors. Use separate
@@ -730,7 +745,7 @@ model (ZCode), so those model combinations and native persisted-session
 restoration remain unverified.
 
 Router reconnection uses the existing parent task recovery and approval replay;
-disconnected progress is not buffered. Restarting the CLI marks retained running
+disconnected progress is not buffered. Restarting the CLI marks retained queued or running
 task records interrupted and never automatically repeats them. Records under
 `~/.remote-cli/delegation/` retain at most 200 completed tasks for seven days.
 If worker shutdown cannot be confirmed, its workspace stays blocked for

@@ -61,6 +61,18 @@ continuation in the same session, without replaying the original request or
 attachments. The Router displays the existing task progress and reply events;
 no new protocol capability is required for this completion barrier.
 
+From CLI 1.6.129, one request may accept multiple independent delegated tasks
+before collecting results, executing them in FIFO order with one active worker.
+Queued tasks are independently cancellable and have no started progress card.
+Their bounded status notices use the existing text channel, not a new wire phase;
+old Routers remain compatible and old CLIs keep their existing behavior. The
+12-task cumulative limit and one-hour queue deadline are enforced locally.
+Other overlapping requests are rejected rather than globally queued. This does
+not add peer communication or modify native backends or Router execution.
+Sibling results are not explicitly forwarded; a reused same-backend lane retains
+its own earlier task context. Uncertain setup or cleanup retains the occupied
+global slot until the local CLI restarts.
+
 CLI 1.6.94 and newer show each finished worker as a result block in the existing
 reply card, with a colored status label, backend name, short task description,
 and elapsed time. Failed, timed-out, cancelled, and interrupted tasks include a

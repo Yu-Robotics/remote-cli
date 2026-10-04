@@ -9,6 +9,14 @@ const task: DelegatedTaskRecord = {
 };
 
 describe('delegation result notices', () => {
+  it('distinguishes a never-started cancellation from elapsed execution', () => {
+    const notice = formatDelegationNotice({ ...task, state: 'cancelled', startedAt: undefined,
+      acceptedAt: 1000, error: 'Cancelled before the worker started.' });
+    expect(notice).toContain('Not started');
+    expect(notice).toContain('Cancelled before');
+    expect(notice).not.toContain('1m 8s');
+  });
+
   it('identifies the DSH worker', () => {
     expect(formatDelegationNotice({ ...task, backend: 'dsh' })).toContain('DSH · Delegated task');
   });

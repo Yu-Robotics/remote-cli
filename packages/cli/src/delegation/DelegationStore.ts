@@ -9,8 +9,11 @@ export interface DelegatedTaskRecord {
   parentMessageId: string;
   backend: string;
   objective: string;
-  state: 'running' | 'succeeded' | 'failed' | 'cancelled' | 'timed_out' | 'interrupted';
-  startedAt: number;
+  state: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'timed_out' | 'interrupted';
+  /** Admission time; older records have only startedAt. */
+  acceptedAt?: number;
+  /** Actual execution start, absent when a task never started. */
+  startedAt?: number;
   /** Last callback from a worker tool; text streaming does not update this value. */
   lastActivityAt?: number;
   lastActivityKind?: 'tool_use' | 'tool_result';
@@ -18,6 +21,14 @@ export interface DelegatedTaskRecord {
   output?: string;
   error?: string;
   truncated?: boolean;
+}
+
+export function isTerminalTaskState(state: DelegatedTaskRecord['state']): state is Exclude<DelegatedTaskRecord['state'], 'queued' | 'running'> {
+  return ['succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted'].includes(state);
+}
+
+function recordTime(record: DelegatedTaskRecord): number {
+  return record.acceptedAt ?? record.startedAt ?? 0;
 }
 
 /** Small atomic records; backend transcripts remain owned by their native CLIs. */
@@ -41,12 +52,12 @@ export class DelegationStore {
         const stat = await fs.stat(file);
         if (stat.size > 128 * 1024) { await fs.unlink(file); continue; }
         const record: DelegatedTaskRecord = JSON.parse(await fs.readFile(file, 'utf8'));
-        if (Date.now() - record.startedAt > 7 * 86400_000) { await fs.unlink(file); continue; }
-        if (record.state === 'running') {
+        if (Date.now() - recordTime(record) > 7 * 86400_000) { await fs.unlink(file); continue; }
+        if (!isTerminalTaskState(record.state)) {
           await this.write({ ...record, state: 'interrupted', finishedAt: Date.now(),
             error: 'The CLI stopped before confirming completion. Work was not automatically repeated.' });
         }
-        retained.push({ name, time: record.startedAt });
+        retained.push({ name, time: recordTime(record) });
       } catch { /* A corrupt record cannot resurrect work. */ }
     }
     retained.sort((a, b) => b.time - a.time);
@@ -78,7 +89,7 @@ export class DelegationStore {
         const file = path.join(this.directory, name);
         try {
           const record = JSON.parse(await fs.readFile(file, 'utf8')) as DelegatedTaskRecord;
-          if (record.state !== 'running') terminal.push({ file, time: record.startedAt });
+          if (isTerminalTaskState(record.state)) terminal.push({ file, time: recordTime(record) });
         } catch { /* Ignore an in-flight replacement or unrelated corrupt record. */ }
       }
       terminal.sort((a, b) => b.time - a.time);
