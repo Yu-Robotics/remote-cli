@@ -836,7 +836,7 @@ All seven backends receive local original/preview paths through the shared comma
 
 ### Models and Reasoning Effort
 
-From CLI 1.6.120, Claude SDK `[claude-code:unrecognized_model]` records with a valid `{model, query_source: "sdk"}` payload are omitted from Feishu streaming/results and Claude slash-command error details. Model names are not hard-coded. Other diagnostics, malformed or unexpected records, actual errors, exit status, and assistant reply text are retained. The persistent Claude process's raw stderr remains in local CLI logs; this presentation filter does not disable Claude Code telemetry or change the configured model, other backends, or the Router protocol.
+From CLI 1.6.120, Claude SDK `[claude-code:unrecognized_model]` diagnostics are omitted from Feishu streaming/results and Claude slash-command error details. CLI 1.6.124 also filters the `generate_session_title` source, including delegated Claude workers. Matching requires a bounded, standalone valid JSON record containing only a nonempty `model` string and a recognized `query_source` (`sdk` or `generate_session_title`); model names are not hard-coded. Unknown sources, additional payload fields, malformed records, actual API/authentication errors, exit status, and assistant reply text are retained. The persistent Claude process's raw stderr remains in local CLI logs; this presentation filter does not disable Claude Code telemetry or change the configured model, other backends, or the Router protocol.
 
 `/model` and `/effort` apply to the current thread and are stored separately for each backend:
 

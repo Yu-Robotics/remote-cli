@@ -2324,10 +2324,10 @@ describe('MessageHandler', () => {
       );
     });
 
-    it.each(['auto', 'agy'])('filters SDK model diagnostics only for Claude slash failures: %s', async type => {
+    it.each(['auto', 'agy'].flatMap(type => ['sdk', 'generate_session_title'].map(source => ({ type, source }))))('filters $source diagnostics only for Claude slash failures: $type', async ({ type, source }) => {
       useBackend({ type });
       const { child, done } = await runSlash(type === 'agy' ? '/credits' : '/doctor');
-      const diagnostic = '[claude-code:unrecognized_model] {"model":"Kimi Code - Coding Plan/kimi-for-coding","query_source":"sdk"}\n';
+      const diagnostic = `[claude-code:unrecognized_model] ${JSON.stringify({ model: 'custom-provider/model', query_source: source })}\n`;
       child.stderr.emit('data', Buffer.from(diagnostic.slice(0, 15)));
       child.stderr.emit('data', Buffer.from(`${diagnostic.slice(15)}Error: request failed`));
       child.emit('exit', 1);
@@ -2338,10 +2338,10 @@ describe('MessageHandler', () => {
       }));
     });
 
-    it('does not turn a failed Claude slash command into success when its only stderr was a diagnostic', async () => {
+    it.each(['sdk', 'generate_session_title'])('keeps a Claude slash failure when its only stderr was a %s diagnostic', async source => {
       useBackend({ type: 'auto' });
       const { child, done } = await runSlash('/doctor');
-      child.stderr.emit('data', Buffer.from('[claude-code:unrecognized_model] {"model":"custom-provider/model","query_source":"sdk"}'));
+      child.stderr.emit('data', Buffer.from(`[claude-code:unrecognized_model] ${JSON.stringify({ model: 'custom-provider/model', query_source: source })}`));
       child.emit('exit', 1);
       await done;
       expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({

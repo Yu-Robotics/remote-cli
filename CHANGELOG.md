@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.124] - 2026-10-04
+
+### Fixed
+- Suppress Claude Code model-recognition stderr diagnostics from session-title generation as well as SDK queries, including delegated-worker streaming and results. Preserve real API/authentication errors, nonzero exits, assistant text, and other backends.
+
 ## [1.6.123] - 2026-10-03
 
 ### Added
