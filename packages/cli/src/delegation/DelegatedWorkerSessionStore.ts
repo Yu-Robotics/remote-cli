@@ -107,22 +107,22 @@ export class DelegatedWorkerSessionStore {
     return this.initialized ??= this.load();
   }
 
-  async acquire(identity: DelegatedWorkerLaneIdentity): Promise<DelegatedWorkerLaneAcquireResult> {
+  async acquire(identity: DelegatedWorkerLaneIdentity,
+    options: { pooled?: boolean; excluded?: ReadonlySet<string> } = {}): Promise<DelegatedWorkerLaneAcquireResult> {
     this.assertIdentity(identity);
     await this.initialize();
     return this.mutate(async () => {
       const ready = [...this.lanes.values()]
-        .filter(lane => lane.state === 'ready' && sameIdentity(lane, identity))
+        .filter(lane => lane.state === 'ready' && sameIdentity(lane, identity) && !options.excluded?.has(lane.id))
         .sort((a, b) => b.updatedAt - a.updatedAt);
 
-      // A healthy execution path serializes acquisitions, so duplicate ready
-      // records indicate an interrupted or manually-corrupted history. Keep no
-      // ambiguous candidate resumable.
-      if (ready.length > 1) {
+      // Shared-directory lanes keep the legacy single-ready invariant. Isolated
+      // worktree pools legitimately contain multiple ready conversations.
+      if (ready.length > 1 && !options.pooled) {
         for (const duplicate of ready) await this.writeAndRemember({ ...duplicate,
           state: 'dirty', cleanupPending: true, updatedAt: Date.now(),
           cleanupError: 'Multiple delegated worker lanes matched one identity.' });
-      } else if (ready.length === 1) {
+      } else if (ready.length >= 1) {
         const lane = { ...ready[0], state: 'preparing' as const, updatedAt: Date.now() };
         await this.writeAndRemember(lane);
         return { lane: clone(lane), reused: true };

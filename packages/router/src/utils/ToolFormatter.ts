@@ -1,4 +1,5 @@
-import { DelegationProgressPhase, ToolUseInfo, ToolResultInfo, TaskNotificationInfo } from '../types';
+import { DelegationProgressPhase, ToolUseInfo, ToolResultInfo, TaskNotificationInfo, type ExecutionMetadata } from '../types';
+import { createExecutionMetadataElement } from './ExecutionMetadata';
 import { createDiffPanels, createEditPanels, createWritePanels } from './DiffFormatter';
 import MarkdownIt from 'markdown-it';
 import { formatWorkerResultMarkdown } from './WorkerResultMarkdown';
@@ -471,6 +472,7 @@ export interface DelegationProgressCardState {
   taskId: string;
   backend: string;
   phase: DelegationProgressPhase;
+  executionMetadata?: ExecutionMetadata;
   startedAt: number;
   ordinal: number;
   finishedAt?: number;
@@ -613,6 +615,9 @@ export function createDelegationProgressElements(state: DelegationProgressCardSt
     const location = state.events.some(event => event.isError) ? 'see activity details' : 'earlier details omitted';
     metadata.push(`<font color='orange'>${state.toolErrorCount} tool issue${state.toolErrorCount === 1 ? '' : 's'} · ${location}</font>`);
   }
+  const executionNote = state.executionMetadata?.backend === state.backend
+    ? createExecutionMetadataElement(state.executionMetadata) : undefined;
+  if (executionNote) metadata.push(executionNote.content);
   const activity = state.events.map(event => `- ${event.isError ? "<text_tag color='red'>Failed</text_tag> " : ''}${literalWorkerText(event.label, 220)}`);
   if (state.hiddenEventCount > 0) activity.push(`\n_${state.hiddenEventCount} earlier activities omitted._`);
   const toolDetails = currentTool

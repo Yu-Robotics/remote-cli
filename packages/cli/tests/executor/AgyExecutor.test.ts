@@ -190,6 +190,14 @@ describe('AgyExecutor', () => {
     expect(await running).toMatchObject({ success: false });
   });
 
+  it('reports configured model and effort without spawning a process or inventing defaults', async () => {
+    expect(executor.getExecutionMetadata()).toMatchObject({ modelSource: 'default', effortSource: 'default' });
+    await executor.destroy();
+    executor = new AgyExecutor(directoryGuard, { initialWorkingDirectory: '~/test-project', model: 'model-a', effort: 'high' });
+    expect(executor.getExecutionMetadata()).toMatchObject({ model: 'model-a', modelSource: 'configured', reasoningEffort: 'high', effortSource: 'configured' });
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
   it('preserves direct-child cancellation for an ordinary AGY session', async () => {
     const running = executor.execute('Run a normal task');
     await waitForSpawn();

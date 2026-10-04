@@ -446,6 +446,31 @@ describe('FeishuLongConnHandler', () => {
   });
 
   describe('finalizeStreamingMessage', () => {
+    it.each([0, 160])('keeps completion metadata with the final thread panel and preserves it on refresh (%s elements)', async count => {
+      mockClient.im.message.patch.mockResolvedValue({});
+      let continuation = 0;
+      mockClient.im.message.create.mockImplementation(async () => ({ data: { message_id: `continuation-${++continuation}` } }));
+      const threads = [{ id: 't1', name: 'default', status: 'idle' as const }, { id: 't2', name: 'thread-2', status: 'idle' as const }];
+      const metadata = { backend: 'codex', model: 'model-a', modelSource: 'reported' as const, reasoningEffort: 'high', effortSource: 'reported' as const };
+      await handler.finalizeStreamingMessage('metadata-card', Array.from({ length: count }, () => ({ tag: 'markdown', content: 'Body' })),
+        undefined, 'owner', '/workspace/project', 'default', threads, 't1', undefined, metadata);
+      const bodies = [...mockClient.im.message.patch.mock.calls, ...mockClient.im.message.create.mock.calls]
+        .map(([request]) => JSON.parse(request.data.content).body.elements);
+      expect(bodies.flat().filter(element => element.content?.includes('Model: model-a'))).toHaveLength(1);
+      const last = bodies.at(-1);
+      const note = last.findIndex(element => element.content?.includes('Completed'));
+      const model = last.findIndex(element => element.content?.includes('Model: model-a'));
+      const panel = last.findIndex(element => element.content?.includes('Switch thread'));
+      expect(note).toBeGreaterThanOrEqual(0);
+      expect(model).toBe(note + 1);
+      expect(panel).toBeGreaterThan(model);
+      const lastCard = continuation ? `continuation-${continuation}` : 'metadata-card';
+      await (handler as any).refreshThreadSwitchButtons(lastCard, 't2');
+      const refreshed = JSON.parse(mockClient.im.message.patch.mock.calls.at(-1)[0].data.content).body.elements;
+      expect(refreshed.filter(element => element.content?.includes('Model: model-a'))).toHaveLength(1);
+      expect(refreshed.some(element => element.content?.includes('Completed'))).toBe(true);
+    });
+
     it('should finalize message within limit', async () => {
       mockClient.im.message.patch.mockResolvedValue({});
 

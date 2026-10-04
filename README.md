@@ -21,6 +21,14 @@ Remote control your Claude Code, AGY CLI (Antigravity), Codex CLI (OpenAI), Open
 - 📂 **Working Directory Controls**: Threads can select only explicitly allowed local working directories
 - 🚀 **Easy Setup**: One-command installation and initialization, supports background daemon mode (`-d`)
 
+### Execution Metadata
+
+From CLI and Router 1.6.132, the final AI reply card shows a compact gray model and effort note below Completed and above the thread buttons. Backend-reported values take precedence; unconfirmed selections are marked `(configured)`, unset selections show `backend default`, and unavailable information shows `unknown`. A model identifier may be an alias and does not verify a proxy's underlying model identity.
+
+The note describes the final execution or synthesis turn, not a later thread preference or every internal call. Earlier continuation pages keep their continuation notice. Local control commands do not receive model attribution. Metadata is sampled from cached executor state without extra API/model requests and retained for terminal reconnect recovery. This is additive protocol-v1 metadata: old CLI/Router combinations still work, but both sides need this release to show the note.
+
+From CLI and Router 1.6.133, each managed delegated worker also shows its own model and effort in the visible metadata area above its collapsed activity details, using the same gray style. Values belong to that worker's execution attempt, never the coordinator. Existing backend events can refine the note while the worker runs; retained terminal task results keep the final snapshot after process cleanup. Queued or unstarted tasks have no execution attribution. No extra model requests are made, and older peers retain their existing behavior.
+
 ### Usage Examples
 
 <table>
@@ -528,11 +536,53 @@ obtain the new default. Existing Routers remain compatible; upgrading only the
 Router leaves an older CLI's default unchanged.
 
 When enabled, each `(parent thread, worker backend, workspace generation)` owns
-one isolated worker lane. A worker lane never reuses the direct conversation of
-the parent backend and continues only its own prior delegated context. The
-worker process stops after every task; a lane becomes reusable only after its
-exit is confirmed. The parent thread's saved model and reasoning effort are
-applied whenever the worker starts.
+isolated worker conversations. Non-Git workspaces retain one serial lane; Git
+workspaces can pool multiple lanes for concurrent tasks, each with its own
+reusable worktree directory. No lane reuses the parent's direct conversation.
+A worker process stops after every task and must confirm exit before reuse.
+The parent's saved model and reasoning effort apply whenever a worker starts.
+
+From CLI 1.6.130, Git workers use detached task checkouts under private local
+storage. Each task starts from a bounded snapshot of the delivery repository,
+including staged, unstaged, and nonignored untracked changes without changing
+the user's index. All accepted tasks in a cohort share that baseline; after
+artifact integration, the next task captures the updated delivery workspace.
+Earlier conversation context may be stale, so workers are told to re-read files.
+Private `refs/remote-cli/*` keep input and output checkpoints outside normal
+branches and tags; do not publish these refs or use a mirror push. Snapshots are
+limited to 10,000 files and 128 MiB. Existing conflicts, submodules, unsafe links,
+known untracked credential files, and broken Git metadata stop setup rather
+than falling back to shared parallel writes. The whole repository must be
+within the directory-selection policy; allowing only a subdirectory is not
+enough. Unsupported repositories fail delegation setup, not ordinary backend
+execution. Standard Git configuration, including clean filters, still runs;
+limits also validate the actual resulting tree. Integration patch output is
+bounded to 32 MiB. Larger patches require manual integration. Ignored files,
+dependencies, and local environment files are not copied; prepare dependencies
+inside a worker checkout when its task needs them.
+
+Task success does not merge files. After all accepted workers finish, the
+coordinator uses `remote_cli_integrate` to inspect an owned artifact and its
+delivery revision, then explicitly apply or retain it. Apply requires the exact
+revision, checks conflicts in a separate integration worktree, and changes
+working files without staging, committing, or pushing. Conflicts leave the
+delivery directory untouched and report a preserved recovery directory.
+Before applying files, private recovery refs preserve both the current working
+tree and the intended result. An interrupted or failed application may have
+changed files: inspection exposes those refs and blocks automatic reapplication
+until manual recovery or explicit retention. Verify working and staged changes
+with `git status` before delivery; application does not update the index.
+Changes outside the selected subdirectory and failed/cancelled partial output
+require manual recovery or explicit retention. Retain declines integration but
+keeps the immutable artifact; it does not delete files. No-change tasks need no
+integration. Pending artifacts and unknown dirty files prevent lane reuse.
+Before a reusable lane starts again, its checkout moves to a fresh baseline,
+including integrated sibling changes, while its native conversation continues.
+Artifacts and recovery files are retained beyond diagnostic expiry and native
+conversation reset/deletion; clean them manually only after confirming delivery.
+A worktree isolates checkout files, not OS permissions, Git configuration,
+external tools, or access to other directories. Git is never initialized
+implicitly for a non-Git directory.
 
 `/status` shows `Delegation: on/off (current thread)` for the thread receiving
 the command. Reading this setting does not initialize delegation or start workers.
@@ -680,11 +730,14 @@ a new worker is not replayed after failure. Abort and shutdown suppress the
 failure-result fallback as well as further continuation.
 Cancellation does not undo existing edits.
 
-There is one active worker per parent and at most three per CLI process in
-non-overlapping workspaces. From CLI 1.6.129, one request may accept multiple
-independent tasks before collecting results; followers report `queued` and run
-in FIFO order, not concurrently. Each accepted task has its own result and
-cancellation; failure or cancellation normally leaves siblings runnable.
+From CLI 1.6.131, there are at most five occupied starting/running worker slots per CLI.
+From CLI 1.6.130, a Git-backed request can run multiple workers concurrently
+in independent worktrees; further tasks report `queued` and start in FIFO order
+as capacity becomes available. Non-Git directories still run one worker at a
+time, enforced by the scheduler, not by a prompt. Each accepted task has its
+own result and cancellation; failure or cancellation normally leaves siblings
+runnable. A plain-text reply is refused when several workers need input; use
+the specific approval card or request ID instead.
 The cumulative limit is 12 accepted tasks across all coordinator continuations
 of that request, including failures and cancellations. A queued task expires
 one hour after admission without extending any other task's deadline. Queue
@@ -710,12 +763,14 @@ its beginning and end, marks the omitted middle, and sets `truncated: true`
 without changing the worker's success or failure status. Combined continuations
 use the same truncation policy within their 64 KiB budget. These limits bound
 retained delegation results, not the backend's own output buffers.
-Managed tasks within one request are serialized; other overlapping requests are rejected. These
+Other requests with overlapping source repositories are rejected. These
 reservations restrict delegation-enabled threads and workers; opted-out ordinary
-threads retain access to their workspace. This does not lock files against those
-threads, the coordinator's native parallel tools, or external editors. Use separate
-workspaces for independent writers; the coordinator is instructed to wait for
-its worker instead of editing concurrently.
+threads retain access to their workspace. They do not lock files against those
+threads, native parallel tools, or external editors. Non-Git shared directories
+must not be edited concurrently with a worker. Git workers must keep changes
+inside their owned checkouts; explicit integration waits for every accepted
+worker and revalidates delivery ownership. No peer messaging, recursive
+delegation, automatic Git commit, or remote push is introduced.
 
 Workers follow the coordinator's effective remote-cli sandbox policy. The default
 `inherit` mode launches unrestricted workers when the coordinator has no sandbox,

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import { createDelegationProgressElements, DELEGATION_PROGRESS_ELEMENT_COUNT, type DelegationProgressCardState } from '../src/utils/ToolFormatter';
 import { countCardTables } from '../src/utils/CardTables';
+import { createExecutionMetadataElement } from '../src/utils/ExecutionMetadata';
 
 const state = (changes: Partial<DelegationProgressCardState> = {}): DelegationProgressCardState => ({
   taskId: 'task-1', backend: 'claude', phase: 'text', startedAt: Date.now() - 5000, ordinal: 2,
@@ -17,6 +18,18 @@ describe('delegated worker progress formatting', () => {
   });
 
   afterEach(() => vi.useRealTimers());
+
+  it.each(['text', 'succeeded', 'failed'] as const)('shows the worker\'s own execution note outside folded details in %s', phase => {
+    const executionMetadata = { backend: 'codex', model: 'child-model', modelSource: 'reported' as const, reasoningEffort: 'high', effortSource: 'reported' as const };
+    const elements = render({ backend: 'codex', phase, executionMetadata });
+    expect(elements).toHaveLength(DELEGATION_PROGRESS_ELEMENT_COUNT);
+    expect(elements[2]).toMatchObject({ tag: 'markdown', text_size: 'notation' });
+    expect(elements[2].content).toContain(createExecutionMetadataElement(executionMetadata)!.content);
+    expect(JSON.stringify(elements[3])).not.toContain('child-model');
+    expect(JSON.stringify(elements).match(/Model: child-model/g)).toHaveLength(1);
+    const mismatched = render({ backend: 'agy', phase, executionMetadata });
+    expect(JSON.stringify(mismatched)).not.toContain('child-model');
+  });
 
   it.each(['started', 'text', 'tool_use', 'tool_result', 'waiting_input', 'succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted'] as const)
     ('keeps identity and four sibling slots stable for %s', phase => {

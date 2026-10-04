@@ -69,6 +69,38 @@ describe.each([
     expect(transport.setConfigOption).not.toHaveBeenCalled();
   });
 
+  it('reads cached native model/effort options without starting or querying a backend', async () => {
+    expect(executor.getExecutionMetadata()).toMatchObject({ modelSource: 'default', effortSource: 'default' });
+    expect(transport.initialize).not.toHaveBeenCalled();
+    transport.newSession.mockResolvedValueOnce({ sessionId: 'metadata-session', configOptions: [
+      { id: 'model', currentValue: 'native-model' },
+      { id: ({ Kimi: 'thinking', OpenCode: 'effort', ZCode: 'thought', DSH: 'reasoning_effort' })[_backend], currentValue: _backend === 'Kimi' ? 'on' : 'high' },
+    ] });
+    await executor.execute('inspect', {});
+    const before = transport.prompt.mock.calls.length;
+    expect(executor.getExecutionMetadata()).toMatchObject({ model: 'native-model', modelSource: 'reported' });
+    expect(executor.getExecutionMetadata()).toMatchObject({ reasoningEffort: _backend === 'Kimi' ? 'on' : 'high', effortSource: 'reported' });
+    expect(transport.prompt.mock.calls.length).toBe(before);
+    expect(transport.setConfigOption).not.toHaveBeenCalled();
+    callbacks.onConfigOptions?.([{ id: 'model', currentValue: 'updated-model' }]);
+    expect(executor.getExecutionMetadata()).toMatchObject({ model: 'updated-model', modelSource: 'reported' });
+  });
+
+  it('does not attribute previous-client settings when a resumed client omits native options', async () => {
+    transport.newSession.mockResolvedValueOnce({ sessionId: 'metadata-session', configOptions: [
+      { id: 'model', currentValue: 'previous-model', options: [{ value: 'previous-model', name: 'Previous model' }] },
+      { id: ({ Kimi: 'thinking', OpenCode: 'effort', ZCode: 'thought', DSH: 'reasoning_effort' })[_backend], currentValue: 'high' },
+    ] });
+    await executor.execute('first', {});
+    expect(executor.getExecutionMetadata()).toMatchObject({ modelSource: 'reported', effortSource: 'reported' });
+    (executor as any).destroyClient();
+    transport.loadSession.mockResolvedValueOnce({});
+    await executor.execute('second', {});
+    expect(executor.getExecutionMetadata()).toMatchObject({ model: undefined, modelSource: 'default', reasoningEffort: undefined, effortSource: 'default' });
+    expect(await executor.listModels()).toMatchObject([{ id: 'previous-model' }]);
+    expect(transport.setConfigOption).not.toHaveBeenCalled();
+  });
+
   it('finishes a thought-only turn with empty output', async () => {
     transport.prompt.mockImplementationOnce(async () => {
       callbacks.onThoughtChunk?.({ type: 'text', text: 'PRIVATE_ONLY' });

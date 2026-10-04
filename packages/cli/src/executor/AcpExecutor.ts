@@ -3,6 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import type { ExecuteOptions, ExecuteResult, ExecutorModelInfo, IExecutor } from './IExecutor';
+import { configuredExecutionMetadata } from './ExecutionMetadata';
 import { AcpClient, type AcpEventCallbacks, type AcpToolCallUpdate, type AcpTransport } from './acp/AcpClient';
 import type { AcpConfigOption, AcpContentBlock, AcpMcpServer, AcpPermissionOption, AcpSessionResult } from './acp/AcpTypes';
 import { delegationSessionServers, sameConnection, type DelegationConnection } from '../delegation/contract';
@@ -126,6 +127,7 @@ export abstract class AcpExecutor implements IExecutor {
   private replayingSession = false;
   private sessionId: string | null = null;
   private configOptions: AcpConfigOption[] = [];
+  private reportedConfigOptions: AcpConfigOption[] = [];
   private activeCallbacks: ActiveCallbacks = {};
   private commandQueue: QueuedCommand[] = [];
   private isProcessing = false;
@@ -296,6 +298,21 @@ export abstract class AcpExecutor implements IExecutor {
     return this.sessionId;
   }
 
+  getExecutionMetadata() {
+    const data = configuredExecutionMetadata(this.model, this.effort);
+    const model = this.reportedConfigOptions.find(option => option.id === 'model')?.currentValue;
+    const effort = this.reportedConfigOptions.find(option => option.id === this.effortConfigId)?.currentValue;
+    if (typeof model === 'string' && model.trim()) {
+      data.model = model;
+      data.modelSource = 'reported';
+    }
+    if (typeof effort === 'string' && effort.trim()) {
+      data.reasoningEffort = effort;
+      data.effortSource = 'reported';
+    }
+    return data;
+  }
+
   async listModels(): Promise<ExecutorModelInfo[]> {
     await this.ensureSession();
     const modelOption = this.findConfigOption('model');
@@ -439,6 +456,7 @@ export abstract class AcpExecutor implements IExecutor {
     if (this.isDestroyed && managed) throw new Error('Executor has been destroyed');
     assertWorkingDirectoryExists(this.currentWorkingDirectory);
     if (this.client && this.sessionId) return { client: this.client, sessionId: this.sessionId };
+    this.reportedConfigOptions = [];
     const client = this.createClient();
     this.transports.set(client, managed);
     try {
@@ -500,7 +518,7 @@ export abstract class AcpExecutor implements IExecutor {
       onPlan: (entries) => !this.replayingSession && this.activeCallbacks.onPlanMode?.(
         entries.map((entry) => `[${entry.status ?? 'pending'}] ${entry.content}`).join('\n')
       ),
-      onConfigOptions: (options) => { this.configOptions = options; },
+      onConfigOptions: (options) => { this.configOptions = options; this.reportedConfigOptions = options; },
       onPermissionRequest: async (title, options) => {
         const isQuestion = options.some((option) => /^q\d+_/.test(option.optionId));
         if (this.autoApprove && !isQuestion) {
@@ -539,7 +557,10 @@ export abstract class AcpExecutor implements IExecutor {
   }
 
   private updateConfigOptions(result?: AcpSessionResult): void {
-    if (result?.configOptions) this.configOptions = result.configOptions;
+    if (result?.configOptions) {
+      this.configOptions = result.configOptions;
+      this.reportedConfigOptions = result.configOptions;
+    }
   }
 
   private findConfigOption(id: string): AcpConfigOption | undefined {
@@ -566,6 +587,7 @@ export abstract class AcpExecutor implements IExecutor {
   }
 
   private destroyClient(): void {
+    this.reportedConfigOptions = [];
     this.clearAbortTimer();
     this.cancelPendingPermission();
     for (const [client, managed] of this.transports) {

@@ -35,6 +35,8 @@ import { DELEGATION_BACKENDS, DELEGATION_INSTRUCTIONS, type DelegationBackend } 
 import { formatDelegationStatus } from '../delegation/DelegationStatusFormatter';
 import { backendProbeFailure, getBackendCommand } from '../utils/BackendCommand';
 import { filterClaudeStderr } from '../executor/claude/ClaudeStderrFilter';
+import type { ExecutionMetadata } from '../types';
+import { captureExecutionMetadata, mergeReportedExecutionMetadata } from '../executor/ExecutionMetadata';
 
 /**
  * Detected backend information
@@ -391,6 +393,25 @@ export class MessageHandler {
     }
 
     // Child input belongs to the child executor, even though the parent owns the thread.
+    const addressedReply = /^(yes|no)\s+(\S+)$/i.exec(content?.trim() ?? '');
+    const addressedApproval = addressedReply ? this.pendingApprovalCards.get(addressedReply[2]) : undefined;
+    if (addressedApproval?.delegated && addressedReply) {
+      let accepted = false;
+      if (addressedApproval.request.threadId === resolvedThreadId && addressedApproval.request.openId === message.openId) {
+        const action = addressedReply[1].toLowerCase() === 'yes' ? 'approve' : 'deny';
+        try { accepted = addressedApproval.executor.respondToApproval?.(addressedReply[2], action) === true; }
+        catch { /* Never fall through to another executor after a targeted approval fails. */ }
+        if (accepted) this.resolveApprovalCard(addressedReply[2], action === 'approve' ? 'approved' : 'denied');
+      }
+      this.sendResponse(messageId, resolvedThreadId, accepted ? { success: true, output: 'Approval response sent.' }
+        : { success: false, error: 'The addressed worker approval could not be applied. Check its request ID and owner.' });
+      return;
+    }
+    if (this.delegation.hasAmbiguousInput(resolvedThreadId)) {
+      this.sendResponse(messageId, resolvedThreadId, { success: false,
+        error: 'Multiple workers are waiting for input. Use the specific approval card or request ID; an unaddressed reply cannot be routed safely.' });
+      return;
+    }
     const inputExecutor = this.delegation.waitingExecutor(resolvedThreadId) ?? executor;
     if ('isWaitingInput' in inputExecutor && typeof inputExecutor.isWaitingInput === 'function') {
       const ex = inputExecutor as { isWaitingInput(): boolean; sendInput(input: string): boolean };
@@ -2022,6 +2043,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     this.sendStreamContext(messageId, threadId, executor);
     let delegationScope: DelegationScope | undefined;
     let delegationBridge: DelegationBridge | undefined;
+    let executionMetadata: ExecutionMetadata | undefined;
     const complete = async (success: boolean, error?: string): Promise<boolean> => {
       delegationBridge?.activate(undefined);
       const retained = !success && delegationScope && !delegationScope.isClosed()
@@ -2042,7 +2064,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       }
       const responseError = fromQueue && !success
         ? this.pauseQueueAfterFailure(threadId, error || 'Queued command failed') : error;
-      this.sendResponse(messageId, threadId, { success, error: responseError, threads: this.threadPool.getSummaries() });
+      this.sendResponse(messageId, threadId, { success, error: responseError, threads: this.threadPool.getSummaries(), executionMetadata });
       if (fromQueue) console.log(`[MessageHandler] Finished queued message ${messageId} in thread ${threadId}: success=${success}, remaining=${this.threadQueues.get(threadId)?.length ?? 0}, paused=${this.pausedQueues.has(threadId)}`);
       return success;
     };
@@ -2131,7 +2153,7 @@ You can also use natural language commands to control Claude Code CLI.`,
           this.sendStreamChunk(messageId, threadId, chunk);
         },
         onToolUse: (toolUse: ToolUseInfo) => {
-          if (delegationScope && /remote_cli_(list_backends|delegate|result|cancel)$/.test(toolUse.name)) {
+          if (delegationScope && /remote_cli_(list_backends|delegate|result|cancel|integrate)$/.test(toolUse.name)) {
             delegationControlTools.add(toolUse.id);
             return;
           }
@@ -2187,8 +2209,14 @@ You can also use natural language commands to control Claude Code CLI.`,
           onToolUse: tool => { if (active && !scope.isClosed()) options.onToolUse?.(tool); },
           onToolResult: tool => { if (active && !scope.isClosed()) options.onToolResult?.(tool); },
         } : options;
+        const backend = this.threadPool.getBackendKey(threadId);
+        const launchMetadata = captureExecutionMetadata(executor, backend);
+        executionMetadata = launchMetadata;
+        let capturedMetadata = false;
         try {
           const result = await executor.execute(prompt, guardedOptions);
+          executionMetadata = mergeReportedExecutionMetadata(launchMetadata, captureExecutionMetadata(executor, backend));
+          capturedMetadata = true;
           active = false;
           delegationBridge?.activate(undefined);
           assertCoordinatorActive();
@@ -2202,6 +2230,7 @@ You can also use natural language commands to control Claude Code CLI.`,
           assertCoordinatorActive();
           return result;
         } finally {
+          if (!capturedMetadata) executionMetadata = mergeReportedExecutionMetadata(launchMetadata, captureExecutionMetadata(executor, backend));
           active = false;
           delegationBridge?.activate(undefined);
           if (!finished) scope?.finishExecution(false);
@@ -2321,7 +2350,8 @@ You can also use natural language commands to control Claude Code CLI.`,
     const longest = (description.match(/`+/g) ?? []).reduce((length, run) => Math.max(length, run.length), 2);
     const fence = '`'.repeat(longest + 1);
     this.sendStreamChunk(request.taskMessageId, request.threadId,
-      `\n🔐 **Approval required**\n\n${fence}\n${description}\n${fence}\n\nReply yes, no${request.approval.canRemember ? ', or remember to save these directories' : ''}.\n`);
+      `\n🔐 **Approval required**\n\n${fence}\n${description}\n${fence}\n\nReply yes, no${request.approval.canRemember ? ', or remember to save these directories' : ''}.${pending.delegated
+        ? ` To address this worker explicitly, reply yes ${requestId} or no ${requestId}.` : ''}\n`);
   }
 
   private resolveApprovalCard(requestId: string, status: ApprovalStatus): void {
@@ -2517,6 +2547,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       sessionAbbr?: string;
       threads?: import('../thread/types').ThreadSummary[];
       queueConfirmation?: QueueConfirmationInfo;
+      executionMetadata?: ExecutionMetadata;
     }
   ): void {
     if (!result.queueConfirmation) this.fileInbox?.release(messageId, !result.success);
@@ -2542,6 +2573,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         threadId,
         threads: result.threads,
         queueConfirmation: result.queueConfirmation,
+        ...(result.executionMetadata ? { executionMetadata: result.executionMetadata } : {}),
         cwd,
         timestamp: Date.now(),
       });

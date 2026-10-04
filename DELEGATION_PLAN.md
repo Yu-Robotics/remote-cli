@@ -1,5 +1,53 @@
 # Cross-Backend Delegation Plan
 
+## Phase 2: reusable isolated worktrees and explicit integration
+
+Contract for CLI 1.6.130; supersedes Phase 1's Git serial-dispatch restriction.
+Non-Git directories retain that restriction in code, with no implicit Git init.
+
+1. Keep native worker identity tied to parent thread, backend, canonical source
+   cwd, and workspace generation. Pool independent Git lanes and reuse each
+   lane's worktree directory only after exit and artifact accounting.
+2. Capture a shared cohort baseline through a temporary index, including relevant
+   working changes. Do not modify the source index. Limit snapshots to 10,000
+   files and 128 MiB; reject broken metadata, existing conflicts, submodules,
+   unsafe links, and known untracked credentials. Ignored dependencies are not
+   copied. Validate actual tree bounds after Git clean filters. Grant the exact
+   owned execution cwd without changing global policy.
+3. Start each Git task in a fresh detached checkout anchored by private refs,
+   never a publishable worker branch. Up to five global starting/running slots
+   permit parallel checkout-isolated work; excess tasks retain FIFO queueing.
+   CLI 1.6.131 raises this global cap from the three slots in 1.6.130.
+   Worktrees are not OS sandboxes or isolation from shared Git configuration.
+4. After confirmed process exit, preserve immutable output and native Git history
+   before normalizing the owned index. Success and integration remain separate.
+   Unresolved artifacts, changed branch identity, or unknown dirty files block
+   lane reuse. No-change tasks can reuse directly; pending lanes are excluded
+   from the ready pool, without corrupting other healthy same-backend lanes.
+5. Add `remote_cli_integrate` for inspect/apply/retain. Require owned identity,
+   completed workers, an exact inspected delivery revision, and lifecycle
+   revalidation. Use an isolated merge checkout compatible with Git 2.34.
+   Conflicts leave source files untouched. Apply changes without staging,
+   committing, or pushing; retain preserves intentionally unmerged artifacts.
+   Check both endpoints of renames. Preserve private before/target recovery refs
+   and a durable receipt before file application. Failed/interrupted application
+   may have changed delivery files and requires manual comparison, not assumed
+   rollback or automatic reapplication.
+6. Capture a new delivery baseline after integration before reusing a lane.
+   Warn the resumed model to re-read current files. Artifact refs and records
+   survive diagnostic expiry and conversation deletion for manual recovery.
+   Do not automatically remove recovery files or publish internal refs.
+7. Preserve Router protocol version 1, same-backend prohibition, sandbox policy,
+   individual cancellation, cumulative admission limits, completion barriers,
+   and native executor behavior. Refuse ambiguous plain-text worker input;
+   request-specific approvals remain supported. Peer messaging is still deferred.
+
+Verify real temporary Git worktrees, dirty inputs, parent-index preservation,
+committed and binary outputs, conflicts, revision/ownership guards, retained and
+unknown files, directory/session reuse, concurrency and queued followers,
+non-Git compatibility, tool registration, and the existing thread workflow.
+Mocked executor tests do not establish provider authentication or live throughput.
+
 ## Phase 1: multiple accepted tasks with serial dispatch
 
 Contract for CLI 1.6.129. This is a scheduling foundation, not simultaneous
@@ -462,9 +510,10 @@ integration, or replacement of normal thread interactions.
 | Tool | Behavior |
 | --- | --- |
 | `remote_cli_list_backends` | Return installed backends, versions and applicable restrictions |
-| `remote_cli_delegate` | Accept an independent task on a different backend; same-request followers queue for serial dispatch; `inherit` is the default and `read_only` is rejected |
+| `remote_cli_delegate` | Accept a different-backend task; Git workers use isolated worktrees and may run concurrently; non-Git followers queue serially; `inherit` is default |
 | `remote_cli_result` | Return an owned task's state and final result; wait up to 25 seconds |
 | `remote_cli_cancel` | Stop an owned worker; existing filesystem changes are not rolled back |
+| `remote_cli_integrate` | Inspect and revision-guardedly apply or retain an owned Git artifact after all workers finish |
 
 Worker results are task data, not new user instructions. A successful native
 turn does not prove acceptance criteria were met; the coordinator must check
@@ -503,9 +552,9 @@ regression test. This affects fresh Codex read-only sessions as well as workers.
 
 Read-only smoke testing found that Codex emits an additional MCP tool approval
 elicitation for the local bridge. The coordinator override now limits the server
-to these four tools and pre-authorizes their invocation after `/delegation on`,
+to these five tools and pre-authorizes their invocation after `/delegation on`,
 using the official `default_tools_approval_mode` setting. Child sandbox policies
-and permission requests remain unchanged. Claude similarly adds only those four
+and permission requests remain unchanged. Claude similarly adds only those five
 MCP tool names to its process-local allow list, retaining native ask/deny rules.
 See [Codex configuration reference](https://developers.openai.com/codex/config-reference/).
 

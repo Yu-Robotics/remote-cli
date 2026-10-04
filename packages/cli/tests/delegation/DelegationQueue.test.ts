@@ -270,17 +270,17 @@ describe('multiple accepted delegated tasks', () => {
       if (record.state === 'queued') await release.promise;
       return write(record);
     });
-    const scopes = Array.from({ length: 4 }, (_, index) => {
+    const scopes = Array.from({ length: 6 }, (_, index) => {
       const cwd = path.join(directory, `project-${index}`); fs.mkdirSync(cwd);
       return manager.begin({ ...parent, cwd, thread: { ...parent.thread, id: `owner-${index}`, workingDirectory: cwd } });
     });
-    const launches = scopes.slice(0, 3).map((scope, index) => delegate(scope, `first-${index}`));
-    await vi.waitFor(() => expect(writes).toHaveBeenCalledTimes(3));
+    const launches = scopes.slice(0, 5).map((scope, index) => delegate(scope, `first-${index}`));
+    await vi.waitFor(() => expect(writes).toHaveBeenCalledTimes(5));
     expect(factory).not.toHaveBeenCalled();
-    await expect(delegate(scopes[3], 'full-during-persistence')).rejects.toThrow('capacity');
+    await expect(delegate(scopes[5], 'full-during-persistence')).rejects.toThrow('capacity');
     release.resolve();
     expect((await Promise.all(launches)).every(task => task.state === 'running')).toBe(true);
-    expect(factory).toHaveBeenCalledTimes(3);
+    expect(factory).toHaveBeenCalledTimes(5);
   });
 
   it('fences a provisional write after close and preserves the later request on the same thread', async () => {
@@ -347,22 +347,22 @@ describe('multiple accepted delegated tasks', () => {
   });
 
   it('keeps the global execution cap without charging queued followers another slot', async () => {
-    const scopes = Array.from({ length: 4 }, (_, index) => {
+    const scopes = Array.from({ length: 6 }, (_, index) => {
       const cwd = path.join(directory, `project-${index}`); fs.mkdirSync(cwd);
       return manager.begin({ ...parent, cwd, thread: { ...parent.thread, id: `owner-${index}`, workingDirectory: cwd } });
     });
-    const initial = await Promise.all(scopes.slice(0, 3).map((scope, index) => delegate(scope, `first-${index}`)));
+    const initial = await Promise.all(scopes.slice(0, 5).map((scope, index) => delegate(scope, `first-${index}`)));
     const follower = await delegate(scopes[0], 'follower');
     expect(follower.state).toBe('queued');
-    expect(factory).toHaveBeenCalledTimes(3);
-    await expect(delegate(scopes[3], 'full')).rejects.toThrow('capacity');
+    expect(factory).toHaveBeenCalledTimes(5);
+    await expect(delegate(scopes[5], 'full')).rejects.toThrow('capacity');
     const firstWorker = workers.find(worker => worker.executor.getCurrentWorkingDirectory() === path.join(directory, 'project-0'))!;
     firstWorker.finish({ success: true });
-    await vi.waitFor(() => expect(workers).toHaveLength(4));
-    await expect(delegate(scopes[3], 'still-full')).rejects.toThrow('capacity');
+    await vi.waitFor(() => expect(workers).toHaveLength(6));
+    await expect(delegate(scopes[5], 'still-full')).rejects.toThrow('capacity');
     await scopes[1].invoke('remote_cli_cancel', { taskId: initial[1].taskId }, 'cancel');
-    expect(await delegate(scopes[3], 'retry')).toMatchObject({ state: 'running' });
-    expect(factory).toHaveBeenCalledTimes(5);
+    expect(await delegate(scopes[5], 'retry')).toMatchObject({ state: 'running' });
+    expect(factory).toHaveBeenCalledTimes(7);
   });
 
   it('rejects cross-root overlap immediately instead of creating mutually waiting queues', async () => {

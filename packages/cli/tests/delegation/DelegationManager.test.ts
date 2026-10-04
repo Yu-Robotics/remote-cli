@@ -9,7 +9,7 @@ import { DelegatedWorkerSessionStore } from '../../src/delegation/DelegatedWorke
 import { DELEGATION_BACKENDS } from '../../src/delegation/contract';
 import { workerConfiguration } from '../../src/delegation/WorkerPolicy';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
-import type { ExecuteOptions, ExecuteResult, IExecutor } from '../../src/executor/IExecutor';
+import type { ExecuteOptions, ExecuteResult, ExecutorExecutionMetadata, IExecutor } from '../../src/executor/IExecutor';
 import { KimiExecutor } from '../../src/executor/KimiExecutor';
 import { OpenCodeExecutor } from '../../src/executor/OpenCodeExecutor';
 import { ZCodeExecutor } from '../../src/executor/ZCodeExecutor';
@@ -155,6 +155,64 @@ describe('cross-backend delegation', () => {
     expect(parent.onToolUse).not.toHaveBeenCalled();
     expect(parent.onToolResult).not.toHaveBeenCalled();
     expect(parent.onNotice).not.toHaveBeenCalled();
+  });
+
+  it('freezes worker preferences, publishes native reports, and retains them after process cleanup', async () => {
+    parent.onProgress = vi.fn(() => true);
+    parent.onTextProgress = vi.fn(() => true);
+    let metadata: ExecutorExecutionMetadata = { model: 'child-launch', modelSource: 'configured', reasoningEffort: 'low', effortSource: 'configured' };
+    worker.getExecutionMetadata = vi.fn(() => metadata);
+    vi.mocked(worker.execute).mockImplementationOnce(async (_prompt, options) => {
+      metadata = { model: 'child-native', modelSource: 'reported', reasoningEffort: 'medium', effortSource: 'reported' };
+      options.onDisplayText?.('Checking the patch');
+      options.onToolUse?.({ id: 'read-1', name: 'Read', input: {} });
+      metadata = { model: 'child-final', modelSource: 'reported', reasoningEffort: 'high', effortSource: 'reported' };
+      return { success: true, output: 'Verified result' };
+    });
+    vi.mocked(worker.destroy).mockImplementation(async () => {
+      metadata = { model: 'next-turn', modelSource: 'configured', reasoningEffort: 'low', effortSource: 'configured' };
+    });
+    const scope = manager.begin(parent);
+    const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Review' }, 'start');
+    const result: any = await scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result');
+    expect(result.executionMetadata).toEqual({ backend: 'codex', model: 'child-final', modelSource: 'reported', reasoningEffort: 'high', effortSource: 'reported' });
+    expect(vi.mocked(parent.onProgress!).mock.calls[0][0].executionMetadata).toMatchObject({ model: 'child-launch', modelSource: 'configured' });
+    expect(parent.onTextProgress).toHaveBeenCalledWith(expect.objectContaining({ executionMetadata: expect.objectContaining({ model: 'child-native', effortSource: 'reported' }) }));
+    expect(parent.onProgress).toHaveBeenLastCalledWith(expect.objectContaining({ phase: 'succeeded', executionMetadata: result.executionMetadata }));
+    result.executionMetadata.model = 'tampered-result';
+    expect(scope.getRetainedResults()[0].executionMetadata?.model).toBe('child-final');
+    expect(JSON.stringify(vi.mocked(parent.onProgress!).mock.calls)).not.toContain('claude-model');
+  });
+
+  it.each(['error', 'cancel'])('retains the last worker report when an execution ends with %s', async ending => {
+    parent.onProgress = vi.fn(() => true);
+    let metadata: ExecutorExecutionMetadata = { model: 'selected-worker', modelSource: 'configured', effortSource: 'default' };
+    worker.getExecutionMetadata = () => metadata;
+    vi.mocked(worker.execute).mockImplementationOnce(() => {
+      metadata = { model: 'confirmed-worker', modelSource: 'reported', reasoningEffort: 'high', effortSource: 'reported' };
+      if (ending === 'error') throw new Error('Synthetic worker error');
+      return new Promise(() => undefined);
+    });
+    vi.mocked(worker.destroy).mockImplementation(async () => { metadata = { modelSource: 'default', effortSource: 'default' }; });
+    const scope = manager.begin(parent);
+    const task: any = await scope.invoke('remote_cli_delegate', { backend: 'agy', objective: 'Review' }, 'start');
+    const result: any = ending === 'cancel'
+      ? await scope.invoke('remote_cli_cancel', { taskId: task.taskId }, 'cancel')
+      : await scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result');
+    expect(result).toMatchObject({ state: ending === 'cancel' ? 'cancelled' : 'failed',
+      executionMetadata: { backend: 'agy', model: 'confirmed-worker', reasoningEffort: 'high', modelSource: 'reported' } });
+    expect(parent.onProgress).toHaveBeenLastCalledWith(expect.objectContaining({ executionMetadata: result.executionMetadata }));
+  });
+
+  it('does not fail a worker or invent coordinator settings when its metadata getter fails', async () => {
+    parent.onProgress = vi.fn(() => true);
+    worker.getExecutionMetadata = () => { throw new Error('Synthetic unavailable metadata'); };
+    const scope = manager.begin(parent);
+    const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Review' }, 'start');
+    const result: any = await scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result');
+    expect(result.state).toBe('succeeded');
+    expect(result).not.toHaveProperty('executionMetadata');
+    expect(vi.mocked(parent.onProgress!).mock.calls.every(([progress]) => progress.executionMetadata === undefined)).toBe(true);
   });
 
   it('buffers worker text as display-only nested progress without treating it as task activity', async () => {
@@ -798,6 +856,7 @@ describe('cross-backend delegation', () => {
   });
 
   it('queues same-request followers while refusing overlapping work from other threads', async () => {
+    worker.getExecutionMetadata = vi.fn(() => ({ model: 'worker-model', modelSource: 'reported', effortSource: 'unknown' }));
     vi.mocked(worker.execute).mockImplementation(() => new Promise(() => undefined));
     const scope = manager.begin(parent);
     const other = manager.begin({ ...parent, thread: { ...parent.thread, id: 'other' } });
@@ -807,9 +866,11 @@ describe('cross-backend delegation', () => {
     expect(manager.blocksWorkspace(path.dirname(home), 'other')).toBe(true);
     const queued: any = await scope.invoke('remote_cli_delegate', { backend: 'pi', objective: 'Work' }, 'follower');
     expect(queued.state).toBe('queued');
+    expect(queued.executionMetadata).toBeUndefined();
     expect(factory).toHaveBeenCalledTimes(1);
     await expect(other.invoke('remote_cli_delegate', { backend: 'pi', objective: 'Work' }, 'conflict')).rejects.toThrow('busy');
-    await scope.invoke('remote_cli_cancel', { taskId: queued.taskId }, 'cancel-queued');
+    const cancelled: any = await scope.invoke('remote_cli_cancel', { taskId: queued.taskId }, 'cancel-queued');
+    expect(cancelled.executionMetadata).toBeUndefined();
     await scope.invoke('remote_cli_cancel', { taskId: task.taskId }, 'cancel');
     await scope.close();
     const busy = manager.begin({ ...parent, isWorkspaceBusy: () => true });
@@ -840,14 +901,14 @@ describe('cross-backend delegation', () => {
   it('caps device concurrency across independent workspaces and releases capacity on cancel', async () => {
     vi.mocked(worker.execute).mockImplementation(() => new Promise(() => undefined));
     factory.mockImplementation((_guard, _config, cwd) => ({ ...worker, getCurrentWorkingDirectory: () => cwd }));
-    const scopes = Array.from({ length: 4 }, (_, index) => {
+    const scopes = Array.from({ length: 6 }, (_, index) => {
       const cwd = path.join(home, `project-${index}`); fs.mkdirSync(cwd);
       return manager.begin({ ...parent, cwd, thread: { ...parent.thread, id: `owner-${index}`, workingDirectory: cwd } });
     });
-    const tasks = await Promise.all(scopes.slice(0, 3).map(scope => scope.invoke('remote_cli_delegate', { backend: 'pi', objective: 'Work' }, 'start')));
-    await expect(scopes[3].invoke('remote_cli_delegate', { backend: 'pi', objective: 'Work' }, 'full')).rejects.toThrow('capacity');
+    const tasks = await Promise.all(scopes.slice(0, 5).map(scope => scope.invoke('remote_cli_delegate', { backend: 'pi', objective: 'Work' }, 'start')));
+    await expect(scopes[5].invoke('remote_cli_delegate', { backend: 'pi', objective: 'Work' }, 'full')).rejects.toThrow('capacity');
     await scopes[0].invoke('remote_cli_cancel', { taskId: (tasks[0] as any).taskId }, 'cancel');
-    await expect(scopes[3].invoke('remote_cli_delegate', { backend: 'pi', objective: 'Work' }, 'retry')).resolves.toHaveProperty('taskId');
+    await expect(scopes[5].invoke('remote_cli_delegate', { backend: 'pi', objective: 'Work' }, 'retry')).resolves.toHaveProperty('taskId');
   });
 
   it('bounds sequential delegation and reports authentication failures without automatic retries', async () => {
@@ -917,6 +978,7 @@ describe('cross-backend delegation', () => {
       ...worker,
       execute: vi.fn().mockResolvedValue({ success: false, error: 'Stored native session is missing' }),
       consumeSessionResumeFailure: vi.fn(() => true),
+      getExecutionMetadata: vi.fn(() => ({ model: 'stale-attempt', modelSource: 'reported', reasoningEffort: 'high', effortSource: 'reported' })),
       destroy: vi.fn().mockResolvedValue(undefined),
       waitForExit: vi.fn().mockResolvedValue(undefined),
     } as IExecutor;
@@ -924,6 +986,7 @@ describe('cross-backend delegation', () => {
       ...worker,
       execute: vi.fn().mockResolvedValue({ success: true, output: 'Fresh lane completed' }),
       consumeSessionResumeFailure: vi.fn(() => false),
+      getExecutionMetadata: vi.fn(() => ({ model: 'fresh-selection', modelSource: 'configured', effortSource: 'default' })),
       destroy: vi.fn().mockResolvedValue(undefined),
       waitForExit: vi.fn().mockResolvedValue(undefined),
     } as IExecutor;
@@ -938,7 +1001,10 @@ describe('cross-backend delegation', () => {
     const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Retry safely' }, 'start');
     await expect(scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result')).resolves.toMatchObject({
       state: 'succeeded', output: 'Fresh lane completed',
+      executionMetadata: { backend: 'codex', model: 'fresh-selection', modelSource: 'configured', effortSource: 'default' },
     });
+    const retained: any = await scope.invoke('remote_cli_result', { taskId: task.taskId }, 'retained');
+    expect(retained.executionMetadata.reasoningEffort).toBeUndefined();
 
     const firstLaneId = factory.mock.calls[0][3];
     const secondLaneId = factory.mock.calls[1][3];

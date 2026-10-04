@@ -5,6 +5,7 @@ import { randomUUID } from 'crypto';
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import type { Attachment, ImageBlock, ApprovalAction, ApprovalStatus, ApprovalRequestInfo } from '../types';
 import type { ExecuteOptions, ExecuteResult, ExecutorModelInfo, IExecutor } from './IExecutor';
+import { configuredExecutionMetadata } from './ExecutionMetadata';
 import { AppServerMessage, CodexAppServerClient } from './CodexAppServerClient';
 import { CodexTaskNotifications } from './CodexTaskNotifications';
 import { CodexSandbox } from './CodexSandbox';
@@ -155,6 +156,8 @@ export class CodexAppServerExecutor implements IExecutor {
   private currentWorkingDirectory: string;
   private model?: string;
   private effort?: string;
+  private reportedModel?: string;
+  private reportedEffort?: string;
   private readonly autoApprove: boolean;
   private readonly sandbox: CodexSandbox;
   private readonly remoteThreadId?: string;
@@ -280,6 +283,7 @@ export class CodexAppServerExecutor implements IExecutor {
 
         void this.client.request('turn/start', params).then((response) => {
           if (this.activeTurn !== active) return;
+          this.captureReportedSettings(response);
           const turnId = response?.turn?.id;
           if (typeof turnId !== 'string' || !turnId) {
             this.completeActive({ success: false, error: 'Codex app-server returned no turn ID' });
@@ -300,6 +304,24 @@ export class CodexAppServerExecutor implements IExecutor {
 
   getCurrentWorkingDirectory(): string {
     return this.currentWorkingDirectory;
+  }
+
+  getExecutionMetadata() {
+    const data = configuredExecutionMetadata(this.model, this.effort);
+    if (this.threadReady && this.client.isRunning() && this.reportedModel) {
+      data.model = this.reportedModel;
+      data.modelSource = 'reported';
+    }
+    if (this.threadReady && this.client.isRunning() && this.reportedEffort && (!this.effort || this.effort === this.reportedEffort)) {
+      data.reasoningEffort = this.reportedEffort;
+      data.effortSource = 'reported';
+    }
+    return data;
+  }
+
+  private captureReportedSettings(response: any): void {
+    if (typeof response?.model === 'string' && response.model.trim()) this.reportedModel = response.model;
+    if (typeof response?.reasoningEffort === 'string' && response.reasoningEffort.trim()) this.reportedEffort = response.reasoningEffort;
   }
 
   isBusy(): boolean {
@@ -597,6 +619,8 @@ export class CodexAppServerExecutor implements IExecutor {
         return { success: false, error: `Unknown Codex model: ${model}. Use /model to list available models.` };
       }
       this.model = model;
+      this.reportedModel = undefined;
+      this.reportedEffort = undefined;
       return { success: true, output: `Model set to ${model}. Takes effect on the next command.` };
     } catch (error) {
       return { success: false, error: this.errorMessage(error) };
@@ -605,6 +629,8 @@ export class CodexAppServerExecutor implements IExecutor {
 
   clearModel(): void {
     this.model = undefined;
+    this.reportedModel = undefined;
+    this.reportedEffort = undefined;
   }
 
   async setEffort(effort: string): Promise<ExecuteResult> {
@@ -635,6 +661,7 @@ export class CodexAppServerExecutor implements IExecutor {
           });
         }
         this.effort = undefined;
+        this.reportedEffort = undefined;
         return { success: true, output: `Reasoning effort restored to ${defaultEffort}, the default for ${activeModel.id}.` };
       }
 
@@ -653,6 +680,7 @@ export class CodexAppServerExecutor implements IExecutor {
         });
       }
       this.effort = normalized;
+      this.reportedEffort = undefined;
       return { success: true, output: `Reasoning effort set to ${normalized}.` };
     } catch (error) {
       return { success: false, error: this.errorMessage(error) };
@@ -692,6 +720,8 @@ export class CodexAppServerExecutor implements IExecutor {
   private async ensureThread(): Promise<void> {
     assertWorkingDirectoryExists(this.currentWorkingDirectory);
     if (this.threadReady && this.client.isRunning()) return;
+    this.reportedModel = undefined;
+    this.reportedEffort = undefined;
     await this.client.start();
 
     const common: any = {
@@ -724,6 +754,7 @@ export class CodexAppServerExecutor implements IExecutor {
         if (response?.thread?.id !== this.codexThreadId) {
           throw new Error('Codex app-server resumed an unexpected thread');
         }
+        this.captureReportedSettings(response);
       } catch (error) {
         if (this.delegationWorker && this.isMissingStoredThreadError(error)) {
           // `thread/resume` runs before `turn/start`, so this is the one native
@@ -739,6 +770,7 @@ export class CodexAppServerExecutor implements IExecutor {
       });
       const id = response?.thread?.id;
       if (typeof id !== 'string' || !id) throw new Error('Codex app-server returned no thread ID');
+      this.captureReportedSettings(response);
       this.setThreadId(id);
     }
     this.threadReady = true;

@@ -3,6 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import type { Attachment } from '../types';
+import { configuredExecutionMetadata } from './ExecutionMetadata';
 import type {
   ExecuteOptions,
   ExecuteResult,
@@ -193,6 +194,8 @@ export class PiExecutor implements IExecutor {
   private currentWorkingDirectory: string;
   private model?: string;
   private effort?: string;
+  private reportedModel?: string;
+  private reportedEffort?: string;
   private readonly provider?: string;
   private readonly autoApprove: boolean;
   private readonly threadId?: string;
@@ -515,6 +518,8 @@ export class PiExecutor implements IExecutor {
         return { success: false, error: response.error || `Failed to set Pi model: ${trimmed}` };
       }
       this.model = formatPiModelRef({ id: resolved.modelId, provider: resolved.provider });
+      this.reportedModel = undefined;
+      this.reportedEffort = undefined;
       this.client.updateLaunch?.({ model: this.model, provider: resolved.provider });
       return { success: true, output: `Model set to ${this.model}.` };
     } catch (error) {
@@ -524,6 +529,8 @@ export class PiExecutor implements IExecutor {
 
   async clearModel(): Promise<void> {
     this.model = undefined;
+    this.reportedModel = undefined;
+    this.reportedEffort = undefined;
     this.client.updateLaunch?.({ model: undefined, provider: this.provider });
     if (!this.client.isRunning()) return;
     try {
@@ -567,6 +574,7 @@ export class PiExecutor implements IExecutor {
     const trimmed = effort.trim().toLowerCase();
     if (trimmed === 'auto') {
       this.effort = undefined;
+      this.reportedEffort = undefined;
       this.client.updateLaunch?.({ thinking: undefined });
       if (this.client.isRunning()) {
         try {
@@ -595,6 +603,7 @@ export class PiExecutor implements IExecutor {
         return { success: false, error: response.error || `Failed to set thinking level: ${trimmed}` };
       }
       this.effort = trimmed;
+      this.reportedEffort = undefined;
       this.client.updateLaunch?.({ thinking: trimmed });
       return { success: true, output: `Reasoning effort set to ${trimmed}.` };
     } catch (error) {
@@ -608,6 +617,19 @@ export class PiExecutor implements IExecutor {
 
   getSessionId(): string | null {
     return this.sessionId;
+  }
+
+  getExecutionMetadata() {
+    const data = configuredExecutionMetadata(this.model, this.effort);
+    if (this.client.isRunning() && this.reportedModel) {
+      data.model = this.reportedModel;
+      data.modelSource = 'reported';
+    }
+    if (this.client.isRunning() && this.reportedEffort) {
+      data.reasoningEffort = this.reportedEffort;
+      data.effortSource = 'reported';
+    }
+    return data;
   }
 
   async getContextUsage(): Promise<ExecutorContextUsage | null> {
@@ -695,6 +717,8 @@ export class PiExecutor implements IExecutor {
     if (this.destroyed) throw new Error('Executor has been destroyed');
     assertWorkingDirectoryExists(this.currentWorkingDirectory);
     if (!this.client.isRunning()) {
+      this.reportedModel = undefined;
+      this.reportedEffort = undefined;
       this.client.updateLaunch?.(this.buildLaunch());
       await this.client.start();
       await this.refreshSessionPointer();
@@ -715,6 +739,8 @@ export class PiExecutor implements IExecutor {
   }
 
   private replaceClient(): void {
+    this.reportedModel = undefined;
+    this.reportedEffort = undefined;
     this.unsubscribe?.();
     this.unsubscribe = null;
     const previous = this.client;
@@ -809,6 +835,10 @@ export class PiExecutor implements IExecutor {
     }
 
     if (event.type === 'message_end' && event.message?.role === 'assistant') {
+      if (typeof event.message.model === 'string' && event.message.model.trim()) {
+        this.reportedModel = typeof event.message.provider === 'string' && event.message.provider
+          ? `${event.message.provider}/${event.message.model}` : event.message.model;
+      }
       const text = extractMessageText(event.message);
       if (text && active.output.join('') === '') {
         active.output.push(text);
@@ -957,6 +987,12 @@ export class PiExecutor implements IExecutor {
     try {
       const response = await this.client.request({ type: 'get_state' });
       if (response.success && response.data) {
+        const model = response.data.model;
+        if (typeof model?.id === 'string' && model.id.trim()) {
+          this.reportedModel = typeof model.provider === 'string' && model.provider
+            ? `${model.provider}/${model.id}` : model.id;
+        }
+        if (typeof response.data.thinkingLevel === 'string' && response.data.thinkingLevel.trim()) this.reportedEffort = response.data.thinkingLevel;
         if (typeof response.data.sessionId === 'string') this.sessionId = response.data.sessionId;
         if (typeof response.data.sessionFile === 'string') this.sessionFile = response.data.sessionFile;
         this.savePointer();

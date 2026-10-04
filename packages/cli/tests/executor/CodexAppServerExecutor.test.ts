@@ -129,6 +129,50 @@ describe('CodexAppServerExecutor', () => {
     } finally { await other.destroy(); }
   });
 
+  it('uses native settings reports without an extra model request or confusing turn effort with the thread default', async () => {
+    expect(executor.getExecutionMetadata()).toMatchObject({ modelSource: 'default', effortSource: 'default' });
+    expect(transport.requests).toHaveLength(0);
+    const request = transport.request.bind(transport);
+    vi.spyOn(transport, 'request').mockImplementation(async (method, params) => {
+      const result = await request(method, params);
+      return method === 'thread/start' ? { ...result, model: 'native-model', reasoningEffort: 'medium' } : result;
+    });
+    const running = executor.execute('metadata', {});
+    await vi.waitFor(() => expect(transport.requests.some(item => item.method === 'turn/start')).toBe(true));
+    transport.emit({ method: 'turn/completed', params: { threadId: transport.nextThreadId, turn: { id: 'turn-1', status: 'completed' } } });
+    await running;
+    expect(executor.getExecutionMetadata()).toMatchObject({ model: 'native-model', modelSource: 'reported', reasoningEffort: 'medium', effortSource: 'reported' });
+    await executor.setEffort('high');
+    expect(executor.getExecutionMetadata()).toMatchObject({ reasoningEffort: 'high', effortSource: 'configured' });
+    await executor.setModel('gpt-b');
+    expect(executor.getExecutionMetadata()).toMatchObject({ model: 'gpt-b', modelSource: 'configured' });
+    executor.clearModel();
+    expect(executor.getExecutionMetadata()).toMatchObject({ modelSource: 'default' });
+  });
+
+  it.each(['reset', 'restart'])('does not reuse native settings after a %s without a fresh report', async action => {
+    const request = transport.request.bind(transport);
+    let reportSettings = true;
+    vi.spyOn(transport, 'request').mockImplementation(async (method, params) => {
+      const result = await request(method, params);
+      return method === 'thread/start' && reportSettings
+        ? { ...result, model: 'previous-model', reasoningEffort: 'high' } : result;
+    });
+    const complete = async (pending: ReturnType<typeof executor.execute>, count: number) => {
+      await vi.waitFor(() => expect(transport.requests.filter(item => item.method === 'turn/start')).toHaveLength(count));
+      transport.emit({ method: 'turn/completed', params: { threadId: transport.nextThreadId, turn: { id: 'turn-1', status: 'completed' } } });
+      await pending;
+    };
+    await complete(executor.execute('first', {}), 1);
+    expect(executor.getExecutionMetadata()).toMatchObject({ modelSource: 'reported', effortSource: 'reported' });
+    reportSettings = false;
+    if (action === 'reset') executor.resetContext();
+    else await transport.stop();
+    await complete(executor.execute('second', {}), 2);
+    expect(executor.getExecutionMetadata()).toMatchObject({ model: undefined, modelSource: 'default', reasoningEffort: undefined, effortSource: 'default' });
+    expect(transport.requests.filter(item => item.method === 'model/list')).toHaveLength(0);
+  });
+
   it('allows an execution to disable the executor inactivity timeout', async () => {
     await executor.destroy();
     executor = new CodexAppServerExecutor(new DirectoryGuard([projectDir]), {
@@ -238,7 +282,7 @@ describe('CodexAppServerExecutor', () => {
     expect(resumed.sandbox).toBe('workspace-write');
     expect(resumed.config['mcp_servers.remote_cli_delegation']).toMatchObject({ enabled: true, required: true, tool_timeout_sec: 35,
       default_tools_approval_mode: 'approve',
-      enabled_tools: ['remote_cli_list_backends', 'remote_cli_delegate', 'remote_cli_result', 'remote_cli_cancel'] });
+      enabled_tools: ['remote_cli_list_backends', 'remote_cli_delegate', 'remote_cli_result', 'remote_cli_cancel', 'remote_cli_integrate'] });
     expect(resumed.approvalPolicy).toBe('on-request');
     expect(resumed.config['sandbox_workspace_write.exclude_slash_tmp']).toBe(true);
     await executor.configureDelegation(undefined);

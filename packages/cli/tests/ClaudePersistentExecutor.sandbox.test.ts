@@ -60,7 +60,8 @@ describe('Claude sandbox launch policy', () => {
     const args = vi.mocked(spawn).mock.calls[0][1] as string[];
     const servers = JSON.parse(args[args.indexOf('--mcp-config') + 1]).mcpServers;
     const permissions = JSON.parse(args[args.indexOf('--settings') + 1]).permissions;
-    expect(permissions.allow).toHaveLength(4);
+    expect(permissions.allow).toHaveLength(5);
+    expect(permissions.allow).toContain('mcp__remote-cli-delegation__remote_cli_integrate');
     expect(permissions.allow).toContain('mcp__remote-cli-delegation__remote_cli_delegate');
     expect(permissions.ask).toContain('Write');
     expect(servers['remote-cli-approval']).toBeDefined();

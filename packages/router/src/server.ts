@@ -7,6 +7,8 @@ import path from 'path';
 import os from 'os';
 import { randomUUID } from 'crypto';
 import type { ApprovalAction } from './types';
+import type { ExecutionMetadata } from './types';
+import { parseExecutionMetadata } from './utils/ExecutionMetadata';
 import Koa from 'koa';
 import bodyParser from 'koa-bodyparser';
 import Router from '@koa/router';
@@ -626,6 +628,7 @@ export class RouterServer {
               const responseThreadId = message.threadId || message.data?.threadId;
               const responseThreads: ThreadSummary[] | undefined = message.threads || message.data?.threads;
               const queueConfirmation: QueueConfirmationInfo | undefined = message.queueConfirmation || message.data?.queueConfirmation;
+              const executionMetadata = parseExecutionMetadata(message.executionMetadata ?? message.data?.executionMetadata);
 
               // If CLI reported a threadId and there is a streaming session for this message,
               // ensure the cardThreadMap is up to date (in case the CLI-reported threadId differs).
@@ -667,6 +670,7 @@ export class RouterServer {
                     sessionAbbr,
                     cwd,
                     queueConfirmation,
+                    executionMetadata,
                   );
                 } else {
                   // No streaming session found - session should have been created when command was sent
@@ -1091,6 +1095,7 @@ export class RouterServer {
       : undefined;
     const startedAt = typeof raw.startedAt === 'number' && Number.isFinite(raw.startedAt) && raw.startedAt >= 0
       ? raw.startedAt : undefined;
+    const executionMetadata = parseExecutionMetadata(raw.executionMetadata);
     return {
       taskId,
       backend,
@@ -1102,6 +1107,7 @@ export class RouterServer {
       summary: this.boundedDelegationProgressText(raw.summary, 4000),
       error: this.boundedDelegationProgressText(raw.error, 4000),
       startedAt,
+      ...(executionMetadata?.backend === backend ? { executionMetadata } : {}),
     };
   }
 
@@ -1226,6 +1232,7 @@ export class RouterServer {
     }
 
     if (!state.objective && progress.objective) state.objective = progress.objective;
+    if (progress.executionMetadata) state.executionMetadata = progress.executionMetadata;
     if (progress.phase === 'waiting_input') state.inputRequest = progress.summary;
     else state.inputRequest = undefined;
     if (progress.phase !== 'waiting_input' && progress.summary !== undefined) state.summary = progress.summary;
@@ -1521,7 +1528,8 @@ export class RouterServer {
       this.cardThreadMap.set(cardId, { threadId, deviceId, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS });
     }
     if (info.state !== 'running') {
-      await this.finalizeStreamingMessage(messageId, info.state === 'completed', undefined, info.error, undefined, info.cwd);
+      await this.finalizeStreamingMessage(messageId, info.state === 'completed', undefined, info.error, undefined, info.cwd,
+        undefined, parseExecutionMetadata(info.executionMetadata));
       if (!isCurrent()) return false;
       this.rememberCompletedTask(messageId, deviceId);
     }
@@ -1643,7 +1651,7 @@ export class RouterServer {
   /**
    * Finalize streaming message
    */
-  private async finalizeStreamingMessage(messageId: string, success: boolean, output?: string, error?: string, sessionAbbr?: string, cwd?: string, queueConfirmation?: QueueConfirmationInfo): Promise<void> {
+  private async finalizeStreamingMessage(messageId: string, success: boolean, output?: string, error?: string, sessionAbbr?: string, cwd?: string, queueConfirmation?: QueueConfirmationInfo, executionMetadata?: ExecutionMetadata): Promise<void> {
     const streamData = this.streamingMessages.get(messageId);
     if (!streamData) return;
 
@@ -1677,7 +1685,8 @@ export class RouterServer {
           streamData.threadName,
           streamData.threads,
           streamData.threadId,
-          queueConfirmation
+          queueConfirmation,
+          executionMetadata
         );
         if (finalized === false) throw new Error('Failed to finalize task card');
       } else {
@@ -1696,7 +1705,8 @@ export class RouterServer {
           streamData.threadName,
           streamData.threads,
           streamData.threadId,
-          queueConfirmation
+          queueConfirmation,
+          executionMetadata
         );
         if (finalized === false) throw new Error('Failed to finalize task card');
       }
