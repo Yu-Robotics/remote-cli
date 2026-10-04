@@ -8,8 +8,8 @@ interface Notice { noticeKey: string; fromVersion: string; toVersion: string; pa
 // Add copy only when that backend's inspection semantics are supported.
 const REMINDER_COPY = {
   codex: {
-    title: '📊 Codex weekly quota',
-    summary: '**Weekly quota available: 100%**\n\nBackend: Codex CLI',
+    title: '🎯 Codex Reset',
+    summary: '**Weekly quota reset: 100%**\n\nBackend: Codex CLI',
     explanation: 'Without new Codex usage, the reset countdown may keep moving forward. Send Codex a normal task to start the next usage window.',
   },
 } as const;
@@ -64,7 +64,6 @@ function reminderHeader(reminder: Reminder, dismissed = false): Record<string, u
 function reminderElements(reminder: Reminder, dismissed = false): FeishuCardElement[] {
   const copy = REMINDER_COPY[reminder.backend ?? 'codex'];
   return [{ tag: 'markdown', content: `${copy.summary}\n\n${copy.explanation}` },
-    { tag: 'markdown', text_size: 'notation', content: 'Quota snapshot from two hourly checks, not a live balance or confirmation of a reset. No model request was sent.' },
     ...(dismissed ? [{ tag: 'markdown', content: 'Dismissed for this CLI session.' }] : [
       button('Dismiss', { action: 'maintenance_reply', id: reminder.reminderId, decision: 'dismiss' }),
     ])];

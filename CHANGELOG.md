@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.125] - 2026-10-04
+
+### Changed
+- Rename Codex weekly-quota reminders to "Codex Reset" with a target emoji and the summary "Weekly quota reset: 100%", and remove their sampling-disclaimer footer, retaining normal-task guidance, optional dismissal, and the existing inspection logic.
+
 ## [1.6.124] - 2026-10-04
 
 ### Fixed
