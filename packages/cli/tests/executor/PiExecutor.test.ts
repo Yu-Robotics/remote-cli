@@ -156,6 +156,59 @@ describe('PiExecutor', () => {
     else process.env.HOME = originalHome;
   });
 
+  it('reads model and effort from already-required state responses without adding RPC calls', async () => {
+    expect(executor.getExecutionMetadata()).toMatchObject({ modelSource: 'default', effortSource: 'default' });
+    expect(transport.request).not.toHaveBeenCalled();
+    const request = transport.request.getMockImplementation()!;
+    transport.request.mockImplementation(async command => {
+      if (command.type === 'prompt') {
+        transport.emit({ type: 'message_end', message: { role: 'assistant', model: 'native-model', content: [] } });
+        expect(executor.getExecutionMetadata().model).toBe('native-model');
+        transport.emit({ type: 'message_end', message: { role: 'assistant', model: 'native-model', provider: 'provider', content: [] } });
+      }
+      const response = await request(command);
+      return command.type === 'get_state' ? { ...response, data: { ...response.data, model: { id: 'native-model', provider: 'provider' }, thinkingLevel: 'high' } } : response;
+    });
+    await executor.execute('metadata', {});
+    const calls = transport.request.mock.calls.length;
+    expect(executor.getExecutionMetadata()).toMatchObject({ model: 'provider/native-model', modelSource: 'reported', reasoningEffort: 'high', effortSource: 'reported' });
+    expect(transport.request.mock.calls).toHaveLength(calls);
+    await executor.setModel('google/gemini-3-flash');
+    expect(executor.getExecutionMetadata()).toMatchObject({ model: 'google/gemini-3-flash', modelSource: 'configured' });
+    await executor.setEffort('low');
+    expect(executor.getExecutionMetadata()).toMatchObject({ reasoningEffort: 'low', effortSource: 'configured' });
+  });
+
+  it.each(['reset', 'restart'])('drops previous native settings after a %s without a fresh state report', async action => {
+    const request = transport.request.getMockImplementation()!;
+    transport.request.mockImplementation(async command => {
+      const response = await request(command);
+      return command.type === 'get_state' && transport.starts === 1
+        ? { ...response, data: { ...response.data, model: { id: 'previous-model', provider: 'provider' }, thinkingLevel: 'high' } } : response;
+    });
+    await executor.execute('first', {});
+    expect(executor.getExecutionMetadata()).toMatchObject({ modelSource: 'reported', effortSource: 'reported' });
+    if (action === 'reset') executor.resetContext();
+    else await transport.stop();
+    await executor.execute('second', {});
+    expect(executor.getExecutionMetadata()).toMatchObject({ model: undefined, modelSource: 'default', reasoningEffort: undefined, effortSource: 'default' });
+    expect(transport.request.mock.calls.filter(([command]) => command.type === 'get_available_models')).toHaveLength(0);
+  });
+
+  it('keeps malformed native metadata from disrupting session persistence', async () => {
+    const request = transport.request.getMockImplementation()!;
+    transport.request.mockImplementation(async command => {
+      const response = await request(command);
+      return command.type === 'get_state' ? { ...response, data: { ...response.data,
+        model: { id: 'native-model', provider: { toString: null, valueOf: null } }, thinkingLevel: 123,
+      } } : response;
+    });
+    await expect(executor.execute('inspect', {})).resolves.toMatchObject({ success: true });
+    expect(executor.getExecutionMetadata()).toMatchObject({ model: 'native-model', modelSource: 'reported', effortSource: 'default' });
+    const stored = JSON.parse(await fs.readFile(path.join(home, '.remote-cli', 'pi-sessions', 'thread-pi.json'), 'utf8'));
+    expect(stored.id).toBe('sess-pi-1');
+  });
+
   it('streams text, tools, and image input while persisting the Pi session', async () => {
     const chunks: string[] = [];
     const visible: string[] = [];

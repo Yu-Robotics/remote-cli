@@ -10,6 +10,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.133] - 2026-10-04
+
+### Added
+- Show each managed delegated worker's own model and reasoning effort as a compact gray note outside its collapsed activity details, matching the final reply footer. Keep the existing card layout and optional protocol-v1 fields compatible with legacy peers.
+- Capture worker metadata per execution attempt, update it from cached backend reports, and retain the final snapshot in bounded task results before process cleanup. Never substitute coordinator settings, attribute queued tasks, or issue extra model requests.
+
+## [1.6.132] - 2026-10-04
+
+### Added
+- Attach bounded, request-scoped model and reasoning-effort metadata to AI execution responses and terminal task recovery. Distinguish backend reports, configured selections, defaults, and unavailable values without extra model requests or changing backend selection.
+- Show a compact gray execution note below Completed and above the thread-switch panel on the final reply card. Preserve it through long-output splitting and thread-button refresh; legacy peers and local control commands retain their existing display.
+
+## [1.6.131] - 2026-10-04
+
+### Changed
+- Raise the shared CLI starting/running worker limit from three to five. Git-backed requests can run five isolated workers concurrently; additional accepted tasks remain queued. Non-Git directories still execute one worker at a time, and the cumulative 12-task limit is unchanged.
+
+## [1.6.130] - 2026-10-04
+
+### Added
+- Run managed Git workers concurrently in reusable per-lane worktrees with bounded snapshots of staged, unstaged, and nonignored untracked input. Preserve native conversation identity while refreshing each task's checkout to an explicit baseline; keep non-Git shared directories on code-enforced FIFO scheduling.
+- Preserve immutable worker artifacts under private Git references and expose explicit revision-guarded inspection, integration, or retention. Preflight conflicts in a separate recovery worktree and preserve before/target snapshots for incomplete file applications; applying changes never stages, commits, or pushes the delivery workspace. Pending or unknown dirty work prevents lane reuse. Validate captured tree limits after Git filters and both rename endpoints against selected-directory scope.
+
+### Fixed
+- Refuse ambiguous plain-text replies when multiple workers require input; retain request-specific approval routing and the existing Router protocol.
+
 ## [1.6.129] - 2026-10-04
 
 ### Added

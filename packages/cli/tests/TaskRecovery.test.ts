@@ -44,6 +44,25 @@ describe('TaskRecovery', () => {
     expect(recovery.hasPendingResults()).toBe(false);
   });
 
+  it('retains a bounded copy of terminal model metadata, without unrelated fields or a transcript', () => {
+    const executionMetadata = { backend: 'claude', model: 'reported-model', modelSource: 'reported', effortSource: 'unknown', extra: 'discarded' };
+    recovery.disconnected();
+    recovery.send({ ...result(), executionMetadata });
+    executionMetadata.model = 'later-model';
+    recovery.registered(true);
+    const received = resumes().at(-1).taskResume.executionMetadata;
+    expect(received).toMatchObject({ backend: 'claude', model: 'reported-model', modelSource: 'reported', effortSource: 'unknown' });
+    expect(received).not.toHaveProperty('extra');
+    expect(JSON.stringify(resumes())).not.toContain('entire transcript');
+  });
+
+  it('does not retain model metadata attributed to another backend', () => {
+    recovery.disconnected();
+    recovery.send({ ...result(), executionMetadata: { backend: 'codex', model: 'wrong', modelSource: 'reported', effortSource: 'default' } });
+    recovery.registered(true);
+    expect(resumes().at(-1).taskResume).not.toHaveProperty('executionMetadata');
+  });
+
   it.each([true, false])('reports an offline terminal state without its transcript (success=%s)', success => {
     recovery.disconnected();
     recovery.send({ ...result(), success, error: success ? undefined : 'Backend failed' });

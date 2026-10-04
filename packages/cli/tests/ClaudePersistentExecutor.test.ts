@@ -75,6 +75,49 @@ describe('ClaudePersistentExecutor', () => {
   });
 
   describe('initialization', () => {
+    it('captures native parent model reports without treating a subagent model as the coordinator model', async () => {
+      expect(executor.getExecutionMetadata()).toMatchObject({ modelSource: 'default', effortSource: 'unknown' });
+      expect(mockSpawn).not.toHaveBeenCalled();
+      const running = executor.execute('metadata');
+      await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalled(), { timeout: 3000 });
+      const emit = (message: object) => mockChildProcess.stdout.emit('data', Buffer.from(`${JSON.stringify(message)}\n`));
+      emit({ type: 'system', subtype: 'init', session_id: 'metadata-session', model: 'native-parent' });
+      expect(executor.getExecutionMetadata()).toMatchObject({ model: 'native-parent', modelSource: 'reported' });
+      await vi.waitFor(() => expect(mockChildProcess.stdin.write).toHaveBeenCalled(), { timeout: 3000 });
+      emit({ type: 'assistant', parent_tool_use_id: 'child-tool', message: { role: 'assistant', model: 'child-model', content: [] } });
+      expect(executor.getExecutionMetadata().model).toBe('native-parent');
+      emit({ type: 'assistant', message: { role: 'assistant', model: 'provider/resolved-parent', content: [] } });
+      expect(executor.getExecutionMetadata()).toMatchObject({ model: 'provider/resolved-parent', modelSource: 'reported', effortSource: 'unknown' });
+      emit({ type: 'result', subtype: 'success', result: 'Done', is_error: false });
+      await running;
+      mockChildProcess.emit('exit', 0, null);
+      mockChildProcess.emit('close', 0, null);
+    });
+
+    it('drops the previous process model when a replacement does not report a model', async () => {
+      const first = executor.execute('first');
+      await vi.waitFor(() => expect(mockChildProcess.stdin.write).toHaveBeenCalled(), { timeout: 3000 });
+      const emit = (message: object) => mockChildProcess.stdout.emit('data', Buffer.from(`${JSON.stringify(message)}\n`));
+      emit({ type: 'system', subtype: 'init', session_id: 'first-session', model: 'previous-model' });
+      emit({ type: 'result', subtype: 'success', result: 'Done' });
+      await first;
+      expect(executor.getExecutionMetadata()).toMatchObject({ model: 'previous-model', modelSource: 'reported' });
+      mockChildProcess.emit('close', 0, null);
+      mockChildProcess = Object.assign(new EventEmitter(), {
+        stdout: new EventEmitter(), stderr: new EventEmitter(),
+        stdin: { write: vi.fn(), end: vi.fn() }, kill: vi.fn(), pid: 12346,
+      });
+      mockSpawn.mockReturnValue(mockChildProcess);
+      const second = executor.execute('second');
+      await vi.waitFor(() => expect(mockChildProcess.stdin.write).toHaveBeenCalled(), { timeout: 3000 });
+      emit({ type: 'system', subtype: 'init', session_id: 'second-session' });
+      emit({ type: 'result', subtype: 'success', result: 'Done' });
+      await second;
+      try {
+        expect(executor.getExecutionMetadata()).toMatchObject({ model: undefined, modelSource: 'default', effortSource: 'unknown' });
+      } finally { mockChildProcess.emit('close', 0, null); }
+    });
+
     it('should have default working directory', () => {
       const cwd = executor.getCurrentWorkingDirectory();
       expect(cwd).toBeDefined();

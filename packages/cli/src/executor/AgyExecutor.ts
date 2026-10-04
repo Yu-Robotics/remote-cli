@@ -5,6 +5,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import { IExecutor, ExecuteOptions, ExecuteResult } from './IExecutor';
+import { configuredExecutionMetadata } from './ExecutionMetadata';
 import { COMPACT_HANDOFF_PROMPT, seedPromptWithHandoff } from './compactHandoff';
 import { stripAnsi } from '../utils/stripAnsi';
 import { assertWorkingDirectoryExists } from '../utils/WorkingDirectory';
@@ -418,6 +419,10 @@ export class AgyExecutor implements IExecutor {
 
   getSessionId(): string | null {
     return this.conversationId;
+  }
+
+  getExecutionMetadata() {
+    return configuredExecutionMetadata(this.model, this.effort);
   }
 
   /**

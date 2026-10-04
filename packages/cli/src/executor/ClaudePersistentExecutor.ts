@@ -5,6 +5,7 @@ import { StructuredContent, ContentBlockUnion, ToolUseInfo, ToolResultInfo, Atta
 import { ClaudeSandbox } from './claude/ClaudeSandbox';
 import { evaluateFileWrite } from './claude/ClaudeFilePolicy';
 import type { ClaudeSandboxConfig } from '../types/config';
+import { configuredExecutionMetadata } from './ExecutionMetadata';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -67,6 +68,7 @@ interface ClaudeOutputMessage {
   /** Nested message object (for assistant type with full message structure) */
   message?: {
     id?: string;
+    model?: string;
     role: string;
     content?: ContentBlock[];
     stop_reason?: string | null;
@@ -82,6 +84,8 @@ interface ClaudeOutputMessage {
   subtype?: 'init' | 'success' | 'error' | 'task_notification';
   /** Current working directory (for system/init) */
   cwd?: string;
+  /** Model identifier reported by the native system/init event. */
+  model?: string;
   /** Session ID (for system/init and system/task_notification) */
   session_id?: string;
   /** Background task ID (for system/task_notification, Claude Code 2.x) */
@@ -179,6 +183,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
   private threadId?: string;
   /** Model to pass via --model on process start. Updated by setModel() for future restarts. */
   private model?: string;
+  private reportedModel?: string;
 
   // Persistent process
   private claudeProcess: ChildProcess | null = null;
@@ -391,6 +396,16 @@ export class ClaudePersistentExecutor extends EventEmitter {
     return this.currentWorkingDirectory;
   }
 
+  getExecutionMetadata() {
+    const data = configuredExecutionMetadata(this.model);
+    data.effortSource = 'unknown';
+    if (this.isProcessRunning() && this.reportedModel) {
+      data.model = this.reportedModel;
+      data.modelSource = 'reported';
+    }
+    return data;
+  }
+
   private delegation?: DelegationConnection;
 
   async configureDelegation(connection?: DelegationConnection): Promise<void> {
@@ -438,6 +453,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
     }
 
     this.isStarting = true;
+    this.reportedModel = undefined;
 
     try {
       assertWorkingDirectoryExists(this.currentWorkingDirectory);
@@ -1148,6 +1164,9 @@ export class ClaudePersistentExecutor extends EventEmitter {
 
         case 'system':
           // System messages (e.g., init)
+          if (message.subtype === 'init' && typeof message.model === 'string' && message.model.trim()) {
+            this.reportedModel = message.model;
+          }
           if (message.subtype === 'init' && message.session_id) {
             console.log(`[ClaudePersistent] Session initialized: ${message.session_id}`);
             this.sessionId = message.session_id;
@@ -1226,6 +1245,9 @@ export class ClaudePersistentExecutor extends EventEmitter {
           break;
 
         case 'assistant':
+          if (!message.parent_tool_use_id && typeof message.message?.model === 'string' && message.message.model.trim()) {
+            this.reportedModel = message.message.model;
+          }
           // Assistant messages contain the actual response content
           // They can be partial (streaming) or complete
           // partial=true: streaming chunk, partial=false or undefined: complete message
@@ -1917,6 +1939,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
     this.model = model;
 
     return new Promise((resolve, reject) => {
+      this.reportedModel = undefined;
       if (this.isDestroyed) {
         resolve({ success: false, error: 'Executor has been destroyed' });
         return;

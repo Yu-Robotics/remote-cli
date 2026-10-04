@@ -202,6 +202,69 @@ describe('MessageHandler', () => {
     });
   });
 
+  describe('execution metadata', () => {
+    const command = (id: string, content = 'Review this') => ({ type: 'command' as const,
+      messageId: id, content, openId: 'owner', timestamp: Date.now() });
+    const response = () => ctx.mockWsClient.send.mock.calls.map(([message]) => message)
+      .filter(message => message.type === 'response').at(-1);
+
+    it('sends backend reports, not merely launch preferences, on the response envelope', async () => {
+      let data: any = { model: 'requested', modelSource: 'configured', reasoningEffort: 'high', effortSource: 'configured' };
+      ctx.mockExecutor.getExecutionMetadata = vi.fn(() => data);
+      vi.mocked(ctx.mockThreadPool.getBackendKey).mockReturnValue('codex');
+      ctx.mockExecutor.execute.mockImplementation(async () => {
+        data = { model: 'resolved', modelSource: 'reported', reasoningEffort: 'medium', effortSource: 'reported' };
+        return { success: true };
+      });
+      await ctx.handler.handleMessage(command('metadata'));
+      expect(response()).toMatchObject({ type: 'response', executionMetadata: { backend: 'codex', ...data } });
+    });
+
+    it('does not rewrite a reply with preferences changed for a future execution', async () => {
+      let data = { model: 'launch-model', modelSource: 'configured' as const, reasoningEffort: 'low', effortSource: 'configured' as const };
+      ctx.mockExecutor.getExecutionMetadata = () => data;
+      ctx.mockExecutor.execute.mockImplementation(async () => {
+        data = { ...data, model: 'next-model', reasoningEffort: 'high' };
+        return { success: true };
+      });
+      await ctx.handler.handleMessage(command('snapshot'));
+      expect(response().executionMetadata).toMatchObject({ model: 'launch-model', reasoningEffort: 'low' });
+    });
+
+    it('samples the successful retry after clearing an unavailable model', async () => {
+      const thread = ctx.mockThreadManager.getDefaultThread();
+      vi.mocked(ctx.mockThreadManager.getThread).mockReturnValue({ ...thread, models: { codex: 'unavailable' } });
+      vi.mocked(ctx.mockThreadPool.getBackendKey).mockReturnValue('codex');
+      let data: any = { model: 'unavailable', modelSource: 'configured', effortSource: 'default' };
+      ctx.mockExecutor.getExecutionMetadata = () => data;
+      ctx.mockExecutor.clearModel = vi.fn(() => { data = { modelSource: 'default', effortSource: 'default' }; });
+      ctx.mockExecutor.execute.mockResolvedValueOnce({ success: false, error: 'Unknown Codex model' })
+        .mockImplementationOnce(async () => {
+          data = { model: 'available', modelSource: 'reported', reasoningEffort: 'medium', effortSource: 'reported' };
+          return { success: true };
+        });
+      await ctx.handler.handleMessage(command('retry-metadata'));
+      expect(ctx.mockExecutor.execute).toHaveBeenCalledTimes(2);
+      expect(response().executionMetadata).toMatchObject({ model: 'available', modelSource: 'reported' });
+    });
+
+    it.each(['/help', '/status', '/clear'])('does not attribute local command %s to a model', async content => {
+      ctx.mockExecutor.getExecutionMetadata = vi.fn(() => ({ model: 'unused', modelSource: 'configured', effortSource: 'default' }));
+      await ctx.handler.handleMessage(command('local-metadata', content));
+      expect(response()).not.toHaveProperty('executionMetadata');
+      expect(ctx.mockExecutor.getExecutionMetadata).not.toHaveBeenCalled();
+      expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
+    });
+
+    it('keeps execution successful when the optional metadata getter fails', async () => {
+      ctx.mockExecutor.getExecutionMetadata = () => { throw new Error('Metadata unavailable'); };
+      ctx.mockExecutor.execute.mockResolvedValue({ success: true });
+      await ctx.handler.handleMessage(command('missing-metadata'));
+      expect(response()).toMatchObject({ success: true });
+      expect(response()).not.toHaveProperty('executionMetadata');
+    });
+  });
+
   describe('multimodal prompts', () => {
     it('reports staging setup errors without crashing registration or invoking a backend', async () => {
       ctx.mockConfig.get.mockImplementation((key: string) => key === 'serverUrl' ? 'wss://router.test/ws' : key === 'files.retentionDays' ? 0 : undefined);

@@ -52,6 +52,8 @@ export interface DelegationProgressInfo {
   taskId: string;
   backend: string;
   phase: DelegationProgressPhase;
+  /** This worker's bounded execution snapshot, never the coordinator's settings. */
+  executionMetadata?: ExecutionMetadata;
   objective?: string;
   toolUse?: ToolUseInfo;
   toolResult?: ToolResultInfo;
@@ -212,6 +214,8 @@ export interface TaskNotificationInfo {
 
 /** Metadata for restoring task routing without replaying output. */
 export interface TaskResumeInfo {
+  /** Available only for a terminal execution; never reconstructed from current preferences. */
+  executionMetadata?: ExecutionMetadata;
   recoveryId: string;
   threadName: string;
   backend: string;
@@ -219,6 +223,17 @@ export interface TaskResumeInfo {
   preview: string;
   state: 'running' | 'completed' | 'failed';
   error?: string;
+}
+
+/** Provenance is not a guarantee about a proxy's underlying model identity. */
+export type ExecutionMetadataSource = 'reported' | 'configured' | 'default' | 'unknown';
+
+export interface ExecutionMetadata {
+  backend: string;
+  model?: string;
+  modelSource: ExecutionMetadataSource;
+  reasoningEffort?: string;
+  effortSource: ExecutionMetadataSource;
 }
 
 /** Outgoing message to router server. */
@@ -268,6 +283,8 @@ export interface OutgoingMessage {
   cwd?: string;
   /** Session abbreviation */
   sessionAbbr?: string;
+  /** Request-scoped execution settings; absent for legacy peers and local controls. */
+  executionMetadata?: ExecutionMetadata;
 }
 
 /** Optional approval-card protocol; negotiated through approvalCards capability. */

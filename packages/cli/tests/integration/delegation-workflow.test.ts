@@ -453,6 +453,45 @@ describe('delegation in the existing thread workflow', () => {
     expect(responseFor('later').success).toBe(true);
   });
 
+  it('rejects ambiguous worker input without sending it to the parent or an arbitrary child', async () => {
+    vi.spyOn((handler as any).delegation, 'hasAmbiguousInput').mockReturnValue(true);
+    main.sendInput = vi.fn();
+    worker.sendInput = vi.fn();
+    await handler.handleMessage(message('ambiguous', 'yes'));
+    expect(responseFor('ambiguous')).toMatchObject({ success: false, error: expect.stringContaining('Multiple workers') });
+    expect(main.sendInput).not.toHaveBeenCalled();
+    expect(worker.sendInput).not.toHaveBeenCalled();
+  });
+
+  it('keeps artifact-control tool output out of ordinary tool cards', async () => {
+    main.execute.mockImplementationOnce(async (_prompt: string, options: ExecuteOptions) => {
+      options.onToolUse?.({ id: 'integrate-control', name: 'mcp__remote-cli-delegation__remote_cli_integrate', input: {} });
+      options.onToolResult?.({ tool_use_id: 'integrate-control', content: 'private artifact metadata' });
+      return { success: true, output: 'Delivered summary' };
+    });
+    await handler.handleMessage(message('integrate-parent', 'Inspect result'));
+    expect(socket.send.mock.calls.some(([value]: any[]) => JSON.stringify(value).includes('private artifact metadata'))).toBe(false);
+    expect(responseFor('integrate-parent').success).toBe(true);
+  });
+
+  it('routes explicitly addressed delegated approvals across waiting workers and validates their owner', async () => {
+    vi.spyOn((handler as any).delegation, 'hasAmbiguousInput').mockReturnValue(true);
+    const threadId = threads.getDefaultThread().id;
+    const child = { respondToApproval: vi.fn(() => true) };
+    const pending = (handler as any).pendingApprovalCards as Map<string, any>;
+    pending.set('approval-fixture', { delegated: true, executor: child,
+      request: { threadId, openId: 'owner' } });
+    await handler.handleMessage(message('addressed', 'yes approval-fixture'));
+    expect(child.respondToApproval).toHaveBeenCalledWith('approval-fixture', 'approve');
+    expect(responseFor('addressed').success).toBe(true);
+    expect(pending.has('approval-fixture')).toBe(false);
+    pending.set('foreign-approval', { delegated: true, executor: child,
+      request: { threadId, openId: 'another-owner' } });
+    await handler.handleMessage(message('foreign-approval-input', 'yes foreign-approval'));
+    expect(responseFor('foreign-approval-input').success).toBe(false);
+    expect(child.respondToApproval).toHaveBeenCalledOnce();
+  });
+
   it('returns a worker question through the parent card and routes the answer to that worker', async () => {
     await handler.handleMessage(message('enable', '/delegation on'));
     let waiting = false;

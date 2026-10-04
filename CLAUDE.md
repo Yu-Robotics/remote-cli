@@ -562,7 +562,7 @@ session pointer into a worker lane.
 
 `MessageHandler` creates a `DelegationScope` for an enabled coordinator turn and
 activates its `DelegationBridge`. The bridge accepts only authenticated loopback
-calls while that scope is active. Backend adapters register the four tools via
+calls while that scope is active. Backend adapters register the five tools via
 MCP or the Pi extension without modifying global backend configuration.
 `BackendRegistry` discovers configured executables; `DelegationManager` owns
 task IDs, limits, workspace reservations, child executors, results, cancellation,
@@ -574,19 +574,44 @@ cross-backend sandbox translation is supported; `read_only` remains a recognized
 but unavailable compatibility value. Discovery and launch use the same policy.
 `DelegationStore`
 keeps bounded diagnostic task records and marks queued/running work interrupted
-after restart without replaying it. From CLI 1.6.129, one request may accept
-multiple independent tasks. The manager dispatches them serially in FIFO order,
-keeps its workspace reservation until the queue drains, and confirms worker exit
-and lane readiness before starting the next task. Queued tasks have no execution
+after restart without replaying it. From CLI 1.6.130, one request may accept
+multiple independent tasks. Git-backed tasks run in reusable per-lane worktrees
+with up to five occupied execution slots per CLI from 1.6.131; non-Git shared directories
+remain code-enforced FIFO serial execution. The manager keeps the source lease
+until the queue drains and confirms exit before releasing slots. Queued tasks have no execution
 timestamp or progress card and can be cancelled without constructing an executor.
 Their status is local tool JSON and existing notice text, never a new Router phase.
 The cumulative 12 accepted-task limit spans coordinator continuations; failures
 and cancellations do not refund it. Queue waits expire one hour after admission.
 Other roots with conflicting workspaces or no initial global execution slot are
-rejected, not queued. Never enable same-root parallelism or peer tools implicitly.
+rejected, not queued. Never enable shared-checkout parallelism or peer tools implicitly.
 Sibling results are not explicitly forwarded; native lane reuse still retains
 that lane's own earlier task context. Uncertain setup/cleanup retains its occupied
 global slot until restart as well as quarantining the workspace.
+
+`GitCheckpoint` captures bounded working input using a temporary index, including
+staged/unstaged/nonignored untracked changes without modifying the user's index.
+`DelegatedWorkspaceManager` owns stable worktree paths, fresh detached task
+checkouts, private `refs/remote-cli/*`, and durable artifact metadata independent
+of diagnostic pruning. Use an executor-only DirectoryGuard grant for the exact
+owned cwd; do not mutate global allowed directories. Worktrees are not sandboxes.
+Never publish private checkpoint refs, initialize non-Git projects implicitly,
+overwrite unknown dirty/ignored files, or reuse a lane with pending artifacts.
+Every worker prompt identifies its new baseline and warns that previous context
+does not establish the current file state. Ignored dependencies are not copied.
+
+The coordinator owns semantic integration. `remote_cli_integrate` inspects an
+artifact and delivery revision, then applies or explicitly retains it after all
+workers finish. Conflicts are preflighted in a separate recovery worktree. Apply
+must revalidate scope, ownership, lifecycle, and revision; it never stages,
+commits, or pushes. Worker success is not artifact integration. Preserve artifacts
+and unknown files on reset, deletion, or failure for manual recovery.
+File application is not an atomic transaction: preserve before/target recovery
+refs and a durable pending receipt before applying. Failed or interrupted apply
+requires manual comparison, not an assumed rollback or automatic retry. Validate
+actual tree sizes after clean filters and both endpoints of renames at scope checks.
+Native executor behavior and Router protocol version 1 remain unchanged. Multiple
+waiting workers must not receive an ambiguously addressed plain-text reply.
 
 Worker completion and terminal-result delivery are separate states. While results
 are missing from the active execution, `MessageHandler` suppresses coordinator prose/plans/images while

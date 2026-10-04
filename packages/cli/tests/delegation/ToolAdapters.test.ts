@@ -76,7 +76,8 @@ describe('native delegation tool adapters', () => {
     vi.stubEnv('REMOTE_CLI_DELEGATION_TOKEN', connection.token);
     const tools: any[] = [];
     registerPiTools({ registerTool: (tool: unknown) => tools.push(tool) });
-    expect(tools).toHaveLength(4);
+    expect(tools).toHaveLength(5);
+    expect(tools.some(tool => tool.name === 'remote_cli_integrate')).toBe(true);
     const result = await tools[0].execute('list', {});
     expect(JSON.parse(result.content[0].text).marker).toBe('ok');
     const controller = new AbortController(); controller.abort();

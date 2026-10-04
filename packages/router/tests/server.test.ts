@@ -212,6 +212,25 @@ describe('RouterServer', () => {
       expect(replies().at(-1)).toMatchObject({ type: 'task_resume_ack', success: true });
     });
 
+    it.each([true, false])('passes optional terminal execution metadata to the recovered card (offline=%s)', async offline => {
+      const { send } = await connect();
+      const metadata = { backend: 'claude', model: 'provider/model-a', modelSource: 'reported', reasoningEffort: 'high', effortSource: 'configured' };
+      if (offline) {
+        await send({ ...resume, taskResume: { ...resume.taskResume, state: 'completed', executionMetadata: metadata } });
+      } else {
+        await send(resume);
+        await send({ type: 'response', messageId: resume.messageId, openId: 'user-1', success: true, executionMetadata: metadata });
+      }
+      expect(mockFeishuHandler.finalizeStreamingMessage.mock.calls.at(-1)[9]).toEqual(metadata);
+    });
+
+    it('ignores malformed optional execution metadata without losing a legacy result', async () => {
+      const { send } = await connect();
+      await send(resume);
+      await send({ type: 'response', messageId: resume.messageId, openId: 'user-1', success: true, executionMetadata: 'invalid' });
+      expect(mockFeishuHandler.finalizeStreamingMessage.mock.calls.at(-1)[9]).toBeUndefined();
+    });
+
     it('retries a failed card API call without accepting early output', async () => {
       const { send, replies } = await connect();
       mockFeishuHandler.sendStreamingStart.mockRejectedValueOnce(new Error('API unavailable'));
@@ -551,7 +570,7 @@ describe('RouterServer', () => {
       expect(mockFeishuHandler.sendStreamingStart).toHaveBeenCalledOnce();
       expect(mockFeishuHandler.finalizeStreamingMessage).toHaveBeenCalledWith(
         'execution-card', expect.any(Array), undefined, 'user-1', '/workspace/project',
-        'thread-2', started.threads, 'thread-1', undefined,
+        'thread-2', started.threads, 'thread-1', undefined, undefined,
       );
     });
 
@@ -997,6 +1016,35 @@ describe('RouterServer', () => {
     expect(JSON.stringify(stream.elements)).toBe(finalJson);
   });
 
+  it('isolates worker execution notes through live updates, heartbeats and terminal replacement', async () => {
+    await server.start();
+    mockFeishuHandler.setOnStartStreaming.mock.calls[0][0]('m1', 'u1', 'f1', 'd1');
+    const stream = (server as any).streamingMessages.get('m1');
+    const metadata = (backend: string, model: string, source = 'reported') => ({ backend, model, modelSource: source, reasoningEffort: 'high', effortSource: 'reported' });
+    const send = (taskId: string, backend: string, phase: string, executionMetadata?: any) => (server as any).handleDelegationProgress(
+      'm1', 'u1', { taskId, backend, phase, executionMetadata }, true);
+    await send('first', 'codex', 'started', metadata('codex', 'selected-model', 'configured'));
+    await send('second', 'agy', 'started', metadata('agy', 'agy-model'));
+    const length = stream.elements.length;
+    const note = (ordinal: number) => stream.elements.find((element: any) => element.element_id === `delegated_worker_${ordinal}_meta`).content;
+    expect(note(1)).toContain('selected-model (configured)');
+    expect(note(2)).toContain('agy-model');
+    await send('first', 'codex', 'tool_use', metadata('codex', 'native-model'));
+    await send('first', 'codex', 'text', metadata('agy', 'other-backend-model'));
+    await send('first', 'codex', 'text', { ...metadata('codex', 'malformed-model'), modelSource: 'invalid' });
+    await send('first', 'codex', 'tool_result');
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(note(1)).toContain('native-model');
+    expect(note(1).match(/Model:/g)).toHaveLength(1);
+    expect(note(1)).not.toContain('agy-model');
+    await send('first', 'codex', 'succeeded', metadata('codex', 'final-model'));
+    await send('first', 'codex', 'text', metadata('codex', 'late-model'));
+    expect(note(1)).toContain('final-model');
+    expect(note(2)).toContain('agy-model');
+    expect(JSON.stringify(stream.elements)).not.toMatch(/other-backend-model|malformed-model|late-model/);
+    expect(stream.elements).toHaveLength(length);
+  });
+
   it('coalesces tool outcomes and keeps tool issues visible after their log entries are evicted', async () => {
     await server.start();
     mockFeishuHandler.setOnStartStreaming.mock.calls[0][0]('m1', 'u1', 'f1', 'd1');
@@ -1146,6 +1194,7 @@ describe('RouterServer', () => {
       expect.arrayContaining([expect.objectContaining({ content: expect.stringContaining('Something went wrong') })]),
       undefined,
       'u1',
+      undefined,
       undefined,
       undefined,
       undefined,

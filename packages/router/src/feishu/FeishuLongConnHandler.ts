@@ -3,6 +3,8 @@ import { v4 as uuidv4 } from 'uuid';
 import { BindingManager } from '../binding/BindingManager';
 import { ConnectionHub } from '../websocket/ConnectionHub';
 import { MAX_THREADS, MessageType, ThreadSummary, Attachment, QueueConfirmationInfo } from '../types';
+import type { ExecutionMetadata } from '../types';
+import { createExecutionMetadataElement } from '../utils/ExecutionMetadata';
 import { JsonStore } from '../storage/JsonStore';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -1498,11 +1500,11 @@ Examples:
    * @param openId User's open_id for creating continuation messages
    * @param replyThreadId Thread that produced the reply, independent of the selected thread
    */
-  async finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string, threads?: ThreadSummary[], replyThreadId?: string, queueConfirmation?: QueueConfirmationInfo): Promise<boolean> {
-    return this.withMessageLock(messageId, () => this._finalizeStreamingMessage(messageId, elements, sessionAbbr, openId, cwd, threadName, threads, replyThreadId, queueConfirmation));
+  async finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string, threads?: ThreadSummary[], replyThreadId?: string, queueConfirmation?: QueueConfirmationInfo, executionMetadata?: ExecutionMetadata): Promise<boolean> {
+    return this.withMessageLock(messageId, () => this._finalizeStreamingMessage(messageId, elements, sessionAbbr, openId, cwd, threadName, threads, replyThreadId, queueConfirmation, executionMetadata));
   }
 
-  private async _finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string, threads?: ThreadSummary[], replyThreadId?: string, queueConfirmation?: QueueConfirmationInfo): Promise<boolean> {
+  private async _finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string, threads?: ThreadSummary[], replyThreadId?: string, queueConfirmation?: QueueConfirmationInfo, executionMetadata?: ExecutionMetadata): Promise<boolean> {
     try {
       // Build completion note
       let noteContent = queueConfirmation ? '⏳ Awaiting queue confirmation' : '✅ Completed';
@@ -1512,7 +1514,10 @@ Examples:
 
       const headerElements = this.createResponseHeaderElements(threadName || 'Resolving thread...', cwd);
       const finalElements: any[] = [...headerElements];
-      finalElements.push(...elements, { tag: 'markdown', content: noteContent });
+      const footerElements: any[] = [{ tag: 'markdown', content: noteContent }];
+      const metadataElement = !queueConfirmation && createExecutionMetadataElement(executionMetadata);
+      if (metadataElement) footerElements.push(metadataElement);
+      finalElements.push(...elements, ...footerElements);
 
       if (queueConfirmation) {
         finalElements.push(...this.createQueueConfirmationElements(queueConfirmation));
@@ -1536,7 +1541,8 @@ Examples:
 
       // Reuse streaming update logic: only create cards, never delete.
       // Whatever layout was built during streaming stays as-is.
-      const updated = await this._updateStreamingMessage(messageId, finalElements, openId, headerElements, threadSwitchElements);
+      const trailingElements = metadataElement && !queueConfirmation ? [...footerElements, ...threadSwitchElements] : threadSwitchElements;
+      const updated = await this._updateStreamingMessage(messageId, finalElements, openId, headerElements, trailingElements);
       if (!updated) {
         return false;
       }
@@ -1544,7 +1550,7 @@ Examples:
       // Store thread switch card state for later refresh (before cleanup)
       if (threads && threads.length >= 1) {
         const chain = this.messageChains.get(messageId);
-        const chunks = this.splitElementsIntoChunks(finalElements, headerElements, threadSwitchElements);
+        const chunks = this.splitElementsIntoChunks(finalElements, headerElements, trailingElements);
         const lastChunkIndex = chunks.length - 1;
         const lastCardId = chain?.[lastChunkIndex];
 

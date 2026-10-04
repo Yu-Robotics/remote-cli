@@ -1,4 +1,4 @@
-import { ToolUseInfo, ToolResultInfo, Attachment, ImageBlock, TaskNotificationInfo, ApprovalRequestInfo, ApprovalAction, ApprovalStatus } from '../types';
+import { ToolUseInfo, ToolResultInfo, Attachment, ImageBlock, TaskNotificationInfo, ApprovalRequestInfo, ApprovalAction, ApprovalStatus, ExecutionMetadata } from '../types';
 import type { DelegationConnection } from '../delegation/contract';
 
 export interface ExecuteOptions {
@@ -39,6 +39,8 @@ export interface ExecutorModelInfo {
   defaultReasoningEffort?: string;
   inputModalities?: string[];
 }
+
+export type ExecutorExecutionMetadata = Omit<ExecutionMetadata, 'backend'>;
 
 export interface ExecutorContextUsage {
   inputTokens?: number;
@@ -92,6 +94,8 @@ export interface IExecutor {
   setEffort?(effort: string): Promise<ExecuteResult>;
   isProcessRunning?(): boolean;
   getSessionId?(): string | null;
+  /** Cached settings only: never starts a process, queries an API, or changes a session. */
+  getExecutionMetadata?(): ExecutorExecutionMetadata;
   /** Return backend-provided token and context-window statistics when available. */
   getContextUsage?(): Promise<ExecutorContextUsage | null> | ExecutorContextUsage | null;
   /** Return backend-provided account plan usage as display-ready text when available. */

@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
-import type { OutgoingMessage, TaskResumeInfo } from '../types';
+import type { OutgoingMessage, TaskResumeInfo, ExecutionMetadata } from '../types';
+import { boundExecutionMetadata } from '../executor/ExecutionMetadata';
 
 export interface RecoverableTask {
   messageId: string;
@@ -18,7 +19,7 @@ interface TaskState {
   recovered: boolean;
   recoveryFailures: number;
   recoveryPaused: boolean;
-  result?: { success: boolean; error?: string; finishedAt: number };
+  result?: { success: boolean; error?: string; finishedAt: number; executionMetadata?: ExecutionMetadata };
 }
 
 const RESULT_TTL = 24 * 60 * 60 * 1000;
@@ -84,6 +85,9 @@ export class TaskRecovery {
     }
     if (message.type === 'response' && typeof message.success === 'boolean') {
       entry.result = { success: message.success, error: message.error?.slice(0, 500), finishedAt: Date.now() };
+      if (message.executionMetadata?.backend === entry.task.backend) {
+        entry.result.executionMetadata = boundExecutionMetadata(message.executionMetadata, entry.task.backend);
+      }
       if (typeof message.cwd === 'string') entry.task.cwd = message.cwd.slice(0, 4096);
       this.prune();
     }
@@ -169,6 +173,7 @@ export class TaskRecovery {
       recoveryId: entry.recoveryId, threadName: task.threadName, backend: task.backend,
       cwd: task.cwd, preview: task.preview,
       state: result ? (result.success ? 'completed' : 'failed') : 'running', error: result?.error,
+      ...(result?.executionMetadata ? { executionMetadata: result.executionMetadata } : {}),
     };
     this.inFlight = { messageId: task.messageId, recoveryId: entry.recoveryId, state: taskResume.state };
     this.acknowledgementTimer = setTimeout(() => this.failRecovery(), RETRY_DELAY);

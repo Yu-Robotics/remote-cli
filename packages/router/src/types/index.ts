@@ -73,6 +73,8 @@ export enum MessageType {
 }
 
 export interface TaskResumeInfo {
+  /** Available only for a terminal execution; old CLIs omit it. */
+  executionMetadata?: ExecutionMetadata;
   recoveryId: string;
   threadName: string;
   backend: string;
@@ -123,6 +125,17 @@ export interface CommandMessage extends WSMessage {
   };
 }
 
+/** Provenance is not a guarantee about a proxy's underlying model identity. */
+export type ExecutionMetadataSource = 'reported' | 'configured' | 'default' | 'unknown';
+
+export interface ExecutionMetadata {
+  backend: string;
+  model?: string;
+  modelSource: ExecutionMetadataSource;
+  reasoningEffort?: string;
+  effortSource: ExecutionMetadataSource;
+}
+
 // Response message
 export interface ResponseMessage extends WSMessage {
   type: MessageType.RESPONSE;
@@ -130,6 +143,8 @@ export interface ResponseMessage extends WSMessage {
   threadId?: string;
   /** Runtime thread summaries for card button rendering (optional — new CLIs only) */
   threads?: ThreadSummary[];
+  /** Optional on the actual top-level response envelope; old CLIs omit it. */
+  executionMetadata?: ExecutionMetadata;
   data: {
     success: boolean;
     output?: string;
@@ -237,6 +252,8 @@ export interface DelegationProgressInfo {
   taskId: string;
   backend: string;
   phase: DelegationProgressPhase;
+  /** This worker's bounded execution snapshot; old CLIs omit it. */
+  executionMetadata?: ExecutionMetadata;
   objective?: string;
   toolUse?: ToolUseInfo;
   toolResult?: ToolResultInfo;
