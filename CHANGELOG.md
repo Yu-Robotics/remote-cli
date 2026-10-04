@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.126] - 2026-10-04
+
+### Fixed
+- Preserve acknowledged Codex quota-reminder suppression across CLI upgrades, restarts, reconnects, and credential refreshes using a private local fingerprint ledger. Valid non-candidate observations rearm reminders; unavailable probes do not, and shutdown waits for accepted acknowledgement writes.
+
+### Changed
+- Remove the redundant Dismiss button from new quota-reminder cards while retaining validated legacy callbacks and the existing notification-only inspection criteria.
+
 ## [1.6.125] - 2026-10-04
 
 ### Changed

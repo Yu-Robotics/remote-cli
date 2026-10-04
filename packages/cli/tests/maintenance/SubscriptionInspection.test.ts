@@ -49,6 +49,17 @@ describe('typed Codex weekly observation', () => {
     expect(codexWeeklyObservation(multiple, 'account-fixture', 'g', epoch)).toBeUndefined();
     expect(codexWeeklyObservation({ rateLimits: { primary: null, secondary: null } }, 'account-fixture', 'g', epoch)).toBeUndefined();
   });
+  it('keeps the durable account key stable across credentials and deadlines, but separates accounts and quota buckets', () => {
+    const first = observation();
+    const refreshed = codexWeeklyObservation(raw(epoch + INSPECTION_INTERVAL_MS), 'account-fixture', 'refreshed-fixture', epoch + INSPECTION_INTERVAL_MS)!;
+    expect(refreshed.identity).not.toBe(first.identity);
+    expect(refreshed.accountKey).toBe(first.accountKey);
+    expect(first.accountKey).toMatch(/^[a-f0-9]{64}$/);
+    const another = raw(); another.accountId = 'another-account-fixture';
+    expect(codexWeeklyObservation(another, another.accountId, 'fixture-generation', epoch)!.accountKey).not.toBe(first.accountKey);
+    const bucket = { rateLimitsByLimitId: { other: { ...raw().rateLimitsByLimitId.codex, limitId: 'other' } } };
+    expect(codexWeeklyObservation(bucket, 'account-fixture', 'fixture-generation', epoch)!.accountKey).not.toBe(first.accountKey);
+  });
   it.each([NaN, Infinity, -1, 101, '0', null])('rejects invalid usage %j and never manufactures a candidate', invalid => {
     const r = raw(); (r.rateLimitsByLimitId.codex.secondary as any).usedPercent = invalid;
     expect(codexWeeklyObservation(r, 'account-fixture', 'g', epoch)).toBeUndefined();
@@ -124,14 +135,16 @@ describe('hourly subscription inspection', () => {
     await manager.cycle(); await advanceSample(); const message = send.mock.calls[0][0];
     manager.handle({ type: 'subscription_reminder_ack', ...message.reminder, generation: 'foreign' });
     await vi.advanceTimersByTimeAsync(60_000); expect(send).toHaveBeenCalledTimes(2);
-    delivered(); inspect.mockImplementation(async () => ({ ...observation(time), identity: 'new-account' }));
+    delivered(); inspect.mockImplementation(async () => ({ ...observation(time), identity: 'new-account', accountKey: 'f'.repeat(64) }));
     await advanceSample(); expect(send).toHaveBeenCalledTimes(2); await advanceSample(); expect(send).toHaveBeenCalledTimes(3);
   });
   it('serializes cycles, aborts on shutdown and never catches up with a burst after an outage', async () => {
-    let finish!: (v: WeeklyObservation) => void;
-    inspect.mockImplementationOnce(() => new Promise<WeeklyObservation>(resolve => { finish = resolve; }));
-    const first = manager.cycle(); const second = manager.cycle(); await Promise.resolve(); expect(inspect).toHaveBeenCalledTimes(1);
-    finish(observation()); await Promise.all([first, second]);
+    let finish!: (v: WeeklyObservation) => void, started!: () => void;
+    const probing = new Promise<void>(resolve => { started = resolve; });
+    inspect.mockImplementationOnce(() => new Promise<WeeklyObservation>(resolve => { finish = resolve; started(); }));
+    const first = manager.cycle(); const second = manager.cycle(); await probing;
+    try { expect(inspect).toHaveBeenCalledTimes(1); }
+    finally { finish(observation()); await Promise.all([first, second]); }
     await advanceSample(3); expect(send).not.toHaveBeenCalled();
     await manager.stop(); await manager.cycle(); expect(inspect).toHaveBeenCalledTimes(2);
   });

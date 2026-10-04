@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MaintenanceClient } from '../../src/maintenance/MaintenanceClient';
 import { UpdateNotices } from '../../src/maintenance/UpdateNotices';
 import { SubscriptionInspection } from '../../src/maintenance/SubscriptionInspection';
+import { SubscriptionReminderStore } from '../../src/maintenance/SubscriptionReminderStore';
 
 const doubles = vi.hoisted(() => ({
   updates: { started: vi.fn(), registered: vi.fn(), handle: vi.fn(), stop: vi.fn(), disconnected: vi.fn() },
@@ -16,6 +17,7 @@ describe('maintenance service lifecycle', () => {
   const make = (enabled?: any) => new MaintenanceClient({ send: vi.fn(), on: vi.fn() }, '/temporary-fixture', 'https://router.example.com', 'device-fixture', () => undefined, enabled);
   it('waits for actual startup and negotiated capabilities, preserving unrelated/legacy traffic', async () => {
     const client = make();
+    expect(vi.mocked(SubscriptionInspection).mock.calls[0][5]).toBeInstanceOf(SubscriptionReminderStore);
     expect(doubles.updates.started).not.toHaveBeenCalled(); expect(doubles.subscriptions.start).not.toHaveBeenCalled();
     expect(await client.handle({ type: 'binding_confirm', data: { success: true } })).toBe(false);
     expect(doubles.updates.registered).toHaveBeenLastCalledWith(false);
@@ -47,5 +49,15 @@ describe('maintenance service lifecycle', () => {
     const client = make(); await client.handle({ type: 'binding_confirm', data: { success: true } });
     await expect(client.started('1.6.122')).resolves.toBeUndefined();
     expect(doubles.subscriptions.start).toHaveBeenCalled(); expect(warn).toHaveBeenCalledWith(expect.not.stringContaining('private-storage-error')); warn.mockRestore();
+  });
+  it('waits for quota acknowledgement persistence without consuming unrelated messages', async () => {
+    let complete!: () => void;
+    doubles.subscriptions.handle.mockImplementationOnce(() => new Promise<void>(resolve => { complete = resolve; }));
+    const client = make();
+    let handled = false;
+    const acknowledgement = client.handle({ type: 'subscription_reminder_ack' }).then(value => { handled = value; });
+    await Promise.resolve(); expect(handled).toBe(false);
+    expect(await client.handle({ type: 'command' })).toBe(false);
+    complete(); await acknowledgement; expect(handled).toBe(true);
   });
 });

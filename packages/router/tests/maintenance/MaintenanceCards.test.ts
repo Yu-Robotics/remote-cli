@@ -82,7 +82,7 @@ describe('standalone maintenance cards', () => {
     cards.disconnect('device-fixture');
     now += 31 * 86400_000; await expect(cards.view('owner-fixture', record.id, record.cardId, 0, () => () => true)).rejects.toThrow();
   });
-  it('delivers actionable quota guidance without prompt actions and validates passive dismissal', async () => {
+  it('delivers button-free quota guidance and retains validated legacy dismissal callbacks', async () => {
     const message = { type: 'subscription_reminder', reminder: { reminderId: key, generation, expiresAt: now + 3600000, activationAvailable: false } };
     await Promise.all([cards.receiveReminder(message, 'device-fixture', () => true), cards.receiveReminder(message, 'device-fixture', () => true)]);
     expect(deps.create).toHaveBeenCalledTimes(1);
@@ -96,7 +96,7 @@ describe('standalone maintenance cards', () => {
     expect(markdown).toHaveLength(1);
     expect(text).toContain('Without new Codex usage, the reset countdown may keep moving forward. Send Codex a normal task to start the next usage window.');
     expect(text).not.toMatch(/activation|Send Hi|Proposed prompt|local Codex CLI|No action is required|\/status|\bverify\b/i);
-    expect(elements.filter((element: any) => element.tag === 'button').map((element: any) => element.behaviors[0].value.decision)).toEqual(['dismiss']);
+    expect(elements.some((element: any) => element.tag === 'button')).toBe(false);
     expect(deps.send).toHaveBeenCalledWith('device-fixture', expect.objectContaining({ type: 'subscription_reminder_ack', reminderId: key, generation }));
     await expect(cards.reply('foreign-owner', key, 'card-fixture', 'send_hi')).rejects.toThrow();
     await expect(cards.reply('owner-fixture', key, 'foreign-card', 'send_hi')).rejects.toThrow();
