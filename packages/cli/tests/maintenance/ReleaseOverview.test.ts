@@ -43,7 +43,8 @@ describe('bounded release overview', () => {
 
   it('validates only bounded, single-line feature metadata from bundled artifacts', () => {
     expect(validReleaseChanges([change])).toBe(true);
-    for (const invalid of [null, {}, [], [change, change, change, change], [null],
+    for (const count of [5, 6]) expect(validReleaseChanges(Array.from({ length: count }, () => change))).toBe(true);
+    for (const invalid of [null, {}, [], Array.from({ length: 7 }, () => change), [null],
       [{ ...change, topic: 123 }], [{ ...change, topic: 'Invalid topic' }],
       [{ ...change, title: 123 }], [{ ...change, title: ' Feature' }], [{ ...change, title: '' }],
       [{ ...change, title: 'x'.repeat(81) }], [{ ...change, title: '*Feature*' }],

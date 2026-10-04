@@ -41,9 +41,9 @@ export function parseReleaseNotes(markdown: string): ReleaseSection[] {
 
 function validateUserSummary(section: ReleaseSection): { text: string; changes: ReleaseChange[] } {
   const lines = section.text.split(/\r?\n/).filter(line => line.trim());
-  if (lines.length < 2 || lines.length > 4 || !/^###\s+\S/.test(lines[0]) || Array.from(lines[0]).length > 100
+  if (lines.length < 2 || lines.length > 7 || !/^###\s+\S/.test(lines[0]) || Array.from(lines[0]).length > 100
     || lines.slice(1).some(line => !/^- \S/.test(line))) {
-    throw new Error('User release summaries require one short heading and one to three single-line bullets.');
+    throw new Error('User release summaries require one short heading and one to six single-line bullets.');
   }
   if (!/\p{Script=Han}/u.test(section.text)) throw new Error('User release summaries require Chinese text.');
   if (Buffer.byteLength(section.text) > USER_SUMMARY_BYTES) throw new Error('User release summary exceeds the summary budget.');

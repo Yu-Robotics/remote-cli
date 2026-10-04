@@ -139,13 +139,34 @@ describe('bundled release-note ranges', () => {
     expect(() => build(`## 1.6.125\n${taggedSummary}\n## 1.6.123+build\n${taggedSummary}\n## 1.6.123\n${taggedSummary}`)).toThrow('Duplicate');
     expect(() => build(`## 1.6.125\n${taggedSummary}\n## 1.6.124-rc.1\n${taggedSummary}`)).toThrow('matching changelog');
     expect(() => build('## 1.6.125\n### Update\n- A change')).toThrow('Chinese');
-    for (const verbose of [summary + '\nA paragraph', summary + '\n- Extra\n- Extra\n- Extra', '- A change', '### ' + 'x'.repeat(101) + '\n- A change']) {
+    for (const verbose of [summary + '\nA paragraph', summary + '\n- Extra'.repeat(6), '- A change', '### ' + 'x'.repeat(101) + '\n- A change']) {
       expect(() => build('## 1.6.125\n' + verbose)).toThrow('one short heading');
     }
     expect(() => build(`## 1.6.125\n${summary}${'x'.repeat(USER_SUMMARY_BYTES)}`)).toThrow('summary budget');
     expect(() => build(`## 1.6.125\n${summary}`)).toThrow('stable feature tag');
     expect(() => build(`## 1.6.125\n${taggedSummary.replace('|Feature]', '| Feature]')}`)).toThrow('feature metadata');
     expect(() => build(`## 1.6.125\n${taggedSummary}\n## 1.6.124\n${taggedSummary.replace('|Feature]', '|Other]')}`)).toThrow('stable display title');
+  });
+  it('bundles five or six features and serves the consolidated release without older version entries', async () => {
+    const read = vi.spyOn(fs, 'readFile');
+    try {
+      for (const count of [5, 6]) {
+        const bullets = Array.from({ length: count }, (_, n) => `- [feature-${n}|Feature ${n}] \u529f\u80fd ${n}`);
+        const index = buildReleaseIndex('## 1.6.134\n- Consolidated changes', '1.6.134', `## 1.6.134\n### \u66f4\u65b0\n${bullets.join('\n')}`);
+        expect(index.sections[0].changes).toHaveLength(count);
+        expect(index.sections[0].text).not.toContain('[feature-');
+        read.mockResolvedValueOnce(JSON.stringify(index));
+        const loaded = await loadReleaseIndex();
+        expect(loaded).toEqual(index);
+        for (const baseline of ['1.6.110', '1.6.128', '1.6.133']) {
+          const page = releasePage(loaded, baseline, '1.6.134');
+          expect(page.sections.map(section => section.version)).toEqual(['1.6.134']);
+          expect(page.overview).toMatchObject({ totalGroups: count, totalItems: count });
+          expect(page.overview!.groups).toHaveLength(count);
+          expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThan(20 * 1024);
+        }
+      }
+    } finally { read.mockRestore(); }
   });
   it('selects the whole upgrade range and distinguishes missing history from display paging', () => {
     const index = buildReleaseIndex(markdown, '1.6.125', summariesFor(markdown));
