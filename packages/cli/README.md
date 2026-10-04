@@ -229,8 +229,21 @@ is disabled and cross-backend sandbox translation remains unsupported. Saved
 sandbox policies are not weakened. `read_only` remains recognized for
 compatibility but is unavailable; discovery reports the rejection reason.
 There is one
-active child per parent and at most three per CLI process, with overlapping
-workspaces serialized and bounded time/output. Workspace reservations apply to
+active child per parent and at most three per CLI process, with bounded time/output.
+From CLI 1.6.129, a request may accept multiple independent tasks before collecting
+results. Followers report `queued`, execute in FIFO order, and may be cancelled
+individually without starting a worker. The cumulative limit is 12 accepted tasks
+per request across continuations, including failures and cancellations. Queue
+waits expire one hour after admission. Confirmed process exit and reusable lane
+metadata are required before the next worker starts; an uncertain exit blocks
+queued siblings. No peer communication or native backend behavior changes are
+included. Other overlapping requests or a new request without an available
+global execution slot are rejected rather than queued. Queue status uses existing
+notice text, with progress cards only for started workers; existing Routers remain
+compatible. Restarting the CLI interrupts retained queued/running records without
+replaying work. Sibling results are not explicitly forwarded; a reused same-backend
+lane retains its own earlier task context. Uncertain startup or cleanup retains
+the occupied global slot until the CLI restarts. Workspace reservations apply to
 delegation-enabled work; opted-out threads keep ordinary workspace access, so
 use separate workspaces for independent writers. See
 [Cross-backend Delegation](../../README.md#cross-backend-delegation) for limits,

@@ -9,7 +9,7 @@ import type { IExecutor, ExecuteResult } from '../executor/IExecutor';
 import type { ApprovalRequestInfo, ApprovalStatus, DelegationProgressInfo, ToolUseInfo, ToolResultInfo } from '../types';
 import { createExecutor } from '../executor';
 import { BackendRegistry } from './BackendRegistry';
-import { DelegationStore, type DelegatedTaskRecord } from './DelegationStore';
+import { DelegationStore, isTerminalTaskState, type DelegatedTaskRecord } from './DelegationStore';
 import {
   DelegatedWorkerSessionStore,
   type DelegatedWorkerLane,
@@ -23,6 +23,7 @@ import { assertWorkingDirectoryExists } from '../utils/WorkingDirectory';
 
 export const DELEGATION_LIMITS = { launches: 12, concurrent: 3,
   idleTimeoutMs: 15 * 60_000, toolIdleTimeoutMs: 45 * 60_000,
+  queueTimeoutMs: 60 * 60_000,
   resultBytes: 32 * 1024, continuationBytes: 64 * 1024,
   storageTimeoutMs: 10_000, calls: 500 } as const;
 
@@ -36,6 +37,7 @@ export const DELEGATION_TEXT_PROGRESS = {
 export interface DelegationTimeoutPolicy {
   idleTimeoutMs: number;
   toolIdleTimeoutMs: number;
+  queueTimeoutMs?: number;
 }
 
 type TimeoutPolicyInput = DelegationTimeoutPolicy | number;
@@ -45,14 +47,15 @@ function validDuration(value: number | undefined, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
-function timeoutPolicy(input: TimeoutPolicyInput): DelegationTimeoutPolicy {
+function timeoutPolicy(input: TimeoutPolicyInput): Required<DelegationTimeoutPolicy> {
   if (typeof input === 'number') {
     const duration = validDuration(input, DELEGATION_LIMITS.idleTimeoutMs);
-    return { idleTimeoutMs: duration, toolIdleTimeoutMs: duration };
+    return { idleTimeoutMs: duration, toolIdleTimeoutMs: duration, queueTimeoutMs: DELEGATION_LIMITS.queueTimeoutMs };
   }
   return {
     idleTimeoutMs: validDuration(input.idleTimeoutMs, DELEGATION_LIMITS.idleTimeoutMs),
     toolIdleTimeoutMs: validDuration(input.toolIdleTimeoutMs, DELEGATION_LIMITS.toolIdleTimeoutMs),
+    queueTimeoutMs: validDuration(input.queueTimeoutMs, DELEGATION_LIMITS.queueTimeoutMs),
   };
 }
 
@@ -91,7 +94,11 @@ export interface DelegationParent {
 
 interface Task {
   record: DelegatedTaskRecord;
+  configuration: ExecutorConfig;
+  objective: string;
   resultDelivered: boolean;
+  settled: boolean;
+  ownsSlot: boolean;
   executor?: IExecutor;
   lane?: DelegatedWorkerLane;
   /** The lane was reserved but no completed turn made its native context reusable. */
@@ -100,7 +107,11 @@ interface Task {
   quarantineWorkspace?: boolean;
   done: Promise<void>;
   settle: () => void;
+  dispatched: Promise<void>;
+  signalDispatch: () => void;
+  finishUnstarted?: Promise<void>;
   stop?: Promise<void>;
+  queueTimer?: ReturnType<typeof setTimeout>;
   idleTimer?: ReturnType<typeof setTimeout>;
   textTimer?: ReturnType<typeof setTimeout>;
   textBuffer?: string;
@@ -195,9 +206,10 @@ export class DelegationManager {
   readonly store: DelegationStore;
   readonly laneStore: DelegatedWorkerSessionStore;
   private running = 0;
-  private workspaces = new Map<string, string>();
+  private workspaces = new Map<string, { id: string; threadId: string; quarantined: boolean }>();
+  private pumps = new Set<() => void>();
   private scopes = new Map<string, DelegationScope>();
-  private readonly timeouts: DelegationTimeoutPolicy;
+  private readonly timeouts: Required<DelegationTimeoutPolicy>;
 
   constructor(private readonly guard: DirectoryGuard,
     private readonly factory: typeof createExecutor = createExecutor,
@@ -223,7 +235,11 @@ export class DelegationManager {
     let closed = false;
     let launches = 0;
     let launchRevision = 0;
-    let starting = false;
+    let admissions = 0;
+    let admissionTail: Promise<unknown> = Promise.resolve();
+    let activeTask: Task | undefined;
+    const workspaceOwner = { id: randomUUID(), threadId: parent.thread.id, quarantined: false };
+    const workspaceGeneration = parent.thread.delegationWorkspaceGeneration ?? 0;
     let execution = 0;
     let acceptingResults = true;
     const stagedResults = new Set<string>();
@@ -235,12 +251,12 @@ export class DelegationManager {
       return task;
     };
     const view = (task: Task): DelegatedTaskResult => ({ taskId: task.record.id, backend: task.record.backend,
-      state: task.record.finishedAt ? task.record.state : 'running',
-      output: task.record.finishedAt ? task.record.output : undefined,
-      error: task.record.finishedAt ? task.record.error : undefined,
+      state: task.record.finishedAt !== undefined ? task.record.state : task.record.startedAt === undefined ? 'queued' : 'running',
+      output: task.record.finishedAt !== undefined ? task.record.output : undefined,
+      error: task.record.finishedAt !== undefined ? task.record.error : undefined,
       truncated: task.record.truncated ?? false });
     const receive = (task: Task, requestedDuring: number): DelegatedTaskResult => {
-      if (task.record.finishedAt && acceptingResults && requestedDuring === execution) stagedResults.add(task.record.id);
+      if (task.record.finishedAt !== undefined && acceptingResults && requestedDuring === execution) stagedResults.add(task.record.id);
       return view(task);
     };
     const save = (task: Task) => this.store.write(task.record).catch(error => {
@@ -248,6 +264,20 @@ export class DelegationManager {
     });
     const notify = (send: () => void) => {
       try { send(); } catch { console.warn('[Delegation] Progress could not be delivered'); }
+    };
+    const releaseWorkspaceIfIdle = (): void => {
+      if (admissions || activeTask || [...tasks.values()].some(task => !task.settled)) return;
+      if (this.workspaces.get(cwd) === workspaceOwner && !workspaceOwner.quarantined) this.workspaces.delete(cwd);
+    };
+    const assertWorkspace = (): void => {
+      assertWorkingDirectoryExists(parent.cwd);
+      if (fs.realpathSync(this.guard.resolveWorkingDirectory(parent.cwd)) !== cwd
+        || (parent.thread.delegationWorkspaceGeneration ?? 0) !== workspaceGeneration) {
+        throw new Error('Delegated workspace changed before the task could start');
+      }
+      if (this.workspaces.get(cwd) !== workspaceOwner || workspaceOwner.quarantined || parent.isWorkspaceBusy?.(cwd)) {
+        throw new Error('Delegation capacity or workspace is busy; task was not started');
+      }
     };
     const reportProgress = (
       task: Task,
@@ -304,7 +334,7 @@ export class DelegationManager {
       scheduleTextProgress(task);
     };
     const reportTerminalProgress = (task: Task): boolean => {
-      if (task.record.state === 'running') return false;
+      if (!isTerminalTaskState(task.record.state) || task.record.startedAt === undefined) return false;
       return reportProgress(task, {
         phase: task.record.state,
         summary: task.record.output ? bounded(task.record.output, 1000, true).text : undefined,
@@ -375,8 +405,41 @@ export class DelegationManager {
       task.record.lastActivityKind = kind;
       armIdleTimer(task);
     };
+    const finishTask = async (task: Task): Promise<void> => {
+      clearTimeout(task.queueTimer);
+      task.record.finishedAt = Date.now();
+      await deadline(async () => { await save(task); await this.store.prune(); }, this.cleanupMs)
+        .catch(() => console.warn('[Delegation] Final task metadata could not be saved or pruned'));
+      if (!reportTerminalProgress(task)) {
+        // A never-started task has no tool/progress card to close on older peers.
+        if (task.record.startedAt !== undefined) {
+          notify(() => parent.onToolResult({ tool_use_id: task.record.id, content: JSON.stringify(view(task)), is_error: task.record.state !== 'succeeded' }));
+        }
+        notify(() => parent.onNotice(formatDelegationNotice(task.record)));
+      }
+      task.settle();
+      if (activeTask === task) activeTask = undefined;
+      releaseWorkspaceIfIdle();
+      for (const start of this.pumps) start();
+    };
+    const completeUnstarted = (task: Task, state: 'cancelled' | 'timed_out' | 'failed' | 'interrupted', error: string): Promise<void> => {
+      if (task.finishUnstarted) return task.finishUnstarted;
+      task.record.state = state;
+      task.record.error = error;
+      return task.finishUnstarted = finishTask(task);
+    };
+    const armQueueTimer = (task: Task): void => {
+      const remaining = Math.max(0, task.record.acceptedAt! + this.timeouts.queueTimeoutMs - Date.now());
+      task.queueTimer = setTimeout(() => {
+        if (task.record.state !== 'queued' || task.ownsSlot) return;
+        void completeUnstarted(task, 'timed_out', `Task was not started within ${formatDuration(this.timeouts.queueTimeoutMs)} of admission.`);
+      }, remaining);
+    };
     const cancel = async (task: Task): Promise<unknown> => {
-      if (task.record.state === 'running') {
+      if (task.record.state === 'queued' && !task.ownsSlot) {
+        await completeUnstarted(task, 'cancelled', 'Cancelled before the worker started.');
+      } else if (!isTerminalTaskState(task.record.state)) {
+        clearTimeout(task.queueTimer);
         clearTaskTimer(task);
         clearTextProgress(task, true);
         task.record.state = 'cancelled';
@@ -386,21 +449,35 @@ export class DelegationManager {
       await task.done;
       return view(task);
     };
-    const run = async (task: Task, configuration: ExecutorConfig, objective: string): Promise<void> => {
+    const run = async (task: Task): Promise<void> => {
+      const { configuration, objective } = task;
       const backend = task.record.backend as DelegationBackend;
       const identity: DelegatedWorkerLaneIdentity = {
         threadId: parent.thread.id,
         backend,
         workingDirectory: cwd,
-        workspaceGeneration: parent.thread.delegationWorkspaceGeneration ?? 0,
+        workspaceGeneration,
+      };
+      const assertStartable = (): void => {
+        if (closed || isTerminalTaskState(task.record.state) || task.quarantineWorkspace) {
+          throw new Error('Delegated task ended before execution could start');
+        }
+        assertWorkspace();
       };
       const createWorker = async (): Promise<IExecutor> => {
+        assertStartable();
         if (!task.lane) {
           const acquired = await this.laneStore.acquire(identity);
           task.lane = acquired.lane;
+          if (task.settled || task.quarantineWorkspace) {
+            // Setup can finish after its deadline, but must never start a late
+            // worker or leave that acquisition resumable.
+            await this.laneStore.markDirty(acquired.lane.id, 'Worker setup completed after its task ended.', true).catch(() => undefined);
+          }
         }
         let worker: IExecutor | undefined;
         try {
+          assertStartable();
           worker = this.factory(this.guard, configuration, cwd, task.lane.executorThreadId,
             resolveThreadModel(parent.thread, configuration), parent.thread.efforts?.[backend],
             { lifecycleHooks: false, delegationWorker: true });
@@ -409,6 +486,7 @@ export class DelegationManager {
             throw new Error('Worker refused the delegated workspace; refusing a fallback directory');
           }
           await this.laneStore.markRunning(task.lane.id);
+          assertStartable();
           return worker;
         } catch (error) {
           // The factory either supplied an executor that final cleanup can stop,
@@ -440,10 +518,29 @@ export class DelegationManager {
         return discarded;
       };
       try {
-        if (task.record.state !== 'running') return;
+        if (isTerminalTaskState(task.record.state)) return;
         let result: ExecuteResult | undefined;
         for (let attempt = 0; attempt < 2; attempt++) {
-          const worker = await createWorker();
+          let setupPending = true;
+          const setup = createWorker().finally(() => { setupPending = false; });
+          let worker: IExecutor;
+          try {
+            worker = await deadline(() => setup, DELEGATION_LIMITS.storageTimeoutMs, 'Worker setup timed out');
+          } catch (error) {
+            if (setupPending) task.quarantineWorkspace = true;
+            throw error;
+          }
+          assertStartable();
+          if (task.record.startedAt === undefined) {
+            task.record.state = 'running';
+            task.record.startedAt = Date.now();
+            void save(task);
+            if (!reportProgress(task, { phase: 'started', objective: task.record.objective, startedAt: task.record.startedAt })) {
+              notify(() => parent.onToolUse({ id: task.record.id, name: 'Task', input: {
+                description: `${backend}: ${objective.slice(0, 120)}`, prompt: objective.slice(0, 1000), subagent_type: backend,
+              } }));
+            }
+          }
           // Native session IDs are distinct; policy was resolved against the real
           // parent thread before passing the synthetic worker identity to the factory.
           const execution = worker.execute(
@@ -508,6 +605,7 @@ ${prompt}`));
             });
           // Start the inactivity window only once the worker has accepted the
           // objective and can emit its first real progress callback.
+          task.signalDispatch();
           armIdleTimer(task);
           result = await Promise.race([task.interrupted, execution]);
           if (!result.success && attempt === 0 && worker.consumeSessionResumeFailure?.()) {
@@ -526,7 +624,7 @@ ${prompt}`));
           if (result.error) task.record.error = bounded(result.error, 4000).text;
         }
       } catch (error) {
-        if (task.record.state === 'running') {
+        if (!isTerminalTaskState(task.record.state)) {
           task.record.state = 'failed';
           task.record.error = bounded(error instanceof Error ? error.message : 'Worker failed', 4000).text;
         }
@@ -534,8 +632,9 @@ ${prompt}`));
       } finally {
         clearTaskTimer(task);
         clearTextProgress(task, true);
+        if (task.record.startedAt === undefined) task.discardLane = true;
         let released = !task.quarantineWorkspace;
-        try {
+        try { await deadline(async () => {
           if (task.stop) await task.stop;
           else if (task.executor) await deadline(() => destroyWorker(task.executor!), this.cleanupMs);
           else if (task.lane) {
@@ -561,29 +660,55 @@ ${prompt}`));
               console.warn('[Delegation] Worker lane could not be retained:', detail);
             }
           }
+        }, this.cleanupMs);
         } catch (error) {
           released = false;
           task.quarantineWorkspace = true;
           if (task.lane) {
             const detail = error instanceof Error ? error.message : 'Worker cleanup could not be confirmed';
-            await this.laneStore.markDirty(task.lane.id, detail).catch(() => undefined);
+            await deadline(() => this.laneStore.markDirty(task.lane!.id, detail), this.cleanupMs).catch(() => undefined);
           }
           task.record.state = 'interrupted';
           task.record.error = 'Worker cleanup could not be confirmed. This workspace is blocked until the worker is stopped and the CLI restarts.';
           console.warn('[Delegation] Worker cleanup failed:', error instanceof Error ? error.message : 'Cleanup failure');
         }
-        if (released) {
-          this.running--; this.workspaces.delete(cwd);
-        } else this.workspaces.set(cwd, `quarantined:${parent.thread.id}`);
-        task.record.finishedAt = Date.now();
-        await deadline(async () => { await save(task); await this.store.prune(); }, this.cleanupMs)
-          .catch(() => console.warn('[Delegation] Final task metadata could not be saved or pruned'));
-        if (!reportTerminalProgress(task)) {
-          notify(() => parent.onToolResult({ tool_use_id: task.record.id, content: JSON.stringify(view(task)), is_error: task.record.state !== 'succeeded' }));
-          notify(() => parent.onNotice(formatDelegationNotice(task.record)));
+        if (released && task.ownsSlot) {
+          task.ownsSlot = false;
+          this.running--;
+        } else if (!released) {
+          workspaceOwner.quarantined = true;
+          task.record.state = 'interrupted';
+          task.record.error = 'Worker cleanup could not be confirmed. This workspace is blocked until the worker is stopped and the CLI restarts.';
         }
-        task.settle();
+        await finishTask(task);
       }
+    };
+    const startTask = (task: Task): void => {
+      clearTimeout(task.queueTimer);
+      activeTask = task;
+      task.ownsSlot = true;
+      this.running++;
+      void run(task).catch(() => undefined);
+    };
+    const pump = (): void => {
+      if (closed || activeTask) return;
+      const queued = [...tasks.values()].filter(task => task.record.state === 'queued' && !task.finishUnstarted);
+      if (workspaceOwner.quarantined) {
+        for (const task of queued) void completeUnstarted(task, 'interrupted', 'Task was not started because the previous worker exit could not be confirmed.');
+        return;
+      }
+      const task = queued[0];
+      if (!task) return;
+      if (Date.now() >= task.record.acceptedAt! + this.timeouts.queueTimeoutMs) {
+        void completeUnstarted(task, 'timed_out', `Task was not started within ${formatDuration(this.timeouts.queueTimeoutMs)} of admission.`);
+        return;
+      }
+      try { assertWorkspace(); }
+      catch (error) {
+        void completeUnstarted(task, 'failed', bounded(error instanceof Error ? error.message : 'Workspace unavailable', 4000).text);
+        return;
+      }
+      if (this.running < DELEGATION_LIMITS.concurrent) startTask(task);
     };
     const invoke: DelegationHandler = async (name, args, callId) => {
       if (closed) throw new Error('Delegation turn has ended');
@@ -610,13 +735,15 @@ ${prompt}`));
               catch { readOnly = false; }
             }
             return { ...item, readOnly };
-          }), workspace: cwd, maxConcurrentChildren: 1 };
+          }), workspace: cwd, maxConcurrentChildren: 1,
+          maxTasksPerRequest: DELEGATION_LIMITS.launches, scheduling: 'serial',
+          queueTimeoutSeconds: this.timeouts.queueTimeoutMs / 1000 };
         }
         if (name === 'remote_cli_result') {
           const task = getTask(args.taskId);
           const seconds = args.waitSeconds ?? 25;
           if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0 || seconds > 25) throw new Error('waitSeconds must be between 0 and 25');
-          if (!task.record.finishedAt && seconds > 0) {
+          if (task.record.finishedAt === undefined && seconds > 0) {
             let timer: ReturnType<typeof setTimeout> | undefined;
             try { await Promise.race([task.done, new Promise<void>(resolve => { timer = setTimeout(resolve, seconds * 1000); })]); }
             finally { clearTimeout(timer); }
@@ -630,8 +757,6 @@ ${prompt}`));
         }
         if (name !== 'remote_cli_delegate') throw new Error('Unknown delegation tool');
         if (!acceptingResults) throw new Error('The coordinator execution has ended');
-        if (starting || [...tasks.values()].some(task => !task.record.finishedAt)) throw new Error('Wait for the current delegated task before starting another');
-        if (launches >= DELEGATION_LIMITS.launches) throw new Error('Delegated task limit reached');
         if (!DELEGATION_BACKENDS.includes(args.backend as DelegationBackend)) throw new Error('Unsupported worker backend');
         if (typeof args.objective !== 'string' || !args.objective.trim() || args.objective.length > 24_000) throw new Error('objective must contain 1 to 24000 characters');
         const objective = args.objective;
@@ -640,64 +765,76 @@ ${prompt}`));
         const backend = args.backend as DelegationBackend;
         const configuration = workerConfiguration(parent.config, this.guard, parent.thread.id, parent.backend, backend, mode);
         launchRevision++;
-        starting = true;
-        try {
-          const available = await this.registry.get(backend, parent.config);
+        admissions++;
+        const discovery = this.registry.get(backend, parent.config);
+        void discovery.catch(() => undefined);
+        // Serialize admission, not worker execution. Replayed calls share the
+        // original promise; simultaneous new calls cannot overdraw the quota.
+        const admitted = admissionTail.then(async (): Promise<Task> => {
+          if (closed) throw new Error('Delegation turn has ended');
+          if (launches >= DELEGATION_LIMITS.launches) throw new Error('Delegated task limit reached');
+          const available = await discovery;
           if (!available.installed) throw new Error(`${backend}: ${available.reason}`);
           await deadline(() => this.store.initialize(), DELEGATION_LIMITS.storageTimeoutMs, 'Task record initialization timed out');
           if (closed) throw new Error('Delegation turn has ended');
-          if (this.running >= DELEGATION_LIMITS.concurrent
-            || [...this.workspaces.keys()].some(active => workspacesOverlap(active, cwd))
+          const first = !activeTask && ![...tasks.values()].some(task => !task.settled);
+          if ((first && this.running >= DELEGATION_LIMITS.concurrent)
+            || workspaceOwner.quarantined
+            || [...this.workspaces].some(([active, owner]) => owner !== workspaceOwner && workspacesOverlap(active, cwd))
             || parent.isWorkspaceBusy?.(cwd)) throw new Error('Delegation capacity or workspace is busy; wait before retrying');
-          launches++; this.running++; this.workspaces.set(cwd, parent.thread.id);
-          let settle!: () => void;
+          this.workspaces.set(cwd, workspaceOwner);
+          assertWorkspace();
+          launches++;
+          let resolveDone!: () => void;
+          let resolveDispatch!: () => void;
           let interrupt!: () => void;
           const interrupted = new Promise<ExecuteResult>(resolve => { interrupt = () => resolve({ success: false }); });
           const task: Task = { record: { id: randomUUID(), threadId: parent.thread.id,
             parentMessageId: parent.messageId, backend, objective: objective.slice(0, 1000),
-            state: 'running', startedAt: Date.now() }, resultDelivered: false,
+            state: 'queued', acceptedAt: Date.now() }, configuration, objective,
+            resultDelivered: false, settled: false, ownsSlot: first,
             textProgressEnabled: parent.onTextProgress !== undefined,
-            activeToolIds: new Set(), done: new Promise<void>(resolve => { settle = resolve; }), settle, interrupted, interrupt };
-          tasks.set(task.record.id, task);
+            activeToolIds: new Set(), done: new Promise<void>(resolve => { resolveDone = resolve; }),
+            dispatched: new Promise<void>(resolve => { resolveDispatch = resolve; }), signalDispatch: () => resolveDispatch(),
+            settle: () => { if (task.settled) return; task.settled = true; resolveDone(); resolveDispatch(); }, interrupted, interrupt };
+          if (first) { activeTask = task; this.running++; }
           try {
             await deadline(() => this.store.write(task.record), DELEGATION_LIMITS.storageTimeoutMs, 'Initial task record write timed out');
           } catch (error) {
-            tasks.delete(task.record.id);
-            this.running--;
-            this.workspaces.delete(cwd);
+            if (task.ownsSlot) { this.running--; task.ownsSlot = false; activeTask = undefined; }
             launches--;
             task.settle();
             throw error;
           }
-          try {
-            const lane = await this.laneStore.acquire({
-              threadId: parent.thread.id,
-              backend,
-              workingDirectory: cwd,
-              workspaceGeneration: parent.thread.delegationWorkspaceGeneration ?? 0,
-            });
-            task.lane = lane.lane;
-          } catch (error) {
-            task.record.state = 'failed';
-            task.record.error = bounded(error instanceof Error ? error.message : 'Worker lane storage failed', 4000).text;
-            task.record.finishedAt = Date.now();
-            await this.store.write(task.record).catch(() => undefined);
-            tasks.delete(task.record.id);
-            this.running--;
-            this.workspaces.delete(cwd);
-            launches--;
-            task.settle();
-            throw error;
+          // The durable queued record is the acceptance boundary. Every task
+          // after it consumes quota, including setup failures and cancellation.
+          tasks.set(task.record.id, task);
+          if (closed) {
+            if (task.ownsSlot) { this.running--; task.ownsSlot = false; activeTask = undefined; }
+            await completeUnstarted(task, 'cancelled', 'Cancelled before the worker started.');
+          } else if (task.ownsSlot) {
+            void run(task).catch(() => undefined);
+          } else {
+            armQueueTimer(task);
+            notify(() => parent.onNotice(`\n\n⏳ ${backend} delegated task ${task.record.id.slice(0, 8)} queued. It will start after earlier tasks finish; queue wait is limited to ${formatDuration(this.timeouts.queueTimeoutMs)}.\n\n`));
+            pump();
           }
-          if (closed) { task.record.state = 'cancelled'; }
-          if (!reportProgress(task, { phase: 'started', objective: task.record.objective, startedAt: task.record.startedAt })) {
-            notify(() => parent.onToolUse({ id: task.record.id, name: 'Task', input: {
-                description: `${backend}: ${objective.slice(0, 120)}`, prompt: objective.slice(0, 1000), subagent_type: backend,
-            } }));
-          }
-          void run(task, configuration, objective).catch(() => undefined);
-          return receive(task, requestedDuring);
-        } finally { starting = false; }
+          return task;
+        });
+        admissionTail = admitted.catch(() => undefined);
+        let task: Task;
+        try { task = await admitted; }
+        finally {
+          admissions--;
+          releaseWorkspaceIfIdle();
+          for (const start of this.pumps) start();
+        }
+        if (task.ownsSlot) {
+          // Preserve the existing first-task response after dispatch/setup,
+          // without holding up admission of followers while setup is pending.
+          await task.dispatched;
+        }
+        return receive(task, requestedDuring);
       })();
       calls.set(callId, { signature, result });
       return result;
@@ -705,7 +842,7 @@ ${prompt}`));
     const scope: DelegationScope = {
       invoke,
       isClosed: () => closed,
-      hasTasks: () => starting || tasks.size > 0,
+      hasTasks: () => admissions > 0 || tasks.size > 0,
       getLaunchRevision: () => launchRevision,
       beginExecution: (taskIds = []) => {
         if (closed) throw new Error('Delegation was cancelled');
@@ -713,7 +850,7 @@ ${prompt}`));
         acceptingResults = true;
         stagedResults.clear();
         for (const id of taskIds) {
-          if (tasks.get(id)?.record.finishedAt) stagedResults.add(id);
+          if (tasks.get(id)?.record.finishedAt !== undefined) stagedResults.add(id);
         }
       },
       finishExecution: success => {
@@ -723,9 +860,9 @@ ${prompt}`));
         }
         stagedResults.clear();
       },
-      hasPendingResults: () => starting || [...tasks.values()].some(task => !task.resultDelivered && !stagedResults.has(task.record.id)),
+      hasPendingResults: () => admissions > 0 || [...tasks.values()].some(task => !task.resultDelivered && !stagedResults.has(task.record.id)),
       getRetainedResults: () => boundedResults([...tasks.values()]
-        .filter(task => task.record.finishedAt && !task.resultDelivered).map(view)),
+        .filter(task => task.record.finishedAt !== undefined && !task.resultDelivered).map(view)),
       collectPendingResults: async () => {
         if (closed) throw new Error('Delegation was cancelled');
         // The caller disables the bridge first, so no new calls can escape this
@@ -737,14 +874,18 @@ ${prompt}`));
         if (closed) throw new Error('Delegation was cancelled');
         return boundedResults(pending.map(view));
       },
-      waitingExecutor: () => [...tasks.values()].find(task => task.executor?.isWaitingInput?.())?.executor,
+      waitingExecutor: () => !closed && activeTask?.record.state === 'running' && activeTask.executor?.isWaitingInput?.()
+        ? activeTask.executor : undefined,
       close: async () => {
         closed = true;
+        this.pumps.delete(pump);
         await Promise.allSettled([...tasks.values()].map(cancel));
+        releaseWorkspaceIfIdle();
         // A version probe may still be pending. Its closed check prevents launch.
         if (this.scopes.get(parent.thread.id) === scope) this.scopes.delete(parent.thread.id);
       },
     };
+    this.pumps.add(pump);
     this.scopes.set(parent.thread.id, scope);
     return scope;
   }
@@ -807,7 +948,7 @@ ${prompt}`));
   blocksWorkspace(cwd: string, threadId: string): boolean {
     if (this.workspaces.size === 0) return false;
     const canonical = fs.realpathSync(cwd);
-    return [...this.workspaces].some(([active, owner]) => owner !== threadId && workspacesOverlap(active, canonical));
+    return [...this.workspaces].some(([active, owner]) => (owner.quarantined || owner.threadId !== threadId) && workspacesOverlap(active, canonical));
   }
   async cancelThread(threadId: string): Promise<void> { await this.scopes.get(threadId)?.close(); }
   async destroy(): Promise<void> { await Promise.allSettled([...this.scopes.values()].map(scope => scope.close())); }

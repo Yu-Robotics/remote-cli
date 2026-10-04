@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.129] - 2026-10-04
+
+### Added
+- Accept multiple independent delegated tasks within one coordinator request and execute them in FIFO order, with honest queued status, individual cancellation, bounded queue waits, cumulative admission limits, and automatic collection of all results. Retain workspace ownership through the queue and require confirmed worker exit and reusable session metadata before advancing. Preserve native backend behavior and the existing Router protocol.
+
+### Fixed
+- Keep queued diagnostic records out of live terminal pruning and reconcile them as interrupted after a CLI restart without replaying work.
+
 ## [1.6.128] - 2026-10-04
 
 ### Changed

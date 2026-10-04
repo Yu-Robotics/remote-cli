@@ -476,6 +476,83 @@ describe('delegation in the existing thread workflow', () => {
     expect(main.execute).toHaveBeenCalledOnce();
   });
 
+  it('collects every accepted task before continuation and keeps the next user message queued', async () => {
+    let finishFirst!: (result: ExecuteResult) => void;
+    let finishSecond!: (result: ExecuteResult) => void;
+    let queuedId!: string;
+    worker.execute.mockImplementationOnce(() => new Promise(resolve => { finishFirst = resolve; }));
+    const secondWorker = { ...worker, execute: vi.fn(() => new Promise(resolve => { finishSecond = resolve; })),
+      abort: vi.fn(async () => true), destroy: vi.fn(async () => undefined), waitForExit: vi.fn(async () => undefined) };
+    const factory = vi.fn().mockReturnValueOnce(worker).mockReturnValueOnce(secondWorker);
+    (handler as any).delegation = new DelegationManager(new DirectoryGuard([home]), factory,
+      new BackendRegistry(async () => 'test 1.0'));
+    main.execute.mockImplementationOnce(async (_prompt: string, options: ExecuteOptions) => {
+      await call('remote_cli_delegate', { backend: 'claude', objective: 'First independent review' });
+      const second = await call('remote_cli_delegate', { backend: 'agy', objective: 'Second independent review' });
+      expect(second.state).toBe('queued');
+      queuedId = second.taskId;
+      options.onStream?.('Premature summary of all reviews');
+      return { success: true };
+    }).mockImplementationOnce(async (prompt: string, options: ExecuteOptions) => {
+      expect(prompt).toContain('First authentication failure');
+      expect(prompt).toContain('Second verified result');
+      expect(prompt).toContain(queuedId);
+      expect(prompt).not.toContain('Original request with attachment');
+      expect(options.attachments).toBeUndefined();
+      options.onStream?.('Combined review conclusion');
+      return { success: true, output: 'Combined review conclusion' };
+    });
+    const active = handler.handleMessage({ ...message('parent', 'Original request with attachment'),
+      attachments: [{ type: 'image' as const, data: 'aW1hZ2U=', mimeType: 'image/png' }] });
+    await vi.waitFor(() => expect(queuedId).toBeTypeOf('string'));
+    expect(factory).toHaveBeenCalledOnce();
+    expect(responseFor('parent')).toBeUndefined();
+    await handler.handleMessage(message('next', 'Next independent user request'));
+    const confirmation = responseFor('next').queueConfirmation;
+    await handler.handleMessage(message('confirm', `/queue confirm ${confirmation.id}`));
+    finishFirst({ success: false, error: 'First authentication failure' });
+    await vi.waitFor(() => expect(secondWorker.execute).toHaveBeenCalledOnce());
+    expect(worker.waitForExit).toHaveBeenCalledOnce();
+    expect(main.execute).toHaveBeenCalledOnce();
+    expect(pool.isThreadBusy(threads.getDefaultThread().id)).toBe(true);
+    finishSecond({ success: true, output: 'Second verified result' });
+    await active;
+    await vi.waitFor(() => expect(responseFor('next')?.success).toBe(true));
+    expect(main.execute).toHaveBeenCalledTimes(3);
+    expect(factory).toHaveBeenCalledTimes(2);
+    expect(responseFor('parent')).toMatchObject({ success: true });
+    const text = socket.send.mock.calls.map(([value]: any[]) => value)
+      .filter((value: any) => value.messageId === 'parent' && value.streamType === 'text');
+    expect(JSON.stringify(text)).toContain('Combined review conclusion');
+    expect(JSON.stringify(text)).not.toContain('Premature summary of all reviews');
+  });
+
+  it.each(['abort', 'shutdown', 'failure'] as const)('never starts a queued sibling after coordinator %s', async action => {
+    let queuedId!: string;
+    worker.execute.mockImplementationOnce(() => new Promise(() => undefined));
+    const factory = vi.fn(() => worker);
+    (handler as any).delegation = new DelegationManager(new DirectoryGuard([home]), factory,
+      new BackendRegistry(async () => 'test 1.0'));
+    main.execute.mockImplementationOnce(async () => {
+      await call('remote_cli_delegate', { backend: 'claude', objective: 'Active review' });
+      queuedId = (await call('remote_cli_delegate', { backend: 'agy', objective: 'Queued review' })).taskId;
+      return action === 'failure' ? { success: false, error: 'Coordinator failure' } : { success: true };
+    });
+    const active = handler.handleMessage(message('parent', 'Review independently'));
+    await vi.waitFor(() => expect(queuedId).toBeTypeOf('string'));
+    if (action === 'abort') await handler.handleMessage(message('abort', '/abort'));
+    else if (action === 'shutdown') await handler.destroy();
+    await active;
+    expect(factory).toHaveBeenCalledOnce();
+    expect(worker.abort).toHaveBeenCalledOnce();
+    expect(worker.destroy).toHaveBeenCalledOnce();
+    expect(main.execute).toHaveBeenCalledOnce();
+    expect(responseFor('parent').success).toBe(false);
+    const record = JSON.parse(fs.readFileSync(path.join(home, '.remote-cli', 'delegation', `${queuedId}.json`), 'utf8'));
+    expect(record).toMatchObject({ state: 'cancelled' });
+    expect(record.startedAt).toBeUndefined();
+  });
+
   it('waits for a verbose worker and resumes the coordinator with its conclusion before draining the queue', async () => {
     await handler.handleMessage(message('enable', '/delegation on'));
     fs.writeFileSync(path.join(home, 'stale.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+cZYsAAAAASUVORK5CYII=', 'base64'));

@@ -428,8 +428,10 @@ describe('cross-backend delegation', () => {
       store, 1000, 10_000, laneStore);
     const scope = manager.begin(parent);
 
-    await expect(scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' }, 'start'))
-      .rejects.toThrow('Lane disk is full');
+    const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' }, 'start');
+    expect(task).toMatchObject({ state: 'failed', error: 'Lane disk is full' });
+    await expect(scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result'))
+      .resolves.toMatchObject({ state: 'failed', error: 'Lane disk is full' });
 
     const files = fs.readdirSync(path.join(home, '.remote-cli', 'delegation'));
     expect(files).toHaveLength(1);
@@ -795,7 +797,7 @@ describe('cross-backend delegation', () => {
     await expect(scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Next' }, 'next')).rejects.toThrow('busy');
   });
 
-  it('refuses overlapping workers and waits for a managed thread using the same workspace', async () => {
+  it('queues same-request followers while refusing overlapping work from other threads', async () => {
     vi.mocked(worker.execute).mockImplementation(() => new Promise(() => undefined));
     const scope = manager.begin(parent);
     const other = manager.begin({ ...parent, thread: { ...parent.thread, id: 'other' } });
@@ -803,8 +805,11 @@ describe('cross-backend delegation', () => {
     const nested = path.join(home, 'nested'); fs.mkdirSync(nested);
     expect(manager.blocksWorkspace(nested, 'other')).toBe(true);
     expect(manager.blocksWorkspace(path.dirname(home), 'other')).toBe(true);
-    await expect(scope.invoke('remote_cli_delegate', { backend: 'claude', objective: 'Work' }, 'duplicate')).rejects.toThrow('current delegated');
+    const queued: any = await scope.invoke('remote_cli_delegate', { backend: 'pi', objective: 'Work' }, 'follower');
+    expect(queued.state).toBe('queued');
+    expect(factory).toHaveBeenCalledTimes(1);
     await expect(other.invoke('remote_cli_delegate', { backend: 'pi', objective: 'Work' }, 'conflict')).rejects.toThrow('busy');
+    await scope.invoke('remote_cli_cancel', { taskId: queued.taskId }, 'cancel-queued');
     await scope.invoke('remote_cli_cancel', { taskId: task.taskId }, 'cancel');
     await scope.close();
     const busy = manager.begin({ ...parent, isWorkspaceBusy: () => true });

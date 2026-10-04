@@ -16,19 +16,24 @@ describe('delegation record lifecycle', () => {
     const store = new DelegationStore(directory);
     await store.initialize();
     const active = record(); await store.write(active);
+    const queued = record({ state: 'queued', acceptedAt: Date.now(), startedAt: undefined }); await store.write(queued);
     const done = record({ state: 'succeeded', output: 'result' }); await store.write(done);
     const restored = new DelegationStore(directory); await restored.initialize();
     expect(JSON.parse(await fs.readFile(path.join(directory, `${active.id}.json`), 'utf8'))).toMatchObject({ state: 'interrupted' });
+    expect(JSON.parse(await fs.readFile(path.join(directory, `${queued.id}.json`), 'utf8'))).toMatchObject({ state: 'interrupted', acceptedAt: queued.acceptedAt });
+    expect(JSON.parse(await fs.readFile(path.join(directory, `${queued.id}.json`), 'utf8')).startedAt).toBeUndefined();
     expect(JSON.parse(await fs.readFile(path.join(directory, `${done.id}.json`), 'utf8'))).toMatchObject({ state: 'succeeded', output: 'result' });
   });
 
   it('bounds retained terminal records during a long-running CLI and keeps active work', async () => {
     const store = new DelegationStore(directory); await store.initialize();
     const active = record({ startedAt: Date.now() - 10000 }); await store.write(active);
+    const queued = record({ state: 'queued', acceptedAt: Date.now() - 8 * 86400_000, startedAt: undefined }); await store.write(queued);
     for (let i = 0; i < 205; i++) await store.write(record({ state: 'succeeded', startedAt: Date.now() - i }));
     await store.prune();
-    expect((await fs.readdir(directory)).filter(name => name.endsWith('.json'))).toHaveLength(201);
+    expect((await fs.readdir(directory)).filter(name => name.endsWith('.json'))).toHaveLength(202);
     expect(JSON.parse(await fs.readFile(path.join(directory, `${active.id}.json`), 'utf8')).state).toBe('running');
+    expect(JSON.parse(await fs.readFile(path.join(directory, `${queued.id}.json`), 'utf8')).state).toBe('queued');
   });
 
   it('deletes only records owned by the deleted thread and keeps the last serialized write', async () => {
