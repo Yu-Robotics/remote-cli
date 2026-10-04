@@ -74,6 +74,9 @@ describe('standalone maintenance cards', () => {
     await cards.receiveNotice({ ...notice(), noticeKey: 'invalid' }, 'device-fixture', () => true);
     await cards.receiveNotice({ ...notice(), page: { ...notice().page, sections: [{ version: '1.6.125', text: 'x'.repeat(25000) }] } }, 'device-fixture', () => true);
     await cards.receiveNotice({ ...notice(), page: { ...notice().page, offset: 1 } }, 'device-fixture', () => true);
+    for (const details of [123, null, { text: '- A feature' }, 'x'.repeat(25000)]) {
+      await cards.receiveNotice({ ...notice(), page: { ...notice().page, sections: [{ version: '1.6.125', text: '- Summary', details }] } }, 'device-fixture', () => true);
+    }
     expect(deps.create).not.toHaveBeenCalled();
     await cards.receiveNotice(notice(), 'device-fixture', () => true); const record = (await receipts.find('device-fixture', key))!;
     await cards.view('owner-fixture', record.id, record.cardId, 1, () => () => true); const request = deps.send.mock.calls.at(-1)[1];
@@ -141,6 +144,80 @@ describe('standalone maintenance cards', () => {
     expect(elements.some(e => e.tag === 'collapsible_panel' && e.expanded === false && e.elements.some((b: any) => b.tag === 'markdown'))).toBe(true);
     expect(elements.some(e => e.tag === 'button' && e.behaviors[0].value.offset === 1)).toBe(true);
     expect(Buffer.byteLength(JSON.stringify(elements))).toBeLessThan(32 * 1024);
+  });
+  it('shows localized summaries directly while collapsing only technical details, including requested pages', async () => {
+    const summary = '### \u66f4\u65b0\n- \u529f\u80fd\u6539\u5584';
+    const section = { version: '1.6.125', text: summary, details: '### Fixed\n- Technical implementation details' };
+    const message = { ...notice(), page: { ...notice().page, sections: [section] } };
+    await cards.receiveNotice(message, 'device-fixture', () => true);
+    const verify = (elements: any[]) => {
+      expect(elements.filter(e => e.tag === 'markdown').some(e => e.content.includes(summary))).toBe(true);
+      expect(elements.filter(e => e.tag === 'markdown').some(e => e.content.includes(section.details))).toBe(false);
+      const panels = elements.filter(e => e.tag === 'collapsible_panel');
+      expect(panels).toHaveLength(1);
+      expect(panels[0]).toMatchObject({ expanded: false, elements: [{ tag: 'markdown', content: section.details }] });
+    };
+    verify(deps.create.mock.calls[0][1]);
+    expect(deps.send).toHaveBeenCalledWith('device-fixture', expect.objectContaining({ type: 'update_notice_ack' }));
+    const receipt = (await receipts.find('device-fixture', key))!;
+    await cards.view('owner-fixture', receipt.id, receipt.cardId, 1, () => () => true);
+    const request = deps.send.mock.calls.at(-1)[1];
+    await cards.receivePage({ ...message, type: 'update_notice_page', requestId: request.requestId,
+      page: { ...message.page, offset: 1, nextOffset: undefined } }, 'device-fixture');
+    verify(deps.update.mock.calls[0][1]);
+    // Older CLI sections retain the original collapsed presentation.
+    const legacyElements = updateNoticeElements({ ...message, page: { ...message.page, sections: [{ version: section.version, text: section.text }] } } as any, key);
+    expect(legacyElements.filter(e => e.tag === 'collapsible_panel')[0]).toMatchObject({
+      expanded: false, elements: [{ tag: 'markdown', content: summary }],
+    });
+  });
+  it('shows a full-range overview above collapsed version records on initial delivery and later pages', async () => {
+    const overview = { totalGroups: 2, totalItems: 2, groups: [
+      { topic: 'feature', title: 'Feature', items: ['A visible change'] },
+      { topic: 'older', title: 'Older feature', items: ['A change outside the current page'] },
+    ] };
+    const message = { ...notice(), page: { ...notice().page, overview,
+      sections: [{ version: '1.6.125', text: '- Original summary', details: '- Original technical detail' }] } };
+    await cards.receiveNotice(message, 'device-fixture', () => true);
+    const verify = (elements: any[]) => {
+      const visible = elements.filter(e => e.tag === 'markdown').map(e => e.content).join('\n');
+      expect(visible).toContain('A visible change'); expect(visible).toContain('A change outside the current page');
+      expect(visible).not.toContain('Original summary'); expect(visible).not.toContain('Original technical detail');
+      const panels = elements.filter(e => e.tag === 'collapsible_panel');
+      expect(panels).toHaveLength(1); expect(panels[0].expanded).toBe(false);
+      expect(panels[0].elements.map((e: any) => e.content).join('\n')).toContain('Original summary');
+      expect(panels[0].elements.map((e: any) => e.content).join('\n')).toContain('Original technical detail');
+    };
+    verify(deps.create.mock.calls[0][1]);
+    const receipt = (await receipts.find('device-fixture', key))!;
+    await cards.view('owner-fixture', receipt.id, receipt.cardId, 1, () => () => true);
+    const request = deps.send.mock.calls.at(-1)[1];
+    await cards.receivePage({ ...message, type: 'update_notice_page', requestId: request.requestId,
+      page: { ...message.page, offset: 1, nextOffset: undefined } }, 'device-fixture');
+    verify(deps.update.mock.calls[0][1]);
+    const truncated = updateNoticeElements({ ...message, page: { ...message.page, overview: { ...overview, totalItems: 20 } } } as any, key);
+    expect(truncated.some(e => e.tag === 'markdown' && e.content.includes('2 of 20 unique changes'))).toBe(true);
+  });
+  it('rejects malformed or oversized overviews without sending a delivery acknowledgement', async () => {
+    const group = { topic: 'feature', title: 'Feature', items: ['A change'] };
+    const valid = { totalGroups: 1, totalItems: 1, groups: [group] };
+    const invalid = [null, {}, { ...valid, groups: [] }, { ...valid, groups: Array(7).fill(group) },
+      { ...valid, totalGroups: 0 }, { ...valid, totalGroups: 1.5 }, { ...valid, totalItems: 0 }, { ...valid, totalItems: 1.5 },
+      { ...valid, groups: [null] }, { ...valid, groups: [{ ...group, topic: 123 }] }, { ...valid, groups: [{ ...group, topic: 'Invalid topic' }] },
+      { ...valid, groups: [{ ...group, title: 123 }] }, { ...valid, groups: [{ ...group, title: ' Feature' }] }, { ...valid, groups: [{ ...group, title: '' }] },
+      { ...valid, groups: [{ ...group, title: 'x'.repeat(81) }] }, { ...valid, groups: [{ ...group, title: '*Feature*' }] },
+      { ...valid, groups: [{ ...group, items: null }] }, { ...valid, groups: [{ ...group, items: [] }] },
+      { ...valid, groups: [{ ...group, items: Array(13).fill('A change') }] }, { ...valid, groups: [{ ...group, items: [123] }] },
+      { ...valid, groups: [{ ...group, items: [' Change'] }] }, { ...valid, groups: [{ ...group, items: [''] }] },
+      { ...valid, groups: [{ ...group, items: ['Two\nlines'] }] }, { ...valid, groups: [{ ...group, items: ['x'.repeat(2049)] }] },
+      { ...valid, totalItems: 2, groups: [{ ...group, items: ['A change', 'A change'] }] },
+      { totalGroups: 2, totalItems: 2, groups: [group, group] },
+      { ...valid, groups: [{ ...group, items: ['A change', 'Another change'] }] },
+      { totalGroups: 2, totalItems: 13, groups: [{ ...group, items: Array.from({ length: 12 }, (_, n) => `Fix ${n}`) }, { ...group, topic: 'other' }] },
+      { ...valid, totalItems: 4, groups: [{ ...group, items: Array.from({ length: 4 }, (_, n) => 'x'.repeat(2000) + n) }] },
+    ];
+    for (const overview of invalid) await cards.receiveNotice({ ...notice(), page: { ...notice().page, overview } }, 'device-fixture', () => true);
+    expect(deps.create).not.toHaveBeenCalled(); expect(deps.send).not.toHaveBeenCalled();
   });
   it('fails closed on corrupt receipt stores, preventing publication without durable deduplication', async () => {
     await fs.writeFile(path.join(directory, 'receipts.json'), '{broken');

@@ -7,6 +7,7 @@ import { EventEmitter } from 'events';
 import WebSocket from 'ws';
 import { WebSocketClient } from '../../src/client/WebSocketClient';
 import { CLI_VERSION, PROTOCOL_VERSION } from '../../src/types';
+import { buildReleaseIndex, releasePage } from '../../src/maintenance/ReleaseNotes';
 
 vi.mock('ws');
 
@@ -57,6 +58,18 @@ describe('CLI wire compatibility', () => {
     expect(registration.data.capabilities.subscriptionInspection).toBeUndefined();
     expect(registration.data.capabilities.queueStarted).toBe(true);
     disabled.disconnect();
+  });
+
+  it('sends localized Markdown through the existing release-page fields with additive technical details', () => {
+    const summary = '### \u66f4\u65b0\n- \u529f\u80fd\u6539\u5584';
+    const index = buildReleaseIndex('## 1.6.124\n- Technical detail', '1.6.124', `## 1.6.124\n${summary.replace('- ', '- [feature|Feature] ')}`);
+    const message = { type: 'update_notice', noticeKey: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      fromVersion: '1.6.123', toVersion: '1.6.124', page: releasePage(index, '1.6.123', '1.6.124') };
+    client.send(message);
+    expect(JSON.parse(socket.send.mock.calls.at(-1)![0])).toEqual(message);
+    expect(message.page.sections[0]).toEqual({ version: '1.6.124', text: summary, details: '- Technical detail' });
+    expect(message.page.overview).toMatchObject({ totalItems: 1, totalGroups: 1, groups: [{ topic: 'feature' }] });
+    expect(PROTOCOL_VERSION).toBe(1);
   });
 
   it.each([
