@@ -9,7 +9,7 @@ export interface ReleaseOverview {
 }
 
 export function validReleaseChanges(value: unknown): value is ReleaseChange[] {
-  return Array.isArray(value) && value.length >= 1 && value.length <= 3 && value.every(change =>
+  return Array.isArray(value) && value.length >= 1 && value.length <= 6 && value.every(change =>
     change && typeof change.topic === 'string' && /^[a-z][a-z0-9-]{0,39}$/.test(change.topic)
     && typeof change.title === 'string' && change.title.trim() === change.title && change.title.length > 0
     && Array.from(change.title).length <= 80 && !/[\r\n\[\]<>|*\x60]/.test(change.title)

@@ -19,7 +19,7 @@ This is a **strictly enforced** rule - unapproved Chinese text must not be added
 
 - Keep `CHANGELOG.md` as the English technical record and `RELEASE_NOTES_ZH.md` as the concise Chinese upgrade summary.
 - Every new release must have a matching, nonempty version entry in both files. The CLI build validates both documents before packaging.
-- Each user summary must contain one short `###` heading and one to three single-line bullets describing user-visible changes, not internal implementation details. Keep each summary within 2 KiB.
+- Each user summary must contain one short `###` heading and one to six single-line bullets describing user-visible changes, not internal implementation details. Keep each summary within 2 KiB.
 - Prefix each bullet with `[topic-id|Display title]`, using a stable English feature identifier and a stable user-facing title. The build strips this metadata from display Markdown and validates consistent titles across releases.
 - Bundle summaries with their English technical details at build time; do not fetch, translate, or summarize them with a model at runtime.
 - Aggregate the entire per-device upgrade range by feature and deduplicate identical items only. Preserve distinct changes in version details. Bound the overview and report omissions explicitly; never aggregate only the current detail page.

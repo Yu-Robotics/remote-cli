@@ -10,80 +10,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
-## [1.6.133] - 2026-10-04
+## [1.6.134] - 2026-10-04
+
+This stage summary consolidates confirmed source changes from 1.6.90 through 1.6.133, including Git-confirmed changes whose per-version notes were missing. It replaces the available entries in that range, not Git history, and is not a complete npm publication ledger. Version 1.6.134 reorganizes release documents, synchronizes package versions, and permits up to six summary bullets in build-time and bundled-artifact validation; backend execution and Router behavior are unchanged.
 
 ### Added
-- Show each managed delegated worker's own model and reasoning effort as a compact gray note outside its collapsed activity details, matching the final reply footer. Keep the existing card layout and optional protocol-v1 fields compatible with legacy peers.
-- Capture worker metadata per execution attempt, update it from cached backend reports, and retain the final snapshot in bounded task results before process cleanup. Never substitute coordinator settings, attribute queued tasks, or issue extra model requests.
-
-## [1.6.132] - 2026-10-04
-
-### Added
-- Attach bounded, request-scoped model and reasoning-effort metadata to AI execution responses and terminal task recovery. Distinguish backend reports, configured selections, defaults, and unavailable values without extra model requests or changing backend selection.
-- Show a compact gray execution note below Completed and above the thread-switch panel on the final reply card. Preserve it through long-output splitting and thread-button refresh; legacy peers and local control commands retain their existing display.
-
-## [1.6.131] - 2026-10-04
-
-### Changed
-- Raise the shared CLI starting/running worker limit from three to five. Git-backed requests can run five isolated workers concurrently; additional accepted tasks remain queued. Non-Git directories still execute one worker at a time, and the cumulative 12-task limit is unchanged.
-
-## [1.6.130] - 2026-10-04
-
-### Added
-- Run managed Git workers concurrently in reusable per-lane worktrees with bounded snapshots of staged, unstaged, and nonignored untracked input. Preserve native conversation identity while refreshing each task's checkout to an explicit baseline; keep non-Git shared directories on code-enforced FIFO scheduling.
-- Preserve immutable worker artifacts under private Git references and expose explicit revision-guarded inspection, integration, or retention. Preflight conflicts in a separate recovery worktree and preserve before/target snapshots for incomplete file applications; applying changes never stages, commits, or pushes the delivery workspace. Pending or unknown dirty work prevents lane reuse. Validate captured tree limits after Git filters and both rename endpoints against selected-directory scope.
-
-### Fixed
-- Refuse ambiguous plain-text replies when multiple workers require input; retain request-specific approval routing and the existing Router protocol.
-
-## [1.6.129] - 2026-10-04
-
-### Added
-- Accept multiple independent delegated tasks within one coordinator request and execute them in FIFO order, with honest queued status, individual cancellation, bounded queue waits, cumulative admission limits, and automatic collection of all results. Retain workspace ownership through the queue and require confirmed worker exit and reusable session metadata before advancing. Preserve native backend behavior and the existing Router protocol.
-
-### Fixed
-- Keep queued diagnostic records out of live terminal pruning and reconcile them as interrupted after a CLI restart without replaying work.
-
-## [1.6.128] - 2026-10-04
+- Integrate DeepSeek Harness (DSH) through its native persistent ACP server, with model and reasoning-effort controls, cancellation, permission prompts, context reporting when available, and isolated coordinator/worker sessions. Keep native capability boundaries: images require advertised support, and unsupported interactive slash commands, plan mode, and elicitation do not fall back to another backend.
+- Preserve DSH session pointers across backend switches and restarts. Recover explicitly non-resumable sessions with an honest fresh-session notice; retain pointers on authentication, provider, network, rate-limit, timeout, or directory-mismatch failures. Summarize-then-reset compaction uses a private, durable handoff rather than claiming native transcript compaction, and refuses to summarize unavailable original context.
+- Show DSH official recharge and bonus wallet balances in `/status` when native account authentication makes them available. Retain native precision and currency, distinguish balances from token usage or plan quota, and use a short-lived account-query process without creating a model turn or changing the ACP conversation.
+- Receive file attachments up to 20 MiB through explicit device enrollment and a same-Router HTTPS download path. Transfer file bytes from Feishu to a private Router spool and CLI staging area; WebSocket messages contain only bounded references, hashes, sizes, and authorization metadata. Enforce authenticated device ownership, actual byte limits, hashes, deadlines, storage quotas, and explicit failure feedback without weakening legacy text/image support.
+- Extract bounded previews from text/code, CSV, JSON, YAML, textual PDF, DOCX main-body text, and XLSX cells, retaining page/sheet/cell provenance. Keep parsing off the control event loop, bound expanded archives and output, and never execute macros or formulas. OCR, protected documents, legacy Office formats, and general archive extraction remain unsupported; saved, parsed, partial, and unsupported outcomes stay distinct.
+- Stage files for a subsequent instruction or a reply to their status card, including instructions with images, rather than starting a model task on file upload alone. Pin queued attachments, bind references to the admitted device/thread/directory, expose `/files` and `/files clear`, and preserve active references during cleanup. Backend tools retain their normal permissions when reading original or preview paths outside the project.
+- Persist isolated delegated-worker lanes separately from direct backend sessions, retaining only each lane's own earlier delegated context. Reuse requires confirmed process exit and valid session state; directory changes invalidate the old workspace generation, and failed lane cleanup remains retryable rather than silently freeing uncertain ownership.
+- Accept multiple independent delegated tasks in one coordinator request, with individual cancellation, queued status, bounded queue waits, cumulative admission limits, and automatic collection of all results. Retain source-workspace ownership while the queue drains; queued work has no execution timestamp or progress card before it starts.
+- Run Git workers in reusable per-lane worktrees with bounded snapshots of staged, unstaged, and nonignored untracked input. Refresh every detached task checkout to an explicit baseline while preserving native lane identity. Non-Git directories use code-enforced FIFO serial scheduling and are never initialized as Git repositories implicitly; worktrees are not process sandboxes.
+- Preserve immutable worker artifacts under private Git references and expose revision-guarded inspection, integration, or retention. Preflight conflicts in a separate recovery worktree; applying changes never stages, commits, or pushes the delivery workspace. Pending artifacts or unknown dirty files block lane reuse. File application is not atomic: preserve before/target snapshots and a durable pending receipt for manual recovery after an incomplete apply, and validate captured tree limits after Git filters and both rename endpoints against the selected-directory scope.
+- Attach bounded execution-scoped model and reasoning-effort metadata to AI responses, terminal recovery, and each delegated worker's progress/results. Distinguish backend reports, configured selections, defaults, and unavailable values without extra model requests. Keep launch preferences stable, retain final worker snapshots before cleanup, and never substitute coordinator settings or attribute a model to an unstarted queued task.
+- Show compact gray model/effort notes below Completed on main replies and outside collapsed worker details. Preserve metadata through long-output splitting, thread-button refresh, and optional protocol-v1 fields, while legacy peers and local control commands retain their existing display.
+- Add standalone CLI upgrade notices with cumulative bundled notes, offline delivery, negotiated capabilities, and a silent baseline on first adoption. Advance notification progress only after acknowledged delivery, retain skipped-upgrade ranges, and keep maintenance cards separate from thread selection and task routing.
+- Add hourly, status-only Codex weekly-quota inspection and notification-only reminders using existing file-backed ChatGPT credentials. Do not send model prompts, create user threads, refresh credentials, or probe other backends. Missing/expired credentials, unsupported native APIs, and failed samples remain unavailable evidence; the experimental native token-handoff API is not a compatibility guarantee.
 
 ### Changed
-- Aggregate upgrade summaries by stable feature tags across each device's full pending version range, deduplicate identical items, and keep per-version summaries and technical details collapsed. Bounded overviews report omitted items while retaining complete paged records, with additive old-peer fallback and no runtime model calls.
-
-## [1.6.127] - 2026-10-04
-
-### Changed
-- Bundle concise Chinese user release summaries alongside English technical changelog entries. Upgrade cards display localized summaries directly and keep technical details collapsed, with legacy-peer fallback and the existing silent first-adoption behavior.
-- Require matching technical and user-summary entries for the current release during CLI builds, with bounded summary structure and package payloads.
-
-## [1.6.126] - 2026-10-04
-
-### Fixed
-- Preserve acknowledged Codex quota-reminder suppression across CLI upgrades, restarts, reconnects, and credential refreshes using a private local fingerprint ledger. Valid non-candidate observations rearm reminders; unavailable probes do not, and shutdown waits for accepted acknowledgement writes.
-
-### Changed
-- Remove the redundant Dismiss button from new quota-reminder cards while retaining validated legacy callbacks and the existing notification-only inspection criteria.
-
-## [1.6.125] - 2026-10-04
-
-### Changed
-- Rename Codex weekly-quota reminders to "Codex Reset" with a target emoji and the summary "Weekly quota reset: 100%", and remove their sampling-disclaimer footer, retaining normal-task guidance, optional dismissal, and the existing inspection logic.
-
-## [1.6.124] - 2026-10-04
+- Enable managed delegation by default for new and existing threads with no saved preference; explicit off remains off through upgrades, context resets, backend switches, and restarts. Exposing delegation tools does not automatically launch workers.
+- Restrict managed delegation to a different backend without changing native backend subagent tools. Unrestricted coordinators launch unrestricted workers; sandboxed coordinators have no eligible cross-backend targets until policy translation is supported. Discovery and launch enforce the same policy.
+- Raise the shared starting/running worker limit from three to five. Git-backed requests can occupy five isolated execution slots; additional accepted tasks remain queued, non-Git requests still run one worker at a time, and the cumulative 12-task limit spans coordinator continuations without refunds for failures or cancellation.
+- Use real worker tool activity for liveness timeouts, with separate idle and tool-idle deadlines, rather than treating a quiet stdout stream as proof that a worker stalled. UI text and card heartbeats do not extend execution liveness.
+- Enrich the local CLI's Linux/macOS startup PATH with verified runtime and conventional installation directories, preserving inherited precedence. Use the same command resolution for startup checks, backend menus, delegation, and auxiliary queries, honor explicit executable overrides, and preserve ZCode's native empty-command discovery without falling back from a nonempty invalid override. Valid existing services do not need reinstallation; startup does not source shell profiles, install tools, or rewrite their service files.
+- Render nested/live worker activity and results as rich Markdown, with independent per-worker text, elapsed/tool activity, consistent icons, and compact mobile layouts. Keep detailed activity collapsed, separate result labels from worker Markdown, preserve stable update slots and card-wide table limits, and make the delegation status menu easier to scan.
+- Label standalone task notifications as Background task, retain their originating thread and task identity, collapse result/output-path details by default, and keep short failures visible. This presentation is separate from foreground replies and managed-worker cards.
+- Show thread/workspace headers on initial streaming and continuation cards before final completion, preserving reply provenance rather than waiting for the terminal card update.
+- Bundle concise Chinese user summaries alongside English technical details at build time. Validate matching nonempty current-version entries, one short heading and one to six single-line user bullets, stable feature tags/titles, and bounded package payloads; never fetch, translate, or summarize release notes with a model at runtime. Version 1.6.134 raises the per-release bullet limit from three to six while retaining the 2 KiB summary budget.
+- Aggregate the entire pending device-upgrade range by feature, removing exact duplicate items only. Keep available summaries and technical details collapsed and paged, report bounded-overview omissions, and preserve legacy-peer fallback, first-adoption silence, and protocol version 1. This release represents the consolidated 1.6.90-1.6.133 range with the 1.6.134 stage summary rather than reconstructing a per-device subset of those changes.
+- Use the title "Codex Reset" with a target emoji and "Weekly quota reset: 100%". Explain why to send Codex a normal task without verification or activation steps, remove the sampling-disclaimer footer and redundant Dismiss button, and retain passive validated legacy callbacks. Eligibility requires two roughly hourly zero-usage observations with approximately seven days remaining and a deadline that advances with the sampling interval; it is a snapshot heuristic, not confirmation of a provider reset or a guarantee that one request starts a usage window.
 
 ### Fixed
-- Suppress Claude Code model-recognition stderr diagnostics from session-title generation as well as SDK queries, including delegated-worker streaming and results. Preserve real API/authentication errors, nonzero exits, assistant text, and other backends.
+- Validate incomplete or incompatible tool parameters before specialized card formatting, using bounded text or no-parameters fallbacks without interrupting later tool events or task completion.
+- Retry confirmed Feishu Markdown-parser failures as literal text, preserve that mode on later updates and thread-button refreshes, and retain table-limit fallback without treating unrelated failures as parse errors.
+- Require successful recovery-notice delivery before acknowledging reuse of a surviving card, avoid duplicate notices within a recovery round, and retain originating thread information through recovery and continuation cards.
+- Reset every backend's remote-cli session binding when a thread changes to a different normalized working directory, preserve backend-native history and thread preferences, and keep a same-directory selection a no-op.
+- Distinguish a deleted or inaccessible selected working directory from a missing backend executable, refuse fallback execution in another directory, and cover remaining executor and passthrough startup paths with actionable errors.
+- Refresh Codex's model catalog and idle app-server after a native CLI version change while preserving the conversation binding, and improve model-recovery card delivery without replaying accepted worker launches.
+- Retain bounded worker results through coordinator continuations and terminal failures without replaying the original request, attachments, or completed workers. Keep execution-scoped result acknowledgement separate from worker completion, suppress premature coordinator output while results are pending, and prevent stale worker progress from overwriting unrelated cards.
+- Deduplicate ACP tool updates and keep reasoning/thought chunks out of answer text, final output, and delegated summaries for Kimi, OpenCode, ZCode, and DSH, while preserving separate native reasoning handling. Generate unique, paired Pi fallback tool IDs so concurrent tool calls cannot collide or report an unrelated result.
+- Filter bounded standalone Claude Code model-recognition stderr diagnostics for SDK queries and session-title generation, including delegated-worker streaming/results and slash-command error details. Preserve actual API/authentication errors, nonzero exits, assistant text, unknown sources, malformed records, and other backends; raw local stderr and telemetry behavior are unchanged.
+- Refuse ambiguous plain-text input when multiple workers are waiting, retain request-specific approval routing, and require confirmed cleanup before releasing occupied slots or workspace ownership.
+- Keep queued diagnostic records out of live terminal pruning, reconcile unfinished records as interrupted after restart without replaying tasks, and make retained worker-lane cleanup retryable.
+- Persist acknowledged Codex reminder suppression across CLI upgrades, restarts, reconnects, and credential refreshes using a private account/bucket fingerprint ledger. Only valid non-candidate observations rearm reminders; unavailable probes do not. Wait for accepted acknowledgement writes on shutdown, preserve corrupt/unavailable storage without affecting normal messaging, and do not claim exactly-once delivery across crashes.
 
-## [1.6.123] - 2026-10-03
+### Security
+- Disable DSH's official extra session-log attachment and OTel telemetry paths independently with a private temporary configuration overlay and the native telemetry-disable flag. Leave existing profiles, credentials, and other backends untouched and remove the overlay after process exit. Normal model requests still send task context to the selected provider and native local history remains; this is not an offline mode or a guarantee about third-party plugins.
 
-### Added
-- Standalone CLI upgrade notices with cumulative bundled release notes, offline delivery, and a silent baseline on first adoption.
-- Hourly, status-only Codex weekly-quota inspection and explicit maintenance reminders, without changing user threads or other backends.
-- Notification-only weekly-quota snapshots with backend-specific explanations and normal-task guidance, without verification steps, activation requests, or claims that a quota reset occurred. Dismissal remains optional.
-
-## [1.6.122] - 2026-10-03
-
-### Fixed
-- Render delegated-result labels separately from worker Markdown while preserving rich content, stable update slots, and card-wide table limits.
+### Maintenance
+- Require staged-change and outgoing-commit privacy checks before publication, and sanitize documentation references without changing functional behavior.
+- Remove redundant presentation/fixture assertions while retaining behavioral regression coverage, clean temporary test fixtures reliably, and make ZCode discovery assertions portable across aliased filesystem paths.
 
 ## [1.6.60] - 2026-09-25
 
