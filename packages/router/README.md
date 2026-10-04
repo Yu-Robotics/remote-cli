@@ -10,6 +10,8 @@ Router and CLI 1.6.123 negotiate optional upgrade-notice and subscription-inspec
 
 Codex inspection and account state belong to the local CLI, not the Router. Its experimental native login API may change; unavailable inspection does not affect messaging. Subscription reminders are independent, notification-only cards, never user-thread output or routing controls. Backend-specific copy is selected by an optional backend identifier; legacy messages without it retain Codex handling, and unsupported identifiers are rejected. Codex explains possible reset-countdown drift and tells the user to send a normal task to start the next usage window, without verification steps. Its 100% weekly availability is a snapshot from the qualifying checks, not a live balance, confirmation that a reset occurred, or a guarantee about when a usage window starts. The only optional button is Dismiss. There is no Send Hi button or automatic activation, and reminder actions never send model requests. Older peers remain usable. See [Maintenance Notices](../../README.md#maintenance-notices) for first-start, offline, privacy, and opt-out behavior.
 
+From Router 1.6.125, quota reminder cards use the title **🎯 Codex Reset** and summary **Weekly quota reset: 100%**, without the sampling-disclaimer footer. Normal-task guidance, the optional Dismiss button, inspection criteria, and reminder actions are unchanged.
+
 ## Overview
 
 The router server acts as a bridge between Feishu messaging and developer machines running the remote-cli client. It handles:

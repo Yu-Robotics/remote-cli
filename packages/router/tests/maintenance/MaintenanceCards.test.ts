@@ -86,10 +86,14 @@ describe('standalone maintenance cards', () => {
     const message = { type: 'subscription_reminder', reminder: { reminderId: key, generation, expiresAt: now + 3600000, activationAvailable: false } };
     await Promise.all([cards.receiveReminder(message, 'device-fixture', () => true), cards.receiveReminder(message, 'device-fixture', () => true)]);
     expect(deps.create).toHaveBeenCalledTimes(1);
+    expect(deps.create.mock.calls[0][2]).toMatchObject({
+      title: { content: '🎯 Codex Reset' }, template: 'blue',
+    });
     const elements = deps.create.mock.calls[0][1];
-    const text = elements.filter((element: any) => element.tag === 'markdown').map((element: any) => element.content).join('\n');
-    expect(text).toContain('Weekly quota available: 100%');
-    expect(text).toContain('snapshot');
+    const markdown = elements.filter((element: any) => element.tag === 'markdown');
+    const text = markdown.map((element: any) => element.content).join('\n');
+    expect(text).toContain('Weekly quota reset: 100%');
+    expect(markdown).toHaveLength(1);
     expect(text).toContain('Without new Codex usage, the reset countdown may keep moving forward. Send Codex a normal task to start the next usage window.');
     expect(text).not.toMatch(/activation|Send Hi|Proposed prompt|local Codex CLI|No action is required|\/status|\bverify\b/i);
     expect(elements.filter((element: any) => element.tag === 'button').map((element: any) => element.behaviors[0].value.decision)).toEqual(['dismiss']);
@@ -104,6 +108,7 @@ describe('standalone maintenance cards', () => {
     await cards.reply('owner-fixture', key, 'card-fixture', 'dismiss');
     expect(deps.send).toHaveBeenCalledWith('device-fixture', expect.objectContaining({ type: 'subscription_action', decision: 'dismiss' }));
     expect(deps.update.mock.calls[0][1].some((element: any) => element.tag === 'button')).toBe(false);
+    expect(deps.update.mock.calls[0][1].filter((element: any) => element.tag === 'markdown')).toHaveLength(2);
     expect(deps.update.mock.calls[0][2]).toMatchObject({ title: deps.create.mock.calls[0][2].title, template: 'grey' });
     const count = deps.send.mock.calls.length; await cards.reply('owner-fixture', key, 'card-fixture', 'dismiss'); expect(deps.send).toHaveBeenCalledTimes(count);
     cards.disconnect('device-fixture'); await expect(cards.reply('owner-fixture', key, 'card-fixture', 'dismiss')).rejects.toThrow();
