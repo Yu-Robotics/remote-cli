@@ -64,9 +64,7 @@ function reminderHeader(reminder: Reminder, dismissed = false): Record<string, u
 function reminderElements(reminder: Reminder, dismissed = false): FeishuCardElement[] {
   const copy = REMINDER_COPY[reminder.backend ?? 'codex'];
   return [{ tag: 'markdown', content: `${copy.summary}\n\n${copy.explanation}` },
-    ...(dismissed ? [{ tag: 'markdown', content: 'Dismissed for this CLI session.' }] : [
-      button('Dismiss', { action: 'maintenance_reply', id: reminder.reminderId, decision: 'dismiss' }),
-    ])];
+    ...(dismissed ? [{ tag: 'markdown', content: 'Dismissed.' }] : [])];
 }
 
 /** Standalone maintenance cards never enter thread/output routing maps. */

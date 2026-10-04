@@ -1,7 +1,11 @@
+import { createHash } from 'crypto';
+
 export const WEEK_SECONDS = 7 * 86400;
 export const INSPECTION_INTERVAL_MS = 3600_000;
 export interface WeeklyObservation {
   identity: string;
+  /** Stable, local-only account/bucket fingerprint, independent of credential refreshes. */
+  accountKey: string;
   /** Local sampling time in milliseconds. */
   observedAt: number;
   /** Absolute provider reset timestamp in Unix seconds. */
@@ -37,7 +41,8 @@ export function codexWeeklyObservation(raw: unknown, accountId: string, credenti
   // Ambiguous weekly buckets cannot authorize a reminder for a guessed account/window.
   if (weekly.length !== 1) return;
   const w = weekly[0];
-  return { identity: JSON.stringify([accountId, credentialGeneration, w.bucket]), observedAt, resetsAt: w.reset,
+  return { identity: JSON.stringify([accountId, credentialGeneration, w.bucket]),
+    accountKey: createHash('sha256').update(JSON.stringify(['codex', accountId, w.bucket])).digest('hex'), observedAt, resetsAt: w.reset,
     candidate: w.used === 0 && Math.abs(w.reset - observedAt / 1000 - WEEK_SECONDS) <= 120 };
 }
 
