@@ -10,6 +10,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.128] - 2026-10-04
+
+### Changed
+- Aggregate upgrade summaries by stable feature tags across each device's full pending version range, deduplicate identical items, and keep per-version summaries and technical details collapsed. Bounded overviews report omitted items while retaining complete paged records, with additive old-peer fallback and no runtime model calls.
+
+## [1.6.127] - 2026-10-04
+
+### Changed
+- Bundle concise Chinese user release summaries alongside English technical changelog entries. Upgrade cards display localized summaries directly and keep technical details collapsed, with legacy-peer fallback and the existing silent first-adoption behavior.
+- Require matching technical and user-summary entries for the current release during CLI builds, with bounded summary structure and package payloads.
+
 ## [1.6.126] - 2026-10-04
 
 ### Fixed

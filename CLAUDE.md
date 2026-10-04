@@ -4,21 +4,31 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Code Language Requirement
 
-**CRITICAL: All code, comments, documentation, commit messages, variable names, and any text in this repository MUST be written in English only.**
+**CRITICAL: Code, comments, technical documentation, commit messages, and identifiers MUST be written in English. The only approved localization exception is the Chinese user-facing release summaries described below.**
 
-- NO Chinese characters are allowed in any source files, comments, or documentation
+- No literal Chinese characters are allowed outside `RELEASE_NOTES_ZH.md` and its generated release-note package artifact. Tests for localized content must use Unicode escapes rather than literal Chinese strings.
 - All JSDoc comments must be in English
-- All error messages and user-facing strings must be in English
+- All error messages and other user-facing strings must be in English; upgrade summaries may use the approved localized release notes.
 - Commit messages must be in English
 - Variable names, function names, and identifiers must use English words
 - Code review comments and PR descriptions must be in English
 
-This is a **strictly enforced** rule - any pull request containing Chinese text will be rejected.
+This is a **strictly enforced** rule - unapproved Chinese text must not be added to code or technical documentation.
+
+### User Release Summary Requirement
+
+- Keep `CHANGELOG.md` as the English technical record and `RELEASE_NOTES_ZH.md` as the concise Chinese upgrade summary.
+- Every new release must have a matching, nonempty version entry in both files. The CLI build validates both documents before packaging.
+- Each user summary must contain one short `###` heading and one to three single-line bullets describing user-visible changes, not internal implementation details. Keep each summary within 2 KiB.
+- Prefix each bullet with `[topic-id|Display title]`, using a stable English feature identifier and a stable user-facing title. The build strips this metadata from display Markdown and validates consistent titles across releases.
+- Bundle summaries with their English technical details at build time; do not fetch, translate, or summarize them with a model at runtime.
+- Aggregate the entire per-device upgrade range by feature and deduplicate identical items only. Preserve distinct changes in version details. Bound the overview and report omissions explicitly; never aggregate only the current detail page.
+- Preserve silent first adoption, cumulative upgrade ranges, and old-peer compatibility when changing upgrade-card presentation.
 
 ### Communication vs Code
 
 - **During conversation**: You may communicate in any language (Chinese, English, etc.)
-- **Code submissions**: All code, comments, documentation, and commit messages MUST be in English
+- **Code submissions**: Code, comments, technical documentation, and commit messages MUST be in English; only the approved user release summaries and their generated package artifact may contain Chinese text.
 - **Consistency**: Maintain the same language within a conversation context for better understanding
 
 ## Privacy and Secret Review Requirement

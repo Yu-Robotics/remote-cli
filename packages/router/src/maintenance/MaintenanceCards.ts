@@ -2,8 +2,9 @@ import { randomUUID } from 'crypto';
 import { NoticeReceipts, type NoticeReceipt } from './NoticeReceipts';
 import { createMarkdownElement, type FeishuCardElement } from '../utils/ToolFormatter';
 
-interface Section { version: string; text: string }
-interface Page { coverage: 'complete' | 'partial' | 'unavailable'; sections: Section[]; offset: number; nextOffset?: number; totalSections: number }
+interface Section { version: string; text: string; details?: string }
+interface Overview { groups: { topic: string; title: string; items: string[] }[]; totalGroups: number; totalItems: number }
+interface Page { coverage: 'complete' | 'partial' | 'unavailable'; sections: Section[]; offset: number; nextOffset?: number; totalSections: number; overview?: Overview }
 interface Notice { noticeKey: string; fromVersion: string; toVersion: string; page: Page }
 // Add copy only when that backend's inspection semantics are supported.
 const REMINDER_COPY = {
@@ -27,12 +28,29 @@ export interface MaintenanceCardDependencies {
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 function version(value: unknown): value is string { return typeof value === 'string' && value.length <= 100 && VERSION.test(value); }
+function validOverview(value: any): value is Overview {
+  if (!value || !Array.isArray(value.groups) || value.groups.length < 1 || value.groups.length > 6
+    || !Number.isSafeInteger(value.totalGroups) || value.totalGroups < value.groups.length
+    || !Number.isSafeInteger(value.totalItems) || value.totalItems < value.totalGroups) return false;
+  if (!value.groups.every((group: any) => group && typeof group.topic === 'string' && /^[a-z][a-z0-9-]{0,39}$/.test(group.topic)
+    && typeof group.title === 'string' && group.title.trim() === group.title && group.title.length > 0
+    && Array.from(group.title).length <= 80 && !/[\r\n\[\]<>|*\x60]/.test(group.title)
+    && Array.isArray(group.items) && group.items.length >= 1 && group.items.length <= 12
+    && group.items.every((item: any) => typeof item === 'string' && item.trim() === item && item.length > 0
+      && !/[\r\n]/.test(item) && Buffer.byteLength(item) <= 2 * 1024)
+    && new Set(group.items).size === group.items.length)) return false;
+  const shown = value.groups.reduce((total: number, group: Overview['groups'][number]) => total + group.items.length, 0);
+  return shown <= 12 && shown <= value.totalItems && new Set(value.groups.map((group: any) => group.topic)).size === value.groups.length
+    && Buffer.byteLength(JSON.stringify(value)) <= 6 * 1024;
+}
 function validPage(value: any): value is Page {
   return value && ['complete', 'partial', 'unavailable'].includes(value.coverage) && Number.isSafeInteger(value.offset) && value.offset >= 0
     && Number.isSafeInteger(value.totalSections) && value.totalSections >= value.offset && value.totalSections <= 10000
     && Array.isArray(value.sections) && value.sections.length <= 10 && value.offset + value.sections.length <= value.totalSections
-    && value.sections.every((s: any) => version(s?.version) && typeof s.text === 'string')
+    && value.sections.every((s: any) => version(s?.version) && typeof s.text === 'string'
+      && (s.details === undefined || typeof s.details === 'string'))
     && (value.nextOffset === undefined || value.sections.length > 0 && value.nextOffset === value.offset + value.sections.length && value.nextOffset < value.totalSections)
+    && (value.overview === undefined || validOverview(value.overview))
     && Buffer.byteLength(JSON.stringify(value)) <= 20 * 1024;
 }
 function validNotice(value: any): value is Notice {
@@ -48,9 +66,23 @@ export function updateNoticeElements(notice: Notice, id: string): FeishuCardElem
   const coverage = page.coverage === 'complete' ? 'Bundled release notes' : page.coverage === 'partial'
     ? 'Some release notes are missing from this package.' : 'Release notes are unavailable in this package.';
   const elements: FeishuCardElement[] = [{ tag: 'markdown', content: `**${notice.fromVersion} → ${notice.toVersion}**\n\n${coverage}` }];
-  for (const section of page.sections) elements.push({ tag: 'collapsible_panel', expanded: false,
-    header: { title: { tag: 'plain_text', content: `Version ${section.version}` } },
-    elements: [createMarkdownElement(section.text)] });
+  if (page.overview) {
+    for (const group of page.overview.groups) elements.push(createMarkdownElement(`**${group.title}**\n${group.items.map(item => `- ${item}`).join('\n')}`));
+    const shown = page.overview.groups.reduce((total, group) => total + group.items.length, 0);
+    if (shown < page.overview.totalItems) elements.push({ tag: 'markdown', text_size: 'notation',
+      content: `Showing ${shown} of ${page.overview.totalItems} unique changes. Additional changes remain in version details.` });
+    const details = page.sections.flatMap(section => [createMarkdownElement(`**Version ${section.version}**\n\n${section.text}`),
+      ...(section.details === undefined ? [] : [createMarkdownElement(`**Technical details**\n\n${section.details}`)])]);
+    if (details.length) elements.push({ tag: 'collapsible_panel', expanded: false,
+      header: { title: { tag: 'plain_text', content: 'Version details' } }, elements: details });
+  } else {
+    for (const section of page.sections) {
+      if (section.details !== undefined) elements.push(createMarkdownElement(`**${section.version}**\n\n${section.text}`));
+      elements.push({ tag: 'collapsible_panel', expanded: false,
+        header: { title: { tag: 'plain_text', content: section.details === undefined ? `Version ${section.version}` : `Technical details · ${section.version}` } },
+        elements: [createMarkdownElement(section.details ?? section.text)] });
+    }
+  }
   if (page.totalSections) elements.push({ tag: 'markdown', text_size: 'notation',
     content: `Showing ${page.offset + 1}–${page.offset + page.sections.length} of ${page.totalSections} releases. Display paging does not change history coverage.` });
   if (page.nextOffset !== undefined) elements.push(button('View more', { action: 'maintenance_view', id, offset: page.nextOffset }));

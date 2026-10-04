@@ -96,9 +96,14 @@ describe('Router wire compatibility', () => {
       capabilities: { updateNotice: true, subscriptionInspection: true } } });
     expect(JSON.parse(socket.send.mock.calls[0][0])).toMatchObject({ type: 'binding_confirm',
       data: { minCliVersion: 1, capabilities: { updateNotice: true, subscriptionInspection: true } } });
-    await receive({ type: 'update_notice', noticeKey: 'fixture' });
+    const update = { type: 'update_notice', noticeKey: 'fixture', page: {
+      coverage: 'complete', offset: 0, totalSections: 1,
+      sections: [{ version: '1.6.127', text: '### \u66f4\u65b0\n- \u529f\u80fd\u6539\u5584', details: '- Technical detail' }],
+      overview: { totalGroups: 1, totalItems: 1, groups: [{ topic: 'feature', title: 'Feature', items: ['A change'] }] },
+    } };
+    await receive(update);
     await receive({ type: 'subscription_reminder', reminder: {} });
-    expect(notice).toHaveBeenCalledWith(expect.any(Object), 'device-1', expect.any(Function));
+    expect(notice).toHaveBeenCalledWith(update, 'device-1', expect.any(Function));
     expect(reminder).toHaveBeenCalledTimes(1);
     expect((server as any).streamingMessages.size).toBe(0);
     expect((server as any).cardThreadMap.size).toBe(0); expect((server as any).activeThreadMap.size).toBe(0);
