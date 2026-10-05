@@ -96,6 +96,61 @@ describe('Worker context reset', () => {
     expect((await acquire).lane).toMatchObject({ id: lane.id, contextGeneration: 2, contextResetPending: false });
   });
 
+  it.each(['preparing', 'running', 'ready'] as const)(
+    'does not revive a superseded shared lane or schedule its %s replacement for cleanup', async state => {
+      const { lane } = await store.acquire(identity);
+      await store.markReady(lane.id);
+      await expect(store.clearContext(lane.id, 0, identity, async () => { throw new Error('Synthetic reset failure'); }))
+        .rejects.toThrow('Synthetic');
+      const reloaded = new DelegatedWorkerSessionStore(path.join(testHome, 'lanes'));
+      const replacement = (await reloaded.acquire(identity)).lane;
+      if (state !== 'preparing') await reloaded.markRunning(replacement.id);
+      if (state === 'ready') await reloaded.markReady(replacement.id);
+      const directory = path.join(testHome, '.remote-cli', 'codex-sessions');
+      await fs.mkdir(directory, { recursive: true });
+      const oldPointer = path.join(directory, `${lane.executorThreadId}.json`);
+      const newPointer = path.join(directory, `${replacement.executorThreadId}.json`);
+      await fs.writeFile(oldPointer, 'old pointer');
+      await fs.writeFile(newPointer, 'new pointer');
+      const clear = vi.fn(async value => clearDelegatedWorkerContext(value, testHome));
+      await reloaded.clearContext(lane.id, 0, identity, clear);
+      await reloaded.clearContext(lane.id, 0, identity, clear);
+      expect(clear).toHaveBeenCalledTimes(1);
+      await expect(fs.stat(oldPointer)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(await fs.readFile(newPointer, 'utf8')).toBe('new pointer');
+      expect(await reloaded.lanesForThread('parent')).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: lane.id, state: 'dirty', contextResetPending: false, lastClearedGeneration: 0 }),
+        expect.objectContaining({ id: replacement.id, state }),
+      ]));
+      await reloaded.markReady(replacement.id);
+      const restarted = new DelegatedWorkerSessionStore(path.join(testHome, 'lanes'));
+      expect(await restarted.cleanupCandidates()).toEqual([]);
+      expect((await restarted.acquire(identity)).lane.id).toBe(replacement.id);
+      expect(await restarted.cleanupCandidates()).toEqual([]);
+    });
+
+  it.each([false, true])('preserves retry safety when persisted pooling mode is %s', async pooled => {
+    const { lane } = await store.acquire(identity, { pooled });
+    await store.markReady(lane.id);
+    await expect(store.clearContext(lane.id, 0, identity, async () => { throw new Error('Synthetic reset failure'); }))
+      .rejects.toThrow('Synthetic');
+    if (!pooled) {
+      // Old CLI versions did not persist the lane's scheduling mode.
+      const file = path.join(testHome, 'lanes', `${lane.id}.json`);
+      const saved = JSON.parse(await fs.readFile(file, 'utf8'));
+      delete saved.pooled;
+      await fs.writeFile(file, JSON.stringify(saved));
+    }
+    const reloaded = new DelegatedWorkerSessionStore(path.join(testHome, 'lanes'));
+    const replacement = (await reloaded.acquire(identity, { pooled })).lane;
+    await reloaded.markReady(replacement.id);
+    await reloaded.clearContext(lane.id, 0, identity, async () => {});
+    const lanes = await reloaded.lanesForThread('parent');
+    expect(lanes.find(value => value.id === lane.id)?.state).toBe(pooled ? 'ready' : 'dirty');
+    expect(lanes.find(value => value.id === replacement.id)?.state).toBe('ready');
+    expect(await reloaded.cleanupCandidates()).toEqual([]);
+  });
+
   it.each(DELEGATION_BACKENDS)('disconnects %s without deleting settings, transcripts or workspace files', async backend => {
     const { lane } = await store.acquire({ ...identity, backend });
     const root = path.join(testHome, '.remote-cli');

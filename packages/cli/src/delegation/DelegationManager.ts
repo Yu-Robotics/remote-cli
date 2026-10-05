@@ -113,6 +113,7 @@ interface Task {
   discardLane?: boolean;
   /** A pre-existing Git lane must retain native context if checkout preparation fails. */
   preserveUnstartedLane?: boolean;
+  workspacePreparationStarted?: boolean;
   /** A worker may have escaped lifecycle tracking; retain its workspace lease. */
   quarantineWorkspace?: boolean;
   done: Promise<void>;
@@ -314,12 +315,15 @@ export class DelegationManager {
       baseline = undefined;
       if (this.workspaces.get(leasePath) === workspaceOwner && !workspaceOwner.quarantined) this.workspaces.delete(leasePath);
     };
-    const assertWorkspace = (): void => {
+    const assertWorkspaceIdentity = (): void => {
       assertWorkingDirectoryExists(parent.cwd);
       if (fs.realpathSync(this.guard.resolveWorkingDirectory(parent.cwd)) !== cwd
         || (parent.thread.delegationWorkspaceGeneration ?? 0) !== workspaceGeneration) {
         throw new Error('Delegated workspace changed before the task could start');
       }
+    };
+    const assertWorkspace = (): void => {
+      assertWorkspaceIdentity();
       if (this.workspaces.get(leasePath) !== workspaceOwner || workspaceOwner.quarantined || parent.isWorkspaceBusy?.(leasePath)) {
         throw new Error('Delegation capacity or workspace is busy; task was not started');
       }
@@ -540,6 +544,7 @@ export class DelegationManager {
           const acquired = await this.laneStore.acquire(identity, source
             ? { pooled: true, excluded: await this.workspaceManager.unavailableLanes() } : undefined);
           task.lane = acquired.lane;
+          task.workspacePreparationStarted = false;
           task.preserveUnstartedLane = Boolean(source && acquired.reused);
           if (task.settled || task.quarantineWorkspace) {
             // Setup can finish after its deadline, but must never start a late
@@ -554,6 +559,7 @@ export class DelegationManager {
             baseline ??= this.workspaceManager.baseline(source);
             const input = await baseline;
             assertStartable();
+            task.workspacePreparationStarted = true;
             task.workspace = await this.workspaceManager.prepare(task.lane, source, input, task.record.id);
             assertStartable();
           }
@@ -740,9 +746,14 @@ ${prompt}`));
             task.discardLane = true;
           }
           if (released && task.lane && task.preserveUnstartedLane) {
-            await this.workspaceManager.preserveLane(task.lane.id);
-            await this.laneStore.markDirty(task.lane.id,
-              'Worker checkout preparation failed; existing context and files were retained for manual recovery.');
+            if (!task.workspacePreparationStarted) {
+              // Only acquisition changed: no checkout or executor was touched.
+              await this.laneStore.markReady(task.lane.id);
+            } else {
+              await this.workspaceManager.preserveLane(task.lane.id);
+              await this.laneStore.markDirty(task.lane.id,
+                `${task.workspace ? 'Worker process setup did not complete' : 'Worker checkout preparation failed'}; existing context and files were retained for manual recovery.`);
+            }
           }
           if (released && task.lane && task.discardLane) {
             const lane = task.lane;
@@ -1048,19 +1059,18 @@ ${prompt}`));
           taskId: task.record.id, backend: task.record.backend, status: 'unavailable',
         }));
         if (!candidates.length) return [];
-        if (integrating || admissions || activeTasks.size || workspaceOwner.quarantined
-          || parent.isWorkspaceBusy?.(leasePath) || [...this.workspaces].some(([active, owner]) =>
-            owner !== workspaceOwner && workspacesOverlap(active, leasePath))) return unavailable();
+        if (integrating || admissions || activeTasks.size || workspaceOwner.quarantined) return unavailable();
         integrating = true;
-        this.workspaces.set(leasePath, workspaceOwner);
-        const checkActive = () => {
+        const checkIdentity = () => {
           if (closed) throw new Error('Delegation was cancelled');
+          assertWorkspaceIdentity();
+        };
+        const checkActive = () => {
+          checkIdentity();
           assertWorkspace();
         };
-        const inspect = async (): Promise<DelegationCloseoutIssue[]> => {
+        const inspect = async (checkActive: () => void): Promise<DelegationCloseoutIssue[]> => {
           checkActive();
-          // Metadata-only reconciliation cannot delete worker files at this barrier.
-          await reconcileHistory(false, undefined, checkActive);
           const issues: DelegationCloseoutIssue[] = [];
           for (const task of candidates) {
             checkActive();
@@ -1081,7 +1091,21 @@ ${prompt}`));
           checkActive();
           return issues;
         };
-        const pending = inspect();
+        const pending = (async () => {
+          // Receipt validation is read-only and serialized by the artifact's lane
+          // guard. Settled delivery does not require an idle source checkout.
+          const issues = await inspect(checkIdentity);
+          if (!issues.length) return issues;
+          if (parent.isWorkspaceBusy?.(leasePath) || [...this.workspaces].some(([active, owner]) =>
+            owner !== workspaceOwner && workspacesOverlap(active, leasePath))) {
+            return issues.map(({ taskId, backend }) => ({ taskId, backend, status: 'unavailable' as const }));
+          }
+          this.workspaces.set(leasePath, workspaceOwner);
+          checkActive();
+          // Metadata-only reconciliation cannot delete worker files at this barrier.
+          await reconcileHistory(false, undefined, checkActive);
+          return inspect(checkActive);
+        })();
         integrationPending = pending;
         try { return await pending; }
         catch {

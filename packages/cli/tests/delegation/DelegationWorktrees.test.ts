@@ -407,6 +407,83 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     await result(scope, third.taskId, 'r3');
   });
 
+  it('returns an untouched reused lane to ready when baseline capture fails', async () => {
+    const scope = manager.begin(parent);
+    const first = await start(scope, 'first');
+    const executorId = factory.mock.calls[0][3];
+    const pointer = path.join(fixture.directory, '.remote-cli', 'codex-sessions', `${executorId}.json`);
+    await fs.mkdir(path.dirname(pointer), { recursive: true });
+    await fs.writeFile(pointer, 'retained context');
+    workers[0].finish({ success: true });
+    await result(scope, first.taskId, 'first-result');
+    const lane = (await manager.laneStore.lanesForThread(parent.thread.id))[0];
+    const savedPath = path.join(fixture.directory, '.remote-cli', 'delegation-workspaces', 'lanes', `${lane.id}.json`);
+    const saved = await fs.readFile(savedPath, 'utf8');
+    const prepare = vi.spyOn(manager.workspaceManager, 'prepare');
+    vi.spyOn(manager.workspaceManager, 'baseline').mockRejectedValueOnce(new Error('Synthetic baseline failure'));
+    const failed = await start(scope, 'failed-baseline');
+    expect(await result(scope, failed.taskId, 'failed-result')).toMatchObject({ state: 'failed' });
+    expect(prepare).not.toHaveBeenCalled();
+    expect(await fs.readFile(savedPath, 'utf8')).toBe(saved);
+    expect((await manager.laneStore.lanesForThread(parent.thread.id))[0]).toMatchObject({ id: lane.id, state: 'ready' });
+    expect((await manager.workspaceManager.unavailableLanes()).has(lane.id)).toBe(false);
+    expect(await fs.readFile(pointer, 'utf8')).toBe('retained context');
+    const next = await start(scope, 'retry-baseline');
+    expect(factory.mock.calls[1][3]).toBe(executorId);
+    workers[1].finish({ success: true });
+    expect(await result(scope, next.taskId, 'next-result')).toMatchObject({ state: 'succeeded' });
+  });
+
+  it('retains a prepared lane on executor setup failure without blaming checkout preparation', async () => {
+    const scope = manager.begin(parent);
+    const first = await start(scope, 'first');
+    workers[0].finish({ success: true });
+    await result(scope, first.taskId, 'first-result');
+    const lane = (await manager.laneStore.lanesForThread(parent.thread.id))[0];
+    factory.mockImplementationOnce(() => { throw new Error('Synthetic executor failure'); });
+    const failed = await start(scope, 'factory-failure');
+    expect(await result(scope, failed.taskId, 'failed-result')).toMatchObject({ state: 'failed' });
+    expect((await manager.laneStore.lanesForThread(parent.thread.id))[0]).toMatchObject({
+      id: lane.id, state: 'dirty', cleanupPending: false,
+      cleanupError: expect.stringContaining('Worker process setup did not complete'),
+    });
+    expect((await manager.workspaceManager.unavailableLanes()).has(lane.id)).toBe(true);
+    expect(await manager.laneStore.cleanupCandidates()).toEqual([]);
+  });
+
+  it('resets preparation tracking before reusing a replacement for a missing native session', async () => {
+    const scope = manager.begin(parent);
+    const first = await start(scope, 'warm-first');
+    const second = await start(scope, 'warm-second');
+    workers[0].finish({ success: true });
+    workers[1].finish({ success: true });
+    await result(scope, first.taskId, 'first-result');
+    await result(scope, second.taskId, 'second-result');
+    const retrying = await start(scope, 'missing-session');
+    workers[2].executor.consumeSessionResumeFailure = () => true;
+    const staleId = factory.mock.calls[2][3];
+    const healthyId = factory.mock.calls.slice(0, 2).map(call => call[3]).find(id => id !== staleId);
+    const acquire = manager.laneStore.acquire.bind(manager.laneStore);
+    const acquisition = vi.spyOn(manager.laneStore, 'acquire').mockImplementationOnce(async (...args) => {
+      const acquired = await acquire(...args);
+      expect(acquired.reused).toBe(true);
+      expect(acquired.lane.executorThreadId).toBe(healthyId);
+      parent.isWorkspaceBusy = () => true;
+      return acquired;
+    });
+    workers[2].finish({ success: false, error: 'Stored native session is missing' });
+    expect(await result(scope, retrying.taskId, 'retry-result')).toMatchObject({ state: 'failed' });
+    expect(acquisition).toHaveBeenCalledOnce();
+    const healthy = (await manager.laneStore.lanesForThread(parent.thread.id)).find(lane => lane.executorThreadId === healthyId);
+    expect(healthy).toMatchObject({ state: 'ready', cleanupPending: false });
+    expect((await manager.workspaceManager.unavailableLanes()).has(healthy!.id)).toBe(false);
+    parent.isWorkspaceBusy = () => false;
+    const recovered = await start(scope, 'retry-after-busy');
+    expect(factory.mock.calls[3][3]).toBe(healthyId);
+    workers[3].finish({ success: true });
+    expect(await result(scope, recovered.taskId, 'recovered-result')).toMatchObject({ state: 'succeeded' });
+  });
+
   it('captures fresh input for a later idle cohort even when the earlier review changed no files', async () => {
     const scope = manager.begin(parent);
     const first = await start(scope, 'first');
@@ -473,6 +550,71 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     expect(await manager.workspaceManager.describe(task.taskId)).toMatchObject({ disposition: 'pending' });
     busy.mockReturnValue(false);
     expect(await scope.checkArtifactCloseout()).toEqual([{ taskId: task.taskId, backend: 'codex', status: 'pending', outputCommit: done.artifact!.outputCommit }]);
+  });
+
+  it.each(['no-change', 'apply', 'retain'])(
+    'accepts validated %s receipts while another thread is busy without reconciling history', async disposition => {
+      const scope = manager.begin(parent);
+      const task = await start(scope, 'delivered');
+      if (disposition !== 'no-change') await fs.writeFile(path.join(workers[0].cwd, 'source.txt'), 'delivered output\n');
+      workers[0].finish({ success: true });
+      await result(scope, task.taskId, 'done');
+      if (disposition !== 'no-change') {
+        const inspected: any = await scope.invoke('remote_cli_integrate', { taskId: task.taskId, action: 'inspect' }, 'inspect');
+        await scope.invoke('remote_cli_integrate', {
+          taskId: task.taskId, action: disposition, expectedRevision: inspected.revision,
+        }, 'integrate');
+      }
+      scope.finishExecution(true);
+      parent.isWorkspaceBusy = () => true;
+      const reconcile = vi.spyOn(manager.workspaceManager, 'reconcileHistoricalDelivery');
+      expect(await scope.checkArtifactCloseout()).toEqual([]);
+      expect(reconcile).not.toHaveBeenCalled();
+    });
+
+  it('does not take another active scope lease to validate an already settled receipt', async () => {
+    const scope = manager.begin(parent);
+    const task = await start(scope, 'delivered');
+    workers[0].finish({ success: true });
+    await result(scope, task.taskId, 'done');
+    scope.finishExecution(true);
+    const sibling = manager.begin({ ...parent, thread: { ...parent.thread, id: 'another-thread' } });
+    const active = await start(sibling, 'active');
+    expect(await scope.checkArtifactCloseout()).toEqual([]);
+    expect(manager.blocksWorkspace(fixture.root, parent.thread.id)).toBe(true);
+    workers[1].finish({ success: true });
+    expect(await result(sibling, active.taskId, 'sibling-done')).toMatchObject({ state: 'succeeded' });
+  });
+
+  it.each(['missing', 'foreign-owner', 'changed-ref'])(
+    'does not accept a %s settled receipt merely because the source is busy', async corruption => {
+      const scope = manager.begin(parent);
+      const task = await start(scope, 'delivered');
+      workers[0].finish({ success: true });
+      await result(scope, task.taskId, 'done');
+      scope.finishExecution(true);
+      const file = path.join(fixture.directory, '.remote-cli', 'delegation-workspaces', 'artifacts', `${task.taskId}.json`);
+      if (corruption === 'missing') await fs.unlink(file);
+      else if (corruption === 'foreign-owner') {
+        const record = JSON.parse(await fs.readFile(file, 'utf8'));
+        await fs.writeFile(file, JSON.stringify({ ...record, threadId: 'other-owner' }));
+      } else await runGit(fixture.root, ['update-ref', `refs/remote-cli/artifacts/${task.taskId}`, fixture.head]);
+      parent.isWorkspaceBusy = () => true;
+      expect(await scope.checkArtifactCloseout()).toEqual([{ taskId: task.taskId, backend: 'codex', status: 'unavailable' }]);
+    });
+
+  it('reports only unresolved artifacts when the source is busy', async () => {
+    const scope = manager.begin(parent);
+    const done = await start(scope, 'settled');
+    const pending = await start(scope, 'pending');
+    await fs.writeFile(path.join(workers[1].cwd, 'source.txt'), 'pending output\n');
+    workers[0].finish({ success: true });
+    workers[1].finish({ success: true });
+    await result(scope, done.taskId, 'done');
+    await result(scope, pending.taskId, 'pending-result');
+    scope.finishExecution(true);
+    parent.isWorkspaceBusy = () => true;
+    expect(await scope.checkArtifactCloseout()).toEqual([{ taskId: pending.taskId, backend: 'codex', status: 'unavailable' }]);
   });
 
   it('allows deliberate retention of recovery-bearing output without deleting recovery refs', async () => {

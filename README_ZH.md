@@ -689,6 +689,13 @@ sessions.
 
 线程使用过委派后，`/delegation off` 会移除受管理的工具。CLI 会记录哪些后端需要清理，重启或切换后端后也能继续处理。原生斜杠命令恢复会话前同样会执行清理。移除工具时，每个执行器实例可能重启一次后端进程，但会保留已保存的对话；已经清理过的进程不会反复重启。未使用过委派的后端无需清理。
 
+From CLI 1.6.138, already settled artifact receipts are validated without requiring
+an idle source workspace; another busy thread does not reopen completed delivery.
+Pending or unverifiable outcomes still require closeout, and history reconciliation
+still requires the source lease. Reused Git lanes remain reusable after confirmed
+failures before checkout preparation starts; uncertain checkout or executor setup
+continues to preserve the lane for manual recovery.
+
 From CLI and Router 1.6.137, finished Worker cards expose **Clear context**
 outside folded details, including failed tasks that established a worker lane.
 The button disconnects only that worker's native conversation continuation.
@@ -699,7 +706,11 @@ Only the original user can operate the control on its original device. Running
 workers, unconfirmed shutdowns, and stale cards after lane reuse are rejected.
 **Context cleared** appears only after CLI acknowledgement; timeouts and failures
 allow explicit retry. An interrupted clear stays non-resumable until a retry
-finishes. Controls require both peers to advertise `workerContextReset`; old
+finishes. From CLI 1.6.138, retrying an old shared-directory lane's clear after a
+replacement has been created clears only the old continuation, without reviving
+that lane or scheduling the replacement for deletion. Ambiguous duplicate lanes
+are preserved for manual recovery; independent Git worker lanes remain reusable.
+Controls require both peers to advertise `workerContextReset`; old
 peers retain their existing behavior. Card controls expire on Router restart,
 after 24 hours, or when their bounded cache is evicted; use a newer card or the
 existing thread-scoped `/delegation reset [backend]` command when idle.

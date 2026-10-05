@@ -572,6 +572,10 @@ active or uncertain lanes and stale cards. Router controls are owner/device/card
 bound and ephemeral; decorate actual cached chunks under the streaming root lock,
 including finalization and thread-footer updates, and never claim success before
 CLI acknowledgement. Clearing context does not run a task or replay prior input.
+Persist each acquired lane's pooling mode. A successful reset must not revive a
+superseded shared-directory lane; retain its metadata and archived data without
+queuing full cleanup. Treat unknown legacy mode conservatively. Ambiguous shared
+ready duplicates are preserved, not implicitly authorized for native deletion.
 
 `MessageHandler` creates a `DelegationScope` for an enabled coordinator turn and
 activates its `DelegationBridge`. The bridge accepts only authenticated loopback
@@ -652,6 +656,9 @@ Full byte audits and interrupted-intent validation hold only the lane guard;
 the shared repository guard covers worktree metadata mutations and their final
 registration/intent checks, not hashing. If preparation of an existing Git lane
 fails, block it and retain native context rather than running new-lane cleanup.
+Before preparation starts, a confirmed setup failure may return the untouched
+reused lane to ready. Once preparation starts, retain uncertain state and report
+checkout failures separately from executor setup failures.
 Valid ready reclaiming receipts are lazily resolved; do not blanket-exclude them
 and abandon an otherwise resumable context after a benign removal refusal.
 
@@ -671,8 +678,10 @@ automatic cross-request result recovery.
 
 From CLI 1.6.136, final success also requires artifact closeout for started Git
 workers in the current request. Wait for accepted tool calls, task collection,
-and confirmed cleanup; reconcile history with the source lease, then validate
-durable owned receipts instead of cached result dispositions. No-change/applied
+and confirmed cleanup; validate durable owned receipts under their lane guards
+without requiring an idle source checkout. Only unresolved outcomes require
+history reconciliation with the source lease and a second validation pass.
+Never substitute cached result dispositions. No-change/applied
 or explicitly retained outcomes settle the check. Missing/corrupt receipts,
 failed collection, pending changes, and unretained recovery remain unresolved.
 Combine unread results with at most two closeout rounds in the same coordinator
