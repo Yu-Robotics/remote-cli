@@ -8,7 +8,8 @@ import { gitText, runGit } from '../../src/delegation/GitCheckpoint';
 import * as gitCommands from '../../src/delegation/GitCheckpoint';
 import { gitFixture } from './gitFixture';
 
-describe('verified worker checkout reclamation and recreation', () => {
+// Real-Git cases execute multiple bounded commands and need headroom on slower hosts.
+describe('verified worker checkout reclamation and recreation', { timeout: 30_000 }, () => {
   let fixture: Awaited<ReturnType<typeof gitFixture>>;
   let manager: DelegatedWorkspaceManager;
   let lanes: DelegatedWorkerSessionStore;
@@ -47,11 +48,11 @@ describe('verified worker checkout reclamation and recreation', () => {
     const source = (await manager.discover(fixture.root))!;
     workspace = await manager.prepare(lane, source, await manager.baseline(source), randomUUID());
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-  });
+  }, 30_000);
   afterEach(async () => {
     vi.restoreAllMocks();
     await fs.rm(fixture.directory, { recursive: true, force: true });
-  });
+  }, 30_000);
 
   it('removes only a verified no-change checkout while preserving every artifact and history ref', async () => {
     const artifact = await complete();
