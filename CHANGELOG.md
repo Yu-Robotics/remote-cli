@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.143] - 2026-10-06
+
+### Fixed
+- Increase the Codex account-usage RPC timeout from five to ten seconds for `/status`, without adding retries or changing failure handling.
+
 ## [1.6.142] - 2026-10-05
 
 ### Added

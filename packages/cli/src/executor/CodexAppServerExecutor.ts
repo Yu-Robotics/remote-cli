@@ -70,7 +70,7 @@ interface PendingUserInput {
 
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_COMPACT_TIMEOUT_MS = 10 * 60 * 1000;
-const ACCOUNT_USAGE_TIMEOUT_MS = 5_000;
+const ACCOUNT_USAGE_TIMEOUT_MS = 10_000;
 
 interface CodexRateLimitWindow {
   usedPercent?: number;

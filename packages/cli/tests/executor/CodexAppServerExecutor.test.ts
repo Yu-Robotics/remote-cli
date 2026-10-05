@@ -595,6 +595,7 @@ describe('CodexAppServerExecutor', () => {
   });
 
   it('reads and formats Codex account rate limits without starting a thread', async () => {
+    const request = vi.spyOn(transport, 'request');
     transport.rateLimitsResponse = {
       rateLimits: {},
       rateLimitsByLimitId: {
@@ -615,6 +616,7 @@ describe('CodexAppServerExecutor', () => {
       method: 'account/rateLimits/read',
       params: { excludeResetCreditDetails: true },
     });
+    expect(request).toHaveBeenCalledWith('account/rateLimits/read', { excludeResetCreditDetails: true }, 10_000);
     expect(transport.requests.some((request) => request.method === 'thread/start')).toBe(false);
   });
 
