@@ -8,6 +8,7 @@ import { BackendRegistry } from '../../src/delegation/BackendRegistry';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 import type { ExecuteResult, IExecutor } from '../../src/executor/IExecutor';
 import { gitText, runGit } from '../../src/delegation/GitCheckpoint';
+import * as gitCommands from '../../src/delegation/GitCheckpoint';
 import { gitFixture } from './gitFixture';
 
 function controlledWorker(cwd: string) {
@@ -19,7 +20,7 @@ function controlledWorker(cwd: string) {
   return { executor, cwd, finish };
 }
 
-describe('Git-aware delegated scheduling and lane reuse', () => {
+describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, () => {
   let fixture: Awaited<ReturnType<typeof gitFixture>>;
   let manager: DelegationManager;
   let parent: DelegationParent;
@@ -104,21 +105,288 @@ describe('Git-aware delegated scheduling and lane reuse', () => {
   it('reuses native conversation and worktree after explicit integration, including sibling changes in the next baseline', async () => {
     const scope = manager.begin(parent);
     const first = await start(scope, 'first');
+    const pointer = path.join(fixture.directory, '.remote-cli', 'codex-sessions', `${factory.mock.calls[0][3]}.json`);
+    await fs.mkdir(path.dirname(pointer), { recursive: true });
+    await fs.writeFile(pointer, JSON.stringify({ threadId: 'fixture-conversation', cwd: workers[0].cwd }));
     await fs.writeFile(path.join(workers[0].cwd, 'source.txt'), 'integrated result\n');
     workers[0].finish({ success: true, output: 'Ready' });
     await result(scope, first.taskId, 'first-result');
     const inspection: any = await scope.invoke('remote_cli_integrate', { taskId: first.taskId }, 'inspect');
     expect(await scope.invoke('remote_cli_integrate', { taskId: first.taskId, action: 'apply',
       expectedRevision: inspection.revision }, 'apply')).toMatchObject({ disposition: 'applied' });
+    await expect(fs.lstat(workers[0].cwd)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(JSON.parse(await fs.readFile(pointer, 'utf8')).threadId).toBe('fixture-conversation');
     await fs.writeFile(path.join(fixture.root, 'sibling.txt'), 'new mainline input\n');
     const second = await start(scope, 'second');
     expect(workers[1].cwd).toBe(workers[0].cwd);
     expect(factory.mock.calls[1][3]).toBe(factory.mock.calls[0][3]);
+    expect(JSON.parse(await fs.readFile(pointer, 'utf8')).cwd).toBe(workers[1].cwd);
     expect(await fs.readFile(path.join(workers[1].cwd, 'sibling.txt'), 'utf8')).toContain('mainline input');
     expect(vi.mocked(workers[1].executor.execute).mock.calls[0][0]).toContain('earlier conversation context may be stale');
     workers[1].finish({ success: true, output: 'Rechecked current files' });
     await result(scope, second.taskId, 'second-result');
+  }, 30_000);
+
+  it('reuses a historically delivered lane before the next worker without deleting its checkout at admission', async () => {
+    const scope = manager.begin(parent);
+    const first = await start(scope, 'first');
+    const originalCwd = workers[0].cwd;
+    const executorId = factory.mock.calls[0][3];
+    await fs.writeFile(path.join(originalCwd, 'source.txt'), 'manual handoff\n');
+    workers[0].finish({ success: true });
+    const completed = await result(scope, first.taskId, 'first-result');
+    await runGit(fixture.root, ['merge', '--ff-only', completed.artifact!.outputCommit]);
+    await fs.writeFile(path.join(fixture.root, 'sibling.txt'), 'fresh coordinator input\n');
+    const removal = vi.spyOn(manager.workspaceManager, 'reclaim');
+    const second = await start(scope, 'second');
+    expect(removal).not.toHaveBeenCalled();
+    expect(workers[1].cwd).toBe(originalCwd);
+    expect(factory.mock.calls[1][3]).toBe(executorId);
+    expect(await manager.workspaceManager.describe(first.taskId)).toMatchObject({ disposition: 'applied',
+      deliveredAtHead: completed.artifact!.outputCommit });
+    expect(await fs.readFile(path.join(workers[1].cwd, 'sibling.txt'), 'utf8')).toBe('fresh coordinator input\n');
+    workers[1].finish({ success: true });
+    await result(scope, second.taskId, 'second-result');
   });
+
+  it('does not charge optional history reconciliation to the native worker startup deadline', async () => {
+    const scope = manager.begin(parent);
+    const first = await start(scope, 'first');
+    // This tests startup timing, not Git's same-size racy-stat detection.
+    await fs.writeFile(path.join(workers[0].cwd, 'source.txt'), 'slow-query handoff captured before startup delay\n');
+    workers[0].finish({ success: true });
+    const completed = await result(scope, first.taskId, 'first-result');
+    expect(completed).toMatchObject({ state: 'succeeded', artifact: { disposition: 'pending' } });
+    await runGit(fixture.root, ['merge', '--ff-only', completed.artifact!.outputCommit]);
+    let release!: () => void;
+    let entered = false;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const original = manager.workspaceManager.reconcileHistoricalDelivery.bind(manager.workspaceManager);
+    vi.spyOn(manager.workspaceManager, 'reconcileHistoricalDelivery').mockImplementation(async (...args) => {
+      entered = true; await gate; return original(...args);
+    });
+    vi.useFakeTimers();
+    try {
+      const starting = start(scope, 'slow-history');
+      await vi.waitFor(() => expect(entered).toBe(true));
+      await vi.advanceTimersByTimeAsync(DELEGATION_LIMITS.storageTimeoutMs + 1);
+      expect(workers).toHaveLength(1);
+      vi.useRealTimers();
+      release();
+      const second = await starting;
+      expect(second.state).toBe('running');
+      expect(workers[1].cwd).toBe(workers[0].cwd);
+      workers[1].finish({ success: true });
+      expect(await result(scope, second.taskId, 'second-result')).toMatchObject({ state: 'succeeded' });
+    } finally { vi.useRealTimers(); release(); }
+  });
+
+  it('automatically recognizes manual handoff at idle turn closure and awaits reclamation', async () => {
+    const scope = manager.begin(parent);
+    const first = await start(scope, 'first');
+    await fs.writeFile(path.join(workers[0].cwd, 'source.txt'), 'closure handoff\n');
+    workers[0].finish({ success: true });
+    const completed = await result(scope, first.taskId, 'first-result');
+    await runGit(fixture.root, ['merge', '--ff-only', completed.artifact!.outputCommit]);
+    const pointer = path.join(fixture.directory, '.remote-cli', 'codex-sessions', `${factory.mock.calls[0][3]}.json`);
+    await fs.mkdir(path.dirname(pointer), { recursive: true });
+    await fs.writeFile(pointer, JSON.stringify({ threadId: 'fixture-conversation', cwd: workers[0].cwd }));
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const reclaiming = new Promise<void>(resolve => { entered = resolve; });
+    const original = manager.workspaceManager.reclaim.bind(manager.workspaceManager);
+    vi.spyOn(manager.workspaceManager, 'reclaim').mockImplementation(async taskId => { entered(); await gate; return original(taskId); });
+    let closed = false;
+    const closing = scope.close().then(() => { closed = true; });
+    await reclaiming;
+    expect(closed).toBe(false);
+    expect((await fs.stat(workers[0].cwd)).isDirectory()).toBe(true);
+    release();
+    await closing;
+    await expect(fs.lstat(workers[0].cwd)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(JSON.parse(await fs.readFile(pointer, 'utf8')).threadId).toBe('fixture-conversation');
+    expect(await manager.workspaceManager.describe(first.taskId)).toMatchObject({ disposition: 'applied' });
+    const nextScope = manager.begin({ ...parent, messageId: 'next-parent' });
+    const next = await start(nextScope, 'recreated');
+    expect(workers[1].cwd).toBe(workers[0].cwd);
+    expect(factory.mock.calls[1][3]).toBe(factory.mock.calls[0][3]);
+    workers[1].finish({ success: true });
+    await result(nextScope, next.taskId, 'next-result');
+  }, 30_000);
+
+  it('defers close-time recognition when another owner holds the delivery workspace', async () => {
+    const scope = manager.begin(parent);
+    const first = await start(scope, 'first');
+    await fs.writeFile(path.join(workers[0].cwd, 'source.txt'), 'deferred handoff\n');
+    workers[0].finish({ success: true });
+    const completed = await result(scope, first.taskId, 'first-result');
+    await runGit(fixture.root, ['merge', '--ff-only', completed.artifact!.outputCommit]);
+    const otherScope = manager.begin({ ...parent, thread: { ...parent.thread, id: 'other-owner' } });
+    const other = await start(otherScope, 'independent');
+    await scope.close();
+    expect(await manager.workspaceManager.describe(first.taskId)).toMatchObject({ disposition: 'pending' });
+    expect((await fs.stat(workers[0].cwd)).isDirectory()).toBe(true);
+    workers[1].finish({ success: true });
+    await result(otherScope, other.taskId, 'other-result');
+  });
+
+  it('defers close-time recognition instead of waiting for an unfinished discovery admission', async () => {
+    const scope = manager.begin(parent);
+    const first = await start(scope, 'first');
+    await fs.writeFile(path.join(workers[0].cwd, 'source.txt'), 'discovery handoff\n');
+    workers[0].finish({ success: true });
+    const completed = await result(scope, first.taskId, 'first-result');
+    await runGit(fixture.root, ['merge', '--ff-only', completed.artifact!.outputCommit]);
+    const available = await manager.registry.get('agy', parent.config);
+    let release!: (value: typeof available) => void;
+    vi.spyOn(manager.registry, 'get').mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+    const starting = start(scope, 'discovering', 'agy');
+    const failure = expect(starting).rejects.toThrow('ended');
+    const reconciliation = vi.spyOn(manager.workspaceManager, 'reconcileHistoricalDelivery');
+    // Enter the admission's probe wait; cancellation before admission starts is already idle.
+    await new Promise<void>(resolve => setImmediate(resolve));
+    try {
+      await scope.close();
+      expect(reconciliation).not.toHaveBeenCalled();
+      expect(await manager.workspaceManager.describe(first.taskId)).toMatchObject({ disposition: 'pending' });
+    } finally { release(available); await failure; }
+    expect(workers).toHaveLength(1);
+    expect((await fs.stat(workers[0].cwd)).isDirectory()).toBe(true);
+  });
+
+  it('waits for native exit before reclaiming a successful no-change checkout', async () => {
+    const scope = manager.begin(parent);
+    const first = await start(scope, 'first');
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    vi.mocked(workers[0].executor.waitForExit!).mockImplementation(() => gate);
+    workers[0].finish({ success: true, output: 'No changes' });
+    await vi.waitFor(() => expect(workers[0].executor.waitForExit).toHaveBeenCalled());
+    expect((await fs.lstat(workers[0].cwd)).isDirectory()).toBe(true);
+    release();
+    expect(await result(scope, first.taskId, 'r1')).toMatchObject({ state: 'succeeded', artifact: { disposition: 'applied' } });
+    await expect(fs.lstat(workers[0].cwd)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it.each(['failed', 'cancelled'])('preserves a %s no-change checkout', async outcome => {
+    const scope = manager.begin(parent);
+    const first = await start(scope, 'first');
+    if (outcome === 'failed') workers[0].finish({ success: false, error: 'Fixture failure' });
+    else await scope.invoke('remote_cli_cancel', { taskId: first.taskId }, 'cancel');
+    expect(await result(scope, first.taskId, 'r1')).toMatchObject({ state: outcome, artifact: { disposition: 'applied' } });
+    expect(await manager.workspaceManager.describe(first.taskId)).toMatchObject({ successful: false });
+    expect((await fs.lstat(workers[0].cwd)).isDirectory()).toBe(true);
+  });
+
+  it('keeps a reclaiming lane non-ready and task success independent of optional cleanup', async () => {
+    const scope = manager.begin(parent);
+    const first = await start(scope, 'first');
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const reclaim = vi.spyOn(manager.workspaceManager, 'reclaim').mockImplementation(async () => { await gate; return false; });
+    workers[0].finish({ success: true });
+    await vi.waitFor(() => expect(reclaim).toHaveBeenCalledWith(first.taskId));
+    expect((await manager.laneStore.lanesForThread(parent.thread.id))[0].state).toBe('running');
+    const second = await start(scope, 'follower');
+    expect(workers[1].cwd).not.toBe(workers[0].cwd);
+    expect(factory.mock.calls[1][3]).not.toBe(factory.mock.calls[0][3]);
+    release();
+    workers[1].finish({ success: true });
+    expect(await result(scope, first.taskId, 'r1')).toMatchObject({ state: 'succeeded' });
+    expect(await result(scope, second.taskId, 'r2')).toMatchObject({ state: 'succeeded' });
+    expect((await fs.lstat(workers[0].cwd)).isDirectory()).toBe(true);
+  });
+
+  it('admits a different lane while full byte verification is waiting', async () => {
+    const scope = manager.begin(parent);
+    const first = await start(scope, 'first');
+    let release!: () => void;
+    let verifying!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const entered = new Promise<void>(resolve => { verifying = resolve; });
+    const original = gitCommands.runGit;
+    vi.spyOn(gitCommands, 'runGit').mockImplementation(async (cwd, args, ...rest) => {
+      if (args[0] === 'ls-tree' && args.includes('--full-tree')) { verifying(); await gate; }
+      return original(cwd, args, ...rest);
+    });
+    workers[0].finish({ success: true });
+    await entered;
+    const following = start(scope, 'follower');
+    try { await vi.waitFor(() => expect(workers).toHaveLength(2), { timeout: 4000 }); }
+    finally { release(); }
+    const second = await following;
+    expect(workers[1].cwd).not.toBe(workers[0].cwd);
+    workers[1].finish({ success: true });
+    expect(await result(scope, first.taskId, 'r1')).toMatchObject({ state: 'succeeded' });
+    expect(await result(scope, second.taskId, 'r2')).toMatchObject({ state: 'succeeded' });
+  }, 30_000);
+
+  it.each(['occupied', 'partial-registration', 'corrupt-receipt'])(
+    'preserves existing context and isolates a %s checkout instead of discarding the lane', async condition => {
+      const scope = manager.begin(parent);
+      const first = await start(scope, 'first');
+      const oldCwd = workers[0].cwd;
+      const executorId = factory.mock.calls[0][3];
+      const pointer = path.join(fixture.directory, '.remote-cli', 'codex-sessions', `${executorId}.json`);
+      await fs.mkdir(path.dirname(pointer), { recursive: true });
+      const saved = JSON.stringify({ threadId: 'fixture-conversation', cwd: oldCwd });
+      await fs.writeFile(pointer, saved);
+      workers[0].finish({ success: true });
+      await result(scope, first.taskId, 'r1');
+      const oldLane = (await manager.laneStore.lanesForThread(parent.thread.id))[0];
+      if (condition === 'occupied') {
+        await fs.mkdir(oldCwd);
+        await fs.writeFile(path.join(oldCwd, 'retained.txt'), 'do not overwrite\n');
+      } else if (condition === 'partial-registration') {
+        const artifact = await manager.workspaceManager.describe(first.taskId);
+        await runGit(fixture.root, ['worktree', 'add', '--detach', oldCwd, artifact!.outputCommit]);
+        await fs.rm(oldCwd, { recursive: true });
+      } else {
+        const file = path.join(fixture.directory, '.remote-cli', 'delegation-workspaces', 'lanes', `${oldLane.id}.json`);
+        const record = JSON.parse(await fs.readFile(file, 'utf8'));
+        await fs.writeFile(file, JSON.stringify({ ...record, reclamation: { ...record.reclamation, output: fixture.head } }));
+      }
+      const failed = await start(scope, 'unavailable');
+      expect(await result(scope, failed.taskId, 'r2')).toMatchObject({ state: 'failed' });
+      expect(workers).toHaveLength(1);
+      expect(await fs.readFile(pointer, 'utf8')).toBe(saved);
+      expect((await manager.laneStore.lanesForThread(parent.thread.id))[0]).toMatchObject({
+        id: oldLane.id, state: 'dirty', cleanupPending: false,
+      });
+      expect((await manager.workspaceManager.unavailableLanes()).has(oldLane.id)).toBe(true);
+      await manager.reconcilePendingWorkerLanes();
+      expect(await fs.readFile(pointer, 'utf8')).toBe(saved);
+      const recovered = await start(scope, 'independent-lane');
+      expect(factory.mock.calls[1][3]).not.toBe(executorId);
+      expect(workers[1].cwd).not.toBe(oldCwd);
+      if (condition === 'occupied') expect(await fs.readFile(path.join(oldCwd, 'retained.txt'), 'utf8')).toBe('do not overwrite\n');
+      workers[1].finish({ success: true });
+      expect(await result(scope, recovered.taskId, 'r3')).toMatchObject({ state: 'succeeded' });
+    }, 30_000);
+
+  it('lazily resolves a ready interrupted removal without abandoning its native conversation', async () => {
+    const scope = manager.begin(parent);
+    const first = await start(scope, 'first');
+    const executorId = factory.mock.calls[0][3];
+    let refused = false;
+    const original = gitCommands.runGit;
+    vi.spyOn(gitCommands, 'runGit').mockImplementation(async (cwd, args, ...rest) => {
+      if (!refused && args[0] === 'worktree' && args[1] === 'remove' && args[2] === workers[0].cwd) {
+        refused = true; throw new Error('Fixture removal refusal');
+      }
+      return original(cwd, args, ...rest);
+    });
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    workers[0].finish({ success: true });
+    expect(await result(scope, first.taskId, 'r1')).toMatchObject({ state: 'succeeded' });
+    expect(refused).toBe(true);
+    const second = await start(scope, 'reuse');
+    expect(factory.mock.calls[1][3]).toBe(executorId);
+    expect(workers[1].cwd).toBe(workers[0].cwd);
+    workers[1].finish({ success: true });
+    expect(await result(scope, second.taskId, 'r2')).toMatchObject({ state: 'succeeded' });
+  }, 30_000);
 
   it('pools same-target conversations without reusing pending artifacts or routing ambiguous input', async () => {
     const scope = manager.begin(parent);
@@ -172,5 +440,83 @@ describe('Git-aware delegated scheduling and lane reuse', () => {
     const scope = manager.begin(parent);
     await expect(start(scope, 'unborn')).rejects.toThrow('Git rev-parse failed');
     expect(factory).not.toHaveBeenCalled();
+  });
+
+  it('waits for native cleanup and collection before checking artifact closeout', async () => {
+    const scope = manager.begin(parent);
+    await start(scope, 'cleanup');
+    let release!: () => void;
+    vi.mocked(workers[0].executor.destroy).mockImplementation(() => new Promise<void>(resolve => { release = resolve; }));
+    workers[0].finish({ success: true });
+    scope.finishExecution(true);
+    let settled = false;
+    const checking = scope.checkArtifactCloseout().finally(() => { settled = true; });
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+    expect(settled).toBe(false);
+    release();
+    expect(await checking).toEqual([]);
+  });
+
+  it('preserves pending artifacts while another thread owns the delivery workspace', async () => {
+    const busy = vi.fn(() => false);
+    parent.isWorkspaceBusy = busy;
+    const scope = manager.begin(parent);
+    const task = await start(scope, 'busy-delivery');
+    await fs.writeFile(path.join(workers[0].cwd, 'source.txt'), 'worker output\n');
+    workers[0].finish({ success: true });
+    const done = await result(scope, task.taskId, 'done');
+    scope.finishExecution(true);
+    busy.mockReturnValue(true);
+    const reconciliation = vi.spyOn(manager.workspaceManager, 'reconcileHistoricalDelivery');
+    expect(await scope.checkArtifactCloseout()).toEqual([{ taskId: task.taskId, backend: 'codex', status: 'unavailable' }]);
+    expect(reconciliation).not.toHaveBeenCalled();
+    expect(await manager.workspaceManager.describe(task.taskId)).toMatchObject({ disposition: 'pending' });
+    busy.mockReturnValue(false);
+    expect(await scope.checkArtifactCloseout()).toEqual([{ taskId: task.taskId, backend: 'codex', status: 'pending', outputCommit: done.artifact!.outputCommit }]);
+  });
+
+  it('allows deliberate retention of recovery-bearing output without deleting recovery refs', async () => {
+    const scope = manager.begin(parent);
+    const task = await start(scope, 'recovery');
+    await fs.writeFile(path.join(workers[0].cwd, 'source.txt'), 'recovery output\n');
+    workers[0].finish({ success: true });
+    await result(scope, task.taskId, 'done');
+    const file = path.join(fixture.directory, '.remote-cli', 'delegation-workspaces', 'artifacts', `${task.taskId}.json`);
+    const saved = JSON.parse(await fs.readFile(file, 'utf8'));
+    const recovery = { beforeRef: `refs/remote-cli/integrations/${task.taskId}/before`, targetRef: `refs/remote-cli/integrations/${task.taskId}/target` };
+    await runGit(fixture.root, ['update-ref', recovery.beforeRef, saved.input.commit]);
+    await runGit(fixture.root, ['update-ref', recovery.targetRef, saved.output]);
+    await fs.writeFile(file, JSON.stringify({ ...saved, recovery }));
+    scope.finishExecution(true);
+    expect(await scope.checkArtifactCloseout()).toMatchObject([{ taskId: task.taskId, status: 'recovery' }]);
+    scope.beginExecution();
+    const view: any = await scope.invoke('remote_cli_integrate', { taskId: task.taskId, action: 'inspect' }, 'inspect-recovery');
+    await scope.invoke('remote_cli_integrate', { taskId: task.taskId, action: 'retain', expectedRevision: view.revision }, 'retain-recovery');
+    scope.finishExecution(true);
+    expect(await scope.checkArtifactCloseout()).toEqual([]);
+    expect(await gitText(fixture.root, ['rev-parse', recovery.targetRef])).toBe(saved.output);
+    expect(await fs.readFile(path.join(workers[0].cwd, 'source.txt'), 'utf8')).toBe('recovery output\n');
+  });
+
+  it('serializes cancellation with an active closeout inspection without continuing after it', async () => {
+    const scope = manager.begin(parent);
+    const task = await start(scope, 'cancel-closeout');
+    workers[0].finish({ success: true });
+    await result(scope, task.taskId, 'done');
+    scope.finishExecution(true);
+    let release!: () => void;
+    const inspect = manager.workspaceManager.inspectCloseout.bind(manager.workspaceManager);
+    vi.spyOn(manager.workspaceManager, 'inspectCloseout').mockImplementation(async (...args) => {
+      await new Promise<void>(resolve => { release = resolve; });
+      return inspect(...args);
+    });
+    const checking = scope.checkArtifactCloseout();
+    const rejected = expect(checking).rejects.toThrow('cancelled');
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+    const closing = scope.close();
+    release();
+    await rejected;
+    await closing;
+    expect(scope.isClosed()).toBe(true);
   });
 });

@@ -12,6 +12,7 @@ import * as path from 'path';
 import { createHash } from 'crypto';
 import { Readable } from 'stream';
 import type { FileInput } from '../files/FileTransfers';
+import type { WorkerContextCards } from './WorkerContextCards';
 import { CARD_TABLE_LIMIT, countCardTables, isCardMarkdownParseError, isCardTableLimitError, limitCardTables, plainTextCard, prepareTableElements } from '../utils/CardTables';
 
 /**
@@ -28,6 +29,7 @@ export interface FeishuLongConnHandlerConfig {
  * Uses Feishu SDK's WSClient for WebSocket long connection
  */
 export class FeishuLongConnHandler {
+  workerContexts?: WorkerContextCards;
   private client: lark.Client;
   private wsClient: lark.WSClient | null = null;
   private bindingManager: BindingManager;
@@ -1135,7 +1137,7 @@ Examples:
       const elementTables = countCardTables(element);
 
       // Keep worker identity, visible content and diagnostics together when packing cards.
-      const workerPrefix = /^delegated_worker_\d+_header$/.test(element.element_id ?? '')
+      const workerPrefix = /^dw_\d+_header$/.test(element.element_id ?? '')
         ? element.element_id.slice(0, -'header'.length) : undefined;
       const workerGroup = workerPrefix ? elements.slice(i, i + 4) : [];
       const isWorkerGroup = workerGroup.length === 4 && ['header', 'body', 'meta', 'details']
@@ -1296,17 +1298,22 @@ Examples:
    * @param elements Array of Feishu Card 2.0 elements
    * @returns The new message ID, or null on error
    */
-  private async createContinuationCard(openId: string, elements: any[], onTextFallback?: () => void, allowFallback = true, header?: Record<string, unknown>): Promise<string | null> {
+  private async createContinuationCard(openId: string, elements: any[], onTextFallback?: () => void, allowFallback = true, header?: Record<string, unknown>, rootId?: string): Promise<string | null> {
     try {
       const content = JSON.stringify({ schema: '2.0', ...(header ? { header } : {}), body: { elements: limitCardTables(elements) } });
-      const result = await this.sendCardRequest(content, body => this.client.im.message.create({
-        params: { receive_id_type: 'open_id' },
-        data: {
-          receive_id: openId,
-          msg_type: 'interactive',
-          content: body,
-        },
-      }), onTextFallback, allowFallback);
+      const result = await this.sendCardRequest(content, async body => {
+        const response = await this.client.im.message.create({
+          params: { receive_id_type: 'open_id' },
+          data: {
+            receive_id: openId,
+            msg_type: 'interactive',
+            content: body,
+          },
+        });
+        if (!response.code && response.data?.message_id) this.workerContexts?.remember(response.data.message_id,
+          rootId ?? response.data.message_id, body);
+        return response;
+      }, onTextFallback, allowFallback);
 
       return result.data?.message_id || null;
     } catch (error: any) {
@@ -1318,7 +1325,7 @@ Examples:
   /** Retry a confirmed table-limit or Markdown parse rejection once with readable text. */
   private async sendCardRequest(content: string, send: (body: string) => Promise<any>, onTextFallback?: () => void, allowFallback = true): Promise<any> {
     const checkedSend = async (body: string) => {
-      const result = await send(body);
+      const result = await send(this.workerContexts?.decorate(body) ?? body);
       if (result?.code) throw result;
       return result;
     };
@@ -1433,10 +1440,11 @@ Examples:
         if (hashes[index] === nextHashes[index]) return;
         updatingMessageId = chain[index];
         updatingCardIndex = index;
-        await this.sendCardRequest(payloads[index], content => this.client.im.message.patch({
-          path: { message_id: chain[index] },
-          data: { content },
-        }), () => usePlainText(index), !fallbackCards.has(index));
+        await this.sendCardRequest(payloads[index], async content => {
+          const result = await this.client.im.message.patch({ path: { message_id: chain[index] }, data: { content } });
+          if (!result?.code) this.workerContexts?.remember(chain[index], messageId, content);
+          return result;
+        }, () => usePlainText(index), !fallbackCards.has(index));
         // Failed requests must remain eligible for retry.
         hashes[index] = nextHashes[index];
       };
@@ -1463,7 +1471,7 @@ Examples:
             const chunkIndex = i + 1;
             const newMessageId = await this.createContinuationCard(openId,
               fallbackCards.has(chunkIndex) ? plainTextCard(chunks[chunkIndex]) : chunks[chunkIndex],
-              () => usePlainText(chunkIndex), !fallbackCards.has(chunkIndex));
+              () => usePlainText(chunkIndex), !fallbackCards.has(chunkIndex), undefined, messageId);
             if (newMessageId) {
               chain.push(newMessageId);
               hashes[chunkIndex] = nextHashes[chunkIndex];
@@ -1733,22 +1741,38 @@ Examples:
    * Re-patches the card with updated button states (new active thread highlighted).
    */
   private async refreshThreadSwitchButtons(cardMessageId: string, newActiveThreadId: string): Promise<void> {
-    const state = this.threadSwitchCardState.get(cardMessageId);
-    if (!state) {
-      console.warn(`[FeishuHandler] No thread switch state found for card ${cardMessageId}`);
-      return;
-    }
-    const updatedElements = [
-      ...state.baseElements,
-      ...this.createThreadSwitchElements(state.threads, newActiveThreadId, state.replyLabel),
-    ];
-    await this.client.im.message.patch({
-      path: { message_id: cardMessageId },
-      data: {
-        content: JSON.stringify({ schema: '2.0', body: { elements: updatedElements } }),
-      },
+    const rootId = this.workerContexts?.rootFor(cardMessageId) ?? cardMessageId;
+    await this.withMessageLock(rootId, async () => {
+      const state = this.threadSwitchCardState.get(cardMessageId);
+      if (!state) {
+        console.warn(`[FeishuHandler] No thread switch state found for card ${cardMessageId}`);
+        return;
+      }
+      const updatedElements = [
+        ...state.baseElements,
+        ...this.createThreadSwitchElements(state.threads, newActiveThreadId, state.replyLabel),
+      ];
+      await this.sendCardRequest(JSON.stringify({ schema: '2.0', body: { elements: updatedElements } }), async content => {
+        const result = await this.client.im.message.patch({ path: { message_id: cardMessageId }, data: { content } });
+        if (!result?.code) this.workerContexts?.remember(cardMessageId, rootId, content);
+        return result;
+      });
+      this.threadSwitchCardState.set(cardMessageId, { ...state, activeThreadId: newActiveThreadId });
     });
-    this.threadSwitchCardState.set(cardMessageId, { ...state, activeThreadId: newActiveThreadId });
+  }
+
+  async refreshWorkerContextCard(cardId: string, rootId: string): Promise<void> {
+    await this.withMessageLock(rootId, async () => {
+      const content = this.workerContexts?.contentFor(cardId);
+      if (!content) return;
+      await this.sendCardRequest(content, async body => {
+        const result = await this.client.im.message.patch({ path: { message_id: cardId }, data: { content: body } });
+        if (!result?.code) this.workerContexts?.remember(cardId, rootId, body);
+        return result;
+      });
+      // A concurrent reset can change controls without changing the streaming source elements.
+      this.cardContentHashes.delete(rootId);
+    });
   }
 
   /**
@@ -1765,6 +1789,18 @@ Examples:
       parsed = typeof actionValue === 'string' ? JSON.parse(actionValue) : actionValue;
     } catch {
       return;
+    }
+
+    if (parsed.action === 'worker_context_clear') {
+      const cardId = data?.context?.open_message_id;
+      if (typeof parsed.id !== 'string' || typeof cardId !== 'string' || !this.workerContexts) {
+        return { toast: { type: 'error', content: 'This Worker control has expired. Use a newer Worker card.' } };
+      }
+      try {
+        return { toast: { type: 'info', content: await this.workerContexts.click(openId, parsed.id, cardId) } };
+      } catch (error) {
+        return { toast: { type: 'error', content: error instanceof Error ? error.message : 'Could not clear Worker context.' } };
+      }
     }
 
     if (parsed.action === 'maintenance_view' || parsed.action === 'maintenance_reply') {

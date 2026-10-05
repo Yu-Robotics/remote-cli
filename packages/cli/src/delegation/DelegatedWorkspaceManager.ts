@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from 'crypto';
+import { constants } from 'fs';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import type { DelegatedWorkerLane } from './DelegatedWorkerSessionStore';
-import { captureCheckpoint, createCheckpointCommit, GIT_OID, gitText, runGit,
+import { captureCheckpoint, CHECKPOINT_LIMITS, createCheckpointCommit, GIT_OID, GitCommandError, gitText, runGit,
   type GitCheckpoint } from './GitCheckpoint';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -28,6 +29,8 @@ export interface DelegatedWorkspace {
   input: GitCheckpoint;
   pendingTaskId?: string;
   blocked?: boolean;
+  checkoutState?: 'present' | 'reclaiming' | 'reclaimed';
+  reclamation?: { taskId: string; output: string; tree: string };
 }
 
 interface Artifact {
@@ -44,6 +47,7 @@ interface Artifact {
   disposition: 'pending' | 'applied' | 'retained';
   createdAt: number;
   integratedTree?: string;
+  deliveredAtHead?: string;
   recovery?: { beforeRef: string; targetRef: string };
 }
 
@@ -55,6 +59,7 @@ export interface DelegatedArtifactView {
   outputCommit: string;
   changedFiles: string[];
   filesTruncated: boolean;
+  deliveredAtHead?: string;
   recovery?: { beforeRef: string; targetRef: string };
 }
 
@@ -72,6 +77,7 @@ function inside(root: string, child: string): boolean {
 
 /** Worktrees isolate checkout files, not process permissions. Artifacts are never expired with task diagnostics. */
 export class DelegatedWorkspaceManager {
+  private static readonly operations = new Map<string, Promise<void>>();
   constructor(private readonly directory = path.join(os.homedir(), '.remote-cli', 'delegation-workspaces')) {}
 
   async discover(cwd: string): Promise<DelegatedWorkspaceSource | undefined> {
@@ -112,12 +118,18 @@ export class DelegatedWorkspaceManager {
       try {
         const record = await this.read<DelegatedWorkspace>('lanes', id);
         if (!record || record.blocked || record.pendingTaskId) blocked.add(id);
+        else this.assertLifecycle(record);
       } catch { blocked.add(id); }
     }
     return blocked;
   }
 
   async prepare(lane: DelegatedWorkerLane, source: DelegatedWorkspaceSource,
+    input: GitCheckpoint, taskId: string): Promise<DelegatedWorkspace> {
+    return this.withLane(lane.id, () => this.prepareLocked(lane, source, input, taskId));
+  }
+
+  private async prepareLocked(lane: DelegatedWorkerLane, source: DelegatedWorkspaceSource,
     input: GitCheckpoint, taskId: string): Promise<DelegatedWorkspace> {
     this.assertId(taskId);
     await this.initialize();
@@ -128,14 +140,22 @@ export class DelegatedWorkspaceManager {
     }
     const directory = this.worktreeDirectory(source, lane.id);
     const taskRef = `refs/remote-cli/tasks/${taskId}`;
-    const previous = await this.read<DelegatedWorkspace>('lanes', lane.id);
+    let previous = await this.read<DelegatedWorkspace>('lanes', lane.id);
     if (previous) {
-      await this.validateWorkspace(previous);
-      if (previous.threadId !== lane.threadId || previous.workspaceGeneration !== lane.workspaceGeneration
+      await this.validateWorkspaceRecord(previous);
+      if (previous.laneId !== lane.id || previous.threadId !== lane.threadId || previous.workspaceGeneration !== lane.workspaceGeneration
         || previous.source.cwd !== source.cwd || previous.blocked || previous.pendingTaskId) {
         throw new Error('Worker workspace has unresolved artifacts or a changed identity');
       }
+      previous = await this.resolveReclamation(previous);
+    }
+    if (previous && previous.checkoutState !== 'reclaimed') {
+      await this.validateWorkspace(previous);
       await this.assertClean(previous.directory);
+      const indexEntries = (await runGit(previous.directory, ['ls-files', '-v', '-z'])).toString('utf8').split('\0').filter(Boolean);
+      if (indexEntries.some(entry => !entry.startsWith('H '))) {
+        throw new Error('Worker checkout has hidden index state; manual recovery is required');
+      }
       // Never reset unknown files, including ignored files that checkout could overwrite.
       await runGit(directory, ['checkout', '--detach', '--no-overwrite-ignore', input.commit]);
     } else {
@@ -144,19 +164,31 @@ export class DelegatedWorkspaceManager {
       await this.safeDirectory(path.dirname(directory));
       // Anchor the baseline before creating any checkout, even if setup later fails.
       await runGit(source.root, ['update-ref', this.inputRef(taskId), input.commit]);
-      await runGit(source.root, ['worktree', 'add', '--detach', directory, input.commit]);
+      await this.withRepository(source, async () => {
+        if (await this.registration(source, directory)) throw new Error('Worker path is still registered; manual recovery is required');
+        await runGit(source.root, ['worktree', 'add', '--detach', directory, input.commit]);
+      });
     }
     await runGit(source.root, ['update-ref', this.inputRef(taskId), input.commit]);
     await runGit(source.root, ['update-ref', taskRef, input.commit]);
     const workspace: DelegatedWorkspace = { laneId: lane.id, threadId: lane.threadId,
       workspaceGeneration: lane.workspaceGeneration, source, directory,
-      cwd: path.join(directory, source.relativeCwd), taskId, taskRef, input };
+      cwd: path.join(directory, source.relativeCwd), taskId, taskRef, input, checkoutState: 'present' };
     await this.write('lanes', lane.id, workspace);
     await this.validateWorkspace(workspace);
     return workspace;
   }
 
   async collect(workspace: DelegatedWorkspace, successful: boolean): Promise<DelegatedArtifactView> {
+    return this.withLane(workspace.laneId, () => this.collectLocked(workspace, successful));
+  }
+
+  private async collectLocked(workspace: DelegatedWorkspace, successful: boolean): Promise<DelegatedArtifactView> {
+    const record = await this.read<DelegatedWorkspace>('lanes', workspace.laneId);
+    if (!record || record.taskId !== workspace.taskId || record.blocked
+      || record.checkoutState && record.checkoutState !== 'present') {
+      throw new Error('Worker workspace task changed before collection');
+    }
     await this.validateWorkspace(workspace);
     const checkpoint = await captureCheckpoint(workspace.directory);
     const output = await createCheckpointCommit(workspace.directory, checkpoint.tree, workspace.input.commit,
@@ -188,16 +220,48 @@ export class DelegatedWorkspaceManager {
     this.assertId(taskId);
     const artifact = await this.read<Artifact>('artifacts', taskId);
     if (!artifact) throw new Error('Worker artifact not found');
+    const result = await this.withLane(artifact.laneId, () => this.integrateLocked(owner, taskId, action, expectedRevision));
+    if (action === 'apply' || action === 'inspect' && (result as DelegatedArtifactView).deliveredAtHead) {
+      await this.reclaim(taskId);
+    }
+    return result;
+  }
+
+  private async integrateLocked(owner: IntegrationOwner, taskId: string, action: unknown, expectedRevision: unknown): Promise<unknown> {
+    this.assertId(taskId);
+    let artifact = await this.read<Artifact>('artifacts', taskId);
+    if (!artifact) throw new Error('Worker artifact not found');
     await this.validateArtifact(artifact, owner);
     owner.checkActive?.();
-    const view = await this.view(artifact);
+    if (action !== 'inspect' && action !== 'apply' && action !== 'retain') {
+      throw new Error('Artifact action must be inspect, apply, or retain');
+    }
     const current = await captureCheckpoint(artifact.source.root);
-    if (action === 'inspect') return { ...view, revision: current.revision,
-      deliveryDirectory: artifact.source.cwd, integration: 'Explicit apply or retain is required for pending changes.' };
-    if (action !== 'apply' && action !== 'retain') throw new Error('Artifact action must be inspect, apply, or retain');
-    if (typeof expectedRevision !== 'string' || expectedRevision !== current.revision) {
+    if (action !== 'inspect' && (typeof expectedRevision !== 'string' || expectedRevision !== current.revision)) {
       throw new Error('Delivery workspace changed; inspect the artifact again before integrating');
     }
+    if (action !== 'retain') {
+      try { artifact = await this.recognizeHistoricalDelivery(artifact, owner); }
+      catch {
+        console.warn('[Delegation] Historical delivery could not be verified; the artifact was preserved');
+        // The receipt may already be durable even if clearing its marker failed.
+        // Never apply stale pending state over a subsequently reverted delivery.
+        try {
+          const persisted = await this.read<Artifact>('artifacts', taskId);
+          if (!persisted) throw new Error('Worker delivery receipt is missing');
+          await this.validateArtifact(persisted, owner);
+          artifact = persisted;
+        } catch {
+          if (action === 'apply') throw new Error('Worker delivery state is unavailable; inspect again before applying');
+        }
+      }
+    }
+    owner.checkActive?.();
+    const view = await this.view(artifact);
+    if (action === 'inspect') return { ...view, revision: current.revision,
+      deliveryDirectory: artifact.source.cwd, integration: artifact.deliveredAtHead
+        ? 'Historically delivered. Later delivery-branch changes do not reopen this artifact.'
+        : 'Explicit apply or retain is required for pending changes.' };
     if (artifact.disposition !== 'pending') return view;
     if (action === 'retain') {
       owner.checkActive?.();
@@ -211,15 +275,303 @@ export class DelegatedWorkspaceManager {
     return this.applyArtifact(artifact, current, owner);
   }
 
+  /** Reconcile only the caller's exited, ready lanes. Admission never removes checkouts. */
+  async reconcileHistoricalDelivery(owner: IntegrationOwner, lanes: DelegatedWorkerLane[],
+    reclaim = false): Promise<DelegatedArtifactView[]> {
+    const delivered: DelegatedArtifactView[] = [];
+    for (const lane of lanes) {
+      if (lane.state !== 'ready' || lane.threadId !== owner.threadId || lane.workingDirectory !== owner.cwd
+        || lane.workspaceGeneration !== owner.workspaceGeneration) continue;
+      owner.checkActive?.();
+      try {
+        const view = await this.withLane(lane.id, async () => {
+          const workspace = await this.read<DelegatedWorkspace>('lanes', lane.id);
+          if (!workspace || workspace.laneId !== lane.id || workspace.threadId !== owner.threadId
+            || workspace.source.cwd !== owner.cwd || workspace.workspaceGeneration !== owner.workspaceGeneration
+            || workspace.blocked || workspace.pendingTaskId !== workspace.taskId) return undefined;
+          const artifact = await this.read<Artifact>('artifacts', workspace.taskId);
+          if (!artifact || artifact.successful !== true || artifact.disposition === 'retained' || artifact.recovery) return undefined;
+          const confirmed = await this.recognizeHistoricalDelivery(artifact, owner);
+          return confirmed.disposition === 'applied' ? this.view(confirmed) : undefined;
+        });
+        if (view) {
+          delivered.push(view);
+          if (reclaim) { owner.checkActive?.(); await this.reclaim(view.taskId); }
+        }
+      } catch { console.warn('[Delegation] Historical delivery could not be verified; the worker lane was preserved'); }
+    }
+    return delivered;
+  }
+
+  private async recognizeHistoricalDelivery(artifact: Artifact, owner: IntegrationOwner): Promise<Artifact> {
+    if (artifact.successful !== true || artifact.disposition === 'retained' || artifact.recovery) return artifact;
+    const workspace = await this.read<DelegatedWorkspace>('lanes', artifact.laneId);
+    if (!workspace || workspace.taskId !== artifact.taskId || workspace.laneId !== artifact.laneId
+      || workspace.threadId !== owner.threadId || workspace.source.cwd !== owner.cwd
+      || workspace.workspaceGeneration !== owner.workspaceGeneration || workspace.blocked) return artifact;
+    if (artifact.disposition === 'applied' && !workspace.pendingTaskId) return artifact;
+    if (workspace.pendingTaskId !== artifact.taskId || workspace.checkoutState && workspace.checkoutState !== 'present') return artifact;
+    await this.validateWorkspaceRecord(workspace);
+    await this.validateArtifact(artifact, owner);
+    if (workspace.input.commit !== artifact.input.commit || workspace.input.tree !== artifact.input.tree
+      || !GIT_OID.test(artifact.originalHead)
+      || await gitText(workspace.source.root, ['rev-parse', workspace.taskRef]) !== artifact.output
+      || await gitText(workspace.source.root, ['rev-parse', `refs/remote-cli/worker-history/${artifact.taskId}`]) !== artifact.originalHead) {
+      throw new Error('Worker delivery references changed');
+    }
+    owner.checkActive?.();
+    if (artifact.disposition === 'applied') {
+      // A crash after the durable receipt must not strand its pending-lane marker.
+      await this.resolveArtifact(artifact, 'applied', artifact.integratedTree);
+      return artifact;
+    }
+    const head = await gitText(artifact.source.root, ['rev-parse', '--verify', 'HEAD']);
+    if (!GIT_OID.test(head)) throw new Error('Delivery HEAD is unavailable');
+    try {
+      await runGit(artifact.source.root, ['--no-replace-objects', 'merge-base', '--is-ancestor', artifact.output, head]);
+    } catch (error) {
+      if (error instanceof GitCommandError && error.code === 1) return artifact;
+      throw error;
+    }
+    if (await gitText(artifact.source.root, ['rev-parse', '--verify', 'HEAD']) !== head) {
+      throw new Error('Delivery HEAD changed during historical verification');
+    }
+    owner.checkActive?.();
+    const confirmed: Artifact = { ...artifact, disposition: 'applied', deliveredAtHead: head };
+    // Record historical handoff, not current-byte inclusion or an integration tree.
+    await this.resolveArtifact(confirmed, 'applied');
+    return confirmed;
+  }
+
   async describe(taskId: string): Promise<DelegatedArtifactView | undefined> {
     const artifact = await this.read<Artifact>('artifacts', taskId);
     return artifact ? this.view(artifact) : undefined;
   }
 
+  /** Closeout needs a fresh, owned receipt, not a cached result or an absent record. */
+  async inspectCloseout(owner: IntegrationOwner, taskId: string): Promise<DelegatedArtifactView> {
+    const saved = await this.read<Artifact>('artifacts', taskId);
+    if (!saved) throw new Error('Worker artifact is unavailable');
+    return this.withLane(saved.laneId, async () => {
+      const artifact = await this.read<Artifact>('artifacts', taskId);
+      if (!artifact || artifact.taskId !== taskId || artifact.laneId !== saved.laneId
+        || typeof artifact.successful !== 'boolean') throw new Error('Invalid worker artifact receipt');
+      await this.validateArtifact(artifact, owner);
+      owner.checkActive?.();
+      const workspace = await this.read<DelegatedWorkspace>('lanes', artifact.laneId);
+      if (artifact.disposition !== 'retained' && workspace?.taskId === taskId && workspace.blocked) {
+        throw new Error('Worker artifact collection requires recovery');
+      }
+      // Failed workers may have a no-change receipt, but cannot claim an applied patch.
+      if (artifact.disposition === 'applied' && !artifact.successful && artifact.tree !== artifact.input.tree) {
+        throw new Error('Unsuccessful worker changes have no delivery receipt');
+      }
+      const view = await this.view(artifact);
+      owner.checkActive?.();
+      return view;
+    });
+  }
+
   /** Removing a conversation does not authorize deleting its files or pending artifacts. */
   async preserveLane(laneId: string): Promise<void> {
+    await this.withLane(laneId, async () => {
+      const workspace = await this.read<DelegatedWorkspace>('lanes', laneId);
+      if (workspace) await this.write('lanes', laneId, { ...workspace, blocked: true });
+    });
+  }
+
+  /** Called only after worker exit or a durable delivery receipt; never races a cleanup deadline. */
+  async reclaim(taskId: string): Promise<boolean> {
+    try {
+      this.assertId(taskId);
+      const artifact = await this.read<Artifact>('artifacts', taskId);
+      if (!artifact) return false;
+      return await this.withLane(artifact.laneId, () => this.reclaimLocked(taskId, artifact.laneId));
+    } catch {
+      // Physical cleanup is optional. Do not turn a delivered result into a failed task.
+      console.warn('[Delegation] Worker checkout retained; automatic reclamation could not be verified');
+      return false;
+    }
+  }
+
+  private async reclaimLocked(taskId: string, laneId: string): Promise<boolean> {
     const workspace = await this.read<DelegatedWorkspace>('lanes', laneId);
-    if (workspace) await this.write('lanes', laneId, { ...workspace, blocked: true });
+    const artifact = await this.read<Artifact>('artifacts', taskId);
+    if (!workspace || workspace.taskId !== taskId || !artifact || workspace.blocked || workspace.pendingTaskId
+      || artifact.successful !== true || artifact.disposition !== 'applied' || artifact.recovery) return false;
+    await this.validateReclamationArtifact(workspace, artifact);
+    if (workspace.checkoutState === 'reclaimed') return false;
+    await this.verifyCheckout(workspace, artifact);
+    const intent: DelegatedWorkspace = { ...workspace, checkoutState: 'reclaiming',
+      reclamation: { taskId, output: artifact.output, tree: artifact.tree } };
+    await this.write('lanes', laneId, intent);
+    // Full byte verification holds only the lane guard, not other lanes' metadata admission.
+    await this.verifyCheckout(intent, artifact);
+    return this.withRepository(workspace.source, async () => {
+      const latest = await this.read<DelegatedWorkspace>('lanes', laneId);
+      if (!latest || JSON.stringify(latest) !== JSON.stringify(intent)) throw new Error('Worker reclamation intent changed');
+      const registered = await this.registration(workspace.source, workspace.directory);
+      if (!registered || registered.locked || registered.head !== artifact.output) {
+        throw new Error('Worker registration changed before removal');
+      }
+      await runGit(workspace.source.root, ['worktree', 'remove', workspace.directory]);
+      if (await this.pathExists(workspace.directory) || await this.registration(workspace.source, workspace.directory)) {
+        throw new Error('Worker checkout removal was not confirmed');
+      }
+      await this.write('lanes', laneId, { ...intent, checkoutState: 'reclaimed' });
+      return true;
+    });
+  }
+
+  private async validateReclamationArtifact(workspace: DelegatedWorkspace, artifact: Artifact): Promise<void> {
+    await this.validateWorkspaceRecord(workspace);
+    await this.validateArtifact(artifact, { threadId: workspace.threadId, cwd: workspace.source.cwd,
+      workspaceGeneration: workspace.workspaceGeneration });
+    if (artifact.laneId !== workspace.laneId || artifact.taskId !== workspace.taskId
+      || artifact.input.commit !== workspace.input.commit || artifact.input.tree !== workspace.input.tree
+      || artifact.successful !== true || artifact.disposition !== 'applied' || artifact.recovery
+      || workspace.blocked || workspace.pendingTaskId
+      || !GIT_OID.test(artifact.originalHead)
+      || await gitText(workspace.source.root, ['rev-parse', workspace.taskRef]) !== artifact.output
+      || await gitText(workspace.source.root, ['rev-parse', `refs/remote-cli/worker-history/${artifact.taskId}`]) !== artifact.originalHead) {
+      throw new Error('Worker checkout has no matching delivery receipt');
+    }
+    if (workspace.reclamation && (workspace.reclamation.taskId !== artifact.taskId
+      || workspace.reclamation.output !== artifact.output || workspace.reclamation.tree !== artifact.tree)) {
+      throw new Error('Worker reclamation receipt changed');
+    }
+  }
+
+  private async resolveReclamation(workspace: DelegatedWorkspace): Promise<DelegatedWorkspace> {
+    if (!workspace.checkoutState || workspace.checkoutState === 'present') return workspace;
+    // The caller holds the lane guard. This resolver does not mutate Git worktree metadata.
+    const artifact = await this.read<Artifact>('artifacts', workspace.taskId);
+    if (!artifact) throw new Error('Worker reclamation artifact is missing');
+    await this.validateReclamationArtifact(workspace, artifact);
+    const exists = await this.pathExists(workspace.directory);
+    const registered = await this.registration(workspace.source, workspace.directory);
+    if (!exists && !registered) {
+      const reclaimed: DelegatedWorkspace = { ...workspace, checkoutState: 'reclaimed' };
+      await this.write('lanes', workspace.laneId, reclaimed);
+      return reclaimed;
+    }
+    if (workspace.checkoutState === 'reclaiming' && exists && registered) {
+      // A fully intact checkout can cancel an interrupted intent. Partial/foreign paths cannot.
+      await this.verifyCheckout(workspace, artifact);
+      const present: DelegatedWorkspace = { ...workspace, checkoutState: 'present', reclamation: undefined };
+      await this.write('lanes', workspace.laneId, present);
+      return present;
+    }
+    throw new Error('Reclaimed worker path is occupied or partially registered; manual recovery is required');
+  }
+
+  private async verifyCheckout(workspace: DelegatedWorkspace, artifact: Artifact): Promise<void> {
+    await this.validateWorkspace(workspace);
+    const registered = await this.registration(workspace.source, workspace.directory);
+    if (!registered || registered.locked || registered.head !== artifact.output
+      || await gitText(workspace.directory, ['branch', '--show-current'])
+      || await gitText(workspace.directory, ['rev-parse', 'HEAD']) !== artifact.output
+      || (await runGit(workspace.directory, ['ls-files', '-u', '-z'])).length) {
+      throw new Error('Worker checkout is locked, unresolved, or no longer at its saved output');
+    }
+    await this.assertClean(workspace.directory);
+    // Git status and a copied index can hide changed bytes behind assume-unchanged,
+    // skip-worktree, or stat-cache flags. Hash actual bytes without filters or index metadata.
+    const files = new Map<string, { mode: string; oid: string }>();
+    const directories = new Set(['']);
+    const tree = await runGit(workspace.source.root, ['ls-tree', '-r', '-z', '--full-tree', artifact.tree]);
+    if (!Buffer.from(tree.toString('utf8')).equals(tree)) throw new Error('Non-UTF-8 checkout paths require manual cleanup');
+    for (const entry of tree.toString('utf8').split('\0').filter(Boolean)) {
+      const match = /^(100644|100755|120000) blob ([a-f0-9]{40}|[a-f0-9]{64})\t(.+)$/s.exec(entry);
+      if (!match) throw new Error('Unsupported checkout tree entry');
+      const [, mode, oid, name] = match;
+      if (!inside(workspace.directory, path.join(workspace.directory, name)) || name.split('/').includes('.git')
+        || files.has(name)) throw new Error('Invalid checkout tree path');
+      files.set(name, { mode, oid });
+      let parent = path.posix.dirname(name);
+      while (parent !== '.') { directories.add(parent); parent = path.posix.dirname(parent); }
+      if (files.size > CHECKPOINT_LIMITS.files) throw new Error('Checkout verification file limit exceeded');
+    }
+    let bytes = 0;
+    let entries = 0;
+    const buffer = Buffer.alloc(64 * 1024);
+    const walk = async (relative: string): Promise<void> => {
+      const absolute = path.join(workspace.directory, relative);
+      if (await fs.realpath(absolute) !== absolute) throw new Error('Checkout directory changed during verification');
+      for (const name of await fs.readdir(absolute)) {
+        if (++entries > CHECKPOINT_LIMITS.files * 2) throw new Error('Checkout verification entry limit exceeded');
+        const child = relative ? `${relative}/${name}` : name;
+        const file = path.join(workspace.directory, child);
+        const stat = await fs.lstat(file);
+        if (child === '.git' && stat.isFile() && !stat.isSymbolicLink()) continue;
+        if (stat.isDirectory() && directories.has(child)) { await walk(child); continue; }
+        const expected = files.get(child);
+        if (!expected || (expected.mode === '120000' ? !stat.isSymbolicLink() : !stat.isFile())) {
+          throw new Error('Checkout contains unknown, ignored, or unsupported files');
+        }
+        if (process.platform !== 'win32' && expected.mode !== '120000'
+          && Boolean(stat.mode & 0o111) !== (expected.mode === '100755')) throw new Error('Checkout file mode changed');
+        bytes += stat.size;
+        if (bytes > CHECKPOINT_LIMITS.bytes) throw new Error('Checkout verification byte limit exceeded');
+        const hash = createHash(expected.oid.length === 64 ? 'sha256' : 'sha1');
+        hash.update(`blob ${stat.size}\0`);
+        if (stat.isSymbolicLink()) hash.update(await fs.readlink(file, { encoding: 'buffer' }));
+        else {
+          const handle = await fs.open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+          try {
+            const opened = await handle.stat();
+            if (!opened.isFile() || opened.dev !== stat.dev || opened.ino !== stat.ino || opened.size !== stat.size) {
+              throw new Error('Checkout file changed during verification');
+            }
+            let read = 0;
+            while (true) {
+              const chunk = await handle.read(buffer, 0, buffer.length, null);
+              if (!chunk.bytesRead) break;
+              read += chunk.bytesRead;
+              if (read > stat.size) throw new Error('Checkout file grew during verification');
+              hash.update(buffer.subarray(0, chunk.bytesRead));
+            }
+            const after = await handle.stat();
+            if (read !== stat.size || after.mtimeMs !== stat.mtimeMs || after.ctimeMs !== stat.ctimeMs) {
+              throw new Error('Checkout file changed during verification');
+            }
+          } finally { await handle.close(); }
+        }
+        if (hash.digest('hex') !== expected.oid) throw new Error('Checkout bytes differ from the saved output');
+        files.delete(child);
+      }
+    };
+    await walk('');
+    if (files.size) throw new Error('Saved checkout files are missing');
+  }
+
+  private async registration(source: DelegatedWorkspaceSource, directory: string): Promise<{ head?: string; locked: boolean } | undefined> {
+    let selected = false;
+    let result: { head?: string; locked: boolean } | undefined;
+    // Git 2.34 has no worktree-list -z option. Decode its quoted paths rather than
+    // weakening ownership checks or raising the existing Git requirement.
+    const output = await runGit(source.root, ['-c', 'core.quotePath=false', 'worktree', 'list', '--porcelain']);
+    if (!Buffer.from(output.toString('utf8')).equals(output)) throw new Error('Unsupported Git worktree path encoding');
+    for (const field of output.toString('utf8').split('\n')) {
+      if (field.startsWith('worktree ')) {
+        const encoded = field.slice(9);
+        let decoded: unknown;
+        try { decoded = encoded.startsWith('"') ? JSON.parse(encoded) : encoded; }
+        catch { throw new Error('Unsupported Git worktree path encoding; manual recovery is required'); }
+        if (typeof decoded !== 'string') throw new Error('Invalid Git worktree path');
+        selected = decoded === directory;
+        if (selected) result = { locked: false };
+      } else if (selected && result) {
+        if (field.startsWith('HEAD ')) result.head = field.slice(5);
+        if (field === 'locked' || field.startsWith('locked ')) result.locked = true;
+      }
+    }
+    return result;
+  }
+
+  private async pathExists(directory: string): Promise<boolean> {
+    try { await fs.lstat(directory); return true; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
   }
 
   private async applyArtifact(artifact: Artifact, current: GitCheckpoint, owner: IntegrationOwner): Promise<unknown> {
@@ -230,7 +582,8 @@ export class DelegatedWorkspaceManager {
     let created = false;
     let preserve = false;
     try {
-      await runGit(artifact.source.root, ['worktree', 'add', '--detach', integrationDirectory, wrapper]);
+      await this.withRepository(artifact.source,
+        () => runGit(artifact.source.root, ['worktree', 'add', '--detach', integrationDirectory, wrapper]));
       created = true;
       try {
         await runGit(integrationDirectory, ['-c', 'user.name=Remote CLI', '-c', 'user.email=remote-cli@example.com',
@@ -276,7 +629,8 @@ export class DelegatedWorkspaceManager {
     } finally {
       if (created && !preserve) {
         // This directory contains only captured integration input and a reproducible merge result.
-        await runGit(artifact.source.root, ['worktree', 'remove', '--force', integrationDirectory])
+        await this.withRepository(artifact.source,
+          () => runGit(artifact.source.root, ['worktree', 'remove', '--force', integrationDirectory]))
           .catch(() => console.warn('[Delegation] Integration scratch worktree retained for manual cleanup'));
       } else if (!created) {
         // Failed setup can leave partial files; preserve them without masking the setup error.
@@ -300,6 +654,7 @@ export class DelegatedWorkspaceManager {
     return { taskId: artifact.taskId, disposition: artifact.disposition, successful: artifact.successful,
       baseCommit: artifact.input.commit, outputCommit: artifact.output,
       changedFiles: files.slice(0, 60), filesTruncated: files.length > 60,
+      ...(artifact.deliveredAtHead ? { deliveredAtHead: artifact.deliveredAtHead } : {}),
       ...(artifact.recovery ? { recovery: artifact.recovery } : {}) };
   }
 
@@ -317,7 +672,10 @@ export class DelegatedWorkspaceManager {
       || artifact.threadId !== owner.threadId || artifact.source.cwd !== owner.cwd
       || artifact.workspaceGeneration !== owner.workspaceGeneration || !GIT_OID.test(artifact.output)
       || !GIT_OID.test(artifact.tree) || !GIT_OID.test(artifact.input.commit) || !GIT_OID.test(artifact.input.tree)
-      || !['pending', 'applied', 'retained'].includes(artifact.disposition)) throw new Error('Invalid or foreign worker artifact');
+      || !['pending', 'applied', 'retained'].includes(artifact.disposition)
+      || artifact.deliveredAtHead !== undefined && (!GIT_OID.test(artifact.deliveredAtHead) || artifact.disposition !== 'applied')) {
+      throw new Error('Invalid or foreign worker artifact');
+    }
     await this.validateSource(artifact.source);
     if (await gitText(artifact.source.root, ['rev-parse', this.outputRef(artifact.taskId)]) !== artifact.output
       || await gitText(artifact.source.root, ['rev-parse', this.inputRef(artifact.taskId)]) !== artifact.input.commit
@@ -334,21 +692,39 @@ export class DelegatedWorkspaceManager {
   }
 
   private async validateWorkspace(workspace: DelegatedWorkspace): Promise<void> {
-    this.assertId(workspace.laneId);
-    this.assertId(workspace.taskId);
-    if (workspace.taskRef !== `refs/remote-cli/tasks/${workspace.taskId}` || !GIT_OID.test(workspace.input.commit)) {
-      throw new Error('Owned worker task reference is invalid');
+    await this.validateWorkspaceRecord(workspace);
+    if (workspace.checkoutState === 'reclaimed' || !await this.pathExists(workspace.directory)) {
+      throw new Error('Owned worker checkout is missing; an explicit reclamation receipt is required');
     }
-    await this.validateSource(workspace.source);
-    if (workspace.directory !== this.worktreeDirectory(workspace.source, workspace.laneId)
-      || workspace.cwd !== path.join(workspace.directory, workspace.source.relativeCwd)
-      || await fs.realpath(workspace.directory) !== workspace.directory
+    if (await fs.realpath(workspace.directory) !== workspace.directory
       || await gitText(workspace.directory, ['rev-parse', '--show-toplevel']) !== workspace.directory
       || await fs.realpath(path.resolve(workspace.directory, await gitText(workspace.directory,
         ['rev-parse', '--git-common-dir']))) !== workspace.source.commonDirectory) {
       throw new Error('Owned worker worktree identity changed');
     }
     if (!inside(workspace.directory, await fs.realpath(workspace.cwd))) throw new Error('Worker directory escapes its worktree');
+  }
+
+  private assertLifecycle(workspace: DelegatedWorkspace): void {
+    const state = workspace.checkoutState ?? 'present';
+    if (!['present', 'reclaiming', 'reclaimed'].includes(state)
+      || (state === 'present' ? workspace.reclamation !== undefined : !workspace.reclamation)) {
+      throw new Error('Invalid worker checkout lifecycle');
+    }
+  }
+
+  private async validateWorkspaceRecord(workspace: DelegatedWorkspace): Promise<void> {
+    this.assertId(workspace.laneId);
+    this.assertId(workspace.taskId);
+    this.assertLifecycle(workspace);
+    if (workspace.taskRef !== `refs/remote-cli/tasks/${workspace.taskId}` || !GIT_OID.test(workspace.input.commit)) {
+      throw new Error('Owned worker task reference is invalid');
+    }
+    await this.validateSource(workspace.source);
+    if (workspace.directory !== this.worktreeDirectory(workspace.source, workspace.laneId)
+      || workspace.cwd !== path.join(workspace.directory, workspace.source.relativeCwd)) {
+      throw new Error('Owned worker worktree identity changed');
+    }
   }
 
   private async assertClean(directory: string): Promise<void> {
@@ -366,6 +742,28 @@ export class DelegatedWorkspaceManager {
   private inputRef(taskId: string): string { this.assertId(taskId); return `refs/remote-cli/inputs/${taskId}`; }
   private outputRef(taskId: string): string { this.assertId(taskId); return `refs/remote-cli/artifacts/${taskId}`; }
   private assertId(id: string): void { if (!UUID.test(id)) throw new Error('Invalid worker workspace ID'); }
+
+  private withLane<T>(laneId: string, operation: () => Promise<T>): Promise<T> {
+    this.assertId(laneId);
+    return this.serialize(`lane:${path.resolve(this.directory)}:${laneId}`, operation);
+  }
+
+  private withRepository<T>(source: DelegatedWorkspaceSource, operation: () => Promise<T>): Promise<T> {
+    return this.serialize(`repository:${source.commonDirectory}`, operation);
+  }
+
+  private async serialize<T>(key: string, operation: () => Promise<T>): Promise<T> {
+    const previous = DelegatedWorkspaceManager.operations.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>(resolve => { release = resolve; });
+    DelegatedWorkspaceManager.operations.set(key, current);
+    await previous;
+    try { return await operation(); }
+    finally {
+      release();
+      if (DelegatedWorkspaceManager.operations.get(key) === current) DelegatedWorkspaceManager.operations.delete(key);
+    }
+  }
 
   private async initialize(): Promise<void> {
     await this.safeDirectory(this.directory);

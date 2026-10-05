@@ -83,3 +83,14 @@ export async function cleanupDelegatedWorkerLane(lane: DelegatedWorkerLane, home
   const homes = home ? [home] : [...new Set([process.env.HOME, os.homedir()].filter((value): value is string => Boolean(value)))];
   await Promise.all(homes.map(candidate => cleanupAtHome(lane, candidate)));
 }
+
+/** Disconnect native continuation without deleting workspaces, history, or settings. */
+export async function clearDelegatedWorkerContext(lane: DelegatedWorkerLane, home?: string): Promise<void> {
+  if (!isWorkerLaneExecutorId(lane.executorThreadId)) throw new Error('Invalid delegated worker executor ID');
+  const homes = home ? [home] : [...new Set([process.env.HOME, os.homedir()].filter((value): value is string => Boolean(value)))];
+  for (const candidate of homes) {
+    const directory = path.join(candidate, '.remote-cli', `${lane.backend}-sessions`);
+    await unlinkFile(path.join(directory, `${lane.executorThreadId}.json`));
+    if (lane.backend === 'dsh') await unlinkFile(path.join(directory, `${lane.executorThreadId}.handoff.json`));
+  }
+}

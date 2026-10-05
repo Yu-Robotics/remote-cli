@@ -13,6 +13,30 @@ const workerBody = (elements: any[]) => elements[1].columns[0].elements;
 const workerBodyContent = (elements: any[]) => workerBody(elements).map((element: any) => element.content ?? '').join('\n');
 
 describe('delegated worker progress formatting', () => {
+  it.each(['succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted'] as const)('keeps context clearing outside folded details without shifting sibling slots for %s', phase => {
+    const elements = render({ phase, contextActionId: 'opaque-action' });
+    expect(elements).toHaveLength(DELEGATION_PROGRESS_ELEMENT_COUNT);
+    const children = elements[3].columns[0].elements;
+    expect(children[0]).toMatchObject({ tag: 'collapsible_panel', expanded: false });
+    expect(JSON.stringify(children[0])).not.toContain('worker_context_clear');
+    expect(children[1].columns[0].elements[0].behaviors[0].value).toEqual({ action: 'worker_context_clear', id: 'opaque-action' });
+    expect(elements[3].element_id).toBe('dw_2_details');
+    // Card JSON 2.0 permits nested columns/panels but requires short, unique element IDs.
+    // https://open.feishu.cn/document/feishu-cards/card-json-v2-components/containers/column-set
+    const ids: string[] = [];
+    const inspect = (value: any, depth = 0) => {
+      if (!value || typeof value !== 'object') return;
+      if (value.element_id) { expect(value.element_id).toMatch(/^[a-zA-Z][a-zA-Z0-9_]{0,19}$/); ids.push(value.element_id); }
+      const next = depth + (['column_set', 'column', 'collapsible_panel'].includes(value.tag) ? 1 : 0);
+      expect(next).toBeLessThanOrEqual(5);
+      for (const child of Object.values(value)) {
+        if (Array.isArray(child)) child.forEach(item => inspect(item, next));
+        else if (child && typeof child === 'object') inspect(child, next);
+      }
+    };
+    elements.forEach(element => inspect(element));
+    expect(new Set(ids).size).toBe(ids.length);
+  });
   it('identifies DSH workers without exposing the raw backend key', () => {
     expect(identity(render({ backend: 'dsh' })).content).toContain('**DSH**');
   });
@@ -36,7 +60,7 @@ describe('delegated worker progress formatting', () => {
       const elements = render({ phase });
       expect(elements).toHaveLength(DELEGATION_PROGRESS_ELEMENT_COUNT);
       expect(elements.map(element => element.element_id)).toEqual([
-        'delegated_worker_2_header', 'delegated_worker_2_body', 'delegated_worker_2_meta', 'delegated_worker_2_details',
+        'dw_2_header', 'dw_2_body', 'dw_2_meta', 'dw_2_details',
       ]);
       expect(identity(elements).icon).toEqual({ tag: 'standard_icon', token: 'robot_outlined', color: 'purple' });
       expect(elements[0]).toMatchObject({ tag: 'column_set', flex_mode: 'none' });

@@ -163,6 +163,30 @@ describe('MessageHandler', () => {
   });
 
   describe('streaming card context', () => {
+    it('negotiates exact Worker reset independently of command execution and waits for CLI completion', async () => {
+      const reset = vi.spyOn((ctx.handler as any).delegation, 'resetWorkerContext');
+      let finish!: () => void;
+      reset.mockImplementation(() => new Promise<void>(resolve => { finish = resolve; }));
+      const request = { type: 'worker_context_reset', messageId: 'reset', threadId: 'default-thread-id', laneId: 'lane', generation: 3 };
+      await ctx.handler.handleMessage(request);
+      expect(reset).not.toHaveBeenCalled();
+      await negotiate({ delegationProgress: true, workerContextReset: true });
+      const pending = ctx.handler.handleMessage(request);
+      expect(reset).toHaveBeenCalledWith(ctx.mockThreadManager.getThread(request.threadId), 'lane', 3);
+      expect(ctx.mockWsClient.send).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'worker_context_reset_result' }));
+      finish(); await pending;
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'worker_context_reset_result', messageId: 'reset', success: true }));
+      expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
+      expect(ctx.mockExecutor.resetContext).not.toHaveBeenCalled();
+      reset.mockRejectedValue(new Error('private filesystem path'));
+      await ctx.handler.handleMessage(request);
+      expect(ctx.mockWsClient.send.mock.calls.at(-1)[0]).toMatchObject({ success: false, error: 'Could not clear Worker context. Check local CLI storage and retry.' });
+      await ctx.handler.handleMessage({ ...request, threadId: 'deleted-thread' });
+      expect(ctx.mockWsClient.send.mock.calls.at(-1)[0].error).toContain('expired');
+      await ctx.handler.handleMessage({ ...request, generation: -1 });
+      expect(ctx.mockWsClient.send.mock.calls.at(-1)[0].error).toContain('Invalid');
+      reset.mockRestore();
+    });
     async function negotiate(capabilities?: Record<string, boolean>) {
       await ctx.handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities } } as any);
     }

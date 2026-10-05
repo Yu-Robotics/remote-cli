@@ -1,4 +1,5 @@
 import { ApprovalCards } from './feishu/ApprovalCards';
+import { WorkerContextCards } from './feishu/WorkerContextCards';
 import { MaintenanceCards } from './maintenance/MaintenanceCards';
 import { NoticeReceipts } from './maintenance/NoticeReceipts';
 import { DeviceAuth } from './files/DeviceAuth';
@@ -80,6 +81,8 @@ export class RouterServer {
   private connectionHub: ConnectionHub;
   private bindingManager: BindingManager;
   private approvalCards: ApprovalCards;
+  private readonly workerContextCards: WorkerContextCards;
+  private readonly workerContextConnections = new Map<string, () => boolean>();
   private readonly maintenanceCards: MaintenanceCards;
   private readonly maintenanceConnections = new Map<string, { updateNotice: boolean; current: () => boolean }>();
   private cleanupInterval: NodeJS.Timeout | null = null;
@@ -166,6 +169,13 @@ export class RouterServer {
     });
     this.feishuLongConnHandler.onApprovalAction = (openId, requestId, cardId, decision) =>
       this.approvalCards.click(openId, requestId, cardId, decision as ApprovalAction);
+    this.workerContextCards = new WorkerContextCards({
+      ownsDevice: async (openId, deviceId) => (await this.bindingManager.getDeviceBinding(deviceId))?.openId === openId,
+      available: deviceId => this.workerContextConnections.get(deviceId)?.() === true,
+      send: (deviceId, message) => this.connectionHub.sendToDevice(deviceId, message),
+      refresh: (cardId, rootId) => this.feishuLongConnHandler.refreshWorkerContextCard(cardId, rootId),
+    });
+    this.feishuLongConnHandler.workerContexts = this.workerContextCards;
     this.maintenanceCards = new MaintenanceCards(new NoticeReceipts(path.join(
       path.dirname(config.getConfigPath() || path.join(os.homedir(), '.remote-cli-router', 'config.json')), 'notice-receipts.json')), {
       owner: async deviceId => (await this.bindingManager.getDeviceBinding(deviceId))?.openId,
@@ -405,6 +415,7 @@ export class RouterServer {
       let approvalCardsEnabled = false;
       let delegationProgressEnabled = false;
       let delegationProgressTextEnabled = false;
+      let workerContextResetEnabled = false;
       let streamingContextEnabled = false;
       let updateNoticeEnabled = false;
       let subscriptionInspectionEnabled = false;
@@ -454,6 +465,10 @@ export class RouterServer {
             return;
           }
 
+          if (message.type === 'worker_context_reset_result') {
+            if (workerContextResetEnabled && deviceId) await this.workerContextCards.resolve(deviceId, message);
+            return;
+          }
           if (message.type === 'approval_request' || message.type === 'approval_resolved') {
             if (!approvalCardsEnabled || !deviceId) return;
             if (message.type === 'approval_request') {
@@ -575,6 +590,10 @@ export class RouterServer {
                 delegationProgressEnabled = message.data.capabilities?.delegationProgress === true;
                 delegationProgressTextEnabled = delegationProgressEnabled
                   && message.data.capabilities?.delegationProgressText === true;
+                workerContextResetEnabled = delegationProgressEnabled && message.data.capabilities?.workerContextReset === true;
+                if (workerContextResetEnabled) this.workerContextConnections.set(deviceId,
+                  () => ws.readyState === WebSocket.OPEN && this.connectionHub.isCurrentConnection(requestedId, ws));
+                else this.workerContextConnections.delete(deviceId);
                 // Send confirmation with version info for client-side version check
                 ws.send(JSON.stringify({
                   type: MessageType.BINDING_CONFIRM,
@@ -592,6 +611,7 @@ export class RouterServer {
                       ...(approvalCardsEnabled ? { approvalCards: true } : {}),
                       ...(delegationProgressEnabled ? { delegationProgress: true } : {}),
                       ...(delegationProgressTextEnabled ? { delegationProgressText: true } : {}),
+                      ...(workerContextResetEnabled ? { workerContextReset: true } : {}),
                       ...(streamingContextEnabled ? { streamingContext: true } : {}),
                     } } : {}),
                   }
@@ -738,7 +758,8 @@ export class RouterServer {
                     break;
                   case 'delegation_progress':
                     if (delegationProgressEnabled && message.delegationProgress) {
-                      await this.handleDelegationProgress(message.messageId, message.openId, message.delegationProgress, delegationProgressTextEnabled);
+                      await this.handleDelegationProgress(message.messageId, message.openId, message.delegationProgress,
+                        delegationProgressTextEnabled, workerContextResetEnabled ? deviceId ?? undefined : undefined);
                     }
                     break;
                   case 'redacted_thinking':
@@ -808,6 +829,7 @@ export class RouterServer {
           this.approvalCards.disconnect(deviceId);
           this.maintenanceCards.disconnect(deviceId);
           this.maintenanceConnections.delete(deviceId);
+          this.workerContextConnections.delete(deviceId);
           this.cleanupStreamingSessionsForDevice(deviceId);
           console.log('Device disconnected:', deviceId);
         }
@@ -1096,6 +1118,11 @@ export class RouterServer {
     const startedAt = typeof raw.startedAt === 'number' && Number.isFinite(raw.startedAt) && raw.startedAt >= 0
       ? raw.startedAt : undefined;
     const executionMetadata = parseExecutionMetadata(raw.executionMetadata);
+    const reference = raw.workerContext as { laneId?: unknown; generation?: unknown } | undefined;
+    const workerContext = reference && typeof reference.laneId === 'string'
+      && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(reference.laneId)
+      && Number.isSafeInteger(reference.generation) && (reference.generation as number) >= 0
+      ? { laneId: reference.laneId, generation: reference.generation as number } : undefined;
     return {
       taskId,
       backend,
@@ -1108,6 +1135,7 @@ export class RouterServer {
       error: this.boundedDelegationProgressText(raw.error, 4000),
       startedAt,
       ...(executionMetadata?.backend === backend ? { executionMetadata } : {}),
+      ...(workerContext ? { workerContext } : {}),
     };
   }
 
@@ -1188,7 +1216,8 @@ export class RouterServer {
   }
 
   /** Update one bounded, nested worker panel rather than flattening child tool cards. */
-  private async handleDelegationProgress(messageId: string, openId: string, value: unknown, allowText = false): Promise<void> {
+  private async handleDelegationProgress(messageId: string, openId: string, value: unknown, allowText = false,
+    contextDeviceId?: string): Promise<void> {
     const progress = this.normalizeDelegationProgress(value, allowText);
     if (!progress) {
       console.log(`[RouterServer] Ignoring malformed delegation progress for ${messageId}`);
@@ -1232,6 +1261,11 @@ export class RouterServer {
     }
 
     if (!state.objective && progress.objective) state.objective = progress.objective;
+    if (DELEGATION_PROGRESS_TERMINAL_PHASES.has(progress.phase) && progress.workerContext && contextDeviceId
+      && streamData.deviceId === contextDeviceId && streamData.openId === openId && streamData.threadId) {
+      state.contextActionId = this.workerContextCards.register({ openId, deviceId: contextDeviceId,
+        threadId: streamData.threadId, ...progress.workerContext });
+    }
     if (progress.executionMetadata) state.executionMetadata = progress.executionMetadata;
     if (progress.phase === 'waiting_input') state.inputRequest = progress.summary;
     else state.inputRequest = undefined;
@@ -1812,6 +1846,8 @@ export class RouterServer {
   async stop(): Promise<void> {
     console.log('Stopping router server...');
     this.approvalCards.destroy();
+    this.workerContextCards.destroy();
+    this.workerContextConnections.clear();
     this.maintenanceCards.destroy();
     this.maintenanceConnections.clear();
     await this.fileTransfers.destroy();

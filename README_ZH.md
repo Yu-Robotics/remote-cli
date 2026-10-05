@@ -575,8 +575,50 @@ keeps the immutable artifact; it does not delete files. No-change tasks need no
 integration. Pending artifacts and unknown dirty files prevent lane reuse.
 Before a reusable lane starts again, its checkout moves to a fresh baseline,
 including integrated sibling changes, while its native conversation continues.
-Artifacts and recovery files are retained beyond diagnostic expiry and native
-conversation reset/deletion; clean them manually only after confirming delivery.
+From CLI 1.6.135, a successful pending artifact also counts as delivered when its
+recorded output snapshot commit is an ancestor of the delivery workspace's HEAD.
+Later reverts do not reopen delivery. Guarded inspection, ready-lane admission,
+and idle turn closure recognize this history automatically and persist the
+observed HEAD. Admission only updates metadata; inspection and idle closure may
+attempt safe reclamation. Explicit retention and unknown/failed/recovery states
+are preserved. Copies, cherry-picks, squash merges, or matching files alone do
+not establish ancestry; patch-only apply remains the other delivery mechanism.
+From CLI 1.6.135, successful no-change tasks and successfully applied artifacts
+automatically reclaim their verified worker checkout directories. Native lane
+identity, conversation pointers, artifact records, and private Git refs remain.
+The next task recreates the checkout at the same path from fresh delivery input.
+Reclamation checks ownership, detached HEAD, delivery receipts, actual file bytes,
+modes, and symlinks; ignored files, extra directories, locked worktrees, and unknown
+state prevent deletion. Filters or line-ending transformations that prevent exact
+byte verification also retain the checkout. Failed/cancelled tasks, pending or
+retained artifacts, and unresolved recovery state are never reclaimed automatically.
+Cleanup failure does not change task success or undo integration. If checkout
+preparation fails, an existing lane's native context is also preserved:
+the lane is blocked for manual recovery, and other lanes can still run. Full byte
+verification does not hold the shared repository metadata guard.
+Persisted intent and receipt states allow interrupted cleanup to be resolved only when directory
+and Git registration agree; missing legacy checkouts, occupied reclaimed paths,
+or partial registrations require manual recovery. No force removal, repository
+pruning, historical sweep, or expiry-based checkout deletion is performed.
+Artifacts and recovery files remain beyond diagnostic expiry and native context
+reset/deletion; manually clean retained files only after confirming delivery.
+From CLI 1.6.136, successful coordinator completion also requires a code-enforced
+artifact closeout check for Git workers started in the current request. The CLI
+waits for tool calls and worker cleanup, recognizes historical delivery, and reads
+validated durable receipts; reading a result or claiming completion is not enough.
+No-change, applied, and explicitly retained artifacts pass. Pending changes,
+failed collection, unavailable records, and unretained recovery state cause up to
+two additional coordinator rounds in the same session, without replaying the
+original request or attachments. New workers do not reset this budget. If unresolved,
+the final response fails with task IDs and available output commits; queued execution
+pauses and existing artifacts stay preserved. Coordinator failure, abort, or shutdown
+does not launch further closeout rounds. Retaining output is a deliberate decision
+not to integrate, not proof of delivery or permission to delete files. The check
+does not certify functional correctness, force cleanup, or replay old requests.
+Worktree lifecycle operations are serialized within this CLI process, not against
+unmanaged programs writing to the same files; keep external writers out of worker
+checkouts. Native executor behavior, non-Git FIFO scheduling, and Router protocol
+remain unchanged; upgrading only the Router does not enable checkout reclamation.
 A worktree isolates checkout files, not OS permissions, Git configuration,
 external tools, or access to other directories. Git is never initialized
 implicitly for a non-Git directory.
@@ -646,6 +688,21 @@ before any tools have been registered does not reconfigure unused native
 sessions.
 
 线程使用过委派后，`/delegation off` 会移除受管理的工具。CLI 会记录哪些后端需要清理，重启或切换后端后也能继续处理。原生斜杠命令恢复会话前同样会执行清理。移除工具时，每个执行器实例可能重启一次后端进程，但会保留已保存的对话；已经清理过的进程不会反复重启。未使用过委派的后端无需清理。
+
+From CLI and Router 1.6.137, finished Worker cards expose **Clear context**
+outside folded details, including failed tasks that established a worker lane.
+The button disconnects only that worker's native conversation continuation.
+It keeps the coordinator, other workers, workspace files, artifacts, login, and
+settings intact; archived native transcripts are not erased. The next delegation
+starts fresh, with no automatic retry of the failed task.
+Only the original user can operate the control on its original device. Running
+workers, unconfirmed shutdowns, and stale cards after lane reuse are rejected.
+**Context cleared** appears only after CLI acknowledgement; timeouts and failures
+allow explicit retry. An interrupted clear stays non-resumable until a retry
+finishes. Controls require both peers to advertise `workerContextReset`; old
+peers retain their existing behavior. Card controls expire on Router restart,
+after 24 hours, or when their bounded cache is evicted; use a newer card or the
+existing thread-scoped `/delegation reset [backend]` command when idle.
 
 `/clear`、`/new`、切换后端和开关`/delegation`都不会丢弃 worker 通道。`/cd`会创建新的工作区代次，并丢弃旧通道。`/delegation reset`会丢弃当前线程的全部通道，`/delegation reset <backend>`只丢弃该后端的通道。委派 worker 运行时，重置和切换工作目录都会被拒绝；`/thread delete`会移除该线程的全部 worker 通道。
 

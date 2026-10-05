@@ -75,6 +75,42 @@ Sibling results are not explicitly forwarded; a reused same-backend lane retains
 its own earlier task context. Uncertain setup or cleanup retains the occupied
 global slot until the local CLI restarts.
 
+From CLI 1.6.135, the local CLI automatically reclaims verified successful
+no-change or successfully applied worker checkout directories and recreates them
+at their stable lane paths when needed. Conversation pointers and artifact refs
+are retained. Unknown or unresolved files remain for manual recovery. Failed
+checkout recreation preserves existing native context; full byte audits do not
+hold other lanes' repository metadata admission guard. Router messages, native
+backends, and non-Git FIFO execution are unchanged; older
+CLIs retain their existing lifecycle even when connected to a newer Router.
+The upgraded CLI also recognizes successful worker snapshot commits already in
+delivery HEAD's ancestry. A later revert does not reopen historical delivery.
+Inspection, ready-lane admission, and idle closure reconcile only that thread's
+owned lanes; safe file-reclamation checks remain independent. This is local CLI
+behavior, not a Router-side merge, content comparison, or new protocol requirement.
+From CLI 1.6.136, the CLI checks durable artifact disposition before successful
+coordinator completion and can resume the same session for at most two closeout
+rounds. Missing, invalid, pending, or unretained recovery state fails the final
+response if unresolved, with task IDs and available output commits, while preserving
+artifacts. A deliberate retain settles the decision without claiming delivery.
+The Router renders existing progress/error messages; no new protocol, automatic
+merge, or old-request replay is introduced. Older CLIs keep their current behavior.
+
+From CLI and Router 1.6.137, finished Worker cards expose **Clear context**
+outside folded details, including failed tasks that established a worker lane.
+The button disconnects only that worker's native conversation continuation.
+It keeps the coordinator, other workers, workspace files, artifacts, login, and
+settings intact; archived native transcripts are not erased. The next delegation
+starts fresh, with no automatic retry of the failed task.
+Only the original user can operate the control on its original device. Running
+workers, unconfirmed shutdowns, and stale cards after lane reuse are rejected.
+**Context cleared** appears only after CLI acknowledgement; timeouts and failures
+allow explicit retry. An interrupted clear stays non-resumable until a retry
+finishes. Controls require both peers to advertise `workerContextReset`; old
+peers retain their existing behavior. Card controls expire on Router restart,
+after 24 hours, or when their bounded cache is evicted; use a newer card or the
+existing thread-scoped `/delegation reset [backend]` command when idle.
+
 CLI 1.6.94 and newer show each finished worker as a result block in the existing
 reply card, with a colored status label, backend name, short task description,
 and elapsed time. Failed, timed-out, cancelled, and interrupted tasks include a

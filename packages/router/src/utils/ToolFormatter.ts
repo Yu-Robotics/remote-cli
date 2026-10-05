@@ -4,6 +4,7 @@ import { createDiffPanels, createEditPanels, createWritePanels } from './DiffFor
 import MarkdownIt from 'markdown-it';
 import { formatWorkerResultMarkdown } from './WorkerResultMarkdown';
 import { limitCardTables } from './CardTables';
+import { workerContextControl } from '../feishu/WorkerContextCards';
 
 /**
  * Feishu Card 2.0 element types
@@ -469,6 +470,7 @@ export interface DelegationProgressEvent {
 }
 
 export interface DelegationProgressCardState {
+  contextActionId?: string;
   taskId: string;
   backend: string;
   phase: DelegationProgressPhase;
@@ -651,8 +653,13 @@ export function createDelegationProgressElements(state: DelegationProgressCardSt
       elements: [{ tag: 'markdown', content: [toolDetails, activity.join('\n') || '_No tool activity yet._'].filter(Boolean).join('\n\n'), text_size: 'notation' }],
     },
   ];
+  if (state.contextActionId) {
+    elements[3] = { tag: 'column_set', flex_mode: 'none', columns: [
+      { tag: 'column', width: 'weighted', weight: 1, elements: [elements[3], workerContextControl(state.contextActionId)] },
+    ] };
+  }
   for (const [index, suffix] of ['header', 'body', 'meta', 'details'].entries()) {
-    elements[index].element_id = `delegated_worker_${ordinal}_${suffix}`;
+    elements[index].element_id = `dw_${ordinal}_${suffix}`;
   }
   return elements;
 }

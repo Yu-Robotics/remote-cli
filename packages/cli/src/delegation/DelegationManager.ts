@@ -16,7 +16,7 @@ import {
   type DelegatedWorkerLane,
   type DelegatedWorkerLaneIdentity,
 } from './DelegatedWorkerSessionStore';
-import { cleanupDelegatedWorkerLane } from './DelegatedWorkerLaneCleanup';
+import { cleanupDelegatedWorkerLane, clearDelegatedWorkerContext } from './DelegatedWorkerLaneCleanup';
 import { DELEGATION_BACKENDS, type DelegationBackend, type DelegationHandler } from './contract';
 import { workerConfiguration } from './WorkerPolicy';
 import { formatDelegationNotice } from './DelegationNotice';
@@ -25,7 +25,7 @@ import { DelegatedWorkspaceManager, type DelegatedWorkspaceSource, type Delegate
   type DelegatedArtifactView } from './DelegatedWorkspaceManager';
 import type { GitCheckpoint } from './GitCheckpoint';
 
-export const DELEGATION_LIMITS = { launches: 12, concurrent: 5,
+export const DELEGATION_LIMITS = { launches: 12, concurrent: 5, closeoutRounds: 2,
   idleTimeoutMs: 15 * 60_000, toolIdleTimeoutMs: 45 * 60_000,
   queueTimeoutMs: 60 * 60_000,
   resultBytes: 32 * 1024, continuationBytes: 64 * 1024,
@@ -111,6 +111,8 @@ interface Task {
   artifact?: DelegatedArtifactView;
   /** The lane was reserved but no completed turn made its native context reusable. */
   discardLane?: boolean;
+  /** A pre-existing Git lane must retain native context if checkout preparation fails. */
+  preserveUnstartedLane?: boolean;
   /** A worker may have escaped lifecycle tracking; retain its workspace lease. */
   quarantineWorkspace?: boolean;
   done: Promise<void>;
@@ -142,6 +144,13 @@ export interface DelegatedTaskResult {
   executionMetadata?: ExecutionMetadata;
 }
 
+export interface DelegationCloseoutIssue {
+  taskId: string;
+  backend: string;
+  status: 'pending' | 'recovery' | 'unavailable';
+  outputCommit?: string;
+}
+
 export interface DelegationScope {
   invoke: DelegationHandler;
   isClosed(): boolean;
@@ -152,6 +161,7 @@ export interface DelegationScope {
   hasPendingResults(): boolean;
   getRetainedResults(): DelegatedTaskResult[];
   collectPendingResults(): Promise<DelegatedTaskResult[]>;
+  checkArtifactCloseout(): Promise<DelegationCloseoutIssue[]>;
   close(): Promise<void>;
   waitingExecutor(): IExecutor | undefined;
   waitingInputCount(): number;
@@ -314,6 +324,18 @@ export class DelegationManager {
         throw new Error('Delegation capacity or workspace is busy; task was not started');
       }
     };
+    const reconcileHistory = async (reclaim: boolean, backend?: DelegationBackend,
+      checkActive: () => void = assertWorkspace): Promise<void> => {
+      if (!source) return;
+      const lanes = await this.laneStore.lanesForThread(parent.thread.id, backend);
+      const delivered = await this.workspaceManager.reconcileHistoricalDelivery({
+        threadId: parent.thread.id, cwd, workspaceGeneration, checkActive,
+      }, lanes, reclaim);
+      for (const artifact of delivered) {
+        const task = tasks.get(artifact.taskId);
+        if (task) task.artifact = artifact;
+      }
+    };
     const captureWorkerMetadata = (task: Task): void => {
       if (!task.executor || task.record.startedAt === undefined) return;
       task.executionMetadata = mergeReportedExecutionMetadata(task.executionMetadata,
@@ -326,6 +348,7 @@ export class DelegationManager {
       try {
         if (task.record.state === 'running') captureWorkerMetadata(task);
         return parent.onProgress?.({ taskId: task.record.id, backend: task.record.backend, ...progress,
+          ...(task.lane ? { workerContext: { laneId: task.lane.id, generation: task.lane.contextGeneration ?? 0 } } : {}),
           ...(task.executionMetadata ? { executionMetadata: { ...task.executionMetadata } } : {}) }) === true;
       } catch {
         console.warn('[Delegation] Progress could not be delivered');
@@ -517,6 +540,7 @@ export class DelegationManager {
           const acquired = await this.laneStore.acquire(identity, source
             ? { pooled: true, excluded: await this.workspaceManager.unavailableLanes() } : undefined);
           task.lane = acquired.lane;
+          task.preserveUnstartedLane = Boolean(source && acquired.reused);
           if (task.settled || task.quarantineWorkspace) {
             // Setup can finish after its deadline, but must never start a late
             // worker or leave that acquisition resumable.
@@ -544,13 +568,14 @@ export class DelegationManager {
           }
           await this.laneStore.markRunning(task.lane.id);
           assertStartable();
+          task.preserveUnstartedLane = false;
           return worker;
         } catch (error) {
           // The factory either supplied an executor that final cleanup can stop,
           // or failed before any worker process became manager-owned. Neither
           // case warrants a workspace quarantine by itself. Do not reuse a lane
           // whose setup did not reach a completed delegated turn.
-          task.discardLane = true;
+          task.discardLane = !task.preserveUnstartedLane;
           if (!worker) task.executor = undefined;
           throw error;
         }
@@ -577,6 +602,12 @@ export class DelegationManager {
       };
       try {
         if (isTerminalTaskState(task.record.state)) return;
+        // An optional history probe is not native startup. A slow Git query must
+        // not quarantine the source as though an untracked worker had started.
+        if (source) {
+          await reconcileHistory(false, backend, assertStartable);
+          assertStartable();
+        }
         let result: ExecuteResult | undefined;
         for (let attempt = 0; attempt < 2; attempt++) {
           let setupPending = true;
@@ -696,16 +727,22 @@ ${prompt}`));
         if (!metadataCaptured) captureWorkerMetadata(task);
         clearTaskTimer(task);
         clearTextProgress(task, true);
-        if (task.record.startedAt === undefined) task.discardLane = true;
+        if (task.record.startedAt === undefined) task.discardLane = !task.preserveUnstartedLane;
         let released = !task.quarantineWorkspace;
+        let readyWorkspaceLane: DelegatedWorkerLane | undefined;
         try { await deadline(async () => {
           if (task.stop) await task.stop;
           else if (task.executor) await deadline(() => destroyWorker(task.executor!), this.cleanupMs);
-          else if (task.lane) {
+          else if (task.lane && !task.preserveUnstartedLane) {
             // A scope can close after durable acquisition but before construction.
             // No backend process was started, so discard the lane rather than
             // reserving the workspace indefinitely.
             task.discardLane = true;
+          }
+          if (released && task.lane && task.preserveUnstartedLane) {
+            await this.workspaceManager.preserveLane(task.lane.id);
+            await this.laneStore.markDirty(task.lane.id,
+              'Worker checkout preparation failed; existing context and files were retained for manual recovery.');
           }
           if (released && task.lane && task.discardLane) {
             const lane = task.lane;
@@ -714,12 +751,14 @@ ${prompt}`));
             await discardLane(lane);
             task.lane = undefined;
           }
-          if (released && task.lane) {
+          if (released && task.lane && !task.preserveUnstartedLane) {
             try {
               if (task.workspace) {
                 task.artifact = await this.workspaceManager.collect(task.workspace, task.record.state === 'succeeded');
+                readyWorkspaceLane = task.lane;
+              } else {
+                await this.laneStore.markReady(task.lane.id);
               }
-              await this.laneStore.markReady(task.lane.id);
             } catch (error) {
               const detail = error instanceof Error ? error.message : 'Worker lane persistence failed';
               if (task.workspace) {
@@ -746,6 +785,20 @@ ${prompt}`));
           task.record.state = 'interrupted';
           task.record.error = 'Worker cleanup could not be confirmed. This workspace is blocked until the worker is stopped and the CLI restarts.';
           console.warn('[Delegation] Worker cleanup failed:', error instanceof Error ? error.message : 'Cleanup failure');
+        }
+        if (released && readyWorkspaceLane) {
+          // Reclamation awaits subprocess exit; a timeout race must not release a live removal.
+          // The lane stays non-ready until its checkout state is settled.
+          if (task.record.state === 'succeeded' && task.artifact?.disposition === 'applied') {
+            await this.workspaceManager.reclaim(task.record.id);
+          }
+          try { await this.laneStore.markReady(readyWorkspaceLane.id); }
+          catch {
+            await this.workspaceManager.preserveLane(readyWorkspaceLane.id).catch(() => undefined);
+            await this.laneStore.markDirty(readyWorkspaceLane.id, 'Worker lane persistence failed').catch(() => undefined);
+            if (task.record.state === 'succeeded') task.record.state = 'failed';
+            task.record.error = 'Worker context could not be finalized. Artifacts were retained for manual recovery.';
+          }
         }
         if (released && task.ownsSlot) {
           task.ownsSlot = false;
@@ -983,6 +1036,59 @@ ${prompt}`));
         if (closed) throw new Error('Delegation was cancelled');
         return boundedResults(pending.map(view));
       },
+      checkArtifactCloseout: async () => {
+        if (closed) throw new Error('Delegation was cancelled');
+        // Unlike result acknowledgement, closeout also waits for native cleanup
+        // and artifact collection of tasks whose results were already read.
+        await Promise.allSettled([...calls.values()].map(call => call.result));
+        await Promise.all([...tasks.values()].map(task => task.done));
+        if (closed) throw new Error('Delegation was cancelled');
+        const candidates = [...tasks.values()].filter(task => task.workspace && task.record.startedAt !== undefined);
+        const unavailable = (): DelegationCloseoutIssue[] => candidates.map(task => ({
+          taskId: task.record.id, backend: task.record.backend, status: 'unavailable',
+        }));
+        if (!candidates.length) return [];
+        if (integrating || admissions || activeTasks.size || workspaceOwner.quarantined
+          || parent.isWorkspaceBusy?.(leasePath) || [...this.workspaces].some(([active, owner]) =>
+            owner !== workspaceOwner && workspacesOverlap(active, leasePath))) return unavailable();
+        integrating = true;
+        this.workspaces.set(leasePath, workspaceOwner);
+        const checkActive = () => {
+          if (closed) throw new Error('Delegation was cancelled');
+          assertWorkspace();
+        };
+        const inspect = async (): Promise<DelegationCloseoutIssue[]> => {
+          checkActive();
+          // Metadata-only reconciliation cannot delete worker files at this barrier.
+          await reconcileHistory(false, undefined, checkActive);
+          const issues: DelegationCloseoutIssue[] = [];
+          for (const task of candidates) {
+            checkActive();
+            try {
+              const artifact = await this.workspaceManager.inspectCloseout({
+                threadId: parent.thread.id, cwd, workspaceGeneration, checkActive,
+              }, task.record.id);
+              if (artifact.disposition !== 'retained' && (artifact.disposition !== 'applied' || artifact.recovery)) {
+                issues.push({ taskId: task.record.id, backend: task.record.backend,
+                  status: artifact.recovery ? 'recovery' : 'pending', outputCommit: artifact.outputCommit });
+              }
+            } catch {
+              // Failed collection, corrupt metadata and changed refs are unknown,
+              // not proof that a failed worker left no changes.
+              issues.push({ taskId: task.record.id, backend: task.record.backend, status: 'unavailable' });
+            }
+          }
+          checkActive();
+          return issues;
+        };
+        const pending = inspect();
+        integrationPending = pending;
+        try { return await pending; }
+        catch {
+          if (closed) throw new Error('Delegation was cancelled');
+          return unavailable();
+        } finally { integrationPending = undefined; integrating = false; releaseWorkspaceIfIdle(); }
+      },
       waitingExecutor: () => {
         const waiting = [...activeTasks].filter(task => task.record.state === 'running' && task.executor?.isWaitingInput?.());
         return !closed && waiting.length === 1 ? waiting[0].executor : undefined;
@@ -994,6 +1100,15 @@ ${prompt}`));
         this.pumps.delete(pump);
         await Promise.allSettled([...tasks.values()].map(cancel));
         await integrationPending?.catch(() => undefined);
+        // Do not wait forever for a discovery-only admission. Its closed check
+        // prevents launch; defer reconciliation unless this scope is fully idle.
+        if (source && !admissions && !activeTasks.size && [...tasks.values()].every(task => task.settled)
+          && !workspaceOwner.quarantined && !parent.isWorkspaceBusy?.(leasePath)
+          && ![...this.workspaces].some(([active, owner]) => owner !== workspaceOwner && workspacesOverlap(active, leasePath))) {
+          this.workspaces.set(leasePath, workspaceOwner);
+          try { await reconcileHistory(true); }
+          catch { console.warn('[Delegation] Historical delivery reconciliation deferred; worker files were preserved'); }
+        }
         releaseWorkspaceIfIdle();
         // A version probe may still be pending. Its closed check prevents launch.
         if (this.scopes.get(parent.thread.id) === scope) this.scopes.delete(parent.thread.id);
@@ -1019,6 +1134,14 @@ ${prompt}`));
       throw new Error('Cannot change working directory while a delegated worker is running. Wait for it to finish or send /abort first.');
     }
     return this.removeWorkerLanes(await this.laneStore.invalidateGeneration(threadId, currentGeneration), true);
+  }
+
+  /** Reset exactly one idle lane without changing its workspace or configuration. */
+  async resetWorkerContext(thread: Thread, laneId: string, generation: number): Promise<void> {
+    const cwd = fs.realpathSync(this.guard.resolveWorkingDirectory(thread.workingDirectory));
+    await this.laneStore.clearContext(laneId, generation, { threadId: thread.id,
+      workingDirectory: cwd, workspaceGeneration: thread.delegationWorkspaceGeneration ?? 0 },
+    clearDelegatedWorkerContext);
   }
 
   /** Forget one backend lane or all lanes for an idle parent thread. */

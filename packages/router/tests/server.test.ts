@@ -893,12 +893,42 @@ describe('RouterServer', () => {
     const panels = elements.filter((element: any) => element.tag === 'collapsible_panel');
     expect(panels).toHaveLength(1);
     expect(panels[0]).toMatchObject({ expanded: false });
-    expect(JSON.stringify(elements.find((element: any) => element.element_id === 'delegated_worker_1_header'))).toContain('Timed out');
+    expect(JSON.stringify(elements.find((element: any) => element.element_id === 'dw_1_header'))).toContain('Timed out');
     expect(panels[0].header.title.content).toContain('Activity details');
     expect(panels[0].elements[0].content).not.toContain('Read running');
     expect(panels[0].elements[0].content).toContain('Read completed');
     expect(panels[0].elements[0].content).not.toContain('Approve the command?');
     expect(panels[0].elements[0].content).not.toContain('**Result:**');
+  });
+
+  it.each([false, true])('negotiates worker context controls without exposing them to legacy peers: %s', async supported => {
+    await server.start();
+    mockFeishuHandler.setOnStartStreaming.mock.calls[0][0]('m1', 'u1', 'f1', 'd1', 'thread-1');
+    const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
+    const ws = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
+    onConnection(ws, { socket: { remoteAddress: '1' } });
+    const message = ws.on.mock.calls.find(call => call[0] === 'message')[1];
+    const send = (value: object) => message(Buffer.from(JSON.stringify(value)));
+    await send({ type: 'binding_request', data: { deviceId: 'd1', capabilities: { delegationProgress: true, workerContextReset: supported } } });
+    const confirmation = ws.send.mock.calls.map(([content]) => JSON.parse(content)).find(value => value.type === 'binding_confirm');
+    expect(confirmation.data.capabilities.workerContextReset).toBe(supported || undefined);
+    const workerContext = { laneId: '00000000-0000-0000-0000-000000000001', generation: 0 };
+    const progress = (phase: string, context: any = workerContext, taskId = 'worker') => send({ type: 'stream', streamType: 'delegation_progress',
+      messageId: 'm1', openId: 'u1', delegationProgress: { taskId, backend: 'claude', phase, workerContext: context } });
+    await progress('started');
+    let state = (server as any).streamingMessages.get('m1').delegationProgress.get('worker');
+    expect(state.contextActionId).toBeUndefined();
+    await progress('failed');
+    expect(Boolean(state.contextActionId)).toBe(supported);
+    await progress('failed', { laneId: '../invalid', generation: -1 }, 'invalid-worker');
+    state = (server as any).streamingMessages.get('m1').delegationProgress.get('invalid-worker');
+    expect(state.contextActionId).toBeUndefined();
+    const resolve = vi.spyOn((server as any).workerContextCards, 'resolve').mockResolvedValue(undefined);
+    await send({ type: 'worker_context_reset_result', messageId: 'reset', success: true });
+    expect(resolve).toHaveBeenCalledTimes(supported ? 1 : 0);
+    mockConnectionHub.isCurrentConnection.mockReturnValue(false);
+    await send({ type: 'worker_context_reset_result', messageId: 'reset', success: true });
+    expect(resolve).toHaveBeenCalledTimes(supported ? 1 : 0);
   });
 
   it('renders terminal worker Markdown received over the existing wire protocol', async () => {
@@ -919,7 +949,7 @@ describe('RouterServer', () => {
       },
     })));
     const body = mockFeishuHandler.updateStreamingMessage.mock.calls.at(-1)[1]
-      .find((element: any) => element.element_id === 'delegated_worker_1_body');
+      .find((element: any) => element.element_id === 'dw_1_body');
     expect(body.tag).toBe('column_set');
     expect(body.columns[0]).toMatchObject({ width: 'weighted', weight: 1 });
     expect(body.columns[0].elements[0]).toEqual({
@@ -964,7 +994,7 @@ describe('RouterServer', () => {
     expect(stream.createdAt).toBe(createdAt);
 
     const body = mockFeishuHandler.updateStreamingMessage.mock.calls.at(-1)[1]
-      .find((element: any) => element.element_id === 'delegated_worker_1_body');
+      .find((element: any) => element.element_id === 'dw_1_body');
     expect(body.columns[0].elements[0].content).toContain('Latest update');
     expect(body.columns[0].elements[1].content).toContain('&lt;unsafe&gt;');
     expect(body.columns[0].elements[1].content).toContain('## Review\n\n**Checking**');
@@ -1000,7 +1030,7 @@ describe('RouterServer', () => {
     expect(worker.lastToolActivityAt).toBe(lastToolActivityAt);
     await send('first', 'failed', { error: '**Worker failed**' });
     await send('second', 'succeeded', { summary: '**Second result**' });
-    const finalBody = (ordinal: number) => stream.elements.find((element: any) => element.element_id === `delegated_worker_${ordinal}_body`);
+    const finalBody = (ordinal: number) => stream.elements.find((element: any) => element.element_id === `dw_${ordinal}_body`);
     expect(delegationBodyContent(finalBody(1))).toContain('**Worker failed**');
     expect(delegationBodyContent(finalBody(1))).toContain('**First latest**');
     expect(delegationBodyContent(finalBody(1))).toContain('not a final result');
@@ -1026,7 +1056,7 @@ describe('RouterServer', () => {
     await send('first', 'codex', 'started', metadata('codex', 'selected-model', 'configured'));
     await send('second', 'agy', 'started', metadata('agy', 'agy-model'));
     const length = stream.elements.length;
-    const note = (ordinal: number) => stream.elements.find((element: any) => element.element_id === `delegated_worker_${ordinal}_meta`).content;
+    const note = (ordinal: number) => stream.elements.find((element: any) => element.element_id === `dw_${ordinal}_meta`).content;
     expect(note(1)).toContain('selected-model (configured)');
     expect(note(2)).toContain('agy-model');
     await send('first', 'codex', 'tool_use', metadata('codex', 'native-model'));
@@ -1062,8 +1092,8 @@ describe('RouterServer', () => {
     expect(worker.hiddenEventCount).toBe(4);
     expect(worker.toolErrorCount).toBe(1);
     expect(worker.activeToolCount).toBe(0);
-    expect(stream.elements.find((element: any) => element.element_id === 'delegated_worker_1_meta').content).toContain('1 tool issue');
-    expect(stream.elements.find((element: any) => element.element_id === 'delegated_worker_1_meta').content).toContain('earlier details omitted');
+    expect(stream.elements.find((element: any) => element.element_id === 'dw_1_meta').content).toContain('1 tool issue');
+    expect(stream.elements.find((element: any) => element.element_id === 'dw_1_meta').content).toContain('earlier details omitted');
     expect(JSON.stringify(stream.elements)).not.toContain('Private tool output');
   });
 
