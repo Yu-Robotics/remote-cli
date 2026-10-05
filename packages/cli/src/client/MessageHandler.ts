@@ -33,6 +33,7 @@ import { DELEGATION_LIMITS, DelegationManager, workspacesOverlap, type Delegatio
 import { DelegationBridge } from '../delegation/DelegationBridge';
 import { DELEGATION_BACKENDS, DELEGATION_INSTRUCTIONS, type DelegationBackend } from '../delegation/contract';
 import { formatDelegationStatus } from '../delegation/DelegationStatusFormatter';
+import { workerAvailability } from '../delegation/WorkerPolicy';
 import { backendProbeFailure, getBackendCommand } from '../utils/BackendCommand';
 import { filterClaudeStderr } from '../executor/claude/ClaudeStderrFilter';
 import type { ExecutionMetadata } from '../types';
@@ -775,7 +776,7 @@ export class MessageHandler {
           enabled: isDelegationEnabled(this.threadManager.getThread(threadId)),
           coordinatorBackend,
           coordinatorSupported: Boolean(executor.configureDelegation),
-          backends,
+          backends: backends.map(item => workerAvailability(config, this.directoryGuard, threadId, coordinatorBackend, item)),
         }),
       });
       return true;

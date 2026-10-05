@@ -249,26 +249,59 @@ describe('delegation in the existing thread workflow', () => {
     expect(responseFor('managed')?.success).toBe(true);
   });
 
-  it('rejects a same-backend tool call and still lets the coordinator obtain a different backend result', async () => {
+  it('returns same-backend and cross-backend worker results without reentering the coordinator executor', async () => {
+    worker.configureDelegation = vi.fn();
     await handler.handleMessage(message('enable', '/delegation on'));
-    expect(responseFor('enable').output).toContain('🤝 **Cross-backend delegation**');
+    expect(responseFor('enable').output).toContain('🤝 **Agent delegation**');
     expect(responseFor('enable').output).toContain('**Backend availability**');
-    expect(responseFor('enable').output).toContain('Same-backend delegation is disabled');
+    expect(responseFor('enable').output).toContain('Same-backend workers use independent sessions');
     main.execute.mockImplementationOnce(async () => {
       const discovery = await call('remote_cli_list_backends');
-      expect(discovery.backends.find((item: any) => item.backend === 'codex')).toMatchObject({ worker: false });
-      await expect(call('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' }))
-        .rejects.toThrow('Same-backend delegation is disabled');
-      expect(worker.execute).not.toHaveBeenCalled();
-      const task = await call('remote_cli_delegate', { backend: 'claude', objective: 'Inspect' });
-      const result = await call('remote_cli_result', { taskId: task.taskId });
-      expect(result).toMatchObject({ state: 'succeeded', output: 'child answer' });
-      return { success: true, output: 'Verified cross-backend result' };
+      expect(discovery.backends.find((item: any) => item.backend === 'codex')).toMatchObject({ worker: true, readOnly: false });
+      for (const backend of ['codex', 'claude']) {
+        const task = await call('remote_cli_delegate', { backend, objective: 'Inspect' });
+        const result = await call('remote_cli_result', { taskId: task.taskId });
+        expect(result).toMatchObject({ state: 'succeeded', output: 'child answer' });
+      }
+      return { success: true, output: 'Verified managed worker results' };
     });
     await handler.handleMessage(message('parent', 'Inspect this'));
     expect(responseFor('parent')).toMatchObject({ success: true });
-    expect(worker.execute).toHaveBeenCalledOnce();
+    expect(worker.execute).toHaveBeenCalledTimes(2);
+    expect(worker.configureDelegation).not.toHaveBeenCalled();
     expect(main.execute).toHaveBeenCalledOnce();
+  });
+
+  it.each((['claude', 'codex'] as const).flatMap(backend => (['configured', 'saved'] as const).map(source => [backend, source] as const)))
+  ('keeps the %s coordinator menu and worker discovery consistent with %s sandbox restrictions', async (backend, source) => {
+    await handler.destroy();
+    const guard = new DirectoryGuard([home]);
+    const executorConfig: any = { type: backend === 'claude' ? 'claude-persistent' : backend };
+    const sandbox = { mode: 'workspace-write', networkAccess: false };
+    if (source === 'configured') executorConfig[backend] = { sandbox };
+    else {
+      const saved = path.join(home, '.remote-cli', `${backend}-sandbox`, `${threads.getDefaultThread().id}.json`);
+      fs.mkdirSync(path.dirname(saved), { recursive: true });
+      fs.writeFileSync(saved, JSON.stringify(sandbox));
+    }
+    const config: any = { get: () => executorConfig, getAll: () => ({}), has: () => true, getConfigDir: () => home };
+    pool = new ThreadExecutorPool(threads, guard, executorConfig, () => main);
+    handler = new MessageHandler(socket, pool, threads, guard, config);
+    (handler as any).delegation = new DelegationManager(guard, () => worker, new BackendRegistry(async () => 'test 1.0'));
+    await handler.handleMessage(message('restricted-menu', '/delegation'));
+    const menu = responseFor('restricted-menu').output;
+    expect(menu).toContain("<text_tag color='blue'>Coordinator</text_tag>");
+    expect(menu).not.toContain('Coordinator + Worker');
+    expect(menu).not.toContain("<text_tag color='green'>Installed</text_tag>");
+    main.execute.mockImplementationOnce(async () => {
+      const discovery = await call('remote_cli_list_backends');
+      expect(discovery.backends.every((item: any) => !item.worker && !item.readOnly)).toBe(true);
+      await expect(call('remote_cli_delegate', { backend, objective: 'Inspect' })).rejects.toThrow('coordinator sandbox is enabled');
+      return { success: true };
+    });
+    await handler.handleMessage(message('restricted-turn', 'Inspect worker eligibility'));
+    expect(responseFor('restricted-turn').success).toBe(true);
+    expect(worker.execute).not.toHaveBeenCalled();
   });
 
   it('persists opt-in, returns child progress in the original reply, and drains the next queued message', async () => {

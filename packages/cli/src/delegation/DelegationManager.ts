@@ -18,7 +18,7 @@ import {
 } from './DelegatedWorkerSessionStore';
 import { cleanupDelegatedWorkerLane, clearDelegatedWorkerContext } from './DelegatedWorkerLaneCleanup';
 import { DELEGATION_BACKENDS, type DelegationBackend, type DelegationHandler } from './contract';
-import { workerConfiguration } from './WorkerPolicy';
+import { workerAvailability, workerConfiguration } from './WorkerPolicy';
 import { formatDelegationNotice } from './DelegationNotice';
 import { assertWorkingDirectoryExists } from '../utils/WorkingDirectory';
 import { DelegatedWorkspaceManager, type DelegatedWorkspaceSource, type DelegatedWorkspace,
@@ -904,18 +904,8 @@ ${prompt}`));
         if (name === 'remote_cli_list_backends') {
           await discoverWorkspace();
           const backends = await this.registry.list(parent.config);
-          return { backends: backends.map(item => {
-            const configure = (mode: 'inherit' | 'read_only') =>
-              workerConfiguration(parent.config, this.guard, parent.thread.id, parent.backend, item.backend, mode);
-            try { configure('inherit'); }
-            catch (error) { return { ...item, worker: false, readOnly: false, reason: (error as Error).message }; }
-            let readOnly = item.readOnly;
-            if (readOnly) {
-              try { configure('read_only'); }
-              catch { readOnly = false; }
-            }
-            return { ...item, readOnly };
-          }), workspace: cwd, maxConcurrentChildren: maxChildren,
+          return { backends: backends.map(item => workerAvailability(parent.config, this.guard, parent.thread.id, parent.backend, item)),
+            workspace: cwd, maxConcurrentChildren: maxChildren,
           maxTasksPerRequest: DELEGATION_LIMITS.launches, scheduling: source ? 'isolated-worktrees' : 'serial',
           queueTimeoutSeconds: this.timeouts.queueTimeoutMs / 1000 };
         }

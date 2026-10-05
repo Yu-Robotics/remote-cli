@@ -1,5 +1,26 @@
 # Cross-Backend Delegation Plan
 
+## Follow-up: independent same-backend workers (CLI 1.6.142)
+
+Allow unrestricted coordinators to choose any eligible installed backend,
+including their own. Remove only the backend-equality rejection in WorkerPolicy;
+discovery and launch retain the same sandbox and inherit-only gates. Preserve
+synthetic lane identities, fresh executor construction, isolated native pointers,
+Git worktrees, shared-directory FIFO execution, five global slots, twelve accepted
+tasks, explicit integration, closeout, context reset, and reclamation. Workers
+receive no recursive managed-delegation tools or coordinator transcript.
+
+Align tool descriptions, injected instructions, status labels, and operating docs.
+Use one worker-availability resolver for menu and tool discovery so sandboxed
+coordinators are not advertised as eligible workers. Construct real executor
+pairs with distinct seeded pointers and disabled native commands to verify
+same-provider context clearing without launching processes or calling providers.
+Cover all 64 backend pairs with mocked executors, plus same-backend concurrency,
+queued dispatch, cancellation, parent-pointer preservation, historical-card reset
+guards, configured/saved sandbox restrictions, and the existing thread workflow.
+These tests do not establish live provider availability. Historical phase notes
+below retain the prior same-backend prohibition; this contract supersedes it.
+
 ## Phase 2: reusable isolated worktrees and explicit integration
 
 Contract for CLI 1.6.130; supersedes Phase 1's Git serial-dispatch restriction.
@@ -533,9 +554,10 @@ configuration change. Deployment and package publication have not been authorize
 Keep the existing thread, backend, workspace, and native conversation. The
 selected backend remains responsible for the final answer. Claude Code, Codex,
 Pi, AGY, OpenCode, Kimi Code, ZCode, and DSH can discover local workers, assign a task, await its
-result, and continue that conversation. Managed workers must use a different
-backend. Same-backend requests are rejected before launch; native backend
-task/subagent tools remain backend-owned.
+result, and continue that conversation. From CLI 1.6.142, managed workers may use
+any eligible installed backend, including the coordinator backend, through
+independent lane sessions. They never reuse the coordinator conversation or
+delegate recursively; native backend task/subagent tools remain backend-owned.
 
 - `/delegation` reports the per-thread setting and executable discovery.
 - `/delegation on|off` changes future turns while the thread is idle. The setting
@@ -615,7 +637,7 @@ integration, or replacement of normal thread interactions.
 | Tool | Behavior |
 | --- | --- |
 | `remote_cli_list_backends` | Return installed backends, versions and applicable restrictions |
-| `remote_cli_delegate` | Accept a different-backend task; Git workers use isolated worktrees and may run concurrently; non-Git followers queue serially; `inherit` is default |
+| `remote_cli_delegate` | Accept an independent task on any eligible installed backend, including the coordinator backend; Git workers use isolated worktrees and may run concurrently; non-Git followers queue serially; `inherit` is default |
 | `remote_cli_result` | Return an owned task's state and final result; wait up to 25 seconds |
 | `remote_cli_cancel` | Stop an owned worker; existing filesystem changes are not rolled back |
 | `remote_cli_integrate` | Inspect and revision-guardedly apply or retain an owned Git artifact after all workers finish |
@@ -670,13 +692,13 @@ See [Codex configuration reference](https://developers.openai.com/codex/config-r
   miss per-thread policy files. When the coordinator is unrestricted, launch
   unrestricted workers without loading the target backend's saved sandbox policy.
   Do not modify saved policies or other backend approval options.
-- Unrestricted coordinators support 42 different-backend directed pairs at the
-  manager boundary; seven same-backend pairs are rejected. Restricted
-  coordinators have no eligible managed workers: same-backend delegation is
-  disabled, and equivalence between different native sandboxes is not assumed.
+- Unrestricted coordinators support all 64 directed backend pairs at the manager
+  boundary, including eight same-backend pairs. Restricted coordinators have no
+  eligible managed workers, including on the same backend: scope-aware worker
+  sandbox preservation and equivalence between native sandboxes are not assumed.
 - Use `inherit` by default, including research tasks whose no-write requirements
   belong in the objective. `read_only` remains recognized for compatibility but
-  is unavailable under the cross-backend-only policy. Unrestricted coordinators
+  is unavailable under the inherit-only policy. Unrestricted coordinators
   cannot enable an extra worker sandbox. Discovery and launch share this policy
   and explain why a target is unavailable; saved backend settings are unchanged.
 - Worker approval cards omit Remember. Persistent grants should be configured

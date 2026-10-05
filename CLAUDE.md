@@ -543,10 +543,12 @@ context resets, backend switches, and restarts. Missing threads stay disabled.
 Default-on exposes tools but does not automatically start workers.
 The selected backend remains the coordinator and owns the user-facing answer.
 Claude Code, Codex, Pi, AGY, OpenCode, Kimi, ZCode, and DSH can use registered local
-tools to start independent worker sessions on a different backend. Same-backend
-managed delegation is rejected; native backend task/subagent tools remain
-unchanged. Workers do not inherit the coordinator transcript or become
-user-facing threads.
+tools to start independent worker sessions on any eligible installed backend.
+From CLI 1.6.142, this includes the coordinator backend, without ever reusing the
+coordinator conversation. Prefer a different backend for independent cross-review;
+native backend task/subagent tools remain unchanged. Workers cannot recursively
+use managed delegation, inherit the coordinator transcript, or become user-facing
+threads.
 
 `DelegatedWorkerSessionStore` owns durable isolated worker lanes keyed by
 `(parent thread ID, target backend, workspace generation)`. Each lane receives
@@ -586,8 +588,9 @@ task IDs, limits, workspace reservations, child executors, results, cancellation
 and cleanup. `WorkerPolicy` resolves the coordinator's effective sandbox against
 the real parent thread before creating a synthetic worker identity. Unrestricted
 coordinators launch unrestricted workers without loading the target's separate
-sandbox settings. Sandboxed coordinators have no eligible workers until
-cross-backend sandbox translation is supported; `read_only` remains a recognized
+sandbox settings. Sandboxed coordinators have no eligible workers, including on
+the same backend, until scope-aware worker sandbox preservation is supported;
+`read_only` remains a recognized
 but unavailable compatibility value. Discovery and launch use the same policy.
 `DelegationStore`
 keeps bounded diagnostic task records and marks queued/running work interrupted

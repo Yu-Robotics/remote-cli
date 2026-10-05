@@ -7,6 +7,7 @@ import ts from 'typescript';
 import registerPiTools from '../../src/delegation/piExtension';
 import { DelegationBridge } from '../../src/delegation/DelegationBridge';
 import { buildPiRpcArgs } from '../../src/executor/pi/PiTypes';
+import { DELEGATION_INSTRUCTIONS, DELEGATION_TOOLS } from '../../src/delegation/contract';
 
 describe('native delegation tool adapters', () => {
   let bridge: DelegationBridge;
@@ -57,6 +58,12 @@ describe('native delegation tool adapters', () => {
     const tools = await request(2, 'tools/list');
     expect(tools.tools.map((tool: any) => tool.name)).toContain('remote_cli_delegate');
     const delegate = tools.tools.find((tool: any) => tool.name === 'remote_cli_delegate');
+    expect(delegate.description).toBe(DELEGATION_TOOLS.find(tool => tool.name === 'remote_cli_delegate')!.description);
+    expect(delegate.description).toContain('including the coordinator backend');
+    expect(delegate.description).toContain('independent sessions, never the coordinator conversation');
+    expect(delegate.inputSchema.properties.mode.description).toContain('Sandboxed coordinators cannot launch managed workers');
+    expect(DELEGATION_INSTRUCTIONS).toContain('including the coordinator backend');
+    expect(DELEGATION_INSTRUCTIONS).toContain('Workers cannot delegate recursively');
     expect(delegate.description).toContain('nested Git metadata/history');
     expect(delegate.description).toContain('Uninitialized submodule paths remain empty');
     const response = new Promise<any>(resolve => pending.set(3, resolve));
@@ -81,6 +88,8 @@ describe('native delegation tool adapters', () => {
     registerPiTools({ registerTool: (tool: unknown) => tools.push(tool) });
     expect(tools).toHaveLength(5);
     expect(tools.some(tool => tool.name === 'remote_cli_integrate')).toBe(true);
+    expect(tools.find(tool => tool.name === 'remote_cli_delegate').description)
+      .toBe(DELEGATION_TOOLS.find(tool => tool.name === 'remote_cli_delegate')!.description);
     const result = await tools[0].execute('list', {});
     expect(JSON.parse(result.content[0].text).marker).toBe('ok');
     const controller = new AbortController(); controller.abort();
