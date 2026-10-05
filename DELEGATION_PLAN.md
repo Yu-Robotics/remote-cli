@@ -682,3 +682,255 @@ parallel read-only workers, isolated worktrees, resumable worker conversations,
 attachment transfer, additional future backends, richer progress, and orchestration
 scheduling. Each should preserve the selected thread/backend contract and have
 its own capability and failure checks. They are not required for this release.
+
+## Follow-up: verified checkout reclamation (1.6.135)
+
+This follow-up supersedes the historical worktree deferral above. Semantic
+integration remains an explicit coordinator decision; physical checkout cleanup
+is a framework lifecycle, not an agent prompt or another cleanup tool.
+
+### Implementation contract
+
+1. Run reclamation only after confirmed native process exit and successful
+   no-change collection, or after a durable successful apply receipt. Require
+   successful=true, applied disposition, exact current task/lane identity, and no
+   blocked, pending, retained, failed/cancelled, or unresolved recovery state.
+2. Keep conversation pointers, executor/lane IDs, artifact records, input/output
+   refs, task refs, and original worker history. Never expire these with diagnostic
+   records. Reset/delete retains the existing explicit native cleanup contract;
+   it does not trigger a historical checkout sweep.
+3. Independently audit actual bytes against saved Git blobs, without relying on
+   copied index flags, stat caches, or filters. Bound files, directory entries,
+   and total bytes. Verify detached HEAD, ownership/common repository, exact refs,
+   modes, symlink targets, and registrations. Ignore no extra file or directory:
+   even non-forced Git removal deletes ignored files. Transformed checkouts that
+   cannot be proven byte-equivalent are retained, not guessed to be caches.
+4. Persist present/reclaiming/reclaimed lifecycle and exact task/output/tree
+   receipts around non-forced removal. Legacy omitted state means present.
+   Resolve reclaiming+verified-intact by cancelling intent, or reclaiming+absent
+   and unregistered by finalizing the receipt. Partial/foreign/locked state,
+   missing legacy checkouts, and occupied reclaimed paths require manual recovery.
+   Never automatically prune repository-wide metadata or overwrite unknown paths.
+5. Recreate only an absent, unregistered owned path at its existing stable lane
+   location. Anchor the fresh input checkpoint before worktree add; preserve
+   native identity and instruct resumed context to reread current files.
+6. Use shared in-process per-lane promise chains for prepare, collect, receipts,
+   reclamation, and preservation, plus a repository-keyed worktree metadata guard.
+   Hashing and interrupted-intent verification hold only the lane guard; keep the
+   shared guard limited to metadata mutations and final registration/intent checks.
+   Workers in different lanes still execute concurrently, up to the existing five
+   slots. These guards are not OS isolation against external processes.
+7. Keep reclamation outside the worker-stop timeout race, await actual Git exit,
+   and mark the lane ready only after cleanup settles. Cleanup refusal/failure
+   preserves task/apply success and leaves a recoverable directory or receipt.
+   Non-Git FIFO behavior, backend adapters, and Router protocol stay unchanged.
+8. Failed preparation of an existing Git lane preserves its native pointer and
+   lane record, blocks the checkout for manual recovery, and allows other lanes
+   to run. Never run fresh-lane native cleanup on a context that already existed.
+   A ready reclaiming receipt can result from a benign removal refusal; resolve
+   it lazily rather than excluding all such lanes and losing normal reuse.
+
+### Adversarial review decisions and validation gate
+
+Claude Code, AGY, and Kimi reviewed the plan independently. DSH's review could not
+complete because its account returned insufficient balance; this is not an
+approval. Coordinator experiments disproved reliance on non-forced removal for
+ignored-file safety. Suggestions to infer reclamation from legacy missing paths
+or to prune registrations automatically were rejected in favor of preserving
+unknown state. Actual-byte hashing avoids one Git subprocess per file and does
+not inherit Git index flags. Git 2.34 worktree-list compatibility is retained.
+
+Before handoff, run real temporary-Git tests for ignored/untracked/hidden files,
+failed/cancelled no-change output, unresolved artifacts, locks, corrupt refs,
+same-path recreation, stale-task cleanup, native-pointer continuity, interrupted
+receipts, partial registrations, bounds, and concurrent lifecycle ordering.
+Run full builds, CLI/Router tests, privacy/language checks, and implementation
+cross-review. Test fixtures must not remove real worker directories or change
+services, authentication, or installed backend environments. Live native/Feishu
+acceptance remains distinct from controlled executor and real-Git validation.
+
+Implementation review identified a cross-lane availability dependency when full
+verification held the repository guard. The guard was narrowed, and gated tests
+cover independent admission during a slow audit. Coordinator review also found
+that pre-existing native pointers needed explicit preservation when recreation
+fails; occupied paths, partial registrations, and corrupt receipts now have
+end-to-end preservation and alternate-lane tests. Valid interrupted-removal reuse
+is tested separately, rather than blanket-excluding all reclaiming records.
+
+### Initial checkout-reclamation validation
+
+Before the historical-delivery addition, Claude Code, AGY, and Kimi approved the implementation after reviewing the
+availability and context-preservation fixes. DSH could not complete its review.
+Both package builds passed, as did all 1,963 CLI and 753 Router tests. The focused
+202-test run measured 94.6% line coverage and 84.82% branch coverage across the two
+changed runtime modules. Added tracked and untracked content was checked for
+privacy and language violations, and the diff passed whitespace validation.
+These results cover controlled executor tests and real temporary Git repositories,
+not live Feishu or authenticated native-backend acceptance. No commit, push,
+service restart, account change, or removal of existing worker directories was
+performed during development.
+
+## Follow-up: historical delivery recognition (1.6.135)
+
+### Delivery definition and implementation plan
+
+Delivery means that a successful worker outcome was handed over to the selected
+delivery workspace, not that its original bytes remain enabled forever. A later
+revert is the delivery branch owner's decision and must not reopen old work.
+
+1. Keep the existing durable apply receipt and no-change behavior. Add one
+   sufficient historical proof: the recorded artifact output snapshot commit is
+   an ancestor of the delivery workspace's current HEAD. Never use the input
+   baseline, original worker HEAD, or a matching tree as substitute evidence.
+2. Run a fixed-argument, bounded Git ancestry check with replacement objects
+   disabled. Exit 0 confirms delivery; exit 1 leaves the artifact pending; other
+   errors retain unknown state without failing inspection or another lane's
+   admission. Revalidate ownership, output refs, and the observed delivery HEAD
+   before persisting the historical receipt; a changed HEAD defers recognition.
+3. Limit recognition to successful pending artifacts belonging to the current
+   thread, workspace generation, source repository, and completed worker lane.
+   Preserve explicit retention, failed/cancelled output, blocked lanes, and
+   unresolved application recovery. Persist the observed delivery commit as
+   evidence before releasing that artifact's pending-lane marker. Repair an
+   interrupted marker clear from the durable applied receipt without requiring
+   ancestry again. HEAD equal to the output commit also confirms delivery.
+4. Recognize history during guarded artifact inspection, before selecting ready
+   lanes for another worker, and at idle delegation-turn closure. Admission only
+   reconciles metadata outside the native startup deadline; a slow optional
+   query must not quarantine a workspace as though a worker had escaped tracking.
+   Physical reclamation runs at worker-free lifecycle
+   boundaries, outside the worker setup/stop timeout race. Do not sweep unrelated
+   threads, obsolete generations, or private historical artifacts.
+5. Delivery recognition does not authorize file deletion. Reuse the existing
+   exact-ref, checkout-byte, ignored-file, lock, and durable lifecycle checks.
+   Preserve native context and private history refs even after safe reclamation.
+6. Do not change patch-only apply into Git merge, commit, stage, or push. Copies,
+   cherry-picks, and squash merges without ancestry remain pending unless there
+   is an existing explicit apply receipt. Non-Git scheduling, backend adapters,
+   Router protocol, and other agents' behavior stay unchanged.
+7. Add real temporary-Git regression tests for included output, later revert,
+   unrelated main changes, baseline-only ancestry, equal trees without ancestry,
+   retained/failed/recovery/foreign state, corrupt refs, replacement objects,
+   Git failures, receipt persistence, and extra files preventing cleanup. Add
+   scheduler tests for automatic closure/admission recognition and safe reuse.
+8. Extend the unreleased 1.6.135 changeset, synchronize all README explanations,
+   and update both release documents. Run focused and full tests, builds,
+   coverage, privacy/language/whitespace checks, then cross-review the final diff.
+   Do not modify services, accounts, existing worker directories, or Git history.
+
+### Plan review decisions
+
+Claude Code, AGY, and Kimi approved the historical handoff definition and the
+three guarded triggers. DSH failed before review because of insufficient balance;
+it did not approve. Review refinements require fail-soft inspection, distinct Git
+exit codes, replacement-object bypass, persisted observed HEAD evidence, and
+idempotent marker repair. A worker-exit-only hook is insufficient because the
+coordinator normally merges after collection. Reclamation must be awaited, not
+fire-and-forget or raced against a timeout. Closure reconciles only when all
+tasks and admissions are idle and the source lease can be reacquired; a pending
+discovery or conflicting owner defers the pass rather than blocking shutdown.
+
+### Final historical-delivery validation
+
+Claude Code and AGY independently verified the frozen implementation and test
+hashes and approved the final changes with no blockers. Kimi independently read
+the current files and approved the implementation, but its shell calls were
+denied, so it could not recompute hashes or run tests. The coordinator verified
+that all four reviewed source/test hashes remained unchanged after these reviews.
+DSH could not review because of insufficient balance; it is not an approval.
+
+Both package builds and the full CLI/Router workspace test command passed. The
+final full run used one test worker and retained the original test timeouts;
+earlier parallel attempts had Git-test timeouts and are not counted as passes.
+The focused history/scheduler/workspace run passed all 59 tests. A separate
+coverage run passed all 277 delegation tests and enforced 80% thresholds across
+both changed runtime modules: 94.58% lines/statements, 85.65% branches, and 97.63%
+functions. Workspace-manager coverage was 95.88% lines and 86.44% branches;
+delegation-manager coverage was 93.68% lines and 85% branches.
+
+Added tracked/untracked content and generated release summaries were checked
+for privacy and language candidates; none remained. Versions and the lockfile
+remain synchronized at 1.6.135, README descriptions agree, and whitespace checks
+passed. These results cover controlled executors and real temporary Git fixtures,
+not live native-backend or Feishu acceptance. No commit, push, service restart,
+account change, history rewrite, or deletion of existing worker directories was
+performed.
+
+## Follow-up: code-enforced artifact closeout
+
+### Implementation plan
+
+1. Extend the existing coordinator completion barrier with a separate artifact
+   check after accepted workers and outstanding tool calls have settled. Reading
+   a worker result or saying that work is complete is not artifact disposition.
+2. Inspect this request's owned Git artifacts from durable workspace records,
+   not cached tool results. Reconcile historical delivery under the existing
+   source/lane guards. Applied and explicitly retained outcomes are settled;
+   pending, missing, corrupt, or unretained recovery-bearing outcomes remain unresolved.
+   No-change outcomes require no additional model decision. Non-Git work keeps
+   its existing shared-directory behavior.
+3. Reuse the same coordinator session for at most two additional closeout rounds
+   per user request. Combine pending worker results and the closeout checklist
+   when possible. Do not reset this budget when another worker is launched, and
+   never repeat the original request or attachments. Recheck durable state after
+   every round; explicit inspect/apply/retain tools keep their current guards.
+4. An unresolved final check produces a program-owned bounded report of task IDs,
+   states, and available artifact references, and prevents an unqualified success
+   response. Keep pending artifacts and recovery refs durable for later handling.
+   Do not add a timer-driven model, automatically replay old tasks, or silently
+   treat timeout, cancellation, storage failure, or prose as approval/retention.
+5. Preserve genuine approval/question prompts, cancellation, shutdown, model
+   recovery, and the existing result acknowledgement boundary. Cancellation and
+   coordinator failure must not trigger additional closeout model requests.
+   The original request stays busy until closeout or explicit unresolved failure.
+6. Add real-Git and workflow regressions for forgotten integration, explicit
+   retention, no-change output, ancestry delivery, stale cached dispositions,
+   failed/partial collection, corrupt records, finite retries, new workers during
+   closeout, abort/shutdown, and attachment/result acknowledgement continuity.
+7. Synchronize release metadata and README explanations, run focused and full
+   tests/builds, review privacy and language requirements, and cross-review the
+   final code. Preserve the pre-existing unreleased reclamation changes. No
+   service restart, commit, or push is part of this implementation request.
+
+### Review clarifications
+
+- Unresolved closeout returns `success: false` with a bounded program-owned report,
+  using the existing queued-command failure/pause behavior. Streaming remains
+  provisional; the authoritative completion response is gated by durable state.
+- Cancelling the parent request or failing its execution never launches another
+  model turn. An individually failed/cancelled worker can leave useful changes:
+  those artifacts still require explicit retention or recovery. A worker error
+  alone is neither proof of delivery nor proof that no files were written.
+- Count only newly constructed closeout checklists against the two-round budget.
+  Existing model-recovery and compact retries do not spend another round. Results
+  in a combined continuation retain the existing success-only acknowledgement.
+- Explicit retention settles even recovery-bearing output, without clearing its
+  recovery refs or authorizing reclamation. No-change output can settle without
+  a model decision; unavailable records never count as empty output.
+
+### Implementation and validation (1.6.136)
+
+- Implemented durable receipt inspection in `DelegatedWorkspaceManager`, the
+  guarded current-request audit in `DelegationScope`, and the bounded completion
+  gate in `MessageHandler`. Existing tools and protocol messages are unchanged.
+- Added 18 real-Git workflow cases and four scheduler regressions. The Git
+  workflow suites use a 30-second test budget for subprocess-heavy suite runs;
+  production worker deadlines and the two-round closeout budget are unchanged.
+- Both workspace builds passed. Full CLI validation passed 2,018 tests across
+  105 files, with two test workers and V8 coverage. Full Router validation passed
+  753 tests across 33 files. For the three affected runtime files, aggregate
+  line/statement coverage is 88.83%, branch coverage 83.87%, and function coverage
+  93.01%; these are scoped measurements, not whole-repository coverage claims.
+- AGY and Kimi independently approved the final implementation without blockers.
+  Claude Code was attempted twice but returned provider API 400 errors before
+  reviewing; this is unavailable review coverage, not an approval. Reviews were
+  static and no reviewer edited files or ran native acceptance experiments.
+- Reviewed the added source, fixtures, release notes, and README updates for
+  privacy and language constraints; the added-line/untracked-artifact heuristic
+  scan reported no candidates. This is not a fresh Git-history or binary audit.
+  README closeout sections, package versions, lockfile, and the AGENTS symlink
+  were checked. No commit, push, or installed-service restart was performed.
+- Validation uses real temporary Git repositories with controlled executors.
+  Live native-backend and Feishu acceptance remains unverified. The gate verifies
+  artifact disposition, not semantic correctness, external-writer isolation, or
+  automatic resolution of artifacts left by earlier requests.

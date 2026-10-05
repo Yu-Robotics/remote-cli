@@ -6,6 +6,7 @@ import * as lark from '@larksuiteoapi/node-sdk';
 import * as fs from 'fs/promises';
 import { createDelegationProgressElements } from '../src/utils/ToolFormatter';
 import { countCardTables } from '../src/utils/CardTables';
+import { WorkerContextCards, workerContextControl } from '../src/feishu/WorkerContextCards';
 
 // Mock dependencies
 vi.mock('../src/binding/BindingManager');
@@ -81,6 +82,7 @@ describe('FeishuLongConnHandler', () => {
   });
 
   afterEach(() => {
+    handler.workerContexts?.destroy();
     vi.clearAllMocks();
   });
 
@@ -212,6 +214,57 @@ describe('FeishuLongConnHandler', () => {
   });
 
   describe('updateStreamingMessage', () => {
+    it('acknowledges the exact continuation control and preserves it across streaming, finalization, and thread switching', async () => {
+      const delivered = new Map<string, string>();
+      mockClient.im.message.patch.mockImplementation(async request => {
+        delivered.set(request.path.message_id, request.data.content); return {};
+      });
+      let sequence = 0;
+      mockClient.im.message.create.mockImplementation(async request => {
+        const id = `continued-${++sequence}`; delivered.set(id, request.data.content); return { data: { message_id: id } };
+      });
+      const send = vi.fn(async () => true);
+      const cards = new WorkerContextCards({ ownsDevice: async () => true, available: () => true, send,
+        refresh: (card, root) => handler.refreshWorkerContextCard(card, root) });
+      handler.workerContexts = cards;
+      const id = cards.register({ openId: 'owner', deviceId: 'device', threadId: 'thread-1', laneId: 'lane', generation: 0 })!;
+      const elements = [...Array.from({ length: 180 }, (_, i) => ({ tag: 'markdown', content: `Row ${i}` })),
+        ...createDelegationProgressElements({ taskId: 'task', backend: 'claude', phase: 'failed', startedAt: 1,
+          ordinal: 1, activeToolCount: 0, events: [], hiddenEventCount: 0, contextActionId: id })];
+      expect(await handler.updateStreamingMessage('root', elements, 'owner', 'thread-1')).toBe(true);
+      const cardId = [...delivered].find(([, content]) => content.includes(id))![0];
+      expect(cardId).not.toBe('root');
+      expect(cards.rootFor(cardId)).toBe('root');
+      const click = { operator: { open_id: 'owner' }, context: { open_message_id: cardId },
+        action: { value: { action: 'worker_context_clear', id } } };
+      expect((await handler.handleCardAction(click))?.toast.type).toBe('info');
+      await Promise.all([
+        handler.updateStreamingMessage('root', [...elements, { tag: 'markdown', content: 'Later output' }], 'owner', 'thread-1'),
+        cards.resolve('device', { messageId: send.mock.calls[0][1].messageId, success: true }),
+      ]);
+      expect(delivered.get(cardId)).toContain('Context cleared');
+      await handler.finalizeStreamingMessage('root', elements, undefined, 'owner', '/workspace/project', 'thread-1', [
+        { id: 'thread-1', name: 'thread-1', status: 'idle' }, { id: 'thread-2', name: 'thread-2', status: 'idle' },
+      ], 'thread-1');
+      await (handler as any).refreshThreadSwitchButtons(cardId, 'thread-2');
+      expect(delivered.get(cardId)).toContain('Context cleared');
+      expect(delivered.get(cardId)).toContain('thread-2');
+      expect((await handler.handleCardAction({ ...click, operator: { open_id: 'another-user' } }))?.toast.type).toBe('error');
+      expect((await handler.handleCardAction({ ...click, context: {} }))?.toast.type).toBe('error');
+      expect(send).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not authorize buttons from a rejected card patch', async () => {
+      const send = vi.fn(async () => true);
+      const cards = new WorkerContextCards({ ownsDevice: async () => true, available: () => true, send,
+        refresh: (card, root) => handler.refreshWorkerContextCard(card, root) });
+      handler.workerContexts = cards;
+      const id = cards.register({ openId: 'owner', deviceId: 'device', threadId: 'thread', laneId: 'lane', generation: 0 })!;
+      mockClient.im.message.patch.mockResolvedValue({ code: 123, msg: 'Rejected' });
+      expect(await handler.updateStreamingMessage('root', [workerContextControl(id)], 'owner')).toBe(false);
+      await expect(cards.click('owner', id, 'root')).rejects.toThrow('expired');
+      expect(send).not.toHaveBeenCalled();
+    });
     it('keeps one header on every streaming patch and does not duplicate it at completion', async () => {
       mockClient.im.message.patch.mockResolvedValue({});
       const output = [{ tag: 'markdown', content: 'Partial answer' }];
@@ -952,8 +1005,8 @@ describe('FeishuLongConnHandler', () => {
       const prefix = Array.from({ length: 144 }, () => ({ tag: 'markdown', content: 'Existing content' }));
       const chunks = (handler as any).splitElementsIntoChunks([...prefix, ...group]);
       expect(chunks.length).toBeGreaterThan(1);
-      const card = chunks.find((chunk: any[]) => chunk.some(element => element.element_id === 'delegated_worker_1_header'));
-      expect(card.filter((element: any) => element.element_id?.startsWith('delegated_worker_1_'))).toEqual(group);
+      const card = chunks.find((chunk: any[]) => chunk.some(element => element.element_id === 'dw_1_header'));
+      expect(card.filter((element: any) => element.element_id?.startsWith('dw_1_'))).toEqual(group);
     });
 
     it('should return single chunk for small number of elements', () => {
@@ -1282,6 +1335,7 @@ describe('FeishuLongConnHandler', () => {
         operator: { open_id: 'user' }, context: { open_message_id: 'older-card' },
         action: { value: { action: 'switch_thread', threadId: 't3', threadName: 'thread-3' } },
       });
+      await vi.waitFor(() => expect(mockClient.im.message.patch).toHaveBeenCalledTimes(2));
       const switched = JSON.parse(mockClient.im.message.patch.mock.calls[1][0].data.content).body.elements;
       expect(switched).toContainEqual(expect.objectContaining({ content: '📍 **Reply from:** thread-2 · project-b\n🗂️ **Switch thread**' }));
       expect(getButtons(switched)[1]).toMatchObject({ type: 'primary', disabled: false });

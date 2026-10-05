@@ -560,6 +560,19 @@ increments the persisted workspace generation and invalidates old lanes.
 `/thread delete` removes all lane state. Never migrate or adopt an old direct
 session pointer into a worker lane.
 
+From 1.6.137, Worker card context clearing is an additive `workerContextReset`
+capability. Router sends `worker_context_reset` with `messageId`, `threadId`,
+`laneId`, and `generation`; CLI replies `worker_context_reset_result` with the
+same message ID and an explicit success/error. Validate exact lane ownership and
+generation under the lane-store write queue, persist reset intent before unlinking,
+and remove native continuation pointers only. Never reuse full lane cleanup:
+workspaces, artifacts, archived native transcripts, login, and settings must survive.
+Increment the context epoch on both lane reuse and successful clearing; reject
+active or uncertain lanes and stale cards. Router controls are owner/device/card
+bound and ephemeral; decorate actual cached chunks under the streaming root lock,
+including finalization and thread-footer updates, and never claim success before
+CLI acknowledgement. Clearing context does not run a task or replay prior input.
+
 `MessageHandler` creates a `DelegationScope` for an enabled coordinator turn and
 activates its `DelegationBridge`. The bridge accepts only authenticated loopback
 calls while that scope is active. Backend adapters register the five tools via
@@ -606,12 +619,41 @@ workers finish. Conflicts are preflighted in a separate recovery worktree. Apply
 must revalidate scope, ownership, lifecycle, and revision; it never stages,
 commits, or pushes. Worker success is not artifact integration. Preserve artifacts
 and unknown files on reset, deletion, or failure for manual recovery.
+Successful pending output also counts as historically delivered when its recorded
+artifact snapshot commit is an ancestor of delivery HEAD, including equality.
+Later reverts do not reopen delivery. Reconcile only exited ready lanes matching
+the current thread/cwd/generation at admission or idle closure, plus guarded
+inspection. Admission is metadata-only; deletion still requires independent
+reclamation checks. Persist observed HEAD before clearing the pending marker,
+repair interrupted marker clears idempotently, disable replacement objects, and
+fail soft on unknown ancestry. Never substitute the input baseline, native worker
+HEAD, copied files, or tree equality. A non-idle/conflicting close defers its pass.
 File application is not an atomic transaction: preserve before/target recovery
 refs and a durable pending receipt before applying. Failed or interrupted apply
 requires manual comparison, not an assumed rollback or automatic retry. Validate
 actual tree sizes after clean filters and both endpoints of renames at scope checks.
 Native executor behavior and Router protocol version 1 remain unchanged. Multiple
 waiting workers must not receive an ambiguously addressed plain-text reply.
+
+From CLI 1.6.135, reclaim only a successful no-change artifact or a durable applied
+artifact with verified lane/task identity, refs, detached HEAD, and checkout bytes.
+Keep native context pointers, lane IDs, artifacts, and private history refs.
+Independent bounded filesystem/hash verification must account for ignored files,
+extra directories, symlinks, file modes, and Git index flags; Git status and even
+non-forced worktree removal do not protect ignored files. Never force removal or
+prune registrations automatically. Persist present/reclaiming/reclaimed state and
+an exact output receipt before/after removal. Recreate only an absent, unregistered
+owned path with a valid receipt; legacy missing paths and partial state fail closed.
+Serialize lane lifecycle operations and repository worktree metadata operations
+in process. Do not mark a lane ready until awaited best-effort reclamation settles;
+never race removal against the worker-stop deadline or change task success when
+optional reclamation fails. This is not protection against external writers.
+Full byte audits and interrupted-intent validation hold only the lane guard;
+the shared repository guard covers worktree metadata mutations and their final
+registration/intent checks, not hashing. If preparation of an existing Git lane
+fails, block it and retain native context rather than running new-lane cleanup.
+Valid ready reclaiming receipts are lazily resolved; do not blanket-exclude them
+and abandon an otherwise resumable context after a benign removal refusal.
 
 Worker completion and terminal-result delivery are separate states. While results
 are missing from the active execution, `MessageHandler` suppresses coordinator prose/plans/images while
@@ -626,6 +668,22 @@ replayed. The bridge is inactive between executions and during compaction. A
 terminal failure displays bounded retained results without replaying workers;
 abort and shutdown suppress this fallback and further continuation. There is no
 automatic cross-request result recovery.
+
+From CLI 1.6.136, final success also requires artifact closeout for started Git
+workers in the current request. Wait for accepted tool calls, task collection,
+and confirmed cleanup; reconcile history with the source lease, then validate
+durable owned receipts instead of cached result dispositions. No-change/applied
+or explicitly retained outcomes settle the check. Missing/corrupt receipts,
+failed collection, pending changes, and unretained recovery remain unresolved.
+Combine unread results with at most two closeout rounds in the same coordinator
+session, without replaying the original request/attachments. Count checklist
+rounds, not model recovery retries; new workers do not reset the budget. Exhaustion
+uses the ordinary failure response and queue pause, with a bounded program-owned
+report. Coordinator failure/abort/shutdown never triggers more model turns. A
+failed or cancelled worker's edits still require disposition unless the whole
+request is cancelled. Explicit retention preserves artifacts, including recovery
+refs, without claiming delivery. Do not use this gate to force file deletion,
+automatically replay old requests, or certify the semantic correctness of edits.
 
 The Router receives existing task, tool, approval, and response events; the
 wire protocol remains version 1. Explicitly disabled threads bypass delegation

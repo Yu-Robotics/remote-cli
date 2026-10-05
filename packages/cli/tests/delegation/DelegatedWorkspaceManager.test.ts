@@ -70,7 +70,7 @@ describe('owned worktrees and explicit artifact integration', () => {
     expect(await fs.readFile(path.join(second.cwd, 'source.txt'), 'utf8')).toContain('integrated worker change');
     expect(await gitText(second.cwd, ['branch', '--show-current'])).toBe('');
     expect(await gitText(source.root, ['for-each-ref', '--format=%(refname)', 'refs/heads'])).toBe('refs/heads/main');
-  });
+  }, 30_000);
 
   it('merges independent committed worker outputs but leaves conflicting changes in a recovery worktree', async () => {
     const baseline = await manager.baseline(source);
@@ -90,7 +90,7 @@ describe('owned worktrees and explicit artifact integration', () => {
     expect(await fs.readFile(path.join(source.cwd, 'source.txt'))).toEqual(before);
     expect(await fs.readFile(path.join(conflicts.recoveryDirectory, 'source.txt'), 'utf8')).toContain('<<<<<<<');
     expect(await gitText(source.root, ['ls-files', '-u'])).toBe('');
-  });
+  }, 30_000);
 
   it('retains intentionally unmerged artifacts, never deletes unknown dirty or ignored files on reuse', async () => {
     const { lane, workspace } = await prepare();

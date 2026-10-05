@@ -196,6 +196,14 @@ describe('Router wire compatibility', () => {
     expect(currentSocket.close).not.toHaveBeenCalled();
   });
 
+  it.each([{}, { workerContextReset: true }, { delegationProgress: true, workerContextReset: true }])
+    ('negotiates context reset only with worker progress: %j', async capabilities => {
+      await receive({ type: 'binding_request', messageId: 'registration', data: { deviceId: 'device-1', capabilities } });
+      const confirmation = JSON.parse(socket.send.mock.calls[0][0]);
+      expect(confirmation.data.minCliVersion).toBe(1);
+      expect(confirmation.data.capabilities?.workerContextReset).toBe(capabilities.delegationProgress ? true : undefined);
+    });
+
   it('rejects an unsupported CLI before registering it and explains how to recover', async () => {
     await receive({
       type: 'binding_request', messageId: 'registration', timestamp: 1000,

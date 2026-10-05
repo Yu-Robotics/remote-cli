@@ -157,6 +157,102 @@ describe('cross-backend delegation', () => {
     expect(parent.onNotice).not.toHaveBeenCalled();
   });
 
+  it('resets one completed worker during an active parent scope without replay or losing other lanes', async () => {
+    vi.stubEnv('HOME', home);
+    try {
+      parent.onProgress = vi.fn(() => true);
+      const scope = manager.begin(parent);
+      const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Review' }, 'launch');
+      await scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result');
+      const progress = vi.mocked(parent.onProgress).mock.calls.at(-1)![0];
+      const lane = (await manager.laneStore.lanesForThread(parent.thread.id, 'codex'))[0];
+      expect(progress.workerContext).toEqual({ laneId: lane.id, generation: 0 });
+      const pointer = path.join(home, '.remote-cli', 'codex-sessions', `${lane.executorThreadId}.json`);
+      fs.mkdirSync(path.dirname(pointer), { recursive: true });
+      fs.writeFileSync(pointer, '{"threadId":"old-native-session"}');
+      const other = await manager.laneStore.acquire({ threadId: parent.thread.id, backend: 'agy', workingDirectory: home, workspaceGeneration: 0 });
+      await manager.laneStore.markReady(other.lane.id);
+      await manager.resetWorkerContext(parent.thread, progress.workerContext!.laneId, progress.workerContext!.generation);
+      expect(fs.existsSync(pointer)).toBe(false);
+      expect((await manager.laneStore.lanesForThread(parent.thread.id)).map(entry => entry.id)).toContain(other.lane.id);
+      expect(worker.execute).toHaveBeenCalledTimes(1);
+      expect(worker.resetContext).not.toHaveBeenCalled();
+      const second: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Continue with fresh context' }, 'next');
+      await scope.invoke('remote_cli_result', { taskId: second.taskId }, 'next-result');
+      expect(vi.mocked(parent.onProgress).mock.calls.at(-1)![0].workerContext).toEqual({ laneId: lane.id, generation: 2 });
+      expect(worker.execute).toHaveBeenCalledTimes(2);
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it('protects a reused worker from historical cards through execution and confirmed process exit', async () => {
+    vi.stubEnv('HOME', home);
+    let finishRun!: () => void;
+    let confirmExit!: () => void;
+    const runGate = new Promise<void>(resolve => { finishRun = resolve; });
+    const exitGate = new Promise<void>(resolve => { confirmExit = resolve; });
+    try {
+      parent.onProgress = vi.fn(() => true);
+      const scope = manager.begin(parent);
+      const first: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Review' }, 'first');
+      await scope.invoke('remote_cli_result', { taskId: first.taskId }, 'first-result');
+      const historical = vi.mocked(parent.onProgress).mock.calls.at(-1)![0].workerContext!;
+      let enteredRun!: () => void;
+      let enteredExit!: () => void;
+      const running = new Promise<void>(resolve => { enteredRun = resolve; });
+      const stopping = new Promise<void>(resolve => { enteredExit = resolve; });
+      vi.mocked(worker.execute).mockImplementationOnce(async () => {
+        enteredRun(); await runGate; return { success: true, output: 'second result' };
+      });
+      vi.mocked(worker.waitForExit!).mockImplementationOnce(async () => { enteredExit(); await exitGate; });
+      const second: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Continue review' }, 'second');
+      await running;
+      const lane = (await manager.laneStore.lanesForThread(parent.thread.id, 'codex'))[0];
+      expect(lane).toMatchObject({ id: historical.laneId, state: 'running', contextGeneration: historical.generation + 1 });
+      const pointer = path.join(home, '.remote-cli', 'codex-sessions', `${lane.executorThreadId}.json`);
+      const activeSession = '{"threadId":"active-worker-session"}';
+      fs.mkdirSync(path.dirname(pointer), { recursive: true });
+      fs.writeFileSync(pointer, activeSession);
+      const expectProtected = async () => {
+        await expect(manager.resetWorkerContext(parent.thread, historical.laneId, historical.generation)).rejects.toThrow('has changed');
+        await expect(manager.resetWorkerContext(parent.thread, lane.id, lane.contextGeneration!)).rejects.toThrow('active');
+        expect(fs.readFileSync(pointer, 'utf8')).toBe(activeSession);
+        expect(worker.resetContext).not.toHaveBeenCalled();
+        expect(worker.abort).not.toHaveBeenCalled();
+      };
+      await expectProtected();
+      finishRun();
+      await stopping;
+      await expectProtected();
+      confirmExit();
+      await expect(scope.invoke('remote_cli_result', { taskId: second.taskId }, 'second-result'))
+        .resolves.toMatchObject({ state: 'succeeded', output: 'second result' });
+      await expect(manager.resetWorkerContext(parent.thread, historical.laneId, historical.generation)).rejects.toThrow('has changed');
+      expect(fs.readFileSync(pointer, 'utf8')).toBe(activeSession);
+      await manager.resetWorkerContext(parent.thread, lane.id, lane.contextGeneration!);
+      expect(fs.existsSync(pointer)).toBe(false);
+      expect(worker.execute).toHaveBeenCalledTimes(2);
+    } finally { finishRun(); confirmExit(); vi.unstubAllEnvs(); }
+  });
+
+  it('clears a worker whose parent selected a symlinked working directory', async () => {
+    vi.stubEnv('HOME', home);
+    try {
+      const alias = path.join(home, 'alias');
+      fs.symlinkSync(home, alias, 'dir');
+      parent.cwd = alias;
+      parent.thread.workingDirectory = alias;
+      parent.onProgress = vi.fn(() => true);
+      const scope = manager.begin(parent);
+      const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Review' }, 'launch');
+      await scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result');
+      const context = vi.mocked(parent.onProgress).mock.calls.at(-1)![0].workerContext!;
+      const lane = (await manager.laneStore.lanesForThread(parent.thread.id))[0];
+      expect(lane.workingDirectory).toBe(home);
+      await expect(manager.resetWorkerContext(parent.thread, context.laneId, context.generation)).resolves.toBeUndefined();
+      expect((await manager.laneStore.lanesForThread(parent.thread.id))[0]).toMatchObject({ id: lane.id, contextGeneration: 1 });
+    } finally { vi.unstubAllEnvs(); }
+  });
+
   it('freezes worker preferences, publishes native reports, and retains them after process cleanup', async () => {
     parent.onProgress = vi.fn(() => true);
     parent.onTextProgress = vi.fn(() => true);

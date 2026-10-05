@@ -251,6 +251,52 @@ use separate workspaces for independent writers. See
 [Cross-backend Delegation](../../README.md#cross-backend-delegation) for limits,
 recovery, context transfer, and permission behavior.
 
+From CLI 1.6.135, verified successful no-change checkouts and successfully applied
+worker outputs reclaim their checkout directories automatically, while retaining
+native conversation pointers, stable lane paths, artifact records, and private Git
+refs. Subsequent tasks recreate the same path on fresh delivery input. Unknown,
+ignored, dirty, locked, failed/cancelled, pending, retained, or partially recovered
+workspaces stay on disk; cleanup failure does not change task success. Exact-byte
+verification may retain transformed checkouts. Missing legacy paths are not
+treated as reclamation receipts. There is no historical sweep, force deletion,
+or repository pruning. External writers must not share managed worker checkouts.
+Failed checkout preparation isolates a reused Git lane without deleting its native
+context; other lanes remain available. Full byte audits do not hold the shared
+repository metadata guard.
+Successful pending outputs are also historically delivered when their recorded
+snapshot commit is an ancestor of delivery HEAD; later reverts do not reopen the
+receipt. Inspection, ready-lane admission, and idle turn closure recognize this
+automatically. Admission changes metadata only; inspection and closure may try
+the same safe reclamation. Explicit retention and unknown recovery state remain
+preserved. Copies, cherry-picks, squash merges, and tree equality are not ancestry;
+explicit patch-only apply stays supported without staging or committing.
+From CLI 1.6.136, a code-enforced final check reads validated durable artifacts
+for Git workers started in the current request. No-change, applied, and explicitly
+retained outcomes pass; unread results and unresolved artifacts are separate checks.
+Pending, missing, invalid, or unretained recovery state gets at most two extra
+coordinator closeout rounds without replaying the request or attachments. New
+workers do not reset that budget. Remaining issues fail the final response with
+task IDs and available output commits, pause queued execution, and preserve artifacts.
+Coordinator errors, abort, and shutdown do not start more closeout rounds. This
+does not guarantee functional correctness, delete retained files, or replay old tasks.
+The local CLI owns this lifecycle; native backends, non-Git FIFO scheduling,
+Router protocol, and old-peer compatibility are unchanged.
+
+From CLI and Router 1.6.137, finished Worker cards expose **Clear context**
+outside folded details, including failed tasks that established a worker lane.
+The button disconnects only that worker's native conversation continuation.
+It keeps the coordinator, other workers, workspace files, artifacts, login, and
+settings intact; archived native transcripts are not erased. The next delegation
+starts fresh, with no automatic retry of the failed task.
+Only the original user can operate the control on its original device. Running
+workers, unconfirmed shutdowns, and stale cards after lane reuse are rejected.
+**Context cleared** appears only after CLI acknowledgement; timeouts and failures
+allow explicit retry. An interrupted clear stays non-resumable until a retry
+finishes. Controls require both peers to advertise `workerContextReset`; old
+peers retain their existing behavior. Card controls expire on Router restart,
+after 24 hours, or when their bounded cache is evicted; use a newer card or the
+existing thread-scoped `/delegation reset [backend]` command when idle.
+
 | Command | Description |
 |---------|-------------|
 | `/thread list/new/delete` | Manage session threads |

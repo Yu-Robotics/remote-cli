@@ -10,6 +10,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.137] - 2026-10-05
+
+### Added
+- Add an owner-bound Clear context control outside delegated Worker card details after successful or failed execution. Reset only the exact idle lane's native continuation, retaining workspaces, artifacts, archived transcripts, authentication, and settings without replaying the task or resetting the coordinator.
+- Negotiate optional workerContextReset support and require CLI acknowledgement before confirming success. Persist reset intents and context epochs, serialize reset with lane acquisition, reject stale or unsafe targets, and permit explicit retries after interrupted resets. Keep controls consistent across streaming, continuation cards, and thread-footer refreshes with a bounded ephemeral Router cache; legacy peers remain compatible.
+
+## [1.6.136] - 2026-10-05
+
+### Added
+- Enforce artifact closeout before successful coordinator completion. Drain accepted tasks and tool calls, reconcile historical delivery under existing ownership guards, then inspect durable receipts rather than cached results. Pending changes, missing or invalid receipts, failed collection, and unretained recovery state prevent success; verified no-change, applied, and deliberately retained outcomes need no further decision.
+- Resume the same coordinator session for at most two artifact-closeout rounds per request, combining unread worker results when available. Preserve attachments, result acknowledgement, approval/input, model recovery, and cancellation boundaries; new workers do not reset the budget. An unresolved final check returns bounded task IDs and artifact references as a failure, pausing queued execution while preserving recoverable output. No new wire messages, implicit merging, automatic cross-request replay, or non-Git lifecycle changes.
+
+## [1.6.135] - 2026-10-05
+
+### Added
+- Automatically reclaim verified delegated Git checkout directories after successful no-change tasks or durable artifact application. Preserve native conversation pointers, stable lane paths, immutable artifacts, and private input/output/history references; recreate absent, unregistered owned paths from fresh delivery input when the lane is reused.
+- Persist present/reclaiming/reclaimed checkout state and exact output receipts. Resolve interrupted intents only from verified intact checkouts or confirmed absent/unregistered paths; never infer ownership from a missing legacy directory, overwrite occupied reclaimed paths, prune registrations, or sweep historical workspaces.
+- Recognize successful pending worker outcomes as historically delivered when their recorded artifact snapshot commit is an ancestor of delivery HEAD, including after a later revert. Persist the observed HEAD and repair interrupted pending-marker clears; reconcile guarded inspection, ready-lane admission, and idle turn closure without content-subset heuristics, automatic merges, staging, commits, or changes to patch-only apply. Keep replacement-object bypass, owner/ref checks, fail-soft errors, and independent safe-reclamation verification.
+
+### Changed
+- Independently bound and hash actual tracked bytes, modes, and symlink targets before checkout deletion, accounting for ignored files, extra directories, unknown entries, and Git index flags. Preserve pending, retained, failed/cancelled, locked, or unresolved recovery workspaces. Transformed bytes that cannot be proven equivalent fail closed.
+- Serialize lane lifecycle and Git worktree metadata operations within the CLI process. Await optional reclamation outside the worker-stop deadline before marking a lane ready; cleanup failure does not change a successful task or artifact application. Native backend execution, non-Git FIFO scheduling, and Router protocol remain unchanged.
+- Keep full byte verification outside the shared repository guard so independent lanes can start during a slow audit. Isolate a reused Git lane whose checkout preparation fails without discarding its existing native context; preserve lazy recovery of valid interrupted-removal receipts.
+
 ## [1.6.134] - 2026-10-04
 
 This stage summary consolidates confirmed source changes from 1.6.90 through 1.6.133, including Git-confirmed changes whose per-version notes were missing. It replaces the available entries in that range, not Git history, and is not a complete npm publication ledger. Version 1.6.134 reorganizes release documents, synchronizes package versions, and permits up to six summary bullets in build-time and bundled-artifact validation; backend execution and Router behavior are unchanged.

@@ -249,6 +249,8 @@ export type DelegationProgressPhase =
 
 /** Bounded delegated-worker progress associated with the coordinator's streaming card. */
 export interface DelegationProgressInfo {
+  /** Optional, CLI-owned identity for a capability-negotiated context reset. */
+  workerContext?: { laneId: string; generation: number };
   taskId: string;
   backend: string;
   phase: DelegationProgressPhase;
