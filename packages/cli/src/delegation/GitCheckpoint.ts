@@ -166,6 +166,13 @@ export async function captureCheckpoint(root: string): Promise<GitCheckpoint> {
     const env = { GIT_INDEX_FILE: path.join(directory, 'index') };
     if (originalIndex.length) await fs.writeFile(env.GIT_INDEX_FILE, originalIndex, { mode: 0o600 });
     else await runGit(root, ['read-tree', head], undefined, env);
+    // Git add can silently skip these entries, including missing sparse files.
+    // Reject the copied flags rather than modifying the user's index or guessing
+    // whether an absent skip-worktree entry represents an intentional deletion.
+    const indexEntries = entries(await runGit(root, ['ls-files', '-v', '-z'], undefined, env));
+    if (indexEntries.some(entry => /^[a-zS] /.test(entry))) {
+      throw new Error('Git checkpoints cannot include assume-unchanged or skip-worktree entries. Resolve those flags and sparse checkouts explicitly before delegating.');
+    }
     await runGit(root, ['add', '--all', '--', '.'], undefined, env);
     const tree = await gitText(root, ['write-tree'], undefined, env);
     await runGit(root, ['add', '--all', '--', '.'], undefined, env);

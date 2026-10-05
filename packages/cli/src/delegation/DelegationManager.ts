@@ -29,7 +29,7 @@ export const DELEGATION_LIMITS = { launches: 12, concurrent: 5, closeoutRounds: 
   idleTimeoutMs: 15 * 60_000, toolIdleTimeoutMs: 45 * 60_000,
   queueTimeoutMs: 60 * 60_000,
   resultBytes: 32 * 1024, continuationBytes: 64 * 1024,
-  storageTimeoutMs: 10_000, calls: 500 } as const;
+  storageTimeoutMs: 10_000, toolResponseWaitMs: 20_000, calls: 500 } as const;
 
 /** Bounds and cadence for optional display-only delegated-worker text. */
 export const DELEGATION_TEXT_PROGRESS = {
@@ -140,6 +140,7 @@ export interface DelegatedTaskResult {
   state: DelegatedTaskRecord['state'];
   output?: string;
   error?: string;
+  statusDetail?: string;
   truncated: boolean;
   artifact?: Pick<DelegatedArtifactView, 'taskId' | 'disposition' | 'outputCommit'>;
   executionMetadata?: ExecutionMetadata;
@@ -538,7 +539,7 @@ export class DelegationManager {
         }
         assertWorkspace();
       };
-      const createWorker = async (): Promise<IExecutor> => {
+      const prepareWorkerWorkspace = async (): Promise<void> => {
         assertStartable();
         if (!task.lane) {
           const acquired = await this.laneStore.acquire(identity, source
@@ -552,17 +553,23 @@ export class DelegationManager {
             await this.laneStore.markDirty(acquired.lane.id, 'Worker setup completed after its task ended.', true).catch(() => undefined);
           }
         }
+        assertStartable();
+        if (source && !task.workspace) {
+          baseline ??= this.workspaceManager.baseline(source);
+          const input = await baseline;
+          assertStartable();
+          task.workspacePreparationStarted = true;
+          task.workspace = await this.workspaceManager.prepare(task.lane, source, input, task.record.id);
+          assertStartable();
+        }
+      };
+      const createWorker = async (): Promise<IExecutor> => {
         let worker: IExecutor | undefined;
         try {
+          // Shared-directory acquisition keeps its existing startup deadline.
+          if (!source) await prepareWorkerWorkspace();
           assertStartable();
-          if (source && !task.workspace) {
-            baseline ??= this.workspaceManager.baseline(source);
-            const input = await baseline;
-            assertStartable();
-            task.workspacePreparationStarted = true;
-            task.workspace = await this.workspaceManager.prepare(task.lane, source, input, task.record.id);
-            assertStartable();
-          }
+          if (!task.lane) throw new Error('Worker lane is unavailable before native startup');
           const executionCwd = task.workspace?.cwd ?? cwd;
           const workerGuard = task.workspace ? new DirectoryGuard([...this.guard.getAllowedDirectories(), executionCwd]) : this.guard;
           worker = this.factory(workerGuard, configuration, executionCwd, task.lane.executorThreadId,
@@ -616,6 +623,10 @@ export class DelegationManager {
         }
         let result: ExecuteResult | undefined;
         for (let attempt = 0; attempt < 2; attempt++) {
+          // Owned Git work and repository-lock waits are not native startup.
+          // Await them even on cancellation: no mutation may outlive its slot
+          // or source lease, and the final startable check prevents late launch.
+          if (source) await prepareWorkerWorkspace();
           let setupPending = true;
           const setup = createWorker().finally(() => { setupPending = false; });
           let worker: IExecutor;
@@ -735,9 +746,10 @@ ${prompt}`));
         clearTextProgress(task, true);
         if (task.record.startedAt === undefined) task.discardLane = !task.preserveUnstartedLane;
         let released = !task.quarantineWorkspace;
+        let nativeExitConfirmed = false;
         let readyWorkspaceLane: DelegatedWorkerLane | undefined;
-        try { await deadline(async () => {
-          if (task.stop) await task.stop;
+        const finalizeLane = async (): Promise<void> => {
+          if (task.stop) await deadline(() => task.stop!, this.cleanupMs);
           else if (task.executor) await deadline(() => destroyWorker(task.executor!), this.cleanupMs);
           else if (task.lane && !task.preserveUnstartedLane) {
             // A scope can close after durable acquisition but before construction.
@@ -745,6 +757,7 @@ ${prompt}`));
             // reserving the workspace indefinitely.
             task.discardLane = true;
           }
+          nativeExitConfirmed = true;
           if (released && task.lane && task.preserveUnstartedLane) {
             if (!task.workspacePreparationStarted) {
               // Only acquisition changed: no checkout or executor was touched.
@@ -785,16 +798,31 @@ ${prompt}`));
               console.warn('[Delegation] Worker lane could not be retained:', detail);
             }
           }
-        }, this.cleanupMs);
+        };
+        try {
+          // Collection owns Git mutations and must settle before releasing the
+          // lane, slot, or source lease. Individual Git commands remain bounded.
+          if (source) await finalizeLane();
+          else await deadline(finalizeLane, this.cleanupMs);
         } catch (error) {
-          released = false;
-          task.quarantineWorkspace = true;
-          if (task.lane) {
-            const detail = error instanceof Error ? error.message : 'Worker cleanup could not be confirmed';
-            await deadline(() => this.laneStore.markDirty(task.lane!.id, detail), this.cleanupMs).catch(() => undefined);
+          const detail = error instanceof Error ? error.message : 'Worker cleanup could not be confirmed';
+          if (source && released && nativeExitConfirmed) {
+            readyWorkspaceLane = undefined;
+            if (task.lane) {
+              await this.workspaceManager.preserveLane(task.lane.id).catch(() => undefined);
+              await this.laneStore.markDirty(task.lane.id, detail).catch(() => undefined);
+            }
+            if (task.record.state === 'succeeded') task.record.state = 'failed';
+            task.record.error = bounded(`Worker lane could not be finalized: ${detail}. Files were retained for manual recovery.`, 4000).text;
+          } else {
+            released = false;
+            task.quarantineWorkspace = true;
+            if (task.lane) {
+              await deadline(() => this.laneStore.markDirty(task.lane!.id, detail), this.cleanupMs).catch(() => undefined);
+            }
+            task.record.state = 'interrupted';
+            task.record.error = 'Worker cleanup could not be confirmed. This workspace is blocked until the worker is stopped and the CLI restarts.';
           }
-          task.record.state = 'interrupted';
-          task.record.error = 'Worker cleanup could not be confirmed. This workspace is blocked until the worker is stopped and the CLI restarts.';
           console.warn('[Delegation] Worker cleanup failed:', error instanceof Error ? error.message : 'Cleanup failure');
         }
         if (released && readyWorkspaceLane) {
@@ -855,6 +883,15 @@ ${prompt}`));
     const invoke: DelegationHandler = async (name, args, callId) => {
       if (closed) throw new Error('Delegation turn has ended');
       const requestedDuring = execution;
+      const responseDeadline = Date.now() + DELEGATION_LIMITS.toolResponseWaitMs;
+      const waitForResponse = async (pending: Promise<unknown>): Promise<void> => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([pending, new Promise<void>(resolve => {
+            timer = setTimeout(resolve, Math.max(0, responseDeadline - Date.now()));
+          })]);
+        } finally { clearTimeout(timer); }
+      };
       if (!callId || callId.length > 200) throw new Error('Invalid tool call ID');
       const signature = JSON.stringify({ name, args });
       const existing = calls.get(callId);
@@ -895,7 +932,14 @@ ${prompt}`));
         }
         if (name === 'remote_cli_cancel') {
           const task = getTask(args.taskId);
-          await cancel(task);
+          const cancelling = cancel(task);
+          if (source) await waitForResponse(cancelling);
+          else await cancelling;
+          if (source && task.record.finishedAt === undefined) {
+            return { ...receive(task, requestedDuring), statusDetail: task.record.state === 'cancelled'
+              ? 'Cancellation requested; owned operations are still settling. Poll this taskId with remote_cli_result. The workspace remains reserved until cleanup completes.'
+              : 'Task finalization is still in progress. Poll this taskId with remote_cli_result. The workspace remains reserved until cleanup completes.' };
+          }
           return receive(task, requestedDuring);
         }
         if (name === 'remote_cli_integrate') {
@@ -1003,9 +1047,15 @@ ${prompt}`));
           for (const start of this.pumps) start();
         }
         if (task.ownsSlot) {
-          // Preserve the existing first-task response after dispatch/setup,
-          // without holding up admission of followers while setup is pending.
-          await task.dispatched;
+          // Preserve prompt dispatch responses, but do not let slow managed Git
+          // work outlive the tool adapter's HTTP timeout. Returning an accepted
+          // task ID never cancels its work or releases its lease/execution slot.
+          if (source) await waitForResponse(task.dispatched);
+          else await task.dispatched;
+          if (source && task.record.finishedAt === undefined && task.record.startedAt === undefined) {
+            return { ...receive(task, requestedDuring), statusDetail:
+              'Task accepted; workspace preparation is still in progress. Poll this taskId with remote_cli_result instead of submitting the task again.' };
+          }
         }
         return receive(task, requestedDuring);
       })();

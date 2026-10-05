@@ -244,7 +244,7 @@ global execution slot are rejected rather than queued. Queue status uses existin
 notice text, with progress cards only for started workers; existing Routers remain
 compatible. Restarting the CLI interrupts retained queued/running records without
 replaying work. Sibling results are not explicitly forwarded; a reused same-backend
-lane retains its own earlier task context. Uncertain startup or cleanup retains
+lane retains its own earlier task context. Uncertain native startup or exit retains
 the occupied global slot until the CLI restarts. Workspace reservations apply to
 delegation-enabled work; opted-out threads keep ordinary workspace access, so
 use separate workspaces for independent writers. See
@@ -255,6 +255,19 @@ From CLI 1.6.139, Git delegation has no fixed repository size or file-count
 limits during snapshots, artifact collection, or checkout verification. Git
 command deadlines and buffered-output limits still apply. Path, ownership,
 artifact-integrity, and unknown-file checks remain in place.
+
+From CLI 1.6.140, managed Git preparation, repository-lock waits, and artifact
+collection are awaited separately from native startup/stop deadlines. Slots and
+source reservations remain held until owned operations settle, even on cancellation;
+no late worker is launched. Failed collection after confirmed exit preserves only
+the affected lane and files for recovery rather than quarantining the source.
+Individual Git command deadlines remain; cancellation may wait for Git to settle.
+Slow launch/cancel tools return the accepted task ID and a pending status before
+the adapter timeout; poll that ID with `remote_cli_result`, not a new delegation.
+The response does not claim cancellation cleanup or workspace release is complete.
+Checkpoints reject `assume-unchanged` and `skip-worktree` entries rather than
+omitting hidden edits or treating missing sparse files as deletions. Resolve those
+flags and sparse checkouts explicitly; the source index is never modified.
 
 From CLI 1.6.135, verified successful no-change checkouts and successfully applied
 worker outputs reclaim their checkout directories automatically, while retaining
