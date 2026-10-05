@@ -191,6 +191,14 @@ export class DelegatedWorkspaceManager {
     }
     await this.validateWorkspace(workspace);
     const checkpoint = await captureCheckpoint(workspace.directory);
+    const opaque = (await runGit(workspace.directory, ['ls-tree', '-r', '-z', workspace.input.tree]))
+      .toString('utf8').split('\0').filter(entry => entry.startsWith('160000 commit '))
+      .map(entry => entry.slice(entry.indexOf('\t') + 1));
+    const changed = (await runGit(workspace.directory, ['diff', '--name-only', '--no-renames', '-z',
+      workspace.input.tree, checkpoint.tree, '--'])).toString('utf8').split('\0').filter(Boolean);
+    const opaqueChange = opaque.find(name => changed.some(file => file === name || file.startsWith(`${name}/`)));
+    const nestedChange = checkpoint.repositories?.[0]?.path;
+    const unsupported = nestedChange !== undefined || opaqueChange !== undefined;
     const output = await createCheckpointCommit(workspace.directory, checkpoint.tree, workspace.input.commit,
       `Remote CLI worker artifact ${workspace.taskId}`);
     await runGit(workspace.directory, ['update-ref', this.outputRef(workspace.taskId), output]);
@@ -198,10 +206,14 @@ export class DelegatedWorkspaceManager {
     const artifact: Artifact = { taskId: workspace.taskId, laneId: workspace.laneId,
       threadId: workspace.threadId, workspaceGeneration: workspace.workspaceGeneration,
       source: workspace.source, input: workspace.input, output, tree: checkpoint.tree,
-      originalHead: checkpoint.head, successful,
-      disposition: checkpoint.tree === workspace.input.tree ? 'applied' : 'pending', createdAt: Date.now() };
+      originalHead: checkpoint.head, successful: successful && !unsupported,
+      disposition: !unsupported && checkpoint.tree === workspace.input.tree ? 'applied' : 'pending', createdAt: Date.now() };
     // Durable artifact + refs precede any index/branch update in the owned checkout.
     await this.write('artifacts', artifact.taskId, artifact);
+    if (unsupported) {
+      await this.write('lanes', workspace.laneId, { ...workspace, blocked: true, pendingTaskId: artifact.taskId });
+      throw new Error(`${nestedChange !== undefined ? 'Worker created nested Git metadata' : 'Worker changed an uninitialized submodule'} at ${JSON.stringify(nestedChange ?? opaqueChange)}; files and history were retained for manual recovery`);
+    }
     const currentBranch = await gitText(workspace.directory, ['branch', '--show-current']);
     if (currentBranch || checkpoint.head !== await gitText(workspace.directory, ['rev-parse', 'HEAD'])) {
       await this.write('lanes', workspace.laneId, { ...workspace, blocked: true, pendingTaskId: artifact.taskId });
@@ -482,9 +494,10 @@ export class DelegatedWorkspaceManager {
     const tree = await runGit(workspace.source.root, ['ls-tree', '-r', '-z', '--full-tree', artifact.tree]);
     if (!Buffer.from(tree.toString('utf8')).equals(tree)) throw new Error('Non-UTF-8 checkout paths require manual cleanup');
     for (const entry of tree.toString('utf8').split('\0').filter(Boolean)) {
-      const match = /^(100644|100755|120000) blob ([a-f0-9]{40}|[a-f0-9]{64})\t(.+)$/s.exec(entry);
+      const match = /^(100644|100755|120000|160000) (blob|commit) ([a-f0-9]{40}|[a-f0-9]{64})\t(.+)$/s.exec(entry);
       if (!match) throw new Error('Unsupported checkout tree entry');
-      const [, mode, oid, name] = match;
+      const [, mode, type, oid, name] = match;
+      if ((mode === '160000') !== (type === 'commit')) throw new Error('Unsupported checkout tree entry');
       if (!inside(workspace.directory, path.join(workspace.directory, name)) || name.split('/').includes('.git')
         || files.has(name)) throw new Error('Invalid checkout tree path');
       files.set(name, { mode, oid });
@@ -502,6 +515,10 @@ export class DelegatedWorkspaceManager {
         if (child === '.git' && stat.isFile() && !stat.isSymbolicLink()) continue;
         if (stat.isDirectory() && directories.has(child)) { await walk(child); continue; }
         const expected = files.get(child);
+        if (expected?.mode === '160000' && stat.isDirectory() && !(await fs.readdir(file)).length) {
+          files.delete(child);
+          continue;
+        }
         if (!expected || (expected.mode === '120000' ? !stat.isSymbolicLink() : !stat.isFile())) {
           throw new Error('Checkout contains unknown, ignored, or unsupported files');
         }
@@ -569,6 +586,22 @@ export class DelegatedWorkspaceManager {
   }
 
   private async applyArtifact(artifact: Artifact, current: GitCheckpoint, owner: IntegrationOwner): Promise<unknown> {
+    const expectedRepositories = new Map((artifact.input.repositories ?? []).map(repository => [repository.path, repository.identity]));
+    const currentRepositories = new Map((current.repositories ?? []).map(repository => [repository.path, repository.identity]));
+    for (const [name, identity] of expectedRepositories) {
+      if (currentRepositories.get(name) !== identity) {
+        throw new Error(`Nested repository identity changed at ${JSON.stringify(name)}; manual integration is required`);
+      }
+    }
+    // Never replace a live repository directory with a worker file or symbolic link.
+    const changes = (await runGit(artifact.source.root, ['diff', '--name-only', '--no-renames', '-z',
+      artifact.input.tree, artifact.tree, '--'])).toString('utf8').split('\0').filter(Boolean);
+    for (const name of currentRepositories.keys()) {
+      if (!expectedRepositories.has(name) && changes.some(file => file.startsWith(`${name}/`))
+        || changes.some(file => name === file || name.startsWith(`${file}/`))) {
+        throw new Error(`Worker changes replace a nested repository boundary at ${JSON.stringify(name)}; manual integration is required`);
+      }
+    }
     // Compatible with Git 2.34: merge in an owned scratch checkout, never in the user's worktree.
     const wrapper = await createCheckpointCommit(artifact.source.root, current.tree, artifact.input.commit,
       `Remote CLI integration input ${artifact.taskId}`);

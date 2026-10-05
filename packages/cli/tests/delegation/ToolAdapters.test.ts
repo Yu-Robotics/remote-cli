@@ -56,6 +56,9 @@ describe('native delegation tool adapters', () => {
     expect(await request(1, 'initialize', { protocolVersion: '2024-11-05' })).toMatchObject({ capabilities: { tools: {} } });
     const tools = await request(2, 'tools/list');
     expect(tools.tools.map((tool: any) => tool.name)).toContain('remote_cli_delegate');
+    const delegate = tools.tools.find((tool: any) => tool.name === 'remote_cli_delegate');
+    expect(delegate.description).toContain('nested Git metadata/history');
+    expect(delegate.description).toContain('Uninitialized submodule paths remain empty');
     const response = new Promise<any>(resolve => pending.set(3, resolve));
     const encoded = Buffer.from(JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call',
       params: { name: 'remote_cli_delegate', arguments: { backend: 'pi', objective: 'Read \u00e9vidence' } } }) + '\n');

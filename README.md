@@ -558,8 +558,22 @@ From CLI 1.6.140, checkpoints reject `assume-unchanged` and `skip-worktree`
 entries rather than silently omitting edits. Resolve hidden index flags and sparse
 checkouts explicitly before delegating or integrating; the CLI never clears them
 in your index. Worker files that cannot be captured remain for manual recovery.
-Existing conflicts, submodules, unsafe links,
-known untracked credential files, and broken Git metadata stop setup rather
+From CLI 1.6.141, initialized local submodules and embedded repositories
+contribute their staged, unstaged, and nonignored files to private snapshots.
+Workers see ordinary files in one worktree; nested Git metadata and histories
+are not copied. Explicit integration updates working files while preserving
+every source repository's HEAD, index, and gitlinks. Uninitialized submodules
+remain empty and do not prevent review of other code. Populating them or creating
+nested Git metadata in a worker preserves its checkout for manual recovery.
+Nested worktrees sharing an ancestor repository, external Git metadata pointers,
+partial clones, and nested-local filter commands require explicit recovery or
+exclusion. Existing system/global Git configuration remains trusted, as for the
+selected repository; worktrees are not a sandbox. Git transfer deadlines still apply.
+A hard kill can leave a transfer quarantine requiring manual cleanup after its
+processes exit. Tracked submodules also matched by outer ignore rules currently
+fail admission; reconcile those rules before delegating.
+Existing conflicts, unsafe links, known untracked credential files, unsupported
+filesystem entries, and broken Git metadata stop setup rather
 than falling back to shared parallel writes. The whole repository must be
 within the directory-selection policy; allowing only a subdirectory is not
 enough. Unsupported repositories fail delegation setup, not ordinary backend

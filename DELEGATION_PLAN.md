@@ -10,7 +10,7 @@ Non-Git directories retain that restriction in code, with no implicit Git init.
    lane's worktree directory only after exit and artifact accounting.
 2. Capture a shared cohort baseline through a temporary index, including relevant
    working changes. Do not modify the source index. From CLI 1.6.139, do not cap
-   repository size or file count. Reject broken metadata, existing conflicts, submodules,
+   repository size or file count. Reject broken metadata, existing conflicts,
    unsafe links, and known untracked credentials. Ignored dependencies are not
    copied. Validate captured tree entries after Git clean filters. Grant the exact
    owned execution cwd without changing global policy.
@@ -47,6 +47,111 @@ committed and binary outputs, conflicts, revision/ownership guards, retained and
 unknown files, directory/session reuse, concurrency and queued followers,
 non-Git compatibility, tool registration, and the existing thread workflow.
 Mocked executor tests do not establish provider authentication or live throughput.
+
+## CLI 1.6.141: local nested repository snapshots
+
+- Fix admission of ordinary tracked files replaced by directories. Diagnose real
+  unsupported entries with repository-relative paths and filesystem types.
+- Recursively capture initialized submodules and embedded repositories through
+  their own temporary indexes, including staged, unstaged, and nonignored input.
+  Import local tree objects through a streaming pipe; never fetch a remote.
+  Expand their files only in private checkpoint trees. Workers use one detached
+  worktree and do not receive nested Git metadata or native nested histories.
+- Compare two full captures, including nested HEAD/index/identity fingerprints.
+  Preserve every delivery repository's HEAD and index. Explicit integration
+  merges and applies working files; it does not update gitlinks or nested refs.
+  Refuse replacement of live repository boundaries and changed repository identities.
+- Preserve uninitialized gitlinks as empty opaque directories. Review of other
+  files can proceed without downloading dependencies. New content in those paths
+  requires manual recovery; never silently initialize or replace a repository.
+- Preserve worker-created Git metadata and history for manual recovery rather
+  than silently delivering it as plain files. Retain existing artifact receipts,
+  conflict handling, guarded reclamation, lane reuse, and old-peer compatibility.
+- Verify real temporary submodule/gitfile and embedded-repository fixtures,
+  nested recursion, unborn embedded repositories, ignored/credential files,
+  file/directory replacements, unsupported files, large streamed objects,
+  revision invalidation, nested conflicts, working-file integration, and safe
+  no-change reclamation/recreation. Build and run both package suites, then obtain
+  a read-only Claude Code review of the implementation.
+
+Design review completed with Claude Code: private flattened trees fit the current
+single-worktree lifecycle. Separate nested worktrees would need independent
+registrations and reclamation receipts. This plan keeps file-level edits explicit;
+Git history transfer, mixed Git object formats, and remote submodule initialization
+are outside this change. Existing Git command deadlines and output limits remain.
+
+This continues the draft at ced0874 on the latest main baseline. Keep the 1.6.140
+native deadline and response-budget fixes unchanged, and retain hidden-index flag
+rejection in every nested repository. A no-change artifact containing new nested
+Git metadata still requires explicit retention; never mark it delivered merely
+because its flattened tree is unchanged. Final validation is recorded below.
+
+Review follow-ups retain the draft's streaming design without resetting all index
+stat data. Preserve the copied index's original timestamp so Git's racy-clean
+check cannot mistake a fresh copy timestamp for evidence that cached file bytes
+are current. A same-size edit with restored file timestamps has a regression test.
+Canonicalize root aliases, use POSIX Git path keys, and memoize only
+successful transfers within one capture. Pack with bounded single-threaded,
+low-compression streaming and no delta search; keep the existing 15-second Git
+deadline and wait for both transfer processes to exit on failure. A synthetic
+probe measured warm 1 GiB root captures at 91/88 ms and a 1 GiB root plus 512 MiB
+nested file at 4.5 seconds. These sparse zero-filled fixtures are not a guarantee
+for arbitrary repositories or hardware; timeouts still preserve recovery state.
+
+Gitfiles must use an ancestor repository's module store; embedded metadata must
+remain inside its own directory. Refuse shared-ancestor worktrees and mismatched
+roots instead of duplicating input or writing into unrelated object databases.
+Nested-local/worktree filters and partial-clone configuration stop capture before
+file ingestion; trusted system/global Git configuration retains existing behavior.
+This is boundary validation, not a process sandbox or a promise that trusted Git
+configuration cannot run commands. Coordinator-owned real tests cover these guards.
+
+Claude Code's final boundary review reproduced three additional cases: failed
+transfers leave partial packs, replacing a gitlink can reveal an embedded
+repository absent from the initial inventory, and a linked root stores initialized
+submodules in its own worktree metadata directory. Receive objects in a unique
+quarantine under the destination object store, wait for both processes, publish
+complete packs with indexes last, and remove only that quarantine in `finally`.
+Rediscover until no cached entries need removal, preserving earlier discoveries.
+Accept the linked root's own module store without relaxing common-repository
+worktree rejection. Regression tests reproduce all three failures before the fix;
+an additional real 15-second transfer timeout checks process exit and cleanup.
+Root and nested same-size timestamp regressions cover the earlier racy-clean fix.
+
+Validation after the final review follow-ups:
+
+- `npm run build` passed for both packages, including release-note validation.
+- The full CLI suite passed: 108 files and 2,120 tests, including 45 new nested
+  repository cases. The full Router suite passed: 34 files and 771 tests.
+- The full CLI run instrumented the three changed runtime files and enforced
+  80 percent per-file statement, branch, function, and line thresholds.
+  `GitCheckpoint.ts` reached 93.91/87.24/96/93.91 percent respectively;
+  `DelegatedWorkspaceManager.ts` reached 95.89/88.16/100/95.89 percent;
+  `contract.ts` reached 100 percent in all four measures. This is targeted
+  changed-file coverage, not a whole-project coverage claim.
+- AGY's read-only reviews approved the boundary/performance fixes, copied-index
+  timestamp correction, and final quarantine/discovery/linked-root follow-ups.
+  Claude Code's final focused review approved all four follow-ups, with small
+  independent Linux probes and no remaining blocker. Both review artifacts were
+  inspected and settled without importing repository changes.
+  Reviewer inspection is separate from the coordinator-run build and tests.
+  No native-provider, remote deployment, macOS,
+  Windows, or live Feishu acceptance is claimed by these Linux fixture tests.
+- Reviewed the exact added diff lines and the complete new test artifact for
+  private paths, deployment addresses, credentials, and unauthorized localization;
+  no findings were identified. This is not an all-history privacy audit.
+
+Non-blocking limits reproduced in Claude Code's Linux review:
+
+- An OS hard kill can bypass `finally` and leave an incoming quarantine. Git
+  garbage collection does not reliably remove this directory. Manual cleanup
+  must identify the exact abandoned transfer directory and confirm its producer
+  and receiver have exited; never sweep object stores or all matching prefixes.
+  No age-only automatic deletion is introduced by this change.
+- A tracked, initialized submodule whose path is also matched by an outer ignore
+  rule can fail at `git add`. This fails closed without a partial snapshot;
+  reconcile the ignore rule before delegating. Inventory rediscovery does not
+  promise compatibility with this conflicting tracked/ignored layout.
 
 ## Phase 1: multiple accepted tasks with serial dispatch
 

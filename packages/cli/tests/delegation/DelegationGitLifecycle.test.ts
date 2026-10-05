@@ -144,10 +144,10 @@ describe('managed Git phases and native worker deadlines', { timeout: 30_000 }, 
 
   it.each(['prepare', 'collect'] as const)('acknowledges cancellation without waiting for slow %s or releasing ownership', async phase => {
     const gate = deferred();
-    let entered = false;
+    const entered = deferred();
     const original = manager.workspaceManager[phase].bind(manager.workspaceManager);
     vi.spyOn(manager.workspaceManager, phase).mockImplementation(async (...args: any[]) => {
-      entered = true;
+      entered.resolve();
       await gate.promise;
       return (original as any)(...args);
     });
@@ -156,12 +156,13 @@ describe('managed Git phases and native worker deadlines', { timeout: 30_000 }, 
     const starting = start(scope);
     if (phase === 'collect') {
       // Let native dispatch settle without advancing its inactivity clock.
-      await vi.waitFor(() => expect(workers).toHaveLength(1));
+      await starting;
+      expect(workers).toHaveLength(1);
       workers[0].finish({ success: true });
     }
     let cancelling: Promise<unknown> | undefined;
     try {
-      await vi.waitFor(() => expect(entered).toBe(true));
+      await entered.promise;
       await vi.advanceTimersByTimeAsync(21_000);
       const task = await starting;
       let response: any;

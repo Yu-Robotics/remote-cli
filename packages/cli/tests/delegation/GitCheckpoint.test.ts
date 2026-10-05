@@ -110,10 +110,11 @@ describe('private Git checkpoints', () => {
     expect(await gitText(fixture.root, ['rev-parse', 'HEAD'])).toBe(head);
   }, 30_000);
 
-  it('rejects submodule and special-file entries', async () => {
+  it('preserves an uninitialized gitlink without requiring its objects or fetching a remote', async () => {
     await runGit(fixture.root, ['update-index', '--add', '--cacheinfo', `160000,${fixture.head},module`]);
     await fs.mkdir(path.join(fixture.root, 'module'));
-    await expect(captureCheckpoint(fixture.root)).rejects.toThrow('Submodules');
+    const checkpoint = await captureCheckpoint(fixture.root);
+    expect(await gitText(fixture.root, ['ls-tree', checkpoint.tree, '--', 'module'])).toContain('160000 commit');
   });
 
   it('detects a changing input rather than claiming a stable snapshot', async () => {

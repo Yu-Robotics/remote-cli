@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.141] - 2026-10-05
+
+### Fixed
+- Include initialized local submodules and embedded repositories in private delegated snapshots, with staged, unstaged, and nonignored files captured through their own temporary indexes. Stream local Git objects without remote fetching or a repository-size cap; workers receive ordinary files rather than nested Git metadata or histories.
+- Apply nested working-file changes through explicit artifact integration while preserving all source HEADs, indexes, and gitlinks. Include nested state in delivery revisions, reject changed repository identities and boundary replacements, preserve uncertain worker-created Git metadata for manual recovery, and keep uninitialized submodules empty without blocking unrelated work.
+- Allow ordinary file/directory replacements and identify unsupported filesystem entries by repository-relative path and type. Cover nested snapshots, conflicts, state preservation, streamed transfer, artifact delivery, and guarded checkout reclamation/reuse with real temporary Git repositories.
+- Preserve warm index stat caches and the original index timestamp so racy-clean detection still catches same-size edits; reuse completed local object transfers within each stable capture. Reject ancestor worktrees, external nested Git metadata, nested-local command filters, and partial-clone hydration. Keep unsupported no-change metadata pending until explicit retention, and wait for deterministic Git lifecycle signals in cancellation tests.
+- Receive nested packs in a per-transfer quarantine and publish complete packs with indexes last. Clean failed and timed-out transfers after both processes exit without sweeping other operations. Discover embedded repositories exposed by gitlink replacements and support initialized submodules owned by linked-worktree metadata stores.
+
 ## [1.6.140] - 2026-10-05
 
 ### Fixed

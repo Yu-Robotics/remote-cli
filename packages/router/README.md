@@ -81,6 +81,19 @@ command deadlines and buffered-output limits still apply. Path, ownership,
 artifact-integrity, and unknown-file checks remain in place. This is local CLI
 behavior; upgrading only the Router does not remove an older CLI's limits.
 
+From CLI 1.6.141, local initialized submodules and embedded repositories also
+contribute staged, unstaged, and nonignored working files. Their Git metadata and
+history are not copied into the worker; explicit integration preserves every
+source HEAD, index, and gitlink. Uninitialized submodule paths stay empty without
+fetching a remote. Worker-created nested repositories or changes to those empty
+paths require manual recovery and explicit retention, even with unchanged files.
+Nested worktrees sharing an ancestor, external metadata pointers, partial clones,
+and nested-local filter commands require recovery or exclusion. System/global
+Git configuration remains trusted; the existing Git transfer deadline still applies.
+A hard kill can leave a transfer quarantine requiring manual cleanup after its
+processes exit. Tracked submodules also matched by outer ignore rules currently
+fail admission; reconcile those rules before delegating.
+
 From CLI 1.6.140, managed Git preparation, repository-lock waits, and artifact
 collection are awaited separately from native startup/stop deadlines. Slots and
 source reservations remain held until owned operations settle, even on cancellation;

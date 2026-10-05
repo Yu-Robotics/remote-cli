@@ -626,6 +626,23 @@ Reject assume-unchanged and skip-worktree entries in the copied checkpoint index
 Git add can silently omit their edits. Never clear the source index flags or infer
 deletions from absent sparse files. This applies to input, output, and integration
 checkpoints; unresolved worker files remain available for manual recovery.
+From 1.6.141, initialized local submodules and embedded repositories contribute
+working files to private flattened trees through their own temporary indexes.
+Preserve source HEADs, indexes, gitlinks, and hidden-index rejection. Stream local
+objects without remote fetching; do not copy nested Git metadata or history into
+worker checkouts. Include nested state and identity in delivery revisions.
+Uninitialized gitlinks stay empty. Worker-created Git metadata or changes to
+opaque paths require manual recovery and explicit retention, even when file
+content is unchanged. Never replace a live nested repository boundary on apply.
+Reject ancestor worktrees and gitfiles outside trusted ancestor module stores.
+Reject nested-local filter commands and partial-clone hydration; existing global
+Git configuration remains trusted, not sandboxed. Preserve copied index stat data
+and its original timestamp for racy-clean detection. Cache only completed object
+transfers within one stable capture. Receive packs in a per-transfer quarantine,
+publish complete packs with indexes last, and clean that quarantine only after
+both children exit. Inventory changes exposed by removed gitlinks require another
+discovery pass. Trust a linked root's own module store as well as its common
+repository's module store, without permitting nested worktrees of that repository.
 `DelegatedWorkspaceManager` owns stable worktree paths, fresh detached task
 checkouts, private `refs/remote-cli/*`, and durable artifact metadata independent
 of diagnostic pruning. Use an executor-only DirectoryGuard grant for the exact
