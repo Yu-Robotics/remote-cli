@@ -43,7 +43,9 @@ function literal(text: string, limit: number): string {
 }
 
 function availabilityTag(item: BackendAvailability, coordinatorBackend: DelegationBackend): StatusTag {
-  if (item.backend === coordinatorBackend) return { color: 'blue', label: 'Coordinator' };
+  if (item.backend === coordinatorBackend) {
+    return { color: 'blue', label: item.installed && item.worker ? 'Coordinator + Worker' : 'Coordinator' };
+  }
   if (!item.installed) return { color: 'red', label: 'Unavailable' };
   if (!item.worker) return { color: 'orange', label: 'Blocked' };
   return { color: 'green', label: 'Installed' };
@@ -76,7 +78,7 @@ export function formatDelegationStatus({
     : [];
 
   return [
-    '🤝 **Cross-backend delegation**',
+    '🤝 **Agent delegation**',
     `${tag(state)} **Current thread**`,
     `**Coordinator:** ${coordinator}`,
     '',
@@ -84,9 +86,9 @@ export function formatDelegationStatus({
     ...availability,
     ...zcodeNote,
     '',
-    '> **Worker rule:** Same-backend delegation is disabled. Use the current backend directly or its native subagents, if supported.',
+    '> **Worker rule:** Same-backend workers use independent sessions; the coordinator conversation is never reused. Workers cannot delegate recursively.',
     '> **When checked:** Authentication and quota are checked when a task starts.',
-    '> **Sandbox:** Cross-backend delegation is unavailable while the coordinator sandbox is enabled.',
+    '> **Sandbox:** Managed delegation is unavailable while the coordinator sandbox is enabled.',
     '',
     '**Commands:** `/delegation on` · `/delegation off` · `/delegation reset [backend]`',
     'Applies to this thread. Worker sessions are isolated from direct conversations and continue across delegated tasks in the same workspace.',

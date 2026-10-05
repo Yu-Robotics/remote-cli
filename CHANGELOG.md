@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.142] - 2026-10-05
+
+### Added
+- Allow unrestricted coordinators to delegate to their own backend through independent managed worker sessions. Preserve synthetic lane identities, isolated Git checkouts, shared-directory FIFO scheduling, explicit artifact integration, context-reset ownership, and existing task/concurrency budgets.
+
+### Changed
+- Report the coordinator backend's worker eligibility in discovery and status using the same admission policy, and align injected tool instructions. Do not advertise sandbox-restricted workers as eligible in the delegation menu. Keep restricted coordinators and read_only requests ineligible; native backend subagents and the Router wire protocol remain unchanged.
+
 ## [1.6.141] - 2026-10-05
 
 ### Fixed

@@ -503,12 +503,12 @@ remote-cli stop
 ### 跨后端任务委派
 
 Claude Code, Codex, Pi, AGY, OpenCode, Kimi Code, ZCode, and DSH can each coordinate
-independent tasks on other installed backends. From CLI 1.6.95, managed
-same-backend delegation is rejected before a worker starts, and discovery marks
-the current backend unavailable as a worker. Use the current backend directly
-or its native subagents, if supported. Keep talking to your existing thread;
-its selected backend collects worker results and answers you. Workers do not
-create extra thread buttons.
+independent tasks on any eligible installed backend. From CLI 1.6.142, this
+includes the coordinator's own backend: managed workers use independent lane
+sessions, never the coordinator conversation. Prefer a different backend for
+independent cross-review. Keep talking to your existing thread; its selected
+backend collects worker results and answers you. Workers do not create extra
+thread buttons, and native backend subagent tools remain unchanged.
 
 ```text
 /delegation
@@ -537,7 +537,8 @@ isolated worker conversations. Non-Git workspaces retain one serial lane; Git
 workspaces can pool multiple lanes for concurrent tasks, each with its own
 reusable worktree directory. No lane reuses the parent's direct conversation.
 A worker process stops after every task and must confirm exit before reuse.
-The parent's saved model and reasoning effort apply whenever a worker starts.
+The parent thread's saved model and reasoning effort for the target backend
+apply whenever a worker starts; native backend support still governs effort.
 
 From CLI 1.6.130, Git workers use detached task checkouts under private local
 storage. Each task starts from a snapshot of the delivery repository,
@@ -830,21 +831,23 @@ even if the target backend has separate saved sandbox settings. This does not
 change those saved settings or other backend approval options. For research
 tasks, use `inherit` and put any no-write requirement in the objective; such an
 instruction is not an enforced sandbox. Unrestricted coordinators can choose
-installed, authenticated workers on a different backend, but cannot request
-`read_only` to enable a new worker sandbox.
+installed, authenticated workers on any eligible backend, including their own,
+but cannot request `read_only` to enable a new worker sandbox.
 
-A sandboxed coordinator has no eligible managed workers in this release:
-same-backend delegation is disabled, and cross-backend sandbox translation
-remains deferred. Discovery reports `worker: false` with a reason, and launch
-requests are rejected without weakening saved sandbox settings. `read_only`
-remains a recognized compatibility value but is unavailable under this policy.
-Native backend task/subagent tools are not changed by these managed delegation
-rules; their availability depends on the backend.
+A sandboxed coordinator has no eligible managed workers in this release,
+including on its own backend. Preserving a restricted policy across independent
+worker identities and worktrees remains deferred; backend equality alone does
+not establish sandbox equivalence. Discovery reports `worker: false` with a
+reason, and launch requests are rejected without weakening saved sandbox
+settings. `read_only` remains a recognized compatibility value but is unavailable
+under this policy. Native backend task/subagent tools are not changed by these
+managed delegation rules; their availability depends on the backend.
 
-All 42 different-backend combinations and seven same-backend rejections are
-covered at the task-manager test boundary with mocked executors. Earlier live
-model delegation verified the original Claude Code/Codex/Pi matrix before this
-cross-backend-only policy.
+All 64 directed backend pairs, including eight same-backend pairs, are covered
+at the task-manager boundary with mocked executors. Same-backend Git concurrency,
+shared-directory serialization, cancellation, and context-reset ownership have
+regression coverage. This is not a live provider validation of those pairs.
+Earlier live model delegation verified the original Claude Code/Codex/Pi matrix.
 The four additional adapters have protocol and lifecycle tests; ZCode also
 passed live MCP tool registration. Their live model tests
 were blocked by missing local authentication (AGY, OpenCode, Kimi) or an unset

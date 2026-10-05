@@ -33,16 +33,24 @@ describe('delegation status formatter', () => {
       ],
     });
 
-    expect(output).toContain('🤝 **Cross-backend delegation**');
+    expect(output).toContain('🤝 **Agent delegation**');
     expect(output).toContain("<text_tag color='green'>Enabled</text_tag> **Current thread**");
     expect(output).toContain('**Coordinator:** Claude Code');
-    expect(output).toContain("<text_tag color='blue'>Coordinator</text_tag> **Claude Code** · <raw>2.1.267 (Claude Code)</raw>");
+    expect(output).toContain("<text_tag color='blue'>Coordinator + Worker</text_tag> **Claude Code** · <raw>2.1.267 (Claude Code)</raw>");
     expect(output).toContain("<text_tag color='green'>Installed</text_tag> **Codex CLI** · <raw>codex-cli 0.159.2</raw>");
     expect(output).toContain("<text_tag color='red'>Unavailable</text_tag> **Pi** · <raw>Executable is missing or its version probe failed</raw>");
-    expect(output).toContain('Same-backend delegation is disabled');
+    expect(output).toContain('Same-backend workers use independent sessions');
+    expect(output).toContain('Workers cannot delegate recursively');
     expect(output).toContain('Authentication and quota are checked when a task starts.');
-    expect(output).toContain('Cross-backend delegation is unavailable while the coordinator sandbox is enabled.');
+    expect(output).toContain('Managed delegation is unavailable while the coordinator sandbox is enabled.');
     expect(output).toContain('**Commands:** `/delegation on` · `/delegation off` · `/delegation reset [backend]`');
+  });
+
+  it.each([false, true])('does not label an ineligible coordinator as a worker when installed=%s', installed => {
+    const output = formatDelegationStatus({ enabled: true, coordinatorBackend: 'claude', coordinatorSupported: true,
+      backends: [availability({ installed, worker: false })] });
+    expect(output).toContain("<text_tag color='blue'>Coordinator</text_tag>");
+    expect(output).not.toContain('Coordinator + Worker');
   });
 
   it('keeps executable output literal and marks an installed but ineligible worker as blocked', () => {

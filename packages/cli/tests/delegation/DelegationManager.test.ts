@@ -17,7 +17,7 @@ import type { AcpEventCallbacks, AcpTransport } from '../../src/executor/acp/Acp
 
 const wait = (milliseconds: number) => new Promise<void>(resolve => setTimeout(resolve, milliseconds));
 
-describe('cross-backend delegation', () => {
+describe('managed agent delegation', () => {
   let home: string;
   let guard: DirectoryGuard;
   let manager: DelegationManager;
@@ -40,7 +40,8 @@ describe('cross-backend delegation', () => {
     manager = new DelegationManager(guard, factory as any, new BackendRegistry(async () => 'test 1.0'));
     parent = { thread: { id: 'owner', name: 'default', workingDirectory: home, sessionId: null,
       createdAt: 0, lastActiveAt: 0, models: { codex: 'codex-model', claude: 'claude-model', pi: 'provider/model',
-        agy: 'agy-model', opencode: 'opencode/model', kimi: 'kimi-model', zcode: 'zcode-model' } },
+        agy: 'agy-model', opencode: 'opencode/model', kimi: 'kimi-model', zcode: 'zcode-model', dsh: 'dsh-model' },
+      efforts: { claude: 'high', codex: 'high', pi: 'high', agy: 'high', opencode: 'high', kimi: 'high', zcode: 'high', dsh: 'high' } },
     cwd: home, messageId: 'message-1', backend: 'claude', config: { type: 'auto' },
     onToolUse: vi.fn(), onToolResult: vi.fn(), onNotice: vi.fn(), onApproval: vi.fn(() => true), onApprovalResolved: vi.fn() };
   });
@@ -83,33 +84,33 @@ describe('cross-backend delegation', () => {
     expect(JSON.stringify(vi.mocked(parent.onTextProgress).mock.calls)).not.toContain('PRIVATE_WORKER_REASONING');
   });
 
-  it.each(DELEGATION_BACKENDS)('rejects same-backend %s delegation before creating a worker or reserving the workspace', async backend => {
+  it.each(DELEGATION_BACKENDS)('discovers same-backend %s workers and rejects read_only before reserving a lane', async backend => {
     parent.backend = backend;
     const scope = manager.begin(parent);
     const discovery = await scope.invoke('remote_cli_list_backends', {}, 'list') as { backends: BackendAvailability[] };
     expect(discovery.backends.find(item => item.backend === backend)).toMatchObject({
-      installed: true, coordinator: true, worker: false, readOnly: false,
-      reason: expect.stringContaining('Same-backend delegation is disabled'),
+      installed: true, coordinator: true, worker: true, readOnly: false, authentication: 'unknown',
     });
     expect(discovery.backends.filter(item => item.backend !== backend).every(item => item.worker)).toBe(true);
-    for (const mode of [undefined, 'inherit', 'read_only']) {
-      await expect(scope.invoke('remote_cli_delegate', { backend, objective: 'Inspect', ...(mode ? { mode } : {}) }, `same-${mode}`))
-        .rejects.toThrow('Same-backend delegation is disabled');
-    }
+    await expect(scope.invoke('remote_cli_delegate', { backend, objective: 'Inspect', mode: 'read_only' }, 'readonly'))
+      .rejects.toThrow('Use inherit');
     expect(factory).not.toHaveBeenCalled();
     expect(parent.onToolUse).not.toHaveBeenCalled();
     expect(scope.hasTasks()).toBe(false);
     expect(scope.getLaunchRevision()).toBe(0);
     expect(manager.blocksWorkspace(home, 'other')).toBe(false);
     expect(fs.existsSync(path.join(home, '.remote-cli', 'delegation'))).toBe(false);
-    const other = DELEGATION_BACKENDS.find(item => item !== backend)!;
-    const task: any = await scope.invoke('remote_cli_delegate', { backend: other, objective: 'Inspect' }, 'other');
+    const task: any = await scope.invoke('remote_cli_delegate', { backend, objective: 'Inspect without writing files', mode: 'inherit' }, 'retry');
     await expect(scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result')).resolves.toMatchObject({ state: 'succeeded' });
   });
 
-  it.each(DELEGATION_BACKENDS.flatMap(main => DELEGATION_BACKENDS.filter(child => child !== main).map(child => [main, child] as const)))
+  it.each(DELEGATION_BACKENDS.flatMap(main => DELEGATION_BACKENDS.map(child => [main, child] as const)))
   ('returns a %s coordinator\'s %s child result without reusing the primary session', async (main, child) => {
     parent.backend = main;
+    // Distinct synthetic values catch a lookup keyed by the coordinator instead of the worker.
+    parent.thread.efforts = Object.fromEntries(DELEGATION_BACKENDS.map(backend => [backend, `${backend}-effort`]));
+    const originalThread = JSON.stringify(parent.thread);
+    const originalConfig = JSON.stringify(parent.config);
     const scope = manager.begin(parent);
     const started: any = await scope.invoke('remote_cli_delegate', { backend: child, objective: 'Review the patch' }, 'start');
     const result: any = await scope.invoke('remote_cli_result', { taskId: started.taskId }, 'result');
@@ -117,11 +118,15 @@ describe('cross-backend delegation', () => {
     expect(factory.mock.calls[0][3]).toMatch(/^delegate-lane-/);
     expect(factory.mock.calls[0][3]).not.toBe(parent.thread.id);
     expect(factory.mock.calls[0][4]).toBe(parent.thread.models![child]);
+    expect(factory.mock.calls[0][5]).toBe(parent.thread.efforts![child]);
     expect(factory.mock.calls[0][6]).toEqual({ lifecycleHooks: false, delegationWorker: true });
     if (child === 'claude' || child === 'codex') {
       expect(factory.mock.calls[0][1][child].sandbox).toEqual({ mode: 'danger-full-access' });
     }
     expect(worker.deleteThreadData).not.toHaveBeenCalled();
+    expect(worker.resetContext).not.toHaveBeenCalled();
+    expect(JSON.stringify(parent.thread)).toBe(originalThread);
+    expect(JSON.stringify(parent.config)).toBe(originalConfig);
     expect(parent.onToolUse).toHaveBeenCalledTimes(1);
     expect(parent.onToolResult).toHaveBeenCalledTimes(1);
     const record = JSON.parse(fs.readFileSync(path.join(home, '.remote-cli', 'delegation', `${started.taskId}.json`), 'utf8'));
@@ -157,34 +162,39 @@ describe('cross-backend delegation', () => {
     expect(parent.onNotice).not.toHaveBeenCalled();
   });
 
-  it('resets one completed worker during an active parent scope without replay or losing other lanes', async () => {
+  it.each(['claude', 'codex'] as const)('clears a same-backend %s worker without clearing the coordinator or sibling context', async backend => {
+    parent.backend = backend;
     vi.stubEnv('HOME', home);
     try {
       parent.onProgress = vi.fn(() => true);
       const scope = manager.begin(parent);
-      const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Review' }, 'launch');
+      const task: any = await scope.invoke('remote_cli_delegate', { backend, objective: 'Review' }, 'launch');
       await scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result');
       const progress = vi.mocked(parent.onProgress).mock.calls.at(-1)![0];
-      const lane = (await manager.laneStore.lanesForThread(parent.thread.id, 'codex'))[0];
+      const lane = (await manager.laneStore.lanesForThread(parent.thread.id, backend))[0];
       expect(progress.workerContext).toEqual({ laneId: lane.id, generation: 0 });
-      const pointer = path.join(home, '.remote-cli', 'codex-sessions', `${lane.executorThreadId}.json`);
+      const pointer = path.join(home, '.remote-cli', `${backend}-sessions`, `${lane.executorThreadId}.json`);
       fs.mkdirSync(path.dirname(pointer), { recursive: true });
       fs.writeFileSync(pointer, '{"threadId":"old-native-session"}');
+      const coordinatorPointer = path.join(path.dirname(pointer), `${parent.thread.id}.json`);
+      fs.writeFileSync(coordinatorPointer, '{"threadId":"coordinator-session"}');
       const other = await manager.laneStore.acquire({ threadId: parent.thread.id, backend: 'agy', workingDirectory: home, workspaceGeneration: 0 });
       await manager.laneStore.markReady(other.lane.id);
       await manager.resetWorkerContext(parent.thread, progress.workerContext!.laneId, progress.workerContext!.generation);
       expect(fs.existsSync(pointer)).toBe(false);
+      expect(fs.readFileSync(coordinatorPointer, 'utf8')).toBe('{"threadId":"coordinator-session"}');
       expect((await manager.laneStore.lanesForThread(parent.thread.id)).map(entry => entry.id)).toContain(other.lane.id);
       expect(worker.execute).toHaveBeenCalledTimes(1);
       expect(worker.resetContext).not.toHaveBeenCalled();
-      const second: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Continue with fresh context' }, 'next');
+      const second: any = await scope.invoke('remote_cli_delegate', { backend, objective: 'Continue with fresh context' }, 'next');
       await scope.invoke('remote_cli_result', { taskId: second.taskId }, 'next-result');
       expect(vi.mocked(parent.onProgress).mock.calls.at(-1)![0].workerContext).toEqual({ laneId: lane.id, generation: 2 });
       expect(worker.execute).toHaveBeenCalledTimes(2);
     } finally { vi.unstubAllEnvs(); }
   });
 
-  it('protects a reused worker from historical cards through execution and confirmed process exit', async () => {
+  it.each(['claude', 'codex'] as const)('protects a %s coordinator worker from historical cards through execution and confirmed exit', async backend => {
+    parent.backend = backend;
     vi.stubEnv('HOME', home);
     let finishRun!: () => void;
     let confirmExit!: () => void;
@@ -906,7 +916,7 @@ describe('cross-backend delegation', () => {
     for (const item of discovery.backends) {
       expect(item).toMatchObject({ worker: false, readOnly: false });
       await expect(scope.invoke('remote_cli_delegate', { backend: item.backend, objective: 'Inspect' }, item.backend))
-        .rejects.toThrow(item.backend === backend ? 'Same-backend' : 'coordinator sandbox is enabled');
+        .rejects.toThrow('coordinator sandbox is enabled');
     }
     const target = backend === 'claude' ? 'codex' : 'claude';
     await expect(scope.invoke('remote_cli_delegate', { backend: target, objective: 'Inspect', mode: 'read_only' }, 'readonly'))

@@ -164,13 +164,13 @@ Linux users upgrading from version 1.6.23 or earlier should run `remote-cli serv
 ### Threads & Machines
 
 From CLI 1.6.121, new and existing threads without a saved preference enable
-delegation by default. Their selected backend can assign bounded tasks to other
+delegation by default. Their selected backend can assign bounded tasks to eligible
 installed, authenticated backends. Claude Code, Codex, Pi, AGY, OpenCode, Kimi
-Code, ZCode, and DSH can coordinate or work. From CLI 1.6.95,
-same-backend delegation is rejected before launching a worker; discovery marks
-the current backend unavailable as a worker. Use the current backend directly
-or its native subagents, if supported. Workers return results to the original conversation and use
-its working directory; they do not create extra thread buttons. `/delegation`
+Code, ZCode, and DSH can coordinate or work. From CLI 1.6.142, this includes
+the coordinator backend through independent worker lane sessions, never the
+coordinator conversation. Prefer a different backend for independent cross-review.
+Workers return results to the original conversation and use isolated Git checkouts
+or the serialized non-Git directory; they do not create extra thread buttons. `/delegation`
 shows discovery and restrictions; `/delegation off` explicitly disables the
 feature and `/delegation on` enables it again. Saved opt-outs remain off across
 upgrades, context resets, backend switches, and CLI restarts. No historical
@@ -226,14 +226,14 @@ remote-cli sandbox policy: with no coordinator sandbox, `inherit` launches
 unrestricted workers, ignoring separate target sandbox settings without changing
 them. Research tasks should put no-write requirements in the objective instead
 of enabling a sandbox. Other backend approval options retain their behavior.
-Sandboxed coordinators have no eligible managed workers: same-backend delegation
-is disabled and cross-backend sandbox translation remains unsupported. Saved
+Sandboxed coordinators have no eligible managed workers, including on the same
+backend: scope-aware worker sandbox preservation remains unsupported. Saved
 sandbox policies are not weakened. `read_only` remains recognized for
 compatibility but is unavailable; discovery reports the rejection reason.
-There is one
-active child per parent and at most three per CLI process, with bounded time/output.
-From CLI 1.6.129, a request may accept multiple independent tasks before collecting
-results. Followers report `queued`, execute in FIFO order, and may be cancelled
+From CLI 1.6.131, up to five Git workers occupy execution slots per CLI process,
+with isolated per-lane checkouts and bounded time/output. Non-Git directories
+remain code-enforced serial execution. A request may accept multiple independent
+tasks before collecting results. Waiting tasks report `queued`, dispatch in FIFO order, and may be cancelled
 individually without starting a worker. The cumulative limit is 12 accepted tasks
 per request across continuations, including failures and cancellations. Queue
 waits expire one hour after admission. Confirmed process exit and reusable lane

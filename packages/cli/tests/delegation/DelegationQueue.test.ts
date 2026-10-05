@@ -159,7 +159,8 @@ describe('multiple accepted delegated tasks', () => {
     expect(factory).not.toHaveBeenCalled();
   });
 
-  it('keeps the workspace and same-backend lane exclusive until exit and lane readiness are confirmed', async () => {
+  it.each(['claude', 'codex'] as const)('keeps a %s coordinator shared workspace serial until worker exit and lane readiness', async backend => {
+    parent.backend = backend;
     const exited = deferred<void>();
     const ready = deferred<void>();
     const markReady = manager.laneStore.markReady.bind(manager.laneStore);
@@ -179,6 +180,7 @@ describe('multiple accepted delegated tasks', () => {
     ready.resolve();
     await vi.waitFor(() => expect(workers).toHaveLength(2));
     expect(factory.mock.calls[1][3]).toBe(factory.mock.calls[0][3]);
+    expect(factory.mock.calls[1][3]).not.toBe(parent.thread.id);
     workers[1].finish({ success: true });
     await scope.collectPendingResults();
     expect(manager.blocksWorkspace(directory, 'other')).toBe(false);

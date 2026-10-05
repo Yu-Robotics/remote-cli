@@ -75,17 +75,20 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     }
   }, 30_000);
 
-  it('runs five isolated tasks concurrently, keeps a sixth queued, and never edits the delivery checkout', async () => {
+  it.each(['mixed', 'same-backend'] as const)('runs five isolated %s tasks concurrently and keeps a sixth queued', async mode => {
     const scope = manager.begin(parent);
     expect(await scope.invoke('remote_cli_list_backends', {}, 'discover')).toMatchObject({
       maxConcurrentChildren: 5, scheduling: 'isolated-worktrees', workspace: fixture.root });
     const tasks: DelegatedTaskResult[] = [];
-    for (const [index, backend] of ['codex', 'agy', 'dsh', 'kimi', 'agy', 'codex'].entries()) {
+    const backends = mode === 'mixed' ? ['codex', 'agy', 'dsh', 'kimi', 'agy', 'codex'] : Array(6).fill(parent.backend);
+    for (const [index, backend] of backends.entries()) {
       tasks.push(await start(scope, `task-${index}`, backend));
     }
     const first = tasks[0];
     expect(tasks.map(task => task.state)).toEqual(['running', 'running', 'running', 'running', 'running', 'queued']);
     expect(new Set(workers.map(worker => worker.cwd)).size).toBe(5);
+    expect(new Set(factory.mock.calls.map(call => call[3])).size).toBe(5);
+    expect(factory.mock.calls.every(call => call[3] !== parent.thread.id && call[6].delegationWorker)).toBe(true);
     expect(workers.every(worker => worker.cwd !== fixture.root)).toBe(true);
     await fs.writeFile(path.join(workers[0].cwd, 'source.txt'), 'first worker only\n');
     expect(await fs.readFile(path.join(workers[1].cwd, 'source.txt'), 'utf8')).toContain('first\nsecond');
@@ -100,6 +103,9 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     expect(terminal.every(task => task.state === 'succeeded')).toBe(true);
     expect(await gitText(fixture.root, ['rev-parse', 'HEAD'])).toBe(fixture.head);
     expect(await gitText(fixture.root, ['for-each-ref', '--format=%(refname)', 'refs/heads'])).toBe('refs/heads/main');
+    const inspection: any = await scope.invoke('remote_cli_integrate', { taskId: first.taskId }, 'inspect');
+    await scope.invoke('remote_cli_integrate', { taskId: first.taskId, action: 'retain', expectedRevision: inspection.revision }, 'retain');
+    expect(await scope.checkArtifactCloseout()).toEqual([]);
   }, 30_000);
 
   it('reuses native conversation and worktree after explicit integration, including sibling changes in the next baseline', async () => {
@@ -496,10 +502,9 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     await result(scope, second.taskId, 'r2');
   });
 
-  it('collects cancelled partial files for recovery and rejects same-backend or foreign integration', async () => {
+  it('collects cancelled same-backend edits for recovery without modifying the coordinator and rejects foreign integration', async () => {
     const scope = manager.begin(parent);
-    await expect(start(scope, 'same', 'claude')).rejects.toThrow('Same-backend');
-    const first = await start(scope, 'first');
+    const first = await start(scope, 'first', parent.backend);
     await fs.writeFile(path.join(workers[0].cwd, 'partial.txt'), 'partial output\n');
     expect(await scope.invoke('remote_cli_cancel', { taskId: first.taskId }, 'cancel')).toMatchObject({
       state: 'cancelled', artifact: { disposition: 'pending' } });
@@ -509,6 +514,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     const other = manager.begin({ ...parent, thread: { ...parent.thread, id: 'other' } });
     await expect(other.invoke('remote_cli_integrate', { taskId: first.taskId }, 'foreign')).rejects.toThrow('foreign');
     expect(await fs.readFile(path.join(workers[0].cwd, 'partial.txt'), 'utf8')).toContain('partial output');
+    await expect(fs.stat(path.join(fixture.root, 'partial.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
     await other.close();
   });
 

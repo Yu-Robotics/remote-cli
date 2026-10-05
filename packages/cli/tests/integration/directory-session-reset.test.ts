@@ -64,6 +64,26 @@ describe('Directory changes and backend session isolation', () => {
     await fs.rm(home, { recursive: true, force: true });
   });
 
+  it.each(backends)('keeps real %s coordinator and worker pointers independent without starting native processes', async backend => {
+    const workerId = 'delegate-lane-11111111-1111-4111-8111-111111111111';
+    const command = path.join(home, 'must-not-start');
+    const config: ExecutorConfig = { ...configFor(backend), [backend]: { command } };
+    await fs.writeFile(pointerPath(backend, workerId), JSON.stringify({ id: `worker-${backend}`, cwd: project }));
+    const coordinator = createExecutor(guard, config, project, threadId);
+    const worker = createExecutor(guard, config, project, workerId, undefined, undefined,
+      { lifecycleHooks: false, delegationWorker: true });
+    executors.push(coordinator, worker);
+    expect(worker).not.toBe(coordinator);
+    expect(coordinator.getSessionId?.()).toBe(`old-${backend}`);
+    expect(worker.getSessionId?.()).toBe(`worker-${backend}`);
+    const savedCoordinator = await fs.readFile(pointerPath(backend), 'utf8');
+    worker.resetContext();
+    expect(worker.getSessionId?.()).toBeNull();
+    expect(coordinator.getSessionId?.()).toBe(`old-${backend}`);
+    await expect(fs.access(pointerPath(backend, workerId))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await fs.readFile(pointerPath(backend), 'utf8')).toBe(savedCoordinator);
+  });
+
   it.each(backends)('clears every backend binding when %s changes directory, including after restart and return', async (backend) => {
     pool = new ThreadExecutorPool(manager, guard, configFor(backend));
     const executor = pool.getExecutor(threadId);
