@@ -37,6 +37,22 @@ describe('private Git checkpoints', () => {
     await expect(captureCheckpoint(fixture.root)).resolves.toHaveProperty('tree');
   });
 
+  it.each([
+    ['assume-unchanged', 'modified'], ['assume-unchanged', 'deleted'],
+    ['skip-worktree', 'modified'], ['skip-worktree', 'deleted'],
+  ])('rejects %s entries with %s files without changing the source index', async (flag, state) => {
+    const file = path.join(fixture.root, 'source.txt');
+    await runGit(fixture.root, ['update-index', `--${flag}`, 'source.txt']);
+    if (state === 'deleted') await fs.rm(file);
+    else await fs.writeFile(file, 'local changes hidden from Git add\n');
+    const index = await fs.readFile(path.join(fixture.root, '.git', 'index'));
+    await expect(captureCheckpoint(fixture.root)).rejects.toThrow('assume-unchanged or skip-worktree');
+    expect(await fs.readFile(path.join(fixture.root, '.git', 'index'))).toEqual(index);
+    expect(await gitText(fixture.root, ['rev-parse', 'HEAD'])).toBe(fixture.head);
+    if (state === 'deleted') await expect(fs.lstat(file)).rejects.toMatchObject({ code: 'ENOENT' });
+    else expect(await fs.readFile(file, 'utf8')).toBe('local changes hidden from Git add\n');
+  });
+
   it('preserves explicitly staged new files even when they match an ignore rule', async () => {
     await fs.writeFile(path.join(fixture.root, '.env'), 'SYNTHETIC_STAGED=fixture\n');
     await runGit(fixture.root, ['add', '--force', '.env']);

@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.140] - 2026-10-05
+
+### Fixed
+- Reject assume-unchanged and skip-worktree index entries before capturing delegated Git checkpoints. Do not silently omit hidden edits, reinterpret absent sparse files as deletions, or modify the source index; preserve unresolved worker files for manual recovery.
+- Keep managed Git baseline capture, checkout preparation, and repository-lock waits outside the native worker startup deadline. Await owned mutations before releasing execution capacity, and prevent late worker startup after cancellation.
+- Bound accepted Git delegation and cancellation response waits below the tool adapter's timeout. Return the existing task ID and explicit pending status for later polling without aborting owned operations, pretending cleanup finished, or encouraging duplicate submission.
+- Separate confirmed process shutdown from artifact collection. Slow collection no longer quarantines the source workspace or leaks global worker slots; collection and lane-persistence failures retain the affected lane while releasing unrelated capacity after Git operations settle. Preserve native-exit quarantine, individual Git command deadlines, non-Git FIFO scheduling, and old-peer compatibility.
+
 ## [1.6.139] - 2026-10-05
 
 ### Fixed

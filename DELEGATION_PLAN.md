@@ -606,9 +606,12 @@ See [Codex configuration reference](https://developers.openai.com/codex/config-r
 | Intermediate text/tool-result output | Not retained by the delegation manager; volume alone does not stop the worker |
 | Objective | 24000 characters; diagnostic record stores first 1000 |
 | Tool wait / HTTP timeout | 25 seconds / 32 seconds |
+| Accepted Git launch/cancel response | Remaining budget from 20 seconds at tool invocation; pending responses retain the task ID and do not release owned work |
 | Initial task record | Up to 10 seconds each for store initialization and the first durable write |
 | Shutdown | Up to 2 seconds for abort, then 10 seconds for destroy |
-| Session and metadata cleanup | Up to 10 seconds per cleanup stage after confirmed process exit |
+| Native startup | Up to 10 seconds; managed Git acquisition, preparation, and repository-lock waits are separate |
+| Git preparation and finalization | Await owned operations through cancellation before releasing capacity; individual Git command deadlines still apply |
+| Non-Git session and metadata cleanup | Up to 10 seconds per cleanup stage after confirmed process exit |
 | Task record retention | 200 terminal records, seven days |
 
 CLI 1.6.95 removes the cumulative intermediate-output abort. Large tool reads
@@ -951,3 +954,50 @@ performed.
   limit wording in this plan, now corrected. Native provider and Feishu acceptance
   were not exercised; the remaining command-output protection can still reject
   extremely large Git metadata or integration patches.
+
+## Follow-up: checkpoint integrity and Git lifecycle deadlines (1.6.140)
+
+- Reject assume-unchanged and skip-worktree entries in the temporary checkpoint
+  index for baseline capture, output collection, and integration. Preserve the
+  source index and absent sparse files; require explicit recovery instead of
+  silently using stale blobs or claiming that hidden edits were delivered.
+- Await managed Git lane acquisition, baseline capture, checkout preparation,
+  and repository-lock waits outside the native startup deadline. Keep slot and
+  source ownership through cancellation; check task startability after each
+  preparation await so no backend launches after cancellation or closure.
+- Keep native process-stop deadlines and unknown-exit quarantine. Once exit is
+  confirmed, await owned artifact collection and lane persistence without a
+  competing deadline that could leave late writes after release. Preserve only
+  affected lanes on collection/persistence failure and release unrelated capacity.
+- Preserve non-Git lifecycle behavior, the five-slot cap, existing Git command
+  timeouts and output limits, and the removal of repository size/file-count caps.
+  No automatic task retry, Git initialization, integration, or protocol change.
+- Bound accepted Git launch/cancel response waits separately from task lifetime,
+  using the remaining 20-second tool budget. Return a pending task ID before the
+  adapter's 32-second abort; polling uses that same task. Do not let a response
+  timeout cancel Git, release ownership early, or acknowledge terminal delivery.
+- Regression coverage uses real temporary repositories plus controlled executors
+  and gated operations: hidden edits/deletions, cancellation before native launch,
+  five lanes waiting for repository admission, bounded launch/cancel responses,
+  slow/failing collection, and
+  unconfirmed native shutdown. Live backend and Feishu acceptance remain separate.
+- Both package builds and the final 2,075 CLI / 771 Router tests passed. A parallel
+  regression initially assumed dispatch order matched admission order; it now
+  observes slot-driven dispatch directly, without relaxing any timeout or safety
+  assertion. Source changes remain limited to the delegation manager and Git
+  checkpoint helper.
+- Focused coverage validation passed all 246 tests and per-file 80% thresholds
+  for statements, lines, branches, and functions in both changed runtime modules.
+  Combined statement/line coverage is 94.64%, branch coverage 85.23%, and function
+  coverage 96.15%.
+- Claude Code and AGY approved the runtime patch after two read-only review
+  rounds. Claude Code identified the adapter timeout at the new slow-preparation
+  boundary; the bounded-response follow-up and its regressions resolved that
+  blocker. Reviewer approval is static evidence, not live provider acceptance.
+- Existing pre-admission discovery/storage waits and long integration tool calls
+  retain their prior limits; the response budget bounds accepted-task waits, not
+  all transport operations. Raw filesystem stalls and single-command Git limits
+  still require recovery rather than an automatic retry or unsafe release.
+- Added-line and complete new-file privacy/language checks found no candidates.
+  This does not constitute a historical, binary, or deployed-environment audit.
+  No commit, push, service restart, or real native-session reset was performed.

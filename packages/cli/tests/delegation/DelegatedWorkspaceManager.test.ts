@@ -72,6 +72,23 @@ describe('owned worktrees and explicit artifact integration', () => {
     expect(await gitText(source.root, ['for-each-ref', '--format=%(refname)', 'refs/heads'])).toBe('refs/heads/main');
   }, 30_000);
 
+  it('rejects hidden delivery edits at baseline and integration without applying a stale patch', async () => {
+    const { workspace } = await prepare();
+    await fs.writeFile(path.join(workspace.cwd, 'source.txt'), 'worker output\n');
+    await manager.collect(workspace, true);
+    const checked = await inspect(workspace);
+    await runGit(source.root, ['update-index', '--assume-unchanged', 'source.txt']);
+    await fs.writeFile(path.join(source.root, 'source.txt'), 'hidden delivery edits\n');
+    const index = await fs.readFile(path.join(source.root, '.git', 'index'));
+    await expect(manager.baseline(source)).rejects.toThrow('assume-unchanged or skip-worktree');
+    await expect(manager.integrate({ ...owner, cwd: source.cwd }, workspace.taskId, 'apply', checked.revision))
+      .rejects.toThrow('assume-unchanged or skip-worktree');
+    expect(await fs.readFile(path.join(source.root, 'source.txt'), 'utf8')).toBe('hidden delivery edits\n');
+    expect(await fs.readFile(path.join(source.root, '.git', 'index'))).toEqual(index);
+    expect(await manager.describe(workspace.taskId)).toMatchObject({ disposition: 'pending' });
+    expect(await gitText(source.root, ['rev-parse', 'HEAD'])).toBe(fixture.head);
+  });
+
   it('merges independent committed worker outputs but leaves conflicting changes in a recovery worktree', async () => {
     const baseline = await manager.baseline(source);
     const first = await prepare();

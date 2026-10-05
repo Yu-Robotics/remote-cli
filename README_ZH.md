@@ -549,6 +549,10 @@ Private `refs/remote-cli/*` keep input and output checkpoints outside normal
 branches and tags; do not publish these refs or use a mirror push. From CLI
 1.6.139, snapshots and checkout verification have no fixed repository size or
 file-count limits. Git command deadlines and buffered-output limits still apply.
+From CLI 1.6.140, checkpoints reject `assume-unchanged` and `skip-worktree`
+entries rather than silently omitting edits. Resolve hidden index flags and sparse
+checkouts explicitly before delegating or integrating; the CLI never clears them
+in your index. Worker files that cannot be captured remain for manual recovery.
 Existing conflicts, submodules, unsafe links,
 known untracked credential files, and broken Git metadata stop setup rather
 than falling back to shared parallel writes. The whole repository must be
@@ -771,8 +775,18 @@ are finished. Other requests with overlapping workspaces or no initial global
 execution slot are rejected, not placed in a cross-request queue.
 This local CLI change works with existing Routers and does not add peer messaging
 or change native backend behavior. Sibling results are not explicitly forwarded;
-a reused same-backend lane retains its own earlier task context. An uncertain
-setup or cleanup retains its occupied global slot until the CLI restarts.
+a reused same-backend lane retains its own earlier task context. Uncertain native
+startup or exit retains its occupied global slot until the CLI restarts.
+From CLI 1.6.140, managed Git preparation, repository-lock waits, and artifact
+collection do not consume the native startup/stop deadline. They retain their
+slot and source reservation until they settle, including after cancellation.
+Collection failure after confirmed exit preserves the affected lane and files
+without blocking the whole source workspace. Individual Git command deadlines
+still apply; cancellation can wait for an in-flight Git operation to finish.
+During slow Git preparation or finalization, launch/cancel tools return the
+accepted task ID and pending status within their response budget. Poll that ID
+with `remote_cli_result` instead of resubmitting; a cancellation acknowledgement
+does not mean the worker workspace has already been released.
 From CLI 1.6.100,
 a task stops after 15 minutes without a worker tool callback. While one or more
 worker tools are active, that callback-silence window is 45 minutes; it returns

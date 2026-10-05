@@ -603,13 +603,29 @@ and cancellations do not refund it. Queue waits expire one hour after admission.
 Other roots with conflicting workspaces or no initial global execution slot are
 rejected, not queued. Never enable shared-checkout parallelism or peer tools implicitly.
 Sibling results are not explicitly forwarded; native lane reuse still retains
-that lane's own earlier task context. Uncertain setup/cleanup retains its occupied
-global slot until restart as well as quarantining the workspace.
+that lane's own earlier task context. Uncertain native setup/exit retains its
+occupied global slot until restart as well as quarantining the workspace.
+From 1.6.140, await Git lane acquisition, baseline capture, checkout preparation,
+and repository-lock waits outside the native startup deadline. Cancellation must
+wait for owned mutations to settle and recheck startability before construction.
+After confirmed exit, await artifact collection and lane finalization without
+racing their writes against the native-stop deadline. A failed Git finalization
+preserves the affected lane for recovery but releases unrelated global capacity.
+Do not weaken native exit confirmation or change non-Git deadline behavior.
+Bound accepted Git launch/cancel response waits to the remaining 20-second
+tool-call budget, below the adapter timeout. Return the existing task ID with a
+pending status detail instead of timing out or claiming dispatch/cleanup is done.
+Polling and scope close still observe the same task; close/drain await full
+settlement. A bounded tool response never releases ownership or cancels Git work.
 
 `GitCheckpoint` captures working input using a temporary index, including
 staged/unstaged/nonignored untracked changes without modifying the user's index.
 Repository size and file count do not limit capture, artifact collection, or
 checkout verification. Git command deadlines and buffered-output limits still apply.
+Reject assume-unchanged and skip-worktree entries in the copied checkpoint index:
+Git add can silently omit their edits. Never clear the source index flags or infer
+deletions from absent sparse files. This applies to input, output, and integration
+checkpoints; unresolved worker files remain available for manual recovery.
 `DelegatedWorkspaceManager` owns stable worktree paths, fresh detached task
 checkouts, private `refs/remote-cli/*`, and durable artifact metadata independent
 of diagnostic pruning. Use an executor-only DirectoryGuard grant for the exact
