@@ -540,20 +540,22 @@ A worker process stops after every task and must confirm exit before reuse.
 The parent's saved model and reasoning effort apply whenever a worker starts.
 
 From CLI 1.6.130, Git workers use detached task checkouts under private local
-storage. Each task starts from a bounded snapshot of the delivery repository,
+storage. Each task starts from a snapshot of the delivery repository,
 including staged, unstaged, and nonignored untracked changes without changing
 the user's index. All accepted tasks in a cohort share that baseline; after
 artifact integration, the next task captures the updated delivery workspace.
 Earlier conversation context may be stale, so workers are told to re-read files.
 Private `refs/remote-cli/*` keep input and output checkpoints outside normal
-branches and tags; do not publish these refs or use a mirror push. Snapshots are
-limited to 10,000 files and 128 MiB. Existing conflicts, submodules, unsafe links,
+branches and tags; do not publish these refs or use a mirror push. From CLI
+1.6.139, snapshots and checkout verification have no fixed repository size or
+file-count limits. Git command deadlines and buffered-output limits still apply.
+Existing conflicts, submodules, unsafe links,
 known untracked credential files, and broken Git metadata stop setup rather
 than falling back to shared parallel writes. The whole repository must be
 within the directory-selection policy; allowing only a subdirectory is not
 enough. Unsupported repositories fail delegation setup, not ordinary backend
 execution. Standard Git configuration, including clean filters, still runs;
-limits also validate the actual resulting tree. Integration patch output is
+captured tree entries are also validated after filtering. Integration patch output is
 bounded to 32 MiB. Larger patches require manual integration. Ignored files,
 dependencies, and local environment files are not copied; prepare dependencies
 inside a worker checkout when its task needs them.

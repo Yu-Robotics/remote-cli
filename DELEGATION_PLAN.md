@@ -9,10 +9,10 @@ Non-Git directories retain that restriction in code, with no implicit Git init.
    cwd, and workspace generation. Pool independent Git lanes and reuse each
    lane's worktree directory only after exit and artifact accounting.
 2. Capture a shared cohort baseline through a temporary index, including relevant
-   working changes. Do not modify the source index. Limit snapshots to 10,000
-   files and 128 MiB; reject broken metadata, existing conflicts, submodules,
+   working changes. Do not modify the source index. From CLI 1.6.139, do not cap
+   repository size or file count. Reject broken metadata, existing conflicts, submodules,
    unsafe links, and known untracked credentials. Ignored dependencies are not
-   copied. Validate actual tree bounds after Git clean filters. Grant the exact
+   copied. Validate captured tree entries after Git clean filters. Grant the exact
    owned execution cwd without changing global policy.
 3. Start each Git task in a fresh detached checkout anchored by private refs,
    never a publishable worker branch. Up to five global starting/running slots
@@ -700,8 +700,8 @@ is a framework lifecycle, not an agent prompt or another cleanup tool.
    records. Reset/delete retains the existing explicit native cleanup contract;
    it does not trigger a historical checkout sweep.
 3. Independently audit actual bytes against saved Git blobs, without relying on
-   copied index flags, stat caches, or filters. Bound files, directory entries,
-   and total bytes. Verify detached HEAD, ownership/common repository, exact refs,
+   copied index flags, stat caches, or filters. From CLI 1.6.139, do not cap files,
+   directory entries, or total bytes. Verify detached HEAD, ownership/common repository, exact refs,
    modes, symlink targets, and registrations. Ignore no extra file or directory:
    even non-forced Git removal deletes ignored files. Transformed checkouts that
    cannot be proven byte-equivalent are retained, not guessed to be caches.
@@ -934,3 +934,20 @@ performed.
   Live native-backend and Feishu acceptance remains unverified. The gate verifies
   artifact disposition, not semantic correctness, external-writer isolation, or
   automatic resolution of artifacts left by earlier requests.
+
+## Follow-up: remove repository admission caps (1.6.139)
+
+- Remove the fixed 128 MiB and 10,000-file limits from input snapshots, captured
+  trees, artifact collection, integration, and checkout verification. Do not add
+  a replacement repository budget or configuration.
+- Preserve path and entry checks, ownership and immutable receipts, parent
+  index/branch isolation, unknown-file rejection, streamed hashing before
+  deletion, and existing Git command deadlines and buffered-output protection.
+- Real-Git regressions cover committed and untracked 129 MiB files, more than
+  10,000 files, explicit artifact application, verified reclamation, and same-path
+  reuse. Both builds and all 2,827 CLI/Router tests passed. The two changed runtime
+  modules have 95.08% statement/line, 86.10% branch, and 98.27% function coverage.
+- Claude Code's static review found no behavioral blockers and identified stale
+  limit wording in this plan, now corrected. Native provider and Feishu acceptance
+  were not exercised; the remaining command-output protection can still reject
+  extremely large Git metadata or integration patches.

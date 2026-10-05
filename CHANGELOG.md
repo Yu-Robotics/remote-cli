@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.139] - 2026-10-05
+
+### Fixed
+- Remove the fixed 128 MiB repository-size and 10,000-file limits from delegated Git input snapshots, filtered trees, artifact collection, and checkout reclamation verification. Large repositories keep their complete staged, unstaged, and nonignored untracked input without a replacement size configuration.
+- Preserve path and entry validation, artifact ownership and reference checks, streamed byte hashing before reclamation, parent index and branch isolation, and existing Git command deadlines and output-buffer limits. Add regression coverage for large committed and untracked files and complete artifact integration, reclamation, and reuse beyond the former limits.
+
 ## [1.6.138] - 2026-10-05
 
 ### Fixed

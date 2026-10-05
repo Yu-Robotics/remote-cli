@@ -4,8 +4,7 @@ import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 
-export const CHECKPOINT_LIMITS = { files: 10_000, bytes: 128 * 1024 * 1024,
-  commandMs: 15_000, outputBytes: 32 * 1024 * 1024 } as const;
+export const CHECKPOINT_LIMITS = { commandMs: 15_000, outputBytes: 32 * 1024 * 1024 } as const;
 export const GIT_OID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 
 export interface GitCheckpoint {
@@ -94,14 +93,12 @@ function sensitiveUntracked(file: string): boolean {
     || /\.(?:pem|key|p12|pfx)$/.test(name);
 }
 
-async function boundFiles(root: string): Promise<void> {
+async function validateFiles(root: string): Promise<void> {
   const untracked = entries(await runGit(root, ['ls-files', '-z', '--others', '--exclude-standard']));
   if (untracked.some(sensitiveUntracked)) {
     throw new Error('Untracked credential/config files prevent a safe checkpoint. Exclude them with Git ignore rules before delegating.');
   }
   const files = [...new Set(entries(await runGit(root, ['ls-files', '-z', '--cached'])).concat(untracked))];
-  if (files.length > CHECKPOINT_LIMITS.files) throw new Error('Workspace exceeds the checkpoint file-count limit');
-  let bytes = 0;
   const parents = new Set<string>();
   for (const file of files) {
     if (!file || path.isAbsolute(file) || file.split('/').some(part => part === '..' || part.toLowerCase() === '.git')) {
@@ -131,25 +128,19 @@ async function boundFiles(root: string): Promise<void> {
           }
         } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
       }
-      bytes += stat.size;
-      if (bytes > CHECKPOINT_LIMITS.bytes) throw new Error('Workspace exceeds the checkpoint byte limit');
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   }
 }
 
-/** Filters and concurrent file growth must not enlarge the immutable tree beyond the filesystem preflight. */
-async function boundTree(root: string, tree: string): Promise<void> {
+/** Validate the captured entries after Git filters and filesystem changes. */
+async function validateTree(root: string, tree: string): Promise<void> {
   const files = entries(await runGit(root, ['ls-tree', '-r', '-l', '-z', tree]));
-  if (files.length > CHECKPOINT_LIMITS.files) throw new Error('Checkpoint tree exceeds the file-count limit');
-  let bytes = 0;
   for (const file of files) {
     const header = file.slice(0, file.indexOf('\t')).trim().split(/\s+/);
     const size = Number(header[3]);
     if (header[1] !== 'blob' || !Number.isSafeInteger(size) || size < 0) {
       throw new Error('Checkpoint tree contains an unsupported entry');
     }
-    bytes += size;
-    if (bytes > CHECKPOINT_LIMITS.bytes) throw new Error('Checkpoint tree exceeds the byte limit');
   }
 }
 
@@ -169,7 +160,7 @@ export async function captureCheckpoint(root: string): Promise<GitCheckpoint> {
   if (!GIT_OID.test(head)) throw new Error('Git worktree delegation requires an initial commit');
   if ((await runGit(root, ['ls-files', '-u', '-z'])).length) throw new Error('Resolve the existing Git index conflicts before delegating');
   const originalIndex = await readIndex(root);
-  await boundFiles(root);
+  await validateFiles(root);
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'remote-cli-checkpoint-'));
   try {
     const env = { GIT_INDEX_FILE: path.join(directory, 'index') };
@@ -183,7 +174,7 @@ export async function captureCheckpoint(root: string): Promise<GitCheckpoint> {
       throw new Error('Workspace changed while its checkpoint was being captured; retry after edits stop');
     }
     if (!GIT_OID.test(tree)) throw new Error('Git returned an invalid checkpoint tree');
-    await boundTree(root, tree);
+    await validateTree(root, tree);
     return { head, tree, commit: await createCheckpointCommit(root, tree, head, `Remote CLI input checkpoint ${randomUUID()}`),
       revision: checkpointRevision(head, tree, originalIndex) };
   } finally { await fs.rm(directory, { recursive: true, force: true }); }
