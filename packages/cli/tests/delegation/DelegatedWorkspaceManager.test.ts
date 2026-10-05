@@ -8,7 +8,8 @@ import { gitText, runGit } from '../../src/delegation/GitCheckpoint';
 import * as gitCommands from '../../src/delegation/GitCheckpoint';
 import { gitFixture } from './gitFixture';
 
-describe('owned worktrees and explicit artifact integration', () => {
+// Real-Git cases execute multiple bounded commands and need headroom on slower hosts.
+describe('owned worktrees and explicit artifact integration', { timeout: 30_000 }, () => {
   let fixture: Awaited<ReturnType<typeof gitFixture>>;
   let manager: DelegatedWorkspaceManager;
   let lanes: DelegatedWorkerSessionStore;
@@ -19,8 +20,8 @@ describe('owned worktrees and explicit artifact integration', () => {
     manager = new DelegatedWorkspaceManager(path.join(fixture.directory, 'workspaces'));
     lanes = new DelegatedWorkerSessionStore(path.join(fixture.directory, 'lanes'));
     source = (await manager.discover(fixture.root))!;
-  });
-  afterEach(async () => { vi.restoreAllMocks(); await fs.rm(fixture.directory, { recursive: true, force: true }); });
+  }, 30_000);
+  afterEach(async () => { vi.restoreAllMocks(); await fs.rm(fixture.directory, { recursive: true, force: true }); }, 30_000);
 
   const prepare = async (selected = source) => {
     const { lane } = await lanes.acquire({ threadId: owner.threadId, workspaceGeneration: 0,
