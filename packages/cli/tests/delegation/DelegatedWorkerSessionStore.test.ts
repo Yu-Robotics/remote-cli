@@ -92,4 +92,22 @@ describe('DelegatedWorkerSessionStore', () => {
     const lanes = await store.lanesForThread('parent-thread');
     expect(lanes.find(lane => lane.id === latestLane.lane.id)).toMatchObject({ state: 'ready' });
   });
+
+  it('preserves ambiguous shared-directory contexts instead of scheduling them for deletion', async () => {
+    const store = new DelegatedWorkerSessionStore(directory);
+    const first = await store.acquire(identity(workspace));
+    const second = await store.acquire(identity(workspace));
+    await store.markReady(first.lane.id);
+    await store.markReady(second.lane.id);
+    const restored = new DelegatedWorkerSessionStore(directory);
+    const next = await restored.acquire(identity(workspace));
+    expect(next.reused).toBe(false);
+    expect(next.lane.id).not.toBe(first.lane.id);
+    expect(next.lane.id).not.toBe(second.lane.id);
+    expect(await restored.cleanupCandidates()).toEqual([]);
+    expect(await restored.lanesForThread('parent-thread')).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: first.lane.id, state: 'dirty', cleanupPending: false }),
+      expect.objectContaining({ id: second.lane.id, state: 'dirty', cleanupPending: false }),
+    ]));
+  });
 });

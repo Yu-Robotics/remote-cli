@@ -10,6 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.138] - 2026-10-05
+
+### Fixed
+- Validate settled worker artifact receipts independently of source-workspace contention, avoiding spurious closeout failures and extra coordinator turns. Keep ownership, reference, recovery, cancellation, and receipt-integrity checks; history reconciliation still requires the source lease.
+- Keep a superseded shared-directory lane non-reusable after a context-clear retry, without deleting another worker's conversation. Persist pooling mode for independent Git lanes and preserve ambiguous legacy duplicate contexts instead of scheduling automatic deletion.
+- Return reused Git lanes to ready after failures before checkout preparation starts. Continue preserving uncertain prepared lanes, and distinguish executor setup failures from checkout failures in recovery diagnostics.
+
 ## [1.6.137] - 2026-10-05
 
 ### Added

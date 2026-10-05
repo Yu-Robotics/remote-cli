@@ -26,6 +26,7 @@ export interface DelegatedWorkerLane {
   contextGeneration?: number;
   contextResetPending?: boolean;
   lastClearedGeneration?: number;
+  pooled?: boolean;
 }
 
 export interface DelegatedWorkerLaneIdentity {
@@ -95,6 +96,7 @@ function validateLane(value: unknown): value is DelegatedWorkerLane {
     && (lane.contextGeneration === undefined || validGeneration(lane.contextGeneration))
     && (lane.lastClearedGeneration === undefined || validGeneration(lane.lastClearedGeneration))
     && (lane.contextResetPending === undefined || typeof lane.contextResetPending === 'boolean')
+    && (lane.pooled === undefined || typeof lane.pooled === 'boolean')
     && (lane.cleanupError === undefined || typeof lane.cleanupError === 'string');
 }
 
@@ -126,11 +128,11 @@ export class DelegatedWorkerSessionStore {
       // worktree pools legitimately contain multiple ready conversations.
       if (ready.length > 1 && !options.pooled) {
         for (const duplicate of ready) await this.writeAndRemember({ ...duplicate,
-          state: 'dirty', cleanupPending: true, updatedAt: Date.now(),
+          state: 'dirty', cleanupPending: false, updatedAt: Date.now(),
           cleanupError: 'Multiple delegated worker lanes matched one identity.' });
       } else if (ready.length >= 1) {
         const lane = { ...ready[0], state: 'preparing' as const, updatedAt: Date.now(),
-          contextGeneration: (ready[0].contextGeneration ?? 0) + 1 };
+          contextGeneration: (ready[0].contextGeneration ?? 0) + 1, pooled: options.pooled === true };
         await this.writeAndRemember(lane);
         return { lane: clone(lane), reused: true };
       }
@@ -141,6 +143,7 @@ export class DelegatedWorkerSessionStore {
         id,
         executorThreadId: workerLaneExecutorId(id),
         ...identity,
+        pooled: options.pooled === true,
         state: 'preparing',
         createdAt: now,
         updatedAt: now,
@@ -267,8 +270,15 @@ export class DelegatedWorkerSessionStore {
       const pending: DelegatedWorkerLane = { ...lane, state: 'dirty', contextResetPending: true, updatedAt: Date.now() };
       await this.writeAndRemember(pending);
       await clear(clone(pending));
-      await this.writeAndRemember({ ...pending, state: 'ready', contextGeneration: current + 1,
-        contextResetPending: false, lastClearedGeneration: generation, cleanupError: undefined, updatedAt: Date.now() });
+      // A failed reset can be superseded by a new shared-directory lane. Clearing
+      // the old pointer must not revive it or authorize deleting its replacement.
+      // Legacy lanes have no mode; preserve them conservatively when ambiguous.
+      const superseded = lane.pooled !== true && [...this.lanes.values()].some(other =>
+        other.id !== lane.id && sameIdentity(other, lane) && other.state !== 'dirty');
+      await this.writeAndRemember({ ...pending, state: superseded ? 'dirty' : 'ready', contextGeneration: current + 1,
+        contextResetPending: false, lastClearedGeneration: generation,
+        cleanupError: superseded ? 'Worker context cleared; a replacement lane remains active.' : undefined,
+        updatedAt: Date.now() });
     });
   }
 
