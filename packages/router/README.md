@@ -75,6 +75,12 @@ Sibling results are not explicitly forwarded; a reused same-backend lane retains
 its own earlier task context. Uncertain setup or cleanup retains the occupied
 global slot until the local CLI restarts.
 
+From CLI 1.6.139, Git delegation has no fixed repository size or file-count
+limits during snapshots, artifact collection, or checkout verification. Git
+command deadlines and buffered-output limits still apply. Path, ownership,
+artifact-integrity, and unknown-file checks remain in place. This is local CLI
+behavior; upgrading only the Router does not remove an older CLI's limits.
+
 From CLI 1.6.135, the local CLI automatically reclaims verified successful
 no-change or successfully applied worker checkout directories and recreates them
 at their stable lane paths when needed. Conversation pointers and artifact refs

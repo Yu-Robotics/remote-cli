@@ -4,7 +4,7 @@ import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DelegatedWorkspaceManager, type DelegatedWorkspace } from '../../src/delegation/DelegatedWorkspaceManager';
 import { DelegatedWorkerSessionStore } from '../../src/delegation/DelegatedWorkerSessionStore';
-import { CHECKPOINT_LIMITS, gitText, runGit } from '../../src/delegation/GitCheckpoint';
+import { gitText, runGit } from '../../src/delegation/GitCheckpoint';
 import * as gitCommands from '../../src/delegation/GitCheckpoint';
 import { gitFixture } from './gitFixture';
 
@@ -208,14 +208,40 @@ describe('verified worker checkout reclamation and recreation', () => {
     expect(await exists(workspace.directory)).toBe(true);
   });
 
-  it('fails closed when the verification bounds are exceeded', async () => {
+  it('collects, applies, reclaims and reuses repositories beyond the former size and file-count limits', async () => {
     await complete();
-    const original = CHECKPOINT_LIMITS.bytes;
-    Object.assign(CHECKPOINT_LIMITS, { bytes: 1 });
-    try { expect(await manager.reclaim(workspace.taskId)).toBe(false); }
-    finally { Object.assign(CHECKPOINT_LIMITS, { bytes: original }); }
-    expect(await exists(workspace.directory)).toBe(true);
-  });
+    expect(await manager.reclaim(workspace.taskId)).toBe(true);
+    const largeFile = path.join(fixture.root, 'large.dat');
+    const size = 129 * 1024 * 1024;
+    await fs.writeFile(largeFile, 'synthetic large file\n');
+    await fs.truncate(largeFile, size);
+    await fs.mkdir(path.join(fixture.root, 'many'));
+    const count = 10_001;
+    for (let offset = 0; offset < count; offset += 128) {
+      await Promise.all(Array.from({ length: Math.min(128, count - offset) }, (_, index) =>
+        fs.writeFile(path.join(fixture.root, 'many', `${offset + index}.txt`), 'fixture\n')));
+    }
+    const index = await fs.readFile(path.join(fixture.root, '.git', 'index'));
+    const directory = workspace.directory;
+    workspace = await recreate();
+    expect(workspace.directory).toBe(directory);
+    expect((await fs.stat(path.join(workspace.cwd, 'large.dat'))).size).toBe(size);
+    expect(await fs.readFile(path.join(workspace.cwd, 'many', '10000.txt'), 'utf8')).toBe('fixture\n');
+    await fs.writeFile(path.join(workspace.cwd, 'source.txt'), 'large repository worker result\n');
+    expect(await complete()).toMatchObject({ disposition: 'pending', changedFiles: ['source.txt'] });
+    expect(await apply()).toMatchObject({ applied: true, disposition: 'applied' });
+    expect(await fs.readFile(path.join(fixture.root, 'source.txt'), 'utf8')).toBe('large repository worker result\n');
+    expect(await fs.readFile(path.join(fixture.root, '.git', 'index'))).toEqual(index);
+    expect(await gitText(fixture.root, ['rev-parse', 'HEAD'])).toBe(fixture.head);
+    expect(await exists(directory)).toBe(false);
+    workspace = await recreate();
+    expect(workspace.directory).toBe(directory);
+    expect((await fs.stat(path.join(workspace.cwd, 'large.dat'))).size).toBe(size);
+    expect(await fs.readFile(path.join(workspace.cwd, 'source.txt'), 'utf8')).toBe('large repository worker result\n');
+    await complete();
+    expect(await manager.reclaim(workspace.taskId)).toBe(true);
+    expect(await exists(directory)).toBe(false);
+  }, 120_000);
 
   it('serializes prepare behind a removal and shares the guard across manager instances', async () => {
     await complete();

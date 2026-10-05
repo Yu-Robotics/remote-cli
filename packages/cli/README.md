@@ -251,6 +251,11 @@ use separate workspaces for independent writers. See
 [Cross-backend Delegation](../../README.md#cross-backend-delegation) for limits,
 recovery, context transfer, and permission behavior.
 
+From CLI 1.6.139, Git delegation has no fixed repository size or file-count
+limits during snapshots, artifact collection, or checkout verification. Git
+command deadlines and buffered-output limits still apply. Path, ownership,
+artifact-integrity, and unknown-file checks remain in place.
+
 From CLI 1.6.135, verified successful no-change checkouts and successfully applied
 worker outputs reclaim their checkout directories automatically, while retaining
 native conversation pointers, stable lane paths, artifact records, and private Git

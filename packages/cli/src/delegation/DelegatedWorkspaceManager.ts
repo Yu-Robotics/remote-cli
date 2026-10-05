@@ -4,7 +4,7 @@ import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import type { DelegatedWorkerLane } from './DelegatedWorkerSessionStore';
-import { captureCheckpoint, CHECKPOINT_LIMITS, createCheckpointCommit, GIT_OID, GitCommandError, gitText, runGit,
+import { captureCheckpoint, createCheckpointCommit, GIT_OID, GitCommandError, gitText, runGit,
   type GitCheckpoint } from './GitCheckpoint';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -490,16 +490,12 @@ export class DelegatedWorkspaceManager {
       files.set(name, { mode, oid });
       let parent = path.posix.dirname(name);
       while (parent !== '.') { directories.add(parent); parent = path.posix.dirname(parent); }
-      if (files.size > CHECKPOINT_LIMITS.files) throw new Error('Checkout verification file limit exceeded');
     }
-    let bytes = 0;
-    let entries = 0;
     const buffer = Buffer.alloc(64 * 1024);
     const walk = async (relative: string): Promise<void> => {
       const absolute = path.join(workspace.directory, relative);
       if (await fs.realpath(absolute) !== absolute) throw new Error('Checkout directory changed during verification');
       for (const name of await fs.readdir(absolute)) {
-        if (++entries > CHECKPOINT_LIMITS.files * 2) throw new Error('Checkout verification entry limit exceeded');
         const child = relative ? `${relative}/${name}` : name;
         const file = path.join(workspace.directory, child);
         const stat = await fs.lstat(file);
@@ -511,8 +507,6 @@ export class DelegatedWorkspaceManager {
         }
         if (process.platform !== 'win32' && expected.mode !== '120000'
           && Boolean(stat.mode & 0o111) !== (expected.mode === '100755')) throw new Error('Checkout file mode changed');
-        bytes += stat.size;
-        if (bytes > CHECKPOINT_LIMITS.bytes) throw new Error('Checkout verification byte limit exceeded');
         const hash = createHash(expected.oid.length === 64 ? 'sha256' : 'sha1');
         hash.update(`blob ${stat.size}\0`);
         if (stat.isSymbolicLink()) hash.update(await fs.readlink(file, { encoding: 'buffer' }));

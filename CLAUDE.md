@@ -606,8 +606,10 @@ Sibling results are not explicitly forwarded; native lane reuse still retains
 that lane's own earlier task context. Uncertain setup/cleanup retains its occupied
 global slot until restart as well as quarantining the workspace.
 
-`GitCheckpoint` captures bounded working input using a temporary index, including
+`GitCheckpoint` captures working input using a temporary index, including
 staged/unstaged/nonignored untracked changes without modifying the user's index.
+Repository size and file count do not limit capture, artifact collection, or
+checkout verification. Git command deadlines and buffered-output limits still apply.
 `DelegatedWorkspaceManager` owns stable worktree paths, fresh detached task
 checkouts, private `refs/remote-cli/*`, and durable artifact metadata independent
 of diagnostic pruning. Use an executor-only DirectoryGuard grant for the exact
@@ -635,14 +637,14 @@ HEAD, copied files, or tree equality. A non-idle/conflicting close defers its pa
 File application is not an atomic transaction: preserve before/target recovery
 refs and a durable pending receipt before applying. Failed or interrupted apply
 requires manual comparison, not an assumed rollback or automatic retry. Validate
-actual tree sizes after clean filters and both endpoints of renames at scope checks.
+captured tree entries after clean filters and both endpoints of renames at scope checks.
 Native executor behavior and Router protocol version 1 remain unchanged. Multiple
 waiting workers must not receive an ambiguously addressed plain-text reply.
 
 From CLI 1.6.135, reclaim only a successful no-change artifact or a durable applied
 artifact with verified lane/task identity, refs, detached HEAD, and checkout bytes.
 Keep native context pointers, lane IDs, artifacts, and private history refs.
-Independent bounded filesystem/hash verification must account for ignored files,
+Independent filesystem/hash verification must account for ignored files,
 extra directories, symlinks, file modes, and Git index flags; Git status and even
 non-forced worktree removal do not protect ignored files. Never force removal or
 prune registrations automatically. Persist present/reclaiming/reclaimed state and

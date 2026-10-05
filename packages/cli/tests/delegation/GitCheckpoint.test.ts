@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs/promises';
 import path from 'path';
-import { captureCheckpoint, CHECKPOINT_LIMITS, checkpointRevision, createCheckpointCommit, gitText, runGit } from '../../src/delegation/GitCheckpoint';
+import { captureCheckpoint, checkpointRevision, createCheckpointCommit, gitText, runGit } from '../../src/delegation/GitCheckpoint';
 import { gitFixture } from './gitFixture';
 
-describe('bounded private Git checkpoints', () => {
+describe('private Git checkpoints', () => {
   let fixture: Awaited<ReturnType<typeof gitFixture>>;
   beforeEach(async () => { fixture = await gitFixture(); });
   afterEach(async () => { vi.restoreAllMocks(); await fs.rm(fixture.directory, { recursive: true, force: true }); });
@@ -53,17 +53,48 @@ describe('bounded private Git checkpoints', () => {
     await expect(captureCheckpoint(fixture.root)).rejects.toThrow('symbolic links');
   });
 
-  it('bounds checkpoint bytes and rejects submodule/special-file entries', async () => {
-    await fs.writeFile(path.join(fixture.root, 'large.txt'), 'fixture');
-    const original = fs.lstat.bind(fs);
-    vi.spyOn(fs, 'lstat').mockImplementation(async (...args: any[]) => {
-      const result = await (original as any)(...args);
-      return String(args[0]).endsWith('large.txt') ? { ...result, size: CHECKPOINT_LIMITS.bytes + 1,
-        isFile: () => true, isSymbolicLink: () => false } : result;
-    });
-    await expect(captureCheckpoint(fixture.root)).rejects.toThrow('byte limit');
-    vi.restoreAllMocks();
-    await fs.rm(path.join(fixture.root, 'large.txt'));
+  it.each(['committed', 'untracked'])('captures a %s file larger than the former 128 MiB limit', async kind => {
+    const file = path.join(fixture.root, 'large.dat');
+    const size = 129 * 1024 * 1024;
+    await fs.writeFile(file, 'synthetic large file\n');
+    await fs.truncate(file, size);
+    if (kind === 'committed') {
+      await runGit(fixture.root, ['add', 'large.dat']);
+      await runGit(fixture.root, ['commit', '-m', 'Add synthetic large file']);
+    }
+    const head = await gitText(fixture.root, ['rev-parse', 'HEAD']);
+    const index = await fs.readFile(path.join(fixture.root, '.git', 'index'));
+    const snapshot = await captureCheckpoint(fixture.root);
+    expect(await gitText(fixture.root, ['cat-file', '-s', `${snapshot.tree}:large.dat`])).toBe(String(size));
+    expect(await fs.readFile(path.join(fixture.root, '.git', 'index'))).toEqual(index);
+    expect(await gitText(fixture.root, ['rev-parse', 'HEAD'])).toBe(head);
+    if (kind === 'committed') expect(snapshot.tree).toBe(await gitText(fixture.root, ['rev-parse', 'HEAD^{tree}']));
+  }, 30_000);
+
+  it('captures more than 10,000 tracked and untracked files without dropping input', async () => {
+    const count = 10_001;
+    for (const directory of ['committed', 'untracked']) await fs.mkdir(path.join(fixture.root, directory));
+    for (let offset = 0; offset < count; offset += 128) {
+      await Promise.all(Array.from({ length: Math.min(128, count - offset) }, (_, index) => {
+        const number = offset + index;
+        return fs.writeFile(path.join(fixture.root, number < 5000 ? 'committed' : 'untracked', `${number}.txt`), 'fixture\n');
+      }));
+    }
+    await runGit(fixture.root, ['add', 'committed']);
+    await runGit(fixture.root, ['commit', '-m', 'Add synthetic tracked files']);
+    const index = await fs.readFile(path.join(fixture.root, '.git', 'index'));
+    const head = await gitText(fixture.root, ['rev-parse', 'HEAD']);
+    const snapshot = await captureCheckpoint(fixture.root);
+    const files = (await runGit(fixture.root, ['ls-tree', '-r', '--name-only', '-z', snapshot.tree]))
+      .toString('utf8').split('\0').filter(Boolean);
+    expect(files).toHaveLength(count + 3);
+    expect(files).toContain('committed/4999.txt');
+    expect(files).toContain('untracked/10000.txt');
+    expect(await fs.readFile(path.join(fixture.root, '.git', 'index'))).toEqual(index);
+    expect(await gitText(fixture.root, ['rev-parse', 'HEAD'])).toBe(head);
+  }, 30_000);
+
+  it('rejects submodule and special-file entries', async () => {
     await runGit(fixture.root, ['update-index', '--add', '--cacheinfo', `160000,${fixture.head},module`]);
     await fs.mkdir(path.join(fixture.root, 'module'));
     await expect(captureCheckpoint(fixture.root)).rejects.toThrow('Submodules');
@@ -80,16 +111,13 @@ describe('bounded private Git checkpoints', () => {
     await expect(captureCheckpoint(fixture.root)).rejects.toThrow('Workspace changed');
   });
 
-  it('bounds the actual captured tree when a Git clean filter expands a small file', async () => {
+  it('preserves the captured tree when a Git clean filter expands a small file', async () => {
     await fs.writeFile(path.join(fixture.root, '.gitattributes'), 'source.txt filter=expand\n');
     await runGit(fixture.root, ['config', 'filter.expand.clean', "printf '%1024s' fixture"]);
     // Change the size so Git cannot skip the filter using the original index's stat cache.
     await fs.writeFile(path.join(fixture.root, 'source.txt'), 'new filter input\n');
-    const limit = CHECKPOINT_LIMITS.bytes;
-    try {
-      (CHECKPOINT_LIMITS as { bytes: number }).bytes = 256;
-      await expect(captureCheckpoint(fixture.root)).rejects.toThrow('Checkpoint tree exceeds the byte limit');
-    } finally { (CHECKPOINT_LIMITS as { bytes: number }).bytes = limit; }
+    const snapshot = await captureCheckpoint(fixture.root);
+    expect(await gitText(fixture.root, ['cat-file', '-s', `${snapshot.tree}:source.txt`])).toBe('1024');
   });
 
   it.skipIf(process.platform !== 'linux')('rejects raw non-UTF8 filenames instead of silently replacing their bytes', async () => {
