@@ -10,6 +10,10 @@ From Router 1.6.145, a foreground tool result updates its original collapsed too
 
 From Router 1.6.146, Bash and other foreground tools share a compact heading with a gray success dot, pending hourglass, or gray failure cross, plus the tool name and an optional public description or file basename. Full tool IDs and explicit status labels remain in the expanded details. Raw commands are not fallback headings. Recursive card-node accounting and cross-page replacement continue to preserve activity tails and completion controls.
 
+CLI and Router 1.6.147 prefer meaningful per-call descriptions or titles over file basenames, including ACP call/update titles and explicit AGY/Pi labels forwarded by the CLI. Redundant tool-name titles are omitted. Terminal-only titles never synthesize calls; results update status/output and preserve the existing label. Missing summaries are not generated from commands or execution-wide activity. Labels remain literal and bounded in the existing heading, without extra card nodes or a protocol-version change. Older clients keep input-label and basename fallbacks; older Routers ignore the new optional fields.
+
+From Router 1.6.148, the status symbol is always a dot (`•`): green for success, blue while awaiting a result, and red for failure. This replaces the pending hourglass and failure cross without changing per-call labels, expanded status text, asynchronous in-place updates, or card-node counts. The color change alone does not require a CLI protocol update.
+
 CLI and Router 1.6.144 negotiate optional `activityProgress` without a protocol
 version bump. One mutable status row sits at the tail of the newest active main
 card, after tools and workers, and moves when the reply paginates. Historical

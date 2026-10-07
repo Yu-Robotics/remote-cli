@@ -91,7 +91,7 @@ describe('ZCodeExecutor', () => {
       { type: 'text', text: 'inspect' },
       { type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' },
     ]);
-    expect(onToolUse).toHaveBeenCalledWith({ id: 'tool-1', name: 'Bash', input: { command: 'pwd' } });
+    expect(onToolUse).toHaveBeenCalledWith({ id: 'tool-1', name: 'Bash', title: 'Bash', input: { command: 'pwd' } });
     expect(onToolResult).toHaveBeenCalledWith({ tool_use_id: 'tool-1', content: '/tmp', is_error: false });
     const stored = JSON.parse(await fs.readFile(path.join(home, '.remote-cli', 'zcode-sessions', 'thread-zcode.json'), 'utf8'));
     expect(stored).toMatchObject({ id: 'sess-zcode', cwd: project });

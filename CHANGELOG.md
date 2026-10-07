@@ -10,6 +10,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.148] - 2026-10-07
+
+### Changed
+- Use a consistent dot in every foreground tool heading: green after success, blue while awaiting a result, and red after failure. Preserve per-call labels, explicit expanded status text, fixed-slot asynchronous updates, and recursive card-node counts without adding elements.
+
+## [1.6.147] - 2026-10-07
+
+### Changed
+- Prefer meaningful backend-provided per-call descriptions and titles in foreground tool headings, falling back to file basenames and omitting redundant tool-name labels. Preserve ACP call/update titles and explicit AGY/Pi parameter labels that tool mapping previously discarded; never synthesize a call to refresh a terminal-result title.
+- Carry optional tool labels over the existing version-1 stream without new capabilities or model calls. Keep execution-wide activity separate, retain fixed-slot asynchronous result updates, and verify unchanged recursive card-node budgets through pagination and shrink.
+
 ## [1.6.146] - 2026-10-07
 
 ### Changed

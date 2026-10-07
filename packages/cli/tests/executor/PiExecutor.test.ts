@@ -642,6 +642,27 @@ describe('PiExecutor', () => {
     expect(onToolResult).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    [{ description: 'Run unit tests', title: 'Test suite' }, { description: 'Run unit tests', title: 'Test suite' }],
+    [{}, {}],
+    [{ description: 42, title: [] }, {}],
+  ])('preserves only explicit string call labels when mapping Pi arguments (%j)', async (labels, expected) => {
+    transport.request.mockImplementation(async (command: Record<string, unknown>) => {
+      if (command.type === 'prompt') {
+        transport.emit({ type: 'agent_start' });
+        transport.emit({ type: 'tool_execution_start', toolCallId: 'tool-current', toolName: 'bash', args: { command: 'npm test', ...labels } });
+        transport.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'Done' } });
+        transport.emit({ type: 'agent_settled' });
+        return { type: 'response', command: 'prompt', success: true };
+      }
+      if (command.type === 'get_state') return { type: 'response', command: 'get_state', success: true, data: { sessionId: 'sess-pi-1' } };
+      return { type: 'response', command: String(command.type), success: true };
+    });
+    const onToolUse = vi.fn();
+    await executor.execute('inspect', { onToolUse });
+    expect(onToolUse).toHaveBeenCalledWith({ id: 'tool-current', name: 'Bash', input: { command: 'npm test' }, ...expected });
+  });
+
   it('pairs unique fallback tool ids when Pi omits toolCallId', async () => {
     transport.request.mockImplementation(async (command: Record<string, unknown>) => {
       if (command.type === 'prompt') {

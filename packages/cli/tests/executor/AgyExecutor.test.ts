@@ -419,6 +419,24 @@ describe('AgyExecutor', () => {
     expect(toolResults[0]).toEqual({ tool_use_id: 'agy-step-2', content: 'HELLO\r\n', is_error: false });
   });
 
+  it.each([
+    [{ description: 'Run unit tests', title: 'Test suite' }, { description: 'Run unit tests', title: 'Test suite' }],
+    [{}, {}],
+    [{ description: 42, title: [] }, {}],
+  ])('preserves only explicit string call labels when mapping AGY parameters (%j)', async (labels, expected) => {
+    const onToolUse = vi.fn();
+    const running = executor.execute('inspect', { onToolUse });
+    await waitForSpawn();
+    emitInit();
+    emitJson({ event: 'step_update', step_update: {
+      conversation_id: 'conv-aaa', step_index: 2, state: 'ACTIVE', step_type: 'tool', tool_name: 'run_command',
+      tool_info: { parameters: { CommandLine: 'npm test', ...labels } },
+    } });
+    emitResult();
+    await running;
+    expect(onToolUse).toHaveBeenCalledWith({ id: 'agy-step-2', name: 'Bash', input: { command: 'npm test' }, ...expected });
+  });
+
   it('marks tool result as error when tool_info contains an error object', async () => {
     const toolResults: any[] = [];
     const p = executor.execute('run bad', { onToolResult: (r) => toolResults.push(r) });

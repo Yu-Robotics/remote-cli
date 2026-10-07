@@ -875,6 +875,8 @@ export class PiExecutor implements IExecutor {
         id,
         name: mapped.name,
         input: mapped.input,
+        ...(typeof event.args?.description === 'string' ? { description: event.args.description } : {}),
+        ...(typeof event.args?.title === 'string' ? { title: event.args.title } : {}),
       });
       this.activityTracker.emitTool(mapped.name, mapped.input);
       return;

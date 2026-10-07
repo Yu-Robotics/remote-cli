@@ -229,6 +229,9 @@ export interface ToolUseInfo {
   name: string;
   id: string;
   input: Record<string, any>;
+  /** Optional per-call labels supplied by the backend, not execution-wide activity. */
+  title?: string;
+  description?: string;
 }
 
 // Tool result information

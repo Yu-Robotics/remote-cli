@@ -494,6 +494,14 @@ function boundedToolHeading(value: unknown, limit = 60): string | undefined {
 /** Use explicit labels or file basenames; never infer a heading from command arguments. */
 export function createToolCallSummary(toolInfo: ToolUseInfo): string | undefined {
   const input = normalizeToolInput(toolInfo.input);
+  const toolName = boundedToolHeading(toolInfo.name)?.toLowerCase();
+  const paths = ['file_path', 'path', 'notebook_path'].map(key => boundedToolHeading(input[key]));
+  for (const value of [toolInfo.description, input.description, toolInfo.title, input.title]) {
+    const summary = boundedToolHeading(value);
+    // Generic tool names add no information; complete file paths belong in
+    // expanded details, with only their basenames used as fallback labels.
+    if (summary && summary.toLowerCase() !== toolName && !paths.includes(summary)) return summary;
+  }
   if (['Read', 'Edit', 'Write', 'NotebookEdit'].includes(toolInfo.name)) {
     for (const key of ['file_path', 'path', 'notebook_path']) {
       if (typeof input[key] !== 'string') continue;
@@ -502,7 +510,6 @@ export function createToolCallSummary(toolInfo: ToolUseInfo): string | undefined
       if (summary && summary !== '.' && summary !== '..') return summary;
     }
   }
-  return boundedToolHeading(input.description) ?? boundedToolHeading(input.title);
 }
 
 /** Inline existing bounded previews inside one tool-call disclosure. */
@@ -525,8 +532,7 @@ function inlineToolDetails(elements: FeishuCardElement[], label: string): Feishu
 /** A result replaces the same visible tool row; independent calls never aggregate. */
 export function createToolCallElement(state: ToolCallCardState): FeishuCardElement {
   const received = state.resultElements !== undefined;
-  const color = received ? 'grey' : 'blue';
-  const status = received ? state.isError ? '×' : '•' : '⏳';
+  const color = received ? state.isError ? 'red' : 'green' : 'blue';
   const name = literalWorkerText(boundedToolHeading(state.name, 40) ?? 'Tool', 40);
   const summary = boundedToolHeading(state.summary);
   const description = summary ? ` · ${literalWorkerText(summary, 60)}` : '';
@@ -543,7 +549,7 @@ export function createToolCallElement(state: ToolCallCardState): FeishuCardEleme
     tag: 'collapsible_panel', expanded: false,
     ...(state.elementIndex !== undefined ? { element_id: `${TOOL_CALL_ELEMENT_PREFIX}${state.elementIndex}` } : {}),
     header: {
-      title: { tag: 'markdown', content: `<font color='${color}'>${status}</font> ${name}${description}` },
+      title: { tag: 'markdown', content: `<font color='${color}'>•</font> ${name}${description}` },
       vertical_align: 'center',
       icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', size: '14px 14px' },
       icon_position: 'right', icon_expanded_angle: -180,

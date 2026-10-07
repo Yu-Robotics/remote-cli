@@ -849,7 +849,10 @@ export class AgyExecutor implements IExecutor {
 
       if (step.state === 'ACTIVE') {
         const { name, input } = mapAgyTool(step.tool_name, parameters);
-        options.onToolUse?.({ id: toolUseId, name, input });
+        options.onToolUse?.({ id: toolUseId, name, input,
+          ...(typeof parameters.description === 'string' ? { description: parameters.description } : {}),
+          ...(typeof parameters.title === 'string' ? { title: parameters.title } : {}),
+        });
         this.activityTracker.emitTool(name, input);
       } else if (step.state === 'DONE') {
         const isError = !!toolInfo.error;
