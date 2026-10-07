@@ -8,6 +8,8 @@ Backend executable discovery is local-client behavior. CLI 1.6.119 supplements L
 
 From Router 1.6.145, a foreground tool result updates its original collapsed tool row rather than adding a second disclosure. Input, output, and per-file diff previews remain inside; later text and worker slots stay stable. Unknown IDs and orphan results are not guessed into another call. Existing CLI peers are compatible, and worker cards and approvals are unchanged. See [Code Change Previews](../../README.md#code-change-previews).
 
+From Router 1.6.146, Bash and other foreground tools share a compact heading with a gray success dot, pending hourglass, or gray failure cross, plus the tool name and an optional public description or file basename. Full tool IDs and explicit status labels remain in the expanded details. Raw commands are not fallback headings. Recursive card-node accounting and cross-page replacement continue to preserve activity tails and completion controls.
+
 CLI and Router 1.6.144 negotiate optional `activityProgress` without a protocol
 version bump. One mutable status row sits at the tail of the newest active main
 card, after tools and workers, and moves when the reply paginates. Historical

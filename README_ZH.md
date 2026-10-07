@@ -936,7 +936,9 @@ New messages cannot bypass confirmed work already waiting in a thread queue, eve
 
 ### Code Change Previews
 
-From Router 1.6.145, each foreground tool call and its matching result share one collapsed row. The result updates the original row to SUCCESS or ERROR instead of adding a second disclosure. Expand it to view Input and Result previews. Independent calls remain separate; missing or placeholder IDs and orphan results are preserved without guessing a match. A new invocation after a completed result gets a separate row even if an adapter reuses its ID. This presentation works with the existing CLI protocol and does not change worker cards or approval flows.
+From Router 1.6.145, each foreground tool call and its matching result share one collapsed row. The result updates the original row in place instead of adding a second disclosure. Expand it to view Input and Result previews. Independent calls remain separate; missing or placeholder IDs and orphan results are preserved without guessing a match. A new invocation after a completed result gets a separate row even if an adapter reuses its ID. This presentation works with the existing CLI protocol and does not change worker cards or approval flows.
+
+From Router 1.6.146, all foreground tools, including Bash, use the same compact heading: a gray `•` for a successful result, `⏳` while awaiting a result, or gray `×` for a failed result, followed by the tool name and an optional short description or file basename. Raw commands are not used as fallback headings. Full tool IDs and explicit status labels remain inside the expanded details. Card splitting recursively counts the actual nested elements, including collapsed previews and reserved activity/footer controls; a tool row is not counted as one node.
 
 Code edits retain per-file previews inside that tool row, with file paths and added/deleted line counts in the expanded details. Deleted lines are explicitly red and added lines green through Feishu rich text, independent of native `diff` syntax highlighting. A copyable diff preview preserves original spaces, tabs, and code characters; rich-text indentation is for display only.
 

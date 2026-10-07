@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.146] - 2026-10-07
+
+### Changed
+- Use one compact foreground tool heading for Bash and other tools: a gray success dot, pending hourglass, or gray failure cross, followed by the tool name and an optional bounded public description or file basename. Keep raw commands out of headings and move full tool IDs and explicit status labels into the existing expanded details.
+- Preserve input, result, diff previews, stable call identities, and existing cross-card cleanup. Verify recursive tagged-node counts at the card boundary through delayed results, activity tails, and completion controls; no multi-call aggregation, execution, or wire-protocol change.
+
 ## [1.6.145] - 2026-10-07
 
 ### Changed
