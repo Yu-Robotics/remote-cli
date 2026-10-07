@@ -20,6 +20,8 @@ Router 1.6.117 and newer explicitly label standalone background-task notificatio
 
 ## Public Activity
 
+Router 1.6.145 combines each foreground tool call and its matching result into one collapsed row, retaining input, output, and diff previews. Independent calls, workers, and approvals remain separate. This uses the existing CLI protocol; the client does not need a new capability. See [Code Change Previews](../../README.md#code-change-previews).
+
 CLI and Router 1.6.144 add optional `activityProgress` snapshots. Public text,
 explicit Codex commentary and public summaries, plan steps, and safe tool labels
 remain separate from answers and raw thinking. The latest main card shows a

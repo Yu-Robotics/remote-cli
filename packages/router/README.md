@@ -6,6 +6,8 @@ Backend executable discovery is local-client behavior. CLI 1.6.119 supplements L
 
 ## Public Activity
 
+From Router 1.6.145, a foreground tool result updates its original collapsed tool row rather than adding a second disclosure. Input, output, and per-file diff previews remain inside; later text and worker slots stay stable. Unknown IDs and orphan results are not guessed into another call. Existing CLI peers are compatible, and worker cards and approvals are unchanged. See [Code Change Previews](../../README.md#code-change-previews).
+
 CLI and Router 1.6.144 negotiate optional `activityProgress` without a protocol
 version bump. One mutable status row sits at the tail of the newest active main
 card, after tools and workers, and moves when the reply paginates. Historical

@@ -5,6 +5,7 @@ import { ConnectionHub } from '../websocket/ConnectionHub';
 import { MAX_THREADS, MessageType, ThreadSummary, Attachment, QueueConfirmationInfo } from '../types';
 import type { ExecutionMetadata, ActivityProgressInfo } from '../types';
 import { ACTIVITY_ELEMENT_ID, createActivityElement, parseActivityProgress } from '../utils/ActivityProgress';
+import { TOOL_CALL_ELEMENT_PREFIX } from '../utils/ToolFormatter';
 import { createExecutionMetadataElement } from '../utils/ExecutionMetadata';
 import { JsonStore } from '../storage/JsonStore';
 import * as fs from 'fs';
@@ -30,6 +31,11 @@ interface ActivityShellState {
   /** Only the delivered active tail needs a snapshot for migration/surplus cleanup. */
   tail?: { index: number; elements: any[] };
   finishedAt?: number;
+}
+
+interface ToolPageRemainder {
+  ids: Set<string>;
+  elements: any[];
 }
 
 /**
@@ -63,6 +69,8 @@ export class FeishuLongConnHandler {
   // Remember successful card payloads without retaining another copy of the content.
   private cardContentHashes = new Map<string, string[]>();
   private plainTextCards = new Map<string, Set<number>>();
+  /** Remember delivered tool ownership and non-tool content, never another copy of tool previews. */
+  private toolPageRemainders = new Map<string, Map<number, ToolPageRemainder>>();
   private activityShells = new Map<string, ActivityShellState>();
   // Per-message serialization locks to prevent concurrent updates from creating duplicates
   private messageLocks: Map<string, Promise<any>> = new Map();
@@ -1451,26 +1459,50 @@ Examples:
         fallbackCards = new Set();
         this.plainTextCards.set(messageId, fallbackCards);
       }
+      const remainders = this.toolPageRemainders.get(messageId) ?? new Map<number, ToolPageRemainder>();
+      const isTool = (element: any) => element.tag === 'collapsible_panel'
+        && typeof element.element_id === 'string' && element.element_id.startsWith(TOOL_CALL_ELEMENT_PREFIX);
+      const nextToolIds = chunks.map(chunk => new Set<string>(chunk.filter(isTool).map(element => element.element_id)));
+      const clearDeliveredPage = async (index: number, elements: any[]) => {
+        const cardId = chain[index];
+        updatingMessageId = cardId;
+        updatingCardIndex = index;
+        const fallback = fallbackCards.has(index);
+        const content = JSON.stringify({ schema: '2.0', body: { elements: fallback ? plainTextCard(elements) : elements } });
+        await this.sendCardRequest(content, async body => {
+          const result = await this.client.im.message.patch({ path: { message_id: cardId }, data: { content: body } });
+          if (!result?.code) this.workerContexts?.remember(cardId, messageId, body);
+          return result;
+        }, () => fallbackCards.add(index), !fallback);
+        hashes[index] = '';
+      };
+      // Remove previous owners before publishing moved tools, including still-active
+      // source pages. Failed cleanup keeps its receipt and cannot acknowledge the update.
+      for (const [index, remainder] of remainders) {
+        if ([...remainder.ids].every(id => nextToolIds[index]?.has(id))) continue;
+        await clearDeliveredPage(index, remainder.elements);
+        remainders.delete(index);
+        if (shell?.tail?.index === index) shell.tail = undefined;
+      }
       // Clear the actual previously delivered tail before moving it, including a
       // surplus page after content shrinks. Preserve its worker controls/content.
       if (shell?.tail && shell.tail.index !== tailIndex) {
         const previous = shell.tail;
         const cardId = chain[previous.index];
         if (cardId) {
-          const content = JSON.stringify({ schema: '2.0', body: { elements: fallbackCards.has(previous.index)
-            ? plainTextCard(previous.elements) : previous.elements } });
-          const fallback = fallbackCards.has(previous.index);
-          await this.sendCardRequest(content, async body => {
-            const result = await this.client.im.message.patch({ path: { message_id: cardId }, data: { content: body } });
-            if (!result?.code) this.workerContexts?.remember(cardId, messageId, body);
-            return result;
-          }, () => fallbackCards.add(previous.index), !fallback);
           // A later ordinary patch must remain eligible after fallback or control decoration.
-          hashes[previous.index] = '';
+          await clearDeliveredPage(previous.index, previous.elements);
         }
         shell.tail = undefined;
       }
-      const rememberTail = (index: number) => {
+      const rememberPage = (index: number) => {
+        if (nextToolIds[index].size) {
+          remainders.set(index, { ids: nextToolIds[index], elements: [
+            ...chunks[index].filter(element => !isTool(element) && element.element_id !== ACTIVITY_ELEMENT_ID),
+            { tag: 'markdown', text_size: 'notation', content: 'Tool details moved to another card.' },
+          ] });
+          this.toolPageRemainders.set(messageId, remainders);
+        } else remainders.delete(index);
         if (shell && index === tailIndex) shell.tail = { index,
           elements: chunks[index].filter(element => element.element_id !== ACTIVITY_ELEMENT_ID) };
       };
@@ -1494,14 +1526,14 @@ Examples:
         }, () => usePlainText(index), !fallbackCards.has(index));
         // Failed requests must remain eligible for retry.
         hashes[index] = nextHashes[index];
-        rememberTail(index);
+        rememberPage(index);
       };
 
       await patchCard(0);
 
       // Handle continuation chunks: only create new cards, never delete during streaming.
       // Deleting a card causes Feishu UI to show "message retracted" which is confusing.
-      // Any excess continuation cards are left with stale content until finalize cleans them up.
+      // Surplus cards retain non-tool content; obsolete paired tool rows were cleared above.
       if (chunks.length > 1 && openId) {
         const existingContinuationCards = chain.slice(1);
         const neededContinuationCards = chunks.length - 1;
@@ -1523,7 +1555,7 @@ Examples:
             if (newMessageId) {
               chain.push(newMessageId);
               hashes[chunkIndex] = nextHashes[chunkIndex];
-              rememberTail(chunkIndex);
+              rememberPage(chunkIndex);
             } else {
               // Keep card indices aligned so the missing chunk can be retried.
               return false;
@@ -1599,7 +1631,7 @@ Examples:
       }
 
       // Reuse streaming update logic: only create cards, never delete.
-      // Whatever layout was built during streaming stays as-is.
+      // Repack changed previews and clear obsolete tool copies without retracting messages.
       const trailingElements = metadataElement && !queueConfirmation ? [...footerElements, ...threadSwitchElements] : threadSwitchElements;
       const updated = await this._updateStreamingMessage(messageId, finalElements, openId, headerElements, trailingElements);
       if (!updated) {
@@ -1629,6 +1661,7 @@ Examples:
       this.messageChains.delete(messageId);
       this.cardContentHashes.delete(messageId);
       this.plainTextCards.delete(messageId);
+      this.toolPageRemainders.delete(messageId);
 
       return true;
     } catch (error: any) {
@@ -2105,6 +2138,7 @@ Examples:
 
       await this.bindingManager.close();
       this.activityShells.clear();
+      this.toolPageRemainders.clear();
       console.log('✅ Feishu WebSocket connection stopped');
     } catch (error) {
       console.error('Error stopping Feishu WebSocket connection:', error);

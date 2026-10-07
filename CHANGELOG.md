@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.145] - 2026-10-07
+
+### Changed
+- Render each foreground tool call and its matching result as one collapsed row, updating its status in place while retaining bounded input, output, and per-file diff previews. Keep later text and worker slots stable; preserve unmatched results without guessing a pairing.
+- Keep independent calls separate, including adapter ID reuse after a completed invocation. Remove previous tool copies before cross-card moves, including still-active and surplus pages, preserving worker context controls and retryable updates. Backend execution, protocol version, and approval flows are unchanged.
+
 ## [1.6.144] - 2026-10-07
 
 ### Added
