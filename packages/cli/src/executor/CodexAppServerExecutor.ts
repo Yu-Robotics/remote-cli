@@ -12,6 +12,7 @@ import { CodexSandbox } from './CodexSandbox';
 import type { CodexSandboxConfig } from '../types/config';
 import { DELEGATION_TOOLS, delegationMcpConfig, sameConnection, type DelegationConnection } from '../delegation/contract';
 import { assertWorkingDirectoryExists } from '../utils/WorkingDirectory';
+import { ActivityTracker, extractTodoPlan } from './Activity';
 
 export interface CodexAppServerTransport {
   start(): Promise<void>;
@@ -50,6 +51,7 @@ interface ActiveTurn {
   errorCode?: string;
   sideEffectsStarted: boolean;
   emittedTools: Set<string>;
+  itemPhases: Map<string, string>;
   temporaryFiles: string[];
   timeoutTimer?: ReturnType<typeof setTimeout>;
   inactivityTimeoutMs?: number;
@@ -166,6 +168,7 @@ export class CodexAppServerExecutor implements IExecutor {
   private readonly compactTimeoutMs: number;
   private readonly client: CodexAppServerTransport;
   private readonly taskNotifications: CodexTaskNotifications;
+  private readonly activityTracker = new ActivityTracker();
   private unsubscribeClient: (() => void) | null = null;
 
   private codexThreadId: string | null = null;
@@ -257,9 +260,12 @@ export class CodexAppServerExecutor implements IExecutor {
           output: [],
           sideEffectsStarted: false,
           emittedTools: new Set(),
+          itemPhases: new Map(),
           temporaryFiles,
           inactivityTimeoutMs: options.inactivityTimeout,
         };
+        this.activityTracker.setCallback(options.onActivity);
+        this.activityTracker.reset();
         if (options.timeout && options.timeout > 0) {
           active.timeoutTimer = setTimeout(() => {
             void this.failAndRestart(`Command timed out after ${options.timeout}ms`);
@@ -824,17 +830,25 @@ export class CodexAppServerExecutor implements IExecutor {
           this.activeTurn.output.push(params.delta);
           this.activeTurn.options.onStream?.(params.delta);
           this.activeTurn.options.onDisplayText?.(params.delta);
+          const phase = params.itemId ? this.activeTurn.itemPhases.get(params.itemId) : undefined;
+          if (phase === 'commentary') {
+            this.activityTracker.emitPublicText(params.delta);
+          }
         }
         break;
       case 'item/reasoning/summaryTextDelta':
         if (this.activeTurn && typeof params.delta === 'string') {
-          this.activeTurn.options.onStream?.(params.delta);
+          if (!this.activeTurn.options.onActivity) this.activeTurn.options.onStream?.(params.delta);
+          const key = params.itemId ? `${params.itemId}:${params.summaryIndex ?? 0}` : undefined;
+          this.activityTracker.emitReasoningSummary(params.delta, key);
         }
         break;
       case 'turn/plan/updated':
         if (this.activeTurn && Array.isArray(params.plan)) {
           const plan = params.plan.map((entry: any) => `${entry.status === 'completed' ? '✅' : entry.status === 'inProgress' ? '🔄' : '⬜'} ${entry.step}`).join('\n');
           if (plan) this.activeTurn.options.onPlanMode?.(plan);
+          const activity = extractTodoPlan({ todos: params.plan });
+          if (activity) this.activityTracker.emitPlan(activity);
         }
         break;
       case 'item/started':
@@ -965,23 +979,26 @@ export class CodexAppServerExecutor implements IExecutor {
     const active = this.activeTurn;
     if (!active || !item || typeof item.id !== 'string') return;
     const id = item.id;
+    if (typeof item.phase === 'string') {
+      active.itemPhases.set(id, item.phase);
+    }
 
     switch (item.type) {
       case 'commandExecution':
         active.sideEffectsStarted = true;
-        this.emitToolUse(active, id, 'Bash', { command: item.command ?? '' });
+        this.emitToolUse(active, id, 'Bash', { command: item.command ?? '' }, item.title || item.description);
         break;
       case 'fileChange':
         active.sideEffectsStarted = true;
-        this.emitToolUse(active, id, 'Edit', { file_path: item.changes?.[0]?.path ?? '' });
+        this.emitToolUse(active, id, 'Edit', { file_path: item.changes?.[0]?.path ?? '' }, item.title || item.description);
         break;
       case 'webSearch':
-        this.emitToolUse(active, id, 'WebSearch', { query: item.query ?? '' });
+        this.emitToolUse(active, id, 'WebSearch', { query: item.query ?? '' }, item.title || item.description);
         break;
       case 'mcpToolCall':
       case 'dynamicToolCall':
         active.sideEffectsStarted = true;
-        this.emitToolUse(active, id, item.tool ?? 'MCP', item.arguments ?? {});
+        this.emitToolUse(active, id, item.tool ?? 'MCP', item.arguments ?? {}, item.title || item.description);
         break;
       default:
         break;
@@ -997,10 +1014,11 @@ export class CodexAppServerExecutor implements IExecutor {
     const active = this.activeTurn;
     if (!active || !item || typeof item.id !== 'string') return;
     const id = item.id;
+    active.itemPhases.delete(id);
 
     switch (item.type) {
       case 'commandExecution':
-        this.emitToolUse(active, id, 'Bash', { command: item.command ?? '' });
+        this.emitToolUse(active, id, 'Bash', { command: item.command ?? '' }, item.title || item.description);
         active.options.onToolResult?.({
           tool_use_id: id,
           content: item.aggregatedOutput ?? '',
@@ -1046,7 +1064,10 @@ export class CodexAppServerExecutor implements IExecutor {
         });
         break;
       case 'plan':
-        if (typeof item.text === 'string' && item.text) active.options.onPlanMode?.(item.text);
+        if (typeof item.text === 'string' && item.text) {
+          active.options.onPlanMode?.(item.text);
+          this.activityTracker.emitPlan(item.text);
+        }
         break;
       case 'imageGeneration':
         this.handleGeneratedImage(active, item);
@@ -1081,10 +1102,11 @@ export class CodexAppServerExecutor implements IExecutor {
     this.completeActive({ success: false, error });
   }
 
-  private emitToolUse(active: ActiveTurn, id: string, name: string, input: Record<string, any>): void {
+  private emitToolUse(active: ActiveTurn, id: string, name: string, input: Record<string, any>, title?: string): void {
     if (active.emittedTools.has(id)) return;
     active.emittedTools.add(id);
     active.options.onToolUse?.({ id, name, input });
+    this.activityTracker.emitTool(name, input, title);
   }
 
   private handleGeneratedImage(active: ActiveTurn, item: any): void {
@@ -1111,6 +1133,8 @@ export class CodexAppServerExecutor implements IExecutor {
     const active = this.activeTurn;
     if (!active) return;
     this.activeTurn = null;
+    this.activityTracker.reset();
+    this.activityTracker.setCallback(undefined);
     for (const pending of this.pendingUserInputs.splice(0)) this.finishApproval(pending, 'expired');
     this.clearInactivityTimer();
     if (active.timeoutTimer) clearTimeout(active.timeoutTimer);

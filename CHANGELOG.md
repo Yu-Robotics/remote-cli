@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.144] - 2026-10-07
+
+### Added
+- Show bounded public activity at the tail of the latest active coordinator card and below each managed worker's identity. Separate explicit Codex commentary and public reasoning summaries, public assistant updates, plan steps, and safe tool descriptions from answer text; never promote raw thinking or estimate completion percentages.
+- Negotiate optional activity progress without a protocol-version change. Coalesce snapshots, preserve worker-result publication barriers, prioritize input and terminal states, discard late events, and leave older peers on their existing presentation.
+
 ## [1.6.143] - 2026-10-06
 
 ### Fixed

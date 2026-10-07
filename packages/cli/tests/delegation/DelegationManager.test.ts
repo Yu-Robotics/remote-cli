@@ -321,6 +321,145 @@ describe('managed agent delegation', () => {
     expect(vi.mocked(parent.onProgress!).mock.calls.every(([progress]) => progress.executionMetadata === undefined)).toBe(true);
   });
 
+  it('coalesces public activity separately from text, keeps the terminal snapshot and cancels delayed events', async () => {
+    vi.useFakeTimers();
+    parent.onProgress = vi.fn(() => true);
+    parent.onActivityProgress = vi.fn(() => true);
+    let finish!: (result: ExecuteResult) => void;
+    let options!: ExecuteOptions;
+    vi.mocked(worker.execute).mockImplementation((_prompt, received) => {
+      options = received;
+      return new Promise(resolve => { finish = resolve; });
+    });
+    try {
+      const scope = manager.begin(parent);
+      const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Review' }, 'start');
+      await vi.waitFor(() => expect(options).toBeDefined());
+      options.onStream?.('PRIVATE_STREAM_REASONING');
+      options.onActivity?.({ source: 'reasoning_summary', text: 'Inspecting the adapter' });
+      options.onActivity?.({ source: 'plan', text: 'Verify timer cancellation' });
+      await vi.advanceTimersByTimeAsync(2_500);
+      expect(parent.onActivityProgress).toHaveBeenCalledOnce();
+      expect(parent.onActivityProgress).toHaveBeenCalledWith(expect.objectContaining({
+        taskId: task.taskId, phase: 'text', activity: { source: 'plan', text: 'Verify timer cancellation' },
+      }));
+      options.onActivity?.({ source: 'plan', text: 'Verify timer cancellation' });
+      await vi.advanceTimersByTimeAsync(2_500);
+      expect(parent.onActivityProgress).toHaveBeenCalledOnce();
+      options.onActivity?.({ source: 'tool', text: 'Using Read' });
+      finish({ success: true, output: 'Independent review complete' });
+      const result = await scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result');
+      expect(result).toMatchObject({ output: 'Independent review complete' });
+      expect(result).not.toHaveProperty('activity');
+      expect(parent.onProgress).toHaveBeenLastCalledWith(expect.objectContaining({ phase: 'succeeded',
+        activity: { source: 'tool', text: 'Using Read' }, summary: 'Independent review complete' }));
+      options.onActivity?.({ source: 'plan', text: 'Late update' });
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(parent.onActivityProgress).toHaveBeenCalledOnce();
+      expect(JSON.stringify(vi.mocked(parent.onActivityProgress).mock.calls)).not.toContain('PRIVATE_STREAM_REASONING');
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('does not extend worker liveness for public activity snapshots', async () => {
+    vi.useFakeTimers();
+    parent.onActivityProgress = vi.fn(() => true);
+    manager = new DelegationManager(guard, factory as any, new BackendRegistry(async () => '1.0'), new DelegationStore(), 3_000);
+    let options!: ExecuteOptions;
+    vi.mocked(worker.execute).mockImplementation((_prompt, received) => {
+      options = received;
+      return new Promise(() => undefined);
+    });
+    try {
+      const scope = manager.begin(parent);
+      const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Wait' }, 'start');
+      await vi.waitFor(() => expect(options).toBeDefined());
+      for (let index = 0; index < 3; index++) {
+        options.onActivity?.({ source: 'public_text', text: `Working ${index}` });
+        await vi.advanceTimersByTimeAsync(1_000);
+      }
+      await expect(scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result')).resolves.toMatchObject({ state: 'timed_out' });
+      expect(worker.abort).toHaveBeenCalled();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('keeps activity behind input requests and omits the field without negotiation', async () => {
+    parent.onProgress = vi.fn(() => true);
+    parent.onActivityProgress = vi.fn(() => true);
+    let waiting = true;
+    worker.isWaitingInput = () => waiting;
+    vi.mocked(worker.execute).mockImplementation(async (_prompt, options) => {
+      options.onActivity?.({ source: 'public_text', text: 'Must not replace input' });
+      options.onStream?.('Choose A or B');
+      await Promise.resolve();
+      waiting = false;
+      return { success: true };
+    });
+    const scope = manager.begin(parent);
+    const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Ask' }, 'start');
+    await scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result');
+    expect(parent.onProgress).toHaveBeenCalledWith(expect.objectContaining({ phase: 'waiting_input' }));
+    expect(parent.onActivityProgress).not.toHaveBeenCalled();
+    parent.onActivityProgress = undefined;
+    vi.mocked(worker.execute).mockImplementation(async (_prompt, options) => {
+      options.onActivity?.({ source: 'plan', text: 'Unnegotiated' });
+      return { success: true };
+    });
+    const other: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Old peer' }, 'next');
+    await scope.invoke('remote_cli_result', { taskId: other.taskId }, 'other-result');
+    expect(vi.mocked(parent.onProgress).mock.calls.every(([value]) => value.activity === undefined)).toBe(true);
+  });
+
+  it('resumes post-input text and activity without requiring another tool call', async () => {
+    vi.useFakeTimers();
+    parent.onProgress = vi.fn(() => true);
+    parent.onActivityProgress = vi.fn(() => true);
+    parent.onTextProgress = vi.fn(() => true);
+    let waiting = true;
+    worker.isWaitingInput = () => waiting;
+    let options: ExecuteOptions;
+    let finish: (result: ExecuteResult) => void;
+    vi.mocked(worker.execute).mockImplementation((_prompt, value) => {
+      options = value;
+      return new Promise(resolve => { finish = resolve; });
+    });
+    const scope = manager.begin(parent);
+    try {
+      const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Ask and continue' }, 'start');
+      await vi.waitFor(() => expect(worker.execute).toHaveBeenCalled());
+      options!.onStream?.('Choose A or B');
+      await Promise.resolve();
+      options!.onActivity?.({ source: 'public_text', text: 'Still waiting' });
+      await vi.advanceTimersByTimeAsync(2500);
+      expect(parent.onActivityProgress).not.toHaveBeenCalled();
+
+      waiting = false;
+      options!.onApprovalResolved?.('approval-1', 'approved');
+      await vi.advanceTimersByTimeAsync(2500);
+      expect(parent.onApprovalResolved).toHaveBeenCalledWith('approval-1', 'approved');
+      expect(parent.onActivityProgress).toHaveBeenLastCalledWith(expect.objectContaining({
+        phase: 'text', waitingForInput: false, activity: { source: 'state', text: 'Working' },
+      }));
+      options!.onActivity?.({ source: 'public_text', text: 'Continuing with your choice' });
+      options!.onDisplayText?.('Public explanation after the answer');
+      await vi.advanceTimersByTimeAsync(2500);
+      expect(parent.onActivityProgress).toHaveBeenLastCalledWith(expect.objectContaining({
+        phase: 'text', waitingForInput: false, activity: { source: 'public_text', text: 'Continuing with your choice' },
+      }));
+      expect(parent.onTextProgress).toHaveBeenLastCalledWith(expect.objectContaining({ phase: 'text', waitingForInput: false }));
+      expect(parent.onToolUse).not.toHaveBeenCalled();
+
+      waiting = true;
+      options!.onStream?.('Choose A or B');
+      await Promise.resolve();
+      expect(vi.mocked(parent.onProgress).mock.calls.filter(([value]) => value.phase === 'waiting_input')).toHaveLength(2);
+      finish!({ success: true, output: 'Done' });
+      await scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result');
+    } finally {
+      await scope.close();
+      vi.useRealTimers();
+    }
+  });
+
   it('buffers worker text as display-only nested progress without treating it as task activity', async () => {
     vi.useFakeTimers();
     const onTextProgress = vi.fn(() => true);
@@ -1080,9 +1219,16 @@ describe('managed agent delegation', () => {
   });
 
   it('retries exactly once with a fresh lane after an executor confirms a missing native session before dispatch', async () => {
+    parent.onProgress = vi.fn(() => true);
+    parent.onActivityProgress = vi.fn(() => true);
+    let oldOptions!: ExecuteOptions;
     const first = {
       ...worker,
-      execute: vi.fn().mockResolvedValue({ success: false, error: 'Stored native session is missing' }),
+      execute: vi.fn(async (_prompt: string, options: ExecuteOptions) => {
+        oldOptions = options;
+        options.onActivity?.({ source: 'plan', text: 'Stale attempt' });
+        return { success: false, error: 'Stored native session is missing' };
+      }),
       consumeSessionResumeFailure: vi.fn(() => true),
       getExecutionMetadata: vi.fn(() => ({ model: 'stale-attempt', modelSource: 'reported', reasoningEffort: 'high', effortSource: 'reported' })),
       destroy: vi.fn().mockResolvedValue(undefined),
@@ -1090,7 +1236,11 @@ describe('managed agent delegation', () => {
     } as IExecutor;
     const second = {
       ...worker,
-      execute: vi.fn().mockResolvedValue({ success: true, output: 'Fresh lane completed' }),
+      execute: vi.fn(async (_prompt: string, options: ExecuteOptions) => {
+        options.onActivity?.({ source: 'plan', text: 'Fresh attempt' });
+        oldOptions.onActivity?.({ source: 'plan', text: 'Old callback after retry' });
+        return { success: true, output: 'Fresh lane completed' };
+      }),
       consumeSessionResumeFailure: vi.fn(() => false),
       getExecutionMetadata: vi.fn(() => ({ model: 'fresh-selection', modelSource: 'configured', effortSource: 'default' })),
       destroy: vi.fn().mockResolvedValue(undefined),
@@ -1111,6 +1261,7 @@ describe('managed agent delegation', () => {
     });
     const retained: any = await scope.invoke('remote_cli_result', { taskId: task.taskId }, 'retained');
     expect(retained.executionMetadata.reasoningEffort).toBeUndefined();
+    expect(parent.onProgress).toHaveBeenLastCalledWith(expect.objectContaining({ activity: { source: 'plan', text: 'Fresh attempt' } }));
 
     const firstLaneId = factory.mock.calls[0][3];
     const secondLaneId = factory.mock.calls[1][3];

@@ -6,7 +6,7 @@ import type { BackendKey, ExecutorConfig } from '../types/config';
 import type { Thread } from '../thread/types';
 import { resolveThreadModel } from '../thread/ThreadExecutorPool';
 import type { IExecutor, ExecuteResult } from '../executor/IExecutor';
-import type { ApprovalRequestInfo, ApprovalStatus, DelegationProgressInfo, ExecutionMetadata, ToolUseInfo, ToolResultInfo } from '../types';
+import type { ActivityProgressInfo, ApprovalRequestInfo, ApprovalStatus, DelegationProgressInfo, ExecutionMetadata, ToolUseInfo, ToolResultInfo } from '../types';
 import { captureExecutionMetadata, mergeReportedExecutionMetadata } from '../executor/ExecutionMetadata';
 import { createExecutor } from '../executor';
 import { BackendRegistry } from './BackendRegistry';
@@ -24,6 +24,8 @@ import { assertWorkingDirectoryExists } from '../utils/WorkingDirectory';
 import { DelegatedWorkspaceManager, type DelegatedWorkspaceSource, type DelegatedWorkspace,
   type DelegatedArtifactView } from './DelegatedWorkspaceManager';
 import type { GitCheckpoint } from './GitCheckpoint';
+import { ActivityProgress } from '../utils/ActivityProgress';
+import { normalizeActivity } from '../executor/Activity';
 
 export const DELEGATION_LIMITS = { launches: 12, concurrent: 5, closeoutRounds: 2,
   idleTimeoutMs: 15 * 60_000, toolIdleTimeoutMs: 45 * 60_000,
@@ -91,6 +93,8 @@ export interface DelegationParent {
   onProgress?: (progress: DelegationProgressInfo) => boolean;
   /** Optional negotiated channel for bounded display-only worker text. */
   onTextProgress?: (progress: DelegationProgressInfo) => boolean;
+  /** Optional negotiated public activity snapshots; not execution heartbeats. */
+  onActivityProgress?: (progress: DelegationProgressInfo) => boolean;
   onApproval: (request: ApprovalRequestInfo, executor: IExecutor) => boolean;
   onApprovalResolved: (id: string, status: ApprovalStatus) => void;
   isWorkspaceBusy?: (canonicalPath: string) => boolean;
@@ -128,6 +132,8 @@ interface Task {
   textBuffer?: string;
   lastReportedText?: string;
   textProgressEnabled?: boolean;
+  activityProgress?: ActivityProgress;
+  activity?: ActivityProgressInfo;
   activeToolIds: Set<string>;
   waitingInputText?: string;
   interrupted: Promise<ExecuteResult>;
@@ -353,6 +359,7 @@ export class DelegationManager {
       try {
         if (task.record.state === 'running') captureWorkerMetadata(task);
         return parent.onProgress?.({ taskId: task.record.id, backend: task.record.backend, ...progress,
+          ...(parent.onActivityProgress && task.activity ? { activity: { ...task.activity } } : {}),
           ...(task.lane ? { workerContext: { laneId: task.lane.id, generation: task.lane.contextGeneration ?? 0 } } : {}),
           ...(task.executionMetadata ? { executionMetadata: { ...task.executionMetadata } } : {}) }) === true;
       } catch {
@@ -362,6 +369,7 @@ export class DelegationManager {
     };
     const reportTextProgress = (task: Task, latestText: string): boolean => {
       try {
+        if (task.executor?.isWaitingInput?.()) return false;
         captureWorkerMetadata(task);
         return parent.onTextProgress?.({
           taskId: task.record.id,
@@ -369,6 +377,7 @@ export class DelegationManager {
           phase: 'text',
           latestText,
           startedAt: task.record.startedAt,
+          ...(parent.onActivityProgress && task.executor?.isWaitingInput?.() === false ? { waitingForInput: false } : {}),
           ...(task.executionMetadata ? { executionMetadata: { ...task.executionMetadata } } : {}),
         }) === true;
       } catch {
@@ -381,8 +390,24 @@ export class DelegationManager {
       task.textTimer = undefined;
       if (discardPending) task.textBuffer = undefined;
     };
+    const recordActivity = (task: Task, value: ActivityProgressInfo): void => {
+      if (!parent.onActivityProgress || closed || task.record.state !== 'running' || task.executor?.isWaitingInput?.()) return;
+      const activity = normalizeActivity(value);
+      if (!activity) return;
+      if (task.executor?.isWaitingInput?.() === false) task.waitingInputText = undefined;
+      task.activity = activity;
+      task.activityProgress ??= new ActivityProgress(snapshot => {
+        if (closed || task.record.state !== 'running' || task.executor?.isWaitingInput?.()) return false;
+        captureWorkerMetadata(task);
+        return parent.onActivityProgress?.({ taskId: task.record.id, backend: task.record.backend,
+          phase: 'text', activity: snapshot, startedAt: task.record.startedAt,
+          ...(task.executor?.isWaitingInput?.() === false ? { waitingForInput: false } : {}),
+          ...(task.executionMetadata ? { executionMetadata: { ...task.executionMetadata } } : {}) }) === true;
+      });
+      task.activityProgress.offer(activity);
+    };
     const flushTextProgress = (task: Task): void => {
-      if (closed || task.record.state !== 'running' || !task.textProgressEnabled) return;
+      if (closed || task.record.state !== 'running' || !task.textProgressEnabled || task.executor?.isWaitingInput?.()) return;
       const latestText = task.textBuffer ? latestDisplayText(task.textBuffer) : undefined;
       if (!latestText || latestText === task.lastReportedText) return;
       if (!reportTextProgress(task, latestText)) {
@@ -402,6 +427,7 @@ export class DelegationManager {
     };
     const recordDisplayText = (task: Task, text: string): void => {
       if (!task.textProgressEnabled || !text) return;
+      if (task.executor?.isWaitingInput?.() === false) task.waitingInputText = undefined;
       task.textBuffer = tailText(`${task.textBuffer ?? ''}${text}`, DELEGATION_TEXT_PROGRESS.bufferBytes);
       scheduleTextProgress(task);
     };
@@ -436,6 +462,7 @@ export class DelegationManager {
     };
     const stop = (task: Task): Promise<void> => task.stop ??= (async () => {
       clearTextProgress(task, true);
+      task.activityProgress?.dispose();
       if (!task.executor) {
         // A cancellation can race with durable lane acquisition. No worker
         // process owns this lane yet, so it must not become a reusable empty
@@ -481,6 +508,7 @@ export class DelegationManager {
     };
     const finishTask = async (task: Task): Promise<void> => {
       clearTimeout(task.queueTimer);
+      task.activityProgress?.dispose();
       task.record.finishedAt = Date.now();
       await deadline(async () => { await save(task); await this.store.prune(); }, this.cleanupMs)
         .catch(() => console.warn('[Delegation] Final task metadata could not be saved or pruned'));
@@ -651,6 +679,7 @@ export class DelegationManager {
           }
           // Native session IDs are distinct; policy was resolved against the real
           // parent thread before passing the synthetic worker identity to the factory.
+          let acceptingActivity = true;
           const execution = worker.execute(
             `You are executing one delegated task in an isolated worker session. This session may contain context from earlier delegated tasks in this thread and workspace. Complete only this objective and return a concise result with verification and remaining issues. Do not delegate to other agents.${task.workspace
               ? `\nThis task runs in an owned Git worktree at ${task.workspace.cwd}, with a fresh detached task checkout based on checkpoint ${task.workspace.input.commit}. Previous task changes are NOT implicitly present. Re-read current files; earlier conversation context may be stale. Stay within this checkout. Do not merge into or edit the delivery directory, push, change branches, or remove the worktree. Your file changes will be captured as an artifact for explicit coordinator integration. Ignored files and dependencies are not copied from the delivery directory. A worktree is not an OS sandbox.` : ''}
@@ -661,6 +690,9 @@ ${objective}`,
               // backend-local limits that would otherwise ignore tool callbacks.
               timeout: 0,
               inactivityTimeout: 0,
+              onActivity: parent.onActivityProgress ? value => {
+                if (acceptingActivity && task.executor === worker) recordActivity(task, value);
+              } : undefined,
               onStream: text => {
                 // Generic streams may include reasoning or backend notices. Use
                 // this channel only to detect interactive input requests.
@@ -668,6 +700,7 @@ ${objective}`,
                   if (closed || task.record.state !== 'running') return;
                   if (task.executor?.isWaitingInput?.()) {
                     clearTextProgress(task, true);
+                    task.activityProgress?.clear();
                     const prompt = bounded(text, 4000).text;
                     if (task.waitingInputText === prompt) return;
                     task.waitingInputText = prompt;
@@ -708,20 +741,35 @@ ${prompt}`));
                   tool_use_id: toolResult.tool_use_id, content: '', is_error: toolResult.is_error,
                 }, startedAt: task.record.startedAt });
               },
-              onApprovalRequest: request => !closed && task.record.state === 'running' && parent.onApproval({ ...request,
-                description: `[${backend} delegated task] ${request.description}`, canRemember: false }, task.executor!),
-              onApprovalResolved: parent.onApprovalResolved,
+              onApprovalRequest: request => {
+                if (closed || task.record.state !== 'running') return false;
+                task.activityProgress?.clear();
+                if (parent.onActivityProgress) reportProgress(task, { phase: 'waiting_input', summary: 'Approval required', startedAt: task.record.startedAt });
+                return parent.onApproval({ ...request,
+                  description: `[${backend} delegated task] ${request.description}`, canRemember: false }, task.executor!);
+              },
+              onApprovalResolved: (id, status) => {
+                parent.onApprovalResolved(id, status);
+                if (acceptingActivity && task.executor === worker && worker.isWaitingInput?.() === false) {
+                  task.waitingInputText = undefined;
+                  recordActivity(task, { source: 'state', text: 'Working' });
+                }
+              },
             });
           // Start the inactivity window only once the worker has accepted the
           // objective and can emit its first real progress callback.
           task.signalDispatch();
           armIdleTimer(task);
-          result = await Promise.race([task.interrupted, execution]);
+          try { result = await Promise.race([task.interrupted, execution]); }
+          finally { acceptingActivity = false; }
           captureWorkerMetadata(task);
           metadataCaptured = true;
           if (!result.success && attempt === 0 && worker.consumeSessionResumeFailure?.()) {
             clearTaskTimer(task);
             clearTextProgress(task, true);
+            task.activityProgress?.dispose();
+            task.activityProgress = undefined;
+            task.activity = undefined;
             task.lastReportedText = undefined;
             if (await discardMissingSessionLane()) continue;
             throw new Error('The worker session was unavailable and its process could not be safely reset.');
@@ -744,6 +792,7 @@ ${prompt}`));
         if (!metadataCaptured) captureWorkerMetadata(task);
         clearTaskTimer(task);
         clearTextProgress(task, true);
+        task.activityProgress?.dispose();
         if (task.record.startedAt === undefined) task.discardLane = !task.preserveUnstartedLane;
         let released = !task.quarantineWorkspace;
         let nativeExitConfirmed = false;

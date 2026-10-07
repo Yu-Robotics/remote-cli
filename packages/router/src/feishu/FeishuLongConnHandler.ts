@@ -3,7 +3,8 @@ import { v4 as uuidv4 } from 'uuid';
 import { BindingManager } from '../binding/BindingManager';
 import { ConnectionHub } from '../websocket/ConnectionHub';
 import { MAX_THREADS, MessageType, ThreadSummary, Attachment, QueueConfirmationInfo } from '../types';
-import type { ExecutionMetadata } from '../types';
+import type { ExecutionMetadata, ActivityProgressInfo } from '../types';
+import { ACTIVITY_ELEMENT_ID, createActivityElement, parseActivityProgress } from '../utils/ActivityProgress';
 import { createExecutionMetadataElement } from '../utils/ExecutionMetadata';
 import { JsonStore } from '../storage/JsonStore';
 import * as fs from 'fs';
@@ -22,6 +23,13 @@ export interface FeishuLongConnHandlerConfig {
   appId: string;
   appSecret: string;
   store: JsonStore;
+}
+
+interface ActivityShellState {
+  activity: ActivityProgressInfo;
+  /** Only the delivered active tail needs a snapshot for migration/surplus cleanup. */
+  tail?: { index: number; elements: any[] };
+  finishedAt?: number;
 }
 
 /**
@@ -55,6 +63,7 @@ export class FeishuLongConnHandler {
   // Remember successful card payloads without retaining another copy of the content.
   private cardContentHashes = new Map<string, string[]>();
   private plainTextCards = new Map<string, Set<number>>();
+  private activityShells = new Map<string, ActivityShellState>();
   // Per-message serialization locks to prevent concurrent updates from creating duplicates
   private messageLocks: Map<string, Promise<any>> = new Map();
   private queueCardDecisions = new Map<string, Promise<void>>();
@@ -1099,19 +1108,19 @@ Examples:
    * @param trailingElements Final panel elements that must remain together
    * @returns Array of element chunks, each satisfying Feishu's limits
    */
-  private splitElementsIntoChunks(elements: any[], continuationHeaderElements: any[] = [], trailingElements: any[] = []): any[][] {
+  private splitElementsIntoChunks(elements: any[], continuationHeaderElements: any[] = [], trailingElements: any[] = [], activityTail?: any): any[][] {
     // If empty or very small, return as-is
     if (elements.length === 0) {
-      return [elements];
+      return [activityTail ? [activityTail] : elements];
     }
 
     elements = prepareTableElements(elements);
     // Check if we need to split at all
-    const needsSplitting = this.checkIfElementsNeedSplitting(elements);
+    const needsSplitting = this.checkIfElementsNeedSplitting(activityTail ? [...elements, activityTail] : elements);
     console.log(`[FeishuHandler] Elements check: count=${elements.length}, needsSplitting=${needsSplitting}`);
 
     if (!needsSplitting) {
-      return [elements];
+      return [activityTail ? [...elements, activityTail] : elements];
     }
 
     const chunks: any[][] = [];
@@ -1127,8 +1136,9 @@ Examples:
       (total, element) => total + this.countTaggedNodes(element),
       0,
     );
-    const continuationIndicatorSize = 200 + continuationHeaderSize;
-    const continuationIndicatorCount = 2 + continuationHeaderTaggedNodes;
+    // Reserve the bounded tail while packing so it never displaces content onto an activity-only page.
+    const continuationIndicatorSize = 200 + continuationHeaderSize + (activityTail ? JSON.stringify(activityTail).length : 0);
+    const continuationIndicatorCount = 2 + continuationHeaderTaggedNodes + (activityTail ? this.countTaggedNodes(activityTail) : 0);
 
     for (let i = 0; i < elements.length; i++) {
       const element = elements[i];
@@ -1207,6 +1217,7 @@ Examples:
       }
     }
 
+    if (activityTail) chunks[chunks.length - 1].push(activityTail);
     return chunks;
   }
 
@@ -1398,9 +1409,19 @@ Examples:
    * @param openId User's open_id for creating continuation messages
    * @param threadName Thread name shown in continuation card headers
    */
-  async updateStreamingMessage(messageId: string, elements: any[], openId?: string, threadName?: string, cwd?: string): Promise<boolean> {
+  async updateStreamingMessage(messageId: string, elements: any[], openId?: string, threadName?: string, cwd?: string, activity?: ActivityProgressInfo): Promise<boolean> {
     const headerElements = this.createResponseHeaderElements(threadName || 'Resolving thread...', cwd);
-    return this.withMessageLock(messageId, () => this._updateStreamingMessage(messageId, [...headerElements, ...elements], openId, headerElements));
+    return this.withMessageLock(messageId, () => {
+      const shell = this.activityShells.get(messageId);
+      // A delayed tool/image/text patch must not reopen a completed activity-bearing card.
+      if (shell?.finishedAt !== undefined) return Promise.resolve(false);
+      const normalized = parseActivityProgress(activity);
+      if (normalized) {
+        if (shell) shell.activity = normalized;
+        else this.activityShells.set(messageId, { activity: normalized });
+      }
+      return this._updateStreamingMessage(messageId, [...headerElements, ...elements], openId, headerElements);
+    });
   }
 
   private async _updateStreamingMessage(messageId: string, elements: any[], openId?: string, continuationHeaderElements: any[] = [], trailingElements: any[] = []): Promise<boolean> {
@@ -1415,7 +1436,10 @@ Examples:
       }
 
       // Split elements into chunks based on Feishu Card 2.0 limits
-      const chunks = this.splitElementsIntoChunks(elements, continuationHeaderElements, trailingElements);
+      const shell = this.activityShells.get(messageId);
+      const activityTail = shell && shell.finishedAt === undefined ? createActivityElement(shell.activity) : undefined;
+      const chunks = this.splitElementsIntoChunks(elements, continuationHeaderElements, trailingElements, activityTail);
+      const tailIndex = activityTail ? chunks.length - 1 : -1;
       console.log(`[FeishuHandler] Need ${chunks.length} card(s), currently have ${chain.length} card(s)`);
       let hashes = this.cardContentHashes.get(messageId);
       if (!hashes) {
@@ -1427,6 +1451,29 @@ Examples:
         fallbackCards = new Set();
         this.plainTextCards.set(messageId, fallbackCards);
       }
+      // Clear the actual previously delivered tail before moving it, including a
+      // surplus page after content shrinks. Preserve its worker controls/content.
+      if (shell?.tail && shell.tail.index !== tailIndex) {
+        const previous = shell.tail;
+        const cardId = chain[previous.index];
+        if (cardId) {
+          const content = JSON.stringify({ schema: '2.0', body: { elements: fallbackCards.has(previous.index)
+            ? plainTextCard(previous.elements) : previous.elements } });
+          const fallback = fallbackCards.has(previous.index);
+          await this.sendCardRequest(content, async body => {
+            const result = await this.client.im.message.patch({ path: { message_id: cardId }, data: { content: body } });
+            if (!result?.code) this.workerContexts?.remember(cardId, messageId, body);
+            return result;
+          }, () => fallbackCards.add(previous.index), !fallback);
+          // A later ordinary patch must remain eligible after fallback or control decoration.
+          hashes[previous.index] = '';
+        }
+        shell.tail = undefined;
+      }
+      const rememberTail = (index: number) => {
+        if (shell && index === tailIndex) shell.tail = { index,
+          elements: chunks[index].filter(element => element.element_id !== ACTIVITY_ELEMENT_ID) };
+      };
       const payloadFor = (index: number) => JSON.stringify({ schema: '2.0',
         body: { elements: fallbackCards.has(index) ? plainTextCard(chunks[index]) : chunks[index] } });
       const payloads = chunks.map((_, index) => payloadFor(index));
@@ -1447,6 +1494,7 @@ Examples:
         }, () => usePlainText(index), !fallbackCards.has(index));
         // Failed requests must remain eligible for retry.
         hashes[index] = nextHashes[index];
+        rememberTail(index);
       };
 
       await patchCard(0);
@@ -1475,6 +1523,7 @@ Examples:
             if (newMessageId) {
               chain.push(newMessageId);
               hashes[chunkIndex] = nextHashes[chunkIndex];
+              rememberTail(chunkIndex);
             } else {
               // Keep card indices aligned so the missing chunk can be retried.
               return false;
@@ -1508,14 +1557,16 @@ Examples:
    * @param openId User's open_id for creating continuation messages
    * @param replyThreadId Thread that produced the reply, independent of the selected thread
    */
-  async finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string, threads?: ThreadSummary[], replyThreadId?: string, queueConfirmation?: QueueConfirmationInfo, executionMetadata?: ExecutionMetadata): Promise<boolean> {
-    return this.withMessageLock(messageId, () => this._finalizeStreamingMessage(messageId, elements, sessionAbbr, openId, cwd, threadName, threads, replyThreadId, queueConfirmation, executionMetadata));
+  async finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string, threads?: ThreadSummary[], replyThreadId?: string, queueConfirmation?: QueueConfirmationInfo, executionMetadata?: ExecutionMetadata, success = true): Promise<boolean> {
+    return this.withMessageLock(messageId, () => this._finalizeStreamingMessage(messageId, elements, sessionAbbr, openId, cwd, threadName, threads, replyThreadId, queueConfirmation, executionMetadata, success));
   }
 
-  private async _finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string, threads?: ThreadSummary[], replyThreadId?: string, queueConfirmation?: QueueConfirmationInfo, executionMetadata?: ExecutionMetadata): Promise<boolean> {
+  private async _finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string, threads?: ThreadSummary[], replyThreadId?: string, queueConfirmation?: QueueConfirmationInfo, executionMetadata?: ExecutionMetadata, success = true): Promise<boolean> {
     try {
+      const shell = this.activityShells.get(messageId);
+      if (shell) shell.finishedAt = Date.now();
       // Build completion note
-      let noteContent = queueConfirmation ? '⏳ Awaiting queue confirmation' : '✅ Completed';
+      let noteContent = queueConfirmation ? '⏳ Awaiting queue confirmation' : success ? '✅ Completed' : '❌ Failed';
       if (sessionAbbr) {
         noteContent += ` · Session: ${sessionAbbr}`;
       }
@@ -2018,6 +2069,9 @@ Examples:
             this.threadSwitchCardState.delete(id);
           }
         }
+        for (const [id, state] of this.activityShells) {
+          if (state.finishedAt !== undefined && state.finishedAt < cutoff) this.activityShells.delete(id);
+        }
       }, 60 * 60 * 1000); // every hour
     } catch (error) {
       console.error('Failed to start Feishu WebSocket connection:', error);
@@ -2050,6 +2104,7 @@ Examples:
       }
 
       await this.bindingManager.close();
+      this.activityShells.clear();
       console.log('✅ Feishu WebSocket connection stopped');
     } catch (error) {
       console.error('Error stopping Feishu WebSocket connection:', error);

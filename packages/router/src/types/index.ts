@@ -136,6 +136,12 @@ export interface ExecutionMetadata {
   effortSource: ExecutionMetadataSource;
 }
 
+/** Public progress provenance, not private reasoning or an estimated percentage. */
+export interface ActivityProgressInfo {
+  source: 'public_text' | 'reasoning_summary' | 'plan' | 'tool' | 'state';
+  text: string;
+}
+
 // Response message
 export interface ResponseMessage extends WSMessage {
   type: MessageType.RESPONSE;
@@ -256,6 +262,10 @@ export interface DelegationProgressInfo {
   phase: DelegationProgressPhase;
   /** This worker's bounded execution snapshot; old CLIs omit it. */
   executionMetadata?: ExecutionMetadata;
+  /** Optional public activity snapshot; never a result or worker liveness signal. */
+  activity?: ActivityProgressInfo;
+  /** Verified native input state from activity-progress-capable CLIs. */
+  waitingForInput?: boolean;
   objective?: string;
   toolUse?: ToolUseInfo;
   toolResult?: ToolResultInfo;

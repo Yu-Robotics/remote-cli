@@ -13,6 +13,29 @@ const workerBody = (elements: any[]) => elements[1].columns[0].elements;
 const workerBodyContent = (elements: any[]) => workerBody(elements).map((element: any) => element.content ?? '').join('\n');
 
 describe('delegated worker progress formatting', () => {
+  it('uses public activity below identity without adding sibling slots or changing legacy output', () => {
+    const plain = state({ latestText: '**Legacy update**' });
+    expect(createDelegationProgressElements({ ...plain, activity: undefined })).toEqual(createDelegationProgressElements(plain));
+    const elements = render({ activity: { source: 'plan', text: 'Review <at id=all> input' }, latestText: 'Older response',
+      currentToolName: 'Read', activeToolCount: 1 });
+    expect(elements.map(element => element.element_id)).toEqual(['dw_2_header', 'dw_2_body', 'dw_2_meta', 'dw_2_details']);
+    expect(workerBody(elements)[0].content).toContain('Activity');
+    expect(workerBodyContent(elements)).toContain('Review &lt;at id=all&gt; input');
+    expect(workerBodyContent(elements)).not.toContain('Older response');
+    expect(elements[2].content).toContain('Read');
+  });
+
+  it('gives input and terminal results precedence over activity and honestly labels a missing result', () => {
+    const activity = { source: 'public_text' as const, text: 'Inspecting the code' };
+    expect(workerBodyContent(render({ phase: 'waiting_input', inputRequest: 'Choose an option', activity })))
+      .not.toContain(activity.text);
+    const terminal = render({ phase: 'failed', error: 'Task failed', summary: 'Result evidence', activity });
+    expect(workerBodyContent(terminal)).toContain('Task failed');
+    expect(workerBodyContent(terminal)).toContain('Result evidence');
+    expect(workerBodyContent(terminal)).not.toContain(activity.text);
+    expect(workerBodyContent(render({ phase: 'interrupted', activity }))).toContain('Last activity · not a final result');
+  });
+
   it.each(['succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted'] as const)('keeps context clearing outside folded details without shifting sibling slots for %s', phase => {
     const elements = render({ phase, contextActionId: 'opaque-action' });
     expect(elements).toHaveLength(DELEGATION_PROGRESS_ELEMENT_COUNT);

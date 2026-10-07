@@ -137,6 +137,129 @@ describe('MessageHandler', () => {
     }));
   });
 
+  describe('coordinator public activity', () => {
+    const activityMessages = () => ctx.mockWsClient.send.mock.calls.map(([value]: any[]) => value)
+      .filter((value: any) => value.streamType === 'activity');
+    const negotiateActivity = (enabled = true) => ctx.handler.handleMessage({ type: 'binding_confirm',
+      data: { success: true, capabilities: enabled ? { activityProgress: true } : {} } } as any);
+
+    it('sends a bounded separate snapshot and drops late callbacks after completion or the next turn', async () => {
+      vi.useFakeTimers();
+      let finish!: (result: any) => void;
+      let options: any;
+      ctx.mockExecutor.execute.mockImplementation((_prompt: string, received: any) => {
+        options = received;
+        return new Promise(resolve => { finish = resolve; });
+      });
+      try {
+        await negotiateActivity();
+        const run = ctx.handler.handleMessage({ type: 'command', messageId: 'activity-task', openId: 'owner', content: 'Inspect' });
+        await vi.waitFor(() => expect(options).toBeDefined());
+        expect(activityMessages()).toContainEqual(expect.objectContaining({ activity: { source: 'state', text: 'Working' } }));
+        options.onActivity({ source: 'reasoning_summary', text: 'Checking event handling' });
+        options.onActivity({ source: 'reasoning_summary', text: 'Checking timer cleanup' });
+        await vi.advanceTimersByTimeAsync(2_500);
+        expect(activityMessages().at(-1)).toMatchObject({ messageId: 'activity-task', threadId: 'default-thread-id', openId: 'owner',
+          activity: { source: 'reasoning_summary', text: 'Checking timer cleanup' } });
+        expect(ctx.mockWsClient.send.mock.calls.some(([value]: any[]) => value.chunk?.includes('Checking timer'))).toBe(false);
+        const oldOptions = options;
+        oldOptions.onActivity({ source: 'plan', text: 'Unsent last activity' });
+        finish({ success: true, output: 'Done' });
+        await run;
+        const count = activityMessages().length;
+        oldOptions.onActivity({ source: 'public_text', text: 'After completion' });
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(activityMessages()).toHaveLength(count);
+        const next = ctx.handler.handleMessage({ type: 'command', messageId: 'next-task', openId: 'owner', content: 'Continue' });
+        await vi.waitFor(() => expect(ctx.mockExecutor.execute).toHaveBeenCalledTimes(2));
+        oldOptions.onActivity({ source: 'plan', text: 'Stale previous task' });
+        await vi.advanceTimersByTimeAsync(2_500);
+        expect(JSON.stringify(activityMessages())).not.toContain('Stale previous task');
+        finish({ success: false, error: 'Stopped' });
+        await next;
+      } finally { vi.useRealTimers(); }
+    });
+
+    it('keeps pending activity behind real input requests and terminal errors', async () => {
+      vi.useFakeTimers();
+      let finish!: (result: any) => void;
+      let options: any;
+      let waiting = false;
+      ctx.mockExecutor.isWaitingInput = () => waiting;
+      ctx.mockExecutor.execute.mockImplementation((_prompt: string, received: any) => {
+        options = received;
+        return new Promise(resolve => { finish = resolve; });
+      });
+      try {
+        await negotiateActivity();
+        const run = ctx.handler.handleMessage({ type: 'command', messageId: 'input-task', content: 'Inspect' });
+        await vi.waitFor(() => expect(options).toBeDefined());
+        options.onActivity({ source: 'public_text', text: 'Pending prose' });
+        waiting = true;
+        options.onStream('Choose A or B');
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(2_500);
+        expect(activityMessages().at(-1)?.activity).toEqual({ source: 'state', text: 'Waiting for your input' });
+        expect(JSON.stringify(activityMessages())).not.toContain('Pending prose');
+        finish({ success: false, error: 'Input cancelled' });
+        await run;
+        expect(ctx.mockWsClient.send.mock.calls.at(-1)[0]).toMatchObject({ type: 'response', success: false, error: 'Input cancelled' });
+      } finally { vi.useRealTimers(); }
+    });
+
+    it('does not send activity to old Routers or after capability downgrade', async () => {
+      vi.useFakeTimers();
+      ctx.mockExecutor.execute.mockImplementation(async (_prompt: string, options: any) => {
+        options.onActivity?.({ source: 'public_text', text: 'Public progress' });
+        await vi.advanceTimersByTimeAsync(2_500);
+        return { success: true };
+      });
+      try {
+        await negotiateActivity();
+        await negotiateActivity(false);
+        await ctx.handler.handleMessage({ type: 'command', messageId: 'old-router', content: 'Inspect' });
+        expect(activityMessages()).toEqual([]);
+      } finally { vi.useRealTimers(); }
+    });
+
+    it('rechecks the worker-result publication barrier when a delayed snapshot flushes', async () => {
+      vi.useFakeTimers();
+      let pending = false;
+      let options: any;
+      let finish!: (result: any) => void;
+      const scope = {
+        isClosed: () => false, hasPendingResults: () => pending, getLaunchRevision: () => 0,
+        beginExecution: vi.fn(), finishExecution: vi.fn(), getRetainedResults: () => [],
+        close: vi.fn(async () => undefined), collectPendingResults: async () => [],
+        checkArtifactCloseout: async () => [], invoke: vi.fn(),
+      };
+      vi.spyOn((ctx.handler as any).delegation, 'begin').mockReturnValue(scope);
+      ctx.mockExecutor.configureDelegation = vi.fn();
+      ctx.mockExecutor.execute.mockImplementation((_prompt: string, received: any) => {
+        options = received;
+        return new Promise(resolve => { finish = resolve; });
+      });
+      try {
+        await negotiateActivity();
+        const run = ctx.handler.handleMessage({ type: 'command', messageId: 'barrier', content: 'Review' });
+        await vi.waitFor(() => expect(options).toBeDefined());
+        options.onActivity({ source: 'reasoning_summary', text: 'Premature queued summary' });
+        pending = true;
+        await vi.advanceTimersByTimeAsync(2_500);
+        expect(JSON.stringify(activityMessages())).not.toContain('Premature queued summary');
+        options.onActivity({ source: 'state', text: 'Native state must not bypass the gate' });
+        expect(activityMessages().at(-1)?.activity).toEqual({ source: 'state', text: 'Waiting for worker results' });
+        expect(JSON.stringify(activityMessages())).not.toContain('Native state');
+        pending = false;
+        options.onActivity({ source: 'plan', text: 'Synthesize retrieved results' });
+        await vi.advanceTimersByTimeAsync(2_500);
+        expect(activityMessages().at(-1)?.activity.text).toBe('Synthesize retrieved results');
+        finish({ success: true });
+        await run;
+      } finally { vi.useRealTimers(); }
+    });
+  });
+
   it('sends late task cards to the originating user and thread after another request completes', async () => {
     ctx.mockExecutor.execute.mockResolvedValue({ success: true, output: 'Started in background' });
     await ctx.handler.handleMessage({ type: 'command', messageId: 'launch-task', content: 'run tests', openId: 'original-user', timestamp: Date.now() });

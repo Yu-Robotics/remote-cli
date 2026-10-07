@@ -46,6 +46,7 @@ describe('WebSocketClient', () => {
       const connected = client.connect(); mockWs.on.mock.calls.find((c: any) => c[0] === 'open')[1](); await connected;
       await vi.waitFor(() => expect(mockWs.send).toHaveBeenCalled());
       expect(JSON.parse(mockWs.send.mock.calls[0][0]).data.capabilities.fileTransferV1).toBe(true);
+      expect(JSON.parse(mockWs.send.mock.calls[0][0]).data.capabilities.activityProgress).toBe(true);
       const nonce = 'a'.repeat(64);
       mockWs.on.mock.calls.find((c: any) => c[0] === 'message')[1](Buffer.from(JSON.stringify({ type: 'device_challenge', data: { nonce } })));
       const proof = JSON.parse(mockWs.send.mock.calls.at(-1)[0]);

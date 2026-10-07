@@ -144,6 +144,152 @@ describe('RouterServer', () => {
     vi.useRealTimers();
   });
 
+  describe('public activity progress', () => {
+    const envelope = { type: 'stream', streamType: 'activity', messageId: 'activity-task', openId: 'owner', threadId: 'thread-1' };
+    const activity = { source: 'plan', text: 'Checking deadline propagation' };
+    async function connect(capabilities: Record<string, boolean> = {}) {
+      await server.start();
+      mockFeishuHandler.setOnStartStreaming.mock.calls[0][0]('activity-task', 'owner', 'activity-card', 'device-1', 'thread-1');
+      const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
+      const ws = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
+      onConnection(ws, { socket: { remoteAddress: '127.0.0.1' } });
+      const receive = ws.on.mock.calls.find(call => call[0] === 'message')[1];
+      const send = (message: any) => receive(Buffer.from(JSON.stringify(message)));
+      await send({ type: 'binding_request', data: { deviceId: 'device-1', capabilities } });
+      return { send, capabilities: JSON.parse(ws.send.mock.calls[0][0]).data.capabilities,
+        stream: (server as any).streamingMessages.get('activity-task') };
+    }
+
+    it('negotiates main support independently and keeps activity out of transcript/final-output fallback', async () => {
+      const { send, stream, capabilities } = await connect({ activityProgress: true });
+      expect(capabilities).toEqual({ activityProgress: true });
+      const createdAt = stream.createdAt;
+      await send({ ...envelope, activity });
+      expect(stream.activity).toEqual(activity);
+      expect(stream.elements).toEqual([]);
+      expect(stream.currentTextContent).toBe('');
+      expect(stream.createdAt).toBe(createdAt);
+      expect(mockFeishuHandler.updateStreamingMessage.mock.calls.at(-1)[5]).toEqual(activity);
+      await send({ ...envelope, type: 'response', success: true, output: 'Nonstreamed final result' });
+      expect(JSON.stringify(mockFeishuHandler.finalizeStreamingMessage.mock.calls.at(-1)[1])).toContain('Nonstreamed final result');
+      expect(JSON.stringify(mockFeishuHandler.finalizeStreamingMessage.mock.calls.at(-1)[1])).not.toContain(activity.text);
+      const count = mockFeishuHandler.updateStreamingMessage.mock.calls.length;
+      await send({ ...envelope, activity: { ...activity, text: 'Late' } });
+      expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenCalledTimes(count);
+    });
+
+    it('ignores unnegotiated main and worker activity without changing legacy latestText', async () => {
+      const { send, stream, capabilities } = await connect({ delegationProgress: true, delegationProgressText: true });
+      expect(capabilities.activityProgress).toBeUndefined();
+      await send({ ...envelope, activity });
+      expect(stream.activity).toBeUndefined();
+      await send({ ...envelope, streamType: 'delegation_progress', delegationProgress: {
+        taskId: 'worker', backend: 'codex', phase: 'text', latestText: 'Legacy latest text', activity,
+      } });
+      expect(stream.delegationProgress.get('worker').activity).toBeUndefined();
+      expect(stream.delegationProgress.get('worker').latestText).toBe('Legacy latest text');
+    });
+
+    it('rejects malformed, wrong-owner, wrong-thread, wrong-device, replaced-connection and finalizing events', async () => {
+      const { send, stream } = await connect({ activityProgress: true, delegationProgress: true });
+      for (const value of [null, [], 'text', { source: 'thinking', text: 'private' }, { source: 'tool', text: [] }, { source: 'plan', text: '\u0000' }]) {
+        await send({ ...envelope, activity: value });
+      }
+      for (const patch of [{ openId: 'other' }, { threadId: 'other' }, { threadId: undefined }, { messageId: 'unknown' }]) {
+        await send({ ...envelope, ...patch, activity });
+        await send({ ...envelope, ...patch, streamType: 'delegation_progress', delegationProgress: { taskId: 'worker', backend: 'codex', phase: 'text', activity } });
+      }
+      stream.deviceId = 'other-device';
+      await send({ ...envelope, activity });
+      stream.deviceId = 'device-1';
+      mockConnectionHub.isCurrentConnection.mockReturnValueOnce(false);
+      await send({ ...envelope, activity });
+      stream.finalizing = true;
+      await send({ ...envelope, activity });
+      expect(stream.activity).toBeUndefined();
+      expect(stream.delegationProgress.size).toBe(0);
+      expect(mockFeishuHandler.updateStreamingMessage).not.toHaveBeenCalled();
+    });
+
+    it('coalesces pending activity/text patches and waits before finalization without allowing late updates', async () => {
+      const { send, stream } = await connect({ activityProgress: true });
+      let release!: () => void;
+      mockFeishuHandler.updateStreamingMessage.mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }));
+      const first = send({ ...envelope, activity });
+      await Promise.resolve();
+      await send({ ...envelope, activity: { source: 'tool', text: 'Verifying the result' } });
+      await send({ ...envelope, streamType: 'text', chunk: 'Public response' });
+      expect(stream.updatePending).toBe(true);
+      const final = send({ ...envelope, type: 'response', success: false, error: 'Task failed' });
+      expect(stream.finalizing).toBe(true);
+      await send({ ...envelope, activity: { ...activity, text: 'Too late' } });
+      expect(mockFeishuHandler.finalizeStreamingMessage).not.toHaveBeenCalled();
+      release();
+      await Promise.all([first, final]);
+      expect(mockFeishuHandler.finalizeStreamingMessage.mock.calls.at(-1)[10]).toBe(false);
+      expect(JSON.stringify(mockFeishuHandler.finalizeStreamingMessage.mock.calls.at(-1)[1])).toContain('Public response');
+      expect(stream.activity.text).toBe('Verifying the result');
+    });
+
+    it('accepts activity-only Worker text updates, preserves lifecycle activity, and protects input/results', async () => {
+      const { send, stream } = await connect({ activityProgress: true, delegationProgress: true });
+      const progress = (phase: string, fields: any = {}) => send({ ...envelope, streamType: 'delegation_progress',
+        delegationProgress: { taskId: 'worker', backend: 'codex', phase, ...fields } });
+      await progress('started', { activity });
+      const worker = stream.delegationProgress.get('worker');
+      const index = worker.elementIndex;
+      const length = stream.elements.length;
+      await progress('tool_use', { toolUse: { id: 'read', name: 'Read' }, activity: { source: 'tool', text: 'Reading the handler' } });
+      const toolTime = worker.lastToolActivityAt;
+      const streamTime = stream.createdAt;
+      await vi.advanceTimersByTimeAsync(100);
+      await progress('text', { activity: { source: 'public_text', text: 'Comparing paths' }, latestText: 'Not negotiated' });
+      expect(worker.phase).toBe('tool_use');
+      expect(worker.activity.text).toBe('Comparing paths');
+      expect(worker.latestText).toBeUndefined();
+      expect(worker.lastToolActivityAt).toBe(toolTime);
+      expect(stream.createdAt).toBe(streamTime);
+      await progress('waiting_input', { summary: 'Choose a path' });
+      await progress('text', { activity });
+      expect(worker.phase).toBe('waiting_input');
+      expect(worker.inputRequest).toBe('Choose a path');
+      await progress('text', { activity, waitingForInput: 'false' });
+      await progress('text', { activity, waitingForInput: true });
+      expect(worker.phase).toBe('waiting_input');
+      await progress('text', { activity: { source: 'public_text', text: 'Resumed after your choice' }, waitingForInput: false });
+      expect(worker.phase).toBe('text');
+      expect(worker.inputRequest).toBeUndefined();
+      expect(worker.activity.text).toBe('Resumed after your choice');
+      await progress('succeeded', { summary: 'Final worker result' });
+      const snapshot = JSON.stringify(stream.elements);
+      await progress('text', { activity });
+      expect(JSON.stringify(stream.elements)).toBe(snapshot);
+      expect(snapshot).toContain('Final worker result');
+      expect(snapshot).not.toContain('Comparing paths');
+      expect(snapshot).not.toContain('Resumed after your choice');
+      expect(worker.elementIndex).toBe(index);
+      expect(stream.elements).toHaveLength(length);
+    });
+
+    it('preserves legacy post-input text progress without requiring a new input-state field', async () => {
+      const { send, stream } = await connect({ delegationProgress: true, delegationProgressText: true });
+      const progress = (phase: string, extra: any = {}) => send({ ...envelope, streamType: 'delegation_progress',
+        delegationProgress: { taskId: 'legacy-worker', backend: 'codex', phase, ...extra } });
+      await progress('waiting_input', { summary: 'Choose a path' });
+      await progress('text', { latestText: 'Legacy worker resumed' });
+      const worker = stream.delegationProgress.get('legacy-worker');
+      expect(worker.phase).toBe('text');
+      expect(worker.inputRequest).toBeUndefined();
+      expect(worker.latestText).toBe('Legacy worker resumed');
+    });
+
+    it('does not accept Worker activity with main support alone', async () => {
+      const { send, stream } = await connect({ activityProgress: true });
+      await send({ ...envelope, streamType: 'delegation_progress', delegationProgress: { taskId: 'worker', backend: 'codex', phase: 'text', activity } });
+      expect(stream.delegationProgress.size).toBe(0);
+    });
+  });
+
   describe('task recovery', () => {
     const resume = {
       type: 'task_resume', messageId: 'recovered-1', openId: 'user-1', threadId: 'thread-1',
@@ -1229,7 +1375,8 @@ describe('RouterServer', () => {
       undefined,
       undefined,
       undefined,
-      undefined
+      undefined,
+      false
     );
   });
 

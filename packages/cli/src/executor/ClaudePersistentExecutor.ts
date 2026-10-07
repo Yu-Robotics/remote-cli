@@ -1,7 +1,8 @@
 import { spawn, ChildProcess } from 'child_process';
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import { claudeCodeHooks } from '../hooks/ClaudeCodeHooks';
-import { StructuredContent, ContentBlockUnion, ToolUseInfo, ToolResultInfo, Attachment, ApprovalRequestInfo, ApprovalAction, ApprovalStatus } from '../types';
+import { StructuredContent, ContentBlockUnion, ToolUseInfo, ToolResultInfo, Attachment, ApprovalRequestInfo, ApprovalAction, ApprovalStatus, ActivityProgressInfo } from '../types';
+import { ActivityTracker } from './Activity';
 import { ClaudeSandbox } from './claude/ClaudeSandbox';
 import { evaluateFileWrite } from './claude/ClaudeFilePolicy';
 import type { ClaudeSandboxConfig } from '../types/config';
@@ -132,6 +133,8 @@ export interface PersistentClaudeOptions {
   onStream?: (chunk: string) => void;
   /** Assistant response text only; excludes thinking and process notices. */
   onDisplayText?: (chunk: string) => void;
+  /** Bounded public activity snapshot; excludes raw thinking and tool output. */
+  onActivity?: (activity: ActivityProgressInfo) => void;
   /** Structured content callback (for rich formatting) */
   onStructuredContent?: (content: StructuredContent) => void;
   /** Tool use callback (for rich formatting) */
@@ -215,6 +218,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
   private currentCommandResolve?: (result: PersistentClaudeResult) => void;
   private currentCommandReject?: (error: Error) => void;
   private currentTimeoutTimer?: NodeJS.Timeout;
+  private readonly activityTracker = new ActivityTracker();
 
   // Plan mode state
   private isInPlanMode = false;
@@ -1056,6 +1060,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
     if (this.isInPlanMode) this.planModeBuffer.push(text);
     this.currentStreamCallback?.(text);
     this.currentDisplayTextCallback?.(text);
+    this.activityTracker.emitPublicText(text);
   }
 
   private handleStreamEvent(message: ClaudeOutputMessage): void {
@@ -1283,6 +1288,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
                 }
 
                 // Send structured tool use event if callback is available
+                this.activityTracker.emitTool(block.name || 'unknown', block.input || {});
                 if (this.currentToolUseCallback) {
                   this.currentToolUseCallback({
                     name: block.name || 'unknown',
@@ -1652,6 +1658,8 @@ export class ClaudePersistentExecutor extends EventEmitter {
     this.currentPlanModeCallback = undefined;
     this.currentCommandResolve = undefined;
     this.currentCommandReject = undefined;
+    this.activityTracker.reset();
+    this.activityTracker.setCallback(undefined);
     if (this.currentTimeoutTimer) {
       clearTimeout(this.currentTimeoutTimer);
       this.currentTimeoutTimer = undefined;
@@ -1715,6 +1723,8 @@ export class ClaudePersistentExecutor extends EventEmitter {
     this.currentPlanModeCallback = command.options.onPlanMode;
     this.currentApprovalRequestCallback = command.options.onApprovalRequest;
     this.currentApprovalResolvedCallback = command.options.onApprovalResolved;
+    this.activityTracker.setCallback(command.options.onActivity);
+    this.activityTracker.reset();
     this.approvalTurnActive = true;
     this.currentCommandResolve = command.resolve;
     this.currentCommandReject = command.reject;

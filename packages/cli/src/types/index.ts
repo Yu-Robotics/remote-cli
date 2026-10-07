@@ -56,6 +56,10 @@ export interface DelegationProgressInfo {
   phase: DelegationProgressPhase;
   /** This worker's bounded execution snapshot, never the coordinator's settings. */
   executionMetadata?: ExecutionMetadata;
+  /** Optional public activity snapshot; never a result or worker liveness signal. */
+  activity?: ActivityProgressInfo;
+  /** Verified native input state, emitted only with activity-progress support. */
+  waitingForInput?: boolean;
   objective?: string;
   toolUse?: ToolUseInfo;
   toolResult?: ToolResultInfo;
@@ -194,7 +198,7 @@ export interface IncomingMessage {
 /**
  * Stream message types
  */
-export type StreamType = 'text' | 'tool_use' | 'tool_result' | 'redacted_thinking' | 'plan_mode' | 'image' | 'delegation_progress';
+export type StreamType = 'text' | 'tool_use' | 'tool_result' | 'redacted_thinking' | 'plan_mode' | 'image' | 'delegation_progress' | 'activity';
 
 /**
  * Background task notification payload shared by executor backends
@@ -238,6 +242,12 @@ export interface ExecutionMetadata {
   effortSource: ExecutionMetadataSource;
 }
 
+/** Public progress provenance, not private reasoning or an estimated percentage. */
+export interface ActivityProgressInfo {
+  source: 'public_text' | 'reasoning_summary' | 'plan' | 'tool' | 'state';
+  text: string;
+}
+
 /** Outgoing message to router server. */
 export interface OutgoingMessage {
   type: 'result' | 'progress' | 'status' | 'pong' | 'structured' | 'stream' | 'response' | 'task_notification' | 'queue_started' | 'task_resume' | 'stream_context';
@@ -263,6 +273,8 @@ export interface OutgoingMessage {
   toolResult?: ToolResultInfo;
   /** Delegated-worker lifecycle update (when streamType === 'delegation_progress'). */
   delegationProgress?: DelegationProgressInfo;
+  /** Capability-negotiated coordinator activity, separate from answer text. */
+  activity?: ActivityProgressInfo;
   /** Plan content (when streamType === 'plan_mode') */
   planContent?: string;
   /** Generated image content (when streamType === 'image') */

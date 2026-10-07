@@ -14,6 +14,7 @@ import type {
 import { PiClient } from './pi/PiClient';
 import { sameConnection, type DelegationConnection } from '../delegation/contract';
 import { assertWorkingDirectoryExists } from '../utils/WorkingDirectory';
+import { ActivityTracker } from './Activity';
 import {
   formatPiModelRef,
   isPiThinkingLevel,
@@ -210,6 +211,7 @@ export class PiExecutor implements IExecutor {
   private sessionId: string | null = null;
   private sessionFile: string | null = null;
   private activeTurn: ActiveTurn | null = null;
+  private readonly activityTracker = new ActivityTracker();
   private pendingUi: PendingUiRequest | null = null;
   private destroyed = false;
   private delegation?: DelegationConnection;
@@ -298,6 +300,8 @@ export class PiExecutor implements IExecutor {
         }, DEFAULT_TURN_TIMEOUT_MS);
       }
       this.activeTurn = active;
+      this.activityTracker.setCallback(options.onActivity);
+      this.activityTracker.reset();
 
       const settled = new Promise<void>((settle) => {
         active.settle = settle;
@@ -830,6 +834,7 @@ export class PiExecutor implements IExecutor {
         active.output.push(delta.delta);
         active.options.onStream?.(delta.delta);
         active.options.onDisplayText?.(delta.delta);
+        this.activityTracker.emitPublicText(delta.delta);
       }
       return;
     }
@@ -844,6 +849,7 @@ export class PiExecutor implements IExecutor {
         active.output.push(text);
         active.options.onStream?.(text);
         active.options.onDisplayText?.(text);
+        this.activityTracker.emitPublicText(text);
       }
       return;
     }
@@ -854,6 +860,7 @@ export class PiExecutor implements IExecutor {
         active.output.push(text);
         active.options.onStream?.(text);
         active.options.onDisplayText?.(text);
+        this.activityTracker.emitPublicText(text);
       }
       return;
     }
@@ -869,6 +876,7 @@ export class PiExecutor implements IExecutor {
         name: mapped.name,
         input: mapped.input,
       });
+      this.activityTracker.emitTool(mapped.name, mapped.input);
       return;
     }
 
@@ -1042,6 +1050,8 @@ export class PiExecutor implements IExecutor {
     const active = this.activeTurn;
     if (!active) return;
     this.activeTurn = null;
+    this.activityTracker.reset();
+    this.activityTracker.setCallback(undefined);
     if (active.timeoutTimer) clearTimeout(active.timeoutTimer);
     active.settle?.();
     this.cancelPendingUi(true);

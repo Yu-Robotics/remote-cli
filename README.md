@@ -29,6 +29,31 @@ The note describes the final execution or synthesis turn, not a later thread pre
 
 From CLI and Router 1.6.133, each managed delegated worker also shows its own model and effort in the visible metadata area above its collapsed activity details, using the same gray style. Values belong to that worker's execution attempt, never the coordinator. Existing backend events can refine the note while the worker runs; retained terminal task results keep the final snapshot after process cleanup. Queued or unstarted tasks have no execution attribution. No extra model requests are made, and older peers retain their existing behavior.
 
+### Public Activity
+
+From CLI and Router 1.6.144, the latest active reply card ends with one mutable
+Running row after transcript, tools, and worker sections. It follows the newest
+continuation page instead of staying below the title. On completion it gives way
+to the existing terminal status, model/effort note, and thread controls. Each
+managed worker shows its own activity below its identity; input requests and final
+results take precedence, and missing terminal output keeps a labeled last activity.
+
+Updates come from public assistant text, explicit Codex commentary and public
+reasoning-summary events, plan steps, and safe tool descriptions. Raw thinking,
+redacted content, replayed history, command arguments, and tool output are not
+activity sources. A plan step is not an estimated percentage or proof of success;
+unfinished or blocked plans are not marked complete merely because a turn ends.
+Providers and model settings may emit no public summaries, so a generic state or
+tool label remains available without extra model calls or prompt injection.
+
+The optional `activityProgress` capability preserves protocol version 1 and old
+peers. Snapshots are bounded to 240 Unicode code points and coalesced at 2.5 seconds.
+Worker activity also requires `delegationProgress`, independently of legacy text
+snapshots. Activity does not extend worker timeouts, bypass pending-result gates,
+or survive a terminal event as a new Running update. Both packages need this
+release for the new presentation; live native coverage excludes uninstalled Pi
+and ZCode backends.
+
 ### Usage Examples
 
 <table>
