@@ -3,6 +3,12 @@ import Koa from 'koa';
 import Router from '@koa/router';
 import { WebSocketServer, WebSocket } from 'ws';
 import { Server as HttpServer } from 'http';
+import { promises as fs } from 'fs';
+import os from 'os';
+import path from 'path';
+import { OpenCodeExecutor } from '../../cli/src/executor/OpenCodeExecutor';
+import { DirectoryGuard } from '../../cli/src/security/DirectoryGuard';
+import type { AcpEventCallbacks, AcpTransport } from '../../cli/src/executor/acp/AcpClient';
 import { RouterServer } from '../src/server';
 import { ConfigManager } from '../src/config/ConfigManager';
 import { JsonStore } from '../src/storage/JsonStore';
@@ -170,13 +176,13 @@ describe('RouterServer', () => {
       await send({ ...envelope, streamType: 'text', chunk: 'Before tool' });
       await send(use('read-1'));
       const index = stream.toolCalls.get('read-1').elementIndex;
-      expect(stream.elements[index].header.title.content).toContain("<font color='blue'>⏳</font>");
+      expect(stream.elements[index].header.title.content).toContain("<font color='blue'>•</font>");
       await send({ ...envelope, streamType: 'text', chunk: 'After tool' });
       await send(result('read-1'));
       expect(stream.elements).toHaveLength(3);
       expect(stream.elements[0].content).toBe('Before tool');
       expect(stream.elements[2].content).toBe('After tool');
-      expect(stream.elements[index].header.title.content).toContain("<font color='grey'>•</font>");
+      expect(stream.elements[index].header.title.content).toContain("<font color='green'>•</font>");
       expect(stream.elements[index].expanded).toBe(false);
       expect(JSON.stringify(stream.elements[index])).toContain('/project/example.ts');
       expect(JSON.stringify(stream.elements[index])).toContain('Example output');
@@ -194,14 +200,84 @@ describe('RouterServer', () => {
       await send(result('read-full-identifier'));
       await send(result('bash-full-identifier', 'Test failed', true));
       expect(stream.elements).toHaveLength(3);
-      expect(stream.elements[0].header.title.content).toBe("<font color='grey'>•</font> <raw>Read</raw> · <raw>config.ts</raw>");
-      expect(stream.elements[1].header.title.content).toBe("<font color='grey'>×</font> <raw>Bash</raw> · <raw>Run tests</raw>");
+      expect(stream.elements[0].header.title.content).toBe("<font color='green'>•</font> <raw>Read</raw> · <raw>config.ts</raw>");
+      expect(stream.elements[1].header.title.content).toBe("<font color='red'>•</font> <raw>Bash</raw> · <raw>Run tests</raw>");
       expect(JSON.stringify(stream.elements[0].elements)).toContain('read-full-identifier');
       expect(JSON.stringify(stream.elements[1].elements)).toContain('bash-full-identifier');
       expect(stream.elements[2].content).toBe('While tools are running');
       await send(use('bash-full-identifier', 'Bash', { command: 'npm run build' }));
-      expect(stream.elements[3].header.title.content).toBe("<font color='blue'>⏳</font> <raw>Bash</raw>");
+      expect(stream.elements[3].header.title.content).toBe("<font color='blue'>•</font> <raw>Bash</raw>");
       expect(stream.toolCalls.get('bash-full-identifier').summary).toBeUndefined();
+    });
+
+    it('updates a native title in its fixed slot and never substitutes execution activity into tool headings', async () => {
+      const { send, stream } = await connect();
+      const start = use('native-call', 'Bash', { command: 'npm test' });
+      await send({ ...start, toolUse: { ...start.toolUse, title: 'Preparing tests' } });
+      const index = stream.toolCalls.get('native-call').elementIndex;
+      await send({ ...envelope, streamType: 'activity', activity: { source: 'public_text', text: 'Execution-wide update' } });
+      await send({ ...start, toolUse: { ...start.toolUse, title: 'Run unit tests' } });
+      expect(stream.elements).toHaveLength(1);
+      expect(stream.toolCalls.get('native-call').elementIndex).toBe(index);
+      expect(stream.elements[index].header.title.content).toContain('Run unit tests');
+      expect(stream.elements[index].header.title.content).not.toContain('Execution-wide update');
+      await send(result('native-call', 'Failed', true));
+      expect(stream.elements[index].header.title.content).toBe("<font color='red'>•</font> <raw>Bash</raw> · <raw>Run unit tests</raw>");
+      await send(use('native-call', 'Bash', { command: 'npm run build' }));
+      expect(stream.elements).toHaveLength(2);
+      expect(stream.elements[1].header.title.content).toBe("<font color='blue'>•</font> <raw>Bash</raw>");
+      expect(stream.toolCalls.get('native-call').summary).toBeUndefined();
+    });
+
+    it.each([undefined, 'pending', 'completed'])('keeps one ACP result-first row after a late identity and repeated terminal title (status=%s)', async status => {
+      const { send, stream } = await connect();
+      const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'remote-cli-caption-pairing-')));
+      let callbacks: AcpEventCallbacks = {};
+      const pending: Promise<void>[] = [];
+      const forwardedUses: unknown[] = [];
+      const flush = async () => { await Promise.all(pending.splice(0)); };
+      const transport: AcpTransport = {
+        initialize: async () => ({}), newSession: async () => ({ sessionId: 'caption-session', configOptions: [] }),
+        loadSession: async () => ({}), setConfigOption: async () => ({}), deleteSession: async () => {},
+        sendCancel: () => {}, destroy: () => {},
+        prompt: async () => {
+          callbacks.onToolResult?.({ toolCallId: 'call-1', status: 'completed', rawOutput: 'First result' });
+          await flush();
+          callbacks.onToolCall?.({ toolCallId: 'call-1', kind: 'execute', title: 'Bash', status, rawInput: { command: 'npm test' } });
+          await flush();
+          callbacks.onToolResult?.({ toolCallId: 'call-1', title: 'Run checks', status: 'completed', rawOutput: 'Repeated result' });
+          await flush();
+          expect(stream.elements).toHaveLength(1);
+          expect(forwardedUses).toHaveLength(1);
+          expect(JSON.stringify(stream.elements[0])).toContain('Repeated result');
+          expect(stream.elements[0].header.title.content).toBe("<font color='green'>•</font> <raw>Bash</raw>");
+          callbacks.onToolCall?.({ toolCallId: 'call-1', kind: 'execute', title: 'Run unit tests', status: 'pending', rawInput: { command: 'npm test' } });
+          await flush();
+          callbacks.onToolCall?.({ toolCallId: 'call-1', title: 'Verify unit tests' });
+          await flush();
+          expect(stream.elements).toHaveLength(2);
+          callbacks.onToolResult?.({ toolCallId: 'call-1', title: 'Terminal-only label', status: 'failed', rawOutput: 'Failed' });
+          await flush();
+          expect(stream.elements).toHaveLength(2);
+          expect(stream.elements[1].header.title.content).toBe("<font color='red'>•</font> <raw>Bash</raw> · <raw>Verify unit tests</raw>");
+          return { stopReason: 'end_turn' };
+        },
+      };
+      const executor = new OpenCodeExecutor(new DirectoryGuard([directory]), { initialWorkingDirectory: directory,
+        sessionBaseDir: path.join(directory, 'sessions'), clientFactory: next => { callbacks = next; return transport; } });
+      try {
+        const outcome = await executor.execute('inspect', {
+          onToolUse: tool => { forwardedUses.push(tool); pending.push(send({ ...envelope, streamType: 'tool_use', toolUse: tool })); },
+          onToolResult: tool => { pending.push(send({ ...envelope, streamType: 'tool_result', toolResult: tool })); },
+        });
+        // The executor converts prompt exceptions into failure results; do not
+        // let an inner assertion become a silently accepted execution failure.
+        expect(outcome.success).toBe(true);
+        expect(stream.elements).toHaveLength(2);
+      } finally {
+        await executor.destroy();
+        await fs.rm(directory, { recursive: true, force: true });
+      }
     });
 
     it('keeps opaque IDs with different whitespace distinct in pairing and expanded details', async () => {
@@ -217,8 +293,8 @@ describe('RouterServer', () => {
       expect(stream.toolCalls.get(spacedId).elementIndex).toBe(0);
       expect(stream.toolCalls.get(compactId).elementIndex).toBe(1);
       const [spaced, compact] = stream.elements;
-      expect(spaced.header.title.content).toContain("<font color='grey'>•</font>");
-      expect(compact.header.title.content).toContain("<font color='grey'>×</font>");
+      expect(spaced.header.title.content).toContain("<font color='green'>•</font>");
+      expect(compact.header.title.content).toContain("<font color='red'>•</font>");
       expect(spaced.elements[0].content).toContain(`**Tool ID:** <raw>${spacedId}</raw>\n`);
       expect(compact.elements[0].content).toContain(`**Tool ID:** <raw>${compactId}</raw>\n`);
       expect(JSON.stringify(spaced.elements)).toContain('Spaced ID succeeded');
@@ -245,8 +321,8 @@ describe('RouterServer', () => {
       expect(stream.elements).toHaveLength(length);
       expect(worker.elementIndex).toBe(workerIndex);
       expect(JSON.stringify(stream.elements[workerIndex + 1])).toContain('Review completed');
-      expect(stream.elements[stream.toolCalls.get('read-1').elementIndex].header.title.content).toContain("<font color='grey'>•</font>");
-      expect(stream.elements[stream.toolCalls.get('bash-1').elementIndex].header.title.content).toContain("<font color='grey'>×</font>");
+      expect(stream.elements[stream.toolCalls.get('read-1').elementIndex].header.title.content).toContain("<font color='green'>•</font>");
+      expect(stream.elements[stream.toolCalls.get('bash-1').elementIndex].header.title.content).toContain("<font color='red'>•</font>");
       expect(stream.toolCalls.size).toBe(2);
     });
 
@@ -255,8 +331,8 @@ describe('RouterServer', () => {
       await send(use(id));
       await send(result(id));
       expect(stream.elements).toHaveLength(2);
-      expect(stream.elements[0].header.title.content).toContain("<font color='blue'>⏳</font>");
-      expect(stream.elements[1].header.title.content).toContain("<font color='grey'>•</font>");
+      expect(stream.elements[0].header.title.content).toContain("<font color='blue'>•</font>");
+      expect(stream.elements[1].header.title.content).toContain("<font color='green'>•</font>");
       expect(stream.toolCalls.size).toBe(0);
     });
 
@@ -267,9 +343,9 @@ describe('RouterServer', () => {
       await send(use('orphan-1', 'Bash', { command: 'npm test' }));
       expect(stream.elements).toHaveLength(2);
       expect(stream.elements[0].header.title.content).toContain('Bash');
-      expect(stream.elements[0].header.title.content).toContain("<font color='grey'>×</font>");
+      expect(stream.elements[0].header.title.content).toContain("<font color='red'>•</font>");
       expect(JSON.stringify(stream.elements[0])).toContain('Late result');
-      expect(stream.elements[1].header.title.content).toContain("<font color='blue'>⏳</font>");
+      expect(stream.elements[1].header.title.content).toContain("<font color='blue'>•</font>");
     });
 
     it('keeps repeated updates in place and a new start after completion independent', async () => {
@@ -295,7 +371,7 @@ describe('RouterServer', () => {
       mockFeishuHandler.setOnStartStreaming.mock.calls[0][0]('other-task', 'owner', 'other-card', 'device-1', 'thread-1');
       await send(use('shared-1', 'Bash', { command: 'x'.repeat(10_000) }));
       await send({ ...result('shared-1', 'Other request'), messageId: 'other-task' });
-      expect(stream.elements[0].header.title.content).toContain("<font color='blue'>⏳</font>");
+      expect(stream.elements[0].header.title.content).toContain("<font color='blue'>•</font>");
       expect(JSON.stringify(stream.toolCalls.get('shared-1'))).not.toContain('x'.repeat(10_000));
       expect(JSON.stringify(stream.toolCalls.get('shared-1')).length).toBeLessThan(2000);
       const other = (server as any).streamingMessages.get('other-task');
@@ -309,7 +385,7 @@ describe('RouterServer', () => {
       await send(use('pending-1'));
       await send({ ...envelope, type: 'response', success: true });
       const elements = mockFeishuHandler.finalizeStreamingMessage.mock.lastCall[1];
-      expect(elements[0].header.title.content).toContain("<font color='blue'>⏳</font>");
+      expect(elements[0].header.title.content).toContain("<font color='blue'>•</font>");
       expect(JSON.stringify(elements)).not.toContain('**Status:** Succeeded');
       const updates = mockFeishuHandler.updateStreamingMessage.mock.calls.length;
       await send(result('pending-1', 'Late output'));

@@ -77,6 +77,37 @@ describe('main activity card tail', () => {
     expect(JSON.stringify(delivered.get('root'))).not.toContain(activity.text);
   });
 
+  it('keeps bounded native call labels on one row through real pagination, shrink and completion', async () => {
+    const info = { id: 'native-edit', name: 'Edit', title: 'Update configuration ' + '\u001b[31m' + '🧪'.repeat(100),
+      input: { file_path: '/project/config.ts' } };
+    const state = { elementIndex: 140, id: info.id, name: info.name, summary: createToolCallSummary(info),
+      inputElements: createToolUseElement(info) };
+    const plain = createToolCallElement({ ...state, summary: undefined });
+    const pending = createToolCallElement(state);
+    expect((handler as any).countTaggedNodes([pending])).toBe((handler as any).countTaggedNodes([plain]));
+    expect(Array.from(state.summary!)).toHaveLength(60);
+    const diff = Array.from({ length: 6 }, (_, i) => `--- a/file-${i}.ts\n+++ b/file-${i}.ts\n@@ -1 +1 @@\n-old\n+new`).join('\n');
+    const large = createToolCallElement({ ...state, resultElements: createToolResultElement({ tool_use_id: info.id, content: '', diff }) });
+    const small = createToolCallElement({ ...state, isError: true,
+      resultElements: createToolResultElement({ tool_use_id: info.id, content: 'Failed', is_error: true }) });
+    const prefix = elements(140);
+    await update([...prefix, pending], activity);
+    expect(delivered.size).toBe(1);
+    await update([...prefix, large]);
+    expect(delivered.size).toBe(2);
+    await update([...prefix, small]);
+    expect(toolRows()).toHaveLength(1);
+    expect(toolRows()[0].header.title.content).toContain("<font color='red'>•</font>");
+    expect(toolRows()[0].header.title.content).toContain(state.summary);
+    expect(toolRows()[0].header.title.content).not.toContain(activity.text);
+    expect(runningCards().map(([id]) => id)).toEqual(['root']);
+    for (const body of delivered.values()) expect((handler as any).countTaggedNodes(body)).toBeLessThanOrEqual(150);
+    await handler.finalizeStreamingMessage('root', [...prefix, small], undefined, 'owner');
+    expect(toolRows()).toHaveLength(1);
+    expect(runningCards()).toHaveLength(0);
+    for (const body of delivered.values()) expect((handler as any).countTaggedNodes(body)).toBeLessThanOrEqual(150);
+  });
+
   it('migrates the tail across two and three pages, stripping sealed and surplus pages', async () => {
     await update(elements(3), activity);
     await update(elements(160));
@@ -112,7 +143,7 @@ describe('main activity card tail', () => {
     const toolRows = [...delivered.values()].flat().filter(element => element.tag === 'collapsible_panel'
       && element.header?.title?.content?.includes('Read'));
     expect(toolRows).toHaveLength(1);
-    expect(toolRows[0].header.title.content).toContain("<font color='grey'>•</font>");
+    expect(toolRows[0].header.title.content).toContain("<font color='green'>•</font>");
     expect(JSON.stringify(toolRows[0])).toContain('File contents');
     expect(runningCards()).toHaveLength(1);
     expect(runningCards()[0][0]).not.toBe('root');
@@ -156,9 +187,9 @@ describe('main activity card tail', () => {
       const tools = [...delivered.values()].flat().filter(element => element.element_id?.startsWith('tc_'));
       expect(tools).toHaveLength(2);
       expect(tools.find(element => element.element_id === `tc_${prefixCount}`).header.title.content)
-        .toBe("<font color='grey'>•</font> <raw>Read</raw> · <raw>config.ts</raw>");
+        .toBe("<font color='green'>•</font> <raw>Read</raw> · <raw>config.ts</raw>");
       expect(tools.find(element => element.element_id === `tc_${prefixCount + 1}`).header.title.content)
-        .toBe("<font color='grey'>×</font> <raw>Bash</raw> · <raw>Run tests</raw>");
+        .toBe("<font color='red'>•</font> <raw>Bash</raw> · <raw>Run tests</raw>");
     };
     checkPages();
     expect(await handler.finalizeStreamingMessage('root', body, undefined, 'owner', '/workspace', 'thread',
@@ -177,11 +208,11 @@ describe('main activity card tail', () => {
     expect(await update([...prefix, tool.large])).toBe(true);
     expect(delivered.size).toBe(2);
     expect(toolRows()).toHaveLength(1);
-    expect(toolRows()[0].header.title.content).toContain("<font color='grey'>•</font>");
+    expect(toolRows()[0].header.title.content).toContain("<font color='green'>•</font>");
     expect(await update([...prefix, tool.small])).toBe(true);
     expect((handler as any).messageChains.get('root')).toHaveLength(2);
     expect(toolRows()).toHaveLength(1);
-    expect(toolRows()[0].header.title.content).toContain("<font color='grey'>×</font>");
+    expect(toolRows()[0].header.title.content).toContain("<font color='red'>•</font>");
     expect(JSON.stringify(delivered.get('page-1'))).not.toContain('**Status:** Succeeded');
     expect(JSON.stringify(delivered.get('page-1'))).not.toContain('file-5.ts');
     expect(runningCards().map(([id]) => id)).toEqual(hasActivity ? ['root'] : []);
@@ -195,22 +226,22 @@ describe('main activity card tail', () => {
     client.im.message.patch.mockRejectedValueOnce(new Error('temporary rejection'));
     expect(await update([...prefix, tool.small])).toBe(false);
     expect(toolRows()).toHaveLength(1);
-    expect(toolRows()[0].header.title.content).toContain("<font color='grey'>•</font>");
+    expect(toolRows()[0].header.title.content).toContain("<font color='green'>•</font>");
     expect(JSON.stringify(delivered.get('root'))).not.toContain('Latest failure');
     expect((handler as any).toolPageRemainders.get('root').has(1)).toBe(true);
     client.im.message.patch.mockResolvedValueOnce({ code: 230099, msg: 'ErrCode: 11311 markdown content parse error' });
     expect(await update([...prefix, tool.small])).toBe(true);
     expect(toolRows()).toHaveLength(1);
-    expect(toolRows()[0].header.title.content).toContain("<font color='grey'>×</font>");
+    expect(toolRows()[0].header.title.content).toContain("<font color='red'>•</font>");
     expect((handler as any).plainTextCards.get('root').has(1)).toBe(true);
     const creates = client.im.message.create.mock.calls.length;
     expect(await update([...prefix, tool.large])).toBe(true);
     expect(client.im.message.create).toHaveBeenCalledTimes(creates);
     expect(toolRows()).toHaveLength(1);
-    expect(toolRows()[0].header.title.content).toContain("<font color='grey'>•</font>");
+    expect(toolRows()[0].header.title.content).toContain("<font color='green'>•</font>");
     expect(await update([...prefix, tool.small])).toBe(true);
     expect(toolRows()).toHaveLength(1);
-    expect(toolRows()[0].header.title.content).toContain("<font color='grey'>×</font>");
+    expect(toolRows()[0].header.title.content).toContain("<font color='red'>•</font>");
   });
 
   it.each([false, true])('clears an old owner before a backward migration between active pages (activity=%s)', async hasActivity => {
@@ -228,14 +259,14 @@ describe('main activity card tail', () => {
     expect(await update(body(tool.small))).toBe(false);
     expect(client.im.message.patch.mock.calls[0][0].path.message_id).toBe('page-1');
     expect(toolRows()).toHaveLength(1);
-    expect(toolRows()[0].header.title.content).toContain("<font color='grey'>•</font>");
+    expect(toolRows()[0].header.title.content).toContain("<font color='green'>•</font>");
     expect(JSON.stringify(delivered.get('root'))).not.toContain('Latest failure');
     expect((handler as any).toolPageRemainders.get('root').has(1)).toBe(true);
     client.im.message.patch.mockImplementation(patch);
     expect(await update(body(tool.small))).toBe(true);
     expect((handler as any).messageChains.get('root')).toHaveLength(2);
     expect(toolRows()).toHaveLength(1);
-    expect(toolRows()[0].header.title.content).toContain("<font color='grey'>×</font>");
+    expect(toolRows()[0].header.title.content).toContain("<font color='red'>•</font>");
     expect(delivered.get('root')!.some(element => element.element_id === 'tc_135')).toBe(true);
     expect(delivered.get('page-1')!.some(element => element.element_id === 'tc_135')).toBe(false);
     expect(runningCards().map(([id]) => id)).toEqual(hasActivity ? ['page-1'] : []);
@@ -257,7 +288,7 @@ describe('main activity card tail', () => {
     client.im.message.patch.mockImplementation(patch);
     expect(await update(body(tool.large))).toBe(true);
     expect(toolRows()).toHaveLength(1);
-    expect(toolRows()[0].header.title.content).toContain("<font color='grey'>•</font>");
+    expect(toolRows()[0].header.title.content).toContain("<font color='green'>•</font>");
     expect(delivered.get('page-1')!.some(element => element.element_id === 'tc_135')).toBe(true);
     expect(runningCards().map(([id]) => id)).toEqual(['page-1']);
   });
@@ -295,7 +326,7 @@ describe('main activity card tail', () => {
     expect((handler as any).toolPageRemainders.get('root').size).toBe(2);
     expect(await update([first.small, second.small])).toBe(true);
     expect(toolRows()).toHaveLength(2);
-    expect(toolRows().every(element => element.header.title.content.includes("<font color='grey'>×</font>"))).toBe(true);
+    expect(toolRows().every(element => element.header.title.content.includes("<font color='red'>•</font>"))).toBe(true);
     for (const [id, body] of delivered) {
       if (id !== 'root') expect(body.some(element => element.element_id?.startsWith('tc_'))).toBe(false);
       expect((handler as any).countTaggedNodes(body)).toBeLessThanOrEqual(150);
@@ -320,7 +351,7 @@ describe('main activity card tail', () => {
     expect(await handler.finalizeStreamingMessage('root', [tool.small], undefined, 'owner', '/workspace', 'thread',
       [{ id: 'thread', name: 'thread', status: 'idle' }], 'thread')).toBe(true);
     expect(toolRows()).toHaveLength(1);
-    expect(toolRows()[0].header.title.content).toContain("<font color='grey'>×</font>");
+    expect(toolRows()[0].header.title.content).toContain("<font color='red'>•</font>");
     expect(JSON.stringify(delivered.get('page-1'))).toContain('worker_context_clear');
     expect(handler.workerContexts.contentFor('page-1')).not.toContain('file-5.ts');
     await handler.workerContexts.click('owner', id, 'page-1');

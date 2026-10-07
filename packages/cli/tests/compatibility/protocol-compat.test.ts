@@ -48,6 +48,16 @@ describe('CLI wire compatibility', () => {
       type: 'heartbeat', timestamp: expect.any(Number),
     });
   });
+
+  it.each([{}, { title: 'Run unit tests', description: 'Verify the change' }])('preserves additive per-call labels on the existing tool-use stream (%j)', labels => {
+    const message = { type: 'stream', messageId: 'message-1', threadId: 'thread-1', streamType: 'tool_use',
+      toolUse: { id: 'call-1', name: 'Bash', input: { command: 'npm test' }, ...labels } };
+    client.send(message);
+    const sent = JSON.parse(socket.send.mock.calls.at(-1)![0]);
+    expect(sent).toEqual(message);
+    expect(sent.toolUse.input).toEqual({ command: 'npm test' });
+    expect(PROTOCOL_VERSION).toBe(1);
+  });
   it('omits disabled maintenance capabilities without changing normal legacy traffic', async () => {
     const disabled = new WebSocketClient('ws://localhost:3000', 'device-1', {
       maintenanceCapabilities: { updateNotice: false, subscriptionInspection: false },

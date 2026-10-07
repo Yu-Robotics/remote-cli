@@ -512,7 +512,9 @@ export abstract class AcpExecutor implements IExecutor {
         const merged = { ...previous, ...tool };
         this.activeToolCalls.set(tool.toolCallId, merged);
         const mapped = mapAcpToolCall(merged);
-        this.activeCallbacks.onToolUse?.({ id: tool.toolCallId, ...mapped });
+        this.activeCallbacks.onToolUse?.({ id: tool.toolCallId, ...mapped,
+          ...(typeof merged.title === 'string' ? { title: merged.title } : {}),
+        });
         this.activityTracker.emitTool(mapped.name, mapped.input, merged.title);
       },
       onToolResult: (tool) => {

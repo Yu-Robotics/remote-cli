@@ -19,9 +19,9 @@ describe('single tool-call disclosure', () => {
     const state = { name: tool.name, id: tool.id, summary: createToolCallSummary(tool), inputElements: createToolUseElement(tool) };
     const expected = ` <raw>${name}</raw> · <raw>${summary}</raw>`;
     for (const [color, symbol, label, completed] of [
-      ['blue', '⏳', 'Awaiting result', {}],
-      ['grey', '•', 'Succeeded', { resultElements: result() }],
-      ['grey', '×', 'Failed', { resultElements: result(true), isError: true }],
+      ['blue', '•', 'Awaiting result', {}],
+      ['green', '•', 'Succeeded', { resultElements: result() }],
+      ['red', '•', 'Failed', { resultElements: result(true), isError: true }],
     ] as const) {
       const panel = createToolCallElement({ ...state, ...completed });
       expect(panel.header.title.content).toBe(`<font color='${color}'>${symbol}</font>${expected}`);
@@ -34,7 +34,7 @@ describe('single tool-call disclosure', () => {
   });
 
   it.each([
-    ['Read', { file_path: '/project/config.ts', description: 'Read configuration' }, 'config.ts'],
+    ['Read', { file_path: '/project/config.ts', description: 'Read configuration' }, 'Read configuration'],
     ['Edit', { path: 'src/app.ts' }, 'app.ts'],
     ['Write', { file_path: 'C:\\project\\app.ts' }, 'app.ts'],
     ['NotebookEdit', { notebook_path: '/project/example.ipynb' }, 'example.ipynb'],
@@ -51,6 +51,32 @@ describe('single tool-call disclosure', () => {
     expect(createToolCallSummary({ name: name as string, input: args })).toBe(expected);
   });
 
+  it.each([
+    [{ description: 'Inspect configuration', title: 'Read file', input: { description: 'Input description', file_path: '/project/config.ts' } }, 'Inspect configuration'],
+    [{ title: 'Native title', input: { description: 'Input description' } }, 'Input description'],
+    [{ title: 'Run unit tests', input: { command: 'npm test', title: 'Input title' } }, 'Run unit tests'],
+    [{ title: '  Run\n tests  ', input: {} }, 'Run tests'],
+    [{ description: 42, title: {}, input: { description: 'Input description' } }, 'Input description'],
+    [{ description: '\u0000', title: 'Useful title', input: {} }, 'Useful title'],
+    [{ title: 'read', input: { file_path: '/project/config.ts' } }, 'config.ts'],
+    [{ title: '/project/config.ts', input: { file_path: '/project/config.ts' } }, 'config.ts'],
+    [{ title: 'Read', input: {} }, undefined],
+    [{ input: { command: 'private command argument', url: 'https://example.com/private-query', query: 'private query' } }, undefined],
+  ])('prefers meaningful per-call labels over file basenames without repeating the tool name (%j)', (fields, expected) => {
+    expect(createToolCallSummary({ id: 'call-1', name: 'Read', ...fields } as any)).toBe(expected);
+  });
+
+  it('renders native labels literally without allocating any additional card elements', () => {
+    const tool = { id: 'call-1', name: 'Bash', input: { command: 'npm test' }, title: '<at id=all>Run tests</at>' };
+    const base = { name: tool.name, id: tool.id, inputElements: createToolUseElement(tool) };
+    const plain = createToolCallElement(base);
+    const labelled = createToolCallElement({ ...base, summary: createToolCallSummary(tool) });
+    expect(countTags(labelled)).toBe(countTags(plain));
+    expect(labelled.header.title.content).toContain('<raw>&lt;at id=all&gt;Run tests&lt;/at&gt;</raw>');
+    expect(labelled.header.title.content).not.toContain('npm test');
+    expect(labelled.header.title.content).not.toContain('<at id=all>');
+  });
+
   it('bounds and escapes headings without exposing commands, directory prefixes, controls, or mentions', () => {
     const summary = createToolCallSummary({ name: 'Bash', input: { description: '\u001b[31m<at id=all>\u202e ' + '🧪'.repeat(80), command: 'private command argument' } })!;
     expect(Array.from(summary)).toHaveLength(60);
@@ -63,7 +89,7 @@ describe('single tool-call disclosure', () => {
     expect(panel.header.title.content).not.toContain('<at id=all>');
     expect(panel.header.title.content).not.toContain('/project/');
     expect(JSON.stringify(panel.elements)).toContain('**Tool ID:** <raw>&lt;at id=all&gt;</raw>');
-    expect(createToolCallElement({ name: 'Bash', summary: '\n\t' }).header.title.content).toBe("<font color='blue'>⏳</font> <raw>Bash</raw>");
+    expect(createToolCallElement({ name: 'Bash', summary: '\n\t' }).header.title.content).toBe("<font color='blue'>•</font> <raw>Bash</raw>");
     expect(createToolCallElement({ name: 'x'.repeat(100), summary: 'y'.repeat(1000) }).header.title.content).not.toContain('y'.repeat(61));
   });
 
@@ -87,7 +113,7 @@ describe('single tool-call disclosure', () => {
     const panel = createToolCallElement({ name: 'Read', id: 'read-1', inputElements, resultElements, isError: false });
     expect(panel.tag).toBe('collapsible_panel');
     expect(panel.expanded).toBe(false);
-    expect(panel.header.title.content).toContain("<font color='grey'>•</font>");
+    expect(panel.header.title.content).toContain("<font color='green'>•</font>");
     expect(panel.header.title.content).toContain('Read');
     expect(panel.elements).toHaveLength(2);
     expect(JSON.stringify(panel.elements)).toContain('**Input**');
@@ -99,10 +125,12 @@ describe('single tool-call disclosure', () => {
     expect(inputElements[1].elements[0].content).not.toContain('**Input**');
   });
 
-  it('does not invent success before any result arrives', () => {
-    const panel = createToolCallElement({ name: 'Read', id: 'read-1', inputElements: input() });
-    expect(panel.header.title.content).toContain("<font color='blue'>⏳</font>");
-    expect(panel.header.title.content).not.toContain("<font color='grey'>•</font>");
+  it.each([undefined, false, true])('keeps a blue pending dot before a result arrives regardless of the error flag (%s)', isError => {
+    const panel = createToolCallElement({ name: 'Read', id: 'read-1', inputElements: input(), isError });
+    expect(panel.header.title.content).toContain("<font color='blue'>•</font>");
+    expect(panel.header.title.content).not.toContain("<font color='green'>•</font>");
+    expect(panel.header.title.content).not.toContain("<font color='red'>•</font>");
+    expect(panel.elements[0].content).toContain('**Status:** Awaiting result');
     expect(JSON.stringify(panel.elements)).not.toContain('**Result**');
   });
 
@@ -118,8 +146,8 @@ describe('single tool-call disclosure', () => {
 
   it('keeps failed and empty outcomes explicit without dropping the input', () => {
     const failed = createToolCallElement({ name: 'Read', inputElements: input(), resultElements: result(true, 'Permission denied'), isError: true });
-    expect(failed.header.title.content).toContain("color='grey'");
-    expect(failed.header.title.content).toContain("<font color='grey'>×</font>");
+    expect(failed.header.title.content).toContain("color='red'");
+    expect(failed.header.title.content).toContain("<font color='red'>•</font>");
     expect(JSON.stringify(failed.elements)).toContain('Permission denied');
     expect(JSON.stringify(failed.elements)).toContain('/project/example.ts');
     const empty = createToolCallElement({ resultElements: result(false, '') });

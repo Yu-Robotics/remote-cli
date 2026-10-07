@@ -132,6 +132,52 @@ describe.each([
     expect(onToolResult).toHaveBeenCalledWith({ tool_use_id: 'read-1', content: 'Document contents', is_error: false });
   });
 
+  it('preserves per-call titles through argument updates without adding them to response text', async () => {
+    transport.prompt.mockImplementationOnce(async () => {
+      callbacks.onToolCall?.({ toolCallId: 'command-1', kind: 'execute', title: 'Preparing tests', rawInput: { command: 'npm test' } });
+      callbacks.onToolCall?.({ toolCallId: 'command-1', title: 'Run unit tests' });
+      callbacks.onToolResult?.({ toolCallId: 'command-1', status: 'completed', rawOutput: 'Passed' });
+      return { stopReason: 'end_turn' };
+    });
+    const onToolUse = vi.fn(), onToolResult = vi.fn();
+    const result = await executor.execute('review', { onToolUse, onToolResult });
+    expect(onToolUse.mock.calls.map(([tool]) => tool)).toEqual([
+      { id: 'command-1', name: 'Bash', title: 'Preparing tests', input: { command: 'npm test' } },
+      { id: 'command-1', name: 'Bash', title: 'Run unit tests', input: { command: 'npm test' } },
+    ]);
+    expect(onToolResult).toHaveBeenCalledWith({ tool_use_id: 'command-1', content: 'Passed', is_error: false });
+    expect(result.output).toBe('');
+  });
+
+  it('does not turn terminal-only titles into synthetic starts for owned, repeated or orphan results', async () => {
+    const events: any[] = [];
+    transport.prompt.mockImplementationOnce(async () => {
+      callbacks.onToolCall?.({ toolCallId: 'command-1', kind: 'execute', rawInput: { command: 'npm test' } });
+      callbacks.onToolResult?.({ toolCallId: 'command-1', title: 'Run unit tests', status: 'failed', rawOutput: 'Failed' });
+      callbacks.onToolResult?.({ toolCallId: 'command-1', title: 'Repeated title', status: 'failed' });
+      callbacks.onToolResult?.({ toolCallId: 'orphan', title: 'Orphan title', status: 'completed' });
+      return { stopReason: 'end_turn' };
+    });
+    await executor.execute('review', { onToolUse: tool => events.push(['use', tool]), onToolResult: tool => events.push(['result', tool]) });
+    expect(events.slice(0, 2)).toEqual([
+      ['use', { id: 'command-1', name: 'Bash', input: { command: 'npm test' } }],
+      ['result', { tool_use_id: 'command-1', content: 'Failed', is_error: true }],
+    ]);
+    expect(events.map(([type]) => type)).toEqual(['use', 'result', 'result', 'result']);
+  });
+
+  it('does not manufacture labels from commands, plans or thoughts when a tool has no title', async () => {
+    transport.prompt.mockImplementationOnce(async () => {
+      callbacks.onThoughtChunk?.({ type: 'text', text: 'PRIVATE_THOUGHT' });
+      callbacks.onPlan?.([{ content: 'Execution-wide plan', status: 'in_progress' }]);
+      callbacks.onToolCall?.({ toolCallId: 'command-1', kind: 'execute', rawInput: { command: 'npm test' } });
+      return { stopReason: 'end_turn' };
+    });
+    const onToolUse = vi.fn();
+    await executor.execute('review', { onToolUse });
+    expect(onToolUse).toHaveBeenCalledWith({ id: 'command-1', name: 'Bash', input: { command: 'npm test' } });
+  });
+
   it.each([false, true])('preserves replay semantics and filters thoughts with worker=%s', async managed => {
     await executor.execute('first turn', {});
     await executor.destroy();

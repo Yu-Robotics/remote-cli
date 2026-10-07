@@ -168,7 +168,7 @@ describe('OpenCodeExecutor', () => {
       return { stopReason: 'end_turn' };
     });
     await executor.execute('pwd', { onToolUse, onToolResult });
-    expect(onToolUse).toHaveBeenCalledWith({ id: 'tool-1', name: 'Bash', input: { command: 'pwd' } });
+    expect(onToolUse).toHaveBeenCalledWith({ id: 'tool-1', name: 'Bash', title: 'Run command', input: { command: 'pwd' } });
     expect(onToolResult).toHaveBeenCalledWith({ tool_use_id: 'tool-1', content: '/tmp', is_error: false });
   });
 
