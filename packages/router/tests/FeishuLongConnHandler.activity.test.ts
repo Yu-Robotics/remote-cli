@@ -3,7 +3,7 @@ import * as lark from '@larksuiteoapi/node-sdk';
 import { FeishuLongConnHandler } from '../src/feishu/FeishuLongConnHandler';
 import { ACTIVITY_ELEMENT_ID } from '../src/utils/ActivityProgress';
 import { WorkerContextCards } from '../src/feishu/WorkerContextCards';
-import { createDelegationProgressElements, createToolCallElement, createToolResultElement, createToolUseElement } from '../src/utils/ToolFormatter';
+import { createDelegationProgressElements, createToolCallElement, createToolCallSummary, createToolResultElement, createToolUseElement } from '../src/utils/ToolFormatter';
 
 vi.mock('@larksuiteoapi/node-sdk');
 vi.mock('../src/binding/BindingManager');
@@ -112,7 +112,7 @@ describe('main activity card tail', () => {
     const toolRows = [...delivered.values()].flat().filter(element => element.tag === 'collapsible_panel'
       && element.header?.title?.content?.includes('Read'));
     expect(toolRows).toHaveLength(1);
-    expect(toolRows[0].header.title.content).toContain('SUCCESS');
+    expect(toolRows[0].header.title.content).toContain("<font color='grey'>•</font>");
     expect(JSON.stringify(toolRows[0])).toContain('File contents');
     expect(runningCards()).toHaveLength(1);
     expect(runningCards()[0][0]).not.toBe('root');
@@ -132,6 +132,43 @@ describe('main activity card tail', () => {
     expect(runningCards()[0][1].at(-1).element_id).toBe(ACTIVITY_ELEMENT_ID);
   });
 
+  it('counts the actual compact Read and Bash trees at the limit and repacks delayed results with the activity and final controls', async () => {
+    const read = { name: 'Read', id: 'read-full-identifier', input: { file_path: '/project/config.ts' } };
+    const bash = { name: 'Bash', id: 'bash-full-identifier', input: { description: 'Run tests', command: 'npm test' } };
+    const state = (tool: typeof read | typeof bash, elementIndex: number) => ({ name: tool.name, id: tool.id, elementIndex,
+      summary: createToolCallSummary(tool), inputElements: createToolUseElement(tool) });
+    const header = (handler as any).createResponseHeaderElements('thread', '/workspace');
+    const prefixCount = 150 - (handler as any).countTaggedNodes(header) - 4 - 4 - 1;
+    const readState = state(read, prefixCount);
+    const bashState = state(bash, prefixCount + 1);
+    const body = [...elements(prefixCount), createToolCallElement(readState), createToolCallElement(bashState)];
+    expect(await update(body, activity)).toBe(true);
+    expect(delivered.size).toBe(1);
+    expect((handler as any).countTaggedNodes(delivered.get('root'))).toBe(150);
+    body[prefixCount] = createToolCallElement({ ...readState, resultElements: createToolResultElement({ tool_use_id: read.id, content: 'File contents' }) });
+    expect(await update(body)).toBe(true);
+    expect(delivered.size).toBe(2);
+    body[prefixCount + 1] = createToolCallElement({ ...bashState, isError: true,
+      resultElements: createToolResultElement({ tool_use_id: bash.id, content: 'Test failed', is_error: true }) });
+    expect(await update(body)).toBe(true);
+    const checkPages = () => {
+      for (const page of delivered.values()) expect((handler as any).countTaggedNodes(page)).toBeLessThanOrEqual(150);
+      const tools = [...delivered.values()].flat().filter(element => element.element_id?.startsWith('tc_'));
+      expect(tools).toHaveLength(2);
+      expect(tools.find(element => element.element_id === `tc_${prefixCount}`).header.title.content)
+        .toBe("<font color='grey'>•</font> <raw>Read</raw> · <raw>config.ts</raw>");
+      expect(tools.find(element => element.element_id === `tc_${prefixCount + 1}`).header.title.content)
+        .toBe("<font color='grey'>×</font> <raw>Bash</raw> · <raw>Run tests</raw>");
+    };
+    checkPages();
+    expect(await handler.finalizeStreamingMessage('root', body, undefined, 'owner', '/workspace', 'thread',
+      [{ id: 'thread', name: 'thread', status: 'idle' }], 'thread')).toBe(true);
+    checkPages();
+    expect(JSON.stringify([...delivered.values()])).toContain('Completed');
+    expect(JSON.stringify([...delivered.values()])).toContain('switch_thread');
+    expect(runningCards()).toHaveLength(0);
+  });
+
   it.each([false, true])('removes an obsolete paired result when two cards shrink to one (activity=%s)', async hasActivity => {
     const tool = pairedTool();
     const prefix = elements(140);
@@ -140,12 +177,12 @@ describe('main activity card tail', () => {
     expect(await update([...prefix, tool.large])).toBe(true);
     expect(delivered.size).toBe(2);
     expect(toolRows()).toHaveLength(1);
-    expect(toolRows()[0].header.title.content).toContain('SUCCESS');
+    expect(toolRows()[0].header.title.content).toContain("<font color='grey'>•</font>");
     expect(await update([...prefix, tool.small])).toBe(true);
     expect((handler as any).messageChains.get('root')).toHaveLength(2);
     expect(toolRows()).toHaveLength(1);
-    expect(toolRows()[0].header.title.content).toContain('ERROR');
-    expect(JSON.stringify(delivered.get('page-1'))).not.toContain('SUCCESS');
+    expect(toolRows()[0].header.title.content).toContain("<font color='grey'>×</font>");
+    expect(JSON.stringify(delivered.get('page-1'))).not.toContain('**Status:** Succeeded');
     expect(JSON.stringify(delivered.get('page-1'))).not.toContain('file-5.ts');
     expect(runningCards().map(([id]) => id)).toEqual(hasActivity ? ['root'] : []);
     expect(client.im.message.delete).not.toHaveBeenCalled();
@@ -158,22 +195,22 @@ describe('main activity card tail', () => {
     client.im.message.patch.mockRejectedValueOnce(new Error('temporary rejection'));
     expect(await update([...prefix, tool.small])).toBe(false);
     expect(toolRows()).toHaveLength(1);
-    expect(toolRows()[0].header.title.content).toContain('SUCCESS');
+    expect(toolRows()[0].header.title.content).toContain("<font color='grey'>•</font>");
     expect(JSON.stringify(delivered.get('root'))).not.toContain('Latest failure');
     expect((handler as any).toolPageRemainders.get('root').has(1)).toBe(true);
     client.im.message.patch.mockResolvedValueOnce({ code: 230099, msg: 'ErrCode: 11311 markdown content parse error' });
     expect(await update([...prefix, tool.small])).toBe(true);
     expect(toolRows()).toHaveLength(1);
-    expect(toolRows()[0].header.title.content).toContain('ERROR');
+    expect(toolRows()[0].header.title.content).toContain("<font color='grey'>×</font>");
     expect((handler as any).plainTextCards.get('root').has(1)).toBe(true);
     const creates = client.im.message.create.mock.calls.length;
     expect(await update([...prefix, tool.large])).toBe(true);
     expect(client.im.message.create).toHaveBeenCalledTimes(creates);
     expect(toolRows()).toHaveLength(1);
-    expect(toolRows()[0].header.title.content).toContain('SUCCESS');
+    expect(toolRows()[0].header.title.content).toContain("<font color='grey'>•</font>");
     expect(await update([...prefix, tool.small])).toBe(true);
     expect(toolRows()).toHaveLength(1);
-    expect(toolRows()[0].header.title.content).toContain('ERROR');
+    expect(toolRows()[0].header.title.content).toContain("<font color='grey'>×</font>");
   });
 
   it.each([false, true])('clears an old owner before a backward migration between active pages (activity=%s)', async hasActivity => {
@@ -191,14 +228,14 @@ describe('main activity card tail', () => {
     expect(await update(body(tool.small))).toBe(false);
     expect(client.im.message.patch.mock.calls[0][0].path.message_id).toBe('page-1');
     expect(toolRows()).toHaveLength(1);
-    expect(toolRows()[0].header.title.content).toContain('SUCCESS');
+    expect(toolRows()[0].header.title.content).toContain("<font color='grey'>•</font>");
     expect(JSON.stringify(delivered.get('root'))).not.toContain('Latest failure');
     expect((handler as any).toolPageRemainders.get('root').has(1)).toBe(true);
     client.im.message.patch.mockImplementation(patch);
     expect(await update(body(tool.small))).toBe(true);
     expect((handler as any).messageChains.get('root')).toHaveLength(2);
     expect(toolRows()).toHaveLength(1);
-    expect(toolRows()[0].header.title.content).toContain('ERROR');
+    expect(toolRows()[0].header.title.content).toContain("<font color='grey'>×</font>");
     expect(delivered.get('root')!.some(element => element.element_id === 'tc_135')).toBe(true);
     expect(delivered.get('page-1')!.some(element => element.element_id === 'tc_135')).toBe(false);
     expect(runningCards().map(([id]) => id)).toEqual(hasActivity ? ['page-1'] : []);
@@ -220,7 +257,7 @@ describe('main activity card tail', () => {
     client.im.message.patch.mockImplementation(patch);
     expect(await update(body(tool.large))).toBe(true);
     expect(toolRows()).toHaveLength(1);
-    expect(toolRows()[0].header.title.content).toContain('SUCCESS');
+    expect(toolRows()[0].header.title.content).toContain("<font color='grey'>•</font>");
     expect(delivered.get('page-1')!.some(element => element.element_id === 'tc_135')).toBe(true);
     expect(runningCards().map(([id]) => id)).toEqual(['page-1']);
   });
@@ -258,7 +295,7 @@ describe('main activity card tail', () => {
     expect((handler as any).toolPageRemainders.get('root').size).toBe(2);
     expect(await update([first.small, second.small])).toBe(true);
     expect(toolRows()).toHaveLength(2);
-    expect(toolRows().every(element => element.header.title.content.includes('ERROR'))).toBe(true);
+    expect(toolRows().every(element => element.header.title.content.includes("<font color='grey'>×</font>"))).toBe(true);
     for (const [id, body] of delivered) {
       if (id !== 'root') expect(body.some(element => element.element_id?.startsWith('tc_'))).toBe(false);
       expect((handler as any).countTaggedNodes(body)).toBeLessThanOrEqual(150);
@@ -283,7 +320,7 @@ describe('main activity card tail', () => {
     expect(await handler.finalizeStreamingMessage('root', [tool.small], undefined, 'owner', '/workspace', 'thread',
       [{ id: 'thread', name: 'thread', status: 'idle' }], 'thread')).toBe(true);
     expect(toolRows()).toHaveLength(1);
-    expect(toolRows()[0].header.title.content).toContain('ERROR');
+    expect(toolRows()[0].header.title.content).toContain("<font color='grey'>×</font>");
     expect(JSON.stringify(delivered.get('page-1'))).toContain('worker_context_clear');
     expect(handler.workerContexts.contentFor('page-1')).not.toContain('file-5.ts');
     await handler.workerContexts.click('owner', id, 'page-1');
@@ -295,6 +332,7 @@ describe('main activity card tail', () => {
     expect(JSON.stringify(delivered.get('root'))).toContain('switch_thread');
     expect(runningCards()).toHaveLength(0);
     expect((handler as any).toolPageRemainders.has('root')).toBe(false);
+    for (const page of delivered.values()) expect((handler as any).countTaggedNodes(page)).toBeLessThanOrEqual(150);
   });
 
   it('cleans a surplus terminal page without losing Worker context controls or their later updates', async () => {

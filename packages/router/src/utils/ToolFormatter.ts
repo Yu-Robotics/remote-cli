@@ -469,6 +469,8 @@ export interface ToolCallCardState {
   /** Router-owned fixed slot; never derived from a backend-provided tool ID. */
   elementIndex?: number;
   name?: string;
+  /** A bounded public description or file name, never a raw command. */
+  summary?: string;
   id?: string;
   inputElements?: FeishuCardElement[];
   resultElements?: FeishuCardElement[];
@@ -476,6 +478,32 @@ export interface ToolCallCardState {
 }
 
 export const TOOL_CALL_ELEMENT_PREFIX = 'tc_';
+
+/** Keep every tool heading on the same compact, literal-text template. */
+function boundedToolHeading(value: unknown, limit = 60): string | undefined {
+  if (typeof value !== 'string') return;
+  const text = value.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/[\t\r\n]/g, ' ')
+    .replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g, '')
+    .replace(/\s+/g, ' ').trim();
+  if (!text) return;
+  const characters = Array.from(text);
+  return characters.length > limit ? `${characters.slice(0, limit - 1).join('')}…` : text;
+}
+
+/** Use explicit labels or file basenames; never infer a heading from command arguments. */
+export function createToolCallSummary(toolInfo: ToolUseInfo): string | undefined {
+  const input = normalizeToolInput(toolInfo.input);
+  if (['Read', 'Edit', 'Write', 'NotebookEdit'].includes(toolInfo.name)) {
+    for (const key of ['file_path', 'path', 'notebook_path']) {
+      if (typeof input[key] !== 'string') continue;
+      const basename = (input[key] as string).split(/[\\/]/).filter(Boolean).at(-1);
+      const summary = boundedToolHeading(basename);
+      if (summary && summary !== '.' && summary !== '..') return summary;
+    }
+  }
+  return boundedToolHeading(input.description) ?? boundedToolHeading(input.title);
+}
 
 /** Inline existing bounded previews inside one tool-call disclosure. */
 function inlineToolDetails(elements: FeishuCardElement[], label: string): FeishuCardElement[] {
@@ -497,24 +525,31 @@ function inlineToolDetails(elements: FeishuCardElement[], label: string): Feishu
 /** A result replaces the same visible tool row; independent calls never aggregate. */
 export function createToolCallElement(state: ToolCallCardState): FeishuCardElement {
   const received = state.resultElements !== undefined;
-  const color = received ? state.isError ? 'red' : 'green' : 'blue';
-  const status = received ? state.isError ? '❌ ERROR' : '✅ SUCCESS' : '🔧 TOOL USE';
-  const name = literalWorkerText(state.name || 'Tool', 100);
-  const id = state.id && state.id !== 'unknown' ? ` · ${literalWorkerText(state.id, 8)}` : '';
+  const color = received ? 'grey' : 'blue';
+  const status = received ? state.isError ? '×' : '•' : '⏳';
+  const name = literalWorkerText(boundedToolHeading(state.name, 40) ?? 'Tool', 40);
+  const summary = boundedToolHeading(state.summary);
+  const description = summary ? ` · ${literalWorkerText(summary, 60)}` : '';
+  const metadata = [`**Status:** ${received ? state.isError ? 'Failed' : 'Succeeded' : 'Awaiting result'}`];
+  if (state.id && state.id !== 'unknown') metadata.push(`**Tool ID:** ${activityLiteral(state.id)}`);
+  const elements = [
+    ...inlineToolDetails(state.inputElements ?? [], 'Input'),
+    ...inlineToolDetails(state.resultElements ?? [], 'Result'),
+  ];
+  // Reuse the first detail block rather than adding layout nodes to ordinary calls.
+  if (elements[0]?.tag === 'markdown') elements[0] = { ...elements[0], content: `${metadata.join('\n')}\n\n${elements[0].content}` };
+  else elements.unshift(createMarkdownElement(metadata.join('\n')));
   return {
     tag: 'collapsible_panel', expanded: false,
     ...(state.elementIndex !== undefined ? { element_id: `${TOOL_CALL_ELEMENT_PREFIX}${state.elementIndex}` } : {}),
     header: {
-      title: { tag: 'markdown', content: `<text_tag color='${color}'>${status}</text_tag> · **${name}**${id}` },
+      title: { tag: 'markdown', content: `<font color='${color}'>${status}</font> ${name}${description}` },
       vertical_align: 'center',
       icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', size: '14px 14px' },
       icon_position: 'right', icon_expanded_angle: -180,
     },
     vertical_spacing: '8px', padding: '4px 8px',
-    elements: [
-      ...inlineToolDetails(state.inputElements ?? [], 'Input'),
-      ...inlineToolDetails(state.resultElements ?? [], 'Result'),
-    ],
+    elements,
   };
 }
 

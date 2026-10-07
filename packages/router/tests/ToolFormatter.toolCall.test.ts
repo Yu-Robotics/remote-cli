@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createToolCallElement, createToolResultElement, createToolUseElement,
+import { createToolCallElement, createToolCallSummary, createToolResultElement, createToolUseElement,
   type FeishuCardElement } from '../src/utils/ToolFormatter';
 
 const input = () => createToolUseElement({ name: 'Read', id: 'read-1', input: { file_path: '/project/example.ts' } });
@@ -11,13 +11,83 @@ function countTags(value: any): number {
 }
 
 describe('single tool-call disclosure', () => {
+  it.each([
+    ['Read', { file_path: '/project/config.ts' }, 'config.ts'],
+    ['Bash', { description: 'Run tests', command: 'npm test' }, 'Run tests'],
+  ])('uses the same compact heading for %s in every state', (name, args, summary) => {
+    const tool = { name: name as string, id: 'full-tool-identifier', input: args };
+    const state = { name: tool.name, id: tool.id, summary: createToolCallSummary(tool), inputElements: createToolUseElement(tool) };
+    const expected = ` <raw>${name}</raw> · <raw>${summary}</raw>`;
+    for (const [color, symbol, label, completed] of [
+      ['blue', '⏳', 'Awaiting result', {}],
+      ['grey', '•', 'Succeeded', { resultElements: result() }],
+      ['grey', '×', 'Failed', { resultElements: result(true), isError: true }],
+    ] as const) {
+      const panel = createToolCallElement({ ...state, ...completed });
+      expect(panel.header.title.content).toBe(`<font color='${color}'>${symbol}</font>${expected}`);
+      expect(panel.header.title.content).not.toMatch(/SUCCESS|ERROR|TOOL USE|full-tool-identifier|text_tag/);
+      expect(panel.header.icon.token).toBe('down-small-ccm_outlined');
+      expect(panel.elements[0].content).toContain(`**Status:** ${label}`);
+      expect(panel.elements[0].content).toContain('**Tool ID:** <raw>full-tool-identifier</raw>');
+      expect(countTags(panel)).toBe('resultElements' in completed ? 5 : 4);
+    }
+  });
+
+  it.each([
+    ['Read', { file_path: '/project/config.ts', description: 'Read configuration' }, 'config.ts'],
+    ['Edit', { path: 'src/app.ts' }, 'app.ts'],
+    ['Write', { file_path: 'C:\\project\\app.ts' }, 'app.ts'],
+    ['NotebookEdit', { notebook_path: '/project/example.ipynb' }, 'example.ipynb'],
+    ['Bash', { description: '  Run\n tests  ', command: 'private command argument' }, 'Run tests'],
+    ['Other', { title: 'Inspect results' }, 'Inspect results'],
+    ['Bash', { description: '\u0000', title: 'Fallback title' }, 'Fallback title'],
+    ['Bash', { command: 'private command argument' }, undefined],
+    ['Other', { url: 'https://example.com/private-query', query: 'private query' }, undefined],
+    ['Read', { file_path: '..', description: 'Inspect parent' }, 'Inspect parent'],
+    ['Read', null, undefined],
+    ['Other', ['unexpected'], undefined],
+    ['Other', { description: 42, title: {} }, undefined],
+  ])('selects only an explicit label or basename for %s (%j)', (name, args, expected) => {
+    expect(createToolCallSummary({ name: name as string, input: args })).toBe(expected);
+  });
+
+  it('bounds and escapes headings without exposing commands, directory prefixes, controls, or mentions', () => {
+    const summary = createToolCallSummary({ name: 'Bash', input: { description: '\u001b[31m<at id=all>\u202e ' + '🧪'.repeat(80), command: 'private command argument' } })!;
+    expect(Array.from(summary)).toHaveLength(60);
+    expect(summary.endsWith('…')).toBe(true);
+    expect(summary).not.toMatch(/[\u001b\u202e\r\n]/);
+    expect(summary).not.toContain('private command argument');
+    const panel = createToolCallElement({ name: '<font color=red>Bash</font>', summary, id: '<at id=all>', inputElements: input() });
+    expect(panel.header.title.content).toContain('&lt;at id=all&gt;');
+    expect(panel.header.title.content).toContain('&lt;font color=red&gt;');
+    expect(panel.header.title.content).not.toContain('<at id=all>');
+    expect(panel.header.title.content).not.toContain('/project/');
+    expect(JSON.stringify(panel.elements)).toContain('**Tool ID:** <raw>&lt;at id=all&gt;</raw>');
+    expect(createToolCallElement({ name: 'Bash', summary: '\n\t' }).header.title.content).toBe("<font color='blue'>⏳</font> <raw>Bash</raw>");
+    expect(createToolCallElement({ name: 'x'.repeat(100), summary: 'y'.repeat(1000) }).header.title.content).not.toContain('y'.repeat(61));
+  });
+
+  it.each([
+    'call  opaque-identifier-123',
+    ' call  opaque-identifier-123 ',
+    'call\u00a0\u00a0opaque-identifier-123',
+    '<at id=all>call  opaque & id</at>',
+    'x'.repeat(200),
+  ])('preserves the complete opaque Tool ID literally in expanded details (%j)', id => {
+    const panel = createToolCallElement({ name: 'Read', id, inputElements: input(), resultElements: result() });
+    const escapedId = id.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    expect(panel.elements[0].content).toContain(`**Tool ID:** <raw>${escapedId}</raw>\n`);
+    expect(panel.header.title.content).not.toContain(escapedId);
+    expect(countTags(panel)).toBe(5);
+  });
+
   it('keeps input and output in one collapsed row with fewer tagged nodes', () => {
     const inputElements = input();
     const resultElements = result();
     const panel = createToolCallElement({ name: 'Read', id: 'read-1', inputElements, resultElements, isError: false });
     expect(panel.tag).toBe('collapsible_panel');
     expect(panel.expanded).toBe(false);
-    expect(panel.header.title.content).toContain('SUCCESS');
+    expect(panel.header.title.content).toContain("<font color='grey'>•</font>");
     expect(panel.header.title.content).toContain('Read');
     expect(panel.elements).toHaveLength(2);
     expect(JSON.stringify(panel.elements)).toContain('**Input**');
@@ -31,8 +101,8 @@ describe('single tool-call disclosure', () => {
 
   it('does not invent success before any result arrives', () => {
     const panel = createToolCallElement({ name: 'Read', id: 'read-1', inputElements: input() });
-    expect(panel.header.title.content).toContain('TOOL USE');
-    expect(panel.header.title.content).not.toContain('SUCCESS');
+    expect(panel.header.title.content).toContain("<font color='blue'>⏳</font>");
+    expect(panel.header.title.content).not.toContain("<font color='grey'>•</font>");
     expect(JSON.stringify(panel.elements)).not.toContain('**Result**');
   });
 
@@ -48,8 +118,8 @@ describe('single tool-call disclosure', () => {
 
   it('keeps failed and empty outcomes explicit without dropping the input', () => {
     const failed = createToolCallElement({ name: 'Read', inputElements: input(), resultElements: result(true, 'Permission denied'), isError: true });
-    expect(failed.header.title.content).toContain("color='red'");
-    expect(failed.header.title.content).toContain('ERROR');
+    expect(failed.header.title.content).toContain("color='grey'");
+    expect(failed.header.title.content).toContain("<font color='grey'>×</font>");
     expect(JSON.stringify(failed.elements)).toContain('Permission denied');
     expect(JSON.stringify(failed.elements)).toContain('/project/example.ts');
     const empty = createToolCallElement({ resultElements: result(false, '') });
@@ -95,6 +165,9 @@ describe('single tool-call disclosure', () => {
 
   it('handles non-Markdown preview children without losing content', () => {
     const panel = createToolCallElement({ inputElements: [{ tag: 'collapsible_panel', elements: [{ tag: 'img', img_key: 'img_example' }] }] });
-    expect(panel.elements).toEqual([{ tag: 'markdown', content: '**Input**' }, { tag: 'img', img_key: 'img_example' }]);
+    expect(panel.elements).toEqual([{ tag: 'markdown', content: '**Status:** Awaiting result\n\n**Input**' }, { tag: 'img', img_key: 'img_example' }]);
+    const imageOnly = createToolCallElement({ inputElements: [{ tag: 'img', img_key: 'img_example' }] });
+    expect(imageOnly.elements).toEqual([{ tag: 'markdown', content: '**Status:** Awaiting result' }, { tag: 'img', img_key: 'img_example' }]);
+    expect(countTags(imageOnly)).toBe(5);
   });
 });

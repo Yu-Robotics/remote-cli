@@ -31,6 +31,7 @@ vi.mock('../src/utils/ToolFormatter', async (importActual) => ({
   createToolUseElement: vi.fn(() => []),
   createToolResultElement: vi.fn(() => []),
   createToolCallElement: vi.fn((await importActual<typeof import('../src/utils/ToolFormatter')>()).createToolCallElement),
+  createToolCallSummary: (await importActual<typeof import('../src/utils/ToolFormatter')>()).createToolCallSummary,
   DELEGATION_PROGRESS_ELEMENT_COUNT: 4,
   createDelegationProgressElements: vi.fn((await importActual<typeof import('../src/utils/ToolFormatter')>()).createDelegationProgressElements),
   createDividerElement: vi.fn((await importActual<typeof import('../src/utils/ToolFormatter')>()).createDividerElement),
@@ -169,17 +170,61 @@ describe('RouterServer', () => {
       await send({ ...envelope, streamType: 'text', chunk: 'Before tool' });
       await send(use('read-1'));
       const index = stream.toolCalls.get('read-1').elementIndex;
-      expect(stream.elements[index].header.title.content).toContain('TOOL USE');
+      expect(stream.elements[index].header.title.content).toContain("<font color='blue'>⏳</font>");
       await send({ ...envelope, streamType: 'text', chunk: 'After tool' });
       await send(result('read-1'));
       expect(stream.elements).toHaveLength(3);
       expect(stream.elements[0].content).toBe('Before tool');
       expect(stream.elements[2].content).toBe('After tool');
-      expect(stream.elements[index].header.title.content).toContain('SUCCESS');
+      expect(stream.elements[index].header.title.content).toContain("<font color='grey'>•</font>");
       expect(stream.elements[index].expanded).toBe(false);
       expect(JSON.stringify(stream.elements[index])).toContain('/project/example.ts');
       expect(JSON.stringify(stream.elements[index])).toContain('Example output');
       expect(stream.elements.filter((element: any) => element.tag === 'collapsible_panel')).toHaveLength(1);
+    });
+
+    it('keeps compact public summaries and full identities in place through delayed results and argument updates', async () => {
+      const { send, stream } = await connect();
+      await send(use('read-full-identifier', 'Read', { file_path: '/project/config.ts' }));
+      await send(use('bash-full-identifier', 'Bash', { description: 'Waiting for arguments' }));
+      await send(use('bash-full-identifier', 'Bash', { description: 'Run tests', command: 'npm test' }));
+      expect(stream.toolCalls.get('bash-full-identifier').summary).toBe('Run tests');
+      expect(stream.elements[1].header.title.content).not.toContain('Waiting for arguments');
+      await send({ ...envelope, streamType: 'text', chunk: 'While tools are running' });
+      await send(result('read-full-identifier'));
+      await send(result('bash-full-identifier', 'Test failed', true));
+      expect(stream.elements).toHaveLength(3);
+      expect(stream.elements[0].header.title.content).toBe("<font color='grey'>•</font> <raw>Read</raw> · <raw>config.ts</raw>");
+      expect(stream.elements[1].header.title.content).toBe("<font color='grey'>×</font> <raw>Bash</raw> · <raw>Run tests</raw>");
+      expect(JSON.stringify(stream.elements[0].elements)).toContain('read-full-identifier');
+      expect(JSON.stringify(stream.elements[1].elements)).toContain('bash-full-identifier');
+      expect(stream.elements[2].content).toBe('While tools are running');
+      await send(use('bash-full-identifier', 'Bash', { command: 'npm run build' }));
+      expect(stream.elements[3].header.title.content).toBe("<font color='blue'>⏳</font> <raw>Bash</raw>");
+      expect(stream.toolCalls.get('bash-full-identifier').summary).toBeUndefined();
+    });
+
+    it('keeps opaque IDs with different whitespace distinct in pairing and expanded details', async () => {
+      const { send, stream } = await connect();
+      const spacedId = 'call  opaque-identifier-123';
+      const compactId = 'call opaque-identifier-123';
+      await send(use(spacedId));
+      await send(use(compactId));
+      await send(result(compactId, 'Compact ID failed', true));
+      await send(result(spacedId, 'Spaced ID succeeded'));
+      expect([...stream.toolCalls.keys()]).toEqual([spacedId, compactId]);
+      expect(stream.elements).toHaveLength(2);
+      expect(stream.toolCalls.get(spacedId).elementIndex).toBe(0);
+      expect(stream.toolCalls.get(compactId).elementIndex).toBe(1);
+      const [spaced, compact] = stream.elements;
+      expect(spaced.header.title.content).toContain("<font color='grey'>•</font>");
+      expect(compact.header.title.content).toContain("<font color='grey'>×</font>");
+      expect(spaced.elements[0].content).toContain(`**Tool ID:** <raw>${spacedId}</raw>\n`);
+      expect(compact.elements[0].content).toContain(`**Tool ID:** <raw>${compactId}</raw>\n`);
+      expect(JSON.stringify(spaced.elements)).toContain('Spaced ID succeeded');
+      expect(JSON.stringify(spaced.elements)).not.toContain('Compact ID failed');
+      expect(JSON.stringify(compact.elements)).toContain('Compact ID failed');
+      expect(JSON.stringify(compact.elements)).not.toContain('Spaced ID succeeded');
     });
 
     it('pairs out-of-order results without moving a later worker section or a second tool', async () => {
@@ -200,8 +245,8 @@ describe('RouterServer', () => {
       expect(stream.elements).toHaveLength(length);
       expect(worker.elementIndex).toBe(workerIndex);
       expect(JSON.stringify(stream.elements[workerIndex + 1])).toContain('Review completed');
-      expect(stream.elements[stream.toolCalls.get('read-1').elementIndex].header.title.content).toContain('SUCCESS');
-      expect(stream.elements[stream.toolCalls.get('bash-1').elementIndex].header.title.content).toContain('ERROR');
+      expect(stream.elements[stream.toolCalls.get('read-1').elementIndex].header.title.content).toContain("<font color='grey'>•</font>");
+      expect(stream.elements[stream.toolCalls.get('bash-1').elementIndex].header.title.content).toContain("<font color='grey'>×</font>");
       expect(stream.toolCalls.size).toBe(2);
     });
 
@@ -210,8 +255,8 @@ describe('RouterServer', () => {
       await send(use(id));
       await send(result(id));
       expect(stream.elements).toHaveLength(2);
-      expect(stream.elements[0].header.title.content).toContain('TOOL USE');
-      expect(stream.elements[1].header.title.content).toContain('SUCCESS');
+      expect(stream.elements[0].header.title.content).toContain("<font color='blue'>⏳</font>");
+      expect(stream.elements[1].header.title.content).toContain("<font color='grey'>•</font>");
       expect(stream.toolCalls.size).toBe(0);
     });
 
@@ -222,9 +267,9 @@ describe('RouterServer', () => {
       await send(use('orphan-1', 'Bash', { command: 'npm test' }));
       expect(stream.elements).toHaveLength(2);
       expect(stream.elements[0].header.title.content).toContain('Bash');
-      expect(stream.elements[0].header.title.content).toContain('ERROR');
+      expect(stream.elements[0].header.title.content).toContain("<font color='grey'>×</font>");
       expect(JSON.stringify(stream.elements[0])).toContain('Late result');
-      expect(stream.elements[1].header.title.content).toContain('TOOL USE');
+      expect(stream.elements[1].header.title.content).toContain("<font color='blue'>⏳</font>");
     });
 
     it('keeps repeated updates in place and a new start after completion independent', async () => {
@@ -250,7 +295,7 @@ describe('RouterServer', () => {
       mockFeishuHandler.setOnStartStreaming.mock.calls[0][0]('other-task', 'owner', 'other-card', 'device-1', 'thread-1');
       await send(use('shared-1', 'Bash', { command: 'x'.repeat(10_000) }));
       await send({ ...result('shared-1', 'Other request'), messageId: 'other-task' });
-      expect(stream.elements[0].header.title.content).toContain('TOOL USE');
+      expect(stream.elements[0].header.title.content).toContain("<font color='blue'>⏳</font>");
       expect(JSON.stringify(stream.toolCalls.get('shared-1'))).not.toContain('x'.repeat(10_000));
       expect(JSON.stringify(stream.toolCalls.get('shared-1')).length).toBeLessThan(2000);
       const other = (server as any).streamingMessages.get('other-task');
@@ -264,8 +309,8 @@ describe('RouterServer', () => {
       await send(use('pending-1'));
       await send({ ...envelope, type: 'response', success: true });
       const elements = mockFeishuHandler.finalizeStreamingMessage.mock.lastCall[1];
-      expect(elements[0].header.title.content).toContain('TOOL USE');
-      expect(JSON.stringify(elements)).not.toContain('SUCCESS');
+      expect(elements[0].header.title.content).toContain("<font color='blue'>⏳</font>");
+      expect(JSON.stringify(elements)).not.toContain('**Status:** Succeeded');
       const updates = mockFeishuHandler.updateStreamingMessage.mock.calls.length;
       await send(result('pending-1', 'Late output'));
       expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenCalledTimes(updates);
@@ -946,7 +991,8 @@ describe('RouterServer', () => {
       const elements = mockFeishuHandler.finalizeStreamingMessage.mock.calls[0][1];
       expect(elements.slice(1)).toEqual([
         { tag: 'markdown', content: 'Before tool' },
-        expect.objectContaining({ tag: 'collapsible_panel', elements: [{ tag: 'markdown', content: 'Tool result' }] }),
+        expect.objectContaining({ tag: 'collapsible_panel', elements: [{ tag: 'markdown',
+          content: '**Status:** Succeeded\n**Tool ID:** <raw>tool-1</raw>\n\nTool result' }] }),
         { tag: 'markdown', content: 'Before image' },
         expect.objectContaining({ tag: 'img', img_key: 'image-key' }),
         { tag: 'markdown', content: 'After image' },
@@ -1772,7 +1818,7 @@ describe('RouterServer', () => {
     const rendered = JSON.stringify(elements);
     expect(rendered).toContain('Waiting for command arguments');
     expect(rendered).toContain('echo recovered');
-    expect(rendered).toContain('SUCCESS');
+    expect(rendered).toContain('**Status:** Succeeded');
     expect(console.error).not.toHaveBeenCalledWith('Error processing message:', expect.anything());
   });
 

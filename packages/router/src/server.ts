@@ -22,7 +22,7 @@ import { FeishuLongConnHandler } from './feishu/FeishuLongConnHandler';
 import { ConnectionHub } from './websocket/ConnectionHub';
 import { BindingManager } from './binding/BindingManager';
 import { MessageType, ToolUseInfo, ToolResultInfo, DelegationProgressInfo, TaskNotificationInfo, PROTOCOL_VERSION, MIN_SUPPORTED_CLI_VERSION, ROUTER_VERSION, ThreadSummary, QueueConfirmationInfo, QueueStartedInfo, TaskResumeInfo, ImageBlock } from './types';
-import { DELEGATION_PROGRESS_ELEMENT_COUNT, DelegationProgressCardState, FeishuCardElement, type ToolCallCardState, createToolCallElement, createDelegationProgressElements, createDividerElement, createToolUseElement, createToolResultElement, createMarkdownElement, createRedactedThinkingElement, createPlanModeElement, createTaskNotificationElement, createImageElement } from './utils/ToolFormatter';
+import { DELEGATION_PROGRESS_ELEMENT_COUNT, DelegationProgressCardState, FeishuCardElement, type ToolCallCardState, createToolCallSummary, createToolCallElement, createDelegationProgressElements, createDividerElement, createToolUseElement, createToolResultElement, createMarkdownElement, createRedactedThinkingElement, createPlanModeElement, createTaskNotificationElement, createImageElement } from './utils/ToolFormatter';
 
 interface ToolCallProgressState extends ToolCallCardState {
   /** A single fixed slot keeps later text and worker section indices stable. */
@@ -1075,6 +1075,7 @@ export class RouterServer {
       if (id) streamData.toolCalls.set(id, state);
     }
     state.name = typeof toolUse.name === 'string' ? toolUse.name.slice(0, 200) : undefined;
+    state.summary = createToolCallSummary(toolUse);
     state.inputElements = createToolUseElement(toolUse);
     streamData.elements[state.elementIndex] = createToolCallElement(state);
     streamData.createdAt = Date.now();
