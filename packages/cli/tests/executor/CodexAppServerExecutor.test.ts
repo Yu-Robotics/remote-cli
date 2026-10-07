@@ -803,6 +803,55 @@ describe('CodexAppServerExecutor', () => {
     expect(executor.getSessionId()).toBe('codex-thread-1');
   });
 
+  it.each([
+    [[{ type: 'read', path: '/project/src/config.ts', name: 'config.ts' }], 'Read config.ts'],
+    [[{ type: 'search', path: '/project', query: 'synthetic-private-query' }], 'Search files'],
+    [[{ type: 'listFiles', path: '/project' }], 'List directory'],
+    [[{ type: 'unknown', command: 'npm test' }], undefined],
+    [undefined, undefined],
+  ])('forwards structured command labels and keeps one call through delayed completion (%j)', async (commandActions, description) => {
+    const onToolUse = vi.fn();
+    const onToolResult = vi.fn();
+    const onActivity = vi.fn();
+    const running = executor.execute('inspect', { onToolUse, onToolResult, onActivity });
+    await vi.waitFor(() => expect(transport.requests.some(request => request.method === 'turn/start')).toBe(true));
+    const item = { type: 'commandExecution', id: 'cmd-label', command: 'synthetic-private-command', commandActions };
+    const emitItem = (method: string, value: any) => transport.emit({ method,
+      params: { threadId: 'codex-thread-1', turnId: 'turn-1', item: value } });
+    emitItem('item/started', item);
+    expect(onToolUse).toHaveBeenCalledWith({ id: 'cmd-label', name: 'Bash', input: { command: item.command },
+      ...(description ? { description } : {}) });
+    expect(onActivity).toHaveBeenCalledWith({ source: 'tool', text: description ?? 'Running command' });
+    transport.emit({ method: 'item/reasoning/summaryTextDelta', params: {
+      threadId: 'codex-thread-1', turnId: 'turn-1', itemId: 'reasoning-1', summaryIndex: 0, delta: 'Execution-wide progress',
+    } });
+    await Promise.resolve();
+    emitItem('item/completed', { ...item, status: 'completed', exitCode: 0, aggregatedOutput: 'ok' });
+    emitItem('item/completed', { ...item, status: 'failed', exitCode: 1, aggregatedOutput: 'Failed' });
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await running;
+    expect(onToolUse).toHaveBeenCalledOnce();
+    expect(onToolUse.mock.calls[0][0].description).toBe(description);
+    expect(onToolResult.mock.calls.map(([result]) => result)).toEqual([
+      { tool_use_id: 'cmd-label', content: 'ok', is_error: false },
+      { tool_use_id: 'cmd-label', content: 'Failed', is_error: true },
+    ]);
+  });
+
+  it('describes completion-only command items without requiring an item-start event', async () => {
+    const onToolUse = vi.fn();
+    const running = executor.execute('inspect', { onToolUse });
+    await vi.waitFor(() => expect(transport.requests.some(request => request.method === 'turn/start')).toBe(true));
+    transport.emit({ method: 'item/completed', params: { threadId: 'codex-thread-1', turnId: 'turn-1', item: {
+      type: 'commandExecution', id: 'completed-label', command: 'synthetic-private-command',
+      commandActions: [{ type: 'read', name: 'config.ts' }], status: 'completed', exitCode: 0,
+    } } });
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await running;
+    expect(onToolUse).toHaveBeenCalledWith({ id: 'completed-label', name: 'Bash',
+      input: { command: 'synthetic-private-command' }, description: 'Read config.ts' });
+  });
+
   it('maps tools and context-window errors without unsafe retry signals after side effects', async () => {
     const toolUse = vi.fn();
     const toolResult = vi.fn();
@@ -816,6 +865,42 @@ describe('CodexAppServerExecutor', () => {
     expect(toolUse).toHaveBeenCalledOnce();
     expect(toolResult).toHaveBeenCalledWith(expect.objectContaining({ content: 'ok', is_error: false }));
     expect(result.error).not.toContain('Prompt too long');
+  });
+
+  it('preserves delayed native web results on the original invocation and keeps completion-only actions', async () => {
+    const onToolUse = vi.fn(), onToolResult = vi.fn();
+    const running = executor.execute('look up docs', { onToolUse, onToolResult });
+    await vi.waitFor(() => expect(transport.requests.some(request => request.method === 'turn/start')).toBe(true));
+    const emit = (method: string, item: any) => transport.emit({ method,
+      params: { threadId: 'codex-thread-1', turnId: 'turn-1', item } });
+    const search = { type: 'webSearch', id: 'web-native', query: 'docs', action: { type: 'search', queries: ['docs', 'examples'] } };
+    emit('item/started', search);
+    emit('item/started', { type: 'commandExecution', id: 'other', command: 'echo example' });
+    expect(onToolResult).not.toHaveBeenCalled();
+    await Promise.resolve();
+    emit('item/completed', { ...search, results: [{ type: 'search_result', domain: 'example.com', ref_id: 'opaque-ref',
+      title: 'Documentation', url: 'https://example.com/docs', snippet: 'Example excerpt', thumbnail_url: null }] });
+    emit('item/completed', { ...search, results: [{ title: 'Updated source', url: 'https://example.com/updated' }] });
+    emit('item/completed', { type: 'webSearch', id: 'web-open', action: { type: 'openPage', url: 'https://example.com/docs' }, results: [] });
+    emit('item/completed', { type: 'webSearch', id: 'web-find', action: { type: 'findInPage', url: 'https://example.com/docs', pattern: 'needle' } });
+    emit('item/completed', { type: 'webSearch', id: 'web-failed', status: 'failed', error: { message: 'Search failed' } });
+    expect(onToolUse.mock.calls.filter(([tool]) => tool.id === 'web-native')).toHaveLength(1);
+    expect(onToolUse.mock.calls[0][0]).toEqual({ id: 'web-native', name: 'WebSearch',
+      input: { query: 'docs', action: 'search', queries: ['docs', 'examples'] }, description: 'Search the web' });
+    expect(onToolUse).toHaveBeenCalledWith(expect.objectContaining({ id: 'web-open', description: 'Open web page',
+      input: { query: 'https://example.com/docs', url: 'https://example.com/docs', action: 'openPage' } }));
+    expect(onToolUse).toHaveBeenCalledWith(expect.objectContaining({ id: 'web-find', description: 'Find text on web page',
+      input: { query: 'https://example.com/docs', url: 'https://example.com/docs', pattern: 'needle', action: 'findInPage' } }));
+    expect(onToolResult.mock.calls[0][0]).toEqual({ tool_use_id: 'web-native', is_error: false,
+      content: '1. Documentation\nSource: https://example.com/docs\nExcerpt: Example excerpt',
+      webSearch: { results: [{ title: 'Documentation', url: 'https://example.com/docs', snippet: 'Example excerpt' }], omittedResults: 0 } });
+    expect(onToolResult.mock.calls[1][0]).toMatchObject({ tool_use_id: 'web-native', content: expect.stringContaining('Updated source') });
+    expect(onToolResult.mock.calls[2][0].webSearch).toEqual({ results: [], omittedResults: 0 });
+    expect(onToolResult.mock.calls[3][0].webSearch).toBeUndefined();
+    expect(onToolResult.mock.calls[3][0].content).toContain('not provided');
+    expect(onToolResult.mock.calls[4][0]).toEqual({ tool_use_id: 'web-failed', is_error: true, content: 'Search failed' });
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await running;
   });
 
   it('maps app-server plans, reasoning, file, web, MCP, and dynamic tool events', async () => {

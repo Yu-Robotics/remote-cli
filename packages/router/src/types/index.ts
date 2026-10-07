@@ -241,6 +241,14 @@ export interface ToolResultInfo {
   is_error: boolean;
   /** Optional unified diff for file-change results. */
   diff?: string;
+  /** Optional bounded native web results; content remains the old-peer fallback. */
+  webSearch?: WebSearchResultsInfo;
+}
+
+export interface WebSearchResultsInfo {
+  results: Array<{ title?: string; url?: string; snippet?: string }>;
+  /** Native entries excluded from this preview, including unsupported entries. */
+  omittedResults: number;
 }
 
 /** Lifecycle event for a delegated worker displayed inside its coordinator card. */

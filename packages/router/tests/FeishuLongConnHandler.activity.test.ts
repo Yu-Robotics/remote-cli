@@ -108,6 +108,38 @@ describe('main activity card tail', () => {
     for (const body of delivered.values()) expect((handler as any).countTaggedNodes(body)).toBeLessThanOrEqual(150);
   });
 
+  it('keeps asynchronous web previews in one row with bounded nodes across real pagination', async () => {
+    const tool = { name: 'WebSearch', id: 'web-native', input: { query: 'docs' } };
+    const state = { elementIndex: 140, name: tool.name, id: tool.id, inputElements: createToolUseElement(tool) };
+    const pending = createToolCallElement(state);
+    const completed = createToolCallElement({ ...state, resultElements: createToolResultElement({ tool_use_id: tool.id,
+      is_error: false, content: 'Old-peer plaintext', webSearch: {
+        results: Array.from({ length: 200 }, (_, i) => ({ title: `Source ${i}`, url: `https://example.com/${i}`, snippet: 'Public excerpt' })), omittedResults: 3,
+      } }) });
+    expect((handler as any).countTaggedNodes(completed)).toBe(5);
+    expect((handler as any).countTaggedNodes(completed)).toBe((handler as any).countTaggedNodes(pending) + 1);
+    const prefix = elements(140);
+    await update([...prefix, pending], activity);
+    await update([...prefix, completed]);
+    await update([...prefix, completed, ...elements(155)]);
+    const updated = createToolCallElement({ ...state, resultElements: createToolResultElement({ tool_use_id: tool.id,
+      content: 'New result', is_error: false, webSearch: { results: [{ title: 'Latest source', url: 'https://example.com/latest' }], omittedResults: 0 } }) });
+    await update([...prefix, updated, ...elements(155)]);
+    const webRows = () => [...delivered.values()].flat().filter(e => e.element_id === 'tc_140');
+    expect(webRows()).toHaveLength(1);
+    expect(JSON.stringify(webRows())).toContain('[Open source](https://example.com/latest)');
+    expect(JSON.stringify(webRows())).not.toContain('Source 0');
+    const error = createToolCallElement({ ...state, isError: true,
+      resultElements: createToolResultElement({ tool_use_id: tool.id, is_error: true, content: 'Search failed' }) });
+    await update([...prefix, error]);
+    expect(webRows()).toHaveLength(1);
+    expect(webRows()[0].header.title.content).toContain("<font color='red'>•</font>");
+    await handler.finalizeStreamingMessage('root', [...prefix, error], undefined, 'owner');
+    expect(runningCards()).toHaveLength(0);
+    expect(webRows()).toHaveLength(1);
+    for (const body of delivered.values()) expect((handler as any).countTaggedNodes(body)).toBeLessThanOrEqual(150);
+  });
+
   it('migrates the tail across two and three pages, stripping sealed and surplus pages', async () => {
     await update(elements(3), activity);
     await update(elements(160));
@@ -163,9 +195,11 @@ describe('main activity card tail', () => {
     expect(runningCards()[0][1].at(-1).element_id).toBe(ACTIVITY_ELEMENT_ID);
   });
 
-  it('counts the actual compact Read and Bash trees at the limit and repacks delayed results with the activity and final controls', async () => {
+  it.each(['Run tests', 'Inspect working changes', 'Read config.ts',
+    'Read aaaaaaaa… / Read b.ts / Search files / +1 more'])(
+    'counts compact tool trees with native labels at the limit and repacks delayed results (%s)', async description => {
     const read = { name: 'Read', id: 'read-full-identifier', input: { file_path: '/project/config.ts' } };
-    const bash = { name: 'Bash', id: 'bash-full-identifier', input: { description: 'Run tests', command: 'npm test' } };
+    const bash = { name: 'Bash', id: 'bash-full-identifier', input: { command: 'npm test' }, description };
     const state = (tool: typeof read | typeof bash, elementIndex: number) => ({ name: tool.name, id: tool.id, elementIndex,
       summary: createToolCallSummary(tool), inputElements: createToolUseElement(tool) });
     const header = (handler as any).createResponseHeaderElements('thread', '/workspace');
@@ -189,7 +223,7 @@ describe('main activity card tail', () => {
       expect(tools.find(element => element.element_id === `tc_${prefixCount}`).header.title.content)
         .toBe("<font color='green'>•</font> <raw>Read</raw> · <raw>config.ts</raw>");
       expect(tools.find(element => element.element_id === `tc_${prefixCount + 1}`).header.title.content)
-        .toBe("<font color='red'>•</font> <raw>Bash</raw> · <raw>Run tests</raw>");
+        .toBe(`<font color='red'>•</font> <raw>Bash</raw> · <raw>${description}</raw>`);
     };
     checkPages();
     expect(await handler.finalizeStreamingMessage('root', body, undefined, 'owner', '/workspace', 'thread',

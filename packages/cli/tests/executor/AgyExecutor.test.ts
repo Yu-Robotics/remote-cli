@@ -421,6 +421,16 @@ describe('AgyExecutor', () => {
 
   it.each([
     [{ description: 'Run unit tests', title: 'Test suite' }, { description: 'Run unit tests', title: 'Test suite' }],
+    [{ toolSummary: 'Run unit tests', toolAction: 'Checking tests' }, { description: 'Run unit tests' }],
+    [{ toolAction: 'Checking tests' }, { description: 'Checking tests' }],
+    [{ description: 'Explicit label', toolSummary: 'Native summary', toolAction: 'Native action' }, { description: 'Explicit label' }],
+    [{ description: ' ', toolSummary: 'Native summary' }, { description: 'Native summary' }],
+    [{ toolSummary: 42, toolAction: 'Checking tests' }, { description: 'Checking tests' }],
+    [{ toolSummary: ' ', toolAction: 'Checking tests', title: 'Test suite' }, { description: 'Checking tests', title: 'Test suite' }],
+    [{ toolSummary: '\u0000\u001b[0m', toolAction: 'Checking tests' }, { description: 'Checking tests' }],
+    [{ toolSummary: '  Inspect\n local  files\u0000 ' }, { description: 'Inspect local files' }],
+    [{ toolSummary: '🧪'.repeat(300) }, { description: '🧪'.repeat(240) }],
+    [{ toolSummary: [], toolAction: {} }, {}],
     [{}, {}],
     [{ description: 42, title: [] }, {}],
   ])('preserves only explicit string call labels when mapping AGY parameters (%j)', async (labels, expected) => {
@@ -435,6 +445,113 @@ describe('AgyExecutor', () => {
     emitResult();
     await running;
     expect(onToolUse).toHaveBeenCalledWith({ id: 'agy-step-2', name: 'Bash', input: { command: 'npm test' }, ...expected });
+  });
+
+  it('keeps native summaries on their tool identities and does not synthesize calls for delayed results', async () => {
+    const onToolUse = vi.fn();
+    const onToolResult = vi.fn();
+    const onActivity = vi.fn();
+    const running = executor.execute('inspect', { onToolUse, onToolResult, onActivity });
+    await waitForSpawn();
+    emitInit();
+    emitJson({ event: 'step_update', step_update: {
+      conversation_id: 'conv-aaa', step_index: 1, state: 'ACTIVE', step_type: 'agent_response',
+      text_delta: 'Execution-wide progress',
+    } });
+    for (const [index, parameters] of [
+      [2, { CommandLine: 'git status --short', toolSummary: 'Inspect working changes' }],
+      [3, { CommandLine: 'npm test', toolAction: 'Run project tests' }],
+      [4, { CommandLine: 'echo example' }],
+    ] as const) {
+      emitJson({ event: 'step_update', step_update: {
+        conversation_id: 'conv-aaa', step_index: index, state: 'ACTIVE', step_type: 'tool',
+        tool_name: 'run_command', tool_info: { parameters },
+      } });
+    }
+    expect(onToolUse.mock.calls.map(([tool]) => tool.description)).toEqual(['Inspect working changes', 'Run project tests', undefined]);
+    expect(onActivity).toHaveBeenCalledWith({ source: 'tool', text: 'Inspect working changes' });
+    expect(onActivity).toHaveBeenCalledWith({ source: 'tool', text: 'Run project tests' });
+    await Promise.resolve();
+    emitJson({ event: 'step_update', step_update: {
+      conversation_id: 'conv-aaa', step_index: 2, state: 'DONE', step_type: 'tool', tool_name: 'run_command',
+      tool_info: { parameters: { toolSummary: 'Terminal-only label' }, output: 'Changes listed' },
+    } });
+    emitJson({ event: 'step_update', step_update: {
+      conversation_id: 'conv-aaa', step_index: 3, state: 'DONE', step_type: 'tool', tool_name: 'run_command',
+      tool_info: { error: { message: 'Test failed' } },
+    } });
+    emitResult();
+    await running;
+    expect(onToolUse).toHaveBeenCalledTimes(3);
+    expect(onToolResult.mock.calls.map(([result]) => result)).toEqual([
+      { tool_use_id: 'agy-step-2', content: 'Changes listed', is_error: false },
+      { tool_use_id: 'agy-step-3', content: 'Test failed', is_error: true },
+    ]);
+  });
+
+  it('forwards native summaries for mapped file tools without exposing them as parameters', async () => {
+    const onToolUse = vi.fn();
+    const running = executor.execute('inspect', { onToolUse });
+    await waitForSpawn();
+    emitInit();
+    emitJson({ event: 'step_update', step_update: {
+      conversation_id: 'conv-aaa', step_index: 2, state: 'ACTIVE', step_type: 'tool', tool_name: 'view_file',
+      tool_info: { parameters: { AbsolutePath: '/project/config.ts', toolSummary: 'Inspect configuration' } },
+    } });
+    emitResult();
+    await running;
+    expect(onToolUse).toHaveBeenCalledWith({ id: 'agy-step-2', name: 'Read',
+      input: { file_path: '/project/config.ts' }, description: 'Inspect configuration' });
+  });
+
+  it.each([
+    [{ query: 'Native lowercase query' }, 'Native lowercase query'],
+    [{ Query: 'Legacy uppercase query' }, 'Legacy uppercase query'],
+    [{ Query: 'Legacy query', query: 'Native query' }, 'Legacy query'],
+  ])('preserves native and legacy AGY search parameters (%j)', async (parameters, query) => {
+    const onToolUse = vi.fn(), onToolResult = vi.fn();
+    const running = executor.execute('search documentation', { onToolUse, onToolResult });
+    await waitForSpawn();
+    emitInit();
+    const step = { conversation_id: 'conv-aaa', step_index: 2, step_type: 'tool', tool_name: 'search_web' };
+    emitJson({ event: 'step_update', step_update: { ...step, state: 'ACTIVE', tool_info: { parameters } } });
+    emitJson({ event: 'step_update', step_update: { ...step, state: 'DONE', tool_info: {
+      output: 'Documentation\nhttps://example.com/docs\nPublic excerpt',
+    } } });
+    emitResult();
+    await running;
+    expect(onToolUse).toHaveBeenCalledWith({ id: 'agy-step-2', name: 'WebSearch', input: { query } });
+    expect(onToolResult).toHaveBeenCalledWith({ tool_use_id: 'agy-step-2', is_error: false,
+      content: 'Documentation\nhttps://example.com/docs\nPublic excerpt' });
+  });
+
+  it.each([
+    [{ results: [{ title: 'Documentation', url: 'https://example.com/docs', snippet: 'Public excerpt' }] }],
+    [[{ title: 'Documentation', url: 'https://example.com/docs' }]],
+    [0], [false],
+  ])('does not silently discard non-string AGY tool output (%j)', async output => {
+    const onToolResult = vi.fn();
+    const running = executor.execute('look up docs', { onToolResult });
+    await waitForSpawn();
+    emitInit();
+    emitJson({ event: 'step_update', step_update: { conversation_id: 'conv-aaa', step_index: 2,
+      step_type: 'tool', tool_name: 'search_web', state: 'DONE', tool_info: { output } } });
+    emitResult();
+    await running;
+    expect(onToolResult).toHaveBeenCalledWith({ tool_use_id: 'agy-step-2', content: JSON.stringify(output), is_error: false });
+  });
+
+  it.each([{}, [], { partial: 'Excerpt' }, 0, false, null])('preserves the AGY error explanation alongside structured output (%j)', async output => {
+    const onToolResult = vi.fn();
+    const running = executor.execute('look up docs', { onToolResult });
+    await waitForSpawn();
+    emitInit();
+    emitJson({ event: 'step_update', step_update: { conversation_id: 'conv-aaa', step_index: 2,
+      step_type: 'tool', tool_name: 'search_web', state: 'DONE', tool_info: { output, error: { message: 'Network failed' } } } });
+    emitResult();
+    await running;
+    expect(onToolResult).toHaveBeenCalledWith({ tool_use_id: 'agy-step-2', is_error: true,
+      content: output === null ? 'Network failed' : `Network failed\n${JSON.stringify(output)}` });
   });
 
   it('marks tool result as error when tool_info contains an error object', async () => {

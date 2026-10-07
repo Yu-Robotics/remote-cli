@@ -12,6 +12,8 @@ import { TaskRecovery } from '../src/client/TaskRecovery';
 import { DirectoryGuard } from '../src/security/DirectoryGuard';
 import { ThreadExecutorPool } from '../src/thread/ThreadExecutorPool';
 import { ThreadManager } from '../src/thread/ThreadManager';
+import * as localImages from '../src/utils/LocalImageDetector';
+import { codexWebSearchResult } from '../src/executor/CodexWebSearch';
 
 vi.mock('../src/client/WebSocketClient');
 
@@ -500,6 +502,95 @@ describe('MessageHandler', () => {
           attachments: [expect.any(Object)]
         })
       );
+    });
+
+    it.each(['WebSearch', 'WebFetch', 'search_web', 'read_url_content', 'web_search', 'fetch', 'other', undefined])(
+      'does not detect or upload local images mentioned by web result data (%s)', async name => {
+        const directory = await mkdtemp(path.join(tmpdir(), 'remote-cli-web-image-test-'));
+        await writeFile(path.join(directory, 'private-screenshot.png'), Buffer.from('synthetic-image-data'));
+        ctx.mockThreadManager.getDefaultThread().workingDirectory = directory;
+        const detector = vi.spyOn(localImages, 'readLocalImages');
+        const guard = vi.spyOn(DirectoryGuard.prototype, 'isSafePath').mockReturnValue(true);
+        const native = codexWebSearchResult({ id: 'web-result', results: [{ title: 'Documentation', snippet: 'See ./private-screenshot.png' }] });
+        const { webSearch, ...textOnly } = native;
+        ctx.mockExecutor.execute.mockImplementation(async (_prompt: string, options: any) => {
+          if (name) options.onToolUse({ id: 'web-result', name, title: name === 'other' ? 'web_search' : undefined, input: {} });
+          // Metadata alone protects result-first events; tracked identity protects other backends.
+          options.onToolResult(name ? textOnly : { ...textOnly, webSearch });
+          options.onToolResult(textOnly);
+          return { success: true, output: '' };
+        });
+        try {
+          await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-web-image', content: 'look up docs', timestamp: Date.now() } as any);
+          // Finalization also scans a whitespace-only transcript separator.
+          expect(detector.mock.calls.filter(([text]) => text.trim())).toEqual([]);
+          const messages = ctx.mockWsClient.send.mock.calls.map(([message]: any[]) => message);
+          expect(messages.filter((message: any) => message.streamType === 'image')).toHaveLength(0);
+          expect(messages.filter((message: any) => message.streamType === 'tool_result')).toHaveLength(2);
+        } finally {
+          detector.mockRestore();
+          guard.mockRestore();
+          await rm(directory, { recursive: true, force: true });
+        }
+      });
+
+    it.each(['other', 'tool'])(
+      'retains web provenance across active %s tool title updates', async name => {
+        const directory = await mkdtemp(path.join(tmpdir(), 'remote-cli-web-update-test-'));
+        await writeFile(path.join(directory, 'private-screenshot.png'), Buffer.from('synthetic-image-data'));
+        ctx.mockThreadManager.getDefaultThread().workingDirectory = directory;
+        const detector = vi.spyOn(localImages, 'readLocalImages');
+        const guard = vi.spyOn(DirectoryGuard.prototype, 'isSafePath').mockReturnValue(true);
+        ctx.mockExecutor.execute.mockImplementation(async (_prompt: string, options: any) => {
+          options.onToolUse({ id: 'web-update', name, title: 'web_search', input: {} });
+          options.onToolUse({ id: 'web-update', name, title: 'Search documentation', input: { query: 'documentation' } });
+          options.onToolResult({ tool_use_id: 'web-update', content: 'See ./private-screenshot.png', is_error: false });
+          options.onToolResult({ tool_use_id: 'web-update', content: 'See ./private-screenshot.png', is_error: false });
+          return { success: true, output: '' };
+        });
+        try {
+          await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-web-update', content: 'look up docs', timestamp: Date.now() } as any);
+          expect(detector.mock.calls.filter(([text]) => text.trim())).toEqual([]);
+          const messages = ctx.mockWsClient.send.mock.calls.map(([message]: any[]) => message);
+          expect(messages.filter((message: any) => message.streamType === 'image')).toHaveLength(0);
+          expect(messages.filter((message: any) => message.streamType === 'tool_use')).toHaveLength(2);
+          expect(messages.filter((message: any) => message.streamType === 'tool_result')).toHaveLength(2);
+        } finally {
+          detector.mockRestore();
+          guard.mockRestore();
+          await rm(directory, { recursive: true, force: true });
+        }
+      });
+
+    it('retains result-first web provenance when a pending call later acquires its identity', async () => {
+      const detector = vi.spyOn(localImages, 'readLocalImages').mockResolvedValue([]);
+      const native = codexWebSearchResult({ id: 'web-orphan', results: [{ snippet: 'See ./private-screenshot.png' }] });
+      const { webSearch: _webSearch, ...textOnly } = native;
+      ctx.mockExecutor.execute.mockImplementation(async (_prompt: string, options: any) => {
+        options.onToolResult(native);
+        options.onToolUse({ id: 'web-orphan', name: 'other', title: 'Search documentation', input: {} });
+        options.onToolResult(textOnly);
+        return { success: true, output: '' };
+      });
+      try {
+        await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-web-orphan', content: 'look up docs', timestamp: Date.now() } as any);
+        expect(detector.mock.calls.filter(([text]) => text.trim())).toEqual([]);
+      } finally { detector.mockRestore(); }
+    });
+
+    it('clears web provenance when a new local tool explicitly reuses the same ID', async () => {
+      const detector = vi.spyOn(localImages, 'readLocalImages').mockResolvedValue([]);
+      ctx.mockExecutor.execute.mockImplementation(async (_prompt: string, options: any) => {
+        options.onToolUse({ id: 'reused', name: 'WebSearch', input: {} });
+        options.onToolResult({ tool_use_id: 'reused', content: 'See ./private-screenshot.png', is_error: false });
+        options.onToolUse({ id: 'reused', name: 'Bash', input: { command: 'generate chart' } });
+        options.onToolResult({ tool_use_id: 'reused', content: 'Saved ./chart.png', is_error: false });
+        return { success: true, output: '' };
+      });
+      try {
+        await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-reused-image', content: 'make a chart', timestamp: Date.now() } as any);
+        expect(detector.mock.calls.filter(([text]) => text.trim()).map(([text]) => text)).toEqual(['Saved ./chart.png']);
+      } finally { detector.mockRestore(); }
     });
 
     it('should forward a local image path from a tool result', async () => {

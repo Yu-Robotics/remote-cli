@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.149] - 2026-10-07
+
+### Changed
+- Forward AGY's native per-call `toolSummary` and fallback `toolAction` as tool descriptions while preserving explicit descriptions and titles. Terminal results keep the original invocation identity and do not synthesize new calls or copy execution-wide activity into labels.
+- Describe Codex's structured `commandActions` as file reads, searches, and directory listings. Use file basenames only, omit raw commands and search arguments, and leave absent, unknown, or partly unknown action sets unlabeled. Reserve omitted-label counts within the existing 60-character heading budget. Reuse existing description fields and compact headings without additional model calls, protocol changes, or card elements.
+- Preserve Codex's native web search, open-page, and find-in-page actions and result entries instead of reporting empty output. Foreground tools show up to five bounded titles, source links, and snippets in the existing output node, with explicit omitted-entry counts and distinct missing, unsupported, and empty-result notices. An additive optional result preview retains a plaintext fallback for older Routers; source links are revalidated and result text is rendered literally. Delayed result updates keep the original invocation slot and recursive pagination limits.
+- Accept AGY's native lowercase `query` as well as legacy `Query`, and preserve non-string tool outputs as JSON alongside any supplied failure explanation instead of discarding either. Add web-result passthrough regressions for Claude, shared ACP backends (OpenCode, Kimi, ZCode, DSH), and Pi without assuming unavailable native samples were verified.
+- Treat structured web previews and recognized web-tool results as display data, not local-image instructions; repeated results retain their origin until an explicit new call reuses the ID. Ordinary local-tool image forwarding remains available. Prefix every native fallback field so untrusted snippets cannot close older Routers' fixed code fences.
+
 ## [1.6.148] - 2026-10-07
 
 ### Changed
