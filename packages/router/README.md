@@ -4,6 +4,17 @@ Router server for [remote-cli](https://www.npmjs.com/package/@yu_robotics/remote
 
 Backend executable discovery is local-client behavior. CLI 1.6.119 supplements Linux/macOS startup PATH and honors configured backend commands across detection and execution, preserving ZCode's native unset/empty-command lookup. Upgrade and restart the client to obtain this fix; upgrading only the Router does not repair an older client's environment. Valid client services need no reinstallation. The Router runtime, wire protocol, and existing compatibility requirements are unchanged. See [Backend Executable Discovery](../../README.md#backend-executable-discovery).
 
+## Public Activity
+
+CLI and Router 1.6.144 negotiate optional `activityProgress` without a protocol
+version bump. One mutable status row sits at the tail of the newest active main
+card, after tools and workers, and moves when the reply paginates. Historical
+pages do not retain a live Running row. Each worker shows its own bounded activity
+below its identity. Input requests and final results win over progress; completion
+preserves the terminal status, model/effort note, and thread controls. Raw thinking
+is not displayed as activity and progress is not a percentage. Older clients keep
+their existing cards. See [Public Activity](../../README.md#public-activity).
+
 ## Maintenance Notices
 
 From CLI and Router 1.6.127, upgrade notices use concise Chinese summaries from `RELEASE_NOTES_ZH.md`, with one short title and bounded user-visible changes per release. `CHANGELOG.md` remains the English technical record. The CLI build requires matching current-version entries in both documents and bundles both, without online translation or model calls. New Routers show summaries directly and collapse technical details. Earlier maintenance-capable Routers show the summary in their existing collapsed panels; new Routers keep older CLI notes collapsed when no technical-details field is present. Cumulative ranges, silent first adoption, delivery acknowledgements, and protocol version 1 are unchanged.

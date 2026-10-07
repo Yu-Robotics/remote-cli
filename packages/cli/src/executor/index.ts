@@ -24,6 +24,13 @@ export { ZCodeExecutor } from './ZCodeExecutor';
 export { PiExecutor } from './PiExecutor';
 export { DshExecutor } from './DshExecutor';
 export type { ExecutorModelInfo, IExecutor } from './IExecutor';
+export {
+  ActivityTracker,
+  normalizeActivity,
+  activityFromTool,
+  extractTodoPlan,
+  sanitizeActivityText,
+} from './Activity';
 
 /**
  * Executor type

@@ -392,6 +392,31 @@ describe('delegation in the existing thread workflow', () => {
     }));
   });
 
+  it('negotiates worker activity independently of display text and strips it after downgrade', async () => {
+    const parents: any[] = [];
+    const delegation = (handler as any).delegation as DelegationManager;
+    const begin = delegation.begin.bind(delegation);
+    vi.spyOn(delegation, 'begin').mockImplementation(parent => { parents.push(parent); return begin(parent); });
+    await handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: { activityProgress: true } } } as any);
+    await handler.handleMessage(message('main-only', 'Inspect'));
+    expect(parents.at(-1).onActivityProgress).toBeUndefined();
+    await handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: {
+      delegationProgress: true, activityProgress: true,
+    } } } as any);
+    await handler.handleMessage(message('worker-activity', 'Inspect'));
+    expect(parents.at(-1).onTextProgress).toBeUndefined();
+    const callback = parents.at(-1).onActivityProgress;
+    expect(callback).toEqual(expect.any(Function));
+    const progress = { taskId: 'worker-1', backend: 'claude', phase: 'text', activity: { source: 'plan', text: 'Review the behavior' } };
+    expect(callback(progress)).toBe(true);
+    expect(socket.send.mock.calls.at(-1)[0]).toMatchObject({ messageId: 'worker-activity', streamType: 'delegation_progress', delegationProgress: progress });
+    await handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: { delegationProgress: true } } } as any);
+    callback({ ...progress, phase: 'tool_use' });
+    expect(socket.send.mock.calls.at(-1)[0].delegationProgress.activity).toBeUndefined();
+    await handler.handleMessage(message('old-peer', 'Inspect'));
+    expect(parents.at(-1).onActivityProgress).toBeUndefined();
+  });
+
   it('resends a child approval after registration and sends the decision only to the child', async () => {
     await handler.handleMessage(message('enable', '/delegation on'));
     await handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: { approvalCards: true } } } as any);
@@ -626,6 +651,7 @@ describe('delegation in the existing thread workflow', () => {
   });
 
   it('waits for a verbose worker and resumes the coordinator with its conclusion before draining the queue', async () => {
+    await handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: { activityProgress: true } } } as any);
     await handler.handleMessage(message('enable', '/delegation on'));
     fs.writeFileSync(path.join(home, 'stale.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+cZYsAAAAASUVORK5CYII=', 'base64'));
     let finish!: (result: ExecuteResult) => void;
@@ -642,6 +668,7 @@ describe('delegation in the existing thread workflow', () => {
       await call('remote_cli_delegate', { backend: 'claude', objective: 'Inspect' });
       options.onStream?.('Still waiting for the worker.');
       options.onPlanMode?.('A stale waiting plan');
+      options.onActivity?.({ source: 'reasoning_summary', text: 'A premature coordinator conclusion' });
       options.onImage?.({ type: 'image', data: 'c3RhbGU=', mimeType: 'image/png' });
       return { success: true, output: 'Still waiting for the worker.\n![stale image](./stale.png)' };
     }).mockImplementationOnce(async (prompt: string, options: ExecuteOptions) => {
@@ -651,6 +678,7 @@ describe('delegation in the existing thread workflow', () => {
       expect(prompt).not.toContain('Unique original request');
       expect(options.attachments).toBeUndefined();
       staleOptions.onStream?.('Late stale waiting text');
+      staleOptions.onActivity?.({ source: 'plan', text: 'Late stale activity' });
       options.onStream?.('The review is complete.');
       return { success: true, output: 'The review is complete.' };
     });
@@ -671,6 +699,10 @@ describe('delegation in the existing thread workflow', () => {
     expect(main.execute).toHaveBeenCalledTimes(3);
     expect(main.execute.mock.calls[0][1].attachments).toEqual(attachments);
     expect(worker.execute).toHaveBeenCalledOnce();
+    const activity = socket.send.mock.calls.map(([value]: any[]) => value).filter((value: any) => value.streamType === 'activity');
+    expect(activity).toContainEqual(expect.objectContaining({ activity: { source: 'state', text: 'Waiting for worker results' } }));
+    expect(JSON.stringify(activity)).not.toContain('premature coordinator');
+    expect(JSON.stringify(activity)).not.toContain('Late stale activity');
     expect(worker.destroy).toHaveBeenCalledOnce();
     expect(responseFor('parent').success).toBe(true);
     const output = socket.send.mock.calls.map(([value]: any[]) => value).filter((value: any) => value.messageId === 'parent');

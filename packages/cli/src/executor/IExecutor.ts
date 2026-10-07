@@ -1,10 +1,12 @@
-import { ToolUseInfo, ToolResultInfo, Attachment, ImageBlock, TaskNotificationInfo, ApprovalRequestInfo, ApprovalAction, ApprovalStatus, ExecutionMetadata } from '../types';
+import { ToolUseInfo, ToolResultInfo, Attachment, ImageBlock, TaskNotificationInfo, ApprovalRequestInfo, ApprovalAction, ApprovalStatus, ExecutionMetadata, ActivityProgressInfo } from '../types';
 import type { DelegationConnection } from '../delegation/contract';
 
 export interface ExecuteOptions {
   onStream?: (chunk: string) => void;
   /** Assistant response text only; excludes reasoning, tool output, and status messages. */
   onDisplayText?: (chunk: string) => void;
+  /** Bounded public activity snapshot; excludes raw thinking, tool output and final Codex prose. */
+  onActivity?: (activity: ActivityProgressInfo) => void;
   onToolUse?: (toolUse: ToolUseInfo) => void;
   onToolResult?: (toolResult: ToolResultInfo) => void;
   onRedactedThinking?: () => void;

@@ -11,6 +11,7 @@ import { stripAnsi } from '../utils/stripAnsi';
 import { assertWorkingDirectoryExists } from '../utils/WorkingDirectory';
 import { configureAgyDelegation } from './agy/AgyDelegationConfig';
 import { delegationEnvironment, sameConnection, type DelegationConnection } from '../delegation/contract';
+import { ActivityTracker } from './Activity';
 
 export interface AgyExecutorOptions {
   /** Model slug passed as --model. Leave unset to use agy's default. */
@@ -177,6 +178,7 @@ export class AgyExecutor implements IExecutor {
   private readonly pendingExits = new Set<Promise<void>>();
   /** Handoff summary from compactWhenFull, wrapped into the next prompt (consumed once). */
   private pendingContextSeed: string | null = null;
+  private readonly activityTracker = new ActivityTracker();
 
   constructor(directoryGuard: DirectoryGuard, options: AgyExecutorOptions = {}) {
     this.directoryGuard = directoryGuard;
@@ -570,6 +572,8 @@ export class AgyExecutor implements IExecutor {
       }
 
       const active: ActiveCommand = { options, resolve, inactivityTimeoutMs: options.inactivityTimeout };
+      this.activityTracker.setCallback(options.onActivity);
+      this.activityTracker.reset();
       if (options.timeout && options.timeout > 0) {
         active.timeoutTimer = setTimeout(() => {
           console.warn(`[AgyExecutor] Command timed out after ${options.timeout}ms, killing process`);
@@ -606,6 +610,8 @@ export class AgyExecutor implements IExecutor {
     const active = this.activeCommand;
     if (!active) return;
     this.activeCommand = null;
+    this.activityTracker.reset();
+    this.activityTracker.setCallback(undefined);
     this.clearInactivityTimer();
     if (active.timeoutTimer) clearTimeout(active.timeoutTimer);
     if (result.success && result.output === undefined) {
@@ -831,6 +837,7 @@ export class AgyExecutor implements IExecutor {
         this.currentOutputBuffer.push(delta);
         options.onStream?.(delta);
         options.onDisplayText?.(delta);
+        this.activityTracker.emitPublicText(delta);
       }
       return;
     }
@@ -843,6 +850,7 @@ export class AgyExecutor implements IExecutor {
       if (step.state === 'ACTIVE') {
         const { name, input } = mapAgyTool(step.tool_name, parameters);
         options.onToolUse?.({ id: toolUseId, name, input });
+        this.activityTracker.emitTool(name, input);
       } else if (step.state === 'DONE') {
         const isError = !!toolInfo.error;
         const content =

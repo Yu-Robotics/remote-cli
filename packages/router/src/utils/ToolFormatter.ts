@@ -1,4 +1,5 @@
-import { DelegationProgressPhase, ToolUseInfo, ToolResultInfo, TaskNotificationInfo, type ExecutionMetadata } from '../types';
+import { DelegationProgressPhase, ToolUseInfo, ToolResultInfo, TaskNotificationInfo, type ExecutionMetadata, type ActivityProgressInfo } from '../types';
+import { activityLiteral, parseActivityProgress } from './ActivityProgress';
 import { createExecutionMetadataElement } from './ExecutionMetadata';
 import { createDiffPanels, createEditPanels, createWritePanels } from './DiffFormatter';
 import MarkdownIt from 'markdown-it';
@@ -484,6 +485,7 @@ export interface DelegationProgressCardState {
   error?: string;
   /** Most recent bounded worker-visible text. Never contains raw reasoning or tool payloads. */
   latestText?: string;
+  activity?: ActivityProgressInfo;
   currentToolName?: string;
   currentToolStartedAt?: number;
   /** Updated only by real tool use/result callbacks, never by text or card heartbeats. */
@@ -590,6 +592,7 @@ export function createDelegationProgressElements(state: DelegationProgressCardSt
     ? `${literalWorkerText(state.currentToolName, 120)}${state.activeToolCount > 1 ? ` · ${state.activeToolCount} tools active` : ''}`
     : undefined;
   const primary: DelegationContentSection[] = [];
+  const publicActivity = parseActivityProgress(state.activity);
   if (state.phase === 'waiting_input') {
     primary.push({
       label: 'Your input is needed', labelColor: 'orange',
@@ -601,6 +604,9 @@ export function createDelegationProgressElements(state: DelegationProgressCardSt
   }
   if (style.terminal && state.summary) {
     primary.push({ label: 'Result excerpt', content: formatWorkerResultMarkdown(state.summary) });
+  } else if (publicActivity && state.phase !== 'waiting_input') {
+    primary.push({ label: style.terminal ? 'Last activity · not a final result' : 'Activity',
+      content: activityLiteral(publicActivity.text) });
   } else if (state.latestText && state.phase !== 'waiting_input') {
     primary.push({
       label: style.terminal ? 'Last activity · not a final result' : 'Latest update',
@@ -612,7 +618,7 @@ export function createDelegationProgressElements(state: DelegationProgressCardSt
   const updated = !style.terminal && state.lastActivityAt !== undefined
     ? ` · Updated ${lastWorkerActivity(state.lastActivityAt)}` : '';
   const metadata = [`${delegationElapsed(state.startedAt, state.finishedAt)}${updated}`];
-  if (currentTool && state.latestText && state.phase !== 'waiting_input') metadata.push(currentTool);
+  if (currentTool && (state.latestText || publicActivity) && state.phase !== 'waiting_input') metadata.push(currentTool);
   if (state.toolErrorCount) {
     const location = state.events.some(event => event.isError) ? 'see activity details' : 'earlier details omitted';
     metadata.push(`<font color='orange'>${state.toolErrorCount} tool issue${state.toolErrorCount === 1 ? '' : 's'} · ${location}</font>`);

@@ -38,7 +38,7 @@ describe('CLI wire compatibility', () => {
       type: 'binding_request',
       messageId: expect.any(String),
       timestamp: expect.any(Number),
-      data: { deviceId: 'device-1', protocolVersion: PROTOCOL_VERSION, capabilities: { queueStarted: true, taskRecovery: true, approvalCards: true, delegationProgress: true, delegationProgressText: true, workerContextReset: true, streamingContext: true, updateNotice: true, subscriptionInspection: true } },
+      data: { deviceId: 'device-1', protocolVersion: PROTOCOL_VERSION, capabilities: { queueStarted: true, taskRecovery: true, approvalCards: true, delegationProgress: true, delegationProgressText: true, workerContextReset: true, streamingContext: true, activityProgress: true, updateNotice: true, subscriptionInspection: true } },
     });
   });
 

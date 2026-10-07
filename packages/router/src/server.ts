@@ -8,7 +8,8 @@ import path from 'path';
 import os from 'os';
 import { randomUUID } from 'crypto';
 import type { ApprovalAction } from './types';
-import type { ExecutionMetadata } from './types';
+import type { ExecutionMetadata, ActivityProgressInfo } from './types';
+import { parseActivityProgress } from './utils/ActivityProgress';
 import { parseExecutionMetadata } from './utils/ExecutionMetadata';
 import Koa from 'koa';
 import bodyParser from 'koa-bodyparser';
@@ -46,6 +47,8 @@ interface StreamingMessageState {
   feishuMessageId: string | null;
   elements: FeishuCardElement[];
   currentTextContent: string;
+  /** Mutable shell state, never transcript content or a completion signal. */
+  activity?: ActivityProgressInfo;
   hasUpdated: boolean;
   createdAt: number;
   deviceId: string;
@@ -417,6 +420,7 @@ export class RouterServer {
       let delegationProgressTextEnabled = false;
       let workerContextResetEnabled = false;
       let streamingContextEnabled = false;
+      let activityProgressEnabled = false;
       let updateNoticeEnabled = false;
       let subscriptionInspectionEnabled = false;
       let authenticationPending = false;
@@ -587,6 +591,7 @@ export class RouterServer {
                 this.maintenanceConnections.set(deviceId, { updateNotice: updateNoticeEnabled,
                   current: () => ws.readyState === WebSocket.OPEN && this.connectionHub.isCurrentConnection(requestedId, ws) });
                 streamingContextEnabled = message.data.capabilities?.streamingContext === true;
+                activityProgressEnabled = message.data.capabilities?.activityProgress === true;
                 delegationProgressEnabled = message.data.capabilities?.delegationProgress === true;
                 delegationProgressTextEnabled = delegationProgressEnabled
                   && message.data.capabilities?.delegationProgressText === true;
@@ -603,7 +608,8 @@ export class RouterServer {
                     success: true,
                     routerVersion: ROUTER_VERSION,
                     minCliVersion: MIN_SUPPORTED_CLI_VERSION,
-                    ...((taskRecoveryEnabled || approvalCardsEnabled || delegationProgressEnabled || streamingContextEnabled || filesEnabled || updateNoticeEnabled || subscriptionInspectionEnabled) ? { capabilities: {
+                    ...((taskRecoveryEnabled || approvalCardsEnabled || delegationProgressEnabled || streamingContextEnabled || activityProgressEnabled || filesEnabled || updateNoticeEnabled || subscriptionInspectionEnabled) ? { capabilities: {
+                      ...(activityProgressEnabled ? { activityProgress: true } : {}),
                       ...(updateNoticeEnabled ? { updateNotice: true } : {}),
                       ...(subscriptionInspectionEnabled ? { subscriptionInspection: true } : {}),
                       ...(filesEnabled ? { fileTransferV1: true } : {}),
@@ -734,6 +740,11 @@ export class RouterServer {
                 const streamType = message.streamType || 'text';
 
                 switch (streamType) {
+                  case 'activity':
+                    if (activityProgressEnabled && this.matchesActivityStream(message, deviceId)) {
+                      await this.handleActivityProgress(message);
+                    }
+                    break;
                   case 'text': {
                     const update = this.handleTextChunk(message.messageId, message.openId, message.chunk || '');
                     if (this.startedQueueMessages.has(message.messageId)) {
@@ -758,8 +769,10 @@ export class RouterServer {
                     break;
                   case 'delegation_progress':
                     if (delegationProgressEnabled && message.delegationProgress) {
+                      if (activityProgressEnabled && !this.matchesActivityStream(message, deviceId)) break;
                       await this.handleDelegationProgress(message.messageId, message.openId, message.delegationProgress,
-                        delegationProgressTextEnabled, workerContextResetEnabled ? deviceId ?? undefined : undefined);
+                        delegationProgressTextEnabled, workerContextResetEnabled ? deviceId ?? undefined : undefined,
+                        activityProgressEnabled);
                     }
                     break;
                   case 'redacted_thinking':
@@ -887,6 +900,24 @@ export class RouterServer {
   private readonly STREAM_UPDATE_INTERVAL_MS = 500; // Update at least every 500ms
   private readonly STREAM_UPDATE_MIN_LENGTH = 10;   // Update every 10 characters
 
+  private matchesActivityStream(message: any, deviceId: string | null): boolean {
+    if (!deviceId || typeof message.messageId !== 'string' || typeof message.openId !== 'string'
+      || typeof message.threadId !== 'string' || !message.threadId) return false;
+    const stream = this.streamingMessages.get(message.messageId);
+    return !!stream && !stream.finalizing && stream.deviceId === deviceId
+      && stream.openId === message.openId && stream.threadId === message.threadId;
+  }
+
+  private async handleActivityProgress(message: any): Promise<void> {
+    const activity = parseActivityProgress(message.activity);
+    const stream = this.streamingMessages.get(message.messageId);
+    if (!activity || !stream || stream.finalizing) return;
+    if (stream.activity?.source === activity.source && stream.activity.text === activity.text) return;
+    stream.activity = activity;
+    // Display snapshots do not renew stream or worker liveness deadlines.
+    await this.updateStreamingText(message.messageId, stream.openId, stream);
+  }
+
   /** Resolve the card header without waiting for backend text or completion. */
   private async handleStreamContext(message: any, deviceId: string | null): Promise<void> {
     const { messageId, openId, threadId, threadName, cwd } = message;
@@ -1001,7 +1032,8 @@ export class RouterServer {
         elements,
         openId,
         streamData.threadName,
-        streamData.cwd
+        streamData.cwd,
+        ...(streamData.activity ? [streamData.activity] as const : [])
       );
     } while (streamData.updatePending);
   }
@@ -1013,7 +1045,7 @@ export class RouterServer {
     console.log(`[RouterServer] Received tool_use for ${messageId}: ${toolUse.name}`);
     const streamData = this.streamingMessages.get(messageId);
 
-    if (!streamData) {
+    if (!streamData || streamData.finalizing) {
       console.log(`[RouterServer] No streaming session found for ${messageId}`);
       return;
     }
@@ -1052,7 +1084,7 @@ export class RouterServer {
     console.log(`[RouterServer] Received tool_result for ${messageId}: ${toolResult.tool_use_id}`);
     const streamData = this.streamingMessages.get(messageId);
 
-    if (!streamData) {
+    if (!streamData || streamData.finalizing) {
       console.log(`[RouterServer] No streaming session found for ${messageId}`);
       return;
     }
@@ -1089,13 +1121,16 @@ export class RouterServer {
     return Array.from(value).slice(0, limit).join('');
   }
 
-  private normalizeDelegationProgress(value: unknown, allowText: boolean): DelegationProgressInfo | undefined {
+  private normalizeDelegationProgress(value: unknown, allowText: boolean, allowActivity = false): DelegationProgressInfo | undefined {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
     const raw = value as Record<string, unknown>;
     const taskId = this.boundedDelegationProgressText(raw.taskId, 200);
     const backend = this.boundedDelegationProgressText(raw.backend, 100);
     if (!taskId || !backend || typeof raw.phase !== 'string' || !DELEGATION_PROGRESS_PHASES.has(raw.phase as DelegationProgressInfo['phase'])) return undefined;
-    if (raw.phase === 'text' && !allowText) return undefined;
+    const activity = allowActivity ? parseActivityProgress(raw.activity) : undefined;
+    if (raw.phase === 'text' && !allowText && !activity) return undefined;
+    if (allowActivity && raw.phase === 'text' && !activity
+      && !(allowText && typeof raw.latestText === 'string' && raw.latestText.trim())) return undefined;
 
     const toolUseRaw = raw.toolUse;
     const toolUse = toolUseRaw && typeof toolUseRaw === 'object' && !Array.isArray(toolUseRaw)
@@ -1130,7 +1165,9 @@ export class RouterServer {
       objective: this.boundedDelegationProgressText(raw.objective, 1000),
       toolUse,
       toolResult,
-      latestText: this.boundedDelegationProgressText(raw.latestText, 1200),
+      latestText: allowText || raw.phase !== 'text' ? this.boundedDelegationProgressText(raw.latestText, 1200) : undefined,
+      ...(activity ? { activity } : {}),
+      ...(allowActivity && typeof raw.waitingForInput === 'boolean' ? { waitingForInput: raw.waitingForInput } : {}),
       summary: this.boundedDelegationProgressText(raw.summary, 4000),
       error: this.boundedDelegationProgressText(raw.error, 4000),
       startedAt,
@@ -1217,8 +1254,8 @@ export class RouterServer {
 
   /** Update one bounded, nested worker panel rather than flattening child tool cards. */
   private async handleDelegationProgress(messageId: string, openId: string, value: unknown, allowText = false,
-    contextDeviceId?: string): Promise<void> {
-    const progress = this.normalizeDelegationProgress(value, allowText);
+    contextDeviceId?: string, allowActivity = false): Promise<void> {
+    const progress = this.normalizeDelegationProgress(value, allowText, allowActivity);
     if (!progress) {
       console.log(`[RouterServer] Ignoring malformed delegation progress for ${messageId}`);
       return;
@@ -1232,6 +1269,8 @@ export class RouterServer {
       return;
     }
     if (state?.terminal) return;
+    if (allowActivity && state?.phase === 'waiting_input' && progress.phase === 'text'
+      && progress.waitingForInput !== false) return;
 
     if (!state) {
       if (streamData.currentTextContent.trim()) {
@@ -1267,12 +1306,13 @@ export class RouterServer {
         threadId: streamData.threadId, ...progress.workerContext });
     }
     if (progress.executionMetadata) state.executionMetadata = progress.executionMetadata;
+    if (progress.activity) state.activity = progress.activity;
     if (progress.phase === 'waiting_input') state.inputRequest = progress.summary;
     else state.inputRequest = undefined;
     if (progress.phase !== 'waiting_input' && progress.summary !== undefined) state.summary = progress.summary;
     if (progress.error !== undefined) state.error = progress.error;
     if (progress.phase !== 'text' || state.activeToolIds.size === 0) state.phase = progress.phase;
-    if (progress.phase !== 'text' || progress.latestText) state.lastActivityAt = Date.now();
+    if (progress.phase !== 'text' || progress.latestText || progress.activity) state.lastActivityAt = Date.now();
 
     switch (progress.phase) {
       case 'started':
@@ -1338,7 +1378,7 @@ export class RouterServer {
     }
     state.activeToolCount = state.activeToolIds.size;
     this.renderDelegationProgress(streamData, state);
-    streamData.createdAt = Date.now();
+    if (progress.phase !== 'text' || progress.latestText) streamData.createdAt = Date.now();
 
     try {
       if (streamData.feishuMessageId) await this.updateStreamingText(messageId, openId, streamData);
@@ -1355,7 +1395,7 @@ export class RouterServer {
     console.log(`[RouterServer] Received redacted_thinking for ${messageId}`);
 
     const streamData = this.streamingMessages.get(messageId);
-    if (!streamData) {
+    if (!streamData || streamData.finalizing) {
       console.log(`[RouterServer] No streaming session found for ${messageId}`);
       return;
     }
@@ -1396,7 +1436,7 @@ export class RouterServer {
     console.log(`[RouterServer] Received plan_mode for ${messageId}, plan length=${planContent.length}`);
 
     const streamData = this.streamingMessages.get(messageId);
-    if (!streamData) {
+    if (!streamData || streamData.finalizing) {
       console.log(`[RouterServer] No streaming session found for ${messageId}`);
       return;
     }
@@ -1432,6 +1472,7 @@ export class RouterServer {
     if (!image || image.type !== 'image' || typeof image.data !== 'string' || typeof image.mimeType !== 'string') return;
 
     const imageKey = await this.feishuLongConnHandler.uploadImage(image.data, image.mimeType);
+    if (streamData.finalizing || this.streamingMessages.get(messageId) !== streamData) return;
     if (!imageKey) {
       streamData.elements.push(createMarkdownElement('⚠️ Generated image could not be uploaded to Feishu.'));
       return;
@@ -1740,7 +1781,8 @@ export class RouterServer {
           streamData.threads,
           streamData.threadId,
           queueConfirmation,
-          executionMetadata
+          executionMetadata,
+          false
         );
         if (finalized === false) throw new Error('Failed to finalize task card');
       }

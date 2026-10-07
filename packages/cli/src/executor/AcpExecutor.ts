@@ -8,6 +8,7 @@ import { AcpClient, type AcpEventCallbacks, type AcpToolCallUpdate, type AcpTran
 import type { AcpConfigOption, AcpContentBlock, AcpMcpServer, AcpPermissionOption, AcpSessionResult } from './acp/AcpTypes';
 import { delegationSessionServers, sameConnection, type DelegationConnection } from '../delegation/contract';
 import { assertWorkingDirectoryExists } from '../utils/WorkingDirectory';
+import { ActivityTracker, extractTodoPlan } from './Activity';
 
 const CANCEL_GRACE_MS = 3_000;
 
@@ -45,6 +46,7 @@ interface QueuedCommand {
 interface ActiveCallbacks {
   onStream?: (chunk: string) => void;
   onDisplayText?: ExecuteOptions['onDisplayText'];
+  onActivity?: ExecuteOptions['onActivity'];
   onToolUse?: ExecuteOptions['onToolUse'];
   onToolResult?: ExecuteOptions['onToolResult'];
   onPlanMode?: ExecuteOptions['onPlanMode'];
@@ -135,6 +137,7 @@ export abstract class AcpExecutor implements IExecutor {
   private abortTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingPermission: PendingPermission | null = null;
   private activeToolCalls = new Map<string, AcpToolCallUpdate>();
+  private readonly activityTracker = new ActivityTracker();
 
   protected constructor(directoryGuard: DirectoryGuard, private readonly options: AcpExecutorOptions) {
     this.directoryGuard = directoryGuard;
@@ -412,6 +415,8 @@ export abstract class AcpExecutor implements IExecutor {
       this.activeCallbacks = {};
       this.activeToolCalls.clear();
       this.clearAbortTimer();
+      this.activityTracker.reset();
+      this.activityTracker.setCallback(undefined);
       this.isProcessing = false;
       void this.processQueue();
     }
@@ -434,13 +439,17 @@ export abstract class AcpExecutor implements IExecutor {
         options.onStream?.(chunk);
       },
       onDisplayText: options.onDisplayText,
+      onActivity: options.onActivity,
       onToolUse: options.onToolUse,
       onToolResult: options.onToolResult,
       onPlanMode: options.onPlanMode,
       onImage: options.onImage,
     };
-
     const { client, sessionId } = await this.ensureSession();
+    // Native session restoration may replay history for legacy transcript consumers.
+    // Only events from the new prompt belong to its public activity snapshot.
+    this.activityTracker.reset();
+    this.activityTracker.setCallback(options.onActivity);
     const result = await client.prompt(sessionId, blocks);
     const success = !['refusal', 'cancelled', 'error'].includes(result.stopReason);
     return {
@@ -504,6 +513,7 @@ export abstract class AcpExecutor implements IExecutor {
         this.activeToolCalls.set(tool.toolCallId, merged);
         const mapped = mapAcpToolCall(merged);
         this.activeCallbacks.onToolUse?.({ id: tool.toolCallId, ...mapped });
+        this.activityTracker.emitTool(mapped.name, mapped.input, merged.title);
       },
       onToolResult: (tool) => {
         if (this.replayingSession) return;
@@ -515,9 +525,16 @@ export abstract class AcpExecutor implements IExecutor {
           is_error: tool.status === 'failed',
         });
       },
-      onPlan: (entries) => !this.replayingSession && this.activeCallbacks.onPlanMode?.(
-        entries.map((entry) => `[${entry.status ?? 'pending'}] ${entry.content}`).join('\n')
-      ),
+      onPlan: (entries) => {
+        if (this.replayingSession) return;
+        this.activeCallbacks.onPlanMode?.(
+          entries.map((entry) => `[${entry.status ?? 'pending'}] ${entry.content}`).join('\n')
+        );
+        if (Array.isArray(entries) && entries.length > 0) {
+          const activity = extractTodoPlan({ todos: entries });
+          if (activity) this.activityTracker.emitPlan(activity);
+        }
+      },
       onConfigOptions: (options) => { this.configOptions = options; this.reportedConfigOptions = options; },
       onPermissionRequest: async (title, options) => {
         const isQuestion = options.some((option) => /^q\d+_/.test(option.optionId));
@@ -546,6 +563,7 @@ export abstract class AcpExecutor implements IExecutor {
     if (content.type === 'text' && typeof content.text === 'string') {
       this.activeCallbacks.onStream?.(content.text);
       this.activeCallbacks.onDisplayText?.(content.text);
+      this.activityTracker.emitPublicText(content.text);
     } else if (content.type === 'image' && typeof content.data === 'string' && typeof content.mimeType === 'string') {
       this.activeCallbacks.onImage?.({ type: 'image', data: content.data, mimeType: content.mimeType });
     }

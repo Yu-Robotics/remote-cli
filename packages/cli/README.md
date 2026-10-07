@@ -18,6 +18,18 @@ Remote control Claude Code, AGY CLI, Codex CLI, OpenCode CLI, Kimi Code CLI, ZCo
 
 Router 1.6.117 and newer explicitly label standalone background-task notifications **Background task**. The status, originating thread name (or thread ID when no name is provided), and abbreviated task ID remain visible, while **View details** is collapsed by default and contains the rich Markdown result and optional output path. Failed tasks also show a short, literal failure summary outside the panel. This changes only the Router presentation: the CLI protocol, foreground replies, delegated-worker cards, and reply-to-thread routing remain unchanged.
 
+## Public Activity
+
+CLI and Router 1.6.144 add optional `activityProgress` snapshots. Public text,
+explicit Codex commentary and public summaries, plan steps, and safe tool labels
+remain separate from answers and raw thinking. The latest main card shows a
+mutable tail row; each worker shows its activity below its identity. Input and
+terminal states take precedence. Snapshots are bounded to 240 Unicode code points,
+coalesced at 2.5 seconds, and do not extend liveness deadlines or bypass worker
+result barriers. Worker activity also requires `delegationProgress`. Older peers
+keep their existing behavior; no percentage, model call, or prompt is added. See
+[Public Activity](../../README.md#public-activity) for provider coverage limits.
+
 ## Maintenance Notices
 
 From CLI and Router 1.6.127, upgrade notices use concise Chinese summaries from `RELEASE_NOTES_ZH.md`, with one short title and bounded user-visible changes per release. `CHANGELOG.md` remains the English technical record. The CLI build requires matching current-version entries in both documents and bundles both, without online translation or model calls. New Routers show summaries directly and collapse technical details. Earlier maintenance-capable Routers show the summary in their existing collapsed panels; new Routers keep older CLI notes collapsed when no technical-details field is present. Cumulative ranges, silent first adoption, delivery acknowledgements, and protocol version 1 are unchanged.

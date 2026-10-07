@@ -145,12 +145,29 @@ describe.each([
       callbacks.onTextChunk?.({ type: 'text', text: 'Fresh answer' });
       return { stopReason: 'end_turn' };
     });
-    const stream = vi.fn();
+    const stream = vi.fn(), activity = vi.fn();
     const suppressReplay = managed || _backend === 'DSH';
-    await expect(executor.execute('next turn', { onStream: stream }))
+    await expect(executor.execute('next turn', { onStream: stream, onActivity: activity }))
       .resolves.toMatchObject({ success: true, output: suppressReplay ? 'Fresh answer' : 'Historical answerFresh answer' });
     expect(transport.loadSession).toHaveBeenCalled();
     expect(stream.mock.calls.flat()).toEqual(suppressReplay ? ['Fresh answer'] : ['Historical answer', 'Fresh answer']);
+    expect(activity.mock.calls).toEqual([[{ source: 'public_text', text: 'Fresh answer' }]]);
+  });
+
+  it('does not turn restored historical text, tools or plans into current activity', async () => {
+    await executor.execute('first turn', {});
+    await executor.destroy();
+    executor = create();
+    transport.loadSession.mockImplementationOnce(async () => {
+      callbacks.onTextChunk?.({ type: 'text', text: 'Historical answer' });
+      callbacks.onToolCall?.({ toolCallId: 'historical-tool', kind: 'execute', title: 'Archived command', status: 'completed' });
+      callbacks.onPlan?.([{ content: 'Archived plan', priority: 'high', status: 'in_progress' }]);
+      return { configOptions: [] };
+    });
+    const activity = vi.fn();
+    await expect(executor.execute('new empty turn', { onActivity: activity })).resolves.toMatchObject({ success: true });
+    expect(transport.loadSession).toHaveBeenCalled();
+    expect(activity).not.toHaveBeenCalled();
   });
 
   it.each([false, true])('preserves interactive input with question=%s', async question => {
