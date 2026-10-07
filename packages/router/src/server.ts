@@ -22,7 +22,12 @@ import { FeishuLongConnHandler } from './feishu/FeishuLongConnHandler';
 import { ConnectionHub } from './websocket/ConnectionHub';
 import { BindingManager } from './binding/BindingManager';
 import { MessageType, ToolUseInfo, ToolResultInfo, DelegationProgressInfo, TaskNotificationInfo, PROTOCOL_VERSION, MIN_SUPPORTED_CLI_VERSION, ROUTER_VERSION, ThreadSummary, QueueConfirmationInfo, QueueStartedInfo, TaskResumeInfo, ImageBlock } from './types';
-import { DELEGATION_PROGRESS_ELEMENT_COUNT, DelegationProgressCardState, FeishuCardElement, createDelegationProgressElements, createDividerElement, createToolUseElement, createToolResultElement, createMarkdownElement, createRedactedThinkingElement, createPlanModeElement, createTaskNotificationElement, createImageElement } from './utils/ToolFormatter';
+import { DELEGATION_PROGRESS_ELEMENT_COUNT, DelegationProgressCardState, FeishuCardElement, type ToolCallCardState, createToolCallElement, createDelegationProgressElements, createDividerElement, createToolUseElement, createToolResultElement, createMarkdownElement, createRedactedThinkingElement, createPlanModeElement, createTaskNotificationElement, createImageElement } from './utils/ToolFormatter';
+
+interface ToolCallProgressState extends ToolCallCardState {
+  /** A single fixed slot keeps later text and worker section indices stable. */
+  elementIndex: number;
+}
 
 interface DelegationProgressState extends DelegationProgressCardState {
   /** First slot of the fixed-size worker section; later sections never shift. */
@@ -68,6 +73,7 @@ interface StreamingMessageState {
   finalizing: boolean;
   lastRenderedTextLength: number;
   delegationProgress: Map<string, DelegationProgressState>;
+  toolCalls: Map<string, ToolCallProgressState>;
 }
 
 /**
@@ -214,6 +220,7 @@ export class RouterServer {
         finalizing: false,
         lastRenderedTextLength: 0,
         delegationProgress: new Map(),
+        toolCalls: new Map(),
       });
       // Populate cardThreadMap for parent_id-based routing
       if (feishuMessageId && threadId) {
@@ -1059,9 +1066,17 @@ export class RouterServer {
     }
     streamData.updatePending = false;
 
-    // Add tool use elements (divider + markdown)
-    const toolUseElements = createToolUseElement(toolUse);
-    streamData.elements.push(...toolUseElements);
+    const id = this.toolCallId(toolUse.id);
+    let state = id ? streamData.toolCalls.get(id) : undefined;
+    // A new start after a received result is another call, even if an adapter
+    // reuses its ID. A result-first placeholder can still acquire its identity.
+    if (!state || (state.inputElements !== undefined && state.resultElements !== undefined)) {
+      state = { elementIndex: streamData.elements.length, id };
+      if (id) streamData.toolCalls.set(id, state);
+    }
+    state.name = typeof toolUse.name === 'string' ? toolUse.name.slice(0, 200) : undefined;
+    state.inputElements = createToolUseElement(toolUse);
+    streamData.elements[state.elementIndex] = createToolCallElement(state);
     streamData.createdAt = Date.now();
 
     // Immediately update card to show tool use
@@ -1098,9 +1113,15 @@ export class RouterServer {
     }
     streamData.updatePending = false;
 
-    // Add tool result elements (markdown + status div)
-    const toolResultElements = createToolResultElement(toolResult);
-    streamData.elements.push(...toolResultElements);
+    const id = this.toolCallId(toolResult.tool_use_id);
+    let state = id ? streamData.toolCalls.get(id) : undefined;
+    if (!state) {
+      state = { elementIndex: streamData.elements.length, id };
+      if (id) streamData.toolCalls.set(id, state);
+    }
+    state.isError = Boolean(toolResult.is_error);
+    state.resultElements = createToolResultElement(toolResult);
+    streamData.elements[state.elementIndex] = createToolCallElement(state);
     streamData.createdAt = Date.now();
 
     // Immediately update card to show tool result
@@ -1114,6 +1135,12 @@ export class RouterServer {
       );
       streamData.hasUpdated = true;
     }
+  }
+
+  /** Missing and placeholder IDs cannot safely identify a tool invocation. */
+  private toolCallId(value: unknown): string | undefined {
+    return typeof value === 'string' && value.trim() && value !== 'unknown' && value.length <= 200
+      && !/[\u0000-\u001f\u007f-\u009f]/.test(value) ? value : undefined;
   }
 
   private boundedDelegationProgressText(value: unknown, limit: number): string | undefined {
@@ -1598,6 +1625,7 @@ export class RouterServer {
         elements: [createMarkdownElement(intro)], currentTextContent: '', hasUpdated: false,
         createdAt: Date.now(), updatePending: false, finalizing: false, lastRenderedTextLength: 0,
         delegationProgress: new Map(),
+        toolCalls: new Map(),
         recoveryId: info.recoveryId, recoveryPlainText: true, recoveryCwd: info.cwd,
       });
       this.cardThreadMap.set(cardId, { threadId, deviceId, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS });
@@ -1660,6 +1688,7 @@ export class RouterServer {
         finalizing: false,
         lastRenderedTextLength: 0,
         delegationProgress: new Map(),
+        toolCalls: new Map(),
         queueStarted: info,
         threads: Array.isArray(message.threads) ? message.threads : undefined,
       });

@@ -984,11 +984,13 @@ New messages cannot bypass confirmed work already waiting in a thread queue, eve
 
 ### Code Change Previews
 
-Code edits use one collapsible preview per file, with the file path and added/deleted line counts in the header. Deleted lines are explicitly red and added lines green through Feishu rich text, independent of native `diff` syntax highlighting. A copyable diff preview preserves original spaces, tabs, and code characters; rich-text indentation is for display only.
+From Router 1.6.145, each foreground tool call and its matching result share one collapsed row. The result updates the original row to SUCCESS or ERROR instead of adding a second disclosure. Expand it to view Input and Result previews. Independent calls remain separate; missing or placeholder IDs and orphan results are preserved without guessing a match. A new invocation after a completed result gets a separate row even if an adapter reuses its ID. This presentation works with the existing CLI protocol and does not change worker cards or approval flows.
+
+Code edits retain per-file previews inside that tool row, with file paths and added/deleted line counts in the expanded details. Deleted lines are explicitly red and added lines green through Feishu rich text, independent of native `diff` syntax highlighting. A copyable diff preview preserves original spaces, tabs, and code characters; rich-text indentation is for display only.
 
 Previews retain three lines of context around each change. Display budgets are shared across files and hunks, with explicit notices for omitted lines, hunks, or files. A diff-only tool result is displayed even without a text message. Codex file-change events retain file boundaries, and ACP old/new text is compared so unchanged lines are not presented as replacements. Snippet-relative line numbers and Write content previews are labeled; Write does not imply a new file when its previous contents are unavailable.
 
-This changes display only. It does not merge tool calls with their results or alter backend execution. The Router upgrade enables the new previews for existing diff data; upgrading the CLI also preserves file names in Codex multi-file changes. Pi and AGY edit payload mappings are unchanged.
+This changes display only, not backend execution. Existing preview limits and omission notices remain; no multi-call aggregation or complete-history viewer is added. The Router upgrade enables the new presentation for existing tool data; upgrading the CLI also preserves file names in Codex multi-file changes. Pi and AGY edit payload mappings are unchanged.
 
 ### Background Task Notifications
 
@@ -1140,7 +1142,7 @@ If a stored working directory is later deleted or renamed, the next backend comm
 
 Replying to a completed Feishu card routes the message back to that card's thread. Thread buttons show the last component of each thread's working directory alongside its backend, making parallel workspaces easier to distinguish. Automatically generated names such as `thread-2` are shown as their sequence number, such as `2`, while custom names remain unchanged. When a long response spans multiple cards, every continuation card repeats the thread and working-directory header. `/thread list` shows the current state of every thread, while `/status` gives a compact overview of active backends, models, working directories, and queues.
 
-Long streaming replies refresh only cards with changed content. Queued tasks combine incoming text while a refresh is pending, so card updates do not build up a backlog of intermediate text. Tool results, images, and the final response retain their order.
+Long streaming replies refresh only cards with changed content. Queued tasks combine incoming text while a refresh is pending, so card updates do not build up a backlog of intermediate text. Matching tool results update their original rows without moving surrounding text or worker sections; images and the final response retain their order.
 
 Card splitting also counts tables embedded in Markdown and nested components, with a conservative budget of three tables per card. Large Markdown blocks split at table boundaries; excess tables inside indivisible containers remain readable as code text. If Feishu still rejects a card with a table-limit error, the Router retries that card once as text and preserves text mode for later updates. Other cards retain their normal formatting. This applies to every backend and requires Router 1.6.53 or newer.
 

@@ -30,6 +30,7 @@ const delegationBodyContent = (body: any) => body.columns[0].elements.map((eleme
 vi.mock('../src/utils/ToolFormatter', async (importActual) => ({
   createToolUseElement: vi.fn(() => []),
   createToolResultElement: vi.fn(() => []),
+  createToolCallElement: vi.fn((await importActual<typeof import('../src/utils/ToolFormatter')>()).createToolCallElement),
   DELEGATION_PROGRESS_ELEMENT_COUNT: 4,
   createDelegationProgressElements: vi.fn((await importActual<typeof import('../src/utils/ToolFormatter')>()).createDelegationProgressElements),
   createDividerElement: vi.fn((await importActual<typeof import('../src/utils/ToolFormatter')>()).createDividerElement),
@@ -142,6 +143,134 @@ describe('RouterServer', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.useRealTimers();
+  });
+
+  describe('paired tool-call progress', () => {
+    const envelope = { type: 'stream', messageId: 'tool-task', openId: 'owner', threadId: 'thread-1' };
+    async function connect() {
+      const formatter = await vi.importActual<typeof import('../src/utils/ToolFormatter')>('../src/utils/ToolFormatter');
+      vi.mocked(createToolUseElement).mockImplementation(formatter.createToolUseElement);
+      vi.mocked(createToolResultElement).mockImplementation(formatter.createToolResultElement);
+      await server.start();
+      mockFeishuHandler.setOnStartStreaming.mock.calls[0][0]('tool-task', 'owner', 'tool-card', 'device-1', 'thread-1');
+      const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
+      const ws = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
+      onConnection(ws, { socket: { remoteAddress: '127.0.0.1' } });
+      const receive = ws.on.mock.calls.find(call => call[0] === 'message')[1];
+      const send = (message: any) => receive(Buffer.from(JSON.stringify(message)));
+      await send({ type: 'binding_request', data: { deviceId: 'device-1', capabilities: { delegationProgress: true, activityProgress: true } } });
+      return { send, stream: (server as any).streamingMessages.get('tool-task') };
+    }
+    const use = (id: string | undefined, name = 'Read', input: any = { file_path: '/project/example.ts' }) => ({ ...envelope, streamType: 'tool_use', toolUse: { id, name, input } });
+    const result = (id: string | undefined, content = 'Example output', is_error = false) => ({ ...envelope, streamType: 'tool_result', toolResult: { tool_use_id: id, content, is_error } });
+
+    it('updates the original tool row while retaining surrounding assistant text', async () => {
+      const { send, stream } = await connect();
+      await send({ ...envelope, streamType: 'text', chunk: 'Before tool' });
+      await send(use('read-1'));
+      const index = stream.toolCalls.get('read-1').elementIndex;
+      expect(stream.elements[index].header.title.content).toContain('TOOL USE');
+      await send({ ...envelope, streamType: 'text', chunk: 'After tool' });
+      await send(result('read-1'));
+      expect(stream.elements).toHaveLength(3);
+      expect(stream.elements[0].content).toBe('Before tool');
+      expect(stream.elements[2].content).toBe('After tool');
+      expect(stream.elements[index].header.title.content).toContain('SUCCESS');
+      expect(stream.elements[index].expanded).toBe(false);
+      expect(JSON.stringify(stream.elements[index])).toContain('/project/example.ts');
+      expect(JSON.stringify(stream.elements[index])).toContain('Example output');
+      expect(stream.elements.filter((element: any) => element.tag === 'collapsible_panel')).toHaveLength(1);
+    });
+
+    it('pairs out-of-order results without moving a later worker section or a second tool', async () => {
+      const { send, stream } = await connect();
+      await send(use('read-1'));
+      await send({ ...envelope, streamType: 'delegation_progress', delegationProgress: {
+        taskId: 'worker-1', backend: 'agy', phase: 'started', startedAt: Date.now(), objective: 'Independent review',
+      } });
+      const worker = stream.delegationProgress.get('worker-1');
+      const workerIndex = worker.elementIndex;
+      await send(use('bash-1', 'Bash', { command: 'npm test' }));
+      const length = stream.elements.length;
+      await send(result('bash-1', 'Test failed', true));
+      await send(result('read-1'));
+      await send({ ...envelope, streamType: 'delegation_progress', delegationProgress: {
+        taskId: 'worker-1', backend: 'agy', phase: 'succeeded', summary: 'Review completed',
+      } });
+      expect(stream.elements).toHaveLength(length);
+      expect(worker.elementIndex).toBe(workerIndex);
+      expect(JSON.stringify(stream.elements[workerIndex + 1])).toContain('Review completed');
+      expect(stream.elements[stream.toolCalls.get('read-1').elementIndex].header.title.content).toContain('SUCCESS');
+      expect(stream.elements[stream.toolCalls.get('bash-1').elementIndex].header.title.content).toContain('ERROR');
+      expect(stream.toolCalls.size).toBe(2);
+    });
+
+    it.each([undefined, '', 'unknown', 'bad\nidentifier', 'x'.repeat(201)])('does not guess a pairing for unusable ID %s', async id => {
+      const { send, stream } = await connect();
+      await send(use(id));
+      await send(result(id));
+      expect(stream.elements).toHaveLength(2);
+      expect(stream.elements[0].header.title.content).toContain('TOOL USE');
+      expect(stream.elements[1].header.title.content).toContain('SUCCESS');
+      expect(stream.toolCalls.size).toBe(0);
+    });
+
+    it('preserves orphan results and pairs a later identity only by the exact ID', async () => {
+      const { send, stream } = await connect();
+      await send(result('orphan-1', 'Late result', true));
+      await send(use('unrelated-1'));
+      await send(use('orphan-1', 'Bash', { command: 'npm test' }));
+      expect(stream.elements).toHaveLength(2);
+      expect(stream.elements[0].header.title.content).toContain('Bash');
+      expect(stream.elements[0].header.title.content).toContain('ERROR');
+      expect(JSON.stringify(stream.elements[0])).toContain('Late result');
+      expect(stream.elements[1].header.title.content).toContain('TOOL USE');
+    });
+
+    it('keeps repeated updates in place and a new start after completion independent', async () => {
+      const { send, stream } = await connect();
+      await send(use('reused-1', 'Bash', { description: 'Waiting for arguments' }));
+      await send(use('reused-1', 'Bash', { command: 'npm test' }));
+      await send(result('reused-1', 'First result'));
+      await send(result('reused-1', 'Updated result'));
+      expect(stream.elements).toHaveLength(1);
+      expect(JSON.stringify(stream.elements[0])).toContain('Updated result');
+      expect(JSON.stringify(stream.elements[0])).not.toContain('First result');
+      await send(use('reused-1', 'Bash', { command: 'npm run build' }));
+      await send(result('reused-1', 'Second call'));
+      expect(stream.elements).toHaveLength(2);
+      expect(JSON.stringify(stream.elements[0])).toContain('npm test');
+      expect(JSON.stringify(stream.elements[0])).toContain('Updated result');
+      expect(JSON.stringify(stream.elements[1])).toContain('npm run build');
+      expect(JSON.stringify(stream.elements[1])).toContain('Second call');
+    });
+
+    it('scopes the same tool ID to its request and retains only rendered previews', async () => {
+      const { send, stream } = await connect();
+      mockFeishuHandler.setOnStartStreaming.mock.calls[0][0]('other-task', 'owner', 'other-card', 'device-1', 'thread-1');
+      await send(use('shared-1', 'Bash', { command: 'x'.repeat(10_000) }));
+      await send({ ...result('shared-1', 'Other request'), messageId: 'other-task' });
+      expect(stream.elements[0].header.title.content).toContain('TOOL USE');
+      expect(JSON.stringify(stream.toolCalls.get('shared-1'))).not.toContain('x'.repeat(10_000));
+      expect(JSON.stringify(stream.toolCalls.get('shared-1')).length).toBeLessThan(2000);
+      const other = (server as any).streamingMessages.get('other-task');
+      expect(JSON.stringify(other.elements[0])).toContain('Other request');
+      await send(result('shared-1', 'y'.repeat(10_000)));
+      expect(JSON.stringify(stream.toolCalls.get('shared-1'))).not.toContain('y'.repeat(10_000));
+    });
+
+    it('does not manufacture a missing result or accept late results after completion', async () => {
+      const { send, stream } = await connect();
+      await send(use('pending-1'));
+      await send({ ...envelope, type: 'response', success: true });
+      const elements = mockFeishuHandler.finalizeStreamingMessage.mock.lastCall[1];
+      expect(elements[0].header.title.content).toContain('TOOL USE');
+      expect(JSON.stringify(elements)).not.toContain('SUCCESS');
+      const updates = mockFeishuHandler.updateStreamingMessage.mock.calls.length;
+      await send(result('pending-1', 'Late output'));
+      expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenCalledTimes(updates);
+      expect(JSON.stringify(stream.elements)).not.toContain('Late output');
+    });
   });
 
   describe('public activity progress', () => {
@@ -568,11 +697,12 @@ describe('RouterServer', () => {
       await send({ type: 'stream', messageId: resume.messageId, openId: 'user-1', chunk: '**Next complete segment**' });
       await send({ type: 'response', messageId: resume.messageId, openId: 'user-1', success: true });
       const elements = mockFeishuHandler.finalizeStreamingMessage.mock.calls[0][1];
-      expect(elements.slice(1, -1)).toHaveLength(5);
-      for (const element of elements.slice(1, -1)) {
+      expect(elements.slice(1, -2)).toHaveLength(5);
+      for (const element of elements.slice(1, -2)) {
         expect(element.content).toMatch(/^<raw>(&lt;&amp;)+<\/raw>$/);
         expect(element.content.length).toBeLessThan(6000);
       }
+      expect(elements.at(-2).tag).toBe('collapsible_panel');
       expect(elements.at(-1).content).toBe('**Next complete segment**');
     });
   });
@@ -816,7 +946,7 @@ describe('RouterServer', () => {
       const elements = mockFeishuHandler.finalizeStreamingMessage.mock.calls[0][1];
       expect(elements.slice(1)).toEqual([
         { tag: 'markdown', content: 'Before tool' },
-        { tag: 'markdown', content: 'Tool result' },
+        expect.objectContaining({ tag: 'collapsible_panel', elements: [{ tag: 'markdown', content: 'Tool result' }] }),
         { tag: 'markdown', content: 'Before image' },
         expect.objectContaining({ tag: 'img', img_key: 'image-key' }),
         { tag: 'markdown', content: 'After image' },

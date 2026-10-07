@@ -936,11 +936,13 @@ New messages cannot bypass confirmed work already waiting in a thread queue, eve
 
 ### Code Change Previews
 
-Code edits use one collapsible preview per file, with the file path and added/deleted line counts in the header. Deleted lines are explicitly red and added lines green through Feishu rich text, independent of native `diff` syntax highlighting. A copyable diff preview preserves original spaces, tabs, and code characters; rich-text indentation is for display only.
+From Router 1.6.145, each foreground tool call and its matching result share one collapsed row. The result updates the original row to SUCCESS or ERROR instead of adding a second disclosure. Expand it to view Input and Result previews. Independent calls remain separate; missing or placeholder IDs and orphan results are preserved without guessing a match. A new invocation after a completed result gets a separate row even if an adapter reuses its ID. This presentation works with the existing CLI protocol and does not change worker cards or approval flows.
+
+Code edits retain per-file previews inside that tool row, with file paths and added/deleted line counts in the expanded details. Deleted lines are explicitly red and added lines green through Feishu rich text, independent of native `diff` syntax highlighting. A copyable diff preview preserves original spaces, tabs, and code characters; rich-text indentation is for display only.
 
 Previews retain three lines of context around each change. Display budgets are shared across files and hunks, with explicit notices for omitted lines, hunks, or files. A diff-only tool result is displayed even without a text message. Codex file-change events retain file boundaries, and ACP old/new text is compared so unchanged lines are not presented as replacements. Snippet-relative line numbers and Write content previews are labeled; Write does not imply a new file when its previous contents are unavailable.
 
-This changes display only. It does not merge tool calls with their results or alter backend execution. The Router upgrade enables the new previews for existing diff data; upgrading the CLI also preserves file names in Codex multi-file changes. Pi and AGY edit payload mappings are unchanged.
+This changes display only, not backend execution. Existing preview limits and omission notices remain; no multi-call aggregation or complete-history viewer is added. The Router upgrade enables the new presentation for existing tool data; upgrading the CLI also preserves file names in Codex multi-file changes. Pi and AGY edit payload mappings are unchanged.
 
 ### Background Task Notifications
 
@@ -1092,7 +1094,7 @@ With CLI 1.6.93 or newer, `/cd` to a different normalized directory clears this 
 
 直接回复某张已经完成的飞书卡片，消息会继续路由到该卡片所属的 thread。Thread 按钮会同时显示各 thread 工作目录的最后一级名称和所用 backend，便于区分并行 workspace。自动生成的 `thread-2` 等名称会在按钮上只显示序号，例如 `2`，自定义名称保持不变。长回复被拆分成多张卡片时，每张续卡都会重复显示 thread 和工作目录头部。`/thread list` 可以查看所有 thread 的状态，`/status` 可以快速查看当前 backend、模型、工作目录和队列。
 
-Long streaming replies refresh only cards with changed content. Queued tasks combine incoming text while a refresh is pending, so card updates do not build up a backlog of intermediate text. Tool results, images, and the final response retain their order.
+Long streaming replies refresh only cards with changed content. Queued tasks combine incoming text while a refresh is pending, so card updates do not build up a backlog of intermediate text. Matching tool results update their original rows without moving surrounding text or worker sections; images and the final response retain their order.
 
 Card splitting also counts tables embedded in Markdown and nested components, with a conservative budget of three tables per card. Large Markdown blocks split at table boundaries; excess tables inside indivisible containers remain readable as code text. If Feishu still rejects a card with a table-limit error, the Router retries that card once as text and preserves text mode for later updates. Other cards retain their normal formatting. This applies to every backend and requires Router 1.6.53 or newer.
 

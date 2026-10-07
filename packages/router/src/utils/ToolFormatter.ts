@@ -464,6 +464,60 @@ export function createToolResultElement(resultInfo: ToolResultInfo): FeishuCardE
   return [collapsiblePanel];
 }
 
+/** Retain rendered previews, not the backend's potentially unbounded payloads. */
+export interface ToolCallCardState {
+  /** Router-owned fixed slot; never derived from a backend-provided tool ID. */
+  elementIndex?: number;
+  name?: string;
+  id?: string;
+  inputElements?: FeishuCardElement[];
+  resultElements?: FeishuCardElement[];
+  isError?: boolean;
+}
+
+export const TOOL_CALL_ELEMENT_PREFIX = 'tc_';
+
+/** Inline existing bounded previews inside one tool-call disclosure. */
+function inlineToolDetails(elements: FeishuCardElement[], label: string): FeishuCardElement[] {
+  return elements.flatMap(element => {
+    if (element.tag === 'hr') return [];
+    if (element.tag !== 'collapsible_panel') return [element];
+    const children: FeishuCardElement[] = element.elements ?? [];
+    // Diff headers carry file names and change counts that must remain available.
+    const fileHeader = children.some(child => child.tag === 'markdown' && child.content?.startsWith('**File:**'))
+      ? element.header?.title?.content : undefined;
+    const heading = [`**${label}**`, fileHeader].filter(Boolean).join('\n');
+    if (children[0]?.tag === 'markdown') {
+      return [{ ...children[0], content: `${heading}\n\n${children[0].content}` }, ...children.slice(1)];
+    }
+    return [createMarkdownElement(heading), ...children];
+  });
+}
+
+/** A result replaces the same visible tool row; independent calls never aggregate. */
+export function createToolCallElement(state: ToolCallCardState): FeishuCardElement {
+  const received = state.resultElements !== undefined;
+  const color = received ? state.isError ? 'red' : 'green' : 'blue';
+  const status = received ? state.isError ? '❌ ERROR' : '✅ SUCCESS' : '🔧 TOOL USE';
+  const name = literalWorkerText(state.name || 'Tool', 100);
+  const id = state.id && state.id !== 'unknown' ? ` · ${literalWorkerText(state.id, 8)}` : '';
+  return {
+    tag: 'collapsible_panel', expanded: false,
+    ...(state.elementIndex !== undefined ? { element_id: `${TOOL_CALL_ELEMENT_PREFIX}${state.elementIndex}` } : {}),
+    header: {
+      title: { tag: 'markdown', content: `<text_tag color='${color}'>${status}</text_tag> · **${name}**${id}` },
+      vertical_align: 'center',
+      icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', size: '14px 14px' },
+      icon_position: 'right', icon_expanded_angle: -180,
+    },
+    vertical_spacing: '8px', padding: '4px 8px',
+    elements: [
+      ...inlineToolDetails(state.inputElements ?? [], 'Input'),
+      ...inlineToolDetails(state.resultElements ?? [], 'Result'),
+    ],
+  };
+}
+
 export interface DelegationProgressEvent {
   label: string;
   isError?: boolean;
