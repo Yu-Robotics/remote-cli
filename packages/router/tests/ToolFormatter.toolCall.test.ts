@@ -11,6 +11,21 @@ function countTags(value: any): number {
 }
 
 describe('single tool-call disclosure', () => {
+  it.each(['Inspect working changes', 'Read config.ts', 'Search files', 'List directory',
+    'Read aaaaaaaa… / Read b.ts / Search files / +1 more'])(
+    'keeps native command descriptions in the existing heading without adding nodes (%s)', description => {
+      const tool = { name: 'Bash', id: 'native-command', input: { command: 'synthetic-private-command' }, description };
+      const base = { name: tool.name, id: tool.id, inputElements: createToolUseElement(tool) };
+      const summary = createToolCallSummary(tool);
+      for (const completed of [{}, { resultElements: result() }, { resultElements: result(true), isError: true }]) {
+        const plain = createToolCallElement({ ...base, ...completed });
+        const described = createToolCallElement({ ...base, summary, ...completed });
+        expect(described.header.title.content).toContain(` · <raw>${description}</raw>`);
+        expect(described.header.title.content).not.toContain(tool.input.command);
+        expect(countTags(described)).toBe(countTags(plain));
+      }
+    });
+
   it.each([
     ['Read', { file_path: '/project/config.ts' }, 'config.ts'],
     ['Bash', { description: 'Run tests', command: 'npm test' }, 'Run tests'],

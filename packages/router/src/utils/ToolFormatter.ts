@@ -6,6 +6,7 @@ import MarkdownIt from 'markdown-it';
 import { formatWorkerResultMarkdown } from './WorkerResultMarkdown';
 import { limitCardTables } from './CardTables';
 import { workerContextControl } from '../feishu/WorkerContextCards';
+import { webSearchResultMarkdown } from './WebSearchResults';
 
 /**
  * Feishu Card 2.0 element types
@@ -215,8 +216,15 @@ function extractWebFetchContext(input: Record<string, unknown>): string {
 function extractWebSearchContext(input: Record<string, unknown>): string {
   const query = input.query;
   if (typeof query !== 'string') return formatGenericContext(input);
-
-  return `**Query:** ${truncate(query, 150)}`;
+  const lines = [`**Query:** ${activityLiteral(truncate(query, 150))}`];
+  if (['search', 'openPage', 'findInPage'].includes(input.action as string)) lines.push(`**Action:** ${input.action}`);
+  if (typeof input.url === 'string') lines.push(`**URL:** ${activityLiteral(truncate(input.url, 2048))}`);
+  if (typeof input.pattern === 'string') lines.push(`**Pattern:** ${activityLiteral(truncate(input.pattern, 500))}`);
+  if (Array.isArray(input.queries)) {
+    for (const entry of input.queries.slice(0, 5)) if (typeof entry === 'string') lines.push(`**Search:** ${activityLiteral(truncate(entry, 500))}`);
+  }
+  if (Number.isSafeInteger(input.omittedQueries) && (input.omittedQueries as number) > 0) lines.push(`${input.omittedQueries} additional queries omitted.`);
+  return lines.join('\n');
 }
 
 function extractTodoWriteContext(input: Record<string, unknown>): string {
@@ -418,16 +426,17 @@ export function createToolResultElement(resultInfo: ToolResultInfo): FeishuCardE
 
   // Prepare content elements inside the collapsible panel
   const panelElements: FeishuCardElement[] = [];
+  const webResults = !is_error ? webSearchResultMarkdown(resultInfo.webSearch) : undefined;
 
-  if (!is_error && (diff || looksLikeDiff(content))) {
+  if (webResults !== undefined) {
+    panelElements.push(createMarkdownElement(webResults));
+  } else if (!is_error && (diff || looksLikeDiff(content))) {
     const panels = createDiffPanels(diff || content, headerTitle);
     if (content && !looksLikeDiff(content) && panels[0]?.elements) {
       panels[0].elements.unshift(createMarkdownElement(`\`\`\`\n${truncate(content, 500)}\n\`\`\``));
     }
     return panels;
-  }
-
-  if (content && !is_error) {
+  } else if (content && !is_error) {
     panelElements.push(createMarkdownElement(`\`\`\`\n${truncate(content, 500)}\n\`\`\``));
   } else if (content && is_error) {
     // For errors, show the error message

@@ -13,6 +13,8 @@ import type { CodexSandboxConfig } from '../types/config';
 import { DELEGATION_TOOLS, delegationMcpConfig, sameConnection, type DelegationConnection } from '../delegation/contract';
 import { assertWorkingDirectoryExists } from '../utils/WorkingDirectory';
 import { ActivityTracker, extractTodoPlan } from './Activity';
+import { describeCodexCommandActions } from './CodexCommandActions';
+import { codexWebSearchUse, codexWebSearchResult } from './CodexWebSearch';
 
 export interface CodexAppServerTransport {
   start(): Promise<void>;
@@ -986,15 +988,18 @@ export class CodexAppServerExecutor implements IExecutor {
     switch (item.type) {
       case 'commandExecution':
         active.sideEffectsStarted = true;
-        this.emitToolUse(active, id, 'Bash', { command: item.command ?? '' }, item.title || item.description);
+        this.emitToolUse(active, id, 'Bash', { command: item.command ?? '' }, item.title || item.description,
+          describeCodexCommandActions(item.commandActions));
         break;
       case 'fileChange':
         active.sideEffectsStarted = true;
         this.emitToolUse(active, id, 'Edit', { file_path: item.changes?.[0]?.path ?? '' }, item.title || item.description);
         break;
-      case 'webSearch':
-        this.emitToolUse(active, id, 'WebSearch', { query: item.query ?? '' }, item.title || item.description);
+      case 'webSearch': {
+        const { input, description } = codexWebSearchUse(item);
+        this.emitToolUse(active, id, 'WebSearch', input, undefined, description);
         break;
+      }
       case 'mcpToolCall':
       case 'dynamicToolCall':
         active.sideEffectsStarted = true;
@@ -1018,7 +1023,8 @@ export class CodexAppServerExecutor implements IExecutor {
 
     switch (item.type) {
       case 'commandExecution':
-        this.emitToolUse(active, id, 'Bash', { command: item.command ?? '' }, item.title || item.description);
+        this.emitToolUse(active, id, 'Bash', { command: item.command ?? '' }, item.title || item.description,
+          describeCodexCommandActions(item.commandActions));
         active.options.onToolResult?.({
           tool_use_id: id,
           content: item.aggregatedOutput ?? '',
@@ -1050,10 +1056,12 @@ export class CodexAppServerExecutor implements IExecutor {
         });
         break;
       }
-      case 'webSearch':
-        this.emitToolUse(active, id, 'WebSearch', { query: item.query ?? '' });
-        active.options.onToolResult?.({ tool_use_id: id, content: '', is_error: false });
+      case 'webSearch': {
+        const { input, description } = codexWebSearchUse(item);
+        this.emitToolUse(active, id, 'WebSearch', input, undefined, description);
+        active.options.onToolResult?.(codexWebSearchResult(item));
         break;
+      }
       case 'mcpToolCall':
       case 'dynamicToolCall':
         this.emitToolUse(active, id, item.tool ?? 'MCP', item.arguments ?? {});
@@ -1102,11 +1110,12 @@ export class CodexAppServerExecutor implements IExecutor {
     this.completeActive({ success: false, error });
   }
 
-  private emitToolUse(active: ActiveTurn, id: string, name: string, input: Record<string, any>, title?: string): void {
+  private emitToolUse(active: ActiveTurn, id: string, name: string, input: Record<string, any>, title?: string,
+    description?: string): void {
     if (active.emittedTools.has(id)) return;
     active.emittedTools.add(id);
-    active.options.onToolUse?.({ id, name, input });
-    this.activityTracker.emitTool(name, input, title);
+    active.options.onToolUse?.({ id, name, input, ...(description ? { description } : {}) });
+    this.activityTracker.emitTool(name, input, description ?? title);
   }
 
   private handleGeneratedImage(active: ActiveTurn, item: any): void {

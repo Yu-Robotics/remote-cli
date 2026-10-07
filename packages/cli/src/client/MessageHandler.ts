@@ -2177,6 +2177,8 @@ You can also use natural language commands to control Claude Code CLI.`,
       const emittedLocalImages = new Set<string>();
       const pendingLocalImageEmissions = new Set<Promise<void>>();
       const delegationControlTools = new Set<string>();
+      const toolImageStates = new Map<string, { started: boolean; completed: boolean; web: boolean }>();
+      const webToolNames = new Set(['websearch', 'webfetch', 'web_search', 'web_fetch', 'search_web', 'read_url_content', 'fetch']);
       let streamedOutput = '';
       const emitLocalImages = async (text: string): Promise<void> => {
         const thread = this.threadManager.getThread(threadId);
@@ -2215,12 +2217,32 @@ You can also use natural language commands to control Claude Code CLI.`,
             delegationControlTools.add(toolUse.id);
             return;
           }
+          const name = typeof toolUse.name === 'string' ? toolUse.name.toLowerCase() : '';
+          const title = typeof toolUse.title === 'string' ? toolUse.title.toLowerCase() : '';
+          let state = toolImageStates.get(toolUse.id);
+          // Match tool-row pairing: active updates and result-first identity
+          // acquisition belong to the same call, not a reused invocation.
+          if (!state || (state.started && state.completed)) {
+            state = { started: false, completed: false, web: false };
+            toolImageStates.set(toolUse.id, state);
+          }
+          state.started = true;
+          state.web ||= webToolNames.has(name) || (['other', 'tool'].includes(name) && webToolNames.has(title));
           this.sendToolUse(messageId, threadId, toolUse);
         },
         onToolResult: (toolResult: ToolResultInfo) => {
           if (delegationControlTools.delete(toolResult.tool_use_id)) return;
           this.sendToolResult(messageId, threadId, toolResult);
-          queueLocalImages(toolResult.content);
+          // Web excerpts are display data, never instructions to publish local files.
+          let state = toolImageStates.get(toolResult.tool_use_id);
+          if (!state) {
+            state = { started: false, completed: false, web: false };
+            toolImageStates.set(toolResult.tool_use_id, state);
+          }
+          state.completed = true;
+          // Positive provenance survives title updates and metadata-less repeated results.
+          state.web ||= toolResult.webSearch !== undefined;
+          if (!state.web) queueLocalImages(toolResult.content);
         },
         onRedactedThinking: () => this.sendRedactedThinking(messageId, threadId),
         onPlanMode: (planContent: string) => this.sendPlanMode(messageId, threadId, planContent),

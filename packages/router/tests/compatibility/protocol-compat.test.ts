@@ -177,6 +177,11 @@ describe('Router wire compatibility', () => {
       toolUse: { id: 'delegated-task', name: 'Task', input: { description: 'Review the project', subagent_type: 'codex' } } });
     await receiveCurrent({ type: 'stream', messageId: 'current-task', openId: 'current-user', streamType: 'tool_result',
       toolResult: { tool_use_id: 'delegated-task', content: 'Delegated review complete' } });
+    await receiveCurrent({ type: 'stream', messageId: 'current-task', openId: 'current-user', streamType: 'tool_use',
+      toolUse: { id: 'web-native', name: 'WebSearch', input: { query: 'docs' } } });
+    await receiveCurrent({ type: 'stream', messageId: 'current-task', openId: 'current-user', streamType: 'tool_result',
+      toolResult: { tool_use_id: 'web-native', content: 'Documentation\nhttps://example.com/docs', is_error: false,
+        webSearch: { results: [{ title: 'Documentation', url: 'https://example.com/docs', snippet: 'Public excerpt' }], omittedResults: 0 } } });
     await receive({ type: 'response', messageId: 'legacy-task', data: { openId: 'legacy-user', success: true, output: 'Legacy progress' } });
     await receiveCurrent({ type: 'response', messageId: 'current-task', openId: 'current-user', threadId: 'thread-2', success: true });
 
@@ -187,6 +192,8 @@ describe('Router wire compatibility', () => {
     expect(finalCards[0][3]).toBe('legacy-user');
     expect(finalCards[1][0]).toBe('current-card');
     expect(JSON.stringify(finalCards[1][1])).toContain('Delegated review complete');
+    expect(JSON.stringify(finalCards[1][1])).toContain('[Open source](https://example.com/docs)');
+    expect(JSON.stringify(finalCards[1][1])).toContain('Public excerpt');
     expect(finalCards[1][3]).toBe('current-user');
     expect(socket.send.mock.calls.map(([value]) => JSON.parse(value).type)).toEqual(['binding_confirm', 'command']);
     expect(currentSocket.send.mock.calls.map(([value]) => JSON.parse(value).type)).toEqual(['binding_confirm', 'command', 'task_result_ack']);

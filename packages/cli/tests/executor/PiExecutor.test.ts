@@ -643,6 +643,27 @@ describe('PiExecutor', () => {
   });
 
   it.each([
+    [{ content: [{ type: 'text', text: 'Documentation\nhttps://example.com/docs\nPublic excerpt' }] }, 'Documentation\nhttps://example.com/docs\nPublic excerpt'],
+    [{ content: 'Web excerpt' }, 'Web excerpt'],
+    [{ results: [{ title: 'Documentation', url: 'https://example.com/docs' }] }, '{"results":[{"title":"Documentation","url":"https://example.com/docs"}]}'],
+  ])('preserves extension web results through the existing Pi result path (%j)', async (result, expected) => {
+    transport.request.mockImplementation(async (command: Record<string, unknown>) => {
+      if (command.type === 'prompt') {
+        transport.emit({ type: 'agent_start' });
+        transport.emit({ type: 'tool_execution_start', toolCallId: 'web-extension', toolName: 'web_search', args: { query: 'docs' } });
+        transport.emit({ type: 'tool_execution_end', toolCallId: 'web-extension', result, isError: false });
+        transport.emit({ type: 'agent_settled' });
+        return { type: 'response', command: 'prompt', success: true };
+      }
+      if (command.type === 'get_state') return { type: 'response', command: 'get_state', success: true, data: { sessionId: 'sess-pi-1' } };
+      return { type: 'response', command: String(command.type), success: true };
+    });
+    const onToolResult = vi.fn();
+    await executor.execute('look up docs', { onToolResult });
+    expect(onToolResult).toHaveBeenCalledWith({ tool_use_id: 'web-extension', content: expected, is_error: false });
+  });
+
+  it.each([
     [{ description: 'Run unit tests', title: 'Test suite' }, { description: 'Run unit tests', title: 'Test suite' }],
     [{}, {}],
     [{ description: 42, title: [] }, {}],

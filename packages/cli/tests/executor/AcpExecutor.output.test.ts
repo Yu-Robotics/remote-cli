@@ -132,6 +132,26 @@ describe.each([
     expect(onToolResult).toHaveBeenCalledWith({ tool_use_id: 'read-1', content: 'Document contents', is_error: false });
   });
 
+  it('preserves web tool text, nested content and structured raw output without emptying results', async () => {
+    const entry = { title: 'Documentation', url: 'https://example.com/docs', snippet: 'Public excerpt' };
+    transport.prompt.mockImplementationOnce(async () => {
+      callbacks.onToolCall?.({ toolCallId: 'web-text', kind: 'fetch', title: 'Fetch docs', rawInput: { url: entry.url } });
+      callbacks.onToolResult?.({ toolCallId: 'web-text', status: 'completed', content: [{ type: 'text', text: 'Web excerpt' }] });
+      callbacks.onToolResult?.({ toolCallId: 'web-nested', status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'Nested excerpt' } }] });
+      callbacks.onToolResult?.({ toolCallId: 'web-raw', status: 'completed', rawOutput: { results: [entry] } });
+      callbacks.onToolResult?.({ toolCallId: 'web-failed', status: 'failed', rawOutput: 'Fetch failed' });
+      return { stopReason: 'end_turn' };
+    });
+    const onToolResult = vi.fn();
+    await executor.execute('look up docs', { onToolResult });
+    expect(onToolResult.mock.calls.map(([result]) => result)).toEqual([
+      { tool_use_id: 'web-text', content: 'Web excerpt', is_error: false },
+      { tool_use_id: 'web-nested', content: 'Nested excerpt', is_error: false },
+      { tool_use_id: 'web-raw', content: JSON.stringify({ results: [entry] }), is_error: false },
+      { tool_use_id: 'web-failed', content: 'Fetch failed', is_error: true },
+    ]);
+  });
+
   it('preserves per-call titles through argument updates without adding them to response text', async () => {
     transport.prompt.mockImplementationOnce(async () => {
       callbacks.onToolCall?.({ toolCallId: 'command-1', kind: 'execute', title: 'Preparing tests', rawInput: { command: 'npm test' } });

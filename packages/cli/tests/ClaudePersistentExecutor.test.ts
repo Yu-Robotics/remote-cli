@@ -75,6 +75,26 @@ describe('ClaudePersistentExecutor', () => {
   });
 
   describe('initialization', () => {
+    it('preserves native Claude WebSearch result text and its invocation identity', async () => {
+      const onToolUse = vi.fn(), onToolResult = vi.fn();
+      const running = executor.execute('look up docs', { onToolUse, onToolResult });
+      await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalled(), { timeout: 3000 });
+      const emit = (message: object) => mockChildProcess.stdout.emit('data', Buffer.from(`${JSON.stringify(message)}\n`));
+      emit({ type: 'system', subtype: 'init', session_id: 'web-test-session' });
+      await vi.waitFor(() => expect(mockChildProcess.stdin.write).toHaveBeenCalled(), { timeout: 3000 });
+      emit({ type: 'assistant', message: { role: 'assistant', content: [
+        { type: 'tool_use', id: 'web-native', name: 'WebSearch', input: { query: 'docs' } },
+      ] } });
+      const content = 'Documentation\nhttps://example.com/docs\nPublic excerpt';
+      emit({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'web-native', content }] } });
+      emit({ type: 'result', subtype: 'success', result: 'Done', is_error: false });
+      await running;
+      expect(onToolUse).toHaveBeenCalledWith({ id: 'web-native', name: 'WebSearch', input: { query: 'docs' } });
+      expect(onToolResult).toHaveBeenCalledWith({ tool_use_id: 'web-native', content, is_error: false });
+      mockChildProcess.emit('exit', 0, null);
+      mockChildProcess.emit('close', 0, null);
+    });
+
     it('captures native parent model reports without treating a subagent model as the coordinator model', async () => {
       expect(executor.getExecutionMetadata()).toMatchObject({ modelSource: 'default', effortSource: 'unknown' });
       expect(mockSpawn).not.toHaveBeenCalled();

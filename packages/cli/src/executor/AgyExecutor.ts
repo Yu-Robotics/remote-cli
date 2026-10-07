@@ -11,7 +11,7 @@ import { stripAnsi } from '../utils/stripAnsi';
 import { assertWorkingDirectoryExists } from '../utils/WorkingDirectory';
 import { configureAgyDelegation } from './agy/AgyDelegationConfig';
 import { delegationEnvironment, sameConnection, type DelegationConnection } from '../delegation/contract';
-import { ActivityTracker } from './Activity';
+import { ActivityTracker, sanitizeActivityText } from './Activity';
 
 export interface AgyExecutorOptions {
   /** Model slug passed as --model. Leave unset to use agy's default. */
@@ -90,7 +90,7 @@ function mapAgyTool(
     case 'find_by_name':
       return { name: 'Glob', input: parameters };
     case 'search_web':
-      return { name: 'WebSearch', input: { query: parameters.Query ?? '' } };
+      return { name: 'WebSearch', input: { query: parameters.Query ?? parameters.query ?? '' } };
     case 'read_url_content':
       return { name: 'WebFetch', input: { url: parameters.Url ?? '' } };
     default:
@@ -849,17 +849,21 @@ export class AgyExecutor implements IExecutor {
 
       if (step.state === 'ACTIVE') {
         const { name, input } = mapAgyTool(step.tool_name, parameters);
+        const description = [parameters.description, parameters.toolSummary, parameters.toolAction]
+          .map(value => typeof value === 'string' ? sanitizeActivityText(value) : '')
+          .find(value => value.length > 0);
         options.onToolUse?.({ id: toolUseId, name, input,
-          ...(typeof parameters.description === 'string' ? { description: parameters.description } : {}),
+          ...(description ? { description } : {}),
           ...(typeof parameters.title === 'string' ? { title: parameters.title } : {}),
         });
-        this.activityTracker.emitTool(name, input);
+        this.activityTracker.emitTool(name, input, description ?? (typeof parameters.title === 'string' ? parameters.title : undefined));
       } else if (step.state === 'DONE') {
         const isError = !!toolInfo.error;
+        const errorMessage = typeof toolInfo.error?.message === 'string' ? toolInfo.error.message : '';
         const content =
           typeof toolInfo.output === 'string'
             ? toolInfo.output
-            : (toolInfo.error?.message ?? '');
+            : [errorMessage, toolInfo.output != null ? JSON.stringify(toolInfo.output) : undefined].filter(Boolean).join('\n');
         options.onToolResult?.({ tool_use_id: toolUseId, content, is_error: isError });
       }
       return;
