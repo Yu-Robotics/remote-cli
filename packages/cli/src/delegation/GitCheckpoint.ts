@@ -153,12 +153,15 @@ async function transferGitTree(source: string, destination: string, tree: string
   });
 }
 
-async function readIndex(root: string): Promise<{ bytes: Buffer; mtime?: Date }> {
-  const file = path.resolve(root, await gitText(root, ['rev-parse', '--git-path', 'index']));
+async function readIndex(file: string): Promise<{ bytes: Buffer; mtime?: Date }> {
   try {
     const stat = await fs.stat(file);
     if (stat.size > CHECKPOINT_LIMITS.outputBytes) throw new Error('Git index exceeds the checkpoint limit');
-    return { bytes: await fs.readFile(file), mtime: stat.mtime };
+    const bytes = await fs.readFile(file);
+    // ENOENT permits bootstrap; an existing zero-byte file is damaged metadata,
+    // not a valid empty Git index. Never silently reconstruct it from HEAD.
+    if (!bytes.length) throw new Error('Git index is empty or corrupt; repair the existing index before delegating');
+    return { bytes, mtime: stat.mtime };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { bytes: Buffer.alloc(0) };
     throw error;
@@ -231,7 +234,18 @@ async function validateFiles(root: string, scope: string, ancestors: string[], e
   if (sensitive) {
     throw new Error(`Untracked credential/config file ${JSON.stringify(relativeName(scope, root, sensitive))} prevents a safe checkpoint. Exclude it with Git ignore rules before delegating.`);
   }
-  const staged = entries(await runGit(root, ['ls-files', '--stage', '-z'], undefined, env));
+  // One read of the checkpoint index provides paths, conflict stages, and
+  // hidden-entry flags. Never clear flags or rely on Git add to reveal them.
+  const staged = entries(await runGit(root, ['ls-files', '--stage', '-v', '-z'], undefined, env)).map(entry => {
+    const header = entry.slice(0, entry.indexOf('\t'));
+    const fields = /^([A-Za-z?]) ([0-7]{6}) ([a-f0-9]+) ([0-3])$/.exec(header);
+    if (!fields || !GIT_OID.test(fields[3])) throw new Error('Invalid Git checkpoint index entry');
+    if (fields[4] !== '0') throw new Error('Resolve the existing Git index conflicts before delegating');
+    if (/^[a-zS]$/.test(fields[1])) {
+      throw new Error('Git checkpoints cannot include assume-unchanged or skip-worktree entries. Resolve those flags and sparse checkouts explicitly before delegating.');
+    }
+    return entry.slice(2);
+  });
   const cached = staged.map(entry => entry.slice(entry.indexOf('\t') + 1));
   const gitlinks = new Set(staged.filter(entry => entry.startsWith('160000 ')).map(entry => entry.slice(entry.indexOf('\t') + 1)));
   const files = [...new Set(cached.concat(untracked.map(file => file.replace(/\/$/, ''))))];
@@ -339,20 +353,14 @@ async function checkpointHead(root: string, nested: boolean): Promise<string> {
 
 interface TreeCapture { head: string; tree: string; index: Buffer; repositories: NestedRepositoryCheckpoint[] }
 
-async function validateIndexFlags(root: string, env: Record<string, string>): Promise<void> {
-  const flags = entries(await runGit(root, ['ls-files', '-v', '-z'], undefined, env));
-  // Preserve the source index and never guess whether sparse absences are deletions.
-  if (flags.some(entry => /^[a-zS] /.test(entry))) {
-    throw new Error('Git checkpoints cannot include assume-unchanged or skip-worktree entries. Resolve those flags and sparse checkouts explicitly before delegating.');
-  }
-}
-
-async function captureTree(root: string, scope: string, nested: boolean, imported: Set<string>, ancestors: string[]): Promise<TreeCapture> {
+async function captureTree(root: string, scope: string, nested: boolean, imported: Set<string>,
+  validatedTrees: Set<string>, ancestors: string[]): Promise<TreeCapture> {
   if (nested) await validateNestedConfig(root);
   const head = await checkpointHead(root, nested);
-  if ((await runGit(root, ['ls-files', '-u', '-z'])).length) throw new Error('Resolve the existing Git index conflicts before delegating');
-  const originalIndex = await readIndex(root);
-  let inventory = await validateFiles(root, scope, ancestors);
+  // Resolve the index once per pass, but reread its bytes at the end. The next
+  // pass resolves it afresh; no repository metadata is cached across passes.
+  const indexFile = path.resolve(root, await gitText(root, ['rev-parse', '--git-path', 'index']));
+  const originalIndex = await readIndex(indexFile);
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'remote-cli-checkpoint-'));
   try {
     const env = { GIT_INDEX_FILE: path.join(directory, 'index') };
@@ -362,7 +370,7 @@ async function captureTree(root: string, scope: string, nested: boolean, importe
       // A fresh copy timestamp can incorrectly bless same-size stale entries.
       if (originalIndex.mtime) await fs.utimes(env.GIT_INDEX_FILE, originalIndex.mtime, originalIndex.mtime);
     } else await runGit(root, head ? ['read-tree', head] : ['read-tree', '--empty'], undefined, env);
-    await validateIndexFlags(root, env);
+    let inventory = await validateFiles(root, scope, ancestors, env);
     for (;;) {
       const replaced = inventory.repositories.concat(inventory.plainDirectories);
       const removed = inventory.cached.filter(file => replaced.some(directory => file === directory || file.startsWith(`${directory}/`)));
@@ -380,7 +388,7 @@ async function captureTree(root: string, scope: string, nested: boolean, importe
       const child = path.join(root, relative);
       try {
         const gitDirectory = await nestedGitDirectory(child, scope, ancestors);
-        const snapshot = await captureTree(child, scope, true, imported, [...ancestors, gitDirectory]);
+        const snapshot = await captureTree(child, scope, true, imported, validatedTrees, [...ancestors, gitDirectory]);
         const transfer = JSON.stringify([root, snapshot.tree]);
         if (!imported.has(transfer)) {
           await importGitTree(child, root, snapshot.tree);
@@ -397,11 +405,17 @@ async function captureTree(root: string, scope: string, nested: boolean, importe
       }
     }
     const tree = await gitText(root, ['write-tree'], undefined, env);
-    if (head !== await checkpointHead(root, nested) || !originalIndex.bytes.equals((await readIndex(root)).bytes)) {
+    if (head !== await checkpointHead(root, nested) || !originalIndex.bytes.equals((await readIndex(indexFile)).bytes)) {
       throw new Error('Workspace changed while its checkpoint was being captured; retry after edits stop');
     }
     if (!GIT_OID.test(tree)) throw new Error('Git returned an invalid checkpoint tree');
-    await validateTree(root, tree);
+    // Identical content-addressed trees need one successful entry audit per
+    // repository in this capture. Working-file inventories still run twice.
+    const validation = JSON.stringify([root, tree]);
+    if (!validatedTrees.has(validation)) {
+      await validateTree(root, tree);
+      validatedTrees.add(validation);
+    }
     return { head, tree, index: originalIndex.bytes, repositories };
   } finally { await fs.rm(directory, { recursive: true, force: true }); }
 }
@@ -412,11 +426,12 @@ export async function captureCheckpoint(root: string): Promise<GitCheckpoint> {
   // Reuse only transfers completed in this capture, never just an existing tree
   // object that could still reference missing descendants in the object store.
   const imported = new Set<string>();
+  const validatedTrees = new Set<string>();
   const common = await fs.realpath(path.resolve(root, await gitText(root, ['rev-parse', '--git-common-dir'])));
   const gitDirectory = await fs.realpath(await gitText(root, ['rev-parse', '--absolute-git-dir']));
   const ancestors = [...new Set([common, gitDirectory])];
-  const first = await captureTree(root, root, false, imported, ancestors);
-  const second = await captureTree(root, root, false, imported, ancestors);
+  const first = await captureTree(root, root, false, imported, validatedTrees, ancestors);
+  const second = await captureTree(root, root, false, imported, validatedTrees, ancestors);
   const revision = checkpointRevision(first.head, first.tree, first.index, first.repositories);
   if (revision !== checkpointRevision(second.head, second.tree, second.index, second.repositories)) {
     throw new Error('Workspace changed while its checkpoint was being captured; retry after edits stop');

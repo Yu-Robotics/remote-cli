@@ -174,7 +174,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     vi.useFakeTimers();
     try {
       const starting = start(scope, 'slow-history');
-      await vi.waitFor(() => expect(entered).toBe(true));
+      await vi.waitFor(() => expect(entered).toBe(true), { timeout: 10_000 });
       await vi.advanceTimersByTimeAsync(DELEGATION_LIMITS.storageTimeoutMs + 1);
       expect(workers).toHaveLength(1);
       vi.useRealTimers();
@@ -198,18 +198,17 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     await fs.mkdir(path.dirname(pointer), { recursive: true });
     await fs.writeFile(pointer, JSON.stringify({ threadId: 'fixture-conversation', cwd: workers[0].cwd }));
     let release!: () => void;
-    let entered!: () => void;
+    let entered = false;
     const gate = new Promise<void>(resolve => { release = resolve; });
-    const reclaiming = new Promise<void>(resolve => { entered = resolve; });
     const original = manager.workspaceManager.reclaim.bind(manager.workspaceManager);
-    vi.spyOn(manager.workspaceManager, 'reclaim').mockImplementation(async taskId => { entered(); await gate; return original(taskId); });
+    vi.spyOn(manager.workspaceManager, 'reclaim').mockImplementation(async taskId => { entered = true; await gate; return original(taskId); });
     let closed = false;
     const closing = scope.close().then(() => { closed = true; });
-    await reclaiming;
-    expect(closed).toBe(false);
-    expect((await fs.stat(workers[0].cwd)).isDirectory()).toBe(true);
-    release();
-    await closing;
+    try {
+      await vi.waitFor(() => expect(entered).toBe(true), { timeout: 10_000 });
+      expect(closed).toBe(false);
+      expect((await fs.stat(workers[0].cwd)).isDirectory()).toBe(true);
+    } finally { release(); await closing; }
     await expect(fs.lstat(workers[0].cwd)).rejects.toMatchObject({ code: 'ENOENT' });
     expect(JSON.parse(await fs.readFile(pointer, 'utf8')).threadId).toBe('fixture-conversation');
     expect(await manager.workspaceManager.describe(first.taskId)).toMatchObject({ disposition: 'applied' });
@@ -268,9 +267,10 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     const gate = new Promise<void>(resolve => { release = resolve; });
     vi.mocked(workers[0].executor.waitForExit!).mockImplementation(() => gate);
     workers[0].finish({ success: true, output: 'No changes' });
-    await vi.waitFor(() => expect(workers[0].executor.waitForExit).toHaveBeenCalled());
-    expect((await fs.lstat(workers[0].cwd)).isDirectory()).toBe(true);
-    release();
+    try {
+      await vi.waitFor(() => expect(workers[0].executor.waitForExit).toHaveBeenCalled(), { timeout: 10_000 });
+      expect((await fs.lstat(workers[0].cwd)).isDirectory()).toBe(true);
+    } finally { release(); }
     expect(await result(scope, first.taskId, 'r1')).toMatchObject({ state: 'succeeded', artifact: { disposition: 'applied' } });
     await expect(fs.lstat(workers[0].cwd)).rejects.toMatchObject({ code: 'ENOENT' });
   });
@@ -285,22 +285,43 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     expect((await fs.lstat(workers[0].cwd)).isDirectory()).toBe(true);
   });
 
-  it('keeps a reclaiming lane non-ready and task success independent of optional cleanup', async () => {
+  it.each([false, true])('settles gated reclamation even after an early assertion failure (earlyFailure=%s)', async earlyFailure => {
     const scope = manager.begin(parent);
     const first = await start(scope, 'first');
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     const reclaim = vi.spyOn(manager.workspaceManager, 'reclaim').mockImplementation(async () => { await gate; return false; });
-    workers[0].finish({ success: true });
-    await vi.waitFor(() => expect(reclaim).toHaveBeenCalledWith(first.taskId));
-    expect((await manager.laneStore.lanesForThread(parent.thread.id))[0].state).toBe('running');
-    const second = await start(scope, 'follower');
-    expect(workers[1].cwd).not.toBe(workers[0].cwd);
-    expect(factory.mock.calls[1][3]).not.toBe(factory.mock.calls[0][3]);
-    release();
-    workers[1].finish({ success: true });
-    expect(await result(scope, first.taskId, 'r1')).toMatchObject({ state: 'succeeded' });
-    expect(await result(scope, second.taskId, 'r2')).toMatchObject({ state: 'succeeded' });
+    if (!earlyFailure) {
+      const collect = manager.workspaceManager.collect.bind(manager.workspaceManager);
+      vi.spyOn(manager.workspaceManager, 'collect').mockImplementationOnce(async (...args) => {
+        // Real Git collection can exceed vi.waitFor's default one-second budget.
+        await new Promise(resolve => setTimeout(resolve, 1100));
+        return collect(...args);
+      });
+    }
+    const assertionFailure = new Error('Synthetic assertion failure while reclamation is gated');
+    const exercise = async () => {
+      try {
+        workers[0].finish({ success: true });
+        await vi.waitFor(() => expect(reclaim).toHaveBeenCalledWith(first.taskId), { timeout: 10_000 });
+        expect((await manager.laneStore.lanesForThread(parent.thread.id))[0].state).toBe('running');
+        if (earlyFailure) throw assertionFailure;
+        const second = await start(scope, 'follower');
+        expect(workers[1].cwd).not.toBe(workers[0].cwd);
+        expect(factory.mock.calls[1][3]).not.toBe(factory.mock.calls[0][3]);
+        release();
+        workers[1].finish({ success: true });
+        expect(await result(scope, first.taskId, 'r1')).toMatchObject({ state: 'succeeded' });
+        expect(await result(scope, second.taskId, 'r2')).toMatchObject({ state: 'succeeded' });
+      } finally {
+        release();
+        workers.forEach(worker => worker.finish({ success: true }));
+        await scope.close();
+      }
+    };
+    if (earlyFailure) await expect(exercise()).rejects.toBe(assertionFailure);
+    else await exercise();
+    expect((await manager.laneStore.lanesForThread(parent.thread.id)).every(lane => lane.state === 'ready')).toBe(true);
     expect((await fs.lstat(workers[0].cwd)).isDirectory()).toBe(true);
   });
 
@@ -308,20 +329,21 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     const scope = manager.begin(parent);
     const first = await start(scope, 'first');
     let release!: () => void;
-    let verifying!: () => void;
+    let verifying = false;
     const gate = new Promise<void>(resolve => { release = resolve; });
-    const entered = new Promise<void>(resolve => { verifying = resolve; });
     const original = gitCommands.runGit;
     vi.spyOn(gitCommands, 'runGit').mockImplementation(async (cwd, args, ...rest) => {
-      if (args[0] === 'ls-tree' && args.includes('--full-tree')) { verifying(); await gate; }
+      if (args[0] === 'ls-tree' && args.includes('--full-tree')) { verifying = true; await gate; }
       return original(cwd, args, ...rest);
     });
     workers[0].finish({ success: true });
-    await entered;
-    const following = start(scope, 'follower');
-    try { await vi.waitFor(() => expect(workers).toHaveLength(2), { timeout: 4000 }); }
-    finally { release(); }
-    const second = await following;
+    let following: Promise<DelegatedTaskResult> | undefined;
+    try {
+      await vi.waitFor(() => expect(verifying).toBe(true), { timeout: 10_000 });
+      following = start(scope, 'follower');
+      await vi.waitFor(() => expect(workers).toHaveLength(2), { timeout: 10_000 });
+    } finally { release(); workers.forEach(worker => worker.finish({ success: true })); }
+    const second = (await following)!;
     expect(workers[1].cwd).not.toBe(workers[0].cwd);
     workers[1].finish({ success: true });
     expect(await result(scope, first.taskId, 'r1')).toMatchObject({ state: 'succeeded' });
@@ -534,9 +556,15 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     scope.finishExecution(true);
     let settled = false;
     const checking = scope.checkArtifactCloseout().finally(() => { settled = true; });
-    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
-    expect(settled).toBe(false);
-    release();
+    try {
+      await vi.waitFor(() => expect(release).toBeTypeOf('function'), { timeout: 10_000 });
+      expect(settled).toBe(false);
+    } finally {
+      // A late destroy invocation must not acquire a new unresolved gate.
+      vi.mocked(workers[0].executor.destroy).mockResolvedValue(undefined);
+      release?.();
+      await checking;
+    }
     expect(await checking).toEqual([]);
   });
 
@@ -660,9 +688,15 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     });
     const checking = scope.checkArtifactCloseout();
     const rejected = expect(checking).rejects.toThrow('cancelled');
-    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
-    const closing = scope.close();
-    release();
+    let closing: Promise<void> | undefined;
+    try {
+      await vi.waitFor(() => expect(release).toBeTypeOf('function'), { timeout: 10_000 });
+      closing = scope.close();
+    } finally {
+      vi.mocked(manager.workspaceManager.inspectCloseout).mockImplementation(inspect);
+      release?.();
+      await Promise.allSettled([rejected, closing]);
+    }
     await rejected;
     await closing;
     expect(scope.isClosed()).toBe(true);

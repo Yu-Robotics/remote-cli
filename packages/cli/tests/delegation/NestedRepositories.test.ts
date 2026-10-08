@@ -254,6 +254,35 @@ describe('local nested repository checkpoints and delivery', { timeout: 30_000 }
     await expect(captureCheckpoint(fixture.root)).rejects.toThrow('Workspace changed');
   });
 
+  it('rejects nested conflict stages from the combined index query without modifying the source', async () => {
+    const child = await nestedGitFixture(fixture);
+    const blob = await gitText(child, ['hash-object', '-w', '--stdin'], 'synthetic conflict\n');
+    await runGit(child, ['update-index', '--index-info'],
+      `0 ${'0'.repeat(40)}\tlocal.txt\n100644 ${blob} 1\tlocal.txt\n100644 ${blob} 2\tlocal.txt\n100644 ${blob} 3\tlocal.txt\n`);
+    const before = await repositoryState(child);
+    await expect(captureCheckpoint(fixture.root)).rejects.toThrow('index conflicts');
+    expect(await repositoryState(child)).toEqual(before);
+  });
+
+  it.each(['empty', 'missing'])('distinguishes a nested %s index without changing either source repository', async state => {
+    const child = await nestedGitFixture(fixture);
+    const before = await repositoryState(child);
+    const outer = await repositoryState(fixture.root);
+    const index = path.join(child, '.git', 'index');
+    if (state === 'empty') {
+      await fs.writeFile(index, Buffer.alloc(0));
+      await expect(captureCheckpoint(fixture.root)).rejects.toThrow('empty or corrupt');
+      expect(await fs.readFile(index)).toEqual(Buffer.alloc(0));
+    } else {
+      await fs.unlink(index);
+      const snapshot = await captureCheckpoint(fixture.root);
+      expect(await gitText(fixture.root, ['show', `${snapshot.tree}:module/local.txt`])).toBe('first\nsecond\nthird');
+      await expect(fs.lstat(index)).rejects.toMatchObject({ code: 'ENOENT' });
+    }
+    expect(await gitText(child, ['rev-parse', 'HEAD'])).toBe(before.head);
+    expect(await repositoryState(fixture.root)).toEqual(outer);
+  });
+
   it.each([
     ['assume-unchanged', 'modified'], ['assume-unchanged', 'deleted'],
     ['skip-worktree', 'modified'], ['skip-worktree', 'deleted'],
