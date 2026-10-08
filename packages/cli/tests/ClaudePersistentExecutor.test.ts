@@ -858,20 +858,23 @@ describe('ClaudePersistentExecutor', () => {
   });
 
   describe('setModel()', () => {
-    it('sends /model <name> as a slash command to stdin', async () => {
+    it('sets model and stops running idle process without injecting slash command', async () => {
       const testExecutor = new ClaudePersistentExecutor(directoryGuard, '~/test-project');
 
       const freshProcess = new EventEmitter() as any;
       freshProcess.stdout = new EventEmitter();
       freshProcess.stderr = new EventEmitter();
-      freshProcess.stdin = { write: vi.fn(), end: vi.fn() };
-      freshProcess.kill = vi.fn();
+      freshProcess.stdin = {
+        write: vi.fn(),
+        end: vi.fn(() => freshProcess.emit('close', 0, null)),
+      };
+      freshProcess.kill = vi.fn(() => freshProcess.emit('close', 0, null));
       freshProcess.pid = 44444;
       mockSpawn.mockReturnValue(freshProcess);
 
-      const setModelPromise = testExecutor.setModel('opus');
-
-      await new Promise(resolve => setTimeout(resolve, 1100));
+      // Start a command to spawn process
+      const execPromise = testExecutor.execute('hello');
+      await vi.waitFor(() => expect(freshProcess.stdin.write).toHaveBeenCalled(), { timeout: 3000 });
 
       freshProcess.stdout.emit('data', Buffer.from(JSON.stringify({
         type: 'system',
@@ -879,42 +882,47 @@ describe('ClaudePersistentExecutor', () => {
         session_id: 'model-session',
         cwd: '/home/user/test-project',
       }) + '\n'));
-
-      expect(freshProcess.stdin.write).toHaveBeenCalled();
-      const writtenArg = freshProcess.stdin.write.mock.calls[0][0] as string;
-      const parsed = JSON.parse(writtenArg.trim());
-      expect(parsed.isSlashCommand).toBe(true);
-      expect(parsed.message.content).toBe('/model opus');
-
       freshProcess.stdout.emit('data', Buffer.from(JSON.stringify({
         type: 'result',
         subtype: 'success',
-        result: 'Model set to opus.',
+        result: 'hello response',
         is_error: false,
       }) + '\n'));
+      await execPromise;
 
-      const result = await setModelPromise;
+      freshProcess.stdin.write.mockClear();
+
+      const result = await testExecutor.setModel('opus');
       expect(result.success).toBe(true);
+      expect(result.output).toBe('Model set to opus.');
 
-      freshProcess.emit('exit', 0, null);
-      freshProcess.emit('close', 0, null);
-      await new Promise(resolve => setTimeout(resolve, 100));
+      // Does NOT write /model to stdin
+      expect(freshProcess.stdin.write).not.toHaveBeenCalled();
+      // Stops the process via stdin.end()
+      expect(freshProcess.stdin.end).toHaveBeenCalled();
+
       await testExecutor.destroy();
     }, 10000);
 
     it('includes --model in spawn args for the next process start after setModel', async () => {
       const testExecutor = new ClaudePersistentExecutor(directoryGuard, '~/test-project');
 
+      const setResult = await testExecutor.setModel('haiku');
+      expect(setResult.success).toBe(true);
+
       const freshProcess = new EventEmitter() as any;
       freshProcess.stdout = new EventEmitter();
       freshProcess.stderr = new EventEmitter();
-      freshProcess.stdin = { write: vi.fn(), end: vi.fn() };
-      freshProcess.kill = vi.fn();
+      freshProcess.stdin = {
+        write: vi.fn(),
+        end: vi.fn(() => freshProcess.emit('close', 0, null)),
+      };
+      freshProcess.kill = vi.fn(() => freshProcess.emit('close', 0, null));
       freshProcess.pid = 55555;
       mockSpawn.mockReturnValue(freshProcess);
 
-      const setModelPromise = testExecutor.setModel('haiku');
-      await new Promise(resolve => setTimeout(resolve, 1100));
+      const execPromise = testExecutor.execute('test');
+      await vi.waitFor(() => expect(freshProcess.stdin.write).toHaveBeenCalled(), { timeout: 3000 });
 
       expect(mockSpawn).toHaveBeenCalledWith(
         'claude',
@@ -931,16 +939,350 @@ describe('ClaudePersistentExecutor', () => {
       freshProcess.stdout.emit('data', Buffer.from(JSON.stringify({
         type: 'result',
         subtype: 'success',
-        result: 'Model set to haiku.',
+        result: 'done',
         is_error: false,
       }) + '\n'));
 
-      await setModelPromise;
-      freshProcess.emit('exit', 0, null);
-      freshProcess.emit('close', 0, null);
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await execPromise;
       await testExecutor.destroy();
     }, 10000);
+
+    it('clearModel resets model and stops process', async () => {
+      const testExecutor = new ClaudePersistentExecutor(directoryGuard, '~/test-project', undefined, 'opus');
+
+      const freshProcess = new EventEmitter() as any;
+      freshProcess.stdout = new EventEmitter();
+      freshProcess.stderr = new EventEmitter();
+      freshProcess.stdin = {
+        write: vi.fn(),
+        end: vi.fn(() => freshProcess.emit('close', 0, null)),
+      };
+      freshProcess.kill = vi.fn(() => freshProcess.emit('close', 0, null));
+      freshProcess.pid = 66666;
+      mockSpawn.mockReturnValue(freshProcess);
+
+      const execPromise = testExecutor.execute('init');
+      await vi.waitFor(() => expect(freshProcess.stdin.write).toHaveBeenCalled(), { timeout: 3000 });
+
+      freshProcess.stdout.emit('data', Buffer.from(JSON.stringify({
+        type: 'system',
+        subtype: 'init',
+        session_id: 's1',
+        cwd: '/home/user/test-project',
+      }) + '\n'));
+      freshProcess.stdout.emit('data', Buffer.from(JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        result: 'ok',
+        is_error: false,
+      }) + '\n'));
+      await execPromise;
+
+      await testExecutor.clearModel();
+      expect(freshProcess.stdin.end).toHaveBeenCalled();
+      await testExecutor.destroy();
+    }, 10000);
+
+    it('listModels queries native Claude control initialize and caches the result', async () => {
+      const testExecutor = new ClaudePersistentExecutor(directoryGuard, '~/test-project');
+
+      const freshProcess = new EventEmitter() as any;
+      freshProcess.stdout = new EventEmitter();
+      freshProcess.stderr = new EventEmitter();
+      freshProcess.stdin = {
+        write: vi.fn(),
+        end: vi.fn(() => freshProcess.emit('close', 0, null)),
+      };
+      freshProcess.kill = vi.fn(() => freshProcess.emit('close', 0, null));
+      freshProcess.pid = 77777;
+      mockSpawn.mockReturnValue(freshProcess);
+
+      const listPromise = testExecutor.listModels();
+      await vi.waitFor(() => expect(freshProcess.stdin.write).toHaveBeenCalled(), { timeout: 3000 });
+
+      const written = JSON.parse(freshProcess.stdin.write.mock.calls[0][0].trim());
+      expect(written).toMatchObject({
+        type: 'control_request',
+        request: { subtype: 'initialize' },
+      });
+      expect(typeof written.request_id).toBe('string');
+
+      freshProcess.stdout.emit('data', Buffer.from(JSON.stringify({
+        type: 'control_response',
+        response: {
+          subtype: 'success',
+          request_id: written.request_id,
+          response: {
+            models: [
+              {
+                value: 'claude-3-7-sonnet',
+                displayName: 'Claude 3.7 Sonnet',
+                supportsEffort: true,
+                supportedEffortLevels: ['low', 'medium', 'high'],
+              },
+              {
+                value: 'claude-3-5-haiku',
+                displayName: 'Claude 3.5 Haiku',
+                supportsEffort: false,
+              },
+            ],
+          },
+        },
+      }) + '\n'));
+
+      const models = await listPromise;
+      expect(models).toHaveLength(2);
+      expect(models[0].id).toBe('claude-3-7-sonnet');
+      expect(models[0].supportedReasoningEfforts).toEqual(['low', 'medium', 'high']);
+      expect(models[1].id).toBe('claude-3-5-haiku');
+      expect(models[1].supportedReasoningEfforts).toBeUndefined();
+
+      // Verify cached without another stdin write
+      freshProcess.stdin.write.mockClear();
+      const cachedModels = await testExecutor.listModels();
+      expect(freshProcess.stdin.write).not.toHaveBeenCalled();
+      expect(cachedModels).toEqual(models);
+
+      await testExecutor.destroy();
+    }, 10000);
+
+    it('listEfforts and setEffort query native effort choices and validate changes', async () => {
+      const testExecutor = new ClaudePersistentExecutor(directoryGuard, '~/test-project');
+
+      const freshProcess = new EventEmitter() as any;
+      freshProcess.stdout = new EventEmitter();
+      freshProcess.stderr = new EventEmitter();
+      freshProcess.stdin = {
+        write: vi.fn(),
+        end: vi.fn(() => freshProcess.emit('close', 0, null)),
+      };
+      freshProcess.kill = vi.fn(() => freshProcess.emit('close', 0, null));
+      freshProcess.pid = 88888;
+      mockSpawn.mockReturnValue(freshProcess);
+
+      const effortsPromise = testExecutor.listEfforts();
+      await vi.waitFor(() => expect(freshProcess.stdin.write).toHaveBeenCalled(), { timeout: 3000 });
+
+      const written = JSON.parse(freshProcess.stdin.write.mock.calls[0][0].trim());
+      freshProcess.stdout.emit('data', Buffer.from(JSON.stringify({
+        type: 'control_response',
+        response: {
+          subtype: 'success',
+          request_id: written.request_id,
+          response: {
+            models: [
+              {
+                value: 'default',
+                resolvedModel: 'claude-3-7-sonnet',
+                displayName: 'Default',
+                supportsEffort: true,
+                supportedEffortLevels: ['low', 'medium', 'high'],
+              },
+            ],
+          },
+        },
+      }) + '\n'));
+
+      const efforts = await effortsPromise;
+      expect(efforts.choices).toEqual([
+        { value: 'low', displayName: 'low' },
+        { value: 'medium', displayName: 'medium' },
+        { value: 'high', displayName: 'high' },
+      ]);
+      expect(efforts.supportsReset).toBe(true);
+
+      // setEffort invalid value rejects
+      const invalidResult = await testExecutor.setEffort('unsupported');
+      expect(invalidResult.success).toBe(false);
+      expect(invalidResult.error).toContain('Unsupported reasoning effort');
+
+      // setEffort valid value succeeds and stops process
+      const validResult = await testExecutor.setEffort('high');
+      expect(validResult.success).toBe(true);
+      expect(validResult.output).toBe('Reasoning effort set to high.');
+      expect(freshProcess.stdin.end).toHaveBeenCalled();
+
+      // Next spawn includes --effort high
+      const spawnProcess = new EventEmitter() as any;
+      spawnProcess.stdout = new EventEmitter();
+      spawnProcess.stderr = new EventEmitter();
+      spawnProcess.stdin = {
+        write: vi.fn(),
+        end: vi.fn(() => spawnProcess.emit('close', 0, null)),
+      };
+      spawnProcess.kill = vi.fn(() => spawnProcess.emit('close', 0, null));
+      spawnProcess.pid = 99999;
+      mockSpawn.mockReturnValue(spawnProcess);
+
+      const execPromise = testExecutor.execute('effort test');
+      await vi.waitFor(() => expect(spawnProcess.stdin.write).toHaveBeenCalled(), { timeout: 3000 });
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        'claude',
+        expect.arrayContaining(['--effort', 'high']),
+        expect.any(Object)
+      );
+
+      spawnProcess.stdout.emit('data', Buffer.from(JSON.stringify({
+        type: 'system',
+        subtype: 'init',
+        session_id: 's-effort',
+        cwd: '/home/user/test-project',
+      }) + '\n'));
+      spawnProcess.stdout.emit('data', Buffer.from(JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        result: 'effort done',
+        is_error: false,
+      }) + '\n'));
+      await execPromise;
+
+      // setEffort auto clears effort
+      const resetResult = await testExecutor.setEffort('auto');
+      expect(resetResult.success).toBe(true);
+      expect(resetResult.output).toBe('Reasoning effort restored to default.');
+
+      await testExecutor.destroy();
+    }, 10000);
+
+    it('setModel rejects incompatible effort without silently changing a saved preference', async () => {
+      const testExecutor = new ClaudePersistentExecutor(directoryGuard, '~/test-project', undefined, 'claude-3-7-sonnet');
+
+      const freshProcess = new EventEmitter() as any;
+      freshProcess.stdout = new EventEmitter();
+      freshProcess.stderr = new EventEmitter();
+      freshProcess.stdin = {
+        write: vi.fn(),
+        end: vi.fn(() => freshProcess.emit('close', 0, null)),
+      };
+      freshProcess.kill = vi.fn(() => freshProcess.emit('close', 0, null));
+      freshProcess.pid = 11111;
+      mockSpawn.mockReturnValue(freshProcess);
+
+      // Populate catalog
+      const listPromise = testExecutor.listModels();
+      await vi.waitFor(() => expect(freshProcess.stdin.write).toHaveBeenCalled(), { timeout: 3000 });
+      const written = JSON.parse(freshProcess.stdin.write.mock.calls[0][0].trim());
+      freshProcess.stdout.emit('data', Buffer.from(JSON.stringify({
+        type: 'control_response',
+        response: {
+          subtype: 'success',
+          request_id: written.request_id,
+          response: {
+            models: [
+              {
+                value: 'claude-3-7-sonnet',
+                displayName: 'Claude 3.7 Sonnet',
+                supportsEffort: true,
+                supportedEffortLevels: ['low', 'medium', 'high'],
+              },
+              {
+                value: 'claude-3-5-haiku',
+                displayName: 'Claude 3.5 Haiku',
+                supportsEffort: false,
+              },
+            ],
+          },
+        },
+      }) + '\n'));
+      await listPromise;
+
+      const effortSet = await testExecutor.setEffort('high');
+      expect(effortSet.success).toBe(true);
+
+      // A recycled process must refresh native capabilities rather than reuse
+      // the prior process's catalog.
+      freshProcess.stdin.write.mockImplementation((line: string) => {
+        const control = JSON.parse(line);
+        queueMicrotask(() => freshProcess.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'control_response',
+          response: { subtype: 'success', request_id: control.request_id, response: { models: [
+            { value: 'claude-3-7-sonnet', supportsEffort: true, supportedEffortLevels: ['low', 'high'] },
+            { value: 'claude-3-5-haiku', supportsEffort: false },
+          ] } } }) + '\n')));
+      });
+
+      // Switch to haiku which does not support effort
+      const setModelResult = await testExecutor.setModel('claude-3-5-haiku');
+      expect(setModelResult.success).toBe(false);
+      expect(setModelResult.error).toContain('Reset /effort auto');
+      expect(testExecutor.getExecutionMetadata()).toMatchObject({ model: 'claude-3-7-sonnet', reasoningEffort: 'high' });
+
+      await testExecutor.destroy();
+    }, 10000);
+  });
+
+  describe('native control lifecycle', () => {
+    function bind() {
+      const child = Object.assign(new EventEmitter(), { killed: false,
+        stdin: { write: vi.fn(), end: vi.fn() }, kill: vi.fn() });
+      child.stdin.end.mockImplementation(() => child.emit('close', 0, null));
+      (executor as any).claudeProcess = child;
+      vi.spyOn(executor as any, 'startProcess').mockResolvedValue(undefined);
+      const reply = (packet: any, response: object) => (executor as any).handleOutputLine(JSON.stringify({
+        type: 'control_response', response: { subtype: 'success', request_id: packet.request_id, response } }));
+      return { child, reply };
+    }
+
+    it('shares one initialization, ignores foreign responses, and keeps account data out of output and logs', async () => {
+      const { child, reply } = bind();
+      const first = executor.listModels();
+      const second = executor.listModels();
+      void first.catch(() => undefined);
+      void second.catch(() => undefined);
+      await vi.waitFor(() => expect(child.stdin.write).toHaveBeenCalledTimes(1));
+      expect(child.stdin.write).toHaveBeenCalledTimes(1);
+      const packet = JSON.parse(child.stdin.write.mock.calls[0][0]);
+      reply({ request_id: 'foreign-request' }, { models: [{ value: 'wrong-model' }] });
+      expect((executor as any).pendingControlRequests.size).toBe(1);
+      reply(packet, { models: [{ value: 'model-a', supportsEffort: true, supportedEffortLevels: ['high'] }],
+        account: { email: 'synthetic@example.com', token: 'synthetic-token' } });
+      expect(await first).toEqual(await second);
+      expect((executor as any).pendingControlRequests.size).toBe(0);
+      expect((executor as any).currentOutputBuffer.join('')).not.toContain('synthetic-token');
+      expect(JSON.stringify(vi.mocked(console.log).mock.calls)).not.toContain('synthetic-token');
+      expect((executor as any).cachedRawEntries).toEqual([expect.objectContaining({ value: 'model-a' })]);
+      await (executor as any).stopProcess();
+      expect((executor as any).cachedModelCatalog).toBeNull();
+      const replacement = bind();
+      const next = executor.listModels();
+      await vi.waitFor(() => expect(replacement.child.stdin.write).toHaveBeenCalledTimes(1));
+      const request = JSON.parse(replacement.child.stdin.write.mock.calls[0][0]);
+      replacement.reply(request, { models: [{ value: 'replacement-model' }] });
+      expect((await next)[0].id).toBe('replacement-model');
+    });
+
+    it('expires a silent control request and cancels another pending request on stop', async () => {
+      vi.useFakeTimers();
+      try {
+        bind();
+        const pending = executor.listModels();
+        const failed = expect(pending).rejects.toThrow('timed out');
+        await vi.advanceTimersByTimeAsync(10_001);
+        await failed;
+        expect((executor as any).pendingControlRequests.size).toBe(0);
+        const next = executor.listModels();
+        const cancelled = expect(next).rejects.toThrow('process stopped');
+        await vi.advanceTimersByTimeAsync(0);
+        await (executor as any).stopProcess();
+        await cancelled;
+      } finally { vi.useRealTimers(); }
+    });
+
+    it('bounds an unconfirmed process stop and retains the child instead of pretending it exited', async () => {
+      vi.useFakeTimers();
+      try {
+        const { child } = bind();
+        child.stdin.end.mockImplementation(() => {});
+        const failed = expect((executor as any).stopProcess()).rejects.toThrow('exit could not be confirmed');
+        await vi.advanceTimersByTimeAsync(9_001);
+        await failed;
+        expect(child.kill.mock.calls).toEqual([['SIGTERM'], ['SIGKILL']]);
+        expect((executor as any).claudeProcess).toBe(child);
+        // The fixture has no OS process; simulate its eventual confirmed exit.
+        (executor as any).claudeProcess = null;
+        (executor as any).isStopping = false;
+      } finally { vi.useRealTimers(); }
+    });
   });
 
   describe('compactWhenFull()', () => {

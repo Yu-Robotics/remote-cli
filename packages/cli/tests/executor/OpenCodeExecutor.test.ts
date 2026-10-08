@@ -81,6 +81,20 @@ describe('OpenCodeExecutor', () => {
     expect(stored.id).toBe('ses-new');
   });
 
+  it('releases only a known synthetic metadata session before its transport is destroyed', async () => {
+    const preview = new OpenCodeExecutor(new DirectoryGuard([home]), { initialWorkingDirectory: project,
+      threadId: 'settings-meta-fixture', delegationWorker: true,
+      sessionBaseDir: path.join(home, '.remote-cli', 'opencode-sessions'), clientFactory: () => transport });
+    try {
+      await preview.listModels();
+      await preview.releaseMetadataSession();
+      expect(transport.deleteSession).toHaveBeenCalledWith('ses-new');
+      expect(transport.destroy).not.toHaveBeenCalled();
+      await executor.releaseMetadataSession();
+      expect(transport.deleteSession).toHaveBeenCalledTimes(1);
+    } finally { await preview.destroy(); }
+  });
+
   it('keeps ACP thought chunks out of all visible text and final output', async () => {
     transport.prompt.mockImplementationOnce(async () => {
       callbacks.onThoughtChunk?.({ type: 'text', text: 'Private thought' });
@@ -192,7 +206,90 @@ describe('OpenCodeExecutor', () => {
   it('lists models from ACP session config options', async () => {
     const models = await executor.listModels();
     expect(models.map((model) => model.id)).toEqual(['opencode/free-a', 'opencode/free-b']);
-    expect(models[0]).toMatchObject({ isDefault: true, inputModalities: ['text', 'image'] });
+    expect(models[0]).toMatchObject({ isCurrent: true, isDefault: undefined, inputModalities: ['text', 'image'] });
+    expect(models[1]).toMatchObject({ isCurrent: false, isDefault: undefined });
+  });
+
+  it('lists efforts with choices, current, and reset support', async () => {
+    const efforts = await executor.listEfforts();
+    expect(efforts.supportsReset).toBe(true);
+    expect(efforts.choices.map((c) => c.value)).toEqual(['minimal', 'low', 'medium', 'high', 'default']);
+    expect(efforts.current).toBeUndefined(); // currentValue is 'default' which is effortAutoValue
+
+    await executor.setEffort('high');
+    const updatedEfforts = await executor.listEfforts();
+    expect(updatedEfforts.current).toBe('high');
+  });
+
+  it('prefers reported config values over saved requests when native settings differ', async () => {
+    await executor.setModel('opencode/free-b');
+    await executor.setEffort('high');
+    (executor as any).updateConfigOptions({ configOptions: options.map(option =>
+      option.id === 'effort' ? { ...option, currentValue: 'low' } : option) });
+    expect(executor.getExecutionMetadata()).toMatchObject({ model: 'opencode/free-a', modelSource: 'reported',
+      reasoningEffort: 'low', effortSource: 'reported' });
+    const listed = await executor.listModels();
+    expect(listed.find(model => model.id === 'opencode/free-a')?.isCurrent).toBe(true);
+    expect(listed.find(model => model.id === 'opencode/free-b')?.isCurrent).toBe(false);
+    expect((await executor.listEfforts()).current).toBe('low');
+  });
+
+  it('supports grouped select options in model and effort catalogs', async () => {
+    const groupedTransport = new FakeTransport();
+    groupedTransport.newSession.mockResolvedValueOnce({
+      sessionId: 'ses-grouped',
+      configOptions: [
+        {
+          id: 'model',
+          name: 'Model',
+          type: 'select',
+          currentValue: 'grouped-model-1',
+          options: [
+            {
+              group: 'Provider A',
+              options: [
+                { value: 'grouped-model-1', name: 'Model 1' },
+                { value: 'grouped-model-2', name: 'Model 2' },
+              ],
+            },
+          ] as any,
+        },
+        {
+          id: 'effort',
+          name: 'Effort',
+          type: 'select',
+          currentValue: 'high',
+          options: [
+            {
+              group: 'Efforts',
+              options: [
+                { value: 'low', name: 'Low' },
+                { value: 'high', name: 'High' },
+              ],
+            },
+          ] as any,
+        },
+      ],
+    });
+
+    const groupedExecutor = new OpenCodeExecutor(new DirectoryGuard([project]), {
+      initialWorkingDirectory: project,
+      sessionBaseDir: path.join(home, 'opencode-sessions'),
+      threadId: 'thread-grouped',
+      clientFactory: () => groupedTransport,
+    });
+
+    const groupedModels = await groupedExecutor.listModels();
+    expect(groupedModels).toHaveLength(2);
+    expect(groupedModels[0]).toMatchObject({ id: 'grouped-model-1', displayName: 'Model 1', isCurrent: true });
+    expect(groupedModels[1]).toMatchObject({ id: 'grouped-model-2', displayName: 'Model 2', isCurrent: false });
+
+    const groupedEfforts = await groupedExecutor.listEfforts();
+    expect(groupedEfforts.choices).toEqual([
+      { value: 'low', displayName: 'Low' },
+      { value: 'high', displayName: 'High' },
+    ]);
+    expect(groupedEfforts.current).toBe('high');
   });
 
   it('sets a known model and rejects an unknown model', async () => {

@@ -264,6 +264,8 @@ export interface OutgoingMessage {
   type: 'result' | 'progress' | 'status' | 'pong' | 'structured' | 'stream' | 'response' | 'task_notification' | 'queue_started' | 'task_resume' | 'stream_context';
   messageId: string;
   success?: boolean;
+  /** Negotiated, dedicated settings card; legacy peers receive output only. */
+  settingsMenu?: import('./Settings').SettingsMenu;
   /** Plain text output (for backward compatibility) */
   output?: string;
   /** Structured content for rich formatting (new format) */

@@ -9,6 +9,7 @@ import type {
   ExecuteResult,
   ExecutorContextUsage,
   ExecutorModelInfo,
+  ExecutorEffortInfo,
   IExecutor,
 } from './IExecutor';
 import { PiClient } from './pi/PiClient';
@@ -125,15 +126,6 @@ function extractAgentError(event: Record<string, any>): string | undefined {
     return text || 'Pi agent ended with an error';
   }
   return undefined;
-}
-
-function defaultPiThinkingLevel(levels: unknown): string {
-  const available = Array.isArray(levels) ? levels.map((level) => String(level)) : [];
-  if (available.includes('medium')) return 'medium';
-  const preferred = available.find((level) => level !== 'off' && isPiThinkingLevel(level));
-  if (preferred) return preferred;
-  if (available[0] && isPiThinkingLevel(available[0])) return available[0];
-  return 'medium';
 }
 
 function toolResultText(result: any): string {
@@ -532,30 +524,11 @@ export class PiExecutor implements IExecutor {
   }
 
   async clearModel(): Promise<void> {
+    await this.recycleClient();
     this.model = undefined;
     this.reportedModel = undefined;
     this.reportedEffort = undefined;
     this.client.updateLaunch?.({ model: undefined, provider: this.provider });
-    if (!this.client.isRunning()) return;
-    try {
-      const models = await this.listModels();
-      const fallback = models.find((model) => model.isDefault) ?? models[0];
-      if (!fallback) {
-        await this.recycleClient();
-        return;
-      }
-      const parsed = parsePiModelRef(fallback.id);
-      const response = await this.client.request({
-        type: 'set_model',
-        provider: parsed.provider,
-        modelId: parsed.modelId,
-      });
-      if (!response.success) {
-        await this.recycleClient();
-      }
-    } catch {
-      await this.recycleClient();
-    }
   }
 
   async listModels(): Promise<ExecutorModelInfo[]> {
@@ -564,34 +537,74 @@ export class PiExecutor implements IExecutor {
     if (!response.success) {
       throw new Error(response.error || 'Failed to list Pi models');
     }
+    const currentModelId = this.reportedModel ?? this.model;
+    let currentModelThinkingLevels: string[] | undefined;
+    try {
+      const levelsResponse = await this.client.request({ type: 'get_available_thinking_levels' });
+      if (levelsResponse.success && Array.isArray(levelsResponse.data?.levels)) {
+        currentModelThinkingLevels = levelsResponse.data.levels.map(String);
+      }
+    } catch {
+      // Ignore failure to fetch thinking levels
+    }
+
     const models = Array.isArray(response.data?.models) ? response.data.models as PiModel[] : [];
-    return models.map((model, index) => ({
-      id: formatPiModelRef(model),
-      displayName: model.name || model.id,
-      isDefault: index === 0,
-      supportedReasoningEfforts: model.reasoning ? [...PI_THINKING_LEVELS] : ['off'],
-      inputModalities: model.input,
-    }));
+    return models.map((model) => {
+      const modelRef = formatPiModelRef(model);
+      const isCurrent = Boolean(currentModelId && (modelRef === currentModelId || model.id === currentModelId));
+      let supportedReasoningEfforts: string[] | undefined;
+      if (isCurrent && currentModelThinkingLevels) {
+        supportedReasoningEfforts = currentModelThinkingLevels;
+      } else if (!model.reasoning) {
+        supportedReasoningEfforts = ['off'];
+      } else {
+        supportedReasoningEfforts = undefined;
+      }
+      return {
+        id: modelRef,
+        displayName: model.name || model.id,
+        isDefault: undefined,
+        isCurrent: isCurrent || undefined,
+        supportedReasoningEfforts,
+        inputModalities: model.input,
+      };
+    });
+  }
+
+  async listEfforts(): Promise<ExecutorEffortInfo> {
+    await this.ensureClient();
+    try {
+      const response = await this.client.request({ type: 'get_available_thinking_levels' });
+      if (!response.success || !Array.isArray(response.data?.levels) || response.data.levels.length === 0) {
+        return {
+          choices: [],
+          supportsReset: false,
+          unavailableReason: response.error || 'Current model does not support reasoning effort',
+        };
+      }
+      const levels: string[] = response.data.levels.map(String);
+      return {
+        choices: levels.map((level) => ({ value: level, displayName: level })),
+        current: this.reportedEffort ?? this.effort,
+        default: undefined,
+        supportsReset: true,
+      };
+    } catch (error) {
+      return {
+        choices: [],
+        supportsReset: false,
+        unavailableReason: this.friendlyError(error),
+      };
+    }
   }
 
   async setEffort(effort: string): Promise<ExecuteResult> {
     const trimmed = effort.trim().toLowerCase();
     if (trimmed === 'auto') {
+      try { await this.recycleClient(); } catch (error) { return { success: false, error: this.friendlyError(error) }; }
       this.effort = undefined;
       this.reportedEffort = undefined;
       this.client.updateLaunch?.({ thinking: undefined });
-      if (this.client.isRunning()) {
-        try {
-          const available = await this.client.request({ type: 'get_available_thinking_levels' });
-          const level = defaultPiThinkingLevel(available.data?.levels);
-          const response = await this.client.request({ type: 'set_thinking_level', level });
-          if (!response.success) {
-            return { success: false, error: response.error || 'Failed to restore Pi thinking level' };
-          }
-        } catch (error) {
-          return { success: false, error: this.friendlyError(error) };
-        }
-      }
       return { success: true, output: 'Reasoning effort set to auto.' };
     }
     if (!isPiThinkingLevel(trimmed)) {
@@ -602,6 +615,8 @@ export class PiExecutor implements IExecutor {
     }
     try {
       await this.ensureClient();
+      const available = await this.listEfforts();
+      if (!available.choices.some(choice => choice.value === trimmed)) return { success: false, error: 'This thinking level is not supported by the selected Pi model.' };
       const response = await this.client.request({ type: 'set_thinking_level', level: trimmed });
       if (!response.success) {
         return { success: false, error: response.error || `Failed to set thinking level: ${trimmed}` };

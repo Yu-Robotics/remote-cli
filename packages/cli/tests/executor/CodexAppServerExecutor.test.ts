@@ -135,13 +135,13 @@ describe('CodexAppServerExecutor', () => {
     const request = transport.request.bind(transport);
     vi.spyOn(transport, 'request').mockImplementation(async (method, params) => {
       const result = await request(method, params);
-      return method === 'thread/start' ? { ...result, model: 'native-model', reasoningEffort: 'medium' } : result;
+      return method === 'thread/start' ? { ...result, model: 'gpt-a', reasoningEffort: 'medium' } : result;
     });
     const running = executor.execute('metadata', {});
     await vi.waitFor(() => expect(transport.requests.some(item => item.method === 'turn/start')).toBe(true));
     transport.emit({ method: 'turn/completed', params: { threadId: transport.nextThreadId, turn: { id: 'turn-1', status: 'completed' } } });
     await running;
-    expect(executor.getExecutionMetadata()).toMatchObject({ model: 'native-model', modelSource: 'reported', reasoningEffort: 'medium', effortSource: 'reported' });
+    expect(executor.getExecutionMetadata()).toMatchObject({ model: 'gpt-a', modelSource: 'reported', reasoningEffort: 'medium', effortSource: 'reported' });
     await executor.setEffort('high');
     expect(executor.getExecutionMetadata()).toMatchObject({ reasoningEffort: 'high', effortSource: 'configured' });
     await executor.setModel('gpt-b');
@@ -592,6 +592,70 @@ describe('CodexAppServerExecutor', () => {
     expect(transport.requests.findLast((request) => request.method === 'turn/start')?.params.model).toBe('gpt-b');
     transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
     await promise;
+  });
+
+  it('marks isCurrent on the matching model in listModels', async () => {
+    let models = await executor.listModels();
+    expect(models.find((m) => m.id === 'gpt-a')?.isCurrent).toBeUndefined();
+
+    await executor.setModel('gpt-b');
+    models = await executor.listModels();
+    expect(models.find((m) => m.id === 'gpt-b')?.isCurrent).toBe(true);
+    expect(models.find((m) => m.id === 'gpt-a')?.isCurrent).toBe(false);
+  });
+
+  it('returns effort choices with current and default from native models in listEfforts', async () => {
+    const effortInfo = await executor.listEfforts();
+    expect(effortInfo.supportsReset).toBe(true);
+    expect(effortInfo.choices).toEqual([
+      { value: 'low', displayName: 'low' },
+      { value: 'medium', displayName: 'medium' },
+      { value: 'high', displayName: 'high' },
+    ]);
+    expect(effortInfo.default).toBe('medium');
+
+    await executor.setModel('gpt-b');
+    const bEffortInfo = await executor.listEfforts();
+    expect(bEffortInfo.choices).toEqual([
+      { value: 'medium', displayName: 'medium' },
+      { value: 'high', displayName: 'high' },
+    ]);
+    expect(bEffortInfo.default).toBe('high');
+
+    await executor.setEffort('high');
+    const setEffortInfo = await executor.listEfforts();
+    expect(setEffortInfo.current).toBe('high');
+  });
+
+  it('uses the reported model and effort rather than a differing configured request', async () => {
+    (executor as any).model = 'gpt-a';
+    (executor as any).effort = 'high';
+    (executor as any).reportedModel = 'gpt-b';
+    (executor as any).reportedEffort = 'medium';
+    const listed = await executor.listModels();
+    expect(listed.find(model => model.id === 'gpt-b')?.isCurrent).toBe(true);
+    expect(listed.find(model => model.id === 'gpt-a')?.isCurrent).toBe(false);
+    expect(await executor.listEfforts()).toMatchObject({ current: 'medium', default: 'high',
+      choices: [{ value: 'medium', displayName: 'medium' }, { value: 'high', displayName: 'high' }] });
+    await expect(executor.setEffort('low')).resolves.toMatchObject({ success: false });
+    (executor as any).reportedModel = 'missing-native-model';
+    expect(await executor.listEfforts()).toMatchObject({ choices: [], supportsReset: false });
+  });
+
+  it('does not guess that the first catalog model is the default effort target', async () => {
+    vi.spyOn(executor, 'listModels').mockResolvedValue([{ id: 'first-model', displayName: 'First',
+      supportedReasoningEfforts: ['high'] }]);
+    expect(await executor.listEfforts()).toMatchObject({ choices: [], supportsReset: false });
+    await expect(executor.setEffort('high')).resolves.toMatchObject({ success: false });
+  });
+
+  it('rejects a model switch incompatible with the saved effort without silently clearing it', async () => {
+    await executor.setModel('gpt-a');
+    await executor.setEffort('low');
+    await expect(executor.setModel('gpt-b')).resolves.toMatchObject({ success: false, error: expect.stringContaining('Reset /effort auto') });
+    expect(executor.getExecutionMetadata()).toMatchObject({ model: 'gpt-a', reasoningEffort: 'low' });
+    await executor.setEffort('auto');
+    await expect(executor.setModel('gpt-b')).resolves.toMatchObject({ success: true });
   });
 
   it('reads and formats Codex account rate limits without starting a thread', async () => {

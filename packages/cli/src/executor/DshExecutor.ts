@@ -152,9 +152,9 @@ export class DshExecutor extends AcpExecutor {
   async listModels(): Promise<ExecutorModelInfo[]> {
     return (await super.listModels()).map(model => ({ ...model,
       supportedReasoningEfforts: model.supportedReasoningEfforts?.map(value => value === '' ? 'auto' : value),
-      defaultReasoningEffort: model.isDefault ? 'auto' : undefined,
+      defaultReasoningEffort: undefined,
       // initialize advertises a connection capability, not a per-catalog-model promise.
-      inputModalities: model.isDefault && this.state.images ? ['text', 'image'] : ['text'],
+      inputModalities: (model.isCurrent ?? model.isDefault) && this.state.images ? ['text', 'image'] : ['text'],
     }));
   }
 

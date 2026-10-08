@@ -4,7 +4,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { DirectoryGuard } from '../security/DirectoryGuard';
-import { IExecutor, ExecuteOptions, ExecuteResult } from './IExecutor';
+import { IExecutor, ExecuteOptions, ExecuteResult, ExecutorModelInfo, ExecutorEffortInfo } from './IExecutor';
 import { configuredExecutionMetadata } from './ExecutionMetadata';
 import { COMPACT_HANDOFF_PROMPT, seedPromptWithHandoff } from './compactHandoff';
 import { stripAnsi } from '../utils/stripAnsi';
@@ -113,6 +113,42 @@ interface ActiveCommand {
   resolve: (result: ExecuteResult) => void;
   timeoutTimer?: ReturnType<typeof setTimeout>;
   inactivityTimeoutMs?: number;
+}
+
+/**
+ * Deterministic bounded parser for `agy models` two-column output (`slug\tDisplay Name`).
+ * Ignores malformed lines, headers/progress notices, and deduplicates slugs.
+ */
+export function parseAgyModels(stdout: string, currentModel?: string): ExecutorModelInfo[] {
+  const clean = stripAnsi(stdout);
+  const lines = clean.split(/\r?\n|\r/);
+  const seen = new Set<string>();
+  const models: ExecutorModelInfo[] = [];
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const tabIndex = line.indexOf('\t');
+    if (tabIndex === -1) {
+      continue;
+    }
+    const slug = line.slice(0, tabIndex).trim();
+    const displayName = line.slice(tabIndex + 1).trim();
+    if (!slug || /\s/.test(slug) || seen.has(slug)) {
+      continue;
+    }
+    seen.add(slug);
+    models.push({
+      id: slug,
+      displayName: displayName || slug,
+      isDefault: undefined,
+      isCurrent: currentModel ? slug === currentModel : undefined,
+      supportedReasoningEfforts: [...SUPPORTED_EFFORTS],
+      inputModalities: ['text'],
+    });
+  }
+
+  return models;
 }
 
 /**
@@ -477,6 +513,44 @@ export class AgyExecutor implements IExecutor {
       output: normalized === 'auto'
         ? 'Reasoning effort restored to the AGY default. Takes effect on the next command.'
         : `Reasoning effort set to ${normalized}. Takes effect on the next command.`,
+    };
+  }
+
+  clearModel(): void {
+    this.model = undefined;
+    if (this.proc && !this.activeCommand) {
+      this.killProcess();
+    } else if (this.proc) {
+      this.pendingSettingsChange = true;
+    }
+  }
+
+  async listModels(): Promise<ExecutorModelInfo[]> {
+    return new Promise((resolve, reject) => {
+      execFile(
+        this.agyCommand,
+        ['models'],
+        { timeout: 10_000, maxBuffer: 1024 * 1024 },
+        (error, stdout) => {
+          if (error) {
+            reject(new Error(`Failed to list AGY models: ${error.message}`));
+            return;
+          }
+          resolve(parseAgyModels(stdout, this.model));
+        }
+      );
+    });
+  }
+
+  async listEfforts(): Promise<ExecutorEffortInfo> {
+    return {
+      choices: SUPPORTED_EFFORTS.map((effort) => ({
+        value: effort,
+        displayName: effort,
+      })),
+      current: this.effort,
+      default: undefined,
+      supportsReset: true,
     };
   }
 

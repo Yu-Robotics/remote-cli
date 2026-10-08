@@ -2,10 +2,10 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { DirectoryGuard } from '../security/DirectoryGuard';
-import type { ExecuteOptions, ExecuteResult, ExecutorModelInfo, IExecutor } from './IExecutor';
+import type { ExecuteOptions, ExecuteResult, ExecutorModelInfo, ExecutorEffortInfo, IExecutor } from './IExecutor';
 import { configuredExecutionMetadata } from './ExecutionMetadata';
 import { AcpClient, type AcpEventCallbacks, type AcpToolCallUpdate, type AcpTransport } from './acp/AcpClient';
-import type { AcpConfigOption, AcpContentBlock, AcpMcpServer, AcpPermissionOption, AcpSessionResult } from './acp/AcpTypes';
+import type { AcpConfigOption, AcpConfigOptionValue, AcpContentBlock, AcpMcpServer, AcpPermissionOption, AcpSessionResult } from './acp/AcpTypes';
 import { delegationSessionServers, sameConnection, type DelegationConnection } from '../delegation/contract';
 import { assertWorkingDirectoryExists } from '../utils/WorkingDirectory';
 import { ActivityTracker, extractTodoPlan } from './Activity';
@@ -104,6 +104,47 @@ function acpToolResult(tool: AcpToolCallUpdate): { content: string; diff?: strin
     text.push(typeof tool.rawOutput === 'string' ? tool.rawOutput : JSON.stringify(tool.rawOutput));
   }
   return { content: text.filter(Boolean).join('\n'), ...(diffs.length ? { diff: diffs.join('\n') } : {}) };
+}
+
+/** Flatten ACP select options supporting both flat items and grouped options containers. */
+export function parseAcpSelectOptions(rawOptions: unknown): AcpConfigOptionValue[] {
+  if (!Array.isArray(rawOptions)) {
+    throw new Error('ACP select options must be an array');
+  }
+  const result: AcpConfigOptionValue[] = [];
+  for (const item of rawOptions) {
+    if (!item || typeof item !== 'object') {
+      throw new Error(`Unsupported ACP option shape: ${JSON.stringify(item)}`);
+    }
+    if ('options' in item && Array.isArray((item as any).options)) {
+      const groupName = typeof (item as any).group === 'string'
+        ? (item as any).group
+        : typeof (item as any).name === 'string'
+          ? (item as any).name
+          : undefined;
+      for (const child of (item as any).options) {
+        if (!child || typeof child !== 'object' || typeof child.value !== 'string') {
+          throw new Error(`Unsupported ACP grouped option shape: ${JSON.stringify(child)}`);
+        }
+        result.push({
+          value: child.value,
+          name: typeof child.name === 'string' ? child.name : child.value,
+          description: typeof child.description === 'string' ? child.description : undefined,
+          group: typeof child.group === 'string' ? child.group : groupName,
+        });
+      }
+    } else if (typeof (item as any).value === 'string') {
+      result.push({
+        value: (item as any).value,
+        name: typeof (item as any).name === 'string' ? (item as any).name : (item as any).value,
+        description: typeof (item as any).description === 'string' ? (item as any).description : undefined,
+        group: typeof (item as any).group === 'string' ? (item as any).group : undefined,
+      });
+    } else {
+      throw new Error(`Unsupported ACP option shape: ${JSON.stringify(item)}`);
+    }
+  }
+  return result;
 }
 
 /** Shared executor implementation for CLI backends that expose ACP over stdio. */
@@ -319,24 +360,64 @@ export abstract class AcpExecutor implements IExecutor {
   async listModels(): Promise<ExecutorModelInfo[]> {
     await this.ensureSession();
     const modelOption = this.findConfigOption('model');
+    if (!modelOption?.options) {
+      return [];
+    }
+    const parsedModels = parseAcpSelectOptions(modelOption.options);
     const effortOption = this.findConfigOption(this.effortConfigId);
-    return (modelOption?.options ?? []).map((entry) => ({
+    let parsedEfforts: AcpConfigOptionValue[] = [];
+    if (effortOption?.options) {
+      try {
+        parsedEfforts = parseAcpSelectOptions(effortOption.options);
+      } catch {
+        // Ignore invalid effort option shapes for model catalog
+      }
+    }
+    const currentModelValue = modelOption.currentValue || this.model;
+    return parsedModels.map((entry) => ({
       id: entry.value,
       displayName: entry.name,
       description: entry.description,
-      isDefault: entry.value === modelOption?.currentValue,
-      supportedReasoningEfforts: entry.value === modelOption?.currentValue
-        ? effortOption?.options?.map((option) => option.value)
+      isDefault: undefined,
+      isCurrent: currentModelValue ? entry.value === currentModelValue : undefined,
+      supportedReasoningEfforts: entry.value === currentModelValue && parsedEfforts.length > 0
+        ? parsedEfforts.map((opt) => opt.value)
         : undefined,
-      defaultReasoningEffort: entry.value === modelOption?.currentValue ? 'default' : undefined,
+      defaultReasoningEffort: undefined,
       inputModalities: ['text', 'image'],
     }));
+  }
+
+  async listEfforts(): Promise<ExecutorEffortInfo> {
+    await this.ensureSession();
+    const option = this.findConfigOption(this.effortConfigId);
+    if (!option) {
+      return {
+        choices: [],
+        supportsReset: false,
+        unavailableReason: `The selected ${this.backendLabel} model does not expose reasoning effort controls.`,
+      };
+    }
+    const parsed = parseAcpSelectOptions(option.options ?? []);
+    const choices = parsed.map((entry) => ({
+      value: entry.value,
+      displayName: entry.name,
+      description: entry.description,
+    }));
+    const currentVal = option.currentValue === this.effortAutoValue ? undefined : (option.currentValue || this.effort);
+    return {
+      choices,
+      current: currentVal,
+      default: undefined,
+      supportsReset: true,
+    };
   }
 
   async setModel(model: string): Promise<ExecuteResult> {
     const { client, sessionId } = await this.ensureSession();
     const option = this.findConfigOption('model');
-    if (option?.options?.length && !option.options.some((entry) => entry.value === model)) {
+    const parsed = option?.options ? parseAcpSelectOptions(option.options) : [];
+    if (parsed.length && !parsed.some((entry) => entry.value === model)) {
       return { success: false, error: `Unknown ${this.backendLabel} model: ${model}. Use /model to list available models.` };
     }
     try {
@@ -353,7 +434,8 @@ export abstract class AcpExecutor implements IExecutor {
     const value = effort === 'auto' ? this.effortAutoValue : effort;
     const option = this.findConfigOption(this.effortConfigId);
     if (!option) return { success: false, error: `The selected ${this.backendLabel} model does not expose reasoning effort controls.` };
-    if (effort !== 'auto' && option.options?.length && !option.options.some((entry) => entry.value === value)) {
+    const parsed = option.options ? parseAcpSelectOptions(option.options) : [];
+    if (effort !== 'auto' && parsed.length && !parsed.some((entry) => entry.value === value)) {
       return { success: false, error: `Unsupported ${this.backendLabel} reasoning effort: ${effort}.` };
     }
     try {
@@ -382,6 +464,11 @@ export abstract class AcpExecutor implements IExecutor {
       }
     }
     return this.execute('/compact', { onStream });
+  }
+
+  async releaseMetadataSession(): Promise<void> {
+    if (!this.threadId?.startsWith('settings-meta-') || !this.client || !this.sessionId || this.isDestroyed) return;
+    await this.client.deleteSession(this.sessionId);
   }
 
   async deleteThreadData(_threadId: string): Promise<void> {

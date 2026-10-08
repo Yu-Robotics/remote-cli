@@ -1029,7 +1029,7 @@ describe('MessageHandler', () => {
       expect(helpResponse.output).toContain('/context - Show current session context');
       expect(helpResponse.output).toContain('/skills - List available skills');
       expect(helpResponse.output).toContain('/clear, /new - Start a fresh conversation');
-      expect(helpResponse.output).toContain('/effort [auto|level] - Show or set effort for Codex/AGY/OpenCode/Kimi/ZCode/Pi/DSH');
+      expect(helpResponse.output).toContain('/effort [auto|level] - Open effort settings');
       expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
     });
   });
@@ -1308,136 +1308,89 @@ describe('MessageHandler', () => {
     });
   });
 
-  describe('bare /model (list models for the active backend)', () => {
+  describe('bare /model (native model catalogs with text fallback presentation)', () => {
     function useBackend(executorConfig: any, threadOverrides: any = {}) {
-      ctx.mockConfig.get.mockImplementation((key: string) =>
-        key === 'executor' ? executorConfig : undefined
-      );
-      const thread = {
-        id: 'default-thread-id', name: 'default', workingDirectory: '/home/user/test-project',
-        sessionId: null, createdAt: 0, lastActiveAt: 0, ...threadOverrides,
-      };
+      ctx.mockConfig.get.mockImplementation((key: string) => key === 'executor' ? executorConfig : undefined);
+      const thread = { id: 'default-thread-id', name: 'default', workingDirectory: '/workspace/example-project',
+        sessionId: null, createdAt: 0, lastActiveAt: 0, ...threadOverrides };
       ctx.mockThreadManager.getThread.mockImplementation((id: string) => id === thread.id ? thread : undefined);
       ctx.mockThreadManager.getDefaultThread.mockReturnValue(thread);
       return thread;
     }
 
-    async function runBareModel() {
-      const child = fakeChild();
-      mockSpawn.mockReturnValue(child);
-      const p = ctx.handler.handleMessage({
-        type: 'command', messageId: 'msg-model-list', content: '/model', timestamp: Date.now(),
-      } as any);
-      await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalled());
-      return { child, done: p };
+    async function list(models: any[]) {
+      ctx.mockExecutor.listModels = vi.fn().mockResolvedValue(models);
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-model-list', content: '/model', timestamp: Date.now() });
+      const response = ctx.mockWsClient.send.mock.calls.find((call: any[]) => call[0].messageId === 'msg-model-list' && call[0].type === 'response')[0];
+      expect(mockSpawn).not.toHaveBeenCalled();
+      expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
+      expect(ctx.mockExecutor.listModels).toHaveBeenCalledOnce();
+      return response;
     }
 
-    it('uses the configured Claude executable for model listing and slash passthrough', async () => {
+    it('uses a native Claude catalog and preserves the configured executable for slash passthrough', async () => {
       useBackend({ type: 'auto', claude: { command: '/opt/example tools/claude' } });
-      const { child, done } = await runBareModel();
-      expect(mockSpawn).toHaveBeenLastCalledWith('/opt/example tools/claude', ['/model', '--print'], expect.anything());
-      child.emit('exit', 0);
-      await done;
+      const response = await list([{ id: 'sonnet', displayName: 'Sonnet' }]);
+      expect(response.output).toContain('sonnet');
       const passthrough = vi.spyOn(ctx.handler as any, 'spawnPassthroughCommand').mockResolvedValue(undefined);
       await (ctx.handler as any).executeSlashCommand('slash-fixture', 'default-thread-id', '/usage', ctx.mockExecutor);
-      expect(passthrough).toHaveBeenCalledWith('slash-fixture', 'default-thread-id', '/opt/example tools/claude', ['/usage', '--print'], ctx.mockExecutor, 'claude', { CLAUDECODE: '' });
+      expect(passthrough).toHaveBeenCalledWith('slash-fixture', 'default-thread-id', '/opt/example tools/claude',
+        ['/usage', '--print'], ctx.mockExecutor, 'claude', { CLAUDECODE: '' });
       passthrough.mockRestore();
     });
 
-    it('claude: lists models via claude --print /model and shows the current selection', async () => {
+    it('shows the Claude per-backend selection without a model-generated listing', async () => {
       useBackend(undefined, { models: { claude: 'opus' } });
-      const { child, done } = await runBareModel();
-
-      expect(mockSpawn).toHaveBeenCalledWith('claude', ['/model', '--print'], expect.anything());
-
-      child.stdout.emit('data', Buffer.from('Current model: sonnet\nUsage: /model <name>. Available: sonnet, opus, haiku'));
-      child.emit('exit', 0);
-      await done;
-
-      const call = ctx.mockWsClient.send.mock.calls.find((c: any[]) => c[0].messageId === 'msg-model-list' && c[0].type === 'response');
-      expect(call[0].success).toBe(true);
-      expect(call[0].output).toContain('opus');                       // current thread selection
-      expect(call[0].output).toContain('sonnet, opus, haiku');        // available list
+      const response = await list([{ id: 'sonnet', displayName: 'Sonnet' }, { id: 'opus', displayName: 'Opus' }]);
+      expect(response.success).toBe(true);
+      expect(response.output).toContain('opus');
+      expect(response.output).toContain('sonnet');
     });
 
-    it('agy: lists models via agy models and shows the per-backend selection', async () => {
+    it('shows AGY model IDs and readable names from the adapter catalog', async () => {
       useBackend({ type: 'agy' }, { models: { agy: 'gemini-3.1-pro-high' } });
-      const { child, done } = await runBareModel();
-
-      expect(mockSpawn).toHaveBeenCalledWith('agy', ['models'], expect.anything());
-
-      child.stdout.emit('data', Buffer.from('gemini-3.8-flash-high\tGemini 3.8 Flash (High)\ngemini-3.1-pro-high\tGemini 3.1 Pro (High)'));
-      child.emit('exit', 0);
-      await done;
-
-      const call = ctx.mockWsClient.send.mock.calls.find((c: any[]) => c[0].messageId === 'msg-model-list' && c[0].type === 'response');
-      expect(call[0].success).toBe(true);
-      expect(call[0].output).toContain('gemini-3.1-pro-high');
-      expect(call[0].output).toContain('gemini-3.8-flash-high');
+      const response = await list([{ id: 'gemini-3.8-flash-high', displayName: 'Gemini Flash' },
+        { id: 'gemini-3.1-pro-high', displayName: 'Gemini Pro' }]);
+      expect(response.output).toContain('gemini-3.1-pro-high');
+      expect(response.output).toContain('Gemini Flash');
     });
 
-    it('agy: honors executor.agy.command override for the listing', async () => {
-      useBackend({ type: 'agy', agy: { command: '/opt/agy-x' } });
-      const { child, done } = await runBareModel();
-
-      expect(mockSpawn).toHaveBeenCalledWith('/opt/agy-x', ['models'], expect.anything());
-      child.emit('exit', 0);
-      await done;
+    it('delegates AGY listing to its configured adapter rather than spawning a second listing process', async () => {
+      useBackend({ type: 'agy', agy: { command: '/opt/example tools/agy' } });
+      expect((await list([{ id: 'fixture-model', displayName: 'Fixture model' }])).output).toContain('fixture-model');
     });
 
-    it('codex: lists app-server models and shows the current selection', async () => {
+    it('shows structured Codex models and the saved current selection', async () => {
       useBackend({ type: 'codex' }, { models: { codex: 'gpt-5.2-codex' } });
-      ctx.mockExecutor.listModels = vi.fn().mockResolvedValue([
-        { id: 'gpt-5.2-codex', displayName: 'GPT-5.2 Codex' },
-        { id: 'gpt-5.3-codex', displayName: 'GPT-5.3 Codex', isDefault: true },
-      ]);
+      const response = await list([{ id: 'gpt-5.2-codex', displayName: 'GPT-5.2 Codex' },
+        { id: 'gpt-5.3-codex', displayName: 'GPT-5.3 Codex', isDefault: true }]);
+      expect(response.output).toContain('gpt-5.2-codex');
+      expect(response.output).toContain('gpt-5.3-codex');
+    });
 
-      await ctx.handler.handleMessage({
-        type: 'command', messageId: 'msg-model-list', content: '/model', timestamp: Date.now(),
-      } as any);
+    it('shows backend default instead of inferring the first catalog model is selected', async () => {
+      useBackend({ type: 'agy' });
+      const response = await list([{ id: 'fixture-model', displayName: 'Fixture model' }]);
+      expect(response.output).toContain('Current model: backend default');
+    });
 
+    it('keeps configured state visible when the native catalog fails', async () => {
+      useBackend({ type: 'agy' }, { models: { agy: 'fixture-model' } });
+      ctx.mockExecutor.listModels = vi.fn().mockRejectedValue(new Error('Catalog unavailable'));
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-model-list', content: '/model', timestamp: Date.now() });
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ success: true,
+        output: expect.stringContaining('fixture-model') }));
       expect(mockSpawn).not.toHaveBeenCalled();
-      const call = ctx.mockWsClient.send.mock.calls.find((c: any[]) => c[0].messageId === 'msg-model-list' && c[0].type === 'response');
-      expect(call[0].success).toBe(true);
-      expect(call[0].output).toContain('gpt-5.2-codex');
-      expect(call[0].output).toContain('gpt-5.3-codex');
-      expect(ctx.mockExecutor.listModels).toHaveBeenCalledOnce();
     });
 
-    it('shows "backend default" when no model has been selected', async () => {
-      useBackend({ type: 'agy' });
-      const { child, done } = await runBareModel();
-
-      child.stdout.emit('data', Buffer.from('gemini-3.8-flash-high\tGemini 3.8 Flash (High)'));
-      child.emit('exit', 0);
-      await done;
-
-      const call = ctx.mockWsClient.send.mock.calls.find((c: any[]) => c[0].messageId === 'msg-model-list' && c[0].type === 'response');
-      expect(call[0].output).toMatch(/default/i);
+    it('reports absence of a native catalog without launching a model prompt', async () => {
+      useBackend({ type: 'claude-persistent' });
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-model-list', content: '/model', timestamp: Date.now() });
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ success: true,
+        output: expect.stringContaining('unavailable') }));
+      expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
+      expect(mockSpawn).not.toHaveBeenCalled();
     });
-
-    it('degrades gracefully when the listing command fails', async () => {
-      useBackend({ type: 'agy' }, { models: { agy: 'gemini-3.1-pro-high' } });
-      const { child, done } = await runBareModel();
-
-      child.stderr.emit('data', Buffer.from('network error'));
-      child.emit('exit', 1);
-      await done;
-
-      const call = ctx.mockWsClient.send.mock.calls.find((c: any[]) => c[0].messageId === 'msg-model-list' && c[0].type === 'response');
-      expect(call[0].success).toBe(true);
-      expect(call[0].output).toContain('gemini-3.1-pro-high');   // current still shown
-    });
-
-    it('degrades gracefully when the listing command hangs', async () => {
-      useBackend({ type: 'agy' });
-      const { done } = await runBareModel();
-      // Never emit exit — the listing helper must time out on its own
-      await done;
-
-      const call = ctx.mockWsClient.send.mock.calls.find((c: any[]) => c[0].messageId === 'msg-model-list' && c[0].type === 'response');
-      expect(call[0].success).toBe(true);
-    }, 20000);
   });
 
   describe('effort command', () => {
@@ -1546,7 +1499,7 @@ describe('MessageHandler', () => {
       );
     });
 
-    it('reports effort as not supported yet on Claude Code', async () => {
+    it('rejects an executor version without native Claude effort support', async () => {
       ctx.mockConfig.get.mockImplementation((key: string) =>
         key === 'executor' ? { type: 'claude-persistent' } : undefined
       );
@@ -1555,7 +1508,7 @@ describe('MessageHandler', () => {
 
       expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
         success: false,
-        error: expect.stringContaining('not supported yet'),
+        error: expect.stringContaining('not supported by this Claude Code executor version'),
       }));
     });
   });
