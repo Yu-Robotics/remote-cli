@@ -310,7 +310,7 @@ export class WebSocketClient {
             streamingContext: true,
             activityProgress: true,
             ...(this.maintenanceCapabilities.updateNotice ? { updateNotice: true } : {}),
-            ...(this.maintenanceCapabilities.subscriptionInspection ? { subscriptionInspection: true } : {}),
+            ...(this.maintenanceCapabilities.subscriptionInspection ? { subscriptionInspection: true, bankedResetReminder: true } : {}),
             ...(this.identity ? { fileTransferV1: true } : {}),
           },
         }

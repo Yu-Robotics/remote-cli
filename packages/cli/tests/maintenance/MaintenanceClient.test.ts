@@ -25,7 +25,13 @@ describe('maintenance service lifecycle', () => {
     await client.started('1.6.122'); expect(doubles.updates.started).toHaveBeenCalledWith('1.6.122');
     await client.handle({ type: 'binding_confirm', data: { success: true, capabilities: { updateNotice: true, subscriptionInspection: true } } });
     expect(doubles.updates.registered).toHaveBeenLastCalledWith(true);
-    expect(doubles.subscriptions.registered).toHaveBeenLastCalledWith(true);
+    expect(doubles.subscriptions.registered).toHaveBeenLastCalledWith(true, false);
+    await client.handle({ type: 'binding_confirm', data: { success: true,
+      capabilities: { subscriptionInspection: true, bankedResetReminder: true } } });
+    expect(doubles.subscriptions.registered).toHaveBeenLastCalledWith(true, true);
+    await client.handle({ type: 'binding_confirm', data: { success: false,
+      capabilities: { subscriptionInspection: true, bankedResetReminder: true } } });
+    expect(doubles.subscriptions.registered).toHaveBeenLastCalledWith(false, false);
     expect(await client.handle({ type: 'update_notice_ack' })).toBe(true);
     expect(await client.handle({ type: 'subscription_action', decision: 'send_hi' })).toBe(true);
     await client.stop(); expect(doubles.updates.stop).toHaveBeenCalled(); expect(doubles.subscriptions.stop).toHaveBeenCalled();

@@ -16,8 +16,12 @@ const REMINDER_COPY = {
 } as const;
 type ReminderBackend = keyof typeof REMINDER_COPY;
 // The false legacy field preserves compatibility; quota notices never support activation.
-interface Reminder { reminderId: string; generation: string; expiresAt: number; activationAvailable: false; backend?: ReminderBackend }
-interface ReminderCard extends Reminder { deviceId: string; openId: string; cardId: string; current: () => boolean; dismissed: boolean }
+interface Reminder {
+  reminderId: string; generation: string; expiresAt: number; activationAvailable: false; backend?: ReminderBackend;
+  kind?: 'banked_reset_increase'; previousCount?: number; availableCount?: number;
+}
+interface ReminderReceipt extends Reminder { deviceId: string; openId: string; cardId: string }
+interface ReminderCard extends ReminderReceipt { current: () => boolean; dismissed: boolean }
 export interface MaintenanceCardDependencies {
   owner: (deviceId: string) => Promise<string | undefined>;
   send: (deviceId: string, message: object) => Promise<boolean>;
@@ -26,6 +30,7 @@ export interface MaintenanceCardDependencies {
   now?: () => number;
 }
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
+const MAX_BANKED_RECEIPTS = 1000;
 const VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 function version(value: unknown): value is string { return typeof value === 'string' && value.length <= 100 && VERSION.test(value); }
 function validOverview(value: any): value is Overview {
@@ -91,11 +96,14 @@ export function updateNoticeElements(notice: Notice, id: string): FeishuCardElem
 }
 
 function reminderHeader(reminder: Reminder, dismissed = false): Record<string, unknown> {
-  return header(REMINDER_COPY[reminder.backend ?? 'codex'].title, dismissed ? 'grey' : 'blue');
+  return header(reminder.kind === 'banked_reset_increase' ? '🎁 Codex Banked Reset' : REMINDER_COPY[reminder.backend ?? 'codex'].title, dismissed ? 'grey' : 'blue');
 }
 function reminderElements(reminder: Reminder, dismissed = false): FeishuCardElement[] {
   const copy = REMINDER_COPY[reminder.backend ?? 'codex'];
-  return [{ tag: 'markdown', content: `${copy.summary}\n\n${copy.explanation}` },
+  const text = reminder.kind === 'banked_reset_increase'
+    ? `**Banked Reset balance increased: ${reminder.previousCount} → ${reminder.availableCount} (+${reminder.availableCount! - reminder.previousCount!})**\n\nBackend: Codex CLI\n\nAvailable at the latest check: ${reminder.availableCount}. This reminder does not consume reset credits.`
+    : `${copy.summary}\n\n${copy.explanation}`;
+  return [{ tag: 'markdown', content: text },
     ...(dismissed ? [{ tag: 'markdown', content: 'Dismissed.' }] : [])];
 }
 
@@ -105,6 +113,9 @@ export class MaintenanceCards {
   private readonly flights = new Map<string, Promise<void>>();
   private readonly deliveredWithoutReceipt = new Map<string, NoticeReceipt>();
   private readonly reminders = new Map<string, ReminderCard>();
+  // Delivery evidence survives socket changes, unlike live card action bindings.
+  private readonly bankedReceipts = new Map<string, ReminderReceipt>();
+  private bankedDeliveries = 0;
   private readonly pageRequests = new Map<string, { record: NoticeReceipt; offset: number; current: () => boolean; expiresAt: number }>();
   constructor(private readonly receipts: NoticeReceipts, private readonly deps: MaintenanceCardDependencies) { this.now = deps.now ?? Date.now; }
 
@@ -171,6 +182,10 @@ export class MaintenanceCards {
     const r = message?.reminder;
     if (!r || !UUID.test(r.reminderId) || !UUID.test(r.generation) || r.activationAvailable !== false || !Number.isFinite(r.expiresAt)
       || (r.backend !== undefined && (typeof r.backend !== 'string' || !Object.prototype.hasOwnProperty.call(REMINDER_COPY, r.backend)))
+      || (r.kind !== undefined && r.kind !== 'banked_reset_increase')
+      || (r.kind === 'banked_reset_increase' && (r.backend !== 'codex' || !Number.isSafeInteger(r.previousCount) || r.previousCount < 0
+        || !Number.isSafeInteger(r.availableCount) || r.availableCount <= r.previousCount))
+      || (r.kind === undefined && (r.previousCount !== undefined || r.availableCount !== undefined))
       || r.expiresAt <= this.now() || r.expiresAt > this.now() + 2 * 3600_000) return;
     const key = JSON.stringify([deviceId, r.reminderId]);
     const existing = this.flights.get(key);
@@ -178,13 +193,23 @@ export class MaintenanceCards {
     const operation = (async () => {
       const openId = await this.deps.owner(deviceId);
       if (!openId || !current()) return;
-      let record = this.reminders.get(key);
-      if (record && (record.openId !== openId || record.generation !== r.generation)) return;
+      let record: ReminderReceipt | undefined = this.reminders.get(key) ?? this.bankedReceipts.get(key);
+      if (record && (record.openId !== openId || record.generation !== r.generation || record.kind !== r.kind
+        || record.previousCount !== r.previousCount || record.availableCount !== r.availableCount)) return;
       if (!record) {
-        const cardId = await this.deps.create(openId, reminderElements(r), reminderHeader(r));
-        if (!cardId || !current()) return;
-        record = { ...r, deviceId, openId, cardId, current, dismissed: false };
-        this.reminders.set(key, record!);
+        const banked = r.kind === 'banked_reset_increase';
+        // Reserve before awaiting creation; concurrent devices must not exceed the receipt bound.
+        if (banked && this.bankedReceipts.size + this.bankedDeliveries >= MAX_BANKED_RECEIPTS) return;
+        if (banked) this.bankedDeliveries++;
+        try {
+          const cardId = await this.deps.create(openId, reminderElements(r), reminderHeader(r));
+          if (!cardId) return;
+          const receipt: ReminderReceipt = { ...r, deviceId, openId, cardId };
+          // A definite delivery must be remembered even if the creating connection just closed.
+          if (banked) this.bankedReceipts.set(key, receipt);
+          if (!current()) return;
+          this.reminders.set(key, { ...receipt, current, dismissed: false });
+        } finally { if (banked) this.bankedDeliveries--; }
       }
       if (await this.deps.owner(deviceId) === openId && current()) await this.deps.send(deviceId, {
         type: 'subscription_reminder_ack', reminderId: r.reminderId, generation: r.generation,
@@ -213,9 +238,10 @@ export class MaintenanceCards {
     for (const [key, r] of this.reminders) if (r.deviceId === deviceId) this.reminders.delete(key);
     for (const [key, r] of this.pageRequests) if (r.record.deviceId === deviceId) this.pageRequests.delete(key);
   }
-  destroy(): void { this.reminders.clear(); this.pageRequests.clear(); }
+  destroy(): void { this.reminders.clear(); this.bankedReceipts.clear(); this.pageRequests.clear(); }
   private prune(): void {
     for (const [key, r] of this.reminders) if (r.expiresAt <= this.now()) this.reminders.delete(key);
+    for (const [key, r] of this.bankedReceipts) if (r.expiresAt <= this.now()) this.bankedReceipts.delete(key);
     for (const [key, r] of this.pageRequests) if (r.expiresAt <= this.now()) this.pageRequests.delete(key);
   }
 }

@@ -15,7 +15,10 @@ describe('quota reminder suppression across service lifetimes', () => {
     limitId: 'codex', secondary: { usedPercent: used, windowDurationMins: 10080, resetsAt: time / 1000 + WEEK_SECONDS },
   } }, account, credential, time)!;
   const make = () => {
-    const client = new SubscriptionInspection(inspectionAdapters(inspect), send, () => time, undefined, undefined, store());
+    const client = new SubscriptionInspection(inspectionAdapters(async signal => {
+      const weekly = await inspect(signal);
+      return weekly && { accountKey: weekly.accountKey, observedAt: weekly.observedAt, weekly };
+    }), send, () => time, undefined, undefined, store());
     clients.push(client); client.registered(true); return client;
   };
   const next = async (client: SubscriptionInspection) => { time += INSPECTION_INTERVAL_MS; await client.cycle(); };

@@ -115,6 +115,21 @@ describe('Router wire compatibility', () => {
     expect(JSON.parse(socket.send.mock.calls[0][0]).data.capabilities).toBeUndefined();
     await receive({ type: 'update_notice', noticeKey: 'fixture' }); expect(notice).not.toHaveBeenCalled();
   });
+  it.each([
+    { capabilities: { subscriptionInspection: true }, enabled: false },
+    { capabilities: { bankedResetReminder: true }, enabled: false },
+    { capabilities: { subscriptionInspection: true, bankedResetReminder: true }, enabled: true },
+  ])('requires explicit additive opt-in for banked reset reminders: $enabled', async ({ capabilities, enabled }) => {
+    const maintenance = (server as any).maintenanceCards;
+    const reminder = vi.spyOn(maintenance, 'receiveReminder').mockResolvedValue(undefined);
+    await receive({ type: 'binding_request', data: { deviceId: 'device-1', protocolVersion: 1, capabilities } });
+    expect(JSON.parse(socket.send.mock.calls[0][0]).data.capabilities?.bankedResetReminder).toBe(enabled ? true : undefined);
+    const message = { type: 'subscription_reminder', reminder: { kind: 'banked_reset_increase' } };
+    await receive(message); expect(reminder).toHaveBeenCalledTimes(enabled ? 1 : 0);
+    expect((server as any).streamingMessages.size).toBe(0);
+    expect((server as any).cardThreadMap.size).toBe(0);
+    expect(PROTOCOL_VERSION).toBe(1);
+  });
 
   it('negotiates additive approval cards and routes a button response to the original request', async () => {
     await receive({ type: 'binding_request', messageId: 'registration', data: {

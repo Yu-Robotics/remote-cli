@@ -29,7 +29,7 @@ describe('independent status-only Codex probe', () => {
     vi.stubEnv('OPENAI_API_KEY', 'synthetic-api-fixture'); vi.stubEnv('OPENAI_BASE_URL', 'https://provider.example.com');
     await fs.writeFile(path.join(nativeHome, 'config.toml'), '[mcp_servers.fixture]\ncommand="should-never-start"');
     const authBefore = await fs.readFile(path.join(nativeHome, 'auth.json'), 'utf8');
-    expect(await probe.inspect(new AbortController().signal)).toMatchObject({ candidate: true });
+    expect(await probe.inspect(new AbortController().signal)).toMatchObject({ weekly: { candidate: true } });
     expect(client.request.mock.calls.map((c: any[]) => c[0])).toEqual(['config/read', 'account/login/start', 'account/rateLimits/read']);
     expect(launch.command).toBe('fixture-codex'); expect(launch.cwd).not.toBe(nativeHome);
     expect(launch.env.CODEX_HOME).toBe(launch.cwd);
@@ -39,6 +39,18 @@ describe('independent status-only Codex probe', () => {
     expect(await fs.readFile(path.join(nativeHome, 'auth.json'), 'utf8')).toBe(authBefore);
     const callback = client.onMessage.mock.calls[0][0]; callback({ method: 'account/chatgptAuthTokens/refresh', id: 1 });
     expect(client.respondError).toHaveBeenCalled();
+  });
+  it('reads banked counts from the existing count-only request without requiring weekly quota or consuming a credit', async () => {
+    const request = client.request.getMockImplementation();
+    client.request.mockImplementation(async (method: string) => method === 'account/rateLimits/read'
+      ? { accountId: 'account-fixture', rateLimitResetCredits: { availableCount: 2, credits: null } } : request(method));
+    const result = await probe.inspect(new AbortController().signal);
+    expect(result).toMatchObject({ bankedResetCount: 2 });
+    expect(result?.weekly).toBeUndefined();
+    expect(client.request).toHaveBeenCalledWith('account/rateLimits/read', { excludeResetCreditDetails: true });
+    expect(client.request.mock.calls.map((c: any[]) => c[0])).toEqual(['config/read', 'account/login/start', 'account/rateLimits/read']);
+    expect(client.stop).toHaveBeenCalledTimes(1);
+    await expect(fs.stat(launch.cwd)).rejects.toThrow();
   });
   it('fails closed for unsupported credentials or account mismatch instead of making a model turn', async () => {
     await fs.writeFile(path.join(nativeHome, 'auth.json'), JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: 'synthetic-fixture' }));

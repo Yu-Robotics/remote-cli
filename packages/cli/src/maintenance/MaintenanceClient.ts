@@ -41,7 +41,8 @@ export class MaintenanceClient {
     if (message.type === 'binding_confirm') {
       this.bound = message.data?.success === true;
       this.updates?.registered(message.data?.success === true && message.data?.capabilities?.updateNotice === true);
-      this.subscriptions?.registered(message.data?.success === true && message.data?.capabilities?.subscriptionInspection === true);
+      this.subscriptions?.registered(message.data?.success === true && message.data?.capabilities?.subscriptionInspection === true,
+        message.data?.success === true && message.data?.capabilities?.bankedResetReminder === true);
       await this.initialize();
       return false;
     }
