@@ -2146,4 +2146,128 @@ describe('RouterServer', () => {
     server.getStats();
     expect(mockConnectionHub.getConnectionStats).toHaveBeenCalled();
   });
+
+  describe('settings cards', () => {
+    const settingsMenu = {
+      snapshotId: 'snap-1', kind: 'backend', threadId: 'thread-1', threadName: 'default',
+      coordinatorBackend: 'claude', targetBackend: 'claude',
+      backends: [
+        { value: 'claude', label: 'Claude Code', installed: true },
+        { value: 'codex', label: 'Codex CLI', installed: true },
+        { value: 'pi', label: 'Pi', installed: false, reason: 'Executable is missing' },
+      ],
+      choices: [], effectiveSource: 'configured', supportsReset: false,
+      busy: false, expiresAt: Date.now() + 60_000,
+    };
+
+    async function connect(capabilities: Record<string, boolean> = {}) {
+      await server.start();
+      const onConnection = mockWss.on.mock.calls.find((call: any[]) => call[0] === 'connection')[1];
+      const ws = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
+      onConnection(ws, { socket: { remoteAddress: '127.0.0.1' } });
+      const receive = ws.on.mock.calls.find((call: any[]) => call[0] === 'message')[1];
+      const send = (message: any) => receive(Buffer.from(JSON.stringify(message)));
+      await send({ type: 'binding_request', data: { deviceId: 'device-1', capabilities } });
+      const reply = JSON.parse(ws.send.mock.calls[0][0]);
+      const onClose = ws.on.mock.calls.find((call: any[]) => call[0] === 'close')?.[1];
+      return { send, reply, onClose, ws };
+    }
+
+    async function respondWithMenu(send: (message: any) => Promise<void>, menu: any) {
+      const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
+      onStartStreaming('m-settings', 'owner', 'feishu-card-1', 'device-1', 'thread-1', undefined, undefined, 'default');
+      await send({
+        type: MessageType.RESPONSE, messageId: 'm-settings', openId: 'owner', threadId: 'thread-1',
+        success: true, output: 'Backend list fallback text', settingsMenu: menu,
+      });
+    }
+
+    it('negotiates the settingsCards capability only when requested', async () => {
+      const capable = await connect({ settingsCards: true });
+      expect(capable.reply.data.capabilities?.settingsCards).toBe(true);
+      const legacy = await connect();
+      expect(legacy.reply.data.capabilities?.settingsCards).toBeUndefined();
+    });
+
+    it('renders a capable CLI settings menu as a bare card bound to the delivered card', async () => {
+      mockFeishuHandler.finalizeStreamingMessage.mockImplementation(
+        async (_id: string, _elements: any[], _s: any, _o: any, _c: any, _t: any, _th: any, _r: any, _q: any, _m: any, _ok: boolean, options: any) => {
+          options?.onDelivered?.(['feishu-card-1']);
+          return true;
+        });
+      const { send } = await connect({ settingsCards: true });
+      await respondWithMenu(send, settingsMenu);
+      const call = mockFeishuHandler.finalizeStreamingMessage.mock.calls.at(-1);
+      expect(call[0]).toBe('feishu-card-1');
+      const options = call[11];
+      expect(options?.bare).toBe(true);
+      const json = JSON.stringify(call[1]);
+      // The full text catalog is only an old-peer/delivery fallback, not a
+      // duplicate unpaginated list inside the interactive card.
+      expect(json).not.toContain('Backend list fallback text');
+      expect(json).toContain('"action":"settings"');
+      expect(json).toContain('Executable is missing');
+      // The menu is registered against the original thread/device/request.
+      const state = [...(server as any).settingsCards['menus'].values()][0] as any;
+      expect(state.menu.threadId).toBe('thread-1');
+      expect(state.deviceId).toBe('device-1');
+      expect([...state.cards]).toEqual(['feishu-card-1']);
+    });
+
+    it('keeps plain text finalization for a CLI without the capability or with an invalid menu', async () => {
+      const legacy = await connect();
+      await respondWithMenu(legacy.send, settingsMenu);
+      let call = mockFeishuHandler.finalizeStreamingMessage.mock.calls.at(-1);
+      expect(call[11]?.bare).toBeUndefined();
+      expect(JSON.stringify(call[1])).toContain('Backend list fallback text');
+
+      const capable = await connect({ settingsCards: true });
+      await respondWithMenu(capable.send, { ...settingsMenu, kind: 'nope' });
+      call = mockFeishuHandler.finalizeStreamingMessage.mock.calls.at(-1);
+      expect(call[11]?.bare).toBeUndefined();
+
+      // A menu naming a different thread must not bind to this request's card.
+      await respondWithMenu(capable.send, { ...settingsMenu, threadId: 'thread-2' });
+      call = mockFeishuHandler.finalizeStreamingMessage.mock.calls.at(-1);
+      expect(call[11]?.bare).toBeUndefined();
+      expect([...((server as any).settingsCards['menus'].values())].every((state: any) => state.menu.threadId !== 'thread-2')).toBe(true);
+    });
+
+    it('falls back to honest text when the settings card cannot be delivered', async () => {
+      mockFeishuHandler.finalizeStreamingMessage.mockResolvedValue(false);
+      const { send } = await connect({ settingsCards: true });
+      await respondWithMenu(send, settingsMenu);
+      expect(mockFeishuHandler.sendMessage).toHaveBeenCalledWith('owner', 'Backend list fallback text');
+    });
+
+    it('routes settings_result only for capable connections', async () => {
+      const resolve = vi.spyOn((server as any).settingsCards, 'resolve');
+      const capable = await connect({ settingsCards: true });
+      await capable.send({ type: 'settings_result', messageId: 'x', openId: 'owner', threadId: 'thread-1', snapshotId: 'snap-1', success: true, timestamp: Date.now() });
+      expect(resolve).toHaveBeenCalledTimes(1);
+      const legacy = await connect();
+      await legacy.send({ type: 'settings_result', messageId: 'x', openId: 'owner', threadId: 'thread-1', snapshotId: 'snap-1', success: true, timestamp: Date.now() });
+      expect(resolve).toHaveBeenCalledTimes(1);
+    });
+
+    it('ignores settings acknowledgements from a replaced connection', async () => {
+      const resolve = vi.spyOn((server as any).settingsCards, 'resolve');
+      const old = await connect({ settingsCards: true });
+      const current = await connect({ settingsCards: true });
+      mockConnectionHub.isCurrentConnection.mockImplementation((_device: string, ws: unknown) => ws === current.ws);
+      const result = { type: 'settings_result', messageId: 'request-1', openId: 'owner',
+        threadId: 'thread-1', snapshotId: 'snap-1', success: true, timestamp: Date.now() };
+      await old.send(result);
+      expect(resolve).not.toHaveBeenCalled();
+      await current.send(result);
+      expect(resolve).toHaveBeenCalledTimes(1);
+    });
+
+    it('clears settings bindings on disconnect', async () => {
+      const { onClose } = await connect({ settingsCards: true });
+      expect((server as any).settingsConnections.has('device-1')).toBe(true);
+      onClose();
+      expect((server as any).settingsConnections.has('device-1')).toBe(false);
+    });
+  });
 });

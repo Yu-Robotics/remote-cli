@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { AgyExecutor } from '../../src/executor/AgyExecutor';
+import { AgyExecutor, parseAgyModels } from '../../src/executor/AgyExecutor';
 import { createExecutor } from '../../src/executor';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 import { EventEmitter } from 'events';
@@ -1453,6 +1453,118 @@ describe('AgyExecutor', () => {
     emitInit();
     emitResult();
     await command;
+  });
+
+  it('clearModel resets model and recycles an idle process', async () => {
+    executor = new AgyExecutor(directoryGuard, {
+      initialWorkingDirectory: '~/test-project',
+      model: 'custom-model',
+    });
+    const command = executor.execute('hi');
+    await waitForSpawn();
+    emitInit();
+    emitResult();
+    await command;
+
+    expect(proc.kill).not.toHaveBeenCalled();
+    executor.clearModel();
+    expect(proc.kill).toHaveBeenCalled();
+  });
+
+  it('clearModel defers recycling while a command is running', async () => {
+    executor = new AgyExecutor(directoryGuard, {
+      initialWorkingDirectory: '~/test-project',
+      model: 'custom-model',
+    });
+    const command = executor.execute('running');
+    await waitForSpawn();
+    emitInit();
+
+    executor.clearModel();
+    expect(proc.kill).not.toHaveBeenCalled();
+
+    emitResult();
+    await command;
+    expect(proc.kill).toHaveBeenCalled();
+  });
+
+  it('listEfforts returns supported efforts and current selection', async () => {
+    const defaultEfforts = await executor.listEfforts();
+    expect(defaultEfforts).toEqual({
+      choices: [
+        { value: 'low', displayName: 'low' },
+        { value: 'medium', displayName: 'medium' },
+        { value: 'high', displayName: 'high' },
+      ],
+      current: undefined,
+      default: undefined,
+      supportsReset: true,
+    });
+
+    await executor.setEffort('high');
+    const updatedEfforts = await executor.listEfforts();
+    expect(updatedEfforts.current).toBe('high');
+  });
+
+  it('listModels calls execFile with ["models"] and parses output', async () => {
+    mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: any, cb: any) => {
+      cb(null, 'gemini-3.8-flash-low\tGemini 3.8 Flash Low\ngemini-3.8-pro\tGemini 3.8 Pro\n', '');
+    });
+
+    const models = await executor.listModels();
+    expect(mockExecFile).toHaveBeenCalledWith(
+      'agy',
+      ['models'],
+      expect.objectContaining({ timeout: 10_000 }),
+      expect.any(Function)
+    );
+    expect(models).toHaveLength(2);
+    expect(models[0]).toMatchObject({
+      id: 'gemini-3.8-flash-low',
+      displayName: 'Gemini 3.8 Flash Low',
+      isCurrent: undefined,
+      isDefault: undefined,
+    });
+  });
+
+  it('listModels rejects when execFile errors', async () => {
+    mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: any, cb: any) => {
+      cb(new Error('command failed'), '', '');
+    });
+
+    await expect(executor.listModels()).rejects.toThrow('Failed to list AGY models: command failed');
+  });
+});
+
+describe('parseAgyModels', () => {
+  it('parses two-column tab-delimited stdout and marks current model', () => {
+    const raw = `
+\u001b[32mLoading models...\u001b[0m
+gemini-3.8-flash-low\tGemini 3.8 Flash Low
+gemini-3.8-pro\tGemini 3.8 Pro
+gemini-3.8-pro\tDuplicate Pro
+invalid slug with spaces\tInvalid
+no-tab-line
+`;
+    const models = parseAgyModels(raw, 'gemini-3.8-flash-low');
+    expect(models).toEqual([
+      {
+        id: 'gemini-3.8-flash-low',
+        displayName: 'Gemini 3.8 Flash Low',
+        isDefault: undefined,
+        isCurrent: true,
+        supportedReasoningEfforts: ['low', 'medium', 'high'],
+        inputModalities: ['text'],
+      },
+      {
+        id: 'gemini-3.8-pro',
+        displayName: 'Gemini 3.8 Pro',
+        isDefault: undefined,
+        isCurrent: false,
+        supportedReasoningEfforts: ['low', 'medium', 'high'],
+        inputModalities: ['text'],
+      },
+    ]);
   });
 });
 

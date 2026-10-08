@@ -10,6 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.152] - 2026-10-08
+
+### Added
+- Negotiate standalone backend, model, and effort settings cards on protocol version 1. Backend selection defaults to the original current thread; selecting a backend or device-wide scope only edits a draft until Confirm. Model and effort choices submit immediately, including preferences for an inactive target backend without switching the coordinator. Missing backends remain disabled; unavailable native catalogs and model-specific effort controls are explicit rather than generated from prompts.
+- Bind immutable choices to the original owner, device, thread, working context and configuration revision. Serialize native changes and persistence with affected command admission, invalidate stale menus, and acknowledge only confirmed changes. Bound snapshot and retry receipts, paginate choices with recursive card-node and byte accounting, and preserve parameterized text-command semantics and older-peer fallbacks. No backend installation, credential mutation, live deployment or inference is performed to build menus.
+
+### Changed
+- Use native structured model and effort metadata, including grouped ACP choices, model-specific Pi thinking levels, bounded AGY model rows, and capability-gated Claude control initialization. Keep configured selections distinct from native reports and defaults. Isolated metadata identities inherit policy resolved under the real thread ID, never share coordinator/Worker pointers, and clean up only their own confirmed-exited data. Claude model updates also maintain its legacy preference field.
+- Bound ACP control requests without timing out normal inference, preserve opaque native IDs, refresh Claude capabilities per process, and reject incompatible model/effort changes rather than silently changing a second preference. Release known temporary ACP sessions before transport shutdown and defer own-pointer cleanup after a timed-out query until settlement and confirmed exit.
+
 ## [1.6.151] - 2026-10-08
 
 ### Changed

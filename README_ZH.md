@@ -518,11 +518,11 @@ remote-cli stop
 | `/new` | `/clear` 的别名；在当前线程中开始全新对话 |
 | `/compact` | 压缩对话历史以节省 Token |
 | `/delegation [on|off|reset [backend]]` | 查看、启用、关闭或重置当前线程中隔离的委派 worker 上下文 |
-| `/model [name]` | 列出当前 backend 的模型，或设置当前线程的模型 |
-| `/effort [auto|level]` | Show or set per-thread reasoning effort for Codex/AGY/OpenCode/Kimi/ZCode/Pi/DSH |
+| `/model [name]` | Open native model settings, or set the active backend model with a text argument |
+| `/effort [auto|level]` | Open native effort settings, or set/clear the active backend effort with a text argument |
 | `/sandbox [on/off/read-only/default]` | 查看或配置当前 Codex 或 Claude Code 线程的沙箱；用 `allow/remove <目录>` 和 `network on/off` 调整访问设置 |
 | `/cd <dir>` | Change directory; a different directory starts fresh conversations for this thread |
-| `/backend` | 列出后端并显示当前线程实际使用的后端 |
+| `/backend` | Open backend settings; Current thread is the default and Confirm applies the selection |
 | `/bind <码>` | 绑定新设备 |
 | `/unbind` | 解绑所有设备 |
 | `/device` | 列出绑定设备及其连接状态，或切换设备 |
@@ -1023,12 +1023,16 @@ From CLI 1.6.120, Claude SDK `[claude-code:unrecognized_model]` diagnostics are 
 
 | 命令 | 说明 |
 |---------|-------------|
-| `/model` | 显示当前 backend、已选模型和可用模型 |
+| `/model` | Open a native model-choice card for the original thread |
 | `/model <name>` | 为当前线程和当前 backend 设置模型 |
-| `/effort` | 显示当前思考等级以及 backend 支持的等级 |
+| `/effort` | Open model-specific native effort choices for the original thread |
 | `/effort <auto|level>` | 设置思考等级，使用 `auto` 清除线程覆盖值 |
 
-模型列表由各 backend 分别提供：Claude Code 使用 `claude --print /model`，AGY 使用 `agy models`，Codex app-server 使用当前账号可用的模型目录，OpenCode 和 Kimi Code 使用 ACP 会话配置选项，ZCode 使用官方 app-server 模型目录，Pi 使用 RPC `get_available_models`。当前 Codex、AGY、OpenCode、Kimi Code、ZCode 和 Pi 支持 reasoning effort；Claude Code 会返回暂不支持。`auto` 会清除当前线程的覆盖值，恢复当前模型或 backend 的默认思考等级。
+Model listing uses native metadata: Claude Code control initialization, bounded `agy models` tab-delimited rows, Codex app-server `model/list`, ACP session options for OpenCode/Kimi/DSH, ZCode's official app-server catalog, and Pi RPC `get_available_models`. Effort choices are scoped to the selected model and exposed native controls; unavailable controls remain explicit. `auto` clears the thread's override rather than guessing a default.
+
+From CLI and Router 1.6.152, bare `/backend`, `/model`, and `/effort` open dedicated settings cards. The backend card lists all eight stable backend choices, including disabled missing installations. It defaults to **Current thread**; **All threads on this device** is opt-in and clears backend overrides and queued messages. Selecting a backend or scope only changes the draft until **Confirm**. Model/effort buttons submit immediately, and applied state appears only after the CLI acknowledges the native change and saved preference. Choose another installed target backend in the model/effort card to configure future worker launches without switching the coordinator. Same-backend coordinator and worker preferences remain shared.
+
+Cards remain bound to their original user, device, thread and settings revision, even after switching the active chat thread. Busy work, stale context, expired cards and mismatched retries cannot change settings. Model choices are paginated eight per page with recursive node/byte limits; native current/default and configured values are distinguished. Metadata previews use separate temporary identities with the real thread's effective sandbox policy, never model-generated menus. Cross-backend previews from a restricted coordinator are unavailable. Pi and ZCode are not auto-installed; unavailable executables or catalogs keep disabled/unavailable states. Older peers retain text lists, and `/backend <index>` still changes all threads while `/backend <index> @` changes only the current thread.
 
 ### 远程机器管理（Machine）
 
@@ -1059,7 +1063,7 @@ remote-cli 自身不处理的斜杠命令会转发给当前 AI 后端，各后�
 
 - **DSH**: no native interactive slash passthrough; remote-cli handles its shared commands. See [Using DeepSeek Harness (DSH)](#using-deepseek-harness-dsh) for image, compaction, and privacy boundaries.
 
-The built-in commands (`/help`, `/status`, `/context`, `/clear`, `/new`, `/compact`, `/model`, `/cd`, `/thread`, `/backend`, `/abort`) work across all backends. `/skills` availability is backend-specific; DSH returns an explicit unsupported response. `/new` is an exact alias for `/clear`: it keeps the current remote-cli thread, working directory, backend, model, and effort settings while starting a fresh backend conversation. `/effort` controls the per-thread reasoning effort for Codex, AGY, OpenCode, Kimi Code, ZCode, Pi, and DSH; Claude Code support is not implemented yet.
+The built-in commands (`/help`, `/status`, `/context`, `/clear`, `/new`, `/compact`, `/model`, `/cd`, `/thread`, `/backend`, `/abort`) work across all backends. `/skills` availability is backend-specific; DSH returns an explicit unsupported response. `/new` is an exact alias for `/clear`: it keeps the current remote-cli thread, working directory, backend, model, and effort settings while starting a fresh backend conversation. `/effort` uses each backend's native controls and returns explicit unavailable states for unsupported installed versions or models.
 `/status` always reports the current remote-cli thread and runtime state. When available, it appends native account information for Codex (app-server rate limits), AGY (`/usage` plus `/credits`), Kimi Code (the authenticated local Kimi server's account-usage endpoint), or DSH (official account wallet balances). Each backend keeps its own fields and wording. An unavailable, unauthenticated, unsupported, or failed query is omitted without failing the normal status response. The short-lived Kimi server binds only to loopback and is stopped after the query. DSH uses a separate, short-lived account-query process without a Web server or model turn.
 `/context` 可用于所有后端，会显示当前会话、模型、工作目录和队列状态。Pi 还会显示官方 RPC 返回的会话 Token 总计和当前上下文窗口用量；其他后端无法提供精确用量时，仍会显示传输层未提供该信息的提示。`/skills` 在 Claude、AGY、OpenCode 和 Kimi Code 上使用原生信息命令，在 ZCode 上映射为原生 `/skill` 命令，在 Pi 上通过 RPC 列出技能；Codex 则扫描 `.agents/skills` 和 `~/.codex/skills` 下的本地 `SKILL.md` 文件。
 
@@ -1155,7 +1159,7 @@ thread 忙碌时，普通消息会先生成确认卡片，不会静默进入队�
 /effort auto
 ```
 
-Codex、AGY、OpenCode、Kimi Code、ZCode 和 Pi 提供原生 effort 控制。Claude Code 自身支持 thinking 和 effort，但 remote-cli 内建的 `/effort` 目前会提示 Claude 暂不支持。不同 backend 的模型列表和 effort 等级可能不同，切换后可以用 `/status` 或 `/context` 确认实际状态。
+Native effort choices vary by backend, installed version and selected model. Claude Code uses only capabilities returned by its native model directory. Unavailable controls are reported explicitly; `/status` or `/context` can confirm observed execution metadata after a task.
 
 ## 资深用法
 

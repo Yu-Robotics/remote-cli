@@ -22,7 +22,7 @@ export function resolveThreadModel(thread: Thread, config: ExecutorConfig): stri
 
 function resolveThreadEffort(thread: Thread, config: ExecutorConfig): string | undefined {
   const key = backendKeyOf(config.type as string);
-  return key === 'codex' || key === 'agy' || key === 'opencode' || key === 'kimi' || key === 'zcode' || key === 'pi' || key === 'dsh' ? thread.efforts?.[key] : undefined;
+  return thread.efforts?.[key];
 }
 
 function isClaudeType(type: string): boolean {

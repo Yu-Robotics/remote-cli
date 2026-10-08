@@ -4,7 +4,7 @@ import * as path from 'path';
 import { randomUUID } from 'crypto';
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import type { Attachment, ImageBlock, ApprovalAction, ApprovalStatus, ApprovalRequestInfo } from '../types';
-import type { ExecuteOptions, ExecuteResult, ExecutorModelInfo, IExecutor } from './IExecutor';
+import type { ExecuteOptions, ExecuteResult, ExecutorModelInfo, ExecutorEffortInfo, IExecutor } from './IExecutor';
 import { configuredExecutionMetadata } from './ExecutionMetadata';
 import { AppServerMessage, CodexAppServerClient } from './CodexAppServerClient';
 import { CodexTaskNotifications } from './CodexTaskNotifications';
@@ -557,6 +557,7 @@ export class CodexAppServerExecutor implements IExecutor {
     await this.refreshModelCatalogAfterCommandUpgrade();
     const models: ExecutorModelInfo[] = [];
     let cursor: string | null = null;
+    const currentModelId = this.reportedModel ?? this.model;
     do {
       const response = await this.client.request('model/list', {
         cursor,
@@ -570,6 +571,7 @@ export class CodexAppServerExecutor implements IExecutor {
           displayName: model.displayName ?? model.id,
           description: model.description,
           isDefault: model.isDefault === true,
+          isCurrent: currentModelId ? model.id === currentModelId : undefined,
           supportedReasoningEfforts: Array.isArray(model.supportedReasoningEfforts)
             ? model.supportedReasoningEfforts.map((entry: any) => entry?.reasoningEffort).filter(Boolean)
             : undefined,
@@ -623,8 +625,12 @@ export class CodexAppServerExecutor implements IExecutor {
   async setModel(model: string): Promise<ExecuteResult> {
     try {
       const models = await this.listModels();
-      if (!models.some((entry) => entry.id === model)) {
+      const selected = models.find(entry => entry.id === model);
+      if (!selected) {
         return { success: false, error: `Unknown Codex model: ${model}. Use /model to list available models.` };
+      }
+      if (this.effort && !selected.supportedReasoningEfforts?.includes(this.effort)) {
+        return { success: false, error: 'The saved reasoning effort is incompatible with this model. Reset /effort auto before changing models.' };
       }
       this.model = model;
       this.reportedModel = undefined;
@@ -641,6 +647,35 @@ export class CodexAppServerExecutor implements IExecutor {
     this.reportedEffort = undefined;
   }
 
+  async listEfforts(): Promise<ExecutorEffortInfo> {
+    const models = await this.listModels();
+    const currentModelId = this.reportedModel ?? this.model;
+    const activeModel = currentModelId
+      ? models.find((entry) => entry.id === currentModelId)
+      : models.find((entry) => entry.isDefault);
+    if (!activeModel) {
+      return {
+        choices: [],
+        supportsReset: false,
+        unavailableReason: 'Codex did not identify a model for reasoning effort validation.',
+      };
+    }
+    const supported = activeModel.supportedReasoningEfforts ?? [];
+    if (supported.length === 0) {
+      return {
+        choices: [],
+        supportsReset: false,
+        unavailableReason: `Model ${activeModel.id} does not support reasoning effort.`,
+      };
+    }
+    return {
+      choices: supported.map((effort) => ({ value: effort, displayName: effort })),
+      current: this.reportedEffort ?? this.effort,
+      default: activeModel.defaultReasoningEffort,
+      supportsReset: true,
+    };
+  }
+
   async setEffort(effort: string): Promise<ExecuteResult> {
     if (this.activeTurn || this.compactWaiter) {
       return { success: false, error: 'Cannot change reasoning effort while the Codex thread is busy' };
@@ -649,9 +684,10 @@ export class CodexAppServerExecutor implements IExecutor {
     try {
       const normalized = effort.trim().toLowerCase();
       const models = await this.listModels();
-      const activeModel = models.find((entry) => entry.id === this.model)
-        ?? models.find((entry) => entry.isDefault)
-        ?? models[0];
+      const currentModelId = this.reportedModel ?? this.model;
+      const activeModel = currentModelId
+        ? models.find((entry) => entry.id === currentModelId)
+        : models.find((entry) => entry.isDefault);
       if (!activeModel) {
         return { success: false, error: 'Codex returned no models for reasoning effort validation.' };
       }

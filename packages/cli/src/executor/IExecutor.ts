@@ -37,9 +37,20 @@ export interface ExecutorModelInfo {
   displayName: string;
   description?: string;
   isDefault?: boolean;
+  /** Native current selection, distinct from a catalog default. */
+  isCurrent?: boolean;
   supportedReasoningEfforts?: string[];
   defaultReasoningEffort?: string;
   inputModalities?: string[];
+}
+
+/** Session/model-specific effort options. An unknown default must remain absent. */
+export interface ExecutorEffortInfo {
+  choices: Array<{ value: string; displayName: string; description?: string }>;
+  current?: string;
+  default?: string;
+  supportsReset: boolean;
+  unavailableReason?: string;
 }
 
 export type ExecutorExecutionMetadata = Omit<ExecutionMetadata, 'backend'>;
@@ -92,6 +103,8 @@ export interface IExecutor {
   clearModel?(): Promise<void> | void;
   /** List models available to the authenticated backend account. */
   listModels?(): Promise<ExecutorModelInfo[]>;
+  /** Read effort choices for the executor's current model, never a global superset. */
+  listEfforts?(): Promise<ExecutorEffortInfo>;
   /** Set a reasoning effort override, or use "auto" to restore the backend default. */
   setEffort?(effort: string): Promise<ExecuteResult>;
   isProcessRunning?(): boolean;
@@ -109,4 +122,9 @@ export interface IExecutor {
    * Each backend cleans up its own storage format and location.
    */
   deleteThreadData?(threadId: string): Promise<void>;
+
+  /** Release a known temporary metadata session while its transport is alive.
+   * Local pointers are removed separately, only after confirmed process exit.
+   */
+  releaseMetadataSession?(): Promise<void>;
 }

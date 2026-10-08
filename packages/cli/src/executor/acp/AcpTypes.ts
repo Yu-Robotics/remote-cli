@@ -15,7 +15,16 @@ export interface AcpConfigOptionValue {
   value: string;
   name: string;
   description?: string;
+  group?: string;
 }
+
+export interface AcpConfigOptionGroup {
+  group?: string;
+  name?: string;
+  options: AcpConfigOptionValue[];
+}
+
+export type AcpSelectOptionItem = AcpConfigOptionValue | AcpConfigOptionGroup;
 
 export interface AcpConfigOption {
   id: string;
@@ -24,7 +33,7 @@ export interface AcpConfigOption {
   category?: string;
   type: string;
   currentValue?: string;
-  options?: AcpConfigOptionValue[];
+  options?: AcpSelectOptionItem[];
 }
 
 export interface AcpSessionResult {

@@ -521,11 +521,11 @@ Once connected, use these commands in Feishu:
 | `/new` | Alias for `/clear`; start a fresh conversation in this thread |
 | `/compact` | Compress conversation history to save tokens |
 | `/delegation [on|off|reset [backend]]` | Inspect, enable, disable, or reset isolated delegated worker context in the current thread |
-| `/model [name]` | List models for the active backend or set this thread's model |
-| `/effort [auto|level]` | Show or set per-thread reasoning effort for Codex/AGY/OpenCode/Kimi/ZCode/Pi/DSH |
+| `/model [name]` | Open native model settings, or set the active backend model with a text argument |
+| `/effort [auto|level]` | Open native effort settings, or set/clear the active backend effort with a text argument |
 | `/sandbox [on/off/read-only/default]` | Show or configure the current Codex or Claude Code thread sandbox; use `allow/remove <directory>` and `network on/off` for access settings |
 | `/cd <dir>` | Change directory; a different directory starts fresh conversations for this thread |
-| `/backend` | List backends and show the current thread's effective backend |
+| `/backend` | Open backend settings; Current thread is the default and Confirm applies the selection |
 | `/bind <码>` | Bind a new device |
 | `/unbind` | Unbind all devices |
 | `/device` | List bound devices with connection status, or switch devices |
@@ -1071,12 +1071,16 @@ From CLI 1.6.120, Claude SDK `[claude-code:unrecognized_model]` diagnostics are 
 
 | Command | Description |
 |---------|-------------|
-| `/model` | Show the current backend, selected model, and available models |
+| `/model` | Open a native model-choice card for the original thread |
 | `/model <name>` | Set the model for the current thread and backend |
-| `/effort` | Show the current reasoning effort and backend-supported levels |
+| `/effort` | Open model-specific native effort choices for the original thread |
 | `/effort <auto|level>` | Set or clear (`auto`) the current thread's effort override |
 
-Model listing is backend-specific: Claude Code uses `claude --print /model`, AGY uses `agy models`, Codex app-server uses its authenticated model catalog, OpenCode and Kimi Code use ACP session configuration options, ZCode uses its official app-server catalog, and Pi uses RPC `get_available_models`. Reasoning effort is currently supported by Codex, AGY, OpenCode, Kimi Code, ZCode, and Pi; Claude Code returns an unsupported message. `auto` removes the per-thread override and restores the selected model's or backend's default effort.
+Model listing uses native metadata: Claude Code control initialization, bounded `agy models` tab-delimited rows, Codex app-server `model/list`, ACP session options for OpenCode/Kimi/DSH, ZCode's official app-server catalog, and Pi RPC `get_available_models`. Effort choices are scoped to the selected model and exposed native controls; unavailable controls remain explicit. `auto` clears the thread's override rather than guessing a default.
+
+From CLI and Router 1.6.152, bare `/backend`, `/model`, and `/effort` open dedicated settings cards. The backend card lists all eight stable backend choices, including disabled missing installations. It defaults to **Current thread**; **All threads on this device** is opt-in and clears backend overrides and queued messages. Selecting a backend or scope only changes the draft until **Confirm**. Model/effort buttons submit immediately, and applied state appears only after the CLI acknowledges the native change and saved preference. Choose another installed target backend in the model/effort card to configure future worker launches without switching the coordinator. Same-backend coordinator and worker preferences remain shared.
+
+Cards remain bound to their original user, device, thread and settings revision, even after switching the active chat thread. Busy work, stale context, expired cards and mismatched retries cannot change settings. Model choices are paginated eight per page with recursive node/byte limits; native current/default and configured values are distinguished. Metadata previews use separate temporary identities with the real thread's effective sandbox policy, never model-generated menus. Cross-backend previews from a restricted coordinator are unavailable. Pi and ZCode are not auto-installed; unavailable executables or catalogs keep disabled/unavailable states. Older peers retain text lists, and `/backend <index>` still changes all threads while `/backend <index> @` changes only the current thread.
 
 ### Remote Machine Management
 
@@ -1107,7 +1111,7 @@ Slash commands that remote-cli does not handle itself are forwarded to the activ
 
 - **DSH**: no native interactive slash passthrough; remote-cli handles its shared commands. See [Using DeepSeek Harness (DSH)](#using-deepseek-harness-dsh) for image, compaction, and privacy boundaries.
 
-The built-in commands (`/help`, `/status`, `/context`, `/clear`, `/new`, `/compact`, `/model`, `/cd`, `/thread`, `/backend`, `/abort`) work across all backends. `/skills` availability is backend-specific; DSH returns an explicit unsupported response. `/new` is an exact alias for `/clear`: it keeps the current remote-cli thread, working directory, backend, model, and effort settings while starting a fresh backend conversation. `/effort` controls the per-thread reasoning effort for Codex, AGY, OpenCode, Kimi Code, ZCode, Pi, and DSH; Claude Code support is not implemented yet.
+The built-in commands (`/help`, `/status`, `/context`, `/clear`, `/new`, `/compact`, `/model`, `/cd`, `/thread`, `/backend`, `/abort`) work across all backends. `/skills` availability is backend-specific; DSH returns an explicit unsupported response. `/new` is an exact alias for `/clear`: it keeps the current remote-cli thread, working directory, backend, model, and effort settings while starting a fresh backend conversation. `/effort` uses each backend's native controls and returns explicit unavailable states for unsupported installed versions or models.
 `/status` always reports the current remote-cli thread and runtime state. When available, it appends native account information for Codex (app-server rate limits), AGY (`/usage` plus `/credits`), Kimi Code (the authenticated local Kimi server's account-usage endpoint), or DSH (official account wallet balances). Each backend keeps its own fields and wording. An unavailable, unauthenticated, unsupported, or failed query is omitted without failing the normal status response. The short-lived Kimi server binds only to loopback and is stopped after the query. DSH uses a separate, short-lived account-query process without a Web server or model turn.
 `/context` works across all backends and reports the active session, model, working directory, and queue state. Pi additionally reports the official RPC session totals and current context-window usage; other backends retain the transport-availability message when exact usage is unavailable. `/skills` uses the native informational command for Claude, AGY, OpenCode, and Kimi Code, maps to ZCode's native `/skill` command, lists Pi skills via RPC, and discovers local `SKILL.md` files for Codex under `.agents/skills` and `~/.codex/skills`.
 
@@ -1203,7 +1207,7 @@ Keep model and effort choices local to the thread when comparing backends:
 /effort auto
 ```
 
-Codex, AGY, OpenCode, Kimi Code, ZCode, and Pi expose native effort controls. Claude Code has native thinking and effort controls in its own CLI, but remote-cli's built-in `/effort` currently reports Claude as unsupported. Model catalogs and accepted effort levels vary by backend, so verify the result with `/status` or `/context` after switching.
+Native effort choices vary by backend, installed version and selected model. Claude Code uses only capabilities returned by its native model directory. Unavailable controls are reported explicitly; `/status` or `/context` can confirm observed execution metadata after a task.
 
 ## Expert Usage
 

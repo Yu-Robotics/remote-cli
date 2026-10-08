@@ -23,6 +23,12 @@ preserves the terminal status, model/effort note, and thread controls. Raw think
 is not displayed as activity and progress is not a percentage. Older clients keep
 their existing cards. See [Public Activity](../../README.md#public-activity).
 
+## Settings Cards
+
+CLI and Router 1.6.152 negotiate `settingsCards` on protocol version 1. Bare `/backend`, `/model`, and `/effort` replace their command placeholder with a standalone interactive settings card. Backend/scope selection changes a draft only until Confirm, with Current thread as the default. Model and effort buttons submit immediately, including an inactive target backend, without switching the coordinator. The CLI remains authoritative for native validation and persistence; the Router shows pending or unknown state until a matching result confirms application.
+
+Choices use opaque stored tokens rather than command text or stale ordinals. Callback ownership includes the delivered card, original user/device/thread, connection, snapshot and page revision. Cards paginate eight choices per page with recursive tagged-node and serialized-byte accounting. Missing backends are disabled, native-unavailable states remain explicit, and expired or stale controls require a fresh menu. Socket changes invalidate action bindings. No native settings, credentials, installations or model inference run on the Router. Older peers retain text lists. See [Model and Reasoning Effort](../../README.md#model-and-reasoning-effort).
+
 ## Maintenance Notices
 
 From CLI and Router 1.6.127, upgrade notices use concise Chinese summaries from `RELEASE_NOTES_ZH.md`, with one short title and bounded user-visible changes per release. `CHANGELOG.md` remains the English technical record. The CLI build requires matching current-version entries in both documents and bundles both, without online translation or model calls. New Routers show summaries directly and collapse technical details. Earlier maintenance-capable Routers show the summary in their existing collapsed panels; new Routers keep older CLI notes collapsed when no technical-details field is present. Cumulative ranges, silent first adoption, delivery acknowledgements, and protocol version 1 are unchanged.

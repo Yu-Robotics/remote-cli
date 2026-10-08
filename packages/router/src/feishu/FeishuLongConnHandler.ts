@@ -15,6 +15,7 @@ import { createHash } from 'crypto';
 import { Readable } from 'stream';
 import type { FileInput } from '../files/FileTransfers';
 import type { WorkerContextCards } from './WorkerContextCards';
+import type { SettingsCards } from './SettingsCards';
 import { CARD_TABLE_LIMIT, countCardTables, isCardMarkdownParseError, isCardTableLimitError, limitCardTables, plainTextCard, prepareTableElements } from '../utils/CardTables';
 
 /**
@@ -44,6 +45,7 @@ interface ToolPageRemainder {
  */
 export class FeishuLongConnHandler {
   workerContexts?: WorkerContextCards;
+  settingsCards?: SettingsCards;
   private client: lark.Client;
   private wsClient: lark.WSClient | null = null;
   private bindingManager: BindingManager;
@@ -1589,24 +1591,28 @@ Examples:
    * @param openId User's open_id for creating continuation messages
    * @param replyThreadId Thread that produced the reply, independent of the selected thread
    */
-  async finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string, threads?: ThreadSummary[], replyThreadId?: string, queueConfirmation?: QueueConfirmationInfo, executionMetadata?: ExecutionMetadata, success = true): Promise<boolean> {
-    return this.withMessageLock(messageId, () => this._finalizeStreamingMessage(messageId, elements, sessionAbbr, openId, cwd, threadName, threads, replyThreadId, queueConfirmation, executionMetadata, success));
+  async finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string, threads?: ThreadSummary[], replyThreadId?: string, queueConfirmation?: QueueConfirmationInfo, executionMetadata?: ExecutionMetadata, success = true, options?: { bare?: boolean; onDelivered?: (cardIds: string[]) => void }): Promise<boolean> {
+    return this.withMessageLock(messageId, () => this._finalizeStreamingMessage(messageId, elements, sessionAbbr, openId, cwd, threadName, threads, replyThreadId, queueConfirmation, executionMetadata, success, options));
   }
 
-  private async _finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string, threads?: ThreadSummary[], replyThreadId?: string, queueConfirmation?: QueueConfirmationInfo, executionMetadata?: ExecutionMetadata, success = true): Promise<boolean> {
+  private async _finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string, threads?: ThreadSummary[], replyThreadId?: string, queueConfirmation?: QueueConfirmationInfo, executionMetadata?: ExecutionMetadata, success = true, options?: { bare?: boolean; onDelivered?: (cardIds: string[]) => void }): Promise<boolean> {
     try {
       const shell = this.activityShells.get(messageId);
       if (shell) shell.finishedAt = Date.now();
+      const bare = options?.bare === true;
       // Build completion note
       let noteContent = queueConfirmation ? '⏳ Awaiting queue confirmation' : success ? '✅ Completed' : '❌ Failed';
       if (sessionAbbr) {
         noteContent += ` · Session: ${sessionAbbr}`;
       }
 
-      const headerElements = this.createResponseHeaderElements(threadName || 'Resolving thread...', cwd);
+      // A bare finalize (interactive settings cards) renders exactly the given
+      // elements: no header/footer/thread-switch rows, so later patches owned by
+      // the settings controller replace the whole body without a visual jump.
+      const headerElements = bare ? [] : this.createResponseHeaderElements(threadName || 'Resolving thread...', cwd);
       const finalElements: any[] = [...headerElements];
-      const footerElements: any[] = [{ tag: 'markdown', content: noteContent }];
-      const metadataElement = !queueConfirmation && createExecutionMetadataElement(executionMetadata);
+      const footerElements: any[] = bare ? [] : [{ tag: 'markdown', content: noteContent }];
+      const metadataElement = !bare && !queueConfirmation ? createExecutionMetadataElement(executionMetadata) : null;
       if (metadataElement) footerElements.push(metadataElement);
       finalElements.push(...elements, ...footerElements);
 
@@ -1625,7 +1631,7 @@ Examples:
       const replyLabel = replyThreadName
         ? [replyThreadName, replyWorkspace].filter(Boolean).join(' · ')
         : undefined;
-      if (threads && threads.length >= 1) {
+      if (!bare && threads && threads.length >= 1) {
         threadSwitchElements = this.createThreadSwitchElements(threads, activeThreadId, replyLabel);
         finalElements.push(...threadSwitchElements);
       }
@@ -1638,8 +1644,15 @@ Examples:
         return false;
       }
 
+      // Bind interactive controllers (settings cards) to the actual delivered
+      // card IDs before any callback can arrive.
+      if (options?.onDelivered) {
+        const delivered = this.messageChains.get(messageId);
+        if (delivered && delivered.length > 0) options.onDelivered([...delivered]);
+      }
+
       // Store thread switch card state for later refresh (before cleanup)
-      if (threads && threads.length >= 1) {
+      if (!bare && threads && threads.length >= 1) {
         const chain = this.messageChains.get(messageId);
         const chunks = this.splitElementsIntoChunks(finalElements, headerElements, trailingElements);
         const lastChunkIndex = chunks.length - 1;
@@ -1868,11 +1881,23 @@ Examples:
     const actionValue = data?.action?.value;
     if (!openId || !actionValue) return;
 
-    let parsed: { action: string; threadId?: string; threadName?: string; queueId?: string; requestId?: string; decision?: string; id?: string; offset?: number };
+    let parsed: { action: string; threadId?: string; threadName?: string; queueId?: string; requestId?: string; decision?: string; id?: string; offset?: number; rev?: number; op?: string; value?: string };
     try {
       parsed = typeof actionValue === 'string' ? JSON.parse(actionValue) : actionValue;
     } catch {
       return;
+    }
+
+    if (parsed.action === 'settings') {
+      const cardId = data?.context?.open_message_id;
+      if (typeof parsed.id !== 'string' || typeof cardId !== 'string' || !this.settingsCards) {
+        return { toast: { type: 'error', content: 'This settings card has expired. Run the command again.' } };
+      }
+      try {
+        return { toast: { type: 'info', content: await this.settingsCards.click(openId, cardId, parsed) } };
+      } catch (error) {
+        return { toast: { type: 'error', content: error instanceof Error ? error.message : 'Settings action failed.' } };
+      }
     }
 
     if (parsed.action === 'worker_context_clear') {

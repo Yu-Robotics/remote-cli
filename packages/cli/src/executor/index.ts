@@ -23,7 +23,7 @@ export { KimiExecutor } from './KimiExecutor';
 export { ZCodeExecutor } from './ZCodeExecutor';
 export { PiExecutor } from './PiExecutor';
 export { DshExecutor } from './DshExecutor';
-export type { ExecutorModelInfo, IExecutor } from './IExecutor';
+export type { ExecutorModelInfo, ExecutorEffortInfo, IExecutor } from './IExecutor';
 export {
   ActivityTracker,
   normalizeActivity,
@@ -172,17 +172,17 @@ export function createExecutor(
     case 'claude-persistent':
       console.log('[ExecutorFactory] Using Claude persistent executor');
       return new ClaudePersistentExecutor(directoryGuard, initialWorkingDirectory, threadId, model,
-        executorConfig.claude?.sandbox, executorConfig.claude?.command, runtime.lifecycleHooks, runtime.delegationWorker);
+        executorConfig.claude?.sandbox, executorConfig.claude?.command, runtime.lifecycleHooks, runtime.delegationWorker, effort);
 
     case 'claude-spawn':
       console.warn('[ExecutorFactory] Claude spawn mode was removed; using persistent mode.');
       return new ClaudePersistentExecutor(directoryGuard, initialWorkingDirectory, threadId, model,
-        executorConfig.claude?.sandbox, executorConfig.claude?.command, runtime.lifecycleHooks, runtime.delegationWorker);
+        executorConfig.claude?.sandbox, executorConfig.claude?.command, runtime.lifecycleHooks, runtime.delegationWorker, effort);
 
     case 'auto':
     default:
       console.log('[ExecutorFactory] Using Claude persistent executor (auto)');
       return new ClaudePersistentExecutor(directoryGuard, initialWorkingDirectory, threadId, model,
-        executorConfig.claude?.sandbox, executorConfig.claude?.command, runtime.lifecycleHooks, runtime.delegationWorker);
+        executorConfig.claude?.sandbox, executorConfig.claude?.command, runtime.lifecycleHooks, runtime.delegationWorker, effort);
   }
 }

@@ -39,6 +39,10 @@ import { filterClaudeStderr } from '../executor/claude/ClaudeStderrFilter';
 import type { ActivityProgressInfo, ExecutionMetadata } from '../types';
 import { captureExecutionMetadata, mergeReportedExecutionMetadata } from '../executor/ExecutionMetadata';
 import { ActivityProgress } from '../utils/ActivityProgress';
+import { SettingsAdmission } from '../settings/SettingsAdmission';
+import { SettingsCatalogReader, configuredBackendModel } from '../settings/SettingsCatalog';
+import { SettingsService, type SettingsState } from '../settings/SettingsService';
+import type { SettingsActionMessage, SettingsBackend, SettingsKind, SettingsMenu, SettingsScope } from '../types/Settings';
 
 /**
  * Detected backend information
@@ -50,8 +54,7 @@ interface BackendInfo {
   reason?: string;
 }
 
-const EFFORT_BACKENDS = new Set(['codex', 'agy', 'opencode', 'kimi', 'zcode', 'pi', 'dsh']);
-const NATIVE_MODEL_LIST_BACKENDS = new Set(['codex', 'opencode', 'kimi', 'zcode', 'pi', 'dsh']);
+const EFFORT_BACKENDS = new Set(['claude', 'codex', 'agy', 'opencode', 'kimi', 'zcode', 'pi', 'dsh']);
 const SLASH_SESSION_BACKENDS = new Set(['opencode', 'kimi', 'zcode', 'pi']);
 const NATIVE_SKILLS_BACKENDS = new Set(['claude', 'agy', 'opencode', 'kimi', 'zcode', 'pi']);
 
@@ -165,6 +168,10 @@ export class MessageHandler {
   private delegationProgressTextSupported = false;
   private activityProgressSupported = false;
   private workerContextResetSupported = false;
+  private settingsCardsSupported = false;
+  private readonly settingsAdmission = new SettingsAdmission();
+  private readonly settingsCatalogReader: SettingsCatalogReader;
+  private readonly settingsService: SettingsService;
   private readonly pendingApprovalCards = new Map<string, { request: ApprovalRequestMessage; executor: IExecutor; delegated?: boolean }>();
   private readonly delegation: DelegationManager;
   private readonly delegationBridges = new Map<string, DelegationBridge>();
@@ -184,6 +191,30 @@ export class MessageHandler {
     this.config = config;
     this.wsClient.onClose?.(() => this.fileInbox?.disconnect());
     this.delegation = new DelegationManager(directoryGuard);
+    this.settingsCatalogReader = new SettingsCatalogReader(directoryGuard);
+    this.settingsService = new SettingsService({
+      state: id => this.settingsState(id),
+      backends: async () => (await this.detectBackends()).map(entry => ({ ...entry, value: backendKeyOf(entry.id) })),
+      catalog: async (id, target, kind) => {
+        const thread = this.threadManager.getThread(id);
+        if (!thread) throw new Error('This thread no longer exists.');
+        const config = this.executorConfiguration();
+        return this.settingsCatalogReader.read(config, thread, this.threadPool.getBackendKey(id), target, kind);
+      },
+      busy: (id, except, queue = true) => this.settingsBusy(id, except, queue),
+      threads: () => this.threadManager.listThreads().map(thread => thread.id),
+      exclusive: async (target, body) => {
+        try { return await this.settingsAdmission.mutation(target, body); }
+        finally {
+          for (const id of target === '*' ? this.threadManager.listThreads().map(thread => thread.id) : [target]) {
+            void this.startNextQueuedCommand(id);
+          }
+        }
+      },
+      backend: (id, target, scope, follow) => this.applyBackendSetting(id, target, scope, follow),
+      preference: (id, target, kind, value) => this.applyPreference(id, target, kind, value),
+    });
+    this.wsClient.onClose?.(() => this.settingsService.invalidate());
 
     this.notificationAdapter = new FeishuNotificationAdapter(wsClient);
     this.notificationAdapter.setThreadNameResolver((threadId) => this.threadManager.getThread(threadId)?.name);
@@ -225,6 +256,12 @@ export class MessageHandler {
       case 'command':
         await this.handleCommandMessage(message as IncomingMessage, this.fileInbox?.mark());
         return;
+      case 'settings_action':
+        if (this.settingsCardsSupported) {
+          const result = await this.settingsService.action(message as unknown as SettingsActionMessage);
+          this.wsClient.send(result);
+        }
+        return;
 
       case 'file_pending':
         if (this.fileInbox) await this.fileInbox.accept(message);
@@ -263,6 +300,7 @@ export class MessageHandler {
         this.activityProgressSupported = data.capabilities?.activityProgress === true;
         this.delegationProgressSupported = data.capabilities?.delegationProgress === true;
         this.workerContextResetSupported = this.delegationProgressSupported && data.capabilities?.workerContextReset === true;
+        this.settingsCardsSupported = data.capabilities?.settingsCards === true;
         this.delegationProgressTextSupported = this.delegationProgressSupported
           && data.capabilities?.delegationProgressText === true;
         for (const pending of this.pendingApprovalCards.values()) {
@@ -317,6 +355,31 @@ export class MessageHandler {
    * Handle command message — route to the correct thread executor.
    */
   private async handleCommandMessage(message: IncomingMessage, fileOrder?: number): Promise<void> {
+    const threadId = message.threadId ?? this.threadManager.getDefaultThread().id;
+    const content = message.content?.trim() ?? '';
+    const body = () => this.handleAdmittedCommandMessage(message, fileOrder);
+    this.messageOpenIds.set(message.messageId, message.openId);
+    try {
+      // Abort and addressed human replies must remain available during native work.
+      if (content === '/abort' || /^(?:yes|no)(?:\s|$)/.test(content) || content.startsWith('/input ')) return await body();
+      if (/^\/(?:backend|model|effort)\s+\S/.test(content)) {
+        const global = /^\/backend\s/.test(content) && !/\s@$/.test(content);
+        await this.settingsAdmission.mutation(global ? '*' : threadId, async () => {
+          this.settingsService.invalidate(global ? undefined : threadId);
+          await body();
+        });
+      } else {
+        await this.settingsAdmission.command(threadId, message.messageId, async () => {
+          if (/^\/(?:clear|new|cd|sandbox)(?:\s|$)/.test(content) || /^\/thread\s+delete(?:\s|$)/.test(content)) this.settingsService.invalidate(threadId);
+          await body();
+        });
+      }
+    } catch (error) {
+      this.sendResponse(message.messageId, threadId, { success: false, error: error instanceof Error ? error.message : 'Command admission failed.' });
+    }
+  }
+
+  private async handleAdmittedCommandMessage(message: IncomingMessage, fileOrder?: number): Promise<void> {
     const { messageId, content, attachments, workingDirectory, openId, isSlashCommand, threadId } = message;
 
     this.currentOpenId = openId;
@@ -343,6 +406,17 @@ export class MessageHandler {
         success: false,
         error: 'The client is installing an automatic update. Please retry after it reconnects.',
       });
+      return;
+    }
+
+    if (this.settingsCardsSupported && openId && /^\/(?:backend|model|effort)$/.test(content?.trim() ?? '')) {
+      const kind = content!.trim().slice(1) as SettingsKind;
+      try {
+        const menu = await this.settingsService.open(kind, resolvedThreadId, openId, undefined, messageId);
+        this.sendResponse(messageId, resolvedThreadId, { success: true, output: this.settingsFallback(menu), settingsMenu: menu });
+      } catch {
+        this.sendResponse(messageId, resolvedThreadId, { success: false, error: 'The settings menu could not be opened. Retry or use the parameterized text command.' });
+      }
       return;
     }
 
@@ -911,11 +985,11 @@ Use /compact to reduce conversation context or /clear to start a fresh context.`
 - /clear, /new - Start a fresh conversation in this thread
 - /compact - Compress conversation history to reduce context size
 - /cd <directory> - Change working directory for this thread
-- /model [name] - Show models for the active backend, or set this thread's model
-- /effort [auto|level] - Show or set effort for Codex/AGY/OpenCode/Kimi/ZCode/Pi/DSH (Claude Code is unsupported)
+- /model [name] - Open model settings, or set the active backend model with a text argument
+- /effort [auto|level] - Open effort settings, or set a native supported level with a text argument
 - /sandbox [on|off|read-only|default|allow <directory>|remove <directory>|network on|off] - Configure this thread's sandbox (Codex, Claude Code)
 - /delegation [on|off|reset [backend]] - Delegate tasks between installed agent backends; reset saved worker context when needed
-- /backend - List backends and show the current thread's effective backend
+- /backend - Open backend settings (Current thread by default; Confirm applies)
 - /backend <index> - Switch all threads and clear per-thread backend overrides
 - /backend <index> @ - Switch only the current thread
 - /backend default @ - Clear the current thread override and follow the global backend
@@ -1051,9 +1125,9 @@ You can also use natural language commands to control Claude Code CLI.`,
         if ('listModels' in executor && typeof executor.listModels === 'function') {
           try {
             const models = await executor.listModels();
-            const activeModel = models.find((entry) => entry.id === configuredModel)
-              ?? models.find((entry) => entry.isDefault)
-              ?? models[0];
+            const activeModel = models.find((entry) => entry.isCurrent)
+              ?? models.find((entry) => entry.id === configuredModel)
+              ?? models.find((entry) => entry.isDefault);
             if (activeModel) {
               lines.push(`Model: ${activeModel.id}`);
               lines.push(`Model default: ${activeModel.defaultReasoningEffort ?? 'unavailable'}`);
@@ -1078,16 +1152,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       }
 
       const effortArg = parts.slice(1).join(' ').toLowerCase();
-      const result = await executor.setEffort(effortArg);
-      if (result.success) {
-        const current = this.threadManager.getThread(threadId);
-        const efforts = { ...current?.efforts };
-        if (effortArg === 'auto') delete efforts[key];
-        else efforts[key] = effortArg;
-        await this.threadManager.updateThread(threadId, {
-          efforts: Object.keys(efforts).length > 0 ? efforts : undefined,
-        });
-      }
+      const result = await this.applyPreference(threadId, key, 'effort', effortArg === 'auto' ? undefined : effortArg);
       this.sendResponse(messageId, threadId, result.success
         ? { success: true, output: result.output || `Reasoning effort set to ${effortArg}.` }
         : { success: false, error: result.error || 'Failed to set reasoning effort' }
@@ -1109,23 +1174,8 @@ You can also use natural language commands to control Claude Code CLI.`,
         });
         return true;
       }
-      const result = await executor.setModel!(modelArg, (chunk: string) => {
-        this.sendStreamChunk(messageId, threadId, chunk);
-      });
-      if (result.success) {
-        // Persist per-backend: model names are backend-specific (Claude's
-        // "opus" is rejected by agy), so selections live under
-        // thread.models[backendKey]. The legacy `model` field is kept in
-        // sync for the Claude backend only.
-        const executorConfig = (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
-        const key = this.threadPool.getBackendKey(threadId);
-        const current = this.threadManager.getThread(threadId);
-        const models = { ...current?.models, [key]: modelArg };
-        await this.threadManager.updateThread(
-          threadId,
-          key === 'claude' ? { models, model: modelArg } : { models }
-        );
-      }
+      const result = await this.applyPreference(threadId, this.threadPool.getBackendKey(threadId), 'model', modelArg,
+        chunk => this.sendStreamChunk(messageId, threadId, chunk));
       this.sendResponse(messageId, threadId, result.success
         ? { success: true, output: result.output || `✅ Model set to ${modelArg}` }
         : { success: false, error: result.error || 'Failed to set model' }
@@ -1290,6 +1340,7 @@ You can also use natural language commands to control Claude Code CLI.`,
   }
 
   private async startNextQueuedCommand(threadId: string): Promise<void> {
+    if (this.settingsAdmission.isBlocked(threadId)) return;
     if (this.threadPool.isThreadBusy(threadId) || this.pausedQueues.has(threadId) || this.abortOperations.has(threadId)) return;
     const queue = this.threadQueues.get(threadId);
     const command = queue?.shift();
@@ -1374,8 +1425,8 @@ You can also use natural language commands to control Claude Code CLI.`,
 
   /**
    * Bare /model: show the thread's current model on the active backend plus
-   * the available models. Listing source per backend (all verified live):
-   * - claude: `claude --print /model` prints current + available aliases
+   * the available models, using each adapter's structured catalog:
+   * - claude: native control initialization exposes model aliases and capabilities
    * - agy: `agy models` prints "slug<TAB>Display Name" lines
    * - codex: app-server `model/list` returns the authenticated catalog
    * - opencode/kimi ACP: session config options expose enabled models
@@ -1383,7 +1434,6 @@ You can also use natural language commands to control Claude Code CLI.`,
    * - pi: RPC `get_available_models` returns the configured Pi catalog
    */
   private async handleModelList(messageId: string, threadId: string): Promise<void> {
-    const executorConfig = (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
     const key = this.threadPool.getBackendKey(threadId);
     const thread = this.threadManager.getThread(threadId);
     const current = thread?.models?.[key] ?? (key === 'claude' ? thread?.model : undefined);
@@ -1394,7 +1444,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       `Current model: ${current ?? 'backend default'}`,
     ];
 
-    if (NATIVE_MODEL_LIST_BACKENDS.has(key)) {
+    {
       const executor = this.threadPool.getExecutor(threadId);
       if ('listModels' in executor && typeof executor.listModels === 'function') {
         try {
@@ -1414,57 +1464,10 @@ You can also use natural language commands to control Claude Code CLI.`,
       } else {
         lines.push('', `Model listing is unavailable in this ${backendLabel} transport.`);
       }
-    } else {
-      const bin = getBackendCommand(key === 'agy' ? 'agy' : 'claude', executorConfig);
-      const args = key === 'agy' ? ['models'] : ['/model', '--print'];
-      const listing = await this.runListingCommand(bin, args);
-      if (listing) {
-        lines.push('', 'Available models:', listing.trim());
-      } else {
-        lines.push('', '⚠️ Could not fetch the model list from the backend CLI.');
-      }
     }
 
     lines.push('', 'Set with: /model <name>');
     this.sendResponse(messageId, threadId, { success: true, output: lines.join('\n') });
-  }
-
-  /**
-   * Run a short-lived CLI listing command with a 10s timeout.
-   * Returns null on failure/timeout — callers degrade gracefully.
-   */
-  private runListingCommand(bin: string, args: string[]): Promise<string | null> {
-    return new Promise((resolve) => {
-      let settled = false;
-      let timer: NodeJS.Timeout | undefined;
-      const finish = (value: string | null) => {
-        if (settled) return;
-        settled = true;
-        if (timer) clearTimeout(timer);
-        resolve(value);
-      };
-
-      let child;
-      try {
-        child = spawn(bin, args, {
-          stdio: ['ignore', 'pipe', 'pipe'],
-          env: { ...process.env, CLAUDECODE: '' },
-        });
-      } catch {
-        finish(null);
-        return;
-      }
-
-      timer = setTimeout(() => {
-        child.kill();
-        finish(null);
-      }, 10000);
-
-      const chunks: string[] = [];
-      child.stdout?.on('data', (d: Buffer) => chunks.push(d.toString()));
-      child.on('exit', (code) => finish(code === 0 ? chunks.join('') : null));
-      child.on('error', () => finish(null));
-    });
   }
 
   /**
@@ -2685,6 +2688,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       threads?: import('../thread/types').ThreadSummary[];
       queueConfirmation?: QueueConfirmationInfo;
       executionMetadata?: ExecutionMetadata;
+      settingsMenu?: SettingsMenu;
     }
   ): void {
     if (!result.queueConfirmation) this.fileInbox?.release(messageId, !result.success);
@@ -2711,6 +2715,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         threads: result.threads,
         queueConfirmation: result.queueConfirmation,
         ...(result.executionMetadata ? { executionMetadata: result.executionMetadata } : {}),
+        ...(this.settingsCardsSupported && result.settingsMenu ? { settingsMenu: result.settingsMenu } : {}),
         cwd,
         timestamp: Date.now(),
       });
@@ -2721,6 +2726,108 @@ You can also use natural language commands to control Claude Code CLI.`,
   }
 
   // ── Backend switching ─────────────────────────────────────────────────────
+
+  private executorConfiguration(): ExecutorConfig {
+    return (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
+  }
+
+  private settingsState(threadId: string): SettingsState | undefined {
+    const thread = this.threadManager.getThread(threadId);
+    if (!thread) return undefined;
+    const projection = (entry: import('../thread/types').Thread) => ({ id: entry.id, backend: entry.backend,
+      cwd: entry.workingDirectory, generation: entry.delegationWorkspaceGeneration, model: entry.model,
+      models: entry.models, efforts: entry.efforts });
+    const all = this.threadManager.listThreads().map(projection).sort((a, b) => a.id.localeCompare(b.id));
+    const configuredModels = { ...thread.models };
+    if (configuredModels.claude === undefined && thread.model) configuredModels.claude = thread.model;
+    return { threadId, threadName: thread.name, coordinatorBackend: this.threadPool.getBackendKey(threadId),
+      followsGlobal: !thread.backend, configuredModels, configuredEfforts: { ...thread.efforts },
+      revision: createHash('sha256').update(JSON.stringify({ thread: projection(thread), all, config: this.executorConfiguration() })).digest('hex') };
+  }
+
+  private settingsBusy(threadId: string, exceptRequest?: string, includeQueue = true): boolean {
+    return this.isDestroyed || this.automaticUpdateInProgress || this.threadPool.isThreadBusy(threadId)
+      || this.delegation.hasActiveTasks(threadId) || this.abortOperations.has(threadId)
+      || this.settingsAdmission.hasCommand(threadId, exceptRequest) || (includeQueue && this.hasThreadQueueState(threadId));
+  }
+
+  private settingsFallback(menu: SettingsMenu): string {
+    const lines = [`${menu.kind === 'backend' ? 'Backend' : menu.kind === 'model' ? 'Model' : 'Reasoning effort'} settings`,
+      `Thread: ${menu.threadName}`, `Target backend: ${menu.targetBackend}`,
+      `Configured: ${menu.configuredValue ?? 'default'}`, `Effective: ${menu.effectiveValue ?? 'not reported'} (${menu.effectiveSource})`];
+    if (menu.unavailableReason) lines.push(menu.unavailableReason);
+    for (const choice of menu.choices) lines.push(`${choice.label}${choice.disabled ? ' (unavailable)' : ''}`);
+    if (menu.kind === 'backend') lines.push('Card scope defaults to Current thread. Confirm to apply. Text commands: /backend <index> @ (current), /backend <index> (all).');
+    else lines.push(`Use the card buttons, or /${menu.kind} <value> for the active backend.`);
+    return lines.join('\n');
+  }
+
+  /** Shared native/persistent mutation for cards and parameterized text commands. */
+  private async applyPreference(threadId: string, backend: SettingsBackend, kind: 'model' | 'effort',
+    value: string | undefined, onStream?: (chunk: string) => void): Promise<ExecuteResult> {
+    const thread = this.threadManager.getThread(threadId);
+    if (!thread) return { success: false, error: 'This thread no longer exists.' };
+    if (value !== undefined && (!value || value.length > 512 || /[\x00-\x1f\x7f]/.test(value))) return { success: false, error: 'Invalid settings value.' };
+    const config = this.executorConfiguration();
+    const coordinator = this.threadPool.getBackendKey(threadId);
+    const apply = async (executor: IExecutor): Promise<ExecuteResult> => {
+      if (kind === 'effort') {
+        if (!executor.setEffort) return { success: false, error: 'This backend does not expose effort controls.' };
+        return executor.setEffort(value ?? 'auto');
+      }
+      if (value === undefined) {
+        const fallback = configuredBackendModel(config, backend);
+        if (fallback && executor.setModel) return executor.setModel(fallback, onStream);
+        if (!executor.clearModel) return { success: false, error: 'This backend cannot safely clear its model override.' };
+        await executor.clearModel();
+        return { success: true, output: 'Model override cleared.' };
+      }
+      if (!executor.setModel) return { success: false, error: 'This backend does not expose model controls.' };
+      return executor.setModel(value, onStream);
+    };
+    try {
+      const result = backend === coordinator ? await apply(this.threadPool.getExecutor(threadId))
+        : await this.settingsCatalogReader.withExecutor(config, thread, coordinator, backend, apply, value === undefined && kind === 'model');
+      if (!result.success) return result;
+      // Persistence uses the latest thread object so unrelated backend choices survive.
+      const current = this.threadManager.getThread(threadId);
+      if (!current) throw new Error('The thread was deleted during the settings operation.');
+      if (kind === 'model') {
+        const models = { ...current.models };
+        if (value === undefined) delete models[backend]; else models[backend] = value;
+        await this.threadManager.updateThread(threadId, { models: Object.keys(models).length ? models : undefined,
+          ...(backend === 'claude' ? { model: value } : {}) });
+      } else {
+        const efforts = { ...current.efforts };
+        if (value === undefined) delete efforts[backend]; else efforts[backend] = value;
+        await this.threadManager.updateThread(threadId, { efforts: Object.keys(efforts).length ? efforts : undefined });
+      }
+      return result;
+    } finally { this.settingsService.invalidate(threadId); }
+  }
+
+  private async applyBackendSetting(threadId: string, backend: SettingsBackend, scope: SettingsScope,
+    followGlobal = false): Promise<ExecuteResult & { clearedCount: number }> {
+    try {
+      if (followGlobal) {
+        await this.threadPool.destroyThread(threadId, { deleteData: false });
+        await this.threadManager.updateThread(threadId, { backend: undefined });
+        return { success: true, output: 'This thread now follows the global backend.', clearedCount: this.clearThreadQueue(threadId) };
+      }
+      if (scope === 'thread') {
+        await this.threadPool.switchThreadBackend(threadId, backend);
+        return { success: true, output: `Thread backend set to ${backend}.`, clearedCount: this.clearThreadQueue(threadId) };
+      }
+      if (this.threadPool.getSummaries().some(thread => thread.status === 'running') || this.delegation.hasActiveTasks(threadId)) {
+        return { success: false, error: 'Cannot switch all backends while a thread is running. Send /abort first.', clearedCount: 0 };
+      }
+      const config: ExecutorConfig = { ...this.executorConfiguration(), type: backend === 'claude' ? 'auto' : backend };
+      await this.config.set('executor', config);
+      await this.threadPool.switchBackend(config);
+      await this.threadManager.clearBackendOverrides();
+      return { success: true, output: `All threads will use ${backend} for future commands.`, clearedCount: this.clearAllQueues() };
+    } finally { this.settingsService.invalidate(scope === 'all' ? undefined : threadId); }
+  }
 
   private checkCommand(cmd: string, args: string[]): Promise<Pick<BackendInfo, 'installed' | 'reason'>> {
     return new Promise((resolve) => {
@@ -2801,9 +2908,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         });
         return;
       }
-      await this.threadPool.destroyThread(threadId, { deleteData: false });
-      await this.threadManager.updateThread(threadId, { backend: undefined });
-      const clearedCount = this.clearThreadQueue(threadId);
+      const { clearedCount } = await this.applyBackendSetting(threadId, backendKeyOf(currentType as string), 'thread', true);
       this.sendResponse(messageId, threadId, {
         success: true,
         output: `✅ Thread backend reset to the global backend (${backendKeyOf(currentType as string)}).${clearedCount ? `\n🗑️ Cleared ${clearedCount} queued message${clearedCount === 1 ? '' : 's'}.` : ''}`,
@@ -2830,11 +2935,9 @@ You can also use natural language commands to control Claude Code CLI.`,
       return;
     }
 
-    const newConfig: ExecutorConfig = { ...currentConfig, type: target.id };
     if (isThreadOverride) {
       try {
-        await this.threadPool.switchThreadBackend(threadId, backendKeyOf(target.id));
-        const clearedCount = this.clearThreadQueue(threadId);
+        const { clearedCount } = await this.applyBackendSetting(threadId, backendKeyOf(target.id), 'thread');
         this.sendResponse(messageId, threadId, {
           success: true,
           output: `✅ This thread switched to: ${target.label}${clearedCount ? `\n🗑️ Cleared ${clearedCount} queued message${clearedCount === 1 ? '' : 's'}.` : ''}\n\nUse /backend ${installed.indexOf(target) + 1} to switch all threads, or /backend default @ to follow the global backend again.`,
@@ -2857,10 +2960,12 @@ You can also use natural language commands to control Claude Code CLI.`,
       return;
     }
 
-    await this.config.set('executor', newConfig);
-    await this.threadPool.switchBackend(newConfig);
-    await this.threadManager.clearBackendOverrides();
-    const clearedCount = this.clearAllQueues();
+    const applied = await this.applyBackendSetting(threadId, backendKeyOf(target.id), 'all');
+    if (!applied.success) {
+      this.sendResponse(messageId, threadId, applied);
+      return;
+    }
+    const { clearedCount } = applied;
 
     this.sendResponse(messageId, threadId, {
       success: true,
@@ -2873,6 +2978,7 @@ You can also use natural language commands to control Claude Code CLI.`,
    * Destroy handler and all executors
    */
   async destroy(): Promise<void> {
+    this.settingsService.destroy();
     this.isDestroyed = true;
     await this.fileInbox?.destroy();
     this.notificationAdapter.unregister();

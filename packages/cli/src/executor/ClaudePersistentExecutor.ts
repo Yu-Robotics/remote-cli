@@ -7,6 +7,12 @@ import { ClaudeSandbox } from './claude/ClaudeSandbox';
 import { evaluateFileWrite } from './claude/ClaudeFilePolicy';
 import type { ClaudeSandboxConfig } from '../types/config';
 import { configuredExecutionMetadata } from './ExecutionMetadata';
+import type { IExecutor, ExecutorModelInfo, ExecutorEffortInfo } from './IExecutor';
+import {
+  ClaudeControlModelEntry,
+  parseClaudeModelsCatalog,
+  resolveClaudeEfforts,
+} from './claude/ClaudeSettings';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -61,9 +67,18 @@ interface ContentBlock {
   redacted_thinking?: string;  // Encrypted thinking content
 }
 
+interface ClaudeControlResponsePayload {
+  subtype?: 'success' | 'error';
+  request_id?: string;
+  response?: Record<string, unknown>;
+  error?: string;
+}
+
 interface ClaudeOutputMessage {
   /** Message type */
-  type: 'message' | 'thinking' | 'redacted_thinking' | 'error' | 'usage' | 'system' | 'stream_event' | 'result' | 'assistant' | 'user';
+  type: 'message' | 'thinking' | 'redacted_thinking' | 'error' | 'usage' | 'system' | 'stream_event' | 'result' | 'assistant' | 'user' | 'control_response' | 'control_request';
+  /** Control response payload */
+  response?: ClaudeControlResponsePayload;
   /** Message content (string or array of content blocks) */
   content?: string | ContentBlock[];
   /** Nested message object (for assistant type with full message structure) */
@@ -175,7 +190,7 @@ export interface PersistentClaudeResult {
  * Maintains a long-running Claude process and communicates via stdin/stdout
  * using stream-json format for real-time bidirectional communication.
  */
-export class ClaudePersistentExecutor extends EventEmitter {
+export class ClaudePersistentExecutor extends EventEmitter implements IExecutor {
   private directoryGuard: DirectoryGuard;
   private currentWorkingDirectory: string;
   private isDestroyed = false;
@@ -186,7 +201,18 @@ export class ClaudePersistentExecutor extends EventEmitter {
   private threadId?: string;
   /** Model to pass via --model on process start. Updated by setModel() for future restarts. */
   private model?: string;
+  private effort?: string;
   private reportedModel?: string;
+
+  // Native control catalog cache & control request state
+  private cachedModelCatalog: ExecutorModelInfo[] | null = null;
+  private cachedRawEntries: ClaudeControlModelEntry[] | null = null;
+  private catalogInitPromise?: Promise<ExecutorModelInfo[]>;
+  private pendingControlRequests = new Map<string, {
+    resolve: (response: unknown) => void;
+    reject: (error: Error) => void;
+    timer: NodeJS.Timeout;
+  }>();
 
   // Persistent process
   private claudeProcess: ChildProcess | null = null;
@@ -278,10 +304,12 @@ export class ClaudePersistentExecutor extends EventEmitter {
     claudeCommand?: string,
     private readonly lifecycleHooks = true,
     private readonly delegationWorker = false,
+    effort?: string,
   ) {
     super();
     this.directoryGuard = directoryGuard;
     this.model = model;
+    this.effort = effort === 'auto' ? undefined : effort;
     this.sandbox = new ClaudeSandbox(directoryGuard, sandbox, threadId);
     this.claudeCommand = claudeCommand ?? 'claude';
     // Use provided working directory or fall back to process.cwd()
@@ -401,8 +429,24 @@ export class ClaudePersistentExecutor extends EventEmitter {
   }
 
   getExecutionMetadata() {
-    const data = configuredExecutionMetadata(this.model);
-    data.effortSource = 'unknown';
+    let effectiveEffort = this.effort;
+    if (this.effort && this.cachedRawEntries) {
+      const activeModel = this.reportedModel || this.model;
+      const entry = activeModel
+        ? this.cachedRawEntries.find(
+            e => e.value === activeModel || (e.resolvedModel !== undefined && e.resolvedModel === activeModel),
+          )
+        : this.cachedRawEntries.find(e => e.value === 'default');
+
+      if (entry && (!entry.supportsEffort || !entry.supportedEffortLevels?.includes(this.effort))) {
+        effectiveEffort = undefined;
+      }
+    }
+
+    const data = configuredExecutionMetadata(this.model, effectiveEffort);
+    if (!effectiveEffort) {
+      data.effortSource = 'unknown';
+    }
     if (this.isProcessRunning() && this.reportedModel) {
       data.model = this.reportedModel;
       data.modelSource = 'reported';
@@ -452,6 +496,7 @@ export class ClaudePersistentExecutor extends EventEmitter {
    * Start the persistent Claude process
    */
   private async startProcess(): Promise<void> {
+    if (this.isDestroyed || (this.isStopping && this.claudeProcess)) throw new Error('Claude process is unavailable or its exit is unconfirmed');
     if (this.claudeProcess || this.isStarting) {
       return;
     }
@@ -514,6 +559,10 @@ export class ClaudePersistentExecutor extends EventEmitter {
 
       if (this.model) {
         args.push('--model', this.model);
+      }
+
+      if (this.effort) {
+        args.push('--effort', this.effort);
       }
 
       if (this.sessionId) {
@@ -613,8 +662,11 @@ export class ClaudePersistentExecutor extends EventEmitter {
       // Use 'close' event (fires after all I/O streams are closed, i.e. after all stdout
       // data events have been processed) instead of 'exit' for command completion logic.
       child.on('close', (code, signal) => {
+        if (this.claudeProcess !== child) return;
         flushStderr();
         this.clearApprovals('Claude process exited');
+        this.rejectPendingControlRequests('Claude process exited before control response');
+        this.clearCatalogCache();
         this.claudeProcess = null;
 
         // Check if this was an intentional stop (abort/reset)
@@ -746,6 +798,8 @@ export class ClaudePersistentExecutor extends EventEmitter {
     this.filePolicyRoots = [];
     this.filePolicyStarted = false;
     this.clearApprovals('Claude process stopped');
+    this.rejectPendingControlRequests('Claude process stopped before control response');
+    this.clearCatalogCache();
     if (!this.claudeProcess) {
       return;
     }
@@ -753,31 +807,21 @@ export class ClaudePersistentExecutor extends EventEmitter {
     console.log('[ClaudePersistent] Stopping process...');
     this.isStopping = true;
 
-    // Send EOF to stdin to gracefully close
-    this.claudeProcess.stdin?.end();
-
-    // Kill after timeout
-    const killTimeout = setTimeout(() => {
-      if (this.claudeProcess) {
-        console.log('[ClaudePersistent] Force killing process...');
-        this.claudeProcess.kill('SIGTERM');
-      }
-    }, 5000);
-
-    // Wait for process to exit
-    await new Promise<void>(resolve => {
-      if (!this.claudeProcess) {
-        resolve();
-        return;
-      }
-
-      this.claudeProcess.on('close', () => {
-        clearTimeout(killTimeout);
-        resolve();
-      });
+    const child = this.claudeProcess;
+    // A signal is not evidence of exit. Bound the wait and retain the child on
+    // failure so the caller cannot silently launch a replacement over it.
+    await new Promise<void>((resolve, reject) => {
+      const term = setTimeout(() => child.kill('SIGTERM'), 5_000);
+      const kill = setTimeout(() => child.kill('SIGKILL'), 8_000);
+      const deadline = setTimeout(() => { cleanup(); reject(new Error('Claude process exit could not be confirmed')); }, 9_000);
+      const cleanup = () => { clearTimeout(term); clearTimeout(kill); clearTimeout(deadline); child.removeListener('close', closed); };
+      const closed = () => { cleanup(); resolve(); };
+      child.once('close', closed);
+      try { child.stdin?.end(); } catch { child.kill('SIGTERM'); }
     });
 
-    this.claudeProcess = null;
+    if (this.claudeProcess === child) this.claudeProcess = null;
+    this.isStopping = false;
     console.log('[ClaudePersistent] Process stopped');
   }
 
@@ -1103,6 +1147,42 @@ export class ClaudePersistentExecutor extends EventEmitter {
     return text;
   }
 
+  private handleControlMessage(message: ClaudeOutputMessage): void {
+    if (message.type !== 'control_response' || !message.response) {
+      return;
+    }
+
+    const { subtype, request_id, response, error } = message.response;
+    if (!request_id) return;
+
+    const pending = this.pendingControlRequests.get(request_id);
+    if (!pending) return;
+
+    this.pendingControlRequests.delete(request_id);
+    clearTimeout(pending.timer);
+
+    if (subtype === 'success') {
+      if (Buffer.byteLength(JSON.stringify(response ?? {}), 'utf8') > 1024 * 1024) { pending.reject(new Error('Claude control response exceeds the supported size')); return; }
+      pending.resolve(response ?? {});
+    } else {
+      pending.reject(new Error(error || `Claude control request failed with status: ${subtype}`));
+    }
+  }
+
+  private rejectPendingControlRequests(reason: string): void {
+    for (const [id, pending] of this.pendingControlRequests.entries()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error(reason));
+    }
+    this.pendingControlRequests.clear();
+  }
+
+  private clearCatalogCache(): void {
+    this.cachedModelCatalog = null;
+    this.cachedRawEntries = null;
+    this.catalogInitPromise = undefined;
+  }
+
   /**
    * Handle a line of JSON output from Claude
    */
@@ -1110,6 +1190,13 @@ export class ClaudePersistentExecutor extends EventEmitter {
     try {
       // Parse message first to check type
       const parsedMessage: ClaudeOutputMessage = JSON.parse(line);
+
+      // Handle native Claude Control response packets (models catalog, etc.).
+      // These bypass raw stdout logging to prevent any potential account/credential leakage.
+      if (parsedMessage.type === 'control_response' || parsedMessage.type === 'control_request') {
+        this.handleControlMessage(parsedMessage);
+        return;
+      }
 
       // Skip logging for stream_event messages to avoid console spam
       // Token deltas are handled below without logging every fragment.
@@ -1940,30 +2027,241 @@ export class ClaudePersistentExecutor extends EventEmitter {
   }
 
   /**
-   * Send /model slash command to the running Claude process to switch models.
-   * Also stores the model so future process restarts start with --model already set,
-   * since a live /model change does not survive a process respawn on its own.
+   * Switch the model for future commands.
+   * Restarts the process if running, preserving the session via --resume.
+   * Rejects known incompatible effort rather than silently changing a second preference.
+   * Retains a deliberate text-argument full-model path if not found in catalog.
    */
-  setModel(model: string, onStream?: (chunk: string) => void): Promise<PersistentClaudeResult> {
-    console.log(`[ClaudePersistent] Sending /model ${model} slash command`);
-    this.model = model;
+  async setModel(model: string, _onStream?: (chunk: string) => void): Promise<PersistentClaudeResult> {
+    if (this.isDestroyed) {
+      return { success: false, error: 'Executor has been destroyed' };
+    }
+    if (this.isBusy()) {
+      return { success: false, error: 'Cannot change model while Claude is busy' };
+    }
 
-    return new Promise((resolve, reject) => {
-      this.reportedModel = undefined;
-      if (this.isDestroyed) {
-        resolve({ success: false, error: 'Executor has been destroyed' });
-        return;
+    if (this.effort && !this.cachedRawEntries) {
+      try { await this.listModels(); } catch { return { success: false, error: 'Cannot validate the saved reasoning effort. Reset /effort auto before changing models.' }; }
+    }
+    let matchedEntry: ClaudeControlModelEntry | undefined;
+    if (this.cachedRawEntries) {
+      matchedEntry = this.cachedRawEntries.find(
+        e => e.value === model || (e.resolvedModel !== undefined && e.resolvedModel === model),
+      );
+    }
+
+    if (this.effort && matchedEntry) {
+      if (!matchedEntry.supportsEffort || !matchedEntry.supportedEffortLevels?.includes(this.effort)) {
+        return { success: false, error: 'The saved reasoning effort is incompatible with this model. Reset /effort auto before changing models.' };
       }
+    }
 
-      this.commandQueue.push({
-        prompt: `/model ${model}`,
-        options: { onStream },
-        resolve,
-        reject,
-        isSlashCommand: true,
-      });
-      this.processQueue();
+    await this.stopProcess();
+    this.model = model;
+    this.reportedModel = undefined;
+    return {
+      success: true,
+      output: `Model set to ${this.model}.`,
+    };
+  }
+
+  async clearModel(): Promise<void> {
+    if (this.isDestroyed) return;
+    if (this.isBusy()) {
+      throw new Error('Cannot clear model while Claude is busy');
+    }
+    this.model = undefined;
+    this.reportedModel = undefined;
+    await this.stopProcess();
+  }
+
+  /**
+   * Query models available to the authenticated Claude backend using native control initialization.
+   * Bounded by 10s timeout, cached per process instance, and rejects without injecting user prompts.
+   */
+  async listModels(): Promise<ExecutorModelInfo[]> {
+    if (this.isDestroyed) {
+      throw new Error('Executor has been destroyed');
+    }
+
+    if (this.cachedModelCatalog) {
+      return parseClaudeModelsCatalog(this.cachedRawEntries, this.reportedModel || this.model).models;
+    }
+
+    if (this.catalogInitPromise) {
+      return this.catalogInitPromise;
+    }
+
+    const pending = this.performControlInitialization().finally(() => {
+      if (this.catalogInitPromise === pending) this.catalogInitPromise = undefined;
     });
+    this.catalogInitPromise = pending;
+    return pending;
+  }
+
+  private async performControlInitialization(): Promise<ExecutorModelInfo[]> {
+    await this.startProcess();
+
+    const child = this.claudeProcess;
+    if (!child || !child.stdin || child.killed) {
+      throw new Error('Claude process is not available for control initialization');
+    }
+
+    const stdin = child.stdin;
+    const requestId = `catalog-${randomUUID()}`;
+    const requestPacket = {
+      type: 'control_request',
+      request_id: requestId,
+      request: {
+        subtype: 'initialize',
+      },
+    };
+
+    return new Promise<ExecutorModelInfo[]>((resolve, reject) => {
+      let timer: NodeJS.Timeout | undefined;
+
+      const cleanup = () => {
+        if (timer) clearTimeout(timer);
+        this.pendingControlRequests.delete(requestId);
+      };
+
+      timer = setTimeout(() => {
+        cleanup();
+        reject(new Error('Claude control initialization timed out after 10000ms'));
+      }, 10_000);
+
+      this.pendingControlRequests.set(requestId, {
+        resolve: (response: unknown) => {
+          cleanup();
+          if (this.claudeProcess !== child || this.isDestroyed || this.isStopping) { reject(new Error('Claude catalog process is no longer active')); return; }
+          try {
+            const rawResponse = (response as Record<string, unknown>) || {};
+            const { models, rawEntries } = parseClaudeModelsCatalog(
+              rawResponse.models,
+              this.reportedModel || this.model,
+            );
+            this.cachedRawEntries = rawEntries;
+            this.cachedModelCatalog = models;
+            resolve(models);
+          } catch (err) {
+            reject(err instanceof Error ? err : new Error(String(err)));
+          }
+        },
+        reject: (err: Error) => {
+          cleanup();
+          reject(err);
+        },
+        timer,
+      });
+
+      try {
+        stdin.write(JSON.stringify(requestPacket) + '\n', (err) => {
+          if (err) {
+            cleanup();
+            reject(new Error(`Failed to write control request to Claude stdin: ${err.message}`));
+          }
+        });
+      } catch (err) {
+        cleanup();
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+  }
+
+  /**
+   * Query reasoning effort levels supported for the current model.
+   */
+  async listEfforts(): Promise<ExecutorEffortInfo> {
+    if (this.isDestroyed) {
+      return {
+        choices: [],
+        current: this.effort,
+        default: undefined,
+        supportsReset: true,
+        unavailableReason: 'Executor has been destroyed',
+      };
+    }
+
+    try {
+      await this.listModels();
+    } catch (err) {
+      return {
+        choices: [],
+        current: this.effort,
+        default: undefined,
+        supportsReset: true,
+        unavailableReason: err instanceof Error ? err.message : 'Claude model catalog unavailable',
+      };
+    }
+
+    if (!this.cachedRawEntries) {
+      return {
+        choices: [],
+        current: this.effort,
+        default: undefined,
+        supportsReset: true,
+        unavailableReason: 'Reasoning effort is not supported for Claude Code.',
+      };
+    }
+
+    const activeModel = this.reportedModel || this.model;
+    return resolveClaudeEfforts(this.cachedRawEntries, activeModel, this.effort);
+  }
+
+  /**
+   * Set reasoning effort level for future commands.
+   * 'auto' clears the override. Non-auto values validate against native supported levels.
+   * Preserves the session while recycling the idle process and passing --effort to the next spawn.
+   */
+  async setEffort(effort: string): Promise<PersistentClaudeResult> {
+    if (this.isDestroyed) {
+      return { success: false, error: 'Executor has been destroyed' };
+    }
+    if (this.isBusy()) {
+      return { success: false, error: 'Cannot change reasoning effort while Claude is busy' };
+    }
+
+    const normalized = effort.trim().toLowerCase();
+    if (normalized === 'auto' || normalized === '') {
+      await this.stopProcess();
+      this.effort = undefined;
+      return {
+        success: true,
+        output: 'Reasoning effort restored to default.',
+      };
+    }
+
+    let effortInfo: ExecutorEffortInfo;
+    try {
+      effortInfo = await this.listEfforts();
+    } catch (err) {
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : 'Failed to query available reasoning efforts',
+      };
+    }
+
+    if (effortInfo.unavailableReason || !effortInfo.choices.length) {
+      return {
+        success: false,
+        error: effortInfo.unavailableReason || 'Reasoning effort is not supported for the current model.',
+      };
+    }
+
+    const match = effortInfo.choices.find(c => c.value.toLowerCase() === normalized);
+    if (!match) {
+      return {
+        success: false,
+        error: `Unsupported reasoning effort: ${effort}. Supported values: auto, ${effortInfo.choices.map(c => c.value).join(', ')}.`,
+      };
+    }
+
+    await this.stopProcess();
+    this.effort = match.value;
+    return {
+      success: true,
+      output: `Reasoning effort set to ${match.value}.`,
+    };
   }
 
   /**
@@ -2092,6 +2390,8 @@ export class ClaudePersistentExecutor extends EventEmitter {
     this.commandQueue = [];
 
     this.clearApprovals('Executor destroyed');
+    this.rejectPendingControlRequests('Executor has been destroyed');
+    this.clearCatalogCache();
 
     if (this.approvalServer) {
       const server = this.approvalServer;

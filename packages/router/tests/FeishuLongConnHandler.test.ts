@@ -2883,4 +2883,101 @@ describe('FeishuLongConnHandler', () => {
       expect((handler as any).threadSwitchStateCleanupTimer).toBeNull();
     });
   });
+
+  describe('settings card actions', () => {
+    const backendMenu = {
+      snapshotId: 'snap-1', kind: 'backend', threadId: 'thread-1', threadName: 'default',
+      coordinatorBackend: 'claude', targetBackend: 'claude',
+      backends: [
+        { value: 'claude', label: 'Claude Code', installed: true },
+        { value: 'codex', label: 'Codex CLI', installed: true },
+      ],
+      choices: [], effectiveSource: 'configured', supportsReset: false,
+      busy: false, expiresAt: Date.now() + 60_000,
+    } as const;
+
+    function findButton(elements: any[], op: string): any {
+      let found: any;
+      const visit = (node: any) => {
+        if (!node || typeof node !== 'object') return;
+        if (node.tag === 'button' && node.behaviors?.[0]?.value?.op === op && !node.disabled) found = node;
+        for (const child of Object.values(node)) {
+          if (Array.isArray(child)) child.forEach(visit);
+          else if (child && typeof child === 'object') visit(child);
+        }
+      };
+      elements.forEach(visit);
+      return found;
+    }
+
+    it('finalizes a bare settings card, binds the delivered card and routes Confirm to the CLI', async () => {
+      const { SettingsCards } = await import('../src/feishu/SettingsCards');
+      const delivered = new Map<string, string>();
+      mockClient.im.message.patch.mockImplementation(async (request: any) => {
+        delivered.set(request.path.message_id, request.data.content); return {};
+      });
+      mockClient.im.message.create.mockImplementation(async (request: any) => {
+        const id = 'settings-card'; delivered.set(id, request.data.content); return { data: { message_id: id } };
+      });
+      const send = vi.fn(async () => true);
+      const cards = new SettingsCards({
+        ownsDevice: async () => true,
+        available: () => true,
+        send,
+        update: (cardId, elements, header) => handler.updateApprovalCard(cardId, elements, header),
+      });
+      handler.settingsCards = cards;
+      try {
+        const prepared = cards.present({ openId: 'owner', deviceId: 'device', menu: backendMenu, requestMessageId: 'req-1' })!;
+        const deliveredIds: string[] = [];
+        const ok = await handler.finalizeStreamingMessage('root', prepared.elements, undefined, 'owner', '/workspace/project', 'thread-1',
+          [{ id: 'thread-1', name: 'default', status: 'idle' }], 'thread-1', undefined, undefined, true,
+          { bare: true, onDelivered: ids => { deliveredIds.push(...ids); prepared.deliver(ids); } });
+        expect(ok).toBe(true);
+        // The placeholder card itself becomes the settings card (no duplicate).
+        expect(deliveredIds).toEqual(['root']);
+        const card = JSON.parse(delivered.get('root')!);
+        const cardText = JSON.stringify(card);
+        expect(cardText).toContain('"action":"settings"');
+        // Bare finalize: no streaming header, completion footer or thread-switch rows.
+        expect(cardText).not.toContain('Completed');
+        expect(cardText).not.toContain('🧵');
+        expect(cardText).not.toContain('switch_thread');
+
+        const confirm = findButton(card.body.elements, 'apply');
+        expect(confirm.text.content).toBe('Confirm');
+        const result = await handler.handleCardAction({ operator: { open_id: 'owner' },
+          context: { open_message_id: 'root' }, action: { value: confirm.behaviors[0].value } });
+        expect(result?.toast.type).toBe('info');
+        expect(send).toHaveBeenCalledTimes(1);
+        expect(send.mock.calls[0][0]).toBe('device');
+        const action = send.mock.calls[0][1];
+        expect(action).toMatchObject({ type: 'settings_action', operation: 'apply', value: 'claude',
+          scope: 'thread', threadId: 'thread-1', snapshotId: 'snap-1', openId: 'owner' });
+
+        await cards.resolve('device', { type: 'settings_result', messageId: action.messageId, openId: 'owner',
+          threadId: 'thread-1', snapshotId: 'snap-1', success: true, notice: 'Backend applied.', timestamp: Date.now() });
+        await vi.waitFor(() => expect(delivered.get('root')).toContain('Backend applied.'));
+        // Terminal state carries no live controls.
+        expect(findButton(JSON.parse(delivered.get('root')!).body.elements, 'apply')).toBeUndefined();
+      } finally {
+        cards.destroy();
+      }
+    });
+
+    it('rejects settings callbacks when no controller is attached or the card is unknown', async () => {
+      const event = { operator: { open_id: 'owner' }, context: { open_message_id: 'card-x' },
+        action: { value: { action: 'settings', id: 'menu-1', rev: 1, op: 'apply' } } };
+      expect((await handler.handleCardAction(event))?.toast).toMatchObject({ type: 'error' });
+      const { SettingsCards } = await import('../src/feishu/SettingsCards');
+      const cards = new SettingsCards({ ownsDevice: async () => true, available: () => true,
+        send: vi.fn(async () => true), update: vi.fn(async () => {}) });
+      handler.settingsCards = cards;
+      try {
+        expect((await handler.handleCardAction(event))?.toast).toMatchObject({ type: 'error', content: expect.stringContaining('expired') });
+      } finally {
+        cards.destroy();
+      }
+    });
+  });
 });

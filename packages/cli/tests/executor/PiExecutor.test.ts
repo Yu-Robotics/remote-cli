@@ -209,6 +209,20 @@ describe('PiExecutor', () => {
     expect(stored.id).toBe('sess-pi-1');
   });
 
+  it('uses observed native settings in catalogs rather than differing configured values', async () => {
+    await executor.listModels();
+    (executor as any).model = 'anthropic/claude-sonnet-4';
+    (executor as any).effort = 'high';
+    (executor as any).reportedModel = 'google/gemini-3-flash';
+    (executor as any).reportedEffort = 'low';
+    expect(executor.getExecutionMetadata()).toMatchObject({ model: 'google/gemini-3-flash', modelSource: 'reported',
+      reasoningEffort: 'low', effortSource: 'reported' });
+    const listed = await executor.listModels();
+    expect(listed.find(model => model.id === 'google/gemini-3-flash')?.isCurrent).toBe(true);
+    expect(listed.find(model => model.id === 'anthropic/claude-sonnet-4')?.isCurrent).not.toBe(true);
+    expect((await executor.listEfforts()).current).toBe('low');
+  });
+
   it('streams text, tools, and image input while persisting the Pi session', async () => {
     const chunks: string[] = [];
     const visible: string[] = [];
@@ -348,11 +362,36 @@ describe('PiExecutor', () => {
       type: 'set_thinking_level',
       level: 'high',
     }));
-    expect(transport.request).toHaveBeenCalledWith(expect.objectContaining({
-      type: 'set_thinking_level',
-      level: 'medium',
-    }));
+    expect(transport.request).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'set_thinking_level', level: 'medium' }));
+    expect(transport.launch.thinking).toBeUndefined();
     expect(transport.request).toHaveBeenCalledWith({ type: 'compact' }, expect.any(Number));
+  });
+
+  it('queries available thinking levels for current model and does not mark index 0 as default', async () => {
+    const models = await executor.listModels();
+    expect(models[0].isDefault).toBeUndefined();
+    expect(models[1].isDefault).toBeUndefined();
+
+    // Now set model and check isCurrent and efforts
+    await executor.setModel('anthropic/claude-sonnet-4');
+    const updatedModels = await executor.listModels();
+    expect(updatedModels.find((m) => m.id === 'anthropic/claude-sonnet-4')?.isCurrent).toBe(true);
+    expect(updatedModels.find((m) => m.id === 'google/gemini-3-flash')?.isCurrent).toBeUndefined();
+
+    const effortInfo = await executor.listEfforts();
+    expect(effortInfo.supportsReset).toBe(true);
+    expect(effortInfo.choices).toEqual([
+      { value: 'off', displayName: 'off' },
+      { value: 'minimal', displayName: 'minimal' },
+      { value: 'low', displayName: 'low' },
+      { value: 'medium', displayName: 'medium' },
+      { value: 'high', displayName: 'high' },
+    ]);
+    expect(effortInfo.default).toBeUndefined();
+
+    await executor.setEffort('high');
+    const withCurrent = await executor.listEfforts();
+    expect(withCurrent.current).toBe('high');
   });
 
   it('returns Pi session and context usage from the official RPC statistics', async () => {
@@ -444,16 +483,27 @@ describe('PiExecutor', () => {
     } finally { exited(); stop.mockRestore(); }
   });
 
-  it('applies clearModel to the running RPC immediately', async () => {
+  it('restores native model defaults by recycling without guessing the first model', async () => {
     await executor.listModels();
     await expect(executor.setModel('anthropic/claude-sonnet-4')).resolves.toMatchObject({ success: true });
+    const sessionFile = transport.launch.sessionFile;
+    transport.request.mockClear();
     await executor.clearModel();
-    expect(transport.request).toHaveBeenCalledWith(expect.objectContaining({
-      type: 'set_model',
-      provider: 'google',
-      modelId: 'gemini-3-flash',
-    }));
+    expect(transport.running).toBe(false);
+    expect(transport.request).not.toHaveBeenCalled();
     expect(transport.launch.model).toBeUndefined();
+    await executor.listModels();
+    expect(transport.launch.sessionFile).toBe(sessionFile);
+    expect(transport.request).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'set_model' }));
+  });
+
+  it('rejects a global thinking level if the selected model does not advertise it', async () => {
+    const original = transport.request.getMockImplementation()!;
+    transport.request.mockImplementation(command => command.type === 'get_available_thinking_levels'
+      ? Promise.resolve({ type: 'response', command: 'get_available_thinking_levels', success: true, data: { levels: ['off', 'low'] } })
+      : original(command));
+    await expect(executor.setEffort('high')).resolves.toMatchObject({ success: false });
+    expect(transport.request).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'set_thinking_level' }));
   });
 
   it('surfaces agent_end errors instead of an empty successful turn', async () => {

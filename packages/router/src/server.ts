@@ -1,5 +1,6 @@
 import { ApprovalCards } from './feishu/ApprovalCards';
 import { WorkerContextCards } from './feishu/WorkerContextCards';
+import { SettingsCards } from './feishu/SettingsCards';
 import { MaintenanceCards } from './maintenance/MaintenanceCards';
 import { NoticeReceipts } from './maintenance/NoticeReceipts';
 import { DeviceAuth } from './files/DeviceAuth';
@@ -92,6 +93,8 @@ export class RouterServer {
   private approvalCards: ApprovalCards;
   private readonly workerContextCards: WorkerContextCards;
   private readonly workerContextConnections = new Map<string, () => boolean>();
+  private readonly settingsCards: SettingsCards;
+  private readonly settingsConnections = new Map<string, () => boolean>();
   private readonly maintenanceCards: MaintenanceCards;
   private readonly maintenanceConnections = new Map<string, { updateNotice: boolean; current: () => boolean }>();
   private cleanupInterval: NodeJS.Timeout | null = null;
@@ -185,6 +188,13 @@ export class RouterServer {
       refresh: (cardId, rootId) => this.feishuLongConnHandler.refreshWorkerContextCard(cardId, rootId),
     });
     this.feishuLongConnHandler.workerContexts = this.workerContextCards;
+    this.settingsCards = new SettingsCards({
+      ownsDevice: async (openId, deviceId) => (await this.bindingManager.getDeviceBinding(deviceId))?.openId === openId,
+      available: deviceId => this.settingsConnections.get(deviceId)?.() === true,
+      send: (deviceId, message) => this.connectionHub.sendToDevice(deviceId, message),
+      update: (cardId, elements, header) => this.feishuLongConnHandler.updateApprovalCard(cardId, elements, header),
+    });
+    this.feishuLongConnHandler.settingsCards = this.settingsCards;
     this.maintenanceCards = new MaintenanceCards(new NoticeReceipts(path.join(
       path.dirname(config.getConfigPath() || path.join(os.homedir(), '.remote-cli-router', 'config.json')), 'notice-receipts.json')), {
       owner: async deviceId => (await this.bindingManager.getDeviceBinding(deviceId))?.openId,
@@ -426,6 +436,7 @@ export class RouterServer {
       let delegationProgressEnabled = false;
       let delegationProgressTextEnabled = false;
       let workerContextResetEnabled = false;
+      let settingsCardsEnabled = false;
       let streamingContextEnabled = false;
       let activityProgressEnabled = false;
       let updateNoticeEnabled = false;
@@ -482,6 +493,11 @@ export class RouterServer {
 
           if (message.type === 'worker_context_reset_result') {
             if (workerContextResetEnabled && deviceId) await this.workerContextCards.resolve(deviceId, message);
+            return;
+          }
+
+          if (message.type === 'settings_result') {
+            if (settingsCardsEnabled && deviceId) await this.settingsCards.resolve(deviceId, message);
             return;
           }
           if (message.type === 'approval_request' || message.type === 'approval_resolved') {
@@ -585,6 +601,7 @@ export class RouterServer {
 
                 this.approvalCards.disconnect(deviceId);
                 this.maintenanceCards.disconnect(deviceId);
+                this.settingsCards.disconnect(deviceId);
                 if (message.data.capabilities?.queueStarted === true) {
                   this.connectionHub.registerConnection(deviceId, ws, { queueStarted: true });
                 } else {
@@ -611,6 +628,12 @@ export class RouterServer {
                 if (workerContextResetEnabled) this.workerContextConnections.set(deviceId,
                   () => ws.readyState === WebSocket.OPEN && this.connectionHub.isCurrentConnection(requestedId, ws));
                 else this.workerContextConnections.delete(deviceId);
+                // Settings cards are negotiated only when the CLI requests them;
+                // old peers keep plain text output and never see the capability.
+                settingsCardsEnabled = message.data.capabilities?.settingsCards === true;
+                if (settingsCardsEnabled) this.settingsConnections.set(deviceId,
+                  () => ws.readyState === WebSocket.OPEN && this.connectionHub.isCurrentConnection(requestedId, ws));
+                else this.settingsConnections.delete(deviceId);
                 // Send confirmation with version info for client-side version check
                 ws.send(JSON.stringify({
                   type: MessageType.BINDING_CONFIRM,
@@ -620,7 +643,7 @@ export class RouterServer {
                     success: true,
                     routerVersion: ROUTER_VERSION,
                     minCliVersion: MIN_SUPPORTED_CLI_VERSION,
-                    ...((taskRecoveryEnabled || approvalCardsEnabled || delegationProgressEnabled || streamingContextEnabled || activityProgressEnabled || filesEnabled || updateNoticeEnabled || subscriptionInspectionEnabled) ? { capabilities: {
+                    ...((taskRecoveryEnabled || approvalCardsEnabled || delegationProgressEnabled || streamingContextEnabled || activityProgressEnabled || filesEnabled || updateNoticeEnabled || subscriptionInspectionEnabled || settingsCardsEnabled) ? { capabilities: {
                       ...(activityProgressEnabled ? { activityProgress: true } : {}),
                       ...(updateNoticeEnabled ? { updateNotice: true } : {}),
                       ...(subscriptionInspectionEnabled ? { subscriptionInspection: true } : {}),
@@ -632,6 +655,7 @@ export class RouterServer {
                       ...(delegationProgressTextEnabled ? { delegationProgressText: true } : {}),
                       ...(workerContextResetEnabled ? { workerContextReset: true } : {}),
                       ...(streamingContextEnabled ? { streamingContext: true } : {}),
+                      ...(settingsCardsEnabled ? { settingsCards: true } : {}),
                     } } : {}),
                   }
                 }));
@@ -668,6 +692,12 @@ export class RouterServer {
               const responseThreads: ThreadSummary[] | undefined = message.threads || message.data?.threads;
               const queueConfirmation: QueueConfirmationInfo | undefined = message.queueConfirmation || message.data?.queueConfirmation;
               const executionMetadata = parseExecutionMetadata(message.executionMetadata ?? message.data?.executionMetadata);
+              // Interactive settings menus only from a capable CLI on this connection;
+              // the menu is bound to the original streaming session, never to a
+              // user-supplied thread.
+              const settingsMenu = settingsCardsEnabled && deviceId && !queueConfirmation
+                ? (message.settingsMenu ?? message.data?.settingsMenu)
+                : undefined;
 
               // If CLI reported a threadId and there is a streaming session for this message,
               // ensure the cardThreadMap is up to date (in case the CLI-reported threadId differs).
@@ -710,6 +740,7 @@ export class RouterServer {
                     cwd,
                     queueConfirmation,
                     executionMetadata,
+                    settingsMenu,
                   );
                 } else {
                   // No streaming session found - session should have been created when command was sent
@@ -854,6 +885,8 @@ export class RouterServer {
           // Clean up any streaming sessions for this device
           this.approvalCards.disconnect(deviceId);
           this.maintenanceCards.disconnect(deviceId);
+          this.settingsCards.disconnect(deviceId);
+          this.settingsConnections.delete(deviceId);
           this.maintenanceConnections.delete(deviceId);
           this.workerContextConnections.delete(deviceId);
           this.cleanupStreamingSessionsForDevice(deviceId);
@@ -1762,7 +1795,7 @@ export class RouterServer {
   /**
    * Finalize streaming message
    */
-  private async finalizeStreamingMessage(messageId: string, success: boolean, output?: string, error?: string, sessionAbbr?: string, cwd?: string, queueConfirmation?: QueueConfirmationInfo, executionMetadata?: ExecutionMetadata): Promise<void> {
+  private async finalizeStreamingMessage(messageId: string, success: boolean, output?: string, error?: string, sessionAbbr?: string, cwd?: string, queueConfirmation?: QueueConfirmationInfo, executionMetadata?: ExecutionMetadata, settingsMenu?: unknown): Promise<void> {
     const streamData = this.streamingMessages.get(messageId);
     if (!streamData) return;
 
@@ -1786,7 +1819,34 @@ export class RouterServer {
         streamData.elements.push(createMarkdownElement(output));
       }
 
-      if (success) {
+      // A capable CLI's settings menu replaces the placeholder with a dedicated
+      // interactive card bound to the original user/device/thread/request. The
+      // text output is for incapable peers or delivery failure only: including
+      // its complete catalog here would defeat pagination and its node/byte budget.
+      const prepared = settingsMenu && success
+        ? this.settingsCards.present({ openId: streamData.openId, deviceId: streamData.deviceId, menu: settingsMenu, requestMessageId: messageId, expectedThreadId: streamData.threadId })
+        : undefined;
+      if (prepared) {
+        const finalized = await this.feishuLongConnHandler.finalizeStreamingMessage(
+          feishuMessageId,
+          prepared.elements,
+          undefined,
+          openId,
+          cwd,
+          streamData.threadName,
+          undefined,
+          streamData.threadId,
+          undefined,
+          undefined,
+          true,
+          { bare: true, onDelivered: cardIds => prepared.deliver(cardIds) }
+        );
+        if (!finalized) {
+          prepared.discard();
+          const delivered = await this.feishuLongConnHandler.sendMessage(openId, output || '⚙️ Settings are unavailable as a card. Use the text command.');
+          if (delivered === false) throw new Error('Failed to deliver settings result');
+        }
+      } else if (success) {
         const finalized = await this.feishuLongConnHandler.finalizeStreamingMessage(
           feishuMessageId,
           streamData.elements,
@@ -1926,6 +1986,8 @@ export class RouterServer {
     this.approvalCards.destroy();
     this.workerContextCards.destroy();
     this.workerContextConnections.clear();
+    this.settingsCards.destroy();
+    this.settingsConnections.clear();
     this.maintenanceCards.destroy();
     this.maintenanceConnections.clear();
     await this.fileTransfers.destroy();

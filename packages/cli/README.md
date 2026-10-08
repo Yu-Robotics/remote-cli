@@ -171,10 +171,10 @@ Linux users upgrading from version 1.6.23 or earlier should run `remote-cli serv
 | `/new` | Alias for `/clear`; start a fresh conversation in this thread |
 | `/compact` | Compress history to save tokens |
 | `/cd <dir>` | Change directory; a different directory starts fresh conversations for this thread |
-| `/model [name]` | List models for the active backend or set this thread's model |
-| `/effort [auto|level]` | Show or set Codex/AGY/OpenCode/Kimi/ZCode/Pi reasoning effort |
+| `/model [name]` | Open native model settings, or set the active backend model with a text argument |
+| `/effort [auto|level]` | Open native effort settings, or set/clear the active backend effort with a text argument |
 | `/sandbox [on/off/read-only/default]` | Configure the current Codex or Claude Code thread sandbox, directory grants, and networking |
-| `/backend` | List backends and show the current thread's effective backend |
+| `/backend` | Open backend settings; Current thread is the default and Confirm applies the selection |
 | `/delegation [on|off]` | Inspect or enable delegation between installed agent backends in this thread |
 | `/backend <index>` | Switch all threads and clear per-thread backend overrides |
 | `/backend <index> @` | Switch only the current thread |
@@ -182,6 +182,8 @@ Linux users upgrading from version 1.6.23 or earlier should run `remote-cli serv
 | `/bind <code>` | Bind a new device |
 | `/unbind` | Unbind all devices |
 | `/device` | List and switch between bound devices |
+
+CLI and Router 1.6.152 add standalone settings cards. `/backend` lists all eight stable backend choices, disables missing installations and applies only after Confirm; Current thread is the default and All threads on this device is opt-in. `/model` and `/effort` submit native options immediately, and show applied state only after a saved-setting acknowledgement. Their target-backend selector configures future worker launches without switching the coordinator. Busy work, expired cards and changed settings require refresh; older peers and parameterized text commands retain their existing behavior. See [Model and Reasoning Effort](../../README.md#model-and-reasoning-effort).
 
 ### Threads & Machines
 

@@ -15,6 +15,7 @@ import type {
 } from './AcpTypes';
 
 const SIGKILL_GRACE_MS = 3_000;
+const CONTROL_REQUEST_TIMEOUT_MS = 10_000;
 
 export interface AcpToolCallUpdate {
   toolCallId: string;
@@ -40,6 +41,7 @@ export interface AcpEventCallbacks {
 interface PendingRequest {
   resolve: (result: unknown) => void;
   reject: (error: Error) => void;
+  timer?: ReturnType<typeof setTimeout>;
 }
 
 export interface AcpTransport {
@@ -166,8 +168,19 @@ export class AcpClient implements AcpTransport {
   protected sendRequest(method: string, params: unknown): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const id = this.nextId++;
-      this.pendingRequests.set(id, { resolve, reject });
-      this.writeLine({ jsonrpc: '2.0', id, method, params } satisfies AcpJsonRpcRequest);
+      // Inference may wait for tools or human input. Only control RPCs have
+      // this deadline, so settings cannot hold command admission indefinitely.
+      const timer = method === 'session/prompt' ? undefined : setTimeout(() => {
+        this.pendingRequests.delete(id);
+        reject(new Error(`ACP ${method} timed out after ${CONTROL_REQUEST_TIMEOUT_MS}ms`));
+      }, CONTROL_REQUEST_TIMEOUT_MS);
+      this.pendingRequests.set(id, { resolve, reject, timer });
+      try { this.writeLine({ jsonrpc: '2.0', id, method, params } satisfies AcpJsonRpcRequest); }
+      catch (error) {
+        if (timer) clearTimeout(timer);
+        this.pendingRequests.delete(id);
+        reject(error);
+      }
     });
   }
 
@@ -214,6 +227,7 @@ export class AcpClient implements AcpTransport {
     const pending = this.pendingRequests.get(message.id);
     if (!pending) return;
     this.pendingRequests.delete(message.id);
+    if (pending.timer) clearTimeout(pending.timer);
     if ('error' in message) {
       const data = message.error.data === undefined ? '' : ` (${JSON.stringify(message.error.data)})`;
       pending.reject(new Error(`ACP error ${message.error.code}: ${message.error.message}${data}`));
@@ -290,7 +304,10 @@ export class AcpClient implements AcpTransport {
   }
 
   private rejectAllPending(error: Error): void {
-    for (const pending of this.pendingRequests.values()) pending.reject(error);
+    for (const pending of this.pendingRequests.values()) {
+      if (pending.timer) clearTimeout(pending.timer);
+      pending.reject(error);
+    }
     this.pendingRequests.clear();
   }
 

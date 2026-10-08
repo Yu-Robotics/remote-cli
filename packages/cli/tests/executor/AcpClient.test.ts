@@ -115,6 +115,36 @@ describe('AcpClient', () => {
     await expect(pending).resolves.toEqual({ stopReason: 'end_turn' });
   });
 
+  it('times out control requests, ignores late replies, and allows later requests', async () => {
+    vi.useFakeTimers();
+    try {
+      const pending = client.setConfigOption('ses-1', 'model', 'model-a');
+      const sent = request(fake.lines, 'session/set_config_option');
+      const failed = expect(pending).rejects.toThrow('timed out');
+      await vi.advanceTimersByTimeAsync(10_001);
+      await failed;
+      expect((client as any).pendingRequests.size).toBe(0);
+      fake.process.push({ jsonrpc: '2.0', id: sent.id, result: { configOptions: [] } });
+      const next = client.setConfigOption('ses-1', 'effort', 'low');
+      const nextRequest = JSON.parse(fake.lines[fake.lines.length - 1]);
+      fake.process.push({ jsonrpc: '2.0', id: nextRequest.id, result: { configOptions: [] } });
+      await expect(next).resolves.toMatchObject({ configOptions: [] });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('does not charge the control deadline to a long inference prompt', async () => {
+    vi.useFakeTimers();
+    try {
+      const pending = client.prompt('ses-1', [{ type: 'text', text: 'inspect' }]);
+      const sent = request(fake.lines, 'session/prompt');
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect((client as any).pendingRequests.size).toBe(1);
+      fake.process.push({ jsonrpc: '2.0', id: sent.id, result: { stopReason: 'end_turn' } });
+      await expect(pending).resolves.toEqual({ stopReason: 'end_turn' });
+    } finally { vi.useRealTimers(); }
+  });
+
   it('routes text, thought, tool, and config update notifications', async () => {
     const updates = [
       { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'answer' } },
