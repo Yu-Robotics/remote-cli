@@ -10,6 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.153] - 2026-10-09
+
+### Changed
+- Keep real Git suites in isolated processes while allowing up to two Git forks on hosts with at least four available CPUs and one to four lightweight threads. Reuse only pristine test fixture templates, copying repository metadata and files into independent owned directories for every test. The publish lifecycle still runs the entire suite without changing production Git checks or ordinary deadlines.
+- Fill Codex shell-call labels for absent and native unknown command actions with bounded fixed operation descriptions. Simple allowlisted programs receive labels such as Run npm command; compound or unrecognized commands stay generic. Preserve native read/search/list descriptions and every operation in compound action sets. Never copy shell arguments, complete paths, execution output, or turn-level reasoning into fallback headings, and do not claim model-authored purpose summaries.
+- Forward optional public native titles and allow later action metadata to enrich a pending tool row before its first result. Suppress duplicate starts after a result so repeated completion updates retain the original invocation. Reuse existing tool metadata, compact heading limits, asynchronous status updates, and card-element accounting without a wire-version change or extra model call.
+
 ## [1.6.152] - 2026-10-08
 
 ### Added

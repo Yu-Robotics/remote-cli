@@ -871,8 +871,9 @@ describe('CodexAppServerExecutor', () => {
     [[{ type: 'read', path: '/project/src/config.ts', name: 'config.ts' }], 'Read config.ts'],
     [[{ type: 'search', path: '/project', query: 'synthetic-private-query' }], 'Search files'],
     [[{ type: 'listFiles', path: '/project' }], 'List directory'],
-    [[{ type: 'unknown', command: 'npm test' }], undefined],
-    [undefined, undefined],
+    [[{ type: 'unknown', command: 'npm test' }], 'Run npm command'],
+    [[{ type: 'unknown', command: 'git status --short' }], 'Run Git command'],
+    [undefined, 'Run shell command'],
   ])('forwards structured command labels and keeps one call through delayed completion (%j)', async (commandActions, description) => {
     const onToolUse = vi.fn();
     const onToolResult = vi.fn();
@@ -914,6 +915,44 @@ describe('CodexAppServerExecutor', () => {
     await running;
     expect(onToolUse).toHaveBeenCalledWith({ id: 'completed-label', name: 'Bash',
       input: { command: 'synthetic-private-command' }, description: 'Read config.ts' });
+  });
+
+  it('enriches the pending call when native actions arrive later, without another row after a result', async () => {
+    const onToolUse = vi.fn(), onToolResult = vi.fn();
+    const running = executor.execute('inspect', { onToolUse, onToolResult });
+    await vi.waitFor(() => expect(transport.requests.some(request => request.method === 'turn/start')).toBe(true));
+    const emit = (method: string, item: any) => transport.emit({ method,
+      params: { threadId: 'codex-thread-1', turnId: 'turn-1', item } });
+    const item = { type: 'commandExecution', id: 'late-label', command: 'custom-program' };
+    emit('item/started', item);
+    expect(onToolUse.mock.calls[0][0].description).toBe('Run shell command');
+    emit('item/completed', { ...item, commandActions: [{ type: 'read', name: 'config.ts' }],
+      status: 'completed', exitCode: 0, aggregatedOutput: 'ok' });
+    expect(onToolUse.mock.calls.map(([tool]) => tool.description)).toEqual(['Run shell command', 'Read config.ts']);
+    expect(onToolUse.mock.calls.map(([tool]) => tool.id)).toEqual(['late-label', 'late-label']);
+    emit('item/completed', { ...item, commandActions: [{ type: 'search' }], status: 'failed', exitCode: 1 });
+    expect(onToolUse).toHaveBeenCalledTimes(2);
+    expect(onToolResult).toHaveBeenCalledTimes(2);
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await running;
+  });
+
+  it.each([undefined, 'Inspect configuration'])('preserves native labels through sparse updates (title=%s)', async title => {
+    const onToolUse = vi.fn();
+    const running = executor.execute('inspect', { onToolUse });
+    await vi.waitFor(() => expect(transport.requests.some(request => request.method === 'turn/start')).toBe(true));
+    const emit = (method: string, item: any) => transport.emit({ method,
+      params: { threadId: 'codex-thread-1', turnId: 'turn-1', item } });
+    const item = { type: 'commandExecution', id: 'native-title', command: 'git show HEAD:config.ts',
+      commandActions: [{ type: 'read', name: 'config.ts' }], title };
+    emit('item/started', item);
+    emit('item/started', { type: 'commandExecution', id: item.id, command: item.command });
+    emit('item/completed', { type: 'commandExecution', id: item.id, command: item.command, status: 'completed', exitCode: 0 });
+    expect(onToolUse).toHaveBeenCalledOnce();
+    expect(onToolUse.mock.calls[0][0]).toMatchObject({ description: title ?? 'Read config.ts' });
+    expect(onToolUse.mock.calls[0][0].title).toBe(title);
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await running;
   });
 
   it('maps tools and context-window errors without unsafe retry signals after side effects', async () => {

@@ -20,6 +20,8 @@ Router 1.6.117 and newer explicitly label standalone background-task notificatio
 
 ## Public Activity
 
+From CLI 1.6.153, Codex shell calls no longer lose their label when native command actions are absent or unknown. Native reads, searches, and directory listings remain preferred. Other calls use fixed operation labels such as `Run npm command` or `Run Git command` for simple allowlisted programs, and `Run shell command` for compound or unrecognized commands. These are deterministic operation labels, not model-authored purpose summaries: installed Codex 0.160.0 command items have no per-call description field. Arguments, full paths, output, and execution-wide reasoning are never copied into these fallback labels. Late native action metadata can enrich a pending row before its first result; repeated results retain one row. Existing description fields, heading limits, and card-node counts are unchanged; upgrade the CLI, with no new Router capability required.
+
 Router 1.6.145 combines each foreground tool call and its matching result into one collapsed row, retaining input, output, and diff previews. Independent calls, workers, and approvals remain separate. This uses the existing CLI protocol; the client does not need a new capability. See [Code Change Previews](../../README.md#code-change-previews).
 
 Router 1.6.146 gives Bash and other foreground tools one compact heading with a gray success dot, pending hourglass, or gray failure cross, plus the tool name and an optional public description or file basename. Full tool IDs and explicit status labels remain inside the expanded details. Raw commands are not fallback headings; the existing CLI protocol is unchanged.
@@ -296,8 +298,11 @@ fail admission; reconcile those rules before delegating.
 From CLI 1.6.151, checkpoint index queries are combined and identical trees are
 audited once within a capture. Both working-file passes and source HEAD/index
 checks remain; no state is cached across tasks and Git deadlines are unchanged.
-CLI tests run real Git fixture suites in one isolated process alongside at most
-two lightweight test threads, avoiding CPU-count-driven Git subprocess contention.
+From CLI 1.6.153, real Git fixture suites use at most two isolated processes
+(one on hosts with fewer than four available CPUs), alongside one to four
+lightweight test threads. Pristine test repositories are copied into independently
+owned directories instead of rebuilt for every case. Publish still runs the full
+suite; ordinary test deadlines and production Git safety checks are unchanged.
 
 From CLI 1.6.140, managed Git preparation, repository-lock waits, and artifact
 collection are awaited separately from native startup/stop deadlines. Slots and

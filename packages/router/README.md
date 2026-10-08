@@ -6,6 +6,8 @@ Backend executable discovery is local-client behavior. CLI 1.6.119 supplements L
 
 ## Public Activity
 
+From CLI 1.6.153, Codex shell calls no longer lose their label when native command actions are absent or unknown. Native reads, searches, and directory listings remain preferred. Other calls use fixed operation labels such as `Run npm command` or `Run Git command` for simple allowlisted programs, and `Run shell command` for compound or unrecognized commands. These are deterministic operation labels, not model-authored purpose summaries: installed Codex 0.160.0 command items have no per-call description field. Arguments, full paths, output, and execution-wide reasoning are never copied into these fallback labels. Late native action metadata can enrich a pending row before its first result; repeated results retain one row. Existing description fields, heading limits, and card-node counts are unchanged; upgrade the CLI, with no new Router capability required.
+
 From Router 1.6.145, a foreground tool result updates its original collapsed tool row rather than adding a second disclosure. Input, output, and per-file diff previews remain inside; later text and worker slots stay stable. Unknown IDs and orphan results are not guessed into another call. Existing CLI peers are compatible, and worker cards and approvals are unchanged. See [Code Change Previews](../../README.md#code-change-previews).
 
 From Router 1.6.146, Bash and other foreground tools share a compact heading with a gray success dot, pending hourglass, or gray failure cross, plus the tool name and an optional public description or file basename. Full tool IDs and explicit status labels remain in the expanded details. Raw commands are not fallback headings. Recursive card-node accounting and cross-page replacement continue to preserve activity tails and completion controls.
@@ -124,8 +126,11 @@ fail admission; reconcile those rules before delegating.
 From CLI 1.6.151, checkpoint index queries are combined and identical trees are
 audited once within a capture. Both working-file passes and source HEAD/index
 checks remain; no state is cached across tasks and Git deadlines are unchanged.
-CLI tests run real Git fixture suites in one isolated process alongside at most
-two lightweight test threads, avoiding CPU-count-driven Git subprocess contention.
+From CLI 1.6.153, real Git fixture suites use at most two isolated processes
+(one on hosts with fewer than four available CPUs), alongside one to four
+lightweight test threads. Pristine test repositories are copied into independently
+owned directories instead of rebuilt for every case. Publish still runs the full
+suite; ordinary test deadlines and production Git safety checks are unchanged.
 
 From CLI 1.6.140, managed Git preparation, repository-lock waits, and artifact
 collection are awaited separately from native startup/stop deadlines. Slots and

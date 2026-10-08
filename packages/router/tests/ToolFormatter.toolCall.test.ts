@@ -12,6 +12,7 @@ function countTags(value: any): number {
 
 describe('single tool-call disclosure', () => {
   it.each(['Inspect working changes', 'Read config.ts', 'Search files', 'List directory',
+    'Run npm command', 'Run Git command', 'Run shell command', 'Search files / Run shell command',
     'Read aaaaaaaa… / Read b.ts / Search files / +1 more'])(
     'keeps native command descriptions in the existing heading without adding nodes (%s)', description => {
       const tool = { name: 'Bash', id: 'native-command', input: { command: 'synthetic-private-command' }, description };

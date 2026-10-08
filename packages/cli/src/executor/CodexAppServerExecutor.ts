@@ -12,7 +12,7 @@ import { CodexSandbox } from './CodexSandbox';
 import type { CodexSandboxConfig } from '../types/config';
 import { DELEGATION_TOOLS, delegationMcpConfig, sameConnection, type DelegationConnection } from '../delegation/contract';
 import { assertWorkingDirectoryExists } from '../utils/WorkingDirectory';
-import { ActivityTracker, extractTodoPlan } from './Activity';
+import { ActivityTracker, extractTodoPlan, sanitizeActivityText } from './Activity';
 import { describeCodexCommandActions } from './CodexCommandActions';
 import { codexWebSearchUse, codexWebSearchResult } from './CodexWebSearch';
 
@@ -52,7 +52,7 @@ interface ActiveTurn {
   error?: string;
   errorCode?: string;
   sideEffectsStarted: boolean;
-  emittedTools: Set<string>;
+  emittedTools: Map<string, { title?: string; description?: string; fallback?: boolean; completed?: boolean }>;
   itemPhases: Map<string, string>;
   temporaryFiles: string[];
   timeoutTimer?: ReturnType<typeof setTimeout>;
@@ -261,7 +261,7 @@ export class CodexAppServerExecutor implements IExecutor {
           turnId: null,
           output: [],
           sideEffectsStarted: false,
-          emittedTools: new Set(),
+          emittedTools: new Map(),
           itemPhases: new Map(),
           temporaryFiles,
           inactivityTimeoutMs: options.inactivityTimeout,
@@ -1024,8 +1024,7 @@ export class CodexAppServerExecutor implements IExecutor {
     switch (item.type) {
       case 'commandExecution':
         active.sideEffectsStarted = true;
-        this.emitToolUse(active, id, 'Bash', { command: item.command ?? '' }, item.title || item.description,
-          describeCodexCommandActions(item.commandActions));
+        this.emitCommandUse(active, item);
         break;
       case 'fileChange':
         active.sideEffectsStarted = true;
@@ -1059,8 +1058,7 @@ export class CodexAppServerExecutor implements IExecutor {
 
     switch (item.type) {
       case 'commandExecution':
-        this.emitToolUse(active, id, 'Bash', { command: item.command ?? '' }, item.title || item.description,
-          describeCodexCommandActions(item.commandActions));
+        this.emitCommandUse(active, item);
         active.options.onToolResult?.({
           tool_use_id: id,
           content: item.aggregatedOutput ?? '',
@@ -1119,6 +1117,8 @@ export class CodexAppServerExecutor implements IExecutor {
       default:
         break;
     }
+    const tool = active.emittedTools.get(id);
+    if (tool) tool.completed = true;
   }
 
   private handleTurnCompleted(turn: any): void {
@@ -1146,11 +1146,29 @@ export class CodexAppServerExecutor implements IExecutor {
     this.completeActive({ success: false, error });
   }
 
+  private emitCommandUse(active: ActiveTurn, item: any): void {
+    const explicit = [item.description, item.title].find(value => typeof value === 'string' && value.trim());
+    const publicLabel = typeof explicit === 'string' ? sanitizeActivityText(explicit) : undefined;
+    const actionsLabel = describeCodexCommandActions(item.commandActions);
+    const hasNativeAction = actionsLabel !== undefined && item.commandActions.some((action: any) =>
+      ['read', 'search', 'listFiles'].includes(action?.type));
+    const description = publicLabel || actionsLabel || describeCodexCommandActions(undefined, item.command ?? '')!;
+    this.emitToolUse(active, item.id, 'Bash', { command: item.command ?? '' }, publicLabel, description,
+      !publicLabel && !hasNativeAction);
+  }
+
   private emitToolUse(active: ActiveTurn, id: string, name: string, input: Record<string, any>, title?: string,
-    description?: string): void {
-    if (active.emittedTools.has(id)) return;
-    active.emittedTools.add(id);
-    active.options.onToolUse?.({ id, name, input, ...(description ? { description } : {}) });
+    description?: string, fallback = false): void {
+    const previous = active.emittedTools.get(id);
+    // A late completion may refresh its result, but another use after a result
+    // would be interpreted by the Router as a new invocation of the same ID.
+    if (previous?.completed) return;
+    title = title || previous?.title;
+    description = !description || (fallback && previous?.description && !previous.fallback)
+      ? previous?.description : description;
+    if (previous && previous.title === title && previous.description === description) return;
+    active.emittedTools.set(id, { title, description, fallback });
+    active.options.onToolUse?.({ id, name, input, ...(title ? { title } : {}), ...(description ? { description } : {}) });
     this.activityTracker.emitTool(name, input, description ?? title);
   }
 
