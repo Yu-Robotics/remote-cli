@@ -2,12 +2,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
+import { setTimeout as realDelay } from 'node:timers/promises';
 import { BackendRegistry } from '../../src/delegation/BackendRegistry';
 import { DELEGATION_LIMITS, DelegationManager, type DelegationParent, type DelegatedTaskResult } from '../../src/delegation/DelegationManager';
 import { runGit } from '../../src/delegation/GitCheckpoint';
 import type { ExecuteResult, IExecutor } from '../../src/executor/IExecutor';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 import { gitFixture } from './gitFixture';
+
+// Git and filesystem phases still use wall-clock I/O while worker deadlines are virtual.
+const PHASE_WAIT_OPTIONS = { timeout: 10_000 };
 
 function deferred() {
   let resolve!: () => void;
@@ -58,6 +62,14 @@ describe('managed Git phases and native worker deadlines', { timeout: 30_000 }, 
   it.each(['baseline', 'prepare'] as const)('awaits slow %s without charging native startup or releasing its slot', async phase => {
     const gate = deferred();
     let entered = false;
+    if (phase === 'prepare') {
+      const baseline = manager.workspaceManager.baseline.bind(manager.workspaceManager);
+      vi.spyOn(manager.workspaceManager, 'baseline').mockImplementation(async (...args) => {
+        // Real Git setup can exceed waitFor's default one-second observation window.
+        await realDelay(1_100);
+        return baseline(...args);
+      });
+    }
     const original = manager.workspaceManager[phase].bind(manager.workspaceManager);
     vi.spyOn(manager.workspaceManager, phase).mockImplementation(async (...args: any[]) => {
       entered = true;
@@ -68,7 +80,7 @@ describe('managed Git phases and native worker deadlines', { timeout: 30_000 }, 
     vi.useFakeTimers();
     const starting = start(scope);
     try {
-      await vi.waitFor(() => expect(entered).toBe(true));
+      await vi.waitFor(() => expect(entered).toBe(true), PHASE_WAIT_OPTIONS);
       await vi.advanceTimersByTimeAsync(DELEGATION_LIMITS.storageTimeoutMs + 1);
       expect(workers).toHaveLength(0);
       expect((manager as any).running).toBe(1);
@@ -93,10 +105,11 @@ describe('managed Git phases and native worker deadlines', { timeout: 30_000 }, 
     const scope = manager.begin(parent);
     vi.useFakeTimers();
     const starting = start(scope);
-    await vi.waitFor(() => expect(prepare).toHaveBeenCalledOnce());
     let closed = false;
-    const closing = scope.close().then(() => { closed = true; });
+    let closing: Promise<void> | undefined;
     try {
+      await vi.waitFor(() => expect(prepare).toHaveBeenCalledOnce(), PHASE_WAIT_OPTIONS);
+      closing = scope.close().then(() => { closed = true; });
       await vi.advanceTimersByTimeAsync(DELEGATION_LIMITS.storageTimeoutMs + 1);
       expect(closed).toBe(false);
       expect((manager as any).running).toBe(1);
@@ -125,7 +138,7 @@ describe('managed Git phases and native worker deadlines', { timeout: 30_000 }, 
     let response: DelegatedTaskResult | undefined;
     const starting = start(scope).then(value => { response = value; returnedAt = Date.now(); return value; });
     try {
-      await vi.waitFor(() => expect(entered).toBe(true));
+      await vi.waitFor(() => expect(entered).toBe(true), PHASE_WAIT_OPTIONS);
       await vi.advanceTimersByTimeAsync(31_000);
       expect(returnedAt).toBeDefined();
       expect(returnedAt! - invokedAt).toBeLessThan(25_000);
@@ -193,7 +206,7 @@ describe('managed Git phases and native worker deadlines', { timeout: 30_000 }, 
     vi.useFakeTimers();
     const starting = Array.from({ length: 5 }, (_, index) => start(scope, `queued-prepare-${index}`));
     try {
-      await vi.waitFor(() => expect(prepare).toHaveBeenCalledTimes(5), { timeout: 3000 });
+      await vi.waitFor(() => expect(prepare).toHaveBeenCalledTimes(5), PHASE_WAIT_OPTIONS);
       const queued = await start(scope, 'sixth');
       expect(queued.state).toBe('queued');
       await vi.advanceTimersByTimeAsync(DELEGATION_LIMITS.storageTimeoutMs + 1);
@@ -226,9 +239,10 @@ describe('managed Git phases and native worker deadlines', { timeout: 30_000 }, 
     });
     vi.useFakeTimers();
     const starting = start(scope, 'cancelled-warm-lane');
-    await vi.waitFor(() => expect(baseline).toHaveBeenCalledOnce());
-    const closing = scope.close();
+    let closing: Promise<void> | undefined;
     try {
+      await vi.waitFor(() => expect(baseline).toHaveBeenCalledOnce(), PHASE_WAIT_OPTIONS);
+      closing = scope.close();
       await vi.advanceTimersByTimeAsync(DELEGATION_LIMITS.storageTimeoutMs + 1);
       expect((manager as any).running).toBe(1);
     } finally { vi.useRealTimers(); gate.resolve(); }
@@ -276,7 +290,7 @@ describe('managed Git phases and native worker deadlines', { timeout: 30_000 }, 
     let settled = false;
     const finishing = result(scope, task.taskId).then(value => { settled = true; return value; });
     try {
-      await vi.waitFor(() => expect(collect).toHaveBeenCalledOnce());
+      await vi.waitFor(() => expect(collect).toHaveBeenCalledOnce(), PHASE_WAIT_OPTIONS);
       expect(workers[0].executor.waitForExit).toHaveBeenCalledOnce();
       await vi.advanceTimersByTimeAsync(DELEGATION_LIMITS.storageTimeoutMs + 1);
       expect(settled).toBe(false);
@@ -324,7 +338,7 @@ describe('managed Git phases and native worker deadlines', { timeout: 30_000 }, 
     vi.useFakeTimers();
     try {
       workers[0].finish({ success: true });
-      await vi.waitFor(() => expect(exit).toHaveBeenCalledOnce());
+      await vi.waitFor(() => expect(exit).toHaveBeenCalledOnce(), PHASE_WAIT_OPTIONS);
       await vi.advanceTimersByTimeAsync(DELEGATION_LIMITS.storageTimeoutMs + 1);
       expect(await result(scope, task.taskId)).toMatchObject({ state: 'interrupted' });
       expect(collect).not.toHaveBeenCalled();
