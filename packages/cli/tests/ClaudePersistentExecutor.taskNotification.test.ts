@@ -52,6 +52,7 @@ describe('ClaudePersistentExecutor - task_notification', () => {
   };
 
   beforeEach(() => {
+    vi.useFakeTimers();
     vi.clearAllMocks();
 
     vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -83,13 +84,20 @@ describe('ClaudePersistentExecutor - task_notification', () => {
     // Simulate process exit so destroy() doesn't hang waiting for 'close'
     mockChildProcess.emit('exit', 0, null);
     mockChildProcess.emit('close', 0, null);
-    await executor.destroy();
-    vi.clearAllMocks();
+    try {
+      const cleanup = executor.destroy();
+      void cleanup.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(9_000);
+      await cleanup;
+    } finally {
+      vi.useRealTimers();
+      vi.clearAllMocks();
+    }
   });
 
   /**
-   * Start the persistent process for the given command, wait for the command
-   * to become current (startProcess has a 1000ms liveness timer before
+   * Start the persistent process for the given command and advance until it
+   * becomes current (startProcess has a 1000ms liveness timer before
    * processQueue shifts the command — messages emitted earlier would be
    * dropped), then emit the session init message.
    *
@@ -98,14 +106,21 @@ describe('ClaudePersistentExecutor - task_notification', () => {
    * flatten to the command result and deadlock the test.
    */
   const startProcessAndInit = async (executePromise: Promise<unknown>) => {
-    void executePromise; // Document that the caller owns the promise
-    await new Promise(resolve => setTimeout(resolve, 1500));
+    // Observe cleanup rejection while leaving the original promise owned by the caller.
+    void executePromise.catch(() => undefined);
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(mockChildProcess.stdin.write).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(mockChildProcess.stdin.write).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(mockChildProcess.stdin.write.mock.calls[0][0]).type).toBe('user');
     emitJson({
       type: 'system',
       subtype: 'init',
       session_id: 'session-xyz',
       cwd: '/home/user/test-project',
     });
+    expect(executor.getSessionId()).toBe('session-xyz');
   };
 
   const completeCommand = () => {
@@ -134,7 +149,7 @@ describe('ClaudePersistentExecutor - task_notification', () => {
     // The notification must NOT complete or interfere with the in-flight command
     let resolved = false;
     executePromise.then(() => { resolved = true; });
-    await new Promise(resolve => setTimeout(resolve, 50));
+    await vi.advanceTimersByTimeAsync(0);
     expect(resolved).toBe(false);
 
     completeCommand();
@@ -169,7 +184,7 @@ describe('ClaudePersistentExecutor - task_notification', () => {
       session_id: 'session-xyz',
     });
 
-    await new Promise(resolve => setTimeout(resolve, 50));
+    await vi.advanceTimersByTimeAsync(0);
 
     expect(receivedNotifications).toHaveLength(1);
     expect(receivedNotifications[0].taskId).toBe('c7d8e9');
@@ -195,7 +210,7 @@ describe('ClaudePersistentExecutor - task_notification', () => {
       });
     }
 
-    await new Promise(resolve => setTimeout(resolve, 50));
+    await vi.advanceTimersByTimeAsync(0);
 
     expect(receivedNotifications.map(n => n.status)).toEqual(['completed', 'failed', 'stopped']);
   }, 10000);
@@ -255,7 +270,8 @@ describe('ClaudePersistentExecutor - task_notification', () => {
 
     // Command 2: its final output must NOT contain the autonomous turn's text
     const secondPromise = executor.execute('second command');
-    await new Promise(resolve => setTimeout(resolve, 100));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mockChildProcess.stdin.write).toHaveBeenCalledTimes(2);
     emitJson({
       type: 'assistant',
       message: { role: 'assistant', content: [{ type: 'text', text: 'Here is the login fix.' }] },

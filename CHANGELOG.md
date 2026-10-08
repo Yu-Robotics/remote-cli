@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.154] - 2026-10-09
+
+### Changed
+- Separate backend, model and effort cards into numbered functional sections with subtitles and dividers. Mark the drafted backend, applied backend and selected scope explicitly; keep Confirm separate. Model/effort cards separate the target backend, native choices and secondary actions, checking configured or known effective selections without guessing defaults. Include all new section elements in recursive node and byte accounting; retain existing validation, acknowledgements and old-peer behavior.
+- Accept both tab-delimited and formatted multi-space AGY model catalogs, preserving opaque native IDs and exact current-model matching. Reject empty, unusable and oversized responses explicitly instead of silently producing an empty or truncated menu. Query native metadata only; never prompt a model to invent catalog entries.
+- Bound filesystem verification to eight concurrent checks and drain all started work before propagating failure. Share complete ancestor-validation promises within each checkpoint pass, and give checkout byte readers independent buffers up to 1 MiB each. Preserve every file hash, symlink/mode check, HEAD/index recheck, both working-file passes and both reclamation audits; do not cache state across captures or relax production deadlines.
+- Replace real startup/stop waits in mocked Claude executor tests with controlled clocks. Advance the nested transfer timeout only after real producer/receiver startup and a nonempty partial pack, retaining process-exit and quarantine-cleanup assertions. Generate document ZIP fixture CRCs with a lookup table while preserving identical archive bytes, full expansion-bomb payloads and the full publish test suite. Use at most four isolated Git test processes only on hosts with at least eight available CPUs; lower-core limits and ordinary test deadlines are unchanged.
+
 ## [1.6.153] - 2026-10-09
 
 ### Changed

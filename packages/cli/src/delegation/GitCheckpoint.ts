@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'crypto';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
+import { checkFilesInBatches } from './BoundedFileChecks';
 
 export const CHECKPOINT_LIMITS = { commandMs: 15_000, outputBytes: 32 * 1024 * 1024 } as const;
 export const GIT_OID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
@@ -249,40 +250,55 @@ async function validateFiles(root: string, scope: string, ancestors: string[], e
   const cached = staged.map(entry => entry.slice(entry.indexOf('\t') + 1));
   const gitlinks = new Set(staged.filter(entry => entry.startsWith('160000 ')).map(entry => entry.slice(entry.indexOf('\t') + 1)));
   const files = [...new Set(cached.concat(untracked.map(file => file.replace(/\/$/, ''))))];
-  const parents = new Set<string>();
-  const checked = new Set<string>();
+  const parents = new Map<string, Promise<void>>();
+  const checked = new Map<string, Promise<void>>();
   const repositories = new Set<string>();
   const plainDirectories: string[] = [];
-  const checkRepository = async (directory: string): Promise<void> => {
-    if (directory === '.' || checked.has(directory)) return;
-    checked.add(directory);
-    const absolute = path.join(root, directory);
-    try {
-      await fs.lstat(path.join(absolute, '.git'));
-    } catch (error) {
-      if (['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) return;
-      throw error;
+  const checkRepository = (directory: string): Promise<void> => {
+    if (directory === '.') return Promise.resolve();
+    let checking = checked.get(directory);
+    if (!checking) {
+      checking = (async () => {
+        const absolute = path.join(root, directory);
+        try {
+          await fs.lstat(path.join(absolute, '.git'));
+        } catch (error) {
+          if (['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) return;
+          throw error;
+        }
+        await nestedGitDirectory(absolute, scope, ancestors);
+        repositories.add(directory);
+      })();
+      checked.set(directory, checking);
     }
-    await nestedGitDirectory(absolute, scope, ancestors);
-    repositories.add(directory);
+    return checking;
   };
-  for (const file of files) {
+  const checkParent = (directory: string): Promise<void> => {
+    if (directory === '.') return Promise.resolve();
+    let checking = parents.get(directory);
+    if (!checking) {
+      checking = (async () => {
+        // Shared promises make every sibling await the same complete ancestor
+        // validation, including rejection, before inspecting its own entry.
+        await checkParent(path.posix.dirname(directory));
+        try {
+          if ((await fs.lstat(path.join(root, directory))).isSymbolicLink()) {
+            throw new Error(`Checkpoint paths cannot cross a symbolic-link directory: ${JSON.stringify(relativeName(scope, root, directory))}`);
+          }
+          await checkRepository(directory);
+        } catch (error) {
+          if (!['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
+        }
+      })();
+      parents.set(directory, checking);
+    }
+    return checking;
+  };
+  await checkFilesInBatches(files, async file => {
     if (!file || path.isAbsolute(file) || file.split('/').some(part => part === '..' || part.toLowerCase() === '.git')) {
       throw new Error('Unsafe path in the Git checkpoint');
     }
-    let parent = path.posix.dirname(file);
-    while (parent !== '.' && !parents.has(parent)) {
-      parents.add(parent);
-      try {
-        if ((await fs.lstat(path.join(root, parent))).isSymbolicLink()) {
-          throw new Error(`Checkpoint paths cannot cross a symbolic-link directory: ${JSON.stringify(relativeName(scope, root, parent))}`);
-        }
-        await checkRepository(parent);
-      } catch (error) {
-        if (!['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
-      }
-      parent = path.posix.dirname(parent);
-    }
+    await checkParent(path.posix.dirname(file));
     try {
       const stat = await fs.lstat(path.join(root, file));
       if (stat.isDirectory()) {
@@ -311,7 +327,7 @@ async function validateFiles(root: string, scope: string, ancestors: string[], e
     } catch (error) {
       if (!['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
     }
-  }
+  });
   const nested = [...repositories].sort().filter(directory => ![...repositories].some(other => directory.startsWith(`${other}/`)));
   return { cached, repositories: nested, plainDirectories };
 }

@@ -6,6 +6,7 @@ import path from 'path';
 import type { DelegatedWorkerLane } from './DelegatedWorkerSessionStore';
 import { captureCheckpoint, createCheckpointCommit, GIT_OID, GitCommandError, gitText, runGit,
   type GitCheckpoint } from './GitCheckpoint';
+import { checkFilesInBatches } from './BoundedFileChecks';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const RECORD_BYTES = 128 * 1024;
@@ -504,20 +505,20 @@ export class DelegatedWorkspaceManager {
       let parent = path.posix.dirname(name);
       while (parent !== '.') { directories.add(parent); parent = path.posix.dirname(parent); }
     }
-    const buffer = Buffer.alloc(64 * 1024);
     const walk = async (relative: string): Promise<void> => {
       const absolute = path.join(workspace.directory, relative);
       if (await fs.realpath(absolute) !== absolute) throw new Error('Checkout directory changed during verification');
-      for (const name of await fs.readdir(absolute)) {
+      const children: string[] = [];
+      await checkFilesInBatches(await fs.readdir(absolute), async name => {
         const child = relative ? `${relative}/${name}` : name;
         const file = path.join(workspace.directory, child);
         const stat = await fs.lstat(file);
-        if (child === '.git' && stat.isFile() && !stat.isSymbolicLink()) continue;
-        if (stat.isDirectory() && directories.has(child)) { await walk(child); continue; }
+        if (child === '.git' && stat.isFile() && !stat.isSymbolicLink()) return;
+        if (stat.isDirectory() && directories.has(child)) { children.push(child); return; }
         const expected = files.get(child);
         if (expected?.mode === '160000' && stat.isDirectory() && !(await fs.readdir(file)).length) {
           files.delete(child);
-          continue;
+          return;
         }
         if (!expected || (expected.mode === '120000' ? !stat.isSymbolicLink() : !stat.isFile())) {
           throw new Error('Checkout contains unknown, ignored, or unsupported files');
@@ -528,6 +529,8 @@ export class DelegatedWorkspaceManager {
         hash.update(`blob ${stat.size}\0`);
         if (stat.isSymbolicLink()) hash.update(await fs.readlink(file, { encoding: 'buffer' }));
         else {
+          // Each concurrent reader owns its buffer; hash every byte without filters.
+          const buffer = Buffer.alloc(Math.min(1024 * 1024, Math.max(1, stat.size)));
           const handle = await fs.open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
           try {
             const opened = await handle.stat();
@@ -550,7 +553,10 @@ export class DelegatedWorkspaceManager {
         }
         if (hash.digest('hex') !== expected.oid) throw new Error('Checkout bytes differ from the saved output');
         files.delete(child);
-      }
+      });
+      // Descend only after draining the parent batch so depth cannot multiply
+      // the descriptor or buffer bound, including on a failed verification.
+      for (const child of children.sort()) await walk(child);
     };
     await walk('');
     if (files.size) throw new Error('Saved checkout files are missing');

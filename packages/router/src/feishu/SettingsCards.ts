@@ -73,8 +73,9 @@ const MAX_MENUS = 100;
 const MAX_CARDS_PER_MENU = 4;
 const MAX_MENU_AGE_MS = 24 * 60 * 60_000;
 const REQUEST_TIMEOUT_MS = 20_000;
-// The finalize wrapper adds header/footer/thread-switch rows (~46 nodes worst
-// case); the application budget for the whole card is 150 tagged nodes.
+// Delivery is a bare finalize: the handler adds no header/footer/thread-switch
+// rows, and refreshes replace the whole body. The budget below therefore covers
+// everything this controller renders, including section headings and dividers.
 const MAX_TAGGED_NODES = 90;
 const MAX_ELEMENTS_BYTES = 16 * 1024;
 const MAX_BACKENDS = 16;
@@ -515,7 +516,6 @@ export class SettingsCards {
       const current = this.backendLabel(state, menu.targetBackend);
       lines.push(`**Backend** · ${escapeMarkdown(menu.threadName)}`);
       lines.push(`Current: **${escapeMarkdown(current)}**${menu.followsGlobal === false ? ' (thread override)' : ' (global)'}`);
-      if (state.draftFollowGlobal) lines.push('Draft: follow the global backend for this thread. Press Confirm to apply.');
       if (state.draftScope === 'all') lines.push('⚠️ Switching all threads clears per-thread backend overrides and queued messages. Native conversations are kept.');
     } else {
       lines.push(`**${menu.kind === 'model' ? 'Model' : 'Effort'}** · ${escapeMarkdown(this.backendLabel(state, menu.targetBackend))} · ${escapeMarkdown(menu.threadName)}`);
@@ -536,62 +536,97 @@ export class SettingsCards {
     if (pending && !pending.timedOut) elements.push(this.note(`⏳ ${escapeMarkdown(pending.label)} Waiting for the CLI…`));
 
     if (menu.kind === 'backend') {
-      elements.push(...this.renderBackendControls(state, blocked));
+      elements.push(...this.renderBackendSections(state, blocked));
     } else {
-      elements.push(...this.renderChoiceControls(state, blocked));
+      elements.push(...this.renderChoiceSections(state, blocked));
     }
     if (pending?.timedOut) elements.push(this.row([this.button(state, 'retry', 'Retry confirmation', { primary: true })]));
     return elements;
   }
 
-  private renderBackendControls(state: MenuState, blocked: boolean): any[] {
+  /** A visually separated functional section: divider, heading, subtitle, body. */
+  private section(title: string, subtitle: string, body: any[]): any[] {
+    return [{ tag: 'hr' }, { tag: 'markdown', content: title }, this.note(subtitle), ...body];
+  }
+
+  private renderBackendSections(state: MenuState, blocked: boolean): any[] {
     const menu = state.menu;
     const elements: any[] = [];
-    const backendButtons = menu.backends.map(backend =>
-      this.button(state, 'draft_backend', `${!state.draftFollowGlobal && backend.value === state.draftBackend ? '✓ ' : ''}${backend.label}`.slice(0, LIMITS.label), {
-        value: backend.value,
-        primary: !state.draftFollowGlobal && backend.value === state.draftBackend,
-        disabled: blocked || !backend.installed,
-      }));
-    for (let index = 0; index < backendButtons.length; index += 4) elements.push(this.row(backendButtons.slice(index, index + 4)));
+    const current = this.backendLabel(state, menu.targetBackend);
+    const draftNote = state.draftFollowGlobal
+      ? ' Draft: follow the global backend — applies after Confirm.'
+      : state.draftBackend !== menu.targetBackend
+        ? ` Draft: **${escapeMarkdown(this.backendLabel(state, state.draftBackend))}** — applies after Confirm.`
+        : '';
 
-    elements.push(this.row([
+    const backendButtons = menu.backends.map(backend => {
+      const isCurrent = backend.value === menu.targetBackend;
+      const isDraft = !state.draftFollowGlobal && backend.value === state.draftBackend;
+      const label = `${isDraft ? '✓ ' : ''}${backend.label}${isCurrent ? ' (current)' : ''}`.slice(0, LIMITS.label);
+      return this.button(state, 'draft_backend', label, {
+        value: backend.value,
+        primary: isDraft,
+        disabled: blocked || !backend.installed,
+      });
+    });
+    const backendRows: any[] = [];
+    for (let index = 0; index < backendButtons.length; index += 4) backendRows.push(this.row(backendButtons.slice(index, index + 4)));
+    elements.push(...this.section('**1 · Choose backend**',
+      `Current: **${escapeMarkdown(current)}**. Pick a backend to draft it — nothing changes until Confirm.${draftNote}`,
+      backendRows));
+
+    const scopeButtons = [
       this.button(state, 'draft_scope', `${state.draftScope === 'thread' ? '✓ ' : ''}Current thread`, { value: 'thread', disabled: blocked }),
       this.button(state, 'draft_scope', `${state.draftScope === 'all' ? '✓ ' : ''}All threads`, { value: 'all', disabled: blocked }),
-    ]));
-
-    const actions: any[] = [this.button(state, 'apply', 'Confirm', { primary: true, disabled: blocked })];
+    ];
+    let scopeSubtitle = 'Choose where the change applies: only this thread, or every thread on this device.';
     if (menu.followsGlobal === false) {
-      actions.push(this.button(state, 'draft_follow_global', `${state.draftFollowGlobal ? '✓ ' : ''}Follow global`, { disabled: blocked }));
+      scopeButtons.push(this.button(state, 'draft_follow_global', `${state.draftFollowGlobal ? '✓ ' : ''}Follow global`, { disabled: blocked }));
+      scopeSubtitle += ' Follow global uses the device-wide backend for this thread only.';
     }
-    elements.push(this.row(actions));
+    elements.push(...this.section('**2 · Apply to**', scopeSubtitle, [this.row(scopeButtons)]));
+
+    elements.push(...this.section('**3 · Confirm**',
+      'Only Confirm applies the drafted backend and scope.',
+      [this.row([this.button(state, 'apply', 'Confirm', { primary: true, disabled: blocked })])]));
     return elements;
   }
 
-  private renderChoiceControls(state: MenuState, blocked: boolean): any[] {
+  private renderChoiceSections(state: MenuState, blocked: boolean): any[] {
     const menu = state.menu;
     const elements: any[] = [];
+    const targetLabel = this.backendLabel(state, menu.targetBackend);
+
     const targetButtons = menu.backends.map(backend =>
       this.button(state, 'view', `${backend.value === menu.targetBackend ? '✓ ' : ''}${backend.label}`.slice(0, LIMITS.label), {
         value: backend.value,
         primary: backend.value === menu.targetBackend,
         disabled: Boolean(state.pending) || !backend.installed,
       }));
-    for (let index = 0; index < targetButtons.length; index += 4) elements.push(this.row(targetButtons.slice(index, index + 4)));
+    const targetRows: any[] = [];
+    for (let index = 0; index < targetButtons.length; index += 4) targetRows.push(this.row(targetButtons.slice(index, index + 4)));
+    elements.push(...this.section('**1 · Target backend**',
+      `Settings below belong to **${escapeMarkdown(targetLabel)}**. Viewing another target never switches the conversation's backend.`,
+      targetRows));
 
     const pages = this.pageCount(state);
     const page = Math.min(state.page, pages - 1);
     const slice = menu.choices.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE);
+    const selectedValue = menu.configuredValue ?? menu.effectiveValue;
+    const choiceBody: any[] = [];
     if (slice.length === 0) {
-      elements.push(this.note(menu.unavailableReason ? 'No choices available.' : 'No choices reported by the backend.'));
+      choiceBody.push(this.note(menu.unavailableReason ? 'No choices available.' : 'No choices reported by the backend.'));
     }
     const choiceButtons = slice.map(choice =>
-      this.button(state, 'apply', `${choice.value === menu.configuredValue ? '✓ ' : ''}${choice.label}${choice.disabled && choice.reason ? ` (${choice.reason})` : ''}`.slice(0, LIMITS.label), {
+      this.button(state, 'apply', `${choice.value === selectedValue ? '✓ ' : ''}${choice.label}${choice.disabled && choice.reason ? ` (${choice.reason})` : ''}`.slice(0, LIMITS.label), {
         value: choice.value,
-        primary: choice.value === menu.configuredValue,
+        primary: choice.value === selectedValue,
         disabled: blocked || choice.disabled,
       }));
-    for (let index = 0; index < choiceButtons.length; index += 2) elements.push(this.row(choiceButtons.slice(index, index + 2)));
+    for (let index = 0; index < choiceButtons.length; index += 2) choiceBody.push(this.row(choiceButtons.slice(index, index + 2)));
+    elements.push(...this.section(`**2 · ${menu.kind === 'model' ? 'Model' : 'Effort'} for ${escapeMarkdown(targetLabel)}**`,
+      'Tap a choice to apply it immediately — it is saved per backend for this thread and used by future workers.',
+      choiceBody));
 
     const utility: any[] = [];
     utility.push(this.button(state, 'view', 'Refresh', { value: menu.targetBackend,
@@ -602,7 +637,11 @@ export class SettingsCards {
       utility.push(this.button(state, 'page', 'Next ▶', { value: String(page + 1), disabled: blocked || page >= pages - 1 }));
     }
     if (menu.supportsReset) utility.push(this.button(state, 'reset', 'Reset to default', { disabled: blocked }));
-    if (utility.length > 0) elements.push(this.row(utility));
+    if (utility.length > 0) {
+      elements.push(...this.section('**3 · More actions**',
+        `Refresh reloads the choices from the backend.${menu.supportsReset ? ' Reset restores the default.' : ''}`,
+        [this.row(utility)]));
+    }
     return elements;
   }
 

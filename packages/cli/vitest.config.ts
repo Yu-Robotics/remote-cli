@@ -3,7 +3,7 @@ import os from 'os';
 
 export function testWorkerLimits(parallelism: number) {
   const cpus = Number.isFinite(parallelism) ? Math.max(1, Math.floor(parallelism)) : 1;
-  const gitForks = cpus >= 4 ? 2 : 1;
+  const gitForks = cpus >= 8 ? 4 : cpus >= 4 ? 2 : 1;
   return { gitForks, threads: Math.max(1, Math.min(4, cpus - gitForks)) };
 }
 

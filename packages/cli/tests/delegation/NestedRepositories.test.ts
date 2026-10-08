@@ -4,6 +4,7 @@ import * as childProcess from 'child_process';
 import fs from 'fs/promises';
 import path from 'path';
 import { promisify } from 'util';
+import { setTimeout as realDelay } from 'node:timers/promises';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { captureCheckpoint, checkpointRevision, gitText, importGitTree, runGit } from '../../src/delegation/GitCheckpoint';
 import { DelegatedWorkspaceManager, type DelegatedWorkspace } from '../../src/delegation/DelegatedWorkspaceManager';
@@ -497,23 +498,88 @@ describe('local nested repository checkpoints and delivery', { timeout: 30_000 }
     await fs.writeFile(path.join(objects, unrelated, 'marker'), 'keep\n');
     const actual = await vi.importActual<typeof import('child_process')>('child_process');
     const spawning = vi.mocked(childProcess.spawn);
+    const launched: string[] = [];
     const closed: string[] = [];
+    const children: childProcess.ChildProcess[] = [];
+    const childCloses: Promise<void>[] = [];
+    let quarantine: string | undefined;
+    let transfer: Promise<void> | undefined;
     spawning.mockImplementation((command, args, options) => {
       const producer = args?.includes('pack-objects');
+      const receiver = args?.includes('index-pack');
       const spawned = producer
         ? actual.spawn(process.execPath, ['-e',
           "require('fs').createReadStream(process.argv[1]).pipe(process.stdout, {end:false});setInterval(()=>{},1000)", partial], options)
         : actual.spawn(command, args, options);
-      if (producer || args?.includes('index-pack')) spawned.on('close', () => closed.push(producer ? 'producer' : 'receiver'));
+      children.push(spawned);
+      childCloses.push(new Promise(resolve => spawned.once('close', () => resolve())));
+      if (producer || receiver) {
+        spawned.once('spawn', () => launched.push(producer ? 'producer' : 'receiver'));
+        spawned.on('close', () => closed.push(producer ? 'producer' : 'receiver'));
+      }
+      if (receiver) {
+        quarantine = options?.env?.GIT_OBJECT_DIRECTORY;
+        // Preflight Git has finished. Fake only the transfer deadline and its kill escalation.
+        // Real child streams and the readiness poll continue on the native event loop.
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      }
       return spawned;
     });
     try {
-      await expect(importGitTree(child, fixture.root, tree)).rejects.toThrow('Nested Git object transfer timed out');
+      transfer = importGitTree(child, fixture.root, tree);
+      const rejected = expect(transfer).rejects.toThrow('Nested Git object transfer timed out');
+      void rejected.catch(() => undefined);
+      let settled = false;
+      void transfer.then(() => { settled = true; }, () => { settled = true; });
+      let partialPack: { file: string; size: number } | undefined;
+      const readinessDeadline = Date.now() + 5_000;
+      while (!partialPack && !settled && Date.now() < readinessDeadline) {
+        if (launched.length === 2 && quarantine) {
+          for (const name of await fs.readdir(path.join(quarantine, 'pack'))) {
+            if (!name.startsWith('tmp_pack_')) continue;
+            const file = path.join(quarantine, 'pack', name);
+            const { size } = await fs.stat(file);
+            if (size > 0) { partialPack = { file, size }; break; }
+          }
+        }
+        if (!partialPack) await realDelay(10);
+      }
+      expect(launched.sort()).toEqual(['producer', 'receiver']);
+      expect(quarantine).toBeDefined();
+      expect(path.dirname(quarantine!)).toBe(objects);
+      expect(path.basename(quarantine!)).toMatch(/^tmp_objdir-incoming-/);
+      expect(path.basename(quarantine!)).not.toBe(unrelated);
+      expect(partialPack).toBeDefined();
+      expect(partialPack!.size).toBeGreaterThan(0);
+      expect(partialPack!.size).toBeLessThan(pack.length);
+      expect((await fs.readFile(partialPack!.file)).subarray(0, 4).toString()).toBe('PACK');
+      expect(closed).toEqual([]);
+      expect(vi.getTimerCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(14_999);
+      expect(settled).toBe(false);
+      expect(closed).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.advanceTimersByTimeAsync(500);
+      await Promise.all(childCloses);
+      await rejected;
       expect(closed.sort()).toEqual(['producer', 'receiver']);
       expect(await fs.readdir(path.join(objects, 'pack'))).toEqual([]);
       expect((await fs.readdir(objects)).filter(name => name.startsWith('tmp_objdir-'))).toEqual([unrelated]);
       expect(await fs.readFile(path.join(objects, unrelated, 'marker'), 'utf8')).toBe('keep\n');
-    } finally { spawning.mockImplementation(actual.spawn); }
+    } finally {
+      try {
+        // Reap only children launched by this operation, even if readiness/assertions fail.
+        for (const spawned of children) {
+          if (spawned.exitCode === null && spawned.signalCode === null) spawned.kill('SIGKILL');
+        }
+        if (vi.isFakeTimers() && vi.getTimerCount()) await vi.advanceTimersByTimeAsync(15_500);
+        await Promise.all(childCloses);
+        await transfer?.catch(() => undefined);
+      } finally {
+        vi.useRealTimers();
+        spawning.mockImplementation(actual.spawn);
+      }
+    }
   });
 
   it('rejects a blocked pack directory and removes only its own quarantine', async () => {

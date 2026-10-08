@@ -47,6 +47,40 @@ describe('private Git checkpoints', () => {
     expect(await gitText(fixture.root, ['rev-parse', 'HEAD'])).toBe(fixture.head);
   });
 
+  it('shares a pending ancestor validation across siblings before staging any files', async () => {
+    const parent = path.join(fixture.root, 'nested');
+    await fs.writeFile(path.join(parent, 'second.txt'), 'synthetic sibling\n');
+    const lstat = fs.lstat.bind(fs);
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const checking = new Promise<void>(resolve => { entered = resolve; });
+    let parentChecks = 0;
+    let childChecks = 0;
+    vi.spyOn(fs, 'lstat').mockImplementation(async (...args) => {
+      if (args[0] === parent) {
+        parentChecks++;
+        entered();
+        await gate;
+        throw new Error('Synthetic ancestor validation failure');
+      }
+      if (typeof args[0] === 'string' && args[0].startsWith(`${parent}${path.sep}`)) childChecks++;
+      return lstat(...args);
+    });
+    vi.mocked(childProcess.spawn).mockClear();
+    const capture = captureCheckpoint(fixture.root);
+    const failure = expect(capture).rejects.toThrow('Synthetic ancestor validation failure');
+    try {
+      await checking;
+      expect(parentChecks).toBe(1);
+      expect(childChecks).toBe(0);
+      expect(vi.mocked(childProcess.spawn).mock.calls.some(([, args]) => args?.includes('add'))).toBe(false);
+    } finally { release(); }
+    await failure;
+    expect(parentChecks).toBe(1);
+    expect(childChecks).toBe(0);
+  });
+
   it.each(['empty', 'missing'])('distinguishes a malformed %s index from legitimate bootstrap', async state => {
     const index = path.join(fixture.root, '.git', 'index');
     if (state === 'empty') {

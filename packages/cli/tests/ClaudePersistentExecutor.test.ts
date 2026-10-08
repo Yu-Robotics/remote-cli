@@ -40,6 +40,7 @@ describe('ClaudePersistentExecutor', () => {
   let mockChildProcess: any;
 
   beforeEach(() => {
+    vi.useFakeTimers();
     vi.clearAllMocks();
 
     vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -70,18 +71,40 @@ describe('ClaudePersistentExecutor', () => {
   });
 
   afterEach(async () => {
-    await executor.destroy();
-    vi.clearAllMocks();
+    if (!vi.isFakeTimers()) vi.useFakeTimers();
+    try {
+      const cleanup = executor.destroy();
+      void cleanup.catch(() => undefined);
+      // Drain the real stop protocol, including its rejection deadline, on the fake clock.
+      await vi.advanceTimersByTimeAsync(9_000);
+      await cleanup;
+    } finally {
+      vi.useRealTimers();
+      vi.clearAllMocks();
+    }
   });
+
+  const advanceStartup = async (child = mockChildProcess) => {
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(child.stdin.write).toHaveBeenCalled();
+  };
+
+  const readyExternalProcess = async (child: any) => {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mockSpawn).toHaveBeenCalled();
+    expect(child.stdout.listenerCount('data')).toBeGreaterThan(0);
+    expect(child.listenerCount('close')).toBeGreaterThan(0);
+  };
 
   describe('initialization', () => {
     it('preserves native Claude WebSearch result text and its invocation identity', async () => {
       const onToolUse = vi.fn(), onToolResult = vi.fn();
       const running = executor.execute('look up docs', { onToolUse, onToolResult });
-      await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalled(), { timeout: 3000 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mockSpawn).toHaveBeenCalled();
       const emit = (message: object) => mockChildProcess.stdout.emit('data', Buffer.from(`${JSON.stringify(message)}\n`));
       emit({ type: 'system', subtype: 'init', session_id: 'web-test-session' });
-      await vi.waitFor(() => expect(mockChildProcess.stdin.write).toHaveBeenCalled(), { timeout: 3000 });
+      await advanceStartup();
       emit({ type: 'assistant', message: { role: 'assistant', content: [
         { type: 'tool_use', id: 'web-native', name: 'WebSearch', input: { query: 'docs' } },
       ] } });
@@ -99,11 +122,12 @@ describe('ClaudePersistentExecutor', () => {
       expect(executor.getExecutionMetadata()).toMatchObject({ modelSource: 'default', effortSource: 'unknown' });
       expect(mockSpawn).not.toHaveBeenCalled();
       const running = executor.execute('metadata');
-      await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalled(), { timeout: 3000 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mockSpawn).toHaveBeenCalled();
       const emit = (message: object) => mockChildProcess.stdout.emit('data', Buffer.from(`${JSON.stringify(message)}\n`));
       emit({ type: 'system', subtype: 'init', session_id: 'metadata-session', model: 'native-parent' });
       expect(executor.getExecutionMetadata()).toMatchObject({ model: 'native-parent', modelSource: 'reported' });
-      await vi.waitFor(() => expect(mockChildProcess.stdin.write).toHaveBeenCalled(), { timeout: 3000 });
+      await advanceStartup();
       emit({ type: 'assistant', parent_tool_use_id: 'child-tool', message: { role: 'assistant', model: 'child-model', content: [] } });
       expect(executor.getExecutionMetadata().model).toBe('native-parent');
       emit({ type: 'assistant', message: { role: 'assistant', model: 'provider/resolved-parent', content: [] } });
@@ -116,7 +140,7 @@ describe('ClaudePersistentExecutor', () => {
 
     it('drops the previous process model when a replacement does not report a model', async () => {
       const first = executor.execute('first');
-      await vi.waitFor(() => expect(mockChildProcess.stdin.write).toHaveBeenCalled(), { timeout: 3000 });
+      await advanceStartup();
       const emit = (message: object) => mockChildProcess.stdout.emit('data', Buffer.from(`${JSON.stringify(message)}\n`));
       emit({ type: 'system', subtype: 'init', session_id: 'first-session', model: 'previous-model' });
       emit({ type: 'result', subtype: 'success', result: 'Done' });
@@ -129,7 +153,7 @@ describe('ClaudePersistentExecutor', () => {
       });
       mockSpawn.mockReturnValue(mockChildProcess);
       const second = executor.execute('second');
-      await vi.waitFor(() => expect(mockChildProcess.stdin.write).toHaveBeenCalled(), { timeout: 3000 });
+      await advanceStartup();
       emit({ type: 'system', subtype: 'init', session_id: 'second-session' });
       emit({ type: 'result', subtype: 'success', result: 'Done' });
       await second;
@@ -199,13 +223,11 @@ describe('ClaudePersistentExecutor', () => {
       emit({ type: 'assistant', message: { id, role: 'assistant', content }, parent_tool_use_id: parent });
     };
 
-    beforeEach(() => vi.useFakeTimers());
     afterEach(() => {
       // Finish any turn left open by a failed assertion before closing the mock process.
       emit({ type: 'result', subtype: 'success' });
       mockChildProcess.emit('exit', 0, null);
       mockChildProcess.emit('close', 0, null);
-      vi.useRealTimers();
     });
 
     const modelDiagnostics = ['sdk', 'generate_session_title'].map(source => ({ source,
@@ -382,6 +404,34 @@ describe('ClaudePersistentExecutor', () => {
   });
 
   describe('process startup', () => {
+    it('waits for the full liveness boundary before dispatching and accepts delayed stdout', async () => {
+      const resolved = vi.fn();
+      const running = executor.execute('Synthetic startup ordering');
+      void running.then(resolved, () => undefined);
+      expect(mockSpawn).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(999);
+      expect(mockChildProcess.stdin.write).not.toHaveBeenCalled();
+      mockChildProcess.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'result', subtype: 'success' }) + '\n'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(resolved).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(mockChildProcess.stdin.write).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(mockChildProcess.stdin.write.mock.calls[0][0]).message.content).toBe('Synthetic startup ordering');
+      setTimeout(() => {
+        mockChildProcess.stdout.emit('data', Buffer.from(JSON.stringify({
+          type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Synthetic delayed result' }] },
+        }) + '\n'));
+        mockChildProcess.stdout.emit('data', Buffer.from(JSON.stringify({
+          type: 'result', subtype: 'success', result: 'Synthetic delayed result',
+        }) + '\n'));
+      }, 1);
+      expect(resolved).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await running).toMatchObject({ success: true, output: 'Synthetic delayed result' });
+      mockChildProcess.emit('exit', 0, null);
+      mockChildProcess.emit('close', 0, null);
+    });
+
     it('should return error if working directory does not exist', async () => {
       // Set working directory to a safe path
       await executor.setWorkingDirectory('~/test-project');
@@ -466,7 +516,7 @@ describe('ClaudePersistentExecutor', () => {
       const executePromise = testExecutor.execute('test command');
 
       // Wait for process to start
-      await new Promise(resolve => setTimeout(resolve, 1100));
+      await advanceStartup(mockErrorProcess);
 
       // Verify spawn was called with --resume and the non-existent session ID
       expect(mockSpawn).toHaveBeenCalledWith(
@@ -527,7 +577,7 @@ describe('ClaudePersistentExecutor', () => {
       const executePromise = testExecutor.execute('test command');
 
       // Wait for process to start
-      await new Promise(resolve => setTimeout(resolve, 1100));
+      await advanceStartup(freshMockProcess);
 
       // Verify spawn was called WITHOUT --resume flag
       const spawnCalls = mockSpawn.mock.calls;
@@ -562,12 +612,12 @@ describe('ClaudePersistentExecutor', () => {
       freshMockProcess.emit('exit', 0, null);
       freshMockProcess.emit('close', 0, null);
 
-      // Wait a bit for exit handler to complete
-      await new Promise(resolve => setTimeout(resolve, 100));
+      // Flush asynchronous exit handling without a wall-clock delay
+      await vi.advanceTimersByTimeAsync(0);
 
       // Cleanup
       await testExecutor.destroy();
-    }, 10000); // Increase timeout to 10 seconds
+    }, 10000);
 
     it('should resume existing valid session after destroy and recreate', async () => {
       // Step 1: First executor, no session file yet
@@ -592,7 +642,7 @@ describe('ClaudePersistentExecutor', () => {
       mockSpawn.mockReturnValue(firstProcess);
 
       const firstExecutePromise = firstExecutor.execute('echo "first"');
-      await new Promise(resolve => setTimeout(resolve, 1100));
+      await advanceStartup(firstProcess);
 
       // Simulate session init with a session ID
       firstProcess.stdout.emit('data', Buffer.from(JSON.stringify({
@@ -616,7 +666,7 @@ describe('ClaudePersistentExecutor', () => {
       // Simulate clean exit
       firstProcess.emit('exit', 0, null);
       firstProcess.emit('close', 0, null);
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await vi.advanceTimersByTimeAsync(0);
       await firstExecutor.destroy();
 
       // Step 2: Second executor, session file exists with saved ID
@@ -643,7 +693,7 @@ describe('ClaudePersistentExecutor', () => {
       mockSpawn.mockReturnValue(secondProcess);
 
       const secondExecutePromise = secondExecutor.execute('echo "second"');
-      await new Promise(resolve => setTimeout(resolve, 1100));
+      await advanceStartup(secondProcess);
 
       // Verify spawn was called with --resume and the saved session ID
       expect(mockSpawn).toHaveBeenCalledWith(
@@ -672,7 +722,7 @@ describe('ClaudePersistentExecutor', () => {
 
       secondProcess.emit('exit', 0, null);
       secondProcess.emit('close', 0, null);
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await vi.advanceTimersByTimeAsync(0);
       await secondExecutor.destroy();
     }, 10000);
   });
@@ -704,7 +754,7 @@ describe('ClaudePersistentExecutor', () => {
       const compactPromise = testExecutor.compact();
 
       // Wait for process to start
-      await new Promise(resolve => setTimeout(resolve, 1100));
+      await advanceStartup(freshProcess);
 
       // Simulate process init
       freshProcess.stdout.emit('data', Buffer.from(JSON.stringify({
@@ -734,7 +784,7 @@ describe('ClaudePersistentExecutor', () => {
 
       freshProcess.emit('exit', 0, null);
       freshProcess.emit('close', 0, null);
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await vi.advanceTimersByTimeAsync(0);
       await testExecutor.destroy();
     }, 10000);
 
@@ -751,7 +801,7 @@ describe('ClaudePersistentExecutor', () => {
 
       const compactPromise = testExecutor.compact();
 
-      await new Promise(resolve => setTimeout(resolve, 1100));
+      await advanceStartup(freshProcess);
 
       freshProcess.stdout.emit('data', Buffer.from(JSON.stringify({
         type: 'system',
@@ -772,7 +822,7 @@ describe('ClaudePersistentExecutor', () => {
 
       freshProcess.emit('exit', 0, null);
       freshProcess.emit('close', 0, null);
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await vi.advanceTimersByTimeAsync(0);
       await testExecutor.destroy();
     }, 10000);
   });
@@ -790,7 +840,7 @@ describe('ClaudePersistentExecutor', () => {
       const modelExecutor = new ClaudePersistentExecutor(directoryGuard, '~/test-project', 'thread-1', 'opus');
 
       const executePromise = modelExecutor.execute('hello');
-      await new Promise(resolve => setTimeout(resolve, 1100));
+      await advanceStartup(freshMockProcess);
 
       expect(mockSpawn).toHaveBeenCalledWith(
         'claude',
@@ -814,7 +864,7 @@ describe('ClaudePersistentExecutor', () => {
       await executePromise;
       freshMockProcess.emit('exit', 0, null);
       freshMockProcess.emit('close', 0, null);
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await vi.advanceTimersByTimeAsync(0);
       await modelExecutor.destroy();
     }, 10000);
 
@@ -830,7 +880,7 @@ describe('ClaudePersistentExecutor', () => {
       const noModelExecutor = new ClaudePersistentExecutor(directoryGuard, '~/test-project');
 
       const executePromise = noModelExecutor.execute('hello');
-      await new Promise(resolve => setTimeout(resolve, 1100));
+      await advanceStartup(freshMockProcess);
 
       const spawnCalls = mockSpawn.mock.calls;
       const lastCall = spawnCalls[spawnCalls.length - 1];
@@ -852,7 +902,7 @@ describe('ClaudePersistentExecutor', () => {
       await executePromise;
       freshMockProcess.emit('exit', 0, null);
       freshMockProcess.emit('close', 0, null);
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await vi.advanceTimersByTimeAsync(0);
       await noModelExecutor.destroy();
     }, 10000);
   });
@@ -874,7 +924,7 @@ describe('ClaudePersistentExecutor', () => {
 
       // Start a command to spawn process
       const execPromise = testExecutor.execute('hello');
-      await vi.waitFor(() => expect(freshProcess.stdin.write).toHaveBeenCalled(), { timeout: 3000 });
+      await advanceStartup(freshProcess);
 
       freshProcess.stdout.emit('data', Buffer.from(JSON.stringify({
         type: 'system',
@@ -922,7 +972,7 @@ describe('ClaudePersistentExecutor', () => {
       mockSpawn.mockReturnValue(freshProcess);
 
       const execPromise = testExecutor.execute('test');
-      await vi.waitFor(() => expect(freshProcess.stdin.write).toHaveBeenCalled(), { timeout: 3000 });
+      await advanceStartup(freshProcess);
 
       expect(mockSpawn).toHaveBeenCalledWith(
         'claude',
@@ -962,7 +1012,7 @@ describe('ClaudePersistentExecutor', () => {
       mockSpawn.mockReturnValue(freshProcess);
 
       const execPromise = testExecutor.execute('init');
-      await vi.waitFor(() => expect(freshProcess.stdin.write).toHaveBeenCalled(), { timeout: 3000 });
+      await advanceStartup(freshProcess);
 
       freshProcess.stdout.emit('data', Buffer.from(JSON.stringify({
         type: 'system',
@@ -998,7 +1048,7 @@ describe('ClaudePersistentExecutor', () => {
       mockSpawn.mockReturnValue(freshProcess);
 
       const listPromise = testExecutor.listModels();
-      await vi.waitFor(() => expect(freshProcess.stdin.write).toHaveBeenCalled(), { timeout: 3000 });
+      await advanceStartup(freshProcess);
 
       const written = JSON.parse(freshProcess.stdin.write.mock.calls[0][0].trim());
       expect(written).toMatchObject({
@@ -1061,7 +1111,7 @@ describe('ClaudePersistentExecutor', () => {
       mockSpawn.mockReturnValue(freshProcess);
 
       const effortsPromise = testExecutor.listEfforts();
-      await vi.waitFor(() => expect(freshProcess.stdin.write).toHaveBeenCalled(), { timeout: 3000 });
+      await advanceStartup(freshProcess);
 
       const written = JSON.parse(freshProcess.stdin.write.mock.calls[0][0].trim());
       freshProcess.stdout.emit('data', Buffer.from(JSON.stringify({
@@ -1115,7 +1165,7 @@ describe('ClaudePersistentExecutor', () => {
       mockSpawn.mockReturnValue(spawnProcess);
 
       const execPromise = testExecutor.execute('effort test');
-      await vi.waitFor(() => expect(spawnProcess.stdin.write).toHaveBeenCalled(), { timeout: 3000 });
+      await advanceStartup(spawnProcess);
 
       expect(mockSpawn).toHaveBeenCalledWith(
         'claude',
@@ -1161,7 +1211,7 @@ describe('ClaudePersistentExecutor', () => {
 
       // Populate catalog
       const listPromise = testExecutor.listModels();
-      await vi.waitFor(() => expect(freshProcess.stdin.write).toHaveBeenCalled(), { timeout: 3000 });
+      await advanceStartup(freshProcess);
       const written = JSON.parse(freshProcess.stdin.write.mock.calls[0][0].trim());
       freshProcess.stdout.emit('data', Buffer.from(JSON.stringify({
         type: 'control_response',
@@ -1202,7 +1252,11 @@ describe('ClaudePersistentExecutor', () => {
       });
 
       // Switch to haiku which does not support effort
-      const setModelResult = await testExecutor.setModel('claude-3-5-haiku');
+      freshProcess.stdin.write.mockClear();
+      const changingModel = testExecutor.setModel('claude-3-5-haiku');
+      await advanceStartup(freshProcess);
+      const setModelResult = await changingModel;
+      expect(freshProcess.stdin.write).toHaveBeenCalledTimes(1);
       expect(setModelResult.success).toBe(false);
       expect(setModelResult.error).toContain('Reset /effort auto');
       expect(testExecutor.getExecutionMetadata()).toMatchObject({ model: 'claude-3-7-sonnet', reasoningEffort: 'high' });
@@ -1229,7 +1283,7 @@ describe('ClaudePersistentExecutor', () => {
       const second = executor.listModels();
       void first.catch(() => undefined);
       void second.catch(() => undefined);
-      await vi.waitFor(() => expect(child.stdin.write).toHaveBeenCalledTimes(1));
+      await vi.advanceTimersByTimeAsync(0);
       expect(child.stdin.write).toHaveBeenCalledTimes(1);
       const packet = JSON.parse(child.stdin.write.mock.calls[0][0]);
       reply({ request_id: 'foreign-request' }, { models: [{ value: 'wrong-model' }] });
@@ -1245,7 +1299,8 @@ describe('ClaudePersistentExecutor', () => {
       expect((executor as any).cachedModelCatalog).toBeNull();
       const replacement = bind();
       const next = executor.listModels();
-      await vi.waitFor(() => expect(replacement.child.stdin.write).toHaveBeenCalledTimes(1));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(replacement.child.stdin.write).toHaveBeenCalledTimes(1);
       const request = JSON.parse(replacement.child.stdin.write.mock.calls[0][0]);
       replacement.reply(request, { models: [{ value: 'replacement-model' }] });
       expect((await next)[0].id).toBe('replacement-model');
@@ -1327,7 +1382,7 @@ describe('ClaudePersistentExecutor', () => {
       const compactPromise = testExecutor.compactWhenFull();
 
       // Compact process emits output and exits successfully
-      await new Promise(resolve => setTimeout(resolve, 10));
+      await readyExternalProcess(compactProcess);
       compactProcess.stdout.emit('data', Buffer.from('Compacted successfully.\n'));
       compactProcess.emit('exit', 0, null);
       compactProcess.emit('close', 0, null);
@@ -1335,7 +1390,8 @@ describe('ClaudePersistentExecutor', () => {
       // After compact, loadSessionId() re-reads from disk — return new session
       mockFs.readFileSync.mockReturnValue(JSON.stringify({ id: 'new-compacted-session' }));
 
-      // startProcess() waits 1000ms internally; let it complete
+      // Advance the restart liveness check before awaiting compaction.
+      await vi.advanceTimersByTimeAsync(1_000);
       const result = await compactPromise;
 
       expect(result.success).toBe(true);
@@ -1379,10 +1435,11 @@ describe('ClaudePersistentExecutor', () => {
       const compactPromise = testExecutor.compactWhenFull();
 
       // Compact process fails (non-zero exit)
-      await new Promise(resolve => setTimeout(resolve, 10));
+      await readyExternalProcess(failingCompactProcess);
       failingCompactProcess.emit('exit', 1, null);
       failingCompactProcess.emit('close', 1, null);
 
+      await vi.advanceTimersByTimeAsync(1_000);
       const result = await compactPromise;
 
       expect(result.success).toBe(false);
@@ -1421,12 +1478,13 @@ describe('ClaudePersistentExecutor', () => {
       const chunks: string[] = [];
       const compactPromise = testExecutor.compactWhenFull((chunk) => chunks.push(chunk));
 
-      await new Promise(resolve => setTimeout(resolve, 10));
+      await readyExternalProcess(compactProcess);
       compactProcess.stdout.emit('data', Buffer.from('Summarizing...'));
       compactProcess.stdout.emit('data', Buffer.from('Done.'));
       compactProcess.emit('exit', 0, null);
       compactProcess.emit('close', 0, null);
 
+      await vi.advanceTimersByTimeAsync(1_000);
       await compactPromise;
 
       expect(chunks).toContain('Summarizing...');
