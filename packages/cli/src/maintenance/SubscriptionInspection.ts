@@ -2,15 +2,17 @@ import { randomUUID } from 'crypto';
 import type { BackendKey } from '../types/config';
 import { INSPECTION_INTERVAL_MS, floatingWeeklyPair, type WeeklyObservation } from './CodexWeekly';
 import type { SubscriptionReminderStore } from './SubscriptionReminderStore';
+import type { CodexQuotaObservation } from './CodexQuota';
+import { BankedResetReminders } from './BankedResetReminders';
 
 export interface InspectionAdapter {
   backend: BackendKey;
-  inspect(signal: AbortSignal): Promise<{ kind: 'unsupported' | 'unavailable' } | { kind: 'observed'; observation: WeeklyObservation }>;
+  inspect(signal: AbortSignal): Promise<{ kind: 'unsupported' | 'unavailable' } | { kind: 'observed'; observation: CodexQuotaObservation }>;
 }
 // The false legacy field preserves compatibility; quota notices never support activation.
 interface Reminder { reminderId: string; generation: string; expiresAt: number; activationAvailable: false; backend: 'codex' }
 const BACKENDS: BackendKey[] = ['claude', 'codex', 'agy', 'pi', 'opencode', 'kimi', 'zcode', 'dsh'];
-export function inspectionAdapters(codex: (signal: AbortSignal) => Promise<WeeklyObservation | undefined>): InspectionAdapter[] {
+export function inspectionAdapters(codex: (signal: AbortSignal) => Promise<CodexQuotaObservation | undefined>): InspectionAdapter[] {
   return BACKENDS.map(backend => ({ backend, inspect: async signal => {
     if (backend !== 'codex') return { kind: 'unsupported' };
     const observation = await codex(signal);
@@ -24,6 +26,7 @@ export class SubscriptionInspection {
   private reminder?: Reminder;
   private suppressed = false;
   private accountKey?: string;
+  private quotaAccountKey?: string;
   private conditionRevision = 0;
   private persistenceUnavailable = false;
   private operations = Promise.resolve();
@@ -34,15 +37,20 @@ export class SubscriptionInspection {
   private deliveryTimer?: ReturnType<typeof setTimeout>;
   private readonly controller = new AbortController();
   private readonly generation = randomUUID();
+  private readonly banked: BankedResetReminders;
   constructor(private readonly adapters: InspectionAdapter[], private readonly send: (message: object) => void,
     private readonly now = Date.now, private readonly intervalMs = INSPECTION_INTERVAL_MS, private readonly retryMs = 60_000,
-    private readonly store?: SubscriptionReminderStore) {}
+    private readonly store?: SubscriptionReminderStore) {
+    this.banked = new BankedResetReminders(send, this.generation, now, retryMs);
+  }
 
   start(): void { if (!this.stopped && !this.timer && !this.inFlight) this.scheduleCycle(0); }
-  registered(supported: boolean): void { this.supported = supported; this.deliver(); }
-  disconnected(): void { this.supported = false; this.clearDeliveryTimer(); }
+  registered(supported: boolean, bankedResetSupported = false): void {
+    this.supported = supported; this.banked.registered(supported && bankedResetSupported && !this.persistenceUnavailable); this.deliver();
+  }
+  disconnected(): void { this.supported = false; this.clearDeliveryTimer(); this.banked.disconnected(); }
   async stop(): Promise<void> {
-    this.stopped = true; this.disconnected(); this.controller.abort();
+    this.stopped = true; this.disconnected(); this.banked.stop(); this.controller.abort();
     if (this.timer) clearTimeout(this.timer); this.timer = undefined;
     await this.inFlight;
     await this.operations;
@@ -65,7 +73,15 @@ export class SubscriptionInspection {
         catch { continue; } // Unavailable evidence never clears delivery suppression or a valid baseline.
         if (this.stopped || adapter.backend !== 'codex' || result.kind !== 'observed') continue;
         try {
-          const current = result.observation;
+          // A proven account switch invalidates old-account notices even if its weekly fields are unavailable.
+          if (result.observation.accountKey !== this.quotaAccountKey) {
+            this.quotaAccountKey = result.observation.accountKey;
+            this.previous = undefined; this.reminder = undefined; this.clearDeliveryTimer();
+            this.accountKey = undefined; this.suppressed = false; this.conditionRevision++;
+          }
+          this.banked.observe(result.observation);
+          const current = result.observation.weekly;
+          if (!current) continue;
           if (current.accountKey !== this.accountKey) {
             this.suppressed = this.store ? await this.store.isSuppressed(current.accountKey) : false;
             this.accountKey = current.accountKey; this.conditionRevision++;
@@ -95,6 +111,7 @@ export class SubscriptionInspection {
   }
 
   handle(message: any): Promise<void> {
+    if (this.banked.handle(message)) return Promise.resolve();
     if (!this.supported || !this.reminder || !this.accountKey || message.reminderId !== this.reminder.reminderId || message.generation !== this.generation
       || this.reminder.expiresAt <= this.now()) return Promise.resolve();
     if (message.type === 'subscription_reminder_ack' || message.type === 'subscription_action' && message.decision === 'dismiss') {
@@ -119,7 +136,7 @@ export class SubscriptionInspection {
 
   private disablePersistence(): void {
     if (!this.persistenceUnavailable) console.warn('[Maintenance] Quota reminders paused: local delivery state is unavailable. Normal messaging is unchanged.');
-    this.persistenceUnavailable = true; this.clearDeliveryTimer();
+    this.persistenceUnavailable = true; this.clearDeliveryTimer(); this.banked.stop();
   }
 
   private scheduleCycle(delay: number): void {

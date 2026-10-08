@@ -4,7 +4,7 @@ import os from 'os';
 import { CodexAppServerClient, type CodexAppServerClientOptions } from '../executor/CodexAppServerClient';
 import { getBackendCommand } from '../utils/BackendCommand';
 import type { ExecutorConfig } from '../types/config';
-import { codexWeeklyObservation, type WeeklyObservation } from './CodexWeekly';
+import { codexQuotaObservation, type CodexQuotaObservation } from './CodexQuota';
 
 export interface StatusProbeClient {
   request(method: string, params?: unknown): Promise<any>;
@@ -29,7 +29,7 @@ export class CodexStatusProbe {
     this.now = options.now ?? Date.now;
   }
 
-  async inspect(signal: AbortSignal): Promise<WeeklyObservation | undefined> {
+  async inspect(signal: AbortSignal): Promise<CodexQuotaObservation | undefined> {
     let temporary: string | undefined;
     let client: StatusProbeClient | undefined;
     let timedOut = false;
@@ -83,7 +83,7 @@ export class CodexStatusProbe {
         const raw = await Promise.race([client.request('account/rateLimits/read', { excludeResetCreditDetails: true }), deadline]); ensureActive();
         const after = await fs.stat(authPath); ensureActive();
         if (`${after.ino}:${after.size}:${after.mtimeMs}` !== credentialGeneration) return;
-        return codexWeeklyObservation(raw, accountId, credentialGeneration, this.now());
+        return codexQuotaObservation(raw, accountId, credentialGeneration, this.now());
       })();
       // Wait for setup to settle before cleanup, even if a local filesystem operation finishes after the deadline.
       try { return await Promise.race([operation, deadline]); }

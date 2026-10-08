@@ -430,6 +430,7 @@ export class RouterServer {
       let activityProgressEnabled = false;
       let updateNoticeEnabled = false;
       let subscriptionInspectionEnabled = false;
+      let bankedResetReminderEnabled = false;
       let authenticationPending = false;
       let challengeTimer: NodeJS.Timeout | undefined;
       let heartbeatTimeout: NodeJS.Timeout | null = null;
@@ -472,7 +473,10 @@ export class RouterServer {
             const current = () => this.connectionHub.isCurrentConnection(deviceId!, ws);
             if (message.type === 'update_notice' && updateNoticeEnabled) await this.maintenanceCards.receiveNotice(message, deviceId, current);
             if (message.type === 'update_notice_page' && updateNoticeEnabled) await this.maintenanceCards.receivePage(message, deviceId);
-            if (message.type === 'subscription_reminder' && subscriptionInspectionEnabled) await this.maintenanceCards.receiveReminder(message, deviceId, current);
+            if (message.type === 'subscription_reminder' && subscriptionInspectionEnabled
+              && (message.reminder?.kind !== 'banked_reset_increase' || bankedResetReminderEnabled)) {
+              await this.maintenanceCards.receiveReminder(message, deviceId, current);
+            }
             return;
           }
 
@@ -595,6 +599,7 @@ export class RouterServer {
                 approvalCardsEnabled = message.data.capabilities?.approvalCards === true;
                 updateNoticeEnabled = message.data.capabilities?.updateNotice === true;
                 subscriptionInspectionEnabled = message.data.capabilities?.subscriptionInspection === true;
+                bankedResetReminderEnabled = subscriptionInspectionEnabled && message.data.capabilities?.bankedResetReminder === true;
                 this.maintenanceConnections.set(deviceId, { updateNotice: updateNoticeEnabled,
                   current: () => ws.readyState === WebSocket.OPEN && this.connectionHub.isCurrentConnection(requestedId, ws) });
                 streamingContextEnabled = message.data.capabilities?.streamingContext === true;
@@ -619,6 +624,7 @@ export class RouterServer {
                       ...(activityProgressEnabled ? { activityProgress: true } : {}),
                       ...(updateNoticeEnabled ? { updateNotice: true } : {}),
                       ...(subscriptionInspectionEnabled ? { subscriptionInspection: true } : {}),
+                      ...(bankedResetReminderEnabled ? { bankedResetReminder: true } : {}),
                       ...(filesEnabled ? { fileTransferV1: true } : {}),
                       ...(taskRecoveryEnabled ? { taskRecovery: true } : {}),
                       ...(approvalCardsEnabled ? { approvalCards: true } : {}),

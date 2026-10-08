@@ -8,6 +8,10 @@ function raw(time = epoch, used = 0, remaining = WEEK_SECONDS) {
     secondary: { usedPercent: used, windowDurationMins: 10080, resetsAt: time / 1000 + remaining } } } };
 }
 const observation = (time = epoch, used = 0, remaining = WEEK_SECONDS): WeeklyObservation => codexWeeklyObservation(raw(time, used, remaining), 'account-fixture', 'fixture-generation', time)!;
+const adapters = (inspect: (signal: AbortSignal) => Promise<WeeklyObservation | undefined>) => inspectionAdapters(async signal => {
+  const weekly = await inspect(signal);
+  return weekly && { accountKey: weekly.accountKey, observedAt: weekly.observedAt, weekly };
+});
 
 describe('typed Codex weekly observation', () => {
   it('uses usage, remaining reset time and advancing deadline, not the seven-day window length alone', () => {
@@ -79,7 +83,7 @@ describe('hourly subscription inspection', () => {
   let manager: SubscriptionInspection;
   beforeEach(() => {
     vi.useFakeTimers(); time = epoch; inspect = vi.fn(async () => observation(time)); send = vi.fn();
-    manager = new SubscriptionInspection(inspectionAdapters(inspect), send, () => time);
+    manager = new SubscriptionInspection(adapters(inspect), send, () => time);
     manager.registered(true);
   });
   afterEach(async () => { await manager.stop(); vi.clearAllTimers(); vi.useRealTimers(); });
@@ -87,7 +91,7 @@ describe('hourly subscription inspection', () => {
   const delivered = () => { const message = send.mock.calls.at(-1)![0]; manager.handle({ type: 'subscription_reminder_ack', ...message.reminder }); return message; };
 
   it('visits every backend slot but calls only the implemented Codex adapter, once per process', async () => {
-    const slots = inspectionAdapters(inspect);
+    const slots = adapters(inspect);
     expect(slots.map(s => s.backend)).toEqual(['claude', 'codex', 'agy', 'pi', 'opencode', 'kimi', 'zcode', 'dsh']);
     await Promise.all(slots.map(a => a.inspect(new AbortController().signal)));
     expect(inspect).toHaveBeenCalledTimes(1);

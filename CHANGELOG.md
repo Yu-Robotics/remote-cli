@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.150] - 2026-10-08
+
+### Added
+- Notify about Codex Banked Reset balance increases using the existing independent startup/hourly status read and native `rateLimitResetCredits.availableCount`. First observations and account switches are silent; compare each valid count with the previous valid count for that account, not a historical maximum. Decreases update the baseline without notifying, and missing or invalid fields remain unknown rather than zero.
+- Reuse standalone, notification-only quota cards and delivery acknowledgements, with previous/current balances and the increase. Keep banked-credit events separate from weekly quota delivery suppression, cancel pending notices on observed consumption/account changes, and retry only the latest pending event. Retain up to 1,000 banked delivery receipts in Router memory until notice expiry, including in-flight reservations, so lost-ACK retries across CLI reconnects revalidate ownership and acknowledge the existing card instead of sending duplicates; action bindings remain connection-scoped. A new additive `bankedResetReminder` capability prevents old Routers from mislabeling banked-credit notices. No extra native read, model request, credit consumption, expiry warning, or persisted balance is introduced.
+
 ## [1.6.149] - 2026-10-07
 
 ### Changed

@@ -4,6 +4,8 @@ import os from 'os';
 import path from 'path';
 import { MaintenanceCards, updateNoticeElements } from '../../src/maintenance/MaintenanceCards';
 import { NoticeReceipts } from '../../src/maintenance/NoticeReceipts';
+import { BankedResetReminders } from '../../../cli/src/maintenance/BankedResetReminders';
+import { codexQuotaObservation } from '../../../cli/src/maintenance/CodexQuota';
 
 const key = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const generation = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
@@ -138,6 +140,105 @@ describe('standalone maintenance cards', () => {
     deps.create.mockResolvedValueOnce(null); await cards.receiveReminder({ reminder: r }, 'device-fixture', () => true); expect(deps.send).not.toHaveBeenCalled();
     await cards.receiveReminder({ reminder: r }, 'device-fixture', () => true);
     now += 3600001; await expect(cards.reply('owner-fixture', key, 'card-fixture', 'dismiss')).rejects.toThrow();
+  });
+  it('shows an independent button-free banked balance increase and ACKs only successful delivery', async () => {
+    const reminder = { reminderId: key, generation, expiresAt: now + 3600000, activationAvailable: false,
+      backend: 'codex', kind: 'banked_reset_increase', previousCount: 3, availableCount: 5 };
+    deps.create.mockResolvedValueOnce(null); await cards.receiveReminder({ reminder }, 'device-fixture', () => true);
+    expect(deps.send).not.toHaveBeenCalled();
+    await Promise.all([cards.receiveReminder({ reminder }, 'device-fixture', () => true), cards.receiveReminder({ reminder }, 'device-fixture', () => true)]);
+    expect(deps.create).toHaveBeenCalledTimes(2);
+    expect(deps.create.mock.calls[1][2]).toMatchObject({ title: { content: '🎁 Codex Banked Reset' } });
+    const elements = deps.create.mock.calls[1][1];
+    expect(elements).toHaveLength(1); expect(elements[0].content).toContain('3 → 5 (+2)');
+    expect(elements[0].content).toContain('Available at the latest check: 5');
+    expect(elements[0].content).not.toContain('Weekly quota');
+    expect(elements.some((e: any) => e.tag === 'button')).toBe(false);
+    expect(deps.send).toHaveBeenCalledWith('device-fixture', { type: 'subscription_reminder_ack', reminderId: key, generation });
+    const acknowledged = deps.send.mock.calls.length;
+    await cards.receiveReminder({ reminder: { ...reminder, availableCount: 6 } }, 'device-fixture', () => true);
+    await cards.receiveReminder({ reminder: { ...reminder, kind: undefined, previousCount: undefined, availableCount: undefined } }, 'device-fixture', () => true);
+    expect(deps.create).toHaveBeenCalledTimes(2); expect(deps.send).toHaveBeenCalledTimes(acknowledged);
+    await expect(cards.reply('foreign-owner', key, 'card-fixture', 'dismiss')).rejects.toThrow();
+    await expect(cards.reply('owner-fixture', key, 'card-fixture', 'send_hi')).rejects.toThrow('notification-only');
+    await cards.reply('owner-fixture', key, 'card-fixture', 'dismiss');
+    expect(deps.update.mock.calls[0][1][0].content).toContain('3 → 5 (+2)');
+  });
+  it('rejects non-increases, invalid counts and unknown notice kinds without publication or ACK', async () => {
+    const r = { reminderId: key, generation, expiresAt: now + 3600000, activationAvailable: false,
+      backend: 'codex', kind: 'banked_reset_increase', previousCount: 2, availableCount: 3 };
+    for (const reminder of [{ ...r, previousCount: -1 }, { ...r, previousCount: '2' }, { ...r, previousCount: 1.5 },
+      { ...r, availableCount: 2 }, { ...r, availableCount: 1 }, { ...r, availableCount: '3' }, { ...r, availableCount: Number.MAX_SAFE_INTEGER + 1 },
+      { ...r, availableCount: null }, { ...r, previousCount: undefined }, { ...r, backend: undefined }, { ...r, kind: 'unknown' },
+      { ...r, kind: undefined }]) await cards.receiveReminder({ reminder }, 'device-fixture', () => true);
+    expect(deps.create).not.toHaveBeenCalled(); expect(deps.send).not.toHaveBeenCalled();
+    await cards.receiveReminder({ reminder: { ...r, previousCount: 0, availableCount: 1 } }, 'device-fixture', () => false);
+    expect(deps.create).not.toHaveBeenCalled();
+    deps.owner.mockResolvedValueOnce(undefined);
+    await cards.receiveReminder({ reminder: r }, 'device-fixture', () => true); expect(deps.create).not.toHaveBeenCalled();
+  });
+  it('deduplicates a real banked event across a lost ACK and reconnect, then delivers later growth separately', async () => {
+    let connected = true, loseAck = true;
+    const messages: any[] = [], flights: Promise<void>[] = [];
+    const client = new BankedResetReminders(message => {
+      messages.push(message); flights.push(cards.receiveReminder(message, 'device-fixture', () => connected));
+    }, generation, () => now);
+    deps.send.mockImplementation(async (_device: string, message: any) => {
+      if (loseAck) return false;
+      return client.handle(message);
+    });
+    try {
+      client.registered(true);
+      for (const count of [5, 3, 4]) {
+        client.observe(codexQuotaObservation({ rateLimitResetCredits: { availableCount: count, credits: null } }, 'account-fixture', 'credential-fixture', now++)!);
+      }
+      await Promise.all(flights); expect(deps.create).toHaveBeenCalledTimes(1); expect(messages).toHaveLength(1);
+      expect(messages[0].reminder).toMatchObject({ previousCount: 3, availableCount: 4 });
+      connected = false; client.disconnected(); cards.disconnect('device-fixture');
+      await expect(cards.reply('owner-fixture', messages[0].reminder.reminderId, 'card-fixture', 'dismiss')).rejects.toThrow();
+      loseAck = false; connected = true; client.registered(true); await Promise.all(flights);
+      expect(deps.create).toHaveBeenCalledTimes(1); expect(deps.send).toHaveBeenCalledTimes(2);
+      expect(messages[1]).toEqual(messages[0]);
+      client.disconnected(); client.registered(true); expect(messages).toHaveLength(2);
+      client.observe(codexQuotaObservation({ rateLimitResetCredits: { availableCount: 5 } }, 'account-fixture', 'credential-fixture', now++)!);
+      await Promise.all(flights); expect(deps.create).toHaveBeenCalledTimes(2);
+      expect(messages[2].reminder.reminderId).not.toBe(messages[0].reminder.reminderId);
+    } finally { client.stop(); }
+  });
+  it('remembers definite banked delivery even if its socket closes during card creation, and revalidates ownership', async () => {
+    const reminder = { reminderId: key, generation, expiresAt: now + 3600000, activationAvailable: false,
+      backend: 'codex', kind: 'banked_reset_increase', previousCount: 2, availableCount: 3 };
+    let connected = true;
+    deps.create.mockImplementationOnce(async () => { connected = false; cards.disconnect('device-fixture'); return 'card-fixture'; });
+    await cards.receiveReminder({ reminder }, 'device-fixture', () => connected);
+    expect(deps.create).toHaveBeenCalledTimes(1); expect(deps.send).not.toHaveBeenCalled();
+    connected = true; deps.owner.mockResolvedValue('another-owner-fixture');
+    await cards.receiveReminder({ reminder }, 'device-fixture', () => connected);
+    expect(deps.create).toHaveBeenCalledTimes(1); expect(deps.send).not.toHaveBeenCalled();
+    deps.owner.mockResolvedValue('owner-fixture');
+    await cards.receiveReminder({ reminder: { ...reminder, availableCount: 4 } }, 'device-fixture', () => connected);
+    expect(deps.send).not.toHaveBeenCalled();
+    await cards.receiveReminder({ reminder }, 'device-fixture', () => connected);
+    expect(deps.create).toHaveBeenCalledTimes(1); expect(deps.send).toHaveBeenCalledTimes(1);
+    await expect(cards.reply('owner-fixture', key, 'card-fixture', 'dismiss')).rejects.toThrow();
+    now = reminder.expiresAt; await cards.receiveReminder({ reminder }, 'device-fixture', () => connected);
+    expect((cards as any).bankedReceipts.size).toBe(0); expect(deps.send).toHaveBeenCalledTimes(1);
+  });
+  it('bounds retained banked receipts including in-flight creations without evicting unexpired delivery evidence', async () => {
+    const reminder = { reminderId: key, generation, expiresAt: now + 3600000, activationAvailable: false,
+      backend: 'codex', kind: 'banked_reset_increase', previousCount: 2, availableCount: 3 };
+    const retained = (cards as any).bankedReceipts;
+    for (let i = 0; i < 999; i++) retained.set(`fixture-${i}`, { ...reminder, deviceId: 'device-fixture', openId: 'owner-fixture', cardId: `card-${i}` });
+    let complete!: (cardId: string) => void;
+    deps.create.mockImplementationOnce(() => new Promise<string>(resolve => { complete = resolve; }));
+    const first = cards.receiveReminder({ reminder }, 'device-fixture', () => true);
+    const second = cards.receiveReminder({ reminder: { ...reminder, reminderId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' } }, 'device-fixture', () => true);
+    try { await vi.waitFor(() => expect(deps.create).toHaveBeenCalledTimes(1)); }
+    finally { complete('card-fixture'); await Promise.all([first, second]); }
+    expect(retained.size).toBe(1000); expect(deps.send).toHaveBeenCalledTimes(1);
+    cards.disconnect('device-fixture'); await cards.receiveReminder({ reminder }, 'device-fixture', () => true);
+    expect(deps.create).toHaveBeenCalledTimes(1); expect(deps.send).toHaveBeenCalledTimes(2);
+    cards.destroy(); expect(retained.size).toBe(0);
   });
   it('renders full Markdown release sections collapsed, with coverage and paging kept separate', () => {
     const elements = updateNoticeElements(notice() as any, key);
