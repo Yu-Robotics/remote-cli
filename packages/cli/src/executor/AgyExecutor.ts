@@ -12,6 +12,7 @@ import { assertWorkingDirectoryExists } from '../utils/WorkingDirectory';
 import { configureAgyDelegation } from './agy/AgyDelegationConfig';
 import { delegationEnvironment, sameConnection, type DelegationConnection } from '../delegation/contract';
 import { ActivityTracker, sanitizeActivityText } from './Activity';
+import { parseAgyModels } from './agy/AgyModels';
 
 export interface AgyExecutorOptions {
   /** Model slug passed as --model. Leave unset to use agy's default. */
@@ -115,41 +116,7 @@ interface ActiveCommand {
   inactivityTimeoutMs?: number;
 }
 
-/**
- * Deterministic bounded parser for `agy models` two-column output (`slug\tDisplay Name`).
- * Ignores malformed lines, headers/progress notices, and deduplicates slugs.
- */
-export function parseAgyModels(stdout: string, currentModel?: string): ExecutorModelInfo[] {
-  const clean = stripAnsi(stdout);
-  const lines = clean.split(/\r?\n|\r/);
-  const seen = new Set<string>();
-  const models: ExecutorModelInfo[] = [];
-
-  for (const rawLine of lines) {
-    const line = rawLine.trim();
-    if (!line) continue;
-    const tabIndex = line.indexOf('\t');
-    if (tabIndex === -1) {
-      continue;
-    }
-    const slug = line.slice(0, tabIndex).trim();
-    const displayName = line.slice(tabIndex + 1).trim();
-    if (!slug || /\s/.test(slug) || seen.has(slug)) {
-      continue;
-    }
-    seen.add(slug);
-    models.push({
-      id: slug,
-      displayName: displayName || slug,
-      isDefault: undefined,
-      isCurrent: currentModel ? slug === currentModel : undefined,
-      supportedReasoningEfforts: [...SUPPORTED_EFFORTS],
-      inputModalities: ['text'],
-    });
-  }
-
-  return models;
-}
+export { parseAgyModels };
 
 /**
  * IExecutor implementation for the Antigravity CLI (`agy`) — Google's
@@ -536,7 +503,15 @@ export class AgyExecutor implements IExecutor {
             reject(new Error(`Failed to list AGY models: ${error.message}`));
             return;
           }
-          resolve(parseAgyModels(stdout, this.model));
+          try {
+            const models = parseAgyModels(stdout, this.model);
+            if (!models.length) {
+              throw new Error('AGY returned no usable model entries. Refresh and check the installed AGY version.');
+            }
+            resolve(models);
+          } catch (parseError) {
+            reject(parseError);
+          }
         }
       );
     });

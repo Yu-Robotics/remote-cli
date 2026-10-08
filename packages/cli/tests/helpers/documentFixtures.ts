@@ -1,5 +1,11 @@
 import { deflateRawSync } from 'zlib';
 
+const CRC_TABLE = Uint32Array.from({ length: 256 }, (_, byte) => {
+  let crc = byte;
+  for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+  return crc >>> 0;
+});
+
 /** Minimal ZIP builder for parser tests; never extracts entries onto disk. */
 export function zipFixture(entries: Array<[string, string | Buffer]>): Buffer {
   const local: Buffer[] = []; const central: Buffer[] = []; let offset = 0;
@@ -7,9 +13,8 @@ export function zipFixture(entries: Array<[string, string | Buffer]>): Buffer {
     const data = Buffer.isBuffer(value) ? value : Buffer.from(value);
     const compressed = deflateRawSync(data); const filename = Buffer.from(name);
     let crc = 0xffffffff;
-    for (const byte of data) {
-      crc ^= byte;
-      for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+    for (let index = 0; index < data.length; index++) {
+      crc = (crc >>> 8) ^ CRC_TABLE[(crc ^ data[index]) & 0xff];
     }
     crc = (crc ^ 0xffffffff) >>> 0;
     const header = Buffer.alloc(30);

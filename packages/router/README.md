@@ -29,6 +29,8 @@ their existing cards. See [Public Activity](../../README.md#public-activity).
 
 CLI and Router 1.6.152 negotiate `settingsCards` on protocol version 1. Bare `/backend`, `/model`, and `/effort` replace their command placeholder with a standalone interactive settings card. Backend/scope selection changes a draft only until Confirm, with Current thread as the default. Model and effort buttons submit immediately, including an inactive target backend, without switching the coordinator. The CLI remains authoritative for native validation and persistence; the Router shows pending or unknown state until a matching result confirms application.
 
+From 1.6.154, numbered headings, subtitles and dividers distinguish backend selection, application scope and Confirm, or target backend, its model/effort choices and secondary actions. Explicit checks identify selected drafts and known preferences without guessing unknown values. Section elements participate in recursive node and byte accounting and still render as one bounded settings card. AGY catalog-format compatibility is handled by the CLI; no new Router capability is required.
+
 Choices use opaque stored tokens rather than command text or stale ordinals. Callback ownership includes the delivered card, original user/device/thread, connection, snapshot and page revision. Cards paginate eight choices per page with recursive tagged-node and serialized-byte accounting. Missing backends are disabled, native-unavailable states remain explicit, and expired or stale controls require a fresh menu. Socket changes invalidate action bindings. No native settings, credentials, installations or model inference run on the Router. Older peers retain text lists. See [Model and Reasoning Effort](../../README.md#model-and-reasoning-effort).
 
 ## Maintenance Notices
@@ -131,6 +133,14 @@ From CLI 1.6.153, real Git fixture suites use at most two isolated processes
 lightweight test threads. Pristine test repositories are copied into independently
 owned directories instead of rebuilt for every case. Publish still runs the full
 suite; ordinary test deadlines and production Git safety checks are unchanged.
+From 1.6.154, filesystem checks run in batches of at most eight and drain before
+failure; checkout readers still hash every byte with independent buffers up to
+1 MiB each. Test-only clocks remove mocked startup/stop and transfer-deadline
+waits after readiness gates; real Git streams, partial packs, cleanup assertions,
+129 MiB files and 10,001-file stress coverage remain. ZIP fixtures use faster
+CRC generation without changing archive bytes. Hosts with at least eight
+available CPUs use at most four isolated Git processes plus at most four
+lightweight threads; lower-core pool limits and ordinary deadlines are unchanged.
 
 From CLI 1.6.140, managed Git preparation, repository-lock waits, and artifact
 collection are awaited separately from native startup/stop deadlines. Slots and

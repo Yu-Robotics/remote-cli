@@ -66,6 +66,35 @@ describe('verified worker checkout reclamation and recreation', { timeout: 30_00
     expect(await manager.reclaim(workspace.taskId)).toBe(false);
   });
 
+  it('drains active file readers before rejecting cleanup after another reader fails', async () => {
+    await complete();
+    const open = fs.open.bind(fs);
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const reading = new Promise<void>(resolve => { entered = resolve; });
+    let failed = false;
+    vi.spyOn(fs, 'open').mockImplementation(async (file, ...args) => {
+      if (file === path.join(workspace.directory, '.gitignore')) {
+        failed = true;
+        throw new Error('Synthetic file reader failure');
+      }
+      if (file === path.join(workspace.directory, 'source.txt')) { entered(); await gate; }
+      return open(file, ...args);
+    });
+    let settled = false;
+    const reclaiming = manager.reclaim(workspace.taskId).finally(() => { settled = true; });
+    try {
+      await reading;
+      expect(failed).toBe(true);
+      expect(settled).toBe(false);
+      expect(await exists(workspace.directory)).toBe(true);
+    } finally { release(); }
+    expect(await reclaiming).toBe(false);
+    expect(await exists(workspace.directory)).toBe(true);
+    expect((await manager.describe(workspace.taskId))?.disposition).toBe('applied');
+  });
+
   it('automatically reclaims applied output and recreates at the same path on a fresh delivery baseline', async () => {
     await fs.writeFile(path.join(workspace.cwd, 'source.txt'), 'delivered worker result\n');
     await complete();

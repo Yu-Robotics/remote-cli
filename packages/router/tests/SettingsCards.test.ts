@@ -385,6 +385,172 @@ describe('SettingsCards', () => {
       expect(buttonsOf(call[1])).toHaveLength(0);
     }
   });
+
+  it('separates the backend card into headed sections with subtitles and dividers', () => {
+    const { elements } = present(backendMenu());
+    const sectionIndex = (title: string) => elements.findIndex(element => element.tag === 'markdown' && element.content === title);
+    const choose = sectionIndex('**1 · Choose backend**');
+    const scope = sectionIndex('**2 · Apply to**');
+    const confirm = sectionIndex('**3 · Confirm**');
+    expect(choose).toBeGreaterThan(-1);
+    expect(choose).toBeLessThan(scope);
+    expect(scope).toBeLessThan(confirm);
+    // Every section opens with a divider and a brief notation-size subtitle.
+    for (const index of [choose, scope, confirm]) {
+      expect(elements[index - 1]).toEqual({ tag: 'hr' });
+      expect(elements[index + 1]).toMatchObject({ tag: 'markdown', text_size: 'notation' });
+    }
+    expect(elements[choose + 1].content).toContain('Current: **Claude Code**');
+    expect(elements[scope + 1].content).toContain('only this thread');
+    expect(elements[scope + 1].content).toContain('device-wide backend for this thread only');
+    expect(elements[confirm + 1].content).toContain('Only Confirm applies');
+    // Controls live inside their own sections, not stacked together.
+    const between = (from: number, to: number) => buttonsOf(elements.slice(from + 1, to));
+    expect(between(choose, scope).every(button => button.behaviors[0].value.op === 'draft_backend')).toBe(true);
+    expect(new Set(between(scope, confirm).map(button => button.behaviors[0].value.op))).toEqual(new Set(['draft_scope', 'draft_follow_global']));
+    expect(between(confirm, elements.length).map(button => button.text.content)).toEqual(['Confirm']);
+  });
+
+  it('checks Current thread by default and moves the explicit check with the scope draft', async () => {
+    const { elements } = present(backendMenu());
+    const scopeOf = (root: any[]) => buttonsOf(root).filter(button => button.behaviors[0].value.op === 'draft_scope');
+    expect(scopeOf(elements).find(button => button.behaviors[0].value.value === 'thread')!.text.content).toBe('✓ Current thread');
+    expect(scopeOf(elements).find(button => button.behaviors[0].value.value === 'all')!.text.content).toBe('All threads');
+    await cards.click('owner', 'card-1', clickPayload(elements, 'draft_scope', 'all'));
+    await flush();
+    const patched = transport.update.mock.calls.at(-1)[1];
+    expect(scopeOf(patched).find(button => button.behaviors[0].value.value === 'thread')!.text.content).toBe('Current thread');
+    expect(scopeOf(patched).find(button => button.behaviors[0].value.value === 'all')!.text.content).toBe('✓ All threads');
+    expect(JSON.stringify(patched)).toContain('clears per-thread backend overrides');
+    await cards.click('owner', 'card-1', { ...clickPayload(patched, 'draft_scope', 'thread') });
+    await flush();
+    const restored = transport.update.mock.calls.at(-1)[1];
+    expect(scopeOf(restored).find(button => button.behaviors[0].value.value === 'thread')!.text.content).toBe('✓ Current thread');
+    expect(JSON.stringify(restored)).not.toContain('clears per-thread');
+  });
+
+  it('distinguishes the currently-effective backend from the draft selection', async () => {
+    const { elements } = present(backendMenu());
+    const backendsOf = (root: any[]) => buttonsOf(root).filter(button => button.behaviors[0].value.op === 'draft_backend');
+    const initial = backendsOf(elements).find(button => button.behaviors[0].value.value === 'claude')!;
+    expect(initial.text.content).toBe('✓ Claude Code (current)');
+    expect(initial.type).toBe('primary');
+    await cards.click('owner', 'card-1', clickPayload(elements, 'draft_backend', 'codex'));
+    await flush();
+    const patched = transport.update.mock.calls.at(-1)[1];
+    const draft = backendsOf(patched).find(button => button.behaviors[0].value.value === 'codex')!;
+    expect(draft.text.content).toBe('✓ Codex CLI');
+    expect(draft.type).toBe('primary');
+    const current = backendsOf(patched).find(button => button.behaviors[0].value.value === 'claude')!;
+    expect(current.text.content).toBe('Claude Code (current)');
+    expect(current.type).not.toBe('primary');
+    expect(JSON.stringify(patched)).toContain('Draft: **Codex CLI** — applies after Confirm.');
+  });
+
+  it('marks follow-global as the draft while keeping scope on the current thread', async () => {
+    const { elements } = present(backendMenu({ followsGlobal: false }));
+    await cards.click('owner', 'card-1', clickPayload(elements, 'draft_follow_global'));
+    await flush();
+    const patched = transport.update.mock.calls.at(-1)[1];
+    const json = JSON.stringify(patched);
+    expect(json).toContain('Draft: follow the global backend — applies after Confirm.');
+    expect(json).toContain('device-wide backend for this thread only');
+    const follow = buttonsOf(patched).find(button => button.behaviors[0].value.op === 'draft_follow_global')!;
+    expect(follow.text.content).toBe('✓ Follow global');
+    const scope = buttonsOf(patched).filter(button => button.behaviors[0].value.op === 'draft_scope');
+    expect(scope.find(button => button.behaviors[0].value.value === 'thread')!.text.content).toBe('✓ Current thread');
+    const backends = buttonsOf(patched).filter(button => button.behaviors[0].value.op === 'draft_backend');
+    expect(backends.every(button => !button.text.content.startsWith('✓'))).toBe(true);
+    expect(backends.find(button => button.behaviors[0].value.value === 'claude')!.text.content).toBe('Claude Code (current)');
+  });
+
+  it('orders the model card as target backend, choices for that target, then secondary actions', () => {
+    const { elements } = present(modelMenu());
+    const sectionIndex = (title: string) => elements.findIndex(element => element.tag === 'markdown' && typeof element.content === 'string' && element.content.startsWith(title));
+    const target = sectionIndex('**1 · Target backend**');
+    const choices = sectionIndex('**2 · Model for');
+    const actions = sectionIndex('**3 · More actions**');
+    expect(target).toBeGreaterThan(-1);
+    expect(target).toBeLessThan(choices);
+    expect(choices).toBeLessThan(actions);
+    expect(elements[choices].content).toBe('**2 · Model for Claude Code**');
+    expect(elements[target + 1].content).toContain("never switches the conversation's backend");
+    expect(elements[choices + 1].content).toContain('apply it immediately');
+    expect(elements[choices + 1].content).toContain('future workers');
+    for (const index of [target, choices, actions]) expect(elements[index - 1]).toEqual({ tag: 'hr' });
+    // The target backend and the configured choice carry explicit checks.
+    const targetButtons = buttonsOf(elements).filter(button => button.behaviors[0].value.op === 'view');
+    expect(targetButtons.find(button => button.behaviors[0].value.value === 'claude')!.text.content).toBe('✓ Claude Code');
+    const opus = buttonsOf(elements).find(button => button.behaviors[0].value.value === 'opus')!;
+    expect(opus.text.content).toBe('✓ Opus');
+    expect(opus.type).toBe('primary');
+    // Disabled choices keep their literal reason on the button.
+    expect(buttonsOf(elements).find(button => button.behaviors[0].value.value === 'haiku')!.text.content).toBe('Haiku (Not entitled)');
+  });
+
+  it('separates native effort choices from the target backend and applies without Confirm', async () => {
+    const { elements } = present(modelMenu({ kind: 'effort', targetBackend: 'codex',
+      configuredValue: 'medium', effectiveValue: 'medium', defaultValue: 'low',
+      choices: [{ value: 'low', label: 'Low' }, { value: 'medium', label: 'Medium' }, { value: 'high', label: 'High' }] }));
+    const target = elements.findIndex(element => element.content === '**1 · Target backend**');
+    const choices = elements.findIndex(element => element.content === '**2 · Effort for Codex CLI**');
+    const actions = elements.findIndex(element => element.content === '**3 · More actions**');
+    expect(target).toBeGreaterThan(-1);
+    expect(choices).toBeGreaterThan(target);
+    expect(actions).toBeGreaterThan(choices);
+    expect(elements[choices - 1]).toEqual({ tag: 'hr' });
+    const medium = buttonsOf(elements.slice(choices, actions)).find(button => button.behaviors[0].value.value === 'medium')!;
+    expect(medium.text.content).toBe('✓ Medium');
+    expect(medium.type).toBe('primary');
+    expect(buttonsOf(elements).some(button => button.text.content === 'Confirm')).toBe(false);
+    await cards.click('owner', 'card-1', clickPayload(elements, 'apply', 'high'));
+    const action = transport.send.mock.calls.at(-1)[1];
+    expect(action).toMatchObject({ type: 'settings_action', operation: 'apply', snapshotId: 'snap-model', value: 'high' });
+    // The CLI's immutable snapshot supplies kind and target; apply does not override either.
+    expect(action).not.toHaveProperty('kind');
+    expect(action).not.toHaveProperty('targetBackend');
+  });
+
+  it.each([
+    { configuredValue: undefined, effectiveValue: 'opus', selected: 'opus' },
+    { configuredValue: 'sonnet', effectiveValue: 'opus', selected: 'sonnet' },
+    { configuredValue: undefined, effectiveValue: undefined, selected: undefined },
+  ])('marks only a known model selection without guessing (%j)', ({ configuredValue, effectiveValue, selected }) => {
+    const { elements } = present(modelMenu({ configuredValue, effectiveValue,
+      choices: [{ value: 'opus', label: 'Opus' }, { value: 'sonnet', label: 'Sonnet' }] }));
+    const choices = buttonsOf(elements).filter(button => button.behaviors[0].value.op === 'apply');
+    const checked = choices.filter(button => button.text.content.startsWith('✓ '));
+    expect(checked.map(button => button.behaviors[0].value.value)).toEqual(selected ? [selected] : []);
+    expect(choices.filter(button => button.type === 'primary')).toEqual(checked);
+  });
+
+  it('keeps sectioned cards within node and byte budgets under long labels and pagination', async () => {
+    const long = 'x'.repeat(78);
+    const model = present(modelMenu({
+      backends: BACKENDS.map(([value]) => ({ value, label: `${value}-${long}`, installed: value !== 'pi',
+        ...(value === 'pi' ? { reason: long } : {}) })),
+      choices: Array.from({ length: 20 }, (_, index) => ({ value: `m-${index}`, label: `${index}-${long}`,
+        ...(index === 3 ? { disabled: true, reason: long } : {}) })),
+      omittedChoices: 7, supportsReset: true,
+    }));
+    expect(taggedNodes(model.elements)).toBeLessThanOrEqual(90);
+    expect(Buffer.byteLength(JSON.stringify(model.elements))).toBeLessThanOrEqual(16 * 1024);
+    await cards.click('owner', 'card-1', clickPayload(model.elements, 'page', '1'));
+    await flush();
+    const pageTwo = transport.update.mock.calls.at(-1)[1];
+    expect(taggedNodes(pageTwo)).toBeLessThanOrEqual(90);
+    expect(Buffer.byteLength(JSON.stringify(pageTwo))).toBeLessThanOrEqual(16 * 1024);
+
+    const backend = present(backendMenu({
+      backends: BACKENDS.map(([value]) => ({ value, label: `${value}-${long}`, installed: value !== 'pi' && value !== 'zcode',
+        ...((value === 'pi' || value === 'zcode') ? { reason: long } : {}) })),
+    }), 'card-2');
+    expect(taggedNodes(backend.elements)).toBeLessThanOrEqual(90);
+    expect(Buffer.byteLength(JSON.stringify(backend.elements))).toBeLessThanOrEqual(16 * 1024);
+    // Long labels stay bounded; the effective backend is still named in the subtitle.
+    expect(JSON.stringify(backend.elements)).toContain('Current: **claude-');
+    for (const button of buttonsOf(backend.elements)) expect(button.text.content.length).toBeLessThanOrEqual(80);
+  });
 });
 
 describe('sanitizeSettingsMenu', () => {

@@ -187,6 +187,8 @@ Linux users upgrading from version 1.6.23 or earlier should run `remote-cli serv
 
 CLI and Router 1.6.152 add standalone settings cards. `/backend` lists all eight stable backend choices, disables missing installations and applies only after Confirm; Current thread is the default and All threads on this device is opt-in. `/model` and `/effort` submit native options immediately, and show applied state only after a saved-setting acknowledgement. Their target-backend selector configures future worker launches without switching the coordinator. Busy work, expired cards and changed settings require refresh; older peers and parameterized text commands retain their existing behavior. See [Model and Reasoning Effort](../../README.md#model-and-reasoning-effort).
 
+From 1.6.154, numbered sections separate backend selection, scope and Confirm, or target backend, model/effort choices and secondary actions. Selected drafts and known preferences carry explicit checks; changing the target still never switches the coordinator. AGY model catalogs accept tab-delimited and formatted multi-space native rows, with exact IDs and explicit failures for empty, unusable or oversized responses. No inference or additional protocol capability is needed.
+
 ### Threads & Machines
 
 From CLI 1.6.121, new and existing threads without a saved preference enable
@@ -303,6 +305,14 @@ From CLI 1.6.153, real Git fixture suites use at most two isolated processes
 lightweight test threads. Pristine test repositories are copied into independently
 owned directories instead of rebuilt for every case. Publish still runs the full
 suite; ordinary test deadlines and production Git safety checks are unchanged.
+From 1.6.154, filesystem checks run in batches of at most eight and drain before
+failure; checkout readers still hash every byte with independent buffers up to
+1 MiB each. Test-only clocks remove mocked startup/stop and transfer-deadline
+waits after readiness gates; real Git streams, partial packs, cleanup assertions,
+129 MiB files and 10,001-file stress coverage remain. ZIP fixtures use faster
+CRC generation without changing archive bytes. Hosts with at least eight
+available CPUs use at most four isolated Git processes plus at most four
+lightweight threads; lower-core pool limits and ordinary deadlines are unchanged.
 
 From CLI 1.6.140, managed Git preparation, repository-lock waits, and artifact
 collection are awaited separately from native startup/stop deadlines. Slots and

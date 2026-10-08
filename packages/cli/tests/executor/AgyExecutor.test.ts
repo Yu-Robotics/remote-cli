@@ -1534,6 +1534,29 @@ describe('AgyExecutor', () => {
 
     await expect(executor.listModels()).rejects.toThrow('Failed to list AGY models: command failed');
   });
+
+  it('listModels accepts formatted columns without guessing the current model', async () => {
+    mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: any, cb: any) => {
+      cb(null, 'Model  Display Name\nprovider/Model:v2  Native Model\n', 'Fetching available models...');
+    });
+    expect(await executor.listModels()).toEqual([
+      expect.objectContaining({ id: 'provider/Model:v2', displayName: 'Native Model', isCurrent: undefined }),
+    ]);
+  });
+
+  it.each(['', 'Fetching available models...\n', 'Unexpected unstructured output\n'])
+    ('listModels rejects an empty or unusable successful response (%j)', async (stdout) => {
+      mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: any, cb: any) => cb(null, stdout, ''));
+      await expect(executor.listModels()).rejects.toThrow('no usable model entries');
+    });
+
+  it('listModels rejects parser errors through the promise rather than its process callback', async () => {
+    const stdout = Array.from({ length: 129 }, (_, index) => `model-${index}\tModel ${index}`).join('\n');
+    mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: any, cb: any) => {
+      queueMicrotask(() => cb(null, stdout, ''));
+    });
+    await expect(executor.listModels()).rejects.toThrow('entry limit');
+  });
 });
 
 describe('parseAgyModels', () => {

@@ -19,7 +19,7 @@ describe('CLI test scheduling', () => {
   });
 
   it.each([
-    [1, 1, 1], [2, 1, 1], [3, 1, 2], [4, 2, 2], [8, 2, 4], [64, 2, 4],
+    [1, 1, 1], [2, 1, 1], [3, 1, 2], [4, 2, 2], [7, 2, 4], [8, 4, 4], [64, 4, 4],
     [0, 1, 1], [-1, 1, 1], [NaN, 1, 1], [Infinity, 1, 1],
   ])('bounds both pools for %s available CPUs', (cpus, gitForks, threads) => {
     expect(testWorkerLimits(cpus)).toEqual({ gitForks, threads });

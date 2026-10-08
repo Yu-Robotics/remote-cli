@@ -608,6 +608,14 @@ From CLI 1.6.153, real Git fixture suites use at most two isolated processes
 lightweight test threads. Pristine test repositories are copied into independently
 owned directories instead of rebuilt for every case. Publish still runs the full
 suite; ordinary test deadlines and production Git safety checks are unchanged.
+From 1.6.154, filesystem checks run in batches of at most eight and drain before
+failure; checkout readers still hash every byte with independent buffers up to
+1 MiB each. Test-only clocks remove mocked startup/stop and transfer-deadline
+waits after readiness gates; real Git streams, partial packs, cleanup assertions,
+129 MiB files and 10,001-file stress coverage remain. ZIP fixtures use faster
+CRC generation without changing archive bytes. Hosts with at least eight
+available CPUs use at most four isolated Git processes plus at most four
+lightweight threads; lower-core pool limits and ordinary deadlines are unchanged.
 Existing conflicts, unsafe links, known untracked credential files, unsupported
 filesystem entries, and broken Git metadata stop setup rather
 than falling back to shared parallel writes. The whole repository must be
@@ -1081,9 +1089,11 @@ From CLI 1.6.120, Claude SDK `[claude-code:unrecognized_model]` diagnostics are 
 | `/effort` | Open model-specific native effort choices for the original thread |
 | `/effort <auto|level>` | Set or clear (`auto`) the current thread's effort override |
 
-Model listing uses native metadata: Claude Code control initialization, bounded `agy models` tab-delimited rows, Codex app-server `model/list`, ACP session options for OpenCode/Kimi/DSH, ZCode's official app-server catalog, and Pi RPC `get_available_models`. Effort choices are scoped to the selected model and exposed native controls; unavailable controls remain explicit. `auto` clears the thread's override rather than guessing a default.
+Model listing uses native metadata: Claude Code control initialization, bounded `agy models` two-column rows, Codex app-server `model/list`, ACP session options for OpenCode/Kimi/DSH, ZCode's official app-server catalog, and Pi RPC `get_available_models`. AGY accepts tab-delimited and formatted multi-space columns, preserves exact native IDs, and rejects empty, unusable or oversized catalogs instead of showing an unexplained empty list. Effort choices are scoped to the selected model and exposed native controls; unavailable controls remain explicit. `auto` clears the thread's override rather than guessing a default.
 
 From CLI and Router 1.6.152, bare `/backend`, `/model`, and `/effort` open dedicated settings cards. The backend card lists all eight stable backend choices, including disabled missing installations. It defaults to **Current thread**; **All threads on this device** is opt-in and clears backend overrides and queued messages. Selecting a backend or scope only changes the draft until **Confirm**. Model/effort buttons submit immediately, and applied state appears only after the CLI acknowledges the native change and saved preference. Choose another installed target backend in the model/effort card to configure future worker launches without switching the coordinator. Same-backend coordinator and worker preferences remain shared.
+
+From 1.6.154, settings cards separate their functional areas with numbered headings, subtitles and dividers. `/backend` separates backend selection, application scope and Confirm, marking the drafted backend and scope explicitly while identifying the currently applied backend. `/model` and `/effort` separate the target backend, its native choices and secondary actions. Checks mark a configured selection, or a known effective selection when no override exists; unknown values are never guessed. Sections are included in recursive card-node and byte budgets. No new protocol capability is required.
 
 Cards remain bound to their original user, device, thread and settings revision, even after switching the active chat thread. Busy work, stale context, expired cards and mismatched retries cannot change settings. Model choices are paginated eight per page with recursive node/byte limits; native current/default and configured values are distinguished. Metadata previews use separate temporary identities with the real thread's effective sandbox policy, never model-generated menus. Cross-backend previews from a restricted coordinator are unavailable. Pi and ZCode are not auto-installed; unavailable executables or catalogs keep disabled/unavailable states. Older peers retain text lists, and `/backend <index>` still changes all threads while `/backend <index> @` changes only the current thread.
 
