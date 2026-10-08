@@ -603,8 +603,11 @@ fail admission; reconcile those rules before delegating.
 From CLI 1.6.151, checkpoint index queries are combined and identical trees are
 audited once within a capture. Both working-file passes and source HEAD/index
 checks remain; no state is cached across tasks and Git deadlines are unchanged.
-CLI tests run real Git fixture suites in one isolated process alongside at most
-two lightweight test threads, avoiding CPU-count-driven Git subprocess contention.
+From CLI 1.6.153, real Git fixture suites use at most two isolated processes
+(one on hosts with fewer than four available CPUs), alongside one to four
+lightweight test threads. Pristine test repositories are copied into independently
+owned directories instead of rebuilt for every case. Publish still runs the full
+suite; ordinary test deadlines and production Git safety checks are unchanged.
 Existing conflicts, unsafe links, known untracked credential files, unsupported
 filesystem entries, and broken Git metadata stop setup rather
 than falling back to shared parallel writes. The whole repository must be
@@ -1010,6 +1013,8 @@ Code edits retain per-file previews inside that tool row, with file paths and ad
 Previews retain three lines of context around each change. Display budgets are shared across files and hunks, with explicit notices for omitted lines, hunks, or files. A diff-only tool result is displayed even without a text message. Codex file-change events retain file boundaries, and ACP old/new text is compared so unchanged lines are not presented as replacements. Snippet-relative line numbers and Write content previews are labeled; Write does not imply a new file when its previous contents are unavailable.
 
 This changes display only, not backend execution. Existing preview limits and omission notices remain; no multi-call aggregation or complete-history viewer is added. The Router upgrade enables the new presentation for existing tool data; upgrading the CLI also preserves file names in Codex multi-file changes. Pi and AGY edit payload mappings are unchanged.
+
+From CLI 1.6.153, Codex shell calls no longer lose their label when native command actions are absent or unknown. Native reads, searches, and directory listings remain preferred. Other calls use fixed operation labels such as `Run npm command` or `Run Git command` for simple allowlisted programs, and `Run shell command` for compound or unrecognized commands. These are deterministic operation labels, not model-authored purpose summaries: installed Codex 0.160.0 command items have no per-call description field. Arguments, full paths, output, and execution-wide reasoning are never copied into these fallback labels. Late native action metadata can enrich a pending row before its first result; repeated results retain one row. Existing description fields, heading limits, and card-node counts are unchanged; upgrade the CLI, with no new Router capability required.
 
 ### Background Task Notifications
 

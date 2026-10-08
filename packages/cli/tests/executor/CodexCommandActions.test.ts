@@ -14,17 +14,65 @@ describe('native Codex command-action descriptions', () => {
     [[{ type: 'read', path: '..' }], 'Read file'],
     [[{ type: 'search', query: 'synthetic-private-query', path: '/project/private' }], 'Search files'],
     [[{ type: 'listFiles', path: '/project/private' }], 'List directory'],
+    [[{ type: 'unknown', command: 'npm test -- --silent' }], 'Run npm command'],
+    [[{ type: 'unknown', command: 'git status --short' }], 'Run Git command'],
+    [[{ type: 'unknown', command: 'custom-program synthetic-private-argument' }], 'Run shell command'],
+    [[{ type: 'unknown' }], 'Run shell command'],
     [[{ type: 'read', name: '\u001b[31mapp\u001b[0m\u0000.ts\n' }], 'Read app.ts'],
   ])('uses only structured action metadata (%j)', (actions, expected) => {
     expect(describeCodexCommandActions(actions)).toBe(expected);
   });
 
   it.each([undefined, null, {}, 'read', [], [null], [false], [42], ['read'], [[]], [{}],
-    [{ type: 'unknown', command: 'npm test' }], [{ type: 'futureAction' }],
-    [{ type: 'search' }, { type: 'unknown', command: 'npm test' }],
+    [{ type: 'futureAction' }],
+    [{ type: 'search' }, { type: 'futureAction' }],
     [{ type: 'read', name: 'app.ts' }, null],
-  ])('omits malformed, absent, unknown, and partly unknown actions (%j)', actions => {
+  ])('omits malformed, absent, and unsupported future actions (%j)', actions => {
     expect(describeCodexCommandActions(actions)).toBeUndefined();
+  });
+
+  it.each([
+    ['npx vitest run', 'Run npm command'], ['pnpm test', 'Run pnpm command'],
+    ['yarn test', 'Run Yarn command'], ['bun test', 'Run Bun command'],
+    ['python app.py', 'Run Python command'], ['python3 app.py', 'Run Python command'],
+    ['node app.js', 'Run Node.js command'], ['pytest tests', 'Run tests'],
+    ['vitest run', 'Run tests'], ['tsc --noEmit', 'Run TypeScript compiler'],
+    ['make check', 'Run Make command'], ['cmake --build build', 'Run CMake command'],
+    ['cargo test', 'Run Cargo command'], ['go test ./...', 'Run Go command'],
+    ['docker version', 'Run Docker command'],
+  ])('uses a fixed operation label for %s, not its arguments', (cmd, label) => {
+    expect(describeCodexCommandActions([{ type: 'unknown', command: cmd }])).toBe(label);
+    expect(describeCodexCommandActions(undefined, cmd)).toBe(label);
+  });
+
+  it.each([
+    'npm test && custom-program', 'git status; custom-program', 'git status | custom-program',
+    'git status > /private/output', 'git status\ncustom-program', 'git status\rcustom-program',
+    'git show $(custom-program)', 'git show `custom-program`', 'SECRET=value git status',
+    '/private/tool/script --synthetic-secret', 'toString synthetic-private-argument',
+    'constructor synthetic-private-argument', 'npmtest synthetic-private-argument',
+    'git' + ' '.repeat(4097), '', false, undefined,
+  ])('keeps compound, custom, and untrusted shell commands generic (%s)', cmd => {
+    expect(describeCodexCommandActions([{ type: 'unknown', command: cmd }])).toBe('Run shell command');
+  });
+
+  it('does not hide an unknown operation behind a recognized prefix', () => {
+    expect(describeCodexCommandActions([
+      { type: 'search', query: 'synthetic-private-query' },
+      { type: 'unknown', command: '/private/script synthetic-private-argument' },
+    ])).toBe('Search files / Run shell command');
+  });
+
+  it('labels missing native actions without borrowing turn-level reasoning', () => {
+    expect(describeCodexCommandActions(undefined, 'git status')).toBe('Run Git command');
+    expect(describeCodexCommandActions([], 'custom-program')).toBe('Run shell command');
+  });
+
+  it('uses the native schema field even if tool-call argument names are also present', () => {
+    expect(describeCodexCommandActions([{ type: 'unknown', command: 'git status', cmd: 'npm test' }]))
+      .toBe('Run Git command');
+    expect(describeCodexCommandActions([{ type: 'unknown', cmd: 'git status' }]))
+      .toBe('Run shell command');
   });
 
   it('describes all recognized operations and deduplicates repeated actions', () => {

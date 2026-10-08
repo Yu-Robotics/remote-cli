@@ -229,6 +229,24 @@ describe('RouterServer', () => {
       expect(stream.toolCalls.get('native-call').summary).toBeUndefined();
     });
 
+    it('enriches a pending Codex command label in place and retains it across delayed result updates', async () => {
+      const { send, stream } = await connect();
+      const start = use('codex-call', 'Bash', { command: 'custom-program synthetic-private-argument' });
+      await send({ ...start, toolUse: { ...start.toolUse, description: 'Run shell command' } });
+      const index = stream.toolCalls.get('codex-call').elementIndex;
+      await send({ ...envelope, streamType: 'text', chunk: 'Between start and result' });
+      await send({ ...start, toolUse: { ...start.toolUse, description: 'Read config.ts' } });
+      expect(stream.elements).toHaveLength(2);
+      expect(stream.toolCalls.get('codex-call').elementIndex).toBe(index);
+      expect(stream.elements[index].header.title.content).toContain('Read config.ts');
+      await send(result('codex-call', 'First result'));
+      await send(result('codex-call', 'Updated failure', true));
+      expect(stream.elements).toHaveLength(2);
+      expect(stream.elements[index].header.title.content).toBe("<font color='red'>•</font> <raw>Bash</raw> · <raw>Read config.ts</raw>");
+      expect(stream.elements[index].header.title.content).not.toContain('synthetic-private-argument');
+      expect(JSON.stringify(stream.elements[1])).toContain('Between start and result');
+    });
+
     it.each([undefined, 'pending', 'completed'])('keeps one ACP result-first row after a late identity and repeated terminal title (status=%s)', async status => {
       const { send, stream } = await connect();
       const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'remote-cli-caption-pairing-')));
