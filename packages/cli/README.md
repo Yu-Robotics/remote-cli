@@ -291,6 +291,12 @@ A hard kill can leave a transfer quarantine requiring manual cleanup after its
 processes exit. Tracked submodules also matched by outer ignore rules currently
 fail admission; reconcile those rules before delegating.
 
+From CLI 1.6.151, checkpoint index queries are combined and identical trees are
+audited once within a capture. Both working-file passes and source HEAD/index
+checks remain; no state is cached across tasks and Git deadlines are unchanged.
+CLI tests run real Git fixture suites in one isolated process alongside at most
+two lightweight test threads, avoiding CPU-count-driven Git subprocess contention.
+
 From CLI 1.6.140, managed Git preparation, repository-lock waits, and artifact
 collection are awaited separately from native startup/stop deadlines. Slots and
 source reservations remain held until owned operations settle, even on cancellation;

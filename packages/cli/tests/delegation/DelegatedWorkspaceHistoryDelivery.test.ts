@@ -8,7 +8,7 @@ import { createCheckpointCommit, GitCommandError, gitText, runGit } from '../../
 import * as gitCommands from '../../src/delegation/GitCheckpoint';
 import { gitFixture } from './gitFixture';
 
-describe('historical worker delivery recognition', () => {
+describe('historical worker delivery recognition', { timeout: 30_000 }, () => {
   let fixture: Awaited<ReturnType<typeof gitFixture>>;
   let manager: DelegatedWorkspaceManager;
   let lanes: DelegatedWorkerSessionStore;

@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.151] - 2026-10-08
+
+### Changed
+- Reduce delegated Git checkpoint subprocesses by reading paths, conflict stages, and hidden-entry flags together from each private index. Resolve the source index path once per pass and audit identical content-addressed trees once per capture; retain both full working-file passes, source HEAD/index rechecks, copied-index timestamps, nested-repository validation, and independent checkout byte audits. Reject existing zero-byte indexes instead of treating corrupt metadata as missing; legitimate missing and serialized zero-entry indexes remain supported. No state is cached across captures and Git deadlines are unchanged.
+- Bound real Git integration suites to one isolated process alongside at most two lightweight test threads. Keep ordinary test and hook deadlines unchanged; give historical delivery the same explicit 30-second budget as other Git suites. Release controlled lifecycle gates in finally blocks, cover slow collection and early assertion failure, and guard subprocess counts against regressions.
+
 ## [1.6.150] - 2026-10-08
 
 ### Added

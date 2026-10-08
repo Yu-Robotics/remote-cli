@@ -1,13 +1,76 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs/promises';
 import path from 'path';
+import * as childProcess from 'child_process';
+import { isMainThread } from 'worker_threads';
 import { captureCheckpoint, checkpointRevision, createCheckpointCommit, gitText, runGit } from '../../src/delegation/GitCheckpoint';
 import { gitFixture } from './gitFixture';
+
+vi.mock('child_process', async importOriginal => {
+  const actual = await importOriginal<typeof import('child_process')>();
+  return { ...actual, spawn: vi.fn(actual.spawn) };
+});
 
 describe('private Git checkpoints', () => {
   let fixture: Awaited<ReturnType<typeof gitFixture>>;
   beforeEach(async () => { fixture = await gitFixture(); });
   afterEach(async () => { vi.restoreAllMocks(); await fs.rm(fixture.directory, { recursive: true, force: true }); });
+
+  it('bounds Git subprocesses while preserving both capture passes and source state', async () => {
+    expect(isMainThread).toBe(true);
+    const index = await fs.readFile(path.join(fixture.root, '.git', 'index'));
+    vi.mocked(childProcess.spawn).mockClear();
+    const snapshot = await captureCheckpoint(fixture.root);
+    const calls = vi.mocked(childProcess.spawn).mock.calls.filter(([command]) => command === 'git');
+    expect(calls.length).toBeLessThanOrEqual(18);
+    expect(calls.filter(([, args]) => args?.includes('add'))).toHaveLength(2);
+    expect(calls.filter(([, args]) => args?.includes('--stage') && args.includes('-v'))).toHaveLength(2);
+    expect(calls.filter(([, args]) => args?.includes('--git-path') && args.includes('index'))).toHaveLength(2);
+    expect(calls.filter(([, args]) => args?.includes('ls-tree'))).toHaveLength(1);
+    expect(snapshot.tree).toBe(await gitText(fixture.root, ['rev-parse', 'HEAD^{tree}']));
+    expect(await gitText(fixture.root, ['rev-parse', 'HEAD'])).toBe(fixture.head);
+    expect(await fs.readFile(path.join(fixture.root, '.git', 'index'))).toEqual(index);
+  });
+
+  it('still detects working-file changes between capture passes', async () => {
+    const original = fs.rm.bind(fs);
+    let changed = false;
+    vi.spyOn(fs, 'rm').mockImplementation(async (file, options) => {
+      await original(file, options);
+      if (!changed && path.basename(String(file)).startsWith('remote-cli-checkpoint-')) {
+        changed = true;
+        await fs.writeFile(path.join(fixture.root, 'source.txt'), 'different working content after the first pass\n');
+      }
+    });
+    await expect(captureCheckpoint(fixture.root)).rejects.toThrow('Workspace changed');
+    expect(changed).toBe(true);
+    expect(await gitText(fixture.root, ['rev-parse', 'HEAD'])).toBe(fixture.head);
+  });
+
+  it.each(['empty', 'missing'])('distinguishes a malformed %s index from legitimate bootstrap', async state => {
+    const index = path.join(fixture.root, '.git', 'index');
+    if (state === 'empty') {
+      await fs.writeFile(index, Buffer.alloc(0));
+      await expect(captureCheckpoint(fixture.root)).rejects.toThrow('empty or corrupt');
+      expect(await fs.readFile(index)).toEqual(Buffer.alloc(0));
+    } else {
+      await fs.unlink(index);
+      const snapshot = await captureCheckpoint(fixture.root);
+      expect(snapshot.tree).toBe(await gitText(fixture.root, ['rev-parse', 'HEAD^{tree}']));
+      await expect(fs.lstat(index)).rejects.toMatchObject({ code: 'ENOENT' });
+    }
+    expect(await gitText(fixture.root, ['rev-parse', 'HEAD'])).toBe(fixture.head);
+  });
+
+  it('accepts a valid zero-entry index without rewriting it', async () => {
+    await runGit(fixture.root, ['read-tree', '--empty']);
+    const index = path.join(fixture.root, '.git', 'index');
+    const original = await fs.readFile(index);
+    expect(original.length).toBeGreaterThan(0);
+    const snapshot = await captureCheckpoint(fixture.root);
+    expect(snapshot.tree).toBe(await gitText(fixture.root, ['rev-parse', 'HEAD^{tree}']));
+    expect(await fs.readFile(index)).toEqual(original);
+  });
 
   it('captures staged, unstaged, deleted, binary and untracked files without changing the parent index or branch', async () => {
     const { root, head } = fixture;
