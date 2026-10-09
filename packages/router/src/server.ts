@@ -94,7 +94,7 @@ export class RouterServer {
   private readonly workerContextCards: WorkerContextCards;
   private readonly workerContextConnections = new Map<string, () => boolean>();
   private readonly settingsCards: SettingsCards;
-  private readonly settingsConnections = new Map<string, () => boolean>();
+  private readonly settingsConnections = new Map<string, (kind?: import('./types/Settings').SettingsKind) => boolean>();
   private readonly maintenanceCards: MaintenanceCards;
   private readonly maintenanceConnections = new Map<string, { updateNotice: boolean; current: () => boolean }>();
   private cleanupInterval: NodeJS.Timeout | null = null;
@@ -190,7 +190,7 @@ export class RouterServer {
     this.feishuLongConnHandler.workerContexts = this.workerContextCards;
     this.settingsCards = new SettingsCards({
       ownsDevice: async (openId, deviceId) => (await this.bindingManager.getDeviceBinding(deviceId))?.openId === openId,
-      available: deviceId => this.settingsConnections.get(deviceId)?.() === true,
+      available: (deviceId, kind) => this.settingsConnections.get(deviceId)?.(kind) === true,
       send: (deviceId, message) => this.connectionHub.sendToDevice(deviceId, message),
       update: (cardId, elements, header) => this.feishuLongConnHandler.updateApprovalCard(cardId, elements, header),
     });
@@ -437,6 +437,7 @@ export class RouterServer {
       let delegationProgressTextEnabled = false;
       let workerContextResetEnabled = false;
       let settingsCardsEnabled = false;
+      let delegationCardsEnabled = false;
       let streamingContextEnabled = false;
       let activityProgressEnabled = false;
       let updateNoticeEnabled = false;
@@ -497,7 +498,7 @@ export class RouterServer {
           }
 
           if (message.type === 'settings_result') {
-            if (settingsCardsEnabled && deviceId) await this.settingsCards.resolve(deviceId, message);
+            if (settingsCardsEnabled && deviceId && (message.menu?.kind !== 'delegation' || delegationCardsEnabled)) await this.settingsCards.resolve(deviceId, message);
             return;
           }
           if (message.type === 'approval_request' || message.type === 'approval_resolved') {
@@ -631,8 +632,10 @@ export class RouterServer {
                 // Settings cards are negotiated only when the CLI requests them;
                 // old peers keep plain text output and never see the capability.
                 settingsCardsEnabled = message.data.capabilities?.settingsCards === true;
+                delegationCardsEnabled = settingsCardsEnabled && message.data.capabilities?.delegationCards === true;
                 if (settingsCardsEnabled) this.settingsConnections.set(deviceId,
-                  () => ws.readyState === WebSocket.OPEN && this.connectionHub.isCurrentConnection(requestedId, ws));
+                  kind => ws.readyState === WebSocket.OPEN && this.connectionHub.isCurrentConnection(requestedId, ws)
+                    && (kind !== 'delegation' || delegationCardsEnabled));
                 else this.settingsConnections.delete(deviceId);
                 // Send confirmation with version info for client-side version check
                 ws.send(JSON.stringify({
@@ -656,6 +659,7 @@ export class RouterServer {
                       ...(workerContextResetEnabled ? { workerContextReset: true } : {}),
                       ...(streamingContextEnabled ? { streamingContext: true } : {}),
                       ...(settingsCardsEnabled ? { settingsCards: true } : {}),
+                      ...(delegationCardsEnabled ? { delegationCards: true } : {}),
                     } } : {}),
                   }
                 }));
@@ -695,9 +699,10 @@ export class RouterServer {
               // Interactive settings menus only from a capable CLI on this connection;
               // the menu is bound to the original streaming session, never to a
               // user-supplied thread.
-              const settingsMenu = settingsCardsEnabled && deviceId && !queueConfirmation
+              const candidateSettingsMenu = settingsCardsEnabled && deviceId && !queueConfirmation
                 ? (message.settingsMenu ?? message.data?.settingsMenu)
                 : undefined;
+              const settingsMenu = candidateSettingsMenu?.kind === 'delegation' && !delegationCardsEnabled ? undefined : candidateSettingsMenu;
 
               // If CLI reported a threadId and there is a streaming session for this message,
               // ensure the cardThreadMap is up to date (in case the CLI-reported threadId differs).

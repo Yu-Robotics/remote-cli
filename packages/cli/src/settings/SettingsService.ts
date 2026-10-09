@@ -11,6 +11,7 @@ export interface SettingsState {
   revision: string;
   configuredModels: Partial<Record<SettingsBackend, string>>;
   configuredEfforts: Partial<Record<SettingsBackend, string>>;
+  delegationEnabled: boolean;
 }
 
 export interface SettingsCatalog {
@@ -24,18 +25,20 @@ export interface SettingsCatalog {
 
 export interface SettingsDependencies {
   state(threadId: string): SettingsState | undefined;
-  backends(): Promise<SettingsBackendInfo[]>;
+  backends(threadId?: string, kind?: SettingsKind): Promise<SettingsBackendInfo[]>;
   catalog(threadId: string, backend: SettingsBackend, kind: 'model' | 'effort'): Promise<SettingsCatalog>;
   busy(threadId: string, exceptRequest?: string, includeQueue?: boolean): boolean;
   threads(): string[];
   exclusive<T>(target: string, body: () => Promise<T>): Promise<T>;
   backend(threadId: string, backend: SettingsBackend, scope: SettingsScope, followGlobal: boolean): Promise<ExecuteResult>;
   preference(threadId: string, backend: SettingsBackend, kind: 'model' | 'effort', value: string | undefined): Promise<ExecuteResult>;
+  delegation(threadId: string, enabled: boolean): Promise<ExecuteResult>;
+  delegationSupported(threadId: string): boolean;
   now?(): number;
 }
 
 interface Snapshot { menu: SettingsMenu; owner: string; revision: string }
-interface Receipt { digest: string; expiresAt: number; pending: boolean; result: Promise<SettingsResultMessage> }
+interface Receipt { digest: string; expiresAt: number; pending: boolean; delegation: boolean; result: Promise<SettingsResultMessage> }
 
 const SNAPSHOT_TTL = 15 * 60_000;
 const RECEIPT_TTL = 20 * 60_000;
@@ -80,15 +83,23 @@ export class SettingsService {
     const initialRevision = initial.revision;
     const backend = target ?? initial.coordinatorBackend;
     if (!BACKENDS.includes(backend)) throw new SettingsValidationError('Invalid settings backend.');
+    if (kind === 'delegation' && backend !== initial.coordinatorBackend) throw new SettingsValidationError('Delegation settings belong to the current thread, not another backend.');
     this.openings++;
     try {
-      const backends = await this.dependencies.backends();
+      const backends = await this.dependencies.backends(threadId, kind);
       const installed = backends.find(entry => entry.value === backend)?.installed === true;
       const busy = this.dependencies.busy(threadId, requestId, kind !== 'backend');
       let catalog: SettingsCatalog = { choices: [], effectiveSource: 'unknown', supportsReset: false };
       if (kind === 'backend') {
         catalog = { choices: backends.map(entry => ({ value: entry.value, label: entry.label, disabled: !entry.installed, reason: entry.reason })),
           effectiveValue: initial.coordinatorBackend, effectiveSource: 'configured', supportsReset: true };
+      } else if (kind === 'delegation') {
+        const supported = this.dependencies.delegationSupported(threadId);
+        catalog = { choices: [
+          { value: 'on', label: 'On', disabled: !supported,
+            reason: supported ? undefined : 'This backend cannot register delegation tools.' },
+          { value: 'off', label: 'Off' },
+        ], effectiveValue: initial.delegationEnabled ? 'on' : 'off', effectiveSource: 'configured', supportsReset: false };
       } else if (!installed) catalog.unavailableReason = 'This backend is not installed or its executable check failed.';
       else if (busy) catalog.unavailableReason = 'This thread is busy. Refresh after its work finishes.';
       else {
@@ -108,10 +119,12 @@ export class SettingsService {
         snapshotId: randomUUID(), kind, threadId, threadName: literal(current.threadName, 80),
         coordinatorBackend: current.coordinatorBackend, targetBackend: backend,
         backends: backends.filter(entry => BACKENDS.includes(entry.value)).slice(0, 8)
-          .map(entry => ({ ...entry, label: literal(entry.label, 80), reason: entry.reason ? literal(entry.reason) : undefined })),
+          .map(entry => ({ ...entry, label: literal(entry.label, 80), reason: entry.reason ? literal(entry.reason) : undefined,
+            version: entry.version ? literal(entry.version, 80) : undefined })),
         choices: choices.slice(0, MAX_CHOICES).map(choice => ({ ...choice, label: literal(choice.label, 120),
           description: choice.description ? literal(choice.description) : undefined, reason: choice.reason ? literal(choice.reason) : undefined })),
         configuredValue: kind === 'backend' ? current.coordinatorBackend
+          : kind === 'delegation' ? current.delegationEnabled ? 'on' : 'off'
           : kind === 'model' ? current.configuredModels[backend] : current.configuredEfforts[backend],
         effectiveValue: catalog.effectiveValue, defaultValue: catalog.defaultValue,
         effectiveSource: catalog.effectiveSource, supportsReset: catalog.supportsReset && installed && !busy,
@@ -125,7 +138,7 @@ export class SettingsService {
     } finally { this.openings--; }
   }
 
-  async action(request: SettingsActionMessage): Promise<SettingsResultMessage> {
+  async action(request: SettingsActionMessage, allowDelegation = true): Promise<SettingsResultMessage> {
     this.prune();
     const failure = (error: string): SettingsResultMessage => ({ type: 'settings_result', messageId: request.messageId,
       openId: request.openId, threadId: request.threadId, snapshotId: request.snapshotId, success: false, error, timestamp: this.now() });
@@ -136,18 +149,22 @@ export class SettingsService {
     const digest = createHash('sha256').update(JSON.stringify([request.openId, request.threadId, request.snapshotId,
       request.operation, request.targetBackend, request.value, request.scope])).digest('hex');
     const existing = this.receipts.get(request.messageId);
+    const delegation = this.snapshots.get(request.snapshotId)?.menu.kind === 'delegation';
+    if (!allowDelegation && (delegation || existing?.delegation)) return failure('Delegation cards were not negotiated with this Router.');
     if (existing) return existing.digest === digest ? existing.result : failure('This request ID belongs to a different settings action.');
     if (this.receipts.size >= MAX_RECEIPTS) return failure('Settings acknowledgement storage is full. Please retry later.');
     // Defer body by one microtask so every concurrent retry sees this reservation.
-    const receipt: Receipt = { digest, expiresAt: this.now() + RECEIPT_TTL, pending: true, result: Promise.resolve(null as never) };
+    const receipt: Receipt = { digest, expiresAt: this.now() + RECEIPT_TTL, pending: true, delegation, result: Promise.resolve(null as never) };
     receipt.result = Promise.resolve().then(async () => {
       try {
         const record = this.validate(request);
         const menu = record.menu;
+        if (menu.kind === 'delegation' && !allowDelegation) throw new SettingsValidationError('Delegation cards were not negotiated with this Router.');
         if (request.operation === 'view') {
           if (request.value !== undefined || request.scope !== undefined) throw new SettingsValidationError('Invalid settings view action.');
           const target = request.targetBackend ?? menu.targetBackend;
-          if (!menu.backends.some(entry => entry.value === target && entry.installed)) throw new SettingsValidationError('This backend is unavailable.');
+          if (menu.kind === 'delegation' && request.targetBackend !== undefined) throw new SettingsValidationError('Delegation cards cannot select another backend.');
+          if (menu.kind !== 'delegation' && !menu.backends.some(entry => entry.value === target && entry.installed)) throw new SettingsValidationError('This backend is unavailable.');
           const refreshed = await this.open(menu.kind, menu.threadId, request.openId, target);
           this.snapshots.delete(menu.snapshotId);
           return { ...failure(''), success: true, error: undefined, menu: refreshed };
@@ -157,21 +174,22 @@ export class SettingsService {
         if (request.operation === 'follow_global' && (menu.kind !== 'backend' || request.scope === 'all' || request.value !== undefined)) throw new SettingsValidationError('Invalid follow-global action.');
         if (request.operation === 'reset' && (!menu.supportsReset || menu.kind === 'backend' || request.value !== undefined || request.scope !== undefined)) throw new SettingsValidationError('Reset is not available for this setting.');
         if (request.operation === 'apply' && !menu.choices.some(choice => choice.value === request.value && !choice.disabled)) throw new SettingsValidationError('This choice is not available on the original settings card.');
-        if (menu.kind !== 'backend' && request.scope !== undefined) throw new SettingsValidationError('Model and effort settings only affect the original thread.');
+        if (menu.kind !== 'backend' && request.scope !== undefined) throw new SettingsValidationError('This setting only affects the original thread.');
         if (request.scope !== undefined && request.scope !== 'thread' && request.scope !== 'all') throw new SettingsValidationError('Invalid settings scope.');
         const scope = menu.kind === 'backend' && request.scope === 'all' ? 'all' : 'thread';
         const result = await this.dependencies.exclusive(scope === 'all' ? '*' : menu.threadId, async () => {
           this.validate(request);
           const affected = scope === 'all' ? this.dependencies.threads() : [menu.threadId];
           if (affected.some(id => this.dependencies.busy(id, undefined, menu.kind !== 'backend'))) throw new SettingsValidationError('An affected thread is busy. Retry when its work is finished.');
-          const installed = await this.dependencies.backends();
+          const installed = await this.dependencies.backends(menu.threadId, menu.kind);
           this.validate(request);
           if (affected.some(id => this.dependencies.busy(id, undefined, menu.kind !== 'backend'))) throw new SettingsValidationError('An affected thread became busy. No setting was applied.');
           const backend = menu.kind === 'backend' && request.operation === 'apply' ? request.value as SettingsBackend : menu.targetBackend;
-          if (request.operation !== 'follow_global' && !installed.some(entry => entry.value === backend && entry.installed)) throw new SettingsValidationError('This backend is no longer available.');
+          if (menu.kind !== 'delegation' && request.operation !== 'follow_global' && !installed.some(entry => entry.value === backend && entry.installed)) throw new SettingsValidationError('This backend is no longer available.');
           try {
             return menu.kind === 'backend'
               ? await this.dependencies.backend(menu.threadId, backend, scope, request.operation === 'follow_global')
+              : menu.kind === 'delegation' ? await this.dependencies.delegation(menu.threadId, request.value === 'on')
               : await this.dependencies.preference(menu.threadId, backend, menu.kind, request.operation === 'reset' ? undefined : request.value);
           } finally { this.invalidate(scope === 'all' ? undefined : menu.threadId); }
         });
@@ -180,7 +198,9 @@ export class SettingsService {
         let fresh: SettingsMenu | undefined;
         try { fresh = await this.open(menu.kind, menu.threadId, request.openId,
           menu.kind === 'backend' ? undefined : menu.targetBackend); } catch { /* Preserve the positive acknowledgement. */ }
-        return { ...failure(''), success: true, error: undefined, notice: 'Setting applied. Future commands and worker launches will use the updated preference.', menu: fresh };
+        return { ...failure(''), success: true, error: undefined,
+          notice: menu.kind === 'delegation' ? 'Delegation setting applied to this thread. Future commands will use the updated setting.'
+            : 'Setting applied. Future commands and worker launches will use the updated preference.', menu: fresh };
       } catch (error) {
         return failure(error instanceof SettingsValidationError || error instanceof SettingsBusyError
           ? literal(error.message) : 'Settings could not be confirmed. Refresh and check backend state before retrying.');

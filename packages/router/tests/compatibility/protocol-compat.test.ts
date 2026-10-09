@@ -116,6 +116,16 @@ describe('Router wire compatibility', () => {
     await receive({ type: 'update_notice', noticeKey: 'fixture' }); expect(notice).not.toHaveBeenCalled();
   });
   it.each([
+    { capabilities: { settingsCards: true }, enabled: false },
+    { capabilities: { delegationCards: true }, enabled: false },
+    { capabilities: { settingsCards: true, delegationCards: true }, enabled: true },
+  ])('requires additive opt-in for delegation settings without changing protocol v1 ($enabled)', async ({ capabilities, enabled }) => {
+    await receive({ type: 'binding_request', data: { deviceId: 'device-1', protocolVersion: 1, capabilities } });
+    expect(JSON.parse(socket.send.mock.calls[0][0]).data.capabilities?.delegationCards).toBe(enabled ? true : undefined);
+    expect((server as any).settingsConnections.get('device-1')?.('delegation') === true).toBe(enabled);
+    expect(PROTOCOL_VERSION).toBe(1);
+  });
+  it.each([
     { capabilities: { subscriptionInspection: true }, enabled: false },
     { capabilities: { bankedResetReminder: true }, enabled: false },
     { capabilities: { subscriptionInspection: true, bankedResetReminder: true }, enabled: true },

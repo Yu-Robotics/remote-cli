@@ -151,7 +151,7 @@ export interface ResponseMessage extends WSMessage {
   threads?: ThreadSummary[];
   /** Optional on the actual top-level response envelope; old CLIs omit it. */
   executionMetadata?: ExecutionMetadata;
-  /** Optional top-level field; negotiated by the settingsCards capability. */
+  /** Optional top-level field; delegation menus require settingsCards and delegationCards. */
   settingsMenu?: import('./Settings').SettingsMenu;
   data: {
     success: boolean;

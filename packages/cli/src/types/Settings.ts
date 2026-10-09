@@ -1,6 +1,6 @@
 /** Additive, capability-gated settings-card protocol. Never send credentials or native sessions. */
 export type SettingsBackend = 'claude' | 'codex' | 'opencode' | 'kimi' | 'zcode' | 'pi' | 'agy' | 'dsh';
-export type SettingsKind = 'backend' | 'model' | 'effort';
+export type SettingsKind = 'backend' | 'model' | 'effort' | 'delegation';
 export type SettingsScope = 'thread' | 'all';
 
 export interface SettingsChoice {
@@ -16,6 +16,8 @@ export interface SettingsBackendInfo {
   label: string;
   installed: boolean;
   reason?: string;
+  worker?: boolean;
+  version?: string;
 }
 
 /** A bounded, opaque CLI-owned snapshot, bound to the original thread and configuration. */

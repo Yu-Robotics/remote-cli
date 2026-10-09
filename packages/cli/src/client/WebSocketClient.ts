@@ -308,6 +308,7 @@ export class WebSocketClient {
             delegationProgressText: true,
             workerContextReset: true,
             settingsCards: true,
+            delegationCards: true,
             streamingContext: true,
             activityProgress: true,
             ...(this.maintenanceCapabilities.updateNotice ? { updateNotice: true } : {}),
