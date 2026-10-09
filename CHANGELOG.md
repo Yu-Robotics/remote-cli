@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.157] - 2026-10-09
+
+### Changed
+- Restore colored status badges in the `/delegation` card's backend-availability section: blue for the coordinator, green for installed workers, orange for blocked workers, red for unavailable backends and neutral for unknown worker availability. Preserve literal detail escaping, card capacity accounting and acknowledged On/Off controls.
+
 ## [1.6.156] - 2026-10-09
 
 ### Added
