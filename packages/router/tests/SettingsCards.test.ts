@@ -162,19 +162,68 @@ describe('SettingsCards', () => {
   it('renders bounded worker policy details literally and never guesses missing availability', () => {
     const { elements } = present(delegationMenu({ coordinatorBackend: 'zcode', targetBackend: 'zcode', backends: [
       { value: 'zcode', label: 'ZCode', installed: true, worker: false, reason: 'Sandbox <at id=all>blocked</at>' },
+      { value: 'opencode', label: 'OpenCode', installed: true, worker: false, reason: 'Sandbox is enabled' },
       { value: 'pi', label: 'Pi', installed: false, reason: 'Executable is missing' },
       { value: 'codex', label: 'Codex', installed: true },
     ] }));
     const output = JSON.stringify(elements);
-    expect(output).toContain('Blocked');
-    expect(output).toContain('Not installed');
-    expect(output).toContain('Availability unknown');
+    expect(output).toContain("<text_tag color='blue'>Coordinator</text_tag> **ZCode**");
+    expect(output).toContain("<text_tag color='orange'>Blocked</text_tag> **OpenCode**");
+    expect(output).toContain("<text_tag color='red'>Unavailable</text_tag> **Pi**");
+    expect(output).toContain("<text_tag color='neutral'>Availability unknown</text_tag> **Codex**");
     expect(output).toContain('&lt;at id=all&gt;');
     expect(output).not.toContain('<at id=all>');
     expect(output).toContain('Off restores the normal MCP configuration');
     expect(sanitizeSettingsMenu(delegationMenu({ configuredValue: undefined }))).toBeUndefined();
     expect(sanitizeSettingsMenu(delegationMenu({ targetBackend: 'codex' }))).toBeUndefined();
     expect(sanitizeSettingsMenu(delegationMenu({ supportsReset: true }))!.supportsReset).toBe(false);
+  });
+
+  it('restores colored delegation badges without adding controls or card elements', async () => {
+    const { elements } = present(delegationMenu({ backends: [
+      { value: 'claude', label: 'Claude Code', installed: true, worker: true, version: '1.0.0' },
+      { value: 'codex', label: 'Codex CLI', installed: true, worker: true, version: '1.0.0' },
+      { value: 'opencode', label: 'OpenCode', installed: true, worker: false, reason: 'Sandbox is enabled' },
+      { value: 'kimi', label: 'Kimi Code', installed: false, worker: true, reason: 'Executable is missing' },
+      { value: 'zcode', label: 'ZCode', installed: false, worker: false, reason: 'Executable is missing' },
+      { value: 'pi', label: 'Pi', installed: true },
+      { value: 'agy', label: 'AGY <text_tag color=red>fake</text_tag>', installed: true, worker: true,
+        version: '<at id=all>fake</at>' },
+      { value: 'dsh', label: 'DSH', installed: true, worker: false, reason: '<text_tag color=green>fake</text_tag>' },
+    ] }));
+    const rows = elements.filter(element => element.tag === 'markdown' && element.content.startsWith('<text_tag'));
+    expect(rows).toHaveLength(8);
+    expect(rows.map(row => row.content.match(/^<text_tag color='([^']+)'>([^<]+)<\/text_tag>/)?.slice(1))).toEqual([
+      ['blue', 'Coordinator + Worker'], ['green', 'Installed'], ['orange', 'Blocked'], ['red', 'Unavailable'],
+      ['red', 'Unavailable'], ['neutral', 'Availability unknown'], ['green', 'Installed'], ['orange', 'Blocked'],
+    ]);
+    expect(rows.every(row => (row.content.match(/<text_tag/g) ?? []).length === 1)).toBe(true);
+    expect(rows[6].content).toContain('&lt;text\\_tag color=red&gt;fake&lt;/text\\_tag&gt;');
+    expect(rows[6].content).toContain('&lt;at id=all&gt;fake&lt;/at&gt;');
+    expect(rows[7].content).toContain('&lt;text\\_tag color=green&gt;fake&lt;/text\\_tag&gt;');
+    expect(buttonsOf(elements).map(button => button.text.content)).toEqual(['✓ On', 'Off', 'Refresh']);
+    expect(rows.every(row => taggedNodes(row) === 1)).toBe(true);
+    await cards.click('owner', 'card-1', clickPayload(elements, 'view'));
+    await flush();
+    const [, body, header] = transport.update.mock.calls.at(-1);
+    expect(header.title.content).toBe('🤝 Agent delegation');
+    const payload = { schema: '2.0', header, body: { elements: body } };
+    expect(taggedNodes(payload)).toBeLessThanOrEqual(90);
+    expect(Buffer.byteLength(JSON.stringify(payload))).toBeLessThanOrEqual(16 * 1024);
+  });
+
+  it.each([
+    { installed: true, worker: false },
+    { installed: true, worker: undefined },
+    { installed: false, worker: true },
+  ])('does not advertise coordinator worker eligibility without confirmed installation and policy: %j', backend => {
+    const { elements } = present(delegationMenu({ backends: [
+      { value: 'claude', label: 'Claude Code', ...backend, reason: 'Worker eligibility is not confirmed' },
+    ] }));
+    const output = JSON.stringify(elements);
+    expect(output).toContain("<text_tag color='blue'>Coordinator</text_tag> **Claude Code**");
+    expect(output).not.toContain('Coordinator + Worker');
+    expect(output).toContain('Worker eligibility is not confirmed');
   });
 
   it('renders all backend rows with unavailable entries disabled, current-thread default and confirm', () => {

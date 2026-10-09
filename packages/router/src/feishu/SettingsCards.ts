@@ -636,10 +636,23 @@ export class SettingsCards {
         value: choice.value, primary: choice.value === menu.configuredValue, disabled: blocked || choice.disabled,
       }));
     const availability = menu.backends.map(backend => {
-      const status = !backend.installed ? 'Not installed' : backend.worker === true ? 'Ready'
-        : backend.worker === false ? 'Blocked' : 'Availability unknown';
+      let color = 'neutral';
+      let status = 'Availability unknown';
+      if (backend.value === menu.coordinatorBackend) {
+        color = 'blue';
+        status = backend.installed && backend.worker === true ? 'Coordinator + Worker' : 'Coordinator';
+      } else if (!backend.installed) {
+        color = 'red';
+        status = 'Unavailable';
+      } else if (backend.worker === false) {
+        color = 'orange';
+        status = 'Blocked';
+      } else if (backend.worker === true) {
+        color = 'green';
+        status = 'Installed';
+      }
       const detail = backend.reason || backend.version;
-      return this.note(`**${escapeMarkdown(backend.label)}**${backend.value === menu.coordinatorBackend ? ' (Main)' : ''} · ${status}`
+      return this.note(`<text_tag color='${color}'>${status}</text_tag> **${escapeMarkdown(backend.label)}**`
         + (detail ? ` · ${escapeMarkdown(detail)}` : ''));
     });
     const elements = [

@@ -193,6 +193,8 @@ From Router 1.6.155, the selected backend application scope is highlighted in bl
 
 From CLI and Router 1.6.156, bare `/delegation` opens a thread-only On/Off card with a separate backend-availability section, gated by both `settingsCards` and `delegationCards`. Selection is confirmed only after cleanup and persistence succeed. Busy or queued work blocks toggles but not inspection/refresh; enabling does not bypass sandbox policy or prove authentication/quota. Parameterized toggles and `/delegation reset [backend]` remain text commands, and older peers retain the text menu.
 
+Backend availability uses colored status badges: blue for the coordinator, green for installed workers, orange for blocked workers, red for unavailable backends and gray for unknown worker availability. Text labels and version or restriction details remain visible; these badges do not prove authentication or quota.
+
 ### Threads & Machines
 
 From CLI 1.6.121, new and existing threads without a saved preference enable
