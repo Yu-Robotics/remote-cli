@@ -5,7 +5,7 @@ import { ConnectionHub } from '../src/websocket/ConnectionHub';
 import * as lark from '@larksuiteoapi/node-sdk';
 import * as fs from 'fs/promises';
 import { createDelegationProgressElements } from '../src/utils/ToolFormatter';
-import { countCardTables } from '../src/utils/CardTables';
+import { CARD_TABLE_LIMIT, countCardTables } from '../src/utils/CardTables';
 import { WorkerContextCards, workerContextControl } from '../src/feishu/WorkerContextCards';
 
 // Mock dependencies
@@ -499,6 +499,41 @@ describe('FeishuLongConnHandler', () => {
   });
 
   describe('finalizeStreamingMessage', () => {
+    it.each([true, false])('keeps body content on the completion page after streaming (%s metadata)', async withMetadata => {
+      const cards = new Map<string, any[]>();
+      let created = 0;
+      mockClient.im.message.patch.mockImplementation(async ({ path, data }: any) => {
+        cards.set(path.message_id, JSON.parse(data.content).body.elements);
+        return {};
+      });
+      mockClient.im.message.create.mockImplementation(async ({ data }: any) => {
+        const id = `continuation-${++created}`;
+        cards.set(id, JSON.parse(data.content).body.elements);
+        return { data: { message_id: id } };
+      });
+      const body = Array.from({ length: 257 }, (_, i) => ({ tag: 'markdown', content: `Body ${i}` }));
+      const threads = Array.from({ length: 8 }, (_, i) => ({ id: `t${i}`, name: `thread-${i}`, status: 'idle' as const }));
+      const metadata = withMetadata ? { backend: 'codex', model: 'model-a', modelSource: 'reported' as const, effortSource: 'unknown' as const } : undefined;
+      expect(await handler.updateStreamingMessage('root', body, 'owner', 'thread-0', '/work/project',
+        { source: 'tool', text: 'Running command' })).toBe(true);
+      expect(cards.size).toBe(2);
+      expect(await handler.finalizeStreamingMessage('root', body, undefined, 'owner', '/work/project', 'thread-0',
+        threads, 't0', undefined, metadata)).toBe(true);
+      const finalPages = [...cards.values()];
+      const completion = finalPages.filter(page => page.some(element => element.content?.includes('Completed')));
+      expect(completion).toHaveLength(1);
+      expect(completion[0].some(element => element.content === 'Body 256')).toBe(true);
+      expect(JSON.stringify(completion[0])).toContain('switch_thread');
+      expect(finalPages.flat().filter(element => /^Body \d+$/.test(element.content ?? ''))).toEqual(body);
+      for (const page of finalPages) {
+        expect((handler as any).countTaggedNodes(page)).toBeLessThanOrEqual(150);
+        expect(countCardTables(page)).toBeLessThanOrEqual(CARD_TABLE_LIMIT);
+        expect(JSON.stringify(page)).not.toContain('Running command');
+      }
+      await (handler as any).refreshThreadSwitchButtons(`continuation-${created}`, 't1');
+      expect(cards.get(`continuation-${created}`)?.some(element => element.content === 'Body 256')).toBe(true);
+    });
+
     it.each([0, 160])('keeps completion metadata with the final thread panel and preserves it on refresh (%s elements)', async count => {
       mockClient.im.message.patch.mockResolvedValue({});
       let continuation = 0;
@@ -980,6 +1015,39 @@ describe('FeishuLongConnHandler', () => {
   });
 
   describe('splitElementsIntoChunks', () => {
+    it('moves a complete final worker group with the completion block', () => {
+      const group = createDelegationProgressElements({ taskId: 'worker', ordinal: 1, backend: 'agy', phase: 'succeeded',
+        startedAt: Date.now(), summary: 'Worker result', activeToolCount: 0, events: [], hiddenEventCount: 0 });
+      const footer = [{ tag: 'markdown', content: 'Completed' }, ...Array.from({ length: 30 }, () => ({ tag: 'hr' }))];
+      const prefix = Array.from({ length: 130 }, () => ({ tag: 'markdown', content: 'Body' }));
+      const chunks = (handler as any).splitElementsIntoChunks([...prefix, ...group, ...footer], [], footer, undefined, true);
+      expect(chunks.at(-1).filter((item: any) => group.includes(item))).toEqual(group);
+      expect(chunks.at(-1).filter((item: any) => footer.includes(item))).toEqual(footer);
+      for (const chunk of chunks) expect((handler as any).countTaggedNodes(chunk)).toBeLessThanOrEqual(150);
+    });
+
+    it.each(['nodes', 'size', 'tables'])('respects %s limits when a final body group cannot share the completion block', limit => {
+      const item = (content: string) => ({ tag: 'markdown', content });
+      const body = limit === 'nodes' ? { tag: 'column', elements: Array.from({ length: 120 }, () => item('Body')) }
+        : item(limit === 'size' ? 'x'.repeat(1500) : ('| A |\n| --- |\n| B |\n\n').repeat(3));
+      const footer = limit === 'nodes' ? Array.from({ length: 35 }, () => item('Footer'))
+        : [item(limit === 'size' ? 'f'.repeat(500) : '| Footer |\n| --- |\n| Value |\n')];
+      if (limit === 'size') {
+        (handler as any).CARD_DATA_SIZE_LIMIT = 2100;
+        (handler as any).CARD_SIZE_BUFFER = 100;
+      }
+      const chunks = (handler as any).splitElementsIntoChunks([body, ...footer], [], footer, undefined, true);
+      expect(chunks).toHaveLength(2);
+      expect(chunks.flat().filter((entry: any) => entry === body)).toHaveLength(1);
+      expect(chunks.at(-1).filter((entry: any) => footer.includes(entry))).toEqual(footer);
+      for (const chunk of chunks) {
+        expect((handler as any).countTaggedNodes(chunk)).toBeLessThanOrEqual(150);
+        expect(countCardTables(chunk)).toBeLessThanOrEqual(CARD_TABLE_LIMIT);
+        expect(JSON.stringify({ schema: '2.0', body: { elements: chunk } }).length)
+          .toBeLessThan((handler as any).CARD_DATA_SIZE_LIMIT - (handler as any).CARD_SIZE_BUFFER);
+      }
+    });
+
     it('packs each worker header, visible body, metadata and diagnostics together', () => {
       const table = '| A | B |\n| --- | --- |\n| 1 | 2 |\n';
       const worker = (ordinal: number) => createDelegationProgressElements({

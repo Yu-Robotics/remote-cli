@@ -31,6 +31,8 @@ From CLI and Router 1.6.133, each managed delegated worker also shows its own mo
 
 ### Public Activity
 
+From Router 1.6.158, completion pagination keeps the final body item (or complete worker group) with the completion note, optional model metadata and thread controls when they fit together. This avoids preventable footer-only continuations, including replies without model metadata. Indivisible oversized groups still split according to node, size and table limits; thread-button refreshes preserve the final body. This does not change streaming completion timing or the wire protocol.
+
 From CLI and Router 1.6.144, the latest active reply card ends with one mutable
 Running row after transcript, tools, and worker sections. It follows the newest
 continuation page instead of staying below the title. On completion it gives way
