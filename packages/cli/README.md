@@ -189,6 +189,8 @@ CLI and Router 1.6.152 add standalone settings cards. `/backend` lists all eight
 
 From 1.6.154, numbered sections separate backend selection, scope and Confirm, or target backend, model/effort choices and secondary actions. Selected drafts and known preferences carry explicit checks; changing the target still never switches the coordinator. AGY model catalogs accept tab-delimited and formatted multi-space native rows, with exact IDs and explicit failures for empty, unusable or oversized responses. No inference or additional protocol capability is needed.
 
+From Router 1.6.155, the selected backend application scope is highlighted in blue, and model/effort target selectors separate the main backend from other backends' worker preferences. Choices are shown together when the complete card fits its node and byte budgets; only oversized catalogs paginate, with headers, groups and pending/retry controls included. Viewing a target never changes the coordinator, and same-backend workers continue to share its per-thread preference. Existing CLI settings metadata is sufficient; no new capability or native request is required.
+
 ### Threads & Machines
 
 From CLI 1.6.121, new and existing threads without a saved preference enable

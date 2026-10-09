@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.155] - 2026-10-09
+
+### Changed
+- Show all model and effort choices when the complete settings card fits its recursive node and UTF-8 JSON budgets. Paginate only oversized catalogs, packing each page by actual capacity instead of a fixed eight-choice limit. Count headers, sections, backend groups, navigation, notices and pending/retry controls, preserve every opaque choice and retain existing callback validation and single-card delivery.
+- Highlight the drafted backend application scope in blue. Separate the current thread's main backend from other backends' worker preferences in model/effort cards, keeping the main role tied to the coordinator while viewing other targets. Preserve same-backend preference sharing, explicit backend confirmation and immediate acknowledged model/effort changes; no native request or protocol capability is added.
+
 ## [1.6.154] - 2026-10-09
 
 ### Changed

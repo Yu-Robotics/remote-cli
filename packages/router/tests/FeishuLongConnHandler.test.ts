@@ -2965,6 +2965,76 @@ describe('FeishuLongConnHandler', () => {
       }
     });
 
+    it('keeps expanded and capacity-paginated model choices on one real delivered card', async () => {
+      const { SettingsCards } = await import('../src/feishu/SettingsCards');
+      const delivered = new Map<string, string>();
+      mockClient.im.message.patch.mockImplementation(async (request: any) => {
+        delivered.set(request.path.message_id, request.data.content); return {};
+      });
+      const send = vi.fn(async () => true);
+      const cards = new SettingsCards({ ownsDevice: async () => true, available: () => true, send,
+        update: (cardId, elements, header) => handler.updateApprovalCard(cardId, elements, header) });
+      handler.settingsCards = cards;
+      const modelMenu = {
+        ...backendMenu, kind: 'model', supportsReset: true,
+        backends: ['claude', 'codex', 'opencode', 'kimi', 'zcode', 'pi', 'agy', 'dsh']
+          .map(value => ({ value, label: value, installed: true })),
+        choices: Array.from({ length: 12 }, (_, index) => ({ value: `model-${index}`, label: `Model ${index}` })),
+      };
+      const values = (card: any): string[] => {
+        const found: string[] = [];
+        const visit = (node: any) => {
+          if (!node || typeof node !== 'object') return;
+          if (node.tag === 'button' && node.behaviors?.[0]?.value?.op === 'apply') found.push(node.behaviors[0].value.value);
+          for (const child of Object.values(node)) {
+            if (Array.isArray(child)) child.forEach(visit);
+            else if (child && typeof child === 'object') visit(child);
+          }
+        };
+        visit(card);
+        return found;
+      };
+      try {
+        const prepared = cards.present({ openId: 'owner', deviceId: 'device', menu: modelMenu, requestMessageId: 'req-model' })!;
+        const ok = await handler.finalizeStreamingMessage('root', prepared.elements, undefined, 'owner', undefined, undefined,
+          undefined, 'thread-1', undefined, undefined, true, { bare: true, onDelivered: ids => prepared.deliver(ids) });
+        expect(ok).toBe(true);
+        const initial = JSON.parse(delivered.get('root')!);
+        expect(values(initial)).toEqual(modelMenu.choices.map(choice => choice.value));
+        expect(findButton(initial.body.elements, 'page')).toBeUndefined();
+        const choice = findButton(initial.body.elements, 'apply');
+        await handler.handleCardAction({ operator: { open_id: 'owner' }, context: { open_message_id: 'root' },
+          action: { value: choice.behaviors[0].value } });
+        const request = send.mock.calls[0][1];
+        const choices = Array.from({ length: 30 }, (_, index) => ({
+          value: `v-${index}-${'\u6a21'.repeat(500)}`, label: `Large ${index}`,
+        }));
+        await cards.resolve('device', { type: 'settings_result', messageId: request.messageId, openId: 'owner',
+          threadId: 'thread-1', snapshotId: 'snap-1', success: true,
+          menu: { ...modelMenu, snapshotId: 'snap-large', choices }, timestamp: Date.now() } as any);
+        // Pending can already contain disabled navigation after repacking.
+        // Wait for the replacement catalog, not merely a pagination caption.
+        await vi.waitFor(() => expect(delivered.get('root')).toContain('Large 0'));
+        const seen: string[] = [];
+        for (let iteration = 0; iteration < choices.length; iteration++) {
+          const content = delivered.get('root')!;
+          const card = JSON.parse(content);
+          expect((handler as any).countTaggedNodes(card)).toBeLessThanOrEqual(90);
+          expect(Buffer.byteLength(content)).toBeLessThanOrEqual(16 * 1024);
+          expect(content).not.toContain('switch_thread');
+          seen.push(...values(card));
+          const next = findButton(card.body.elements, 'page');
+          if (!next || next.text.content !== 'Next ▶') break;
+          await handler.handleCardAction({ operator: { open_id: 'owner' }, context: { open_message_id: 'root' },
+            action: { value: next.behaviors[0].value } });
+          await vi.waitFor(() => expect(delivered.get('root')).not.toBe(content));
+        }
+        expect(seen).toEqual(choices.map(choice => choice.value));
+        expect(send).toHaveBeenCalledTimes(1);
+        expect(mockClient.im.message.create).not.toHaveBeenCalled();
+      } finally { cards.destroy(); }
+    });
+
     it('rejects settings callbacks when no controller is attached or the card is unknown', async () => {
       const event = { operator: { open_id: 'owner' }, context: { open_message_id: 'card-x' },
         action: { value: { action: 'settings', id: 'menu-1', rev: 1, op: 'apply' } } };
