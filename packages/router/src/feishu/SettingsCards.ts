@@ -61,6 +61,21 @@ interface MenuState {
   terminal?: string;
   createdAt: number;
   chain: Promise<void>;
+  choiceLayout?: ChoiceLayout;
+}
+
+interface ChoicePage {
+  choices: SettingsChoice[];
+  index: number;
+  total: number;
+}
+
+interface ChoiceLayout {
+  menu: SettingsMenu;
+  pending?: PendingRequest;
+  timedOut?: boolean;
+  notice?: string;
+  pages: SettingsChoice[][];
 }
 
 type SettingsOperation = SettingsActionMessage['operation'];
@@ -68,7 +83,6 @@ type LocalOperation = 'draft_backend' | 'draft_scope' | 'draft_follow_global' | 
 type ClickOperation = SettingsOperation | LocalOperation | 'retry';
 
 const BACKENDS: readonly SettingsBackend[] = ['claude', 'codex', 'opencode', 'kimi', 'zcode', 'pi', 'agy', 'dsh'];
-const PAGE_SIZE = 8;
 const MAX_MENUS = 100;
 const MAX_CARDS_PER_MENU = 4;
 const MAX_MENU_AGE_MS = 24 * 60 * 60_000;
@@ -358,7 +372,7 @@ export class SettingsCards {
   private localEdit(state: MenuState, op: LocalOperation, value: unknown): string {
     if (op === 'page') {
       const target = Number(value);
-      const pages = this.pageCount(state);
+      const pages = this.choicePages(state).length;
       if (!Number.isInteger(target) || target < 0 || target >= pages || target === state.page) throw new Error('That page is unavailable.');
       state.page = target;
       this.touch(state);
@@ -430,8 +444,54 @@ export class SettingsCards {
     return undefined;
   }
 
-  private pageCount(state: MenuState): number {
-    return Math.max(1, Math.ceil(state.menu.choices.length / PAGE_SIZE));
+  private withinBudget(state: MenuState, elements: any[]): boolean {
+    const card = { schema: '2.0', header: this.header(state), body: { elements } };
+    return taggedNodes(card) <= MAX_TAGGED_NODES
+      && Buffer.byteLength(JSON.stringify(card)) <= MAX_ELEMENTS_BYTES;
+  }
+
+  /** Show every choice when possible; otherwise pack complete, budgeted cards. */
+  private choicePages(state: MenuState): SettingsChoice[][] {
+    const choices = state.menu.choices;
+    if (choices.length === 0 || state.menu.kind === 'backend') return [choices];
+    const layout = state.choiceLayout;
+    if (layout?.menu === state.menu && layout.pending === state.pending
+      && layout.timedOut === state.pending?.timedOut && layout.notice === state.notice) return layout.pages;
+    const remember = (pages: SettingsChoice[][]) => {
+      state.choiceLayout = { menu: state.menu, pending: state.pending, timedOut: state.pending?.timedOut, notice: state.notice, pages };
+      return pages;
+    };
+    const fits = (renderState: MenuState, page: ChoicePage) => this.withinBudget(renderState, this.renderInteractive(renderState, page));
+    if (fits(state, { choices, index: 0, total: 1 })) return remember([choices]);
+
+    // Reserve callback revision width so paging cannot shift choice boundaries
+    // when revisions gain digits. Reuse the layout until visible chrome changes.
+    const packingState = { ...state, revision: Number.MAX_SAFE_INTEGER };
+
+    const pages: SettingsChoice[][] = [];
+    let offset = 0;
+    while (offset < choices.length) {
+      let low = 1;
+      let high = choices.length - offset;
+      let size = 0;
+      while (low <= high) {
+        const candidate = Math.floor((low + high) / 2);
+        // Reserve the largest possible page-number labels and callback values.
+        // Actual pages use fewer digits and never need more navigation space.
+        if (fits(packingState, { choices: choices.slice(offset, offset + candidate), index: choices.length, total: choices.length + 2 })) {
+          size = candidate;
+          low = candidate + 1;
+        } else {
+          high = candidate - 1;
+        }
+      }
+      // If even one choice cannot fit, keep it reachable through the existing
+      // static fallback rather than dropping it or looping without progress.
+      size = Math.max(1, size);
+      pages.push(choices.slice(offset, offset + size));
+      offset += size;
+    }
+    return remember(pages);
   }
 
   private touch(state: MenuState): void {
@@ -487,10 +547,13 @@ export class SettingsCards {
   }
 
   private render(state: MenuState): any[] {
-    const elements = state.terminal ? this.renderTerminal(state) : this.renderInteractive(state);
+    const pages = state.terminal ? undefined : this.choicePages(state);
+    const index = pages ? Math.min(state.page, pages.length - 1) : 0;
+    const elements = state.terminal ? this.renderTerminal(state)
+      : this.renderInteractive(state, { choices: pages![index], index, total: pages!.length });
     // Budget guard: degrade to a static card instead of risking a split card
     // with controls detached from their bound chunk.
-    if (taggedNodes(elements) > MAX_TAGGED_NODES || Buffer.byteLength(JSON.stringify(elements)) > MAX_ELEMENTS_BYTES) {
+    if (!this.withinBudget(state, elements)) {
       return [
         { tag: 'markdown', content: `**Settings** · ${escapeMarkdown(state.menu.threadName)}` },
         this.note('This menu is too large to render safely as a card. Use the text command instead.'),
@@ -506,7 +569,7 @@ export class SettingsCards {
     ];
   }
 
-  private renderInteractive(state: MenuState): any[] {
+  private renderInteractive(state: MenuState, page: ChoicePage): any[] {
     const menu = state.menu;
     const lines: string[] = [];
     const pending = state.pending;
@@ -538,7 +601,7 @@ export class SettingsCards {
     if (menu.kind === 'backend') {
       elements.push(...this.renderBackendSections(state, blocked));
     } else {
-      elements.push(...this.renderChoiceSections(state, blocked));
+      elements.push(...this.renderChoiceSections(state, blocked, page));
     }
     if (pending?.timedOut) elements.push(this.row([this.button(state, 'retry', 'Retry confirmation', { primary: true })]));
     return elements;
@@ -576,12 +639,18 @@ export class SettingsCards {
       backendRows));
 
     const scopeButtons = [
-      this.button(state, 'draft_scope', `${state.draftScope === 'thread' ? '✓ ' : ''}Current thread`, { value: 'thread', disabled: blocked }),
-      this.button(state, 'draft_scope', `${state.draftScope === 'all' ? '✓ ' : ''}All threads`, { value: 'all', disabled: blocked }),
+      this.button(state, 'draft_scope', `${state.draftScope === 'thread' ? '✓ ' : ''}Current thread`, {
+        value: 'thread', primary: state.draftScope === 'thread', disabled: blocked,
+      }),
+      this.button(state, 'draft_scope', `${state.draftScope === 'all' ? '✓ ' : ''}All threads`, {
+        value: 'all', primary: state.draftScope === 'all', disabled: blocked,
+      }),
     ];
     let scopeSubtitle = 'Choose where the change applies: only this thread, or every thread on this device.';
     if (menu.followsGlobal === false) {
-      scopeButtons.push(this.button(state, 'draft_follow_global', `${state.draftFollowGlobal ? '✓ ' : ''}Follow global`, { disabled: blocked }));
+      scopeButtons.push(this.button(state, 'draft_follow_global', `${state.draftFollowGlobal ? '✓ ' : ''}Follow global`, {
+        primary: Boolean(state.draftFollowGlobal), disabled: blocked,
+      }));
       scopeSubtitle += ' Follow global uses the device-wide backend for this thread only.';
     }
     elements.push(...this.section('**2 · Apply to**', scopeSubtitle, [this.row(scopeButtons)]));
@@ -592,32 +661,37 @@ export class SettingsCards {
     return elements;
   }
 
-  private renderChoiceSections(state: MenuState, blocked: boolean): any[] {
+  private renderChoiceSections(state: MenuState, blocked: boolean, page: ChoicePage): any[] {
     const menu = state.menu;
     const elements: any[] = [];
     const targetLabel = this.backendLabel(state, menu.targetBackend);
 
-    const targetButtons = menu.backends.map(backend =>
+    const targetButton = (backend: SettingsMenu['backends'][number]) =>
       this.button(state, 'view', `${backend.value === menu.targetBackend ? '✓ ' : ''}${backend.label}`.slice(0, LIMITS.label), {
         value: backend.value,
         primary: backend.value === menu.targetBackend,
         disabled: Boolean(state.pending) || !backend.installed,
-      }));
-    const targetRows: any[] = [];
-    for (let index = 0; index < targetButtons.length; index += 4) targetRows.push(this.row(targetButtons.slice(index, index + 4)));
+      });
+    const main = menu.backends.find(backend => backend.value === menu.coordinatorBackend);
+    const others = menu.backends.filter(backend => backend.value !== menu.coordinatorBackend).map(targetButton);
+    const targetRows: any[] = [this.note('**Main backend · current thread**')];
+    targetRows.push(main ? this.row([targetButton(main)])
+      : this.note(`${escapeMarkdown(this.backendLabel(state, menu.coordinatorBackend))} is not available in this menu.`));
+    if (others.length > 0) {
+      targetRows.push({ tag: 'hr' }, this.note('**Other backends · worker preferences**'));
+      for (let index = 0; index < others.length; index += 4) targetRows.push(this.row(others.slice(index, index + 4)));
+    }
     elements.push(...this.section('**1 · Target backend**',
       `Settings below belong to **${escapeMarkdown(targetLabel)}**. Viewing another target never switches the conversation's backend.`,
       targetRows));
 
-    const pages = this.pageCount(state);
-    const page = Math.min(state.page, pages - 1);
-    const slice = menu.choices.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE);
+    const { choices, index, total } = page;
     const selectedValue = menu.configuredValue ?? menu.effectiveValue;
     const choiceBody: any[] = [];
-    if (slice.length === 0) {
+    if (choices.length === 0) {
       choiceBody.push(this.note(menu.unavailableReason ? 'No choices available.' : 'No choices reported by the backend.'));
     }
-    const choiceButtons = slice.map(choice =>
+    const choiceButtons = choices.map(choice =>
       this.button(state, 'apply', `${choice.value === selectedValue ? '✓ ' : ''}${choice.label}${choice.disabled && choice.reason ? ` (${choice.reason})` : ''}`.slice(0, LIMITS.label), {
         value: choice.value,
         primary: choice.value === selectedValue,
@@ -631,10 +705,10 @@ export class SettingsCards {
     const utility: any[] = [];
     utility.push(this.button(state, 'view', 'Refresh', { value: menu.targetBackend,
       disabled: Boolean(state.pending) || !menu.backends.some(backend => backend.value === menu.targetBackend && backend.installed) }));
-    if (pages > 1) {
-      utility.push(this.button(state, 'page', '◀ Prev', { value: String(page - 1), disabled: blocked || page === 0 }));
-      utility.push(this.button(state, 'page', `${page + 1}/${pages}`, { value: String(page), disabled: true }));
-      utility.push(this.button(state, 'page', 'Next ▶', { value: String(page + 1), disabled: blocked || page >= pages - 1 }));
+    if (total > 1) {
+      utility.push(this.button(state, 'page', '◀ Prev', { value: String(index - 1), disabled: blocked || index === 0 }));
+      utility.push(this.button(state, 'page', `${index + 1}/${total}`, { value: String(index), disabled: true }));
+      utility.push(this.button(state, 'page', 'Next ▶', { value: String(index + 1), disabled: blocked || index >= total - 1 }));
     }
     if (menu.supportsReset) utility.push(this.button(state, 'reset', 'Reset to default', { disabled: blocked }));
     if (utility.length > 0) {

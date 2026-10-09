@@ -153,8 +153,13 @@ Keep provider data separate from account credentials and native transcripts.
   choice tokens. Do not reuse effort buttons from the previous model.
 - Count nested tagged elements and serialized payload size, including headers,
   buttons, containers, controls, and footers. Use existing card budget helpers.
-- Begin with at most eight model/effort choices per page. The 150 tagged-node
-  budget is the application's conservative limit, not the platform's full limit.
+- Show all model/effort choices when the complete card fits its node and byte
+  budgets. Otherwise pack capacity-based pages, including headers, backend
+  groups, navigation, notices and pending/retry controls. The application uses
+  conservative budgets, not the platform's full limits.
+- Highlight the drafted application scope. Separate the main coordinator
+  backend from other worker-preference targets without changing its identity
+  when viewing another target; same-backend preferences remain shared.
 - Escape labels and errors; bound strings, arrays, pages, and retained state.
 - Card delivery failure must leave honest text fallback, not invisible success.
 

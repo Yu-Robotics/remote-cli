@@ -106,7 +106,7 @@ describe('SettingsCards', () => {
     // Draft defaults to the current backend and Current thread scope.
     expect(backendButtons.find(button => button.behaviors[0].value.value === 'claude')!.type).toBe('primary');
     const scopeButtons = buttons.filter(button => button.behaviors[0].value.op === 'draft_scope');
-    expect(scopeButtons.find(button => button.behaviors[0].value.value === 'thread')!.type).not.toBe('primary');
+    expect(scopeButtons.find(button => button.behaviors[0].value.value === 'thread')!.type).toBe('primary');
     expect(scopeButtons.find(button => button.behaviors[0].value.value === 'thread')!.text.content).toContain('✓');
     expect(buttons.some(button => button.behaviors[0].value.op === 'apply' && button.text.content === 'Confirm')).toBe(true);
     expect(buttons.some(button => button.behaviors[0].value.op === 'draft_follow_global')).toBe(true);
@@ -338,6 +338,107 @@ describe('SettingsCards', () => {
     await expect(cards.click('owner', 'card-1', { ...clickPayload(patched, 'page', '2'), value: '9' })).rejects.toThrow('page');
   });
 
+  it.each(['model', 'effort'] as const)('shows every %s choice that fits, including more than eight', async kind => {
+    const choices = Array.from({ length: 12 }, (_, index) => ({ value: `choice-${index}`, label: `Choice ${index}` }));
+    const { elements } = present(modelMenu({ kind, choices }));
+    const buttons = buttonsOf(elements);
+    expect(buttons.filter(button => button.behaviors[0].value.op === 'apply').map(button => button.behaviors[0].value.value))
+      .toEqual(choices.map(choice => choice.value));
+    expect(buttons.some(button => button.behaviors[0].value.op === 'page')).toBe(false);
+    // Include the real header, not just top-level body elements.
+    const header = { title: { tag: 'plain_text', content: kind === 'model' ? '🎯 Model settings' : '⚡ Effort settings' }, template: 'blue' };
+    expect(taggedNodes({ header, elements })).toBeLessThanOrEqual(90);
+    expect(Buffer.byteLength(JSON.stringify({ header, elements }))).toBeLessThanOrEqual(16 * 1024);
+    await cards.click('owner', 'card-1', clickPayload(elements, 'apply', 'choice-11'));
+    expect(transport.send.mock.calls.at(-1)[1]).toMatchObject({ operation: 'apply', value: 'choice-11' });
+  });
+
+  it.each([false, true])('packs every choice within complete node/byte budgets (long native values=%s)', async longValues => {
+    const choices = Array.from({ length: 40 }, (_, index) => ({
+      value: longValues ? `value-${index}-${'\u6a21'.repeat(500)}` : `value-${index}`,
+      label: `Choice ${index}`,
+    }));
+    const { elements: initial } = present(modelMenu({ choices, threadName: 't'.repeat(80) }));
+    let elements = initial;
+    const seen: string[] = [];
+    const pageSizes: number[] = [];
+    for (let iteration = 0; iteration < choices.length; iteration++) {
+      const header = { title: { tag: 'plain_text', content: '🎯 Model settings' }, template: 'blue' };
+      expect(taggedNodes({ header, elements })).toBeLessThanOrEqual(90);
+      expect(Buffer.byteLength(JSON.stringify({ header, elements }))).toBeLessThanOrEqual(16 * 1024);
+      const buttons = buttonsOf(elements);
+      const onPage = buttons.filter(button => button.behaviors[0].value.op === 'apply');
+      expect(onPage.length).toBeGreaterThan(0);
+      seen.push(...onPage.map(button => button.behaviors[0].value.value));
+      pageSizes.push(onPage.length);
+      const next = buttons.find(button => button.text.content === 'Next ▶' && !button.disabled);
+      if (!next) break;
+      await cards.click('owner', 'card-1', next.behaviors[0].value);
+      await flush();
+      elements = transport.update.mock.calls.at(-1)[1];
+    }
+    expect(seen).toEqual(choices.map(choice => choice.value));
+    expect(transport.send).not.toHaveBeenCalled();
+    if (longValues) expect(Math.max(...pageSizes)).toBeLessThan(9);
+    else expect(pageSizes[0]).toBeGreaterThan(8);
+    // Applying an option from the final page retains its exact opaque value.
+    await cards.click('owner', 'card-1', clickPayload(elements, 'apply', choices.at(-1)!.value));
+    expect(transport.send.mock.calls.at(-1)[1].value).toBe(choices.at(-1)!.value);
+  });
+
+  it('rechecks complete capacity for pending, rejected and timed-out states without losing controls', async () => {
+    const { elements } = present(modelMenu({ choices: Array.from({ length: 12 }, (_, index) => ({ value: `m-${index}`, label: `Model ${index}` })) }));
+    const oldChoice = clickPayload(elements, 'apply', 'm-11');
+    await cards.click('owner', 'card-1', oldChoice);
+    await flush();
+    const request = transport.send.mock.calls.at(-1)[1];
+    const checkBudget = () => {
+      const [, body, header] = transport.update.mock.calls.at(-1);
+      expect(taggedNodes({ header, elements: body })).toBeLessThanOrEqual(90);
+      expect(Buffer.byteLength(JSON.stringify({ header, elements: body }))).toBeLessThanOrEqual(16 * 1024);
+      expect(buttonsOf(body).length).toBeGreaterThan(0);
+      return body;
+    };
+    expect(buttonsOf(checkBudget()).filter(button => button.behaviors[0].value.op === 'apply').every(button => button.disabled)).toBe(true);
+    await cards.resolve('device', { type: 'settings_result', messageId: request.messageId, openId: 'owner', threadId: 'thread-1',
+      snapshotId: 'snap-model', success: false, error: '<&'.repeat(150), timestamp: Date.now() });
+    await flush();
+    const rejected = checkBudget();
+    await expect(cards.click('owner', 'card-1', oldChoice)).rejects.toThrow('outdated');
+    await cards.click('owner', 'card-1', clickPayload(rejected, 'apply', 'm-0'));
+    await vi.advanceTimersByTimeAsync(20_001);
+    await flush();
+    expect(buttonsOf(checkBudget()).some(button => button.text.content === 'Retry confirmation')).toBe(true);
+  });
+
+  it('keeps byte-limited page boundaries stable when callback revisions gain digits', async () => {
+    const choices = Array.from({ length: 60 }, (_, index) => ({
+      value: `v-${index}-${'\u6a21'.repeat(433)}`, label: `Choice ${index}`,
+    }));
+    let { elements } = present(modelMenu({ choices, threadName: 'Example', configuredValue: undefined,
+      effectiveValue: undefined, defaultValue: undefined, effectiveSource: 'unknown',
+      backends: BACKENDS.map(([value]) => ({ value, label: value, installed: true })) }));
+    const seen: string[] = [];
+    let lastRevision = 0;
+    for (let iteration = 0; iteration < choices.length; iteration++) {
+      const buttons = buttonsOf(elements);
+      seen.push(...buttons.filter(button => button.behaviors[0].value.op === 'apply').map(button => button.behaviors[0].value.value));
+      lastRevision = buttons[0].behaviors[0].value.rev;
+      const next = buttons.find(button => button.text.content === 'Next ▶' && !button.disabled);
+      if (!next) break;
+      await cards.click('owner', 'card-1', next.behaviors[0].value);
+      await flush();
+      const [, body, header] = transport.update.mock.calls.at(-1);
+      expect(taggedNodes({ header, elements: body })).toBeLessThanOrEqual(90);
+      expect(Buffer.byteLength(JSON.stringify({ schema: '2.0', header, body: { elements: body } }))).toBeLessThanOrEqual(16 * 1024);
+      elements = body;
+    }
+    expect(lastRevision).toBeGreaterThanOrEqual(10);
+    expect(seen).toEqual(choices.map(choice => choice.value));
+    expect(new Set(seen).size).toBe(choices.length);
+    expect(transport.send).not.toHaveBeenCalled();
+  });
+
   it('renders markup-shaped labels literally and escapes markdown sections', async () => {
     const { elements } = present(modelMenu());
     const button = buttonsOf(elements).find(candidate => candidate.behaviors[0].value.value === 'sonnet')!;
@@ -416,16 +517,23 @@ describe('SettingsCards', () => {
     const scopeOf = (root: any[]) => buttonsOf(root).filter(button => button.behaviors[0].value.op === 'draft_scope');
     expect(scopeOf(elements).find(button => button.behaviors[0].value.value === 'thread')!.text.content).toBe('✓ Current thread');
     expect(scopeOf(elements).find(button => button.behaviors[0].value.value === 'all')!.text.content).toBe('All threads');
+    expect(scopeOf(elements).find(button => button.behaviors[0].value.value === 'thread')!.type).toBe('primary');
+    expect(scopeOf(elements).find(button => button.behaviors[0].value.value === 'all')!.type).toBe('default');
     await cards.click('owner', 'card-1', clickPayload(elements, 'draft_scope', 'all'));
     await flush();
     const patched = transport.update.mock.calls.at(-1)[1];
     expect(scopeOf(patched).find(button => button.behaviors[0].value.value === 'thread')!.text.content).toBe('Current thread');
     expect(scopeOf(patched).find(button => button.behaviors[0].value.value === 'all')!.text.content).toBe('✓ All threads');
+    expect(scopeOf(patched).find(button => button.behaviors[0].value.value === 'thread')!.type).toBe('default');
+    expect(scopeOf(patched).find(button => button.behaviors[0].value.value === 'all')!.type).toBe('primary');
     expect(JSON.stringify(patched)).toContain('clears per-thread backend overrides');
     await cards.click('owner', 'card-1', { ...clickPayload(patched, 'draft_scope', 'thread') });
     await flush();
     const restored = transport.update.mock.calls.at(-1)[1];
     expect(scopeOf(restored).find(button => button.behaviors[0].value.value === 'thread')!.text.content).toBe('✓ Current thread');
+    expect(scopeOf(restored).find(button => button.behaviors[0].value.value === 'thread')!.type).toBe('primary');
+    expect(scopeOf(restored).find(button => button.behaviors[0].value.value === 'all')!.type).toBe('default');
+    expect(transport.send).not.toHaveBeenCalled();
     expect(JSON.stringify(restored)).not.toContain('clears per-thread');
   });
 
@@ -457,6 +565,7 @@ describe('SettingsCards', () => {
     expect(json).toContain('device-wide backend for this thread only');
     const follow = buttonsOf(patched).find(button => button.behaviors[0].value.op === 'draft_follow_global')!;
     expect(follow.text.content).toBe('✓ Follow global');
+    expect(follow.type).toBe('primary');
     const scope = buttonsOf(patched).filter(button => button.behaviors[0].value.op === 'draft_scope');
     expect(scope.find(button => button.behaviors[0].value.value === 'thread')!.text.content).toBe('✓ Current thread');
     const backends = buttonsOf(patched).filter(button => button.behaviors[0].value.op === 'draft_backend');
@@ -486,6 +595,35 @@ describe('SettingsCards', () => {
     expect(opus.type).toBe('primary');
     // Disabled choices keep their literal reason on the button.
     expect(buttonsOf(elements).find(button => button.behaviors[0].value.value === 'haiku')!.text.content).toBe('Haiku (Not entitled)');
+  });
+
+  it.each(['model', 'effort'] as const)('separates the main backend from other %s targets, even while viewing a worker backend', async kind => {
+    const { elements } = present(modelMenu({ kind, coordinatorBackend: 'claude', targetBackend: 'codex',
+      backends: backendMenu().backends }));
+    const main = elements.findIndex(element => element.content === '**Main backend · current thread**');
+    const others = elements.findIndex(element => element.content === '**Other backends · worker preferences**');
+    const choices = elements.findIndex(element => element.content === `**2 · ${kind === 'model' ? 'Model' : 'Effort'} for Codex CLI**`);
+    expect(main).toBeGreaterThan(-1);
+    expect(others).toBeGreaterThan(main);
+    expect(choices).toBeGreaterThan(others);
+    expect(elements[others - 1]).toEqual({ tag: 'hr' });
+    const mainButtons = buttonsOf(elements.slice(main, others));
+    expect(mainButtons.map(button => button.behaviors[0].value.value)).toEqual(['claude']);
+    expect(mainButtons[0].type).toBe('default');
+    const workerButtons = buttonsOf(elements.slice(others, choices));
+    expect(workerButtons.map(button => button.behaviors[0].value.value)).toEqual(BACKENDS.filter(([value]) => value !== 'claude').map(([value]) => value));
+    expect(workerButtons.find(button => button.behaviors[0].value.value === 'codex')!.type).toBe('primary');
+    expect(workerButtons.find(button => button.behaviors[0].value.value === 'pi')!.disabled).toBe(true);
+    await cards.click('owner', 'card-1', mainButtons[0].behaviors[0].value);
+    expect(transport.send.mock.calls.at(-1)[1]).toMatchObject({ operation: 'view', targetBackend: 'claude' });
+    expect(transport.send.mock.calls.at(-1)[1]).not.toHaveProperty('value');
+  });
+
+  it('does not invent a selectable main backend absent from the snapshot', () => {
+    const { elements } = present(modelMenu({ coordinatorBackend: 'claude', targetBackend: 'codex',
+      backends: [{ value: 'codex', label: 'Codex CLI', installed: true }] }));
+    expect(JSON.stringify(elements)).toContain('claude is not available in this menu');
+    expect(buttonsOf(elements).some(button => button.behaviors[0].value.value === 'claude')).toBe(false);
   });
 
   it('separates native effort choices from the target backend and applies without Confirm', async () => {
