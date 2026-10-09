@@ -1118,7 +1118,7 @@ Examples:
    * @param trailingElements Final panel elements that must remain together
    * @returns Array of element chunks, each satisfying Feishu's limits
    */
-  private splitElementsIntoChunks(elements: any[], continuationHeaderElements: any[] = [], trailingElements: any[] = [], activityTail?: any): any[][] {
+  private splitElementsIntoChunks(elements: any[], continuationHeaderElements: any[] = [], trailingElements: any[] = [], activityTail?: any, keepCompletionWithBody = false): any[][] {
     // If empty or very small, return as-is
     if (elements.length === 0) {
       return [activityTail ? [activityTail] : elements];
@@ -1150,6 +1150,21 @@ Examples:
     const continuationIndicatorSize = 200 + continuationHeaderSize + (activityTail ? JSON.stringify(activityTail).length : 0);
     const continuationIndicatorCount = 2 + continuationHeaderTaggedNodes + (activityTail ? this.countTaggedNodes(activityTail) : 0);
 
+    // Keep the completion block with the final body item when they fit on a
+    // continuation card. Include the whole worker group, never just its details.
+    const trailingStart = keepCompletionWithBody && trailingElements.length ? elements.indexOf(trailingElements[0]) : -1;
+    let finalBodyStart = trailingStart - 1;
+    const workerTail = /^dw_\d+_details$/.test(elements[finalBodyStart]?.element_id ?? '')
+      ? elements[finalBodyStart].element_id.slice(0, -'details'.length) : undefined;
+    if (workerTail && ['header', 'body', 'meta', 'details'].every((suffix, index) =>
+      elements[finalBodyStart - 3 + index]?.element_id === `${workerTail}${suffix}`)) finalBodyStart -= 3;
+    const finalGroup = finalBodyStart >= continuationHeaderElements.length
+      ? elements.slice(finalBodyStart) : [];
+    const keepFinalBody = finalGroup.length > trailingElements.length
+      && finalGroup.reduce((sum, item) => sum + this.countTaggedNodes(item), 0) + continuationIndicatorCount <= this.CARD_ELEMENT_LIMIT
+      && finalGroup.reduce((sum, item) => sum + JSON.stringify(item).length, 0) + continuationIndicatorSize <= this.CARD_DATA_SIZE_LIMIT - this.CARD_SIZE_BUFFER
+      && countCardTables(finalGroup) + headerTables <= CARD_TABLE_LIMIT;
+
     for (let i = 0; i < elements.length; i++) {
       const element = elements[i];
       const elementSize = JSON.stringify(element).length;
@@ -1163,7 +1178,8 @@ Examples:
       const isWorkerGroup = workerGroup.length === 4 && ['header', 'body', 'meta', 'details']
         .every((suffix, index) => workerGroup[index].element_id === `${workerPrefix}${suffix}`);
       // The switch panel caption and all its button rows also travel together.
-      const group = isWorkerGroup ? workerGroup : element === trailingElements[0] ? trailingElements : [element];
+      const group = keepFinalBody && i === finalBodyStart ? finalGroup
+        : isWorkerGroup ? workerGroup : element === trailingElements[0] ? trailingElements : [element];
       const groupSize = group.reduce((sum, item) => sum + JSON.stringify(item).length, 0);
       const groupTaggedNodes = group.reduce((sum, item) => sum + this.countTaggedNodes(item), 0);
       const groupTables = countCardTables(group);
@@ -1434,7 +1450,7 @@ Examples:
     });
   }
 
-  private async _updateStreamingMessage(messageId: string, elements: any[], openId?: string, continuationHeaderElements: any[] = [], trailingElements: any[] = []): Promise<boolean> {
+  private async _updateStreamingMessage(messageId: string, elements: any[], openId?: string, continuationHeaderElements: any[] = [], trailingElements: any[] = [], keepCompletionWithBody = false): Promise<boolean> {
     let updatingMessageId = messageId;
     let updatingCardIndex = 0;
     try {
@@ -1448,7 +1464,7 @@ Examples:
       // Split elements into chunks based on Feishu Card 2.0 limits
       const shell = this.activityShells.get(messageId);
       const activityTail = shell && shell.finishedAt === undefined ? createActivityElement(shell.activity) : undefined;
-      const chunks = this.splitElementsIntoChunks(elements, continuationHeaderElements, trailingElements, activityTail);
+      const chunks = this.splitElementsIntoChunks(elements, continuationHeaderElements, trailingElements, activityTail, keepCompletionWithBody);
       const tailIndex = activityTail ? chunks.length - 1 : -1;
       console.log(`[FeishuHandler] Need ${chunks.length} card(s), currently have ${chain.length} card(s)`);
       let hashes = this.cardContentHashes.get(messageId);
@@ -1638,8 +1654,9 @@ Examples:
 
       // Reuse streaming update logic: only create cards, never delete.
       // Repack changed previews and clear obsolete tool copies without retracting messages.
-      const trailingElements = metadataElement && !queueConfirmation ? [...footerElements, ...threadSwitchElements] : threadSwitchElements;
-      const updated = await this._updateStreamingMessage(messageId, finalElements, openId, headerElements, trailingElements);
+      const trailingElements = !queueConfirmation ? [...footerElements, ...threadSwitchElements] : threadSwitchElements;
+      const keepCompletionWithBody = !bare && !queueConfirmation;
+      const updated = await this._updateStreamingMessage(messageId, finalElements, openId, headerElements, trailingElements, keepCompletionWithBody);
       if (!updated) {
         return false;
       }
@@ -1654,7 +1671,7 @@ Examples:
       // Store thread switch card state for later refresh (before cleanup)
       if (!bare && threads && threads.length >= 1) {
         const chain = this.messageChains.get(messageId);
-        const chunks = this.splitElementsIntoChunks(finalElements, headerElements, trailingElements);
+        const chunks = this.splitElementsIntoChunks(finalElements, headerElements, trailingElements, undefined, keepCompletionWithBody);
         const lastChunkIndex = chunks.length - 1;
         const lastCardId = chain?.[lastChunkIndex];
 

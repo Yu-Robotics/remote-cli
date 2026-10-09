@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.158] - 2026-10-09
+
+### Fixed
+- Keep the completion note, optional execution metadata and thread controls with the final body item or complete worker group when they fit together within continuation-card node, size and table budgets. Avoid a preventable footer-only continuation, including replies without execution metadata; retain the body when refreshing thread controls. Oversized indivisible groups still respect capacity limits. Streaming, queue confirmations and bare settings cards retain their existing behavior.
+
 ## [1.6.157] - 2026-10-09
 
 ### Changed
