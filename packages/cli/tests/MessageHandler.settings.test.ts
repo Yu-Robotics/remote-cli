@@ -60,7 +60,7 @@ async function fixture() {
     messageId: `command-${++sequence}`, openId: 'owner-a', threadId, content, timestamp: Date.now() } as any);
   const responses = () => ws.send.mock.calls.map(([value]) => value as any).filter(value => value.type === 'response');
   const results = () => ws.send.mock.calls.map(([value]) => value as any).filter(value => value.type === 'settings_result');
-  const open = async (kind: 'backend' | 'model' | 'effort'): Promise<SettingsMenu> => { await send(`/${kind}`); return responses().at(-1)!.settingsMenu; };
+  const open = async (kind: 'backend' | 'model' | 'effort' | 'delegation'): Promise<SettingsMenu> => { await send(`/${kind}`); return responses().at(-1)!.settingsMenu; };
   const action = async (menu: SettingsMenu, fields: Partial<SettingsActionMessage> = {}) => {
     const request = { type: 'settings_action', messageId: `action-${++sequence}`, openId: 'owner-a', threadId: menu.threadId,
       snapshotId: menu.snapshotId, operation: 'apply', value: 'model-a', timestamp: Date.now(), ...fields };
@@ -78,9 +78,103 @@ describe('settings cards command integration', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
     f = await fixture();
-    await f.handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: { settingsCards: true } } } as any);
+    vi.spyOn((f.handler as any).delegation.registry, 'list').mockResolvedValue(BACKENDS.map(backend => ({
+      backend, installed: backend !== 'pi' && backend !== 'zcode', worker: backend !== 'pi' && backend !== 'zcode', readOnly: false,
+      version: '1.0.0', reason: backend === 'pi' || backend === 'zcode' ? 'Executable is missing' : undefined,
+    })));
+    await f.handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: { settingsCards: true, delegationCards: true } } } as any);
   });
   afterEach(async () => { await f.handler.destroy(); await rm(f.cwd, { recursive: true, force: true }); vi.restoreAllMocks(); });
+
+  it('opens and toggles delegation for the original thread without running an agent', async () => {
+    Object.assign(f.executor, { configureDelegation: vi.fn(async () => {}) });
+    const menu = await f.open('delegation');
+    expect(menu).toMatchObject({ kind: 'delegation', configuredValue: 'on', busy: false });
+    expect(menu.backends.find(row => row.value === 'codex')).toMatchObject({ worker: true, installed: true });
+    const off = await f.action(menu, { value: 'off' });
+    expect(off).toMatchObject({ success: true, menu: { configuredValue: 'off' } });
+    expect(f.threads[0].delegation).toBe(false);
+    expect(f.threads[1].delegation).toBeUndefined();
+    expect((await f.action(off.menu, { value: 'on' })).success).toBe(true);
+    expect(f.threads[0].delegation).toBe(true);
+    expect(f.executor.execute).not.toHaveBeenCalled();
+    expect(f.reader.read).not.toHaveBeenCalled();
+  });
+
+  it('preserves native cleanup ownership and waits for Off cleanup before acknowledging', async () => {
+    f.threads[0].delegation = true;
+    let release!: () => void;
+    const configure = vi.fn(async () => new Promise<void>(resolve => { release = resolve; }));
+    Object.assign(f.executor, { configureDelegation: configure });
+    const close = vi.fn(async () => {});
+    (f.handler as any).delegationBridges.set('thread-a', { close });
+    const menu = await f.open('delegation');
+    const applying = f.action(menu, { value: 'off' });
+    await vi.waitFor(() => expect(configure).toHaveBeenCalledWith(undefined));
+    expect(f.results()).toHaveLength(0);
+    expect(f.threads[0].delegation).toBe(true);
+    release();
+    expect((await applying).success).toBe(true);
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(f.threads[0]).toMatchObject({ delegation: false, delegationBackends: ['codex'] });
+  });
+
+  it('shows sandbox policy independently from the enabled flag and blocks busy workers', async () => {
+    Object.assign(f.executor, { configureDelegation: vi.fn(async () => {}) });
+    f.setConfig({ type: 'codex', codex: { sandbox: { mode: 'workspace-write' } } });
+    const menu = await f.open('delegation');
+    expect(menu.configuredValue).toBe('on');
+    expect(menu.backends.filter(row => row.installed).every(row => row.worker === false && row.reason?.includes('sandbox'))).toBe(true);
+    vi.spyOn((f.handler as any).delegation, 'hasActiveTasks').mockReturnValue(true);
+    const busy = await f.open('delegation');
+    expect(busy.busy).toBe(true);
+    expect((await f.action(busy, { value: 'off' })).success).toBe(false);
+    expect(f.threads[0].delegation).toBeUndefined();
+  });
+
+  it('keeps text delegation for old Routers and rejects stale cards after text toggles', async () => {
+    Object.assign(f.executor, { configureDelegation: vi.fn(async () => {}) });
+    const menu = await f.open('delegation');
+    await f.send('/delegation off');
+    expect((await f.action(menu, { value: 'on' })).success).toBe(false);
+    await f.handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: { settingsCards: true } } } as any);
+    await f.send('/delegation');
+    expect(f.responses().at(-1)).toMatchObject({ success: true });
+    expect(f.responses().at(-1).settingsMenu).toBeUndefined();
+    expect(f.responses().at(-1).output).toContain('Agent delegation');
+    await f.send('/delegation on');
+    expect(f.threads[0].delegation).toBe(true);
+  });
+
+  it.each(['main', 'queue'] as const)('rechecks %s work started after opening a delegation card', async work => {
+    Object.assign(f.executor, { configureDelegation: vi.fn(async () => {}) });
+    const menu = await f.open('delegation');
+    if (work === 'main') f.busy.add('thread-a');
+    else {
+      (f.handler as any).threadQueues.set('thread-a', [{ messageId: 'queued-work', content: 'Synthetic work' }]);
+      (f.handler as any).pausedQueues.add('thread-a');
+    }
+    expect((await f.action(menu, { value: 'off' })).success).toBe(false);
+    const busy = await f.open('delegation');
+    expect(busy.busy).toBe(true);
+    expect(f.threads[0].delegation).toBeUndefined();
+  });
+
+  it.each(['cleanup', 'persistence'] as const)('does not acknowledge Off after a %s failure', async failure => {
+    f.threads[0].delegation = true;
+    f.threads[0].delegationBackends = ['codex', 'agy'];
+    const configure = vi.fn(async () => {});
+    Object.assign(f.executor, { configureDelegation: configure });
+    const menu = await f.open('delegation');
+    if (failure === 'cleanup') configure.mockRejectedValueOnce(new Error('Synthetic cleanup failure'));
+    else f.manager.updateThread.mockRejectedValueOnce(new Error('Synthetic persistence failure'));
+    const result = await f.action(menu, { value: 'off' });
+    expect(result.success).toBe(false);
+    expect(f.threads[0]).toMatchObject({ delegation: true, delegationBackends: ['codex', 'agy'] });
+    expect(f.threads[0].models).toMatchObject({ codex: 'saved-codex', claude: 'saved-claude' });
+    expect(f.threads[0].efforts).toEqual({ agy: 'low' });
+    expect(JSON.stringify(result)).not.toContain(`Synthetic ${failure} failure`);
+  });
 
   it.each(['backend', 'model', 'effort'] as const)('opens a dedicated %s snapshot without executing an agent prompt', async kind => {
     const menu = await f.open(kind);

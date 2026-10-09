@@ -2207,6 +2207,28 @@ describe('RouterServer', () => {
       expect(legacy.reply.data.capabilities?.settingsCards).toBeUndefined();
     });
 
+    it.each([
+      { settingsCards: true, delegationCards: true, enabled: true },
+      { settingsCards: true, delegationCards: false, enabled: false },
+      { settingsCards: false, delegationCards: true, enabled: false },
+    ])('gates delegation menus independently from older settings cards ($enabled)', async ({ settingsCards, delegationCards, enabled }) => {
+      mockFeishuHandler.finalizeStreamingMessage.mockImplementation(async (...args: any[]) => {
+        args[11]?.onDelivered?.(['feishu-card-1']); return true;
+      });
+      const { send, reply } = await connect({ settingsCards, delegationCards });
+      expect(reply.data.capabilities?.delegationCards).toBe(enabled ? true : undefined);
+      await respondWithMenu(send, { ...settingsMenu, kind: 'delegation', configuredValue: 'on', effectiveValue: 'on',
+        choices: [{ value: 'on', label: 'On' }, { value: 'off', label: 'Off' }] });
+      const call = mockFeishuHandler.finalizeStreamingMessage.mock.calls.at(-1);
+      expect(call[11]?.bare).toBe(enabled ? true : undefined);
+      if (enabled) {
+        expect(JSON.stringify(call[1])).toContain('Backend availability');
+        const state = [...(server as any).settingsCards['menus'].values()][0] as any;
+        expect(state.menu.kind).toBe('delegation');
+        expect(state.cards.has('feishu-card-1')).toBe(true);
+      } else expect(JSON.stringify(call[1])).not.toContain('"action":"settings"');
+    });
+
     it('renders a capable CLI settings menu as a bare card bound to the delivered card', async () => {
       mockFeishuHandler.finalizeStreamingMessage.mockImplementation(
         async (_id: string, _elements: any[], _s: any, _o: any, _c: any, _t: any, _th: any, _r: any, _q: any, _m: any, _ok: boolean, options: any) => {

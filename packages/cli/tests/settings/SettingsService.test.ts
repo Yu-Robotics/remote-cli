@@ -10,7 +10,7 @@ function fixture() {
   let sequence = 0;
   const states = new Map<string, SettingsState>(['thread-a', 'thread-b'].map(threadId => [threadId, {
     threadId, threadName: threadId, coordinatorBackend: 'codex', followsGlobal: true, revision: 'revision-a',
-    configuredModels: { codex: 'saved-model' }, configuredEfforts: { codex: 'high' },
+    configuredModels: { codex: 'saved-model' }, configuredEfforts: { codex: 'high' }, delegationEnabled: true,
   }]));
   const rows: SettingsBackendInfo[] = BACKENDS.map(value => ({ value, label: value,
     installed: value !== 'pi' && value !== 'zcode', reason: value === 'pi' || value === 'zcode' ? 'Not installed' : undefined }));
@@ -22,6 +22,8 @@ function fixture() {
     busy: vi.fn(() => false), threads: vi.fn(() => [...states.keys()]),
     exclusive: (target, body) => admission.mutation(target, body),
     backend: vi.fn(async () => ({ success: true })), preference: vi.fn(async () => ({ success: true })), now: () => time,
+    delegationSupported: vi.fn(() => true),
+    delegation: vi.fn(async (id, enabled) => { states.get(id)!.delegationEnabled = enabled; return { success: true }; }),
   };
   const service = new SettingsService(dependencies);
   const action = (menu: SettingsMenu, fields: Partial<SettingsActionMessage> = {}): SettingsActionMessage => ({
@@ -32,6 +34,72 @@ function fixture() {
 }
 
 describe('immutable settings menus and acknowledged mutations', () => {
+  it('offers thread-only delegation controls without querying native catalogs', async () => {
+    const f = fixture();
+    const menu = await f.service.open('delegation', 'thread-a', 'owner-a');
+    expect(menu).toMatchObject({ configuredValue: 'on', effectiveValue: 'on', supportsReset: false });
+    expect(menu.choices.map(choice => choice.value)).toEqual(['on', 'off']);
+    const result = await f.service.action(f.action(menu, { value: 'off' }));
+    expect(result).toMatchObject({ success: true, menu: { configuredValue: 'off' } });
+    expect(f.dependencies.delegation).toHaveBeenCalledWith('thread-a', false);
+    expect(f.states.get('thread-b')!.delegationEnabled).toBe(true);
+    expect(f.dependencies.catalog).not.toHaveBeenCalled();
+    expect(f.dependencies.backend).not.toHaveBeenCalled();
+    expect(f.dependencies.preference).not.toHaveBeenCalled();
+    const on = await f.service.action(f.action(result.menu!, { value: 'on' }));
+    expect(on.menu!.configuredValue).toBe('on');
+  });
+
+  it('rejects delegation scopes, backend views, resets and invalid values', async () => {
+    const f = fixture();
+    const menu = await f.service.open('delegation', 'thread-a', 'owner-a');
+    for (const fields of [
+      { value: 'off', scope: 'all' }, { value: 'off', scope: 'thread' }, { value: 'other' },
+      { operation: 'reset', value: undefined }, { operation: 'follow_global', value: undefined },
+      { operation: 'view', value: undefined, targetBackend: 'agy' },
+    ] as Partial<SettingsActionMessage>[]) expect((await f.service.action(f.action(menu, fields))).success).toBe(false);
+    await expect(f.service.open('delegation', 'thread-a', 'owner-a', 'agy')).rejects.toThrow('another backend');
+    expect(f.dependencies.delegation).not.toHaveBeenCalled();
+    const refreshed = await f.service.action(f.action(menu, { operation: 'view', value: undefined }));
+    expect(refreshed).toMatchObject({ success: true, menu: { kind: 'delegation', targetBackend: 'codex' } });
+  });
+
+  it('disables unsupported On without preventing Off or busy refresh', async () => {
+    const f = fixture();
+    vi.mocked(f.dependencies.delegationSupported).mockReturnValue(false);
+    const menu = await f.service.open('delegation', 'thread-a', 'owner-a');
+    expect(menu.choices[0]).toMatchObject({ value: 'on', disabled: true });
+    expect((await f.service.action(f.action(menu, { value: 'on' }))).success).toBe(false);
+    expect((await f.service.action(f.action(menu, { value: 'off' }))).success).toBe(true);
+    vi.mocked(f.dependencies.busy).mockReturnValue(true);
+    const busy = await f.service.open('delegation', 'thread-a', 'owner-a');
+    expect(busy.busy).toBe(true);
+    expect((await f.service.action(f.action(busy, { value: 'off' }))).success).toBe(false);
+    expect((await f.service.action(f.action(busy, { operation: 'view', value: undefined }))).success).toBe(true);
+  });
+
+  it('requires the additive delegation-card capability for mutations', async () => {
+    const f = fixture();
+    const menu = await f.service.open('delegation', 'thread-a', 'owner-a');
+    const result = await f.service.action(f.action(menu, { value: 'off' }), false);
+    expect(result).toMatchObject({ success: false });
+    expect(result.error).toContain('not negotiated');
+    expect(f.dependencies.delegation).not.toHaveBeenCalled();
+    const request = f.action(menu, { value: 'off' });
+    expect((await f.service.action(request)).success).toBe(true);
+    expect((await f.service.action(request, false)).success).toBe(false);
+    expect(f.dependencies.delegation).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not acknowledge a failed delegation persistence as applied', async () => {
+    const f = fixture();
+    vi.mocked(f.dependencies.delegation).mockRejectedValueOnce(new Error('Synthetic persistence failure'));
+    const menu = await f.service.open('delegation', 'thread-a', 'owner-a');
+    const result = await f.service.action(f.action(menu, { value: 'off' }));
+    expect(result.success).toBe(false);
+    expect(f.states.get('thread-a')!.delegationEnabled).toBe(true);
+  });
+
   it('offers every stable backend, disables missing tools and defaults to the original thread', async () => {
     const f = fixture();
     const menu = await f.service.open('backend', 'thread-a', 'owner-a');

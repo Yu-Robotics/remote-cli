@@ -3,13 +3,14 @@ import type {
   SettingsActionMessage,
   SettingsBackend,
   SettingsChoice,
+  SettingsKind,
   SettingsMenu,
   SettingsResultMessage,
   SettingsScope,
 } from '../types/Settings';
 
 /**
- * Dedicated interactive settings cards (backend/model/effort menus).
+ * Dedicated interactive settings cards (backend/model/effort/delegation menus).
  *
  * Menus are delivered as the finalized card of the originating command's
  * streaming placeholder, bound to the original user, device, thread, request
@@ -25,7 +26,7 @@ import type {
 export interface SettingsTransport {
   ownsDevice(openId: string, deviceId: string): Promise<boolean>;
   /** True only while the device's current connection negotiated settingsCards. */
-  available(deviceId: string): boolean;
+  available(deviceId: string, kind?: SettingsKind): boolean;
   send(deviceId: string, message: object): Promise<boolean>;
   update(cardId: string, elements: any[], header?: Record<string, unknown>): Promise<void>;
 }
@@ -131,7 +132,7 @@ function taggedNodes(value: unknown): number {
 export function sanitizeSettingsMenu(input: unknown): SettingsMenu | undefined {
   if (!input || typeof input !== 'object') return undefined;
   const raw = input as Record<string, unknown>;
-  const kind = raw.kind === 'backend' || raw.kind === 'model' || raw.kind === 'effort' ? raw.kind : undefined;
+  const kind = raw.kind === 'backend' || raw.kind === 'model' || raw.kind === 'effort' || raw.kind === 'delegation' ? raw.kind : undefined;
   const snapshotId = identifier(raw.snapshotId, LIMITS.id);
   const threadId = identifier(raw.threadId, LIMITS.id);
   const threadName = bounded(raw.threadName, LIMITS.label);
@@ -139,6 +140,7 @@ export function sanitizeSettingsMenu(input: unknown): SettingsMenu | undefined {
   const targetBackend = BACKENDS.includes(raw.targetBackend as SettingsBackend) ? raw.targetBackend as SettingsBackend : undefined;
   const expiresAt = typeof raw.expiresAt === 'number' && Number.isFinite(raw.expiresAt) ? raw.expiresAt : undefined;
   if (!kind || !snapshotId || !threadId || !threadName || !coordinatorBackend || !targetBackend || !expiresAt || expiresAt <= 0) return undefined;
+  if (kind === 'delegation' && (targetBackend !== coordinatorBackend || !['on', 'off'].includes(raw.configuredValue as string))) return undefined;
 
   const backends: SettingsMenu['backends'] = [];
   if (!Array.isArray(raw.backends)) return undefined;
@@ -155,6 +157,8 @@ export function sanitizeSettingsMenu(input: unknown): SettingsMenu | undefined {
       label,
       installed: candidate.installed === true,
       reason: bounded(candidate.reason, LIMITS.reason),
+      worker: typeof candidate.worker === 'boolean' ? candidate.worker : undefined,
+      version: bounded(candidate.version, LIMITS.label),
     });
   }
   if (!backends.some(backend => backend.value === targetBackend)) return undefined;
@@ -167,6 +171,7 @@ export function sanitizeSettingsMenu(input: unknown): SettingsMenu | undefined {
     const value = identifier(candidate.value, LIMITS.value);
     const label = bounded(candidate.label, LIMITS.label);
     if (!value || !label || seenChoices.has(value)) continue;
+    if (kind === 'delegation' && value !== 'on' && value !== 'off') continue;
     seenChoices.add(value);
     choices.push({
       value,
@@ -191,7 +196,7 @@ export function sanitizeSettingsMenu(input: unknown): SettingsMenu | undefined {
     effectiveValue: identifier(raw.effectiveValue, LIMITS.value),
     defaultValue: identifier(raw.defaultValue, LIMITS.value),
     effectiveSource,
-    supportsReset: raw.supportsReset === true,
+    supportsReset: kind !== 'delegation' && raw.supportsReset === true,
     followsGlobal: typeof raw.followsGlobal === 'boolean' ? raw.followsGlobal : undefined,
     busy: raw.busy === true,
     expiresAt,
@@ -211,6 +216,7 @@ export class SettingsCards {
     this.prune();
     const menu = sanitizeSettingsMenu(input.menu);
     if (!menu || menu.expiresAt <= Date.now()) return undefined;
+    if (menu.kind === 'delegation' && !this.transport.available(input.deviceId, menu.kind)) return undefined;
     // A menu only lands on the card of its own thread's request.
     if (input.expectedThreadId && menu.threadId !== input.expectedThreadId) return undefined;
     for (const state of this.menus.values()) {
@@ -274,7 +280,7 @@ export class SettingsCards {
     // the still-visible older revision must see "waiting", not "outdated".
     if (state.pending) {
       if (state.pending.timedOut && op === 'retry') {
-        if (!this.transport.available(state.deviceId)) throw new Error('The original CLI is offline. Reconnect it and open a new settings card.');
+        if (!this.transport.available(state.deviceId, state.menu.kind)) throw new Error('The original CLI is offline. Reconnect it and open a new settings card.');
         await this.sendPending(state, state.pending);
         return 'Retrying confirmation for the original settings request.';
       }
@@ -289,7 +295,7 @@ export class SettingsCards {
     // Mutations and view requests require the exact rendered revision: a stale
     // card must never silently apply a different operation.
     if (payload.rev !== state.revision) throw new Error('This settings card is outdated. Use the latest card.');
-    if (!this.transport.available(state.deviceId)) {
+    if (!this.transport.available(state.deviceId, state.menu.kind)) {
       throw new Error('The original CLI is offline or does not support settings cards. Reconnect it first.');
     }
     const action = this.buildAction(state, op, payload.value);
@@ -415,6 +421,11 @@ export class SettingsCards {
       timestamp: Date.now(),
     });
     const busyBlocked = menu.busy;
+    if (op === 'view' && menu.kind === 'delegation') {
+      if (value !== undefined) return undefined;
+      return { label: 'Refreshing delegation…', toast: 'Refreshing delegation…',
+        message: requestId => ({ ...base(requestId), operation: 'view' }) };
+    }
     if (op === 'view' && menu.kind !== 'backend') {
       const backend = menu.backends.find(entry => entry.value === value);
       if (!backend || !backend.installed) return undefined;
@@ -453,7 +464,7 @@ export class SettingsCards {
   /** Show every choice when possible; otherwise pack complete, budgeted cards. */
   private choicePages(state: MenuState): SettingsChoice[][] {
     const choices = state.menu.choices;
-    if (choices.length === 0 || state.menu.kind === 'backend') return [choices];
+    if (choices.length === 0 || state.menu.kind === 'backend' || state.menu.kind === 'delegation') return [choices];
     const layout = state.choiceLayout;
     if (layout?.menu === state.menu && layout.pending === state.pending
       && layout.timedOut === state.pending?.timedOut && layout.notice === state.notice) return layout.pages;
@@ -524,7 +535,7 @@ export class SettingsCards {
 
   private header(state: MenuState): Record<string, unknown> {
     const title = state.menu.kind === 'backend' ? '⚙️ Backend settings'
-      : state.menu.kind === 'model' ? '🎯 Model settings' : '⚡ Effort settings';
+      : state.menu.kind === 'model' ? '🎯 Model settings' : state.menu.kind === 'delegation' ? '🤝 Agent delegation' : '⚡ Effort settings';
     return { title: { tag: 'plain_text', content: title }, template: state.terminal ? 'grey' : state.pending ? 'blue' : 'blue' };
   }
 
@@ -580,6 +591,10 @@ export class SettingsCards {
       lines.push(`**Backend** · ${escapeMarkdown(menu.threadName)}`);
       lines.push(`Current: **${escapeMarkdown(current)}**${menu.followsGlobal === false ? ' (thread override)' : ' (global)'}`);
       if (state.draftScope === 'all') lines.push('⚠️ Switching all threads clears per-thread backend overrides and queued messages. Native conversations are kept.');
+    } else if (menu.kind === 'delegation') {
+      lines.push(`**Agent delegation** · ${escapeMarkdown(menu.threadName)}`);
+      lines.push(`Current thread only · Main backend: **${escapeMarkdown(this.backendLabel(state, menu.coordinatorBackend))}**`);
+      lines.push(`Delegation: **${menu.configuredValue === 'on' ? 'On' : 'Off'}**`);
     } else {
       lines.push(`**${menu.kind === 'model' ? 'Model' : 'Effort'}** · ${escapeMarkdown(this.backendLabel(state, menu.targetBackend))} · ${escapeMarkdown(menu.threadName)}`);
       lines.push(`Configured: ${menu.configuredValue ? `\`${escapeMarkdown(menu.configuredValue)}\`` : '—'}`
@@ -600,6 +615,8 @@ export class SettingsCards {
 
     if (menu.kind === 'backend') {
       elements.push(...this.renderBackendSections(state, blocked));
+    } else if (menu.kind === 'delegation') {
+      elements.push(...this.renderDelegationSections(state, blocked));
     } else {
       elements.push(...this.renderChoiceSections(state, blocked, page));
     }
@@ -610,6 +627,31 @@ export class SettingsCards {
   /** A visually separated functional section: divider, heading, subtitle, body. */
   private section(title: string, subtitle: string, body: any[]): any[] {
     return [{ tag: 'hr' }, { tag: 'markdown', content: title }, this.note(subtitle), ...body];
+  }
+
+  private renderDelegationSections(state: MenuState, blocked: boolean): any[] {
+    const menu = state.menu;
+    const buttons = menu.choices.map(choice => this.button(state, 'apply',
+      `${choice.value === menu.configuredValue ? '✓ ' : ''}${choice.label}`, {
+        value: choice.value, primary: choice.value === menu.configuredValue, disabled: blocked || choice.disabled,
+      }));
+    const availability = menu.backends.map(backend => {
+      const status = !backend.installed ? 'Not installed' : backend.worker === true ? 'Ready'
+        : backend.worker === false ? 'Blocked' : 'Availability unknown';
+      const detail = backend.reason || backend.version;
+      return this.note(`**${escapeMarkdown(backend.label)}**${backend.value === menu.coordinatorBackend ? ' (Main)' : ''} · ${status}`
+        + (detail ? ` · ${escapeMarkdown(detail)}` : ''));
+    });
+    const elements = [
+      ...this.section('**1 · Delegation**', 'Applies only to this thread. Click On or Off; the selection changes only after CLI confirmation.',
+        [this.row(buttons), ...menu.choices.filter(choice => choice.disabled && choice.reason).map(choice => this.note(escapeMarkdown(choice.reason!))),
+          this.row([this.button(state, 'view', 'Refresh', { disabled: Boolean(state.pending) })])]),
+      ...this.section('**2 · Backend availability**',
+        'Installation and sandbox policy only. Authentication and quota are checked when a task starts.', availability),
+      this.note('Managed workers are unavailable while the coordinator sandbox is enabled. Same-backend workers use independent sessions and cannot delegate recursively.'),
+    ];
+    if (menu.coordinatorBackend === 'zcode') elements.push(this.note('ZCode delegation temporarily replaces user-configured MCP servers. Off restores the normal MCP configuration.'));
+    return elements;
   }
 
   private renderBackendSections(state: MenuState, blocked: boolean): any[] {

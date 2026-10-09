@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.156] - 2026-10-09
+
+### Added
+- Add a thread-scoped `/delegation` settings card with blue checked On/Off controls and a separate backend-availability section. Clicks submit immediately, update selection only after durable CLI acknowledgement, and preserve pending/unknown states and exact-request retries. Running work and queued commands block mutation, not inspection or refresh; reset remains a separate text command.
+- Negotiate `delegationCards` in addition to `settingsCards` on protocol v1. Older peers retain the existing delegation status text and parameterized commands. Reuse immutable snapshots, ownership checks, admission barriers and native cleanup for card/text toggles; distinguish the enabled preference from sandbox restrictions, installation, authentication and quota.
+
 ## [1.6.155] - 2026-10-09
 
 ### Changed

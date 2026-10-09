@@ -47,6 +47,8 @@ describe('WebSocketClient', () => {
       await vi.waitFor(() => expect(mockWs.send).toHaveBeenCalled());
       expect(JSON.parse(mockWs.send.mock.calls[0][0]).data.capabilities.fileTransferV1).toBe(true);
       expect(JSON.parse(mockWs.send.mock.calls[0][0]).data.capabilities.activityProgress).toBe(true);
+      expect(JSON.parse(mockWs.send.mock.calls[0][0]).data.capabilities.settingsCards).toBe(true);
+      expect(JSON.parse(mockWs.send.mock.calls[0][0]).data.capabilities.delegationCards).toBe(true);
       expect(JSON.parse(mockWs.send.mock.calls[0][0]).data.capabilities.bankedResetReminder).toBe(true);
       const nonce = 'a'.repeat(64);
       mockWs.on.mock.calls.find((c: any) => c[0] === 'message')[1](Buffer.from(JSON.stringify({ type: 'device_challenge', data: { nonce } })));

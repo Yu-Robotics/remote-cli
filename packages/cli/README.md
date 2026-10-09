@@ -191,6 +191,8 @@ From 1.6.154, numbered sections separate backend selection, scope and Confirm, o
 
 From Router 1.6.155, the selected backend application scope is highlighted in blue, and model/effort target selectors separate the main backend from other backends' worker preferences. Choices are shown together when the complete card fits its node and byte budgets; only oversized catalogs paginate, with headers, groups and pending/retry controls included. Viewing a target never changes the coordinator, and same-backend workers continue to share its per-thread preference. Existing CLI settings metadata is sufficient; no new capability or native request is required.
 
+From CLI and Router 1.6.156, bare `/delegation` opens a thread-only On/Off card with a separate backend-availability section, gated by both `settingsCards` and `delegationCards`. Selection is confirmed only after cleanup and persistence succeed. Busy or queued work blocks toggles but not inspection/refresh; enabling does not bypass sandbox policy or prove authentication/quota. Parameterized toggles and `/delegation reset [backend]` remain text commands, and older peers retain the text menu.
+
 ### Threads & Machines
 
 From CLI 1.6.121, new and existing threads without a saved preference enable

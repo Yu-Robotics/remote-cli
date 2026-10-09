@@ -35,6 +35,13 @@ function modelMenu(overrides: Partial<SettingsMenu> = {}): SettingsMenu {
   };
 }
 
+function delegationMenu(overrides: Partial<SettingsMenu> = {}): SettingsMenu {
+  const base = backendMenu();
+  return { ...base, kind: 'delegation', snapshotId: 'snap-delegation', configuredValue: 'on', effectiveValue: 'on',
+    choices: [{ value: 'on', label: 'On' }, { value: 'off', label: 'Off' }],
+    backends: base.backends.map(backend => ({ ...backend, worker: backend.installed, version: '1.0.0' })), ...overrides };
+}
+
 function taggedNodes(value: unknown): number {
   if (!value || typeof value !== 'object') return 0;
   let count = (value as any).tag ? 1 : 0;
@@ -91,6 +98,84 @@ describe('SettingsCards', () => {
     expect(button, `enabled ${op} button${value ? ` (${value})` : ''}`).toBeDefined();
     return button!.behaviors[0].value;
   }
+
+  it('separates delegation controls and availability and changes selection only after ACK', async () => {
+    const { elements } = present(delegationMenu());
+    const buttons = buttonsOf(elements);
+    expect(buttons.filter(button => button.behaviors[0].value.op === 'apply').map(button => button.text.content)).toEqual(['✓ On', 'Off']);
+    expect(buttons.find(button => button.text.content === '✓ On')!.type).toBe('primary');
+    expect(JSON.stringify(elements)).toContain('**1 · Delegation**');
+    expect(JSON.stringify(elements)).toContain('**2 · Backend availability**');
+    expect(JSON.stringify(elements)).toContain('Current thread only');
+    expect(buttons.some(button => /draft_|reset/.test(button.behaviors[0].value.op) || button.text.content === 'Confirm')).toBe(false);
+    await cards.click('owner', 'card-1', clickPayload(elements, 'apply', 'off'));
+    await flush();
+    const request = transport.send.mock.calls.at(-1)[1];
+    expect(request).toMatchObject({ operation: 'apply', value: 'off', threadId: 'thread-1' });
+    expect(request).not.toHaveProperty('scope');
+    expect(request).not.toHaveProperty('targetBackend');
+    let patched = transport.update.mock.calls.at(-1)[1];
+    expect(buttonsOf(patched).find(button => button.text.content === '✓ On')!.type).toBe('primary');
+    expect(buttonsOf(patched).every(button => button.disabled)).toBe(true);
+    await cards.resolve('device', { type: 'settings_result', messageId: request.messageId, openId: 'owner', threadId: 'thread-1',
+      snapshotId: 'snap-delegation', success: true, menu: delegationMenu({ snapshotId: 'fresh', configuredValue: 'off', effectiveValue: 'off' }), timestamp: Date.now() });
+    await flush();
+    const [, body, header] = transport.update.mock.calls.at(-1);
+    patched = body;
+    expect(buttonsOf(patched).find(button => button.text.content === '✓ Off')!.type).toBe('primary');
+    expect(header.title.content).toBe('🤝 Agent delegation');
+    expect(taggedNodes({ schema: '2.0', header, body: { elements: body } })).toBeLessThanOrEqual(90);
+    expect(Buffer.byteLength(JSON.stringify({ schema: '2.0', header, body: { elements: body } }))).toBeLessThanOrEqual(16 * 1024);
+  });
+
+  it('retains the confirmed delegation selection on failure and retries unknown outcomes with the same request', async () => {
+    const { elements } = present(delegationMenu());
+    await cards.click('owner', 'card-1', clickPayload(elements, 'apply', 'off'));
+    const request = transport.send.mock.calls.at(-1)[1];
+    await cards.resolve('device', { ...request, type: 'settings_result', success: false, error: 'Synthetic failure' });
+    await flush();
+    let patched = transport.update.mock.calls.at(-1)[1];
+    expect(buttonsOf(patched).find(button => button.text.content === '✓ On')!.type).toBe('primary');
+    await cards.click('owner', 'card-1', clickPayload(patched, 'apply', 'off'));
+    const pending = transport.send.mock.calls.at(-1)[1];
+    await vi.advanceTimersByTimeAsync(20_001);
+    await flush();
+    patched = transport.update.mock.calls.at(-1)[1];
+    expect(JSON.stringify(patched)).toContain('may or may not have been applied');
+    await cards.click('owner', 'card-1', clickPayload(patched, 'retry'));
+    expect(transport.send.mock.calls.at(-1)[1]).toEqual(pending);
+  });
+
+  it('allows delegation refresh while busy without backend targeting and rejects unnegotiated cards', async () => {
+    const { elements } = present(delegationMenu({ busy: true }));
+    const buttons = buttonsOf(elements);
+    expect(buttons.filter(button => button.behaviors[0].value.op === 'apply').every(button => button.disabled)).toBe(true);
+    await expect(cards.click('owner', 'card-1', { ...buttons[0].behaviors[0].value, value: 'off' })).rejects.toThrow();
+    await cards.click('owner', 'card-1', clickPayload(elements, 'view'));
+    expect(transport.send.mock.calls.at(-1)[1]).toMatchObject({ operation: 'view' });
+    expect(transport.send.mock.calls.at(-1)[1]).not.toHaveProperty('targetBackend');
+    transport.available.mockReturnValue(false);
+    expect(cards.present({ openId: 'owner', deviceId: 'device', menu: delegationMenu(), requestMessageId: 'later' })).toBeUndefined();
+    expect(transport.available).toHaveBeenCalledWith('device', 'delegation');
+  });
+
+  it('renders bounded worker policy details literally and never guesses missing availability', () => {
+    const { elements } = present(delegationMenu({ coordinatorBackend: 'zcode', targetBackend: 'zcode', backends: [
+      { value: 'zcode', label: 'ZCode', installed: true, worker: false, reason: 'Sandbox <at id=all>blocked</at>' },
+      { value: 'pi', label: 'Pi', installed: false, reason: 'Executable is missing' },
+      { value: 'codex', label: 'Codex', installed: true },
+    ] }));
+    const output = JSON.stringify(elements);
+    expect(output).toContain('Blocked');
+    expect(output).toContain('Not installed');
+    expect(output).toContain('Availability unknown');
+    expect(output).toContain('&lt;at id=all&gt;');
+    expect(output).not.toContain('<at id=all>');
+    expect(output).toContain('Off restores the normal MCP configuration');
+    expect(sanitizeSettingsMenu(delegationMenu({ configuredValue: undefined }))).toBeUndefined();
+    expect(sanitizeSettingsMenu(delegationMenu({ targetBackend: 'codex' }))).toBeUndefined();
+    expect(sanitizeSettingsMenu(delegationMenu({ supportsReset: true }))!.supportsReset).toBe(false);
+  });
 
   it('renders all backend rows with unavailable entries disabled, current-thread default and confirm', () => {
     const { elements } = present(backendMenu());
@@ -252,11 +337,12 @@ describe('SettingsCards', () => {
     });
     const service = new SettingsService({
       state: () => ({ threadId: 'thread-1', threadName: 'default', coordinatorBackend: 'claude', followsGlobal: true,
-        revision, configuredModels: { claude: configured }, configuredEfforts: {} }),
+        revision, configuredModels: { claude: configured }, configuredEfforts: {}, delegationEnabled: true }),
       backends: async () => modelMenu().backends,
       catalog: async () => ({ choices: modelMenu().choices, effectiveSource: 'configured', supportsReset: true }),
       busy: () => false, threads: () => ['thread-1'], exclusive: (_target, body) => body(),
       backend: async () => ({ success: true }), preference,
+      delegationSupported: () => true, delegation: async () => ({ success: true }),
     });
     transport.send.mockImplementation(async (_device: string, request: any) => {
       const result = await service.action(request);

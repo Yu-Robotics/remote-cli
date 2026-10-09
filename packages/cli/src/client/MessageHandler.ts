@@ -169,6 +169,7 @@ export class MessageHandler {
   private activityProgressSupported = false;
   private workerContextResetSupported = false;
   private settingsCardsSupported = false;
+  private delegationCardsSupported = false;
   private readonly settingsAdmission = new SettingsAdmission();
   private readonly settingsCatalogReader: SettingsCatalogReader;
   private readonly settingsService: SettingsService;
@@ -194,7 +195,16 @@ export class MessageHandler {
     this.settingsCatalogReader = new SettingsCatalogReader(directoryGuard);
     this.settingsService = new SettingsService({
       state: id => this.settingsState(id),
-      backends: async () => (await this.detectBackends()).map(entry => ({ ...entry, value: backendKeyOf(entry.id) })),
+      backends: async (id, kind) => {
+        if (kind !== 'delegation' || !id) return (await this.detectBackends()).map(entry => ({ ...entry, value: backendKeyOf(entry.id) }));
+        const config = this.executorConfiguration();
+        const coordinator = this.threadPool.getBackendKey(id);
+        return (await this.delegation.registry.list(config)).map(item => {
+          const entry = workerAvailability(config, this.directoryGuard, id, coordinator, item);
+          return { value: entry.backend, label: backendDisplayName(entry.backend), installed: entry.installed,
+            worker: entry.worker, version: entry.version, reason: entry.reason };
+        });
+      },
       catalog: async (id, target, kind) => {
         const thread = this.threadManager.getThread(id);
         if (!thread) throw new Error('This thread no longer exists.');
@@ -213,6 +223,8 @@ export class MessageHandler {
       },
       backend: (id, target, scope, follow) => this.applyBackendSetting(id, target, scope, follow),
       preference: (id, target, kind, value) => this.applyPreference(id, target, kind, value),
+      delegation: (id, enabled) => this.applyDelegationSetting(id, enabled),
+      delegationSupported: id => Boolean(this.threadPool.getExecutor(id).configureDelegation),
     });
     this.wsClient.onClose?.(() => this.settingsService.invalidate());
 
@@ -258,7 +270,7 @@ export class MessageHandler {
         return;
       case 'settings_action':
         if (this.settingsCardsSupported) {
-          const result = await this.settingsService.action(message as unknown as SettingsActionMessage);
+          const result = await this.settingsService.action(message as unknown as SettingsActionMessage, this.delegationCardsSupported);
           this.wsClient.send(result);
         }
         return;
@@ -301,6 +313,7 @@ export class MessageHandler {
         this.delegationProgressSupported = data.capabilities?.delegationProgress === true;
         this.workerContextResetSupported = this.delegationProgressSupported && data.capabilities?.workerContextReset === true;
         this.settingsCardsSupported = data.capabilities?.settingsCards === true;
+        this.delegationCardsSupported = this.settingsCardsSupported && data.capabilities?.delegationCards === true;
         this.delegationProgressTextSupported = this.delegationProgressSupported
           && data.capabilities?.delegationProgressText === true;
         for (const pending of this.pendingApprovalCards.values()) {
@@ -409,7 +422,9 @@ export class MessageHandler {
       return;
     }
 
-    if (this.settingsCardsSupported && openId && /^\/(?:backend|model|effort)$/.test(content?.trim() ?? '')) {
+    const settingsCommand = content?.trim() ?? '';
+    if (this.settingsCardsSupported && openId && (/^\/(?:backend|model|effort)$/.test(settingsCommand)
+      || (this.delegationCardsSupported && settingsCommand === '/delegation'))) {
       const kind = content!.trim().slice(1) as SettingsKind;
       try {
         const menu = await this.settingsService.open(kind, resolvedThreadId, openId, undefined, messageId);
@@ -830,19 +845,11 @@ export class MessageHandler {
         return true;
       }
       if (action) {
-        if (action === 'off') {
-          const thread = this.threadManager.getThread(threadId)!;
-          const backend = this.threadPool.getBackendKey(threadId);
-          // An implicit default does not imply that native tools were ever registered.
-          if (thread.delegationBackends?.includes(backend) || (thread.delegation === true && !thread.delegationBackends)) {
-            await executor.configureDelegation?.(undefined);
-            // Preserve cleanup ownership across process recreation and backend switches.
-            if (!thread.delegationBackends) await this.threadManager.updateThread(threadId, { delegationBackends: [backend] });
-          }
-          await this.delegationBridges.get(threadId)?.close();
-          this.delegationBridges.delete(threadId);
+        const applied = await this.applyDelegationSetting(threadId, action === 'on');
+        if (!applied.success) {
+          this.sendResponse(messageId, threadId, applied);
+          return true;
         }
-        await this.threadManager.updateThread(threadId, { delegation: action === 'on' });
       }
       const config = (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
       const backends = await this.delegation.registry.list(config);
@@ -2715,7 +2722,8 @@ You can also use natural language commands to control Claude Code CLI.`,
         threads: result.threads,
         queueConfirmation: result.queueConfirmation,
         ...(result.executionMetadata ? { executionMetadata: result.executionMetadata } : {}),
-        ...(this.settingsCardsSupported && result.settingsMenu ? { settingsMenu: result.settingsMenu } : {}),
+        ...(this.settingsCardsSupported && result.settingsMenu
+          && (result.settingsMenu.kind !== 'delegation' || this.delegationCardsSupported) ? { settingsMenu: result.settingsMenu } : {}),
         cwd,
         timestamp: Date.now(),
       });
@@ -2736,12 +2744,12 @@ You can also use natural language commands to control Claude Code CLI.`,
     if (!thread) return undefined;
     const projection = (entry: import('../thread/types').Thread) => ({ id: entry.id, backend: entry.backend,
       cwd: entry.workingDirectory, generation: entry.delegationWorkspaceGeneration, model: entry.model,
-      models: entry.models, efforts: entry.efforts });
+      models: entry.models, efforts: entry.efforts, delegation: entry.delegation, delegationBackends: entry.delegationBackends });
     const all = this.threadManager.listThreads().map(projection).sort((a, b) => a.id.localeCompare(b.id));
     const configuredModels = { ...thread.models };
     if (configuredModels.claude === undefined && thread.model) configuredModels.claude = thread.model;
     return { threadId, threadName: thread.name, coordinatorBackend: this.threadPool.getBackendKey(threadId),
-      followsGlobal: !thread.backend, configuredModels, configuredEfforts: { ...thread.efforts },
+      followsGlobal: !thread.backend, configuredModels, configuredEfforts: { ...thread.efforts }, delegationEnabled: isDelegationEnabled(thread),
       revision: createHash('sha256').update(JSON.stringify({ thread: projection(thread), all, config: this.executorConfiguration() })).digest('hex') };
   }
 
@@ -2752,14 +2760,38 @@ You can also use natural language commands to control Claude Code CLI.`,
   }
 
   private settingsFallback(menu: SettingsMenu): string {
-    const lines = [`${menu.kind === 'backend' ? 'Backend' : menu.kind === 'model' ? 'Model' : 'Reasoning effort'} settings`,
+    const lines = [`${menu.kind === 'backend' ? 'Backend' : menu.kind === 'model' ? 'Model' : menu.kind === 'delegation' ? 'Delegation' : 'Reasoning effort'} settings`,
       `Thread: ${menu.threadName}`, `Target backend: ${menu.targetBackend}`,
       `Configured: ${menu.configuredValue ?? 'default'}`, `Effective: ${menu.effectiveValue ?? 'not reported'} (${menu.effectiveSource})`];
     if (menu.unavailableReason) lines.push(menu.unavailableReason);
     for (const choice of menu.choices) lines.push(`${choice.label}${choice.disabled ? ' (unavailable)' : ''}`);
     if (menu.kind === 'backend') lines.push('Card scope defaults to Current thread. Confirm to apply. Text commands: /backend <index> @ (current), /backend <index> (all).');
+    else if (menu.kind === 'delegation') lines.push('Applies only to this thread. Text commands: /delegation on or /delegation off.');
     else lines.push(`Use the card buttons, or /${menu.kind} <value> for the active backend.`);
     return lines.join('\n');
+  }
+
+  /** Shared delegation cleanup/persistence for cards and parameterized text commands. */
+  private async applyDelegationSetting(threadId: string, enabled: boolean): Promise<ExecuteResult> {
+    const thread = this.threadManager.getThread(threadId);
+    if (!thread) return { success: false, error: 'This thread no longer exists.' };
+    const executor = this.threadPool.getExecutor(threadId);
+    if (enabled && !executor.configureDelegation) return { success: false, error: 'This executor does not support delegation tool registration.' };
+    try {
+      if (!enabled) {
+        const backend = this.threadPool.getBackendKey(threadId);
+        // An inherited enabled default does not mean tools were registered.
+        if (thread.delegationBackends?.includes(backend) || (thread.delegation === true && !thread.delegationBackends)) {
+          await executor.configureDelegation?.(undefined);
+          // Keep ownership so inactive backends are cleaned when next resumed.
+          if (!thread.delegationBackends) await this.threadManager.updateThread(threadId, { delegationBackends: [backend] });
+        }
+        await this.delegationBridges.get(threadId)?.close();
+        this.delegationBridges.delete(threadId);
+      }
+      await this.threadManager.updateThread(threadId, { delegation: enabled });
+      return { success: true, output: `Delegation ${enabled ? 'enabled' : 'disabled'} for this thread.` };
+    } finally { this.settingsService.invalidate(threadId); }
   }
 
   /** Shared native/persistent mutation for cards and parameterized text commands. */
