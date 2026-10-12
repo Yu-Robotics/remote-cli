@@ -843,6 +843,7 @@ slot and source reservation until they settle, including after cancellation.
 Collection failure after confirmed exit preserves the affected lane and files
 without blocking the whole source workspace. Individual Git command deadlines
 still apply; cancellation can wait for an in-flight Git operation to finish.
+From CLI 1.6.159, delegated `git worktree add` and `git checkout` commands have a 120-second deadline per command. Other Git commands, including worktree listing/removal and nested object transfers, retain their 15-second deadlines. Git command timeout errors show the operation, elapsed milliseconds and deadline without paths or checkout references. Preparation remains pending until the Git child exits; cancellation can wait for this bounded cleanup, and the existing task ID remains available for polling.
 During slow Git preparation or finalization, launch/cancel tools return the
 accepted task ID and pending status within their response budget. Poll that ID
 with `remote_cli_result` instead of resubmitting; a cancellation acknowledgement
