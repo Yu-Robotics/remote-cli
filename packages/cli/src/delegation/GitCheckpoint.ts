@@ -5,7 +5,7 @@ import os from 'os';
 import path from 'path';
 import { checkFilesInBatches } from './BoundedFileChecks';
 
-export const CHECKPOINT_LIMITS = { commandMs: 15_000, outputBytes: 32 * 1024 * 1024 } as const;
+export const CHECKPOINT_LIMITS = { commandMs: 15_000, checkoutMs: 120_000, outputBytes: 32 * 1024 * 1024 } as const;
 export const GIT_OID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 
 export interface GitCheckpoint {
@@ -42,6 +42,16 @@ function gitArguments(args: string[]): string[] {
 export async function runGit(cwd: string, args: string[], input?: Buffer | string,
   extraEnv: Record<string, string> = {}): Promise<Buffer> {
   return new Promise((resolve, reject) => {
+    // Skip configuration values for labels only; deadlines match fixed call sites.
+    let operationIndex = 0;
+    while (args[operationIndex] === '-c' && operationIndex + 1 < args.length) operationIndex += 2;
+    const command = args[operationIndex];
+    const subcommand = args[operationIndex + 1];
+    const worktreeOperation = command === 'worktree' && ['add', 'list', 'remove'].includes(subcommand);
+    const operation = worktreeOperation ? `worktree ${subcommand}` : command;
+    const timeoutMs = args[0] === 'checkout' || (args[0] === 'worktree' && args[1] === 'add')
+      ? CHECKPOINT_LIMITS.checkoutMs : CHECKPOINT_LIMITS.commandMs;
+    const startedAt = Date.now();
     const child = spawn('git', gitArguments(args), {
       cwd, env: gitEnvironment(extraEnv), stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -55,10 +65,10 @@ export async function runGit(cwd: string, args: string[], input?: Buffer | strin
       child.kill('SIGTERM');
       killTimer ??= setTimeout(() => child.kill('SIGKILL'), 500);
     };
-    const timer = setTimeout(() => stop(new Error(`Git ${args[0]} timed out`)), CHECKPOINT_LIMITS.commandMs);
+    const timer = setTimeout(() => stop(new Error(`Git ${operation} timed out after ${Date.now() - startedAt}ms (limit ${timeoutMs}ms)`)), timeoutMs);
     child.stdout.on('data', (chunk: Buffer) => {
       size += chunk.length;
-      if (size > CHECKPOINT_LIMITS.outputBytes) stop(new Error(`Git ${args[0]} output exceeded the checkpoint limit`));
+      if (size > CHECKPOINT_LIMITS.outputBytes) stop(new Error(`Git ${operation} output exceeded the checkpoint limit`));
       else chunks.push(chunk);
     });
     child.stderr.on('data', (chunk: Buffer) => { detail = (detail + chunk.toString('utf8')).slice(-2000); });
@@ -67,7 +77,7 @@ export async function runGit(cwd: string, args: string[], input?: Buffer | strin
     child.on('close', code => {
       clearTimeout(timer); clearTimeout(killTimer);
       if (failure) reject(failure);
-      else if (code !== 0) reject(new GitCommandError(args[0], code, detail.trim()));
+      else if (code !== 0) reject(new GitCommandError(operation, code, detail.trim()));
       else resolve(Buffer.concat(chunks));
     });
     child.stdin.end(input);

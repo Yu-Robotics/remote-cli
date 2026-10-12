@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.159] - 2026-10-12
+
+### Fixed
+- Allow delegated `git worktree add` and `git checkout` commands up to 120 seconds so larger working trees can finish preparing. Other Git commands and nested object transfers retain their 15-second deadlines. Timeout messages identify the worktree subcommand and report elapsed time and the deadline without including paths or checkout references. Preserve child-exit waiting, kill escalation, output limits, task reservations and cancellation ordering.
+
 ## [1.6.158] - 2026-10-09
 
 ### Fixed
