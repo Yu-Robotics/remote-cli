@@ -2,8 +2,9 @@
 
 ## Status and authority
 
-Release `1.6.160` adds read-only Pi/Codex/Claude Code catalogs and Pi native
-connection, release and detach. All eight backends remain future targets;
+Release `1.6.163` adds read-only Pi/Codex/Claude Code catalogs and Pi native
+connection and detach, with adopted history reloaded before every remote turn.
+The release action and released-state gate are removed. All eight backends remain future targets;
 other backend connections and verified bidirectional handoff are unavailable.
 
 - Baseline: `5df21c1`, package version `1.6.159`.
@@ -61,11 +62,18 @@ migration, deployment or publication instructions.
 - [x] Omit adopted `--name` so user-owned native names are not overwritten.
 - [x] Detect another recorded remote thread holder and native revision changes
   between selection and confirmation. This is not a writer lease.
-- [x] Preserve adopted history on reset and thread-data deletion.
-- [x] Release the owned process, keep the binding and block remote work until
-  explicit connection, including after service restart.
+- [x] Preserve ordinary/adopted foreground history on reset and thread-data
+  deletion; assign independent IDs to fresh conversations without changing
+  worker/metadata cleanup.
+- [x] Verify A -> `/new` -> independent B -> confirmed `/resume` back to A;
+  unconfirmed drafts do not redirect ordinary messages and reset/restart does
+  not resurrect retained history.
+- [x] Reload and verify adopted native history before each remote turn without
+  release/reacquisition commands; ignore legacy released flags after restart.
+- [x] Remove `/session release` from command grammar, executor controls and help;
+  retain detach and explain the single-active-side/local-resume requirement.
 - [x] Confirm detach before forgetting the association and allocating a fresh ID.
-- [x] Keep existing bindings inspectable/releasable/detachable when discovery is off.
+- [x] Keep existing bindings inspectable/detachable when discovery is off.
 - [x] Reject session mutation when tasks or queue confirmations are pending;
   finish thread operations and resume queue draining afterward.
 - [x] Return a bounded session-control error rather than crash message handling.
@@ -77,7 +85,7 @@ migration, deployment or publication instructions.
 | Existing/new component | Implemented responsibility |
 | --- | --- |
 | `client/MessageHandler.ts` | Program-control dispatch, thread scope, admission hooks and safe response routing. |
-| `session/SessionControl.ts` | Chooser, confirmation, binding inspection, release and detach orchestration. |
+| `session/SessionControl.ts` | Chooser, confirmation, binding inspection and detach orchestration. |
 | `session/SessionMenu.ts` | Text grammar, bounded snapshots and action-specific confirmation tokens. |
 | `session/SessionResumeService.ts` | Opt-in validation, backend availability and safe catalog rendering. |
 | `session/SessionCatalog.ts`, `session/adapters/` | Bounded, read-only backend metadata discovery and Pi locator resolution. |
@@ -191,7 +199,7 @@ npm run build -w @yu_robotics/remote-cli
 
 Retain command-scope/expiry/fail-closed tests, native-format fixtures, exact
 adoption failure tests, no-prompt assertions, history-preserving reset/deletion,
-release/restart behavior and queued-work refusal/draining. New runtime modules
+per-turn refresh/restart behavior and queued-work refusal/draining. New runtime modules
 require unit/integration coverage under the repository's coverage policy.
 
 Future tests add process contention, orphan children, alias/store conflicts,
@@ -199,7 +207,7 @@ crash/persistence injection, stale enrollment and binding revisions, historical
 notification suppression, live startup input and full local round trips.
 
 - [x] Align root READMEs and help with current commands and limitations.
-- [x] Synchronize version `1.6.160` in all manifests and applicable lockfile entries.
+- [x] Synchronize version `1.6.163` in all manifests and applicable lockfile entries.
 - [x] Add English CHANGELOG and validated localized release summary.
 - [x] Record native probes, manual Feishu results and environment blockers.
 - [ ] Recheck exact staged changes and all new artifacts before every commit.
@@ -211,6 +219,6 @@ paths. Generalize fixtures; do not probe discovered credentials against services
 Publication, MR creation, deployment and remote history rewriting require explicit
 permission. Local commit restructuring does not imply permission to push.
 
-Before downgrade, finish work and release/detach adopted bindings with the new
+Before downgrade, finish work and detach adopted bindings with the new
 version. Older executors may delete files referenced by adopted pointers; there
 is no automatic native-history rollback, repair or credential rotation.

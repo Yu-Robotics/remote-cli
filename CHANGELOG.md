@@ -10,6 +10,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.163] - 2026-10-14
+
+### Fixed
+- Give newly created Pi foreground sessions a default name based on their independent native session ID, not the reusable remote thread ID. `/new` sessions are distinguishable in `/resume`, and reopening a persisted file no longer appends `--name` or overwrites names assigned locally. Adopted sessions and synthetic runtime naming remain unchanged. Existing duplicate names are not rewritten automatically.
+
+## [1.6.162] - 2026-10-14
+
+### Changed
+- Pi foreground `/new` and `/clear` now remove only the current association and preserve native session history for `/resume`. Fresh conversations use independent random IDs rather than the stable remote thread ID, so retained files cannot resurrect cleared context, including after restart before the next prompt.
+- Pi foreground thread-data deletion also preserves native history. Delegated-worker and temporary metadata runtimes retain their disposable cleanup and thread-ID behavior.
+
+### Tests
+- Cover foreground A to `/new` to independent B, ordinary messages remaining in B during an unconfirmed resume draft, and confirmed native switching back to A. Cover reset/restart identity separation and unchanged synthetic-runtime cleanup.
+
+## [1.6.161] - 2026-10-13
+
+### Changed
+- Remove `/session release`, the executor release operation and the persisted released-state gate. Existing adopted pointers with an old released flag remain usable; `/session detach` still confirms association removal without deleting native history.
+- Reload and verify the exact adopted Pi session before every remote prompt, including native slash prompts, so sequential local writes are visible without another remote resume or release step. Idle local Pi windows may remain open, but must resume the same file before their next turn. Simultaneous writing is unsupported and can create separate native branches; no automatic local refresh or writer exclusion is claimed.
+- Reserve remote turn preparation against overlapping execution/context changes and cancel preparation before prompt dispatch on abort/reset/shutdown. Keep legacy private sessions and worker execution unchanged.
+
+### Fixed
+- Synchronize the lockfile package versions with all package manifests.
+
 ## [1.6.160] - 2026-10-13
 
 ### Added

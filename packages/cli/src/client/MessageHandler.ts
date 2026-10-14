@@ -159,8 +159,7 @@ function remoteCliDirectory(): string {
 function readPiBinding(threadId: string): PiBindingState | undefined {
   try {
     const pointer = JSON.parse(fs.readFileSync(path.join(remoteCliDirectory(), 'pi-sessions', `${threadId}.json`), 'utf8'));
-    return { id: typeof pointer.id === 'string' ? pointer.id : undefined, adopted: pointer.adopted === true,
-      released: pointer.adopted === true && pointer.released === true };
+    return { id: typeof pointer.id === 'string' ? pointer.id : undefined, adopted: pointer.adopted === true };
   } catch {
     return undefined;
   }
@@ -181,7 +180,7 @@ export class MessageHandler {
   private readonly pendingQueueConfirmations = new Map<string, PendingQueueConfirmation>();
   private readonly pausedQueues = new Set<string>();
   private readonly messageOpenIds = new Map<string, string | undefined>();
-  /** Thread operations held by session controls (adopt, release, detach). */
+  /** Thread operations held by session controls (adopt and detach). */
   private readonly sessionOperations = new Map<string, symbol>();
   /** `/resume` and `/session`: read-only listing plus confirmed, strict native adoption. */
   private readonly sessionControl = new SessionControl({
@@ -1069,7 +1068,7 @@ Use /compact to reduce conversation context or /clear to start a fresh context.`
 - /thread list - List all threads with their status
 - /thread new [name] - Create a new thread
 - /thread delete <name> - Delete a thread (only when idle)
-- /session - Show this thread's native session binding; /session release | detach
+- /session - Show this thread's native session binding; /session detach
 - /resume - List this workspace's Pi sessions and connect one after confirmation (Pi only)
 
 Remote Machine commands:

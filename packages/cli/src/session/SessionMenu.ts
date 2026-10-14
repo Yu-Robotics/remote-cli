@@ -37,7 +37,7 @@ export type SessionMenuCommand =
 /** `/session` subcommands; a bare `/session` is the status view. */
 export type SessionBindingCommand =
   | { kind: 'status' }
-  | { kind: 'release' | 'detach' }
+  | { kind: 'detach' }
   | { kind: 'confirm' | 'cancel'; token: string }
   | { kind: 'invalid'; error: string };
 
@@ -87,14 +87,14 @@ export function parseSessionMenuCommand(content: string): SessionMenuCommand | u
   return { kind: 'search', token, text };
 }
 
-/** Parse `/session [release|detach|confirm <token>|cancel <token>]`. */
+/** Parse `/session [detach|confirm <token>|cancel <token>]`. */
 export function parseSessionBindingCommand(content: string): SessionBindingCommand | undefined {
   const parts = content.trim().split(/\s+/);
   if (!/^\/session$/i.test(parts[0])) return undefined;
   if (parts.length === 1) return { kind: 'status' };
-  if ((parts[1] === 'release' || parts[1] === 'detach') && parts.length === 2) return { kind: parts[1] };
+  if (parts[1] === 'detach' && parts.length === 2) return { kind: 'detach' };
   if ((parts[1] === 'confirm' || parts[1] === 'cancel') && parts.length === 3 && TOKEN.test(parts[2])) return { kind: parts[1], token: parts[2] };
-  return { kind: 'invalid', error: 'Expected /session, /session release, /session detach, /session confirm <token> or /session cancel <token>.' };
+  return { kind: 'invalid', error: 'Expected /session, /session detach, /session confirm <token> or /session cancel <token>.' };
 }
 
 function sameScope(a: SessionMenuScope, b: SessionMenuScope): boolean {

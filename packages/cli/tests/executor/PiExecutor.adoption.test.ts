@@ -19,6 +19,7 @@ class FakeTransport implements PiTransport {
   streaming = false;
   promptGate?: Promise<void>;
   launches: PiLaunchOptions[] = [];
+  loadedText?: string;
   handlers = new Set<(event: Record<string, any>) => void>();
   request = vi.fn(async (command: Record<string, unknown>): Promise<PiRpcResponse> => {
     if (command.type === 'get_state') {
@@ -38,7 +39,12 @@ class FakeTransport implements PiTransport {
   });
   send = vi.fn();
   constructor(public launch: PiLaunchOptions) {}
-  async start(): Promise<void> { this.starts += 1; this.running = true; this.launches.push({ ...this.launch }); }
+  async start(): Promise<void> {
+    this.starts += 1;
+    this.running = true;
+    this.launches.push({ ...this.launch });
+    this.loadedText = this.launch.sessionFile ? readFileSync(this.launch.sessionFile, 'utf8') : undefined;
+  }
   async stop(): Promise<void> {
     if (this.stopFails) throw new Error('Pi RPC process exit could not be confirmed');
     this.running = false;
@@ -100,7 +106,64 @@ describe('PiExecutor native session adoption', () => {
 
     expect((await run()).success).toBe(true);
     expect(latest().prompts()).toBe(1);
-    expect(latest().starts).toBe(1);
+    expect(latest().starts).toBe(2);
+  });
+
+  it('reloads local appends before every adopted turn without losing identity or renaming', async () => {
+    await executor.adoptNativeSession({ sessionId: NATIVE_ID, sessionFile: nativeFile });
+    expect((await run('first remote turn')).success).toBe(true);
+    await fs.appendFile(nativeFile, 'SYNTHETIC-LOCAL-UPDATE\n');
+    expect((await run('return from local')).success).toBe(true);
+    expect(latest().starts).toBe(3);
+    expect(latest().loadedText).toContain('SYNTHETIC-LOCAL-UPDATE');
+    expect(latest().prompts()).toBe(2);
+    expect(latest().launch.sessionFile).toBe(nativeFile);
+    expect(latest().launch.sessionName).toBeUndefined();
+    expect(pointer().id).toBe(NATIVE_ID);
+  });
+
+  it('blocks dispatch on a reload stop failure or mismatching identity, even with a live idle client', async () => {
+    await executor.adoptNativeSession({ sessionId: NATIVE_ID, sessionFile: nativeFile });
+    latest().stopFails = true;
+    const failedStop = await run();
+    expect(failedStop.error).toContain('exit could not be confirmed');
+    expect(latest().prompts()).toBe(0);
+    latest().stopFails = false;
+    latest().reportedId = 'replacement';
+    expect((await run()).error).toContain('different session');
+    expect(latest().prompts()).toBe(0);
+    expect(pointer().id).toBe(NATIVE_ID);
+  });
+
+  it('reserves a preparing turn and cancels reset before any prompt is sent', async () => {
+    await executor.adoptNativeSession({ sessionId: NATIVE_ID, sessionFile: nativeFile });
+    let finishStop!: () => void;
+    const stopped = new Promise<void>(resolve => { finishStop = resolve; });
+    latest().stop = vi.fn(() => stopped);
+    const turn = run();
+    expect(executor.isBusy()).toBe(true);
+    expect((await run('overlapping')).error).toContain('already running');
+    expect((await executor.adoptNativeSession({ sessionId: NATIVE_ID, sessionFile: nativeFile })).success).toBe(false);
+    expect((await executor.detachNativeSession()).success).toBe(false);
+    // Reset during preparation must not dispatch against the replacement context.
+    executor.resetContext();
+    finishStop();
+    expect((await turn).error).toContain('cancelled before startup');
+    expect(latest().prompts()).toBe(0);
+  });
+
+  it('cancels an adopted reload through /abort before native prompt dispatch', async () => {
+    await executor.adoptNativeSession({ sessionId: NATIVE_ID, sessionFile: nativeFile });
+    const originalStart = latest().start.bind(latest());
+    let finishStart!: () => void;
+    latest().start = vi.fn(async () => { await new Promise<void>(resolve => { finishStart = resolve; }); await originalStart(); });
+    const turn = run();
+    await vi.waitFor(() => expect(finishStart).toBeDefined());
+    expect(await executor.abort()).toBe(true);
+    finishStart();
+    expect((await turn).error).toContain('cancelled before dispatch');
+    expect(latest().prompts()).toBe(0);
+    expect(latest().running).toBe(false);
   });
 
   it('fails closed and restores the previous conversation when Pi reports another identity', async () => {
@@ -116,7 +179,7 @@ describe('PiExecutor native session adoption', () => {
     latest().reportedId = undefined;
     expect((await run('after')).success).toBe(true);
     expect(latest().launches.at(-1)!.sessionFile).not.toBe(nativeFile);
-    expect(latest().launches.at(-1)!.sessionName).toBe('remote-cli-thread-pi');
+    expect(latest().launches.at(-1)!.sessionName).toBe(`remote-cli-${latest().launches.at(-1)!.sessionId}`);
   });
 
   it('rejects a streaming native session and a missing file without touching the process', async () => {
@@ -172,32 +235,89 @@ describe('PiExecutor native session adoption', () => {
     await fresh.destroy();
   });
 
-  it('still deletes remote-cli created history on /clear', async () => {
+  it('preserves ordinary foreground history and starts a different native ID on /clear', async () => {
     expect((await run()).success).toBe(true);
-    const owned = pointer().sessionFile as string;
+    const first = pointer();
+    const owned = first.sessionFile as string;
+    await fs.mkdir(path.dirname(owned), { recursive: true });
+    await fs.writeFile(owned, 'SYNTHETIC-SAVED-HISTORY\n');
+    executor.resetContext();
+    expect(existsSync(owned)).toBe(true);
+    expect(readFileSync(owned, 'utf8')).toBe('SYNTHETIC-SAVED-HISTORY\n');
+    expect(latest().launch.sessionFile).toBeUndefined();
+    expect(latest().launch.sessionId).not.toBe(first.id);
+    expect(latest().launch.sessionId).not.toBe('thread-pi');
+    expect((await run()).success).toBe(true);
+    expect(pointer().id).not.toBe(first.id);
+  });
+
+  it('gives reset foreground sessions distinct names and does not rename a persisted reopen', async () => {
+    const initialName = latest().launch.sessionName;
+    expect(initialName).toBe(`remote-cli-${latest().launch.sessionId}`);
+    await run();
+    const file = pointer().sessionFile as string;
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, '{}\n');
+    await executor.destroy();
+    executor = create();
+    expect(latest().launch.sessionName).toBeUndefined();
+    executor.resetContext();
+    expect(latest().launch.sessionName).toBe(`remote-cli-${latest().launch.sessionId}`);
+    expect(latest().launch.sessionName).not.toBe(initialName);
+  });
+
+  it('preserves ordinary foreground history when the remote thread data is deleted', async () => {
+    await run();
+    const file = pointer().sessionFile as string;
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, 'SYNTHETIC-FOREGROUND-HISTORY\n');
+    await executor.destroy();
+    executor = create();
+    await executor.deleteThreadData('thread-pi');
+    expect(readFileSync(file, 'utf8')).toBe('SYNTHETIC-FOREGROUND-HISTORY\n');
+    expect(existsSync(path.join(pointerDir, 'thread-pi.json'))).toBe(false);
+  });
+
+  it('does not resurrect the cleared session when restarted before the next prompt', async () => {
+    await run();
+    const oldId = pointer().id;
+    executor.resetContext();
+    await executor.destroy();
+    executor = create();
+    expect(latest().launch.sessionId).not.toBe(oldId);
+    expect(latest().launch.sessionId).not.toBe('thread-pi');
+    expect(latest().launch.sessionFile).toBeUndefined();
+    await run();
+    expect(pointer().id).not.toBe(oldId);
+  });
+
+  it.each([
+    { threadId: 'delegate-lane-synthetic', delegationWorker: true },
+    { threadId: 'settings-meta-synthetic', delegationWorker: false },
+  ])('retains disposable reset behavior for synthetic runtime $threadId', async options => {
+    await executor.destroy();
+    executor = new PiExecutor(new DirectoryGuard([home]), {
+      initialWorkingDirectory: project, sessionBaseDir: pointerDir, ...options,
+      clientFactory: launch => { const transport = new FakeTransport(launch); transports.push(transport); return transport; },
+    });
+    await run();
+    const owned = latest().launch.sessionFile ?? path.join(latest().launch.sessionDir!, `${options.threadId}.jsonl`);
     await fs.mkdir(path.dirname(owned), { recursive: true });
     await fs.writeFile(owned, '{}\n');
     executor.resetContext();
     expect(existsSync(owned)).toBe(false);
+    expect(latest().launch.sessionId).toBe(options.threadId);
   });
 
-  it('release blocks remote work across restarts until the session is connected again', async () => {
+  it('ignores a legacy released pointer and reloads before remote work after restart', async () => {
     await executor.adoptNativeSession({ sessionId: NATIVE_ID, sessionFile: nativeFile });
-    expect(await executor.releaseNativeSession()).toEqual({ success: true });
-    expect(latest().running).toBe(false);
-    expect(pointer()).toMatchObject({ adopted: true, released: true });
-    const blocked = await run();
-    expect(blocked.success).toBe(false);
-    expect(blocked.error).toContain('released its Pi session');
-
     await executor.destroy();
+    await fs.writeFile(path.join(pointerDir, 'thread-pi.json'), JSON.stringify({ ...pointer(), released: true }));
     executor = create();
-    expect((await run()).error).toContain('released its Pi session');
-    expect(latest().starts).toBe(0);
-
-    expect((await executor.adoptNativeSession({ sessionId: NATIVE_ID, sessionFile: nativeFile })).success).toBe(true);
-    expect(pointer().released).toBeUndefined();
     expect((await run()).success).toBe(true);
+    expect(latest().starts).toBe(1);
+    expect(latest().launch.sessionFile).toBe(nativeFile);
+    expect(latest().prompts()).toBe(1);
   });
 
   it('detach keeps the native file and starts a fresh remote-cli conversation next', async () => {
@@ -212,22 +332,19 @@ describe('PiExecutor native session adoption', () => {
     const launch = latest().launches.at(-1)!;
     expect(launch.sessionFile).toBeUndefined();
     expect(launch.sessionId).toBe(detached.id);
-    expect(launch.sessionName).toBe('remote-cli-thread-pi');
+    expect(launch.sessionName).toBe(`remote-cli-${detached.id}`);
   });
 
-  it('refuses release and detach without an adopted session or during a turn, and reports stop failures', async () => {
-    expect((await executor.releaseNativeSession()).success).toBe(false);
+  it('refuses detach without an adopted session or during a turn, and reports stop failures', async () => {
     expect((await executor.detachNativeSession()).success).toBe(false);
     await executor.adoptNativeSession({ sessionId: NATIVE_ID, sessionFile: nativeFile });
     latest().stopFails = true;
-    expect((await executor.releaseNativeSession()) as any).toMatchObject({ success: false, error: expect.stringContaining('still held') });
     expect((await executor.detachNativeSession()) as any).toMatchObject({ success: false, error: expect.stringContaining('still connected') });
     latest().stopFails = false;
     let release!: () => void;
     latest().promptGate = new Promise(resolve => { release = resolve; });
     const turn = run();
     await vi.waitFor(() => expect(latest().prompts()).toBe(1));
-    expect((await executor.releaseNativeSession()) as any).toMatchObject({ error: expect.stringContaining('/abort') });
     expect((await executor.detachNativeSession()) as any).toMatchObject({ error: expect.stringContaining('/abort') });
     release();
     await turn;

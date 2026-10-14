@@ -2,8 +2,9 @@
 
 ## Status and authority
 
-Release `1.6.160` implements read-only discovery for Pi, Codex and Claude Code,
-and native session connection, release and detach for Pi only. Pi `1.2.0` was
+Release `1.6.163` implements read-only discovery for Pi, Codex and Claude Code,
+and native session connection and detach for Pi only. Adopted Pi sessions reload
+before each remote turn; there is no release action. Pi `1.2.0` was
 verified with synthetic native sessions and a manual Feishu continuation test.
 These observations are not a minimum-version or all-platform support matrix.
 
@@ -31,9 +32,11 @@ buffers, translate between backends, replay old requests, or prompt a model to
 pretend that it remembers a different conversation.
 
 Current Pi connection is an exact native load, not attachment to a running
-terminal or transfer of its process. The local Pi must be fully closed first.
-`/session release` stops the owned remote process before local use; automatic
-local-process detection and coordinated local launching are unavailable.
+terminal or transfer of its process. Idle windows may stay open, but the user
+must ensure that only one side executes at a time. Before returning to a local
+window, use native `/resume` to reload the same file; remote turns reload
+automatically. Automatic local refresh, writer exclusion and process takeover
+are unavailable.
 
 The feature does not provide cloud synchronization, transcript merging,
 cross-project adoption, automatic fork, worker-history import or an OS sandbox.
@@ -43,7 +46,7 @@ sends native context to its configured model provider under normal backend rules
 
 ### Current backend matrix
 
-| Backend | Read-only chooser | Connect/release/detach | Remaining native work |
+| Backend | Read-only chooser | Connect/detach | Remaining native work |
 | --- | --- | --- | --- |
 | Pi | Implemented | Implemented | Local-to-remote reacquisition round trip, platform/version coverage and managed ownership. |
 | Codex | Implemented | Unavailable | No-prompt `thread/resume` identity, strict failure, release and local round trip. |
@@ -74,7 +77,7 @@ chooser/connection actions. Invalid configuration fails closed without replacing
 unrelated settings. Restart the service after local configuration edits.
 
 Remote commands cannot enable sharing, grant new working directories or accept
-native store paths. Existing Pi bindings remain inspectable, releasable and
+native store paths. Existing Pi bindings remain inspectable and
 detachable after sharing is disabled; disabling discovery MUST NOT authorize
 history deletion. Blocking every already-connected turn on configuration changes
 is a future lifecycle requirement, not a guarantee of the current gate.
@@ -135,7 +138,6 @@ backend does not switch the thread; Pi connection requires an already-Pi thread.
 | `/resume confirm <token>` | Consume and revalidate a Pi connection confirmation. |
 | `/resume cancel <token>` | Cancel a connection draft without changing history or binding. |
 | `/session` | Inspect the current Pi binding or report an unavailable/unbound state. |
-| `/session release` | Stop the owned idle Pi runtime and retain a released binding. |
 | `/session detach` | Display a confirmation to forget the Pi association. |
 | `/session confirm <token>` | Apply the matching detach draft. |
 | `/session cancel <token>` | Cancel the detach draft. |
@@ -158,15 +160,19 @@ credentials, unrelated workspaces or native locators are sent in the chooser.
 Session names may themselves be private; local opt-in authorizes their display
 to the bound Feishu user. An unnamed row uses an ID, not its first prompt.
 
-Selection is mutation-free. Pi confirmation describes the chosen session,
+Selection is mutation-free. Ordinary messages continue in the current
+conversation while a draft is pending; only successful connection changes the
+binding. Pi confirmation describes the chosen session,
 replacement of an existing connection, history preservation, no-task loading,
-current model/effort overrides and the need to close local Pi completely.
+current model/effort overrides and the need to keep the other side idle.
+It warns that native local `/resume` is still required and concurrent writes may
+create separate branches.
 Confirmation re-resolves the candidate rather than trusting a path from chat.
 The file revision fingerprint is `dev:ino:size:mtimeMs`; a detected change since
 selection requires a new selection. This is not a content hash or writer lock.
 
 Read-only controls need no executor and may run while ordinary work is busy.
-Connection/release/detach reject running or queued work and pending queue
+Connection/detach reject running or queued work and pending queue
 confirmations; they use thread operations and resume queue draining afterward.
 Complete settings/approval/delegation/maintenance admission and durable context
 revision binding remain future hardening requirements.
@@ -186,17 +192,22 @@ Resume is therefore not a read-only native operation. Adopted launches omit
 Older-format migration and arbitrary extension startup behavior need separate
 version-specific evidence; startup identity alone does not certify them.
 
-The per-thread Pi pointer records `adopted` and `released`. Adopted history is
+The per-thread Pi pointer records `adopted`. Legacy `released` flags are ignored. Adopted history is
 preserved by reset and thread-data deletion. Detach stops the owned process,
 forgets the file association and allocates a fresh identity for the next turn.
-The retention change is scoped to adopted sessions; existing private/worker
-cleanup semantics are not globally replaced.
+Foreground Pi reset and thread-data deletion preserve ordinary and adopted
+native history. `/new` and `/clear` remain aliases: they remove the current
+association and choose an independent new native ID without changing the remote
+thread or preferences. The next prompt materializes the new session; the old
+one remains discoverable. Worker/metadata cleanup retains its disposable rules.
 
-Release waits for owned process shutdown and persists the released flag. Released
-bindings block lazy remote startup, including after restart, until explicit
-connection. The association remains reserved by its pointer; another thread must
-not assume that release removes it. Pointer scans detect other recorded thread
-holders but do not provide atomic cross-process admission or native exclusivity.
+Each adopted prompt first stops the owned idle RPC process, reopens the exact
+session file and verifies native ID/file before dispatch. Local appends are thus
+loaded without another remote chooser or release step. Busy preparation blocks
+overlapping turns/context changes; abort/reset/shutdown cancel before dispatch.
+Private non-adopted sessions and delegated workers retain their persistent mode.
+The association remains reserved by its pointer. Pointer scans detect other
+recorded thread holders, not atomic cross-process admission or native exclusivity.
 
 `remote-cli session show --thread <name> --backend <key>` reads only local pointer
 metadata and works without a daemon or backend process. Verified native reopen
@@ -206,8 +217,8 @@ round trip or a managed writer lease.
 
 ### Current limitations
 
-- Plain terminal Pi is unmanaged. Fully close it before connection and release
-  remote Pi before opening the same session locally. There is no force takeover.
+- Plain terminal Pi is unmanaged. Keep the other side idle while executing and
+  resume the file before the next local turn. There is no force takeover.
 - Different CLI instances/config roots can evade pointer-based conflict checks.
 - Confirmation tokens do not persist across restart and are not idempotent receipts.
 - Current pointer writes are not a crash-recoverable, multi-record transaction.
@@ -218,7 +229,7 @@ round trip or a managed writer lease.
 - Delegation instructions, when enabled, become part of subsequent user turns.
   Old approvals, worker handles and tool results are not restored as live actions.
 - Do not downgrade with adopted pointers still present: older deletion code may
-  unlink user-owned native history. Release/detach using the new version first.
+  unlink user-owned native history. Detach using the new version first.
 
 ## 5. Requirements before extending support
 
@@ -278,8 +289,9 @@ DSH's existing telemetry/log suppression remains mandatory for new transports.
 ### Local round trips and optional cards
 
 Bidirectional support requires a same-native-session test with distinguishable
-sentinels: local work, full local exit, remote continuation, confirmed remote
-release, local continuation, full local exit and explicit remote reacquisition.
+sentinels: local work, remote continuation, local reload/continuation, and
+remote refresh/continuation on the same session. Idle windows may stay open
+under the explicit single-active-side assumption.
 A remote-only prompt test or a saved pointer does not prove that round trip.
 
 A managed launcher additionally needs native exclusive ownership or a verified
@@ -309,8 +321,10 @@ Current regression coverage must retain these scenarios:
 - Selection/cancellation do not construct a runtime or send a task.
 - Missing/mismatching/native-error loads preserve the old association.
 - Successful Pi connection verifies exact file/ID before the next real prompt.
-- Adopted history survives clear, detach and thread deletion; detach starts fresh.
-- Release blocks remote work across restart until explicit connection.
+- Foreground history survives clear, new, detach and thread deletion; reset uses
+  a fresh independent ID, including after restart before the next prompt.
+- Every adopted remote prompt reloads the exact file; legacy released flags do
+  not block restart. Removed release syntax never reaches native slash passthrough.
 - Running/queued work blocks context change; queue draining resumes afterward.
 - Errors produce bounded command responses rather than crashing message handling.
 - Native fixtures use Pi's block-array message shape, not invented transcripts.
