@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.160] - 2026-10-14
+
+### Changed
+- Remove the backend card's Confirm section. Backend choices submit immediately using the selected scope, defaulting to Current thread, while Choose backend remains above Apply to. Scope buttons only change the next backend click's target; keep that scope within the same card after acknowledgement. Show only the acknowledged backend as selected, disable further changes while pending, and preserve exact-request retries and stale-revision validation. Follow global applies immediately to the original thread and restores the local scope to Current thread after acknowledgement. Existing CLI settings actions and text commands remain compatible.
+
 ## [1.6.159] - 2026-10-12
 
 ### Fixed
