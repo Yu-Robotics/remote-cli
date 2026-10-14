@@ -10,6 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.166] - 2026-10-14
+
+### Fixed
+- Normalize Claude native tool-result content blocks to text before forwarding; ignore embedded media and unknown payloads instead of passing them to string-only consumers.
+- Exclude native tool-result payloads from raw stdout logging before normalization.
+- Ignore non-string input in local-image detection and contain optional image-forwarding failures without terminating the CLI or failing an otherwise successful task. Preserve web-result exclusions and directory/size checks.
+
+### Tests
+- Cover mixed Claude content blocks, malformed image-detector input, asynchronous tool-result scan failures, final-output failures, and subsequent task execution.
+
 ## [1.6.165] - 2026-10-14
 
 ### Fixed

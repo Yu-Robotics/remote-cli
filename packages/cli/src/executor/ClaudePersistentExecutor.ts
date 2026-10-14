@@ -62,9 +62,18 @@ interface ContentBlock {
   id?: string;
   name?: string;
   input?: Record<string, unknown>;
-  content?: string;
+  content?: unknown;
   is_error?: boolean;
   redacted_thinking?: string;  // Encrypted thinking content
+}
+
+/** Extract only display text from native tool results, never embedded media or metadata. */
+function toolResultText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content.filter((block): block is { type: 'text'; text: string } => (
+    block !== null && typeof block === 'object' && block.type === 'text' && typeof block.text === 'string'
+  )).map(block => block.text).join('\n');
 }
 
 interface ClaudeControlResponsePayload {
@@ -1198,9 +1207,13 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
         return;
       }
 
-      // Skip logging for stream_event messages to avoid console spam
-      // Token deltas are handled below without logging every fragment.
-      if (parsedMessage.type !== 'stream_event') {
+      const nativeContent = parsedMessage.message?.content ?? parsedMessage.content;
+      const containsToolResult = Array.isArray(nativeContent) && nativeContent.some(block => (
+        block !== null && typeof block === 'object' && block.type === 'tool_result'
+      ));
+      // Token deltas are noisy; tool results may contain private media or metadata.
+      // Neither should enter raw stdout logs before normalization.
+      if (parsedMessage.type !== 'stream_event' && !containsToolResult) {
         const timestamp = new Date().toISOString();
         console.log(`[ClaudePersistent RAW ${timestamp}] ${line}`);
       }
@@ -1443,15 +1456,15 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
             for (const block of userContentBlocks) {
               if (block.type === 'tool_result') {
                 const isError = block.is_error === true;
+                const resultText = toolResultText(block.content);
                 // tool_use_id lives on block.tool_use_id in tool_result blocks (not block.id)
                 const toolUseId = (block as any).tool_use_id || (block as any).id || '';
                 console.log(`[ClaudePersistent] Tool result received: tool_use_id=${toolUseId}, is_error=${isError}`);
-                console.log(`[ClaudePersistent] Tool result full: ${JSON.stringify(message).substring(0, 500)}`);
 
                 // ExitPlanMode returns is_error=true with content "Exit plan mode?" when Claude Code
                 // requires user confirmation before exiting plan mode. This is a normal internal state
                 // transition, not a user-facing error — skip emitting it as a tool result card.
-                if (isError && typeof block.content === 'string' && /exit plan mode\??/i.test(block.content)) {
+                if (isError && /exit plan mode\??/i.test(resultText)) {
                   console.log('[ClaudePersistent] Suppressing ExitPlanMode pseudo-error tool result');
                   continue;
                 }
@@ -1460,7 +1473,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
                 if (this.currentToolResultCallback) {
                   this.currentToolResultCallback({
                     tool_use_id: toolUseId,
-                    content: block.content || '(no content)',
+                    content: resultText || '(no content)',
                     is_error: isError
                   });
                 }
@@ -1480,8 +1493,8 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
                   },
                   {
                     success: !isError,
-                    result: block.content || '',
-                    error: isError ? (block.content || 'Tool execution failed') : undefined,
+                    result: resultText,
+                    error: isError ? (resultText || 'Tool execution failed') : undefined,
                     duration: 0, // Duration not available
                   }
                 );

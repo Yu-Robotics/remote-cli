@@ -2270,19 +2270,24 @@ You can also use natural language commands to control Claude Code CLI.`,
       const webToolNames = new Set(['websearch', 'webfetch', 'web_search', 'web_fetch', 'search_web', 'read_url_content', 'fetch']);
       let streamedOutput = '';
       const emitLocalImages = async (text: string): Promise<void> => {
-        const thread = this.threadManager.getThread(threadId);
-        if (!text || !thread?.workingDirectory) return;
-        const images = await readLocalImages(text, thread.workingDirectory, (candidate, cwd) => (
-          this.directoryGuard.isSafePath(candidate, cwd)
-        ));
-        for (const image of images) {
-          if (emittedLocalImages.has(image.path)) continue;
-          emittedLocalImages.add(image.path);
-          this.sendImage(messageId, threadId, {
-            type: 'image',
-            data: image.data,
-            mimeType: image.mimeType,
-          });
+        try {
+          const thread = this.threadManager.getThread(threadId);
+          if (typeof text !== 'string' || !text || !thread?.workingDirectory) return;
+          const images = await readLocalImages(text, thread.workingDirectory, (candidate, cwd) => (
+            this.directoryGuard.isSafePath(candidate, cwd)
+          ));
+          for (const image of images) {
+            if (emittedLocalImages.has(image.path)) continue;
+            emittedLocalImages.add(image.path);
+            this.sendImage(messageId, threadId, {
+              type: 'image',
+              data: image.data,
+              mimeType: image.mimeType,
+            });
+          }
+        } catch {
+          // Image forwarding is optional; never reject a task or log native content on failure.
+          console.warn('Failed to forward local images; continuing task output.');
         }
       };
       const queueLocalImages = (text: string): void => {
