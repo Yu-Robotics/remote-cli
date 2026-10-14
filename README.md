@@ -1047,6 +1047,8 @@ Codex App Server generated images are also forwarded back to Feishu. Codex emits
 
 All backends can also send a local image generated during a task when the tool result or final response includes its path or a Markdown image link, such as `chart.png` or `![chart](./chart.png)`. The file must be inside an allowed working directory and no larger than 2 MiB. The CLI reads the file and reuses the same image stream; Router uploads it and renders it in the current Card 2.0 response. This path-based fallback is useful for charts and screenshots and does not require the backend to emit a native image event.
 
+Claude tool-result content blocks are normalized to text; embedded media and unknown payloads are not scanned for local files. Local image detection and forwarding are best-effort: failures do not fail the task or terminate the CLI. Web-result excerpts remain excluded from local-file scanning.
+
 Image uploads require the bot application's `im:resource` permission; publish
 the updated Feishu application permissions before retrying a denied upload.
 Router 1.6.85 and newer display local and URL-based Markdown image references

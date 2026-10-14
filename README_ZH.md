@@ -999,6 +999,8 @@ Codex App Server 生成的图片也会转发回飞书。Codex 通过 app-server 
 
 所有 backend 也可以发送任务期间生成的本地图片，只要工具结果或最终回复中包含图片路径或 Markdown 图片链接，例如 `chart.png` 或 `![chart](./chart.png)`。文件必须位于允许的工作目录内，且不超过 2 MiB。CLI 会读取文件并复用同一条图片流，Router 上传到飞书并将其显示在当前 Card 2.0 回复卡片中。这个路径回退机制适用于图表和截图，不要求 backend 发出原生图片事件。
 
+Claude tool-result content blocks are normalized to text; embedded media and unknown payloads are not scanned for local files. Local image detection and forwarding are best-effort: failures do not fail the task or terminate the CLI. Web-result excerpts remain excluded from local-file scanning.
+
 Image uploads require the bot application's `im:resource` permission; publish
 the updated Feishu application permissions before retrying a denied upload.
 Router 1.6.85 and newer display local and URL-based Markdown image references

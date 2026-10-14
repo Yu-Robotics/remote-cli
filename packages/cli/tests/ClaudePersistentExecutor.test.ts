@@ -97,6 +97,55 @@ describe('ClaudePersistentExecutor', () => {
   };
 
   describe('initialization', () => {
+    it.each(['nested', 'top-level'])('does not log raw %s tool-result content', async shape => {
+      const onToolResult = vi.fn();
+      const running = executor.execute('inspect synthetic output', { onToolResult });
+      await vi.advanceTimersByTimeAsync(0);
+      const emit = (message: object) => mockChildProcess.stdout.emit('data', Buffer.from(`${JSON.stringify(message)}\n`));
+      emit({ type: 'system', subtype: 'init', session_id: 'synthetic-log-session' });
+      await advanceStartup();
+      const content = [{ type: 'tool_result', tool_use_id: 'log-tool', content: [
+        { type: 'text', text: 'Visible output' },
+        { type: 'image', source: { data: 'SYNTHETIC_HIDDEN_MEDIA' } },
+        { type: 'thinking', text: 'SYNTHETIC_HIDDEN_THOUGHT' },
+        { type: 'unknown', metadata: 'SYNTHETIC_HIDDEN_METADATA' },
+      ] }];
+      emit(shape === 'nested' ? { type: 'user', message: { role: 'user', content } } : { type: 'user', content });
+      emit({ type: 'result', subtype: 'success', result: 'Done', is_error: false });
+      await running;
+      expect(onToolResult).toHaveBeenCalledWith({ tool_use_id: 'log-tool', content: 'Visible output', is_error: false });
+      const logged = [console.log, console.warn, console.error].flatMap(fn => vi.mocked(fn).mock.calls).flat().join('\n');
+      expect(logged).not.toMatch(/SYNTHETIC_HIDDEN_(?:MEDIA|THOUGHT|METADATA)/);
+      mockChildProcess.emit('exit', 0, null);
+      mockChildProcess.emit('close', 0, null);
+    });
+
+    it.each([
+      ['native string', 'Saved chart.png', 'Saved chart.png'],
+      ['text blocks', [{ type: 'text', text: 'Saved chart.png' }, { type: 'text', text: 'Second line' }], 'Saved chart.png\nSecond line'],
+      ['mixed blocks', [null, 'ignored', { type: 'text', text: 'Visible output' },
+        { type: 'image', source: { data: 'synthetic-base64', path: 'hidden.png' } },
+        { type: 'thinking', text: 'Hidden reasoning' }, { type: 'text', text: 42 }], 'Visible output'],
+      ['media only', [{ type: 'image', source: { data: 'synthetic-base64' } }], '(no content)'],
+      ['unknown object', { text: 'Do not stringify this payload' }, '(no content)'],
+      ['empty array', [], '(no content)'],
+      ['null', null, '(no content)'],
+      ['number', 42, '(no content)'],
+    ])('normalizes %s tool results before invoking callbacks', async (_label, content, expected) => {
+      const onToolResult = vi.fn();
+      const running = executor.execute('inspect synthetic output', { onToolResult });
+      await vi.advanceTimersByTimeAsync(0);
+      const emit = (message: object) => mockChildProcess.stdout.emit('data', Buffer.from(`${JSON.stringify(message)}\n`));
+      emit({ type: 'system', subtype: 'init', session_id: 'synthetic-tool-session' });
+      await advanceStartup();
+      emit({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'native-tool', content, is_error: true }] } });
+      emit({ type: 'result', subtype: 'success', result: 'Done', is_error: false });
+      await running;
+      expect(onToolResult).toHaveBeenCalledWith({ tool_use_id: 'native-tool', content: expected, is_error: true });
+      mockChildProcess.emit('exit', 0, null);
+      mockChildProcess.emit('close', 0, null);
+    });
+
     it('preserves native Claude WebSearch result text and its invocation identity', async () => {
       const onToolUse = vi.fn(), onToolResult = vi.fn();
       const running = executor.execute('look up docs', { onToolUse, onToolResult });

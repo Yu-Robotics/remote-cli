@@ -40,7 +40,8 @@ function normalizeReferenceLabel(label: string): string {
 }
 
 /** Extract standard Markdown image destinations and plain local image paths. */
-export function extractLocalImagePaths(text: string): string[] {
+export function extractLocalImagePaths(text: unknown): string[] {
+  if (typeof text !== 'string') return [];
   const candidates = new Set<string>();
   const references = new Map<string, string>();
   const referenceDefinitionPattern = /^[ \t]{0,3}\[([^\]\r\n]+)\]:[ \t]*(?:<([^>\r\n]+)>|(\S+))(?:[ \t]+(?:"[^"\r\n]*"|'[^'\r\n]*'|\([^)]*\)))?[ \t]*$/gm;
@@ -84,7 +85,7 @@ export function extractLocalImagePaths(text: string): string[] {
 
 /** Read detected images that are allowed by the caller's directory policy. */
 export async function readLocalImages(
-  text: string,
+  text: unknown,
   cwd: string,
   isAllowed: (candidate: string, cwd: string) => boolean,
 ): Promise<LocalImage[]> {

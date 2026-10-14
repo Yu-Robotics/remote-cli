@@ -11,6 +11,15 @@ afterEach(async () => {
 });
 
 describe('LocalImageDetector', () => {
+  it.each([undefined, null, 0, false, {}, [], [{ type: 'text', text: 'chart.png' }]])(
+    'ignores non-string input without inspecting files (%j)', async content => {
+      expect(extractLocalImagePaths(content)).toEqual([]);
+      let policyCalls = 0;
+      expect(await readLocalImages(content, '/workspace', () => { policyCalls++; return true; })).toEqual([]);
+      expect(policyCalls).toBe(0);
+    },
+  );
+
   it('extracts Markdown and plain local image paths without duplicates', () => {
     expect(extractLocalImagePaths(
       '![chart](./chart.png) and /workspace/chart.png. Also chart.png',

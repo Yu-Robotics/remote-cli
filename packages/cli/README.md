@@ -76,6 +76,8 @@ The client is normally installed and run directly on the developer's machine rat
 
 ## Installation
 
+Claude tool-result content blocks are normalized to text; embedded media and unknown payloads are not scanned for local files. Local image detection and forwarding are best-effort: failures do not fail the task or terminate the CLI. Web-result excerpts remain excluded from local-file scanning.
+
 Sending local image files requires a Router with image forwarding support and
 the bot application's `im:resource` permission. Router 1.6.85 and newer render
 local and URL-based Markdown image references as captions; the uploaded image

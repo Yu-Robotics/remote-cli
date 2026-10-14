@@ -593,6 +593,59 @@ describe('MessageHandler', () => {
       } finally { detector.mockRestore(); }
     });
 
+    it('contains image detection failures during tool streaming and final output', async () => {
+      const detector = vi.spyOn(localImages, 'readLocalImages').mockRejectedValue(new Error('Synthetic detection failure'));
+      const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      let finish!: (result: any) => void;
+      ctx.mockExecutor.execute.mockImplementation((_prompt: string, options: any) => {
+        options.onToolResult({ tool_use_id: 'failed-image-scan', content: 'Saved chart.png', is_error: false });
+        return new Promise(resolve => { finish = result => {
+          options.onStream(result.output);
+          resolve(result);
+        }; });
+      });
+      try {
+        const run = ctx.handler.handleMessage({ type: 'command', messageId: 'image-failure', content: 'make a chart', timestamp: Date.now() } as any);
+        await vi.waitFor(() => expect(warning).toHaveBeenCalledWith('Failed to forward local images; continuing task output.'));
+        expect(detector).toHaveBeenCalledTimes(1);
+        finish({ success: true, output: 'Completed chart.png' });
+        await run;
+        await vi.waitFor(() => expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+          type: 'response', messageId: 'image-failure', success: true,
+        })));
+        expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+          type: 'stream', messageId: 'image-failure', streamType: 'text', chunk: 'Completed chart.png',
+        }));
+        expect(detector).toHaveBeenCalledTimes(2);
+        expect(warning).toHaveBeenCalledTimes(2);
+        expect(ctx.mockWsClient.send.mock.calls.some(([value]: any[]) => value.streamType === 'image')).toBe(false);
+        detector.mockResolvedValue([]);
+        ctx.mockExecutor.execute.mockResolvedValue({ success: true, output: 'Next task completed' });
+        await ctx.handler.handleMessage({ type: 'command', messageId: 'after-image-failure', content: 'next task', timestamp: Date.now() } as any);
+        await vi.waitFor(() => expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+          type: 'response', messageId: 'after-image-failure', success: true,
+        })));
+      } finally {
+        finish?.({ success: true, output: 'Done' });
+        detector.mockRestore();
+        warning.mockRestore();
+      }
+    });
+
+    it('skips non-string tool output without attempting local image detection', async () => {
+      const detector = vi.spyOn(localImages, 'readLocalImages').mockResolvedValue([]);
+      ctx.mockExecutor.execute.mockImplementation(async (_prompt: string, options: any) => {
+        options.onToolResult({ tool_use_id: 'malformed-tool', content: [{ type: 'text', text: 'chart.png' }], is_error: false });
+        return { success: true, output: 'Done' };
+      });
+      try {
+        await ctx.handler.handleMessage({ type: 'command', messageId: 'malformed-image', content: 'inspect', timestamp: Date.now() } as any);
+        await vi.waitFor(() => expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'response', messageId: 'malformed-image', success: true })));
+        expect(detector).toHaveBeenCalledTimes(1);
+        expect(detector).toHaveBeenCalledWith('\nDone', expect.any(String), expect.any(Function));
+      } finally { detector.mockRestore(); }
+    });
+
     it('should forward a local image path from a tool result', async () => {
       const directory = await mkdtemp(path.join(tmpdir(), 'remote-cli-message-test-'));
       const imagePath = path.join(directory, 'chart.png');
