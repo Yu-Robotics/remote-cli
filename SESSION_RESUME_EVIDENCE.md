@@ -1,4 +1,6 @@
-# Session Handoff Native Evidence and Implementation Status
+# Session Resume Native Evidence and Implementation Status
+
+The initial `1.6.160` records below are historical. Release `1.6.161` removes the release action and uses automatic adopted-session reload before each remote prompt; the former release-based round trip is not the current user workflow.
 
 ## Scope
 
@@ -69,6 +71,79 @@ Strict Pi adoption was first verified only to the point where a prompt reached P
 - With delegation enabled (the default), the delegation instructions are prepended to each user message, so they appear in the adopted history. This applies to every backend and is unchanged here.
 
 **Validation.** `PiExecutor.adoption.test.ts`, `integration/pi-session-resume.test.ts` (including queued-work refusal, queue draining after adoption and a session-control failure path), the session suites and the CLI build pass.
+
+## Native local/remote/local/remote round-trip probe
+
+A separate synthetic test used Pi 1.2.0, a real configured model and the built CLI without reading user transcripts or copying `auth.json`. Only the selected provider configuration was available in the private test home; its credential was supplied through an environment variable. Extensions, MCP, skills, context files and tools were disabled, and delegation was disabled on the test thread.
+
+The native local leg used Pi's one-shot CLI, not a hand-written JSONL fixture. The remote leg used the real `MessageHandler`, `ThreadExecutorPool` and Pi RPC executor. Command/response delivery was captured in-process, so this probe **did not exercise Feishu or Router transport**.
+
+Verified sequence:
+
+1. Native local Pi created one session and remembered a random local sentinel.
+2. `/resume` selection and confirmation loaded that ID/file without adding a user turn.
+3. A remote prompt recalled the local sentinel and added a different remote sentinel.
+4. `/session release` stopped remote access. A subsequent remote prompt failed without changing the native file.
+5. The local `session show` helper produced guidance for that exact file.
+6. Native local Pi reopened the file, recalled both earlier sentinels and added a third local-return sentinel.
+7. Remote selection and confirmation reloaded the same file and a real prompt recalled all three sentinels.
+
+The native store contained exactly one session throughout. The header ID and canonical cwd stayed the same, and the existing byte prefix was preserved after each continuation. Native record counts progressed from 6 to 8 to 10 to 12. This proves a sequential manual round trip in the tested local harness, not automatic writer coordination, TUI behavior, all-platform support or a complete Feishu bidirectional test.
+
+### Live Feishu round-trip result
+
+The same sequence was subsequently repeated on a separate live test device through the configured Router and Feishu. Native local Pi first created the session and its random local marker. The user selected and confirmed it in Feishu; a model response recalled that marker and added a different remote marker. After the user sent `/session release`, native local Pi reopened the exact file, recalled both markers and added a third local-return marker. The local process exited before the next remote connection.
+
+The user then selected and confirmed the session again in Feishu and asked for all three markers without including their values. The returned local-return marker exactly matched the private expected value, which had not been disclosed to the user or included in the final prompt. The persisted final assistant message also contained all three markers.
+
+Final checks confirmed the same native ID/file/canonical workspace, one session file, preserved history and a remote-ready adopted pointer after reacquisition. The primary device configuration was unchanged. This verifies **sequential manual native-CLI/Feishu/native-CLI/Feishu continuation** for the tested Pi 1.2.0 model and isolated environment. It does not certify the interactive TUI picker, concurrency prevention, crash recovery, other models/platforms/backends or arbitrary extension startup behavior. No runtime code changed during this verification.
+
+## Two native Pi processes on one session
+
+Two Pi 1.2.0 RPC processes opened the same synthetic JSONL session successfully. The probe used native `bash` commands to add distinguishable context entries without provider calls; it disabled extensions, MCP, skills and context-file discovery and cleaned up both processes and their owned temporary store. The observations were reproduced on a second run.
+
+- Both processes reported the same native session ID and file and stayed running.
+- An entry appended by process A was visible to A but not to the already-open process B through `get_messages`. B's later entry was likewise absent from A's in-memory context.
+- Both entries remained physically present as valid JSONL, but neither was an ancestor of the other: they belonged to different branches rather than one continuously shared context.
+- A native `switch_session` back to the same file loaded B's latest branch. A then saw B's entry, while its earlier A entry was absent from the active context. B was not stopped and could append again; A did not automatically see that later append.
+- The pre-existing byte prefix and single session header were preserved. The test did not demonstrate byte corruption, native writer exclusion, or automatic ownership transfer.
+
+Consequently, native multi-open is supported in this tested version, but it is not automatic context synchronization or exclusive takeover. A future no-release workflow could reload before each alternating turn and let idle windows remain open. It must disclose branch behavior and unmanaged concurrency; it cannot promise that an ordinary local Pi process is prevented from writing. Model prompts, tools, compaction and interactive TUI behavior require additional tests before claiming equivalent semantics.
+
+## No-release sequential switching (`1.6.161`)
+
+A second real-Pi/model probe kept the native local RPC process and the remote executor open across alternating turns. It used the same isolated provider-only setup described above, no real transcripts or auth-file copies, no extensions/MCP/tools, and no simultaneous work. Remote command delivery was captured in-process, so this test did not exercise the live Router/Feishu UI.
+
+1. Native local Pi created the session and its initial sentinel; remote selection/confirmation preserved the exact native ID/file and sent no prompt.
+2. A remote model turn recalled the initial sentinel and added a remote sentinel.
+3. `/session release` was rejected as removed syntax. No release or remote reconnect was performed.
+4. A native local process opened the same file while the remote process remained idle, recalled both sentinels and added a local-return sentinel.
+5. The next ordinary remote message, without another `/resume`, automatically restarted the owned RPC process, loaded the new local history and recalled all three sentinels. The native local process was still running.
+6. That same local process used native `switch_session` to reload the file and continued successfully with all three sentinels.
+
+Every step retained the native ID/file/cwd and existing byte prefix, with exactly one native file throughout. A local window still needs its own native resume/reload; the feature does not install a local extension or stop other writers. This verifies sequential no-release switching in the tested Pi 1.2.0/model environment, not synchronized concurrent collaboration or fully automatic two-sided refresh.
+
+Regression tests cover local file appends observed after per-turn reload, mismatching identity and stop failures preventing prompt dispatch, overlapping preparation rejection, abort/reset before dispatch, legacy released pointers no longer blocking restart, removed command grammar and confirmed detach/history retention. Validation: 66 related files passed 1,367 cases; the focused Pi/session run passed 181 cases. PiExecutor line coverage was 85.44% and SessionControl line coverage was 100% in that focused run (not whole-package certification). The full CLI run passed 2,784 cases in 138 files; the existing DocumentExtractor suite failed 10 cases because PDF/archive dependencies are unavailable. No dependencies were installed. CLI build and bundled release-summary validation passed.
+
+## Foreground Pi `/new` retention (`1.6.162`)
+
+The shared `/new` command is deliberately an alias for `/clear`: reset the current thread's context while keeping its directory/backend/preferences. The original Claude, Codex, AGY and ACP reset paths remove remote continuation pointers rather than directly deleting native history. Pi's former reset path separately unlinked its JSONL and reused the stable thread ID; that backend-specific cleanup is changed here, not the shared alias.
+
+Foreground Pi reset now preserves ordinary and adopted native history and selects an independent random ID for the next conversation. Foreground thread-data deletion removes its pointer but retains native history. Delegation workers and synthetic metadata runtimes retain their previous disposable cleanup and ID behavior.
+
+A real Pi/model probe exercised the built `MessageHandler`, pool and executor against isolated synthetic history without Feishu transport:
+
+1. An ordinary foreground prompt created A with an ID distinct from the remote thread.
+2. `/new` preserved A's bytes, then the harness recreated its remote runtime before the next prompt.
+3. A prompt created B with a different native ID and no A sentinel in B's persisted messages. The model confirmed that there was no earlier local marker.
+4. `/resume id <A>` displayed a draft; an ordinary message before confirmation still used B, recalled B's marker and did not change A.
+5. Confirmation restored A's exact ID/file. A subsequent real prompt recalled A's original marker. Both A and B remained in the read-only chooser with no history merge.
+
+The probe used the configured test model, no tools/extensions and no real user transcripts or copied auth files. Regression tests additionally cover reset/restart separation, native cwd changes, foreground thread deletion and unchanged worker/metadata cleanup. Related validation passed 1,372 tests across 66 files; CLI build and release-summary validation passed. Full CLI validation passed 2,789 cases with the same 10 existing DocumentExtractor failures caused by unavailable PDF/archive dependencies. This is native runtime/context evidence, not another live Feishu or interactive TUI test.
+
+## Foreground session naming (`1.6.163`)
+
+Independent foreground session IDs exposed a naming inconsistency: each `/new` session received `remote-cli-<thread-id>`, so different native files had identical display names. Fresh foreground names now use their native ID. Reopening an existing file omits `--name`, preserving locally assigned names; adopted and synthetic-runtime naming are unchanged. Existing duplicate names are not rewritten automatically. Focused Pi executor/adoption/integration tests passed 70 cases and CLI build/release-summary validation passed.
 
 ## Shared catalog scanner
 

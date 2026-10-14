@@ -29,6 +29,13 @@ class Transport implements PiTransport {
         data: { sessionId, sessionFile: this.launch.sessionFile ?? path.join(this.launch.sessionDir!, `${sessionId}.jsonl`), isStreaming: false } };
     }
     if (command.type === 'prompt') {
+      const nativeFile = this.launch.sessionFile ?? path.join(this.launch.sessionDir!, `${this.launch.sessionId}.jsonl`);
+      if (!fs.existsSync(nativeFile)) {
+        fs.writeFileSync(nativeFile, JSON.stringify({ type: 'session', version: 3, id: this.launch.sessionId,
+          cwd: this.launch.cwd, timestamp: new Date().toISOString() }) + '\n');
+      }
+      fs.appendFileSync(nativeFile, JSON.stringify({ type: 'message', id: `synthetic-${Date.now()}`, parentId: null,
+        timestamp: new Date().toISOString(), message: { role: 'user', content: [{ type: 'text', text: command.message }] } }) + '\n');
       this.emit({ type: 'agent_start' });
       this.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'continued' } });
       this.emit({ type: 'agent_settled' });
@@ -83,8 +90,8 @@ describe('Integration: connecting a native Pi session from chat', () => {
     busy = false;
     executor = undefined;
     const guard = new DirectoryGuard([home]);
-    wsClient = { send: vi.fn(), on: vi.fn(), isConnected: vi.fn(() => true) };
-    const thread = { id: 'thread-a', name: 'default', workingDirectory: project, sessionId: null, createdAt: 0, lastActiveAt: 0 };
+    wsClient = { send: vi.fn(), on: vi.fn(), isConnected: vi.fn(() => true), trackTask: vi.fn() };
+    const thread = { id: 'thread-a', name: 'default', workingDirectory: project, sessionId: null, delegation: false, createdAt: 0, lastActiveAt: 0 };
     const threadManager: any = {
       getDefaultThread: vi.fn(() => thread), getThread: vi.fn((id: string) => (id === 'thread-a' ? thread : undefined)),
       getThreadByName: vi.fn(), listThreads: vi.fn(() => [thread]), touchThread: vi.fn(), updateThread: vi.fn(),
@@ -96,6 +103,7 @@ describe('Integration: connecting a native Pi session from chat', () => {
       })),
       isThreadBusy: vi.fn(() => busy),
       setThreadBusy: vi.fn((_id: string, value: boolean) => { busy = value; }),
+      setThreadError: vi.fn(),
       getSummaries: vi.fn(() => []),
       getBackendKey: vi.fn(() => 'pi'),
     };
@@ -110,6 +118,40 @@ describe('Integration: connecting a native Pi session from chat', () => {
     fs.rmSync(home, { recursive: true, force: true });
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
+  });
+
+  it('keeps foreground A and B after /new and switches back to A only after confirmation', async () => {
+    expect((await send('ordinary-a', 'SYNTHETIC-A')).success).toBe(true);
+    const a = JSON.parse(fs.readFileSync(pointerFile(), 'utf8'));
+    const bytesA = fs.readFileSync(a.sessionFile, 'utf8');
+    expect(a.adopted).toBeUndefined();
+
+    expect((await send('new', '/new')).success).toBe(true);
+    expect(fs.readFileSync(a.sessionFile, 'utf8')).toBe(bytesA);
+    expect((await send('ordinary-b', 'SYNTHETIC-B')).success).toBe(true);
+    const b = JSON.parse(fs.readFileSync(pointerFile(), 'utf8'));
+    expect(b.id).not.toBe(a.id);
+    expect(b.sessionFile).not.toBe(a.sessionFile);
+    expect(fs.readFileSync(b.sessionFile, 'utf8')).not.toContain('SYNTHETIC-A');
+
+    const selected = await send('select-a', `/resume id ${a.id}`);
+    expect(selected.success).toBe(true);
+    // Drafts do not redirect ordinary work: it still belongs to B until confirm.
+    expect((await send('before-confirm', 'STILL-IN-B')).success).toBe(true);
+    expect(fs.readFileSync(b.sessionFile, 'utf8')).toContain('STILL-IN-B');
+    expect(fs.readFileSync(a.sessionFile, 'utf8')).toBe(bytesA);
+    const confirmed = await send('confirm-a', `/resume confirm ${tokenAfter(selected.output, 'resume confirm')}`);
+    expect(confirmed.success).toBe(true);
+    expect((await send('after-confirm', 'BACK-IN-A')).success).toBe(true);
+    const resumed = JSON.parse(fs.readFileSync(pointerFile(), 'utf8'));
+    expect(resumed.id).toBe(a.id);
+    expect(resumed.adopted).toBe(true);
+    expect(fs.readFileSync(a.sessionFile, 'utf8')).toContain('BACK-IN-A');
+    expect(fs.readFileSync(b.sessionFile, 'utf8')).not.toContain('BACK-IN-A');
+
+    const catalog = await send('catalog', '/resume');
+    expect(catalog.output).toContain(a.id);
+    expect(catalog.output).toContain(b.id);
   });
 
   it('lists, confirms and adopts the exact native file without sending a prompt', async () => {
@@ -134,37 +176,28 @@ describe('Integration: connecting a native Pi session from chat', () => {
     expect(busy).toBe(false);
 
     const status = await send('status', '/session');
-    expect(status.output).toContain('remote-ready');
+    expect(status.output).toContain('reloads before every remote turn');
 
     // Re-selecting the same session in this thread is refused as already connected.
     const relist = await send('relist', '/resume');
     expect((await send('reselect', `/resume select ${tokenAfter(relist.output, 'resume select')} 1`)).error).toContain('already connected');
   });
 
-  it('protects adopted history from /clear and supports release and detach', async () => {
+  it('protects adopted history on clear and confirmed detach without a release step', async () => {
     const list = await send('list', '/resume');
     const selected = await send('select', `/resume select ${tokenAfter(list.output, 'resume select')} 1`);
     await send('confirm', `/resume confirm ${tokenAfter(selected.output, 'resume confirm')}`);
-
-    const released = await send('release', '/session release');
-    expect(released.output).toContain('Released Pi session');
-    expect(transports.at(-1)!.running).toBe(false);
-    expect((await send('status', '/session')).output).toContain('released for local use');
-
-    // Reconnect, then detach: history stays, the pointer forgets it.
-    const again = await send('list-2', '/resume');
-    const reselected = await send('select-2', `/resume select ${tokenAfter(again.output, 'resume select')} 1`);
-    expect((await send('confirm-2', `/resume confirm ${tokenAfter(reselected.output, 'resume confirm')}`)).success).toBe(true);
+    expect((await send('status', '/session')).output).toContain('reloads before every remote turn');
+    expect((await send('removed-command', '/session release')).success).toBe(false);
     const prompt = await send('detach', '/session detach');
     const detached = await send('detach-confirm', `/session confirm ${tokenAfter(prompt.output, 'session confirm')}`);
     expect(detached.output).toContain('Detached');
     expect(fs.existsSync(nativeFile)).toBe(true);
     expect(JSON.parse(fs.readFileSync(pointerFile(), 'utf8')).adopted).toBeUndefined();
 
-    // /clear after a new adoption keeps the native file.
-    const third = await send('list-3', '/resume');
-    const pick = await send('select-3', `/resume select ${tokenAfter(third.output, 'resume select')} 1`);
-    await send('confirm-3', `/resume confirm ${tokenAfter(pick.output, 'resume confirm')}`);
+    const again = await send('list-2', '/resume');
+    const pick = await send('select-2', `/resume select ${tokenAfter(again.output, 'resume select')} 1`);
+    await send('confirm-2', `/resume confirm ${tokenAfter(pick.output, 'resume confirm')}`);
     executor!.resetContext();
     expect(fs.existsSync(nativeFile)).toBe(true);
   });

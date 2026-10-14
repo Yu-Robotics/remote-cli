@@ -32,7 +32,6 @@ export interface SessionControlResponse {
 export interface PiBindingState {
   id?: string;
   adopted: boolean;
-  released: boolean;
 }
 
 /** Everything the service needs from the daemon; injected for isolated tests. */
@@ -177,7 +176,7 @@ export class SessionControl {
         ...(replaced ? [`- This replaces this thread's current connection to session \`${replaced}\`; that session's history is kept.`, ''] : []),
         '- Its existing history is kept. Later /clear or /thread delete in this thread will not delete it.',
         '- Connecting sends no task. Your next message continues this session.',
-        '- Close any local Pi using this session first: remote-cli cannot detect a terminal Pi, and two writers would corrupt the conversation.',
+        '- Local Pi may stay open, but keep it idle while this thread runs. Resume the same file locally before switching back; concurrent writes can create separate branches.',
         '- This thread\'s model or effort override, if set, applies to new turns.',
         '',
         `Confirm: \`/resume confirm ${pending.token}\``,
@@ -192,10 +191,10 @@ export class SessionControl {
     const holder = this.deps.piHolder(locator.file, threadId);
     if (holder) {
       const name = this.deps.threadName(holder);
-      return { error: `This session is already used by ${name ? `thread "${name}"` : 'another remote-cli thread'}. Release or detach it there first. Nothing was changed.` };
+      return { error: `This session is already used by ${name ? `thread "${name}"` : 'another remote-cli thread'}. Detach it there first. Nothing was changed.` };
     }
     const current = this.deps.piBinding(threadId);
-    if (current?.adopted && !current.released && current.id === id) {
+    if (current?.adopted && current.id === id) {
       return { error: 'This thread is already connected to that session. Send your next instruction to continue it.' };
     }
     return { locator };
@@ -215,7 +214,7 @@ export class SessionControl {
     const checked = this.checkTarget(sessionId, scope.threadId, cwd);
     if ('error' in checked) return { success: false, error: checked.error };
     if (checked.locator.revision !== revision) {
-      return { success: false, error: 'The session changed after you selected it (for example a local Pi wrote to it). Close local Pi, send /resume and select it again. Nothing was changed.' };
+      return { success: false, error: 'The session changed after you selected it (for example a local Pi wrote to it). Wait for local work to finish, send /resume and select it again. Nothing was changed.' };
     }
     const executor = this.deps.executor(scope.threadId);
     if (!executor.adoptNativeSession) return { success: false, error: 'This backend cannot connect native sessions. Nothing was changed.' };
@@ -232,14 +231,14 @@ export class SessionControl {
         `\u2705 Connected to Pi session \`${sessionId}\`. ${NOTHING_SENT}`,
         ...(replaces ? [`The previous connection to \`${replaces}\` was replaced; its history is kept.`] : []),
         'Send your next instruction to continue it.',
-        'Before working on it locally, send /session release here; /session shows the binding.',
+        'Remote turns reload this session automatically. Before local work, wait for this thread to finish and resume the same file locally.',
       ].join('\n'),
     };
   }
 
-  private async handleBinding(kind: 'status' | 'release' | 'detach' | 'confirm' | 'cancel', token: string | undefined,
+  private async handleBinding(kind: 'status' | 'detach' | 'confirm' | 'cancel', token: string | undefined,
     backend: BackendKey, scope: SessionMenuScope, content: string): Promise<SessionControlResponse> {
-    // An existing binding stays inspectable and releasable even if sharing was disabled later.
+    // An existing binding stays inspectable and detachable even if sharing was disabled later.
     const state = backend === 'pi' ? this.deps.piBinding(scope.threadId) : undefined;
     if (!state?.adopted) {
       const denied = sessionSharingDenied(backend, this.deps.sharingConfig());
@@ -249,19 +248,12 @@ export class SessionControl {
     }
     const id = state.id ?? 'unknown';
     if (kind === 'status') {
-      return {
-        success: true,
-        output: [
-          `\ud83d\udd17 This thread is connected to Pi session \`${id}\` (${state.released ? 'released for local use; remote work is blocked' : 'remote-ready'}).`,
-          '',
-          state.released
-            ? 'To use it here again, close local Pi, send /resume and connect it again.'
-            : 'Send /session release before working on it locally.',
-          'Send /session detach to stop using it here and start a fresh conversation (its history is kept).',
-          '',
-          `On this computer, run \`remote-cli session show --thread <thread-name> --backend pi\` for local reopen guidance.`,
-        ].join('\n'),
-      };
+      return { success: true, output: [
+        `This thread is connected to Pi session \`${id}\` (reloads before every remote turn).`,
+        'Local Pi may stay open. Use only one side at a time; resume the same file locally before the next local turn.',
+        'Send /session detach to start a fresh conversation here without deleting native history.',
+        'On this computer, run \`remote-cli session show --thread <thread-name> --backend pi\` for local reopen guidance.',
+      ].join('\n') };
     }
     if (kind === 'detach') {
       const pending = this.menus.confirm({ action: 'detach', backend, scope, sessionId: id });
@@ -287,9 +279,8 @@ export class SessionControl {
       return { success: false, error: 'This thread is running a task. Wait for it to finish (or send /abort) first. Nothing was changed.' };
     }
     const executor = this.deps.executor(scope.threadId);
-    const operation = kind === 'release' ? executor.releaseNativeSession : executor.detachNativeSession;
-    if (!operation) return { success: false, error: 'This backend cannot release or detach native sessions. Nothing was changed.' };
-    if (kind === 'release' && state.released) return { success: true, output: `Pi session \`${id}\` is already released for local use.` };
+    const operation = executor.detachNativeSession;
+    if (!operation) return { success: false, error: 'This backend cannot detach native sessions. Nothing was changed.' };
     this.deps.setBusy(scope.threadId, true);
     try {
       const result = await operation.call(executor);
@@ -299,9 +290,7 @@ export class SessionControl {
     }
     return {
       success: true,
-      output: kind === 'release'
-        ? `Released Pi session \`${id}\`: the remote Pi process has stopped and this thread will not use it until you connect it again with /resume. You can now open it locally, for example with \`pi --session <file>\` (see \`remote-cli session show --thread <thread-name> --backend pi\`).`
-        : `Detached Pi session \`${id}\`. Its history is kept on the computer; the next message here starts a fresh conversation.`,
+      output: `Detached Pi session \`${id}\`. Its history is kept on the computer; the next message here starts a fresh conversation.`,
     };
   }
 }

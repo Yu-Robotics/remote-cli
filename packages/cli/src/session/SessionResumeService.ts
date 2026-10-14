@@ -147,7 +147,7 @@ export function sessionResumeGate(content: string, currentBackend: BackendKey, c
   if (sessionStatus) {
     return {
       success: false, code: 'native_capability_unavailable',
-      error: `No native session is bound to this thread. ${BACKEND_LABELS[backend]} session status, release and detach become available after native resume is verified. No session was loaded or task sent.\n\nOn this computer, run \`remote-cli session show --thread <thread-name> --backend ${backend}\` for local-only reopen guidance; it never starts a backend.`,
+      error: `No native session is bound to this thread. ${BACKEND_LABELS[backend]} session status and detach become available after native resume is verified. No session was loaded or task sent.\n\nOn this computer, run \`remote-cli session show --thread <thread-name> --backend ${backend}\` for local-only reopen guidance; it never starts a backend.`,
     };
   }
   return {

@@ -39,7 +39,6 @@ describe('SessionControl', () => {
     now = 1_000;
     executor = {
       adoptNativeSession: vi.fn(async () => ({ success: true })),
-      releaseNativeSession: vi.fn(async () => ({ success: true })),
       detachNativeSession: vi.fn(async () => ({ success: true })),
     };
     deps = {
@@ -71,7 +70,7 @@ describe('SessionControl', () => {
     const selected = await send(`/resume select ${token(list.output!, 'resume select')} 1`);
     expect(selected.output).toContain('Fix login');
     expect(selected.output).toContain('4 messages');
-    expect(selected.output).toContain('Close any local Pi');
+    expect(selected.output).toContain('Local Pi may stay open');
     expect(selected.output).not.toContain('/native/');
     expect(deps.executor).not.toHaveBeenCalled();
 
@@ -119,7 +118,7 @@ describe('SessionControl', () => {
   });
 
   it('states that a confirmed connection replaces the previous binding and keeps its history', async () => {
-    binding = { id: 'session-02', adopted: true, released: false };
+    binding = { id: 'session-02', adopted: true };
     const selected = await send(`/resume select ${token((await send('/resume')).output!, 'resume select')} 1`);
     expect(selected.output).toContain('This replaces this thread\'s current connection to session `session-02`');
     const confirmed = await send(`/resume confirm ${token(selected.output!, 'resume confirm')}`);
@@ -141,7 +140,7 @@ describe('SessionControl', () => {
     holder = 'thread-b';
     expect((await send(`/resume select ${menu} 1`)).error).toContain('already used by thread "other"');
     holder = undefined;
-    binding = { id: ID, adopted: true, released: false };
+    binding = { id: ID, adopted: true };
     expect((await send(`/resume select ${menu} 1`)).error).toContain('already connected');
     binding = undefined;
     backend = 'codex';
@@ -184,50 +183,45 @@ describe('SessionControl', () => {
     expect((await send('/resume backend nope')).error).toContain('Expected a backend key');
   });
 
-  it('reports status, release and confirmed detach for an adopted binding', async () => {
+  it('reports automatic reload status, rejects release and supports confirmed detach', async () => {
     expect((await send('/session')).error).toContain('No native session is bound');
-    expect((await send('/session release')).error).toContain('not connected');
-    binding = { id: ID, adopted: true, released: false };
-    expect((await send('/session')).output).toContain('remote-ready');
-
-    expect((await send('/session release')).output).toContain('Released Pi session');
-    expect(executor.releaseNativeSession).toHaveBeenCalledTimes(1);
-    binding = { id: ID, adopted: true, released: true };
-    expect((await send('/session')).output).toContain('released for local use');
-    expect((await send('/session release')).output).toContain('already released');
-    expect(executor.releaseNativeSession).toHaveBeenCalledTimes(1);
-
+    expect((await send('/session release')).error).toContain('Expected /session');
+    binding = { id: ID, adopted: true };
+    expect((await send('/session')).output).toContain('reloads before every remote turn');
+    expect((await send('/session')).output).not.toContain('/session release');
     const prompt = await send('/session detach');
     expect(prompt.output).toContain('is not deleted');
     expect(executor.detachNativeSession).not.toHaveBeenCalled();
-    const detach = token(prompt.output!, 'session confirm');
-    expect((await send(`/resume confirm ${detach}`)).success).toBe(false); // action-bound
-    const again = token((await send('/session detach')).output!, 'session confirm');
-    expect((await send(`/session confirm ${again}`)).output).toContain('Detached');
+    const again = token(prompt.output!, 'session confirm');
+    expect((await send('/resume confirm ' + again)).success).toBe(false);
+    expect((await send('/session confirm ' + again)).output).toContain('Detached');
     expect(executor.detachNativeSession).toHaveBeenCalledTimes(1);
-    expect((await send(`/session confirm ${again}`)).error).toContain('expired');
+    expect((await send('/session confirm ' + again)).error).toContain('expired');
   });
 
-  it('allows status and release after sharing is disabled, and guards busy or failing operations', async () => {
-    binding = { id: ID, adopted: true, released: false };
+  it('allows status and detach after sharing is disabled, and guards busy or failing operations', async () => {
+    binding = { id: ID, adopted: true };
     sharing = undefined;
     expect((await send('/session')).success).toBe(true);
+    const pending = token((await send('/session detach')).output!, 'session confirm');
     busy = true;
-    expect((await send('/session release')).error).toContain('running a task');
+    expect((await send('/session confirm ' + pending)).error).toContain('running a task');
     busy = false;
-    executor.releaseNativeSession.mockResolvedValue({ success: false, error: 'still held' });
-    expect((await send('/session release')).error).toBe('still held');
-    executor.releaseNativeSession = undefined;
-    expect((await send('/session release')).error).toContain('cannot release');
+    executor.detachNativeSession.mockResolvedValue({ success: false, error: 'still connected' });
+    const retry = token((await send('/session detach')).output!, 'session confirm');
+    expect((await send('/session confirm ' + retry)).error).toBe('still connected');
+    executor.detachNativeSession = undefined;
+    const unavailable = token((await send('/session detach')).output!, 'session confirm');
+    expect((await send('/session confirm ' + unavailable)).error).toContain('cannot detach');
     const cancel = token((await send('/session detach')).output!, 'session cancel');
-    expect((await send(`/session cancel ${cancel}`)).output).toContain('Cancelled');
+    expect((await send('/session cancel ' + cancel)).output).toContain('Cancelled');
     binding = undefined;
     sharing = { enabled: true };
     expect((await send('/session confirm AAAAAAAAAAAA')).error).toContain('not connected');
     expect((await send('/session bogus')).error).toContain('Expected /session');
     backend = 'codex';
-    binding = { id: ID, adopted: true, released: false };
-    expect((await send('/session')).success).toBe(false); // bindings are Pi-only
+    binding = { id: ID, adopted: true };
+    expect((await send('/session')).success).toBe(false);
   });
 });
 
@@ -245,7 +239,7 @@ describe('session command grammar', () => {
 
   it('parses /session subcommands', () => {
     expect(parseSessionBindingCommand('/session')).toEqual({ kind: 'status' });
-    expect(parseSessionBindingCommand('/session release')).toEqual({ kind: 'release' });
+    expect(parseSessionBindingCommand('/session release')).toMatchObject({ kind: 'invalid' });
     expect(parseSessionBindingCommand('/session detach')).toEqual({ kind: 'detach' });
     expect(parseSessionBindingCommand('/session confirm abcdefghijkl')).toEqual({ kind: 'confirm', token: 'abcdefghijkl' });
     expect(parseSessionBindingCommand('/session cancel abcdefghijkl')).toEqual({ kind: 'cancel', token: 'abcdefghijkl' });

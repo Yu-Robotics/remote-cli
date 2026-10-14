@@ -133,8 +133,6 @@ export interface IExecutor {
    * restore the previous conversation unchanged when verification fails.
    */
   adoptNativeSession?(target: NativeSessionTarget): Promise<NativeSessionResult>;
-  /** Stop the owned runtime and block remote work until the session is adopted again. */
-  releaseNativeSession?(): Promise<NativeSessionResult>;
   /** Drop the association without deleting native history; the next turn starts fresh. */
   detachNativeSession?(): Promise<NativeSessionResult>;
 }
