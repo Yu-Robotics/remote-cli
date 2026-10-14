@@ -143,4 +143,9 @@ export interface NativeSessionTarget {
   sessionFile: string;
 }
 
-export type NativeSessionResult = { success: true } | { success: false; error: string };
+export type NativeSessionResult = { success: true } | {
+  success: false;
+  error: string;
+  /** Keep the native file reserved when process cleanup could not be confirmed. */
+  recoveryRequired?: boolean;
+};

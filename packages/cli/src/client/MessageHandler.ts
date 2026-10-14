@@ -193,7 +193,8 @@ export class MessageHandler {
     threadName: threadId => this.threadManager.getThread(threadId)?.name,
     // Queued or pending work counts as busy: a confirmation must never redirect it into another session.
     isBusy: threadId => this.threadPool.isThreadBusy(threadId) || this.hasThreadQueueState(threadId)
-      || this.abortOperations.has(threadId),
+      || this.abortOperations.has(threadId) || this.isDestroyed || this.automaticUpdateInProgress
+      || this.delegation.hasActiveTasks(threadId) || this.settingsAdmission.hasCommand(threadId),
     setBusy: (threadId, busy) => {
       if (busy) {
         this.sessionOperations.set(threadId, this.beginThreadOperation(threadId));
@@ -430,7 +431,19 @@ export class MessageHandler {
       }
       let response: { success: boolean; output?: string; error?: string };
       try {
-        response = await this.sessionControl.handle(content, { openId: message.openId, threadId });
+        const control = () => this.sessionControl.handle(content, { openId: message.openId, threadId });
+        // Only Pi confirmations mutate native context. Other catalogs remain read-only.
+        if (this.threadPool.getBackendKey(threadId) === 'pi' && /^\/(?:resume|r|session)\s+confirm(?:\s|$)/i.test(content)) {
+          try {
+            response = await this.settingsAdmission.mutation(threadId, async () => {
+              this.settingsService.invalidate(threadId);
+              try { return await control(); }
+              finally { this.settingsService.invalidate(threadId); }
+            });
+          } finally { void this.startNextQueuedCommand(threadId); }
+        } else {
+          response = await control();
+        }
       } catch (error) {
         response = { success: false, error: `Session control failed: ${error instanceof Error ? error.message : String(error)}. No task was sent.` };
       }

@@ -81,6 +81,63 @@ describe('SessionControl', () => {
     expect(deps.setBusy).toHaveBeenNthCalledWith(2, 'thread-a', false);
   });
 
+  it('reserves one native file before async startup across different threads', async () => {
+    const other = { ...ctx, threadId: 'thread-b' };
+    const firstToken = token((await send(`/resume id ${ID}`)).output!, 'resume confirm');
+    const secondToken = token((await send(`/resume id ${ID}`, other)).output!, 'resume confirm');
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    executor.adoptNativeSession.mockImplementation(async () => { await gate; holder = 'thread-a'; return { success: true }; });
+    const first = send(`/resume confirm ${firstToken}`);
+    try {
+      expect(await send(`/resume confirm ${secondToken}`, other)).toMatchObject({ success: false, error: expect.stringContaining('being connected') });
+      expect(executor.adoptNativeSession).toHaveBeenCalledTimes(1);
+    } finally { release(); }
+    expect((await first).success).toBe(true);
+    expect((await send(`/resume id ${ID}`, other)).error).toContain('already used');
+  });
+
+  it('allows different native files to connect independently', async () => {
+    const other = { ...ctx, threadId: 'thread-b' };
+    const a = token((await send(`/resume id ${ID}`)).output!, 'resume confirm');
+    const b = token((await send('/resume id session-02', other)).output!, 'resume confirm');
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    executor.adoptNativeSession.mockImplementation(async () => { await gate; return { success: true }; });
+    const first = send(`/resume confirm ${a}`), second = send(`/resume confirm ${b}`, other);
+    try { expect(executor.adoptNativeSession).toHaveBeenCalledTimes(2); }
+    finally { release(); }
+    expect((await Promise.all([first, second])).every(result => result.success)).toBe(true);
+  });
+
+  it('releases a failed reservation only after confirmed cleanup', async () => {
+    executor.adoptNativeSession.mockResolvedValueOnce({ success: false, error: 'Synthetic verification failure' });
+    expect((await send(`/resume confirm ${await confirmToken()}`)).success).toBe(false);
+    expect((await send(`/resume confirm ${await confirmToken()}`)).success).toBe(true);
+  });
+
+  it.each(['uncertain', 'throw'])('quarantines the native file after an %s outcome', async outcome => {
+    const pending = await confirmToken();
+    if (outcome === 'throw') executor.adoptNativeSession.mockRejectedValueOnce(new Error('Synthetic unknown outcome'));
+    else executor.adoptNativeSession.mockResolvedValueOnce({ success: false, error: 'Synthetic cleanup failure', recoveryRequired: true });
+    if (outcome === 'throw') await expect(send(`/resume confirm ${pending}`)).rejects.toThrow('unknown outcome');
+    else expect((await send(`/resume confirm ${pending}`)).success).toBe(false);
+    expect((await send(`/resume id ${ID}`, { ...ctx, threadId: 'thread-b' })).error).toContain('requires process cleanup');
+    expect(deps.setBusy).toHaveBeenLastCalledWith('thread-a', false);
+    expect(executor.adoptNativeSession).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['claude', 'codex'] as const)('keeps %s discovery read-only without constructing any executor', async target => {
+    backend = target;
+    expect((await send('/resume')).success).toBe(true);
+    expect((await send(`/resume id ${ID}`)).success).toBe(false);
+    expect((await send('/session detach')).success).toBe(false);
+    expect(deps.executor).not.toHaveBeenCalled();
+    expect(executor.adoptNativeSession).not.toHaveBeenCalled();
+    expect(executor.detachNativeSession).not.toHaveBeenCalled();
+    expect(deps.setBusy).not.toHaveBeenCalled();
+  });
+
   it('makes confirmations single use, scope bound, expiring and cancellable', async () => {
     const pending = await confirmToken();
     expect((await send(`/resume confirm ${pending}`, { ...ctx, openId: 'someone-else' })).error).toContain('expired, was already used');

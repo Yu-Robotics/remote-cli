@@ -85,6 +85,61 @@ describe('PiClient process lifecycle', () => {
     vi.unstubAllEnvs();
   });
 
+  it.each(['destroy', 'abort'] as const)('awaits native connection rollback on %s without restarting Pi for identity or abort RPCs', async action => {
+    const project = fs.mkdtempSync(path.join(os.homedir(), '.pi-connect-stop-test-'));
+    const sessionFile = path.join(project, 'native.jsonl');
+    fs.writeFileSync(sessionFile, '{"type":"session","id":"native-synthetic"}\n');
+    const processes: any[] = [];
+    vi.mocked(spawn).mockImplementation(() => {
+      const proc = Object.assign(new EventEmitter(), {
+        stdin: { end: vi.fn(), write: vi.fn(), destroyed: false, writable: true, on: vi.fn() },
+        stdout: new EventEmitter(), stderr: new EventEmitter(), exitCode: null as number | null, signalCode: null,
+        kill: vi.fn(() => {
+          queueMicrotask(() => { proc.exitCode = 0; proc.emit('exit', 0, null); proc.emit('close', 0, null); });
+          return true;
+        }),
+      });
+      processes.push(proc);
+      return proc as any;
+    });
+    let release!: () => void, entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const executor = new PiExecutor(new DirectoryGuard([project]), {
+      initialWorkingDirectory: project, sessionBaseDir: path.join(project, 'pointers'), threadId: 'thread-synthetic',
+      clientFactory: launch => {
+        const client = new PiClient({ ...launch, killEscalationMs: 100, requestTimeoutMs: 100 });
+        const start = client.start.bind(client);
+        vi.spyOn(client, 'start').mockImplementationOnce(async () => { await start(); entered(); await gate; });
+        return client;
+      },
+    });
+    const adopting = executor.adoptNativeSession({ sessionId: 'native-synthetic', sessionFile });
+    let stopping: Promise<void | boolean> | undefined;
+    let stopped = false;
+    try {
+      await started;
+      stopping = executor[action]().then(result => { stopped = true; return result; });
+      await vi.waitFor(() => expect(processes[0].exitCode).toBe(0));
+      expect(stopped).toBe(false);
+      release();
+      const result = await stopping;
+      if (action === 'abort') expect(result).toBe(true);
+      expect(await adopting).toMatchObject({ success: false, error: expect.stringContaining('cancelled') });
+      expect(spawn).toHaveBeenCalledTimes(1);
+      expect(processes.every(proc => proc.exitCode !== null)).toBe(true);
+      expect(processes[0].stdin.write).not.toHaveBeenCalled();
+      expect(fs.existsSync(path.join(project, 'pointers', 'thread-synthetic.json'))).toBe(false);
+    } finally {
+      release();
+      await adopting;
+      for (const proc of processes) { proc.exitCode = 0; proc.emit('exit', 0, null); }
+      await stopping;
+      await executor.destroy();
+      fs.rmSync(project, { recursive: true, force: true });
+    }
+  });
+
   it.each([false, true])('preserves ordinary environment inheritance and strips managed worker credentials: %s', async delegationWorker => {
     vi.stubEnv('REMOTE_CLI_DELEGATION_URL', 'http://127.0.0.1:12345/');
     vi.stubEnv('REMOTE_CLI_DELEGATION_TOKEN', 'parent-test-token');

@@ -2,7 +2,7 @@
 
 ## Status and authority
 
-Release `1.6.164` implements read-only discovery for Pi, Codex and Claude Code,
+Release `1.6.165` implements read-only discovery for Pi, Codex and Claude Code,
 and native session connection and detach for Pi only. Adopted Pi sessions reload
 before each remote turn; there is no release action. Pi `1.2.0` was
 verified with synthetic native sessions and a manual Feishu continuation test.
@@ -12,7 +12,8 @@ This document distinguishes the current contract from future requirements.
 Cross-process ownership, managed local launching, durable operation recovery,
 other backend connections and fully verified bidirectional handoff are **not
 implemented**. An unused registry/lease prototype was removed from this change.
-No locking guarantee may be inferred from the remaining thread-pointer checks.
+The daemon reserves Pi files during connection and serializes Pi confirmations
+with settings admission. This is not an OS lock or cross-process ownership guarantee.
 
 - Baseline: `5df21c1`, package version `1.6.159`.
 - Implementation backlog: [Session Resume Plan](SESSION_RESUME_PLAN.md).
@@ -208,6 +209,14 @@ overlapping turns/context changes; abort/reset/shutdown cancel before dispatch.
 Private non-adopted sessions and delegated workers retain their persistent mode.
 The association remains reserved by its pointer. Pointer scans detect other
 recorded thread holders, not atomic cross-process admission or native exclusivity.
+
+From `1.6.165`, connection reserves the canonical Pi file before asynchronous
+startup across threads in one daemon. Connection and detach succeed only after
+their pointer write succeeds; write failure retains the previous association.
+An unknown or unconfirmed cleanup outcome quarantines the selected file until
+client restart after confirmed Pi exit. Pi confirmations share settings admission
+and reject queued work, active delegated tasks, and automatic updates. These guards
+do not change Claude Code or Codex executors, settings, or native histories.
 
 `remote-cli session show --thread <name> --backend <key>` reads only local pointer
 metadata and works without a daemon or backend process. Verified native reopen

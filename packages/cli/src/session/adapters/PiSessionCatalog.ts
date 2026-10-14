@@ -90,9 +90,12 @@ export function resolvePiSessionDirectory(workingDirectory: string, options: PiC
   };
   const project = configured(readJsonFile(path.join(workingDirectory, '.pi', 'settings.json')));
   if (project) return { directory: project, source: 'project-setting', unresolved: false, notes };
+  if (env.PI_CODING_AGENT_DIR && !agentOverride) {
+    return { source: 'default', unresolved: true, notes };
+  }
   const global = configured(readJsonFile(path.join(agent, 'settings.json')));
   if (global) return { directory: global, source: 'global-setting', unresolved: false, notes };
-  return { source: 'default', unresolved: false, notes };
+  return { directory: path.join(agent, 'sessions', piProjectDirectoryName(workingDirectory)), source: 'default', unresolved: false, notes };
 }
 
 /** Session files referenced by synthetic worker/metadata pointers stay excluded after reuse. */

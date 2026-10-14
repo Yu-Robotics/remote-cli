@@ -2,7 +2,7 @@
 
 ## Status and authority
 
-Release `1.6.164` adds read-only Pi/Codex/Claude Code catalogs and Pi native
+Release `1.6.165` adds read-only Pi/Codex/Claude Code catalogs and Pi native
 connection and detach, with adopted history reloaded before every remote turn.
 The release action and released-state gate are removed. All eight backends remain future targets;
 other backend connections and verified bidirectional handoff are unavailable.
@@ -101,14 +101,20 @@ until a reviewed implementation needs them.
 
 These are open work, not completed guarantees of this release:
 
+Delivered Pi-only hardening in `1.6.165`: in-daemon canonical-file reservations,
+mandatory connection/detach pointer writes with previous-association retention on
+failure, settings admission, update/delegation/queue guards, cancellation and
+unknown-cleanup quarantine. Claude Code and Codex retain read-only discovery
+without executor, settings, or history changes.
+
 - [ ] Integrate settings, approvals/input, delegation closeout, attachments,
   shutdown and automatic-update admission with session-context mutations.
 - [ ] Bind drafts to backend/config/binding/enrollment revisions as well as the
   current user/thread/workspace scope; invalidate revoked or stale actions.
-- [ ] Make persistence failure explicit and recoverable rather than rely on
-  best-effort pointer writes or in-memory success.
-- [ ] Serialize physical session admission across threads/processes/config aliases;
-  pointer scanning alone cannot establish exclusive ownership.
+- [ ] Make operation persistence crash-recoverable across all affected records;
+  synchronous Pi pointer-write failure is handled, not a durable transaction.
+- [ ] Serialize physical session admission across processes/config aliases;
+  in-daemon reservations do not establish cross-process exclusive ownership.
 - [ ] Retain durable foreground/synthetic provenance after pointer removal so
   cleanup cannot relabel retained worker history as user history.
 - [ ] Verify changed-cwd, inactive-backend deletion, settings metadata executors,

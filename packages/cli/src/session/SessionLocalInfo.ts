@@ -35,7 +35,7 @@ const REOPEN_RULES: Partial<Record<BackendKey, ReopenRule>> = {
   claude: { command: id => `claude --resume ${id}`, verified: 'verified against the installed Claude Code --help' },
   codex: { command: id => `codex resume ${id}`, verified: 'verified against the installed Codex CLI resume help' },
   opencode: { command: id => `opencode --session ${id}`, verified: 'verified against the installed OpenCode --session flag' },
-  pi: { command: (id, sessionFile) => `pi --session ${sessionFile ?? id}`, verified: 'verified against the installed Pi --session flag' },
+  pi: { command: (id, sessionFile) => `pi --session '${(sessionFile ?? id).replace(/'/g, "'\\''")}'`, verified: 'verified against the installed Pi --session flag' },
 };
 
 export interface LocalSessionInfoOptions {

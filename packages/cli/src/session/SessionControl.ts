@@ -71,6 +71,8 @@ function describe(candidate: SessionCatalogCandidate): string {
  */
 export class SessionControl {
   private readonly menus: SessionMenuStore;
+  /** In-flight native files, including quarantined outcomes, shared across this daemon's threads. */
+  private readonly sessionReservations = new Map<string, string>();
 
   constructor(private readonly deps: SessionControlDeps, menus = new SessionMenuStore()) {
     this.menus = menus;
@@ -188,6 +190,9 @@ export class SessionControl {
   private checkTarget(id: string, threadId: string, cwd: string): { locator: PiSessionLocator } | { error: string } {
     const locator = this.deps.resolvePi(cwd, id);
     if (!locator) return { error: 'This session is no longer listed for this workspace. Send /resume to list sessions again. Nothing was changed.' };
+    if (this.sessionReservations.has(locator.file)) {
+      return { error: 'This Pi session is being connected or requires process cleanup. Retry after the operation finishes; uncertain cleanup requires restarting the client after Pi exits.' };
+    }
     const holder = this.deps.piHolder(locator.file, threadId);
     if (holder) {
       const name = this.deps.threadName(holder);
@@ -218,11 +223,16 @@ export class SessionControl {
     }
     const executor = this.deps.executor(scope.threadId);
     if (!executor.adoptNativeSession) return { success: false, error: 'This backend cannot connect native sessions. Nothing was changed.' };
-    this.deps.setBusy(scope.threadId, true);
+    // Reserve before the first asynchronous native operation, not after pointer publication.
+    this.sessionReservations.set(checked.locator.file, scope.threadId);
+    let releaseReservation = false;
     try {
+      this.deps.setBusy(scope.threadId, true);
       const result = await executor.adoptNativeSession({ sessionId, sessionFile: checked.locator.file });
+      releaseReservation = result.success || !result.recoveryRequired;
       if (!result.success) return { success: false, error: result.error };
     } finally {
+      if (releaseReservation) this.sessionReservations.delete(checked.locator.file);
       this.deps.setBusy(scope.threadId, false);
     }
     return {
