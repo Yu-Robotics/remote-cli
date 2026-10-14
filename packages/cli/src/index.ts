@@ -8,6 +8,7 @@ import { statusCommand } from './commands/status';
 import { configCommand, ConfigAction } from './commands/config';
 import { serviceCommand, ServiceAction } from './commands/service';
 import { enableFiles } from './commands/files';
+import { sessionShowCommand } from './commands/session';
 import chalk from 'chalk';
 import path from 'path';
 import fs from 'fs';
@@ -405,6 +406,25 @@ configCmd
       console.error(chalk.red('❌ Error:'), error);
       process.exit(1);
     }
+  });
+
+/**
+ * Local read-only session inspection
+ */
+program
+  .command('session')
+  .description('Inspect a thread\'s locally recorded native session (read-only, no backend started)')
+  .command('show')
+  .description('Print local-only reopen guidance for one thread and backend')
+  .requiredOption('--thread <name>', 'Remote thread name shown by /thread list')
+  .requiredOption('--backend <key>', 'Backend key, for example pi or codex')
+  .action(async (options) => {
+    const result = await sessionShowCommand({ thread: options.thread, backend: options.backend });
+    if (!result.success) {
+      console.error(chalk.red('\u274c Failed:'), result.error);
+      process.exit(1);
+    }
+    console.log(result.output);
   });
 
 // Parse arguments

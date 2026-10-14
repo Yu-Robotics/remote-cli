@@ -127,4 +127,22 @@ export interface IExecutor {
    * Local pointers are removed separately, only after confirmed process exit.
    */
   releaseMetadataSession?(): Promise<void>;
+  /**
+   * Strict native session adoption. Implementations must verify the loaded native
+   * identity without sending a prompt, never fall back to a fresh session, and
+   * restore the previous conversation unchanged when verification fails.
+   */
+  adoptNativeSession?(target: NativeSessionTarget): Promise<NativeSessionResult>;
+  /** Stop the owned runtime and block remote work until the session is adopted again. */
+  releaseNativeSession?(): Promise<NativeSessionResult>;
+  /** Drop the association without deleting native history; the next turn starts fresh. */
+  detachNativeSession?(): Promise<NativeSessionResult>;
 }
+
+/** Adapter-validated native selection; the locator never comes from a chat message. */
+export interface NativeSessionTarget {
+  sessionId: string;
+  sessionFile: string;
+}
+
+export type NativeSessionResult = { success: true } | { success: false; error: string };

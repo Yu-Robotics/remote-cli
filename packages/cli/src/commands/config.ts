@@ -1,4 +1,5 @@
 import { ConfigManager } from '../config/ConfigManager';
+import { SESSION_BACKENDS, validateSessionSharing } from '../session/SessionResumeService';
 
 /**
  * Config command action types
@@ -201,6 +202,19 @@ async function handleSetConfig(
         error: 'Invalid server URL format',
       };
     }
+  }
+
+  if (key === 'sessionSharing' || key.startsWith('sessionSharing.')) {
+    const match = /^sessionSharing\.backends\.([a-z]+)\.enabled$/.exec(key);
+    if (key !== 'sessionSharing.enabled' && (!match || !SESSION_BACKENDS.includes(match[1] as typeof SESSION_BACKENDS[number]))) {
+      return { success: false, error: 'Only sessionSharing.enabled and known backend enabled flags are supported in this release.' };
+    }
+    if (value !== 'true' && value !== 'false') return { success: false, error: 'Session-sharing options require true or false.' };
+    const prior = config.get('sessionSharing');
+    const invalid = validateSessionSharing(prior);
+    if (invalid) return { success: false, error: invalid };
+    await config.set(key, value === 'true');
+    return { success: true, value: value === 'true' };
   }
 
   if (key === 'maintenance.updateNotice' || key === 'maintenance.subscriptionInspection') {
