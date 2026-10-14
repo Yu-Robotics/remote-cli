@@ -452,6 +452,12 @@ Claude Code also supports opt-in `/sandbox` policies. Workspace-write mode autom
 - **Device authentication**: Each device has a unique hardware-based ID
 - **Binding codes**: Expire after 5 minutes
 
+## Session Resume
+
+CLI 1.6.164 supports confirmed Pi native session connections and read-only Pi/Codex/Claude Code discovery. Adopted Pi history reloads before every remote turn; `/session detach` preserves it and `/session release` is removed. Foreground Pi `/new` and `/clear` also preserve old history and start independent IDs; new default names use native session IDs and persisted names are not overwritten on reopen. Worker/metadata cleanup is unchanged. Resume drafts keep ordinary messages in the current conversation until confirmation succeeds. Use only one side at a time. Local Pi windows may stay open but must use native `/resume` before their next local turn; automatic local refresh and writer locking are not provided. Existing Router command/response envelopes support the text workflow without a new wire capability. See the [session resume specification](../../SESSION_RESUME_SPEC.md).
+
+From CLI 1.6.165, Pi connection and detach confirmations exclude simultaneous settings/context mutations and reject queued work, active delegated tasks, and automatic updates. One daemon reserves a selected Pi file before startup; successful connection/detach requires pointer persistence. Failed writes keep the previous association. Uncertain process cleanup keeps the selected file reserved; confirm Pi has exited before restarting the client to clear that quarantine. Discovery respects `PI_CODING_AGENT_DIR`, and Pi local reopen commands quote file paths. These guards do not lock unmanaged terminals or other CLI instances. Claude Code and Codex catalogs remain read-only; their executor, settings, and history behavior is unchanged.
+
 ## Documentation
 
 For full documentation including router server deployment, see the [project README](https://github.com/Yu-Robotics/remote-cli#readme).

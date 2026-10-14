@@ -26,6 +26,14 @@ export interface ServerConfig {
   heartbeatInterval: number;
 }
 
+/** Local opt-in for native session discovery and sequential handoff. */
+export interface SessionSharingConfig {
+  /** Master switch. Disabled by default. */
+  enabled?: boolean;
+  /** Backend-specific capability switches. */
+  backends?: Partial<Record<BackendKey, { enabled?: boolean }>>;
+}
+
 /**
  * AGY (Antigravity CLI) executor configuration
  */
@@ -192,6 +200,8 @@ export interface Config {
   };
   /** Executor backend selection. Defaults to 'auto' (Claude persistent). */
   executor?: ExecutorConfig;
+  /** Local opt-in for native session discovery and handoff. */
+  sessionSharing?: SessionSharingConfig;
   /** Remote machine configurations */
   machines?: Record<string, any>;
   /** Remote proxy/host configuration */
@@ -206,6 +216,9 @@ export const DEFAULT_CONFIG: Config = {
     allowedDirectories: [],
     deniedCommands: [],
     maxConcurrentTasks: 1
+  },
+  sessionSharing: {
+    enabled: false,
   },
   server: {
     url: 'wss://localhost:3000',

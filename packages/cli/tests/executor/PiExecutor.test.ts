@@ -858,10 +858,9 @@ describe('PiExecutor', () => {
     expect(transport.running).toBe(false);
     expect(executor.getCurrentWorkingDirectory()).toBe(other);
     expect(executor.getSessionId()).toBeNull();
-    expect(transport.launch).toMatchObject({
-      cwd: other,
-      sessionId: 'thread-pi',
-    });
+    expect(transport.launch.cwd).toBe(other);
+    expect(transport.launch.sessionId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(transport.launch.sessionId).not.toBe('thread-pi');
     expect(transport.launch.sessionFile).toBeUndefined();
     await expect(fs.access(path.join(home, '.remote-cli', 'pi-sessions', 'thread-pi.json')))
       .rejects.toMatchObject({ code: 'ENOENT' });
