@@ -2,6 +2,15 @@
 
 这里只记录用户能感知的变化；英文技术细节见 CHANGELOG.md。
 
+## [1.6.160] - 2026-10-13
+
+### 会话接续
+- [session-handoff|会话接续] 一个线程现在可以连接并继续一个已有的 Pi 会话：`/resume` 列出当前工作目录的会话，`/resume select` 或 `id` 选中后显示确认，`/resume confirm` 连接；连接不发送任务。
+- [session-handoff|会话接续] 连接时会校验 Pi 实际打开的会话：不一致、已被其他线程占用、或选中后被本机修改都会被拒绝并保留原会话；接管的历史不会被 `/clear` 或 `/thread delete` 删除。
+- [session-handoff|会话接续] `/session` 查看连接状态，`/session release` 停止后端进程并锁定远程使用以方便本机继续，`/session detach` 确认后解除连接。
+- [session-handoff|会话接续] `/resume` 也支持翻页与搜索，令牌 5 分钟内有效且只对发起人、当前线程和工作目录生效。
+- [session-handoff|会话接续] 在本机运行 `remote-cli session show` 可查看重新打开会话的命令；Codex、Claude Code 等其他后端目前只能列出，还不能连接。
+
 ## [1.6.159] - 2026-10-12
 
 ### 大项目委派准备允许更长等待

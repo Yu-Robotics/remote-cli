@@ -834,15 +834,11 @@ describe('MessageHandler', () => {
   });
 
   describe('command shortcuts', () => {
-    it('should expand /r to resume command', async () => {
-      ctx.mockExecutor.execute.mockResolvedValue({ success: true, output: 'ok' });
-
+    it('reserves /r for native resume rather than prompting the model', async () => {
       await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-123', content: '/r', timestamp: Date.now() });
-
-      expect(ctx.mockExecutor.execute).toHaveBeenCalledWith(
-        expect.stringContaining('resume'),
-        expect.any(Object)
-      );
+      expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
+      expect(ctx.mockThreadPool.getExecutor).not.toHaveBeenCalled();
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ success: false, error: expect.stringContaining('disabled') }));
     });
 
     it('should expand /c to continue command', async () => {
@@ -856,15 +852,12 @@ describe('MessageHandler', () => {
       );
     });
 
-    it('should expand /resume to full resume command', async () => {
-      ctx.mockExecutor.execute.mockResolvedValue({ success: true, output: 'ok' });
-
-      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-123', content: '/resume', timestamp: Date.now() });
-
-      expect(ctx.mockExecutor.execute).toHaveBeenCalledWith(
-        expect.stringContaining('resume'),
-        expect.any(Object)
-      );
+    it('reserves /resume before actual Feishu slash passthrough', async () => {
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-123', content: '/resume', isSlashCommand: true, timestamp: Date.now() });
+      expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
+      expect(ctx.mockThreadPool.getExecutor).not.toHaveBeenCalled();
+      expect(mockSpawn).not.toHaveBeenCalled();
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ success: false, error: expect.stringContaining('disabled') }));
     });
 
     it('should expand /continue to full continue command', async () => {
@@ -1920,7 +1913,7 @@ describe('MessageHandler', () => {
     it('should inject hint for Chinese read commands', async () => {
       ctx.mockExecutor.execute.mockResolvedValue({ success: true, output: 'ok' });
 
-      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-123', content: '读取 config.ts', timestamp: Date.now() });
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-123', content: '\u8bfb\u53d6 config.ts', timestamp: Date.now() });
 
       expect(ctx.mockExecutor.execute).toHaveBeenCalledWith(
         expect.stringContaining('[System hint:'),

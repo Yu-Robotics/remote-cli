@@ -10,6 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.160] - 2026-10-13
+
+### Added
+- Reserve `/resume`, `/r` and `/session` as program-owned native session controls before executor construction, working-directory changes, queue admission or backend slash passthrough, and remove the misleading natural-language resume shortcut. Local session sharing stays disabled by default; enabling it never makes an unverified adapter available.
+- Add read-only native session discovery for Pi, Codex and Claude Code: `/resume` lists the current workspace's sessions (bounded reads, no backend process, no transcript text, no symlink following), hiding synthetic, delegated-worker, sidechain and ambiguous duplicate entries and reporting incomplete coverage. Message counts stay unavailable where they cannot be read safely.
+- Add paging and search to the read-only list: each list is a snapshot with an unguessable 12-character token, eight rows per page and a five-minute lifetime, bound to the requesting user, thread and workspace; `/resume page` and `/resume search` never reread native stores.
+- Connect a thread to an existing Pi session and continue its history. `/resume select` or `/resume id` shows a confirmation naming the session and any binding it replaces, and `/resume confirm` connects it. The loaded identity is verified through Pi RPC state without sending a prompt, so a silently substituted session is refused and the previous conversation is restored.
+- Add `/session` binding status, `/session release` (stop the owned Pi process and block remote work so a local Pi can take over) and `/session detach` (forget the association after confirmation). Adopted native history is user-owned: `/clear`, detach and `/thread delete` never delete it. A session held by another remote-cli thread, or changed locally after selection, is refused.
+- Add `remote-cli session show --thread <name> --backend <key>`: a read-only, daemon-free helper printing exact native reopen guidance.
+
 ## [1.6.159] - 2026-10-12
 
 ### Fixed

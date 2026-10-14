@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { randomUUID } from 'crypto';
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import type { Attachment } from '../types';
 import { configuredExecutionMetadata } from './ExecutionMetadata';
@@ -11,6 +12,8 @@ import type {
   ExecutorModelInfo,
   ExecutorEffortInfo,
   IExecutor,
+  NativeSessionResult,
+  NativeSessionTarget,
 } from './IExecutor';
 import { PiClient } from './pi/PiClient';
 import { sameConnection, type DelegationConnection } from '../delegation/contract';
@@ -71,6 +74,18 @@ interface SessionPointer {
   id?: string;
   sessionFile?: string;
   cwd?: string;
+  /** The user explicitly connected this thread to an existing native session. */
+  adopted?: boolean;
+  /** Remote work is blocked until the adopted session is connected again. */
+  released?: boolean;
+}
+
+const MISSING_ADOPTED_ERROR = 'The connected Pi session is no longer available on this computer. Send /session detach to start a fresh conversation, or /resume to connect another session.';
+const RELEASED_ERROR = 'This thread released its Pi session for local use. Close any local Pi using it, then send /resume and connect it again.';
+
+function sameFilePath(left: string, right: string): boolean {
+  const canonical = (value: string) => { try { return fs.realpathSync.native(value); } catch { return path.resolve(value); } };
+  return canonical(left) === canonical(right);
 }
 
 const DEFAULT_TURN_TIMEOUT_MS = 10 * 60 * 1000;
@@ -202,6 +217,9 @@ export class PiExecutor implements IExecutor {
   private unsubscribe: (() => void) | null = null;
   private sessionId: string | null = null;
   private sessionFile: string | null = null;
+  /** Adopted native history is user-owned: never deleted, never renamed. */
+  private adopted = false;
+  private released = false;
   private activeTurn: ActiveTurn | null = null;
   private readonly activityTracker = new ActivityTracker();
   private pendingUi: PendingUiRequest | null = null;
@@ -678,19 +696,23 @@ export class PiExecutor implements IExecutor {
   async deleteThreadData(threadId: string): Promise<void> {
     const pointerPath = path.join(path.dirname(this.sessionFilePath), `${threadId}.json`);
     let sessionFile = this.sessionFile;
+    let adopted = threadId === this.threadId && this.adopted;
     try {
       const stored = JSON.parse(fs.readFileSync(pointerPath, 'utf8')) as SessionPointer;
       sessionFile = stored.sessionFile ?? sessionFile;
+      adopted = adopted || stored.adopted === true;
     } catch {
       // Pointer may already be gone.
     }
     try { fs.unlinkSync(pointerPath); } catch { /* ignore */ }
-    if (sessionFile) {
+    if (sessionFile && !adopted) {
       try { fs.unlinkSync(sessionFile); } catch { /* ignore */ }
     }
     if (threadId === this.threadId) {
       this.sessionId = null;
       this.sessionFile = null;
+      this.adopted = false;
+      this.released = false;
     }
   }
 
@@ -729,6 +751,8 @@ export class PiExecutor implements IExecutor {
 
   private async ensureClient(): Promise<void> {
     if (this.destroyed) throw new Error('Executor has been destroyed');
+    if (this.released) throw new Error(RELEASED_ERROR);
+    if (this.adopted && (!this.sessionFile || !fs.existsSync(this.sessionFile))) throw new Error(MISSING_ADOPTED_ERROR);
     assertWorkingDirectoryExists(this.currentWorkingDirectory);
     if (this.retiredClients.size > 0) {
       await Promise.all([...this.retiredClients].map(client => this.stopRetiredClient(client)));
@@ -740,8 +764,111 @@ export class PiExecutor implements IExecutor {
       this.reportedEffort = undefined;
       this.client.updateLaunch?.(this.buildLaunch());
       await this.client.start();
-      await this.refreshSessionPointer();
+      if (!this.adopted) {
+        await this.refreshSessionPointer();
+        return;
+      }
+      // Adopted sessions never follow a silently substituted identity after a restart.
+      const mismatch = await this.checkAdoptedIdentity({ sessionId: this.sessionId!, sessionFile: this.sessionFile! });
+      if (mismatch) {
+        await this.client.stop().catch(() => undefined);
+        throw new Error(`${mismatch} ${MISSING_ADOPTED_ERROR}`);
+      }
     }
+  }
+
+  /**
+   * Connect this thread to an existing native Pi session file. Verification uses
+   * RPC `get_state` only: no prompt is sent. Pi may append ordinary metadata
+   * entries (for example a thinking-level record) but keeps prior history intact.
+   */
+  async adoptNativeSession(target: NativeSessionTarget): Promise<NativeSessionResult> {
+    const fail = (error: string): NativeSessionResult => ({ success: false, error });
+    if (this.destroyed) return fail('Executor has been destroyed.');
+    if (this.activeTurn) return fail('Wait for the running Pi task to finish before connecting a session.');
+    if (!fs.existsSync(target.sessionFile)) return fail('The selected Pi session is no longer available. No session was changed.');
+    const previous = { sessionId: this.sessionId, sessionFile: this.sessionFile, adopted: this.adopted, released: this.released };
+    try {
+      await this.recycleClient();
+    } catch (error) {
+      return fail(`Could not confirm that the current Pi process stopped (${this.friendlyError(error)}). No session was changed.`);
+    }
+    this.sessionId = target.sessionId;
+    this.sessionFile = target.sessionFile;
+    this.adopted = true;
+    this.released = false;
+    let error: string | undefined;
+    try {
+      assertWorkingDirectoryExists(this.currentWorkingDirectory);
+      this.reportedModel = undefined;
+      this.reportedEffort = undefined;
+      this.client.updateLaunch?.(this.buildLaunch());
+      await this.client.start();
+      error = await this.checkAdoptedIdentity(target);
+    } catch (startError) {
+      error = this.friendlyError(startError);
+    }
+    if (!error) {
+      this.savePointer();
+      return { success: true };
+    }
+    let stopped = true;
+    try { await this.client.stop(); } catch { stopped = false; }
+    Object.assign(this, previous);
+    // An unconfirmed stop is retired and retried before the previous session starts again.
+    if (stopped) this.client.updateLaunch?.(this.buildLaunch());
+    else this.replaceClient();
+    return fail(`${error} Nothing was changed; the previous conversation is kept.`);
+  }
+
+  /** Stop the owned Pi process and block remote work until the session is connected again. */
+  async releaseNativeSession(): Promise<NativeSessionResult> {
+    if (!this.adopted) return { success: false, error: 'This thread is not connected to a native Pi session.' };
+    if (this.activeTurn) return { success: false, error: 'Wait for the running Pi task to finish (or send /abort) before releasing the session.' };
+    try {
+      await this.recycleClient();
+    } catch (error) {
+      return { success: false, error: `Could not confirm that the Pi process stopped (${this.friendlyError(error)}). The session is still held by this thread; try again.` };
+    }
+    this.released = true;
+    this.savePointer();
+    return { success: true };
+  }
+
+  /** Forget the adopted session without deleting it; the next turn starts a fresh conversation. */
+  async detachNativeSession(): Promise<NativeSessionResult> {
+    if (!this.adopted) return { success: false, error: 'This thread is not connected to a native Pi session.' };
+    if (this.activeTurn) return { success: false, error: 'Wait for the running Pi task to finish (or send /abort) before detaching the session.' };
+    try {
+      await this.recycleClient();
+    } catch (error) {
+      return { success: false, error: `Could not confirm that the Pi process stopped (${this.friendlyError(error)}). The session is still connected; try again.` };
+    }
+    this.adopted = false;
+    this.released = false;
+    this.sessionFile = null;
+    this.sessionId = randomUUID();
+    this.savePointer();
+    this.client.updateLaunch?.(this.buildLaunch());
+    return { success: true };
+  }
+
+  /** Returns an error description when Pi did not load exactly the expected session. */
+  private async checkAdoptedIdentity(expected: NativeSessionTarget): Promise<string | undefined> {
+    const response = await this.client.request({ type: 'get_state' });
+    const data = response.success ? response.data : undefined;
+    if (!data) return 'Pi did not report its session state.';
+    if (data.sessionId !== expected.sessionId || typeof data.sessionFile !== 'string'
+      || !sameFilePath(data.sessionFile, expected.sessionFile)) {
+      return 'Pi opened a different session than the one selected.';
+    }
+    if (data.isStreaming === true) return 'Pi reported that the session is already running a turn.';
+    const model = data.model;
+    if (typeof model?.id === 'string' && model.id.trim()) {
+      this.reportedModel = typeof model.provider === 'string' && model.provider ? `${model.provider}/${model.id}` : model.id;
+    }
+    if (typeof data.thinkingLevel === 'string' && data.thinkingLevel.trim()) this.reportedEffort = data.thinkingLevel;
+    return undefined;
   }
 
   private async recycleClient(): Promise<void> {
@@ -773,8 +900,10 @@ export class PiExecutor implements IExecutor {
 
   private forgetSession(): void {
     const sessionFile = this.sessionFile;
+    const adopted = this.adopted;
     this.clearPointer();
-    if (sessionFile) {
+    // Only remote-cli-created history is disposable; adopted native sessions are preserved.
+    if (sessionFile && !adopted) {
       try { fs.unlinkSync(sessionFile); } catch { /* ignore */ }
     }
   }
@@ -788,7 +917,8 @@ export class PiExecutor implements IExecutor {
       sessionDir: this.sessionStoreDir,
       sessionId: this.sessionId ?? this.threadId,
       sessionFile: pointerFile,
-      sessionName: this.threadId ? `remote-cli-${this.threadId}` : undefined,
+      // `--name` appends a session_info entry, which would rename user-owned history.
+      sessionName: this.threadId && !this.adopted ? `remote-cli-${this.threadId}` : undefined,
       provider: this.provider,
       model: this.model,
       thinking: this.effort,
@@ -1036,6 +1166,8 @@ export class PiExecutor implements IExecutor {
       }
       if (stored.id) this.sessionId = stored.id;
       if (stored.sessionFile) this.sessionFile = stored.sessionFile;
+      this.adopted = stored.adopted === true;
+      this.released = this.adopted && stored.released === true;
     } catch {
       // First run for this thread.
     }
@@ -1046,6 +1178,8 @@ export class PiExecutor implements IExecutor {
       id: this.sessionId ?? undefined,
       sessionFile: this.sessionFile ?? undefined,
       cwd: this.currentWorkingDirectory,
+      ...(this.adopted ? { adopted: true } : {}),
+      ...(this.released ? { released: true } : {}),
     };
     const temporaryPath = `${this.sessionFilePath}.${process.pid}.tmp`;
     try {
@@ -1060,6 +1194,8 @@ export class PiExecutor implements IExecutor {
   private clearPointer(): void {
     this.sessionId = null;
     this.sessionFile = null;
+    this.adopted = false;
+    this.released = false;
     try { fs.unlinkSync(this.sessionFilePath); } catch { /* ignore */ }
   }
 

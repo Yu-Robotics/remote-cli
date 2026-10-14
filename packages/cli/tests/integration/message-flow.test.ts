@@ -180,12 +180,117 @@ describe('Integration: Message Flow', () => {
   });
 
   describe('Special command handling', () => {
-    it('should handle resume command', async () => {
-      executor.execute.mockResolvedValueOnce({ success: true, output: 'Session resumed' });
+    it.each([true, false])('intercepts resume without a model prompt (real slash envelope: %s)', async isSlashCommand => {
+      await handler.handleMessage({ type: 'command', messageId: 'msg_005', content: '/resume',
+        isSlashCommand, workingDirectory: '~/projects', timestamp: Date.now() });
 
-      await handler.handleMessage({ type: 'command', messageId: 'msg_005', content: '/resume', workingDirectory: '~/projects', timestamp: Date.now() });
+      expect(executor.execute).not.toHaveBeenCalled();
+      expect(mockThreadPool.getExecutor).not.toHaveBeenCalled();
+      expect(mockThreadPool.setWorkingDirectory).not.toHaveBeenCalled();
+      expect(mockThreadManager.updateThread).not.toHaveBeenCalled();
+      expect(wsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'response', messageId: 'msg_005', success: false, error: expect.stringContaining('disabled'),
+      }));
+    });
 
-      expect(executor.execute).toHaveBeenCalledWith('Please resume the previous conversation', expect.any(Object));
+    it.each(['claude', 'codex', 'agy', 'opencode', 'kimi', 'zcode', 'dsh'])('fails closed for unverified %s without constructing its executor', async backend => {
+      mockThreadPool.getBackendKey.mockReturnValue(backend);
+      (handler as any).config.get.mockImplementation((key: string) => key === 'sessionSharing' ? { enabled: true } : undefined);
+      await handler.handleMessage({ type: 'command', messageId: 'resume-native', content: '/resume id native-example',
+        isSlashCommand: true, openId: 'owner-example', timestamp: Date.now() });
+      expect(executor.execute).not.toHaveBeenCalled();
+      expect(mockThreadPool.getExecutor).not.toHaveBeenCalled();
+      expect(wsClient.send).toHaveBeenCalledWith(expect.objectContaining({ success: false, error: expect.stringContaining('not available') }));
+    });
+
+    it('rejects an unknown Pi session ID without constructing its executor', async () => {
+      mockThreadPool.getBackendKey.mockReturnValue('pi');
+      (handler as any).config.get.mockImplementation((key: string) => key === 'sessionSharing' ? { enabled: true } : undefined);
+      const guardSpy = vi.spyOn(guard, 'isSafePath').mockReturnValue(true);
+      await handler.handleMessage({ type: 'command', messageId: 'resume-pi-id', content: '/resume id native-example',
+        isSlashCommand: true, openId: 'owner-example', timestamp: Date.now() });
+      expect(executor.execute).not.toHaveBeenCalled();
+      expect(mockThreadPool.getExecutor).not.toHaveBeenCalled();
+      expect(wsClient.send).toHaveBeenCalledWith(expect.objectContaining({ success: false, error: expect.stringContaining('No Pi session with that ID') }));
+      guardSpy.mockRestore();
+    });
+
+    it('lists Pi sessions read-only when sharing is enabled, without constructing an executor', async () => {
+      mockThreadPool.getBackendKey.mockReturnValue('pi');
+      (handler as any).config.get.mockImplementation((key: string) => key === 'sessionSharing' ? { enabled: true } : undefined);
+      const guardSpy = vi.spyOn(guard, 'isSafePath').mockReturnValue(true);
+      await handler.handleMessage({ type: 'command', messageId: 'resume-list', content: '/resume', isSlashCommand: true, timestamp: Date.now() });
+      expect(mockThreadPool.getExecutor).not.toHaveBeenCalled();
+      expect(executor.execute).not.toHaveBeenCalled();
+      expect(wsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+        messageId: 'resume-list', success: true, output: expect.stringContaining('read-only'),
+      }));
+      const sent = wsClient.send.mock.calls.map((call: any[]) => call[0]).find((m: any) => m.messageId === 'resume-list');
+      expect(sent.output).toContain('nothing is loaded and no task is sent until you confirm');
+      guardSpy.mockRestore();
+    });
+
+    it('lists Codex sessions read-only on a Codex thread without constructing an executor', async () => {
+      // os.homedir() is pinned by the suite setup, so the adapter's default HOME is the real one.
+      mockThreadPool.getBackendKey.mockReturnValue('codex');
+      (handler as any).config.get.mockImplementation((key: string) => key === 'sessionSharing' ? { enabled: true } : undefined);
+      const guardSpy = vi.spyOn(guard, 'isSafePath').mockReturnValue(true);
+      await handler.handleMessage({ type: 'command', messageId: 'resume-codex', content: '/resume', isSlashCommand: true, timestamp: Date.now() });
+      expect(mockThreadPool.getExecutor).not.toHaveBeenCalled();
+      expect(executor.execute).not.toHaveBeenCalled();
+      const sent = wsClient.send.mock.calls.map((call: any[]) => call[0]).find((m: any) => m.messageId === 'resume-codex');
+      expect(sent.success).toBe(true);
+      expect(sent.output).toContain('Codex sessions in this workspace');
+      expect(sent.output).toContain('not available yet');
+      guardSpy.mockRestore();
+    });
+
+    it('lists Claude Code sessions read-only on a Claude thread without constructing an executor', async () => {
+      // The default backend for this suite is claude; the real project store for this
+      // workspace has no transcripts, so the answer is an explicit empty catalog.
+      (handler as any).config.get.mockImplementation((key: string) => key === 'sessionSharing' ? { enabled: true } : undefined);
+      const guardSpy = vi.spyOn(guard, 'isSafePath').mockReturnValue(true);
+      await handler.handleMessage({ type: 'command', messageId: 'resume-claude', content: '/resume', isSlashCommand: true, timestamp: Date.now() });
+      expect(mockThreadPool.getExecutor).not.toHaveBeenCalled();
+      expect(executor.execute).not.toHaveBeenCalled();
+      const sent = wsClient.send.mock.calls.map((call: any[]) => call[0]).find((m: any) => m.messageId === 'resume-claude');
+      expect(sent.success).toBe(true);
+      expect(sent.output).toContain('Claude Code sessions in this workspace');
+      expect(sent.output).toContain('not available yet');
+      guardSpy.mockRestore();
+    });
+
+    it('rejects a catalog request for a disallowed working directory', async () => {
+      mockThreadPool.getBackendKey.mockReturnValue('pi');
+      (handler as any).config.get.mockImplementation((key: string) => key === 'sessionSharing' ? { enabled: true } : undefined);
+      const guardSpy = vi.spyOn(guard, 'isSafePath').mockReturnValue(false);
+      await handler.handleMessage({ type: 'command', messageId: 'resume-denied', content: '/r', timestamp: Date.now() });
+      expect(wsClient.send).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'resume-denied', success: false, error: expect.stringContaining('not allowed') }));
+      guardSpy.mockRestore();
+    });
+
+    it('returns thread summaries so the card heading resolves without constructing an executor', async () => {
+      await handler.handleMessage({ type: 'command', messageId: 'resume-heading', content: '/resume', isSlashCommand: true, timestamp: Date.now() });
+      expect(mockThreadPool.getExecutor).not.toHaveBeenCalled();
+      expect(wsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'response', messageId: 'resume-heading', threadId: 'default-id',
+        threads: [expect.objectContaining({ id: 'default-id', name: 'default' })],
+      }));
+    });
+
+    it('keeps resume and session inspection responsive while ordinary work is busy', async () => {
+      mockThreadPool.isThreadBusy.mockReturnValue(true);
+      await handler.handleMessage({ type: 'command', messageId: 'session-control', content: '/session', isSlashCommand: true, timestamp: Date.now() });
+      expect(mockThreadPool.getExecutor).not.toHaveBeenCalled();
+      expect(mockThreadPool.setThreadBusy).not.toHaveBeenCalled();
+      expect(executor.execute).not.toHaveBeenCalled();
+    });
+
+    it('rejects a session control for a missing thread rather than falling back to default', async () => {
+      await handler.handleMessage({ type: 'command', messageId: 'session-missing', threadId: 'missing-thread', content: '/r', timestamp: Date.now() });
+      expect(mockThreadPool.getBackendKey).not.toHaveBeenCalled();
+      expect(mockThreadPool.getExecutor).not.toHaveBeenCalled();
+      expect(wsClient.send).toHaveBeenCalledWith(expect.objectContaining({ success: false, error: expect.stringContaining('no longer exists') }));
     });
 
     it('should handle continue command', async () => {
