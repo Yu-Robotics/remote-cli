@@ -10,12 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
-## [1.6.163] - 2026-10-14
+## [1.6.164] - 2026-10-14
 
 ### Fixed
 - Give newly created Pi foreground sessions a default name based on their independent native session ID, not the reusable remote thread ID. `/new` sessions are distinguishable in `/resume`, and reopening a persisted file no longer appends `--name` or overwrites names assigned locally. Adopted sessions and synthetic runtime naming remain unchanged. Existing duplicate names are not rewritten automatically.
 
-## [1.6.162] - 2026-10-14
+## [1.6.163] - 2026-10-14
 
 ### Changed
 - Pi foreground `/new` and `/clear` now remove only the current association and preserve native session history for `/resume`. Fresh conversations use independent random IDs rather than the stable remote thread ID, so retained files cannot resurrect cleared context, including after restart before the next prompt.
@@ -24,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Tests
 - Cover foreground A to `/new` to independent B, ordinary messages remaining in B during an unconfirmed resume draft, and confirmed native switching back to A. Cover reset/restart identity separation and unchanged synthetic-runtime cleanup.
 
-## [1.6.161] - 2026-10-13
+## [1.6.162] - 2026-10-13
 
 ### Changed
 - Remove `/session release`, the executor release operation and the persisted released-state gate. Existing adopted pointers with an old released flag remain usable; `/session detach` still confirms association removal without deleting native history.
@@ -34,7 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Synchronize the lockfile package versions with all package manifests.
 
-## [1.6.160] - 2026-10-13
+## [1.6.161] - 2026-10-13
 
 ### Added
 - Reserve `/resume`, `/r` and `/session` as program-owned native session controls before executor construction, working-directory changes, queue admission or backend slash passthrough, and remove the misleading natural-language resume shortcut. Local session sharing stays disabled by default; enabling it never makes an unverified adapter available.
@@ -43,6 +43,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Connect a thread to an existing Pi session and continue its history. `/resume select` or `/resume id` shows a confirmation naming the session and any binding it replaces, and `/resume confirm` connects it. The loaded identity is verified through Pi RPC state without sending a prompt, so a silently substituted session is refused and the previous conversation is restored.
 - Add `/session` binding status, `/session release` (stop the owned Pi process and block remote work so a local Pi can take over) and `/session detach` (forget the association after confirmation). Adopted native history is user-owned: `/clear`, detach and `/thread delete` never delete it. A session held by another remote-cli thread, or changed locally after selection, is refused.
 - Add `remote-cli session show --thread <name> --backend <key>`: a read-only, daemon-free helper printing exact native reopen guidance.
+
+## [1.6.160] - 2026-10-14
+
+### Changed
+- Remove the backend card's Confirm section. Backend choices submit immediately using the selected scope, defaulting to Current thread, while Choose backend remains above Apply to. Scope buttons only change the next backend click's target; keep that scope within the same card after acknowledgement. Show only the acknowledged backend as selected, disable further changes while pending, and preserve exact-request retries and stale-revision validation. Follow global applies immediately to the original thread and restores the local scope to Current thread after acknowledgement. Existing CLI settings actions and text commands remain compatible.
 
 ## [1.6.159] - 2026-10-12
 

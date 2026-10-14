@@ -1,10 +1,10 @@
 # Session Resume Native Evidence and Implementation Status
 
-The initial `1.6.160` records below are historical. Release `1.6.161` removes the release action and uses automatic adopted-session reload before each remote prompt; the former release-based round trip is not the current user workflow.
+The initial `1.6.161` records below are historical. Release `1.6.162` removes the release action and uses automatic adopted-session reload before each remote prompt; the former release-based round trip is not the current user workflow.
 
 ## Scope
 
-This is the M0 evidence record for the cross-backend session handoff project. It records bounded, no-prompt capability probes and the first routing/configuration foundation in package `1.6.160`; it does not certify native session handoff or all-backend completion.
+This is the M0 evidence record for the cross-backend session handoff project. It records bounded, no-prompt capability probes and the first routing/configuration foundation in package `1.6.161`; it does not certify native session handoff or all-backend completion.
 
 No real user transcript was read. No backend was installed, authentication changed, credential copied, native user store migrated, model task sent, or service deployed. Native runtime experimentation used an owned temporary directory, synthetic session data, an isolated Pi agent directory, and a credential-free environment. Owned probe processes exited and their temporary data was removed.
 
@@ -14,7 +14,7 @@ No real user transcript was read. No backend was installed, authentication chang
 | --- | --- | --- | --- |
 | Pi | Available, `1.2.0` | Help exposes exact-file/session-ID/session-dir options. Synthetic exact-file RPC startup answered `get_state` with matching file/ID and `isStreaming: false` without any prompt. Orderly stdin closure exited with code 0. | Native loading changed the synthetic file despite no prompt; determine which metadata/migration writes occurred and ensure preservation/recovery/ownership before real adoption. Shared storage settings parity, strict binding registry, leases, retention and local round-trip remain unimplemented. |
 | Claude Code | Available, `2.1.260` | Help exposes `--resume`, `--session-id`, input/output formats. | Native history metadata, no-prompt identity handshake, local round-trip, sandbox/preservation and release still need synthetic verification. Help is not certification. |
-| Codex | Available, `0.162.1` | `app-server --help` succeeds and exposes supported tooling/stdio transport. `app-server generate-json-schema` documents `thread/list` (cwd/archived/sourceKinds filters), `thread/read`, and `thread/resume`. Read-only discovery of local rollout headers plus the native name index is implemented (`1.6.160`) without starting the app server. | Strict no-prompt identity handshake via `thread/resume`, release/close semantics, local reopen guidance, and history-preserving handoff still require isolated native probes; message counts remain unavailable without a verified transcript reader. |
+| Codex | Available, `0.162.1` | `app-server --help` succeeds and exposes supported tooling/stdio transport. `app-server generate-json-schema` documents `thread/list` (cwd/archived/sourceKinds filters), `thread/read`, and `thread/resume`. Read-only discovery of local rollout headers plus the native name index is implemented (`1.6.161`) without starting the app server. | Strict no-prompt identity handshake via `thread/resume`, release/close semantics, local reopen guidance, and history-preserving handoff still require isolated native probes; message counts remain unavailable without a verified transcript reader. |
 | OpenCode | Available, `1.18.32` | Help exposes ACP, session management, export, and exact local `--session` selection. | Metadata list/detail, ACP native identity, strict restore/release, local round-trip require isolated verification. |
 | AGY | Unavailable | Repository transport inspected; no native executable probe. | All native certification blocked; original store/HOME/delegation configuration and retention remain major design gates. |
 | Kimi | Unavailable | Repository ACP integration inspected; no native executable probe. | Native metadata, identity, local reopen and release unverified. |
@@ -110,7 +110,7 @@ Two Pi 1.2.0 RPC processes opened the same synthetic JSONL session successfully.
 
 Consequently, native multi-open is supported in this tested version, but it is not automatic context synchronization or exclusive takeover. A future no-release workflow could reload before each alternating turn and let idle windows remain open. It must disclose branch behavior and unmanaged concurrency; it cannot promise that an ordinary local Pi process is prevented from writing. Model prompts, tools, compaction and interactive TUI behavior require additional tests before claiming equivalent semantics.
 
-## No-release sequential switching (`1.6.161`)
+## No-release sequential switching (`1.6.162`)
 
 A second real-Pi/model probe kept the native local RPC process and the remote executor open across alternating turns. It used the same isolated provider-only setup described above, no real transcripts or auth-file copies, no extensions/MCP/tools, and no simultaneous work. Remote command delivery was captured in-process, so this test did not exercise the live Router/Feishu UI.
 
@@ -125,7 +125,7 @@ Every step retained the native ID/file/cwd and existing byte prefix, with exactl
 
 Regression tests cover local file appends observed after per-turn reload, mismatching identity and stop failures preventing prompt dispatch, overlapping preparation rejection, abort/reset before dispatch, legacy released pointers no longer blocking restart, removed command grammar and confirmed detach/history retention. Validation: 66 related files passed 1,367 cases; the focused Pi/session run passed 181 cases. PiExecutor line coverage was 85.44% and SessionControl line coverage was 100% in that focused run (not whole-package certification). The full CLI run passed 2,784 cases in 138 files; the existing DocumentExtractor suite failed 10 cases because PDF/archive dependencies are unavailable. No dependencies were installed. CLI build and bundled release-summary validation passed.
 
-## Foreground Pi `/new` retention (`1.6.162`)
+## Foreground Pi `/new` retention (`1.6.163`)
 
 The shared `/new` command is deliberately an alias for `/clear`: reset the current thread's context while keeping its directory/backend/preferences. The original Claude, Codex, AGY and ACP reset paths remove remote continuation pointers rather than directly deleting native history. Pi's former reset path separately unlinked its JSONL and reused the stable thread ID; that backend-specific cleanup is changed here, not the shared alias.
 
@@ -141,7 +141,7 @@ A real Pi/model probe exercised the built `MessageHandler`, pool and executor ag
 
 The probe used the configured test model, no tools/extensions and no real user transcripts or copied auth files. Regression tests additionally cover reset/restart separation, native cwd changes, foreground thread deletion and unchanged worker/metadata cleanup. Related validation passed 1,372 tests across 66 files; CLI build and release-summary validation passed. Full CLI validation passed 2,789 cases with the same 10 existing DocumentExtractor failures caused by unavailable PDF/archive dependencies. This is native runtime/context evidence, not another live Feishu or interactive TUI test.
 
-## Foreground session naming (`1.6.163`)
+## Foreground session naming (`1.6.164`)
 
 Independent foreground session IDs exposed a naming inconsistency: each `/new` session received `remote-cli-<thread-id>`, so different native files had identical display names. Fresh foreground names now use their native ID. Reopening an existing file omits `--name`, preserving locally assigned names; adopted and synthetic-runtime naming are unchanged. Existing duplicate names are not rewritten automatically. Focused Pi executor/adoption/integration tests passed 70 cases and CLI build/release-summary validation passed.
 

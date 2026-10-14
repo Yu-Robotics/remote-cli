@@ -226,33 +226,31 @@ describe('SettingsCards', () => {
     expect(output).toContain('Worker eligibility is not confirmed');
   });
 
-  it('renders all backend rows with unavailable entries disabled, current-thread default and confirm', () => {
+  it('renders immediate backend choices above scope, with unavailable entries disabled and no Confirm', () => {
     const { elements } = present(backendMenu());
     expect(taggedNodes(elements)).toBeLessThanOrEqual(90);
     expect(Buffer.byteLength(JSON.stringify(elements))).toBeLessThanOrEqual(16 * 1024);
     const buttons = buttonsOf(elements);
-    const backendButtons = buttons.filter(button => button.behaviors[0].value.op === 'draft_backend');
+    const backendButtons = buttons.filter(button => button.behaviors[0].value.op === 'apply');
     expect(backendButtons).toHaveLength(8);
     const pi = backendButtons.find(button => button.behaviors[0].value.value === 'pi')!;
     expect(pi.disabled).toBe(true);
     const json = JSON.stringify(elements);
     expect(json).toContain('Executable is missing');
-    // Draft defaults to the current backend and Current thread scope.
+    // Applied backend and the next click's default scope are independent.
     expect(backendButtons.find(button => button.behaviors[0].value.value === 'claude')!.type).toBe('primary');
     const scopeButtons = buttons.filter(button => button.behaviors[0].value.op === 'draft_scope');
     expect(scopeButtons.find(button => button.behaviors[0].value.value === 'thread')!.type).toBe('primary');
     expect(scopeButtons.find(button => button.behaviors[0].value.value === 'thread')!.text.content).toContain('✓');
-    expect(buttons.some(button => button.behaviors[0].value.op === 'apply' && button.text.content === 'Confirm')).toBe(true);
-    expect(buttons.some(button => button.behaviors[0].value.op === 'draft_follow_global')).toBe(true);
+    expect(buttons.some(button => button.text.content === 'Confirm')).toBe(false);
+    expect(buttons.some(button => button.behaviors[0].value.op === 'follow_global')).toBe(true);
     // Fallback of the warning about global scope only after opting in.
     expect(json).not.toContain('clears per-thread');
   });
 
-  it('keeps draft toggles local and requires Confirm for the apply action', async () => {
+  it('keeps scope local and applies the clicked backend immediately to all threads', async () => {
     const { elements } = present(backendMenu());
-    let toast = await cards.click('owner', 'card-1', clickPayload(elements, 'draft_backend', 'codex'));
-    expect(toast).toContain('Confirm');
-    toast = await cards.click('owner', 'card-1', clickPayload(elements, 'draft_scope', 'all'));
+    let toast = await cards.click('owner', 'card-1', clickPayload(elements, 'draft_scope', 'all'));
     expect(toast).toContain('all threads');
     expect(transport.send).not.toHaveBeenCalled();
     await flush();
@@ -260,8 +258,7 @@ describe('SettingsCards', () => {
     const patched = transport.update.mock.calls.at(-1);
     expect(patched[0]).toBe('card-1');
     expect(JSON.stringify(patched[1])).toContain('clears per-thread backend overrides');
-    const confirm = clickPayload(patched[1], 'apply');
-    toast = await cards.click('owner', 'card-1', confirm);
+    toast = await cards.click('owner', 'card-1', clickPayload(patched[1], 'apply', 'codex'));
     expect(toast).toContain('Applying');
     expect(transport.send).toHaveBeenCalledTimes(1);
     const action = transport.send.mock.calls[0][1];
@@ -270,15 +267,106 @@ describe('SettingsCards', () => {
     expect(typeof action.messageId).toBe('string');
   });
 
+  it('retains the selected scope across rejection and successful backend acknowledgement', async () => {
+    const { elements } = present(backendMenu());
+    await cards.click('owner', 'card-1', clickPayload(elements, 'draft_scope', 'all'));
+    await flush();
+    await cards.click('owner', 'card-1', clickPayload(transport.update.mock.calls.at(-1)[1], 'apply', 'codex'));
+    const failed = transport.send.mock.calls[0][1];
+    await cards.resolve('device', { ...failed, type: 'settings_result', success: false, error: 'Another thread is busy' });
+    await flush();
+    const rejected = transport.update.mock.calls.at(-1)[1];
+    expect(JSON.stringify(rejected)).toContain('✓ Claude Code (current)');
+    expect(JSON.stringify(rejected)).toContain('Another thread is busy');
+    expect(clickPayload(rejected, 'draft_scope', 'all')).toBeDefined();
+    await cards.click('owner', 'card-1', clickPayload(rejected, 'apply', 'agy'));
+    const applied = transport.send.mock.calls[1][1];
+    expect(applied).toMatchObject({ value: 'agy', scope: 'all' });
+    await cards.resolve('device', { ...applied, type: 'settings_result', success: true,
+      menu: backendMenu({ snapshotId: 'next', coordinatorBackend: 'agy', targetBackend: 'agy' }) });
+    await flush();
+    const fresh = transport.update.mock.calls.at(-1)[1];
+    expect(buttonsOf(fresh).find(button => button.behaviors[0].value.value === 'all')!.type).toBe('primary');
+    await cards.click('owner', 'card-1', clickPayload(fresh, 'apply', 'codex'));
+    expect(transport.send.mock.calls[2][1]).toMatchObject({ snapshotId: 'next', value: 'codex', scope: 'all' });
+    const reopened = present(backendMenu({ snapshotId: 'reopened' }), 'card-2');
+    expect(buttonsOf(reopened.elements).find(button => button.behaviors[0].value.value === 'thread')!.type).toBe('primary');
+  });
+
+  it('rejects stale backend clicks after a scope change rather than applying an unexpected scope', async () => {
+    const { elements } = present(backendMenu());
+    const old = clickPayload(elements, 'apply', 'codex');
+    await cards.click('owner', 'card-1', clickPayload(elements, 'draft_scope', 'all'));
+    await expect(cards.click('owner', 'card-1', old)).rejects.toThrow('outdated');
+    expect(transport.send).not.toHaveBeenCalled();
+  });
+
+  it('rejects unavailable and obsolete backend actions, and blocks busy or offline immediate switches', async () => {
+    const { elements } = present(backendMenu());
+    const payload = clickPayload(elements, 'apply', 'codex');
+    for (const action of [{ ...payload, value: 'pi' }, { ...payload, value: 'invented' },
+      { ...payload, value: undefined }, { ...payload, op: 'draft_backend' }, { ...payload, op: 'draft_follow_global' }]) {
+      await expect(cards.click('owner', 'card-1', action)).rejects.toThrow('not available');
+    }
+    transport.available.mockReturnValue(false);
+    await expect(cards.click('owner', 'card-1', payload)).rejects.toThrow('offline');
+    transport.available.mockReturnValue(true);
+    const busy = present(backendMenu({ snapshotId: 'busy', busy: true }), 'card-2');
+    const blocked = buttonsOf(busy.elements).find(button => button.behaviors[0].value.op === 'apply')!;
+    expect(blocked.disabled).toBe(true);
+    await expect(cards.click('owner', 'card-2', blocked.behaviors[0].value)).rejects.toThrow('not available');
+    expect(transport.send).not.toHaveBeenCalled();
+  });
+
+  it('deduplicates an immediate all-thread backend switch through the actual CLI settings service', async () => {
+    let revision = 'before';
+    let current: SettingsMenu['coordinatorBackend'] = 'claude';
+    let acknowledge = false;
+    const backend = vi.fn(async (_thread: string, target: SettingsMenu['coordinatorBackend']) => {
+      current = target; revision = 'after'; return { success: true };
+    });
+    const service = new SettingsService({
+      state: () => ({ threadId: 'thread-1', threadName: 'default', coordinatorBackend: current, followsGlobal: true,
+        revision, configuredModels: {}, configuredEfforts: {}, delegationEnabled: true }),
+      backends: async () => backendMenu().backends,
+      catalog: async () => ({ choices: [], effectiveSource: 'unknown', supportsReset: false }),
+      busy: () => false, threads: () => ['thread-1', 'thread-2'], exclusive: (_target, body) => body(),
+      backend, preference: async () => ({ success: true }),
+      delegationSupported: () => true, delegation: async () => ({ success: true }),
+    });
+    try {
+      transport.send.mockImplementation(async (_device: string, request: any) => {
+        const result = await service.action(request);
+        if (acknowledge) await cards.resolve('device', result);
+        return true;
+      });
+      const { elements } = present(await service.open('backend', 'thread-1', 'owner'));
+      await cards.click('owner', 'card-1', clickPayload(elements, 'draft_scope', 'all'));
+      await flush();
+      expect(backend).not.toHaveBeenCalled();
+      await cards.click('owner', 'card-1', clickPayload(transport.update.mock.calls.at(-1)[1], 'apply', 'codex'));
+      expect(backend).toHaveBeenCalledTimes(1);
+      expect(backend).toHaveBeenCalledWith('thread-1', 'codex', 'all', false);
+      const original = transport.send.mock.calls[0][1];
+      await vi.advanceTimersByTimeAsync(20_000);
+      acknowledge = true;
+      await cards.click('owner', 'card-1', clickPayload(transport.update.mock.calls.at(-1)[1], 'retry'));
+      await flush();
+      expect(backend).toHaveBeenCalledTimes(1);
+      expect(transport.send.mock.calls[1][1]).toEqual(original);
+      const fresh = transport.update.mock.calls.at(-1)[1];
+      expect(JSON.stringify(fresh)).toContain('✓ Codex CLI (current)');
+      expect(buttonsOf(fresh).find(button => button.behaviors[0].value.value === 'all')!.type).toBe('primary');
+    } finally { service.destroy(); }
+  });
+
   it('hides the global warning for thread scope and offers follow-global only with an override', async () => {
     const withGlobal = present(backendMenu({ followsGlobal: true }));
-    expect(buttonsOf(withGlobal.elements).some(button => button.behaviors[0].value.op === 'draft_follow_global')).toBe(false);
+    expect(buttonsOf(withGlobal.elements).some(button => button.behaviors[0].value.op === 'follow_global')).toBe(false);
     const { elements } = present(backendMenu({ followsGlobal: false, threadId: 'thread-2' }), 'card-2');
-    const toast = await cards.click('owner', 'card-2', clickPayload(elements, 'draft_follow_global'));
+    const toast = await cards.click('owner', 'card-2', clickPayload(elements, 'follow_global'));
     expect(toast).toContain('global');
-    expect(transport.send).not.toHaveBeenCalled();
-    await flush();
-    await cards.click('owner', 'card-2', clickPayload(transport.update.mock.calls.at(-1)[1], 'apply'));
+    expect(transport.send).toHaveBeenCalledTimes(1);
     const action = transport.send.mock.calls.at(-1)[1];
     expect(action).toMatchObject({ operation: 'follow_global', threadId: 'thread-2' });
     expect(action.value).toBeUndefined();
@@ -595,9 +683,9 @@ describe('SettingsCards', () => {
   it('invalidates live controls on disconnect and rejects expired menus at presentation', () => {
     expect(cards.present({ openId: 'owner', deviceId: 'device', menu: backendMenu({ expiresAt: Date.now() - 1 }), requestMessageId: 'req-x' })).toBeUndefined();
     const { elements } = present(backendMenu());
-    const confirm = clickPayload(elements, 'apply');
+    const choice = clickPayload(elements, 'apply', 'codex');
     cards.disconnect('device');
-    return expect(cards.click('owner', 'card-1', confirm)).rejects.toThrow('expired');
+    return expect(cards.click('owner', 'card-1', choice)).rejects.toThrow('expired');
   });
 
   it('never evicts a menu with a pending request under capacity pressure', async () => {
@@ -627,24 +715,23 @@ describe('SettingsCards', () => {
     const sectionIndex = (title: string) => elements.findIndex(element => element.tag === 'markdown' && element.content === title);
     const choose = sectionIndex('**1 · Choose backend**');
     const scope = sectionIndex('**2 · Apply to**');
-    const confirm = sectionIndex('**3 · Confirm**');
     expect(choose).toBeGreaterThan(-1);
     expect(choose).toBeLessThan(scope);
-    expect(scope).toBeLessThan(confirm);
+    expect(sectionIndex('**3 · Confirm**')).toBe(-1);
     // Every section opens with a divider and a brief notation-size subtitle.
-    for (const index of [choose, scope, confirm]) {
+    for (const index of [choose, scope]) {
       expect(elements[index - 1]).toEqual({ tag: 'hr' });
       expect(elements[index + 1]).toMatchObject({ tag: 'markdown', text_size: 'notation' });
     }
     expect(elements[choose + 1].content).toContain('Current: **Claude Code**');
-    expect(elements[scope + 1].content).toContain('only this thread');
+    expect(elements[choose + 1].content).toContain('switch this thread immediately');
+    expect(elements[scope + 1].content).toContain('Scope buttons only set where the next backend click applies');
     expect(elements[scope + 1].content).toContain('device-wide backend for this thread only');
-    expect(elements[confirm + 1].content).toContain('Only Confirm applies');
     // Controls live inside their own sections, not stacked together.
     const between = (from: number, to: number) => buttonsOf(elements.slice(from + 1, to));
-    expect(between(choose, scope).every(button => button.behaviors[0].value.op === 'draft_backend')).toBe(true);
-    expect(new Set(between(scope, confirm).map(button => button.behaviors[0].value.op))).toEqual(new Set(['draft_scope', 'draft_follow_global']));
-    expect(between(confirm, elements.length).map(button => button.text.content)).toEqual(['Confirm']);
+    expect(between(choose, scope).every(button => button.behaviors[0].value.op === 'apply')).toBe(true);
+    expect(new Set(between(scope, elements.length).map(button => button.behaviors[0].value.op))).toEqual(new Set(['draft_scope', 'follow_global']));
+    expect(buttonsOf(elements).some(button => button.text.content === 'Confirm')).toBe(false);
   });
 
   it('checks Current thread by default and moves the explicit check with the scope draft', async () => {
@@ -672,40 +759,50 @@ describe('SettingsCards', () => {
     expect(JSON.stringify(restored)).not.toContain('clears per-thread');
   });
 
-  it('distinguishes the currently-effective backend from the draft selection', async () => {
+  it('applies to the current thread with one click and changes selection only after acknowledgement', async () => {
     const { elements } = present(backendMenu());
-    const backendsOf = (root: any[]) => buttonsOf(root).filter(button => button.behaviors[0].value.op === 'draft_backend');
+    const backendsOf = (root: any[]) => buttonsOf(root).filter(button => button.behaviors[0].value.op === 'apply');
     const initial = backendsOf(elements).find(button => button.behaviors[0].value.value === 'claude')!;
     expect(initial.text.content).toBe('✓ Claude Code (current)');
     expect(initial.type).toBe('primary');
-    await cards.click('owner', 'card-1', clickPayload(elements, 'draft_backend', 'codex'));
+    await cards.click('owner', 'card-1', clickPayload(elements, 'apply', 'codex'));
+    const request = transport.send.mock.calls[0][1];
+    expect(request).toMatchObject({ operation: 'apply', value: 'codex', scope: 'thread' });
     await flush();
     const patched = transport.update.mock.calls.at(-1)[1];
-    const draft = backendsOf(patched).find(button => button.behaviors[0].value.value === 'codex')!;
-    expect(draft.text.content).toBe('✓ Codex CLI');
-    expect(draft.type).toBe('primary');
+    expect(backendsOf(patched).every(button => button.disabled)).toBe(true);
     const current = backendsOf(patched).find(button => button.behaviors[0].value.value === 'claude')!;
-    expect(current.text.content).toBe('Claude Code (current)');
-    expect(current.type).not.toBe('primary');
-    expect(JSON.stringify(patched)).toContain('Draft: **Codex CLI** — applies after Confirm.');
+    expect(current.text.content).toBe('✓ Claude Code (current)');
+    expect(current.type).toBe('primary');
+    expect(await cards.click('owner', 'card-1', clickPayload(elements, 'apply', 'agy'))).toContain('Waiting');
+    expect(await cards.click('owner', 'card-1', clickPayload(elements, 'draft_scope', 'all'))).toContain('Waiting');
+    expect(transport.send).toHaveBeenCalledTimes(1);
+    await cards.resolve('device', { ...request, type: 'settings_result', success: true,
+      menu: backendMenu({ snapshotId: 'next', coordinatorBackend: 'codex', targetBackend: 'codex' }) });
+    await flush();
+    const applied = transport.update.mock.calls.at(-1)[1];
+    expect(backendsOf(applied).find(button => button.behaviors[0].value.value === 'codex')!.text.content).toBe('✓ Codex CLI (current)');
+    expect(backendsOf(applied).find(button => button.behaviors[0].value.value === 'codex')!.type).toBe('primary');
   });
 
-  it('marks follow-global as the draft while keeping scope on the current thread', async () => {
+  it('keeps follow-global thread-only even when the next-click scope is all', async () => {
     const { elements } = present(backendMenu({ followsGlobal: false }));
-    await cards.click('owner', 'card-1', clickPayload(elements, 'draft_follow_global'));
+    await cards.click('owner', 'card-1', clickPayload(elements, 'draft_scope', 'all'));
     await flush();
     const patched = transport.update.mock.calls.at(-1)[1];
-    const json = JSON.stringify(patched);
-    expect(json).toContain('Draft: follow the global backend — applies after Confirm.');
-    expect(json).toContain('device-wide backend for this thread only');
-    const follow = buttonsOf(patched).find(button => button.behaviors[0].value.op === 'draft_follow_global')!;
-    expect(follow.text.content).toBe('✓ Follow global');
-    expect(follow.type).toBe('primary');
-    const scope = buttonsOf(patched).filter(button => button.behaviors[0].value.op === 'draft_scope');
+    const follow = buttonsOf(patched).find(button => button.behaviors[0].value.op === 'follow_global')!;
+    expect(follow.text.content).toBe('Follow global (this thread)');
+    await cards.click('owner', 'card-1', clickPayload(patched, 'follow_global'));
+    const request = transport.send.mock.calls[0][1];
+    expect(request).toMatchObject({ operation: 'follow_global' });
+    expect(request.scope).toBeUndefined();
+    await cards.resolve('device', { ...request, type: 'settings_result', success: true,
+      menu: backendMenu({ snapshotId: 'next', followsGlobal: true }) });
+    await flush();
+    const applied = transport.update.mock.calls.at(-1)[1];
+    const scope = buttonsOf(applied).filter(button => button.behaviors[0].value.op === 'draft_scope');
     expect(scope.find(button => button.behaviors[0].value.value === 'thread')!.text.content).toBe('✓ Current thread');
-    const backends = buttonsOf(patched).filter(button => button.behaviors[0].value.op === 'draft_backend');
-    expect(backends.every(button => !button.text.content.startsWith('✓'))).toBe(true);
-    expect(backends.find(button => button.behaviors[0].value.value === 'claude')!.text.content).toBe('Claude Code (current)');
+    expect(buttonsOf(applied).some(button => button.behaviors[0].value.op === 'follow_global')).toBe(false);
   });
 
   it('orders the model card as target backend, choices for that target, then secondary actions', () => {

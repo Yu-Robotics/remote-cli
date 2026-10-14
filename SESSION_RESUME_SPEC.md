@@ -2,7 +2,7 @@
 
 ## Status and authority
 
-Release `1.6.163` implements read-only discovery for Pi, Codex and Claude Code,
+Release `1.6.164` implements read-only discovery for Pi, Codex and Claude Code,
 and native session connection and detach for Pi only. Adopted Pi sessions reload
 before each remote turn; there is no release action. Pi `1.2.0` was
 verified with synthetic native sessions and a manual Feishu continuation test.
