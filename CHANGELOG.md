@@ -10,6 +10,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.165] - 2026-10-14
+
+### Fixed
+- Reserve a selected Pi session file before asynchronous startup across threads in one daemon. Failed or unknown cleanup keeps the file quarantined until recovery; this is not an OS or cross-process writer lock.
+- Require successful pointer persistence before acknowledging Pi connection or detach. Failed writes retain the previous association; cancelled startup cannot commit a new connection.
+- Serialize Pi session confirmations with settings admission and reject context changes during queued work, active delegated tasks, or automatic updates. Claude Code and Codex remain read-only catalogs with unchanged executor and history behavior.
+- Discover default Pi sessions under `PI_CODING_AGENT_DIR`, fail closed for unresolved agent roots, and shell-quote Pi-only local reopen guidance.
+
+### Tests
+- Add concurrent-confirmation, persistence-failure, restart, cancellation, settings-conflict, custom-directory, and non-Pi read-only regressions.
+
+## [1.6.164] - 2026-10-14
+
+### Fixed
+- Give newly created Pi foreground sessions a default name based on their independent native session ID, not the reusable remote thread ID. `/new` sessions are distinguishable in `/resume`, and reopening a persisted file no longer appends `--name` or overwrites names assigned locally. Adopted sessions and synthetic runtime naming remain unchanged. Existing duplicate names are not rewritten automatically.
+
+## [1.6.163] - 2026-10-14
+
+### Changed
+- Pi foreground `/new` and `/clear` now remove only the current association and preserve native session history for `/resume`. Fresh conversations use independent random IDs rather than the stable remote thread ID, so retained files cannot resurrect cleared context, including after restart before the next prompt.
+- Pi foreground thread-data deletion also preserves native history. Delegated-worker and temporary metadata runtimes retain their disposable cleanup and thread-ID behavior.
+
+### Tests
+- Cover foreground A to `/new` to independent B, ordinary messages remaining in B during an unconfirmed resume draft, and confirmed native switching back to A. Cover reset/restart identity separation and unchanged synthetic-runtime cleanup.
+
+## [1.6.162] - 2026-10-13
+
+### Changed
+- Remove `/session release`, the executor release operation and the persisted released-state gate. Existing adopted pointers with an old released flag remain usable; `/session detach` still confirms association removal without deleting native history.
+- Reload and verify the exact adopted Pi session before every remote prompt, including native slash prompts, so sequential local writes are visible without another remote resume or release step. Idle local Pi windows may remain open, but must resume the same file before their next turn. Simultaneous writing is unsupported and can create separate native branches; no automatic local refresh or writer exclusion is claimed.
+- Reserve remote turn preparation against overlapping execution/context changes and cancel preparation before prompt dispatch on abort/reset/shutdown. Keep legacy private sessions and worker execution unchanged.
+
+### Fixed
+- Synchronize the lockfile package versions with all package manifests.
+
+## [1.6.161] - 2026-10-13
+
+### Added
+- Reserve `/resume`, `/r` and `/session` as program-owned native session controls before executor construction, working-directory changes, queue admission or backend slash passthrough, and remove the misleading natural-language resume shortcut. Local session sharing stays disabled by default; enabling it never makes an unverified adapter available.
+- Add read-only native session discovery for Pi, Codex and Claude Code: `/resume` lists the current workspace's sessions (bounded reads, no backend process, no transcript text, no symlink following), hiding synthetic, delegated-worker, sidechain and ambiguous duplicate entries and reporting incomplete coverage. Message counts stay unavailable where they cannot be read safely.
+- Add paging and search to the read-only list: each list is a snapshot with an unguessable 12-character token, eight rows per page and a five-minute lifetime, bound to the requesting user, thread and workspace; `/resume page` and `/resume search` never reread native stores.
+- Connect a thread to an existing Pi session and continue its history. `/resume select` or `/resume id` shows a confirmation naming the session and any binding it replaces, and `/resume confirm` connects it. The loaded identity is verified through Pi RPC state without sending a prompt, so a silently substituted session is refused and the previous conversation is restored.
+- Add `/session` binding status, `/session release` (stop the owned Pi process and block remote work so a local Pi can take over) and `/session detach` (forget the association after confirmation). Adopted native history is user-owned: `/clear`, detach and `/thread delete` never delete it. A session held by another remote-cli thread, or changed locally after selection, is refused.
+- Add `remote-cli session show --thread <name> --backend <key>`: a read-only, daemon-free helper printing exact native reopen guidance.
+
 ## [1.6.160] - 2026-10-14
 
 ### Changed

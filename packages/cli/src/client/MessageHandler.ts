@@ -4,6 +4,8 @@ import { FileInbox } from '../files/FileInbox';
 import { fileOrigin } from '../files/DeviceIdentity';
 import { createHash } from 'crypto';
 import { extractDocument } from '../files/DocumentExtractor';
+import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import { IncomingMessage, OutgoingMessage, StructuredContent, ToolUseInfo, ToolResultInfo, DelegationProgressInfo, Attachment, ImageBlock, QueueConfirmationInfo, TaskNotificationInfo } from '../types';
@@ -43,6 +45,10 @@ import { SettingsAdmission } from '../settings/SettingsAdmission';
 import { SettingsCatalogReader, configuredBackendModel } from '../settings/SettingsCatalog';
 import { SettingsService, type SettingsState } from '../settings/SettingsService';
 import type { SettingsActionMessage, SettingsBackend, SettingsKind, SettingsMenu, SettingsScope } from '../types/Settings';
+import { isSessionControl } from '../session/SessionResumeService';
+import { readSessionCatalog } from '../session/adapters';
+import { piSessionHolder, resolvePiSessionLocator } from '../session/adapters/PiSessionCatalog';
+import { SessionControl, type PiBindingState } from '../session/SessionControl';
 
 /**
  * Detected backend information
@@ -144,6 +150,21 @@ export interface Message {
  * Each thread has its own executor process managed by ThreadExecutorPool.
  * Commands without a threadId are routed to the default thread.
  */
+/** Same base directory PiExecutor uses for its per-thread pointers. */
+function remoteCliDirectory(): string {
+  return path.join(process.env.HOME || os.homedir(), '.remote-cli');
+}
+
+/** Read the thread's Pi pointer binding flags without starting an executor. */
+function readPiBinding(threadId: string): PiBindingState | undefined {
+  try {
+    const pointer = JSON.parse(fs.readFileSync(path.join(remoteCliDirectory(), 'pi-sessions', `${threadId}.json`), 'utf8'));
+    return { id: typeof pointer.id === 'string' ? pointer.id : undefined, adopted: pointer.adopted === true };
+  } catch {
+    return undefined;
+  }
+}
+
 export class MessageHandler {
   private wsClient: WebSocketClient;
   private threadPool: ThreadExecutorPool;
@@ -159,6 +180,37 @@ export class MessageHandler {
   private readonly pendingQueueConfirmations = new Map<string, PendingQueueConfirmation>();
   private readonly pausedQueues = new Set<string>();
   private readonly messageOpenIds = new Map<string, string | undefined>();
+  /** Thread operations held by session controls (adopt and detach). */
+  private readonly sessionOperations = new Map<string, symbol>();
+  /** `/resume` and `/session`: read-only listing plus confirmed, strict native adoption. */
+  private readonly sessionControl = new SessionControl({
+    sharingConfig: () => this.config.get('sessionSharing'),
+    backendOf: threadId => this.threadPool.getBackendKey(threadId),
+    workingDirectory: threadId => {
+      const directory = this.threadManager.getThread(threadId)?.workingDirectory;
+      try { return directory ? this.directoryGuard.resolveWorkingDirectory(directory) : undefined; } catch { return undefined; }
+    },
+    threadName: threadId => this.threadManager.getThread(threadId)?.name,
+    // Queued or pending work counts as busy: a confirmation must never redirect it into another session.
+    isBusy: threadId => this.threadPool.isThreadBusy(threadId) || this.hasThreadQueueState(threadId)
+      || this.abortOperations.has(threadId) || this.isDestroyed || this.automaticUpdateInProgress
+      || this.delegation.hasActiveTasks(threadId) || this.settingsAdmission.hasCommand(threadId),
+    setBusy: (threadId, busy) => {
+      if (busy) {
+        this.sessionOperations.set(threadId, this.beginThreadOperation(threadId));
+        return;
+      }
+      const token = this.sessionOperations.get(threadId);
+      this.sessionOperations.delete(threadId);
+      // Messages that arrived during the operation were queued; resume draining them.
+      if (token && this.finishThreadOperation(threadId, token)) void this.startNextQueuedCommand(threadId);
+    },
+    executor: threadId => this.threadPool.getExecutor(threadId),
+    readCatalog: (backend, cwd) => readSessionCatalog(backend, cwd),
+    resolvePi: (cwd, id) => resolvePiSessionLocator(cwd, id, { remoteCliDirectory: remoteCliDirectory() }),
+    piHolder: (file, threadId) => piSessionHolder(file, threadId, { remoteCliDirectory: remoteCliDirectory() }),
+    piBinding: threadId => readPiBinding(threadId),
+  });
   private readonly activeThreadOperations = new Map<string, ActiveThreadOperation>();
   private readonly abortOperations = new Map<string, Promise<void>>();
   private automaticUpdateInProgress = false;
@@ -372,6 +424,32 @@ export class MessageHandler {
     const content = message.content?.trim() ?? '';
     const body = () => this.handleAdmittedCommandMessage(message, fileOrder);
     this.messageOpenIds.set(message.messageId, message.openId);
+    if (isSessionControl(content)) {
+      if (!this.threadManager.getThread(threadId)) {
+        this.sendResponse(message.messageId, undefined, { success: false, error: 'The selected thread no longer exists.' });
+        return;
+      }
+      let response: { success: boolean; output?: string; error?: string };
+      try {
+        const control = () => this.sessionControl.handle(content, { openId: message.openId, threadId });
+        // Only Pi confirmations mutate native context. Other catalogs remain read-only.
+        if (this.threadPool.getBackendKey(threadId) === 'pi' && /^\/(?:resume|r|session)\s+confirm(?:\s|$)/i.test(content)) {
+          try {
+            response = await this.settingsAdmission.mutation(threadId, async () => {
+              this.settingsService.invalidate(threadId);
+              try { return await control(); }
+              finally { this.settingsService.invalidate(threadId); }
+            });
+          } finally { void this.startNextQueuedCommand(threadId); }
+        } else {
+          response = await control();
+        }
+      } catch (error) {
+        response = { success: false, error: `Session control failed: ${error instanceof Error ? error.message : String(error)}. No task was sent.` };
+      }
+      this.sendResponse(message.messageId, threadId, { ...response, threads: this.threadPool.getSummaries() }, true);
+      return;
+    }
     try {
       // Abort and addressed human replies must remain available during native work.
       if (content === '/abort' || /^(?:yes|no)(?:\s|$)/.test(content) || content.startsWith('/input ')) return await body();
@@ -1003,6 +1081,8 @@ Use /compact to reduce conversation context or /clear to start a fresh context.`
 - /thread list - List all threads with their status
 - /thread new [name] - Create a new thread
 - /thread delete <name> - Delete a thread (only when idle)
+- /session - Show this thread's native session binding; /session detach
+- /resume - List this workspace's Pi sessions and connect one after confirmation (Pi only)
 
 Remote Machine commands:
 - /proxy set <proxyHost> <proxyPort> <hostSuffix> [proxyAuth] - Configure global proxy
@@ -1858,7 +1938,6 @@ You can also use natural language commands to control Claude Code CLI.`,
    */
   private expandCommandShortcuts(content: string): string {
     const trimmed = content.trim();
-    if (trimmed === '/r' || trimmed === '/resume') return 'Please resume the previous conversation';
     if (trimmed === '/c' || trimmed === '/continue') return 'Please continue from where we left off';
     return content;
   }
@@ -2696,7 +2775,8 @@ You can also use natural language commands to control Claude Code CLI.`,
       queueConfirmation?: QueueConfirmationInfo;
       executionMetadata?: ExecutionMetadata;
       settingsMenu?: SettingsMenu;
-    }
+    },
+    metadataOnly = false,
   ): void {
     if (!result.queueConfirmation) this.fileInbox?.release(messageId, !result.success);
     try {
@@ -2704,7 +2784,8 @@ You can also use natural language commands to control Claude Code CLI.`,
       let cwd: string | undefined;
       try {
         if (threadId) {
-          cwd = this.threadPool.getExecutor(threadId).getCurrentWorkingDirectory();
+          cwd = metadataOnly ? this.threadManager.getThread(threadId)?.workingDirectory
+            : this.threadPool.getExecutor(threadId).getCurrentWorkingDirectory();
         }
       } catch {
         // Ignore — thread may have been deleted

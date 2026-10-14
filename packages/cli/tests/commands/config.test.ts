@@ -143,6 +143,30 @@ describe('config command', () => {
   });
 
   describe('set configuration', () => {
+    it.each(['sessionSharing.enabled', ...['claude', 'codex', 'agy', 'opencode', 'kimi', 'zcode', 'pi', 'dsh'].map(backend => `sessionSharing.backends.${backend}.enabled`)])('stores the local %s opt-in as a boolean', async key => {
+      expect(await configCommand({ action: 'set', key, value: 'true' })).toMatchObject({ success: true, value: true });
+      expect(mockConfig.set).toHaveBeenLastCalledWith(key, true);
+      expect(await configCommand({ action: 'set', key, value: 'false' })).toMatchObject({ success: true, value: false });
+      expect(mockConfig.set).toHaveBeenLastCalledWith(key, false);
+    });
+
+    it.each(['sessionSharing', 'sessionSharing.backends.unknown.enabled', 'sessionSharing.backends.pi.stores',
+      'sessionSharing.__proto__.enabled', 'sessionSharing.backends.pi.enabled.extra'])('rejects unsupported session config path %s', async key => {
+      expect(await configCommand({ action: 'set', key, value: 'true' })).toMatchObject({ success: false });
+      expect(mockConfig.set).not.toHaveBeenCalled();
+    });
+
+    it.each(['on', '1', 'TRUE', 'false '])('rejects a non-boolean opt-in %s', async value => {
+      expect(await configCommand({ action: 'set', key: 'sessionSharing.enabled', value })).toMatchObject({ success: false });
+      expect(mockConfig.set).not.toHaveBeenCalled();
+    });
+
+    it('does not overwrite malformed existing session configuration', async () => {
+      mockConfig.get.mockReturnValue({ enabled: 'true' });
+      expect(await configCommand({ action: 'set', key: 'sessionSharing.enabled', value: 'true' })).toMatchObject({ success: false });
+      expect(mockConfig.set).not.toHaveBeenCalled();
+    });
+
     it.each(['maintenance.updateNotice', 'maintenance.subscriptionInspection'])('stores %s as a boolean so the documented opt-out works', async key => {
       expect(await configCommand({ action: 'set', key, value: 'false' })).toMatchObject({ success: true, value: false });
       expect(mockConfig.set).toHaveBeenLastCalledWith(key, false);

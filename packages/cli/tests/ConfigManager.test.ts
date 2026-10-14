@@ -49,6 +49,26 @@ describe('ConfigManager', () => {
       );
     });
 
+    it('defaults session sharing to disabled without migrating thread metadata', async () => {
+      (fs.access as any) = vi.fn().mockResolvedValue(undefined);
+      (fs.readFile as any) = vi.fn().mockResolvedValue(JSON.stringify({ security: { allowedDirectories: ['~/projects'] } }));
+      (fs.writeFile as any) = vi.fn().mockResolvedValue(undefined);
+      const config = await ConfigManager.initialize();
+      expect(config.get('sessionSharing.enabled')).toBe(false);
+      expect(fs.writeFile).not.toHaveBeenCalled();
+    });
+
+    it('preserves malformed session-sharing opt-in for fail-closed validation without resetting unrelated values', async () => {
+      const existing = { deviceId: 'synthetic-device', sessionSharing: { enabled: 'true' }, security: { allowedDirectories: ['~/projects'] } };
+      (fs.access as any) = vi.fn().mockResolvedValue(undefined);
+      (fs.readFile as any) = vi.fn().mockResolvedValue(JSON.stringify(existing));
+      (fs.writeFile as any) = vi.fn().mockResolvedValue(undefined);
+      const config = await ConfigManager.initialize();
+      expect(config.get('deviceId')).toBe(existing.deviceId);
+      expect(config.get('sessionSharing')).toEqual(existing.sessionSharing);
+      expect(fs.writeFile).not.toHaveBeenCalled();
+    });
+
     it('should load existing config file', async () => {
       const existingConfig = {
         security: {
