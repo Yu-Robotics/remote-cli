@@ -2,7 +2,7 @@
 
 ## Status and authority
 
-Release `1.6.163` adds read-only Pi/Codex/Claude Code catalogs and Pi native
+Release `1.6.164` adds read-only Pi/Codex/Claude Code catalogs and Pi native
 connection and detach, with adopted history reloaded before every remote turn.
 The release action and released-state gate are removed. All eight backends remain future targets;
 other backend connections and verified bidirectional handoff are unavailable.
@@ -207,7 +207,7 @@ crash/persistence injection, stale enrollment and binding revisions, historical
 notification suppression, live startup input and full local round trips.
 
 - [x] Align root READMEs and help with current commands and limitations.
-- [x] Synchronize version `1.6.163` in all manifests and applicable lockfile entries.
+- [x] Synchronize version `1.6.164` in all manifests and applicable lockfile entries.
 - [x] Add English CHANGELOG and validated localized release summary.
 - [x] Record native probes, manual Feishu results and environment blockers.
 - [ ] Recheck exact staged changes and all new artifacts before every commit.
