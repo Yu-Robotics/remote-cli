@@ -31,6 +31,17 @@ describe('local read-only session inspection', () => {
     expect(formatLocalSessionInfo(info)).toContain('pi-sessions/');
   });
 
+  it('quotes a Pi file locator literally while leaving other reopen helpers unchanged', () => {
+    const sessionFile = "/workspace/example with spaces/it's $(synthetic); session.jsonl";
+    writePointer('pi', { id: 'pi-native', sessionFile });
+    const info = readLocalSessionInfo({ ...base(), backend: 'pi' });
+    expect(info.reopen?.command).toBe("pi --session '/workspace/example with spaces/it'\\''s $(synthetic); session.jsonl'");
+    writePointer('codex', { id: 'codex-native' });
+    writePointer('claude', { id: 'claude-native' });
+    expect(readLocalSessionInfo({ ...base(), backend: 'codex' }).reopen?.command).toBe('codex resume codex-native');
+    expect(readLocalSessionInfo({ ...base(), backend: 'claude' }).reopen?.command).toBe('claude --resume claude-native');
+  });
+
   it('reports a present pointer with verified reopen guidance for each verified backend', () => {
     writePointer('claude', { id: 'claude-native', cwd: workspace });
     const claude = readLocalSessionInfo({ ...base(), backend: 'claude' });
@@ -47,7 +58,7 @@ describe('local read-only session inspection', () => {
 
     writePointer('pi', { id: 'pi-native', sessionFile: '/tmp/example-session.jsonl' });
     const pi = readLocalSessionInfo({ ...base(), backend: 'pi' });
-    expect(pi.reopen?.command).toBe('pi --session /tmp/example-session.jsonl');
+    expect(pi.reopen?.command).toBe("pi --session '/tmp/example-session.jsonl'");
     expect(pi.sessionFile).toBe('/tmp/example-session.jsonl');
   });
 

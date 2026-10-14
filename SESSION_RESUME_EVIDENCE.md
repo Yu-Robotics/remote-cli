@@ -1,5 +1,33 @@
 # Session Resume Native Evidence and Implementation Status
 
+## 1.6.165 Pi-only hardening validation
+
+The hardening changes are based on feature checkpoint `7544039`. Native behavior
+changes are limited to Pi. Claude Code and Codex executors, native settings,
+history handling, and existing read-only catalog adapters are unchanged.
+
+- Full project build passed.
+- Full CLI suite passed: 139 files, 2,826 tests.
+- Focused lifecycle and catalog coverage passed: 13 files, 229 tests. The measured
+  scope is `PiExecutor`, `SessionControl`, `SessionLocalInfo`, and `PiSessionCatalog`:
+  91.44% statements, 80.69% branches, and 95.87% functions. This is not whole-CLI coverage.
+- Regressions cover same-file concurrent confirmations, pointer write/rename
+  failure and restart behavior, settings conflicts, custom agent directories,
+  literal Pi reopen arguments, and non-Pi discovery without executor creation.
+- Actual `PiClient` transport code with mocked children verifies cancellation
+  during connection startup, no identity/abort RPC restart after cancellation,
+  confirmed final exit, and busy protection through rollback and cleanup.
+- Independent Codex probes found startup/destroy and abort/rollback races during
+  review. Both were fixed and the final narrow follow-up approved their closure.
+- AGY review was attempted twice, but both requests failed with a network EOF;
+  neither attempt supplies an approval or independent correctness evidence.
+
+Pi is not installed on the validation host. No live Pi, provider, or Feishu
+acceptance is claimed for this hardening. In-daemon reservations do not exclude
+unmanaged terminals or other CLI instances; uncertain process cleanup retains
+the file quarantine until client restart after confirmed Pi exit. Pointer writes
+are mandatory for successful control actions, not a crash-recoverable transaction.
+
 The initial `1.6.161` records below are historical. Release `1.6.162` removes the release action and uses automatic adopted-session reload before each remote prompt; the former release-based round trip is not the current user workflow.
 
 ## Scope

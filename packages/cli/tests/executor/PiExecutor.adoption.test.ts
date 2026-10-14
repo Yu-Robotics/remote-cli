@@ -6,6 +6,22 @@ import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 import { PiExecutor } from '../../src/executor/PiExecutor';
 import type { PiLaunchOptions, PiRpcResponse, PiTransport } from '../../src/executor/pi/PiTypes';
 
+const pointerFault = vi.hoisted(() => ({ method: '', calls: 0 }));
+vi.mock('fs', async importOriginal => {
+  const actual = await importOriginal<typeof import('fs')>();
+  return {
+    ...actual,
+    writeFileSync: (...args: Parameters<typeof actual.writeFileSync>) => {
+      if (pointerFault.method === 'writeFileSync') { pointerFault.calls += 1; throw new Error('Synthetic pointer write failure'); }
+      return actual.writeFileSync(...args);
+    },
+    renameSync: (...args: Parameters<typeof actual.renameSync>) => {
+      if (pointerFault.method === 'renameSync') { pointerFault.calls += 1; throw new Error('Synthetic pointer rename failure'); }
+      return actual.renameSync(...args);
+    },
+  };
+});
+
 const originalHome = process.env.HOME;
 const originalHomedir = os.homedir();
 const NATIVE_ID = '01900000-0000-7000-8000-0000000000aa';
@@ -182,6 +198,101 @@ describe('PiExecutor native session adoption', () => {
     expect(latest().launches.at(-1)!.sessionName).toBe(`remote-cli-${latest().launches.at(-1)!.sessionId}`);
   });
 
+  it.each(['writeFileSync', 'renameSync'] as const)('does not acknowledge adoption when pointer %s fails', async method => {
+    await run('before');
+    const before = pointer();
+    const history = readFileSync(nativeFile, 'utf8');
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    pointerFault.method = method;
+    pointerFault.calls = 0;
+    try {
+      const result = await executor.adoptNativeSession({ sessionId: NATIVE_ID, sessionFile: nativeFile });
+      expect(pointerFault.calls).toBe(1);
+      expect(result).toMatchObject({ success: false, error: expect.stringContaining('persist') });
+      expect(pointer()).toEqual(before);
+      expect(latest().running).toBe(false);
+      expect(readFileSync(nativeFile, 'utf8')).toBe(history);
+    } finally { pointerFault.method = ''; warning.mockRestore(); }
+    await executor.destroy();
+    executor = create();
+    expect(latest().launch.sessionId).toBe(before.id);
+    expect(latest().launch.sessionFile).not.toBe(nativeFile);
+  });
+
+  it('keeps the adopted binding in memory and after restart when detach persistence fails', async () => {
+    await executor.adoptNativeSession({ sessionId: NATIVE_ID, sessionFile: nativeFile });
+    const before = pointer();
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    pointerFault.method = 'renameSync';
+    try {
+      expect(await executor.detachNativeSession()).toMatchObject({ success: false, error: expect.stringContaining('still connected') });
+      expect(pointer()).toEqual(before);
+      expect(latest().launch.sessionFile).toBe(nativeFile);
+    } finally { pointerFault.method = ''; warning.mockRestore(); }
+    await executor.destroy();
+    executor = create();
+    expect(latest().launch.sessionFile).toBe(nativeFile);
+    expect(pointer().adopted).toBe(true);
+    expect(existsSync(nativeFile)).toBe(true);
+  });
+
+  it('reserves the executor during adoption and rejects overlapping tasks and context changes', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    latest().stop = vi.fn().mockImplementationOnce(() => gate).mockResolvedValue(undefined);
+    const adopting = executor.adoptNativeSession({ sessionId: NATIVE_ID, sessionFile: nativeFile });
+    try {
+      expect(executor.isBusy()).toBe(true);
+      expect((await run('overlapping')).success).toBe(false);
+      expect((await executor.adoptNativeSession({ sessionId: NATIVE_ID, sessionFile: nativeFile })).success).toBe(false);
+      expect(() => executor.resetContext()).toThrow('connection is changing');
+    } finally { release(); }
+    expect(await adopting).toEqual({ success: true });
+    expect(executor.isBusy()).toBe(false);
+  });
+
+  it('does not commit a connection whose startup overlaps executor destruction', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const original = latest().start.bind(latest());
+    latest().start = vi.fn(async () => { await gate; await original(); });
+    const adopting = executor.adoptNativeSession({ sessionId: NATIVE_ID, sessionFile: nativeFile });
+    await vi.waitFor(() => expect(latest().start).toHaveBeenCalled());
+    let destroyed = false;
+    const destroying = executor.destroy().then(() => { destroyed = true; });
+    try {
+      await Promise.resolve();
+      expect(destroyed).toBe(false);
+    }
+    finally { release(); }
+    await destroying;
+    expect(await adopting).toMatchObject({ success: false, error: expect.stringContaining('cancelled') });
+    expect(existsSync(path.join(pointerDir, 'thread-pi.json'))).toBe(false);
+    expect(latest().running).toBe(false);
+  });
+
+  it('keeps the executor busy through the final abort cleanup after connection rollback', async () => {
+    let releaseStart!: () => void, releaseCleanup!: () => void;
+    const startup = new Promise<void>(resolve => { releaseStart = resolve; });
+    const cleanup = new Promise<void>(resolve => { releaseCleanup = resolve; });
+    const start = latest().start.bind(latest()), stop = latest().stop.bind(latest());
+    latest().start = vi.fn(async () => { await start(); await startup; });
+    let stops = 0;
+    latest().stop = vi.fn(async () => { await stop(); if (++stops === 4) await cleanup; });
+    const adopting = executor.adoptNativeSession({ sessionId: NATIVE_ID, sessionFile: nativeFile });
+    await vi.waitFor(() => expect(latest().start).toHaveBeenCalled());
+    const aborting = executor.abort();
+    releaseStart();
+    try {
+      expect((await adopting).success).toBe(false);
+      await vi.waitFor(() => expect(stops).toBe(4));
+      expect(executor.isBusy()).toBe(true);
+      expect((await run('overlap during cleanup')).success).toBe(false);
+      expect((await executor.adoptNativeSession({ sessionId: NATIVE_ID, sessionFile: nativeFile })).success).toBe(false);
+    } finally { releaseCleanup(); await aborting; }
+    expect(executor.isBusy()).toBe(false);
+  });
+
   it('rejects a streaming native session and a missing file without touching the process', async () => {
     latest().streaming = true;
     expect((await executor.adoptNativeSession({ sessionId: NATIVE_ID, sessionFile: nativeFile })) as any)
@@ -201,6 +312,7 @@ describe('PiExecutor native session adoption', () => {
       .mockRejectedValue(new Error('exit unconfirmed'));
     const result = await executor.adoptNativeSession({ sessionId: NATIVE_ID, sessionFile: nativeFile });
     expect(result.success).toBe(false);
+    expect(result).toMatchObject({ recoveryRequired: true });
     expect(transports.length).toBe(2);
     expect(latest()).not.toBe(first);
   });
@@ -333,6 +445,27 @@ describe('PiExecutor native session adoption', () => {
     expect(launch.sessionFile).toBeUndefined();
     expect(launch.sessionId).toBe(detached.id);
     expect(launch.sessionName).toBe(`remote-cli-${detached.id}`);
+  });
+
+  it('awaits a cancelled detach without abort RPCs or a new pointer', async () => {
+    await executor.adoptNativeSession({ sessionId: NATIVE_ID, sessionFile: nativeFile });
+    const before = pointer();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const original = latest().stop.bind(latest());
+    latest().stop = vi.fn().mockImplementationOnce(async () => { await original(); await gate; }).mockImplementation(original);
+    latest().request.mockClear();
+    const detaching = executor.detachNativeSession();
+    const aborting = executor.abort();
+    try {
+      expect(executor.isBusy()).toBe(true);
+      expect(latest().request).not.toHaveBeenCalled();
+    } finally { release(); }
+    expect(await detaching).toMatchObject({ success: false, error: expect.stringContaining('cancelled') });
+    expect(await aborting).toBe(true);
+    expect(pointer()).toEqual(before);
+    expect(latest().running).toBe(false);
+    expect(latest().launch.sessionFile).toBe(nativeFile);
   });
 
   it('refuses detach without an adopted session or during a turn, and reports stop failures', async () => {

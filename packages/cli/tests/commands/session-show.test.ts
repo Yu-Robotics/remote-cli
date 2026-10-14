@@ -37,7 +37,7 @@ describe('session show command', () => {
     fs.writeFileSync(path.join(directory, `${threadId}.json`), JSON.stringify({ id: 'pi-native', cwd: workspace }), { mode: 0o600 });
     const result = await sessionShowCommand({ thread: 'default', backend: 'pi' });
     expect(result.success).toBe(true);
-    expect(result.output).toContain('pi --session pi-native');
+    expect(result.output).toContain("pi --session 'pi-native'");
     expect(result.output).toContain('pi-sessions/default-id.json');
   });
 

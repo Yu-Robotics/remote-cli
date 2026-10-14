@@ -10,6 +10,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.165] - 2026-10-14
+
+### Fixed
+- Reserve a selected Pi session file before asynchronous startup across threads in one daemon. Failed or unknown cleanup keeps the file quarantined until recovery; this is not an OS or cross-process writer lock.
+- Require successful pointer persistence before acknowledging Pi connection or detach. Failed writes retain the previous association; cancelled startup cannot commit a new connection.
+- Serialize Pi session confirmations with settings admission and reject context changes during queued work, active delegated tasks, or automatic updates. Claude Code and Codex remain read-only catalogs with unchanged executor and history behavior.
+- Discover default Pi sessions under `PI_CODING_AGENT_DIR`, fail closed for unresolved agent roots, and shell-quote Pi-only local reopen guidance.
+
+### Tests
+- Add concurrent-confirmation, persistence-failure, restart, cancellation, settings-conflict, custom-directory, and non-Pi read-only regressions.
+
 ## [1.6.164] - 2026-10-14
 
 ### Fixed

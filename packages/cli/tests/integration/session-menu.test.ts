@@ -104,4 +104,68 @@ describe('Integration: paged read-only session menus', () => {
     expect(denied.success).toBe(false);
     expect(denied.error).toContain('disabled for Pi');
   });
+
+  async function prepareConnection(): Promise<string> {
+    Object.assign((handler as any).sessionControl.deps, {
+      resolvePi: (_cwd: string, id: string) => ({ id, file: `/native/${id}.jsonl`, revision: 'synthetic-revision' }),
+      piHolder: () => undefined,
+      piBinding: () => undefined,
+    });
+    executor.adoptNativeSession = vi.fn(async () => ({ success: true }));
+    threadPool.setThreadBusy = vi.fn();
+    const selected = await send('select', '/resume id session-00');
+    expect(selected.success).toBe(true);
+    return /\/resume confirm ([A-Za-z0-9_-]{12})/.exec(selected.output)![1];
+  }
+
+  it.each(['thread-a', '*'])('rejects Pi confirmation while a %s settings writer is active without consuming its token', async target => {
+    const pending = await prepareConnection();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const writer = (handler as any).settingsAdmission.mutation(target, () => gate);
+    try {
+      const refused = await send('blocked-confirm', `/resume confirm ${pending}`);
+      expect(refused.success).toBe(false);
+      expect(refused.error).toContain('settings operation');
+      expect(executor.adoptNativeSession).not.toHaveBeenCalled();
+    } finally { release(); await writer; }
+    expect((await send('retry-confirm', `/resume confirm ${pending}`)).success).toBe(true);
+    expect(executor.adoptNativeSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('holds settings admission throughout Pi startup and rejects an overlapping model change', async () => {
+    const pending = await prepareConnection();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    executor.adoptNativeSession.mockImplementation(async () => { await gate; return { success: true }; });
+    executor.setModel = vi.fn();
+    const connecting = send('connecting', `/resume confirm ${pending}`);
+    try {
+      expect((handler as any).settingsAdmission.isBlocked('thread-a')).toBe(true);
+      expect((await send('model-overlap', '/model example/model-a')).success).toBe(false);
+      expect(executor.setModel).not.toHaveBeenCalled();
+    } finally { release(); await connecting; }
+    expect((handler as any).settingsAdmission.isBlocked('thread-a')).toBe(false);
+  });
+
+  it.each(['update', 'workers'])('refuses Pi context changes during %s', async reason => {
+    const pending = await prepareConnection();
+    if (reason === 'update') (handler as any).automaticUpdateInProgress = true;
+    else vi.spyOn((handler as any).delegation, 'hasActiveTasks').mockReturnValue(true);
+    expect((await send('busy-confirm', `/resume confirm ${pending}`)).success).toBe(false);
+    expect(executor.adoptNativeSession).not.toHaveBeenCalled();
+  });
+
+  it.each(['claude', 'codex'])('keeps %s catalogs read-only even during an unrelated settings writer', async backend => {
+    threadPool.getBackendKey.mockReturnValue(backend);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const writer = (handler as any).settingsAdmission.mutation('*', () => gate);
+    try {
+      expect((await send('read-only-list', '/resume')).success).toBe(true);
+      expect((await send('no-connect', '/resume id session-00')).success).toBe(false);
+      expect(threadPool.getExecutor).not.toHaveBeenCalled();
+      expect(executor.execute).not.toHaveBeenCalled();
+    } finally { release(); await writer; }
+  });
 });

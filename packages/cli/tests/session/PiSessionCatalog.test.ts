@@ -31,6 +31,23 @@ describe('read-only Pi session catalog', () => {
   afterEach(() => fs.rmSync(home, { recursive: true, force: true }));
   const list = (env: NodeJS.ProcessEnv = {}) => listPiSessions(workspace, { home, env });
 
+  it('uses the custom agent directory for its default session namespace', () => {
+    const agent = path.join(home, 'custom-agent');
+    write(path.join(agent, 'sessions', piProjectDirectoryName(workspace)), 'custom.jsonl', { id: 'custom-session', cwd: workspace });
+    write(native, 'default.jsonl', { id: 'wrong-namespace', cwd: workspace });
+    const env = { PI_CODING_AGENT_DIR: agent };
+    expect(resolvePiSessionDirectory(workspace, { home, env })).toMatchObject({ source: 'default', directory: path.join(agent, 'sessions', piProjectDirectoryName(workspace)) });
+    expect(list(env).candidates.map(candidate => candidate.id)).toEqual(['custom-session']);
+  });
+
+  it('does not silently substitute the default store for an unresolved agent directory', () => {
+    write(native, 'default.jsonl', { id: 'wrong-namespace', cwd: workspace });
+    const result = list({ PI_CODING_AGENT_DIR: './relative-agent' });
+    expect(result.complete).toBe(false);
+    expect(result.candidates).toEqual([]);
+    expect(result.notes.join(' ')).toContain('could not be resolved');
+  });
+
   it('lists only current-workspace sessions from native and remote-cli stores with safe metadata', () => {
     write(native, 'a.jsonl', { id: 'native-session', cwd: workspace }, [message('user'), message('assistant'),
       { type: 'session_info', name: 'Refactor **auth** `module`' }]);
@@ -132,7 +149,8 @@ describe('read-only Pi session catalog', () => {
     expect(resolvePiSessionDirectory(workspace, { home, env: { PI_CODING_AGENT_SESSION_DIR: exact } }))
       .toEqual({ directory: exact, source: 'env-override', unresolved: false, notes: [] });
     expect(resolvePiSessionDirectory(workspace, { home, env: { PI_CODING_AGENT_SESSION_DIR: 'relative' } }).unresolved).toBe(true);
-    expect(resolvePiSessionDirectory(workspace, { home, env: {} }).directory).toBeUndefined();
+    expect(resolvePiSessionDirectory(workspace, { home, env: {} }).directory)
+      .toBe(path.join(home, '.pi', 'agent', 'sessions', piProjectDirectoryName(workspace)));
     expect(resolvePiSessionDirectory(workspace, { home, env: {} }).source).toBe('default');
   });
 
