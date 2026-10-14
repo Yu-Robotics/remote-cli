@@ -16,8 +16,8 @@ import type {
  * streaming placeholder, bound to the original user, device, thread, request
  * and CLI-owned snapshot. Callback values are untrusted: every click is
  * revalidated against the stored snapshot, the delivered card ID, the current
- * device ownership and the menu revision. Local draft edits (backend/scope/
- * page) never reach the CLI; only Confirm, an explicit choice, Reset,
+ * device ownership and the menu revision. Local scope/page selections never
+ * reach the CLI; explicit backend/native choices, Reset,
  * Follow-global and target-backend views send a `settings_action`. A pending
  * request suppresses further mutations until a matching `settings_result`
  * arrives or the bounded wait expires (unknown, never success).
@@ -53,9 +53,7 @@ interface MenuState {
   menu: SettingsMenu;
   revision: number;
   page: number;
-  draftBackend: SettingsBackend;
   draftScope: SettingsScope;
-  draftFollowGlobal?: boolean;
   cards: Set<string>;
   pending?: PendingRequest;
   notice?: string;
@@ -80,7 +78,7 @@ interface ChoiceLayout {
 }
 
 type SettingsOperation = SettingsActionMessage['operation'];
-type LocalOperation = 'draft_backend' | 'draft_scope' | 'draft_follow_global' | 'page';
+type LocalOperation = 'draft_scope' | 'page';
 type ClickOperation = SettingsOperation | LocalOperation | 'retry';
 
 const BACKENDS: readonly SettingsBackend[] = ['claude', 'codex', 'opencode', 'kimi', 'zcode', 'pi', 'agy', 'dsh'];
@@ -238,7 +236,6 @@ export class SettingsCards {
       menu,
       revision: 1,
       page: 0,
-      draftBackend: menu.targetBackend,
       draftScope: 'thread',
       cards: new Set(),
       createdAt: Date.now(),
@@ -287,7 +284,7 @@ export class SettingsCards {
       return state.pending.timedOut ? 'The outcome is unknown. Retry confirmation or run the settings command again.'
         : `${state.pending.label} Waiting for the CLI.`;
     }
-    if (op === 'page' || op === 'draft_backend' || op === 'draft_scope' || op === 'draft_follow_global') {
+    if (op === 'page' || op === 'draft_scope') {
       // Local draft edits are deterministic against the immutable snapshot and
       // safe from any past revision of the same delivered card.
       return this.localEdit(state, op, payload.value);
@@ -342,17 +339,16 @@ export class SettingsCards {
     for (const state of this.menus.values()) {
       if (state.deviceId !== deviceId || state.pending?.requestId !== message.messageId) continue;
       if (message.openId !== state.openId || message.threadId !== state.menu.threadId || message.snapshotId !== state.menu.snapshotId) continue;
+      const operation = state.pending.message.operation;
       clearTimeout(state.pending.timer);
       state.pending = undefined;
       if (message.success) {
         const fresh = message.menu ? sanitizeSettingsMenu(message.menu) : undefined;
         if (message.menu && fresh && fresh.kind === state.menu.kind && fresh.threadId === state.menu.threadId) {
-          // A fresh menu replaces page/draft state and invalidates old buttons.
+          // Invalidate old buttons while retaining the next backend click's scope.
           state.menu = fresh;
           state.page = 0;
-          state.draftBackend = fresh.targetBackend;
-          state.draftScope = 'thread';
-          state.draftFollowGlobal = false;
+          if (fresh.kind !== 'backend' || operation === 'follow_global') state.draftScope = 'thread';
           state.notice = bounded(message.notice, LIMITS.notice);
         } else {
           this.setTerminal(state, bounded(message.notice, LIMITS.notice) ?? 'Applied.');
@@ -384,28 +380,13 @@ export class SettingsCards {
       this.touch(state);
       return `Page ${target + 1} of ${pages}.`;
     }
-    if (op === 'draft_backend' && state.menu.kind === 'backend') {
-      const backend = state.menu.backends.find(entry => entry.value === value);
-      if (!backend || !backend.installed) throw new Error('That backend is not available.');
-      state.draftBackend = backend.value;
-      state.draftFollowGlobal = false;
-      this.touch(state);
-      return `Selected ${backend.label}. Press Confirm to apply.`;
-    }
     if (op === 'draft_scope' && state.menu.kind === 'backend') {
       if (value !== 'thread' && value !== 'all') throw new Error('Unknown scope.');
       state.draftScope = value;
-      if (value === 'all') state.draftFollowGlobal = false;
       this.touch(state);
       return value === 'all'
-        ? 'Scope: all threads on this device. Press Confirm to apply.'
-        : 'Scope: this thread. Press Confirm to apply.';
-    }
-    if (op === 'draft_follow_global' && state.menu.kind === 'backend' && state.menu.followsGlobal === false) {
-      state.draftFollowGlobal = true;
-      state.draftScope = 'thread';
-      this.touch(state);
-      return 'Selected the global backend for this thread. Press Confirm to apply.';
+        ? 'Next backend click applies to all threads on this device. No backend has changed.'
+        : 'Next backend click applies to this thread. No backend has changed.';
     }
     throw new Error('That action is not available for this card.');
   }
@@ -443,14 +424,14 @@ export class SettingsCards {
         message: requestId => ({ ...base(requestId), operation: 'reset' }) };
     }
     if (op === 'apply' && menu.kind === 'backend') {
-      if (state.draftFollowGlobal && menu.followsGlobal === false && !busyBlocked) {
-        return { label: 'Following the global backend…', toast: 'Following the global backend…',
-          message: requestId => ({ ...base(requestId), operation: 'follow_global' }) };
-      }
-      const backend = menu.backends.find(entry => entry.value === state.draftBackend);
+      const backend = menu.backends.find(entry => entry.value === value);
       if (!backend || !backend.installed || busyBlocked) return undefined;
       return { label: `Applying ${backend.label}…`, toast: `Applying ${backend.label}…`,
         message: requestId => ({ ...base(requestId), operation: 'apply', value: backend.value, scope: state.draftScope }) };
+    }
+    if (op === 'follow_global' && menu.kind === 'backend' && menu.followsGlobal === false && value === undefined && !busyBlocked) {
+      return { label: 'Following the global backend for this thread…', toast: 'Following the global backend for this thread…',
+        message: requestId => ({ ...base(requestId), operation: 'follow_global' }) };
     }
     return undefined;
   }
@@ -671,26 +652,19 @@ export class SettingsCards {
     const menu = state.menu;
     const elements: any[] = [];
     const current = this.backendLabel(state, menu.targetBackend);
-    const draftNote = state.draftFollowGlobal
-      ? ' Draft: follow the global backend — applies after Confirm.'
-      : state.draftBackend !== menu.targetBackend
-        ? ` Draft: **${escapeMarkdown(this.backendLabel(state, state.draftBackend))}** — applies after Confirm.`
-        : '';
-
     const backendButtons = menu.backends.map(backend => {
       const isCurrent = backend.value === menu.targetBackend;
-      const isDraft = !state.draftFollowGlobal && backend.value === state.draftBackend;
-      const label = `${isDraft ? '✓ ' : ''}${backend.label}${isCurrent ? ' (current)' : ''}`.slice(0, LIMITS.label);
-      return this.button(state, 'draft_backend', label, {
+      const label = `${isCurrent ? '✓ ' : ''}${backend.label}${isCurrent ? ' (current)' : ''}`.slice(0, LIMITS.label);
+      return this.button(state, 'apply', label, {
         value: backend.value,
-        primary: isDraft,
+        primary: isCurrent,
         disabled: blocked || !backend.installed,
       });
     });
     const backendRows: any[] = [];
     for (let index = 0; index < backendButtons.length; index += 4) backendRows.push(this.row(backendButtons.slice(index, index + 4)));
     elements.push(...this.section('**1 · Choose backend**',
-      `Current: **${escapeMarkdown(current)}**. Pick a backend to draft it — nothing changes until Confirm.${draftNote}`,
+      `Current: **${escapeMarkdown(current)}**. Click a backend to switch ${state.draftScope === 'all' ? 'all threads on this device' : 'this thread'} immediately. Selection updates after CLI acknowledgement.`,
       backendRows));
 
     const scopeButtons = [
@@ -701,18 +675,15 @@ export class SettingsCards {
         value: 'all', primary: state.draftScope === 'all', disabled: blocked,
       }),
     ];
-    let scopeSubtitle = 'Choose where the change applies: only this thread, or every thread on this device.';
+    let scopeSubtitle = 'Current thread is the default. Scope buttons only set where the next backend click applies; they do not switch backends.';
     if (menu.followsGlobal === false) {
-      scopeButtons.push(this.button(state, 'draft_follow_global', `${state.draftFollowGlobal ? '✓ ' : ''}Follow global`, {
-        primary: Boolean(state.draftFollowGlobal), disabled: blocked,
+      scopeButtons.push(this.button(state, 'follow_global', 'Follow global (this thread)', {
+        disabled: blocked,
       }));
-      scopeSubtitle += ' Follow global uses the device-wide backend for this thread only.';
+      scopeSubtitle += ' Follow global immediately uses the device-wide backend for this thread only.';
     }
     elements.push(...this.section('**2 · Apply to**', scopeSubtitle, [this.row(scopeButtons)]));
 
-    elements.push(...this.section('**3 · Confirm**',
-      'Only Confirm applies the drafted backend and scope.',
-      [this.row([this.button(state, 'apply', 'Confirm', { primary: true, disabled: blocked })])]));
     return elements;
   }
 

@@ -2978,7 +2978,7 @@ describe('FeishuLongConnHandler', () => {
       return found;
     }
 
-    it('finalizes a bare settings card, binds the delivered card and routes Confirm to the CLI', async () => {
+    it('finalizes a bare settings card, binds the delivered card and routes a backend click to the CLI', async () => {
       const { SettingsCards } = await import('../src/feishu/SettingsCards');
       const delivered = new Map<string, string>();
       mockClient.im.message.patch.mockImplementation(async (request: any) => {
@@ -3012,15 +3012,16 @@ describe('FeishuLongConnHandler', () => {
         expect(cardText).not.toContain('🧵');
         expect(cardText).not.toContain('switch_thread');
 
-        const confirm = findButton(card.body.elements, 'apply');
-        expect(confirm.text.content).toBe('Confirm');
+        const choice = findButton(card.body.elements, 'apply');
+        expect(choice.text.content).toBe('Codex CLI');
+        expect(cardText).not.toContain('Confirm');
         const result = await handler.handleCardAction({ operator: { open_id: 'owner' },
-          context: { open_message_id: 'root' }, action: { value: confirm.behaviors[0].value } });
+          context: { open_message_id: 'root' }, action: { value: choice.behaviors[0].value } });
         expect(result?.toast.type).toBe('info');
         expect(send).toHaveBeenCalledTimes(1);
         expect(send.mock.calls[0][0]).toBe('device');
         const action = send.mock.calls[0][1];
-        expect(action).toMatchObject({ type: 'settings_action', operation: 'apply', value: 'claude',
+        expect(action).toMatchObject({ type: 'settings_action', operation: 'apply', value: 'codex',
           scope: 'thread', threadId: 'thread-1', snapshotId: 'snap-1', openId: 'owner' });
 
         await cards.resolve('device', { type: 'settings_result', messageId: action.messageId, openId: 'owner',
