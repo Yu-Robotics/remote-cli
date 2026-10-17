@@ -79,7 +79,7 @@ interface ChoiceLayout {
 
 type SettingsOperation = SettingsActionMessage['operation'];
 type LocalOperation = 'draft_scope' | 'page';
-type ClickOperation = SettingsOperation | LocalOperation | 'retry';
+type ClickOperation = SettingsOperation | LocalOperation | 'retry' | 'cancel';
 
 const BACKENDS: readonly SettingsBackend[] = ['claude', 'codex', 'opencode', 'kimi', 'zcode', 'pi', 'agy', 'dsh'];
 const MAX_MENUS = 100;
@@ -130,7 +130,7 @@ function taggedNodes(value: unknown): number {
 export function sanitizeSettingsMenu(input: unknown): SettingsMenu | undefined {
   if (!input || typeof input !== 'object') return undefined;
   const raw = input as Record<string, unknown>;
-  const kind = raw.kind === 'backend' || raw.kind === 'model' || raw.kind === 'effort' || raw.kind === 'delegation' ? raw.kind : undefined;
+  const kind = raw.kind === 'backend' || raw.kind === 'model' || raw.kind === 'effort' || raw.kind === 'delegation' || raw.kind === 'directory' ? raw.kind : undefined;
   const snapshotId = identifier(raw.snapshotId, LIMITS.id);
   const threadId = identifier(raw.threadId, LIMITS.id);
   const threadName = bounded(raw.threadName, LIMITS.label);
@@ -139,6 +139,18 @@ export function sanitizeSettingsMenu(input: unknown): SettingsMenu | undefined {
   const expiresAt = typeof raw.expiresAt === 'number' && Number.isFinite(raw.expiresAt) ? raw.expiresAt : undefined;
   if (!kind || !snapshotId || !threadId || !threadName || !coordinatorBackend || !targetBackend || !expiresAt || expiresAt <= 0) return undefined;
   if (kind === 'delegation' && (targetBackend !== coordinatorBackend || !['on', 'off'].includes(raw.configuredValue as string))) return undefined;
+  let directory: SettingsMenu['directory'];
+  if (kind === 'directory') {
+    if (!raw.directory || typeof raw.directory !== 'object') return undefined;
+    const source = raw.directory as Record<string, unknown>;
+    const roots = identifier(source.roots, LIMITS.id);
+    const refresh = identifier(source.refresh, LIMITS.id);
+    const currentPath = bounded(source.currentPath, 1024);
+    const browsingPath = bounded(source.browsingPath, 1024);
+    if (!roots || !refresh || !currentPath || !browsingPath || !snapshotId.startsWith('directory-')) return undefined;
+    directory = { roots, refresh, currentPath, browsingPath, parent: identifier(source.parent, LIMITS.id),
+      apply: identifier(source.apply, LIMITS.id), notice: bounded(source.notice, 1000) };
+  }
 
   const backends: SettingsMenu['backends'] = [];
   if (!Array.isArray(raw.backends)) return undefined;
@@ -201,6 +213,7 @@ export function sanitizeSettingsMenu(input: unknown): SettingsMenu | undefined {
     unavailableReason: bounded(raw.unavailableReason, LIMITS.reason),
     omittedChoices: ((typeof raw.omittedChoices === 'number' && Number.isInteger(raw.omittedChoices) && raw.omittedChoices > 0
       ? Math.min(raw.omittedChoices, 100_000) : 0) + (Array.isArray(raw.choices) ? Math.max(0, raw.choices.length - MAX_CHOICES) : 0)) || undefined,
+    ...(directory ? { directory } : {}),
   };
 }
 
@@ -214,7 +227,7 @@ export class SettingsCards {
     this.prune();
     const menu = sanitizeSettingsMenu(input.menu);
     if (!menu || menu.expiresAt <= Date.now()) return undefined;
-    if (menu.kind === 'delegation' && !this.transport.available(input.deviceId, menu.kind)) return undefined;
+    if ((menu.kind === 'delegation' || menu.kind === 'directory') && !this.transport.available(input.deviceId, menu.kind)) return undefined;
     // A menu only lands on the card of its own thread's request.
     if (input.expectedThreadId && menu.threadId !== input.expectedThreadId) return undefined;
     for (const state of this.menus.values()) {
@@ -292,6 +305,10 @@ export class SettingsCards {
     // Mutations and view requests require the exact rendered revision: a stale
     // card must never silently apply a different operation.
     if (payload.rev !== state.revision) throw new Error('This settings card is outdated. Use the latest card.');
+    if (op === 'cancel' && state.menu.kind === 'directory') {
+      this.setTerminal(state, 'Directory browser closed. No directory was changed.');
+      return 'Directory browser closed.';
+    }
     if (!this.transport.available(state.deviceId, state.menu.kind)) {
       throw new Error('The original CLI is offline or does not support settings cards. Reconnect it first.');
     }
@@ -402,6 +419,18 @@ export class SettingsCards {
       timestamp: Date.now(),
     });
     const busyBlocked = menu.busy;
+    if (menu.kind === 'directory' && menu.directory) {
+      if (op === 'view' && typeof value === 'string'
+        && [menu.directory.parent, menu.directory.roots, menu.directory.refresh, ...menu.choices.filter(choice => !choice.disabled).map(choice => choice.value)].includes(value)) {
+        return { label: 'Loading directories…', toast: 'Browsing only — the working directory is unchanged.',
+          message: requestId => ({ ...base(requestId), operation: 'view', value }) };
+      }
+      if (op === 'apply' && typeof value === 'string' && value === menu.directory.apply && !busyBlocked) {
+        return { label: 'Changing working directory…', toast: 'Changing directory for this thread…',
+          message: requestId => ({ ...base(requestId), operation: 'apply', value }) };
+      }
+      return undefined;
+    }
     if (op === 'view' && menu.kind === 'delegation') {
       if (value !== undefined) return undefined;
       return { label: 'Refreshing delegation…', toast: 'Refreshing delegation…',
@@ -516,6 +545,7 @@ export class SettingsCards {
 
   private header(state: MenuState): Record<string, unknown> {
     const title = state.menu.kind === 'backend' ? '⚙️ Backend settings'
+      : state.menu.kind === 'directory' ? '📁 Working directory'
       : state.menu.kind === 'model' ? '🎯 Model settings' : state.menu.kind === 'delegation' ? '🤝 Agent delegation' : '⚡ Effort settings';
     return { title: { tag: 'plain_text', content: title }, template: state.terminal ? 'grey' : state.pending ? 'blue' : 'blue' };
   }
@@ -562,6 +592,7 @@ export class SettingsCards {
   }
 
   private renderInteractive(state: MenuState, page: ChoicePage): any[] {
+    if (state.menu.kind === 'directory') return this.renderDirectory(state, page);
     const menu = state.menu;
     const lines: string[] = [];
     const pending = state.pending;
@@ -602,6 +633,43 @@ export class SettingsCards {
       elements.push(...this.renderChoiceSections(state, blocked, page));
     }
     if (pending?.timedOut) elements.push(this.row([this.button(state, 'retry', 'Retry confirmation', { primary: true })]));
+    return elements;
+  }
+
+  private renderDirectory(state: MenuState, page: ChoicePage): any[] {
+    const directory = state.menu.directory!;
+    const pending = Boolean(state.pending);
+    const elements: any[] = [
+      { tag: 'markdown', content: `**Working directory** · ${escapeMarkdown(state.menu.threadName)}\nCurrent: ${escapeMarkdown(directory.currentPath)}` },
+      ...this.section('**1 · Browse directories**', `Browsing: ${escapeMarkdown(directory.browsingPath)}`, []),
+    ];
+    if (state.notice) elements.push(this.note(escapeMarkdown(state.notice)));
+    if (pending) elements.push(this.note('Waiting for the CLI. Navigation alone never changes the working directory.'));
+    for (let index = 0; index < page.choices.length; index += 2) {
+      elements.push(this.row(page.choices.slice(index, index + 2).map(choice => this.button(state, 'view', `📁 ${choice.label}`, {
+        value: choice.value, disabled: pending || choice.disabled,
+      }))));
+    }
+    if (!page.choices.length) elements.push(this.note('No selectable subdirectories in this listing.'));
+    if (page.total > 1) elements.push(this.row([
+      this.button(state, 'page', 'Previous', { value: String(page.index - 1), disabled: pending || page.index === 0 }),
+      this.button(state, 'page', 'Next', { value: String(page.index + 1), disabled: pending || page.index + 1 >= page.total }),
+    ]), this.note(`Page ${page.index + 1} of ${page.total}`));
+    elements.push(this.row([
+      this.button(state, 'view', '↑ Parent', { value: directory.parent, disabled: pending || !directory.parent }),
+      this.button(state, 'view', 'Allowed roots', { value: directory.roots, disabled: pending }),
+      this.button(state, 'view', 'Refresh', { value: directory.refresh, disabled: pending }),
+    ]));
+    if (directory.notice) elements.push(this.note(escapeMarkdown(directory.notice)));
+    elements.push(...this.section('**2 · Apply to this thread**',
+      'Browsing does not change context. Changing directory clears conversation bindings for all direct and delegated backends in this thread.', [
+        this.row([
+          this.button(state, 'apply', 'Use this directory', { value: directory.apply, primary: true, disabled: pending || state.menu.busy || !directory.apply }),
+          this.button(state, 'cancel', 'Cancel', { disabled: pending }),
+        ]),
+      ]));
+    if (state.menu.busy) elements.push(this.note('Active or queued work blocks Apply. Refresh after it finishes.'));
+    if (state.pending?.timedOut) elements.push(this.row([this.button(state, 'retry', 'Retry confirmation', { primary: true })]));
     return elements;
   }
 

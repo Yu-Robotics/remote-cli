@@ -129,6 +129,12 @@ export function formatWorkerResultMarkdown(value: string, limit = 1000, preview:
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, ''));
   const truncated = characters.length > limit;
   let source = characters.slice(0, limit).join('');
+  // A head/tail splice has lost its Markdown context. Escaping the entire
+  // excerpt preserves both fragments without interpreting orphaned fences,
+  // links, tables, or worker-supplied card tags as a complete document.
+  if (preview === 'result' && /(?:^|\n)\[Output truncated\](?:\n|$)/.test(source)) {
+    return `${literal(source)}\n\n_Result excerpt contains an omission marker; shown as plain text._`;
+  }
   if (truncated && preview === 'activity') {
     const prefix = characters.slice(0, -limit).join('');
     source = characters.slice(-limit).join('');

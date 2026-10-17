@@ -230,6 +230,15 @@ bound retained delegation results, not backend output buffers. Worker timeouts,
 cancellation, and cleanup still apply. This requires a local CLI upgrade and
 works with existing Routers.
 
+With CLI and Router 1.6.167 or newer, terminal Worker card excerpts retain up to
+4 KiB of UTF-8 text. Excerpts containing standalone omission markers are shown
+as escaped plain text with a separate explanation rather than interpreting
+contextless Markdown fragments. Intact result Markdown is preserved. Upgrade
+both peers for the larger preview; newer Routers also safely display older
+CLI omission markers. Older or unknown Routers keep the legacy 1000-byte
+head/tail summary, including after reconnect. The 32 KiB result and 64 KiB
+continuation limits stay unchanged.
+
 CLI 1.6.89 can compact/retry result continuations that launched no new workers.
 Results remain retained until the coordinator execution succeeds. If its reply
 still fails, bounded completed worker results appear as plain text alongside the
@@ -319,6 +328,8 @@ Clients automatically install a newer Router's exact published npm version when 
 The Feishu command reference includes the cross-backend `/status`, `/context`, and `/skills` commands, the `/clear` and `/new` fresh-conversation aliases, plus per-thread queue controls. See the root [README](../../README.md) for the complete command and backend behavior reference.
 
 CLI 1.6.93 makes `/cd` to a different directory start fresh conversations for all backends in that thread, including inactive ones. Returning to the old directory does not restore its old conversations. Same-directory `/cd` and backend-only switches preserve context. Thread settings and native history files remain intact. The CLI enforces this behavior without a protocol change; upgrading only the Router does not change an older CLI's directory behavior.
+
+From 1.6.168, `directoryCards` is an optional capability requiring `settingsCards` on both peers. Bare `/cd` becomes a directory-only browser; older peers retain text `/cd <path>`. Router reuses settings-card owner/device/delivered-card/revision binding, pending suppression, and exact-request confirmation. Child, Parent, roots, and refresh actions query the original CLI with opaque tokens; Router never reads the CLI filesystem. Only Use this directory applies a cwd change; Cancel closes locally. Navigation leaves context unchanged. The CLI checks policy, snapshot, directory/ancestor identity, busy/queue state, and shared mutation admission at Apply. Large lists use budget-driven paging and bounded scans with explicit omissions. Directory symlinks are omitted, and Parent stops at the nearest allowed root. These checks are not an OS sandbox or complete protection from concurrent filesystem changes or bind mounts. Protocol version remains 1.
 
 With CLI 1.6.84 or newer, `/status` also shows `Delegation: on/off (current thread)`.
 The CLI reads this effective setting without initializing delegation or starting workers.

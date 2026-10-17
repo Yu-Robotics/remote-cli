@@ -2,7 +2,7 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { DELEGATION_TEXT_PROGRESS, DelegationManager, type DelegationParent } from '../../src/delegation/DelegationManager';
+import { DELEGATION_LIMITS, DELEGATION_TEXT_PROGRESS, DelegationManager, type DelegationParent } from '../../src/delegation/DelegationManager';
 import { BackendRegistry, type BackendAvailability } from '../../src/delegation/BackendRegistry';
 import { DelegationStore } from '../../src/delegation/DelegationStore';
 import { DelegatedWorkerSessionStore } from '../../src/delegation/DelegatedWorkerSessionStore';
@@ -42,7 +42,7 @@ describe('managed agent delegation', () => {
       createdAt: 0, lastActiveAt: 0, models: { codex: 'codex-model', claude: 'claude-model', pi: 'provider/model',
         agy: 'agy-model', opencode: 'opencode/model', kimi: 'kimi-model', zcode: 'zcode-model', dsh: 'dsh-model' },
       efforts: { claude: 'high', codex: 'high', pi: 'high', agy: 'high', opencode: 'high', kimi: 'high', zcode: 'high', dsh: 'high' } },
-    cwd: home, messageId: 'message-1', backend: 'claude', config: { type: 'auto' },
+    cwd: home, messageId: 'message-1', backend: 'claude', config: { type: 'auto' }, routerVersion: () => '1.6.167',
     onToolUse: vi.fn(), onToolResult: vi.fn(), onNotice: vi.fn(), onApproval: vi.fn(() => true), onApprovalResolved: vi.fn() };
   });
 
@@ -857,7 +857,50 @@ describe('managed agent delegation', () => {
     expect(parent.onApprovalResolved).toHaveBeenCalledWith('permission', 'denied');
   });
 
+  it.each(['x', '\u{1f680}'])('retains terminal summaries beyond the former 1000-byte limit: %s', async character => {
+    const output = `## Review\n${character.repeat(character === 'x' ? 1500 : 700)}\nVerified conclusion`;
+    parent.onProgress = vi.fn(() => true);
+    vi.mocked(worker.execute).mockResolvedValueOnce({ success: true, output });
+    const scope = manager.begin(parent);
+    const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' }, 'start');
+    await scope.invoke('remote_cli_result', { taskId: task.taskId }, 'read');
+    expect(parent.onProgress).toHaveBeenLastCalledWith(expect.objectContaining({ summary: output }));
+    expect(DELEGATION_LIMITS.summaryBytes).toBe(4096);
+  });
+
+  it.each([undefined, 'invalid', '1.6.166', '1.6.167-rc.1', '1.6.167', '1.6.167+build', '1.7.0'])
+  ('negotiates head/tail summary bounds from the current Router version: %s', async routerVersion => {
+    parent.routerVersion = routerVersion === undefined ? undefined : () => routerVersion;
+    parent.onProgress = vi.fn(() => true);
+    vi.mocked(worker.execute).mockResolvedValueOnce({ success: true, output: `Review context\n${'x'.repeat(5000)}\nVerified conclusion` });
+    const scope = manager.begin(parent);
+    const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' }, 'start');
+    await scope.invoke('remote_cli_result', { taskId: task.taskId }, 'read');
+    const summary = vi.mocked(parent.onProgress).mock.calls.at(-1)![0].summary!;
+    const extended = ['1.6.167', '1.6.167+build', '1.7.0'].includes(routerVersion!);
+    expect(Buffer.byteLength(summary)).toBe(extended ? 4096 : 1000);
+    expect(summary).toMatch(/^Review context\n/);
+    expect(summary).toMatch(/\nVerified conclusion$/);
+  });
+
+  it.each(['1.6.166', undefined])('rechecks the summary budget when a worker outlives a Router reconnect: %s', async nextVersion => {
+    let routerVersion: string | undefined = '1.6.167';
+    parent.routerVersion = () => routerVersion;
+    parent.onProgress = vi.fn(() => true);
+    let finish!: (result: ExecuteResult) => void;
+    vi.mocked(worker.execute).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const scope = manager.begin(parent);
+    const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' }, 'start');
+    routerVersion = nextVersion;
+    finish({ success: true, output: `${'x'.repeat(5000)}\nVerified conclusion` });
+    await scope.invoke('remote_cli_result', { taskId: task.taskId }, 'read');
+    const summary = vi.mocked(parent.onProgress).mock.calls.at(-1)![0].summary!;
+    expect(Buffer.byteLength(summary)).toBe(1000);
+    expect(summary).toMatch(/\nVerified conclusion$/);
+  });
+
   it.each([true, false])('bounds final output without losing the conclusion or changing success=%s', async success => {
+    parent.onProgress = vi.fn(() => false);
     vi.mocked(worker.execute).mockResolvedValueOnce({ success,
       output: `Review context\n${'\u{1f680}'.repeat(100000)}\nVerified conclusion`,
       error: success ? undefined : 'Failed' });
@@ -870,6 +913,12 @@ describe('managed agent delegation', () => {
     expect(result.output).toContain('[Output truncated]');
     expect(result.output).toMatch(/\nVerified conclusion$/);
     expect(result.output).not.toContain('\ufffd');
+    const terminal = vi.mocked(parent.onProgress).mock.calls.at(-1)![0];
+    expect(Buffer.byteLength(terminal.summary!)).toBeLessThanOrEqual(4096);
+    expect(Buffer.byteLength(terminal.summary!)).toBeGreaterThan(1000);
+    expect(terminal.summary).toContain('[Output truncated]');
+    expect(terminal.summary).toMatch(/\nVerified conclusion$/);
+    expect(terminal.summary).not.toContain('\ufffd');
     expect(parent.onToolResult).toHaveBeenCalledWith({ tool_use_id: task.taskId,
       content: JSON.stringify(result), is_error: !success });
     if (!success) expect(parent.onNotice).toHaveBeenCalledWith(expect.stringContaining('**Reason:** <raw>Failed</raw>'));

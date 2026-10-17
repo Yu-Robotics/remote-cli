@@ -53,6 +53,7 @@ function buildHandler(mockExecutorOverrides: Record<string, any> = {}) {
 
   const mockWsClient: any = {
     send: vi.fn(),
+    onClose: vi.fn(),
     trackTask: vi.fn(),
     hasPendingTaskResults: vi.fn(() => false),
     isConnected: vi.fn(() => true),
@@ -137,6 +138,43 @@ describe('MessageHandler', () => {
         await rm(workingDirectory, { recursive: true, force: true });
       }
     }));
+  });
+
+  it('keeps worker summary delivery bound to the current successful Router registration', async () => {
+    const scope = {
+      isClosed: () => false, hasPendingResults: () => false, getLaunchRevision: () => 0,
+      beginExecution: vi.fn(), finishExecution: vi.fn(), getRetainedResults: () => [],
+      close: vi.fn(async () => undefined), collectPendingResults: async () => [],
+      checkArtifactCloseout: async () => [], invoke: vi.fn(),
+    };
+    const begin = vi.spyOn((ctx.handler as any).delegation, 'begin').mockReturnValue(scope);
+    ctx.mockExecutor.configureDelegation = vi.fn();
+    let finish!: (result: any) => void;
+    ctx.mockExecutor.execute.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    const register = (routerVersion?: unknown, success = true) => ctx.handler.handleMessage({ type: 'binding_confirm',
+      data: { success, routerVersion, capabilities: { delegationProgress: true } } } as any);
+    await register('1.6.167');
+    const run = ctx.handler.handleMessage({ type: 'command', messageId: 'summary-version', content: 'Review' });
+    try {
+      await vi.waitFor(() => expect(ctx.mockExecutor.execute).toHaveBeenCalled());
+      const parent = begin.mock.calls[0][0] as any;
+      expect(parent.routerVersion()).toBe('1.6.167');
+      await register('1.6.166', false);
+      expect(parent.routerVersion()).toBe('1.6.167');
+      ctx.mockWsClient.onClose.mock.calls[0][0]();
+      expect(parent.routerVersion()).toBeUndefined();
+      await register('1.6.168');
+      expect(parent.routerVersion()).toBe('1.6.168');
+      await register();
+      expect(parent.routerVersion()).toBeUndefined();
+      await register(167);
+      expect(parent.routerVersion()).toBeUndefined();
+      await register('1.6.166');
+      expect(parent.routerVersion()).toBe('1.6.166');
+    } finally {
+      finish({ success: true, output: 'Done' });
+      await run;
+    }
   });
 
   describe('coordinator public activity', () => {

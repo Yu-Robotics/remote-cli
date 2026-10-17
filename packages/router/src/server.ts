@@ -23,7 +23,7 @@ import { FeishuLongConnHandler } from './feishu/FeishuLongConnHandler';
 import { ConnectionHub } from './websocket/ConnectionHub';
 import { BindingManager } from './binding/BindingManager';
 import { MessageType, ToolUseInfo, ToolResultInfo, DelegationProgressInfo, TaskNotificationInfo, PROTOCOL_VERSION, MIN_SUPPORTED_CLI_VERSION, ROUTER_VERSION, ThreadSummary, QueueConfirmationInfo, QueueStartedInfo, TaskResumeInfo, ImageBlock } from './types';
-import { DELEGATION_PROGRESS_ELEMENT_COUNT, DelegationProgressCardState, FeishuCardElement, type ToolCallCardState, createToolCallSummary, createToolCallElement, createDelegationProgressElements, createDividerElement, createToolUseElement, createToolResultElement, createMarkdownElement, createRedactedThinkingElement, createPlanModeElement, createTaskNotificationElement, createImageElement } from './utils/ToolFormatter';
+import { DELEGATION_PROGRESS_ELEMENT_COUNT, DELEGATION_RESULT_SUMMARY_LIMIT, DelegationProgressCardState, FeishuCardElement, type ToolCallCardState, createToolCallSummary, createToolCallElement, createDelegationProgressElements, createDividerElement, createToolUseElement, createToolResultElement, createMarkdownElement, createRedactedThinkingElement, createPlanModeElement, createTaskNotificationElement, createImageElement } from './utils/ToolFormatter';
 
 interface ToolCallProgressState extends ToolCallCardState {
   /** A single fixed slot keeps later text and worker section indices stable. */
@@ -437,6 +437,7 @@ export class RouterServer {
       let delegationProgressTextEnabled = false;
       let workerContextResetEnabled = false;
       let settingsCardsEnabled = false;
+      let directoryCardsEnabled = false;
       let delegationCardsEnabled = false;
       let streamingContextEnabled = false;
       let activityProgressEnabled = false;
@@ -498,7 +499,8 @@ export class RouterServer {
           }
 
           if (message.type === 'settings_result') {
-            if (settingsCardsEnabled && deviceId && (message.menu?.kind !== 'delegation' || delegationCardsEnabled)) await this.settingsCards.resolve(deviceId, message);
+            if (settingsCardsEnabled && deviceId && (message.menu?.kind !== 'delegation' || delegationCardsEnabled)
+              && (message.menu?.kind !== 'directory' || directoryCardsEnabled)) await this.settingsCards.resolve(deviceId, message);
             return;
           }
           if (message.type === 'approval_request' || message.type === 'approval_resolved') {
@@ -632,10 +634,11 @@ export class RouterServer {
                 // Settings cards are negotiated only when the CLI requests them;
                 // old peers keep plain text output and never see the capability.
                 settingsCardsEnabled = message.data.capabilities?.settingsCards === true;
+                directoryCardsEnabled = settingsCardsEnabled && message.data.capabilities?.directoryCards === true;
                 delegationCardsEnabled = settingsCardsEnabled && message.data.capabilities?.delegationCards === true;
                 if (settingsCardsEnabled) this.settingsConnections.set(deviceId,
                   kind => ws.readyState === WebSocket.OPEN && this.connectionHub.isCurrentConnection(requestedId, ws)
-                    && (kind !== 'delegation' || delegationCardsEnabled));
+                    && (kind !== 'delegation' || delegationCardsEnabled) && (kind !== 'directory' || directoryCardsEnabled));
                 else this.settingsConnections.delete(deviceId);
                 // Send confirmation with version info for client-side version check
                 ws.send(JSON.stringify({
@@ -659,6 +662,7 @@ export class RouterServer {
                       ...(workerContextResetEnabled ? { workerContextReset: true } : {}),
                       ...(streamingContextEnabled ? { streamingContext: true } : {}),
                       ...(settingsCardsEnabled ? { settingsCards: true } : {}),
+                      ...(directoryCardsEnabled ? { directoryCards: true } : {}),
                       ...(delegationCardsEnabled ? { delegationCards: true } : {}),
                     } } : {}),
                   }
@@ -702,7 +706,8 @@ export class RouterServer {
               const candidateSettingsMenu = settingsCardsEnabled && deviceId && !queueConfirmation
                 ? (message.settingsMenu ?? message.data?.settingsMenu)
                 : undefined;
-              const settingsMenu = candidateSettingsMenu?.kind === 'delegation' && !delegationCardsEnabled ? undefined : candidateSettingsMenu;
+              const settingsMenu = (candidateSettingsMenu?.kind === 'delegation' && !delegationCardsEnabled)
+                || (candidateSettingsMenu?.kind === 'directory' && !directoryCardsEnabled) ? undefined : candidateSettingsMenu;
 
               // If CLI reported a threadId and there is a streaming session for this message,
               // ensure the cardThreadMap is up to date (in case the CLI-reported threadId differs).
@@ -1240,7 +1245,7 @@ export class RouterServer {
       latestText: allowText || raw.phase !== 'text' ? this.boundedDelegationProgressText(raw.latestText, 1200) : undefined,
       ...(activity ? { activity } : {}),
       ...(allowActivity && typeof raw.waitingForInput === 'boolean' ? { waitingForInput: raw.waitingForInput } : {}),
-      summary: this.boundedDelegationProgressText(raw.summary, 4000),
+      summary: this.boundedDelegationProgressText(raw.summary, DELEGATION_RESULT_SUMMARY_LIMIT),
       error: this.boundedDelegationProgressText(raw.error, 4000),
       startedAt,
       ...(executionMetadata?.backend === backend ? { executionMetadata } : {}),

@@ -308,6 +308,7 @@ export class WebSocketClient {
             delegationProgressText: true,
             workerContextReset: true,
             settingsCards: true,
+            directoryCards: true,
             delegationCards: true,
             streamingContext: true,
             activityProgress: true,

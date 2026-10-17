@@ -629,6 +629,8 @@ const DELEGATION_PROGRESS_STYLES: Record<DelegationProgressPhase, { color: strin
 const FALLBACK_DELEGATION_PROGRESS_STYLE = { color: 'grey', label: 'Updating', terminal: false };
 // Accept the entire negotiated 1200-byte snapshot, including its latest words.
 const DELEGATION_CURRENT_ACTIVITY_LIMIT = 1200;
+// Accept the CLI's entire 4 KiB UTF-8 terminal summary without a second cut.
+export const DELEGATION_RESULT_SUMMARY_LIMIT = 4 * 1024;
 export const DELEGATION_PROGRESS_ELEMENT_COUNT = 4;
 
 /** Escape untrusted worker text so it cannot become Feishu card markup. */
@@ -707,7 +709,7 @@ export function createDelegationProgressElements(state: DelegationProgressCardSt
     primary.push({ label: 'Reason', labelColor: 'red', content: formatWorkerResultMarkdown(state.error) });
   }
   if (style.terminal && state.summary) {
-    primary.push({ label: 'Result excerpt', content: formatWorkerResultMarkdown(state.summary) });
+    primary.push({ label: 'Result excerpt', content: formatWorkerResultMarkdown(state.summary, DELEGATION_RESULT_SUMMARY_LIMIT) });
   } else if (publicActivity && state.phase !== 'waiting_input') {
     primary.push({ label: style.terminal ? 'Last activity · not a final result' : 'Activity',
       content: activityLiteral(publicActivity.text) });

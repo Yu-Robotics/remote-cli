@@ -1015,6 +1015,29 @@ describe('FeishuLongConnHandler', () => {
   });
 
   describe('splitElementsIntoChunks', () => {
+    it('keeps 4 KiB worker excerpts atomic within node, size and table budgets', () => {
+      (handler as any).CARD_DATA_SIZE_LIMIT = 16000;
+      (handler as any).CARD_SIZE_BUFFER = 2000;
+      const summary = 'x'.repeat(4096 - 'Verified conclusion'.length) + 'Verified conclusion';
+      const workers = Array.from({ length: 5 }, (_, index) => createDelegationProgressElements({
+        taskId: `worker-${index}`, ordinal: index + 1, backend: 'codex', phase: 'succeeded',
+        startedAt: 0, finishedAt: 1, summary, activeToolCount: 0, events: [], hiddenEventCount: 0,
+      }));
+      const chunks = (handler as any).splitElementsIntoChunks(workers.flat());
+      expect(chunks.length).toBeGreaterThan(1);
+      for (const group of workers) {
+        const pages = chunks.filter((chunk: any[]) => chunk.some(element => element.element_id === group[0].element_id));
+        expect(pages).toHaveLength(1);
+        expect(pages[0].filter((element: any) => group.some(item => item.element_id === element.element_id))).toEqual(group);
+      }
+      expect(JSON.stringify(chunks).match(/Verified conclusion/g)).toHaveLength(workers.length);
+      for (const chunk of chunks) {
+        expect((handler as any).countTaggedNodes(chunk)).toBeLessThanOrEqual(150);
+        expect(countCardTables(chunk)).toBeLessThanOrEqual(CARD_TABLE_LIMIT);
+        expect(JSON.stringify({ schema: '2.0', body: { elements: chunk } }).length).toBeLessThan(14000);
+      }
+    });
+
     it('moves a complete final worker group with the completion block', () => {
       const group = createDelegationProgressElements({ taskId: 'worker', ordinal: 1, backend: 'agy', phase: 'succeeded',
         startedAt: Date.now(), summary: 'Worker result', activeToolCount: 0, events: [], hiddenEventCount: 0 });

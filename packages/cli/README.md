@@ -176,7 +176,7 @@ Linux users upgrading from version 1.6.23 or earlier should run `remote-cli serv
 | `/clear` | Clear context for this thread |
 | `/new` | Alias for `/clear`; start a fresh conversation in this thread |
 | `/compact` | Compress history to save tokens |
-| `/cd <dir>` | Change directory; a different directory starts fresh conversations for this thread |
+| `/cd [dir]` | Browse directories as a card, or change directory directly with a path |
 | `/model [name]` | Open native model settings, or set the active backend model with a text argument |
 | `/effort [auto|level]` | Open native effort settings, or set/clear the active backend effort with a text argument |
 | `/sandbox [on/off/read-only/default]` | Configure the current Codex or Claude Code thread sandbox, directory grants, and networking |
@@ -243,6 +243,15 @@ truncation does not change the task's success or failure status. These limits
 bound retained delegation results, not backend output buffers. Worker timeouts,
 cancellation, and cleanup still apply. This requires a local CLI upgrade and
 works with existing Routers.
+
+With CLI and Router 1.6.167 or newer, terminal Worker card excerpts retain up to
+4 KiB of UTF-8 text. Excerpts containing standalone omission markers are shown
+as escaped plain text with a separate explanation rather than interpreting
+contextless Markdown fragments. Intact result Markdown is preserved. Upgrade
+both peers for the larger preview; newer Routers also safely display older
+CLI omission markers. Older or unknown Routers keep the legacy 1000-byte
+head/tail summary, including after reconnect. The 32 KiB result and 64 KiB
+continuation limits stay unchanged.
 
 Child progress, approvals, and questions use the existing reply flow. `/abort`
 stops managed children as well as the parent. While delegated results remain
@@ -415,6 +424,8 @@ Backend-specific commands are forwarded only where the active backend supports t
 ## Advanced Usage
 
 Use one thread per project or task so each thread keeps its own working directory, backend session, model, and queue. Use `/backend <index>` for a global switch, or `/backend <index> @` to override only the current thread. `/backend default @` removes that override.
+
+With CLI and Router 1.6.168 or newer, `/cd` opens a directory-only browser with child, Parent, Allowed roots, Refresh, Use this directory, and Cancel controls. Navigation never changes context or runs a backend. Only Apply changes the original thread, following the existing all-backend context reset and delegation-lane invalidation; the same directory remains a no-op. Both card Apply and text `/cd <path>` share exclusive settings admission and reject active, delegated, queued, aborting, or updating work. Older peers retain text behavior. Symbolic-link directories are omitted; Parent stops at the nearest allowed root. Snapshots expire after ten minutes and reject changed policy, cwd, root, directory, or ancestor identity. Scans cap at 4096 entries, 128 directories, or five seconds between filesystem operations, with explicit partial-list guidance; at most 32 roots are offered. Cards fill before budget-driven paging. Application-level canonical and identity checks are not an OS sandbox or protection against all external filesystem races and bind mounts.
 
 With CLI 1.6.93 or newer, `/cd` to a different normalized directory clears saved conversation bindings for every backend in that thread, including inactive ones. Returning to the old directory does not restore its previous conversation. Selecting the same directory preserves context; backend switching without a directory change still resumes conversations. Thread identity, model, effort, sandbox grants, delegation settings, and native history files remain intact. Separate plans should use separate threads, even when they share a directory. This change requires a CLI upgrade and works with existing Routers.
 

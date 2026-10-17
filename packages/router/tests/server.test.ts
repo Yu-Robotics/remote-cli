@@ -39,6 +39,7 @@ vi.mock('../src/utils/ToolFormatter', async (importActual) => ({
   createToolCallElement: vi.fn((await importActual<typeof import('../src/utils/ToolFormatter')>()).createToolCallElement),
   createToolCallSummary: (await importActual<typeof import('../src/utils/ToolFormatter')>()).createToolCallSummary,
   DELEGATION_PROGRESS_ELEMENT_COUNT: 4,
+  DELEGATION_RESULT_SUMMARY_LIMIT: 4096,
   createDelegationProgressElements: vi.fn((await importActual<typeof import('../src/utils/ToolFormatter')>()).createDelegationProgressElements),
   createDividerElement: vi.fn((await importActual<typeof import('../src/utils/ToolFormatter')>()).createDividerElement),
   createMarkdownElement: vi.fn((await importActual<typeof import('../src/utils/ToolFormatter')>()).createMarkdownElement),
@@ -1280,6 +1281,15 @@ describe('RouterServer', () => {
     expect(resolveThread('unknown-card')).toBeUndefined();
     vi.setSystemTime(Date.now() + 7 * 24 * 60 * 60 * 1000 + 1);
     expect(resolveThread('f1')).toBeUndefined();
+  });
+
+  it('accepts full 4 KiB worker summaries without losing the final 96 characters', () => {
+    const summary = 'x'.repeat(4096 - 'Verified conclusion'.length) + 'Verified conclusion';
+    const progress = { taskId: 'worker-1', backend: 'codex', phase: 'succeeded', summary };
+    const parsed = (server as any).normalizeDelegationProgress(progress, false);
+    expect(parsed.summary).toBe(summary);
+    expect((server as any).normalizeDelegationProgress({ ...progress, summary: summary + 'hidden' }, false).summary)
+      .toBe(summary);
   });
 
   it('renders supported worker progress as stable visible content and folded diagnostics', async () => {

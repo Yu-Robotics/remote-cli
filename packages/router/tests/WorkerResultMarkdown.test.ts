@@ -89,6 +89,34 @@ describe('worker result Markdown', () => {
     expect(html).not.toContain('x'.repeat(100));
   });
 
+  it.each([
+    'Introduction\n\n```ts\nconst head = 1;\n[Output truncated]\nconst tail = 2;\n```\n\n## Conclusion\nVerified conclusion',
+    '| Name | Status |\n| --- | --- |\n[Output truncated]\n| Test | Passed |\n\nVerified conclusion',
+    '[Report](https://example.com/\n[Output truncated]\nreport) **Verified conclusion**',
+    '~~~text\n[Output truncated]\n~~~\n\n<at id=all></at> <font color=red>Verified conclusion</font>',
+  ])('renders contextless head/tail fragments literally: %s', source => {
+    const result = formatWorkerResultMarkdown(source);
+    const html = parser.render(result);
+    expect(html).toContain('Verified conclusion');
+    expect(html).not.toMatch(/<(?:pre|code|table|h[1-6]|a|at|font)\b/);
+    expect(result).not.toMatch(/<(?:at|font)\b/);
+    expect(html).toContain('[Output truncated]');
+    expect(html).toContain('<em>Result excerpt contains an omission marker; shown as plain text.</em>');
+  });
+
+  it('keeps a legacy end-only omission marker outside active Markdown syntax', () => {
+    const source = '```ts\nconst partial = 1;\n[Output truncated]';
+    const html = render(source);
+    expect(html).not.toContain('<pre>');
+    expect(html).toContain('const partial = 1;');
+    expect(html).toContain('<p><em>Result excerpt contains an omission marker; shown as plain text.</em></p>');
+  });
+
+  it('does not reinterpret an inline mention of the marker as a truncated result', () => {
+    expect(render('**Explain** `[Output truncated]` here.'))
+      .toBe(parser.render('**Explain** `[Output truncated]` here.'));
+  });
+
   it('normalizes line endings and removes controls without merging paragraphs', () => {
     expect(formatWorkerResultMarkdown('First\u0000\r\n\r\nSecond\u001b')).toBe('First\n\nSecond');
   });

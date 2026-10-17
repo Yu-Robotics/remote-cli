@@ -1,6 +1,6 @@
 /** Additive, capability-gated settings-card protocol. Never send credentials or native sessions. */
 export type SettingsBackend = 'claude' | 'codex' | 'opencode' | 'kimi' | 'zcode' | 'pi' | 'agy' | 'dsh';
-export type SettingsKind = 'backend' | 'model' | 'effort' | 'delegation';
+export type SettingsKind = 'backend' | 'model' | 'effort' | 'delegation' | 'directory';
 export type SettingsScope = 'thread' | 'all';
 
 export interface SettingsChoice {
@@ -40,9 +40,11 @@ export interface SettingsMenu {
   expiresAt: number;
   unavailableReason?: string;
   omittedChoices?: number;
+  /** Display paths only; action values remain opaque CLI-owned tokens. */
+  directory?: { currentPath: string; browsingPath: string; parent?: string; roots: string; refresh: string; apply?: string; notice?: string };
 }
 
-/** Only view requests and explicit backend confirmation may carry a target/scope. */
+/** Model views may carry a target backend; only backend changes may carry a scope. */
 export interface SettingsActionMessage {
   type: 'settings_action';
   messageId: string;

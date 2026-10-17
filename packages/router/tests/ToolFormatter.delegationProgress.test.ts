@@ -13,6 +13,18 @@ const workerBody = (elements: any[]) => elements[1].columns[0].elements;
 const workerBodyContent = (elements: any[]) => workerBody(elements).map((element: any) => element.content ?? '').join('\n');
 
 describe('delegated worker progress formatting', () => {
+  it('retains a full 4 KiB terminal result without changing worker slots', () => {
+    const summary = 'x'.repeat(4096 - 'Verified conclusion'.length) + 'Verified conclusion';
+    const elements = render({ phase: 'succeeded', summary });
+    expect(workerBodyContent(elements)).toContain(summary);
+    expect(workerBodyContent(elements)).not.toContain('preview truncated');
+    expect(elements).toHaveLength(DELEGATION_PROGRESS_ELEMENT_COUNT);
+    const bounded = workerBodyContent(render({ phase: 'succeeded', summary: summary + 'hidden' }));
+    expect(bounded).toContain('Verified conclusion');
+    expect(bounded).not.toContain('hidden');
+    expect(bounded).toContain('Result preview truncated');
+  });
+
   it('uses public activity below identity without adding sibling slots or changing legacy output', () => {
     const plain = state({ latestText: '**Legacy update**' });
     expect(createDelegationProgressElements({ ...plain, activity: undefined })).toEqual(createDelegationProgressElements(plain));
@@ -142,7 +154,7 @@ describe('delegated worker progress formatting', () => {
   });
 
   it('shows the failure reason above the result and closes cut code fences', () => {
-    const elements = render({ phase: 'failed', summary: '~~~ts\n' + 'x'.repeat(1200), error: '**Build failed**\n\n<at id=all></at>',
+    const elements = render({ phase: 'failed', summary: '~~~ts\n' + 'x'.repeat(5000), error: '**Build failed**\n\n<at id=all></at>',
       events: [{ label: 'Bash failed', isError: true }], hiddenEventCount: 2, toolErrorCount: 1 });
     expect(workerBody(elements)[0].content).toContain('Reason');
     expect(workerBody(elements)[0]).toMatchObject({ text_size: 'notation' });

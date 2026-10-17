@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm } from 'fs/promises';
+import { mkdtemp, rm, mkdir } from 'fs/promises';
+import os from 'os';
 import { tmpdir } from 'os';
 import path from 'path';
 import { MessageHandler } from '../src/client/MessageHandler';
@@ -38,6 +39,12 @@ async function fixture() {
     setThreadError: vi.fn(), destroyAll: vi.fn(async () => {}), destroyThread: vi.fn(async () => {}),
     switchThreadBackend: vi.fn(async (id: string, backend: SettingsBackend) => { await manager.updateThread(id, { backend }); }),
     switchBackend: vi.fn(async () => {}),
+    setWorkingDirectory: vi.fn(async (id: string, target: string) => {
+      const thread = threads.find(entry => entry.id === id)!;
+      const changed = thread.workingDirectory !== target;
+      await manager.updateThread(id, { workingDirectory: target, delegationWorkspaceGeneration: (thread.delegationWorkspaceGeneration ?? 0) + (changed ? 1 : 0) });
+      return { cwd: target, changed };
+    }),
   };
   const ws = { send: vi.fn(), trackTask: vi.fn(), hasPendingTaskResults: vi.fn(() => false), isConnected: vi.fn(() => true),
     onClose: vi.fn((callback: () => void) => { closed = callback; }) };
@@ -85,6 +92,82 @@ describe('settings cards command integration', () => {
     await f.handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: { settingsCards: true, delegationCards: true } } } as any);
   });
   afterEach(async () => { await f.handler.destroy(); await rm(f.cwd, { recursive: true, force: true }); vi.restoreAllMocks(); });
+
+  async function directoryMenu() {
+    vi.spyOn(os, 'homedir').mockReturnValue(f.cwd);
+    // The guard captures homedir in its constructor; replace the read-only browser's guard for this fixture.
+    (f.handler as any).directoryBrowser.deps.guard = new DirectoryGuard([f.cwd]);
+    await f.handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: { settingsCards: true, directoryCards: true } } } as any);
+    await f.send('/cd');
+    return f.responses().at(-1).settingsMenu as SettingsMenu;
+  }
+
+  it('opens /cd without constructing an executor, applies through the shared generation cleanup and deduplicates retries', async () => {
+    await mkdir(path.join(f.cwd, 'child'));
+    const count = f.pool.getExecutor.mock.calls.length;
+    const menu = await directoryMenu();
+    expect(menu).toMatchObject({ kind: 'directory', busy: false });
+    expect(f.pool.getExecutor.mock.calls.length).toBe(count);
+    expect(f.pool.setWorkingDirectory).not.toHaveBeenCalled();
+    const child = await f.action(menu, { operation: 'view', value: menu.choices[0].value });
+    expect(child.success).toBe(true);
+    expect(f.threads[0].workingDirectory).toBe(f.cwd);
+    const cleanup = vi.spyOn((f.handler as any).delegation, 'invalidateWorkspaceGeneration').mockResolvedValue({ removed: 0, failed: 1 });
+    const fields = { messageId: 'directory-apply-request', value: child.menu.directory.apply };
+    const applied = await f.action(child.menu, fields);
+    expect(applied.success).toBe(true);
+    expect(applied.notice).toContain('1 delegated worker lane(s)');
+    expect(cleanup).toHaveBeenCalledWith('thread-a', 1);
+    expect(f.pool.setWorkingDirectory).toHaveBeenCalledTimes(1);
+    expect((await f.action(child.menu, fields)).success).toBe(true);
+    expect(f.pool.setWorkingDirectory).toHaveBeenCalledTimes(1);
+    expect(f.threads[1].workingDirectory).toBe(f.cwd);
+    expect(f.executor.execute).not.toHaveBeenCalled();
+  });
+
+  it('retains text /cd with old peers and uses the same cleanup path', async () => {
+    await f.send('/cd');
+    expect(f.responses().at(-1)).toMatchObject({ success: false, error: 'Usage: /cd <directory>' });
+    const cleanup = vi.spyOn((f.handler as any).delegation, 'invalidateWorkspaceGeneration').mockResolvedValue({ removed: 0, failed: 0 });
+    await f.send(`/cd ${f.cwd}/child`);
+    expect(f.pool.setWorkingDirectory).toHaveBeenCalledWith('thread-a', `${f.cwd}/child`);
+    expect(cleanup).toHaveBeenCalledWith('thread-a', 1);
+  });
+
+  it('permits browsing while the main thread is busy, rejects Apply, and ignores unnegotiated directory actions', async () => {
+    const menu = await directoryMenu();
+    f.busy.add('thread-a');
+    const refreshed = await f.action(menu, { operation: 'view', value: menu.directory!.refresh });
+    expect(refreshed.success).toBe(true);
+    expect((await f.action(refreshed.menu, { value: refreshed.menu.directory.apply })).success).toBe(false);
+    expect(f.pool.setWorkingDirectory).not.toHaveBeenCalled();
+    await f.handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: { settingsCards: true } } } as any);
+    const count = f.results().length;
+    await f.action(refreshed.menu, { value: refreshed.menu.directory.apply });
+    expect(f.results()).toHaveLength(count);
+  });
+
+  it.each(['card', 'text'])('blocks automatic updates and another directory change while %s Apply holds admission', async mode => {
+    const menu = await directoryMenu();
+    let release!: () => void;
+    let entered!: () => void;
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    f.pool.setWorkingDirectory.mockImplementationOnce(async (_id, target) => {
+      entered(); await gate; return { cwd: target, changed: false };
+    });
+    const applying = mode === 'card' ? f.action(menu, { value: menu.directory!.apply }) : f.send(`/cd ${f.cwd}`);
+    await waiting;
+    try {
+      expect(f.handler.tryBeginAutomaticUpdate()).toBe(false);
+      await f.send(`/cd ${f.cwd}/elsewhere`);
+      expect(f.responses().at(-1)).toMatchObject({ success: false, error: expect.stringContaining('Retry when it is idle') });
+      expect(f.pool.setWorkingDirectory).toHaveBeenCalledTimes(1);
+    } finally { release(); }
+    const applied = await applying;
+    if (mode === 'card') expect(applied.success).toBe(true);
+    else expect(f.responses().at(-1).success).toBe(true);
+  });
 
   it('opens and toggles delegation for the original thread without running an agent', async () => {
     Object.assign(f.executor, { configureDelegation: vi.fn(async () => {}) });

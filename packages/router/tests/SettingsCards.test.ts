@@ -42,6 +42,13 @@ function delegationMenu(overrides: Partial<SettingsMenu> = {}): SettingsMenu {
     backends: base.backends.map(backend => ({ ...backend, worker: backend.installed, version: '1.0.0' })), ...overrides };
 }
 
+function directoryMenu(overrides: Partial<SettingsMenu> = {}): SettingsMenu {
+  return { ...backendMenu(), kind: 'directory', snapshotId: 'directory-snapshot',
+    directory: { currentPath: '/example/project', browsingPath: '/example', parent: 'parent-token', roots: 'roots-token',
+      refresh: 'refresh-token', apply: 'apply-token', notice: 'Symbolic-link directories are not listed.' },
+    choices: [{ value: 'child-token', label: 'project <at id=all>name</at> **literal**' }], ...overrides };
+}
+
 function taggedNodes(value: unknown): number {
   if (!value || typeof value !== 'object') return 0;
   let count = (value as any).tag ? 1 : 0;
@@ -98,6 +105,68 @@ describe('SettingsCards', () => {
     expect(button, `enabled ${op} button${value ? ` (${value})` : ''}`).toBeDefined();
     return button!.behaviors[0].value;
   }
+
+  it('separates directory navigation from Apply and uses only opaque callback values', async () => {
+    const { elements } = present(directoryMenu());
+    expect(JSON.stringify(elements)).toContain('**1 · Browse directories**');
+    expect(JSON.stringify(elements)).toContain('**2 · Apply to this thread**');
+    expect(JSON.stringify(elements)).toContain('clears conversation bindings');
+    expect(buttonsOf(elements).map(button => button.text.content)).toContain('Use this directory');
+    const payload = clickPayload(elements, 'view', 'child-token');
+    expect(JSON.stringify(payload)).not.toContain('/example');
+    await cards.click('owner', 'card-1', payload);
+    const message = transport.send.mock.calls.at(-1)[1];
+    expect(message).toMatchObject({ operation: 'view', value: 'child-token' });
+    await cards.resolve('device', { ...message, type: 'settings_result', success: true,
+      menu: directoryMenu({ snapshotId: 'directory-child' }) });
+    await flush();
+    const body = transport.update.mock.calls.at(-1)[1];
+    await cards.click('owner', 'card-1', clickPayload(body, 'apply', 'apply-token'));
+    expect(transport.send.mock.calls.at(-1)[1]).toMatchObject({ operation: 'apply', value: 'apply-token' });
+  });
+
+  it('closes a directory card locally without contacting the CLI', async () => {
+    const { elements } = present(directoryMenu());
+    await cards.click('owner', 'card-1', clickPayload(elements, 'cancel'));
+    await flush();
+    expect(transport.send).not.toHaveBeenCalled();
+    expect(JSON.stringify(transport.update.mock.calls.at(-1)[1])).toContain('No directory was changed');
+  });
+
+  it('disables Apply but still allows browsing while busy or showing the root chooser', async () => {
+    const { elements } = present(directoryMenu({ busy: true }));
+    expect(buttonsOf(elements).find(button => button.text.content === 'Use this directory')?.disabled).toBe(true);
+    await cards.click('owner', 'card-1', clickPayload(elements, 'view', 'refresh-token'));
+    expect(transport.send.mock.calls.at(-1)[1].operation).toBe('view');
+    const roots = directoryMenu();
+    delete roots.directory!.apply;
+    const other = present(roots, 'card-2');
+    expect(buttonsOf(other.elements).find(button => button.text.content === 'Use this directory')?.disabled).toBe(true);
+  });
+
+  it('requires directory capability, matching owner and unaltered directory tokens', async () => {
+    const { elements } = present(directoryMenu());
+    const payload = clickPayload(elements, 'view', 'child-token');
+    await expect(cards.click('other', 'card-1', payload)).rejects.toThrow('another user');
+    await expect(cards.click('owner', 'card-1', { ...payload, value: '/forged/path' })).rejects.toThrow();
+    transport.available.mockReturnValue(false);
+    expect(cards.present({ openId: 'owner', deviceId: 'device', menu: directoryMenu(), requestMessageId: 'req' })).toBeUndefined();
+    await expect(cards.click('owner', 'card-1', payload)).rejects.toThrow('offline');
+    expect(sanitizeSettingsMenu({ ...directoryMenu(), snapshotId: 'native-settings' })).toBeUndefined();
+    expect(sanitizeSettingsMenu({ ...directoryMenu(), directory: {} })).toBeUndefined();
+  });
+
+  it('packs large directory lists within the same card budget and escapes path labels', async () => {
+    const menu = directoryMenu({ choices: Array.from({ length: 128 }, (_, index) => ({ value: `directory-${index}`, label: `folder-${index}` })) });
+    menu.directory!.browsingPath = '/example/<at id=all>unsafe</at> **literal**';
+    const { elements } = present(menu);
+    expect(taggedNodes({ schema: '2.0', body: { elements } })).toBeLessThanOrEqual(90);
+    expect(Buffer.byteLength(JSON.stringify(elements))).toBeLessThan(16 * 1024);
+    expect(JSON.stringify(elements)).not.toContain('<at id=all>');
+    expect(buttonsOf(elements).some(button => button.text.content === 'Next')).toBe(true);
+    await cards.click('owner', 'card-1', clickPayload(elements, 'page', '1'));
+    expect(transport.send).not.toHaveBeenCalled();
+  });
 
   it('separates delegation controls and availability and changes selection only after ACK', async () => {
     const { elements } = present(delegationMenu());
