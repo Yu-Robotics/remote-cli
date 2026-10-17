@@ -10,6 +10,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.168] - 2026-10-18
+
+### Added
+- Open bare `/cd` as a directory-only browser when both peers negotiate `directoryCards` and `settingsCards`. Navigate child/parent/root directories without executing a backend; apply only with Use this directory and preserve text `/cd <path>` for all peers.
+- Bind bounded local listings to owner, thread/configuration, allowlist, expiry, canonical roots, directory and ancestor identities. Omit symbolic-link directories, stop at the nearest allowed root, explicitly report partial listings, and reuse budgeted card rendering and exact-request receipts.
+
+### Changed
+- Serialize card and text directory changes through shared settings admission, reject active/queued/delegated work, and preserve existing all-backend context reset, same-directory no-op, and delegation workspace-generation cleanup. External filesystem races and bind mounts remain outside the application-level isolation guarantee.
+
+### Tests
+- Cover directory-only browsing, roots, busy navigation, changed identities/ancestors, symlinks, stale/forged/expired selections, duplicate Apply, text compatibility, card budgets, and optional capability negotiation.
+
+## [1.6.167] - 2026-10-17
+
+### Fixed
+- Expand terminal Worker card summaries from 1000 bytes to 4 KiB for Router 1.6.167 or newer, retain UTF-8-safe beginning/end excerpts, and accept the full summary through Router validation and rendering. Older or unknown Routers retain the legacy budget; strict version precedence excludes 1.6.167 prereleases, and current registration metadata is rechecked after reconnect. Full delegated results and continuations retain their existing 32 KiB and 64 KiB limits.
+- Render worker result excerpts containing standalone omission markers as escaped literal text with a separate explanation, preventing head/tail splices from reinterpreting orphaned Markdown fences, links, tables, or card markup. Intact result Markdown and streaming activity formatting remain unchanged.
+
+### Tests
+- Cover larger ASCII/Unicode summaries, retained conclusions, legacy omission markers, Markdown and card-tag safety, Router boundary validation, and atomic Worker pagination under node, size, and table budgets.
+
 ## [1.6.166] - 2026-10-14
 
 ### Fixed

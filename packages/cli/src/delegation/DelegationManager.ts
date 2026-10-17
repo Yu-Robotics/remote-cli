@@ -26,11 +26,12 @@ import { DelegatedWorkspaceManager, type DelegatedWorkspaceSource, type Delegate
 import type { GitCheckpoint } from './GitCheckpoint';
 import { ActivityProgress } from '../utils/ActivityProgress';
 import { normalizeActivity } from '../executor/Activity';
+import { compareNoticeVersions, validNoticeVersion } from '../maintenance/Version';
 
 export const DELEGATION_LIMITS = { launches: 12, concurrent: 5, closeoutRounds: 2,
   idleTimeoutMs: 15 * 60_000, toolIdleTimeoutMs: 45 * 60_000,
   queueTimeoutMs: 60 * 60_000,
-  resultBytes: 32 * 1024, continuationBytes: 64 * 1024,
+  resultBytes: 32 * 1024, continuationBytes: 64 * 1024, summaryBytes: 4 * 1024,
   storageTimeoutMs: 10_000, toolResponseWaitMs: 20_000, calls: 500 } as const;
 
 /** Bounds and cadence for optional display-only delegated-worker text. */
@@ -91,6 +92,8 @@ export interface DelegationParent {
   onNotice: (text: string) => void;
   /** Returns true when the client accepted a nested worker-progress update for delivery. */
   onProgress?: (progress: DelegationProgressInfo) => boolean;
+  /** Read current binding metadata at delivery, including after a Router reconnect. */
+  routerVersion?: () => unknown;
   /** Optional negotiated channel for bounded display-only worker text. */
   onTextProgress?: (progress: DelegationProgressInfo) => boolean;
   /** Optional negotiated public activity snapshots; not execution heartbeats. */
@@ -433,9 +436,12 @@ export class DelegationManager {
     };
     const reportTerminalProgress = (task: Task): boolean => {
       if (!isTerminalTaskState(task.record.state) || task.record.startedAt === undefined) return false;
+      const routerVersion = parent.routerVersion?.();
+      const summaryBytes = validNoticeVersion(routerVersion) && compareNoticeVersions(routerVersion, '1.6.167') >= 0
+        ? DELEGATION_LIMITS.summaryBytes : 1000;
       return reportProgress(task, {
         phase: task.record.state,
-        summary: task.record.output ? bounded(task.record.output, 1000, true).text : undefined,
+        summary: task.record.output ? bounded(task.record.output, summaryBytes, true).text : undefined,
         error: task.record.error ? bounded(task.record.error, 1000).text : undefined,
         startedAt: task.record.startedAt,
       });

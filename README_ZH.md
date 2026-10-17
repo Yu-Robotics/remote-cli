@@ -523,7 +523,7 @@ remote-cli stop
 | `/model [name]` | Open native model settings, or set the active backend model with a text argument |
 | `/effort [auto|level]` | Open native effort settings, or set/clear the active backend effort with a text argument |
 | `/sandbox [on/off/read-only/default]` | 查看或配置当前 Codex 或 Claude Code 线程的沙箱；用 `allow/remove <目录>` 和 `network on/off` 调整访问设置 |
-| `/cd <dir>` | Change directory; a different directory starts fresh conversations for this thread |
+| `/cd [dir]` | Browse directories as a card, or change directory directly with a path |
 | `/backend` | Open backend settings; click a backend to switch immediately, defaulting to Current thread |
 | `/bind <码>` | 绑定新设备 |
 | `/unbind` | 解绑所有设备 |
@@ -862,6 +862,14 @@ its beginning and end, marks the omitted middle, and sets `truncated: true`
 without changing the worker's success or failure status. Combined continuations
 use the same truncation policy within their 64 KiB budget. These limits bound
 retained delegation results, not the backend's own output buffers.
+With CLI and Router 1.6.167 or newer, terminal Worker card excerpts retain up to
+4 KiB of UTF-8 text. Excerpts containing standalone omission markers are shown
+as escaped plain text with a separate explanation rather than interpreting
+contextless Markdown fragments. Intact result Markdown is preserved. Upgrade
+both peers for the larger preview; newer Routers also safely display older
+CLI omission markers. Older or unknown Routers keep the legacy 1000-byte
+head/tail summary, including after reconnect. The 32 KiB result and 64 KiB
+continuation limits stay unchanged.
 Other requests with overlapping source repositories are rejected. These
 reservations restrict delegation-enabled threads and workers; opted-out ordinary
 threads retain access to their workspace. They do not lock files against those
@@ -1131,6 +1139,10 @@ The built-in commands (`/help`, `/status`, `/context`, `/clear`, `/new`, `/compa
 ## 进阶用法
 
 ### 用 thread 隔离不同工作目标
+
+With CLI and Router 1.6.168 or newer, bare `/cd` opens a directory-only browser. Child buttons, Parent, Allowed roots, and Refresh only navigate; **Use this directory** applies to the original thread and **Cancel** closes without changing it. The card warns that a real directory change clears this thread's direct and delegated conversation bindings. Same-directory Apply preserves context. Browse remains available while busy; Apply and text `/cd <path>` reject active or queued work and concurrent settings changes. Older peers keep the text command and its usage response for bare `/cd`.
+
+The browser uses the existing directory allowlist, stops Parent at the nearest containing allowed root, and omits symbolic-link directories. Entries and ancestors are identity-checked again before Apply; changed, expired, or disconnected listings must be reopened. Choices fill one card when possible and page only for card budgets. Scans stop after 4096 entries, 128 directories, or five seconds between filesystem operations, with explicit partial-list guidance to use `/cd <path>`. At most 32 non-symbolic roots are offered. Filesystem errors may hide unavailable roots or entries with a notice. These are application-level checks, not an OS sandbox: bind mounts and concurrent external filesystem replacement are not fully isolated. Navigation does not run an AI backend and displays no files.
 
 建议为不同项目、故障或目标分别创建 thread，避免把无关任务混在同一个上下文中：
 

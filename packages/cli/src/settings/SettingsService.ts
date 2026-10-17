@@ -72,7 +72,7 @@ export class SettingsService {
 
   destroy(): void { this.destroyed = true; this.invalidate(); this.receipts.clear(); }
 
-  async open(kind: SettingsKind, threadId: string, owner: string, target?: SettingsBackend, requestId?: string): Promise<SettingsMenu> {
+  async open(kind: Exclude<SettingsKind, 'directory'>, threadId: string, owner: string, target?: SettingsBackend, requestId?: string): Promise<SettingsMenu> {
     this.prune();
     const invalidationRevision = this.invalidationRevision;
     if (this.destroyed) throw new SettingsValidationError('Settings are no longer available.');
@@ -159,6 +159,7 @@ export class SettingsService {
       try {
         const record = this.validate(request);
         const menu = record.menu;
+        if (menu.kind === 'directory') throw new SettingsValidationError('Directory cards use a separate snapshot namespace.');
         if (menu.kind === 'delegation' && !allowDelegation) throw new SettingsValidationError('Delegation cards were not negotiated with this Router.');
         if (request.operation === 'view') {
           if (request.value !== undefined || request.scope !== undefined) throw new SettingsValidationError('Invalid settings view action.');
@@ -190,7 +191,7 @@ export class SettingsService {
             return menu.kind === 'backend'
               ? await this.dependencies.backend(menu.threadId, backend, scope, request.operation === 'follow_global')
               : menu.kind === 'delegation' ? await this.dependencies.delegation(menu.threadId, request.value === 'on')
-              : await this.dependencies.preference(menu.threadId, backend, menu.kind, request.operation === 'reset' ? undefined : request.value);
+              : await this.dependencies.preference(menu.threadId, backend, menu.kind as 'model' | 'effort', request.operation === 'reset' ? undefined : request.value);
           } finally { this.invalidate(scope === 'all' ? undefined : menu.threadId); }
         });
         if (!result.success) return failure('The setting was not confirmed as applied. Check backend state and refresh before retrying.');

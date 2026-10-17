@@ -44,6 +44,7 @@ import { ActivityProgress } from '../utils/ActivityProgress';
 import { SettingsAdmission } from '../settings/SettingsAdmission';
 import { SettingsCatalogReader, configuredBackendModel } from '../settings/SettingsCatalog';
 import { SettingsService, type SettingsState } from '../settings/SettingsService';
+import { DirectoryBrowser } from '../settings/DirectoryBrowser';
 import type { SettingsActionMessage, SettingsBackend, SettingsKind, SettingsMenu, SettingsScope } from '../types/Settings';
 import { isSessionControl } from '../session/SessionResumeService';
 import { readSessionCatalog } from '../session/adapters';
@@ -217,10 +218,13 @@ export class MessageHandler {
   private approvalCardsSupported = false;
   private streamingContextSupported = false;
   private delegationProgressSupported = false;
+  private routerVersion?: string;
   private delegationProgressTextSupported = false;
   private activityProgressSupported = false;
   private workerContextResetSupported = false;
   private settingsCardsSupported = false;
+  private directoryCardsSupported = false;
+  private readonly directoryBrowser: DirectoryBrowser;
   private delegationCardsSupported = false;
   private readonly settingsAdmission = new SettingsAdmission();
   private readonly settingsCatalogReader: SettingsCatalogReader;
@@ -242,7 +246,10 @@ export class MessageHandler {
     this.threadManager = threadManager;
     this.directoryGuard = directoryGuard;
     this.config = config;
-    this.wsClient.onClose?.(() => this.fileInbox?.disconnect());
+    this.wsClient.onClose?.(() => {
+      this.routerVersion = undefined;
+      this.fileInbox?.disconnect();
+    });
     this.delegation = new DelegationManager(directoryGuard);
     this.settingsCatalogReader = new SettingsCatalogReader(directoryGuard);
     this.settingsService = new SettingsService({
@@ -278,7 +285,22 @@ export class MessageHandler {
       delegation: (id, enabled) => this.applyDelegationSetting(id, enabled),
       delegationSupported: id => Boolean(this.threadPool.getExecutor(id).configureDelegation),
     });
-    this.wsClient.onClose?.(() => this.settingsService.invalidate());
+    this.directoryBrowser = new DirectoryBrowser({
+      guard: this.directoryGuard,
+      state: id => {
+        const thread = this.threadManager.getThread(id);
+        const state = this.settingsState(id);
+        return thread && state ? { threadName: thread.name, cwd: thread.workingDirectory,
+          revision: state.revision, backend: state.coordinatorBackend } : undefined;
+      },
+      busy: (id, except) => this.settingsBusy(id, except),
+      exclusive: async (id, body) => {
+        try { return await this.settingsAdmission.mutation(id, body); }
+        finally { void this.startNextQueuedCommand(id); }
+      },
+      apply: (id, target) => this.changeWorkingDirectory(id, target),
+    });
+    this.wsClient.onClose?.(() => { this.settingsService.invalidate(); this.directoryCardsSupported = false; this.directoryBrowser.invalidate(); });
 
     this.notificationAdapter = new FeishuNotificationAdapter(wsClient);
     this.notificationAdapter.setThreadNameResolver((threadId) => this.threadManager.getThread(threadId)?.name);
@@ -322,7 +344,11 @@ export class MessageHandler {
         return;
       case 'settings_action':
         if (this.settingsCardsSupported) {
-          const result = await this.settingsService.action(message as unknown as SettingsActionMessage, this.delegationCardsSupported);
+          const request = message as unknown as SettingsActionMessage;
+          const directory = typeof request.snapshotId === 'string' && request.snapshotId.startsWith('directory-');
+          if (directory && !this.directoryCardsSupported) return;
+          const result = directory ? await this.directoryBrowser.action(request)
+            : await this.settingsService.action(request, this.delegationCardsSupported);
           this.wsClient.send(result);
         }
         return;
@@ -345,6 +371,7 @@ export class MessageHandler {
       case 'binding_confirm': {
         const data = (message as any).data;
         if (data?.success !== true) return;
+        this.routerVersion = typeof data.routerVersion === 'string' ? data.routerVersion : undefined;
         if (data.capabilities?.fileTransferV1 === true && !this.fileInbox) {
           try {
             const fileServer = this.config.get('serverUrl') as string;
@@ -365,6 +392,7 @@ export class MessageHandler {
         this.delegationProgressSupported = data.capabilities?.delegationProgress === true;
         this.workerContextResetSupported = this.delegationProgressSupported && data.capabilities?.workerContextReset === true;
         this.settingsCardsSupported = data.capabilities?.settingsCards === true;
+        this.directoryCardsSupported = this.settingsCardsSupported && data.capabilities?.directoryCards === true;
         this.delegationCardsSupported = this.settingsCardsSupported && data.capabilities?.delegationCards === true;
         this.delegationProgressTextSupported = this.delegationProgressSupported
           && data.capabilities?.delegationProgressText === true;
@@ -405,6 +433,7 @@ export class MessageHandler {
       || this.pendingReplaces.size > 0
       || this.activeThreadOperations.size > 0
       || this.abortOperations.size > 0
+      || this.threadManager.listThreads().some(thread => this.settingsAdmission.isBlocked(thread.id))
     ) {
       return false;
     }
@@ -453,15 +482,16 @@ export class MessageHandler {
     try {
       // Abort and addressed human replies must remain available during native work.
       if (content === '/abort' || /^(?:yes|no)(?:\s|$)/.test(content) || content.startsWith('/input ')) return await body();
-      if (/^\/(?:backend|model|effort)\s+\S/.test(content)) {
+      if (/^\/(?:backend|model|effort|cd)\s+\S/.test(content)) {
         const global = /^\/backend\s/.test(content) && !/\s@$/.test(content);
         await this.settingsAdmission.mutation(global ? '*' : threadId, async () => {
           this.settingsService.invalidate(global ? undefined : threadId);
+          if (/^\/cd\s/.test(content)) this.directoryBrowser.invalidate(threadId);
           await body();
         });
       } else {
         await this.settingsAdmission.command(threadId, message.messageId, async () => {
-          if (/^\/(?:clear|new|cd|sandbox)(?:\s|$)/.test(content) || /^\/thread\s+delete(?:\s|$)/.test(content)) this.settingsService.invalidate(threadId);
+          if (/^\/(?:clear|new|sandbox)(?:\s|$)/.test(content) || /^\/thread\s+delete(?:\s|$)/.test(content)) this.settingsService.invalidate(threadId);
           await body();
         });
       }
@@ -501,9 +531,32 @@ export class MessageHandler {
     }
 
     const settingsCommand = content?.trim() ?? '';
+    if (this.directoryCardsSupported && openId && settingsCommand === '/cd') {
+      try {
+        const menu = await this.directoryBrowser.open(resolvedThreadId, openId, messageId);
+        this.sendResponse(messageId, resolvedThreadId, { success: true,
+          output: 'Directory browser. Navigation does not change the thread; choose Use this directory to apply. Text command: /cd <path>.', settingsMenu: menu }, true);
+      } catch {
+        this.sendResponse(messageId, resolvedThreadId, { success: false,
+          error: 'The directory browser could not open. Check allowed directories and permissions, or use /cd <path>.' }, true);
+      }
+      return;
+    }
+    // Text Apply also runs before acquiring a model-turn busy flag. Its caller
+    // already holds the same exclusive admission writer as directory-card Apply.
+    if (/^\/cd\s+\S/.test(settingsCommand)) {
+      try {
+        const result = await this.changeWorkingDirectory(resolvedThreadId, settingsCommand.slice(3).trim());
+        this.sendResponse(messageId, resolvedThreadId, result, true);
+      } catch (error) {
+        this.sendResponse(messageId, resolvedThreadId, { success: false,
+          error: error instanceof Error ? error.message : 'Failed to change directory. Check /status before retrying.' }, true);
+      }
+      return;
+    }
     if (this.settingsCardsSupported && openId && (/^\/(?:backend|model|effort)$/.test(settingsCommand)
       || (this.delegationCardsSupported && settingsCommand === '/delegation'))) {
-      const kind = content!.trim().slice(1) as SettingsKind;
+      const kind = content!.trim().slice(1) as Exclude<SettingsKind, 'directory'>;
       try {
         const menu = await this.settingsService.open(kind, resolvedThreadId, openId, undefined, messageId);
         this.sendResponse(messageId, resolvedThreadId, { success: true, output: this.settingsFallback(menu), settingsMenu: menu });
@@ -1138,7 +1191,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       return true;
     }
 
-    if (trimmed.startsWith('/cd')) {
+    if (trimmed === '/cd' || trimmed.startsWith('/cd ')) {
       const parts = trimmed.split(/\s+/);
       if (parts.length < 2) {
         this.sendResponse(messageId, threadId, { success: false, error: 'Usage: /cd <directory>' });
@@ -1146,18 +1199,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       }
       const targetDir = parts.slice(1).join(' ');
       try {
-        if (this.delegation.hasActiveTasks(threadId)) {
-          throw new Error('Cannot change working directory while a delegated worker is running. Wait for it to finish or send /abort first.');
-        }
-        const generation = this.threadManager.getThread(threadId)?.delegationWorkspaceGeneration ?? 0;
-        const { cwd: newCwd, changed } = await this.threadPool.setWorkingDirectory(threadId, targetDir);
-        const cleanup = changed
-          ? await this.delegation.invalidateWorkspaceGeneration(threadId, generation + 1)
-          : { removed: 0, failed: 0 };
-        this.sendResponse(messageId, threadId, {
-          success: true,
-          output: `✅ Changed working directory to: ${newCwd}${changed ? '\nConversation context cleared for all direct and delegated backends in this thread.' : ''}${cleanup.failed ? `\n⚠️ ${cleanup.failed} delegated worker lane(s) could not be cleaned up. Retry with /delegation reset after checking filesystem permissions.` : ''}`,
-        });
+        this.sendResponse(messageId, threadId, await this.changeWorkingDirectory(threadId, targetDir));
       } catch (error) {
         this.sendResponse(messageId, threadId, {
           success: false,
@@ -2231,6 +2273,7 @@ You can also use natural language commands to control Claude Code CLI.`,
           onToolUse: tool => this.sendToolUse(messageId, threadId, tool),
           onToolResult: result => this.sendToolResult(messageId, threadId, result),
           onNotice: text => this.sendStreamChunk(messageId, threadId, text),
+          routerVersion: () => this.routerVersion,
           onProgress: this.delegationProgressSupported
             ? progress => this.sendDelegationProgress(messageId, threadId, progress)
             : undefined,
@@ -2809,7 +2852,8 @@ You can also use natural language commands to control Claude Code CLI.`,
         queueConfirmation: result.queueConfirmation,
         ...(result.executionMetadata ? { executionMetadata: result.executionMetadata } : {}),
         ...(this.settingsCardsSupported && result.settingsMenu
-          && (result.settingsMenu.kind !== 'delegation' || this.delegationCardsSupported) ? { settingsMenu: result.settingsMenu } : {}),
+          && (result.settingsMenu.kind !== 'delegation' || this.delegationCardsSupported)
+          && (result.settingsMenu.kind !== 'directory' || this.directoryCardsSupported) ? { settingsMenu: result.settingsMenu } : {}),
         cwd,
         timestamp: Date.now(),
       });
@@ -2823,6 +2867,23 @@ You can also use natural language commands to control Claude Code CLI.`,
 
   private executorConfiguration(): ExecutorConfig {
     return (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
+  }
+
+  /** Shared card/text Apply path. Callers hold exclusive settings admission. */
+  private async changeWorkingDirectory(threadId: string, targetDir: string): Promise<ExecuteResult> {
+    if (this.isDestroyed || this.automaticUpdateInProgress || this.abortOperations.has(threadId)
+      || this.threadPool.isThreadBusy(threadId) || this.hasThreadQueueState(threadId)) {
+      throw new Error('Cannot change working directory while the thread has active or queued work. Retry when it is idle.');
+    }
+    if (this.delegation.hasActiveTasks(threadId)) {
+      throw new Error('Cannot change working directory while a delegated worker is running. Wait for it to finish or send /abort first.');
+    }
+    this.settingsService.invalidate(threadId);
+    const generation = this.threadManager.getThread(threadId)?.delegationWorkspaceGeneration ?? 0;
+    const { cwd, changed } = await this.threadPool.setWorkingDirectory(threadId, targetDir);
+    const cleanup = changed ? await this.delegation.invalidateWorkspaceGeneration(threadId, generation + 1) : { removed: 0, failed: 0 };
+    this.directoryBrowser.invalidate(threadId);
+    return { success: true, output: `✅ Changed working directory to: ${cwd}${changed ? '\nConversation context cleared for all direct and delegated backends in this thread.' : ''}${cleanup.failed ? `\n⚠️ ${cleanup.failed} delegated worker lane(s) could not be cleaned up. Retry with /delegation reset after checking filesystem permissions.` : ''}` };
   }
 
   private settingsState(threadId: string): SettingsState | undefined {
@@ -3096,6 +3157,7 @@ You can also use natural language commands to control Claude Code CLI.`,
    * Destroy handler and all executors
    */
   async destroy(): Promise<void> {
+    this.directoryBrowser.destroy();
     this.settingsService.destroy();
     this.isDestroyed = true;
     await this.fileInbox?.destroy();
