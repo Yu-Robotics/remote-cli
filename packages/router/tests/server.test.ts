@@ -1192,6 +1192,39 @@ describe('RouterServer', () => {
     expect(resolved).toEqual({ threadId: 'thread-1', threadName: 'Thread 1' });
   });
 
+  it('validates selector targets against the latest connected device inventory and clears it across reconnects', async () => {
+    mockConnectionHub.isDeviceOnline = vi.fn().mockReturnValue(true);
+    await server.start();
+    const connect = async () => {
+      const ws = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
+      mockWss.on.mock.calls.find(call => call[0] === 'connection')[1](ws, { socket: { remoteAddress: '127.0.0.1' } });
+      const send = (value: any) => ws.on.mock.calls.find(call => call[0] === 'message')[1](Buffer.from(JSON.stringify(value)));
+      await send({ type: MessageType.BINDING_REQUEST, data: { deviceId: 'device' } });
+      return { ws, send };
+    };
+    const first = await connect();
+    const exists = mockFeishuHandler.onCardThreadExists;
+    expect(exists('device', 'thread-a')).toBe(false);
+    await first.send({ type: MessageType.RESPONSE, threads: [{ id: 'thread-a', name: 'A', status: 'idle' }] });
+    expect(exists('device', 'thread-a')).toBe(true);
+    expect(exists('other-device', 'thread-a')).toBe(false);
+    await first.send({ type: MessageType.RESPONSE, threads: [{ id: 'thread-b', name: 'B', status: 'idle' }] });
+    expect(exists('device', 'thread-a')).toBe(false);
+    expect(exists('device', 'thread-b')).toBe(true);
+    mockConnectionHub.isCurrentConnection.mockReturnValue(false);
+    await first.send({ type: MessageType.RESPONSE, threads: [{ id: 'forged', name: 'Forged', status: 'idle' }] });
+    expect(exists('device', 'forged')).toBe(false);
+    mockConnectionHub.isCurrentConnection.mockReturnValue(true);
+    const second = await connect();
+    expect(exists('device', 'thread-b')).toBe(false);
+    await second.send({ type: MessageType.RESPONSE, threads: [{ id: 'thread-b', name: 'B', status: 'idle' }] });
+    mockConnectionHub.isDeviceOnline.mockReturnValue(false);
+    expect(exists('device', 'thread-b')).toBe(false);
+    mockConnectionHub.isDeviceOnline.mockReturnValue(true);
+    second.ws.on.mock.calls.find(call => call[0] === 'close')[1]();
+    expect(exists('device', 'thread-b')).toBe(false);
+  });
+
   it('should handle Feishu card new thread callback', async () => {
     const onCardNewThread = mockFeishuHandler.onCardNewThread;
     await onCardNewThread('user-1');
