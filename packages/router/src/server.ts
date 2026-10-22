@@ -111,8 +111,6 @@ export class RouterServer {
   // Entries are NOT removed on finalize so users can reply to completed cards.
   // Each entry carries an expiresAt timestamp for TTL-based eviction.
   private cardThreadMap = new Map<string, { threadId: string; deviceId: string; expiresAt: number }>();
-  // Device-reported inventories validate completed-card targets without executing a task.
-  private latestDeviceThreads = new Map<string, ThreadSummary[]>();
   // Map from openId to the user's currently active thread (set by card button click).
   // New top-level messages (no parent_id) are routed to this thread.
   private activeThreadMap = new Map<string, { threadId: string; threadName: string }>();
@@ -257,9 +255,6 @@ export class RouterServer {
     this.feishuLongConnHandler.setOnResolveActiveThread((openId: string) => {
       return this.activeThreadMap.get(openId);
     });
-
-    this.feishuLongConnHandler.onCardThreadExists = (deviceId, threadId) =>
-      this.connectionHub.isDeviceOnline(deviceId) && this.latestDeviceThreads.get(deviceId)?.some(thread => thread.id === threadId) === true;
 
     // Register callback for card button thread switching
     this.feishuLongConnHandler.onCardSwitchThread = async (openId: string, threadId: string, threadName: string) => {
@@ -607,7 +602,6 @@ export class RouterServer {
                   break;
                 }
 
-                this.latestDeviceThreads.delete(deviceId);
                 this.approvalCards.disconnect(deviceId);
                 this.maintenanceCards.disconnect(deviceId);
                 this.settingsCards.disconnect(deviceId);
@@ -704,7 +698,6 @@ export class RouterServer {
                 || this.streamingMessages.get(message.messageId)?.cwd;
               const responseThreadId = message.threadId || message.data?.threadId;
               const responseThreads: ThreadSummary[] | undefined = message.threads || message.data?.threads;
-              if (deviceId && Array.isArray(responseThreads)) this.latestDeviceThreads.set(deviceId, responseThreads);
               const queueConfirmation: QueueConfirmationInfo | undefined = message.queueConfirmation || message.data?.queueConfirmation;
               const executionMetadata = parseExecutionMetadata(message.executionMetadata ?? message.data?.executionMetadata);
               // Interactive settings menus only from a capable CLI on this connection;
@@ -898,7 +891,6 @@ export class RouterServer {
         if (challengeTimer) clearTimeout(challengeTimer);
         if (heartbeatTimeout) clearTimeout(heartbeatTimeout);
         if (deviceId && this.connectionHub.unregisterConnection(deviceId, ws)) {
-          this.latestDeviceThreads.delete(deviceId);
           this.fileTransfers.disconnect(deviceId);
           // Clean up any streaming sessions for this device
           this.approvalCards.disconnect(deviceId);
