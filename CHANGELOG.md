@@ -10,15 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
-## [1.6.169] - 2026-10-22
+## [1.6.170] - 2026-10-22
 
-### Changed
-- Collapse reply-card thread controls by default, expand them in place without a separate management message, and collapse after a successful input-thread switch while retaining the reply's original source label.
-- Raise the recursive card-element budget from 150 to 180 and reserve expanded thread controls before pagination. Table and size thresholds are unchanged.
-
-### Tests
-- Cover in-place thread controls, callback binding, source/selection separation, and expanded-state pagination boundaries.
-- Canonicalize settings-command test directories and cover aliased temporary roots without relaxing directory-browser security checks.
+### Reverted
+- Revert the 1.6.169 thread-card presentation change, restoring the always-visible thread controls and 150-node recursive card budget from 1.6.168.
 
 ## [1.6.168] - 2026-10-18
 

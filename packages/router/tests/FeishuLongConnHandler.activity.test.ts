@@ -19,7 +19,7 @@ describe('main activity card tail', () => {
   const update = (body: any[], snapshot?: typeof activity) => handler.updateStreamingMessage('root', body, 'owner', 'thread', '/workspace', snapshot);
   const toolRows = () => [...delivered.values()].flat().filter(element => element.tag === 'collapsible_panel'
     && element.header?.title?.content?.includes('Edit'));
-  const pairedTool = (elementIndex = 170, id = 'edit-1') => {
+  const pairedTool = (elementIndex = 140, id = 'edit-1') => {
     const state = { elementIndex, name: 'Edit', id,
       inputElements: createToolUseElement({ name: 'Edit', id, input: { file_path: '/project/example.ts' } }) };
     const diff = Array.from({ length: 6 }, (_, index) => `--- a/file-${index}.ts\n+++ b/file-${index}.ts\n@@ -1 +1 @@\n-old\n+new`).join('\n');
@@ -80,7 +80,7 @@ describe('main activity card tail', () => {
   it('keeps bounded native call labels on one row through real pagination, shrink and completion', async () => {
     const info = { id: 'native-edit', name: 'Edit', title: 'Update configuration ' + '\u001b[31m' + '🧪'.repeat(100),
       input: { file_path: '/project/config.ts' } };
-    const state = { elementIndex: 170, id: info.id, name: info.name, summary: createToolCallSummary(info),
+    const state = { elementIndex: 140, id: info.id, name: info.name, summary: createToolCallSummary(info),
       inputElements: createToolUseElement(info) };
     const plain = createToolCallElement({ ...state, summary: undefined });
     const pending = createToolCallElement(state);
@@ -90,7 +90,7 @@ describe('main activity card tail', () => {
     const large = createToolCallElement({ ...state, resultElements: createToolResultElement({ tool_use_id: info.id, content: '', diff }) });
     const small = createToolCallElement({ ...state, isError: true,
       resultElements: createToolResultElement({ tool_use_id: info.id, content: 'Failed', is_error: true }) });
-    const prefix = elements(170);
+    const prefix = elements(140);
     await update([...prefix, pending], activity);
     expect(delivered.size).toBe(1);
     await update([...prefix, large]);
@@ -101,16 +101,16 @@ describe('main activity card tail', () => {
     expect(toolRows()[0].header.title.content).toContain(state.summary);
     expect(toolRows()[0].header.title.content).not.toContain(activity.text);
     expect(runningCards().map(([id]) => id)).toEqual(['root']);
-    for (const body of delivered.values()) expect((handler as any).countTaggedNodes(body)).toBeLessThanOrEqual(180);
+    for (const body of delivered.values()) expect((handler as any).countTaggedNodes(body)).toBeLessThanOrEqual(150);
     await handler.finalizeStreamingMessage('root', [...prefix, small], undefined, 'owner');
     expect(toolRows()).toHaveLength(1);
     expect(runningCards()).toHaveLength(0);
-    for (const body of delivered.values()) expect((handler as any).countTaggedNodes(body)).toBeLessThanOrEqual(180);
+    for (const body of delivered.values()) expect((handler as any).countTaggedNodes(body)).toBeLessThanOrEqual(150);
   });
 
   it('keeps asynchronous web previews in one row with bounded nodes across real pagination', async () => {
     const tool = { name: 'WebSearch', id: 'web-native', input: { query: 'docs' } };
-    const state = { elementIndex: 170, name: tool.name, id: tool.id, inputElements: createToolUseElement(tool) };
+    const state = { elementIndex: 140, name: tool.name, id: tool.id, inputElements: createToolUseElement(tool) };
     const pending = createToolCallElement(state);
     const completed = createToolCallElement({ ...state, resultElements: createToolResultElement({ tool_use_id: tool.id,
       is_error: false, content: 'Old-peer plaintext', webSearch: {
@@ -118,14 +118,14 @@ describe('main activity card tail', () => {
       } }) });
     expect((handler as any).countTaggedNodes(completed)).toBe(5);
     expect((handler as any).countTaggedNodes(completed)).toBe((handler as any).countTaggedNodes(pending) + 1);
-    const prefix = elements(170);
+    const prefix = elements(140);
     await update([...prefix, pending], activity);
     await update([...prefix, completed]);
-    await update([...prefix, completed, ...elements(185)]);
+    await update([...prefix, completed, ...elements(155)]);
     const updated = createToolCallElement({ ...state, resultElements: createToolResultElement({ tool_use_id: tool.id,
       content: 'New result', is_error: false, webSearch: { results: [{ title: 'Latest source', url: 'https://example.com/latest' }], omittedResults: 0 } }) });
-    await update([...prefix, updated, ...elements(185)]);
-    const webRows = () => [...delivered.values()].flat().filter(e => e.element_id === 'tc_170');
+    await update([...prefix, updated, ...elements(155)]);
+    const webRows = () => [...delivered.values()].flat().filter(e => e.element_id === 'tc_140');
     expect(webRows()).toHaveLength(1);
     expect(JSON.stringify(webRows())).toContain('[Open source](https://example.com/latest)');
     expect(JSON.stringify(webRows())).not.toContain('Source 0');
@@ -137,21 +137,21 @@ describe('main activity card tail', () => {
     await handler.finalizeStreamingMessage('root', [...prefix, error], undefined, 'owner');
     expect(runningCards()).toHaveLength(0);
     expect(webRows()).toHaveLength(1);
-    for (const body of delivered.values()) expect((handler as any).countTaggedNodes(body)).toBeLessThanOrEqual(180);
+    for (const body of delivered.values()) expect((handler as any).countTaggedNodes(body)).toBeLessThanOrEqual(150);
   });
 
   it('migrates the tail across two and three pages, stripping sealed and surplus pages', async () => {
     await update(elements(3), activity);
-    await update(elements(190));
+    await update(elements(160));
     expect(delivered.size).toBe(2);
     expect(runningCards().map(([id]) => id)).toEqual(['page-1']);
     expect(rows(delivered.get('root')!)).toHaveLength(0);
-    await update(elements(370));
+    await update(elements(310));
     expect(delivered.size).toBe(3);
     expect(runningCards().map(([id]) => id)).toEqual(['page-2']);
     await update(elements(1));
     expect(runningCards().map(([id]) => id)).toEqual(['root']);
-    expect(JSON.stringify(delivered.get('page-2'))).toContain('Line 369');
+    expect(JSON.stringify(delivered.get('page-2'))).toContain('Line 309');
     expect(client.im.message.delete).not.toHaveBeenCalled();
     for (const body of delivered.values()) expect(rows(body).length).toBeLessThanOrEqual(1);
   });
@@ -164,7 +164,7 @@ describe('main activity card tail', () => {
       summary: 'Independent review', contextActionId: actionId, startedAt: 0, finishedAt: 1, activeToolCount: 0, events: [], hiddenEventCount: 0 });
     const state = { name: 'Read', id: 'read-1',
       inputElements: createToolUseElement({ name: 'Read', id: 'read-1', input: { file_path: '/project/example.ts' } }) };
-    const body = [createToolCallElement(state), ...elements(185), ...worker];
+    const body = [createToolCallElement(state), ...elements(155), ...worker];
     await update(body, activity);
     const pageIds = [...delivered.keys()];
     const completed = createToolCallElement({ ...state, isError: false,
@@ -181,14 +181,14 @@ describe('main activity card tail', () => {
     expect(runningCards()[0][0]).not.toBe('root');
     expect(JSON.stringify([...delivered.values()])).toContain('worker_context_clear');
     expect(JSON.stringify([...delivered.values()])).toContain('Independent review');
-    for (const content of delivered.values()) expect((handler as any).countTaggedNodes(content)).toBeLessThanOrEqual(180);
+    for (const content of delivered.values()) expect((handler as any).countTaggedNodes(content)).toBeLessThanOrEqual(150);
   });
 
   it('reserves footer space at the element boundary instead of creating an activity-only page', async () => {
-    await update(elements(179), activity);
+    await update(elements(149), activity);
     expect(delivered.size).toBe(2);
     for (const body of delivered.values()) {
-      expect(body.length).toBeLessThanOrEqual(180);
+      expect(body.length).toBeLessThanOrEqual(150);
       expect(body.some(element => /^Line /.test(element.content ?? ''))).toBe(true);
     }
     expect(runningCards()).toHaveLength(1);
@@ -203,13 +203,13 @@ describe('main activity card tail', () => {
     const state = (tool: typeof read | typeof bash, elementIndex: number) => ({ name: tool.name, id: tool.id, elementIndex,
       summary: createToolCallSummary(tool), inputElements: createToolUseElement(tool) });
     const header = (handler as any).createResponseHeaderElements('thread', '/workspace');
-    const prefixCount = 180 - (handler as any).countTaggedNodes(header) - 4 - 4 - 1;
+    const prefixCount = 150 - (handler as any).countTaggedNodes(header) - 4 - 4 - 1;
     const readState = state(read, prefixCount);
     const bashState = state(bash, prefixCount + 1);
     const body = [...elements(prefixCount), createToolCallElement(readState), createToolCallElement(bashState)];
     expect(await update(body, activity)).toBe(true);
     expect(delivered.size).toBe(1);
-    expect((handler as any).countTaggedNodes(delivered.get('root'))).toBe(180);
+    expect((handler as any).countTaggedNodes(delivered.get('root'))).toBe(150);
     body[prefixCount] = createToolCallElement({ ...readState, resultElements: createToolResultElement({ tool_use_id: read.id, content: 'File contents' }) });
     expect(await update(body)).toBe(true);
     expect(delivered.size).toBe(2);
@@ -217,7 +217,7 @@ describe('main activity card tail', () => {
       resultElements: createToolResultElement({ tool_use_id: bash.id, content: 'Test failed', is_error: true }) });
     expect(await update(body)).toBe(true);
     const checkPages = () => {
-      for (const page of delivered.values()) expect((handler as any).countTaggedNodes(page)).toBeLessThanOrEqual(180);
+      for (const page of delivered.values()) expect((handler as any).countTaggedNodes(page)).toBeLessThanOrEqual(150);
       const tools = [...delivered.values()].flat().filter(element => element.element_id?.startsWith('tc_'));
       expect(tools).toHaveLength(2);
       expect(tools.find(element => element.element_id === `tc_${prefixCount}`).header.title.content)
@@ -230,13 +230,13 @@ describe('main activity card tail', () => {
       [{ id: 'thread', name: 'thread', status: 'idle' }], 'thread')).toBe(true);
     checkPages();
     expect(JSON.stringify([...delivered.values()])).toContain('Completed');
-    expect(JSON.stringify([...delivered.values()])).toContain('thread_selector');
+    expect(JSON.stringify([...delivered.values()])).toContain('switch_thread');
     expect(runningCards()).toHaveLength(0);
   });
 
   it.each([false, true])('removes an obsolete paired result when two cards shrink to one (activity=%s)', async hasActivity => {
     const tool = pairedTool();
-    const prefix = elements(170);
+    const prefix = elements(140);
     expect(await update([...prefix, tool.pending], hasActivity ? activity : undefined)).toBe(true);
     expect(delivered.size).toBe(1);
     expect(await update([...prefix, tool.large])).toBe(true);
@@ -255,7 +255,7 @@ describe('main activity card tail', () => {
 
   it('retries surplus tool cleanup before publishing a replacement, including fallback and page reuse', async () => {
     const tool = pairedTool();
-    const prefix = elements(170);
+    const prefix = elements(140);
     await update([...prefix, tool.large]);
     client.im.message.patch.mockRejectedValueOnce(new Error('temporary rejection'));
     expect(await update([...prefix, tool.small])).toBe(false);
@@ -279,11 +279,11 @@ describe('main activity card tail', () => {
   });
 
   it.each([false, true])('clears an old owner before a backward migration between active pages (activity=%s)', async hasActivity => {
-    const tool = pairedTool(165);
-    const body = (row: any) => [...elements(165), row, ...elements(20)];
+    const tool = pairedTool(135);
+    const body = (row: any) => [...elements(135), row, ...elements(20)];
     await update(body(tool.large), hasActivity ? activity : undefined);
     expect(delivered.size).toBe(2);
-    expect(delivered.get('page-1')!.some(element => element.element_id === 'tc_165')).toBe(true);
+    expect(delivered.get('page-1')!.some(element => element.element_id === 'tc_135')).toBe(true);
     const patch = client.im.message.patch.getMockImplementation();
     client.im.message.patch.mockClear();
     client.im.message.patch.mockImplementation(async args => {
@@ -301,17 +301,17 @@ describe('main activity card tail', () => {
     expect((handler as any).messageChains.get('root')).toHaveLength(2);
     expect(toolRows()).toHaveLength(1);
     expect(toolRows()[0].header.title.content).toContain("<font color='red'>•</font>");
-    expect(delivered.get('root')!.some(element => element.element_id === 'tc_165')).toBe(true);
-    expect(delivered.get('page-1')!.some(element => element.element_id === 'tc_165')).toBe(false);
+    expect(delivered.get('root')!.some(element => element.element_id === 'tc_135')).toBe(true);
+    expect(delivered.get('page-1')!.some(element => element.element_id === 'tc_135')).toBe(false);
     expect(runningCards().map(([id]) => id)).toEqual(hasActivity ? ['page-1'] : []);
   });
 
   it('clears a root-card owner before a forward migration and retries a failed destination patch', async () => {
-    const tool = pairedTool(165);
-    const body = (row: any) => [...elements(165), row, ...elements(20)];
+    const tool = pairedTool(135);
+    const body = (row: any) => [...elements(135), row, ...elements(20)];
     await update(body(tool.small), activity);
     expect(delivered.size).toBe(2);
-    expect(delivered.get('root')!.some(element => element.element_id === 'tc_165')).toBe(true);
+    expect(delivered.get('root')!.some(element => element.element_id === 'tc_135')).toBe(true);
     const patch = client.im.message.patch.getMockImplementation();
     client.im.message.patch.mockImplementation(async args => {
       if (args.path.message_id === 'page-1') throw new Error('destination page unavailable');
@@ -323,20 +323,20 @@ describe('main activity card tail', () => {
     expect(await update(body(tool.large))).toBe(true);
     expect(toolRows()).toHaveLength(1);
     expect(toolRows()[0].header.title.content).toContain("<font color='green'>•</font>");
-    expect(delivered.get('page-1')!.some(element => element.element_id === 'tc_165')).toBe(true);
+    expect(delivered.get('page-1')!.some(element => element.element_id === 'tc_135')).toBe(true);
     expect(runningCards().map(([id]) => id)).toEqual(['page-1']);
   });
 
   it('clears every old owner before publishing several backward moves, including a later cleanup failure', async () => {
-    const first = pairedTool(165, 'edit-1');
-    const second = pairedTool(321, 'edit-2');
-    const body = (one: any, two: any) => [...elements(165), one, ...elements(155), two, ...elements(20)];
+    const first = pairedTool(135, 'edit-1');
+    const second = pairedTool(261, 'edit-2');
+    const body = (one: any, two: any) => [...elements(135), one, ...elements(125), two, ...elements(20)];
     const before = body(first.large, second.large);
     const after = body(first.small, second.small);
     await update(before, activity);
     expect(delivered.size).toBe(3);
-    expect(delivered.get('page-1')!.some(element => element.element_id === 'tc_165')).toBe(true);
-    expect(delivered.get('page-2')!.some(element => element.element_id === 'tc_321')).toBe(true);
+    expect(delivered.get('page-1')!.some(element => element.element_id === 'tc_135')).toBe(true);
+    expect(delivered.get('page-2')!.some(element => element.element_id === 'tc_261')).toBe(true);
     const patch = client.im.message.patch.getMockImplementation();
     client.im.message.patch.mockImplementation(async args => {
       if (args.path.message_id === 'page-2') throw new Error('second source unavailable');
@@ -344,18 +344,18 @@ describe('main activity card tail', () => {
     });
     expect(await update(after)).toBe(false);
     expect(toolRows()).toHaveLength(1);
-    expect(toolRows()[0].element_id).toBe('tc_321');
+    expect(toolRows()[0].element_id).toBe('tc_261');
     client.im.message.patch.mockImplementation(patch);
     expect(await update(after)).toBe(true);
     expect(toolRows()).toHaveLength(2);
-    expect(delivered.get('root')!.some(element => element.element_id === 'tc_165')).toBe(true);
-    expect(delivered.get('page-1')!.some(element => element.element_id === 'tc_321')).toBe(true);
+    expect(delivered.get('root')!.some(element => element.element_id === 'tc_135')).toBe(true);
+    expect(delivered.get('page-1')!.some(element => element.element_id === 'tc_261')).toBe(true);
   });
 
   it('cleans every surplus tool page, not only the last activity-bearing card', async () => {
     const first = pairedTool();
-    const second = pairedTool(341, 'edit-2');
-    await update([...elements(170), first.large, ...elements(170), second.large], activity);
+    const second = pairedTool(281, 'edit-2');
+    await update([...elements(140), first.large, ...elements(140), second.large], activity);
     expect(delivered.size).toBe(3);
     expect((handler as any).toolPageRemainders.get('root').size).toBe(2);
     expect(await update([first.small, second.small])).toBe(true);
@@ -363,7 +363,7 @@ describe('main activity card tail', () => {
     expect(toolRows().every(element => element.header.title.content.includes("<font color='red'>•</font>"))).toBe(true);
     for (const [id, body] of delivered) {
       if (id !== 'root') expect(body.some(element => element.element_id?.startsWith('tc_'))).toBe(false);
-      expect((handler as any).countTaggedNodes(body)).toBeLessThanOrEqual(180);
+      expect((handler as any).countTaggedNodes(body)).toBeLessThanOrEqual(150);
     }
     expect(runningCards().map(([id]) => id)).toEqual(['root']);
     expect(await handler.finalizeStreamingMessage('root', [first.small, second.small], undefined, 'owner')).toBe(true);
@@ -379,7 +379,7 @@ describe('main activity card tail', () => {
     const worker = createDelegationProgressElements({ taskId: 'worker', backend: 'agy', phase: 'succeeded', ordinal: 1,
       summary: 'Worker result', contextActionId: id, startedAt: 0, finishedAt: 1, activeToolCount: 0, events: [], hiddenEventCount: 0 });
     const tool = pairedTool();
-    await update([...elements(170), tool.large, ...worker], activity);
+    await update([...elements(140), tool.large, ...worker], activity);
     expect(delivered.size).toBe(2);
     expect(JSON.stringify(delivered.get('page-1'))).toContain('Worker result');
     expect(await handler.finalizeStreamingMessage('root', [tool.small], undefined, 'owner', '/workspace', 'thread',
@@ -394,10 +394,10 @@ describe('main activity card tail', () => {
     expect(toolRows()).toHaveLength(1);
     await (handler as any).refreshThreadSwitchButtons('root', 'thread');
     expect(JSON.stringify(delivered.get('root'))).toContain('Completed');
-    expect(JSON.stringify(delivered.get('root'))).toContain('thread_selector');
+    expect(JSON.stringify(delivered.get('root'))).toContain('switch_thread');
     expect(runningCards()).toHaveLength(0);
     expect((handler as any).toolPageRemainders.has('root')).toBe(false);
-    for (const page of delivered.values()) expect((handler as any).countTaggedNodes(page)).toBeLessThanOrEqual(180);
+    for (const page of delivered.values()) expect((handler as any).countTaggedNodes(page)).toBeLessThanOrEqual(150);
   });
 
   it('cleans a surplus terminal page without losing Worker context controls or their later updates', async () => {
@@ -406,7 +406,7 @@ describe('main activity card tail', () => {
     const id = handler.workerContexts.register({ openId: 'owner', deviceId: 'device', threadId: 'thread', laneId: 'lane', generation: 1 })!;
     const worker = createDelegationProgressElements({ taskId: 'worker', backend: 'codex', phase: 'succeeded', ordinal: 1,
       summary: 'Worker result', contextActionId: id, startedAt: 0, finishedAt: 1, activeToolCount: 0, events: [], hiddenEventCount: 0 });
-    await update([...elements(174), ...worker], activity);
+    await update([...elements(144), ...worker], activity);
     const [tailId] = runningCards()[0];
     expect(tailId).not.toBe('root');
     const threads = [{ id: 'thread', name: 'thread', status: 'idle' as const }];
@@ -446,10 +446,10 @@ describe('main activity card tail', () => {
   it('retries failed tail cleanup before publishing a new active page', async () => {
     await update(elements(2), activity);
     client.im.message.patch.mockRejectedValueOnce(new Error('temporary rejection'));
-    expect(await update(elements(190))).toBe(false);
+    expect(await update(elements(160))).toBe(false);
     expect(client.im.message.create).not.toHaveBeenCalled();
     expect(runningCards().map(([id]) => id)).toEqual(['root']);
-    expect(await update(elements(190))).toBe(true);
+    expect(await update(elements(160))).toBe(true);
     expect(runningCards().map(([id]) => id)).toEqual(['page-1']);
   });
 
@@ -463,11 +463,11 @@ describe('main activity card tail', () => {
     expect(final).not.toContain('Completed');
     expect(final).not.toContain('Running ·');
     expect(final).toContain('test-model');
-    expect(final).toContain('thread_selector');
+    expect(final).toContain('switch_thread');
   });
 
   it('keeps finalization retryable if cleaning a surplus activity page fails', async () => {
-    await update(elements(190), activity);
+    await update(elements(160), activity);
     client.im.message.patch.mockRejectedValueOnce(new Error('temporary rejection'));
     expect(await handler.finalizeStreamingMessage('root', elements(1), undefined, 'owner')).toBe(false);
     expect(runningCards().map(([id]) => id)).toEqual(['page-1']);
@@ -481,7 +481,7 @@ describe('main activity card tail', () => {
     client.im.message.patch.mockRejectedValueOnce({ code: 230099, msg: 'ErrCode: 11311 markdown content parse error' });
     expect(await update(elements(1), activity)).toBe(true);
     expect(runningCards()).toHaveLength(1);
-    await update(elements(190));
+    await update(elements(160));
     expect(runningCards().map(([id]) => id)).toEqual(['page-1']);
     expect(JSON.stringify(delivered.get('root'))).toContain('Line 0');
     await handler.finalizeStreamingMessage('root', elements(1), undefined, 'owner');
