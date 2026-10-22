@@ -31,6 +31,8 @@ From CLI and Router 1.6.133, each managed delegated worker also shows its own mo
 
 ### Public Activity
 
+From Router 1.6.169, reply-card thread lists start collapsed. Use **Show threads** to expand the list in the same card, or **Switch to this thread** to select the thread that produced the reply. Opening or hiding the list does not change the input target; a successful switch hides the list and confirms the new target without changing the reply's source label. No separate thread-management card is sent. The recursive element budget is 180 instead of 150, with room reserved for the expanded controls; table and size thresholds are unchanged. This presentation update requires the newer Router, not a new CLI protocol capability.
+
 From Router 1.6.158, completion pagination keeps the final body item (or complete worker group) with the completion note, optional model metadata and thread controls when they fit together. This avoids preventable footer-only continuations, including replies without model metadata. Indivisible oversized groups still split according to node, size and table limits; thread-button refreshes preserve the final body. This does not change streaming completion timing or the wire protocol.
 
 From CLI and Router 1.6.144, the latest active reply card ends with one mutable

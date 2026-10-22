@@ -34,6 +34,29 @@ interface ActivityShellState {
   finishedAt?: number;
 }
 
+interface ThreadSelector {
+  id: string;
+  owner: string;
+  deviceId?: string;
+  rootId: string;
+  replyThreadId?: string;
+  expanded: boolean;
+}
+
+interface ThreadSwitchCardState {
+  baseElements: any[];
+  threads: ThreadSummary[];
+  activeThreadId?: string;
+  replyLabel?: string;
+  createdAt: number;
+  selector?: ThreadSelector;
+}
+
+interface SelectorRender {
+  expanded: any[];
+  collapsed: any[];
+}
+
 interface ToolPageRemainder {
   ids: Set<string>;
   elements: any[];
@@ -55,9 +78,8 @@ export class FeishuLongConnHandler {
   // Feishu message size limit (4000 chars per message) - DEPRECATED for Card 2.0
   private readonly FEISHU_MESSAGE_LIMIT = 4000;
   // Feishu Card 2.0 limits (from official docs)
-  // Note: Using conservative limits - official says 200, we use 150 with proper recursive counting
-  // The 150 limit leaves a 50-node safety buffer while still being practical
-  private readonly CARD_ELEMENT_LIMIT = 150; // Conservative: 150 tagged nodes per card (official: 200)
+  // Keep headroom while counting nested text, icons, and container nodes.
+  private readonly CARD_ELEMENT_LIMIT = 180;
   private readonly CARD_DATA_SIZE_LIMIT = 3000000; // Max 3MB (3,000,000 chars) for data field
   private readonly CARD_SIZE_BUFFER = 100000; // Safety buffer: use 2.9MB instead of 3MB
   private readonly THREAD_BUTTONS_PER_ROW = 3;
@@ -65,7 +87,7 @@ export class FeishuLongConnHandler {
   private messageChains: Map<string, string[]> = new Map();
   // Store thread switch card state for re-patching after thread switch.
   // Entries are cleaned up after THREAD_SWITCH_STATE_TTL_MS (1 day).
-  private threadSwitchCardState = new Map<string, { baseElements: any[]; threads: ThreadSummary[]; activeThreadId?: string; replyLabel?: string; createdAt: number }>();
+  private threadSwitchCardState = new Map<string, ThreadSwitchCardState>();
   private readonly THREAD_SWITCH_STATE_TTL_MS = 24 * 60 * 60 * 1000; // 1 day
   private threadSwitchStateCleanupTimer: NodeJS.Timeout | null = null;
   // Remember successful card payloads without retaining another copy of the content.
@@ -142,6 +164,8 @@ export class FeishuLongConnHandler {
    * RouterServer sets this directly after construction.
    */
   onCardNewThread?: (openId: string) => Promise<void>;
+  /** Latest device-reported inventory; missing inventory fails closed for new controls. */
+  onCardThreadExists?: (deviceId: string, threadId: string) => boolean;
   /** Callback invoked when a user confirms or cancels a queued command. */
   onApprovalAction?: (openId: string, requestId: string, cardId: string, decision: string) => Promise<string>;
   onMaintenanceAction?: (openId: string, id: string, cardId: string, action: string, offset?: number) => Promise<string>;
@@ -1103,7 +1127,7 @@ Examples:
    * Split Card 2.0 elements into chunks based on Feishu limits
    *
    * Card packing budgets:
-   * 1. Element count: Max 200 tagged nodes per card (we use 150 for safety)
+   * 1. Element count: Max 200 tagged nodes per card (we use 180 for safety)
    * 2. Data size: Max 3,000,000 characters in the data field (JSON.stringify result)
    * 3. Tables: A conservative budget including tables embedded in Markdown
    *
@@ -1143,12 +1167,12 @@ Examples:
     // Reserve space for continuation indicators and the repeated card header.
     const continuationHeaderSize = JSON.stringify(continuationHeaderElements).length;
     const continuationHeaderTaggedNodes = continuationHeaderElements.reduce(
-      (total, element) => total + this.countTaggedNodes(element),
+      (total, element) => total + this.countTaggedNodes(element, true),
       0,
     );
     // Reserve the bounded tail while packing so it never displaces content onto an activity-only page.
     const continuationIndicatorSize = 200 + continuationHeaderSize + (activityTail ? JSON.stringify(activityTail).length : 0);
-    const continuationIndicatorCount = 2 + continuationHeaderTaggedNodes + (activityTail ? this.countTaggedNodes(activityTail) : 0);
+    const continuationIndicatorCount = 2 + continuationHeaderTaggedNodes + (activityTail ? this.countTaggedNodes(activityTail, true) : 0);
 
     // Keep the completion block with the final body item when they fit on a
     // continuation card. Include the whole worker group, never just its details.
@@ -1161,14 +1185,14 @@ Examples:
     const finalGroup = finalBodyStart >= continuationHeaderElements.length
       ? elements.slice(finalBodyStart) : [];
     const keepFinalBody = finalGroup.length > trailingElements.length
-      && finalGroup.reduce((sum, item) => sum + this.countTaggedNodes(item), 0) + continuationIndicatorCount <= this.CARD_ELEMENT_LIMIT
+      && finalGroup.reduce((sum, item) => sum + this.countTaggedNodes(item, true), 0) + continuationIndicatorCount <= this.CARD_ELEMENT_LIMIT
       && finalGroup.reduce((sum, item) => sum + JSON.stringify(item).length, 0) + continuationIndicatorSize <= this.CARD_DATA_SIZE_LIMIT - this.CARD_SIZE_BUFFER
       && countCardTables(finalGroup) + headerTables <= CARD_TABLE_LIMIT;
 
     for (let i = 0; i < elements.length; i++) {
       const element = elements[i];
       const elementSize = JSON.stringify(element).length;
-      const elementTaggedNodes = this.countTaggedNodes(element);
+      const elementTaggedNodes = this.countTaggedNodes(element, true);
       const elementTables = countCardTables(element);
 
       // Keep worker identity, visible content and diagnostics together when packing cards.
@@ -1181,7 +1205,7 @@ Examples:
       const group = keepFinalBody && i === finalBodyStart ? finalGroup
         : isWorkerGroup ? workerGroup : element === trailingElements[0] ? trailingElements : [element];
       const groupSize = group.reduce((sum, item) => sum + JSON.stringify(item).length, 0);
-      const groupTaggedNodes = group.reduce((sum, item) => sum + this.countTaggedNodes(item), 0);
+      const groupTaggedNodes = group.reduce((sum, item) => sum + this.countTaggedNodes(item, true), 0);
       const groupTables = countCardTables(group);
 
       // Check if adding this element would exceed limits
@@ -1252,9 +1276,10 @@ Examples:
    * According to Feishu docs, all nodes with 'tag' property count towards the 200 limit
    *
    * @param obj The object or array to count tags in
+   * @param reserveWorkerErrors Reserve a future error row for each Worker context control
    * @returns Total count of nodes with 'tag' property
    */
-  private countTaggedNodes(obj: any): number {
+  private countTaggedNodes(obj: any, reserveWorkerErrors = false): number {
     if (!obj || typeof obj !== 'object') {
       return 0;
     }
@@ -1266,6 +1291,13 @@ Examples:
       count = 1;
     }
 
+    // WorkerContextCards.decorate can add one error row after pagination, including
+    // on a later reset failure. Already-decorated rows must not be counted twice.
+    const controlElements = obj.columns?.[0]?.elements;
+    if (reserveWorkerErrors && typeof obj.element_id === 'string' && obj.element_id.startsWith('wc_')
+      && controlElements?.[0]?.behaviors?.[0]?.value?.action === 'worker_context_clear'
+      && !controlElements.some((element: any) => element.tag === 'markdown')) count += 1;
+
     // Recursively count in all properties
     for (const key in obj) {
       if (obj.hasOwnProperty(key)) {
@@ -1273,11 +1305,11 @@ Examples:
         if (Array.isArray(value)) {
           // Recursively count in array elements
           for (const item of value) {
-            count += this.countTaggedNodes(item);
+            count += this.countTaggedNodes(item, reserveWorkerErrors);
           }
         } else if (typeof value === 'object' && value !== null) {
           // Recursively count in nested objects
-          count += this.countTaggedNodes(value);
+          count += this.countTaggedNodes(value, reserveWorkerErrors);
         }
       }
     }
@@ -1298,7 +1330,7 @@ Examples:
     }
 
     // Check element count limit - MUST count ALL nodes with 'tag' property recursively
-    const totalTaggedNodes = elements.reduce((sum, element) => sum + this.countTaggedNodes(element), 0);
+    const totalTaggedNodes = elements.reduce((sum, element) => sum + this.countTaggedNodes(element, true), 0);
 
     console.log(`[FeishuHandler] Element count check: top-level=${elements.length}, total tagged nodes=${totalTaggedNodes}, limit=${this.CARD_ELEMENT_LIMIT}`);
 
@@ -1450,7 +1482,7 @@ Examples:
     });
   }
 
-  private async _updateStreamingMessage(messageId: string, elements: any[], openId?: string, continuationHeaderElements: any[] = [], trailingElements: any[] = [], keepCompletionWithBody = false): Promise<boolean> {
+  private async _updateStreamingMessage(messageId: string, elements: any[], openId?: string, continuationHeaderElements: any[] = [], trailingElements: any[] = [], keepCompletionWithBody = false, selectorRender?: SelectorRender): Promise<boolean> {
     let updatingMessageId = messageId;
     let updatingCardIndex = 0;
     try {
@@ -1464,7 +1496,11 @@ Examples:
       // Split elements into chunks based on Feishu Card 2.0 limits
       const shell = this.activityShells.get(messageId);
       const activityTail = shell && shell.finishedAt === undefined ? createActivityElement(shell.activity) : undefined;
-      const chunks = this.splitElementsIntoChunks(elements, continuationHeaderElements, trailingElements, activityTail, keepCompletionWithBody);
+      const packed = this.splitElementsIntoChunks(elements, continuationHeaderElements, trailingElements, activityTail, keepCompletionWithBody);
+      // Pack the expanded controls, but initially deliver the compact footer on the same page.
+      const chunks = selectorRender ? packed.map(chunk => chunk.flatMap(element =>
+        element === selectorRender.expanded[0] ? selectorRender.collapsed
+          : selectorRender.expanded.includes(element) ? [] : [element])) : packed;
       const tailIndex = activityTail ? chunks.length - 1 : -1;
       console.log(`[FeishuHandler] Need ${chunks.length} card(s), currently have ${chain.length} card(s)`);
       let hashes = this.cardContentHashes.get(messageId);
@@ -1638,6 +1674,8 @@ Examples:
 
       // Append thread switch buttons when at least one thread exists
       let threadSwitchElements: any[] = [];
+      let selector: ThreadSelector | undefined;
+      let selectorRender: SelectorRender | undefined;
       // The reply's owner and the destination of new messages are independent.
       const activeThreadId = (openId ? this.onResolveActiveThread?.(openId)?.threadId : undefined)
         ?? threads?.find(thread => thread.name === 'default')?.id;
@@ -1648,7 +1686,11 @@ Examples:
         ? [replyThreadName, replyWorkspace].filter(Boolean).join(' · ')
         : undefined;
       if (!bare && threads && threads.length >= 1) {
-        threadSwitchElements = this.createThreadSwitchElements(threads, activeThreadId, replyLabel);
+        selector = { id: uuidv4(), owner: openId ?? '', deviceId: this.onResolveThread?.(messageId)?.deviceId,
+          rootId: messageId, replyThreadId, expanded: false };
+        const state = { threads, activeThreadId, replyLabel, selector };
+        threadSwitchElements = this.createThreadSelectorElements(state, true);
+        selectorRender = { expanded: threadSwitchElements, collapsed: this.createThreadSelectorElements(state, false) };
         finalElements.push(...threadSwitchElements);
       }
 
@@ -1656,7 +1698,7 @@ Examples:
       // Repack changed previews and clear obsolete tool copies without retracting messages.
       const trailingElements = !queueConfirmation ? [...footerElements, ...threadSwitchElements] : threadSwitchElements;
       const keepCompletionWithBody = !bare && !queueConfirmation;
-      const updated = await this._updateStreamingMessage(messageId, finalElements, openId, headerElements, trailingElements, keepCompletionWithBody);
+      const updated = await this._updateStreamingMessage(messageId, finalElements, openId, headerElements, trailingElements, keepCompletionWithBody, selectorRender);
       if (!updated) {
         return false;
       }
@@ -1682,6 +1724,7 @@ Examples:
             threads,
             activeThreadId,
             replyLabel,
+            selector,
             createdAt: Date.now(),
           });
         }
@@ -1752,6 +1795,84 @@ Examples:
       content: replyLabel ? `📍 **Reply from:** ${replyLabel}\n🗂️ **Switch thread**` : '🗂️ **Switch thread**',
     };
     return [{ tag: 'hr' }, caption, ...rows];
+  }
+
+  /** The source action never accepts a target from the callback payload. */
+  private createThreadSelectorElements(state: Pick<ThreadSwitchCardState, 'threads' | 'activeThreadId' | 'replyLabel' | 'selector'>, expanded: boolean): any[] {
+    const selector = state.selector!;
+    const button = (text: string, op: string, disabled = false) => ({ tag: 'column', width: 'auto', elements: [{
+      tag: 'button', text: { tag: 'plain_text', content: text }, type: 'default', disabled,
+      behaviors: [{ type: 'callback', value: { action: 'thread_selector', id: selector.id, op } }],
+    }] });
+    const controls = { tag: 'column_set', flex_mode: 'stretch', columns: [
+      button('Switch to this thread', 'source', !selector.replyThreadId || !selector.owner || !selector.deviceId),
+      button(expanded ? 'Hide threads' : 'Show threads', expanded ? 'hide' : 'show'),
+    ] };
+    const full = this.createThreadSwitchElements(state.threads, state.activeThreadId, state.replyLabel);
+    if (!expanded) return [...full.slice(0, 2), controls];
+    for (const row of full.slice(2)) for (const column of row.columns) {
+      const action = column.elements[0].behaviors[0].value;
+      column.elements[0].behaviors[0].value = action.action === 'new_thread'
+        ? { action: 'thread_selector', id: selector.id, op: 'new' }
+        : { action: 'thread_selector', id: selector.id, op: 'select', offset: state.threads.findIndex(thread => thread.id === action.threadId) };
+    }
+    return [...full.slice(0, 2), controls, ...full.slice(2)];
+  }
+
+  /** Caller owns the root message lock. Commit UI state only after a successful patch. */
+  private async patchThreadSelector(cardId: string, state: ThreadSwitchCardState, expanded: boolean, activeThreadId = state.activeThreadId): Promise<void> {
+    const next = { ...state, activeThreadId, selector: { ...state.selector!, expanded } };
+    const elements = [...state.baseElements, ...this.createThreadSelectorElements(next, expanded)];
+    if (this.checkIfElementsNeedSplitting(elements)) throw new Error('Thread controls exceed this card budget.');
+    await this.sendCardRequest(JSON.stringify({ schema: '2.0', body: { elements } }), async content => {
+      this.assertThreadSelectorBudget(content);
+      const result = await this.client.im.message.patch({ path: { message_id: cardId }, data: { content } });
+      if (!result?.code) this.workerContexts?.remember(cardId, next.selector.rootId, content);
+      return result;
+    });
+    this.threadSwitchCardState.set(cardId, next);
+  }
+
+  private assertThreadSelectorBudget(content: string): void {
+    if (this.countTaggedNodes(JSON.parse(content)) > this.CARD_ELEMENT_LIMIT) {
+      throw new Error('Thread controls exceed this card budget after decoration.');
+    }
+  }
+
+  private async handleThreadSelector(openId: string, cardId: unknown, action: { id?: string; op?: string; offset?: number }): Promise<{ toast: { type: string; content: string } }> {
+    const error = (content: string) => ({ toast: { type: 'error', content } });
+    if (typeof cardId !== 'string') return error('This thread selector is unavailable.');
+    const rootId = this.threadSwitchCardState.get(cardId)?.selector?.rootId ?? cardId;
+    return this.withMessageLock(rootId, async () => {
+      const state = this.threadSwitchCardState.get(cardId);
+      const selector = state?.selector;
+      if (!state || !selector || selector.id !== action.id || selector.owner !== openId
+        || Date.now() - state.createdAt >= this.THREAD_SWITCH_STATE_TTL_MS) return error('This thread selector has expired or belongs to another card.');
+      let switched: string | undefined;
+      try {
+        const device = await this.bindingManager.getActiveDevice(openId);
+        if (!selector.deviceId || device?.deviceId !== selector.deviceId) return error('Select the original device before using this card.');
+        if (action.op === 'show' || action.op === 'hide') {
+          await this.patchThreadSelector(cardId, state, action.op === 'show', this.onResolveActiveThread?.(openId)?.threadId);
+          return { toast: { type: 'info', content: action.op === 'show' ? 'Threads shown. Input target unchanged.' : 'Threads hidden. Input target unchanged.' } };
+        }
+        if (action.op === 'new') {
+          if (!selector.expanded || state.threads.length >= MAX_THREADS || !this.onCardNewThread) return error('New thread is unavailable.');
+          await this.onCardNewThread(openId);
+          return { toast: { type: 'info', content: 'Creating new thread...' } };
+        }
+        const target = action.op === 'source' ? state.threads.find(thread => thread.id === selector.replyThreadId)
+          : action.op === 'select' && selector.expanded && Number.isInteger(action.offset) && action.offset! >= 0
+            ? state.threads[action.offset!] : undefined;
+        if (!target || !this.onCardThreadExists?.(selector.deviceId, target.id) || !this.onCardSwitchThread) return error('This thread is no longer available.');
+        await this.onCardSwitchThread(openId, target.id, target.name);
+        switched = target.name;
+        await this.patchThreadSelector(cardId, state, false, target.id);
+        return { toast: { type: 'success', content: `Input target: ${target.name}` } };
+      } catch {
+        return error(switched ? `Input target changed to ${switched}, but the card could not refresh. Try Hide threads again.` : 'Thread action failed. Please try again.');
+      }
+    });
   }
 
   private threadButtonLabel(thread: ThreadSummary, active: boolean): string {
@@ -1855,11 +1976,15 @@ Examples:
    * Re-patches the card with updated button states (new active thread highlighted).
    */
   private async refreshThreadSwitchButtons(cardMessageId: string, newActiveThreadId: string): Promise<void> {
-    const rootId = this.workerContexts?.rootFor(cardMessageId) ?? cardMessageId;
+    const rootId = this.threadSwitchCardState.get(cardMessageId)?.selector?.rootId ?? this.workerContexts?.rootFor(cardMessageId) ?? cardMessageId;
     await this.withMessageLock(rootId, async () => {
       const state = this.threadSwitchCardState.get(cardMessageId);
       if (!state) {
         console.warn(`[FeishuHandler] No thread switch state found for card ${cardMessageId}`);
+        return;
+      }
+      if (state.selector) {
+        await this.patchThreadSelector(cardMessageId, state, false, newActiveThreadId);
         return;
       }
       const updatedElements = [
@@ -1880,6 +2005,7 @@ Examples:
       const content = this.workerContexts?.contentFor(cardId);
       if (!content) return;
       await this.sendCardRequest(content, async body => {
+        if (this.threadSwitchCardState.get(cardId)?.selector) this.assertThreadSelectorBudget(body);
         const result = await this.client.im.message.patch({ path: { message_id: cardId }, data: { content: body } });
         if (!result?.code) this.workerContexts?.remember(cardId, rootId, body);
         return result;
@@ -1903,6 +2029,14 @@ Examples:
       parsed = typeof actionValue === 'string' ? JSON.parse(actionValue) : actionValue;
     } catch {
       return;
+    }
+
+    if (!parsed || typeof parsed !== 'object' || typeof parsed.action !== 'string') return;
+    if (parsed.action === 'thread_selector') return this.handleThreadSelector(openId, data?.context?.open_message_id, parsed);
+    // New cards must not fall through to the legacy unbound callback contract.
+    if ((parsed.action === 'switch_thread' || parsed.action === 'new_thread')
+      && this.threadSwitchCardState.get(data?.context?.open_message_id)?.selector) {
+      return { toast: { type: 'error', content: 'Use this card’s thread controls.' } };
     }
 
     if (parsed.action === 'settings') {
@@ -1951,6 +2085,22 @@ Examples:
         return { toast: { type: 'info', content } };
       } catch (error) {
         return { toast: { type: 'error', content: error instanceof Error ? error.message : 'Approval failed.' } };
+      }
+    }
+
+    // Legacy cards remain usable while their original state is present. A new Router
+    // must not let expired/unknown cards bypass the bound selector via legacy actions.
+    if ((parsed.action === 'switch_thread' || parsed.action === 'new_thread') && this.onCardThreadExists) {
+      const cardId = data?.context?.open_message_id;
+      const state = this.threadSwitchCardState.get(cardId);
+      const route = typeof cardId === 'string' ? this.onResolveThread?.(cardId) : undefined;
+      let device;
+      try { device = await this.bindingManager.getActiveDevice(openId); }
+      catch { return { toast: { type: 'error', content: 'Thread action failed. Please try again.' } }; }
+      if (!state || Date.now() - state.createdAt >= this.THREAD_SWITCH_STATE_TTL_MS || !route
+        || device?.deviceId !== route.deviceId || (parsed.action === 'switch_thread'
+          && (!state.threads.some(thread => thread.id === parsed.threadId) || !this.onCardThreadExists(route.deviceId, parsed.threadId!)))) {
+        return { toast: { type: 'error', content: 'This thread card is no longer available.' } };
       }
     }
 
@@ -2065,15 +2215,16 @@ Examples:
   /** Leave a historical queue receipt after output moves to a new card. */
   async markQueueCardStarted(cardMessageId: string): Promise<void> {
     await this.queueCardDecisions.get(cardMessageId);
-    await this.withMessageLock(cardMessageId, () => this.client.im.message.patch({
-      path: { message_id: cardMessageId },
-      data: {
-        content: JSON.stringify({
-          schema: '2.0',
-          body: { elements: [{ tag: 'markdown', content: '▶️ **Queued task started**\n\nFollow progress in the new execution card at the bottom of the chat.' }] },
-        }),
-      },
-    }));
+    const rootId = this.threadSwitchCardState.get(cardMessageId)?.selector?.rootId ?? cardMessageId;
+    await this.withMessageLock(rootId, async () => {
+      const result = await this.client.im.message.patch({
+        path: { message_id: cardMessageId },
+        data: { content: JSON.stringify({ schema: '2.0', body: { elements: [{ tag: 'markdown',
+          content: '▶️ **Queued task started**\n\nFollow progress in the new execution card at the bottom of the chat.' }] } }) },
+      });
+      if (result?.code) throw result;
+      this.threadSwitchCardState.delete(cardMessageId);
+    });
   }
 
   private removeExpiredQueueActionStates(): void {
@@ -2091,8 +2242,9 @@ Examples:
       : '❌ **Queue request cancelled**\n\nThis message was not added to the thread queue.';
 
     try {
-      await this.withMessageLock(cardMessageId, async () => {
-        await this.client.im.message.patch({
+      const rootId = this.threadSwitchCardState.get(cardMessageId)?.selector?.rootId ?? cardMessageId;
+      await this.withMessageLock(rootId, async () => {
+        const result = await this.client.im.message.patch({
           path: { message_id: cardMessageId },
           data: {
             content: JSON.stringify({
@@ -2101,6 +2253,8 @@ Examples:
             }),
           },
         });
+        if (result?.code) throw result;
+        this.threadSwitchCardState.delete(cardMessageId);
       });
     } catch (error: any) {
       console.error('[FeishuLongConnHandler] Failed to update queue confirmation card:', error?.message || error);

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm, mkdir } from 'fs/promises';
+import { mkdtemp, rm, mkdir, realpath, symlink } from 'fs/promises';
 import os from 'os';
 import { tmpdir } from 'os';
 import path from 'path';
@@ -10,8 +10,9 @@ import type { SettingsActionMessage, SettingsBackend, SettingsMenu } from '../sr
 
 const BACKENDS: SettingsBackend[] = ['claude', 'codex', 'opencode', 'kimi', 'zcode', 'pi', 'agy', 'dsh'];
 
-async function fixture() {
-  const cwd = await mkdtemp(path.join(tmpdir(), 'settings-handler-'));
+async function fixture(temporaryRoot = tmpdir()) {
+  // Temporary roots may contain platform aliases; the browser requires canonical roots.
+  const cwd = await realpath(await mkdtemp(path.join(temporaryRoot, 'settings-handler-')));
   const threads: Thread[] = ['thread-a', 'thread-b'].map(id => ({ id, name: id, workingDirectory: cwd, sessionId: null,
     createdAt: 0, lastActiveAt: 0, models: { codex: 'saved-codex', claude: 'saved-claude' }, efforts: { agy: 'low' } }));
   let config: any = { type: 'codex', claude: { model: 'global-claude' } };
@@ -93,14 +94,34 @@ describe('settings cards command integration', () => {
   });
   afterEach(async () => { await f.handler.destroy(); await rm(f.cwd, { recursive: true, force: true }); vi.restoreAllMocks(); });
 
-  async function directoryMenu() {
-    vi.spyOn(os, 'homedir').mockReturnValue(f.cwd);
+  async function directoryMenu(context = f) {
+    vi.spyOn(os, 'homedir').mockReturnValue(context.cwd);
     // The guard captures homedir in its constructor; replace the read-only browser's guard for this fixture.
-    (f.handler as any).directoryBrowser.deps.guard = new DirectoryGuard([f.cwd]);
-    await f.handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: { settingsCards: true, directoryCards: true } } } as any);
-    await f.send('/cd');
-    return f.responses().at(-1).settingsMenu as SettingsMenu;
+    (context.handler as any).directoryBrowser.deps.guard = new DirectoryGuard([context.cwd]);
+    await context.handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: { settingsCards: true, directoryCards: true } } } as any);
+    await context.send('/cd');
+    const response = context.responses().at(-1);
+    expect(response).toMatchObject({ success: true, settingsMenu: { kind: 'directory' } });
+    return response.settingsMenu as SettingsMenu;
   }
+
+  it('opens a directory card when the temporary root is reached through an alias', async () => {
+    const target = path.join(f.cwd, 'temporary-root');
+    const alias = path.join(f.cwd, 'temporary-alias');
+    await mkdir(target);
+    await symlink(target, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    const linked = await fixture(alias);
+    try {
+      expect(linked.cwd).toBe(await realpath(linked.cwd));
+      expect(path.dirname(linked.cwd)).toBe(target);
+      expect(await directoryMenu(linked)).toMatchObject({ kind: 'directory', busy: false });
+      expect(linked.pool.getExecutor).not.toHaveBeenCalled();
+      expect(linked.pool.setWorkingDirectory).not.toHaveBeenCalled();
+    } finally {
+      await linked.handler.destroy();
+      await rm(linked.cwd, { recursive: true, force: true });
+    }
+  });
 
   it('opens /cd without constructing an executor, applies through the shared generation cleanup and deduplicates retries', async () => {
     await mkdir(path.join(f.cwd, 'child'));
