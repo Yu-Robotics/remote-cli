@@ -396,6 +396,8 @@ Use one Router for multiple trusted clients. Each client connects from the devel
 
 Thread switch panels show `Reply from:` with the reply's full thread name and workspace. Under `Switch thread`, a check mark (`✓`) and primary button styling identify the destination of new top-level messages when the card is finalized or clicked. Selected buttons remain clickable. Switching updates only the clicked card; other historical cards retain their last displayed selection.
 
+From Router 1.6.171, completed cards keep the thread buttons and **+ New** inside a native Feishu **Switch thread** folding panel, collapsed by default. Click its header to expand or collapse the list without sending a command or changing the input target. The reply-source caption remains visible. Selecting a thread uses the existing routing behavior. Hidden buttons still count toward card limits; unrelated full-card updates can reset the panel to its default collapsed state. This uses the existing Card 2.0 client requirement (Feishu 7.20 or newer).
+
 When a client thread is busy, the Router sends a confirmation card before accepting another message into its queue. `/queue` shows queue state, `/queue clear` discards queued messages, and `/abort` stops the active task and clears that thread's queue. Messages received while abort cleanup is in progress wait for the client backend to become safe before execution starts.
 
 ## Expert Usage

@@ -1171,6 +1171,8 @@ Router 1.6.90 checks tool parameters before using specialized card formatting. M
 
 线程切换面板的两行说明文字使用 emoji 和加粗关键词、正文大小的字体：`📍 Reply from:` 显示回复所属线程的完整名称和工作目录，`🗂️ Switch thread` 标记切换区域。在 `Switch thread` 下方，对勾（`✓`）和主色按钮样式标识出卡片 finalize 或点击后新的顶层消息将发往的线程。已选中的按钮仍可点击。切换只更新被点击的卡片；其他历史卡片保留各自最后显示的选择状态。
 
+From Router 1.6.171, completed cards keep the thread buttons and **+ New** inside a native Feishu **Switch thread** folding panel, collapsed by default. Click its header to expand or collapse the list without sending a command or changing the input target. The reply-source caption remains visible. Selecting a thread uses the existing routing behavior. Hidden buttons still count toward card limits; unrelated full-card updates can reset the panel to its default collapsed state. This uses the existing Card 2.0 client requirement (Feishu 7.20 or newer).
+
 ### 组合使用全局和按线程 backend
 
 当所有 thread 都要切换时使用 `/backend <index>`；只有当前 thread 需要特殊 backend 时使用 `/backend <index> @`：

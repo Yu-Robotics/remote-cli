@@ -1219,6 +1219,8 @@ Router 1.6.90 checks tool parameters before using specialized card formatting. M
 
 Thread switch panels mark the caption lines with emojis and bold keywords at normal text size: `📍 Reply from:` with the reply's full thread name and workspace, and `🗂️ Switch thread`. Under `Switch thread`, a check mark (`✓`) and primary button styling identify the destination of new top-level messages when the card is finalized or clicked. Selected buttons remain clickable. Switching updates only the clicked card; other historical cards retain their last displayed selection.
 
+From Router 1.6.171, completed cards keep the thread buttons and **+ New** inside a native Feishu **Switch thread** folding panel, collapsed by default. Click its header to expand or collapse the list without sending a command or changing the input target. The reply-source caption remains visible. Selecting a thread uses the existing routing behavior. Hidden buttons still count toward card limits; unrelated full-card updates can reset the panel to its default collapsed state. This uses the existing Card 2.0 client requirement (Feishu 7.20 or newer).
+
 ### Combine global and per-thread backends
 
 Use `/backend <index>` when the whole workspace should move together. Use `/backend <index> @` when only the current thread needs a different backend:
