@@ -548,7 +548,7 @@ describe('FeishuLongConnHandler', () => {
       const last = bodies.at(-1);
       const note = last.findIndex(element => element.content?.includes('Completed'));
       const model = last.findIndex(element => element.content?.includes('Model: model-a'));
-      const panel = last.findIndex(element => element.content?.includes('Switch thread'));
+      const panel = last.findIndex(element => element.element_id === 'thread_controls');
       expect(note).toBeGreaterThanOrEqual(0);
       expect(model).toBe(note + 1);
       expect(panel).toBeGreaterThan(model);
@@ -1346,10 +1346,134 @@ describe('FeishuLongConnHandler', () => {
   });
 
   describe('finalizeStreamingMessage with chunking', () => {
-    const getButtons = (elements: any[]) => elements
-      .filter(element => element.tag === 'column_set')
+    const getPanel = (elements: any[]) => elements.find(element => element.element_id === 'thread_controls');
+    const getButtons = (elements: any[]) => (getPanel(elements)?.elements ?? [])
       .flatMap(row => row.columns)
       .map(column => column.elements[0]);
+
+    it('delivers native collapsed controls with every existing callback and no expansion callback', async () => {
+      const threads = [
+        { id: 'default-id', name: 'default', status: 'idle' as const },
+        { id: 'review-id', name: 'review', status: 'idle' as const },
+      ];
+      await handler.finalizeStreamingMessage('card', [{ tag: 'markdown', content: 'Answer' }], undefined,
+        'owner', '/workspace/project', 'default', threads, 'default-id');
+      const card = JSON.parse(mockClient.im.message.patch.mock.calls[0][0].data.content);
+      expect(card.schema).toBe('2.0');
+      const panel = getPanel(card.body.elements);
+      expect(panel).toMatchObject({ tag: 'collapsible_panel', expanded: false, header: {
+        title: { tag: 'plain_text', content: 'Switch thread' },
+        icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined' },
+        icon_position: 'right', icon_expanded_angle: -180,
+      } });
+      expect(panel.element_id).toMatch(/^[A-Za-z][A-Za-z0-9_]{0,19}$/);
+      expect(panel.header).not.toHaveProperty('width');
+      expect(panel).not.toHaveProperty('behaviors');
+      expect(panel.elements.every((row: any) => row.tag === 'column_set')).toBe(true);
+      expect(getButtons(card.body.elements).map(button => button.behaviors[0].value)).toEqual([
+        { action: 'switch_thread', threadId: 'default-id', threadName: 'default' },
+        { action: 'switch_thread', threadId: 'review-id', threadName: 'review' },
+        { action: 'new_thread' },
+      ]);
+      expect(card.body.elements).toContainEqual({ tag: 'markdown', content: '📍 **Reply from:** default · project' });
+      expect(JSON.stringify(panel)).not.toMatch(/Reply from|thread_selector|Show threads|Hide threads|Input target unchanged/);
+      expect(mockClient.im.message.patch).toHaveBeenCalledTimes(1);
+      expect(mockClient.im.message.create).not.toHaveBeenCalled();
+    });
+
+    it('routes new text to the non-default target from an actual generated button', async () => {
+      let active = { threadId: 'default-id', threadName: 'default' };
+      handler.setOnResolveActiveThread(() => active);
+      handler.onCardSwitchThread = vi.fn(async (_owner, threadId, threadName) => { active = { threadId, threadName }; });
+      const threads = [
+        { id: 'default-id', name: 'default', status: 'idle' as const },
+        { id: 'review-id', name: 'review', status: 'idle' as const },
+      ];
+      await handler.finalizeStreamingMessage('card', [], undefined, 'owner', '/workspace/project', 'default', threads, 'default-id');
+      const original = JSON.parse(mockClient.im.message.patch.mock.calls[0][0].data.content).body.elements;
+      const callback = getButtons(original)[1].behaviors[0].value;
+      const result = await handler.handleCardAction({ operator: { open_id: 'owner' }, context: { open_message_id: 'card' },
+        action: { value: callback } });
+      expect(result).toEqual({ toast: { type: 'success', content: 'Switched to: review' } });
+      await vi.waitFor(() => expect(mockClient.im.message.patch).toHaveBeenCalledTimes(2));
+      const refreshed = JSON.parse(mockClient.im.message.patch.mock.calls[1][0].data.content).body.elements;
+      expect(getPanel(refreshed).expanded).toBe(false);
+      expect(getPanel(refreshed).element_id).toBe(getPanel(original).element_id);
+      expect(getButtons(refreshed)[1]).toMatchObject({ type: 'primary', text: { content: '✓ review' } });
+      expect(refreshed).toContainEqual({ tag: 'markdown', content: '📍 **Reply from:** default · project' });
+      mockBindingManager.getUserBinding.mockResolvedValue({ openId: 'owner' });
+      mockBindingManager.getActiveDevice.mockResolvedValue({ deviceId: 'device' });
+      mockConnectionHub.isDeviceOnline.mockReturnValue(true);
+      mockConnectionHub.sendToDevice.mockResolvedValue(true);
+      mockClient.im.message.create.mockResolvedValue({ data: { message_id: 'next-card' } });
+      await (handler as any).handleMessageEvent({ sender: { sender_id: { open_id: 'owner' } }, message: {
+        message_type: 'text', message_id: 'new-message', content: JSON.stringify({ text: 'Continue review' }),
+      } });
+      expect(mockConnectionHub.sendToDevice).toHaveBeenCalledWith('device', expect.objectContaining({
+        threadId: 'review-id', content: 'Continue review',
+      }));
+    });
+
+    it('preserves the native panel and button callbacks through text fallback and later refresh', async () => {
+      mockClient.im.message.patch.mockRejectedValueOnce({ code: 230099,
+        msg: 'Failed to create card content, ext=ErrCode: 11310; ErrMsg: card table number over limit; ErrorValue: table;' })
+        .mockResolvedValue({});
+      await handler.finalizeStreamingMessage('card', [{ tag: 'markdown', content: '**Conclusion**' }], undefined,
+        'owner', '/workspace/project', 'default', [
+          { id: 'default-id', name: 'default', status: 'idle' },
+          { id: 'review-id', name: 'review', status: 'idle' },
+        ], 'default-id');
+      expect(mockClient.im.message.patch).toHaveBeenCalledTimes(2);
+      const initial = JSON.parse(mockClient.im.message.patch.mock.calls[0][0].data.content).body.elements;
+      const fallback = JSON.parse(mockClient.im.message.patch.mock.calls[1][0].data.content).body.elements;
+      expect(getPanel(fallback)).toEqual(getPanel(initial));
+      expect(fallback.some((element: any) => element.content?.includes('Conclusion'))).toBe(true);
+      await (handler as any).refreshThreadSwitchButtons('card', 'review-id');
+      const refreshed = JSON.parse(mockClient.im.message.patch.mock.calls[2][0].data.content).body.elements;
+      expect(getPanel(refreshed)).toMatchObject({ expanded: false, element_id: 'thread_controls' });
+      expect(getButtons(refreshed)[1].behaviors[0].value).toEqual({ action: 'switch_thread', threadId: 'review-id', threadName: 'review' });
+      expect(refreshed.some((element: any) => element.content?.includes('Conclusion'))).toBe(true);
+    });
+
+    it.each([149, 150])('budgets hidden thread buttons and a future Worker error in a %i-node final card', async total => {
+      const delivered = new Map<string, any[]>();
+      mockClient.im.message.patch.mockImplementation(async ({ path, data }) => {
+        delivered.set(path.message_id, JSON.parse(data.content).body.elements); return {};
+      });
+      mockClient.im.message.create.mockImplementation(async ({ data }) => {
+        delivered.set('last-card', JSON.parse(data.content).body.elements); return { data: { message_id: 'last-card' } };
+      });
+      const send = vi.fn(async () => true);
+      const cards = new WorkerContextCards({ ownsDevice: async () => true, available: () => true, send,
+        refresh: (card, root) => handler.refreshWorkerContextCard(card, root) });
+      handler.workerContexts = cards;
+      const id = cards.register({ openId: 'owner', deviceId: 'device', threadId: 't0', laneId: 'lane', generation: 1 })!;
+      const control = workerContextControl(id);
+      const threads = Array.from({ length: 10 }, (_, index) => ({ id: `t${index}`, name: `thread-${index + 1}`, status: 'idle' as const }));
+      const controls = (handler as any).createThreadSwitchElements(threads, 't0', 'thread-1 · project');
+      const prefix = Array.from({ length: total - 4 - (handler as any).countTaggedNodes(controls)
+        - (handler as any).countTaggedNodes(control) }, (_, index) => ({ tag: 'markdown', content: `Body ${index}` }));
+      const body = [...prefix, { tag: 'markdown', content: 'Final conclusion' }, control];
+      expect(await handler.finalizeStreamingMessage('root', body, undefined, 'owner', '/workspace/project', 'thread-1', threads, 't0')).toBe(true);
+      expect(mockClient.im.message.create.mock.calls.length).toBe(total === 149 ? 0 : 1);
+      const allElements = [...delivered.values()].flat();
+      const panel = getPanel(allElements);
+      expect(getButtons(allElements)).toHaveLength(11);
+      expect(getButtons(allElements).at(-1).disabled).toBe(true);
+      expect((handler as any).countTaggedNodes(panel)).toBeGreaterThan(11);
+      expect(allElements.filter(element => element.element_id === 'thread_controls')).toHaveLength(1);
+      expect(allElements.filter(element => element.content === 'Final conclusion')).toHaveLength(1);
+      const workerCard = [...delivered].find(([, elements]) => JSON.stringify(elements).includes(id))![0];
+      await cards.click('owner', id, workerCard);
+      await cards.resolve('device', { messageId: send.mock.calls[0][1].messageId, success: false });
+      await (handler as any).refreshThreadSwitchButtons(workerCard, 't1');
+      for (const page of delivered.values()) expect((handler as any).countTaggedNodes(page)).toBeLessThanOrEqual(150);
+      const refreshed = delivered.get(workerCard)!;
+      expect(JSON.stringify(refreshed)).toContain('Retry clear context');
+      expect(JSON.stringify(refreshed)).toContain('Could not clear Worker context');
+      expect(getPanel(refreshed).expanded).toBe(false);
+      expect((handler as any).countTaggedNodes(refreshed, true)).toBe((handler as any).countTaggedNodes(refreshed));
+    });
 
     it.each(['thread-2', 'release-review'])('separates the reply owner %s from the selected thread', async (replyName) => {
       const threads = [
@@ -1362,7 +1486,7 @@ describe('FeishuLongConnHandler', () => {
       const elements = JSON.parse(mockClient.im.message.patch.mock.calls[0][0].data.content).body.elements;
       expect(elements[0].content).toContain(replyName);
       expect(elements).toContainEqual({
-        tag: 'markdown', content: `📍 **Reply from:** ${replyName} · project-b\n🗂️ **Switch thread**`,
+        tag: 'markdown', content: `📍 **Reply from:** ${replyName} · project-b`,
       });
       const buttons = getButtons(elements);
       expect(buttons[0]).toMatchObject({ type: 'default', disabled: false });
@@ -1380,7 +1504,7 @@ describe('FeishuLongConnHandler', () => {
       ];
       await handler.finalizeStreamingMessage('card-2', [], undefined, 'user', undefined, undefined, threads, 't2');
       const elements = JSON.parse(mockClient.im.message.patch.mock.calls[0][0].data.content).body.elements;
-      expect(elements).toContainEqual(expect.objectContaining({ content: '📍 **Reply from:** thread-2 · project-b\n🗂️ **Switch thread**' }));
+      expect(elements).toContainEqual(expect.objectContaining({ content: '📍 **Reply from:** thread-2 · project-b' }));
       expect(getButtons(elements)[0]).toMatchObject({ type: 'primary', text: { content: '✓ default' } });
       expect(getButtons(elements)[1].type).toBe('default');
     });
@@ -1419,7 +1543,7 @@ describe('FeishuLongConnHandler', () => {
       expect(mockClient.im.message.patch).toHaveBeenCalledTimes(1);
       expect(mockClient.im.message.patch.mock.calls[0][0].path.message_id).toBe('older-card');
       const elements = JSON.parse(mockClient.im.message.patch.mock.calls[0][0].data.content).body.elements;
-      expect(elements).toContainEqual(expect.objectContaining({ content: '📍 **Reply from:** thread-2 · project-b\n🗂️ **Switch thread**' }));
+      expect(elements).toContainEqual(expect.objectContaining({ content: '📍 **Reply from:** thread-2 · project-b' }));
       expect(getButtons(elements)[0]).toMatchObject({ type: 'primary', disabled: false });
 
       await handler.handleCardAction({
@@ -1428,7 +1552,7 @@ describe('FeishuLongConnHandler', () => {
       });
       await vi.waitFor(() => expect(mockClient.im.message.patch).toHaveBeenCalledTimes(2));
       const switched = JSON.parse(mockClient.im.message.patch.mock.calls[1][0].data.content).body.elements;
-      expect(switched).toContainEqual(expect.objectContaining({ content: '📍 **Reply from:** thread-2 · project-b\n🗂️ **Switch thread**' }));
+      expect(switched).toContainEqual(expect.objectContaining({ content: '📍 **Reply from:** thread-2 · project-b' }));
       expect(getButtons(switched)[1]).toMatchObject({ type: 'primary', disabled: false });
     });
 
@@ -1443,7 +1567,7 @@ describe('FeishuLongConnHandler', () => {
       expect(getButtons(first)).toHaveLength(0);
       expect(first.some((element: any) => element.content?.includes('Reply from:'))).toBe(false);
       const last = JSON.parse(mockClient.im.message.create.mock.calls[0][0].data.content).body.elements;
-      expect(last).toContainEqual(expect.objectContaining({ content: '📍 **Reply from:** thread-1 · project\n🗂️ **Switch thread**' }));
+      expect(last).toContainEqual(expect.objectContaining({ content: '📍 **Reply from:** thread-1 · project' }));
       expect(getButtons(last)).toHaveLength(11);
       expect(getButtons(last).at(-1)).toMatchObject({ disabled: true, text: { content: '+ New (max)' } });
 
@@ -1469,7 +1593,7 @@ describe('FeishuLongConnHandler', () => {
         { id: 'thread-1', name: 'Thread 1', status: 'idle', backend },
       ], 'thread-1');
 
-      expect(elements.find((element: any) => element.tag === 'column_set').columns[0].elements[0].text.content).toBe(`✓ Thread 1 · ${label}`);
+      expect(getButtons(elements)[0].text.content).toBe(`✓ Thread 1 · ${label}`);
     });
 
     it('shows the workspace name in thread switch buttons', () => {
@@ -1483,7 +1607,7 @@ describe('FeishuLongConnHandler', () => {
         },
       ], 'thread-1');
 
-      expect(elements.find((element: any) => element.tag === 'column_set').columns[0].elements[0].text.content)
+      expect(getButtons(elements)[0].text.content)
         .toBe('✓ Thread 1 · remote-cli · Codex');
     });
 
@@ -1492,7 +1616,7 @@ describe('FeishuLongConnHandler', () => {
         { id: 'thread-1', name: 'Thread 1', status: 'idle' },
       ]);
 
-      expect(elements.find((element: any) => element.tag === 'column_set').columns[0].elements[0].text.content).toBe('Thread 1');
+      expect(getButtons(elements)[0].text.content).toBe('Thread 1');
     });
 
     it('splits thread switch buttons into rows of at most three columns', () => {
@@ -1503,7 +1627,7 @@ describe('FeishuLongConnHandler', () => {
       }));
 
       const elements = (handler as any).createThreadSwitchElements(threads, 'thread-1');
-      const rows = elements.filter((element: any) => element.tag === 'column_set');
+      const rows = getPanel(elements).elements;
 
       expect(rows.map((row: any) => row.columns.length)).toEqual([3, 3, 2]);
       const labels = rows.flatMap((row: any) => row.columns)
@@ -1527,10 +1651,7 @@ describe('FeishuLongConnHandler', () => {
         { id: 'thread-2-new-id', name: 'thread-2', status: 'idle' },
       ], 'thread-2-new-id');
 
-      const buttons = elements
-        .filter((element: any) => element.tag === 'column_set')
-        .flatMap((row: any) => row.columns)
-        .map((column: any) => column.elements[0]);
+      const buttons = getButtons(elements);
 
       expect(buttons.map((button: any) => button.text.content)).toEqual([
         'default',
@@ -1551,10 +1672,7 @@ describe('FeishuLongConnHandler', () => {
         { id: 'thread-2-id', name: 'thread-2', status: 'idle' },
       ]);
 
-      const labels = elements
-        .filter((element: any) => element.tag === 'column_set')
-        .flatMap((row: any) => row.columns)
-        .map((column: any) => column.elements[0].text.content);
+      const labels = getButtons(elements).map(button => button.text.content);
 
       expect(labels).toEqual(['default', 'feature', '2', 'review', '10', '+ New']);
     });

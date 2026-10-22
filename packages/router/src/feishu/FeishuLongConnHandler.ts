@@ -1143,12 +1143,12 @@ Examples:
     // Reserve space for continuation indicators and the repeated card header.
     const continuationHeaderSize = JSON.stringify(continuationHeaderElements).length;
     const continuationHeaderTaggedNodes = continuationHeaderElements.reduce(
-      (total, element) => total + this.countTaggedNodes(element),
+      (total, element) => total + this.countTaggedNodes(element, true),
       0,
     );
     // Reserve the bounded tail while packing so it never displaces content onto an activity-only page.
     const continuationIndicatorSize = 200 + continuationHeaderSize + (activityTail ? JSON.stringify(activityTail).length : 0);
-    const continuationIndicatorCount = 2 + continuationHeaderTaggedNodes + (activityTail ? this.countTaggedNodes(activityTail) : 0);
+    const continuationIndicatorCount = 2 + continuationHeaderTaggedNodes + (activityTail ? this.countTaggedNodes(activityTail, true) : 0);
 
     // Keep the completion block with the final body item when they fit on a
     // continuation card. Include the whole worker group, never just its details.
@@ -1161,14 +1161,14 @@ Examples:
     const finalGroup = finalBodyStart >= continuationHeaderElements.length
       ? elements.slice(finalBodyStart) : [];
     const keepFinalBody = finalGroup.length > trailingElements.length
-      && finalGroup.reduce((sum, item) => sum + this.countTaggedNodes(item), 0) + continuationIndicatorCount <= this.CARD_ELEMENT_LIMIT
+      && finalGroup.reduce((sum, item) => sum + this.countTaggedNodes(item, true), 0) + continuationIndicatorCount <= this.CARD_ELEMENT_LIMIT
       && finalGroup.reduce((sum, item) => sum + JSON.stringify(item).length, 0) + continuationIndicatorSize <= this.CARD_DATA_SIZE_LIMIT - this.CARD_SIZE_BUFFER
       && countCardTables(finalGroup) + headerTables <= CARD_TABLE_LIMIT;
 
     for (let i = 0; i < elements.length; i++) {
       const element = elements[i];
       const elementSize = JSON.stringify(element).length;
-      const elementTaggedNodes = this.countTaggedNodes(element);
+      const elementTaggedNodes = this.countTaggedNodes(element, true);
       const elementTables = countCardTables(element);
 
       // Keep worker identity, visible content and diagnostics together when packing cards.
@@ -1181,7 +1181,7 @@ Examples:
       const group = keepFinalBody && i === finalBodyStart ? finalGroup
         : isWorkerGroup ? workerGroup : element === trailingElements[0] ? trailingElements : [element];
       const groupSize = group.reduce((sum, item) => sum + JSON.stringify(item).length, 0);
-      const groupTaggedNodes = group.reduce((sum, item) => sum + this.countTaggedNodes(item), 0);
+      const groupTaggedNodes = group.reduce((sum, item) => sum + this.countTaggedNodes(item, true), 0);
       const groupTables = countCardTables(group);
 
       // Check if adding this element would exceed limits
@@ -1252,9 +1252,10 @@ Examples:
    * According to Feishu docs, all nodes with 'tag' property count towards the 200 limit
    *
    * @param obj The object or array to count tags in
+   * @param reserveWorkerErrors Reserve a future error row for each Worker context control
    * @returns Total count of nodes with 'tag' property
    */
-  private countTaggedNodes(obj: any): number {
+  private countTaggedNodes(obj: any, reserveWorkerErrors = false): number {
     if (!obj || typeof obj !== 'object') {
       return 0;
     }
@@ -1266,6 +1267,12 @@ Examples:
       count = 1;
     }
 
+    // Worker controls may acquire an error row after pagination or on a later refresh.
+    const controlElements = obj.columns?.[0]?.elements;
+    if (reserveWorkerErrors && typeof obj.element_id === 'string' && obj.element_id.startsWith('wc_')
+      && controlElements?.[0]?.behaviors?.[0]?.value?.action === 'worker_context_clear'
+      && !controlElements.some((element: any) => element.tag === 'markdown')) count += 1;
+
     // Recursively count in all properties
     for (const key in obj) {
       if (obj.hasOwnProperty(key)) {
@@ -1273,11 +1280,11 @@ Examples:
         if (Array.isArray(value)) {
           // Recursively count in array elements
           for (const item of value) {
-            count += this.countTaggedNodes(item);
+            count += this.countTaggedNodes(item, reserveWorkerErrors);
           }
         } else if (typeof value === 'object' && value !== null) {
           // Recursively count in nested objects
-          count += this.countTaggedNodes(value);
+          count += this.countTaggedNodes(value, reserveWorkerErrors);
         }
       }
     }
@@ -1298,7 +1305,7 @@ Examples:
     }
 
     // Check element count limit - MUST count ALL nodes with 'tag' property recursively
-    const totalTaggedNodes = elements.reduce((sum, element) => sum + this.countTaggedNodes(element), 0);
+    const totalTaggedNodes = elements.reduce((sum, element) => sum + this.countTaggedNodes(element, true), 0);
 
     console.log(`[FeishuHandler] Element count check: top-level=${elements.length}, total tagged nodes=${totalTaggedNodes}, limit=${this.CARD_ELEMENT_LIMIT}`);
 
@@ -1702,8 +1709,8 @@ Examples:
 
   /**
    * Create Feishu Card 2.0 elements for thread switching buttons.
-   * Renders one button per thread (active is highlighted) plus a "+ New" button,
-   * split across rows so desktop clients do not compress every button into one line.
+   * Native expansion needs no callback or server update. Hidden button rows still
+   * count towards the card budget, and retain their existing switching callbacks.
    */
   private createThreadSwitchElements(threads: ThreadSummary[], activeThreadId?: string, replyLabel?: string): any[] {
     const orderedThreads = this.orderThreadsForDisplay(threads);
@@ -1747,11 +1754,22 @@ Examples:
       });
     }
 
-    const caption = {
-      tag: 'markdown',
-      content: replyLabel ? `📍 **Reply from:** ${replyLabel}\n🗂️ **Switch thread**` : '🗂️ **Switch thread**',
-    };
-    return [{ tag: 'hr' }, caption, ...rows];
+    return [
+      { tag: 'hr' },
+      ...(replyLabel ? [{ tag: 'markdown', content: `📍 **Reply from:** ${replyLabel}` }] : []),
+      {
+        tag: 'collapsible_panel',
+        element_id: 'thread_controls',
+        expanded: false,
+        header: {
+          title: { tag: 'plain_text', content: 'Switch thread' },
+          icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', size: '16px 16px' },
+          icon_position: 'right',
+          icon_expanded_angle: -180,
+        },
+        elements: rows,
+      },
+    ];
   }
 
   private threadButtonLabel(thread: ThreadSummary, active: boolean): string {

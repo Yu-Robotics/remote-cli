@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.171] - 2026-10-23
+
+### Fixed
+- Use the native Feishu Card 2.0 collapsible panel for completed-card thread controls. Expanding or collapsing the list requires no application callback or message PATCH, avoiding the previous PATCH-before-callback-response path that could immediately revert the expansion.
+- Keep thread selection and New controls inside the panel, with reply-source information outside it. Hidden controls remain included in recursive card budgets; existing backend execution, thread routing, and protocol behavior are preserved.
+
+### Tests
+- Cover native panel payloads, generated non-default thread selections, reply-source preservation, recursive budgets, and existing card fallback and Worker controls.
+
 ## [1.6.170] - 2026-10-22
 
 ### Reverted
