@@ -12,6 +12,8 @@ export interface ExecuteOptions {
   onRedactedThinking?: () => void;
   onPlanMode?: (planContent: string) => void;
   onImage?: (image: ImageBlock) => void;
+  /** Explicit native image artifact only; recipients must validate and bound local reads. */
+  onImageFile?: (path: string) => void;
   /** May fire after execute resolves; recipients must remain bound to the originating request. */
   onTaskNotification?: (notification: TaskNotificationInfo) => void;
   /** Return true when an interactive card replaces the text approval prompt. */

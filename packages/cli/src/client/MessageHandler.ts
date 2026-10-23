@@ -19,7 +19,8 @@ import { createExecutor } from '../executor';
 import { FeishuNotificationAdapter } from '../hooks';
 import { ConfigManager } from '../config/ConfigManager';
 import { processFileReadContent } from '../utils/FileReadDetector';
-import { readLocalImages } from '../utils/LocalImageDetector';
+import { readLocalImagePath } from '../utils/LocalImageDetector';
+import { ImageDelivery } from '../utils/ImageDelivery';
 import { assertWorkingDirectoryExists } from '../utils/WorkingDirectory';
 import { MachineCommands } from '../machines/MachineCommands';
 import type { PendingReplace } from '../machines/types';
@@ -235,6 +236,8 @@ export class MessageHandler {
   private readonly delegation: DelegationManager;
   private readonly delegationBridges = new Map<string, DelegationBridge>();
   private fileInbox?: FileInbox;
+  private readonly imageDeliveries = new Map<string, ImageDelivery>();
+  private imageConnectionEpoch = 0;
 
   constructor(
     wsClient: WebSocketClient,
@@ -249,8 +252,10 @@ export class MessageHandler {
     this.directoryGuard = directoryGuard;
     this.config = config;
     this.wsClient.onClose?.(() => {
+      this.imageConnectionEpoch++;
       this.routerVersion = undefined;
       this.fileInbox?.disconnect();
+      for (const delivery of this.imageDeliveries.values()) delivery.invalidatePending();
     });
     this.delegation = new DelegationManager(directoryGuard);
     this.settingsCatalogReader = new SettingsCatalogReader(directoryGuard);
@@ -870,6 +875,7 @@ export class MessageHandler {
     executor: IExecutor
   ): Promise<void> {
     this.fileInbox?.cancelThread(threadId);
+    this.imageDeliveries.get(threadId)?.cancel();
     const pendingGoal = this.pendingGoalActivations.get(threadId);
     if (pendingGoal) pendingGoal.cancelled = true;
     const existingAbort = this.abortOperations.get(threadId);
@@ -2280,6 +2286,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     let delegationBridge: DelegationBridge | undefined;
     let executionMetadata: ExecutionMetadata | undefined;
     let requestFinished = false;
+    let imageDelivery: ImageDelivery | undefined;
     let executionActive = false;
     let lastProgramState: string | undefined;
     const activity = new ActivityProgress(snapshot => {
@@ -2297,6 +2304,8 @@ You can also use natural language commands to control Claude Code CLI.`,
       if (this.sendActivity(messageId, threadId, { source: 'state', text })) lastProgramState = text;
     };
     const complete = async (success: boolean, error?: string): Promise<boolean> => {
+      await imageDelivery?.finish();
+      if (this.imageDeliveries.get(threadId) === imageDelivery) this.imageDeliveries.delete(threadId);
       requestFinished = true;
       activity.dispose();
       delegationBridge?.activate(undefined);
@@ -2382,36 +2391,40 @@ You can also use natural language commands to control Claude Code CLI.`,
         if (this.isDestroyed || !this.threadManager.getThread(threadId)) return;
         this.notificationAdapter.sendTaskNotification({ ...notification, threadId }, openId);
       };
-      const emittedLocalImages = new Set<string>();
-      const pendingLocalImageEmissions = new Set<Promise<void>>();
+      const imageCwd = thread?.workingDirectory ?? executor.getCurrentWorkingDirectory();
+      const imageGeneration = thread?.delegationWorkspaceGeneration ?? 0;
+      const imageBackend = this.threadPool.getBackendKey(threadId);
+      let imagePhase = 0;
+      const imageEligible = () => {
+        const phase = imagePhase;
+        return () => phase === imagePhase && (!delegationScope
+          || (!delegationScope.isClosed() && !delegationScope.hasPendingResults()));
+      };
+      imageDelivery = new ImageDelivery({
+        readFile: filePath => readLocalImagePath(filePath, imageCwd, this.directoryGuard),
+        publish: image => {
+          if (!this.sendImage(messageId, threadId, image)) throw new Error('Image send failed');
+        },
+        notice: text => this.sendStreamChunk(messageId, threadId, text),
+        isCurrent: () => {
+          const current = this.threadManager.getThread(threadId);
+          return !requestFinished && !this.isDestroyed && !this.abortOperations.has(threadId)
+            && this.wsClient.isConnected() && this.imageDeliveries.get(threadId) === imageDelivery
+            && this.wsClient.canSendTaskOutput?.(messageId) !== false
+            && !!current && current.workingDirectory === imageCwd
+            && (current.delegationWorkspaceGeneration ?? 0) === imageGeneration
+            && this.threadPool.getBackendKey(threadId) === imageBackend;
+        },
+      });
+      this.imageDeliveries.get(threadId)?.cancel();
+      this.imageDeliveries.set(threadId, imageDelivery);
       const delegationControlTools = new Set<string>();
       const toolImageStates = new Map<string, { started: boolean; completed: boolean; web: boolean }>();
       const webToolNames = new Set(['websearch', 'webfetch', 'web_search', 'web_fetch', 'search_web', 'read_url_content', 'fetch']);
-      let streamedOutput = '';
-      const emitLocalImages = async (text: string): Promise<void> => {
-        try {
-          const thread = this.threadManager.getThread(threadId);
-          if (typeof text !== 'string' || !text || !thread?.workingDirectory) return;
-          const images = await readLocalImages(text, thread.workingDirectory, (candidate, cwd) => (
-            this.directoryGuard.isSafePath(candidate, cwd)
-          ));
-          for (const image of images) {
-            if (emittedLocalImages.has(image.path)) continue;
-            emittedLocalImages.add(image.path);
-            this.sendImage(messageId, threadId, {
-              type: 'image',
-              data: image.data,
-              mimeType: image.mimeType,
-            });
-          }
-        } catch {
-          // Image forwarding is optional; never reject a task or log native content on failure.
-          console.warn('Failed to forward local images; continuing task output.');
-        }
-      };
+      let streamedAny = false;
+      let imageTextDropped = false;
       const queueLocalImages = (text: string): void => {
-        const pending = emitLocalImages(text).finally(() => pendingLocalImageEmissions.delete(pending));
-        pendingLocalImageEmissions.add(pending);
+        imageDelivery?.offerText(text, imageEligible());
       };
       const executeOptions = {
         onActivity: this.activityProgressSupported ? (snapshot: ActivityProgressInfo) => activity.offer(snapshot) : undefined,
@@ -2422,8 +2435,9 @@ You can also use natural language commands to control Claude Code CLI.`,
         onApprovalResolved: (requestId: string, status: ApprovalStatus) => this.resolveApprovalCard(requestId, status),
         onTaskNotification,
         onStream: (chunk: string) => {
-          streamedOutput += chunk;
-          this.sendStreamChunk(messageId, threadId, chunk);
+          streamedAny = true;
+          if (this.sendStreamChunk(messageId, threadId, chunk)) imageDelivery?.offerStream(chunk, imageEligible());
+          else imageTextDropped = true;
         },
         onToolUse: (toolUse: ToolUseInfo) => {
           if (delegationScope && /remote_cli_(list_backends|delegate|result|cancel|integrate)$/.test(toolUse.name)) {
@@ -2459,7 +2473,8 @@ You can also use natural language commands to control Claude Code CLI.`,
         },
         onRedactedThinking: () => this.sendRedactedThinking(messageId, threadId),
         onPlanMode: (planContent: string) => this.sendPlanMode(messageId, threadId, planContent),
-        onImage: (image: ImageBlock) => this.sendImage(messageId, threadId, image),
+        onImage: (image: ImageBlock) => imageDelivery?.offerImage(image, imageEligible()),
+        onImageFile: (filePath: string) => imageDelivery?.offerFile(filePath, imageEligible()),
         attachments,
       };
       const assertCoordinatorActive = (): void => {
@@ -2471,6 +2486,11 @@ You can also use natural language commands to control Claude Code CLI.`,
       let mayRetry = true;
       const executeOnce = async (prompt: string, options: ExecuteOptions, flushImages = true): Promise<ExecuteResult> => {
         assertCoordinatorActive();
+        imagePhase++;
+        streamedAny = false;
+        imageTextDropped = false;
+        imageDelivery?.resetStream();
+        const imageEpoch = this.imageConnectionEpoch;
         const scope = delegationScope;
         let active = true;
         let finished = false;
@@ -2510,6 +2530,7 @@ You can also use natural language commands to control Claude Code CLI.`,
           },
           onPlanMode: plan => { if (canPublish()) options.onPlanMode?.(plan); else suppressed = true; },
           onImage: image => { if (canPublish()) options.onImage?.(image); else suppressed = true; },
+          onImageFile: filePath => { if (canPublish()) options.onImageFile?.(filePath); else suppressed = true; },
           onRedactedThinking: () => { if (canPublish()) options.onRedactedThinking?.(); },
           onToolUse: tool => { if (active && !scope?.isClosed()) options.onToolUse?.(tool); },
           onToolResult: tool => { if (active && !scope?.isClosed()) options.onToolResult?.(tool); },
@@ -2530,7 +2551,7 @@ You can also use natural language commands to control Claude Code CLI.`,
           const result = goalRequest
             ? await executor.executeGoal!(goalRequest, guardedOptions)
             : await executor.execute(prompt, guardedOptions);
-          if (goalRequest && !streamedOutput && result.output) guardedOptions.onStream?.(result.output);
+          if (goalRequest && !streamedAny && result.output) guardedOptions.onStream?.(result.output);
           executionMetadata = mergeReportedExecutionMetadata(launchMetadata, captureExecutionMetadata(executor, backend));
           capturedMetadata = true;
           active = false;
@@ -2541,9 +2562,11 @@ You can also use natural language commands to control Claude Code CLI.`,
           scope?.finishExecution(result.success);
           finished = true;
           if (flushImages) {
-            await Promise.all(pendingLocalImageEmissions);
-            const visibleResult = scope && (suppressed || scope.hasPendingResults()) ? '' : result.output ?? '';
-            await emitLocalImages(`${streamedOutput}\n${visibleResult}`);
+            imageDelivery?.flushStream();
+            const visibleResult = imageTextDropped || this.imageConnectionEpoch !== imageEpoch
+              || (scope && (suppressed || scope.hasPendingResults())) ? '' : result.output ?? '';
+            queueLocalImages(visibleResult);
+            await imageDelivery?.drain();
           }
           assertCoordinatorActive();
           return result;
@@ -2750,9 +2773,9 @@ You can also use natural language commands to control Claude Code CLI.`,
     }
   }
 
-  private sendStreamChunk(messageId: string, threadId: string | undefined, chunk: string): void {
+  private sendStreamChunk(messageId: string, threadId: string | undefined, chunk: string): boolean {
     try {
-      this.wsClient.send({
+      return this.wsClient.send({
         type: 'stream',
         messageId,
         chunk,
@@ -2760,9 +2783,10 @@ You can also use natural language commands to control Claude Code CLI.`,
         openId: this.getMessageOpenId(messageId),
         threadId,
         timestamp: Date.now(),
-      });
+      }) !== false;
     } catch (error) {
       console.error('Failed to send stream chunk:', error);
+      return false;
     }
   }
 
@@ -2864,9 +2888,9 @@ You can also use natural language commands to control Claude Code CLI.`,
     }
   }
 
-  private sendImage(messageId: string, threadId: string | undefined, image: ImageBlock): void {
+  private sendImage(messageId: string, threadId: string | undefined, image: ImageBlock): boolean {
     try {
-      this.wsClient.send({
+      return this.wsClient.send({
         type: 'stream',
         messageId,
         streamType: 'image',
@@ -2874,9 +2898,10 @@ You can also use natural language commands to control Claude Code CLI.`,
         openId: this.getMessageOpenId(messageId),
         threadId,
         timestamp: Date.now(),
-      });
-    } catch (error) {
-      console.error('Failed to send generated image:', error);
+      }) !== false;
+    } catch {
+      console.warn('Failed to send generated image.');
+      return false;
     }
   }
 
@@ -3248,6 +3273,8 @@ You can also use natural language commands to control Claude Code CLI.`,
     this.directoryBrowser.destroy();
     this.settingsService.destroy();
     this.isDestroyed = true;
+    for (const delivery of this.imageDeliveries.values()) delivery.cancel();
+    this.imageDeliveries.clear();
     await this.fileInbox?.destroy();
     this.notificationAdapter.unregister();
     try {

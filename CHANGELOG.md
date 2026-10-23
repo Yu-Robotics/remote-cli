@@ -10,6 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.173] - 2026-10-24
+
+### Fixed
+- Forward recognized Codex native, MCP, and dynamic-tool image results directly to response cards without requiring Markdown. Prefer inline bytes and allow explicit native saved paths only through the local directory policy; omit image bytes from tool diagnostics.
+- Drain admitted image uploads before Router response finalization, including ordinary replies. Bound image work and fence late results after timeout, cancellation, disconnect, or stream replacement.
+- Deduplicate images by decoded content within a reply, retain changed content at the same path, and harden local reads with canonical-path checks, regular-file verification, bounded reads, and format validation. Keep image failures separate from task success.
+
+### Tests
+- Cover structured image variants, inline/file/Markdown deduplication, read and upload limits, finalization ordering, late results, filesystem boundaries, and unchanged text and goal behavior.
+
 ## [1.6.172] - 2026-10-23
 
 ### Added

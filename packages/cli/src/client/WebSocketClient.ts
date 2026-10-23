@@ -177,8 +177,15 @@ export class WebSocketClient {
    * Send message
    * @param message Message object
    */
-  send(message: any): void {
-    this.taskRecovery.send(message);
+  send(message: any): boolean {
+    // Avoid accumulating image payloads behind a slow connection. Ordinary task
+    // output retains its existing recovery semantics and is not blocked here.
+    if (message?.streamType === 'image' && (this.ws?.bufferedAmount ?? 0) > 8 * 1024 * 1024) return false;
+    return this.taskRecovery.send(message);
+  }
+
+  canSendTaskOutput(messageId: string): boolean {
+    return this.connected && this.taskRecovery.canSendTaskOutput(messageId);
   }
 
   trackTask(task: RecoverableTask): void {

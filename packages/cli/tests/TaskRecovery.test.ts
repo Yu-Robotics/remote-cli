@@ -44,6 +44,24 @@ describe('TaskRecovery', () => {
     expect(recovery.hasPendingResults()).toBe(false);
   });
 
+  it('reports local acceptance and task readiness without acknowledging remote delivery', () => {
+    expect(recovery.canSendTaskOutput('m1')).toBe(true);
+    expect(recovery.send(stream('before'))).toBe(true);
+    recovery.disconnected();
+    expect(recovery.canSendTaskOutput('m1')).toBe(false);
+    expect(recovery.send(stream('disconnected'))).toBe(false);
+    recovery.registered(true);
+    expect(recovery.canSendTaskOutput('m1')).toBe(false);
+    expect(recovery.send(stream('waiting for card'))).toBe(false);
+    acknowledge();
+    expect(recovery.canSendTaskOutput('m1')).toBe(true);
+    expect(recovery.send(stream('after'))).toBe(true);
+    expect(recovery.send({ type: 'structured', messageId: 'm1', content: 'old aggregate' })).toBe(false);
+    send.mockImplementationOnce(() => { throw new Error('Synthetic transport error'); });
+    expect(recovery.send(stream('failed'))).toBe(false);
+    expect(recovery.canSendTaskOutput('m1')).toBe(false);
+  });
+
   it('retains a bounded copy of terminal model metadata, without unrelated fields or a transcript', () => {
     const executionMetadata = { backend: 'claude', model: 'reported-model', modelSource: 'reported', effortSource: 'unknown', extra: 'discarded' };
     recovery.disconnected();

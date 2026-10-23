@@ -8,6 +8,7 @@ import { FileTransfers } from './files/FileTransfers';
 import path from 'path';
 import os from 'os';
 import { randomUUID } from 'crypto';
+import { ImageLifecycle, IMAGE_LIMITS, type ImageReply } from './utils/ImageLifecycle';
 import type { ApprovalAction } from './types';
 import type { ExecutionMetadata, ActivityProgressInfo } from './types';
 import { parseActivityProgress } from './utils/ActivityProgress';
@@ -72,6 +73,13 @@ interface StreamingMessageState {
   updateInFlight?: Promise<void>;
   updatePending: boolean;
   finalizing: boolean;
+  /** Set once a terminal response arrived; accepted image work still drains. */
+  imageIntakeClosed?: boolean;
+  imageFailureHinted?: boolean;
+  /** Reply budgets survive replacement of the socket while this card survives. */
+  imageAttempts?: number;
+  imageHashes?: Set<string>;
+  imageDrainDeadline?: number;
   lastRenderedTextLength: number;
   delegationProgress: Map<string, DelegationProgressState>;
   toolCalls: Map<string, ToolCallProgressState>;
@@ -103,6 +111,11 @@ export class RouterServer {
   private completedTasks = new Map<string, { deviceId: string; completedAt: number }>();
   private queueMessageOperations = new Map<string, Promise<void>>();
   private startedQueueMessages = new Map<string, number>();
+  private readonly images = new ImageLifecycle();
+  private readonly imageReplies = new Map<string, {
+    reply: ImageReply; openId: string; deviceId: string; threadId?: string;
+    current: () => boolean; stream?: StreamingMessageState; createdAt: number;
+  }>();
   private readonly STREAMING_SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes timeout
   private readonly DELEGATION_PROGRESS_HEARTBEAT_MS = 30 * 1000;
   // TTL for cardThreadMap entries: 7 days (allows users to reply to old cards)
@@ -212,6 +225,7 @@ export class RouterServer {
     // Register callback for streaming message start
     this.feishuLongConnHandler.setOnStartStreaming((messageId: string, openId: string, feishuMessageId: string | null, deviceId: string, threadId?: string, pendingNewThread?: boolean, queueCardId?: string, threadName?: string) => {
       console.log(`[RouterServer] Registering streaming session: msgId=${messageId}, feishuMsgId=${feishuMessageId}, deviceId=${deviceId}, threadId=${threadId}, pendingNewThread=${pendingNewThread}`);
+      this.cancelImageReply(messageId);
       const previous = this.streamingMessages.get(messageId);
       if (previous) this.clearDelegationProgressTimers(previous);
       this.streamingMessages.set(messageId, {
@@ -431,6 +445,7 @@ export class RouterServer {
       console.log('New WebSocket connection from:', req.socket.remoteAddress);
 
       let deviceId: string | null = null;
+      let socketClosed = false;
       let taskRecoveryEnabled = false;
       let approvalCardsEnabled = false;
       let delegationProgressEnabled = false;
@@ -510,8 +525,43 @@ export class RouterServer {
             } else await this.approvalCards.resolve(message, deviceId);
             return;
           }
+          const imageDevice = deviceId;
+          const imageCurrent = () => !socketClosed && ws.readyState === WebSocket.OPEN
+            && !!imageDevice && this.connectionHub.isCurrentConnection(imageDevice, ws);
+          // Establish routing before card creation awaits. Payload admission and
+          // response closure must occur before waiting for earlier operations.
+          if (imageDevice && taskRecoveryEnabled && message.type === 'task_resume') {
+            this.prepareImageReply(message.messageId, message.openId, imageDevice, imageCurrent, message.threadId, true);
+          }
+          if (imageDevice && message.type === MessageType.RESPONSE) {
+            const owner = message.openId || message.data?.openId;
+            const stream = this.streamingMessages.get(message.messageId);
+            const route = this.imageReplies.get(message.messageId);
+            if ((stream && (stream.openId !== owner || stream.deviceId !== imageDevice))
+              || (route && (route.openId !== owner || route.deviceId !== imageDevice))) return;
+            if (route) this.images.close(route.reply);
+            if (stream) this.closeImageIntake(stream, route?.reply.deadline);
+          }
+          if (message.type === 'stream' && message.streamType === 'image') {
+            if (!imageDevice) return;
+            const priorImageQueue = this.queueMessageOperations.get(message.messageId);
+            const operation = this.handleImage(message.messageId, message.openId, message.image, imageDevice, imageCurrent);
+            // Do not retain the parsed payload or raw frame in this async handler.
+            delete message.image;
+            data = Buffer.alloc(0);
+            if (this.startedQueueMessages.has(message.messageId)
+              && this.imageReplies.get(message.messageId)?.reply.tail === operation) {
+              const barrier = priorImageQueue ? priorImageQueue.then(() => operation, () => operation) : operation;
+              this.queueMessageOperations.set(message.messageId, barrier);
+              void barrier.then(() => {
+                if (this.queueMessageOperations.get(message.messageId) === barrier) this.queueMessageOperations.delete(message.messageId);
+              });
+            }
+            await operation;
+            return;
+          }
           if (message.type === 'queue_started') {
-            await this.handleQueueStarted(message, deviceId);
+            await this.handleQueueStarted(message, deviceId, imageCurrent);
             return;
           }
           // Serialize queued output through card creation, asynchronous tool/image
@@ -544,6 +594,7 @@ export class RouterServer {
               } catch (error) {
                 console.error('[RouterServer] Failed to recover task card:', error);
               }
+              if (!success && current()) this.cancelImageReply(message.messageId);
               if (current()) ws.send(JSON.stringify({ type: 'task_resume_ack', messageId: message.messageId,
                 recoveryId: message.taskResume?.recoveryId, state: message.taskResume?.state, success, timestamp: Date.now() }));
               break;
@@ -602,6 +653,7 @@ export class RouterServer {
                   break;
                 }
 
+                this.cancelDeviceImages(deviceId);
                 this.approvalCards.disconnect(deviceId);
                 this.maintenanceCards.disconnect(deviceId);
                 this.settingsCards.disconnect(deviceId);
@@ -837,11 +889,6 @@ export class RouterServer {
                       await this.handlePlanMode(message.messageId, message.openId, message.planContent);
                     }
                     break;
-                  case 'image':
-                    if (message.image) {
-                      await this.handleImage(message.messageId, message.openId, message.image);
-                    }
-                    break;
                 }
               }
               break;
@@ -888,6 +935,10 @@ export class RouterServer {
 
       // Handle connection close
       ws.on('close', () => {
+        socketClosed = true;
+        for (const [id, route] of this.imageReplies) {
+          if (!route.current()) this.cancelImageReply(id);
+        }
         if (challengeTimer) clearTimeout(challengeTimer);
         if (heartbeatTimeout) clearTimeout(heartbeatTimeout);
         if (deviceId && this.connectionHub.unregisterConnection(deviceId, ws)) {
@@ -1542,39 +1593,108 @@ export class RouterServer {
     }
   }
 
-  private async handleImage(messageId: string, openId: string, image: ImageBlock): Promise<void> {
-    console.log(`[RouterServer] Received generated image for ${messageId}`);
-    const streamData = this.streamingMessages.get(messageId);
-    if (!streamData || streamData.finalizing) return;
-    if (!image || image.type !== 'image' || typeof image.data !== 'string' || typeof image.mimeType !== 'string') return;
+  /** Response receipt closes admission; accepted jobs consult the mutable deadline. */
+  private closeImageIntake(stream: StreamingMessageState, deadline = Date.now() + IMAGE_LIMITS.drainMs): void {
+    stream.imageIntakeClosed = true;
+    stream.imageDrainDeadline ??= deadline;
+  }
 
-    const imageKey = await this.feishuLongConnHandler.uploadImage(image.data, image.mimeType);
-    if (streamData.finalizing || this.streamingMessages.get(messageId) !== streamData) return;
-    if (!imageKey) {
-      streamData.elements.push(createMarkdownElement('⚠️ Generated image could not be uploaded to Feishu.'));
-      return;
+  private cancelImageReply(messageId: string): void {
+    const route = this.imageReplies.get(messageId);
+    if (route) {
+      const stream = this.streamingMessages.get(messageId);
+      if (stream && stream === route.stream) {
+        stream.imageAttempts = route.reply.attempts;
+        stream.imageHashes = route.reply.hashes;
+      }
+      this.images.cancel(route.reply);
     }
+    this.imageReplies.delete(messageId);
+  }
 
-    if (streamData.currentTextContent.trim()) {
-      streamData.elements.push(...this.renderCurrentText(streamData));
-      streamData.currentTextContent = '';
-      streamData.recoveryPlainText = false;
-      streamData.lastRenderedTextLength = 0;
-    }
-    streamData.updatePending = false;
-    streamData.elements.push(createImageElement(imageKey));
-    streamData.createdAt = Date.now();
+  private cancelDeviceImages(deviceId: string): void {
+    for (const [id, route] of this.imageReplies) if (route.deviceId === deviceId) this.cancelImageReply(id);
+  }
 
-    if (streamData.feishuMessageId) {
-      await this.feishuLongConnHandler.updateStreamingMessage(
-        streamData.feishuMessageId,
-        streamData.elements,
-        openId,
-        streamData.threadName,
-        streamData.cwd
-      );
-      streamData.hasUpdated = true;
+  private prepareImageReply(messageId: string, openId: string, deviceId: string, current: () => boolean,
+    threadId?: string, pendingCard = false) {
+    if (typeof messageId !== 'string' || !messageId || messageId.length > 200
+      || typeof openId !== 'string' || !openId || openId.length > 200
+      || (threadId !== undefined && (typeof threadId !== 'string' || threadId.length > 200))) return;
+    const stream = this.streamingMessages.get(messageId);
+    if (stream && (stream.openId !== openId || stream.deviceId !== deviceId
+      || (stream.threadId && threadId && stream.threadId !== threadId))) return;
+    const existing = this.imageReplies.get(messageId);
+    if (existing) {
+      if (existing.openId !== openId || existing.deviceId !== deviceId
+        || (existing.threadId && threadId && existing.threadId !== threadId)) return;
+      return existing;
     }
+    if ((!stream && !pendingCard) || stream?.finalizing || stream?.imageIntakeClosed
+      || this.isCompletedTask(messageId, deviceId) || this.imageReplies.size >= 1024) return;
+    const reply = this.images.createReply();
+    reply.attempts = stream?.imageAttempts ?? 0;
+    reply.hashes = stream?.imageHashes ?? new Set();
+    const route = { reply, openId, deviceId, threadId, current,
+      stream: pendingCard ? undefined : stream, createdAt: Date.now() };
+    this.imageReplies.set(messageId, route);
+    return route;
+  }
+
+  private noteImageFailure(messageId: string, stream: StreamingMessageState): void {
+    if (stream.imageFailureHinted || stream.finalizing || this.streamingMessages.get(messageId) !== stream) return;
+    stream.imageFailureHinted = true;
+    stream.elements.push(createMarkdownElement('⚠️ Generated image could not be uploaded to Feishu.'));
+    void this.refreshStreamCard(messageId, stream);
+  }
+
+  private async refreshStreamCard(messageId: string, stream: StreamingMessageState): Promise<void> {
+    try { await this.updateStreamingText(messageId, stream.openId, stream); }
+    catch { console.warn('[RouterServer] Could not refresh the image result.'); }
+  }
+
+  private handleImage(messageId: string, openId: string, image: ImageBlock, deviceId: string,
+    connectionCurrent: () => boolean): Promise<void> {
+    const route = this.prepareImageReply(messageId, openId, deviceId, connectionCurrent);
+    if (!route || !route.current()) return Promise.resolve();
+    const previous = this.queueMessageOperations.get(messageId);
+    const current = () => {
+      const stream = this.streamingMessages.get(messageId);
+      return this.imageReplies.get(messageId) === route && route.current() && !!stream
+        && stream === route.stream && !stream.finalizing && stream.openId === route.openId
+        && stream.deviceId === route.deviceId;
+    };
+    const failure = () => {
+      if (current()) this.noteImageFailure(messageId, route.stream!);
+    };
+    return this.images.offer(route.reply, image, previous, {
+      current,
+      upload: (data, mimeType) => this.feishuLongConnHandler.uploadImage(data, mimeType),
+      failure,
+      publish: async key => {
+        if (!current()) return;
+        const stream = route.stream!;
+        if (stream.currentTextContent.trim()) {
+          stream.elements.push(...this.renderCurrentText(stream));
+          stream.currentTextContent = '';
+          stream.recoveryPlainText = false;
+          stream.lastRenderedTextLength = 0;
+        }
+        stream.elements.push(createImageElement(key));
+        stream.createdAt = Date.now();
+        await this.refreshStreamCard(messageId, stream);
+      },
+    });
+  }
+
+  /** Bind pre-card admissions only to the card produced by their original route. */
+  private bindImageStream(messageId: string): void {
+    const route = this.imageReplies.get(messageId);
+    const stream = this.streamingMessages.get(messageId);
+    if (!route || !stream || !route.current() || stream.deviceId !== route.deviceId || stream.openId !== route.openId) return;
+    route.stream = stream;
+    if (route.reply.closed) this.closeImageIntake(stream, route.reply.deadline);
+    if (route.reply.failed) this.noteImageFailure(messageId, stream);
   }
 
   private rememberCompletedTask(messageId: string, deviceId: string): void {
@@ -1680,6 +1800,7 @@ export class RouterServer {
       });
       this.cardThreadMap.set(cardId, { threadId, deviceId, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS });
     }
+    this.bindImageStream(messageId);
     if (info.state !== 'running') {
       await this.finalizeStreamingMessage(messageId, info.state === 'completed', undefined, info.error, undefined, info.cwd,
         undefined, parseExecutionMetadata(info.executionMetadata));
@@ -1690,7 +1811,7 @@ export class RouterServer {
   }
 
   /** Create a fresh card before accepting any output for a dequeued task. */
-  private async handleQueueStarted(message: any, deviceId: string | null): Promise<void> {
+  private async handleQueueStarted(message: any, deviceId: string | null, isCurrent = () => true): Promise<void> {
     const info = message.queueStarted as QueueStartedInfo | undefined;
     const { messageId, openId, threadId } = message;
     if (!deviceId || typeof messageId !== 'string' || !messageId
@@ -1706,6 +1827,8 @@ export class RouterServer {
     if (this.startedQueueMessages.has(messageId)) return;
 
     this.startedQueueMessages.set(messageId, Date.now());
+    this.cancelImageReply(messageId);
+    const imageRoute = this.prepareImageReply(messageId, openId, deviceId, isCurrent, threadId, true);
     const operation = Promise.resolve().then(async () => {
       const intro = `▶️ **Queued task started**
 
@@ -1719,6 +1842,7 @@ export class RouterServer {
       } catch (error) {
         console.error('[RouterServer] Failed to create queued execution card:', error);
       }
+      if (!isCurrent() || (imageRoute && this.imageReplies.get(messageId) !== imageRoute)) return;
       const fallbackCardId = previous?.feishuMessageId || previous?.queueCardId || null;
       if (previous && this.streamingMessages.get(messageId) === previous) {
         this.clearDelegationProgressTimers(previous);
@@ -1742,6 +1866,7 @@ export class RouterServer {
         queueStarted: info,
         threads: Array.isArray(message.threads) ? message.threads : undefined,
       });
+      this.bindImageStream(messageId);
       if (cardId || fallbackCardId) {
         this.cardThreadMap.set((cardId || fallbackCardId)!, {
           threadId, deviceId, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS,
@@ -1750,6 +1875,7 @@ export class RouterServer {
       if (cardId) {
         const oldCards = new Set([previous?.queueCardId, previous?.feishuMessageId]);
         for (const oldCard of oldCards) {
+          if (!isCurrent()) return;
           if (!oldCard || oldCard === cardId) continue;
           try {
             await this.feishuLongConnHandler.markQueueCardStarted(oldCard);
@@ -1809,6 +1935,16 @@ export class RouterServer {
     const streamData = this.streamingMessages.get(messageId);
     if (!streamData) return;
 
+    const route = this.imageReplies.get(messageId);
+    if (route) this.images.close(route.reply);
+    this.closeImageIntake(streamData, route?.reply.deadline);
+    // Snapshot accepted work before awaiting; intake is already closed.
+    const accepted = route?.reply.tail;
+    if (accepted) await accepted;
+    if (this.streamingMessages.get(messageId) !== streamData
+      || (route && (this.imageReplies.get(messageId) !== route || !route.current()))) return;
+    if (route?.reply.failed) this.noteImageFailure(messageId, streamData);
+    this.cancelImageReply(messageId);
     streamData.finalizing = true;
     streamData.updatePending = false;
     this.clearDelegationProgressTimers(streamData);
@@ -1921,6 +2057,10 @@ export class RouterServer {
   private cleanupStaleStreamingSessions(): void {
     const now = Date.now();
     let cleanedCount = 0;
+    for (const [messageId, route] of this.imageReplies) {
+      if (!route.current() || (!this.streamingMessages.has(messageId)
+        && now - route.createdAt > this.STREAMING_SESSION_TIMEOUT_MS)) this.cancelImageReply(messageId);
+    }
 
     for (const [messageId, session] of this.streamingMessages.entries()) {
       if (now - session.createdAt > this.STREAMING_SESSION_TIMEOUT_MS) {
@@ -1931,6 +2071,7 @@ export class RouterServer {
           this.cardThreadMap.delete(session.feishuMessageId);
         }
         this.clearDelegationProgressTimers(session);
+        this.cancelImageReply(messageId);
         this.streamingMessages.delete(messageId);
         this.lastStreamUpdateTime.delete(messageId);
         cleanedCount++;
@@ -1960,6 +2101,7 @@ export class RouterServer {
    * @param deviceId Device ID that disconnected
    */
   private cleanupStreamingSessionsForDevice(deviceId: string): void {
+    this.cancelDeviceImages(deviceId);
     let cleanedCount = 0;
 
     for (const [messageId, session] of this.streamingMessages.entries()) {
@@ -1970,6 +2112,7 @@ export class RouterServer {
           this.cardThreadMap.delete(session.feishuMessageId);
         }
         this.clearDelegationProgressTimers(session);
+        this.cancelImageReply(messageId);
         this.streamingMessages.delete(messageId);
         this.lastStreamUpdateTime.delete(messageId);
         cleanedCount++;
@@ -1993,6 +2136,7 @@ export class RouterServer {
    */
   async stop(): Promise<void> {
     console.log('Stopping router server...');
+    for (const id of this.imageReplies.keys()) this.cancelImageReply(id);
     this.approvalCards.destroy();
     this.workerContextCards.destroy();
     this.workerContextConnections.clear();

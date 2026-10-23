@@ -126,6 +126,26 @@ describe('MessageHandler native goal commands', () => {
     (f.handler as any).pausedQueues.clear();
   });
 
+  it('retains image delivery and reply-wide deduplication across native goal turns', async () => {
+    const bytes = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000b49444154789c636000020000050001a5f645400000000049454e44ae426082', 'hex');
+    const first = { type: 'image' as const, data: bytes.toString('base64'), mimeType: 'image/png' };
+    const second = { ...first, data: Buffer.concat([bytes, Buffer.from('second')]).toString('base64') };
+    f.executor.executeGoal.mockImplementation(async (_request, options) => {
+      options.onStream?.('First automatic turn');
+      options.onImage?.(first);
+      await Promise.resolve();
+      options.onStream?.('Second automatic turn');
+      options.onImage?.(first);
+      options.onImage?.(second);
+      return { success: true, output: 'Done' };
+    });
+    await f.send('/goal Draw both charts');
+    const messages = f.ws.send.mock.calls.map(([message]) => message);
+    expect(messages.filter(message => message.streamType === 'image').map(message => message.image)).toEqual([first, second]);
+    expect(f.responses().at(-1).success).toBe(true);
+    expect(f.busy.has('thread-a')).toBe(false);
+  });
+
   it('displays a native stop result even when no assistant text was streamed', async () => {
     f.executor.executeGoal.mockResolvedValue({ success: true, output: 'Goal paused before any model output' });
     await f.send('/goal Fix');

@@ -165,7 +165,8 @@ describe('WebSocketClient', () => {
       client.trackTask({ messageId: 'task', openId: 'user', threadId: 'thread', threadName: 'default',
         backend: 'claude', cwd: '/workspace', preview: 'Keep working' });
       callback(mockWs, 'close')(1006, Buffer.from('restart'));
-      client.send({ type: 'stream', messageId: 'task', chunk: 'discarded' });
+      expect(client.canSendTaskOutput('task')).toBe(false);
+      expect(client.send({ type: 'stream', messageId: 'task', chunk: 'discarded' })).toBe(false);
       const next = { ...mockWs, on: vi.fn(), send: vi.fn() };
       vi.mocked(WebSocket).mockImplementation(() => next);
       vi.advanceTimersByTime(5000);
@@ -178,9 +179,11 @@ describe('WebSocketClient', () => {
       expect(recovery.type).toBe('task_resume');
       callback(mockWs, 'close')(1006, Buffer.from('delayed close'));
       expect(client.isConnected()).toBe(true);
+      expect(client.canSendTaskOutput('task')).toBe(false);
       callback(next, 'message')(Buffer.from(JSON.stringify({ type: 'task_resume_ack', messageId: 'task',
         recoveryId: recovery.taskResume.recoveryId, state: 'running', success: true })));
-      client.send({ type: 'stream', messageId: 'task', chunk: 'new output' });
+      expect(client.canSendTaskOutput('task')).toBe(true);
+      expect(client.send({ type: 'stream', messageId: 'task', chunk: 'new output' })).toBe(true);
       expect(JSON.parse(next.send.mock.calls.at(-1)[0]).chunk).toBe('new output');
       expect(JSON.stringify(next.send.mock.calls)).not.toContain('discarded');
       client.disconnect();
@@ -345,7 +348,7 @@ describe('WebSocketClient', () => {
       mockWs.send.mockClear();
 
       const testMessage = { type: 'result', data: 'test' };
-      client.send(testMessage);
+      expect(client.send(testMessage)).toBe(true);
 
       expect(mockWs.send).toHaveBeenCalledWith(JSON.stringify(testMessage));
     });
@@ -354,6 +357,20 @@ describe('WebSocketClient', () => {
       const testMessage = { type: 'result', data: 'test' };
 
       expect(() => client.send(testMessage)).toThrow('Not connected');
+    });
+
+    it('rejects image backlog without disconnecting or blocking ordinary text', async () => {
+      const connection = client.connect();
+      mockWs.on.mock.calls.find((call: any) => call[0] === 'open')[1]();
+      await connection;
+      mockWs.send.mockClear();
+      (mockWs as any).bufferedAmount = 9 * 1024 * 1024;
+      try {
+        expect(client.send({ type: 'stream', messageId: 'image', streamType: 'image', image: { data: 'synthetic' } })).toBe(false);
+        expect(mockWs.send).not.toHaveBeenCalled();
+        expect(client.isConnected()).toBe(true);
+        expect(client.send({ type: 'stream', messageId: 'text', streamType: 'text', chunk: 'Continuing' })).toBe(true);
+      } finally { delete (mockWs as any).bufferedAmount; }
     });
   });
 

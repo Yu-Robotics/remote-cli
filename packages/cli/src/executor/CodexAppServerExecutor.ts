@@ -3,9 +3,10 @@ import * as os from 'os';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
 import { DirectoryGuard } from '../security/DirectoryGuard';
-import type { Attachment, ImageBlock, ApprovalAction, ApprovalStatus, ApprovalRequestInfo } from '../types';
+import type { Attachment, ApprovalAction, ApprovalStatus, ApprovalRequestInfo } from '../types';
 import type { ExecuteOptions, ExecuteResult, ExecutorGoal, ExecutorGoalRunRequest, ExecutorModelInfo, ExecutorEffortInfo, IExecutor } from './IExecutor';
 import { assertNativeGoalsVersion, nativeGoalError, parseNativeGoal, validateGoalRequest } from './codex/CodexGoals';
+import { CodexImages, codexToolResultText } from './codex/CodexImages';
 import { configuredExecutionMetadata } from './ExecutionMetadata';
 import { AppServerMessage, CodexAppServerClient } from './CodexAppServerClient';
 import { CodexTaskNotifications } from './CodexTaskNotifications';
@@ -56,6 +57,7 @@ interface ActiveTurn {
   emittedTools: Map<string, { title?: string; description?: string; fallback?: boolean; completed?: boolean }>;
   itemPhases: Map<string, string>;
   temporaryFiles: string[];
+  images: CodexImages;
   timeoutTimer?: ReturnType<typeof setTimeout>;
   inactivityTimeoutMs?: number;
 }
@@ -296,6 +298,7 @@ export class CodexAppServerExecutor implements IExecutor {
           emittedTools: new Map(),
           itemPhases: new Map(),
           temporaryFiles,
+          images: new CodexImages(),
           inactivityTimeoutMs: options.inactivityTimeout,
         };
         this.activityTracker.setCallback(options.onActivity);
@@ -378,7 +381,7 @@ export class CodexAppServerExecutor implements IExecutor {
     let resolve!: (result: ExecuteResult) => void;
     const done = new Promise<ExecuteResult>(settle => { resolve = settle; });
     const active: ActiveTurn = { options, resolve, turnId: null, output: [], sideEffectsStarted: false,
-      emittedTools: new Map(), itemPhases: new Map(), temporaryFiles: [], inactivityTimeoutMs: options.inactivityTimeout };
+      emittedTools: new Map(), itemPhases: new Map(), temporaryFiles: [], images: new CodexImages(), inactivityTimeoutMs: options.inactivityTimeout };
     const run: GoalRun = { active, done, objective: request.objective, ready: false, inFlight: new Set(), retired: new Set(),
       revision: 0, checking: false, controlling: false, stopping: false };
     // Install ownership before any native loading or mutation can start a turn.
@@ -1484,9 +1487,10 @@ export class CodexAppServerExecutor implements IExecutor {
       case 'mcpToolCall':
       case 'dynamicToolCall':
         this.emitToolUse(active, id, item.tool ?? 'MCP', item.arguments ?? {});
+        this.handleGeneratedImage(active, item);
         active.options.onToolResult?.({
           tool_use_id: id,
-          content: this.stringifyResult(item.result ?? item.contentItems ?? item.error ?? ''),
+          content: codexToolResultText(item.result ?? item.contentItems ?? item.error ?? ''),
           is_error: item.status !== 'completed' || item.success === false || Boolean(item.error),
         });
         break;
@@ -1580,23 +1584,15 @@ export class CodexAppServerExecutor implements IExecutor {
   }
 
   private handleGeneratedImage(active: ActiveTurn, item: any): void {
-    if (item.status !== 'completed' || typeof item.result !== 'string' || !item.result) return;
-
-    let data = item.result;
-    let mimeType = typeof item.mimeType === 'string' ? item.mimeType : 'image/png';
-    const dataUrlMatch = data.match(/^data:(image\/[a-z0-9.+-]+);base64,(.+)$/i);
-    if (dataUrlMatch) {
-      mimeType = dataUrlMatch[1];
-      data = dataUrlMatch[2];
+    const parsed = active.images.extract(item, active.turnId);
+    for (const artifact of parsed.artifacts) {
+      if ('image' in artifact) active.options.onImage?.(artifact.image);
+      else active.options.onImageFile?.(artifact.path);
     }
-
-    if (!/^[a-z0-9+/]+={0,2}$/i.test(data) || data.length % 4 !== 0) {
-      console.warn('[CodexAppServer] Ignoring imageGeneration result with unsupported format');
-      return;
+    if (parsed.notice) {
+      active.output.push(parsed.notice);
+      active.options.onStream?.(parsed.notice);
     }
-
-    const image: ImageBlock = { type: 'image', data, mimeType };
-    active.options.onImage?.(image);
   }
 
   private completeActive(result: ExecuteResult): void {
@@ -1731,15 +1727,6 @@ export class CodexAppServerExecutor implements IExecutor {
     if (!info || typeof info !== 'object') return undefined;
     if (typeof info.type === 'string') return info.type;
     return Object.keys(info)[0];
-  }
-
-  private stringifyResult(value: any): string {
-    if (typeof value === 'string') return value;
-    try {
-      return JSON.stringify(value).slice(0, 2_000);
-    } catch {
-      return String(value);
-    }
   }
 
   private errorMessage(error: unknown): string {

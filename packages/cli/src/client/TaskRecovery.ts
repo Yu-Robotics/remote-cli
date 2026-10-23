@@ -77,11 +77,16 @@ export class TaskRecovery {
     this.pump();
   }
 
-  send(message: any): void {
+  canSendTaskOutput(messageId: string): boolean {
+    return this.connected && !this.tasks.get(messageId)?.needsRecovery;
+  }
+
+  /** Return local transport acceptance, not a remote delivery acknowledgement. */
+  send(message: any): boolean {
     const entry = this.tasks.get(message.messageId);
     if (!entry) {
       this.sendRaw(message);
-      return;
+      return true;
     }
     if (message.type === 'response' && typeof message.success === 'boolean') {
       entry.result = { success: message.success, error: message.error?.slice(0, 500), finishedAt: Date.now() };
@@ -93,21 +98,22 @@ export class TaskRecovery {
     }
     if (!this.connected || entry.needsRecovery) {
       this.pump();
-      return;
+      return false;
     }
     // Aggregate plans and final bodies may contain text generated before reconnecting.
-    if (entry.recovered && (message.streamType === 'plan_mode' || message.type === 'structured')) return;
+    if (entry.recovered && (message.streamType === 'plan_mode' || message.type === 'structured')) return false;
     try {
       this.sendRaw(entry.recovered && message.type === 'response'
         ? { ...message, output: undefined, error: entry.result?.error } : message);
     } catch (error) {
       this.disconnected();
-      return;
+      return false;
     }
     if (entry.result) {
       if (!this.supported) this.tasks.delete(message.messageId);
       else this.waitForResultReceipt();
     }
+    return true;
   }
 
   acknowledge(message: any): void {
