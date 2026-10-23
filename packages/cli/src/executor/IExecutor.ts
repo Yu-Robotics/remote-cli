@@ -32,6 +32,26 @@ export interface ExecuteResult {
   sessionAbbr?: string;
 }
 
+export type ExecutorGoalStatus = 'active' | 'paused' | 'blocked' | 'usageLimited' | 'budgetLimited' | 'complete';
+
+/** Authoritative native goal state; usage is never estimated by the adapter. */
+export interface ExecutorGoal {
+  threadId: string;
+  objective: string;
+  status: ExecutorGoalStatus;
+  tokenBudget: number | null;
+  tokensUsed: number;
+  timeUsedSeconds: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** An omitted objective resumes an existing, unfinished native goal only. */
+export interface ExecutorGoalRunRequest {
+  objective?: string;
+  tokenBudget?: number;
+}
+
 export interface ExecutorModelInfo {
   id: string;
   displayName: string;
@@ -92,6 +112,11 @@ export interface IExecutor {
   // Optional — MessageHandler uses 'method' in executor checks for these
   /** Enable tools for future turns without changing the native conversation. */
   configureDelegation?(connection?: DelegationConnection): Promise<void>;
+  getGoal?(): Promise<ExecutorGoal | null>;
+  executeGoal?(request: ExecutorGoalRunRequest, options: ExecuteOptions): Promise<ExecuteResult>;
+  pauseGoal?(): Promise<ExecuteResult>;
+  clearGoal?(): Promise<ExecuteResult>;
+  isGoalRunning?(): boolean;
   isWaitingInput?(): boolean;
   sendInput?(input: string): boolean;
   respondToApproval?(requestId: string, action: ApprovalAction): boolean;

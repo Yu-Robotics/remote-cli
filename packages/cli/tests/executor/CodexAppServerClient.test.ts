@@ -76,6 +76,42 @@ describe('CodexAppServerClient', () => {
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
+  it('retains failed exit confirmation across repeated stop and start attempts until actual exit', async () => {
+    const child = fakeProcess();
+    child.exitCode = null; child.signalCode = null;
+    child.kill.mockImplementation(() => { throw new Error('Synthetic signal denied'); });
+    mockSpawn.mockReturnValue(child);
+    const client = new CodexAppServerClient();
+    await client.start();
+    await expect(client.stop()).rejects.toThrow('could not be stopped');
+    await expect(client.stop()).rejects.toThrow('exit could not be confirmed');
+    await expect(client.waitForExit()).rejects.toThrow('exit could not be confirmed');
+    await expect(client.start()).rejects.toThrow('exit is still unconfirmed');
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    child.emit('exit', 0, null);
+    await expect(client.waitForExit()).resolves.toBeUndefined();
+    await expect(client.stop()).resolves.toBeUndefined();
+    mockSpawn.mockReturnValue(fakeProcess());
+    await client.start(); await client.stop();
+    expect(mockSpawn).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not spawn a replacement while a previous stop is still awaiting exit', async () => {
+    const child = fakeProcess(); child.exitCode = null; child.signalCode = null;
+    mockSpawn.mockReturnValue(child);
+    const client = new CodexAppServerClient();
+    await client.start();
+    const stopping = client.stop();
+    mockSpawn.mockReturnValue(fakeProcess());
+    const starting = client.start();
+    await Promise.resolve();
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    child.emit('exit', 0, null);
+    await stopping; await starting;
+    expect(mockSpawn).toHaveBeenCalledTimes(2);
+    await client.stop();
+  });
+
   it('applies launch isolation only to opted-in maintenance clients and leaves ordinary clients unchanged', async () => {
     const child = fakeProcess(); mockSpawn.mockReturnValue(child);
     const env = { PATH: '/usr/bin', CODEX_HOME: '/temporary-fixture' };

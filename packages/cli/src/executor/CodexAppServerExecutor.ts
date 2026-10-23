@@ -4,7 +4,8 @@ import * as path from 'path';
 import { randomUUID } from 'crypto';
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import type { Attachment, ImageBlock, ApprovalAction, ApprovalStatus, ApprovalRequestInfo } from '../types';
-import type { ExecuteOptions, ExecuteResult, ExecutorModelInfo, ExecutorEffortInfo, IExecutor } from './IExecutor';
+import type { ExecuteOptions, ExecuteResult, ExecutorGoal, ExecutorGoalRunRequest, ExecutorModelInfo, ExecutorEffortInfo, IExecutor } from './IExecutor';
+import { assertNativeGoalsVersion, nativeGoalError, parseNativeGoal, validateGoalRequest } from './codex/CodexGoals';
 import { configuredExecutionMetadata } from './ExecutionMetadata';
 import { AppServerMessage, CodexAppServerClient } from './CodexAppServerClient';
 import { CodexTaskNotifications } from './CodexTaskNotifications';
@@ -64,6 +65,23 @@ interface CompactWaiter {
   timer: ReturnType<typeof setTimeout>;
 }
 
+interface GoalRun {
+  active: ActiveTurn;
+  done: Promise<ExecuteResult>;
+  startup?: Promise<void>;
+  goal?: ExecutorGoal | null;
+  objective?: string;
+  ready: boolean;
+  inFlight: Set<string>;
+  retired: Set<string>;
+  revision: number;
+  checking: boolean;
+  controlling: boolean;
+  stopping: boolean;
+  lastNotice?: string;
+  onIdle?: () => void;
+}
+
 interface PendingUserInput {
   id: number | string;
   method: string;
@@ -75,6 +93,8 @@ interface PendingUserInput {
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_COMPACT_TIMEOUT_MS = 10 * 60 * 1000;
 const ACCOUNT_USAGE_TIMEOUT_MS = 10_000;
+const GOAL_CONTROL_TIMEOUT_MS = 10_000;
+const GOAL_RECOVERY_GUIDANCE = 'Use /goal resume to continue the saved native goal, or /goal pause or /goal clear before sending another task.';
 
 interface CodexRateLimitWindow {
   usedPercent?: number;
@@ -184,6 +204,13 @@ export class CodexAppServerExecutor implements IExecutor {
   private delegationConfigured = false;
   private readonly delegationWorker: boolean;
   private sessionResumeFailure = false;
+  private goalManaged = false;
+  private goalNeedsResume = false;
+  private goalRun: GoalRun | null = null;
+  private goalControl: Promise<ExecuteResult> | null = null;
+  private goalControlClear = false;
+  private goalTransportStops = 0;
+  private threadLoads = 0;
 
   async configureDelegation(connection?: DelegationConnection): Promise<void> {
     if (this.delegationConfigured && sameConnection(this.delegation, connection)) return;
@@ -238,12 +265,13 @@ export class CodexAppServerExecutor implements IExecutor {
   async execute(prompt: string, options: ExecuteOptions = {}): Promise<ExecuteResult> {
     this.sessionResumeFailure = false;
     if (this.destroyed) throw new Error('Executor has been destroyed');
-    if (this.activeTurn || this.compactWaiter) {
+    if (this.isBusy()) {
       return { success: false, error: 'Codex thread is already running a command' };
     }
 
     try {
       await this.ensureThread();
+      if (this.isBusy()) return { success: false, error: 'Codex thread is already running a command' };
     } catch (error) {
       return { success: false, error: this.errorMessage(error) };
     }
@@ -254,6 +282,10 @@ export class CodexAppServerExecutor implements IExecutor {
       // leave the executor busy without an actual app-server turn.
       const sandboxOptions = this.sandbox.turnOptions(this.currentWorkingDirectory);
       const input = await this.buildInput(prompt, options.attachments, temporaryFiles);
+      if (this.isBusy()) {
+        await this.cleanupTemporaryFiles(temporaryFiles);
+        return { success: false, error: 'Codex thread is already running a command' };
+      }
       return await new Promise<ExecuteResult>((resolve) => {
         const active: ActiveTurn = {
           options,
@@ -314,6 +346,281 @@ export class CodexAppServerExecutor implements IExecutor {
     return this.currentWorkingDirectory;
   }
 
+  isGoalRunning(): boolean {
+    return this.goalRun !== null;
+  }
+
+  /** Reading a saved goal must never materialize or resume its native thread. */
+  async getGoal(): Promise<ExecutorGoal | null> {
+    if (this.destroyed) throw new Error('Executor has been destroyed');
+    if (!this.codexThreadId) return null;
+    const threadId = this.codexThreadId;
+    try {
+      await this.goalDeadline(this.client.start());
+      assertNativeGoalsVersion(this.client.getServerVersion?.());
+      const response = await this.goalRequest('thread/goal/get', { threadId });
+      if (this.codexThreadId !== threadId || this.destroyed) throw new Error('The native goal session changed while reading it.');
+      const goal = parseNativeGoal(response?.goal, threadId);
+      if (goal && !this.goalManaged) this.rememberGoalManagement();
+      return goal;
+    } catch (error) { throw new Error(nativeGoalError(error)); }
+  }
+
+  async executeGoal(request: ExecutorGoalRunRequest, options: ExecuteOptions): Promise<ExecuteResult> {
+    try {
+      validateGoalRequest(request);
+      if (this.destroyed) throw new Error('Executor has been destroyed');
+      if (this.isBusy()) throw new Error('Codex thread is already running a command');
+      if (this.delegationWorker || this.delegation) throw new Error('Native goals require managed delegation to be off and cannot run in a delegated worker.');
+      if (request.objective === undefined && !this.codexThreadId) throw new Error('There is no saved native goal to resume.');
+    } catch (error) { return { success: false, error: nativeGoalError(error) }; }
+
+    let resolve!: (result: ExecuteResult) => void;
+    const done = new Promise<ExecuteResult>(settle => { resolve = settle; });
+    const active: ActiveTurn = { options, resolve, turnId: null, output: [], sideEffectsStarted: false,
+      emittedTools: new Map(), itemPhases: new Map(), temporaryFiles: [], inactivityTimeoutMs: options.inactivityTimeout };
+    const run: GoalRun = { active, done, objective: request.objective, ready: false, inFlight: new Set(), retired: new Set(),
+      revision: 0, checking: false, controlling: false, stopping: false };
+    // Install ownership before any native loading or mutation can start a turn.
+    this.goalRun = run;
+    this.activeTurn = active;
+    this.activityTracker.setCallback(options.onActivity);
+    this.activityTracker.reset();
+    this.armInactivityTimer();
+    if (options.timeout && options.timeout > 0) active.timeoutTimer = setTimeout(() => {
+      void this.failGoal(run, `Native goal timed out after ${options.timeout}ms. ${GOAL_RECOVERY_GUIDANCE}`);
+    }, options.timeout);
+    run.startup = this.startGoal(run, request).catch(error => this.failGoal(run, nativeGoalError(error)));
+    return done;
+  }
+
+  pauseGoal(): Promise<ExecuteResult> {
+    return this.controlGoal(false);
+  }
+
+  clearGoal(): Promise<ExecuteResult> {
+    return this.controlGoal(true);
+  }
+
+  private async startGoal(run: GoalRun, request: ExecutorGoalRunRequest): Promise<void> {
+    await this.goalDeadline(this.client.start());
+    this.assertGoalOwner(run);
+    assertNativeGoalsVersion(this.client.getServerVersion?.());
+    let previous: ExecutorGoal | null = null;
+    if (this.codexThreadId) {
+      previous = await this.getGoal();
+      this.assertGoalOwner(run);
+    }
+    if (request.objective === undefined && (!previous || previous.status === 'complete')) {
+      throw new Error('There is no unfinished native goal to resume.');
+    }
+    // Replacing an active saved goal must not briefly execute its old objective on load.
+    if (request.objective !== undefined && previous?.status === 'active' && !this.threadReady) {
+      throw new Error('Pause or clear the saved active goal before replacing its objective.');
+    }
+    run.goal = previous;
+    run.objective = request.objective ?? previous?.objective;
+    this.rememberGoalManagement();
+    if (previous?.status === 'active' && !this.threadReady) {
+      // Loading an active goal can dispatch before settings/update. Suspend it
+      // without loading, then restore activation only after native policy sync.
+      const response = await this.goalRequest('thread/goal/set', {
+        threadId: this.codexThreadId, status: 'paused', origin: 'user',
+      });
+      this.assertGoalOwner(run);
+      const paused = parseNativeGoal(response?.goal, this.codexThreadId!);
+      if (!paused || paused.status !== 'paused') throw new Error('Codex did not pause the saved goal before loading its policies.');
+      run.goal = paused;
+      if (run.controlling) return;
+    }
+    await this.ensureThread();
+    this.assertGoalOwner(run);
+    this.rememberGoalManagement();
+    if (run.controlling) return;
+    // Native continuations bypass turn/start, so their settings must be sticky.
+    const goalPolicy = this.sandbox.turnOptions(this.currentWorkingDirectory);
+    if (this.model || this.effort || Object.keys(goalPolicy).length) {
+      await this.goalRequest('thread/settings/update', { threadId: this.codexThreadId,
+        ...(this.model ? { model: this.model } : {}), ...(this.effort ? { effort: this.effort } : {}), ...goalPolicy });
+      this.assertGoalOwner(run);
+      if (run.controlling) return;
+    }
+    // A resumed active goal may already have completed while the load request ran.
+    if (request.objective !== undefined || run.goal?.status !== 'complete') {
+      const revision = run.revision;
+      const response = await this.goalRequest('thread/goal/set', {
+        threadId: this.codexThreadId, origin: 'user',
+        ...(request.objective !== undefined ? { objective: request.objective } : {}),
+        status: 'active', ...(request.tokenBudget !== undefined ? { tokenBudget: request.tokenBudget } : {}),
+      });
+      this.assertGoalOwner(run);
+      const goal = parseNativeGoal(response?.goal, this.codexThreadId!);
+      if (!goal) throw new Error('Codex did not return the activated native goal.');
+      if (run.revision === revision) run.goal = goal;
+    }
+    run.ready = true;
+    this.goalNeedsResume = false;
+    if (run.goal?.status === 'active') {
+      this.goalNotice(run, run.inFlight.size ? 'Native goal running' : 'Native goal active; waiting for native continuation');
+    }
+    this.maybeCompleteGoal(run);
+    if (this.goalRun === run && !run.inFlight.size) void this.checkGoalAfterTurn(run);
+  }
+
+  private assertGoalOwner(run: GoalRun): void {
+    if (this.goalRun !== run || this.destroyed || run.stopping) throw new Error('Native goal operation was cancelled.');
+  }
+
+  private goalNotice(run: GoalRun, text: string): void {
+    const bounded = Array.from(text).slice(0, 400).join('');
+    if (this.goalRun !== run || run.lastNotice === bounded) return;
+    run.lastNotice = bounded;
+    try {
+      if (run.active.options.onActivity) run.active.options.onActivity({ source: 'state', text: bounded });
+      else run.active.options.onStream?.(`\n[${bounded}]\n`);
+    } catch { /* A display failure cannot change native goal ownership. */ }
+  }
+
+  private maybeCompleteGoal(run: GoalRun): void {
+    if (this.goalRun !== run || !run.ready || run.controlling || run.stopping || run.inFlight.size
+      || run.goal === undefined || run.goal?.status === 'active') return;
+    const status = run.goal?.status ?? 'cleared';
+    this.goalNotice(run, `Native goal ${status}`);
+    const summary = `\n\nNative goal ${status}.\n`;
+    run.active.output.push(summary);
+    try { run.active.options.onStream?.(summary); } catch { /* Native completion still releases ownership. */ }
+    try { run.active.options.onDisplayText?.(summary); } catch { /* Native completion still releases ownership. */ }
+    this.completeActive({ success: status === 'complete' || status === 'paused' || status === 'cleared',
+      output: run.active.output.join(''), sessionAbbr: this.codexThreadId?.slice(0, 8),
+      ...(['blocked', 'usageLimited', 'budgetLimited'].includes(status) ? { error: `Native goal stopped: ${status}.` } : {}) });
+  }
+
+  private async checkGoalAfterTurn(run: GoalRun): Promise<void> {
+    if (this.goalRun !== run || run.checking || run.controlling || run.stopping) return;
+    run.checking = true;
+    const revision = run.revision;
+    try {
+      const goal = await this.getGoal();
+      if (this.goalRun !== run || run.controlling || run.stopping) return;
+      if (revision === run.revision) run.goal = goal;
+      this.maybeCompleteGoal(run);
+    } catch (error) {
+      if (this.goalRun === run) await this.failGoal(run, `Could not reconcile native goal: ${nativeGoalError(error)}`);
+    } finally { run.checking = false; }
+  }
+
+  private goalDeadline<T>(promise: Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Native goal control timed out.')), GOAL_CONTROL_TIMEOUT_MS);
+      promise.then(value => { clearTimeout(timer); resolve(value); }, error => { clearTimeout(timer); reject(error); });
+    });
+  }
+
+  private goalRequest(method: string, params: object): Promise<any> {
+    if (this.destroyed) return Promise.reject(new Error('Executor has been destroyed'));
+    return this.goalDeadline(this.client.request(method, params, GOAL_CONTROL_TIMEOUT_MS));
+  }
+
+  private async stopGoalTransport(): Promise<void> {
+    this.threadReady = false;
+    this.goalNeedsResume = this.goalManaged;
+    this.goalTransportStops++;
+    try {
+      await this.goalDeadline(this.client.stop());
+      if (this.client.waitForExit) await this.goalDeadline(this.client.waitForExit());
+      else if (this.client.isRunning()) throw new Error('Codex goal process exit could not be confirmed.');
+    } finally { this.goalTransportStops--; }
+  }
+
+  private async failGoal(run: GoalRun, error: string): Promise<void> {
+    if (this.goalRun !== run || run.stopping) return;
+    run.stopping = true;
+    this.clearInactivityTimer();
+    if (run.active.timeoutTimer) clearTimeout(run.active.timeoutTimer);
+    try {
+      await this.stopGoalTransport();
+      if (this.goalRun === run) this.completeActive({ success: false, error });
+    } catch (stopError) {
+      run.stopping = false;
+      this.goalNotice(run, `Native goal stop unconfirmed: ${nativeGoalError(stopError)}. Retry /abort.`);
+    }
+  }
+
+  private controlGoal(clear: boolean): Promise<ExecuteResult> {
+    if (this.goalControl) {
+      if (this.goalControlClear === clear) return this.goalControl;
+      return this.goalControl.then(result => result.success ? this.controlGoal(clear) : result);
+    }
+    const control = this.stopGoalControl(this.goalRun, clear);
+    this.goalControl = control;
+    this.goalControlClear = clear;
+    void control.then(() => { if (this.goalControl === control) this.goalControl = null; });
+    return control;
+  }
+
+  private async stopGoalControl(run: GoalRun | null, clear: boolean): Promise<ExecuteResult> {
+    if (this.destroyed) return { success: false, error: 'Executor has been destroyed' };
+    if (!run && (this.activeTurn || this.compactWaiter || this.threadLoads)) {
+      return { success: false, error: 'Wait for the current ordinary task before changing its goal.' };
+    }
+    if (!this.codexThreadId && !run) return { success: true, output: 'No native goal is set.' };
+    if (run) run.controlling = true;
+    try {
+      if (run?.startup) await this.goalDeadline(run.startup);
+      if (run && this.goalRun !== run) return { success: false, error: 'The native goal run already stopped.' };
+      await this.goalDeadline(this.client.start());
+      assertNativeGoalsVersion(this.client.getServerVersion?.());
+      const threadId = this.codexThreadId;
+      if (!threadId) throw new Error('No native goal session was created.');
+      this.rememberGoalManagement();
+      const existing = await this.getGoal();
+      let goal = existing;
+      if (existing && existing.status !== 'complete') {
+        const paused = await this.goalRequest('thread/goal/set', { threadId, status: 'paused', origin: 'user' });
+        goal = parseNativeGoal(paused?.goal, threadId);
+        if (!goal || goal.status === 'active') throw new Error('Codex did not confirm that the native goal is paused.');
+      }
+      if (clear && existing) {
+        const response = await this.goalRequest('thread/goal/clear', { threadId, origin: 'user' });
+        if (typeof response?.cleared !== 'boolean') throw new Error('Codex did not confirm clearing the native goal.');
+        goal = null;
+      }
+      if (run) {
+        run.goal = goal;
+        for (const pending of this.pendingUserInputs.splice(0)) {
+          this.finishApproval(pending, 'expired');
+          this.client.respond(pending.id, pending.method === 'item/tool/requestUserInput' ? { answers: {} }
+            : pending.method === 'item/permissions/requestApproval' ? { permissions: {}, scope: 'turn' } : { decision: 'cancel' });
+        }
+        for (const turnId of [...run.inFlight]) await this.goalRequest('turn/interrupt', { threadId, turnId });
+        if (run.inFlight.size) await this.goalDeadline(new Promise<void>(resolve => { run.onIdle = resolve; }));
+        if (this.goalRun !== run) throw new Error('The native goal stopped before its control operation finished.');
+      }
+      // A late dispatched continuation must not outlive a successful stop ACK.
+      // Reopening this process is safe because native state is now paused/cleared.
+      await this.stopGoalTransport();
+      this.goalNeedsResume = false;
+      if (run) {
+        if (this.goalRun !== run) throw new Error('The native goal stopped before its control operation finished.');
+        run.inFlight.clear();
+        run.ready = true;
+        run.controlling = false;
+        this.maybeCompleteGoal(run);
+        const result = await this.goalDeadline(run.done);
+        if (!result.success) throw new Error(result.error ?? 'Native goal did not stop successfully.');
+      }
+      return { success: true, output: clear ? 'Native goal cleared; execution stopped.'
+        : goal?.status === 'complete' ? 'Native goal was already complete; execution stopped.'
+          : goal ? 'Native goal paused; execution stopped.' : 'No native goal is set; execution stopped.' };
+    } catch (error) {
+      if (run && this.goalRun === run) {
+        run.controlling = false;
+        await this.failGoal(run, `Native goal control failed: ${nativeGoalError(error)}. ${GOAL_RECOVERY_GUIDANCE}`);
+      }
+      return { success: false, error: nativeGoalError(error) };
+    }
+  }
+
   getExecutionMetadata() {
     const data = configuredExecutionMetadata(this.model, this.effort);
     if (this.threadReady && this.client.isRunning() && this.reportedModel) {
@@ -333,7 +640,7 @@ export class CodexAppServerExecutor implements IExecutor {
   }
 
   isBusy(): boolean {
-    return this.activeTurn !== null || this.compactWaiter !== null;
+    return this.activeTurn !== null || this.compactWaiter !== null || this.goalControl !== null || this.threadLoads > 0;
   }
 
   async setWorkingDirectory(targetPath: string): Promise<void> {
@@ -384,6 +691,7 @@ export class CodexAppServerExecutor implements IExecutor {
   }
 
   resetContext(): void {
+    if (this.goalRun) throw new Error('Stop the native goal before clearing its conversation.');
     this.taskNotifications.clear();
     const previousId = this.codexThreadId;
     if (this.activeTurn || this.compactWaiter) {
@@ -392,6 +700,8 @@ export class CodexAppServerExecutor implements IExecutor {
       void this.client.stop();
     }
     this.codexThreadId = null;
+    this.goalManaged = false;
+    this.goalNeedsResume = false;
     this.threadReady = false;
     this.pendingUserInputs = [];
     this.clearThreadId();
@@ -401,6 +711,7 @@ export class CodexAppServerExecutor implements IExecutor {
   }
 
   async abort(): Promise<boolean> {
+    if (this.goalRun) return (await this.pauseGoal()).success;
     const active = this.activeTurn;
     if (!active || !this.codexThreadId) return false;
 
@@ -433,11 +744,16 @@ export class CodexAppServerExecutor implements IExecutor {
   }
 
   async destroy(): Promise<void> {
-    if (this.destroyed) return;
+    if (this.destroyed && !this.goalRun) return;
     this.destroyed = true;
     this.taskNotifications.clear();
     this.unsubscribeClient?.();
     this.unsubscribeClient = null;
+    if (this.goalRun) {
+      this.goalRun.stopping = true;
+      this.clearInactivityTimer();
+      await this.stopGoalTransport();
+    }
     if (this.activeTurn) this.completeActive({ success: false, error: 'Executor destroyed' });
     this.completeCompact({ success: false, error: 'Executor destroyed' });
     await this.client.stop();
@@ -762,11 +1078,23 @@ export class CodexAppServerExecutor implements IExecutor {
   }
 
   private async ensureThread(): Promise<void> {
+    this.threadLoads++;
+    try { await this.loadThread(); }
+    finally { this.threadLoads--; }
+  }
+
+  private async loadThread(): Promise<void> {
     assertWorkingDirectoryExists(this.currentWorkingDirectory);
+    if (this.goalManaged && this.codexThreadId && !this.goalRun) {
+      const goal = await this.getGoal();
+      if (this.goalNeedsResume || goal?.status === 'active') throw new Error(GOAL_RECOVERY_GUIDANCE);
+    }
     if (this.threadReady && this.client.isRunning()) return;
+    const goalOwner = this.goalRun;
     this.reportedModel = undefined;
     this.reportedEffort = undefined;
     await this.client.start();
+    if (goalOwner) this.assertGoalOwner(goalOwner);
 
     const common: any = {
       ...(this.model ? { model: this.model } : {}),
@@ -777,6 +1105,8 @@ export class CodexAppServerExecutor implements IExecutor {
       } : {}),
       ...this.sandbox.threadOptions(this.currentWorkingDirectory, this.delegationWorker || !!this.delegation),
     };
+    // A saved active goal can dispatch during resume, before settings/update.
+    if (goalOwner && this.effort) common.config = { ...common.config, model_reasoning_effort: this.effort };
     if (this.delegationConfigured) {
       common.config = { ...common.config,
         'mcp_servers.remote_cli_delegation': this.delegation
@@ -798,6 +1128,7 @@ export class CodexAppServerExecutor implements IExecutor {
         if (response?.thread?.id !== this.codexThreadId) {
           throw new Error('Codex app-server resumed an unexpected thread');
         }
+        if (goalOwner) this.assertGoalOwner(goalOwner);
         this.captureReportedSettings(response);
       } catch (error) {
         if (this.delegationWorker && this.isMissingStoredThreadError(error)) {
@@ -813,6 +1144,7 @@ export class CodexAppServerExecutor implements IExecutor {
         serviceName: 'remote_cli',
       });
       const id = response?.thread?.id;
+      if (goalOwner) this.assertGoalOwner(goalOwner);
       if (typeof id !== 'string' || !id) throw new Error('Codex app-server returned no thread ID');
       this.captureReportedSettings(response);
       this.setThreadId(id);
@@ -821,6 +1153,7 @@ export class CodexAppServerExecutor implements IExecutor {
   }
 
   private handleMessage(message: AppServerMessage): void {
+    if (this.destroyed) return;
     const method = message.method;
     if (!method) return;
     const params = message.params ?? {};
@@ -828,7 +1161,11 @@ export class CodexAppServerExecutor implements IExecutor {
     if (method === 'client/disconnected') {
       this.taskNotifications.clear();
       this.threadReady = false;
-      if (this.activeTurn) {
+      if (this.goalRun) {
+        if (!this.goalTransportStops) {
+          void this.failGoal(this.goalRun, `${params.error ?? 'Codex app-server disconnected'}. ${GOAL_RECOVERY_GUIDANCE}`);
+        }
+      } else if (this.activeTurn) {
         this.completeActive({ success: false, error: params.error ?? 'Codex app-server disconnected' });
       }
       this.completeCompact({ success: false, error: params.error ?? 'Codex app-server disconnected' });
@@ -841,6 +1178,22 @@ export class CodexAppServerExecutor implements IExecutor {
     }
 
     if (params.threadId && params.threadId !== this.codexThreadId) return;
+    const goalRun = this.goalRun;
+    if (goalRun?.stopping) return;
+    // Goal changes may arrive after their turn completed, or without any turn ID.
+    if (goalRun && (method === 'thread/goal/updated' || method === 'thread/goal/cleared')) {
+      if (params.threadId !== this.codexThreadId) return;
+      try {
+        const goal = method === 'thread/goal/cleared' ? null : parseNativeGoal(params.goal, this.codexThreadId!);
+        if (method === 'thread/goal/updated' && !goal) throw new Error('Codex returned an empty native goal update.');
+        if (goal && (goalRun.objective && goal.objective !== goalRun.objective
+          || goalRun.goal && goal.updatedAt < goalRun.goal.updatedAt)) return;
+        goalRun.goal = goal;
+        goalRun.revision++;
+        this.maybeCompleteGoal(goalRun);
+      } catch (error) { void this.failGoal(goalRun, nativeGoalError(error)); }
+      return;
+    }
     if (method === 'serverRequest/resolved') {
       this.pendingUserInputs = this.pendingUserInputs.filter(pending => {
         if (pending.id !== params.requestId) return true;
@@ -856,16 +1209,43 @@ export class CodexAppServerExecutor implements IExecutor {
     if (notified) return;
     // Late background output must not become part of a subsequent turn.
     if (eventTurnId && !matchesActiveTurn && method !== 'turn/started'
+      && !(method === 'turn/completed' && goalRun?.inFlight.has(eventTurnId))
       && params.item?.type !== 'contextCompaction') return;
     if (this.activeTurn) this.armInactivityTimer();
 
     switch (method) {
       case 'turn/started':
+        if (goalRun) {
+          const id = params.turn?.id;
+          if (params.threadId !== this.codexThreadId || typeof id !== 'string' || !id || goalRun.retired.has(id)) break;
+          goalRun.inFlight.add(id);
+          if (this.activeTurn?.turnId !== id) {
+            if (goalRun.retired.size && goalRun.active.output.length) {
+              goalRun.active.output.push('\n\n');
+              goalRun.active.options.onStream?.('\n\n');
+              goalRun.active.options.onDisplayText?.('\n\n');
+            }
+            goalRun.active.emittedTools.clear();
+            goalRun.active.itemPhases.clear();
+            goalRun.active.error = undefined;
+            goalRun.active.errorCode = undefined;
+          }
+          this.goalNotice(goalRun, 'Native goal running');
+        }
         if (this.activeTurn && typeof params.turn?.id === 'string') this.activeTurn.turnId = params.turn.id;
+        break;
+      case 'thread/status/changed':
+        if (goalRun && params.status?.type === 'idle' && goalRun.goal?.status === 'active') {
+          this.goalNotice(goalRun, 'Native goal active; waiting for native continuation or user control');
+        }
         break;
       case 'item/agentMessage/delta':
         if (this.activeTurn && typeof params.delta === 'string') {
           this.activeTurn.output.push(params.delta);
+          if (goalRun && this.activeTurn.output.reduce((size, part) => size + part.length, 0) > 65_536) {
+            this.activeTurn.output = ['[Earlier native goal output omitted from this diagnostic buffer]\n',
+              this.activeTurn.output.join('').slice(-65_536)];
+          }
           this.activeTurn.options.onStream?.(params.delta);
           this.activeTurn.options.onDisplayText?.(params.delta);
           const phase = params.itemId ? this.activeTurn.itemPhases.get(params.itemId) : undefined;
@@ -972,6 +1352,11 @@ export class CodexAppServerExecutor implements IExecutor {
   }
 
   private handleServerRequest(id: number | string, method: string, params: any): void {
+    if (this.goalRun && (this.goalRun.stopping || this.goalRun.controlling || !this.goalRun.inFlight.size
+      || params.turnId && !this.goalRun.inFlight.has(params.turnId))) {
+      this.client.respondError(id, 'Request does not belong to a running native goal turn');
+      return;
+    }
     if (params.threadId && params.threadId !== this.codexThreadId) {
       this.client.respondError(id, 'Request does not belong to this remote-cli thread');
       return;
@@ -1124,6 +1509,28 @@ export class CodexAppServerExecutor implements IExecutor {
   private handleTurnCompleted(turn: any): void {
     const active = this.activeTurn;
     if (!active || !turn) return;
+    const run = this.goalRun;
+    if (run) {
+      if (!run.inFlight.has(turn.id) || run.retired.has(turn.id)) return;
+      run.inFlight.delete(turn.id);
+      if (!run.inFlight.size) run.onIdle?.();
+      run.retired.add(turn.id);
+      if (run.retired.size > 256) run.retired.delete(run.retired.values().next().value!);
+      if (active.turnId === turn.id) active.turnId = null;
+      this.pendingUserInputs = this.pendingUserInputs.filter(pending => {
+        if (pending.params.turnId && pending.params.turnId !== turn.id) return true;
+        this.finishApproval(pending, 'expired');
+        return false;
+      });
+      if (turn.status !== 'completed' && !run.controlling) {
+        void this.failGoal(run, turn.status === 'interrupted' ? 'Native goal interrupted. Resume explicitly to continue.'
+          : turn.error?.message ?? active.error ?? 'Native goal turn failed.');
+      } else {
+        this.maybeCompleteGoal(run);
+        if (run.ready && this.goalRun === run) void this.checkGoalAfterTurn(run);
+      }
+      return;
+    }
     if (active.turnId && turn.id && active.turnId !== turn.id) return;
 
     if (turn.status === 'completed') {
@@ -1196,6 +1603,10 @@ export class CodexAppServerExecutor implements IExecutor {
     const active = this.activeTurn;
     if (!active) return;
     this.activeTurn = null;
+    if (this.goalRun?.active === active) {
+      this.goalRun.onIdle?.();
+      this.goalRun = null;
+    }
     this.activityTracker.reset();
     this.activityTracker.setCallback(undefined);
     for (const pending of this.pendingUserInputs.splice(0)) this.finishApproval(pending, 'expired');
@@ -1214,6 +1625,7 @@ export class CodexAppServerExecutor implements IExecutor {
   }
 
   private async failAndRestart(error: string): Promise<void> {
+    if (this.goalRun) return this.failGoal(this.goalRun, error);
     this.taskNotifications.clear();
     this.threadReady = false;
     this.completeActive({ success: false, error });
@@ -1269,15 +1681,19 @@ export class CodexAppServerExecutor implements IExecutor {
     try {
       const session = JSON.parse(fs.readFileSync(this.sessionFilePath, 'utf8'));
       if (typeof session.id === 'string' && session.id) this.codexThreadId = session.id;
+      this.goalManaged = !!this.codexThreadId && session.goalManaged === true;
+      this.goalNeedsResume = this.goalManaged;
     } catch {
       this.codexThreadId = null;
+      this.goalManaged = false;
+      this.goalNeedsResume = false;
     }
   }
 
   private setThreadId(id: string): void {
     this.codexThreadId = id;
     const temporaryPath = `${this.sessionFilePath}.${process.pid}.tmp`;
-    const data = JSON.stringify({ id, savedAt: new Date().toISOString() });
+    const data = JSON.stringify({ id, savedAt: new Date().toISOString(), ...(this.goalManaged ? { goalManaged: true } : {}) });
     try {
       fs.writeFileSync(temporaryPath, data, { encoding: 'utf8', mode: 0o600 });
       fs.renameSync(temporaryPath, this.sessionFilePath);
@@ -1292,6 +1708,21 @@ export class CodexAppServerExecutor implements IExecutor {
       fs.unlinkSync(this.sessionFilePath);
     } catch (error: any) {
       if (error?.code !== 'ENOENT') console.error('[CodexAppServerExecutor] Failed to delete session file:', error);
+    }
+  }
+
+  /** Persist opt-in before a native mutation; a failed write must prevent activation. */
+  private rememberGoalManagement(): void {
+    this.goalManaged = true;
+    if (!this.codexThreadId) return;
+    const temporaryPath = `${this.sessionFilePath}.${process.pid}.goal.tmp`;
+    try {
+      fs.writeFileSync(temporaryPath, JSON.stringify({ id: this.codexThreadId, goalManaged: true,
+        savedAt: new Date().toISOString() }), { encoding: 'utf8', mode: 0o600 });
+      fs.renameSync(temporaryPath, this.sessionFilePath);
+    } catch {
+      try { fs.unlinkSync(temporaryPath); } catch { /* Keep the previous binding intact. */ }
+      throw new Error('Could not persist native goal ownership. No goal activation was requested.');
     }
   }
 

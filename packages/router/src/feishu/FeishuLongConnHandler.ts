@@ -782,6 +782,7 @@ Backend and session commands (sent to active device):
 /files [clear] - List staged attachments or remove unused local copies
 /model [name] - Show models or set this thread's model
 /effort [auto|low|medium|high] - Show or set Codex/AGY reasoning effort
+/goal [objective|pause|resume|clear] - Manage a native Codex goal; /goal help shows budget options
 /delegation [on|off] - Delegate between installed agent backends in the current thread
 /backend - List backends and show the current thread's effective backend
 /backend <index> - Switch all threads and clear per-thread backend overrides

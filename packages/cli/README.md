@@ -433,6 +433,19 @@ Thread switch panels show `Reply from:` with the reply's full thread name and wo
 
 From Router 1.6.171, completed cards keep the thread buttons and **+ New** inside a native Feishu **Switch thread** folding panel, collapsed by default. Click its header to expand or collapse the list without sending a command or changing the input target. The reply-source caption remains visible. Selecting a thread uses the existing routing behavior. Hidden buttons still count toward card limits; unrelated full-card updates can reset the panel to its default collapsed state. This uses the existing Card 2.0 client requirement (Feishu 7.20 or newer).
 
+From CLI 1.6.172, Codex threads support native goals through `/goal` (status), `/goal <objective>` (start), `/goal pause`, `/goal resume`, and `/goal clear`. Start or resume only when the thread and queue are idle, with managed delegation explicitly disabled using `/delegation off`. This initial restriction does not disable Codex's native subagents. Optional `--budget <tokens>` on start or resume sets an explicit positive token budget; omitting it does not invent a budget. For example:
+
+```text
+/delegation off
+/goal --budget 40000 Fix the failing tests and verify the public API stays compatible
+/goal
+/goal pause
+/goal resume
+/goal clear
+```
+
+Codex owns the persisted goal and automatic continuations; remote-cli keeps the execution card, approvals, and busy-state reservation across native turns. Status, pause, clear, and `/abort` remain available during work. Pause and clear stop current goal work; `/abort` pauses the goal, while clear removes the goal without clearing the conversation. After process loss, inspect with `/goal` and explicitly recover with `/goal resume`; status queries do not load or start the goal. Send attachments in an ordinary message before starting a goal. Use a Codex build exposing the native thread-goal APIs (verified with 0.163.0); unavailable APIs or disabled goals report an error. Other backends reject `/goal`. See [the native goal API](https://learn.chatgpt.com/docs/app-server#manage-a-thread-goal).
+
 With a CLI and Router that support queue-start notifications, confirming a message keeps a static queue receipt. When the task actually starts, a new execution card appears at the bottom of the chat with its thread, working directory, task preview, and remaining queue count. Progress and results stay on that new card, and the old receipt points to it. Older clients retain the waiting-card behavior. Queued work remains in memory; this does not make queues persistent across service restarts.
 
 When a thread is busy, ordinary messages require confirmation before they enter its queue. Use `/queue` to inspect pending work, `/queue clear` to discard queued messages, and `/abort` to stop the active task and clear that thread's queue. A message received during abort cleanup waits and starts after the backend is safe to reuse. A backend failure in the active task still advances to the first confirmed queued message; a failure in a task taken from the queue pauses the remaining queue. Context-changing commands such as `/model`, `/effort`, `/cd`, `/compact`, `/clear`, and its `/new` alias are handled separately rather than queued as ordinary messages. Feishu thread buttons show automatic names such as `thread-2` as their sequence number, such as `2`; routing continues to use the full internal name. Continuation cards repeat the thread and working-directory header of the original card.

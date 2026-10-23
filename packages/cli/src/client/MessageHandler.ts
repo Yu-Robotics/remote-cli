@@ -13,7 +13,8 @@ import { ThreadExecutorPool } from '../thread/ThreadExecutorPool';
 import { ThreadManager } from '../thread/ThreadManager';
 import { DEFAULT_THREAD_NAME } from '../thread/types';
 import { isDelegationEnabled } from '../thread/DelegationSettings';
-import type { ExecuteOptions, ExecuteResult, ExecutorContextUsage, IExecutor } from '../executor/IExecutor';
+import type { ExecuteOptions, ExecuteResult, ExecutorContextUsage, ExecutorGoalRunRequest, IExecutor } from '../executor/IExecutor';
+import { formatGoal, GOAL_USAGE, parseGoalCommand } from './GoalCommand';
 import { createExecutor } from '../executor';
 import { FeishuNotificationAdapter } from '../hooks';
 import { ConfigManager } from '../config/ConfigManager';
@@ -214,6 +215,7 @@ export class MessageHandler {
   });
   private readonly activeThreadOperations = new Map<string, ActiveThreadOperation>();
   private readonly abortOperations = new Map<string, Promise<void>>();
+  private readonly pendingGoalActivations = new Map<string, { cancelled: boolean }>();
   private automaticUpdateInProgress = false;
   private approvalCardsSupported = false;
   private streamingContextSupported = false;
@@ -569,6 +571,52 @@ export class MessageHandler {
     const executor = this.threadPool.getExecutor(resolvedThreadId);
     this.sendStreamContext(messageId, resolvedThreadId, executor);
 
+    const goalCommand = parseGoalCommand(settingsCommand);
+    let goalRequest: ExecutorGoalRunRequest | undefined;
+    if (goalCommand) {
+      if (goalCommand.kind === 'invalid' || goalCommand.kind === 'help') {
+        this.sendResponse(messageId, resolvedThreadId, goalCommand.kind === 'invalid'
+          ? { success: false, error: goalCommand.error } : { success: true, output: GOAL_USAGE });
+        return;
+      }
+      if (this.threadPool.getBackendKey(resolvedThreadId) !== 'codex'
+        || !executor.getGoal || !executor.executeGoal || !executor.pauseGoal || !executor.clearGoal) {
+        this.sendResponse(messageId, resolvedThreadId, { success: false,
+          error: '/goal requires the Codex app-server backend and an executor version with native goal support.' });
+        return;
+      }
+      if (attachments?.length || message.fileIds?.length) {
+        this.sendResponse(messageId, resolvedThreadId, { success: false,
+          error: 'Send attachments in a normal message before starting a goal. No goal was changed.' });
+        return;
+      }
+      if (goalCommand.kind !== 'run') {
+        try {
+          const pending = this.pendingGoalActivations.get(resolvedThreadId);
+          if (pending && goalCommand.kind !== 'show') pending.cancelled = true;
+          const result = goalCommand.kind === 'show' ? { success: true, output: formatGoal(await executor.getGoal()) }
+            : goalCommand.kind === 'pause' ? await executor.pauseGoal() : await executor.clearGoal();
+          this.sendResponse(messageId, resolvedThreadId, { ...result, threads: this.threadPool.getSummaries() });
+        } catch (error) {
+          this.sendResponse(messageId, resolvedThreadId, { success: false,
+            error: `Goal control failed: ${error instanceof Error ? error.message : String(error)}` });
+        }
+        return;
+      }
+      if (isDelegationEnabled(thread) || this.delegation.hasActiveTasks(resolvedThreadId)) {
+        this.sendResponse(messageId, resolvedThreadId, { success: false,
+          error: 'Native goals require managed delegation to be off. Wait for workers to finish and send /delegation off in this thread, then retry /goal.' });
+        return;
+      }
+      if (this.threadPool.isThreadBusy(resolvedThreadId) || executor.isBusy?.()
+        || this.hasThreadQueueState(resolvedThreadId) || this.abortOperations.has(resolvedThreadId)) {
+        this.sendResponse(messageId, resolvedThreadId, { success: false,
+          error: 'Start or resume a goal only when this thread and its queue are idle. Use /goal pause or /abort to stop current goal work.' });
+        return;
+      }
+      goalRequest = goalCommand.request;
+    }
+
     // Handle /abort for this specific thread (bypasses busy check)
     if (content?.trim() === '/abort') {
       await this.handleAbortCommand(messageId, resolvedThreadId, executor);
@@ -642,7 +690,7 @@ export class MessageHandler {
       return;
     }
     const inputExecutor = this.delegation.waitingExecutor(resolvedThreadId) ?? executor;
-    if ('isWaitingInput' in inputExecutor && typeof inputExecutor.isWaitingInput === 'function') {
+    if (!goalRequest && 'isWaitingInput' in inputExecutor && typeof inputExecutor.isWaitingInput === 'function') {
       const ex = inputExecutor as { isWaitingInput(): boolean; sendInput(input: string): boolean };
       if (ex.isWaitingInput()) {
         const input = content?.trim();
@@ -735,6 +783,8 @@ export class MessageHandler {
       });
       return;
     }
+    const goalActivation = goalRequest ? { cancelled: false } : undefined;
+    if (goalActivation) this.pendingGoalActivations.set(resolvedThreadId, goalActivation);
     const operationToken = this.beginThreadOperation(resolvedThreadId);
 
     try {
@@ -773,6 +823,11 @@ export class MessageHandler {
         return;
       }
 
+      if (goalRequest) {
+        await this.executeCommand(messageId, resolvedThreadId, content!, executor, undefined, false, goalRequest, goalActivation);
+        return;
+      }
+
       const builtInResult = await this.handleBuiltInCommand(
         messageId,
         resolvedThreadId,
@@ -797,6 +852,9 @@ export class MessageHandler {
         error: error instanceof Error ? error.message : 'Unknown error',
       });
     } finally {
+      if (goalActivation && this.pendingGoalActivations.get(resolvedThreadId) === goalActivation) {
+        this.pendingGoalActivations.delete(resolvedThreadId);
+      }
       if (this.finishThreadOperation(resolvedThreadId, operationToken) && !this.pausedQueues.has(resolvedThreadId)) {
         void this.startNextQueuedCommand(resolvedThreadId);
       }
@@ -812,9 +870,18 @@ export class MessageHandler {
     executor: IExecutor
   ): Promise<void> {
     this.fileInbox?.cancelThread(threadId);
+    const pendingGoal = this.pendingGoalActivations.get(threadId);
+    if (pendingGoal) pendingGoal.cancelled = true;
     const existingAbort = this.abortOperations.get(threadId);
     if (existingAbort) {
       await existingAbort;
+      if (executor.isGoalRunning?.()) {
+        this.sendResponse(messageId, threadId, {
+          success: false,
+          error: 'Native goal stop could not be confirmed. This thread remains busy; retry /goal pause or /abort.',
+        });
+        return;
+      }
       this.sendResponse(messageId, threadId, {
         success: true,
         output: 'ℹ️ The abort operation has already completed.',
@@ -829,6 +896,9 @@ export class MessageHandler {
     const operation = (async () => {
       if (isDelegationEnabled(this.threadManager.getThread(threadId))) await this.delegation.cancelThread(threadId);
       aborted = await executor.abort();
+      if (!aborted && executor.isGoalRunning?.()) {
+        throw new Error('Native goal stop could not be confirmed. This thread remains busy; retry /goal pause or /abort.');
+      }
       if (activeOperation) await activeOperation.done;
     })();
     const barrier = operation.then(() => undefined, () => undefined);
@@ -1125,6 +1195,7 @@ Use /compact to reduce conversation context or /clear to start a fresh context.`
 - /cd <directory> - Change working directory for this thread
 - /model [name] - Open model settings, or set the active backend model with a text argument
 - /effort [auto|level] - Open effort settings, or set a native supported level with a text argument
+- /goal [objective|pause|resume|clear] - Manage a native Codex goal; optional --budget <tokens> on start or resume
 - /sandbox [on|off|read-only|default|allow <directory>|remove <directory>|network on|off] - Configure this thread's sandbox (Codex, Claude Code)
 - /delegation [on|off|reset [backend]] - Delegate tasks between installed agent backends; reset saved worker context when needed
 - /backend - Open backend settings (Current thread by default; Confirm applies)
@@ -2201,6 +2272,8 @@ You can also use natural language commands to control Claude Code CLI.`,
     executor: IExecutor,
     attachments?: Attachment[],
     fromQueue = false,
+    goalRequest?: ExecutorGoalRunRequest,
+    goalActivation?: { cancelled: boolean },
   ): Promise<boolean> {
     this.sendStreamContext(messageId, threadId, executor);
     let delegationScope: DelegationScope | undefined;
@@ -2258,6 +2331,9 @@ You can also use natural language commands to control Claude Code CLI.`,
       }
       const openId = this.getMessageOpenId(messageId);
       const thread = this.threadManager.getThread(threadId);
+      if (goalRequest && thread && isDelegationEnabled(thread)) {
+        throw new Error('Turn managed delegation off before starting a native goal.');
+      }
       if (thread && isDelegationEnabled(thread) && executor.configureDelegation) {
         if (this.delegation.blocksWorkspace(executor.getCurrentWorkingDirectory(), threadId)) {
           throw new Error('A delegated worker holds this workspace. Wait for it to finish; if worker cleanup failed, stop the worker and restart the CLI.');
@@ -2443,7 +2519,18 @@ You can also use natural language commands to control Claude Code CLI.`,
         executionMetadata = launchMetadata;
         let capturedMetadata = false;
         try {
-          const result = await executor.execute(prompt, guardedOptions);
+          if (goalRequest && (goalActivation?.cancelled || this.isDestroyed || this.abortOperations.has(threadId))) {
+            throw new Error('Native goal activation was cancelled before it started.');
+          }
+          // No await between releasing preparation ownership and the adapter's
+          // synchronous installation of native goal ownership.
+          if (goalActivation && this.pendingGoalActivations.get(threadId) === goalActivation) {
+            this.pendingGoalActivations.delete(threadId);
+          }
+          const result = goalRequest
+            ? await executor.executeGoal!(goalRequest, guardedOptions)
+            : await executor.execute(prompt, guardedOptions);
+          if (goalRequest && !streamedOutput && result.output) guardedOptions.onStream?.(result.output);
           executionMetadata = mergeReportedExecutionMetadata(launchMetadata, captureExecutionMetadata(executor, backend));
           capturedMetadata = true;
           active = false;
@@ -2467,7 +2554,8 @@ You can also use natural language commands to control Claude Code CLI.`,
           activity.clear();
           delegationBridge?.activate(undefined);
           if (!finished) scope?.finishExecution(false);
-          mayRetry = !scope || scope.getLaunchRevision() === launchRevision;
+          // Goal activation mutates durable native state; never replay it as a model retry.
+          mayRetry = !goalRequest && (!scope || scope.getLaunchRevision() === launchRevision);
         }
       };
 

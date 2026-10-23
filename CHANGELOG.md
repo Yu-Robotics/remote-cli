@@ -10,6 +10,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.172] - 2026-10-23
+
+### Added
+- Support Codex native `/goal`, `/goal <objective>`, `/goal pause`, `/goal resume`, and `/goal clear`, with optional explicit token budgets on activation or resume. Goal state and continuation remain owned by Codex's thread-goal APIs, without prompt-based continuation loops.
+- Keep goal output, approvals, activity, and thread admission attached across native continuation turns. Status and stop controls remain available during execution; unsupported backends fail without forwarding goal text to a model.
+
+### Changed
+- Initially require managed delegation disabled and an empty queue before activating a goal. Preserve native goal state on process loss and require explicit recovery; avoid accidentally resuming goals through status queries. Threads that never use native goals retain their existing execution path.
+
+### Tests
+- Cover command parsing, explicit budgets, native lifecycle transitions, multi-turn output ownership, stop and recovery behavior, unsupported versions, queue/settings exclusion, and unchanged ordinary execution.
+
 ## [1.6.171] - 2026-10-23
 
 ### Fixed
