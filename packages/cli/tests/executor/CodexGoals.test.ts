@@ -205,6 +205,28 @@ describe('native Codex goal lifecycle', () => {
     client.update('complete'); await pending;
   });
 
+  it('keeps one candidate budget and callback owner through native automatic turns', async () => {
+    const onImage = vi.fn();
+    const onImageFile = vi.fn();
+    const { done } = await begin({ onImage, onImageFile });
+    for (let turn = 0; turn < 2; turn++) {
+      const turnId = `images-${turn}`;
+      started(turnId);
+      for (let i = 0; i < 20; i++) {
+        client.emit('item/completed', { turnId, item: { type: 'imageGeneration', id: `image-${i}`, status: 'completed',
+          result: Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, turn * 20 + i]).toString('base64') } });
+      }
+      completed(turnId);
+      await tick();
+    }
+    expect(onImage).toHaveBeenCalledTimes(32);
+    expect(onImageFile).not.toHaveBeenCalled();
+    client.update('complete');
+    expect((await done).output).toContain('could not be attached');
+    client.emit('item/completed', { item: { type: 'imageGeneration', id: 'late', status: 'completed', savedPath: '/workspace/late.png' } });
+    expect(onImageFile).not.toHaveBeenCalled();
+  });
+
   it('keeps callbacks, tools and approvals through multiple automatic native turns', async () => {
     const text = vi.fn(); const tools = vi.fn(); const approvals = vi.fn(() => true); const resolved = vi.fn();
     const { done } = await begin({ onDisplayText: text, onToolUse: tools, onApprovalRequest: approvals, onApprovalResolved: resolved });

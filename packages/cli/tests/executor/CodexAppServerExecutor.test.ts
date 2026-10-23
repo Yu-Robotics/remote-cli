@@ -1062,18 +1062,71 @@ describe('CodexAppServerExecutor', () => {
 
   it('forwards completed imageGeneration items as image callbacks', async () => {
     const onImage = vi.fn();
+    const data = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).toString('base64');
     const running = executor.execute('generate an image', { onImage });
     await vi.waitFor(() => expect(transport.requests.some((request) => request.method === 'turn/start')).toBe(true));
 
     transport.emit({ method: 'item/completed', params: {
       threadId: 'codex-thread-1',
       turnId: 'turn-1',
-      item: { type: 'imageGeneration', id: 'image-1', status: 'completed', result: 'aGVsbG8=', mimeType: 'image/png' },
+      item: { type: 'imageGeneration', id: 'image-1', status: 'completed', result: data, mimeType: 'image/png' },
     } });
     transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
 
     await running;
-    expect(onImage).toHaveBeenCalledWith({ type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' });
+    expect(onImage).toHaveBeenCalledWith({ type: 'image', data, mimeType: 'image/png' });
+  });
+
+  it('extracts tool images before safe diagnostics and preserves callback ownership', async () => {
+    const events: string[] = [];
+    const onImage = vi.fn(() => { events.push('image'); });
+    const onImageFile = vi.fn();
+    const onToolResult = vi.fn(() => { events.push('result'); });
+    const onStream = vi.fn();
+    const data = Buffer.from([255, 216, 255, 224]).toString('base64');
+    const running = executor.execute('generate tool images', { onImage, onImageFile, onToolResult, onStream });
+    await vi.waitFor(() => expect(transport.requests.some(request => request.method === 'turn/start')).toBe(true));
+    const emit = (item: any, method = 'item/completed', threadId = 'codex-thread-1', turnId = 'turn-1') =>
+      transport.emit({ method, params: { threadId, turnId, item } });
+    const mcp = { type: 'mcpToolCall', id: 'mcp-image', status: 'completed', tool: 'draw',
+      result: { content: [{ type: 'image', data, mimeType: 'image/png' }, { type: 'text', text: 'created' }] } };
+    emit(mcp, 'item/started');
+    expect(onImage).not.toHaveBeenCalled();
+    emit(mcp, 'item/completed', 'wrong-thread');
+    emit(mcp, 'item/completed', 'codex-thread-1', 'old-turn');
+    expect(onImage).not.toHaveBeenCalled();
+    emit(mcp);
+    expect(events).toEqual(['image', 'result']);
+    expect(onImage).toHaveBeenCalledWith({ type: 'image', data, mimeType: 'image/jpeg' });
+    expect(onToolResult.mock.calls[0][0]).toMatchObject({ is_error: false, content: expect.stringContaining('created') });
+    expect(onToolResult.mock.calls[0][0].content).not.toContain(data);
+    emit(mcp);
+    emit({ type: 'dynamicToolCall', id: 'dynamic-image', status: 'completed', success: true,
+      contentItems: [{ type: 'inputImage', imageUrl: `data:image/jpeg;base64,${data}` }, { type: 'inputAudio', audioUrl: 'private-audio' }] });
+    expect(onImage).toHaveBeenCalledTimes(2);
+    expect(onToolResult.mock.calls.at(-1)![0].content).not.toContain('private-audio');
+    emit({ type: 'imageGeneration', id: 'file-image', status: 'completed', result: '', savedPath: '/workspace/generated.png' });
+    expect(onImageFile).toHaveBeenCalledWith('/workspace/generated.png');
+    emit({ type: 'imageView', id: 'view', status: 'completed', savedPath: '/workspace/ignored.png' });
+    emit({ ...mcp, id: 'failed', status: 'failed' });
+    expect(onImage).toHaveBeenCalledTimes(2);
+    expect(onImageFile).toHaveBeenCalledTimes(1);
+    emit({ type: 'imageGeneration', id: 'bad', status: 'completed', result: 'invalid' });
+    emit({ type: 'imageGeneration', id: 'bad-again', status: 'completed', result: 'invalid' });
+    expect(onStream).toHaveBeenCalledTimes(1);
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    expect((await running).output).toContain('could not be attached');
+    emit({ ...mcp, id: 'late' });
+    expect(onImage).toHaveBeenCalledTimes(2);
+
+    const nextImage = vi.fn();
+    transport.nextTurnId = 'turn-2';
+    const next = executor.execute('another reply', { onImage: nextImage });
+    await vi.waitFor(() => expect(transport.requests.filter(request => request.method === 'turn/start')).toHaveLength(2));
+    emit(mcp, 'item/completed', 'codex-thread-1', 'turn-2');
+    expect(nextImage).toHaveBeenCalledTimes(1);
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-2', status: 'completed' } } });
+    await next;
   });
 
   it('exposes a safe retry signal for structured context errors before side effects', async () => {

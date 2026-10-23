@@ -23,6 +23,9 @@ vi.mock('child_process', async (importActual) => {
 });
 
 const mockSpawn = vi.mocked(spawn);
+const outputImage = { type: 'image' as const, mimeType: 'image/png', data: Buffer.from(
+  '89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000b49444154789c636000020000050001a5f645400000000049454e44ae426082', 'hex',
+).toString('base64') };
 const testContexts = new Set<{ handler: MessageHandler; workingDirectory: string }>();
 
 /** A fake ChildProcess with EventEmitter stdout/stderr. */
@@ -547,7 +550,7 @@ describe('MessageHandler', () => {
         const directory = await mkdtemp(path.join(tmpdir(), 'remote-cli-web-image-test-'));
         await writeFile(path.join(directory, 'private-screenshot.png'), Buffer.from('synthetic-image-data'));
         ctx.mockThreadManager.getDefaultThread().workingDirectory = directory;
-        const detector = vi.spyOn(localImages, 'readLocalImages');
+        const detector = vi.spyOn(localImages, 'readLocalImagePath');
         const guard = vi.spyOn(DirectoryGuard.prototype, 'isSafePath').mockReturnValue(true);
         const native = codexWebSearchResult({ id: 'web-result', results: [{ title: 'Documentation', snippet: 'See ./private-screenshot.png' }] });
         const { webSearch, ...textOnly } = native;
@@ -577,7 +580,7 @@ describe('MessageHandler', () => {
         const directory = await mkdtemp(path.join(tmpdir(), 'remote-cli-web-update-test-'));
         await writeFile(path.join(directory, 'private-screenshot.png'), Buffer.from('synthetic-image-data'));
         ctx.mockThreadManager.getDefaultThread().workingDirectory = directory;
-        const detector = vi.spyOn(localImages, 'readLocalImages');
+        const detector = vi.spyOn(localImages, 'readLocalImagePath');
         const guard = vi.spyOn(DirectoryGuard.prototype, 'isSafePath').mockReturnValue(true);
         ctx.mockExecutor.execute.mockImplementation(async (_prompt: string, options: any) => {
           options.onToolUse({ id: 'web-update', name, title: 'web_search', input: {} });
@@ -601,7 +604,7 @@ describe('MessageHandler', () => {
       });
 
     it('retains result-first web provenance when a pending call later acquires its identity', async () => {
-      const detector = vi.spyOn(localImages, 'readLocalImages').mockResolvedValue([]);
+      const detector = vi.spyOn(localImages, 'readLocalImagePath').mockResolvedValue(null);
       const native = codexWebSearchResult({ id: 'web-orphan', results: [{ snippet: 'See ./private-screenshot.png' }] });
       const { webSearch: _webSearch, ...textOnly } = native;
       ctx.mockExecutor.execute.mockImplementation(async (_prompt: string, options: any) => {
@@ -617,7 +620,7 @@ describe('MessageHandler', () => {
     });
 
     it('clears web provenance when a new local tool explicitly reuses the same ID', async () => {
-      const detector = vi.spyOn(localImages, 'readLocalImages').mockResolvedValue([]);
+      const detector = vi.spyOn(localImages, 'readLocalImagePath').mockResolvedValue(null);
       ctx.mockExecutor.execute.mockImplementation(async (_prompt: string, options: any) => {
         options.onToolUse({ id: 'reused', name: 'WebSearch', input: {} });
         options.onToolResult({ tool_use_id: 'reused', content: 'See ./private-screenshot.png', is_error: false });
@@ -627,13 +630,12 @@ describe('MessageHandler', () => {
       });
       try {
         await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-reused-image', content: 'make a chart', timestamp: Date.now() } as any);
-        expect(detector.mock.calls.filter(([text]) => text.trim()).map(([text]) => text)).toEqual(['Saved ./chart.png']);
+        expect(detector.mock.calls.map(([filePath]) => filePath)).toEqual(['./chart.png']);
       } finally { detector.mockRestore(); }
     });
 
     it('contains image detection failures during tool streaming and final output', async () => {
-      const detector = vi.spyOn(localImages, 'readLocalImages').mockRejectedValue(new Error('Synthetic detection failure'));
-      const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const detector = vi.spyOn(localImages, 'readLocalImagePath').mockRejectedValue(new Error('Synthetic detection failure'));
       let finish!: (result: any) => void;
       ctx.mockExecutor.execute.mockImplementation((_prompt: string, options: any) => {
         options.onToolResult({ tool_use_id: 'failed-image-scan', content: 'Saved chart.png', is_error: false });
@@ -644,7 +646,7 @@ describe('MessageHandler', () => {
       });
       try {
         const run = ctx.handler.handleMessage({ type: 'command', messageId: 'image-failure', content: 'make a chart', timestamp: Date.now() } as any);
-        await vi.waitFor(() => expect(warning).toHaveBeenCalledWith('Failed to forward local images; continuing task output.'));
+        await vi.waitFor(() => expect(detector).toHaveBeenCalledTimes(1));
         expect(detector).toHaveBeenCalledTimes(1);
         finish({ success: true, output: 'Completed chart.png' });
         await run;
@@ -654,10 +656,12 @@ describe('MessageHandler', () => {
         expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
           type: 'stream', messageId: 'image-failure', streamType: 'text', chunk: 'Completed chart.png',
         }));
-        expect(detector).toHaveBeenCalledTimes(2);
-        expect(warning).toHaveBeenCalledTimes(2);
+        expect(detector).toHaveBeenCalledTimes(3);
+        expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+          type: 'stream', streamType: 'text', chunk: expect.stringContaining('Images omitted: 3'),
+        }));
         expect(ctx.mockWsClient.send.mock.calls.some(([value]: any[]) => value.streamType === 'image')).toBe(false);
-        detector.mockResolvedValue([]);
+        detector.mockResolvedValue(null);
         ctx.mockExecutor.execute.mockResolvedValue({ success: true, output: 'Next task completed' });
         await ctx.handler.handleMessage({ type: 'command', messageId: 'after-image-failure', content: 'next task', timestamp: Date.now() } as any);
         await vi.waitFor(() => expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
@@ -666,12 +670,11 @@ describe('MessageHandler', () => {
       } finally {
         finish?.({ success: true, output: 'Done' });
         detector.mockRestore();
-        warning.mockRestore();
       }
     });
 
     it('skips non-string tool output without attempting local image detection', async () => {
-      const detector = vi.spyOn(localImages, 'readLocalImages').mockResolvedValue([]);
+      const detector = vi.spyOn(localImages, 'readLocalImagePath').mockResolvedValue(null);
       ctx.mockExecutor.execute.mockImplementation(async (_prompt: string, options: any) => {
         options.onToolResult({ tool_use_id: 'malformed-tool', content: [{ type: 'text', text: 'chart.png' }], is_error: false });
         return { success: true, output: 'Done' };
@@ -679,18 +682,158 @@ describe('MessageHandler', () => {
       try {
         await ctx.handler.handleMessage({ type: 'command', messageId: 'malformed-image', content: 'inspect', timestamp: Date.now() } as any);
         await vi.waitFor(() => expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'response', messageId: 'malformed-image', success: true })));
-        expect(detector).toHaveBeenCalledTimes(1);
-        expect(detector).toHaveBeenCalledWith('\nDone', expect.any(String), expect.any(Function));
+        expect(detector).not.toHaveBeenCalled();
       } finally { detector.mockRestore(); }
+    });
+
+    it('forwards a native image without Markdown and deduplicates the file fallback', async () => {
+      const reader = vi.spyOn(localImages, 'readLocalImagePath').mockResolvedValue({ path: '/tmp/chart.png', ...outputImage });
+      ctx.mockExecutor.execute.mockImplementation(async (_prompt: string, options: any) => {
+        options.onImage(outputImage);
+        options.onImageFile('./chart.png');
+        return { success: true, output: '![chart](./chart.png)' };
+      });
+      try {
+        await ctx.handler.handleMessage({ type: 'command', messageId: 'native-image', content: 'draw', timestamp: Date.now() } as any);
+        await vi.waitFor(() => expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'response', messageId: 'native-image' })));
+        const messages = ctx.mockWsClient.send.mock.calls.map(([message]: any[]) => message);
+        expect(messages.filter((message: any) => message.streamType === 'image')).toHaveLength(1);
+        expect(messages.findIndex((message: any) => message.streamType === 'image')).toBeLessThan(messages.findIndex((message: any) => message.type === 'response'));
+      } finally { reader.mockRestore(); }
+    });
+
+    it('waits for an accepted saved image after execute resolves before sending the final response', async () => {
+      let resolve!: (value: any) => void;
+      const reader = vi.spyOn(localImages, 'readLocalImagePath').mockImplementation(() => new Promise(done => { resolve = done; }));
+      ctx.mockExecutor.execute.mockImplementation(async (_prompt: string, options: any) => {
+        options.onImageFile('./chart.png');
+        return { success: true, output: 'Done' };
+      });
+      try {
+        const run = ctx.handler.handleMessage({ type: 'command', messageId: 'delayed-image', content: 'draw', timestamp: Date.now() } as any);
+        await vi.waitFor(() => expect(reader).toHaveBeenCalled());
+        expect(ctx.mockWsClient.send).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'response', messageId: 'delayed-image' }));
+        resolve({ path: '/tmp/chart.png', ...outputImage });
+        await run;
+        await vi.waitFor(() => expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'response', messageId: 'delayed-image', success: true })));
+        expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ streamType: 'image', messageId: 'delayed-image' }));
+      } finally { resolve?.(null); reader.mockRestore(); }
+    });
+
+    it.each(['disconnect', 'abort', 'generation', 'backend', 'destroy'])('rejects a delayed saved image after %s', async change => {
+      let resolve!: (value: any) => void;
+      const reader = vi.spyOn(localImages, 'readLocalImagePath').mockImplementation(() => new Promise(done => { resolve = done; }));
+      ctx.mockExecutor.execute.mockImplementation(async (_prompt: string, options: any) => {
+        options.onImageFile('./chart.png');
+        return { success: true, output: 'Done' };
+      });
+      try {
+        const run = ctx.handler.handleMessage({ type: 'command', messageId: 'stale-image', content: 'draw', timestamp: Date.now() } as any);
+        await vi.waitFor(() => expect(reader).toHaveBeenCalled());
+        let abort: Promise<unknown> | undefined;
+        if (change === 'disconnect') ctx.mockWsClient.onClose.mock.calls[0][0]();
+        if (change === 'abort') abort = ctx.handler.handleMessage({ type: 'command', messageId: 'stop-image', content: '/abort', timestamp: Date.now() } as any);
+        if (change === 'generation') ctx.mockThreadManager.getDefaultThread().delegationWorkspaceGeneration = 1;
+        if (change === 'backend') vi.mocked(ctx.mockThreadPool.getBackendKey).mockReturnValue('codex');
+        if (change === 'destroy') await ctx.handler.destroy();
+        resolve({ path: '/tmp/chart.png', ...outputImage });
+        await run;
+        await abort;
+        await vi.waitFor(() => expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'response', messageId: 'stale-image' })));
+        expect(ctx.mockWsClient.send).not.toHaveBeenCalledWith(expect.objectContaining({ streamType: 'image', messageId: 'stale-image' }));
+      } finally { resolve?.(null); reader.mockRestore(); }
+    });
+
+    it('accepts new image events after reconnect without replaying pre-disconnect reads', async () => {
+      let resolveRead!: (value: any) => void;
+      let resume!: () => void;
+      const reader = vi.spyOn(localImages, 'readLocalImagePath').mockImplementation(() => new Promise(done => { resolveRead = done; }));
+      ctx.mockExecutor.execute.mockImplementation(async (_prompt: string, options: any) => {
+        options.onImageFile('./old.png');
+        await new Promise<void>(done => { resume = done; });
+        options.onImage(outputImage);
+        return { success: true, output: 'Done' };
+      });
+      try {
+        const run = ctx.handler.handleMessage({ type: 'command', messageId: 'recover-image', content: 'draw', timestamp: Date.now() } as any);
+        await vi.waitFor(() => expect(reader).toHaveBeenCalled());
+        ctx.mockWsClient.onClose.mock.calls[0][0]();
+        resolveRead({ path: '/tmp/old.png', ...outputImage });
+        resume();
+        await run;
+        await vi.waitFor(() => expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'response', messageId: 'recover-image' })));
+        expect(ctx.mockWsClient.send.mock.calls.filter(([message]: any[]) => message.streamType === 'image')).toHaveLength(1);
+      } finally { resolveRead?.(null); resume?.(); reader.mockRestore(); }
+    });
+
+    it('does not rescan pre-disconnect Markdown from the streamed or final aggregate', async () => {
+      let resume!: () => void;
+      const reader = vi.spyOn(localImages, 'readLocalImagePath').mockResolvedValue({ path: '/tmp/old.png', ...outputImage });
+      ctx.mockExecutor.execute.mockImplementation(async (_prompt: string, options: any) => {
+        options.onStream('![old](./old.png)');
+        await new Promise<void>(done => { resume = done; });
+        options.onStream('New output after reconnect');
+        return { success: true, output: '![old](./old.png)\nNew output after reconnect' };
+      });
+      try {
+        const run = ctx.handler.handleMessage({ type: 'command', messageId: 'old-image-text', content: 'draw', timestamp: Date.now() } as any);
+        await vi.waitFor(() => expect(resume).toBeTypeOf('function'));
+        ctx.mockWsClient.onClose.mock.calls[0][0]();
+        resume();
+        await run;
+        await vi.waitFor(() => expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'response', messageId: 'old-image-text' })));
+        expect(reader).not.toHaveBeenCalled();
+      } finally { resume?.(); reader.mockRestore(); }
+    });
+
+    it('preserves a final Markdown image after a long streamed prefix', async () => {
+      const reader = vi.spyOn(localImages, 'readLocalImagePath').mockResolvedValue({ path: '/tmp/chart.png', ...outputImage });
+      ctx.mockExecutor.execute.mockImplementation(async (_prompt: string, options: any) => {
+        options.onStream('x'.repeat(600 * 1024));
+        return { success: true, output: '![chart](./chart.png)' };
+      });
+      try {
+        await ctx.handler.handleMessage({ type: 'command', messageId: 'long-image-text', content: 'draw', timestamp: Date.now() } as any);
+        await vi.waitFor(() => expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'response', messageId: 'long-image-text' })));
+        expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ streamType: 'image', messageId: 'long-image-text' }));
+      } finally { reader.mockRestore(); }
+    });
+
+    it('does not deduplicate an image discarded before recovery acknowledgement', async () => {
+      const raw = vi.fn();
+      const recovery = new TaskRecovery(raw);
+      recovery.registered(true);
+      ctx.mockWsClient.trackTask.mockImplementation((task: any) => recovery.track(task));
+      ctx.mockWsClient.send.mockImplementation((message: any) => recovery.send(message));
+      ctx.mockWsClient.canSendTaskOutput = (id: string) => recovery.canSendTaskOutput(id);
+      ctx.mockExecutor.execute.mockImplementation(async (_prompt: string, options: any) => {
+        recovery.disconnected();
+        ctx.mockWsClient.onClose.mock.calls[0][0]();
+        recovery.registered(true);
+        options.onImage(outputImage);
+        const resume = raw.mock.calls.map(([message]) => message).find(message => message.type === 'task_resume');
+        expect(resume).toBeDefined();
+        recovery.acknowledge({ type: 'task_resume_ack', messageId: resume.messageId,
+          recoveryId: resume.taskResume.recoveryId, state: resume.taskResume.state, success: true });
+        options.onImage(outputImage);
+        return { success: true, output: 'Done' };
+      });
+      try {
+        await ctx.handler.handleMessage({ type: 'command', messageId: 'recover-dedupe', openId: 'owner', content: 'draw', timestamp: Date.now() } as any);
+        await vi.waitFor(() => expect(raw).toHaveBeenCalledWith(expect.objectContaining({ type: 'response', messageId: 'recover-dedupe' })));
+        expect(raw.mock.calls.filter(([message]) => message.streamType === 'image')).toHaveLength(1);
+      } finally { recovery.destroy(); }
     });
 
     it('should forward a local image path from a tool result', async () => {
       const directory = await mkdtemp(path.join(tmpdir(), 'remote-cli-message-test-'));
       const imagePath = path.join(directory, 'chart.png');
-      await writeFile(imagePath, Buffer.from('image-data'));
+      const imageBytes = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000b49444154789c636000020000050001a5f645400000000049454e44ae426082', 'hex');
+      await writeFile(imagePath, imageBytes);
       const thread = ctx.mockThreadManager.getDefaultThread();
       thread.workingDirectory = directory;
       const isSafePath = vi.spyOn(DirectoryGuard.prototype, 'isSafePath').mockReturnValue(true);
+      const roots = vi.spyOn(DirectoryGuard.prototype, 'getAllowedDirectories').mockReturnValue([directory]);
 
       ctx.mockExecutor.execute.mockImplementation(async (_prompt: string, options: any) => {
         options.onToolResult({ tool_use_id: 'tool-1', content: 'Saved chart.png', is_error: false });
@@ -709,10 +852,11 @@ describe('MessageHandler', () => {
           type: 'stream',
           streamType: 'image',
           messageId: 'msg-local-image',
-          image: { type: 'image', data: Buffer.from('image-data').toString('base64'), mimeType: 'image/png' },
+          image: { type: 'image', data: imageBytes.toString('base64'), mimeType: 'image/png' },
         })));
       } finally {
         isSafePath.mockRestore();
+        roots.mockRestore();
         await rm(directory, { recursive: true, force: true });
       }
     });

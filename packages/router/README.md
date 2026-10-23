@@ -63,6 +63,12 @@ From CLI and Router 1.6.150, the same startup/hourly status read also checks nat
 
 Claude tool-result content blocks are normalized to text by the CLI; embedded media and unknown payloads are not scanned for local files. Local image detection and forwarding are best-effort: failures do not fail the task or terminate the CLI. Web-result excerpts remain excluded from local-file scanning.
 
+CLI and Router 1.6.173 add direct forwarding for recognized successful Codex native image results, MCP image blocks, and dynamic-tool inline images. These images do not require a Markdown link. Native saved-file references use the same local directory policy as Markdown images. Structured extraction does not traverse arbitrary JSON path fields or publish image-view events, and remote URLs are not fetched. Ordinary tool-result text retains local-path detection; shell tools that return only text still need a local path or Markdown image link.
+
+Each reply accepts up to 32 image candidates and displays up to 8 distinct images, with a 2 MiB decoded limit per image. Supported raster formats are checked from their bytes. Local files must pass canonical directory and regular-file checks; denied, missing, invalid, oversized, or timed-out images produce a bounded omission notice while text can still complete. Identical bytes are deduplicated within the reply, including native and Markdown copies; changed bytes at the same path can be displayed again. Reads and uploads have bounded concurrency and waiting times, and late results cannot be attached after cancellation or replacement.
+
+Upgrade both CLI and Router for the complete fix: the CLI discovers and validates images, while the Router waits for admitted uploads before completing the card. The image wire format remains compatible with older image-capable peers, but an older Router retains its upload/finalization race. Delivery is best-effort with no image replay across disconnects; a model saying it sent an image is not a delivery acknowledgement.
+
 ## Overview
 
 The router server acts as a bridge between Feishu messaging and developer machines running the remote-cli client. It handles:
