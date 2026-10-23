@@ -2,6 +2,12 @@
 
 这里只记录用户能感知的变化；英文技术细节见 CHANGELOG.md。
 
+## [1.6.172] - 2026-10-23
+
+### 在 Codex 线程中持续推进目标
+- [codex-goal|Codex 目标] 支持 /goal 创建和查看原生目标，使用 pause、resume、clear 暂停、恢复或清除，并可通过 --budget 显式设置 token 预算。
+- [codex-goal|Codex 目标] 连续执行期间保留输出和审批入口；首版启动目标前需关闭当前线程的 managed delegation 并清空队列，进程恢复后需显式继续目标。
+
 ## [1.6.171] - 2026-10-23
 
 ### 稳定展开线程列表

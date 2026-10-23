@@ -398,6 +398,19 @@ Thread switch panels show `Reply from:` with the reply's full thread name and wo
 
 From Router 1.6.171, completed cards keep the thread buttons and **+ New** inside a native Feishu **Switch thread** folding panel, collapsed by default. Click its header to expand or collapse the list without sending a command or changing the input target. The reply-source caption remains visible. Selecting a thread uses the existing routing behavior. Hidden buttons still count toward card limits; unrelated full-card updates can reset the panel to its default collapsed state. This uses the existing Card 2.0 client requirement (Feishu 7.20 or newer).
 
+From CLI 1.6.172, Codex threads support native goals through `/goal` (status), `/goal <objective>` (start), `/goal pause`, `/goal resume`, and `/goal clear`. Start or resume only when the thread and queue are idle, with managed delegation explicitly disabled using `/delegation off`. This initial restriction does not disable Codex's native subagents. Optional `--budget <tokens>` on start or resume sets an explicit positive token budget; omitting it does not invent a budget. For example:
+
+```text
+/delegation off
+/goal --budget 40000 Fix the failing tests and verify the public API stays compatible
+/goal
+/goal pause
+/goal resume
+/goal clear
+```
+
+Codex owns the persisted goal and automatic continuations; remote-cli keeps the execution card, approvals, and busy-state reservation across native turns. Status, pause, clear, and `/abort` remain available during work. Pause and clear stop current goal work; `/abort` pauses the goal, while clear removes the goal without clearing the conversation. After process loss, inspect with `/goal` and explicitly recover with `/goal resume`; status queries do not load or start the goal. Send attachments in an ordinary message before starting a goal. Use a Codex build exposing the native thread-goal APIs (verified with 0.163.0); unavailable APIs or disabled goals report an error. Other backends reject `/goal`. See [the native goal API](https://learn.chatgpt.com/docs/app-server#manage-a-thread-goal).
+
 When a client thread is busy, the Router sends a confirmation card before accepting another message into its queue. `/queue` shows queue state, `/queue clear` discards queued messages, and `/abort` stops the active task and clears that thread's queue. Messages received while abort cleanup is in progress wait for the client backend to become safe before execution starts.
 
 ## Expert Usage
