@@ -2,6 +2,8 @@
 
 Remote control Claude Code, AGY CLI, Codex CLI, OpenCode CLI, Kimi Code CLI, ZCode, or Pi from anywhere using your mobile phone through Feishu (Lark) messaging.
 
+![Remote CLI architecture](../../docs/images/remote-cli-architecture.png)
+
 ## Features
 
 - **Remote Control**: Control your local development environment from anywhere via mobile

@@ -337,11 +337,7 @@ Older CLIs keep their existing status output.
 
 ## Architecture
 
-```
-Mobile Phone -> Feishu -> Router Server -> WebSocket -> Local CLI -> AI Backend
-                                                                        |
-Mobile Phone <- Feishu <- Router Server <- WebSocket <- Local CLI <- Results
-```
+![Remote CLI architecture](../../docs/images/remote-cli-architecture.png)
 
 ## Nginx Reverse Proxy
 

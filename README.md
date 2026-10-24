@@ -125,38 +125,7 @@ You only need to send one message from your phone. Claude Code, AGY CLI, Codex C
 
 ## Architecture
 
-```
-┌─────────────────┐         ┌──────────────────────────────┐
-│  Feishu Server  │         │  Developer A's Work PC       │
-│                 │         │  (Mac/Linux)                 │
-│  Developer A's  │◀───────▶│  ┌─────────────────────────┐ │
-│  Phone          │         │  │  remote-cli (local)     │ │
-│  Private Chat   │         │  │  - WebSocket Client     │ │
-│  with Bot       │         │  │  - AI CLI Executor      │ │
-└─────────────────┘         │  │    (Claude/AGY/Codex/OpenCode/Kimi/ZCode/Pi)   │ │
-        │                   │  │  - Security Directory   │ │
-        │                   │  │    Guard                │ │
-        │                   │  └──────────┬──────────────┘ │
-        │                   │             ▼                 │
-        │                   │  Claude Code / AGY / Codex / OpenCode / Kimi / ZCode / Pi  │
-        ▼                   │  (Local AI Backend)           │
-┌─────────────────┐         └──────────────────────────────┘
-│  Router Server  │
-│  (Team Deploy)  │         ┌──────────────────────────────┐
-│  ┌───────────┐  │         │  Developer B's Work PC       │
-│  │ Feishu WS │  │         │  ┌─────────────────────────┐ │
-│  │ Handler   │  │◀───────▶│  │  remote-cli (local)     │ │
-│  └───────────┘  │         │  └─────────────────────────┘ │
-│  ┌───────────┐  │         └──────────────────────────────┘
-│  │WebSocket  │  │
-│  │   Hub     │  │
-│  └───────────┘  │
-│  ┌───────────┐  │
-│  │  Binding  │  │
-│  │  Registry │  │
-│  └───────────┘  │
-└─────────────────┘
-```
+![Remote CLI architecture](docs/images/remote-cli-architecture.png)
 
 ## Quick Start
 
