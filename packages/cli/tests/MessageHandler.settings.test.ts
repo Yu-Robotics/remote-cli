@@ -1,3 +1,4 @@
+import { ThreadContextReset } from '../src/thread/ThreadContextReset';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm, mkdir, realpath, symlink } from 'fs/promises';
 import os from 'os';
@@ -28,6 +29,7 @@ async function fixture(temporaryRoot = tmpdir()) {
   };
   const preview = { ...executor, setModel: vi.fn(async () => ({ success: true })), setEffort: vi.fn(async () => ({ success: true })), clearModel: vi.fn(async () => {}) };
   const manager = {
+    contextResets: new ThreadContextReset(path.join(cwd, 'reset-markers')),
     getDefaultThread: vi.fn(() => threads[0]), getThread: vi.fn((id: string) => threads.find(thread => thread.id === id)),
     listThreads: vi.fn(() => threads),
     updateThread: vi.fn(async (id: string, fields: Partial<Thread>) => { const thread = threads.find(entry => entry.id === id)!; Object.assign(thread, fields); return thread; }),

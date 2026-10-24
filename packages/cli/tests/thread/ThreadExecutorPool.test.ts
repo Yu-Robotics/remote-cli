@@ -203,6 +203,54 @@ describe('ThreadExecutorPool', () => {
     it('is a no-op when pool is empty', async () => {
       await expect(pool.destroyAll()).resolves.not.toThrow();
     });
+
+    it('joins timed-out reset cleanup during shutdown without releasing reset intent', async () => {
+      pool = new ThreadExecutorPool(manager, directoryGuard, executorConfig, mockExecutorFactory, 1);
+      const thread = manager.getDefaultThread();
+      const executor = pool.getExecutor(thread.id);
+      let release!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      vi.mocked(executor.destroy).mockImplementationOnce(() => gate);
+      await manager.contextResets.begin(thread.id);
+      await expect(pool.clearThreadContext(thread.id)).rejects.toThrow('shutdown timed out');
+      let settled = false;
+      const shutdown = pool.destroyAll({ deleteData: false, shutdown: true }).then(() => { settled = true; });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      expect(executor.destroy).toHaveBeenCalledOnce();
+      release();
+      await shutdown;
+      expect(executor.resetContext).toHaveBeenCalledOnce();
+      expect(manager.contextResets.isPending(thread.id)).toBe(true);
+      expect(() => pool.getExecutor(thread.id)).toThrow('incomplete');
+      await manager.contextResets.complete(thread.id);
+    });
+
+    it('retains unconfirmed executors for shutdown retry while stopping other threads', async () => {
+      const thread = manager.getDefaultThread();
+      const sibling = await manager.createThread('shutdown-sibling', tmpDir);
+      const waitForExit = vi.fn().mockRejectedValueOnce(new Error('Synthetic unconfirmed exit')).mockResolvedValue(undefined);
+      const deleteThreadData = vi.fn();
+      mockExecutorFactory.mockImplementationOnce(() => makeMockExecutor({ waitForExit, deleteThreadData }));
+      const executor = pool.getExecutor(thread.id);
+      const other = pool.getExecutor(sibling.id);
+      await manager.contextResets.begin(thread.id);
+      await expect(pool.destroyAll({ deleteData: false, shutdown: true })).rejects.toThrow('unconfirmed exit');
+      expect(other.destroy).toHaveBeenCalledOnce();
+      expect(deleteThreadData).not.toHaveBeenCalled();
+      expect(manager.contextResets.isPending(thread.id)).toBe(true);
+      await expect(pool.destroyAll({ deleteData: false, shutdown: true })).resolves.toBeUndefined();
+      expect(executor.destroy).toHaveBeenCalledTimes(2);
+      expect(other.destroy).toHaveBeenCalledOnce();
+      expect(waitForExit).toHaveBeenCalledTimes(2);
+      await manager.contextResets.complete(thread.id);
+    });
+
+    it('rejects shutdown that would delete conversation data', async () => {
+      const executor = pool.getExecutor(manager.getDefaultThread().id);
+      await expect(pool.destroyAll({ shutdown: true })).rejects.toThrow('preserve conversation data');
+      expect(executor.destroy).not.toHaveBeenCalled();
+    });
   });
 
   describe('switchBackend', () => {

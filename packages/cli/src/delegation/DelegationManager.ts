@@ -260,6 +260,7 @@ export class DelegationManager {
   }
 
   begin(parent: DelegationParent): DelegationScope {
+    this.laneStore.assertContextReady(parent.thread.id);
     if (this.scopes.has(parent.thread.id)) throw new Error('This thread already owns a delegation turn');
     // Fail with recovery guidance before realpathSync reports a raw ENOENT.
     // This must stay above scopes.set: a throw after registration would leave
@@ -1261,6 +1262,18 @@ ${prompt}`));
     await this.laneStore.clearContext(laneId, generation, { threadId: thread.id,
       workingDirectory: cwd, workspaceGeneration: thread.delegationWorkspaceGeneration ?? 0 },
     clearDelegatedWorkerContext);
+  }
+
+  async assertThreadContextResettable(threadId: string): Promise<void> {
+    if (this.hasActiveTasks(threadId) || [...this.workspaces.values()].some(owner => owner.threadId === threadId)) {
+      throw new Error('Cannot clear thread context while delegated work is queued, active, or awaiting confirmed shutdown. Wait before retrying /clear.');
+    }
+    await this.laneStore.assertThreadContextResettable(threadId);
+  }
+
+  async clearThreadContexts(threadId: string): Promise<void> {
+    await this.assertThreadContextResettable(threadId);
+    await this.laneStore.clearThreadContexts(threadId, clearDelegatedWorkerContext);
   }
 
   /** Forget one backend lane or all lanes for an idle parent thread. */

@@ -35,6 +35,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { isZCodeAvailable } from '../executor/zcode/ZCodeCommand';
 import { DELEGATION_LIMITS, DelegationManager, workspacesOverlap, type DelegationScope, type DelegatedTaskResult } from '../delegation/DelegationManager';
 import { DelegationBridge } from '../delegation/DelegationBridge';
+import { DelegatedWorkerSessionStore } from '../delegation/DelegatedWorkerSessionStore';
 import { DELEGATION_BACKENDS, DELEGATION_INSTRUCTIONS, type DelegationBackend } from '../delegation/contract';
 import { formatDelegationStatus } from '../delegation/DelegationStatusFormatter';
 import { workerAvailability } from '../delegation/WorkerPolicy';
@@ -258,7 +259,8 @@ export class MessageHandler {
       this.fileInbox?.disconnect();
       for (const delivery of this.imageDeliveries.values()) delivery.invalidatePending();
     });
-    this.delegation = new DelegationManager(directoryGuard);
+    this.delegation = new DelegationManager(directoryGuard, undefined, undefined, undefined, undefined, undefined,
+      new DelegatedWorkerSessionStore(undefined, threadManager.contextResets));
     this.settingsCatalogReader = new SettingsCatalogReader(directoryGuard);
     this.settingsService = new SettingsService({
       state: id => this.settingsState(id),
@@ -461,7 +463,11 @@ export class MessageHandler {
   private async handleCommandMessage(message: IncomingMessage, fileOrder?: number): Promise<void> {
     const threadId = message.threadId ?? this.threadManager.getDefaultThread().id;
     const content = message.content?.trim() ?? '';
-    const body = () => this.handleAdmittedCommandMessage(message, fileOrder);
+    const clearing = content === '/clear' || content === '/new';
+    const body = () => {
+      if (!clearing) this.threadManager.contextResets.assertReady(threadId);
+      return this.handleAdmittedCommandMessage(message, fileOrder);
+    };
     this.messageOpenIds.set(message.messageId, message.openId);
     if (isSessionControl(content)) {
       if (!this.threadManager.getThread(threadId)) {
@@ -470,11 +476,13 @@ export class MessageHandler {
       }
       let response: { success: boolean; output?: string; error?: string };
       try {
+        this.threadManager.contextResets.assertReady(threadId);
         const control = () => this.sessionControl.handle(content, { openId: message.openId, threadId });
         // Only Pi confirmations mutate native context. Other catalogs remain read-only.
         if (this.threadPool.getBackendKey(threadId) === 'pi' && /^\/(?:resume|r|session)\s+confirm(?:\s|$)/i.test(content)) {
           try {
             response = await this.settingsAdmission.mutation(threadId, async () => {
+              this.threadManager.contextResets.assertReady(threadId);
               this.settingsService.invalidate(threadId);
               try { return await control(); }
               finally { this.settingsService.invalidate(threadId); }
@@ -492,7 +500,7 @@ export class MessageHandler {
     try {
       // Abort and addressed human replies must remain available during native work.
       if (content === '/abort' || /^(?:yes|no)(?:\s|$)/.test(content) || content.startsWith('/input ')) return await body();
-      if (/^\/(?:backend|model|effort|cd)\s+\S/.test(content)) {
+      if (clearing || /^\/(?:backend|model|effort|cd)\s+\S/.test(content)) {
         const global = /^\/backend\s/.test(content) && !/\s@$/.test(content);
         await this.settingsAdmission.mutation(global ? '*' : threadId, async () => {
           this.settingsService.invalidate(global ? undefined : threadId);
@@ -506,7 +514,7 @@ export class MessageHandler {
         });
       }
     } catch (error) {
-      this.sendResponse(message.messageId, threadId, { success: false, error: error instanceof Error ? error.message : 'Command admission failed.' });
+      this.sendResponse(message.messageId, threadId, { success: false, error: error instanceof Error ? error.message : 'Command admission failed.' }, clearing);
     }
   }
 
@@ -541,6 +549,10 @@ export class MessageHandler {
     }
 
     const settingsCommand = content?.trim() ?? '';
+    if (settingsCommand === '/clear' || settingsCommand === '/new') {
+      await this.clearThreadConversation(messageId, resolvedThreadId);
+      return;
+    }
     if (this.directoryCardsSupported && openId && settingsCommand === '/cd') {
       try {
         const menu = await this.directoryBrowser.open(resolvedThreadId, openId, messageId);
@@ -990,6 +1002,29 @@ export class MessageHandler {
       success: !error, ...(error ? { error } : {}), timestamp: Date.now() });
   }
 
+  private async clearThreadConversation(messageId: string, threadId: string): Promise<void> {
+    if (this.threadPool.isThreadBusy(threadId) || this.hasThreadQueueState(threadId)
+      || this.abortOperations.has(threadId) || this.activeThreadOperations.has(threadId)) {
+      throw new Error('This thread is busy or has queued messages. Wait for it to finish and clear its queue before retrying /clear.');
+    }
+    this.threadPool.assertContextResettable(threadId);
+    const token = this.beginThreadOperation(threadId);
+    try {
+      await this.delegation.assertThreadContextResettable(threadId);
+      await this.threadManager.contextResets.begin(threadId);
+      await this.threadPool.clearThreadContext(threadId);
+      await this.delegation.clearThreadContexts(threadId);
+      await this.threadManager.contextResets.complete(threadId);
+      this.sendResponse(messageId, threadId, { success: true,
+        output: 'Conversation context cleared for all direct backends and managed workers in this thread.' }, true);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'Local context storage is unavailable';
+      throw new Error(`Could not clear thread conversation: ${detail}. Check local CLI storage and retry /clear or /new.`);
+    } finally {
+      this.finishThreadOperation(threadId, token);
+    }
+  }
+
   /**
    * Handle built-in commands (thread-scoped).
    * Returns true if handled.
@@ -1233,15 +1268,6 @@ Remote Machine commands:
 - /cancel - Cancel pending replace operation
 
 You can also use natural language commands to control Claude Code CLI.`,
-      });
-      return true;
-    }
-
-    if (trimmed === '/clear' || trimmed === '/new') {
-      executor.resetContext();
-      this.sendResponse(messageId, threadId, {
-        success: true,
-        output: '✅ Conversation context cleared',
       });
       return true;
     }
@@ -3003,6 +3029,7 @@ You can also use natural language commands to control Claude Code CLI.`,
   }
 
   private settingsState(threadId: string): SettingsState | undefined {
+    this.threadManager.contextResets.assertReady(threadId);
     const thread = this.threadManager.getThread(threadId);
     if (!thread) return undefined;
     const projection = (entry: import('../thread/types').Thread) => ({ id: entry.id, backend: entry.backend,
@@ -3060,6 +3087,7 @@ You can also use natural language commands to control Claude Code CLI.`,
   /** Shared native/persistent mutation for cards and parameterized text commands. */
   private async applyPreference(threadId: string, backend: SettingsBackend, kind: 'model' | 'effort' | 'speed',
     value: string | undefined, onStream?: (chunk: string) => void): Promise<ExecuteResult> {
+    this.threadManager.contextResets.assertReady(threadId);
     const thread = this.threadManager.getThread(threadId);
     if (!thread) return { success: false, error: 'This thread no longer exists.' };
     if (value !== undefined && (!value || value.length > 512 || /[\x00-\x1f\x7f]/.test(value))) return { success: false, error: 'Invalid settings value.' };
@@ -3115,6 +3143,9 @@ You can also use natural language commands to control Claude Code CLI.`,
   private async applyBackendSetting(threadId: string, backend: SettingsBackend, scope: SettingsScope,
     followGlobal = false): Promise<ExecuteResult & { clearedCount: number }> {
     try {
+      for (const thread of scope === 'all' ? this.threadManager.listThreads() : [{ id: threadId }]) {
+        this.threadManager.contextResets.assertReady(thread.id);
+      }
       if (followGlobal) {
         await this.threadPool.destroyThread(threadId, { deleteData: false });
         await this.threadManager.updateThread(threadId, { backend: undefined });
@@ -3292,13 +3323,18 @@ You can also use natural language commands to control Claude Code CLI.`,
     await this.fileInbox?.destroy();
     this.notificationAdapter.unregister();
     try {
-      await this.delegation.destroy();
-      await Promise.all([...this.delegationBridges.values()].map(bridge => bridge.close()));
+      const results = await Promise.allSettled([
+        this.delegation.destroy(),
+        ...[...this.delegationBridges.values()].map(bridge => bridge.close()),
+        this.threadPool.destroyAll({ deleteData: false, shutdown: true }),
+      ]);
+      const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+      if (failure) throw failure.reason;
       this.delegationBridges.clear();
-      await this.threadPool.destroyAll({ deleteData: false });
       this.pendingApprovalCards.clear();
     } catch (err) {
       console.error('Error destroying thread executors:', err);
+      throw err;
     }
   }
 }

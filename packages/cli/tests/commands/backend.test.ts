@@ -77,6 +77,7 @@ describe('/backend command', () => {
     const defaultThread = { id: 'default-id', name: 'default', workingDirectory: '/home/user/project', sessionId: null, createdAt: 0, lastActiveAt: 0 };
 
     mockThreadManager = {
+      contextResets: { assertReady: vi.fn() },
       getDefaultThread: vi.fn().mockReturnValue(defaultThread),
       getThread: vi.fn().mockImplementation((id: string) => id === defaultThread.id ? defaultThread : undefined),
       getThreadByName: vi.fn().mockImplementation((name: string) => name === 'default' ? defaultThread : undefined),

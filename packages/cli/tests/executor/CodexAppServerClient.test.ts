@@ -1,8 +1,14 @@
 import { EventEmitter } from 'events';
+import fs from 'fs/promises';
+import os from 'os';
 import path from 'path';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { spawn } from 'child_process';
 import { CodexAppServerClient } from '../../src/executor/CodexAppServerClient';
+import { CodexAppServerExecutor } from '../../src/executor/CodexAppServerExecutor';
+import { DirectoryGuard } from '../../src/security/DirectoryGuard';
+import { ThreadExecutorPool } from '../../src/thread/ThreadExecutorPool';
+import { ThreadManager } from '../../src/thread/ThreadManager';
 
 vi.mock('child_process', async (importActual) => {
   const actual = await importActual<typeof import('child_process')>();
@@ -11,8 +17,10 @@ vi.mock('child_process', async (importActual) => {
 
 const mockSpawn = vi.mocked(spawn);
 
-function fakeProcess(userAgent = 'test') {
+function fakeProcess(userAgent = 'test', closesOnKill = true) {
   const process: any = new EventEmitter();
+  process.exitCode = null;
+  process.signalCode = null;
   process.stdout = new EventEmitter();
   process.stderr = new EventEmitter();
   process.stdin = Object.assign(new EventEmitter(), {
@@ -29,7 +37,14 @@ function fakeProcess(userAgent = 'test') {
     }),
     end: vi.fn(),
   });
-  process.kill = vi.fn();
+  process.kill = vi.fn((signal = 'SIGTERM') => {
+    if (closesOnKill) {
+      process.signalCode = signal;
+      process.emit('exit', null, signal);
+      process.emit('close', null, signal);
+    }
+    return true;
+  });
   return process;
 }
 
@@ -48,6 +63,128 @@ function fakeVersionProcess(output = 'codex-cli 0.159.2\n') {
 describe('CodexAppServerClient', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('retains a timed-out child until close, blocking shutdown retries and replacement startup', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const child = fakeProcess('test', false);
+    mockSpawn.mockReturnValue(child);
+    const client = new CodexAppServerClient({ killEscalationMs: 10 });
+    await client.start();
+
+    const stopping = expect(client.stop()).rejects.toThrow('exit could not be confirmed');
+    await vi.advanceTimersByTimeAsync(1_010);
+    await stopping;
+    await expect(client.waitForExit()).rejects.toThrow('exit could not be confirmed');
+    await expect(client.stop()).rejects.toThrow('exit could not be confirmed');
+    await expect(client.start()).rejects.toThrow('exit could not be confirmed');
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+
+    // Exit codes and exit events do not confirm that inherited stdio has closed.
+    child.exitCode = 0;
+    child.emit('exit', 0, null);
+    await expect(client.waitForExit()).rejects.toThrow('exit could not be confirmed');
+    child.emit('close', 0, null);
+    await expect(client.waitForExit()).resolves.toBeUndefined();
+    mockSpawn.mockReturnValue(fakeProcess());
+    await client.start();
+    expect(mockSpawn).toHaveBeenCalledTimes(2);
+    await client.stop();
+  });
+
+  it('joins an ongoing stop and waits for close even after the child exits', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const child = fakeProcess('test', false);
+    mockSpawn.mockReturnValue(child);
+    const client = new CodexAppServerClient({ killEscalationMs: 10 });
+    await client.start();
+    let closed = false;
+    const stopping = client.stop().then(() => { closed = true; });
+    const retry = client.stop();
+    const waiting = client.waitForExit();
+    child.exitCode = 0;
+    child.emit('exit', 0, null);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(closed).toBe(false);
+    mockSpawn.mockReturnValue(fakeProcess());
+    let restarted = false;
+    const starting = client.start().then(() => { restarted = true; });
+    await Promise.resolve();
+    expect(restarted).toBe(false);
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    child.emit('close', 0, null);
+    await Promise.all([stopping, retry, waiting, starting]);
+    expect(closed).toBe(true);
+    expect(restarted).toBe(true);
+    const finalStop = client.stop();
+    await vi.advanceTimersByTimeAsync(10);
+    await finalStop;
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('retains child ownership when signaling fails, until a later close is observed', async () => {
+    const child = fakeProcess('test', false);
+    child.kill.mockImplementation(() => { throw new Error('Synthetic signal failure'); });
+    mockSpawn.mockReturnValue(child);
+    const client = new CodexAppServerClient();
+    await client.start();
+    await expect(client.stop()).rejects.toThrow('could not be stopped');
+    await expect(client.waitForExit()).rejects.toThrow('exit could not be confirmed');
+    await expect(client.start()).rejects.toThrow('exit could not be confirmed');
+    child.emit('close', null, 'SIGKILL');
+    await expect(client.waitForExit()).resolves.toBeUndefined();
+  });
+
+  it('keeps whole-thread reset retries blocked after the real Codex executor has already been destroyed', async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-reset-exit-'));
+    vi.stubEnv('HOME', home);
+    const homedir = vi.spyOn(os, 'homedir').mockReturnValue(home);
+    const child = fakeProcess('test', false);
+    mockSpawn.mockReturnValue(child);
+    const client = new CodexAppServerClient({ cwd: home, killEscalationMs: 10 });
+    try {
+      const manager = await ThreadManager.initialize(home);
+      const threadId = manager.getDefaultThread().id;
+      const guard = new DirectoryGuard([home]);
+      const executor = new CodexAppServerExecutor(guard, { threadId,
+        initialWorkingDirectory: home, clientFactory: () => client });
+      const reset = vi.spyOn(executor, 'resetContext');
+      const factory = vi.fn(() => executor);
+      const pool = new ThreadExecutorPool(manager, guard, { type: 'codex' }, factory, 2_000);
+      pool.getExecutor(threadId);
+      const pointer = path.join(home, '.remote-cli', 'codex-sessions', `${threadId}.json`);
+      await fs.writeFile(pointer, 'old binding');
+      await manager.contextResets.begin(threadId);
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      await client.start();
+
+      const first = expect(pool.clearThreadContext(threadId)).rejects.toThrow('exit could not be confirmed');
+      await vi.advanceTimersByTimeAsync(1_010);
+      await first;
+      // destroy() is now a no-op, so the retry must still check the client's child.
+      await expect(pool.clearThreadContext(threadId)).rejects.toThrow('exit could not be confirmed');
+      expect(manager.contextResets.isPending(threadId)).toBe(true);
+      expect(await fs.readFile(pointer, 'utf8')).toBe('old binding');
+      expect(reset).not.toHaveBeenCalled();
+      expect(() => pool.getExecutor(threadId)).toThrow('incomplete');
+      await expect(client.start()).rejects.toThrow('exit could not be confirmed');
+      expect(factory).toHaveBeenCalledOnce();
+      expect(mockSpawn).toHaveBeenCalledOnce();
+
+      child.emit('close', 0, null);
+      await pool.clearThreadContext(threadId);
+      expect(reset).toHaveBeenCalledOnce();
+      await expect(fs.stat(pointer)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(manager.contextResets.isPending(threadId)).toBe(true);
+      await manager.contextResets.complete(threadId);
+    } finally {
+      child.emit('close', 0, null);
+      vi.useRealTimers();
+      homedir.mockRestore();
+      vi.unstubAllEnvs();
+      await fs.rm(home, { recursive: true, force: true });
+    }
   });
 
   it('starts app-server and completes the required initialization handshake', async () => {
@@ -76,7 +213,7 @@ describe('CodexAppServerClient', () => {
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
-  it('retains failed exit confirmation across repeated stop and start attempts until actual exit', async () => {
+  it('retains failed exit confirmation across repeated stop and start attempts until actual close', async () => {
     const child = fakeProcess();
     child.exitCode = null; child.signalCode = null;
     child.kill.mockImplementation(() => { throw new Error('Synthetic signal denied'); });
@@ -86,9 +223,11 @@ describe('CodexAppServerClient', () => {
     await expect(client.stop()).rejects.toThrow('could not be stopped');
     await expect(client.stop()).rejects.toThrow('exit could not be confirmed');
     await expect(client.waitForExit()).rejects.toThrow('exit could not be confirmed');
-    await expect(client.start()).rejects.toThrow('exit is still unconfirmed');
+    await expect(client.start()).rejects.toThrow('exit could not be confirmed');
     expect(mockSpawn).toHaveBeenCalledTimes(1);
     child.emit('exit', 0, null);
+    await expect(client.waitForExit()).rejects.toThrow('exit could not be confirmed');
+    child.emit('close', 0, null);
     await expect(client.waitForExit()).resolves.toBeUndefined();
     await expect(client.stop()).resolves.toBeUndefined();
     mockSpawn.mockReturnValue(fakeProcess());
@@ -107,6 +246,9 @@ describe('CodexAppServerClient', () => {
     await Promise.resolve();
     expect(mockSpawn).toHaveBeenCalledTimes(1);
     child.emit('exit', 0, null);
+    await Promise.resolve();
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    child.emit('close', 0, null);
     await stopping; await starting;
     expect(mockSpawn).toHaveBeenCalledTimes(2);
     await client.stop();
