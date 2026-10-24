@@ -6,6 +6,7 @@ import { MessageHandler } from '../src/client/MessageHandler';
 import { DirectoryGuard } from '../src/security/DirectoryGuard';
 import type { ExecuteOptions, ExecuteResult, ExecutorGoalRunRequest } from '../src/executor/IExecutor';
 import type { Thread } from '../src/thread/types';
+import { ThreadContextReset } from '../src/thread/ThreadContextReset';
 
 async function fixture() {
   const cwd = await realpath(await mkdtemp(path.join(tmpdir(), 'goal-handler-')));
@@ -39,6 +40,7 @@ async function fixture() {
     setThreadError: vi.fn(), destroyAll: vi.fn(async () => {}),
   };
   const manager = {
+    contextResets: new ThreadContextReset(path.join(cwd, 'reset-markers')),
     getDefaultThread: vi.fn(() => threads[0]), getThread: vi.fn((id: string) => threads.find(thread => thread.id === id)),
     listThreads: vi.fn(() => threads), updateThread: vi.fn(async (id: string, fields: Partial<Thread>) => {
       const thread = threads.find(thread => thread.id === id)!; Object.assign(thread, fields); return thread;

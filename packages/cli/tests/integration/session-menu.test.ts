@@ -49,6 +49,7 @@ describe('Integration: paged read-only session menus', () => {
     const thread = { id: 'thread-a', name: 'default', workingDirectory: '~/projects', sessionId: null, createdAt: 0, lastActiveAt: 0 };
     const threads: Record<string, any> = { 'thread-a': thread, 'thread-b': { ...thread, id: 'thread-b', name: 'other' } };
     const threadManager: any = {
+      contextResets: { assertReady: vi.fn() },
       getDefaultThread: vi.fn(() => thread),
       getThread: vi.fn((id: string) => threads[id]),
       getThreadByName: vi.fn(),

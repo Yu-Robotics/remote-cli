@@ -60,12 +60,14 @@ export class ThreadExecutorPool {
   private readonly threadManager: ThreadManager;
   private readonly directoryGuard: DirectoryGuard;
   private readonly factory: ExecutorFactory;
+  private readonly contextResetShutdowns = new Map<string, Promise<void>>();
 
   constructor(
     threadManager: ThreadManager,
     directoryGuard: DirectoryGuard,
     executorConfig: ExecutorConfig,
-    factory: ExecutorFactory = createExecutor
+    factory: ExecutorFactory = createExecutor,
+    private readonly contextResetShutdownTimeoutMs = 15_000
   ) {
     this.threadManager = threadManager;
     this.directoryGuard = directoryGuard;
@@ -80,6 +82,7 @@ export class ThreadExecutorPool {
   getExecutor(threadId: string): IExecutor {
     const thread = this.threadManager.getThread(threadId);
     if (!thread) throw new Error(`Thread not found: ${threadId}`);
+    this.threadManager.contextResets.assertReady(threadId);
 
     let executor = this.executors.get(threadId);
     if (!executor) {
@@ -98,6 +101,50 @@ export class ThreadExecutorPool {
       this.executors.set(threadId, executor);
     }
     return executor;
+  }
+
+  assertContextResettable(threadId: string): void {
+    if (!this.threadManager.getThread(threadId)) throw new Error(`Thread not found: ${threadId}`);
+    if (this.executors.get(threadId)?.isBusy?.()) {
+      throw new Error('Cannot clear conversation context while the backend is busy. Wait for it to finish.');
+    }
+  }
+
+  /** Called under thread admission exclusion, after persisting whole-thread reset intent. */
+  async clearThreadContext(threadId: string): Promise<void> {
+    this.assertContextResettable(threadId);
+    if (!this.threadManager.contextResets.isPending(threadId)) throw new Error('Thread context reset intent is missing');
+    const executor = this.executors.get(threadId);
+    if (executor) {
+      let shutdown = this.contextResetShutdowns.get(threadId);
+      if (!shutdown) {
+        shutdown = Promise.resolve().then(async () => {
+          // Native cleanup and reset may still mutate pointers after an outer timeout.
+          await executor.destroy();
+          if (executor.waitForExit) await executor.waitForExit();
+          else if (executor.isProcessRunning?.()) throw new Error('Backend shutdown is unconfirmed. Retry /clear after it exits.');
+          await executor.resetContext();
+        });
+        this.contextResetShutdowns.set(threadId, shutdown);
+        void shutdown.catch(() => {
+          if (this.contextResetShutdowns.get(threadId) === shutdown) this.contextResetShutdowns.delete(threadId);
+        });
+      }
+      // A timeout releases admission, but retains the executor and the same cleanup
+      // promise. Only an explicit retry that observes its settlement may detach it.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([shutdown, new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(
+            'Backend shutdown timed out. Context remains blocked; wait for cleanup and retry /clear or /new.'
+          )), this.contextResetShutdownTimeoutMs);
+        })]);
+      } finally { if (timer) clearTimeout(timer); }
+    }
+    await this.threadManager.clearBackendSessionPointers(threadId);
+    await this.threadManager.updateThread(threadId, { sessionId: null });
+    this.executors.delete(threadId);
+    this.contextResetShutdowns.delete(threadId);
   }
 
   /** Changing projects invalidates this thread's sessions on every backend. */
@@ -200,6 +247,8 @@ export class ThreadExecutorPool {
    * resume the conversation.
    */
   async destroyThread(threadId: string, options: { deleteData?: boolean } = {}): Promise<void> {
+    // Teardown must not discard ownership of cleanup retained by a failed reset.
+    this.threadManager.contextResets.assertReady(threadId);
     const deleteData = options.deleteData ?? true;
     const executor = this.executors.get(threadId);
     if (executor) {
@@ -218,8 +267,27 @@ export class ThreadExecutorPool {
   /**
    * Destroy all executors in the pool.
    * Pass `{ deleteData: false }` to keep per-backend session files on disk.
+   * Service shutdown also joins retained cleanup without clearing reset intent.
    */
-  async destroyAll(options: { deleteData?: boolean } = {}): Promise<void> {
+  async destroyAll(options: { deleteData?: boolean; shutdown?: boolean } = {}): Promise<void> {
+    if (options.shutdown) {
+      if (options.deleteData !== false) throw new Error('Service shutdown must preserve conversation data');
+      const results = await Promise.allSettled(Array.from(this.executors.keys()).map(async threadId => {
+        const executor = this.executors.get(threadId)!;
+        const retained = this.contextResetShutdowns.get(threadId);
+        if (retained) await retained;
+        else await executor.destroy();
+        if (executor.waitForExit) await executor.waitForExit();
+        else if (executor.isProcessRunning?.()) throw new Error('Backend shutdown is unconfirmed');
+        this.executors.delete(threadId);
+        this.contextResetShutdowns.delete(threadId);
+        this.busy.delete(threadId);
+        this.errorFlag.delete(threadId);
+      }));
+      const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+      if (failure) throw failure.reason;
+      return;
+    }
     await Promise.all(
       Array.from(this.executors.keys()).map(id => this.destroyThread(id, options))
     );
@@ -233,12 +301,14 @@ export class ThreadExecutorPool {
    * resumes the conversation that thread had on it.
    */
   async switchBackend(newConfig: ExecutorConfig): Promise<void> {
+    for (const thread of this.threadManager.listThreads()) this.threadManager.contextResets.assertReady(thread.id);
     await this.destroyAll({ deleteData: false });
     this.executorConfig = newConfig;
   }
 
   /** Switch one thread without affecting any other executor. */
   async switchThreadBackend(threadId: string, backend: BackendKey): Promise<void> {
+    this.threadManager.contextResets.assertReady(threadId);
     if (this.isThreadBusy(threadId)) {
       throw new Error('Cannot switch backend while this thread is running. Send /abort first.');
     }

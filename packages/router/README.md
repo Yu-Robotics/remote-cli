@@ -354,11 +354,7 @@ Older CLIs keep their existing status output.
 
 ## Architecture
 
-```
-Mobile Phone -> Feishu -> Router Server -> WebSocket -> Local CLI -> AI Backend
-                                                                        |
-Mobile Phone <- Feishu <- Router Server <- WebSocket <- Local CLI <- Results
-```
+![Remote CLI architecture](../../docs/images/remote-cli-architecture.png)
 
 ## Nginx Reverse Proxy
 
@@ -435,6 +431,21 @@ docker compose logs --tail=100 router
 ```
 
 Back up `./router-data` before upgrades and do not use `docker compose down -v` for routine updates. Restrict the Router port to the trusted network. When diagnosing routing issues, inspect `/health` and the Router logs before restarting clients.
+
+From CLI 1.6.177, `/clear` and its `/new` alias reset the entire current
+thread's conversation context: all direct backend session bindings and every
+managed worker conversation, across backends and parallel worker lanes. The
+working directory, files, Git artifacts, archived native transcripts, login,
+backend/model/effort selections, delegation preference, and sandbox grants are
+preserved. Other threads are unaffected. A later backend switch starts fresh
+instead of restoring a pre-clear binding. Busy tasks, queued work, and workers
+with unconfirmed shutdowns must settle before clearing. Reset intent is saved
+before any session binding changes. A persisted reset intent blocks old
+conversations until clearing succeeds, including after a CLI restart. If
+clearing fails, resolve the reported problem and retry `/clear` or `/new`.
+Service shutdown waits for retained cleanup and reports unconfirmed native exits
+before acknowledging completion.
+Single-worker **Clear context** controls still reset only the selected worker.
 
 ## Session Resume
 

@@ -66,7 +66,8 @@ export class CodexAppServerClient {
   private stopping = false;
   private serverVersion: string | null = null;
   private readonly pendingExits = new Set<Promise<void>>();
-  private readonly unconfirmedExits = new Set<ChildProcess>();
+  /** A failed stop must not forget a child whose close event is still missing. */
+  private readonly unclosedProcesses = new Set<ChildProcess>();
 
   constructor(options: CodexAppServerClientOptions = {}) {
     this.command = options.command ?? 'codex';
@@ -135,9 +136,9 @@ export class CodexAppServerClient {
 
   async start(): Promise<void> {
     if (this.pendingExits.size) await this.waitForExit();
-    if (this.unconfirmedExits.size) throw new Error('Previous Codex app-server process exit is still unconfirmed');
     if (this.proc) return;
     if (this.startPromise) return this.startPromise;
+    if (this.unclosedProcesses.size) throw new Error('Codex app-server process exit could not be confirmed');
 
     this.startPromise = this.startInternal();
     try {
@@ -167,6 +168,8 @@ export class CodexAppServerClient {
     }
 
     this.proc = proc;
+    this.unclosedProcesses.add(proc);
+    proc.once('close', () => this.unclosedProcesses.delete(proc));
     proc.stdout?.on('data', (data: Buffer) => this.handleStdout(proc, data));
     proc.stderr?.on('data', (data: Buffer) => {
       if (proc !== this.proc) return;
@@ -208,7 +211,7 @@ export class CodexAppServerClient {
       this.serverVersion = parseCodexVersion(initialized?.userAgent);
       this.notify('initialized');
     } catch (error) {
-      await this.stop();
+      try { await this.stop(); } catch { /* Retain child ownership and the original initialization error. */ }
       throw error;
     }
   }
@@ -252,7 +255,6 @@ export class CodexAppServerClient {
       let escalation: ReturnType<typeof setTimeout> | undefined;
       let giveUp: ReturnType<typeof setTimeout> | undefined;
       const finish = () => {
-        this.unconfirmedExits.delete(proc);
         if (settled) return;
         settled = true;
         if (escalation) clearTimeout(escalation);
@@ -261,13 +263,12 @@ export class CodexAppServerClient {
       };
       const fail = (error: Error) => {
         if (settled) return;
-        this.unconfirmedExits.add(proc);
         settled = true;
         if (escalation) clearTimeout(escalation);
         if (giveUp) clearTimeout(giveUp);
         reject(error);
       };
-      proc.once('exit', finish);
+      proc.once('close', finish);
       proc.once('error', fail);
       escalation = setTimeout(() => {
         if (proc.exitCode === null && proc.signalCode === null) {
@@ -278,7 +279,7 @@ export class CodexAppServerClient {
         this.killEscalationMs + 1_000);
       escalation.unref?.();
       giveUp.unref?.();
-      if (proc.exitCode !== null || proc.signalCode !== null) {
+      if (!this.unclosedProcesses.has(proc)) {
         finish();
         return;
       }
@@ -290,8 +291,10 @@ export class CodexAppServerClient {
   }
 
   async waitForExit(): Promise<void> {
-    if (this.pendingExits.size) await Promise.all([...this.pendingExits]);
-    if (this.unconfirmedExits.size) throw new Error('Codex app-server process exit could not be confirmed');
+    await Promise.all([...this.pendingExits]);
+    if (this.unclosedProcesses.size) {
+      throw new Error('Codex app-server process exit could not be confirmed');
+    }
   }
 
   private requestRaw(method: string, params?: any, timeoutMs = this.requestTimeoutMs): Promise<any> {

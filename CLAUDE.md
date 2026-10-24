@@ -567,9 +567,13 @@ threads.
 a synthetic `delegate-lane-<uuid>` executor ID, so it cannot read, overwrite,
 or delete the parent backend's direct conversation pointer. A lane retains only
 its own earlier delegated context and its worker process is destroyed after each
-task. It becomes reusable only after process exit is confirmed. `/clear`,
-`/new`, backend switches, and `/delegation off/on` preserve lanes; `/cd`
-increments the persisted workspace generation and invalidates old lanes.
+task. It becomes reusable only after process exit is confirmed. From 1.6.177,
+`/clear` and `/new` reset all direct backend bindings and all managed worker
+continuations for the current thread while preserving files, artifacts, archived
+transcripts, and settings. Persist reset intent before changing any pointer;
+failed/interrupted resets must block old context reuse across CLI restarts and
+remain retryable. Backend switches and `/delegation off/on` preserve context
+unless cleared; `/cd` increments the workspace generation and invalidates old lanes.
 `/delegation reset [backend]` removes idle lane state without starting a backend;
 `/thread delete` removes all lane state. Never migrate or adopt an old direct
 session pointer into a worker lane.

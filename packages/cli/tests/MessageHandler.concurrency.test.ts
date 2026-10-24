@@ -48,6 +48,7 @@ describe('MessageHandler Concurrency', () => {
 
     mockThreadManager = {
       getThread: vi.fn().mockReturnValue({ id: 'thread-1', name: 'Thread 1' }),
+      contextResets: { assertReady: vi.fn() },
       getDefaultThread: vi.fn().mockReturnValue({ id: 'thread-1', name: 'Thread 1' }),
       updateThread: vi.fn().mockResolvedValue(undefined),
       createThread: vi.fn().mockResolvedValue({ id: 'thread-2', name: 'thread-2', sessionId: null }),
