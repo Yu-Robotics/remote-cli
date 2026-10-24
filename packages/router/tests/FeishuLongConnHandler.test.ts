@@ -228,7 +228,7 @@ describe('FeishuLongConnHandler', () => {
         refresh: (card, root) => handler.refreshWorkerContextCard(card, root) });
       handler.workerContexts = cards;
       const id = cards.register({ openId: 'owner', deviceId: 'device', threadId: 'thread-1', laneId: 'lane', generation: 0 })!;
-      const elements = [...Array.from({ length: 180 }, (_, i) => ({ tag: 'markdown', content: `Row ${i}` })),
+      const elements = [...Array.from({ length: 210 }, (_, i) => ({ tag: 'markdown', content: `Row ${i}` })),
         ...createDelegationProgressElements({ taskId: 'task', backend: 'claude', phase: 'failed', startedAt: 1,
           ordinal: 1, activeToolCount: 0, events: [], hiddenEventCount: 0, contextActionId: id })];
       expect(await handler.updateStreamingMessage('root', elements, 'owner', 'thread-1')).toBe(true);
@@ -336,7 +336,7 @@ describe('FeishuLongConnHandler', () => {
       // The SDK can return an API error body without rejecting its promise.
       mockClient.im.message.create.mockResolvedValueOnce(error.response.data)
         .mockResolvedValue({ data: { message_id: 'continuation' } });
-      const elements = Array.from({ length: 160 }, (_, index) => ({ tag: 'markdown', content: `Line ${index}` }));
+      const elements = Array.from({ length: 190 }, (_, index) => ({ tag: 'markdown', content: `Line ${index}` }));
       expect(await handler.updateStreamingMessage('root', elements, 'user')).toBe(true);
       expect(mockClient.im.message.create).toHaveBeenCalledTimes(2);
       expect(await handler.updateStreamingMessage('root', elements, 'user')).toBe(true);
@@ -381,10 +381,10 @@ describe('FeishuLongConnHandler', () => {
     it('identifies a rejected continuation and retries it on a later update without duplicating cards', async () => {
       mockClient.im.message.patch.mockResolvedValue({});
       mockClient.im.message.create.mockResolvedValue({ data: { message_id: 'continuation' } });
-      const elements = Array.from({ length: 160 }, (_, index) => ({ tag: 'markdown', content: `Line ${index}` }));
+      const elements = Array.from({ length: 190 }, (_, index) => ({ tag: 'markdown', content: `Line ${index}` }));
       expect(await handler.updateStreamingMessage('root', elements, 'user')).toBe(true);
       mockClient.im.message.patch.mockClear();
-      elements[159] = { tag: 'markdown', content: 'Later private output' };
+      elements[elements.length - 1] = { tag: 'markdown', content: 'Later private output' };
       mockClient.im.message.patch.mockRejectedValueOnce({ response: { data: {
         code: 230099, msg: 'Failed to create card content, ext=ErrCode: 200800; ErrMsg: create universal card fail;', log_id: 'trace-1',
       } } });
@@ -446,9 +446,9 @@ describe('FeishuLongConnHandler', () => {
       mockClient.im.message.patch.mockResolvedValue({});
       mockClient.im.message.create.mockResolvedValue({ data: { message_id: 'msg_456' } });
 
-      // 160 elements > CARD_ELEMENT_LIMIT (150), triggers chunking
+      // 190 elements > CARD_ELEMENT_LIMIT (180), triggers chunking
       const longElements = [];
-      for (let i = 0; i < 160; i++) {
+      for (let i = 0; i < 190; i++) {
         longElements.push({ tag: 'markdown', content: 'line ' + i });
       }
 
@@ -465,9 +465,9 @@ describe('FeishuLongConnHandler', () => {
         .mockResolvedValueOnce({ data: { message_id: 'msg_456' } })
         .mockResolvedValueOnce({ data: { message_id: 'msg_789' } });
 
-      // 310 elements forces at least 3 chunks (each chunk holds ~148 elements)
+      // 370 elements force at least 3 chunks after header and indicator reserves.
       const veryLongElements = [];
-      for (let i = 0; i < 310; i++) {
+      for (let i = 0; i < 370; i++) {
         veryLongElements.push({ tag: 'markdown', content: 'line ' + i });
       }
 
@@ -481,7 +481,7 @@ describe('FeishuLongConnHandler', () => {
     it('should not create continuation message if openId not provided', async () => {
       mockClient.im.message.patch.mockResolvedValue({});
 
-      const longContent = Array.from({ length: 160 }, (_, index) => ({ tag: 'markdown', content: `Line ${index}` }));
+      const longContent = Array.from({ length: 190 }, (_, index) => ({ tag: 'markdown', content: `Line ${index}` }));
       const result = await handler.updateStreamingMessage('msg_123', longContent);
 
       expect(result).toBe(true);
@@ -526,7 +526,7 @@ describe('FeishuLongConnHandler', () => {
       expect(JSON.stringify(completion[0])).toContain('switch_thread');
       expect(finalPages.flat().filter(element => /^Body \d+$/.test(element.content ?? ''))).toEqual(body);
       for (const page of finalPages) {
-        expect((handler as any).countTaggedNodes(page)).toBeLessThanOrEqual(150);
+        expect((handler as any).countTaggedNodes(page)).toBeLessThanOrEqual(180);
         expect(countCardTables(page)).toBeLessThanOrEqual(CARD_TABLE_LIMIT);
         expect(JSON.stringify(page)).not.toContain('Running command');
       }
@@ -534,7 +534,7 @@ describe('FeishuLongConnHandler', () => {
       expect(cards.get(`continuation-${created}`)?.some(element => element.content === 'Body 256')).toBe(true);
     });
 
-    it.each([0, 160])('keeps completion metadata with the final thread panel and preserves it on refresh (%s elements)', async count => {
+    it.each([0, 190])('keeps completion metadata with the final thread controls and preserves it on refresh (%s elements)', async count => {
       mockClient.im.message.patch.mockResolvedValue({});
       let continuation = 0;
       mockClient.im.message.create.mockImplementation(async () => ({ data: { message_id: `continuation-${++continuation}` } }));
@@ -548,10 +548,10 @@ describe('FeishuLongConnHandler', () => {
       const last = bodies.at(-1);
       const note = last.findIndex(element => element.content?.includes('Completed'));
       const model = last.findIndex(element => element.content?.includes('Model: model-a'));
-      const panel = last.findIndex(element => element.element_id === 'thread_controls');
+      const controls = last.findIndex(element => element.tag === 'column_set');
       expect(note).toBeGreaterThanOrEqual(0);
       expect(model).toBe(note + 1);
-      expect(panel).toBeGreaterThan(model);
+      expect(controls).toBeGreaterThan(model);
       const lastCard = continuation ? `continuation-${continuation}` : 'metadata-card';
       await (handler as any).refreshThreadSwitchButtons(lastCard, 't2');
       const refreshed = JSON.parse(mockClient.im.message.patch.mock.calls.at(-1)[0].data.content).body.elements;
@@ -656,7 +656,7 @@ describe('FeishuLongConnHandler', () => {
   });
 
   describe('finalizeStreamingMessage after streaming updates', () => {
-    // Helper: generate elements that exceed the 150-node limit
+    // Helper: generate elements that exceed the 180-node limit
     const makeElements = (count: number) => {
       const elements = [];
       for (let i = 0; i < count; i++) {
@@ -669,11 +669,11 @@ describe('FeishuLongConnHandler', () => {
       mockClient.im.message.patch.mockResolvedValue({});
       mockClient.im.message.create.mockResolvedValue({ data: { message_id: 'msg_cont_1' } });
 
-      // Step 1: First update: fits in one message (< 150 elements)
+      // Step 1: First update: fits in one message (< 180 elements)
       await handler.updateStreamingMessage('msg_123', makeElements(10), 'ou_user_123');
 
       // Second update: exceeds limit, creates continuation message
-      await handler.updateStreamingMessage('msg_123', makeElements(160), 'ou_user_123');
+      await handler.updateStreamingMessage('msg_123', makeElements(190), 'ou_user_123');
 
       // At this point, chain = ['msg_123', 'msg_cont_1']
 
@@ -682,7 +682,7 @@ describe('FeishuLongConnHandler', () => {
       mockClient.im.message.create.mockClear();
 
       // Step 2: Finalize with same element count (no new content added)
-      await handler.finalizeStreamingMessage('msg_123', makeElements(160), 'ABC123', 'ou_user_123');
+      await handler.finalizeStreamingMessage('msg_123', makeElements(190), 'ABC123', 'ou_user_123');
 
       expect(mockClient.im.message.patch).toHaveBeenCalledTimes(1);
       expect(mockClient.im.message.patch).toHaveBeenCalledWith(expect.objectContaining({
@@ -700,10 +700,10 @@ describe('FeishuLongConnHandler', () => {
         .mockResolvedValueOnce({ data: { message_id: 'msg_cont_2' } })
         .mockResolvedValueOnce({ data: { message_id: 'msg_unexpected' } });
 
-      // Step 1: Stream content that creates 3-message chain (each chunk ~148 nodes)
+      // Step 1: Stream content that creates a 3-message chain.
       await handler.updateStreamingMessage('msg_123', makeElements(10), 'ou_user_123');
-      await handler.updateStreamingMessage('msg_123', makeElements(160), 'ou_user_123');
-      await handler.updateStreamingMessage('msg_123', makeElements(310), 'ou_user_123');
+      await handler.updateStreamingMessage('msg_123', makeElements(190), 'ou_user_123');
+      await handler.updateStreamingMessage('msg_123', makeElements(370), 'ou_user_123');
 
       // chain = ['msg_123', 'msg_cont_1', 'msg_cont_2']
 
@@ -711,7 +711,7 @@ describe('FeishuLongConnHandler', () => {
       mockClient.im.message.create.mockClear();
 
       // Step 2: Finalize - should reuse existing chain, not create new messages
-      await handler.finalizeStreamingMessage('msg_123', makeElements(310), 'ABC123', 'ou_user_123');
+      await handler.finalizeStreamingMessage('msg_123', makeElements(370), 'ABC123', 'ou_user_123');
 
       // Should NOT create any new continuation messages
       expect(mockClient.im.message.create).not.toHaveBeenCalled();
@@ -729,16 +729,16 @@ describe('FeishuLongConnHandler', () => {
         .mockResolvedValueOnce({ data: { message_id: 'msg_cont_1' } })  // from update
         .mockResolvedValueOnce({ data: { message_id: 'msg_cont_2' } }); // from finalize
 
-      // Step 1: Stream creates 2-message chain (160 elements > 150 limit)
-      await handler.updateStreamingMessage('msg_123', makeElements(160), 'ou_user_123');
+      // Step 1: Stream creates 2-message chain (190 elements > 180 limit)
+      await handler.updateStreamingMessage('msg_123', makeElements(190), 'ou_user_123');
       // chain = ['msg_123', 'msg_cont_1']
 
       mockClient.im.message.patch.mockClear();
       mockClient.im.message.create.mockClear();
       mockClient.im.message.create.mockResolvedValue({ data: { message_id: 'msg_cont_2' } });
 
-      // Step 2: Finalize with MORE content that needs a 3rd message (310 elements > 2 chunks)
-      await handler.finalizeStreamingMessage('msg_123', makeElements(310), 'ABC123', 'ou_user_123');
+      // Step 2: Finalize with MORE content that needs a 3rd message (370 elements > 2 chunks)
+      await handler.finalizeStreamingMessage('msg_123', makeElements(370), 'ABC123', 'ou_user_123');
 
       // Should only create 1 new message (the 3rd chunk), not recreate existing ones
       expect(mockClient.im.message.create).toHaveBeenCalledTimes(1);
@@ -750,8 +750,8 @@ describe('FeishuLongConnHandler', () => {
 
   describe('streaming card update cost', () => {
     it.each([
-      { elements: 160, cards: 2 },
-      { elements: 7250, cards: 50 },
+      { elements: 190, cards: 2 },
+      { elements: 8750, cards: 50 },
     ])('patches only the changed tail in a $cards-card reply', async ({ elements: count, cards }) => {
       let nextCard = 0;
       mockClient.im.message.patch.mockResolvedValue({});
@@ -793,7 +793,7 @@ describe('FeishuLongConnHandler', () => {
     });
 
     it('retries a missing continuation before creating later chunks', async () => {
-      const elements = Array.from({ length: 310 }, (_, index) => ({ tag: 'markdown', content: `line ${index}` }));
+      const elements = Array.from({ length: 370 }, (_, index) => ({ tag: 'markdown', content: `line ${index}` }));
       mockClient.im.message.create.mockRejectedValueOnce(new Error('Temporary failure'))
         .mockResolvedValueOnce({ data: { message_id: 'second' } })
         .mockResolvedValueOnce({ data: { message_id: 'third' } });
@@ -851,7 +851,7 @@ describe('FeishuLongConnHandler', () => {
   });
 
   describe('concurrent update serialization', () => {
-    // Helper: generate elements that exceed the 150-node limit
+    // Helper: generate elements that exceed the 180-node limit
     const makeElements = (count: number) => {
       const elements = [];
       for (let i = 0; i < count; i++) {
@@ -870,10 +870,10 @@ describe('FeishuLongConnHandler', () => {
         });
       });
 
-      // Fire two concurrent updates that both exceed the element limit (160 > 150)
+      // Fire two concurrent updates that both exceed the element limit (190 > 180)
       // Without serialization, both will try to create a continuation message
-      const update1 = handler.updateStreamingMessage('msg_123', makeElements(160), 'ou_user_123');
-      const update2 = handler.updateStreamingMessage('msg_123', makeElements(165), 'ou_user_123');
+      const update1 = handler.updateStreamingMessage('msg_123', makeElements(190), 'ou_user_123');
+      const update2 = handler.updateStreamingMessage('msg_123', makeElements(195), 'ou_user_123');
 
       // Wait for microtasks so both calls enter the method
       await new Promise(r => setTimeout(r, 10));
@@ -1015,6 +1015,21 @@ describe('FeishuLongConnHandler', () => {
   });
 
   describe('splitElementsIntoChunks', () => {
+    it.each([180, 181])('enforces the %i-node boundary including nested button text', total => {
+      const nested = Array.from({ length: 45 }, (_, index) => ({
+        tag: 'column_set', element_id: `nested_${index}`, columns: [{
+          tag: 'column', elements: [{ tag: 'button', text: { tag: 'plain_text', content: `Action ${index}` } }],
+        }],
+      }));
+      const body = [...nested, ...(total === 181 ? [{ tag: 'markdown', content: 'Overflow' }] : [])];
+      expect((handler as any).countTaggedNodes(body)).toBe(total);
+      expect((handler as any).checkIfElementsNeedSplitting(body)).toBe(total === 181);
+      const pages = (handler as any).splitElementsIntoChunks(body);
+      expect(pages).toHaveLength(total === 180 ? 1 : 2);
+      for (const page of pages) expect((handler as any).countTaggedNodes(page)).toBeLessThanOrEqual(180);
+      for (const element of body) expect(pages.flat().filter(item => item === element)).toHaveLength(1);
+    });
+
     it('keeps 4 KiB worker excerpts atomic within node, size and table budgets', () => {
       (handler as any).CARD_DATA_SIZE_LIMIT = 16000;
       (handler as any).CARD_SIZE_BUFFER = 2000;
@@ -1032,7 +1047,7 @@ describe('FeishuLongConnHandler', () => {
       }
       expect(JSON.stringify(chunks).match(/Verified conclusion/g)).toHaveLength(workers.length);
       for (const chunk of chunks) {
-        expect((handler as any).countTaggedNodes(chunk)).toBeLessThanOrEqual(150);
+        expect((handler as any).countTaggedNodes(chunk)).toBeLessThanOrEqual(180);
         expect(countCardTables(chunk)).toBeLessThanOrEqual(CARD_TABLE_LIMIT);
         expect(JSON.stringify({ schema: '2.0', body: { elements: chunk } }).length).toBeLessThan(14000);
       }
@@ -1042,16 +1057,16 @@ describe('FeishuLongConnHandler', () => {
       const group = createDelegationProgressElements({ taskId: 'worker', ordinal: 1, backend: 'agy', phase: 'succeeded',
         startedAt: Date.now(), summary: 'Worker result', activeToolCount: 0, events: [], hiddenEventCount: 0 });
       const footer = [{ tag: 'markdown', content: 'Completed' }, ...Array.from({ length: 30 }, () => ({ tag: 'hr' }))];
-      const prefix = Array.from({ length: 130 }, () => ({ tag: 'markdown', content: 'Body' }));
+      const prefix = Array.from({ length: 160 }, () => ({ tag: 'markdown', content: 'Body' }));
       const chunks = (handler as any).splitElementsIntoChunks([...prefix, ...group, ...footer], [], footer, undefined, true);
       expect(chunks.at(-1).filter((item: any) => group.includes(item))).toEqual(group);
       expect(chunks.at(-1).filter((item: any) => footer.includes(item))).toEqual(footer);
-      for (const chunk of chunks) expect((handler as any).countTaggedNodes(chunk)).toBeLessThanOrEqual(150);
+      for (const chunk of chunks) expect((handler as any).countTaggedNodes(chunk)).toBeLessThanOrEqual(180);
     });
 
     it.each(['nodes', 'size', 'tables'])('respects %s limits when a final body group cannot share the completion block', limit => {
       const item = (content: string) => ({ tag: 'markdown', content });
-      const body = limit === 'nodes' ? { tag: 'column', elements: Array.from({ length: 120 }, () => item('Body')) }
+      const body = limit === 'nodes' ? { tag: 'column', elements: Array.from({ length: 150 }, () => item('Body')) }
         : item(limit === 'size' ? 'x'.repeat(1500) : ('| A |\n| --- |\n| B |\n\n').repeat(3));
       const footer = limit === 'nodes' ? Array.from({ length: 35 }, () => item('Footer'))
         : [item(limit === 'size' ? 'f'.repeat(500) : '| Footer |\n| --- |\n| Value |\n')];
@@ -1064,7 +1079,7 @@ describe('FeishuLongConnHandler', () => {
       expect(chunks.flat().filter((entry: any) => entry === body)).toHaveLength(1);
       expect(chunks.at(-1).filter((entry: any) => footer.includes(entry))).toEqual(footer);
       for (const chunk of chunks) {
-        expect((handler as any).countTaggedNodes(chunk)).toBeLessThanOrEqual(150);
+        expect((handler as any).countTaggedNodes(chunk)).toBeLessThanOrEqual(180);
         expect(countCardTables(chunk)).toBeLessThanOrEqual(CARD_TABLE_LIMIT);
         expect(JSON.stringify({ schema: '2.0', body: { elements: chunk } }).length)
           .toBeLessThan((handler as any).CARD_DATA_SIZE_LIMIT - (handler as any).CARD_SIZE_BUFFER);
@@ -1093,7 +1108,7 @@ describe('FeishuLongConnHandler', () => {
     it('reserves native worker layout nodes before splitting at an element limit', () => {
       const group = createDelegationProgressElements({ taskId: 'worker', ordinal: 1, backend: 'agy', phase: 'text',
         startedAt: Date.now(), latestText: 'Current output', activeToolCount: 0, events: [], hiddenEventCount: 0 });
-      const prefix = Array.from({ length: 144 }, () => ({ tag: 'markdown', content: 'Existing content' }));
+      const prefix = Array.from({ length: 174 }, () => ({ tag: 'markdown', content: 'Existing content' }));
       const chunks = (handler as any).splitElementsIntoChunks([...prefix, ...group]);
       expect(chunks.length).toBeGreaterThan(1);
       const card = chunks.find((chunk: any[]) => chunk.some(element => element.element_id === 'dw_1_header'));
@@ -1112,8 +1127,8 @@ describe('FeishuLongConnHandler', () => {
       expect(chunks[0]).toEqual(elements);
     });
 
-    it('should split when element count exceeds CARD_ELEMENT_LIMIT (150)', () => {
-      // Create 200 elements to exceed the new conservative limit of 150
+    it('should split when element count exceeds CARD_ELEMENT_LIMIT (180)', () => {
+      // Create 200 elements to exceed the new conservative limit of 180
       const elements = Array.from({ length: 200 }, (_, i) => ({
         tag: 'markdown',
         content: `Element ${i}`,
@@ -1124,9 +1139,9 @@ describe('FeishuLongConnHandler', () => {
       // Should be split into multiple chunks
       expect(chunks.length).toBeGreaterThan(1);
 
-      // Each chunk should have at most 152 elements (150 elements + 2 indicators max)
+      // Continuation indicators must fit inside the recursive node budget.
       chunks.forEach((chunk: any[]) => {
-        expect(chunk.length).toBeLessThanOrEqual(152);
+        expect((handler as any).countTaggedNodes(chunk)).toBeLessThanOrEqual(180);
       });
 
       // Count original elements (excluding continuation indicators)
@@ -1245,7 +1260,7 @@ describe('FeishuLongConnHandler', () => {
       expect(continuation.reduce(
         (total: number, element: any) => total + (handler as any).countTaggedNodes(element),
         0,
-      )).toBeLessThanOrEqual(150);
+      )).toBeLessThanOrEqual(180);
     });
   });
 
@@ -1346,12 +1361,13 @@ describe('FeishuLongConnHandler', () => {
   });
 
   describe('finalizeStreamingMessage with chunking', () => {
-    const getPanel = (elements: any[]) => elements.find(element => element.element_id === 'thread_controls');
-    const getButtons = (elements: any[]) => (getPanel(elements)?.elements ?? [])
+    const getRows = (elements: any[]) => elements.filter(element => element.tag === 'column_set'
+      && element.columns?.some(column => ['switch_thread', 'new_thread'].includes(column.elements?.[0]?.behaviors?.[0]?.value?.action)));
+    const getButtons = (elements: any[]) => getRows(elements)
       .flatMap(row => row.columns)
       .map(column => column.elements[0]);
 
-    it('delivers native collapsed controls with every existing callback and no expansion callback', async () => {
+    it('delivers directly visible thread controls with every existing callback and no folding panel', async () => {
       const threads = [
         { id: 'default-id', name: 'default', status: 'idle' as const },
         { id: 'review-id', name: 'review', status: 'idle' as const },
@@ -1360,23 +1376,16 @@ describe('FeishuLongConnHandler', () => {
         'owner', '/workspace/project', 'default', threads, 'default-id');
       const card = JSON.parse(mockClient.im.message.patch.mock.calls[0][0].data.content);
       expect(card.schema).toBe('2.0');
-      const panel = getPanel(card.body.elements);
-      expect(panel).toMatchObject({ tag: 'collapsible_panel', expanded: false, header: {
-        title: { tag: 'plain_text', content: 'Switch thread' },
-        icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined' },
-        icon_position: 'right', icon_expanded_angle: -180,
-      } });
-      expect(panel.element_id).toMatch(/^[A-Za-z][A-Za-z0-9_]{0,19}$/);
-      expect(panel.header).not.toHaveProperty('width');
-      expect(panel).not.toHaveProperty('behaviors');
-      expect(panel.elements.every((row: any) => row.tag === 'column_set')).toBe(true);
+      expect(card.body.elements.some(element => element.tag === 'collapsible_panel')).toBe(false);
+      expect(getRows(card.body.elements)).toHaveLength(1);
+      expect(card.body.elements).toContainEqual({ tag: 'markdown', content: 'Answer' });
       expect(getButtons(card.body.elements).map(button => button.behaviors[0].value)).toEqual([
         { action: 'switch_thread', threadId: 'default-id', threadName: 'default' },
         { action: 'switch_thread', threadId: 'review-id', threadName: 'review' },
         { action: 'new_thread' },
       ]);
       expect(card.body.elements).toContainEqual({ tag: 'markdown', content: '📍 **Reply from:** default · project' });
-      expect(JSON.stringify(panel)).not.toMatch(/Reply from|thread_selector|Show threads|Hide threads|Input target unchanged/);
+      expect(JSON.stringify(getRows(card.body.elements))).not.toMatch(/thread_controls|thread_selector|Show threads|Hide threads|Input target unchanged/);
       expect(mockClient.im.message.patch).toHaveBeenCalledTimes(1);
       expect(mockClient.im.message.create).not.toHaveBeenCalled();
     });
@@ -1389,7 +1398,7 @@ describe('FeishuLongConnHandler', () => {
         { id: 'default-id', name: 'default', status: 'idle' as const },
         { id: 'review-id', name: 'review', status: 'idle' as const },
       ];
-      await handler.finalizeStreamingMessage('card', [], undefined, 'owner', '/workspace/project', 'default', threads, 'default-id');
+      await handler.finalizeStreamingMessage('card', [{ tag: 'markdown', content: 'Original answer' }], undefined, 'owner', '/workspace/project', 'default', threads, 'default-id');
       const original = JSON.parse(mockClient.im.message.patch.mock.calls[0][0].data.content).body.elements;
       const callback = getButtons(original)[1].behaviors[0].value;
       const result = await handler.handleCardAction({ operator: { open_id: 'owner' }, context: { open_message_id: 'card' },
@@ -1397,8 +1406,9 @@ describe('FeishuLongConnHandler', () => {
       expect(result).toEqual({ toast: { type: 'success', content: 'Switched to: review' } });
       await vi.waitFor(() => expect(mockClient.im.message.patch).toHaveBeenCalledTimes(2));
       const refreshed = JSON.parse(mockClient.im.message.patch.mock.calls[1][0].data.content).body.elements;
-      expect(getPanel(refreshed).expanded).toBe(false);
-      expect(getPanel(refreshed).element_id).toBe(getPanel(original).element_id);
+      expect(refreshed.some(element => element.tag === 'collapsible_panel')).toBe(false);
+      expect(getButtons(refreshed)).toHaveLength(3);
+      expect(refreshed).toContainEqual({ tag: 'markdown', content: 'Original answer' });
       expect(getButtons(refreshed)[1]).toMatchObject({ type: 'primary', text: { content: '✓ review' } });
       expect(refreshed).toContainEqual({ tag: 'markdown', content: '📍 **Reply from:** default · project' });
       mockBindingManager.getUserBinding.mockResolvedValue({ openId: 'owner' });
@@ -1414,7 +1424,7 @@ describe('FeishuLongConnHandler', () => {
       }));
     });
 
-    it('preserves the native panel and button callbacks through text fallback and later refresh', async () => {
+    it('preserves visible button rows through text fallback and later refresh', async () => {
       mockClient.im.message.patch.mockRejectedValueOnce({ code: 230099,
         msg: 'Failed to create card content, ext=ErrCode: 11310; ErrMsg: card table number over limit; ErrorValue: table;' })
         .mockResolvedValue({});
@@ -1426,16 +1436,19 @@ describe('FeishuLongConnHandler', () => {
       expect(mockClient.im.message.patch).toHaveBeenCalledTimes(2);
       const initial = JSON.parse(mockClient.im.message.patch.mock.calls[0][0].data.content).body.elements;
       const fallback = JSON.parse(mockClient.im.message.patch.mock.calls[1][0].data.content).body.elements;
-      expect(getPanel(fallback)).toEqual(getPanel(initial));
+      expect(getRows(fallback)).toEqual(getRows(initial));
+      expect(getButtons(fallback)).toHaveLength(3);
       expect(fallback.some((element: any) => element.content?.includes('Conclusion'))).toBe(true);
       await (handler as any).refreshThreadSwitchButtons('card', 'review-id');
       const refreshed = JSON.parse(mockClient.im.message.patch.mock.calls[2][0].data.content).body.elements;
-      expect(getPanel(refreshed)).toMatchObject({ expanded: false, element_id: 'thread_controls' });
+      expect(refreshed.some(element => element.tag === 'collapsible_panel')).toBe(false);
+      expect(getButtons(refreshed)).toHaveLength(3);
+      expect(refreshed.some(element => element.content?.includes('Reply from:'))).toBe(true);
       expect(getButtons(refreshed)[1].behaviors[0].value).toEqual({ action: 'switch_thread', threadId: 'review-id', threadName: 'review' });
       expect(refreshed.some((element: any) => element.content?.includes('Conclusion'))).toBe(true);
     });
 
-    it.each([149, 150])('budgets hidden thread buttons and a future Worker error in a %i-node final card', async total => {
+    it.each([179, 180])('budgets visible thread buttons and a future Worker error in a %i-node final card', async total => {
       const delivered = new Map<string, any[]>();
       mockClient.im.message.patch.mockImplementation(async ({ path, data }) => {
         delivered.set(path.message_id, JSON.parse(data.content).body.elements); return {};
@@ -1454,24 +1467,30 @@ describe('FeishuLongConnHandler', () => {
       const prefix = Array.from({ length: total - 4 - (handler as any).countTaggedNodes(controls)
         - (handler as any).countTaggedNodes(control) }, (_, index) => ({ tag: 'markdown', content: `Body ${index}` }));
       const body = [...prefix, { tag: 'markdown', content: 'Final conclusion' }, control];
+      const finalBody = [...(handler as any).createResponseHeaderElements('thread-1', '/workspace/project'),
+        ...body, { tag: 'markdown', content: '✅ Completed' }, ...controls];
+      expect((handler as any).countTaggedNodes(finalBody)).toBe(total);
+      expect((handler as any).countTaggedNodes(finalBody, true)).toBe(total + 1);
+      expect((handler as any).checkIfElementsNeedSplitting(finalBody)).toBe(total + 1 > 180);
       expect(await handler.finalizeStreamingMessage('root', body, undefined, 'owner', '/workspace/project', 'thread-1', threads, 't0')).toBe(true);
-      expect(mockClient.im.message.create.mock.calls.length).toBe(total === 149 ? 0 : 1);
+      expect(mockClient.im.message.create.mock.calls.length).toBe(total === 179 ? 0 : 1);
       const allElements = [...delivered.values()].flat();
-      const panel = getPanel(allElements);
       expect(getButtons(allElements)).toHaveLength(11);
       expect(getButtons(allElements).at(-1).disabled).toBe(true);
-      expect((handler as any).countTaggedNodes(panel)).toBeGreaterThan(11);
-      expect(allElements.filter(element => element.element_id === 'thread_controls')).toHaveLength(1);
+      expect((handler as any).countTaggedNodes(getRows(allElements))).toBeGreaterThan(11);
+      expect(getRows(allElements)).toHaveLength(4);
+      expect(allElements.some(element => element.element_id === 'thread_controls')).toBe(false);
       expect(allElements.filter(element => element.content === 'Final conclusion')).toHaveLength(1);
       const workerCard = [...delivered].find(([, elements]) => JSON.stringify(elements).includes(id))![0];
       await cards.click('owner', id, workerCard);
       await cards.resolve('device', { messageId: send.mock.calls[0][1].messageId, success: false });
       await (handler as any).refreshThreadSwitchButtons(workerCard, 't1');
-      for (const page of delivered.values()) expect((handler as any).countTaggedNodes(page)).toBeLessThanOrEqual(150);
+      for (const page of delivered.values()) expect((handler as any).countTaggedNodes(page)).toBeLessThanOrEqual(180);
       const refreshed = delivered.get(workerCard)!;
       expect(JSON.stringify(refreshed)).toContain('Retry clear context');
       expect(JSON.stringify(refreshed)).toContain('Could not clear Worker context');
-      expect(getPanel(refreshed).expanded).toBe(false);
+      expect(getButtons(refreshed)).toHaveLength(11);
+      expect(refreshed.some(element => element.element_id === 'thread_controls')).toBe(false);
       expect((handler as any).countTaggedNodes(refreshed, true)).toBe((handler as any).countTaggedNodes(refreshed));
     });
 
@@ -1556,11 +1575,11 @@ describe('FeishuLongConnHandler', () => {
       expect(getButtons(switched)[1]).toMatchObject({ type: 'primary', disabled: false });
     });
 
-    it('keeps a full thread panel together at a continuation boundary and after switching', async () => {
+    it('keeps all thread controls together at a continuation boundary and after switching', async () => {
       const threads = Array.from({ length: 10 }, (_, index) => ({
         id: `t${index}`, name: `thread-${index + 1}`, status: 'idle' as const,
       }));
-      const content = Array.from({ length: 135 }, () => ({ tag: 'markdown', content: 'Result' }));
+      const content = Array.from({ length: 165 }, () => ({ tag: 'markdown', content: 'Result' }));
       mockClient.im.message.create.mockResolvedValue({ data: { message_id: 'last-card' } });
       await handler.finalizeStreamingMessage('first-card', content, undefined, 'user', '/work/project', 'thread-1', threads, 't0');
       const first = JSON.parse(mockClient.im.message.patch.mock.calls[0][0].data.content).body.elements;
@@ -1576,7 +1595,7 @@ describe('FeishuLongConnHandler', () => {
       const refreshed = JSON.parse(mockClient.im.message.patch.mock.calls[0][0].data.content).body.elements;
       expect(refreshed.filter((element: any) => element.content?.includes('Reply from:'))).toHaveLength(1);
       expect(getButtons(refreshed)).toHaveLength(11);
-      expect(refreshed.reduce((count: number, element: any) => count + (handler as any).countTaggedNodes(element), 0)).toBeLessThanOrEqual(150);
+      expect(refreshed.reduce((count: number, element: any) => count + (handler as any).countTaggedNodes(element), 0)).toBeLessThanOrEqual(180);
     });
 
     it.each([
@@ -1627,7 +1646,7 @@ describe('FeishuLongConnHandler', () => {
       }));
 
       const elements = (handler as any).createThreadSwitchElements(threads, 'thread-1');
-      const rows = getPanel(elements).elements;
+      const rows = getRows(elements);
 
       expect(rows.map((row: any) => row.columns.length)).toEqual([3, 3, 2]);
       const labels = rows.flatMap((row: any) => row.columns)
@@ -1752,7 +1771,7 @@ describe('FeishuLongConnHandler', () => {
         (total: number, element: any) => total + (handler as any).countTaggedNodes(element),
         0,
       );
-      expect(taggedNodeCount).toBeLessThanOrEqual(150);
+      expect(taggedNodeCount).toBeLessThanOrEqual(180);
       expect(JSON.stringify(refreshedElements)).not.toContain('Element 0');
       expect(JSON.stringify(refreshedElements)).toContain('Element 249');
     });
@@ -1875,8 +1894,8 @@ describe('FeishuLongConnHandler', () => {
       const messageId = 'msg_reuse';
       const openId = 'test_open_id';
 
-      // First update: create 2 cards (original + 1 continuation) with 180 elements (exceeds 150 limit)
-      const elements1 = Array.from({ length: 180 }, (_, i) => ({
+      // First update: create 2 cards (original + 1 continuation) with 210 elements (exceeds 180 limit)
+      const elements1 = Array.from({ length: 210 }, (_, i) => ({
         tag: 'markdown',
         content: `Element ${i}`,
       }));
@@ -1891,8 +1910,8 @@ describe('FeishuLongConnHandler', () => {
       const createCallCount1 = mockClient.im.message.create.mock.calls.length;
       const patchCallCount1 = mockClient.im.message.patch.mock.calls.length;
 
-      // Second update: still needs 2 cards with 190 elements, should reuse the continuation card
-      const elements2 = Array.from({ length: 190 }, (_, i) => ({
+      // Second update: grows to 220 elements but still reuses the same continuation card.
+      const elements2 = Array.from({ length: 220 }, (_, i) => ({
         tag: 'markdown',
         content: `Updated ${i}`,
       }));
@@ -1913,8 +1932,8 @@ describe('FeishuLongConnHandler', () => {
       const messageId = 'msg_expand';
       const openId = 'test_open_id';
 
-      // First update: 180 elements -> 2 cards (exceeds 150 limit)
-      const elements1 = Array.from({ length: 180 }, (_, i) => ({
+      // First update: 210 elements -> 2 cards (exceeds 180 limit)
+      const elements1 = Array.from({ length: 210 }, (_, i) => ({
         tag: 'markdown',
         content: `Element ${i}`,
       }));
@@ -1928,8 +1947,8 @@ describe('FeishuLongConnHandler', () => {
       await handler.updateStreamingMessage(messageId, elements1, openId);
       const createCallCount1 = mockClient.im.message.create.mock.calls.length;
 
-      // Second update: 350 elements -> needs 3 cards (350 / 150 = 2.33, rounds to 3)
-      const elements2 = Array.from({ length: 350 }, (_, i) => ({
+      // Second update: 410 elements -> needs 3 cards (410 / 180 rounds up to 3)
+      const elements2 = Array.from({ length: 410 }, (_, i) => ({
         tag: 'markdown',
         content: `More ${i}`,
       }));

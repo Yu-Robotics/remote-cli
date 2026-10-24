@@ -55,9 +55,8 @@ export class FeishuLongConnHandler {
   // Feishu message size limit (4000 chars per message) - DEPRECATED for Card 2.0
   private readonly FEISHU_MESSAGE_LIMIT = 4000;
   // Feishu Card 2.0 limits (from official docs)
-  // Note: Using conservative limits - official says 200, we use 150 with proper recursive counting
-  // The 150 limit leaves a 50-node safety buffer while still being practical
-  private readonly CARD_ELEMENT_LIMIT = 150; // Conservative: 150 tagged nodes per card (official: 200)
+  // Count nested tagged nodes and retain a 20-node safety buffer.
+  private readonly CARD_ELEMENT_LIMIT = 180;
   private readonly CARD_DATA_SIZE_LIMIT = 3000000; // Max 3MB (3,000,000 chars) for data field
   private readonly CARD_SIZE_BUFFER = 100000; // Safety buffer: use 2.9MB instead of 3MB
   private readonly THREAD_BUTTONS_PER_ROW = 3;
@@ -1104,7 +1103,7 @@ Examples:
    * Split Card 2.0 elements into chunks based on Feishu limits
    *
    * Card packing budgets:
-   * 1. Element count: Max 200 tagged nodes per card (we use 150 for safety)
+   * 1. Element count: Max 200 tagged nodes per card (we use 180 for safety)
    * 2. Data size: Max 3,000,000 characters in the data field (JSON.stringify result)
    * 3. Tables: A conservative budget including tables embedded in Markdown
    *
@@ -1116,7 +1115,7 @@ Examples:
    *
    * @param elements Array of Feishu Card 2.0 elements
    * @param continuationHeaderElements Header elements repeated at the top of continuation cards
-   * @param trailingElements Final panel elements that must remain together
+   * @param trailingElements Final controls and footer elements that must remain together
    * @returns Array of element chunks, each satisfying Feishu's limits
    */
   private splitElementsIntoChunks(elements: any[], continuationHeaderElements: any[] = [], trailingElements: any[] = [], activityTail?: any, keepCompletionWithBody = false): any[][] {
@@ -1178,7 +1177,7 @@ Examples:
       const workerGroup = workerPrefix ? elements.slice(i, i + 4) : [];
       const isWorkerGroup = workerGroup.length === 4 && ['header', 'body', 'meta', 'details']
         .every((suffix, index) => workerGroup[index].element_id === `${workerPrefix}${suffix}`);
-      // The switch panel caption and all its button rows also travel together.
+      // The switch controls caption and all button rows also travel together.
       const group = keepFinalBody && i === finalBodyStart ? finalGroup
         : isWorkerGroup ? workerGroup : element === trailingElements[0] ? trailingElements : [element];
       const groupSize = group.reduce((sum, item) => sum + JSON.stringify(item).length, 0);
@@ -1710,8 +1709,7 @@ Examples:
 
   /**
    * Create Feishu Card 2.0 elements for thread switching buttons.
-   * Native expansion needs no callback or server update. Hidden button rows still
-   * count towards the card budget, and retain their existing switching callbacks.
+   * Button rows remain directly visible and retain their switching callbacks.
    */
   private createThreadSwitchElements(threads: ThreadSummary[], activeThreadId?: string, replyLabel?: string): any[] {
     const orderedThreads = this.orderThreadsForDisplay(threads);
@@ -1758,18 +1756,7 @@ Examples:
     return [
       { tag: 'hr' },
       ...(replyLabel ? [{ tag: 'markdown', content: `📍 **Reply from:** ${replyLabel}` }] : []),
-      {
-        tag: 'collapsible_panel',
-        element_id: 'thread_controls',
-        expanded: false,
-        header: {
-          title: { tag: 'plain_text', content: 'Switch thread' },
-          icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', size: '16px 16px' },
-          icon_position: 'right',
-          icon_expanded_angle: -180,
-        },
-        elements: rows,
-      },
+      ...rows,
     ];
   }
 
