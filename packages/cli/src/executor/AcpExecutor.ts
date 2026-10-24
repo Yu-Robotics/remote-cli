@@ -170,6 +170,8 @@ export abstract class AcpExecutor implements IExecutor {
   private replayingSession = false;
   private sessionId: string | null = null;
   private configOptions: AcpConfigOption[] = [];
+  private catalogLifecycleRevision = 0;
+  private refreshedModelOption?: AcpConfigOption;
   private reportedConfigOptions: AcpConfigOption[] = [];
   private activeCallbacks: ActiveCallbacks = {};
   private commandQueue: QueuedCommand[] = [];
@@ -388,6 +390,57 @@ export abstract class AcpExecutor implements IExecutor {
     }));
   }
 
+  /** Apply an explicitly refreshed native catalog only to the same idle context. */
+  protected prepareIdleModelCatalogUpdate(): (models: ExecutorModelInfo[]) => ExecutorModelInfo[] {
+    const revision = this.catalogLifecycleRevision;
+    const client = this.client;
+    const sessionId = this.sessionId;
+    const cwd = this.currentWorkingDirectory;
+    const assertCurrent = () => {
+      if (this.isDestroyed || this.isBusy() || revision !== this.catalogLifecycleRevision
+        || client !== this.client || sessionId !== this.sessionId || cwd !== this.currentWorkingDirectory) {
+        throw new Error(`The ${this.backendLabel} thread changed or became busy during model discovery. Retry /model when it is idle.`);
+      }
+    };
+    assertCurrent();
+    return models => {
+      assertCurrent();
+      const current = this.findConfigOption('model')?.currentValue || this.model;
+      const options: AcpConfigOption = { id: 'model', name: 'Model', type: 'select', currentValue: current,
+        options: models.map(model => ({ value: model.id, name: model.displayName, description: model.description })) };
+      this.refreshedModelOption = options;
+      this.configOptions = [...this.configOptions.filter(option => option.id !== 'model'), options];
+      // Catalog discovery does not report a new native model selection.
+      return models.map(model => ({ ...model, isCurrent: current ? model.id === current : undefined }));
+    };
+  }
+
+  /** Select a discovered alias through a fresh, lifecycle-fenced native process. */
+  protected async selectIdleRefreshedModel(model: string, catalog: ExecutorModelInfo[]): Promise<ExecuteResult> {
+    if (!catalog.some(entry => entry.id === model)) {
+      return { success: false, error: `Unknown ${this.backendLabel} model. Refresh /model and select an available alias.` };
+    }
+    try {
+      if (this.isDestroyed || this.isBusy()) throw new Error('Model changes require an idle thread.');
+      const cwd = this.currentWorkingDirectory;
+      this.destroyClient();
+      const revision = this.catalogLifecycleRevision;
+      const assertCurrent = () => {
+        if (this.isDestroyed || this.isBusy() || revision !== this.catalogLifecycleRevision
+          || cwd !== this.currentWorkingDirectory) throw new Error('The thread changed during model selection.');
+      };
+      await this.waitForExit();
+      assertCurrent();
+      this.prepareIdleModelCatalogUpdate()(catalog);
+      await this.ensureSession({ model, assertCurrent });
+      assertCurrent();
+      this.model = model;
+      return { success: true, output: `Model set to ${model}.` };
+    } catch {
+      return { success: false, error: `Could not select the refreshed ${this.backendLabel} model safely. Keep the thread idle, check native account access, and retry /model. The conversation binding was not replaced.` };
+    }
+  }
+
   async listEfforts(): Promise<ExecutorEffortInfo> {
     await this.ensureSession();
     const option = this.findConfigOption(this.effortConfigId);
@@ -415,7 +468,7 @@ export abstract class AcpExecutor implements IExecutor {
 
   async setModel(model: string): Promise<ExecuteResult> {
     const { client, sessionId } = await this.ensureSession();
-    const option = this.findConfigOption('model');
+    const option = this.refreshedModelOption ?? this.findConfigOption('model');
     const parsed = option?.options ? parseAcpSelectOptions(option.options) : [];
     if (parsed.length && !parsed.some((entry) => entry.value === model)) {
       return { success: false, error: `Unknown ${this.backendLabel} model: ${model}. Use /model to list available models.` };
@@ -547,8 +600,9 @@ export abstract class AcpExecutor implements IExecutor {
     };
   }
 
-  private async ensureSession(): Promise<{ client: AcpTransport; sessionId: string }> {
-    const managed = this.isDelegationManaged();
+  private async ensureSession(selection?: { model: string; assertCurrent: () => void }): Promise<{ client: AcpTransport; sessionId: string }> {
+    const managed = this.isDelegationManaged() || selection !== undefined;
+    selection?.assertCurrent();
     if (this.isDestroyed && managed) throw new Error('Executor has been destroyed');
     assertWorkingDirectoryExists(this.currentWorkingDirectory);
     if (this.client && this.sessionId) return { client: this.client, sessionId: this.sessionId };
@@ -557,6 +611,7 @@ export abstract class AcpExecutor implements IExecutor {
     this.transports.set(client, managed);
     try {
       await client.initialize();
+      selection?.assertCurrent();
       const servers = delegationSessionServers(this.delegationConnection);
       const extra: [AcpMcpServer[]?] = servers.length ? [servers] : [];
       let result;
@@ -564,27 +619,32 @@ export abstract class AcpExecutor implements IExecutor {
         try {
           this.replayingSession = managed;
           result = await client.loadSession(this.sessionId, this.currentWorkingDirectory, ...extra);
+          selection?.assertCurrent();
         } catch (error) {
           const missingSession = /\bsession (?:not found|does not exist|no longer exists|is missing)\b/i
             .test(error instanceof Error ? error.message : String(error));
-          if ((this.delegationConnection || this.options.preserveSessionOnResumeError) && !missingSession) throw error;
+          if (selection || ((this.delegationConnection || this.options.preserveSessionOnResumeError) && !missingSession)) throw error;
           console.warn(`[${this.backendLabel}Executor] Stored session could not be loaded; starting fresh`, error);
           this.clearSessionPointer();
         } finally { this.replayingSession = false; }
       }
       if (!this.sessionId) {
         result = await client.newSession(this.currentWorkingDirectory, ...extra);
+        selection?.assertCurrent();
         if (!result.sessionId) throw new Error(`${this.backendLabel} did not return a session ID`);
         this.sessionId = result.sessionId;
         this.saveSessionPointer();
       }
       this.updateConfigOptions(result);
+      selection?.assertCurrent();
       if (this.isDestroyed && managed) throw new Error('Executor has been destroyed');
       this.client = client;
-      await this.applyConfiguredOptions(client, this.sessionId!);
+      await this.applyConfiguredOptions(client, this.sessionId!, selection);
+      selection?.assertCurrent();
       return { client, sessionId: this.sessionId! };
     } catch (error) {
       this.retireClient(client);
+      if (selection && this.client === client) this.client = null;
       throw error;
     }
   }
@@ -658,9 +718,19 @@ export abstract class AcpExecutor implements IExecutor {
     }
   }
 
-  private async applyConfiguredOptions(client: AcpTransport, sessionId: string): Promise<void> {
-    if (this.model) this.updateConfigOptions(await client.setConfigOption(sessionId, 'model', this.model));
-    if (this.effort) this.updateConfigOptions(await client.setConfigOption(sessionId, this.effortConfigId, this.effort));
+  private async applyConfiguredOptions(client: AcpTransport, sessionId: string,
+    selection?: { model: string; assertCurrent: () => void }): Promise<void> {
+    const model = selection?.model ?? this.model;
+    if (model) {
+      const result = await client.setConfigOption(sessionId, 'model', model);
+      selection?.assertCurrent();
+      this.updateConfigOptions(result);
+    }
+    if (this.effort) {
+      const result = await client.setConfigOption(sessionId, this.effortConfigId, this.effort);
+      selection?.assertCurrent();
+      this.updateConfigOptions(result);
+    }
   }
 
   private updateConfigOptions(result?: AcpSessionResult): void {
@@ -694,6 +764,8 @@ export abstract class AcpExecutor implements IExecutor {
   }
 
   private destroyClient(): void {
+    this.catalogLifecycleRevision++;
+    this.refreshedModelOption = undefined;
     this.reportedConfigOptions = [];
     this.clearAbortTimer();
     this.cancelPendingPermission();

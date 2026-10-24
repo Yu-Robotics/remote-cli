@@ -245,6 +245,20 @@ describe('immutable settings menus and acknowledged mutations', () => {
     expect((await f.service.open('model', 'thread-a', 'owner-a')).unavailableReason).toContain('No selectable options');
   });
 
+  it('reports failed Kimi model refresh without exposing native errors and allows a fresh retry', async () => {
+    const f = fixture();
+    vi.mocked(f.dependencies.catalog).mockRejectedValueOnce(new Error('Private native details'));
+    const unavailable = await f.service.open('model', 'thread-a', 'owner-a', 'kimi');
+    expect(unavailable.choices).toEqual([]);
+    expect(unavailable.unavailableReason).toContain('Kimi model discovery or refresh failed');
+    expect(unavailable.unavailableReason).toContain('then Refresh');
+    expect(JSON.stringify(unavailable)).not.toContain('Private native details');
+    const retry = await f.service.action(f.action(unavailable, { operation: 'view', value: undefined }));
+    expect(retry).toMatchObject({ success: true, menu: { targetBackend: 'kimi', choices: f.catalog.choices } });
+    expect(retry.menu?.unavailableReason).toBeUndefined();
+    expect(f.dependencies.catalog).toHaveBeenCalledTimes(2);
+  });
+
   it('rechecks all affected threads and installation under the admission barrier', async () => {
     const f = fixture();
     const menu = await f.service.open('backend', 'thread-a', 'owner-a');

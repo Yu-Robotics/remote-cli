@@ -12,6 +12,7 @@ function fakeProcess() {
   child.killed = false;
   child.kill = vi.fn(() => {
     child.killed = true;
+    queueMicrotask(() => child.emit('close', 0));
     return true;
   });
   return child;
@@ -23,9 +24,7 @@ describe('KimiAccountUsage', () => {
     vi.stubEnv('PATH', composed);
     const child = fakeProcess();
     const spawnProcess = vi.fn(() => child) as any;
-    const fetchImpl = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(JSON.stringify({
         data: {
           kind: 'ok',
           quota: {
@@ -44,8 +43,7 @@ describe('KimiAccountUsage', () => {
             },
           },
         },
-      }),
-    }) as any;
+    }))) as any;
 
     const result = queryKimiAccountUsage('kimi-custom', '/project', {
       spawnProcess,
@@ -62,7 +60,7 @@ describe('KimiAccountUsage', () => {
     expect(output).toContain('Extra usage balance: $12.34');
     expect(spawnProcess).toHaveBeenCalledWith(
       'kimi-custom',
-      ['web', '--no-open', '--port', '0', '--log-level', 'silent'],
+      ['web', '--no-open', '--host', '127.0.0.1', '--port', '0', '--log-level', 'silent'],
       expect.objectContaining({ cwd: '/project', env: expect.objectContaining({ PATH: composed }) })
     );
     expect(fetchImpl).toHaveBeenCalledWith(
@@ -76,10 +74,7 @@ describe('KimiAccountUsage', () => {
     const child = fakeProcess();
     const result = queryKimiAccountUsage('kimi', '/project', {
       spawnProcess: vi.fn(() => child) as any,
-      fetchImpl: vi.fn().mockResolvedValue({
-        ok: true,
-        json: async () => ({ data: { kind: 'error', message: 'No token' } }),
-      }) as any,
+      fetchImpl: vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: { kind: 'error', message: 'No token' } }))) as any,
       timeoutMs: 5_000,
     });
     child.stdout.emit('data', Buffer.from('Local: http://127.0.0.1:45678/#token=local-token\n'));
