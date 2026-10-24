@@ -973,7 +973,8 @@ export class PiExecutor implements IExecutor {
 
   private buildLaunch(): PiLaunchOptions {
     const pointerFile = this.sessionFile && fs.existsSync(this.sessionFile) ? this.sessionFile : undefined;
-    const sessionId = this.sessionId ?? (this.isForegroundSession() ? this.freshSessionId : this.threadId);
+    // A cleared pointer must never reopen history through a reused runtime ID.
+    const sessionId = this.sessionId ?? this.freshSessionId;
     return {
       command: this.piCommand,
       cwd: this.currentWorkingDirectory,

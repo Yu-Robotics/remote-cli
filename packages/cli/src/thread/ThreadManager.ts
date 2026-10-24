@@ -10,6 +10,7 @@ import {
   THREAD_NAME_REGEX,
 } from './types';
 import type { BackendKey } from '../types/config';
+import { ThreadContextReset } from './ThreadContextReset';
 
 /**
  * Manages thread lifecycle: create, list, update, delete.
@@ -18,6 +19,7 @@ import type { BackendKey } from '../types/config';
  * AgyExecutor) and cleaned up via IExecutor.deleteThreadData().
  */
 export class ThreadManager {
+  readonly contextResets: ThreadContextReset;
   private store: ThreadStore;
   private storePath: string;
   private sessionsDir: string;
@@ -27,6 +29,7 @@ export class ThreadManager {
     this.storePath = storePath;
     this.sessionsDir = sessionsDir;
     this.store = store;
+    this.contextResets = new ThreadContextReset(path.join(path.dirname(storePath), 'thread-context-resets'));
   }
 
   /**

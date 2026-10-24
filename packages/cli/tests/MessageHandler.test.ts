@@ -1,3 +1,4 @@
+import { ThreadContextReset } from '../src/thread/ThreadContextReset';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'events';
 import { spawn } from 'child_process';
@@ -73,6 +74,7 @@ function buildHandler(mockExecutorOverrides: Record<string, any> = {}) {
   const defaultThread = { id: 'default-thread-id', name: 'default', workingDirectory: '/home/user/test-project', sessionId: null, createdAt: 0, lastActiveAt: 0 };
 
   const mockThreadManager = {
+    contextResets: new ThreadContextReset(path.join(workingDirectory, 'reset-markers')),
     getDefaultThread: vi.fn().mockReturnValue(defaultThread),
     getThread: vi.fn().mockImplementation((id: string) => id === defaultThread.id ? defaultThread : undefined),
     getThreadByName: vi.fn().mockImplementation((name: string) => name === 'default' ? defaultThread : undefined),
@@ -85,6 +87,8 @@ function buildHandler(mockExecutorOverrides: Record<string, any> = {}) {
 
   const mockThreadPool = {
     getExecutor: vi.fn().mockReturnValue(mockExecutor),
+    assertContextResettable: vi.fn(),
+    clearThreadContext: vi.fn(async () => { mockExecutor.resetContext(); }),
     setWorkingDirectory: vi.fn().mockResolvedValue({ cwd: '/home/user/test-project', changed: true }),
     isThreadBusy: vi.fn().mockReturnValue(false),
     setThreadBusy: vi.fn(),
@@ -108,6 +112,8 @@ function buildHandler(mockExecutorOverrides: Record<string, any> = {}) {
     directoryGuard,
     mockConfig
   );
+  vi.spyOn((handler as any).delegation, 'assertThreadContextResettable').mockResolvedValue(undefined);
+  vi.spyOn((handler as any).delegation, 'clearThreadContexts').mockResolvedValue(undefined);
 
   const context = { handler, mockExecutor, mockWsClient, mockThreadPool, mockThreadManager, mockConfig, workingDirectory };
   testContexts.add(context);
@@ -1085,6 +1091,8 @@ describe('MessageHandler', () => {
       await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-123', content: command, timestamp: Date.now() });
 
       expect(ctx.mockExecutor.resetContext).toHaveBeenCalledOnce();
+      expect(ctx.mockThreadPool.clearThreadContext).toHaveBeenCalledWith('default-thread-id');
+      expect((ctx.handler as any).delegation.clearThreadContexts).toHaveBeenCalledWith('default-thread-id');
       expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
       expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
         expect.objectContaining({

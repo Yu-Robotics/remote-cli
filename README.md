@@ -488,8 +488,8 @@ Once connected, use these commands in Feishu:
 | `/skills` | List available skills for the active backend |
 | `/abort` | Abort the currently executing task in this thread |
 | `/queue` | Inspect or manage confirmed messages waiting in thread queues |
-| `/clear` | Clear conversation context for this thread |
-| `/new` | Alias for `/clear`; start a fresh conversation in this thread |
+| `/clear` | Reset all direct backend and managed worker conversations for this thread |
+| `/new` | Alias for `/clear`; start fresh across this thread's backends and workers |
 | `/compact` | Compress conversation history to save tokens |
 | `/delegation [on|off|reset [backend]]` | Inspect, enable, disable, or reset isolated delegated worker context in the current thread |
 | `/model [name]` | Open native model settings, or set the active backend model with a text argument |
@@ -772,11 +772,23 @@ peers retain their existing behavior. Card controls expire on Router restart,
 after 24 hours, or when their bounded cache is evicted; use a newer card or the
 existing thread-scoped `/delegation reset [backend]` command when idle.
 
-`/clear`, `/new`, backend switches, and toggling `/delegation` leave worker
-lanes intact. `/cd` starts a new workspace generation and discards the old
-lanes. `/delegation reset` discards every lane in the current thread, while
-`/delegation reset <backend>` discards only that backend's lane. Reset and
-working-directory changes are refused while a delegated worker is active;
+From CLI 1.6.167, `/clear` and its `/new` alias reset the entire current
+thread's conversation context: all direct backend session bindings and every
+managed worker conversation, across backends and parallel worker lanes. The
+working directory, files, Git artifacts, archived native transcripts, login,
+backend/model/effort selections, delegation preference, and sandbox grants are
+preserved. Other threads are unaffected. A later backend switch starts fresh
+instead of restoring a pre-clear binding. Busy tasks, queued work, and workers
+with unconfirmed shutdowns must settle before clearing. Reset intent is saved
+before any session binding changes. A persisted reset intent blocks old
+conversations until clearing succeeds, including after a CLI restart. If
+clearing fails, resolve the reported problem and retry `/clear` or `/new`.
+Single-worker **Clear context** controls still reset only the selected worker.
+
+Backend switches and toggling `/delegation` preserve worker context unless
+`/clear` or `/new` was used. `/cd` starts a new workspace generation and discards
+the old lanes. `/delegation reset` discards every lane in the current thread,
+while `/delegation reset <backend>` discards only that backend's lanes.
 `/thread delete` removes all of that thread's worker lanes.
 If lane cleanup fails, reset or thread deletion reports an error and retains the
 pending lane record for retry. The CLI retries explicitly pending cleanup on
@@ -1110,7 +1122,7 @@ Slash commands that remote-cli does not handle itself are forwarded to the activ
 
 - **DSH**: no native interactive slash passthrough; remote-cli handles its shared commands. See [Using DeepSeek Harness (DSH)](#using-deepseek-harness-dsh) for image, compaction, and privacy boundaries.
 
-The built-in commands (`/help`, `/status`, `/context`, `/clear`, `/new`, `/compact`, `/model`, `/cd`, `/thread`, `/backend`, `/abort`) work across all backends. `/skills` availability is backend-specific; DSH returns an explicit unsupported response. `/new` is an exact alias for `/clear`: it keeps the current remote-cli thread, working directory, backend, model, and effort settings while starting a fresh backend conversation. `/effort` uses each backend's native controls and returns explicit unavailable states for unsupported installed versions or models.
+The built-in commands (`/help`, `/status`, `/context`, `/clear`, `/new`, `/compact`, `/model`, `/cd`, `/thread`, `/backend`, `/abort`) work across all backends. `/skills` availability is backend-specific; DSH returns an explicit unsupported response. `/new` is an exact alias for `/clear`: it keeps the current remote-cli thread, working directory, backend, model, and effort settings while resetting all direct backend and managed worker conversations for this thread. `/effort` uses each backend's native controls and returns explicit unavailable states for unsupported installed versions or models.
 `/status` always reports the current remote-cli thread and runtime state. When available, it appends native account information for Codex (app-server rate limits), AGY (`/usage` plus `/credits`), Kimi Code (the authenticated local Kimi server's account-usage endpoint), or DSH (official account wallet balances). Each backend keeps its own fields and wording. An unavailable, unauthenticated, unsupported, or failed query is omitted without failing the normal status response. The short-lived Kimi server binds only to loopback and is stopped after the query. DSH uses a separate, short-lived account-query process without a Web server or model turn.
 `/context` works across all backends and reports the active session, model, working directory, and queue state. Pi additionally reports the official RPC session totals and current context-window usage; other backends retain the transport-availability message when exact usage is unavailable. `/skills` uses the native informational command for Claude, AGY, OpenCode, and Kimi Code, maps to ZCode's native `/skill` command, lists Pi skills via RPC, and discovers local `SKILL.md` files for Codex under `.agents/skills` and `~/.codex/skills`.
 

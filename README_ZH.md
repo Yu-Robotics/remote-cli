@@ -487,8 +487,8 @@ remote-cli stop
 | `/skills` | 列出当前 backend 可用的 skills |
 | `/abort` | 中止当前线程正在运行的 AI 任务 |
 | `/queue` | 查看或管理线程中已确认的排队消息 |
-| `/clear` | 清除当前线程的对话上下文 |
-| `/new` | `/clear` 的别名；在当前线程中开始全新对话 |
+| `/clear` | Reset all direct backend and managed worker conversations for this thread |
+| `/new` | Alias for `/clear`; start fresh across this thread's backends and workers |
 | `/compact` | 压缩对话历史以节省 Token |
 | `/delegation [on|off|reset [backend]]` | 查看、启用、关闭或重置当前线程中隔离的委派 worker 上下文 |
 | `/model [name]` | Open native model settings, or set the active backend model with a text argument |
@@ -752,7 +752,24 @@ peers retain their existing behavior. Card controls expire on Router restart,
 after 24 hours, or when their bounded cache is evicted; use a newer card or the
 existing thread-scoped `/delegation reset [backend]` command when idle.
 
-`/clear`、`/new`、切换后端和开关`/delegation`都不会丢弃 worker 通道。`/cd`会创建新的工作区代次，并丢弃旧通道。`/delegation reset`会丢弃当前线程的全部通道，`/delegation reset <backend>`只丢弃该后端的通道。委派 worker 运行时，重置和切换工作目录都会被拒绝；`/thread delete`会移除该线程的全部 worker 通道。
+From CLI 1.6.167, `/clear` and its `/new` alias reset the entire current
+thread's conversation context: all direct backend session bindings and every
+managed worker conversation, across backends and parallel worker lanes. The
+working directory, files, Git artifacts, archived native transcripts, login,
+backend/model/effort selections, delegation preference, and sandbox grants are
+preserved. Other threads are unaffected. A later backend switch starts fresh
+instead of restoring a pre-clear binding. Busy tasks, queued work, and workers
+with unconfirmed shutdowns must settle before clearing. Reset intent is saved
+before any session binding changes. A persisted reset intent blocks old
+conversations until clearing succeeds, including after a CLI restart. If
+clearing fails, resolve the reported problem and retry `/clear` or `/new`.
+Single-worker **Clear context** controls still reset only the selected worker.
+
+Backend switches and toggling `/delegation` preserve worker context unless
+`/clear` or `/new` was used. `/cd` starts a new workspace generation and discards
+the old lanes. `/delegation reset` discards every lane in the current thread,
+while `/delegation reset <backend>` discards only that backend's lanes.
+`/thread delete` removes all of that thread's worker lanes.
 
 如果通道清理失败，重置或删除线程会报告错误，并保留待清理记录以便重试。CLI 启动时会重试明确标记为待清理的通道；对于无法确认进程已退出的 worker，不会自动删除其通道。这种情况应先确认 worker 已停止，再重试清理。
 如果 `/cd` 后清理失败，工作目录切换仍然成功，回复会单独提示待清理的通道。
@@ -1064,7 +1081,7 @@ remote-cli 自身不处理的斜杠命令会转发给当前 AI 后端，各后�
 
 - **DSH**: no native interactive slash passthrough; remote-cli handles its shared commands. See [Using DeepSeek Harness (DSH)](#using-deepseek-harness-dsh) for image, compaction, and privacy boundaries.
 
-The built-in commands (`/help`, `/status`, `/context`, `/clear`, `/new`, `/compact`, `/model`, `/cd`, `/thread`, `/backend`, `/abort`) work across all backends. `/skills` availability is backend-specific; DSH returns an explicit unsupported response. `/new` is an exact alias for `/clear`: it keeps the current remote-cli thread, working directory, backend, model, and effort settings while starting a fresh backend conversation. `/effort` uses each backend's native controls and returns explicit unavailable states for unsupported installed versions or models.
+The built-in commands (`/help`, `/status`, `/context`, `/clear`, `/new`, `/compact`, `/model`, `/cd`, `/thread`, `/backend`, `/abort`) work across all backends. `/skills` availability is backend-specific; DSH returns an explicit unsupported response. `/new` is an exact alias for `/clear`: it keeps the current remote-cli thread, working directory, backend, model, and effort settings while resetting all direct backend and managed worker conversations for this thread. `/effort` uses each backend's native controls and returns explicit unavailable states for unsupported installed versions or models.
 `/status` always reports the current remote-cli thread and runtime state. When available, it appends native account information for Codex (app-server rate limits), AGY (`/usage` plus `/credits`), Kimi Code (the authenticated local Kimi server's account-usage endpoint), or DSH (official account wallet balances). Each backend keeps its own fields and wording. An unavailable, unauthenticated, unsupported, or failed query is omitted without failing the normal status response. The short-lived Kimi server binds only to loopback and is stopped after the query. DSH uses a separate, short-lived account-query process without a Web server or model turn.
 `/context` 可用于所有后端，会显示当前会话、模型、工作目录和队列状态。Pi 还会显示官方 RPC 返回的会话 Token 总计和当前上下文窗口用量；其他后端无法提供精确用量时，仍会显示传输层未提供该信息的提示。`/skills` 在 Claude、AGY、OpenCode 和 Kimi Code 上使用原生信息命令，在 ZCode 上映射为原生 `/skill` 命令，在 Pi 上通过 RPC 列出技能；Codex 则扫描 `.agents/skills` 和 `~/.codex/skills` 下的本地 `SKILL.md` 文件。
 

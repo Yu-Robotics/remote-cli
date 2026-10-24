@@ -3,6 +3,7 @@ import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { DELEGATION_BACKENDS, type DelegationBackend } from './contract';
+import { ThreadContextReset } from '../thread/ThreadContextReset';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const STATES = new Set<DelegatedWorkerLaneState>(['preparing', 'running', 'ready', 'dirty']);
@@ -26,6 +27,8 @@ export interface DelegatedWorkerLane {
   contextGeneration?: number;
   contextResetPending?: boolean;
   lastClearedGeneration?: number;
+  /** Confirmed cleared and superseded; retained for stale cards but never reused. */
+  contextRetired?: boolean;
   pooled?: boolean;
 }
 
@@ -96,6 +99,9 @@ function validateLane(value: unknown): value is DelegatedWorkerLane {
     && (lane.contextGeneration === undefined || validGeneration(lane.contextGeneration))
     && (lane.lastClearedGeneration === undefined || validGeneration(lane.lastClearedGeneration))
     && (lane.contextResetPending === undefined || typeof lane.contextResetPending === 'boolean')
+    && (lane.contextRetired === undefined || typeof lane.contextRetired === 'boolean')
+    && (lane.contextRetired !== true || (lane.state === 'dirty' && lane.contextResetPending === false
+      && validGeneration(lane.lastClearedGeneration) && lane.contextGeneration === lane.lastClearedGeneration + 1))
     && (lane.pooled === undefined || typeof lane.pooled === 'boolean')
     && (lane.cleanupError === undefined || typeof lane.cleanupError === 'string');
 }
@@ -109,10 +115,18 @@ export class DelegatedWorkerSessionStore {
   private readonly lanes = new Map<string, DelegatedWorkerLane>();
   private writes: Promise<void> = Promise.resolve();
 
-  constructor(private readonly directory = path.join(os.homedir(), '.remote-cli', 'delegation-workers')) {}
+  constructor(private readonly directory = path.join(os.homedir(), '.remote-cli', 'delegation-workers'),
+    private readonly contextResets = new ThreadContextReset()) {}
+
+  assertContextReady(threadId: string): void { this.contextResets.assertReady(threadId); }
 
   initialize(): Promise<void> {
-    return this.initialized ??= this.load();
+    return this.initialized ??= this.load().catch(error => {
+      // Storage failures must block admission, but a repaired inventory can be
+      // retried in this process instead of caching a rejected initialization.
+      this.initialized = undefined;
+      throw error;
+    });
   }
 
   async acquire(identity: DelegatedWorkerLaneIdentity,
@@ -120,8 +134,10 @@ export class DelegatedWorkerSessionStore {
     this.assertIdentity(identity);
     await this.initialize();
     return this.mutate(async () => {
+      this.assertContextReady(identity.threadId);
       const ready = [...this.lanes.values()]
-        .filter(lane => lane.state === 'ready' && sameIdentity(lane, identity) && !options.excluded?.has(lane.id))
+        .filter(lane => lane.state === 'ready' && !lane.contextRetired
+          && sameIdentity(lane, identity) && !options.excluded?.has(lane.id))
         .sort((a, b) => b.updatedAt - a.updatedAt);
 
       // Shared-directory lanes keep the legacy single-ready invariant. Isolated
@@ -241,6 +257,7 @@ export class DelegatedWorkerSessionStore {
     return this.mutate(async () => {
       const lane = this.lanes.get(id);
       if (!lane) throw new Error('Delegated worker lane not found');
+      if (lane.contextRetired) throw new Error('The Worker context has been retired and cannot be reused.');
       const next: DelegatedWorkerLane = { ...lane, ...extra, state, updatedAt: Date.now() };
       await this.writeAndRemember(next);
       return clone(next);
@@ -253,60 +270,101 @@ export class DelegatedWorkerSessionStore {
     if (!UUID_RE.test(id) || !validGeneration(generation)) throw new Error('Invalid worker context reference');
     await this.initialize();
     await this.mutate(async () => {
-      const lane = this.lanes.get(id);
-      if (!lane || lane.threadId !== identity.threadId || lane.workingDirectory !== identity.workingDirectory
-        || lane.workspaceGeneration !== identity.workspaceGeneration) {
-        throw new Error('This Worker card has expired. Use the latest Worker card.');
-      }
-      const current = lane.contextGeneration ?? 0;
-      if (current !== generation) {
-        if (lane.lastClearedGeneration === generation) return;
-        throw new Error('The Worker context has changed. Use the latest Worker card.');
-      }
-      if (lane.cleanupPending || (lane.state !== 'ready' && !(lane.state === 'dirty' && lane.contextResetPending))) {
-        throw new Error('The Worker is active or its shutdown is unconfirmed. Wait before clearing context.');
-      }
-      // Persist intent before unlinking. A crash or partial failure must never resume old context.
-      const pending: DelegatedWorkerLane = { ...lane, state: 'dirty', contextResetPending: true, updatedAt: Date.now() };
-      await this.writeAndRemember(pending);
-      await clear(clone(pending));
-      // A failed reset can be superseded by a new shared-directory lane. Clearing
-      // the old pointer must not revive it or authorize deleting its replacement.
-      // Legacy lanes have no mode; preserve them conservatively when ambiguous.
-      const superseded = lane.pooled !== true && [...this.lanes.values()].some(other =>
-        other.id !== lane.id && sameIdentity(other, lane) && other.state !== 'dirty');
-      await this.writeAndRemember({ ...pending, state: superseded ? 'dirty' : 'ready', contextGeneration: current + 1,
-        contextResetPending: false, lastClearedGeneration: generation,
-        cleanupError: superseded ? 'Worker context cleared; a replacement lane remains active.' : undefined,
-        updatedAt: Date.now() });
+      this.assertContextReady(identity.threadId);
+      await this.clearContextLocked(id, generation, identity, clear);
     });
   }
 
+  async assertThreadContextResettable(threadId: string): Promise<void> {
+    await this.initialize();
+    await this.mutate(async () => { this.resettableLanes(threadId); });
+  }
+
+  /** The thread-level barrier covers all lanes, including a later lane that fails to clear. */
+  async clearThreadContexts(threadId: string, clear: (lane: DelegatedWorkerLane) => Promise<void>): Promise<void> {
+    await this.initialize();
+    await this.mutate(async () => {
+      if (!this.contextResets.isPending(threadId)) throw new Error('Thread context reset intent is missing');
+      for (const lane of this.resettableLanes(threadId)) {
+        await this.clearContextLocked(lane.id, lane.contextGeneration ?? 0, lane, clear);
+      }
+    });
+  }
+
+  private resettableLanes(threadId: string): DelegatedWorkerLane[] {
+    const lanes = [...this.lanes.values()].filter(lane => lane.threadId === threadId);
+    if (lanes.some(lane => lane.cleanupPending || (lane.state !== 'ready'
+      && !(lane.state === 'dirty' && (lane.contextResetPending || lane.contextRetired))))) {
+      throw new Error('Cannot clear thread context: a Worker is active or its shutdown is unconfirmed. Wait for confirmed exit before retrying /clear.');
+    }
+    return lanes.filter(lane => !lane.contextRetired);
+  }
+
+  private async clearContextLocked(id: string, generation: number,
+    identity: Omit<DelegatedWorkerLaneIdentity, 'backend'>,
+    clear: (lane: DelegatedWorkerLane) => Promise<void>): Promise<void> {
+    const lane = this.lanes.get(id);
+    if (!lane || lane.threadId !== identity.threadId || lane.workingDirectory !== identity.workingDirectory
+      || lane.workspaceGeneration !== identity.workspaceGeneration) {
+      throw new Error('This Worker card has expired. Use the latest Worker card.');
+    }
+    const current = lane.contextGeneration ?? 0;
+    if (current !== generation) {
+      if (lane.lastClearedGeneration === generation) return;
+      throw new Error('The Worker context has changed. Use the latest Worker card.');
+    }
+    if (lane.cleanupPending || (lane.state !== 'ready' && !(lane.state === 'dirty' && lane.contextResetPending))) {
+      throw new Error('The Worker is active or its shutdown is unconfirmed. Wait before clearing context.');
+    }
+    // Persist intent before unlinking. A crash or partial failure must never resume old context.
+    const pending: DelegatedWorkerLane = { ...lane, state: 'dirty', contextResetPending: true, updatedAt: Date.now() };
+    await this.writeAndRemember(pending);
+    await clear(clone(pending));
+    // A failed reset can be superseded by a new shared-directory lane. Clearing
+    // the old pointer must not revive it or authorize deleting its replacement.
+    // Legacy lanes have no mode; preserve them conservatively when ambiguous.
+    const superseded = lane.pooled !== true && [...this.lanes.values()].some(other =>
+      other.id !== lane.id && sameIdentity(other, lane) && other.state !== 'dirty');
+    await this.writeAndRemember({ ...pending, state: superseded ? 'dirty' : 'ready', contextGeneration: current + 1,
+      contextResetPending: false, lastClearedGeneration: generation,
+      contextRetired: superseded ? true : undefined,
+      cleanupError: superseded ? 'Worker context cleared; a replacement lane remains active.' : undefined,
+      updatedAt: Date.now() });
+  }
+
   private async load(): Promise<void> {
-    await fs.mkdir(this.directory, { recursive: true, mode: 0o700 });
-    let names: string[] = [];
-    try { names = await fs.readdir(this.directory); } catch { return; }
-    for (const name of names) {
-      if (!UUID_RE.test(name.replace(/\.json$/, '')) || !name.endsWith('.json')) continue;
-      const file = path.join(this.directory, name);
-      try {
-        const stat = await fs.stat(file);
-        if (stat.size > 64 * 1024) continue;
+    // Publish only a complete inventory. Silently omitting even one unreadable
+    // record could allow a thread reset to finish with its old pointer intact.
+    const loaded = new Map<string, DelegatedWorkerLane>();
+    try {
+      await fs.mkdir(this.directory, { recursive: true, mode: 0o700 });
+      const names = await fs.readdir(this.directory);
+      for (const name of names) {
+        if (!name.endsWith('.json')) continue;
+        if (!UUID_RE.test(name.slice(0, -5))) throw new Error('Invalid worker lane filename');
+        const file = path.join(this.directory, name);
+        const stat = await fs.lstat(file);
+        if (!stat.isFile() || stat.size > 64 * 1024) throw new Error('Invalid worker lane file');
         const parsed = JSON.parse(await fs.readFile(file, 'utf8')) as unknown;
-        if (!validateLane(parsed)) continue;
-        const lane = parsed;
+        if (!validateLane(parsed) || name !== `${parsed.id}.json`) throw new Error('Invalid worker lane record');
+        loaded.set(parsed.id, parsed);
+      }
+      for (const [id, lane] of loaded) {
         // A process may have died between any write and terminal confirmation.
         // Only a ready lane is resumable after a CLI restart.
         if (lane.state !== 'ready') {
           const dirty: DelegatedWorkerLane = { ...lane, state: 'dirty', cleanupPending: lane.cleanupPending === true,
             cleanupError: lane.cleanupError ?? 'The CLI stopped before worker cleanup was confirmed.', updatedAt: Date.now() };
           await this.writeRecord(dirty);
-          this.lanes.set(dirty.id, dirty);
-        } else this.lanes.set(lane.id, lane);
-      } catch {
-        // A corrupt lane cannot become resumable.
+          loaded.set(id, dirty);
+        }
       }
+    } catch (cause) {
+      // Missing records during enumeration are also uncertain. Retry a fresh
+      // inventory rather than accepting a partial snapshot or rewriting it.
+      throw new Error('Cannot load delegated worker inventory. Check local CLI storage and repair unreadable or invalid lane records before retrying /clear.', { cause });
     }
+    for (const [id, lane] of loaded) this.lanes.set(id, lane);
   }
 
   private assertIdentity(identity: DelegatedWorkerLaneIdentity): void {
