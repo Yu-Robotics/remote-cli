@@ -47,6 +47,7 @@ class GoalTransport implements CodexAppServerTransport {
     if (override) return override;
     if (method === 'thread/start' || method === 'thread/resume') return { thread: { id: 'native-thread' } };
     if (method === 'turn/start') return { turn: { id: 'ordinary-turn' } };
+    if (method === 'config/read') return { config: {} };
     if (method === 'thread/goal/get') return { goal: this.goal ? { ...this.goal } : null };
     if (method === 'thread/goal/set') {
       if (!this.goal && !params.objective) throw new Error('No existing native goal');
@@ -80,7 +81,7 @@ describe('native Codex goal lifecycle', () => {
   let executor: CodexAppServerExecutor;
   const tick = async () => { for (let i = 0; i < 40; i++) await Promise.resolve(); };
   const pointer = () => path.join(home, '.remote-cli', 'codex-sessions', 'remote-thread.json');
-  const create = (worker = false, settings: { model?: string; effort?: string } = {}) => new CodexAppServerExecutor(new DirectoryGuard([project]), {
+  const create = (worker = false, settings: { model?: string; effort?: string; speed?: string | null } = {}) => new CodexAppServerExecutor(new DirectoryGuard([project]), {
     threadId: 'remote-thread', initialWorkingDirectory: project, autoApprove: false,
     delegationWorker: worker, clientFactory: () => client, inactivityTimeoutMs: 60_000,
     ...settings,
@@ -120,6 +121,109 @@ describe('native Codex goal lifecycle', () => {
     expect(await executor.getGoal()).toBeNull();
     expect(await executor.executeGoal({}, {})).toMatchObject({ success: false, error: expect.stringContaining('no saved') });
     expect(client.requests).toEqual([]);
+  });
+
+  it('rejects an incompatible reported model before activating automatic goal work', async () => {
+    await executor.destroy(); client = new GoalTransport();
+    client.hook = method => {
+      if (method === 'model/list') return Promise.resolve({ data: [
+        { id: 'configured-model', displayName: 'Configured', isDefault: true, serviceTiers: [{ id: 'priority', name: 'Fast' }] },
+        { id: 'reported-model', displayName: 'Reported', serviceTiers: [] },
+      ], nextCursor: null });
+      if (method === 'thread/start') return Promise.resolve({ thread: { id: 'native-thread' }, model: 'reported-model' });
+      return undefined;
+    };
+    executor = create(false, { speed: 'priority' });
+    expect(await executor.executeGoal({ objective: 'Verify synthetic model isolation' }, {})).toMatchObject({ success: false });
+    expect(client.requests.some(request => request.method === 'thread/goal/set' && request.params.status === 'active')).toBe(false);
+    expect(client.requests.some(request => request.method === 'turn/start')).toBe(false);
+  });
+
+  it('sets native speed on sticky goal policies before automatic turns can start', async () => {
+    await executor.destroy(); client = new GoalTransport();
+    client.hook = (method) => method === 'model/list' ? Promise.resolve({ data: [{ id: 'native-model', displayName: 'Native', isDefault: true,
+      serviceTiers: [{ id: 'native-priority', name: 'Native Fast' }] }], nextCursor: null }) : undefined;
+    executor = create(false, { speed: 'native-priority' });
+    const { done } = await begin();
+    const policy = client.requests.findIndex(request => request.method === 'thread/settings/update');
+    const activate = client.requests.findIndex(request => request.method === 'thread/goal/set' && request.params.status === 'active');
+    expect(policy).toBeGreaterThanOrEqual(0);
+    expect(policy).toBeLessThan(activate);
+    expect(client.requests[policy].params.serviceTier).toBe('native-priority');
+    expect(client.requests.some(request => request.method === 'turn/start')).toBe(false);
+    client.update('complete'); await done;
+  });
+
+  it('saves a speed preference for a recovered goal without resuming or activating it during settings', async () => {
+    await executor.destroy();
+    await fs.writeFile(pointer(), JSON.stringify({ id: 'native-thread', goalManaged: true }));
+    client = new GoalTransport(); client.goal = client.makeGoal('paused');
+    client.hook = method => method === 'model/list' ? Promise.resolve({ data: [{ id: 'native-model', displayName: 'Native', isDefault: true,
+      serviceTiers: [{ id: 'priority', name: 'Fast' }] }], nextCursor: null }) : undefined;
+    executor = create();
+    expect(await executor.setSpeed('priority')).toMatchObject({ success: true });
+    expect(client.requests.every(request => request.method === 'model/list' || request.method === 'config/read')).toBe(true);
+    const pending = executor.executeGoal({}, {});
+    await tick();
+    expect(client.requests.find(request => request.method === 'thread/resume')?.params.serviceTier).toBe('priority');
+    const update = client.requests.findIndex(request => request.method === 'thread/settings/update');
+    const active = client.requests.findIndex(request => request.method === 'thread/goal/set' && request.params.status === 'active');
+    expect(update).toBeGreaterThanOrEqual(0); expect(update).toBeLessThan(active);
+    client.update('complete'); await pending;
+  });
+
+  it('bounds native-config reads for Follow and fences late goal startup after cancellation', async () => {
+    vi.useFakeTimers();
+    await executor.destroy(); client = new GoalTransport();
+    let release!: (value: any) => void;
+    client.hook = method => method === 'config/read' ? new Promise(resolve => { release = resolve; })
+      : method === 'model/list' ? Promise.resolve({ data: [{ id: 'native-model', serviceTiers: [] }], nextCursor: null }) : undefined;
+    executor = create(false, { speed: null });
+    const done = executor.executeGoal({ objective: 'Verify synthetic evidence' }, {});
+    await tick();
+    expect(release).toBeDefined();
+    await vi.advanceTimersByTimeAsync(10_001);
+    expect(await done).toMatchObject({ success: false });
+    release({ config: { service_tier: 'priority' } });
+    await tick();
+    expect(client.requests.some(request => request.method === 'thread/start' || request.method === 'thread/resume' || request.method === 'thread/goal/set')).toBe(false);
+  });
+
+  it('recovers a suspended goal from a disappeared tier without loading or activating it during reset', async () => {
+    await executor.destroy();
+    await fs.writeFile(pointer(), JSON.stringify({ id: 'native-thread', goalManaged: true }));
+    client = new GoalTransport(); client.goal = client.makeGoal('paused');
+    client.hook = method => method === 'model/list' ? Promise.resolve({ data: [{ id: 'native-model', serviceTiers: [] }], nextCursor: null })
+      : method === 'config/read' ? Promise.resolve({ config: { model: 'native-model', service_tier: 'priority', features: { fast_mode: false } } }) : undefined;
+    executor = create(false, { speed: 'priority' });
+    expect(await executor.listSpeeds()).toMatchObject({ choices: [], current: 'priority' });
+    const before = client.requests.length;
+    expect((await executor.setSpeed(undefined)).success).toBe(true);
+    expect(client.requests).toHaveLength(before);
+    expect(executor.getSessionId()).toBe('native-thread');
+    const done = executor.executeGoal({}, {});
+    await tick();
+    expect(client.requests.find(request => request.method === 'thread/resume')?.params.serviceTier).toBeNull();
+    const policies = client.requests.findIndex(request => request.method === 'thread/settings/update');
+    const active = client.requests.findIndex(request => request.method === 'thread/goal/set' && request.params.status === 'active');
+    expect(policies).toBeGreaterThanOrEqual(0); expect(policies).toBeLessThan(active);
+    expect(client.requests[policies].params.serviceTier).toBeNull();
+    expect(client.requests.some(request => request.method === 'turn/start')).toBe(false);
+    client.update('complete'); await done;
+  });
+
+  it('never activates an old saved goal when its native protocol cannot safely clear a persisted Follow marker', async () => {
+    await executor.destroy();
+    await fs.writeFile(pointer(), JSON.stringify({ id: 'native-thread', goalManaged: true }));
+    client = new GoalTransport(); client.goal = client.makeGoal('paused');
+    executor = create(false, { speed: 'priority' });
+    expect((await executor.setSpeed(undefined)).success).toBe(true);
+    expect(client.requests).toEqual([]);
+    expect((await executor.executeGoal({}, {})).success).toBe(false);
+    expect(client.requests.some(request => request.method === 'thread/resume' || request.method === 'turn/start'
+      || (request.method === 'thread/goal/set' && request.params.status === 'active'))).toBe(false);
+    for (const request of client.requests) expect(request.params).not.toHaveProperty('serviceTier');
+    expect(executor.getSessionId()).toBe('native-thread');
   });
 
   it('reads saved native state without thread/start or thread/resume', async () => {

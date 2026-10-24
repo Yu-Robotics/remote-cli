@@ -30,6 +30,8 @@ export interface SettingsMenu {
   targetBackend: SettingsBackend;
   backends: SettingsBackendInfo[];
   choices: SettingsChoice[];
+  /** Only sent after negotiating modelSpeedSettings. Separate from model IDs. */
+  speed?: { choices: SettingsChoice[]; configuredValue?: string; defaultValue?: string | null };
   configuredValue?: string;
   effectiveValue?: string;
   defaultValue?: string;
@@ -52,6 +54,8 @@ export interface SettingsActionMessage {
   threadId: string;
   snapshotId: string;
   operation: 'view' | 'apply' | 'reset' | 'follow_global';
+  /** Absent retains the original model/effort action semantics. */
+  setting?: 'speed';
   targetBackend?: SettingsBackend;
   value?: string;
   scope?: SettingsScope;

@@ -28,6 +28,7 @@ function makeMockExecutor(overrides: Partial<IExecutor> = {}): IExecutor {
 
 describe('ThreadExecutorPool', () => {
   let tmpDir: string;
+  let previousHome: string | undefined;
   let manager: ThreadManager;
   let directoryGuard: DirectoryGuard;
   let executorConfig: ExecutorConfig;
@@ -35,7 +36,8 @@ describe('ThreadExecutorPool', () => {
   let pool: ThreadExecutorPool;
 
   beforeEach(async () => {
-    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'thread-pool-test-'));
+    tmpDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'thread-pool-test-')));
+    previousHome = process.env.HOME;
     process.env.HOME = tmpDir;
     manager = await ThreadManager.initialize(tmpDir);
     directoryGuard = new DirectoryGuard([tmpDir]);
@@ -47,10 +49,18 @@ describe('ThreadExecutorPool', () => {
   afterEach(async () => {
     await pool.destroyAll();
     await fs.rm(tmpDir, { recursive: true, force: true });
-    delete process.env.HOME;
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
   });
 
   describe('lazy executor creation', () => {
+    it('routes only the active backend speed preference, including explicit Follow, to the executor factory', async () => {
+      const thread = manager.getDefaultThread();
+      await manager.updateThread(thread.id, { speeds: { codex: 'priority', claude: null } });
+      pool.getExecutor(thread.id);
+      expect(mockExecutorFactory.mock.calls[0][6]).toEqual({ speed: null });
+      expect(manager.getThread(thread.id)?.speeds?.codex).toBe('priority');
+    });
     it('does not create executor until getExecutor() is called', () => {
       expect(mockExecutorFactory).not.toHaveBeenCalled();
     });

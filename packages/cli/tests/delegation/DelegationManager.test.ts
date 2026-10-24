@@ -133,6 +133,16 @@ describe('managed agent delegation', () => {
     expect(record).toMatchObject({ threadId: 'owner', parentMessageId: 'message-1', state: 'succeeded' });
   });
 
+  it.each(['priority', null])('inherits the worker backend speed (%s) without changing coordinator preferences or native lanes', async speed => {
+    parent.thread.speeds = { codex: speed };
+    const scope = manager.begin(parent);
+    const started: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Review synthetic changes' }, 'start-speed');
+    expect(await scope.invoke('remote_cli_result', { taskId: started.taskId }, 'result-speed')).toMatchObject({ state: 'succeeded' });
+    expect(factory.mock.calls[0][6]).toEqual({ lifecycleHooks: false, delegationWorker: true, speed });
+    expect(parent.thread.speeds).toEqual({ codex: speed });
+    expect(worker.resetContext).not.toHaveBeenCalled();
+  });
+
   it('emits bounded nested progress instead of flat child tool cards when the parent supports it', async () => {
     const onProgress = vi.fn(() => true);
     parent.onProgress = onProgress;

@@ -2,6 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SettingsCards, sanitizeSettingsMenu } from '../src/feishu/SettingsCards';
 import type { SettingsMenu } from '../src/types/Settings';
 import { SettingsService } from '../../cli/src/settings/SettingsService';
+import { CodexAppServerExecutor } from '../../cli/src/executor/CodexAppServerExecutor';
+import { DirectoryGuard } from '../../cli/src/security/DirectoryGuard';
+import fs from 'fs/promises';
+import os from 'os';
+import { homedir as nativeHomedir } from 'os';
+import { syncBuiltinESMExports } from 'module';
+import path from 'path';
 
 const BACKENDS = [
   ['claude', 'Claude Code'], ['codex', 'Codex CLI'], ['opencode', 'OpenCode'], ['kimi', 'Kimi Code'],
@@ -105,6 +112,153 @@ describe('SettingsCards', () => {
     expect(button, `enabled ${op} button${value ? ` (${value})` : ''}`).toBeDefined();
     return button!.behaviors[0].value;
   }
+
+  it('renders and sends speed separately from model IDs only after speed negotiation', async () => {
+    const menu = modelMenu({ targetBackend: 'codex', speed: { choices: [
+      { value: 'default', label: 'Standard' }, { value: 'priority', label: 'Native Fast', description: 'Native description' }], configuredValue: 'priority' } });
+    expect(sanitizeSettingsMenu(menu)?.speed).toBeUndefined();
+    const legacy = present(menu);
+    expect(JSON.stringify(legacy.elements)).not.toContain('**3 · Speed**');
+    transport.speedAvailable = vi.fn(() => true);
+    const current = present({ ...menu, snapshotId: 'speed-snapshot' }, 'speed-card');
+    expect(JSON.stringify(current.elements)).toContain('**3 · Speed**');
+    expect(JSON.stringify(current.elements)).toContain('Native description');
+    expect(taggedNodes({ body: { elements: current.elements } })).toBeLessThanOrEqual(90);
+    await cards.click('owner', 'speed-card', clickPayload(current.elements, 'speed_apply', 'priority'));
+    expect(transport.send).toHaveBeenLastCalledWith('device', expect.objectContaining({ operation: 'apply', setting: 'speed', value: 'priority' }));
+    const request = transport.send.mock.calls.at(-1)[1];
+    await cards.resolve('device', { ...request, type: 'settings_result', success: true,
+      menu: { ...menu, snapshotId: 'speed-confirmed', speed: { ...menu.speed!, configuredValue: 'priority' } } });
+    await flush();
+    const refreshed = transport.update.mock.calls.at(-1)[1];
+    expect(JSON.stringify(refreshed)).toContain('**3 · Speed**');
+    expect(buttonsOf(refreshed).find(button => button.behaviors[0].value.op === 'speed_apply' && button.behaviors[0].value.value === 'priority')?.type).toBe('primary');
+  });
+
+  it('sends Follow native config as a distinct reset and rejects unnegotiated or busy speed callbacks', async () => {
+    transport.speedAvailable = vi.fn(() => true);
+    const menu = modelMenu({ speed: { choices: [{ value: 'priority', label: 'Fast' }] } });
+    const prepared = present(menu);
+    await cards.click('owner', 'card-1', clickPayload(prepared.elements, 'speed_reset'));
+    expect(transport.send).toHaveBeenLastCalledWith('device', expect.objectContaining({ setting: 'speed', operation: 'reset' }));
+    expect(transport.send.mock.calls.at(-1)[1]).not.toHaveProperty('value');
+    const next = present({ ...menu, snapshotId: 'speed-busy', busy: true }, 'busy-card');
+    expect(buttonsOf(next.elements).filter(button => /^speed_/.test(button.behaviors[0].value.op)).every(button => button.disabled)).toBe(true);
+    const ready = present({ ...menu, snapshotId: 'speed-disconnected' }, 'lost-card');
+    transport.speedAvailable.mockReturnValue(false);
+    await expect(cards.click('owner', 'lost-card', clickPayload(ready.elements, 'speed_apply', 'priority'))).rejects.toThrow('not available');
+  });
+
+  it('retains a recovery-only Speed section when a saved tier disappears and sends only a distinct reset', async () => {
+    transport.speedAvailable = vi.fn(() => true);
+    const menu = modelMenu({ targetBackend: 'codex', speed: { choices: [], configuredValue: 'priority' } });
+    expect(sanitizeSettingsMenu(menu, true)?.speed).toEqual({ choices: [], configuredValue: 'priority' });
+    expect(sanitizeSettingsMenu(menu)?.speed).toBeUndefined();
+    const prepared = present(menu);
+    const raw = JSON.stringify(prepared.elements);
+    expect(raw).toContain('**3 · Speed**');
+    expect(raw).toContain('Native speed choices are unavailable');
+    expect(buttonsOf(prepared.elements).filter(button => button.behaviors[0].value.op === 'speed_apply')).toEqual([]);
+    expect(taggedNodes({ body: { elements: prepared.elements } })).toBeLessThanOrEqual(90);
+    await cards.click('owner', 'card-1', clickPayload(prepared.elements, 'speed_reset'));
+    const request = transport.send.mock.calls.at(-1)[1];
+    expect(request).toMatchObject({ operation: 'reset', setting: 'speed' });
+    expect(request).not.toHaveProperty('value');
+    await cards.resolve('device', { ...request, type: 'settings_result', success: true,
+      menu: { ...menu, snapshotId: 'after-recovery', speed: { choices: [] } } });
+    await flush();
+    const refreshed = transport.update.mock.calls.at(-1)[1];
+    expect(buttonsOf(refreshed).find(button => button.behaviors[0].value.op === 'speed_reset')?.type).toBe('primary');
+    expect(JSON.stringify(refreshed)).toContain('**3 · Speed**');
+  });
+
+  it('recovers a disappeared tier through the actual CLI service and Codex adapter without resuming during the callback', async () => {
+    const home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'router-speed-recovery-')));
+    const homedir = vi.spyOn(os, 'homedir').mockReturnValue(home);
+    vi.stubEnv('HOME', home);
+    vi.stubEnv('USERPROFILE', home);
+    syncBuiltinESMExports();
+    // Fail before constructing an executor if native home lookup is not isolated.
+    if (nativeHomedir() !== home) {
+      homedir.mockRestore();
+      syncBuiltinESMExports();
+      vi.unstubAllEnvs();
+      await fs.rm(home, { recursive: true, force: true });
+      throw new Error('Native home isolation failed for the speed recovery fixture.');
+    }
+    let emit: ((message: any) => void) | undefined;
+    const request = vi.fn(async (method: string, params: any): Promise<any> => {
+      if (method === 'model/list') return { data: [{ id: 'native-model', displayName: 'Native', isDefault: true, serviceTiers: [] }], nextCursor: null };
+      if (method === 'config/read') return { config: { model: 'native-model', service_tier: 'priority', features: { fast_mode: false } } };
+      if (method === 'thread/resume') return { thread: { id: params.threadId } };
+      if (method === 'turn/start') return { turn: { id: 'native-turn' } };
+      return {};
+    });
+    const directory = path.join(home, '.remote-cli', 'codex-sessions');
+    await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(path.join(directory, 'recovery-thread.json'), JSON.stringify({ id: 'native-thread' }));
+    const adapter = new CodexAppServerExecutor(new DirectoryGuard([home]), {
+      threadId: 'recovery-thread', initialWorkingDirectory: home, speed: 'priority', model: 'native-model',
+      clientFactory: () => ({ start: async () => {}, stop: async () => {}, isRunning: () => true, setWorkingDirectory: () => {},
+        onMessage: handler => { emit = handler; return () => {}; }, request, respond: () => {}, respondError: () => {} }),
+    });
+    let revision = 'before', configured: string | null = 'priority';
+    const service = new SettingsService({
+      state: () => ({ threadId: 'thread-1', threadName: 'default', coordinatorBackend: 'codex', followsGlobal: true,
+        revision, configuredModels: { codex: 'native-model' }, configuredEfforts: {}, delegationEnabled: false }),
+      backends: async () => modelMenu().backends, busy: () => false, threads: () => ['thread-1'], exclusive: (_target, body) => body(),
+      backend: async () => ({ success: false }), delegation: async () => ({ success: false }), delegationSupported: () => false,
+      speedSettingsSupported: () => true,
+      catalog: async () => ({ choices: [{ value: 'native-model', label: 'Native' }], effectiveSource: 'configured', supportsReset: true,
+        speed: { choices: (await adapter.listSpeeds())!.choices.map(choice => ({ value: choice.value, label: choice.displayName })), configuredValue: configured ?? undefined } }),
+      preference: async (_thread, _backend, kind, value) => {
+        expect(kind).toBe('speed');
+        const result = await adapter.setSpeed(value);
+        if (result.success) { configured = null; revision = 'after'; }
+        return result;
+      },
+    });
+    try {
+      expect(adapter.getSessionId()).toBe('native-thread');
+      expect((await adapter.execute('obsolete tier', {})).success).toBe(false);
+      transport.speedAvailable = vi.fn(() => true);
+      transport.send.mockImplementation(async (device: string, message: any) => { await cards.resolve(device, await service.action(message)); return true; });
+      const prepared = present(await service.open('model', 'thread-1', 'owner'));
+      await cards.click('owner', 'card-1', clickPayload(prepared.elements, 'speed_reset'));
+      expect(configured).toBeNull();
+      expect(request.mock.calls.some(([method]) => method === 'thread/resume' || method === 'turn/start')).toBe(false);
+      const turn = adapter.execute('safe resume', {});
+      for (let tick = 0; tick < 100; tick++) await Promise.resolve();
+      expect(request.mock.calls.find(([method]) => method === 'thread/resume')?.[1]).toMatchObject({ threadId: 'native-thread', serviceTier: null });
+      expect(request.mock.calls.find(([method]) => method === 'turn/start')?.[1].serviceTier).toBeNull();
+      emit!({ method: 'turn/completed', params: { threadId: 'native-thread', turn: { id: 'native-turn', status: 'completed' } } });
+      expect((await turn).success).toBe(true);
+    } finally {
+      service.destroy();
+      await adapter.destroy();
+      homedir.mockRestore();
+      syncBuiltinESMExports();
+      vi.unstubAllEnvs();
+      await fs.rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps every native speed reachable through bounded pages with model pagination', async () => {
+    transport.speedAvailable = vi.fn(() => true);
+    const choices = Array.from({ length: 33 }, (_, index) => ({ value: `tier-${index}`, label: `Native speed ${index}`, description: 'Native description' }));
+    const prepared = present(modelMenu({ choices: Array.from({ length: 80 }, (_, index) => ({ value: `model-${index}`, label: `Model ${index}` })), speed: { choices } }));
+    let elements = prepared.elements;
+    const seen = new Set<string>();
+    for (let page = 0; page < 17; page++) {
+      expect(taggedNodes({ body: { elements } })).toBeLessThanOrEqual(90);
+      expect(Buffer.byteLength(JSON.stringify(elements))).toBeLessThanOrEqual(16 * 1024);
+      for (const button of buttonsOf(elements)) if (button.behaviors[0].value.op === 'speed_apply') seen.add(button.behaviors[0].value.value);
+      await cards.click('owner', 'card-1', clickPayload(elements, 'speed_page'));
+      await flush();
+      elements = transport.update.mock.calls.at(-1)[1];
+    }
+    expect([...seen]).toEqual(choices.map(choice => choice.value));
+  });
 
   it('separates directory navigation from Apply and uses only opaque callback values', async () => {
     const { elements } = present(directoryMenu());

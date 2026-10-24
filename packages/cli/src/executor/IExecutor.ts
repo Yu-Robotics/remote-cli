@@ -64,6 +64,15 @@ export interface ExecutorModelInfo {
   supportedReasoningEfforts?: string[];
   defaultReasoningEffort?: string;
   inputModalities?: string[];
+  serviceTiers?: Array<{ id: string; name: string; description?: string }>;
+  defaultServiceTier?: string | null;
+}
+
+/** Native model-specific speed choices; absence means the backend has no control. */
+export interface ExecutorSpeedInfo {
+  choices: Array<{ value: string; displayName: string; description?: string }>;
+  current?: string;
+  default?: string | null;
 }
 
 /** Session/model-specific effort options. An unknown default must remain absent. */
@@ -130,6 +139,9 @@ export interface IExecutor {
   clearModel?(): Promise<void> | void;
   /** List models available to the authenticated backend account. */
   listModels?(): Promise<ExecutorModelInfo[]>;
+  listSpeeds?(models?: ExecutorModelInfo[]): Promise<ExecutorSpeedInfo | undefined>;
+  /** Undefined follows native configuration; "default" explicitly selects Standard. */
+  setSpeed?(speed: string | undefined): Promise<ExecuteResult>;
   /** Read effort choices for the executor's current model, never a global superset. */
   listEfforts?(): Promise<ExecutorEffortInfo>;
   /** Set a reasoning effort override, or use "auto" to restore the backend default. */

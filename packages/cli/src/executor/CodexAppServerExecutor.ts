@@ -4,7 +4,7 @@ import * as path from 'path';
 import { randomUUID } from 'crypto';
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import type { Attachment, ApprovalAction, ApprovalStatus, ApprovalRequestInfo } from '../types';
-import type { ExecuteOptions, ExecuteResult, ExecutorGoal, ExecutorGoalRunRequest, ExecutorModelInfo, ExecutorEffortInfo, IExecutor } from './IExecutor';
+import type { ExecuteOptions, ExecuteResult, ExecutorGoal, ExecutorGoalRunRequest, ExecutorModelInfo, ExecutorEffortInfo, ExecutorSpeedInfo, IExecutor } from './IExecutor';
 import { assertNativeGoalsVersion, nativeGoalError, parseNativeGoal, validateGoalRequest } from './codex/CodexGoals';
 import { CodexImages, codexToolResultText } from './codex/CodexImages';
 import { configuredExecutionMetadata } from './ExecutionMetadata';
@@ -35,6 +35,7 @@ export interface CodexAppServerTransport {
 export interface CodexAppServerExecutorOptions {
   model?: string;
   effort?: string;
+  speed?: string | null;
   autoApprove?: boolean;
   sandbox?: CodexSandboxConfig;
   initialWorkingDirectory?: string;
@@ -182,6 +183,9 @@ export class CodexAppServerExecutor implements IExecutor {
   private currentWorkingDirectory: string;
   private model?: string;
   private effort?: string;
+  private speed?: string | null;
+  /** Only a fresh legacy thread is known not to carry an older remote speed override. */
+  private legacyFollowReady = false;
   private reportedModel?: string;
   private reportedEffort?: string;
   private readonly autoApprove: boolean;
@@ -226,6 +230,7 @@ export class CodexAppServerExecutor implements IExecutor {
   constructor(directoryGuard: DirectoryGuard, options: CodexAppServerExecutorOptions = {}) {
     this.directoryGuard = directoryGuard;
     this.model = options.model;
+    this.speed = options.speed;
     this.effort = options.effort;
     this.autoApprove = options.autoApprove ?? true;
     this.remoteThreadId = options.threadId;
@@ -284,6 +289,7 @@ export class CodexAppServerExecutor implements IExecutor {
       // leave the executor busy without an actual app-server turn.
       const sandboxOptions = this.sandbox.turnOptions(this.currentWorkingDirectory);
       const input = await this.buildInput(prompt, options.attachments, temporaryFiles);
+      const speedOptions = await this.speedOptions();
       if (this.isBusy()) {
         await this.cleanupTemporaryFiles(temporaryFiles);
         return { success: false, error: 'Codex thread is already running a command' };
@@ -317,6 +323,7 @@ export class CodexAppServerExecutor implements IExecutor {
           cwd: this.currentWorkingDirectory,
           ...(this.model ? { model: this.model } : {}),
           ...(this.effort ? { effort: this.effort } : {}),
+          ...speedOptions,
           ...(this.autoApprove ? {
             approvalPolicy: 'never',
             sandboxPolicy: { type: 'dangerFullAccess' },
@@ -442,9 +449,13 @@ export class CodexAppServerExecutor implements IExecutor {
     if (run.controlling) return;
     // Native continuations bypass turn/start, so their settings must be sticky.
     const goalPolicy = this.sandbox.turnOptions(this.currentWorkingDirectory);
-    if (this.model || this.effort || Object.keys(goalPolicy).length) {
+    if (this.model || this.effort || this.speed !== undefined || Object.keys(goalPolicy).length) {
+      const speedOptions = await this.speedOptions();
+      this.assertGoalOwner(run);
+      if (run.controlling) return;
       await this.goalRequest('thread/settings/update', { threadId: this.codexThreadId,
-        ...(this.model ? { model: this.model } : {}), ...(this.effort ? { effort: this.effort } : {}), ...goalPolicy });
+        ...(this.model ? { model: this.model } : {}), ...(this.effort ? { effort: this.effort } : {}),
+        ...speedOptions, ...goalPolicy });
       this.assertGoalOwner(run);
       if (run.controlling) return;
     }
@@ -874,15 +885,22 @@ export class CodexAppServerExecutor implements IExecutor {
 
   async listModels(): Promise<ExecutorModelInfo[]> {
     await this.refreshModelCatalogAfterCommandUpgrade();
+    return this.readModelCatalog();
+  }
+
+  private async readModelCatalog(): Promise<ExecutorModelInfo[]> {
     const models: ExecutorModelInfo[] = [];
     let cursor: string | null = null;
     const currentModelId = this.reportedModel ?? this.model;
     do {
-      const response = await this.client.request('model/list', {
+      const owner = this.goalRun;
+      const params: { cursor: string | null; limit: number; includeHidden: boolean } = {
         cursor,
         limit: 100,
         includeHidden: false,
-      });
+      };
+      const response: any = await (owner ? this.goalRequest('model/list', params) : this.client.request('model/list', params));
+      if (owner) this.assertGoalOwner(owner);
       for (const model of Array.isArray(response?.data) ? response.data : []) {
         if (typeof model?.id !== 'string') continue;
         models.push({
@@ -898,6 +916,11 @@ export class CodexAppServerExecutor implements IExecutor {
             ? model.defaultReasoningEffort
             : undefined,
           inputModalities: Array.isArray(model.inputModalities) ? model.inputModalities : undefined,
+          ...(Array.isArray(model.serviceTiers) && model.serviceTiers.length <= 32
+            && model.serviceTiers.every((tier: any) => tier && this.validSpeedValue(tier.id) && this.validSpeedValue(tier.name)
+              && (tier.description === undefined || (typeof tier.description === 'string' && tier.description.length <= 4096)))
+            ? { serviceTiers: model.serviceTiers.map((tier: any) => ({ id: tier.id, name: tier.name, description: tier.description })),
+              ...(model.defaultServiceTier === null || this.validSpeedValue(model.defaultServiceTier) ? { defaultServiceTier: model.defaultServiceTier } : {}) } : {}),
         });
       }
       cursor = typeof response?.nextCursor === 'string' ? response.nextCursor : null;
@@ -948,6 +971,10 @@ export class CodexAppServerExecutor implements IExecutor {
       if (!selected) {
         return { success: false, error: `Unknown Codex model: ${model}. Use /model to list available models.` };
       }
+      if (typeof this.speed === 'string' && (!selected.serviceTiers?.length
+        || (this.speed !== 'default' && !selected.serviceTiers.some(tier => tier.id === this.speed)))) {
+        return { success: false, error: 'The saved speed is incompatible with this model. Follow native config in the Speed section before changing models.' };
+      }
       if (this.effort && !selected.supportedReasoningEfforts?.includes(this.effort)) {
         return { success: false, error: 'The saved reasoning effort is incompatible with this model. Reset /effort auto before changing models.' };
       }
@@ -961,9 +988,139 @@ export class CodexAppServerExecutor implements IExecutor {
   }
 
   clearModel(): void {
+    if (typeof this.speed === 'string') throw new Error('Follow native config in the Speed section before clearing the model override.');
     this.model = undefined;
     this.reportedModel = undefined;
     this.reportedEffort = undefined;
+  }
+
+  private validSpeedValue(value: unknown): value is string {
+    return typeof value === 'string' && value.length > 0 && value.length <= 512 && !/[\x00-\x1f\x7f]/.test(value);
+  }
+
+  async listSpeeds(models?: ExecutorModelInfo[]): Promise<ExecutorSpeedInfo | undefined> {
+    const catalog = models ?? await this.listModels();
+    const recovery: ExecutorSpeedInfo | undefined = this.speed !== undefined ? { choices: [], current: this.speed ?? undefined } : undefined;
+    // Do not add config RPCs to legacy catalogs or to models with no tier choices.
+    if (!catalog.some(model => model.serviceTiers?.length)) return recovery;
+    let id = this.reportedModel ?? this.model;
+    if (!id) {
+      try { id = (await this.readNativeSpeedConfig()).model; }
+      catch (error) {
+        // A failed native query must not turn a catalog default into an offer of
+        // paid speed. A saved override can still be cleared without discovery.
+        if (recovery) return recovery;
+        throw error;
+      }
+    }
+    const selected = id ? catalog.find(model => model.id === id) : catalog.find(model => model.isDefault);
+    if (!selected?.serviceTiers?.length) return recovery;
+    const choices = [{ value: 'default', displayName: 'Standard', description: 'Use standard processing.' },
+      ...selected.serviceTiers.filter(tier => tier.id !== 'default').map(tier => ({ value: tier.id, displayName: tier.name, description: tier.description }))];
+    return { choices, current: this.speed ?? undefined, default: selected.defaultServiceTier };
+  }
+
+  private async assertReportedSpeed(speed: string): Promise<void> {
+    if (!this.reportedModel) return;
+    const owner = this.goalRun;
+    const catalog = await (owner ? this.goalDeadline(this.readModelCatalog()) : this.readModelCatalog());
+    if (owner) this.assertGoalOwner(owner);
+    const selected = catalog.find(model => model.id === this.reportedModel);
+    if (!selected?.serviceTiers?.length || (speed !== 'default' && !selected.serviceTiers.some(tier => tier.id === speed))) {
+      throw new Error('This speed is unavailable for the model reported by Codex. Follow native config in /model before starting work.');
+    }
+  }
+
+  private async speedOptions(speed: string | null | undefined = this.speed): Promise<{ serviceTier?: string | null }> {
+    if (speed === undefined) return {};
+    if (speed !== null) return { serviceTier: speed };
+    // Avoid the public upgrade check while preparing a turn: replacing the
+    // transport here would discard the native thread just loaded by ensureThread.
+    const catalog = await this.readModelCatalog();
+    if (!catalog.some(model => model.serviceTiers !== undefined)) {
+      if (this.codexThreadId && !(this.threadReady && this.legacyFollowReady)) {
+        throw new Error('This Codex version cannot safely clear the speed of a saved conversation. Upgrade Codex or use /clear before resuming.');
+      }
+      // Old protocols must never receive unsupported serviceTier keys. A fresh
+      // thread can safely use native startup configuration without an override.
+      return {};
+    }
+    const config = await this.readNativeSpeedConfig();
+    const id = this.reportedModel ?? this.model ?? config.model;
+    const selected = id ? catalog.find(model => model.id === id) : catalog.find(model => model.isDefault);
+    if (config.tier === 'fast' || config.tier === 'priority') {
+      const fast = selected?.serviceTiers?.find(tier => tier.id === 'priority')
+        ?? selected?.serviceTiers?.find(tier => tier.id === 'fast');
+      return { serviceTier: config.fastMode && fast ? fast.id : null };
+    }
+    if (config.tier !== null && config.tier !== 'default' && config.tier !== 'flex'
+      && !selected?.serviceTiers?.some(tier => tier.id === config.tier)) {
+      throw new Error('Codex configured speed is unavailable for the selected model. Check native configuration before resuming.');
+    }
+    return { serviceTier: config.tier };
+  }
+
+  private async readNativeSpeedConfig(): Promise<{ model?: string; tier: string | null; fastMode: boolean }> {
+    const owner = this.goalRun;
+    const params = { includeLayers: false, cwd: this.currentWorkingDirectory };
+    const response = await (owner ? this.goalRequest('config/read', params) : this.client.request('config/read', params));
+    if (owner) this.assertGoalOwner(owner);
+    if (!response?.config || typeof response.config !== 'object') throw new Error('Codex did not provide its native speed configuration.');
+    const native = response.config.service_tier;
+    if (native !== undefined && native !== null && !this.validSpeedValue(native)) throw new Error('Codex returned an invalid native speed setting.');
+    const model = response.config.model;
+    if (model !== undefined && model !== null && !this.validSpeedValue(model)) throw new Error('Codex returned an invalid configured model.');
+    const features = response.config.features;
+    if (features !== undefined && (features === null || typeof features !== 'object' || Array.isArray(features))) throw new Error('Codex returned invalid native speed features.');
+    const fastMode = features?.fast_mode;
+    if (fastMode !== undefined && typeof fastMode !== 'boolean') throw new Error('Codex returned an invalid native Fast mode setting.');
+    return { model: model ?? undefined, tier: native ?? null, fastMode: fastMode !== false };
+  }
+
+  async setSpeed(speed: string | undefined): Promise<ExecuteResult> {
+    try {
+      const cwd = this.currentWorkingDirectory, threadId = this.codexThreadId;
+      const assertCurrent = () => {
+        if (this.isBusy() || this.destroyed || cwd !== this.currentWorkingDirectory || threadId !== this.codexThreadId) throw new Error('The Codex thread changed during speed selection.');
+      };
+      if (this.isBusy() || this.destroyed) throw new Error('The Codex thread must be idle to change speed.');
+      if (speed === undefined) {
+        // Reset is recovery, not another selection. Never load a saved thread
+        // through its obsolete tier, nor resume suspended native goals here.
+        this.threadReady = false;
+        this.legacyFollowReady = false;
+        this.threadLoads++;
+        try {
+          await this.client.stop();
+          await this.client.waitForExit?.();
+        } finally { this.threadLoads--; }
+        assertCurrent();
+        this.speed = null;
+        return { success: true, output: 'Speed follows native configuration on the next safe resume. Older Codex versions may require an upgrade or /clear.' };
+      }
+      const choices = await this.listSpeeds();
+      assertCurrent();
+      if (!choices || !choices.choices.some(choice => choice.value === speed)) {
+        throw new Error('This speed is unavailable for the current Codex model. Refresh /model.');
+      }
+      if (this.isBusy() || this.destroyed) throw new Error('The Codex thread changed during speed selection.');
+      if (this.codexThreadId && !(this.goalManaged && this.goalNeedsResume)) {
+        await this.ensureThread();
+        assertCurrent();
+        // Restored conversations can report a different model than the preview.
+        await this.assertReportedSpeed(speed);
+        assertCurrent();
+        // Explicit selections may update a live thread. Follow never loads it.
+        const { serviceTier } = await this.speedOptions(speed);
+        assertCurrent();
+        await this.client.request('thread/settings/update', { threadId: this.codexThreadId, serviceTier });
+        assertCurrent();
+      }
+      this.speed = speed;
+      return { success: true, output: 'Speed preference applied.' };
+    } catch (error) {
+      return { success: false, error: this.errorMessage(error) };
+    }
   }
 
   async listEfforts(): Promise<ExecutorEffortInfo> {
@@ -1093,14 +1250,26 @@ export class CodexAppServerExecutor implements IExecutor {
       if (this.goalNeedsResume || goal?.status === 'active') throw new Error(GOAL_RECOVERY_GUIDANCE);
     }
     if (this.threadReady && this.client.isRunning()) return;
+    this.threadReady = false;
+    this.legacyFollowReady = false;
     const goalOwner = this.goalRun;
     this.reportedModel = undefined;
     this.reportedEffort = undefined;
     await this.client.start();
     if (goalOwner) this.assertGoalOwner(goalOwner);
+    if (typeof this.speed === 'string') {
+      const available = await (goalOwner ? this.goalDeadline(this.listSpeeds()) : this.listSpeeds());
+      if (goalOwner) this.assertGoalOwner(goalOwner);
+      if (!available?.choices.some(choice => choice.value === this.speed)) {
+        throw new Error('The saved speed is unavailable for this Codex model. Follow native config in /model before starting work.');
+      }
+    }
 
+    const speedOptions = await this.speedOptions();
+    if (goalOwner) this.assertGoalOwner(goalOwner);
     const common: any = {
       ...(this.model ? { model: this.model } : {}),
+      ...speedOptions,
       cwd: this.currentWorkingDirectory,
       ...(this.autoApprove ? {
         approvalPolicy: 'never',
@@ -1151,7 +1320,10 @@ export class CodexAppServerExecutor implements IExecutor {
       if (typeof id !== 'string' || !id) throw new Error('Codex app-server returned no thread ID');
       this.captureReportedSettings(response);
       this.setThreadId(id);
+      this.legacyFollowReady = this.speed === null && !Object.prototype.hasOwnProperty.call(common, 'serviceTier');
     }
+    if (typeof this.speed === 'string') await this.assertReportedSpeed(this.speed);
+    if (goalOwner) this.assertGoalOwner(goalOwner);
     this.threadReady = true;
   }
 

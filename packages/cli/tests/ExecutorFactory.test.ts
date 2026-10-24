@@ -6,6 +6,8 @@ import { ZCodeExecutor } from '../src/executor/ZCodeExecutor';
 import { PiExecutor } from '../src/executor/PiExecutor';
 import { DirectoryGuard } from '../src/security/DirectoryGuard';
 import { existsSync } from 'fs';
+import os from 'os';
+import path from 'path';
 
 vi.mock('fs', async () => {
   const actual = await vi.importActual<typeof import('fs')>('fs');
@@ -17,6 +19,20 @@ vi.mock('fs', async () => {
 });
 
 describe('executor/index', () => {
+  it.each(['priority', null])('passes explicit Codex speed policy (%s) to its adapter only', async speed => {
+    const actual = await vi.importActual<typeof import('fs')>('fs');
+    const home = await actual.promises.realpath(await actual.promises.mkdtemp(path.join(os.tmpdir(), 'executor-speed-')));
+    const homedir = vi.spyOn(os, 'homedir').mockReturnValue(home);
+    try {
+      const executor = createExecutor(new DirectoryGuard([process.cwd()]), { type: 'codex' }, process.cwd(), 'speed-fixture', undefined, undefined, { speed });
+      expect(executor).toBeInstanceOf(CodexAppServerExecutor);
+      expect((executor as any).speed).toBe(speed);
+      await executor.destroy();
+    } finally {
+      homedir.mockRestore();
+      await actual.promises.rm(home, { recursive: true, force: true });
+    }
+  });
   let directoryGuard: DirectoryGuard;
   const originalEnv = process.env;
 

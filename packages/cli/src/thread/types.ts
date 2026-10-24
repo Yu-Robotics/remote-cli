@@ -41,6 +41,8 @@ export interface Thread {
   models?: Partial<Record<BackendKey, string>>;
   /** Per-backend reasoning effort overrides, applied only through native supported controls. */
   efforts?: Partial<Record<BackendKey, string>>;
+  /** Native speed overrides; null explicitly follows config on resume, unset preserves legacy behavior. */
+  speeds?: Partial<Record<BackendKey, string | null>>;
 }
 
 export interface ThreadStore {

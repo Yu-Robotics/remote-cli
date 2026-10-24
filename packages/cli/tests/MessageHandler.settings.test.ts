@@ -94,6 +94,30 @@ describe('settings cards command integration', () => {
   });
   afterEach(async () => { await f.handler.destroy(); await rm(f.cwd, { recursive: true, force: true }); vi.restoreAllMocks(); });
 
+  it('persists speed separately per backend and rejects speed on old connections', async () => {
+    const setSpeed = vi.fn(async () => ({ success: true }));
+    Object.assign(f.executor, { setSpeed });
+    f.reader.read.mockResolvedValue({ choices: [{ value: 'model-a', label: 'Model A' }], supportsReset: true, effectiveSource: 'unknown',
+      speed: { choices: [{ value: 'priority', label: 'Native Fast' }, { value: 'default', label: 'Standard' }] } });
+    await f.handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: { settingsCards: true, modelSpeedSettings: true } } } as any);
+    const menu = await f.open('model');
+    expect(menu.speed?.choices).toHaveLength(2);
+    const applied = await f.action(menu, { setting: 'speed', value: 'priority' });
+    expect(applied.success).toBe(true);
+    expect(f.threads[0].speeds).toEqual({ codex: 'priority' });
+    expect(f.threads[1].speeds).toBeUndefined();
+    expect(f.threads[0].models?.codex).toBe('saved-codex');
+    expect(setSpeed).toHaveBeenCalledWith('priority');
+    expect(f.executor.setModel).not.toHaveBeenCalled();
+    expect((await f.action(applied.menu, { setting: 'speed', operation: 'reset', value: undefined })).success).toBe(true);
+    expect(f.threads[0].speeds).toEqual({ codex: null });
+    await f.handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: { settingsCards: true } } } as any);
+    const old = await f.open('model');
+    expect(old.speed).toBeUndefined();
+    expect((await f.action(old, { setting: 'speed', value: 'priority' })).success).toBe(false);
+    expect(setSpeed).toHaveBeenCalledTimes(2);
+  });
+
   async function directoryMenu(context = f) {
     vi.spyOn(os, 'homedir').mockReturnValue(context.cwd);
     // The guard captures homedir in its constructor; replace the read-only browser's guard for this fixture.
