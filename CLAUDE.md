@@ -113,6 +113,18 @@ git commit -m "chore: bump version to 1.1.1"
 
 Every commit that modifies source code MUST include the corresponding test changes. Test files are an integral part of the project and must be committed together with the source code.
 
+### Cross-Platform Test Compatibility
+
+**CRITICAL: Every implementation and test change MUST be reviewed for Linux, macOS, and Windows compatibility. A passing Linux run alone does not establish cross-platform correctness.**
+
+- Build host-native fixture paths with `path.join`, `path.resolve`, `os.tmpdir`, and isolated temporary directories. Do not hard-code `/tmp`, `/home`, `/Users`, a drive letter, a path separator, or a PATH delimiter unless that exact platform syntax is the subject of the test. Use `path.posix` and `path.win32` explicitly when testing platform-specific path semantics on another host.
+- Canonicalize temporary roots with `fs.realpath` before configuring directory guards, allowlists, or identity comparisons. Account for macOS aliases such as `/var` versus `/private/var`; do not weaken production symlink or canonical-path checks to make fixtures pass.
+- Isolate home-dependent tests by mocking `os.homedir()` consistently with the fixture, and restore all environment changes and mocks afterward. Consider `HOME`, `USERPROFILE`, and Windows home-drive variables where the code uses them. Never let a test read or modify real credentials, configuration, or sessions because one platform ignores an environment override.
+- Cover relevant differences in drive letters, UNC paths, case sensitivity, trailing separators, and symlink privileges. Detect unsupported filesystem capabilities explicitly and document narrowly scoped skips; do not skip entire Windows or macOS suites to hide fixture failures.
+- Use Node filesystem and process APIs for portable fixtures. Review executable extensions, argv quoting, shell availability, `path.delimiter`, process signals, and process-group support. Keep POSIX-only helpers explicitly platform-scoped, and close file handles and await child exit before cleanup so Windows file locking does not invalidate tests.
+- For a platform-specific regression, add coverage for the failing platform behavior as well as the ordinary path. Mocked `process.platform`, `path.win32`, and synthetic fixtures test selected branches; they do not replace execution on that operating system.
+- Run affected tests and builds on available Linux, macOS, and Windows runners or CI jobs. At handoff, state which platforms actually ran and which remain unverified. Require native runner or CI evidence before claiming that all three platforms pass.
+
 ## Project Overview
 
 This is a remote CLI tool that allows developers to control Claude Code CLI from their mobile phones via Feishu (飞书) messaging. The system enables developers to write code remotely when away from their computers, providing a mobile-friendly interface to Claude Code's capabilities.

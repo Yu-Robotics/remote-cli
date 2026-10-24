@@ -104,7 +104,11 @@ export class SettingsService {
       else if (busy) catalog.unavailableReason = 'This thread is busy. Refresh after its work finishes.';
       else {
         try { catalog = await this.dependencies.catalog(threadId, backend, kind); }
-        catch { catalog.unavailableReason = 'The backend did not provide a usable native catalog. Check backend capability/version, refresh or use a supported text command.'; }
+        catch {
+          catalog.unavailableReason = backend === 'kimi' && kind === 'model'
+            ? 'Kimi model discovery or refresh failed. Check the Kimi version, sign-in and connectivity, then Refresh. The old list was not treated as refreshed.'
+            : 'The backend did not provide a usable native catalog. Check backend capability/version, refresh or use a supported text command.';
+        }
       }
       const current = this.dependencies.state(threadId);
       if (this.destroyed || this.invalidationRevision !== invalidationRevision || !current || current.revision !== initialRevision) {

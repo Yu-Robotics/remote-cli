@@ -10,6 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.175] - 2026-10-24
+
+### Fixed
+- Refresh Kimi Code's native managed model catalog automatically when listing models, so newly available models can appear without opening the native terminal or signing in again.
+- Bound refresh requests and local server cleanup, coalesce concurrent refreshes, and report discovery failures instead of silently presenting stale metadata as refreshed.
+- Reload an idle Kimi ACP process before applying discovered aliases while preserving its conversation binding, including choices discovered by temporary settings previews.
+
+### Tests
+- Cover native refresh ordering, new model discovery, failure and timeout handling, concurrent requests, and preservation of ordinary backend execution.
+
 ## [1.6.174] - 2026-10-24
 
 ### Changed

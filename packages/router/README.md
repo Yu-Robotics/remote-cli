@@ -398,6 +398,8 @@ curl https://your-domain.com/health
 
 ## Advanced Usage
 
+From CLI 1.6.175, opening or refreshing Kimi's `/model` list also refreshes the native OAuth-managed model catalog through Kimi's authenticated loopback server. Manual terminal refresh and repeated sign-in are not required. Kimi must expose the native model-refresh endpoint; account permissions and upstream availability still determine the returned choices. Failed or timed-out refreshes are reported rather than treated as a successful refresh of an old list. Upgrade the local CLI to use this behavior; the Router protocol is unchanged. Applying a discovered model to an idle Kimi thread reloads the native ACP process and resumes the same conversation binding, so its process-local catalog cannot reject the new alias.
+
 Use one Router for multiple trusted clients. Each client connects from the developer's machine, while the Router owns Feishu configuration, device bindings, routing, and thread switch state. Feishu thread buttons show automatic names such as `thread-2` as their sequence number, such as `2`, while callbacks retain the full internal name. Continuation cards repeat the thread and working-directory header of the original card. A thread can override its backend with `/backend <index> @`; `/backend <index>` changes the global backend and clears per-thread overrides.
 
 Thread switch panels show `Reply from:` with the reply's full thread name and workspace. Under `Switch thread`, a check mark (`✓`) and primary button styling identify the destination of new top-level messages when the card is finalized or clicked. Selected buttons remain clickable. Switching updates only the clicked card; other historical cards retain their last displayed selection.

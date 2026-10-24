@@ -36,6 +36,9 @@ describe.each([
     delegationWorker,
     sessionBaseDir: path.join(directory, 'sessions'),
     clientFactory: next => { callbacks = next; return transport; },
+    // Kimi listing refreshes its native managed catalog; this shared fixture
+    // must never start a local server or reach an authenticated provider.
+    ...(_backend === 'Kimi' ? { modelCatalogQuery: vi.fn(async () => [{ id: 'previous-model', displayName: 'Previous model' }]) } : {}),
   });
 
   beforeEach(async () => {

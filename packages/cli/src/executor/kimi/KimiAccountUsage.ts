@@ -1,9 +1,6 @@
-import { spawn, type ChildProcess } from 'child_process';
-import { stripAnsi } from '../../utils/stripAnsi';
+import { withKimiLocalServer, type KimiLocalServerDependencies } from './KimiLocalServer';
 
 const DEFAULT_TIMEOUT_MS = 12_000;
-const KILL_GRACE_MS = 2_000;
-const MAX_STARTUP_OUTPUT = 64 * 1024;
 
 interface KimiQuotaEntry {
   usedRatio?: number;
@@ -26,11 +23,7 @@ interface KimiQuota {
   } | null;
 }
 
-export interface KimiAccountUsageDependencies {
-  spawnProcess?: typeof spawn;
-  fetchImpl?: typeof fetch;
-  timeoutMs?: number;
-}
+export type KimiAccountUsageDependencies = KimiLocalServerDependencies;
 
 function resetSuffix(value?: string): string {
   if (!value) return '';
@@ -94,72 +87,15 @@ export function formatKimiAccountUsage(quota: KimiQuota): string | null {
 }
 
 /** Query Kimi's own local authenticated server so account quota is not confused with ACP session usage. */
-export function queryKimiAccountUsage(
+export async function queryKimiAccountUsage(
   command: string,
   cwd: string,
   dependencies: KimiAccountUsageDependencies = {}
 ): Promise<string | null> {
-  const spawnProcess = dependencies.spawnProcess ?? spawn;
-  const fetchImpl = dependencies.fetchImpl ?? fetch;
-  const timeoutMs = dependencies.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-
-  return new Promise((resolve) => {
-    let child: ChildProcess;
-    try {
-      child = spawnProcess(command, ['web', '--no-open', '--port', '0', '--log-level', 'silent'], {
-        cwd,
-        env: process.env,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-    } catch {
-      resolve(null);
-      return;
-    }
-
-    let settled = false;
-    let exited = false;
-    let requestStarted = false;
-    let startupOutput = '';
-    let controller: AbortController | null = null;
-    const finish = (value: string | null) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      controller?.abort();
-      if (!exited) {
-        child.kill('SIGTERM');
-        const escalation = setTimeout(() => {
-          if (!exited) child.kill('SIGKILL');
-        }, KILL_GRACE_MS);
-        escalation.unref?.();
-      }
-      resolve(value);
-    };
-    const timeout = setTimeout(() => finish(null), timeoutMs);
-    timeout.unref?.();
-
-    child.stdout?.on('data', (chunk: Buffer) => {
-      if (requestStarted || settled) return;
-      startupOutput = (startupOutput + stripAnsi(chunk.toString())).slice(-MAX_STARTUP_OUTPUT);
-      const match = startupOutput.match(/Local:\s+(http:\/\/127\.0\.0\.1:\d+)\/#token=([^\s]+)/);
-      if (!match) return;
-      requestStarted = true;
-      controller = new AbortController();
-      void fetchImpl(`${match[1]}/api/v1/oauth/usage?provider=managed%3Akimi-code`, {
-        headers: { Authorization: `Bearer ${match[2]}`, Accept: 'application/json' },
-        signal: controller.signal,
-      }).then(async (response) => {
-        if (!response.ok) return null;
-        const body = await response.json() as { data?: { kind?: string; quota?: KimiQuota } };
-        return body.data?.kind === 'ok' && body.data.quota
-          ? formatKimiAccountUsage(body.data.quota)
-          : null;
-      }).then(finish, () => finish(null));
-    });
-    child.once('error', () => finish(null));
-    child.once('exit', () => {
-      exited = true;
-      finish(null);
-    });
-  });
+  try {
+    return await withKimiLocalServer(command, cwd, async request => {
+      const body = await request('usage') as { data?: { kind?: string; quota?: KimiQuota } };
+      return body?.data?.kind === 'ok' && body.data.quota ? formatKimiAccountUsage(body.data.quota) : null;
+    }, { ...dependencies, timeoutMs: dependencies.timeoutMs ?? DEFAULT_TIMEOUT_MS });
+  } catch { return null; }
 }
