@@ -1,3 +1,4 @@
+import { ThreadContextReset } from '../src/thread/ThreadContextReset';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { MessageHandler } from '../src/client/MessageHandler';
 import { ThreadExecutorPool } from '../src/thread/ThreadExecutorPool';
@@ -48,6 +49,7 @@ describe('MessageHandler Concurrency', () => {
 
     mockThreadManager = {
       getThread: vi.fn().mockReturnValue({ id: 'thread-1', name: 'Thread 1' }),
+      contextResets: new ThreadContextReset(),
       getDefaultThread: vi.fn().mockReturnValue({ id: 'thread-1', name: 'Thread 1' }),
       updateThread: vi.fn().mockResolvedValue(undefined),
       createThread: vi.fn().mockResolvedValue({ id: 'thread-2', name: 'thread-2', sessionId: null }),

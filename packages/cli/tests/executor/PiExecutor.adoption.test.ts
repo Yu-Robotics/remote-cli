@@ -4,6 +4,7 @@ import os from 'os';
 import path from 'path';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 import { PiExecutor } from '../../src/executor/PiExecutor';
+import { clearDelegatedWorkerContext } from '../../src/delegation/DelegatedWorkerLaneCleanup';
 import type { PiLaunchOptions, PiRpcResponse, PiTransport } from '../../src/executor/pi/PiTypes';
 
 const pointerFault = vi.hoisted(() => ({ method: '', calls: 0 }));
@@ -412,13 +413,48 @@ describe('PiExecutor native session adoption', () => {
       initialWorkingDirectory: project, sessionBaseDir: pointerDir, ...options,
       clientFactory: launch => { const transport = new FakeTransport(launch); transports.push(transport); return transport; },
     });
+    const previousId = latest().launch.sessionId;
     await run();
-    const owned = latest().launch.sessionFile ?? path.join(latest().launch.sessionDir!, `${options.threadId}.jsonl`);
+    const owned = latest().launch.sessionFile ?? path.join(latest().launch.sessionDir!, `${previousId}.jsonl`);
     await fs.mkdir(path.dirname(owned), { recursive: true });
     await fs.writeFile(owned, '{}\n');
     executor.resetContext();
     expect(existsSync(owned)).toBe(false);
-    expect(latest().launch.sessionId).toBe(options.threadId);
+    expect(latest().launch.sessionId).not.toBe(previousId);
+    expect(latest().launch.sessionId).not.toBe(options.threadId);
+  });
+
+  it('starts a fresh worker identity after pointer-only clear while retaining its transcript', async () => {
+    await executor.destroy();
+    const laneId = '01900000-0000-7000-8000-0000000000bb';
+    const threadId = `delegate-lane-${laneId}`;
+    const createWorker = () => new PiExecutor(new DirectoryGuard([home]), {
+      initialWorkingDirectory: project, sessionBaseDir: pointerDir, threadId, delegationWorker: true,
+      clientFactory: launch => { const transport = new FakeTransport(launch); transports.push(transport); return transport; },
+    });
+    executor = createWorker();
+    const previousId = latest().launch.sessionId;
+    await run();
+    const saved = JSON.parse(readFileSync(path.join(pointerDir, `${threadId}.json`), 'utf8'));
+    await fs.mkdir(path.dirname(saved.sessionFile), { recursive: true });
+    await fs.writeFile(saved.sessionFile, 'retained worker history');
+    await executor.destroy();
+    executor = createWorker();
+    expect(latest().launch.sessionId).toBe(previousId);
+    expect(latest().launch.sessionFile).toBe(saved.sessionFile);
+    await executor.destroy();
+    await clearDelegatedWorkerContext({ id: laneId, executorThreadId: threadId, threadId: 'parent',
+      backend: 'pi', workingDirectory: project, workspaceGeneration: 0, state: 'ready',
+      createdAt: 0, updatedAt: 0 }, home);
+    executor = createWorker();
+    expect(latest().launch.sessionFile).toBeUndefined();
+    expect(latest().launch.sessionId).not.toBe(previousId);
+    expect(latest().launch.sessionId).not.toBe(threadId);
+    expect(readFileSync(saved.sessionFile, 'utf8')).toBe('retained worker history');
+    await run();
+    const next = JSON.parse(readFileSync(path.join(pointerDir, `${threadId}.json`), 'utf8'));
+    expect(next.id).not.toBe(previousId);
+    expect(readFileSync(saved.sessionFile, 'utf8')).toBe('retained worker history');
   });
 
   it('ignores a legacy released pointer and reloads before remote work after restart', async () => {

@@ -225,7 +225,7 @@ Status: implemented and validated, 2026-10-01. Version 1.6.104.
 - Destroy the worker process after every task, and mark a lane reusable only after its process exit is confirmed.
   An uncertain shutdown marks the lane dirty and quarantines its workspace rather than risking reuse.
 - Reapply the parent thread's configured model and effort whenever a lane starts. Do not infer or change a model from a backend label.
-- Preserve lanes through direct `/clear`, `/new`, backend switches, and `/delegation off/on`.
+- Preserve lanes through backend switches and `/delegation off/on`. From 1.6.167, `/clear` and `/new` clear all direct backend and worker conversation continuations for the current thread while retaining workspaces, artifacts, settings, and archived transcripts.
   `/cd` advances a persisted workspace generation and discards old lanes; `/delegation reset [backend]` removes idle lane state; thread deletion removes all lanes.
 - Never import old direct session pointers or the former per-task `delegate-<taskId>` pointers into a lane.
   A missing native session may create one fresh lane only when an executor explicitly confirms that it failed before objective dispatch.

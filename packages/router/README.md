@@ -396,6 +396,19 @@ docker compose logs --tail=100 router
 
 Back up `./router-data` before upgrades and do not use `docker compose down -v` for routine updates. Restrict the Router port to the trusted network. When diagnosing routing issues, inspect `/health` and the Router logs before restarting clients.
 
+From CLI 1.6.167, `/clear` and its `/new` alias reset the entire current
+thread's conversation context: all direct backend session bindings and every
+managed worker conversation, across backends and parallel worker lanes. The
+working directory, files, Git artifacts, archived native transcripts, login,
+backend/model/effort selections, delegation preference, and sandbox grants are
+preserved. Other threads are unaffected. A later backend switch starts fresh
+instead of restoring a pre-clear binding. Busy tasks, queued work, and workers
+with unconfirmed shutdowns must settle before clearing. Reset intent is saved
+before any session binding changes. A persisted reset intent blocks old
+conversations until clearing succeeds, including after a CLI restart. If
+clearing fails, resolve the reported problem and retry `/clear` or `/new`.
+Single-worker **Clear context** controls still reset only the selected worker.
+
 ## Session Resume
 
 CLI 1.6.164 supports confirmed Pi native session connections and read-only Pi/Codex/Claude Code discovery. Adopted Pi history reloads before every remote turn; `/session detach` preserves it and `/session release` is removed. Foreground Pi `/new` and `/clear` also preserve old history and start independent IDs; new default names use native session IDs and persisted names are not overwritten on reopen. Worker/metadata cleanup is unchanged. Resume drafts keep ordinary messages in the current conversation until confirmation succeeds. Use only one side at a time. Local Pi windows may stay open but must use native `/resume` before their next local turn; automatic local refresh and writer locking are not provided. Existing Router command/response envelopes support the text workflow without a new wire capability. See the [session resume specification](../../SESSION_RESUME_SPEC.md).

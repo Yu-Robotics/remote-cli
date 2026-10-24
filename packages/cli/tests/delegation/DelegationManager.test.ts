@@ -705,7 +705,8 @@ describe('managed agent delegation', () => {
   it('finishes the completion barrier when task metadata pruning stalls after confirmed worker exit', async () => {
     const store = new DelegationStore();
     vi.spyOn(store, 'prune').mockImplementation(() => new Promise(() => undefined));
-    manager = new DelegationManager(guard, factory as any, new BackendRegistry(async () => '1.0'), store, 1000, 20);
+    // Real lane persistence must settle under parallel load; only pruning is intentionally stalled.
+    manager = new DelegationManager(guard, factory as any, new BackendRegistry(async () => '1.0'), store, 1000, 500);
     const scope = manager.begin(parent);
     await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' }, 'start');
     await expect(scope.collectPendingResults()).resolves.toEqual([expect.objectContaining({ state: 'succeeded' })]);

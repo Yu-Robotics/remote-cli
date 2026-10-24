@@ -1,3 +1,4 @@
+import { ThreadContextReset } from '../../src/thread/ThreadContextReset';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
@@ -93,10 +94,18 @@ describe('Integration: connecting a native Pi session from chat', () => {
     wsClient = { send: vi.fn(), on: vi.fn(), isConnected: vi.fn(() => true), trackTask: vi.fn() };
     const thread = { id: 'thread-a', name: 'default', workingDirectory: project, sessionId: null, delegation: false, createdAt: 0, lastActiveAt: 0 };
     const threadManager: any = {
+      contextResets: new ThreadContextReset(),
       getDefaultThread: vi.fn(() => thread), getThread: vi.fn((id: string) => (id === 'thread-a' ? thread : undefined)),
       getThreadByName: vi.fn(), listThreads: vi.fn(() => [thread]), touchThread: vi.fn(), updateThread: vi.fn(),
     };
     const threadPool: any = {
+      assertContextResettable: vi.fn(),
+      clearThreadContext: vi.fn(async () => {
+        await executor?.destroy();
+        await executor?.waitForExit();
+        fs.rmSync(pointerFile(), { force: true });
+        executor = undefined;
+      }),
       getExecutor: vi.fn(() => executor ??= new PiExecutor(guard, {
         initialWorkingDirectory: project, threadId: 'thread-a',
         clientFactory: launch => { const t = new Transport(launch); transports.push(t); return t; },

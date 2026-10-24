@@ -175,8 +175,8 @@ Linux users upgrading from version 1.6.23 or earlier should run `remote-cli serv
 | `/skills` | List available skills for the active backend |
 | `/abort` | Abort executing task in current thread |
 | `/queue` | Inspect or manage confirmed messages waiting in thread queues |
-| `/clear` | Clear context for this thread |
-| `/new` | Alias for `/clear`; start a fresh conversation in this thread |
+| `/clear` | Reset all direct backend and managed worker conversations for this thread |
+| `/new` | Alias for `/clear`; start fresh across this thread's backends and workers |
 | `/compact` | Compress history to save tokens |
 | `/cd <dir>` | Change directory; a different directory starts fresh conversations for this thread |
 | `/model [name]` | Open native model settings, or set the active backend model with a text argument |
@@ -455,6 +455,19 @@ Claude Code also supports opt-in `/sandbox` policies. Workspace-write mode autom
 - **Backend permissions**: AI processes inherit the operating-system user's permissions. remote-cli does not install a global Claude security hook or automatically filter backend shell commands.
 - **Device authentication**: Each device has a unique hardware-based ID
 - **Binding codes**: Expire after 5 minutes
+
+From CLI 1.6.167, `/clear` and its `/new` alias reset the entire current
+thread's conversation context: all direct backend session bindings and every
+managed worker conversation, across backends and parallel worker lanes. The
+working directory, files, Git artifacts, archived native transcripts, login,
+backend/model/effort selections, delegation preference, and sandbox grants are
+preserved. Other threads are unaffected. A later backend switch starts fresh
+instead of restoring a pre-clear binding. Busy tasks, queued work, and workers
+with unconfirmed shutdowns must settle before clearing. Reset intent is saved
+before any session binding changes. A persisted reset intent blocks old
+conversations until clearing succeeds, including after a CLI restart. If
+clearing fails, resolve the reported problem and retry `/clear` or `/new`.
+Single-worker **Clear context** controls still reset only the selected worker.
 
 ## Session Resume
 

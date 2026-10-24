@@ -10,6 +10,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.167] - 2026-10-24
+
+### Changed
+- Make `/clear` and `/new` reset every direct backend session binding and managed worker continuation owned by the current thread, including inactive backends and parallel worker lanes. Preserve files, artifacts, archived transcripts, settings, and other threads.
+- Persist reset intent before clearing native pointers. After intent is saved, failed or interrupted resets remain retryable and prevent old context from resuming, including after CLI restarts; running, queued, and uncertain worker activity refuses an unsafe reset.
+- Reject incomplete worker inventories and unconfirmed native exits. Bound shutdown waits while preserving reset intent and process ownership for safe retries.
+- Keep single-worker card clearing and explicit `/delegation reset [backend]` available with their existing scopes. This CLI change uses the existing Router protocol.
+
+### Tests
+- Add regressions for both aliases, all-backend and multiple-worker isolation, reset failure/retry/restart handling, admission guards, and preservation of artifacts and settings. Verify that Pi workers start with a fresh native identity after pointer-only clearing while their archived transcripts remain available.
+
 ## [1.6.166] - 2026-10-14
 
 ### Fixed
