@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.174] - 2026-10-24
+
+### Changed
+- Restore directly visible thread-switch buttons and the new-thread button on completed cards, removing the thread folding panel while preserving reply attribution and routing behavior.
+- Increase the recursive card element budget from 150 to 180 tagged nodes, retaining completion reserves and the existing size and table limits.
+
+### Tests
+- Cover visible thread controls through finalization and refresh, switching callbacks, and recursive pagination boundaries at the new limit.
+
 ## [1.6.173] - 2026-10-24
 
 ### Fixed
