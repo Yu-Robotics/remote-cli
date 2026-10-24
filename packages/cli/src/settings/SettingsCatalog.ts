@@ -43,7 +43,8 @@ export class SettingsCatalogReader {
     const id = `settings-meta-${randomUUID()}`;
     const model = withoutModelOverride ? configuredBackendModel(resolved, target) : resolveThreadModel(thread, resolved);
     const executor = this.factory(this.guard, resolved, thread.workingDirectory, id, model,
-      thread.efforts?.[target], { lifecycleHooks: false, delegationWorker: true });
+      thread.efforts?.[target], { lifecycleHooks: false, delegationWorker: true,
+        ...(thread.speeds?.[target] !== undefined ? { speed: thread.speeds[target] } : {}) });
     let timer: NodeJS.Timeout | undefined;
     let settled = false;
     const operation = Promise.resolve().then(() => body(executor));
@@ -91,11 +92,12 @@ export class SettingsCatalogReader {
   }
 
   async read(config: ExecutorConfig, thread: Thread, coordinator: SettingsBackend,
-    target: SettingsBackend, kind: 'model' | 'effort'): Promise<SettingsCatalog> {
+    target: SettingsBackend, kind: 'model' | 'effort', includeSpeed = false): Promise<SettingsCatalog> {
     return this.withExecutor(config, thread, coordinator, target, async executor => {
       if (kind === 'model') {
         if (!executor.listModels) throw new Error('This backend does not expose a structured model catalog.');
         const models = await executor.listModels();
+        const speed = includeSpeed && executor.listSpeeds && executor.setSpeed ? await executor.listSpeeds(models) : undefined;
         const current = models.find(model => model.isCurrent);
         const reported = executor.getExecutionMetadata?.()?.modelSource === 'reported';
         const configured = resolveThreadModel(thread, { ...config, type: target === 'claude' ? 'claude-persistent' : target })
@@ -106,6 +108,8 @@ export class SettingsCatalogReader {
           effectiveSource: current ? (reported ? 'native' : 'configured') : configured ? 'configured' : 'unknown',
           defaultValue: models.find(model => model.isDefault)?.id,
           supportsReset: Boolean(executor.clearModel || (configuredBackendModel(config, target) && executor.setModel)),
+          ...(speed ? { speed: { choices: speed.choices.map(choice => ({ value: choice.value, label: choice.displayName, description: choice.description })),
+            configuredValue: thread.speeds?.[target] ?? undefined, defaultValue: speed.default } } : {}),
         };
       }
       if (!executor.listEfforts) throw new Error('This backend does not expose model-specific effort choices.');

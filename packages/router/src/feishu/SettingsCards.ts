@@ -27,6 +27,7 @@ export interface SettingsTransport {
   ownsDevice(openId: string, deviceId: string): Promise<boolean>;
   /** True only while the device's current connection negotiated settingsCards. */
   available(deviceId: string, kind?: SettingsKind): boolean;
+  speedAvailable?(deviceId: string): boolean;
   send(deviceId: string, message: object): Promise<boolean>;
   update(cardId: string, elements: any[], header?: Record<string, unknown>): Promise<void>;
 }
@@ -53,6 +54,7 @@ interface MenuState {
   menu: SettingsMenu;
   revision: number;
   page: number;
+  speedPage?: number;
   draftScope: SettingsScope;
   cards: Set<string>;
   pending?: PendingRequest;
@@ -78,8 +80,8 @@ interface ChoiceLayout {
 }
 
 type SettingsOperation = SettingsActionMessage['operation'];
-type LocalOperation = 'draft_scope' | 'page';
-type ClickOperation = SettingsOperation | LocalOperation | 'retry' | 'cancel';
+type LocalOperation = 'draft_scope' | 'page' | 'speed_page';
+type ClickOperation = SettingsOperation | LocalOperation | 'retry' | 'cancel' | 'speed_apply' | 'speed_reset';
 
 const BACKENDS: readonly SettingsBackend[] = ['claude', 'codex', 'opencode', 'kimi', 'zcode', 'pi', 'agy', 'dsh'];
 const MAX_MENUS = 100;
@@ -127,7 +129,7 @@ function taggedNodes(value: unknown): number {
 }
 
 /** Validate and bound an untrusted wire menu. Returns undefined when unusable. */
-export function sanitizeSettingsMenu(input: unknown): SettingsMenu | undefined {
+export function sanitizeSettingsMenu(input: unknown, allowSpeed = false): SettingsMenu | undefined {
   if (!input || typeof input !== 'object') return undefined;
   const raw = input as Record<string, unknown>;
   const kind = raw.kind === 'backend' || raw.kind === 'model' || raw.kind === 'effort' || raw.kind === 'delegation' || raw.kind === 'directory' ? raw.kind : undefined;
@@ -193,6 +195,24 @@ export function sanitizeSettingsMenu(input: unknown): SettingsMenu | undefined {
   }
 
   const effectiveSource = raw.effectiveSource === 'native' || raw.effectiveSource === 'configured' ? raw.effectiveSource : 'unknown';
+  let speed: SettingsMenu['speed'];
+  if (allowSpeed && kind === 'model' && raw.speed && typeof raw.speed === 'object') {
+    const source = raw.speed as Record<string, unknown>;
+    if (Array.isArray(source.choices) && source.choices.length <= 33) {
+      const seen = new Set<string>();
+      const options: SettingsChoice[] = [];
+      for (const rawChoice of source.choices) {
+        if (!rawChoice || typeof rawChoice !== 'object') continue;
+        const choice = rawChoice as Record<string, unknown>;
+        const value = identifier(choice.value, LIMITS.value), label = bounded(choice.label, LIMITS.label);
+        if (!value || !label || seen.has(value)) continue;
+        seen.add(value);
+        options.push({ value, label, description: bounded(choice.description, LIMITS.reason), disabled: choice.disabled === true });
+      }
+      if (options.length || source.choices.length === 0) speed = { choices: options, configuredValue: identifier(source.configuredValue, LIMITS.value),
+        ...(source.defaultValue === null || identifier(source.defaultValue, LIMITS.value) ? { defaultValue: source.defaultValue as string | null } : {}) };
+    }
+  }
   return {
     snapshotId,
     kind,
@@ -202,6 +222,7 @@ export function sanitizeSettingsMenu(input: unknown): SettingsMenu | undefined {
     targetBackend,
     backends,
     choices,
+    ...(speed ? { speed } : {}),
     configuredValue: identifier(raw.configuredValue, LIMITS.value),
     effectiveValue: identifier(raw.effectiveValue, LIMITS.value),
     defaultValue: identifier(raw.defaultValue, LIMITS.value),
@@ -225,7 +246,7 @@ export class SettingsCards {
   /** Build the card body for a freshly arrived menu; delivery binds actual card IDs. */
   present(input: { openId: string; deviceId: string; menu: unknown; requestMessageId: string; expectedThreadId?: string }): PreparedSettings | undefined {
     this.prune();
-    const menu = sanitizeSettingsMenu(input.menu);
+    const menu = sanitizeSettingsMenu(input.menu, this.transport.speedAvailable?.(input.deviceId) === true);
     if (!menu || menu.expiresAt <= Date.now()) return undefined;
     if ((menu.kind === 'delegation' || menu.kind === 'directory') && !this.transport.available(input.deviceId, menu.kind)) return undefined;
     // A menu only lands on the card of its own thread's request.
@@ -297,7 +318,7 @@ export class SettingsCards {
       return state.pending.timedOut ? 'The outcome is unknown. Retry confirmation or run the settings command again.'
         : `${state.pending.label} Waiting for the CLI.`;
     }
-    if (op === 'page' || op === 'draft_scope') {
+    if (op === 'page' || op === 'draft_scope' || op === 'speed_page') {
       // Local draft edits are deterministic against the immutable snapshot and
       // safe from any past revision of the same delivered card.
       return this.localEdit(state, op, payload.value);
@@ -323,6 +344,7 @@ export class SettingsCards {
   }
 
   private async sendPending(state: MenuState, pending: PendingRequest): Promise<void> {
+    if (pending.message.setting === 'speed' && !this.transport.speedAvailable?.(state.deviceId)) throw new Error('Speed settings are no longer negotiated. Open a new model card.');
     const { requestId } = pending;
     pending.timedOut = false;
     const timer = setTimeout(() => {
@@ -360,7 +382,7 @@ export class SettingsCards {
       clearTimeout(state.pending.timer);
       state.pending = undefined;
       if (message.success) {
-        const fresh = message.menu ? sanitizeSettingsMenu(message.menu) : undefined;
+        const fresh = message.menu ? sanitizeSettingsMenu(message.menu, this.transport.speedAvailable?.(deviceId) === true) : undefined;
         if (message.menu && fresh && fresh.kind === state.menu.kind && fresh.threadId === state.menu.threadId) {
           // Invalidate old buttons while retaining the next backend click's scope.
           state.menu = fresh;
@@ -389,6 +411,14 @@ export class SettingsCards {
   }
 
   private localEdit(state: MenuState, op: LocalOperation, value: unknown): string {
+    if (op === 'speed_page' && state.menu.speed) {
+      const target = Number(value), pages = Math.ceil(state.menu.speed.choices.length / 2);
+      if (!Number.isInteger(target) || target < 0 || target >= pages) throw new Error('That speed page is unavailable.');
+      state.speedPage = target;
+      state.choiceLayout = undefined;
+      this.touch(state);
+      return `Speed page ${target + 1} of ${pages}.`;
+    }
     if (op === 'page') {
       const target = Number(value);
       const pages = this.choicePages(state).length;
@@ -419,6 +449,14 @@ export class SettingsCards {
       timestamp: Date.now(),
     });
     const busyBlocked = menu.busy;
+    if ((op === 'speed_apply' || op === 'speed_reset') && menu.kind === 'model' && menu.speed
+      && !busyBlocked && this.transport.speedAvailable?.(state.deviceId)) {
+      const choice = menu.speed.choices.find(entry => entry.value === value && !entry.disabled);
+      if (op === 'speed_apply' && !choice) return undefined;
+      if (op === 'speed_reset' && value !== undefined) return undefined;
+      return { label: 'Applying speed…', toast: 'Applying speed…', message: requestId => ({ ...base(requestId),
+        setting: 'speed', operation: op === 'speed_apply' ? 'apply' : 'reset', ...(choice ? { value: choice.value } : {}) }) };
+    }
     if (menu.kind === 'directory' && menu.directory) {
       if (op === 'view' && typeof value === 'string'
         && [menu.directory.parent, menu.directory.roots, menu.directory.refresh, ...menu.choices.filter(choice => !choice.disabled).map(choice => choice.value)].includes(value)) {
@@ -796,6 +834,23 @@ export class SettingsCards {
       'Tap a choice to apply it immediately — it is saved per backend for this thread and used by future workers.',
       choiceBody));
 
+    if (menu.kind === 'model' && menu.speed) {
+      const speed = menu.speed, pages = Math.max(1, Math.ceil(speed.choices.length / 2));
+      const index = Math.min(state.speedPage ?? 0, pages - 1);
+      const choices = speed.choices.slice(index * 2, index * 2 + 2);
+      const body = choices.length ? [this.row(choices.map(choice => this.button(state, 'speed_apply',
+        `${choice.value === speed.configuredValue ? '✓ ' : ''}${choice.label}`, {
+          value: choice.value, primary: choice.value === speed.configuredValue, disabled: blocked || choice.disabled })))]
+        : [this.note('Native speed choices are unavailable. Follow native config clears a saved override. Older backends may require an upgrade or /clear before resuming.')];
+      for (const choice of choices) if (choice.description) body.push(this.note(`${escapeMarkdown(choice.label)}: ${escapeMarkdown(choice.description)}`));
+      const controls = [this.button(state, 'speed_reset', `${speed.configuredValue === undefined ? '✓ ' : ''}Follow native config`, {
+        primary: speed.configuredValue === undefined, disabled: blocked })];
+      if (pages > 1) controls.push(this.button(state, 'speed_page', `More speeds (${index + 1}/${pages})`, {
+        value: String((index + 1) % pages), disabled: blocked }));
+      body.push(this.row(controls));
+      elements.push(...this.section('**3 · Speed**', 'Native processing speed for the selected model. Standard is an explicit override; Follow native config removes it.', body));
+    }
+
     const utility: any[] = [];
     utility.push(this.button(state, 'view', 'Refresh', { value: menu.targetBackend,
       disabled: Boolean(state.pending) || !menu.backends.some(backend => backend.value === menu.targetBackend && backend.installed) }));
@@ -806,7 +861,7 @@ export class SettingsCards {
     }
     if (menu.supportsReset) utility.push(this.button(state, 'reset', 'Reset to default', { disabled: blocked }));
     if (utility.length > 0) {
-      elements.push(...this.section('**3 · More actions**',
+      elements.push(...this.section(`**${menu.speed ? '4' : '3'} · More actions**`,
         `Refresh reloads the choices from the backend.${menu.supportsReset ? ' Reset restores the default.' : ''}`,
         [this.row(utility)]));
     }

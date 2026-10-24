@@ -21,6 +21,7 @@ export interface SettingsCatalog {
   effectiveSource: SettingsMenu['effectiveSource'];
   supportsReset: boolean;
   unavailableReason?: string;
+  speed?: SettingsMenu['speed'];
 }
 
 export interface SettingsDependencies {
@@ -31,7 +32,8 @@ export interface SettingsDependencies {
   threads(): string[];
   exclusive<T>(target: string, body: () => Promise<T>): Promise<T>;
   backend(threadId: string, backend: SettingsBackend, scope: SettingsScope, followGlobal: boolean): Promise<ExecuteResult>;
-  preference(threadId: string, backend: SettingsBackend, kind: 'model' | 'effort', value: string | undefined): Promise<ExecuteResult>;
+  preference(threadId: string, backend: SettingsBackend, kind: 'model' | 'effort' | 'speed', value: string | undefined): Promise<ExecuteResult>;
+  speedSettingsSupported?(): boolean;
   delegation(threadId: string, enabled: boolean): Promise<ExecuteResult>;
   delegationSupported(threadId: string): boolean;
   now?(): number;
@@ -134,6 +136,10 @@ export class SettingsService {
         effectiveSource: catalog.effectiveSource, supportsReset: catalog.supportsReset && installed && !busy,
         followsGlobal: current.followsGlobal, busy, expiresAt: this.now() + SNAPSHOT_TTL,
         unavailableReason: catalog.unavailableReason ? literal(catalog.unavailableReason) : undefined,
+        ...(kind === 'model' && this.dependencies.speedSettingsSupported?.() && catalog.speed ? { speed: {
+          choices: catalog.speed.choices.filter(choice => validString(choice.value) && validString(choice.label, 4096))
+            .slice(0, 33).map(choice => ({ ...choice, label: literal(choice.label, 120), description: choice.description ? literal(choice.description) : undefined })),
+          configuredValue: catalog.speed.configuredValue, defaultValue: catalog.speed.defaultValue } } : {}),
         ...(choices.length > MAX_CHOICES ? { omittedChoices: choices.length - MAX_CHOICES } : {}),
       };
       if (!menu.choices.length && !menu.unavailableReason) menu.unavailableReason = 'No selectable options were returned by this backend.';
@@ -150,8 +156,9 @@ export class SettingsService {
       || !validString(request.snapshotId, 100) || !['view', 'apply', 'reset', 'follow_global'].includes(request.operation)) {
       return failure('Invalid settings action.');
     }
+    if (request.setting !== undefined && (request.setting !== 'speed' || !this.dependencies.speedSettingsSupported?.())) return failure('Speed settings were not negotiated.');
     const digest = createHash('sha256').update(JSON.stringify([request.openId, request.threadId, request.snapshotId,
-      request.operation, request.targetBackend, request.value, request.scope])).digest('hex');
+      request.operation, request.targetBackend, request.value, request.scope, request.setting])).digest('hex');
     const existing = this.receipts.get(request.messageId);
     const delegation = this.snapshots.get(request.snapshotId)?.menu.kind === 'delegation';
     if (!allowDelegation && (delegation || existing?.delegation)) return failure('Delegation cards were not negotiated with this Router.');
@@ -163,6 +170,8 @@ export class SettingsService {
       try {
         const record = this.validate(request);
         const menu = record.menu;
+        const speed = request.setting === 'speed';
+        if (speed && (menu.kind !== 'model' || !menu.speed || !['apply', 'reset'].includes(request.operation))) throw new SettingsValidationError('Speed is unavailable on this card.');
         if (menu.kind === 'directory') throw new SettingsValidationError('Directory cards use a separate snapshot namespace.');
         if (menu.kind === 'delegation' && !allowDelegation) throw new SettingsValidationError('Delegation cards were not negotiated with this Router.');
         if (request.operation === 'view') {
@@ -177,8 +186,8 @@ export class SettingsService {
         if (request.targetBackend !== undefined) throw new SettingsValidationError('Only a settings view can change its target backend.');
         if (menu.busy) throw new SettingsValidationError('This card was opened while the thread was busy. Refresh before applying settings.');
         if (request.operation === 'follow_global' && (menu.kind !== 'backend' || request.scope === 'all' || request.value !== undefined)) throw new SettingsValidationError('Invalid follow-global action.');
-        if (request.operation === 'reset' && (!menu.supportsReset || menu.kind === 'backend' || request.value !== undefined || request.scope !== undefined)) throw new SettingsValidationError('Reset is not available for this setting.');
-        if (request.operation === 'apply' && !menu.choices.some(choice => choice.value === request.value && !choice.disabled)) throw new SettingsValidationError('This choice is not available on the original settings card.');
+        if (request.operation === 'reset' && ((!speed && !menu.supportsReset) || menu.kind === 'backend' || request.value !== undefined || request.scope !== undefined)) throw new SettingsValidationError('Reset is not available for this setting.');
+        if (request.operation === 'apply' && !(speed ? menu.speed!.choices : menu.choices).some(choice => choice.value === request.value && !choice.disabled)) throw new SettingsValidationError('This choice is not available on the original settings card.');
         if (menu.kind !== 'backend' && request.scope !== undefined) throw new SettingsValidationError('This setting only affects the original thread.');
         if (request.scope !== undefined && request.scope !== 'thread' && request.scope !== 'all') throw new SettingsValidationError('Invalid settings scope.');
         const scope = menu.kind === 'backend' && request.scope === 'all' ? 'all' : 'thread';
@@ -195,7 +204,7 @@ export class SettingsService {
             return menu.kind === 'backend'
               ? await this.dependencies.backend(menu.threadId, backend, scope, request.operation === 'follow_global')
               : menu.kind === 'delegation' ? await this.dependencies.delegation(menu.threadId, request.value === 'on')
-              : await this.dependencies.preference(menu.threadId, backend, menu.kind as 'model' | 'effort', request.operation === 'reset' ? undefined : request.value);
+              : await this.dependencies.preference(menu.threadId, backend, speed ? 'speed' : menu.kind as 'model' | 'effort', request.operation === 'reset' ? undefined : request.value);
           } finally { this.invalidate(scope === 'all' ? undefined : menu.threadId); }
         });
         if (!result.success) return failure('The setting was not confirmed as applied. Check backend state and refresh before retrying.');

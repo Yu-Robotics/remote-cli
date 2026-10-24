@@ -102,7 +102,7 @@ export class RouterServer {
   private readonly workerContextCards: WorkerContextCards;
   private readonly workerContextConnections = new Map<string, () => boolean>();
   private readonly settingsCards: SettingsCards;
-  private readonly settingsConnections = new Map<string, (kind?: import('./types/Settings').SettingsKind) => boolean>();
+  private readonly settingsConnections = new Map<string, (kind?: import('./types/Settings').SettingsKind | 'speed') => boolean>();
   private readonly maintenanceCards: MaintenanceCards;
   private readonly maintenanceConnections = new Map<string, { updateNotice: boolean; current: () => boolean }>();
   private cleanupInterval: NodeJS.Timeout | null = null;
@@ -204,6 +204,7 @@ export class RouterServer {
     this.settingsCards = new SettingsCards({
       ownsDevice: async (openId, deviceId) => (await this.bindingManager.getDeviceBinding(deviceId))?.openId === openId,
       available: (deviceId, kind) => this.settingsConnections.get(deviceId)?.(kind) === true,
+      speedAvailable: deviceId => this.settingsConnections.get(deviceId)?.('speed') === true,
       send: (deviceId, message) => this.connectionHub.sendToDevice(deviceId, message),
       update: (cardId, elements, header) => this.feishuLongConnHandler.updateApprovalCard(cardId, elements, header),
     });
@@ -452,6 +453,7 @@ export class RouterServer {
       let delegationProgressTextEnabled = false;
       let workerContextResetEnabled = false;
       let settingsCardsEnabled = false;
+      let modelSpeedSettingsEnabled = false;
       let directoryCardsEnabled = false;
       let delegationCardsEnabled = false;
       let streamingContextEnabled = false;
@@ -686,11 +688,13 @@ export class RouterServer {
                 // Settings cards are negotiated only when the CLI requests them;
                 // old peers keep plain text output and never see the capability.
                 settingsCardsEnabled = message.data.capabilities?.settingsCards === true;
+                modelSpeedSettingsEnabled = settingsCardsEnabled && message.data.capabilities?.modelSpeedSettings === true;
                 directoryCardsEnabled = settingsCardsEnabled && message.data.capabilities?.directoryCards === true;
                 delegationCardsEnabled = settingsCardsEnabled && message.data.capabilities?.delegationCards === true;
                 if (settingsCardsEnabled) this.settingsConnections.set(deviceId,
                   kind => ws.readyState === WebSocket.OPEN && this.connectionHub.isCurrentConnection(requestedId, ws)
-                    && (kind !== 'delegation' || delegationCardsEnabled) && (kind !== 'directory' || directoryCardsEnabled));
+                    && (kind !== 'delegation' || delegationCardsEnabled) && (kind !== 'directory' || directoryCardsEnabled)
+                    && (kind !== 'speed' || modelSpeedSettingsEnabled));
                 else this.settingsConnections.delete(deviceId);
                 // Send confirmation with version info for client-side version check
                 ws.send(JSON.stringify({
@@ -714,6 +718,7 @@ export class RouterServer {
                       ...(workerContextResetEnabled ? { workerContextReset: true } : {}),
                       ...(streamingContextEnabled ? { streamingContext: true } : {}),
                       ...(settingsCardsEnabled ? { settingsCards: true } : {}),
+                      ...(modelSpeedSettingsEnabled ? { modelSpeedSettings: true } : {}),
                       ...(directoryCardsEnabled ? { directoryCards: true } : {}),
                       ...(delegationCardsEnabled ? { delegationCards: true } : {}),
                     } } : {}),

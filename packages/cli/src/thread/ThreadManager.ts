@@ -152,7 +152,7 @@ export class ThreadManager {
    */
   async updateThread(
     id: string,
-    updates: Partial<Pick<Thread, 'sessionId' | 'workingDirectory' | 'lastActiveAt' | 'model' | 'models' | 'efforts' | 'backend' | 'delegation' | 'delegationBackends' | 'delegationWorkspaceGeneration'>>
+    updates: Partial<Pick<Thread, 'sessionId' | 'workingDirectory' | 'lastActiveAt' | 'model' | 'models' | 'efforts' | 'speeds' | 'backend' | 'delegation' | 'delegationBackends' | 'delegationWorkspaceGeneration'>>
   ): Promise<Thread> {
     const thread = this.store.threads[id];
     if (!thread) throw new Error(`Thread not found: ${id}`);

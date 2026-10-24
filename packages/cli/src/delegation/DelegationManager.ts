@@ -608,7 +608,7 @@ export class DelegationManager {
           const workerGuard = task.workspace ? new DirectoryGuard([...this.guard.getAllowedDirectories(), executionCwd]) : this.guard;
           worker = this.factory(workerGuard, configuration, executionCwd, task.lane.executorThreadId,
             resolveThreadModel(parent.thread, configuration), parent.thread.efforts?.[backend],
-            { lifecycleHooks: false, delegationWorker: true });
+            { lifecycleHooks: false, delegationWorker: true, ...(parent.thread.speeds?.[backend] !== undefined ? { speed: parent.thread.speeds[backend] } : {}) });
           task.executor = worker;
           if (fs.realpathSync(worker.getCurrentWorkingDirectory()) !== fs.realpathSync(executionCwd)) {
             throw new Error('Worker refused the delegated workspace; refusing a fallback directory');

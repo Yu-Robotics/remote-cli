@@ -2218,6 +2218,16 @@ describe('RouterServer', () => {
     });
 
     it.each([
+      { settingsCards: true, modelSpeedSettings: true, enabled: true },
+      { settingsCards: true, modelSpeedSettings: false, enabled: false },
+      { settingsCards: false, modelSpeedSettings: true, enabled: false },
+    ])('negotiates model speed independently from legacy settings ($enabled)', async ({ settingsCards, modelSpeedSettings, enabled }) => {
+      const { reply } = await connect({ settingsCards, modelSpeedSettings });
+      expect(reply.data.capabilities?.modelSpeedSettings).toBe(enabled ? true : undefined);
+      expect((server as any).settingsConnections.get('device-1')?.('speed')).toBe(enabled ? true : settingsCards ? false : undefined);
+    });
+
+    it.each([
       { settingsCards: true, delegationCards: true, enabled: true },
       { settingsCards: true, delegationCards: false, enabled: false },
       { settingsCards: false, delegationCards: true, enabled: false },

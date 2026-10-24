@@ -315,6 +315,7 @@ export class WebSocketClient {
             delegationProgressText: true,
             workerContextReset: true,
             settingsCards: true,
+            modelSpeedSettings: true,
             directoryCards: true,
             delegationCards: true,
             streamingContext: true,

@@ -23,7 +23,7 @@ export { KimiExecutor } from './KimiExecutor';
 export { ZCodeExecutor } from './ZCodeExecutor';
 export { PiExecutor } from './PiExecutor';
 export { DshExecutor } from './DshExecutor';
-export type { ExecutorModelInfo, ExecutorEffortInfo, IExecutor } from './IExecutor';
+export type { ExecutorModelInfo, ExecutorEffortInfo, ExecutorSpeedInfo, IExecutor } from './IExecutor';
 export {
   ActivityTracker,
   normalizeActivity,
@@ -74,7 +74,7 @@ export function createExecutor(
   threadId?: string,
   model?: string,
   effort?: string,
-  runtime: { lifecycleHooks?: boolean; delegationWorker?: boolean } = {},
+  runtime: { lifecycleHooks?: boolean; delegationWorker?: boolean; speed?: string | null } = {},
 ): IExecutor {
   const executorType = executorConfig.type as string;
   switch (executorType) {
@@ -100,6 +100,7 @@ export function createExecutor(
         // Per-thread model (set via /model, persisted on the thread) wins
         model: model ?? executorConfig.codex?.model,
         effort,
+        speed: runtime.speed,
         autoApprove: executorConfig.codex?.autoApprove ?? true,
         sandbox: executorConfig.codex?.sandbox,
         initialWorkingDirectory,

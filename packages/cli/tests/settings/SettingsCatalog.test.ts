@@ -42,6 +42,17 @@ beforeEach(() => { policies.codex.clear(); policies.claude.clear(); policies.rea
 afterEach(() => { vi.useRealTimers(); });
 
 describe('isolated native settings catalogs', () => {
+  it('queries native speed capability only for negotiated model cards and preserves target preferences', async () => {
+    const listSpeeds = vi.fn(async () => ({ choices: [{ value: 'priority', displayName: 'Native Fast', description: 'Native description' }], default: null }));
+    const f = fixture({ listSpeeds, setSpeed: vi.fn() });
+    expect((await f.reader.read(config, thread, 'codex', 'codex', 'model')).speed).toBeUndefined();
+    expect(listSpeeds).not.toHaveBeenCalled();
+    const result = await f.reader.read(config, { ...thread, speeds: { codex: 'priority' } }, 'codex', 'codex', 'model', true);
+    expect(result.speed).toMatchObject({ configuredValue: 'priority', defaultValue: null,
+      choices: [{ value: 'priority', label: 'Native Fast', description: 'Native description' }] });
+    expect((f.factory.mock.calls.at(-1) as any[])[6]).toMatchObject({ speed: 'priority', delegationWorker: true });
+    expect(f.executor.execute).not.toHaveBeenCalled();
+  });
   it('resolves saved policy using the real parent ID before creating an isolated synthetic identity', async () => {
     policies.codex.set(thread.id, { mode: 'workspace-write', networkAccess: false });
     const f = fixture();

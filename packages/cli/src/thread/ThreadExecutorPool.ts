@@ -43,7 +43,8 @@ export type ExecutorFactory = (
   initialWorkingDirectory?: string,
   threadId?: string,
   model?: string,
-  effort?: string
+  effort?: string,
+  runtime?: { speed?: string | null }
 ) => IExecutor;
 
 /**
@@ -82,14 +83,18 @@ export class ThreadExecutorPool {
 
     let executor = this.executors.get(threadId);
     if (!executor) {
-      executor = this.factory(
+      const configuration = this.getEffectiveConfig(thread);
+      const speed = thread.speeds?.[backendKeyOf(configuration.type as string)];
+      const args: Parameters<ExecutorFactory> = [
         this.directoryGuard,
-        this.getEffectiveConfig(thread),
+        configuration,
         thread.workingDirectory || undefined,
         threadId,
-        resolveThreadModel(thread, this.getEffectiveConfig(thread)),
-        resolveThreadEffort(thread, this.getEffectiveConfig(thread))
-      );
+        resolveThreadModel(thread, configuration),
+        resolveThreadEffort(thread, configuration),
+      ];
+      if (speed !== undefined) args.push({ speed });
+      executor = this.factory(...args);
       this.executors.set(threadId, executor);
     }
     return executor;

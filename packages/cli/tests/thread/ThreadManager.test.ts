@@ -16,7 +16,7 @@ describe('ThreadManager', () => {
   let previousHome: string | undefined;
 
   beforeEach(async () => {
-    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'thread-manager-test-'));
+    tmpDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'thread-manager-test-')));
     previousHome = process.env.HOME;
     process.env.HOME = tmpDir;
     manager = await ThreadManager.initialize(tmpDir);
@@ -29,6 +29,15 @@ describe('ThreadManager', () => {
   });
 
   describe('initialization', () => {
+    it('persists native speed overrides and explicit Follow markers independently of model and effort', async () => {
+      const thread = manager.getDefaultThread();
+      await manager.updateThread(thread.id, { models: { codex: 'native-model' }, efforts: { codex: 'high' }, speeds: { codex: 'priority' } });
+      let reloaded = await ThreadManager.initialize(tmpDir);
+      expect(reloaded.getThread(thread.id)).toMatchObject({ models: { codex: 'native-model' }, efforts: { codex: 'high' }, speeds: { codex: 'priority' } });
+      await reloaded.updateThread(thread.id, { speeds: { codex: null } });
+      reloaded = await ThreadManager.initialize(tmpDir);
+      expect(reloaded.getThread(thread.id)?.speeds).toEqual({ codex: null });
+    });
     it('cleans DSH pointers and compact summaries without removing another thread', async () => {
       const thread = await manager.createThread('dsh-delete', tmpDir, 'dsh');
       const directory = path.join(tmpDir, '.remote-cli', 'dsh-sessions');

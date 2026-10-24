@@ -10,6 +10,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.176] - 2026-10-24
+
+### Added
+- Add a separate Speed section to model settings when the selected Codex model exposes native service tiers. Preserve native tier names and descriptions, with explicit Standard and Follow native config choices.
+- Persist speed independently per thread and backend, including future delegated workers, and apply sticky speed policy before activating native goals.
+- Negotiate model speed settings independently so older peers and backends without native speed controls retain their existing model behavior.
+
+### Safety
+- Validate speed against the selected model, reject incompatible model changes, and restore native configured speed explicitly instead of retaining a previous sticky override. Untouched threads send no new speed parameters or settings requests.
+- Keep speed reset available after tier removal. Require an upgrade or explicit conversation reset when a downgraded Codex protocol cannot safely clear a saved tier.
+
 ## [1.6.175] - 2026-10-24
 
 ### Fixed

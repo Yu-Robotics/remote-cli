@@ -48,6 +48,7 @@ class FakeTransport implements CodexAppServerTransport {
     }
     if (method === 'turn/start') return { turn: { id: this.nextTurnId, status: 'inProgress' } };
     if (method === 'model/list') return { data: this.models, nextCursor: null };
+    if (method === 'config/read') return { config: {} };
     if (method === 'account/rateLimits/read') return this.rateLimitsResponse;
     return {};
   }
@@ -61,7 +62,7 @@ describe('CodexAppServerExecutor', () => {
   let originalHome: string | undefined;
 
   beforeEach(async () => {
-    tempHome = await fs.mkdtemp(path.join(process.cwd(), '.codex-app-executor-test-'));
+    tempHome = await fs.realpath(await fs.mkdtemp(path.join(process.cwd(), '.codex-app-executor-test-')));
     originalHome = process.env.HOME;
     process.env.HOME = tempHome;
     projectDir = path.join(tempHome, 'project');
@@ -753,6 +754,273 @@ describe('CodexAppServerExecutor', () => {
       expect.objectContaining({ id: 'gpt-b', displayName: 'gpt-b' }),
     ]);
     expect(transport.requests.filter((request) => request.method === 'model/list')).toHaveLength(2);
+  });
+
+  it('discovers opaque native service tiers without creating a conversation or inferring deprecated speed aliases', async () => {
+    Object.assign(transport.models[0], { serviceTiers: [{ id: 'native-priority', name: 'Native Fast', description: 'Native description' }], defaultServiceTier: null });
+    Object.assign(transport.models[1], { additionalSpeedTiers: ['fast'] });
+    const models = await executor.listModels();
+    expect(models[0]).toMatchObject({ serviceTiers: [{ id: 'native-priority', name: 'Native Fast', description: 'Native description' }], defaultServiceTier: null });
+    expect(await executor.listSpeeds(models)).toMatchObject({ choices: [
+      { value: 'default', displayName: 'Standard' }, { value: 'native-priority', displayName: 'Native Fast', description: 'Native description' }], default: null });
+    expect(models[1].serviceTiers).toBeUndefined();
+    expect(transport.requests.every(request => request.method === 'model/list' || request.method === 'config/read')).toBe(true);
+  });
+
+  it('keeps legacy models without native tiers free of speed controls and parameters', async () => {
+    expect(await executor.listSpeeds()).toBeUndefined();
+    expect(await executor.setSpeed('fast')).toMatchObject({ success: false });
+    const turn = executor.execute('ordinary', {});
+    await vi.waitFor(() => expect(transport.requests.some(request => request.method === 'turn/start')).toBe(true));
+    for (const request of transport.requests) expect(request.params).not.toHaveProperty('serviceTier');
+    expect(transport.requests.some(request => request.method === 'thread/settings/update' || request.method === 'config/read')).toBe(false);
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await turn;
+  });
+
+  it('uses reported, explicit, and configured models before the catalog default without creating metadata conversations', async () => {
+    Object.assign(transport.models[0], { serviceTiers: [{ id: 'priority', name: 'Fast A' }] });
+    Object.assign(transport.models[1], { serviceTiers: [{ id: 'tier-b', name: 'Speed B' }] });
+    let nativeModel: string | undefined = 'gpt-b';
+    const original = transport.request.bind(transport);
+    const request = vi.spyOn(transport, 'request').mockImplementation(async (method, params) => {
+      if (method === 'config/read') return { config: { model: nativeModel } };
+      const result = await original(method, params);
+      return method === 'thread/start' ? { ...result, model: 'gpt-b' } : result;
+    });
+    expect((await executor.listSpeeds())?.choices.map(choice => choice.value)).toEqual(['default', 'tier-b']);
+    nativeModel = 'unknown-configured-model';
+    expect(await executor.listSpeeds()).toBeUndefined();
+    nativeModel = undefined;
+    expect((await executor.listSpeeds())?.choices.map(choice => choice.value)).toEqual(['default', 'priority']);
+    expect(transport.requests.some(item => item.method === 'thread/start' || item.method === 'turn/start')).toBe(false);
+    expect((await executor.setModel('gpt-a')).success).toBe(true);
+    const configCalls = request.mock.calls.filter(([method]) => method === 'config/read').length;
+    expect((await executor.listSpeeds())?.choices[1].value).toBe('priority');
+    expect(request.mock.calls.filter(([method]) => method === 'config/read')).toHaveLength(configCalls);
+    const turn = executor.execute('reported model', {});
+    await vi.waitFor(() => expect(transport.requests.some(item => item.method === 'turn/start')).toBe(true));
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await turn;
+    expect((await executor.listSpeeds())?.choices[1].value).toBe('tier-b');
+  });
+
+  it.each(['selection', 'execution'] as const)('revalidates the restored model before speed %s can affect a turn', async mode => {
+    Object.assign(transport.models[0], { serviceTiers: [{ id: 'priority', name: 'Fast A' }] });
+    Object.assign(transport.models[1], { serviceTiers: [] });
+    await executor.destroy();
+    await fs.writeFile(path.join(tempHome, '.remote-cli', 'codex-sessions', 'remote-thread.json'), JSON.stringify({ id: 'codex-thread-1' }));
+    const original = transport.request.bind(transport);
+    vi.spyOn(transport, 'request').mockImplementation(async (method, params) => {
+      if (method === 'config/read') return { config: { model: 'gpt-a' } };
+      const result = await original(method, params);
+      return method === 'thread/resume' ? { ...result, model: 'gpt-b' } : result;
+    });
+    executor = new CodexAppServerExecutor(new DirectoryGuard([projectDir]), {
+      threadId: 'remote-thread', initialWorkingDirectory: projectDir, clientFactory: () => transport,
+      ...(mode === 'execution' ? { speed: 'priority' } : {}),
+    });
+    const result = mode === 'selection' ? await executor.setSpeed('priority')
+      : await executor.execute('Do not start an incompatible turn', { timeout: 100 });
+    expect(result).toMatchObject({ success: false, error: expect.stringContaining('model reported by Codex') });
+    expect(transport.requests.some(request => request.method === 'turn/start' || request.method === 'thread/settings/update')).toBe(false);
+    expect((await executor.setSpeed(undefined)).success).toBe(true);
+  });
+
+  it.each([
+    { tier: 'fast', fastMode: false, model: 'gpt-a', expected: null },
+    { tier: 'priority', fastMode: false, model: 'gpt-a', expected: null },
+    { tier: 'fast', fastMode: true, model: 'gpt-a', expected: 'priority' },
+    { tier: 'priority', fastMode: undefined, model: 'gpt-a', expected: 'priority' },
+    { tier: 'priority', fastMode: true, model: 'gpt-b', expected: null },
+    { tier: 'priority', fastMode: true, model: 'unknown-model', expected: null },
+    { tier: 'flex', fastMode: false, model: 'gpt-b', expected: 'flex' },
+    { tier: 'default', fastMode: false, model: 'gpt-a', expected: 'default' },
+  ])('follows the effective native speed policy ($tier, flag=$fastMode, model=$model)', async ({ tier, fastMode, model, expected }) => {
+    await executor.destroy();
+    Object.assign(transport.models[0], { serviceTiers: [{ id: 'priority', name: 'Fast' }] });
+    Object.assign(transport.models[1], { serviceTiers: [] });
+    const original = transport.request.bind(transport);
+    vi.spyOn(transport, 'request').mockImplementation(async (method, params) => method === 'config/read'
+      ? { config: { model, service_tier: tier, features: fastMode === undefined ? {} : { fast_mode: fastMode } } } : original(method, params));
+    executor = new CodexAppServerExecutor(new DirectoryGuard([projectDir]), { threadId: 'remote-thread', initialWorkingDirectory: projectDir,
+      speed: null, clientFactory: () => transport });
+    const turn = executor.execute('follow effective policy', {});
+    await vi.waitFor(() => expect(transport.requests.some(item => item.method === 'turn/start')).toBe(true));
+    expect(transport.requests.find(item => item.method === 'thread/start')?.params.serviceTier).toBe(expected);
+    expect(transport.requests.find(item => item.method === 'turn/start')?.params.serviceTier).toBe(expected);
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await turn;
+    if (tier === 'fast' && fastMode === false && model === 'gpt-a') {
+      expect((await executor.setSpeed('priority')).success).toBe(true);
+      expect(transport.requests.findLast(item => item.method === 'thread/settings/update')?.params.serviceTier).toBe('priority');
+    }
+  });
+
+  it('recovers a vanished saved tier without loading it and clears sticky speed on the same conversation after process recreation', async () => {
+    Object.assign(transport.models[0], { serviceTiers: [{ id: 'priority', name: 'Fast' }] });
+    await executor.setSpeed('priority');
+    const seed = executor.execute('seed', {});
+    await vi.waitFor(() => expect(transport.requests.some(item => item.method === 'turn/start')).toBe(true));
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await seed;
+    await executor.destroy();
+    transport = new FakeTransport(); Object.assign(transport.models[0], { serviceTiers: [] });
+    const original = transport.request.bind(transport);
+    vi.spyOn(transport, 'request').mockImplementation(async (method, params) => method === 'config/read'
+      ? { config: { model: 'gpt-a', service_tier: 'priority', features: { fast_mode: true } } } : original(method, params));
+    executor = new CodexAppServerExecutor(new DirectoryGuard([projectDir]), { threadId: 'remote-thread', initialWorkingDirectory: projectDir,
+      speed: 'priority', clientFactory: () => transport });
+    expect(await executor.execute('blocked obsolete speed', {})).toMatchObject({ success: false });
+    expect(await executor.listSpeeds()).toMatchObject({ choices: [], current: 'priority' });
+    const stop = vi.spyOn(transport, 'stop');
+    expect((await executor.setSpeed(undefined)).success).toBe(true);
+    expect(stop).toHaveBeenCalledOnce();
+    expect(transport.requests.some(item => item.method === 'thread/resume' || item.method === 'thread/start' || item.method === 'turn/start')).toBe(false);
+    expect(executor.getSessionId()).toBe('codex-thread-1');
+    const resumed = executor.execute('recover the same conversation', {});
+    await vi.waitFor(() => expect(transport.requests.some(item => item.method === 'turn/start')).toBe(true));
+    expect(transport.requests.find(item => item.method === 'thread/resume')?.params).toMatchObject({ threadId: 'codex-thread-1', serviceTier: null });
+    expect(transport.requests.find(item => item.method === 'turn/start')?.params.serviceTier).toBeNull();
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await resumed;
+  });
+
+  it('omits unsupported speed keys for fresh legacy workers, but refuses an uncertain legacy conversation until cleared', async () => {
+    const seed = executor.execute('legacy seed', {});
+    await vi.waitFor(() => expect(transport.requests.some(item => item.method === 'turn/start')).toBe(true));
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await seed; await executor.destroy();
+    transport = new FakeTransport();
+    executor = new CodexAppServerExecutor(new DirectoryGuard([projectDir]), { threadId: 'remote-thread', initialWorkingDirectory: projectDir,
+      speed: 'priority', clientFactory: () => transport });
+    expect((await executor.listSpeeds())?.choices).toEqual([]);
+    expect((await executor.setSpeed(undefined)).success).toBe(true);
+    expect(await executor.execute('uncertain old binding', {})).toMatchObject({ success: false, error: expect.stringContaining('Upgrade Codex or use /clear') });
+    expect(transport.requests.some(item => item.method === 'thread/resume')).toBe(false);
+    await executor.resetContext();
+    const fresh = executor.execute('fresh after clear', {});
+    await vi.waitFor(() => expect(transport.requests.some(item => item.method === 'turn/start')).toBe(true));
+    for (const item of transport.requests) expect(item.params).not.toHaveProperty('serviceTier');
+    expect(transport.requests.some(item => item.method === 'config/read')).toBe(false);
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await fresh;
+    await executor.destroy(); transport = new FakeTransport();
+    executor = new CodexAppServerExecutor(new DirectoryGuard([projectDir]), { threadId: 'fresh-worker', delegationWorker: true,
+      initialWorkingDirectory: projectDir, speed: null, clientFactory: () => transport });
+    const worker = executor.execute('fresh worker', {});
+    await vi.waitFor(() => expect(transport.requests.some(item => item.method === 'turn/start')).toBe(true));
+    for (const item of transport.requests) expect(item.params).not.toHaveProperty('serviceTier');
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await worker;
+  });
+
+  it('does not turn malformed native Fast policy into paid speed or require a working config query to save recovery', async () => {
+    await executor.destroy();
+    Object.assign(transport.models[0], { serviceTiers: [{ id: 'priority', name: 'Fast' }] });
+    const original = transport.request.bind(transport);
+    vi.spyOn(transport, 'request').mockImplementation(async (method, params) => method === 'config/read'
+      ? { config: { service_tier: 'priority', features: { fast_mode: 'false' } } } : original(method, params));
+    executor = new CodexAppServerExecutor(new DirectoryGuard([projectDir]), { threadId: 'remote-thread', initialWorkingDirectory: projectDir,
+      speed: 'priority', clientFactory: () => transport });
+    expect(await executor.listSpeeds()).toMatchObject({ choices: [], current: 'priority' });
+    expect((await executor.setSpeed(undefined)).success).toBe(true);
+    expect((await executor.execute('invalid native policy', {})).success).toBe(false);
+    expect(transport.requests.some(item => item.method === 'thread/start' || item.method === 'turn/start')).toBe(false);
+  });
+
+  it('retains the saved tier when the owned idle server cannot confirm its stop during recovery', async () => {
+    Object.assign(transport.models[0], { serviceTiers: [{ id: 'priority', name: 'Fast' }] });
+    expect((await executor.setSpeed('priority')).success).toBe(true);
+    vi.spyOn(transport, 'stop').mockRejectedValueOnce(new Error('Synthetic unconfirmed exit'));
+    expect((await executor.setSpeed(undefined)).success).toBe(false);
+    expect((await executor.listSpeeds())?.current).toBe('priority');
+    expect(transport.requests.some(item => item.method === 'thread/start' || item.method === 'thread/resume')).toBe(false);
+  });
+
+  it('applies explicit speed on thread and turn requests and refuses incompatible model changes', async () => {
+    Object.assign(transport.models[0], { serviceTiers: [{ id: 'priority', name: 'Fast' }] });
+    expect(await executor.setSpeed('priority')).toMatchObject({ success: true });
+    expect(transport.requests.some(request => request.method === 'thread/start')).toBe(false);
+    expect(await executor.setModel('gpt-b')).toMatchObject({ success: false, error: expect.stringContaining('saved speed') });
+    expect(() => executor.clearModel()).toThrow('Follow native config');
+    const turn = executor.execute('fast', {});
+    await vi.waitFor(() => expect(transport.requests.some(request => request.method === 'turn/start')).toBe(true));
+    expect(transport.requests.find(request => request.method === 'thread/start')?.params.serviceTier).toBe('priority');
+    expect(transport.requests.find(request => request.method === 'turn/start')?.params.serviceTier).toBe('priority');
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await turn;
+  });
+
+  it.each([null, 'priority'])('restores native config (%s), rather than retaining sticky Fast, and supports explicit Standard', async nativeTier => {
+    Object.assign(transport.models[0], { serviceTiers: [{ id: 'priority', name: 'Fast' }] });
+    await executor.setSpeed('priority');
+    const turn = executor.execute('seed', {});
+    await vi.waitFor(() => expect(transport.requests.some(request => request.method === 'turn/start')).toBe(true));
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await turn;
+    const original = transport.request.bind(transport);
+    vi.spyOn(transport, 'request').mockImplementation(async (method, params) => method === 'config/read'
+      ? { config: { service_tier: nativeTier } } : original(method, params));
+    expect(await executor.setSpeed(undefined)).toMatchObject({ success: true });
+    const resumed = executor.execute('resume after Follow', {});
+    await vi.waitFor(() => expect(transport.requests.some(request => request.method === 'thread/resume')).toBe(true));
+    expect(transport.requests.findLast(request => request.method === 'thread/resume')?.params).toMatchObject({ threadId: 'codex-thread-1', serviceTier: nativeTier });
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await resumed;
+    expect((await executor.listSpeeds())?.current).toBeUndefined();
+    expect(await executor.setSpeed('default')).toMatchObject({ success: true });
+    expect(transport.requests.findLast(request => request.method === 'thread/settings/update')?.params.serviceTier).toBe('default');
+  });
+
+  it('rejects invalid speed metadata and choices, and does not mutate while busy', async () => {
+    Object.assign(transport.models[0], { serviceTiers: [{ id: 'bad\nvalue', name: 'Fast' }] });
+    expect(await executor.listSpeeds()).toBeUndefined();
+    Object.assign(transport.models[0], { serviceTiers: [{ id: 'priority', name: 'Fast' }] });
+    expect((await executor.setSpeed('fast')).success).toBe(false);
+    const turn = executor.execute('busy', {});
+    await vi.waitFor(() => expect(transport.requests.some(request => request.method === 'turn/start')).toBe(true));
+    expect((await executor.setSpeed('priority')).success).toBe(false);
+    expect(transport.requests.some(request => request.method === 'thread/settings/update')).toBe(false);
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await turn;
+  });
+
+  it('applies a persisted Follow marker on resume without replaying an earlier sticky Fast tier', async () => {
+    const turn = executor.execute('seed', {});
+    await vi.waitFor(() => expect(transport.requests.some(request => request.method === 'turn/start')).toBe(true));
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await turn;
+    await executor.destroy();
+    transport = new FakeTransport();
+    Object.assign(transport.models[0], { serviceTiers: [] });
+    const original = transport.request.bind(transport);
+    vi.spyOn(transport, 'request').mockImplementation(async (method, params) => method === 'config/read' ? { config: {} } : original(method, params));
+    executor = new CodexAppServerExecutor(new DirectoryGuard([projectDir]), { threadId: 'remote-thread', initialWorkingDirectory: projectDir,
+      speed: null, clientFactory: () => transport });
+    const next = executor.execute('resumed', {});
+    await vi.waitFor(() => expect(transport.requests.some(request => request.method === 'turn/start')).toBe(true));
+    expect(transport.requests.find(request => request.method === 'thread/resume')?.params.serviceTier).toBeNull();
+    expect(transport.requests.find(request => request.method === 'turn/start')?.params.serviceTier).toBeNull();
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await next;
+  });
+
+  it('does not publish a late speed acknowledgement after reset', async () => {
+    Object.assign(transport.models[0], { serviceTiers: [{ id: 'priority', name: 'Fast' }] });
+    const turn = executor.execute('seed', {});
+    await vi.waitFor(() => expect(transport.requests.some(request => request.method === 'turn/start')).toBe(true));
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    await turn;
+    const original = transport.request.bind(transport);
+    let release!: (value: any) => void;
+    vi.spyOn(transport, 'request').mockImplementation(async (method, params) => method === 'thread/settings/update'
+      ? new Promise(resolve => { release = resolve; }) : original(method, params));
+    const setting = executor.setSpeed('priority');
+    await vi.waitFor(() => expect(release).toBeDefined());
+    await executor.resetContext(); release({});
+    expect((await setting).success).toBe(false);
+    expect((await executor.listSpeeds())?.current).toBeUndefined();
   });
 
   it('refreshes an idle app-server after a Codex CLI upgrade while preserving its session', async () => {

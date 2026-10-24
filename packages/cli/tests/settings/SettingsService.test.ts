@@ -34,6 +34,24 @@ function fixture() {
 }
 
 describe('immutable settings menus and acknowledged mutations', () => {
+  it('gates speed snapshots and actions, validates separate immutable choices, and distinguishes receipt digests', async () => {
+    const f = fixture();
+    f.catalog.speed = { choices: [{ value: 'model-a', label: 'Native Fast' }, { value: 'default', label: 'Standard' }] };
+    const old = await f.service.open('model', 'thread-a', 'owner-a');
+    expect(old.speed).toBeUndefined();
+    expect((await f.service.action(f.action(old, { setting: 'speed' }))).success).toBe(false);
+    f.dependencies.speedSettingsSupported = () => true;
+    const menu = await f.service.open('model', 'thread-a', 'owner-a');
+    expect(menu.speed?.choices).toHaveLength(2);
+    const request = f.action(menu, { setting: 'speed' });
+    expect((await f.service.action(request)).success).toBe(true);
+    expect(f.dependencies.preference).toHaveBeenCalledWith('thread-a', 'codex', 'speed', 'model-a');
+    expect((await f.service.action({ ...request, setting: undefined })).error).toContain('different settings action');
+    const fresh = await f.service.open('model', 'thread-a', 'owner-a');
+    expect((await f.service.action(f.action(fresh, { setting: 'speed', value: 'unlisted' }))).success).toBe(false);
+    expect((await f.service.action(f.action(fresh, { setting: 'speed', operation: 'reset', value: undefined }))).success).toBe(true);
+    expect(f.dependencies.preference).toHaveBeenLastCalledWith('thread-a', 'codex', 'speed', undefined);
+  });
   it('offers thread-only delegation controls without querying native catalogs', async () => {
     const f = fixture();
     const menu = await f.service.open('delegation', 'thread-a', 'owner-a');

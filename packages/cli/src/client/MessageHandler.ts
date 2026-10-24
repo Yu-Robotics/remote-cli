@@ -226,6 +226,7 @@ export class MessageHandler {
   private activityProgressSupported = false;
   private workerContextResetSupported = false;
   private settingsCardsSupported = false;
+  private modelSpeedSettingsSupported = false;
   private directoryCardsSupported = false;
   private readonly directoryBrowser: DirectoryBrowser;
   private delegationCardsSupported = false;
@@ -275,7 +276,7 @@ export class MessageHandler {
         const thread = this.threadManager.getThread(id);
         if (!thread) throw new Error('This thread no longer exists.');
         const config = this.executorConfiguration();
-        return this.settingsCatalogReader.read(config, thread, this.threadPool.getBackendKey(id), target, kind);
+        return this.settingsCatalogReader.read(config, thread, this.threadPool.getBackendKey(id), target, kind, this.modelSpeedSettingsSupported);
       },
       busy: (id, except, queue = true) => this.settingsBusy(id, except, queue),
       threads: () => this.threadManager.listThreads().map(thread => thread.id),
@@ -291,6 +292,7 @@ export class MessageHandler {
       preference: (id, target, kind, value) => this.applyPreference(id, target, kind, value),
       delegation: (id, enabled) => this.applyDelegationSetting(id, enabled),
       delegationSupported: id => Boolean(this.threadPool.getExecutor(id).configureDelegation),
+      speedSettingsSupported: () => this.modelSpeedSettingsSupported,
     });
     this.directoryBrowser = new DirectoryBrowser({
       guard: this.directoryGuard,
@@ -399,6 +401,7 @@ export class MessageHandler {
         this.delegationProgressSupported = data.capabilities?.delegationProgress === true;
         this.workerContextResetSupported = this.delegationProgressSupported && data.capabilities?.workerContextReset === true;
         this.settingsCardsSupported = data.capabilities?.settingsCards === true;
+        this.modelSpeedSettingsSupported = this.settingsCardsSupported && data.capabilities?.modelSpeedSettings === true;
         this.directoryCardsSupported = this.settingsCardsSupported && data.capabilities?.directoryCards === true;
         this.delegationCardsSupported = this.settingsCardsSupported && data.capabilities?.delegationCards === true;
         this.delegationProgressTextSupported = this.delegationProgressSupported
@@ -3004,7 +3007,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     if (!thread) return undefined;
     const projection = (entry: import('../thread/types').Thread) => ({ id: entry.id, backend: entry.backend,
       cwd: entry.workingDirectory, generation: entry.delegationWorkspaceGeneration, model: entry.model,
-      models: entry.models, efforts: entry.efforts, delegation: entry.delegation, delegationBackends: entry.delegationBackends });
+      models: entry.models, efforts: entry.efforts, speeds: entry.speeds, delegation: entry.delegation, delegationBackends: entry.delegationBackends });
     const all = this.threadManager.listThreads().map(projection).sort((a, b) => a.id.localeCompare(b.id));
     const configuredModels = { ...thread.models };
     if (configuredModels.claude === undefined && thread.model) configuredModels.claude = thread.model;
@@ -3055,7 +3058,7 @@ You can also use natural language commands to control Claude Code CLI.`,
   }
 
   /** Shared native/persistent mutation for cards and parameterized text commands. */
-  private async applyPreference(threadId: string, backend: SettingsBackend, kind: 'model' | 'effort',
+  private async applyPreference(threadId: string, backend: SettingsBackend, kind: 'model' | 'effort' | 'speed',
     value: string | undefined, onStream?: (chunk: string) => void): Promise<ExecuteResult> {
     const thread = this.threadManager.getThread(threadId);
     if (!thread) return { success: false, error: 'This thread no longer exists.' };
@@ -3063,6 +3066,10 @@ You can also use natural language commands to control Claude Code CLI.`,
     const config = this.executorConfiguration();
     const coordinator = this.threadPool.getBackendKey(threadId);
     const apply = async (executor: IExecutor): Promise<ExecuteResult> => {
+      if (kind === 'speed') {
+        if (!this.modelSpeedSettingsSupported || !executor.setSpeed) return { success: false, error: 'Native speed settings are unavailable.' };
+        return executor.setSpeed(value);
+      }
       if (kind === 'effort') {
         if (!executor.setEffort) return { success: false, error: 'This backend does not expose effort controls.' };
         return executor.setEffort(value ?? 'auto');
@@ -3089,10 +3096,17 @@ You can also use natural language commands to control Claude Code CLI.`,
         if (value === undefined) delete models[backend]; else models[backend] = value;
         await this.threadManager.updateThread(threadId, { models: Object.keys(models).length ? models : undefined,
           ...(backend === 'claude' ? { model: value } : {}) });
-      } else {
+      } else if (kind === 'effort') {
         const efforts = { ...current.efforts };
         if (value === undefined) delete efforts[backend]; else efforts[backend] = value;
         await this.threadManager.updateThread(threadId, { efforts: Object.keys(efforts).length ? efforts : undefined });
+      } else {
+        const speeds = { ...current.speeds };
+        // Null records an explicit return to native configuration, so resumed
+        // worker lanes also clear any previously sticky tier. Unset old threads
+        // retain their original RPC shapes without additional settings reads.
+        speeds[backend] = value ?? null;
+        await this.threadManager.updateThread(threadId, { speeds: Object.keys(speeds).length ? speeds : undefined });
       }
       return result;
     } finally { this.settingsService.invalidate(threadId); }
