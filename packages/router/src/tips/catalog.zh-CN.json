@@ -573,5 +573,51 @@
       ],
       "takeaway": "先看支持范围，再选择命令沙箱模式"
     }
+  },
+  {
+    "id": "codex-weekly-reset-notice",
+    "topic": "codex-notices",
+    "title": "彩蛋：Codex 周额度状态也有提醒",
+    "problem": "不常用 Codex，容易忽略它的周额度状态。",
+    "benefit": "符合周额度检查条件时，飞书会出现 Codex Reset 卡片，提醒你按需使用 Codex。",
+    "action": "订阅检查开启且 Codex 的 ChatGPT 登录和额度查询可用时，留意 Codex Reset 卡片；有任务时可在 Codex 线程正常发送。卡片没有激活按钮，不会自动启动任务。",
+    "example": "在 Codex 线程中发送一项正常任务，例如：请介绍当前项目的启动方法。",
+    "detail": "启动后需两次约隔一小时的检测都符合条件；卡片是检测快照，不证明刚发生重置，也不保证一次请求启动周期。不花重置卡，不清对话。",
+    "image": "codex-weekly-reset-notice.png",
+    "illustration": {
+      "layout": "codex-weekly-reset-notice",
+      "labels": [
+        "认准 Codex Reset",
+        "符合检测条件才会出现",
+        "按需要正常使用 Codex",
+        "提醒不会替你启动任务",
+        "显示的是检测时状态",
+        "不花重置卡，不清对话"
+      ],
+      "takeaway": "这是一张状态提醒，不是自动重置按钮"
+    }
+  },
+  {
+    "id": "codex-banked-reset-notice",
+    "topic": "codex-notices",
+    "title": "彩蛋：重置卡增加了也能收到提醒",
+    "problem": "Codex 账号可用重置卡变多了，你却不一定会主动查看。",
+    "benefit": "同一账号可用重置卡张数增加时，工具会在飞书展示前后数量和本次增加量。",
+    "action": "看到 Codex Banked Reset 卡片，查看“上次 → 本次（+增加量）”即可；这是张数增加通知，不代表 remote-cli 替你发放或领取卡片。",
+    "example": "示意：上次 3 张 → 本次 5 张（+2）；看提醒不会领取或消耗重置卡。",
+    "detail": "需订阅检查开启、账号查询可用且两端支持；首次检测、重启或换账号只建基线。未知不是零，卡片不是实时余额，也不会使用卡。",
+    "image": "codex-banked-reset-notice.png",
+    "illustration": {
+      "layout": "codex-banked-reset-notice",
+      "labels": [
+        "认准 Banked Reset 卡",
+        "原生可用张数增加才提醒",
+        "查看前后张数和增加量",
+        "示意 3 → 5，增加 2 张",
+        "不负责发放或使用卡",
+        "首次检测和重启不补发提醒"
+      ],
+      "takeaway": "这是张数增加通知，不是领卡或用卡入口"
+    }
   }
 ]

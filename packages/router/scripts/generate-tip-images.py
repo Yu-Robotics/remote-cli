@@ -49,7 +49,10 @@ def settings_fixtures():
     # Exercise the real card builder with synthetic, public demo values only.
     script = r"""
 import mod from './packages/router/src/feishu/SettingsCards.ts';
+import maintenanceMod from './packages/router/src/maintenance/MaintenanceCards.ts';
+import { randomUUID } from 'node:crypto';
 const {SettingsCards}=mod;
+const {MaintenanceCards}=maintenanceMod;
 const backends=[['claude','Claude Code'],['codex','Codex CLI (OpenAI)'],
  ['opencode','OpenCode CLI'],['kimi','Kimi Code CLI'],['zcode','ZCode'],['pi','Pi'],
  ['agy','AGY CLI (Antigravity)'],['dsh','DeepSeek Harness (DSH)']]
@@ -83,6 +86,19 @@ for(const [key,menu] of Object.entries(menus)){
  if(!prepared) throw Error(`Synthetic menu rejected: ${key}`);
  result[key]=clean({schema:'2.0',header:cards['header']({menu}),body:{elements:prepared.elements}});
  prepared.discard();cards.destroy();
+}
+for(const [key,extra] of [['weeklyReminder',{}],['bankedReminder',
+ {kind:'banked_reset_increase',previousCount:3,availableCount:5}]]){
+ // Reminder rendering uses only injected in-memory transports; persistence is forbidden.
+ const receipts=new Proxy({}, {get(){throw Error('Reminder artwork must not access receipt storage');}});
+ const now=Date.UTC(2026,0,1);
+ const cards=new MaintenanceCards(receipts, {owner:async()=> 'demo-owner',send:async()=>true,
+  update:async()=>{throw Error('Reminder artwork must not update a real card');},now:()=>now,
+  create:async(_owner,elements,header)=>{result[key]=clean({header,body:{elements}});return 'demo-reminder-card';}});
+ await cards.receiveReminder({reminder:{reminderId:randomUUID(),generation:randomUUID(),
+  expiresAt:now+3600000,activationAvailable:false,backend:'codex',...extra}},'demo-device',()=>true);
+ if(!result[key])throw Error(`Synthetic reminder rejected: ${key}`);
+ cards.destroy();
 }
 process.stdout.write(JSON.stringify(result));
 """
@@ -217,14 +233,16 @@ class Canvas:
         x = 1054
         prerequisite = (self.tip['id'].startswith('delegation-')
                         and self.tip['id'] not in ['delegation-toggle', 'delegation-reset-backend']) or self.tip['id'] == 'cross-backend-review'
-        caption = UI['interaction'] if self.tip['id'] == 'tool-row-details' else UI['delegation'] if prerequisite else UI['command']
+        automatic = self.tip['id'] in ['codex-weekly-reset-notice', 'codex-banked-reset-notice']
+        caption = UI['automatic'] if automatic else UI['interaction'] if self.tip['id'] == 'tool-row-details' else UI['delegation'] if prerequisite else UI['command']
         self.text(x, 236, caption, 21, '#646a73')
         command = self.tip['example'].split('\n')[0] if self.tip['example'].startswith('/') else '/delegation'
         if len(command) > 25 and self.tip['id'] != 'delegation-reset-backend':
             command = command.split(' ')[0]
         command = {'queue-confirm': UI['queue'], 'file-needs-instruction': UI['file'],
                    'image-with-question': UI['image'],
-                   'tool-row-details': labels[2]}.get(self.tip['id'], command)
+                   'tool-row-details': labels[2], 'codex-weekly-reset-notice': 'Codex Reset',
+                   'codex-banked-reset-notice': 'Codex Banked Reset'}.get(self.tip['id'], command)
         self.rect(x, 280, 450, 72, 'white', '#dce2eb', 12)
         self.block(x + 22, 292, command, 406, 25, BLUE, True, max_lines=1)
         for number, top in [(1, 405), (2, 597)]:
@@ -492,9 +510,41 @@ def operation_scene(c, kind):
         c.block(98, y + 310, 'Native command policy for this thread.\nNot whole-process isolation.', 830, 23, '#646a73')
 
 
+def reminder_scene(c, fixture):
+    """Render the native passive notification, never a reset or grant control."""
+    c.rect(64, 224, 936, 730, 'white', '#d9dce1', 12)
+    c.rect(65, 225, 934, 58, '#eaf0ff', radius=11)
+    c.rect(65, 260, 934, 23, '#eaf0ff')
+    c.text(94, 236, fixture['header']['title']['content'], 25, BLUE, True)
+    assert all(element['tag'] == 'markdown' for element in fixture['body']['elements'])
+    paragraphs = fixture['body']['elements'][0]['content'].split('\n\n')
+    y = 319
+    for index, paragraph in enumerate(paragraphs):
+        start = y
+        size = 26 if index == 0 else 23
+        lines = ['']
+        for word in plain(paragraph).split():
+            candidate = f'{lines[-1]} {word}'.strip()
+            if lines[-1] and measure(candidate, size, index == 0) > 844:
+                lines.append(word)
+            else:
+                lines[-1] = candidate
+        for line in lines:
+            c.text(98, y, line, size, '#1f2329' if index == 0 else '#646a73', bold=index == 0)
+            y += size * 1.55
+        y += 28
+        if index == 0:
+            c.highlight(94, start - 4, 852, y - start - 15, 1)
+        elif index == len(paragraphs) - 1:
+            c.highlight(94, start - 4, 852, y - start - 15, 2)
+
+
 def render_svg(tip, number, fixtures):
     c = Canvas(tip, number)
-    if tip['id'] in ['directory-browser', 'delegation-toggle', 'codex-model-speed']:
+    if tip['id'] in ['codex-weekly-reset-notice', 'codex-banked-reset-notice']:
+        key = 'weeklyReminder' if tip['id'] == 'codex-weekly-reset-notice' else 'bankedReminder'
+        reminder_scene(c, fixtures[key])
+    elif tip['id'] in ['directory-browser', 'delegation-toggle', 'codex-model-speed']:
         kind = {'directory-browser': 'directory', 'delegation-toggle': 'delegation', 'codex-model-speed': 'speed'}[tip['id']]
         focused_settings(c, fixtures[kind], kind)
     elif tip['id'] in ['named-project-thread', 'tool-row-details', 'delegation-reset-backend',
@@ -567,7 +617,7 @@ def gallery(catalog, portable=False):
 
 def main():
     catalog = json.loads((SOURCE / 'catalog.zh-CN.json').read_text())
-    assert len(catalog) == 25, 'Expected the approved 25-topic catalog'
+    assert len(catalog) == 27, 'Expected the approved 27-topic catalog'
     fixtures = settings_fixtures()
     svg_directory = DOCS / 'svg'
     svg_directory.mkdir(parents=True, exist_ok=True)

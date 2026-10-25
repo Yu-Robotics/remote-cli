@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.183] - 2026-10-25
+
+### Added
+- Add two Easter-egg Tips explaining the passive Codex weekly-quota and banked-reset-credit increase notices, including their sampling limits and the distinction from resetting context or granting, claiming, or consuming credits.
+- Expand the bundled catalog, native-card-based SVG/PNG illustrations, preview gallery, contact sheet, and download archive to 27 tutorials while preserving existing content and progress.
+
+### Tests
+- Cover passive notification copy and artwork, complete packaging, and preserved reading progress and opt-outs when upgrading from the 25-tip catalog.
+
 ## [1.6.182] - 2026-10-25
 
 ### Added

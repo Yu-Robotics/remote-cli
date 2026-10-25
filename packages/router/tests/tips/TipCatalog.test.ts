@@ -26,6 +26,7 @@ const expectedIds = [
   'device-selection', 'clear-thread-context', 'compact-backend', 'skills-by-backend',
   'directory-browser', 'named-project-thread', 'tool-row-details', 'delegation-toggle',
   'delegation-reset-backend', 'codex-model-speed', 'codex-native-goal', 'sandbox-thread-controls',
+  'codex-weekly-reset-notice', 'codex-banked-reset-notice',
 ];
 const naturalInstructionIds = [
   'cross-backend-review', 'delegation-independent-checks', 'delegation-parallel-changes',
@@ -62,10 +63,10 @@ afterEach(() => {
 });
 
 describe('reviewed illustrated tip catalog', () => {
-  it('exposes 25 stable, frozen definitions with only contract fields', () => {
+  it('exposes 27 stable, frozen definitions with only contract fields', () => {
     expect(TIPS.map(tip => tip.id)).toEqual(expectedIds);
     expect(Object.isFrozen(TIPS)).toBe(true);
-    expect(new Set(TIPS.map(tip => tip.id)).size).toBe(25);
+    expect(new Set(TIPS.map(tip => tip.id)).size).toBe(27);
     expect(validateCatalog(catalog)).toBe(catalog);
     for (const tip of TIPS) {
       expect(Object.isFrozen(tip)).toBe(true);
@@ -86,9 +87,9 @@ describe('reviewed illustrated tip catalog', () => {
       expect(tip.benefit.match(/\u3002/g)).toHaveLength(1);
       expect(tip.image).toBe(`${tip.id}.png`);
     }
-    expect(new Set(catalog.map(tip => tip.illustration.layout)).size).toBe(25);
-    expect(new Set(TIPS.map(tip => tip.title)).size).toBe(25);
-    expect(new Set(TIPS.map(tip => tip.problem)).size).toBe(25);
+    expect(new Set(catalog.map(tip => tip.illustration.layout)).size).toBe(27);
+    expect(new Set(TIPS.map(tip => tip.title)).size).toBe(27);
+    expect(new Set(TIPS.map(tip => tip.problem)).size).toBe(27);
   });
 
   it('keeps unsupported commands out while allowing the newly approved thread workflow', () => {
@@ -166,6 +167,31 @@ describe('reviewed illustrated tip catalog', () => {
     }
   });
 
+  it('keeps both Codex Easter eggs informational rather than inventing reset or grant commands', () => {
+    const weekly = find('codex-weekly-reset-notice');
+    const banked = find('codex-banked-reset-notice');
+    expect(weekly.action).toContain('Codex Reset');
+    expect(weekly.detail).toMatch(/\u4e24\u6b21.*\u4e00\u5c0f\u65f6/);
+    expect(weekly.detail).toMatch(/\u4e0d\u8bc1\u660e.*\u4e0d\u4fdd\u8bc1/);
+    expect(banked.action).toContain('Codex Banked Reset');
+    expect(banked.detail).toMatch(/\u9996\u6b21.*\u91cd\u542f.*\u57fa\u7ebf/);
+    expect(banked.action).toMatch(/\u4e0d\u4ee3\u8868.*\u53d1\u653e.*\u9886\u53d6/);
+    for (const tip of [weekly, banked]) {
+      expect(tip.title).toMatch(/^\u5f69\u86cb/);
+      expect(tip.example).not.toMatch(/^\//);
+      expect(JSON.stringify(tip)).not.toMatch(/\/(?:reset|redeem|claim|grant)\b/);
+    }
+    const svg = (id: string) => fs.readFileSync(path.join(root, 'docs/tips/svg', `${id}.svg`), 'utf8');
+    expect(svg(weekly.id)).toContain('Weekly quota reset: 100%');
+    expect(svg(weekly.id)).toContain('Codex Reset');
+    expect(svg(banked.id)).toContain('Banked Reset balance increased: 3 → 5 (+2)');
+    expect(svg(banked.id)).toContain('This reminder does not consume reset credits.');
+    for (const tip of [weekly, banked]) {
+      expect(svg(tip.id)).not.toContain('/delegation');
+      expect(svg(tip.id)).not.toContain('Use reset credit');
+    }
+  });
+
   it('preserves independent-worker, integration, dictation and allowance boundaries', () => {
     expect(find('cross-backend-review').example).toMatch(/\u6574\u5408.*\u518d\u8bf7\u53e6\u4e00\u79cd/);
     expect(find('cross-backend-review').detail).toContain('\u4e0d\u4f1a\u81ea\u52a8\u5408\u5e76');
@@ -228,7 +254,7 @@ describe('reviewed illustrated tip catalog', () => {
       hashes.add(createHash('sha256').update(image).digest('hex'));
       total += image.length;
     }
-    expect(hashes.size).toBe(25);
+    expect(hashes.size).toBe(27);
     expect(total).toBeLessThan(5 * 1024 * 1024);
   });
 
@@ -324,7 +350,7 @@ describe('reviewed illustrated tip catalog', () => {
   it('packages the JSON and all byte-identical images without a renderer dependency', () => {
     const outputDirectory = makeTemp();
     const result = buildTips({ sourceDirectory: source, outputDirectory });
-    expect(result.count).toBe(25);
+    expect(result.count).toBe(27);
     expect(result.bytes).toBeLessThan(5 * 1024 * 1024);
     expect(JSON.parse(fs.readFileSync(path.join(outputDirectory, 'catalog.zh-CN.json'), 'utf8'))).toEqual(catalog);
     for (const tip of TIPS) expect(fs.readFileSync(path.join(outputDirectory, 'assets', tip.image)))
@@ -369,12 +395,12 @@ describe('reviewed illustrated tip catalog', () => {
     }
   });
 
-  it('provides a 25-tip preview with local images and matching editable SVGs', () => {
+  it('provides a 27-tip preview with local images and matching editable SVGs', () => {
     const svgDirectory = path.join(root, 'docs/tips/svg');
     expect(fs.readdirSync(svgDirectory).sort()).toEqual(TIPS.map(tip => `${tip.id}.svg`).sort());
     const gallery = fs.readFileSync(path.join(root, 'docs/tips-preview.html'), 'utf8');
-    expect(gallery.match(/<article /g)).toHaveLength(25);
-    expect(gallery.match(/<img /g)).toHaveLength(25);
+    expect(gallery.match(/<article /g)).toHaveLength(27);
+    expect(gallery.match(/<img /g)).toHaveLength(27);
     expect(gallery).not.toMatch(/<details(?:\s|>)/);
     expect(gallery).not.toMatch(/https?:\/\/|<script/);
     for (const tip of TIPS) {
