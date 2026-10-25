@@ -9,19 +9,13 @@ describe('PidManager', () => {
   let pidManager: PidManager;
 
   beforeEach(async () => {
-    // Create temporary directory for testing
-    testDir = path.join(os.tmpdir(), `test-router-${Date.now()}`);
-    await fs.mkdir(testDir, { recursive: true });
+    testDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'router-pid-test-')));
     pidManager = new PidManager(testDir);
   });
 
   afterEach(async () => {
-    // Cleanup test directory
-    try {
-      await fs.rm(testDir, { recursive: true, force: true });
-    } catch (error) {
-      // Ignore cleanup errors
-    }
+    vi.restoreAllMocks();
+    await fs.rm(testDir, { recursive: true, force: true });
   });
 
   describe('writePid', () => {
@@ -35,7 +29,7 @@ describe('PidManager', () => {
     });
 
     it('should create directory if it does not exist', async () => {
-      const deepDir = path.join(os.tmpdir(), `test-router-deep-${Date.now()}`, 'nested');
+      const deepDir = path.join(testDir, 'nested');
       const deepManager = new PidManager(deepDir);
 
       await deepManager.writePid(99999);
@@ -44,8 +38,72 @@ describe('PidManager', () => {
       const content = await fs.readFile(pidFilePath, 'utf-8');
       expect(content).toBe('99999');
 
-      // Cleanup
-      await fs.rm(path.dirname(deepDir), { recursive: true, force: true });
+    });
+  });
+
+  describe('startup ownership', () => {
+    it('retains the first-line PID for legacy readers and ordinary stop/status probes', async () => {
+      await pidManager.writeOwnedPid(process.pid);
+      const content = await fs.readFile(path.join(testDir, 'server.pid'), 'utf8');
+      expect(content.split('\n')[0]).toBe(String(process.pid));
+      expect(content.split('\n')[1]).toMatch(/^[0-9a-f-]{36}$/);
+      expect(parseInt(content.trim(), 10)).toBe(process.pid);
+      expect(await pidManager.readPid()).toBe(process.pid);
+      expect(pidManager.isProcessRunning(process.pid)).toBe(true);
+      expect(await pidManager.getRunningPid()).toBe(process.pid);
+      await pidManager.removeOwnedPid();
+      expect(await pidManager.readPid()).toBeNull();
+      await expect(pidManager.removeOwnedPid()).resolves.toBeUndefined();
+    });
+
+    it('does not clean any record before this attempt writes its own', async () => {
+      await pidManager.writePid(process.pid);
+      await pidManager.removeOwnedPid();
+      expect(await fs.readFile(path.join(testDir, 'server.pid'), 'utf8')).toBe(String(process.pid));
+    });
+
+    it('preserves a replacement startup record even if its PID is identical', async () => {
+      await pidManager.writeOwnedPid(process.pid);
+      const replacement = new PidManager(testDir);
+      await replacement.writeOwnedPid(process.pid);
+      const content = await fs.readFile(path.join(testDir, 'server.pid'), 'utf8');
+      await pidManager.removeOwnedPid();
+      expect(await fs.readFile(path.join(testDir, 'server.pid'), 'utf8')).toBe(content);
+      await replacement.removeOwnedPid();
+      expect(await pidManager.readPid()).toBeNull();
+    });
+
+    it.each([12345, process.pid])('preserves replacement legacy PID %i', async pid => {
+      await pidManager.writeOwnedPid(process.pid);
+      await new PidManager(testDir).writePid(pid);
+      await pidManager.removeOwnedPid();
+      expect(await fs.readFile(path.join(testDir, 'server.pid'), 'utf8')).toBe(String(pid));
+    });
+
+    it('can clean an owned write that reached disk before reporting failure', async () => {
+      const original = fs.writeFile.bind(fs);
+      vi.spyOn(fs, 'writeFile').mockImplementationOnce(async (...args) => {
+        await original(...args);
+        throw new Error('Synthetic write completion failure');
+      });
+      await expect(pidManager.writeOwnedPid(process.pid)).rejects.toThrow('Failed to write PID file');
+      expect(await pidManager.readPid()).toBe(process.pid);
+      await pidManager.removeOwnedPid();
+      expect(await pidManager.readPid()).toBeNull();
+    });
+
+    it.each(['readFile', 'unlink'] as const)('reports an owned cleanup %s error without removing the record', async operation => {
+      await pidManager.writeOwnedPid(process.pid);
+      const failure = vi.spyOn(fs, operation).mockRejectedValueOnce(new Error('Synthetic storage failure'));
+      await expect(pidManager.removeOwnedPid()).rejects.toThrow('Failed to remove owned PID file');
+      failure.mockRestore();
+      expect(await pidManager.readPid()).toBe(process.pid);
+    });
+
+    it('reports PID persistence errors', async () => {
+      vi.spyOn(fs, 'mkdir').mockRejectedValueOnce(new Error('Synthetic storage failure'));
+      await expect(pidManager.writeOwnedPid(process.pid)).rejects.toThrow('Failed to write PID file');
+      await pidManager.removeOwnedPid();
     });
   });
 

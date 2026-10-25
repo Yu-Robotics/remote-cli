@@ -564,6 +564,11 @@ From CLI 1.6.165, Pi connection and detach confirmations exclude simultaneous se
 
 For full documentation including router server deployment, see the [project README](https://github.com/Yu-Robotics/remote-cli#readme).
 
+Router 1.6.184 recovers a stale PID record pointing to its own new startup process,
+including Docker PID 1, and attempts bounded cleanup on startup failure or shutdown.
+Run one Router per storage directory; unrelated PID reuse and concurrent starts
+require additional coordination. See [Docker Compose deployment](../../README.md#docker-compose-deployment-recommended-for-shared-routers).
+
 ## License
 
 MIT

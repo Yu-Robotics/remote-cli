@@ -364,6 +364,13 @@ docker compose up -d
 
 The `./router-data` bind mount stores Router data under the container's `/router-data` home directory (`/router-data/.remote-cli-router/`). On Linux, set `ROUTER_UID` and `ROUTER_GID` in `.env` to the output of `id -u` and `id -g`; they must match the directory owner. Set `ROUTER_PORT` before setup if port `3000` is unavailable; it must match the server port entered in the setup wizard. The Compose service uses `restart: always`, so Docker starts the Router again after unexpected exits and Docker daemon restarts; `docker compose down` still removes the container. Use `docker compose logs -f router` to inspect logs and `docker compose down` to stop the service. Run local clients directly on their host machines rather than in Docker so they can access project files and local AI CLI binaries.
 
+From Router 1.6.184, startup accepts a stale PID record that points to the new
+startup process itself, including PID 1 after Docker recreation. Startup failures
+and shutdown attempt bounded cleanup of the current instance's PID record.
+Abrupt termination can still leave a record; successful cleanup is not required
+for this self-PID recovery. Run only one Router per storage directory. This does
+not provide concurrent-start locking or identity checks for unrelated reused PIDs.
+
 Clients automatically install a newer Router's exact published npm version when their tasks and queues are idle. Manual clients continue running the old version until their next start; clients launched with `--non-interactive` exit for their supervisor to restart. A rejected CLI protocol requires a restart after installation. Publish the matching CLI package when upgrading the Router.
 
 ## Commands

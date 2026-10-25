@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.184] - 2026-10-25
+
+### Fixed
+- Recover from a persisted Router PID equal to the new startup process, including Docker PID 1 after container recreation, while retaining ordinary stop/status process checks and rejecting another live PID.
+- Register shutdown handling before asynchronous startup and use bounded cleanup for initialization failures and termination. Preserve replacement PID records and prevent interrupted initialization from continuing into a new server start.
+
+### Tests
+- Cover self-PID recovery, duplicate-process refusal, initialization failures, early signals, bounded shutdown, and ownership-safe cleanup with isolated fixtures.
+
 ## [1.6.183] - 2026-10-25
 
 ### Added
