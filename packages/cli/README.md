@@ -9,6 +9,7 @@ Remote control Claude Code, AGY CLI, Codex CLI, OpenCode CLI, Kimi Code CLI, ZCo
 - **Remote Control**: Control your local development environment from anywhere via mobile
 - **Access Controls**: Working-directory allowlist and user-device binding
 - **Mobile-Optimized**: Simplified commands and rich text formatting for Feishu
+- **Illustrated Tips**: Browse Router-owned tutorials with `/tips`; copyable examples appear directly below usage instructions, with only Next, Mastered, and Settings controls. See [Illustrated Tips](../../README.md#illustrated-tips).
 - **Readable Code Changes**: Edit operations show collapsible, line-aware diff previews inside the existing progress card
 - **Multi-Backend Support**: Supports Claude Code, AGY CLI (Antigravity), Codex CLI (OpenAI), OpenCode CLI, Kimi Code CLI, ZCode, and Pi
 - **Image Input and Output**: Forward Feishu images to supported backends and return Codex native image output. All backends can return local images through file paths or Markdown image links; files must be inside an allowed directory and no larger than 2 MiB. AGY does not accept image input.
