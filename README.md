@@ -501,6 +501,40 @@ Once connected, use these commands in Feishu:
 | `/unbind` | Unbind all devices |
 | `/device` | List bound devices with connection status, or switch devices |
 
+### Illustrated Tips
+
+Use `/tips` to browse 17 short Chinese scenario cards, each with its own bundled
+illustration based on the actual settings panels or task cards, a benefit, and a copyable example. Examples are educational text;
+card buttons never execute them or change backend, model, effort, device, or thread.
+Browsing works for bound users even while their CLI is offline.
+
+| Command | Result |
+| --- | --- |
+| `/tips next` / `/tips list` | Read another tip or browse the library |
+| `/tips settings` | View subscription, mute, and timezone settings |
+| `/tips daily` / `/tips weekly` | Explicitly subscribe daily or on Tuesday and Thursday |
+| `/tips mute 7` | Pause automatic tips for seven days (1-365 supported) |
+| `/tips unmute` | Remove the pause without enabling a disabled subscription |
+| `/tips off` | Disable automatic tips permanently until explicitly subscribed again |
+| `/tips timezone Asia/Shanghai` | Select the IANA timezone for this user's schedule |
+
+Automatic delivery is **off by default**. Subscribed tips are due at 10:30 in the
+user's timezone (default `Asia/Shanghai`), within 10:30-19:00 only, at most once per
+local day and at least 20 hours apart. Delivery requires a bound online device,
+bot activity within seven days, two minutes of quiet, and no task currently visible
+to the Router. This check cannot observe every backend-local operation or queue.
+Offline periods create no backlog; device registration never triggers tips.
+Settings cards offer 1/3/7/14-day mute controls. Seen or mastered tips are skipped.
+
+The Router stores private per-user preferences and delivery intent beside its
+configuration. A send with an uncertain result is suppressed rather than replayed.
+Run one Router process per storage directory; this is not multi-replica delivery.
+Optional Router configuration `tips.enabled: false` disables automatic delivery
+globally while retaining browsing; `tips.timezone` sets the default IANA timezone.
+Tips use reviewed bundled content and static PNGs, with no model calls or catalog
+probes. Some examples require a compatible CLI; the backend tip includes the text
+command alternative for clients without settings cards.
+
 ### Cross-backend Delegation
 
 Claude Code, Codex, Pi, AGY, OpenCode, Kimi Code, ZCode, and DSH can each coordinate

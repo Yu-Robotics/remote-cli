@@ -3,6 +3,9 @@ import { WorkerContextCards } from './feishu/WorkerContextCards';
 import { SettingsCards } from './feishu/SettingsCards';
 import { MaintenanceCards } from './maintenance/MaintenanceCards';
 import { NoticeReceipts } from './maintenance/NoticeReceipts';
+import { TipService } from './tips/TipService';
+import { TIPS } from './tips/TipCatalog';
+import { TipImages } from './tips/TipImages';
 import { DeviceAuth } from './files/DeviceAuth';
 import { FileTransfers } from './files/FileTransfers';
 import path from 'path';
@@ -104,6 +107,7 @@ export class RouterServer {
   private readonly settingsCards: SettingsCards;
   private readonly settingsConnections = new Map<string, (kind?: import('./types/Settings').SettingsKind | 'speed') => boolean>();
   private readonly maintenanceCards: MaintenanceCards;
+  private readonly tips: TipService;
   private readonly maintenanceConnections = new Map<string, { updateNotice: boolean; current: () => boolean }>();
   private cleanupInterval: NodeJS.Timeout | null = null;
   // Track streaming messages and coalesced Feishu card update state.
@@ -147,6 +151,28 @@ export class RouterServer {
 
     // Share ConnectionHub with Feishu handler
     this.feishuLongConnHandler.setConnectionHub(this.connectionHub);
+    const tipImages = new TipImages((data, mimeType) => this.feishuLongConnHandler.uploadImage(data, mimeType));
+    const tipsConfig = config.get('tips');
+    this.tips = new TipService({
+      directory: path.join(path.dirname(config.getConfigPath() || path.join(os.homedir(), '.remote-cli-router', 'config.json')), 'tips'),
+      catalog: TIPS,
+      timezone: tipsConfig?.timezone,
+      users: () => this.bindingManager.listBoundUserIds(),
+      isBound: async openId => (await this.bindingManager.getUserDevices(openId)).length > 0,
+      canDeliver: async openId => {
+        if (tipsConfig?.enabled === false) return false;
+        // This observes Router tasks, not every backend-local queue or operation.
+        if ([...this.streamingMessages.values()].some(stream => stream.openId === openId)) return false;
+        const devices = await this.bindingManager.getUserDevices(openId);
+        return devices.some(device => this.connectionHub.isDeviceOnline(device.deviceId));
+      },
+      image: tip => tipImages.get(tip),
+      create: (openId, elements, header, deliveryKey) => this.feishuLongConnHandler.sendTipCard(openId, elements, header, deliveryKey),
+      update: (cardId, elements, header) => this.feishuLongConnHandler.updateTipCard(cardId, elements, header),
+    });
+    this.feishuLongConnHandler.onTipsCommand = (openId, content) => this.tips.command(openId, content);
+    this.feishuLongConnHandler.onTipsAction = (openId, cardId, payload) => this.tips.action(openId, cardId, payload);
+    this.feishuLongConnHandler.onUserActivity = openId => this.tips.activity(openId);
     const fileConfig = config.get('files');
     this.fileTransfers = new FileTransfers(
       path.join(path.dirname(config.getConfigPath() || path.join(os.homedir(), '.remote-cli-router', 'config.json')), 'attachments'),
@@ -986,6 +1012,7 @@ export class RouterServer {
     // Start Feishu WebSocket long connection
     try {
       await this.feishuLongConnHandler.start();
+      this.tips.start();
     } catch (error) {
       console.error('⚠️  Failed to start Feishu long connection:', error);
       console.log('   Server will continue without Feishu integration');
@@ -2141,6 +2168,7 @@ export class RouterServer {
    */
   async stop(): Promise<void> {
     console.log('Stopping router server...');
+    await this.tips.stop();
     for (const id of this.imageReplies.keys()) this.cancelImageReply(id);
     this.approvalCards.destroy();
     this.workerContextCards.destroy();

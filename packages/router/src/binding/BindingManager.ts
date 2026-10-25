@@ -121,6 +121,10 @@ export class BindingManager {
     return this.store.getUserBinding(openId);
   }
 
+  async listBoundUserIds(): Promise<string[]> {
+    return this.store.listBoundUserIds();
+  }
+
   /**
    * Get all devices for a user
    */

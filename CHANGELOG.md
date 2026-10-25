@@ -10,6 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.178] - 2026-10-25
+
+### Added
+- Bundle 17 illustrated Chinese scenario tips with deterministic manual browsing and passive Feishu cards. Each tip includes a distinct packaged PNG redrawn from the real settings or task-card UI, an editable SVG, and a copyable example that is never executed by a card action. All examples use synthetic content.
+- Add Router-owned explicit daily or twice-weekly subscriptions, timezone settings, permanent opt-out, and timed mute controls. Deduplicate per user across devices; skip recent activity, observed tasks, offline users, and exhausted catalogs.
+- Persist private preferences and pre-dispatch delivery intent. Suppress ambiguous sends after failures or restarts, validate card ownership and expiry, and stop scheduling before Router shutdown.
+
+### Tests
+- Cover content and packaging, subscription and delivery state transitions, failure recovery, action validation, transport isolation, and Router integration with mocked Feishu APIs.
+
 ## [1.6.177] - 2026-10-24
 
 ### Changed

@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Code Language Requirement
 
-**CRITICAL: Code, comments, technical documentation, commit messages, and identifiers MUST be written in English. The only approved localization exception is the Chinese user-facing release summaries described below.**
+**CRITICAL: Code, comments, technical documentation, commit messages, and identifiers MUST be written in English. Approved localization exceptions are the Chinese user-facing release summaries and the user-requested Tips resources described below.**
 
-- No literal Chinese characters are allowed outside `RELEASE_NOTES_ZH.md` and its generated release-note package artifact. Tests for localized content must use Unicode escapes rather than literal Chinese strings.
+- Literal Chinese is allowed only in `RELEASE_NOTES_ZH.md`, its generated release-note package artifact, `packages/router/src/tips/catalog.zh-CN.json`, `packages/router/src/tips/ui.zh-CN.json`, and their generated Tips illustrations/package assets and preview gallery. The user explicitly requested plain-language Chinese Tips with an illustration for each on 2026-10-25. Source code, comments, tests, and technical documentation remain English; localized tests use Unicode escapes or resource imports.
 - All JSDoc comments must be in English
 - All error messages and other user-facing strings must be in English; upgrade summaries may use the approved localized release notes.
 - Commit messages must be in English
@@ -28,7 +28,7 @@ This is a **strictly enforced** rule - unapproved Chinese text must not be added
 ### Communication vs Code
 
 - **During conversation**: You may communicate in any language (Chinese, English, etc.)
-- **Code submissions**: Code, comments, technical documentation, and commit messages MUST be in English; only the approved user release summaries and their generated package artifact may contain Chinese text.
+- **Code submissions**: Code, comments, technical documentation, and commit messages MUST be in English; only the approved release summaries and Tips localization resources/generated artifacts may contain Chinese text.
 - **Consistency**: Maintain the same language within a conversation context for better understanding
 
 ## Privacy and Secret Review Requirement
