@@ -47,6 +47,8 @@ Use `/tips` to browse 17 short Chinese scenario cards, each with its own bundled
 illustration based on the actual settings panels or task cards, a benefit, and a copyable example. Examples are educational text;
 card buttons never execute them or change backend, model, effort, device, or thread.
 Browsing works for bound users even while their CLI is offline.
+Usage notes appear directly in the card body. Cards offer Example, Next, Mastered,
+and Settings controls, with no separate detail button.
 
 | Command | Result |
 | --- | --- |

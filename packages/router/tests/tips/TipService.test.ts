@@ -108,8 +108,14 @@ describe('Router-owned Tips', () => {
     expect(options.create).toHaveBeenCalledTimes(1);
     const [target, elements] = vi.mocked(options.create).mock.calls[0];
     expect(target).toBe(user); expect(elements[0]).toMatchObject({ tag: 'img', img_key: 'synthetic-image-key' });
+    expect(elements[2]).toMatchObject({ text_size: 'notation', content: `**${ui.usageNote}**\n${catalog[0].detail}` });
     expect(await click('example')).toBe(ui.delivered);
-    expect(JSON.stringify(vi.mocked(options.update).mock.calls[0])).toContain('/backend 1 @');
+    const [updatedCardId, exampleElements] = vi.mocked(options.update).mock.calls[0];
+    expect(updatedCardId).toBe((await state()).cards.at(-1)!.cardId);
+    expect(exampleElements[0]).toMatchObject({ tag: 'img', img_key: 'synthetic-image-key' });
+    expect(exampleElements[1]).toEqual(elements[1]); expect(exampleElements[2]).toEqual(elements[2]);
+    expect(exampleElements[3]).toEqual({ tag: 'markdown', content: catalog[0].example });
+    expect(options.create).toHaveBeenCalledTimes(1);
     expect((await state()).subscription).toBe('daily');
     expect(options.canDeliver).not.toHaveBeenCalled();
     const files = await fs.readdir(directory);
@@ -353,6 +359,39 @@ describe('Router-owned Tips', () => {
     expect(options.update).not.toHaveBeenCalled();
   });
 
+  it('refreshes a legacy detail callback into the new summary across restart without changing progress or preferences', async () => {
+    await service.command(user, '/tips'); const receipt = (await state()).cards.at(-1)!;
+    expect(await click('example', undefined, receipt)).toBe(ui.delivered);
+    await service.stop(); service = createService();
+    vi.mocked(options.create).mockClear(); vi.mocked(options.update).mockClear();
+    const before = await state(); now += 1000;
+    expect(await click('detail', undefined, receipt)).toBe(ui.delivered);
+    expect(options.create).not.toHaveBeenCalled(); expect(options.update).toHaveBeenCalledTimes(1);
+    const [cardId, elements] = vi.mocked(options.update).mock.calls[0];
+    expect(cardId).toBe(receipt.cardId);
+    expect(elements[0]).toMatchObject({ tag: 'img', img_key: 'synthetic-image-key' });
+    expect(elements[1].content).toContain(catalog[0].action);
+    expect(elements[2]).toMatchObject({ text_size: 'notation', content: `**${ui.usageNote}**\n${catalog[0].detail}` });
+    expect(elements.some(element => element.content === catalog[0].example)).toBe(false);
+    const buttons = elements.flatMap(element => element.columns ?? []).flatMap(column => column.elements);
+    expect(buttons.map(button => button.behaviors[0].value.op)).toEqual(['example', 'next', 'mastered', 'settings']);
+    expect(await state()).toEqual({ ...before, lastActivity: now });
+    expect(options.canDeliver).not.toHaveBeenCalled();
+  });
+
+  it.each(['foreign-user', 'forged-card', 'navigation-expired', 'control-expired'])('rejects a %s legacy detail callback before loading its image or updating any card', async scenario => {
+    await service.command(user, '/tips'); const receipt = (await state()).cards.at(-1)!;
+    vi.mocked(options.create).mockClear(); vi.mocked(options.image).mockClear();
+    const before = await state();
+    if (scenario === 'navigation-expired') now += DAY;
+    if (scenario === 'control-expired') now += 30 * DAY;
+    expect(await service.action(scenario === 'foreign-user' ? 'foreign-user' : user,
+      scenario === 'forged-card' ? 'forged-card' : receipt.cardId!,
+      { action: 'tips', id: receipt.id, op: 'detail' })).toBe(ui.stale);
+    expect(options.image).not.toHaveBeenCalled(); expect(options.update).not.toHaveBeenCalled();
+    expect(options.create).not.toHaveBeenCalled(); expect(await state()).toEqual(before);
+  });
+
   it('requires the current settings revision for enrollment/unmute while old stop/mute remain safe and idempotent', async () => {
     await service.command(user, '/tips settings'); const old = (await state()).cards.at(-1)!;
     expect(await click('subscribe', 'daily', old)).toBe(ui.saved);
@@ -391,9 +430,31 @@ describe('Router-owned Tips', () => {
     expect(await click('mastered', undefined, receipt)).toBe(ui.learned);
     expect(await click('mastered', undefined, receipt)).toBe(ui.already);
     expect((await state()).mastered).toEqual(['tip-0']);
+    expect((await state()).seen).toEqual(['tip-0']); expect(options.create).toHaveBeenCalledTimes(1);
+    expect(options.update).not.toHaveBeenCalled();
     expect(await click('next', undefined, receipt)).toBe(ui.delivered);
     expect(await click('next', undefined, receipt)).toBe(ui.already);
     expect(options.create).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(options.create).mock.calls[1][2].title).toEqual({ tag: 'plain_text', content: catalog[1].title });
+    expect((await state()).seen).toEqual(['tip-0', 'tip-1']); expect(options.update).not.toHaveBeenCalled();
+  });
+
+  it('opens a separate settings card from a tutorial with cadence, mute and stop controls', async () => {
+    await service.command(user, '/tips'); const receipt = (await state()).cards.at(-1)!;
+    expect(await click('settings', undefined, receipt)).toBe(ui.delivered);
+    expect(options.create).toHaveBeenCalledTimes(2); expect(options.update).not.toHaveBeenCalled();
+    const saved = await state();
+    expect(saved.cards[0]).toEqual(receipt); expect(saved.cards.at(-1)!.kind).toBe('settings');
+    expect(saved.cards.at(-1)!.cardId).not.toBe(receipt.cardId);
+    const [, elements, header] = vi.mocked(options.create).mock.calls[1];
+    expect(header.title).toEqual({ tag: 'plain_text', content: ui.settingsTitle });
+    const controls = elements.flatMap(element => element.columns ?? []).flatMap(column => column.elements)
+      .map(button => button.behaviors[0].value);
+    expect(controls.map(control => ({ op: control.op, value: control.value }))).toEqual([
+      { op: 'subscribe', value: 'daily' }, { op: 'subscribe', value: 'weekly' }, { op: 'off', value: undefined },
+      ...['1', '3', '7', '14'].map(value => ({ op: 'mute', value })),
+    ]);
+    expect(saved.subscription).toBe('daily'); expect(saved.muteUntil).toBe(0); expect(saved.seen).toEqual(['tip-0']);
   });
 
   it('keeps a next button retryable after image failure but consumes it on an uncertain dispatch', async () => {

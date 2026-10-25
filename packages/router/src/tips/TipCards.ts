@@ -19,14 +19,15 @@ function row(elements: any[]): any {
   return { tag: 'column_set', flex_mode: 'stretch', columns: elements.map(element => ({ tag: 'column', width: 'auto', elements: [element] })) };
 }
 
-/** Every tutorial view retains its uploaded illustration, including detail updates. */
-export function tipCard(tip: TipDefinition, receipt: TipReceipt, image: string, view: 'summary' | 'detail' | 'example' = 'summary'): TipCard {
+/** Every tutorial view retains its uploaded illustration and inline usage note. */
+export function tipCard(tip: TipDefinition, receipt: TipReceipt, image: string, view: 'summary' | 'example' = 'summary'): TipCard {
   return { header: header(tip.title), elements: [
     { tag: 'img', img_key: image, alt: { tag: 'plain_text', content: tip.title }, mode: 'fit_horizontal', preview: true },
     markdown(`**${ui.problem}**\n${tip.problem}\n\n**${ui.benefit}**\n${tip.benefit}\n\n**${ui.action}**\n${tip.action}`),
-    ...(view === 'summary' ? [] : [markdown(view === 'detail' ? tip.detail : tip.example)]), note(ui.passive),
-    row([button(receipt, ui.detail, 'detail'), button(receipt, ui.example, 'example')]),
-    row([button(receipt, ui.next, 'next'), button(receipt, ui.mastered, 'mastered'), button(receipt, ui.settings, 'settings')]),
+    note(`**${ui.usageNote}**\n${tip.detail}`),
+    ...(view === 'example' ? [markdown(tip.example)] : []), note(ui.passive),
+    row([button(receipt, ui.example, 'example'), button(receipt, ui.next, 'next')]),
+    row([button(receipt, ui.mastered, 'mastered'), button(receipt, ui.settings, 'settings')]),
   ] };
 }
 

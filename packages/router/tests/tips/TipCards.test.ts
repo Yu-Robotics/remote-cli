@@ -9,13 +9,26 @@ const tip = { id: 'tip-1', topic: 'Topic', title: 'Synthetic tutorial', problem:
   example: '/effort high', detail: 'Detail', image: 'synthetic.png' };
 
 describe('passive localized Tips cards', () => {
-  it('retains the uploaded image in summary, detail, and example views with callback-only buttons', () => {
-    for (const view of ['summary', 'detail', 'example'] as const) {
+  it('retains the illustration, summary, and inline usage note in both views with exactly four passive controls', () => {
+    for (const view of ['summary', 'example'] as const) {
       const card = tipCard(tip, receipt, 'uploaded-key', view);
-      expect(card.elements[0]).toMatchObject({ tag: 'img', img_key: 'uploaded-key' });
+      expect(card.header.title).toEqual({ tag: 'plain_text', content: tip.title });
+      expect(card.elements[0]).toMatchObject({ tag: 'img', img_key: 'uploaded-key', mode: 'fit_horizontal', preview: true });
+      expect(card.elements[1]).toEqual({ tag: 'markdown',
+        content: `**${ui.problem}**\n${tip.problem}\n\n**${ui.benefit}**\n${tip.benefit}\n\n**${ui.action}**\n${tip.action}` });
+      expect(card.elements[2]).toEqual({ tag: 'markdown', text_size: 'notation', content: `**${ui.usageNote}**\n${tip.detail}` });
+      const examples = card.elements.filter(element => element.content === tip.example);
+      expect(examples).toHaveLength(view === 'example' ? 1 : 0);
+      const rows = card.elements.filter(element => element.tag === 'column_set');
+      expect(rows.map(element => element.columns.length)).toEqual([2, 2]);
+      const buttons = rows.flatMap(element => element.columns).flatMap(column => column.elements);
+      expect(buttons.map(button => button.text.content)).toEqual([ui.example, ui.next, ui.mastered, ui.settings]);
+      expect(buttons.map(button => button.behaviors)).toEqual(['example', 'next', 'mastered', 'settings'].map(op => [
+        { type: 'callback', value: { action: 'tips', id: receipt.id, op } },
+      ]));
       expect(JSON.stringify(card)).toContain(ui.passive);
       expect(JSON.stringify(card)).not.toContain('open_url');
-      expect(JSON.stringify(card)).toContain('"action":"tips"');
+      expect(JSON.stringify(card)).not.toContain('"op":"detail"');
     }
   });
 

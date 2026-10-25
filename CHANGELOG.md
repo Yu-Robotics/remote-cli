@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.180] - 2026-10-25
+
+### Changed
+- Remove the extra detail button from illustrated Tips and show concise usage notes directly in the card body. Keep examples, next-tip navigation, progress marking, and subscription settings available.
+- Refresh previously delivered detail controls into the simplified card after normal ownership and expiry validation.
+
+### Tests
+- Verify inline notes, the four remaining controls, example rendering, and safe handling of legacy detail callbacks.
+
 ## [1.6.179] - 2026-10-25
 
 ### Changed
