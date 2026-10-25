@@ -19,7 +19,22 @@ describe('passive localized Tips cards', () => {
     }
   });
 
-  it('displays consent, timezone, schedule, mute expiry, and explicit resumption controls', () => {
+  it('shows default daily delivery with pause, stop, and frequency controls', () => {
+    const card = settingsCard(newTipState('Asia/Shanghai'), receipt, 1000);
+    const content = JSON.stringify(card);
+    expect(content).toContain(ui.stateDaily);
+    expect(ui.consent).toContain('\u9ed8\u8ba4\u6bcf\u5929\u63a8\u9001\u4e00\u6761');
+    const actions = card.elements.flatMap(element => element.columns ?? [])
+      .flatMap((column: any) => column.elements)
+      .flatMap((button: any) => button.behaviors.map((behavior: any) => behavior.value));
+    expect(actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ op: 'off' }),
+      expect.objectContaining({ op: 'mute', value: '7' }),
+      expect.objectContaining({ op: 'subscribe', value: 'weekly' }),
+    ]));
+  });
+
+  it('displays preference controls, timezone, schedule, mute expiry, and explicit resumption controls', () => {
     const state = newTipState('Asia/Shanghai'); state.subscription = 'weekly'; state.muteUntil = 1800000000000;
     const card = settingsCard(state, receipt, 1000);
     expect(JSON.stringify(card)).toContain(ui.stateWeekly); expect(JSON.stringify(card)).toContain('Asia/Shanghai');

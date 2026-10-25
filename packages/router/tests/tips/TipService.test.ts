@@ -4,7 +4,7 @@ import os from 'os';
 import path from 'path';
 import { randomUUID } from 'crypto';
 import { TipService, TIP_TRANSPORT_TIMEOUT } from '../../src/tips/TipService';
-import { TipStore } from '../../src/tips/TipStore';
+import { newTipState, TipStore } from '../../src/tips/TipStore';
 import { ui } from '../../src/tips/TipCards';
 import type { TipServiceOptions } from '../../src/tips/TipTypes';
 
@@ -31,7 +31,7 @@ describe('Router-owned Tips', () => {
   };
 
   beforeEach(async () => {
-    directory = await fs.mkdtemp(path.join(os.tmpdir(), 'tips-core-test-'));
+    directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'tips-core-test-')));
     now = Date.parse('2026-10-27T02:30:00Z'); sequence = 0;
     options = { directory, catalog, now: () => now, users: vi.fn().mockResolvedValue([user, user]),
       isBound: vi.fn().mockResolvedValue(true), canDeliver: vi.fn().mockResolvedValue(true),
@@ -47,17 +47,70 @@ describe('Router-owned Tips', () => {
     await fs.rm(directory, { recursive: true, force: true });
   });
 
-  it('preserves default-off consent and manual offline browsing without executor metadata', async () => {
+  it('delivers daily without manual subscription after activity and quiet, retaining deduplication across restart', async () => {
+    await service.tick(); expect(options.create).not.toHaveBeenCalled();
+    await service.activity(user); await service.tick(); expect(options.create).not.toHaveBeenCalled();
+    quiet(); await service.tick(); expect(options.create).toHaveBeenCalledTimes(1);
+    expect((await state()).subscription).toBe('daily'); expect((await state()).seen).toEqual(['tip-0']);
+    await service.stop(); service = createService(); await service.tick();
+    expect(options.create).toHaveBeenCalledTimes(1);
+    now += DAY; await service.tick(); expect(options.create).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([0, DAY])('migrates legacy implicit off and keeps mute %i, progress and cooldown through restart', async muteDuration => {
+    const previous = newTipState('Asia/Shanghai'); previous.subscription = 'off';
+    previous.muteUntil = muteDuration ? now + muteDuration : 0; previous.lastActivity = now - 120_000;
+    previous.lastAutomaticAt = now; previous.seen = ['tip-0']; previous.mastered = ['tip-0'];
+    await store.save(user, previous);
+    await service.tick(); expect(options.create).not.toHaveBeenCalled();
+    expect(await state()).toMatchObject({ subscription: 'daily', muteUntil: previous.muteUntil,
+      lastActivity: previous.lastActivity, lastAutomaticAt: previous.lastAutomaticAt,
+      seen: previous.seen, mastered: previous.mastered });
+    await service.stop(); service = createService();
+    now += DAY - 1; await service.tick(); expect(options.create).not.toHaveBeenCalled();
+    now++; await service.tick(); expect(options.create).toHaveBeenCalledTimes(1);
+    expect((await state()).seen).toEqual(['tip-0', 'tip-1']);
+    expect((await state()).mastered).toEqual(['tip-0']);
+  });
+
+  it('does not send before legacy migration persists and retries safely after storage recovers', async () => {
+    const previous = newTipState('Asia/Shanghai'); previous.subscription = 'off'; previous.lastActivity = now - 120_000;
+    await store.save(user, previous);
+    const file = path.join(directory, (await fs.readdir(directory))[0]);
+    vi.spyOn(fs, 'rename').mockRejectedValueOnce(new Error('synthetic migration write failure'));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await service.tick(); expect(options.create).not.toHaveBeenCalled();
+    expect(JSON.parse(await fs.readFile(file, 'utf8'))).toEqual(previous);
+    await service.tick(); expect(options.create).toHaveBeenCalledTimes(1);
+    expect((await state()).subscription).toBe('daily'); expect((await state()).seen).toEqual(['tip-0']);
+  });
+
+  it('invalidates pre-migration settings cards while retaining their safe stop control', async () => {
+    const previous = newTipState('Asia/Shanghai'); previous.subscription = 'off'; previous.muteUntil = now + DAY;
+    const receipt = { id: randomUUID(), cardId: 'synthetic-legacy-settings', kind: 'settings' as const,
+      createdAt: now, revision: previous.revision, used: [] };
+    previous.cards = [receipt]; await store.save(user, previous);
+    expect(await click('subscribe', 'weekly', receipt)).toBe(ui.stale);
+    expect(await click('unmute', undefined, receipt)).toBe(ui.stale);
+    expect((await state()).subscription).toBe('daily'); expect((await state()).muteUntil).toBe(previous.muteUntil);
+    await service.stop(); service = createService();
+    expect(await click('subscribe', 'daily', receipt)).toBe(ui.stale);
+    expect(await click('off', undefined, receipt)).toBe(ui.stopped);
+    expect((await state()).subscription).toBe('off');
+  });
+
+  it('allows manual offline browsing without executor metadata', async () => {
+    vi.mocked(options.canDeliver).mockResolvedValue(false);
     await service.activity(user); quiet(); await service.tick();
     expect(options.create).not.toHaveBeenCalled();
-    vi.mocked(options.canDeliver).mockResolvedValue(false);
+    vi.mocked(options.canDeliver).mockClear();
     await service.command(user, '/tips');
     expect(options.create).toHaveBeenCalledTimes(1);
     const [target, elements] = vi.mocked(options.create).mock.calls[0];
     expect(target).toBe(user); expect(elements[0]).toMatchObject({ tag: 'img', img_key: 'synthetic-image-key' });
     expect(await click('example')).toBe(ui.delivered);
     expect(JSON.stringify(vi.mocked(options.update).mock.calls[0])).toContain('/backend 1 @');
-    expect((await state()).subscription).toBe('off');
+    expect((await state()).subscription).toBe('daily');
     expect(options.canDeliver).not.toHaveBeenCalled();
     const files = await fs.readdir(directory);
     expect(files.every(name => !name.includes(user))).toBe(true);
@@ -82,7 +135,7 @@ describe('Router-owned Tips', () => {
   });
 
   it('persists opt-out across restarts and unmute never enrolls an off user', async () => {
-    await subscribe(); await service.command(user, '/tips off'); await service.stop(); service = createService();
+    await service.activity(user); await service.command(user, '/tips off'); await service.stop(); service = createService();
     await service.command(user, '/tips mute 1'); await service.command(user, '/tips unmute'); quiet();
     vi.mocked(options.create).mockClear(); await service.tick();
     expect(options.create).not.toHaveBeenCalled(); expect((await state()).subscription).toBe('off');
@@ -90,7 +143,7 @@ describe('Router-owned Tips', () => {
   });
 
   it('serializes simultaneous ticks across duplicate device/user entries and defers busy or recent activity', async () => {
-    await subscribe(); await service.tick(); expect(options.create).not.toHaveBeenCalled();
+    await service.activity(user); await service.tick(); expect(options.create).not.toHaveBeenCalled();
     quiet(); vi.mocked(options.canDeliver).mockResolvedValue(false);
     await service.tick(); expect(options.image).not.toHaveBeenCalled();
     vi.mocked(options.canDeliver).mockResolvedValue(true);
@@ -100,7 +153,7 @@ describe('Router-owned Tips', () => {
   });
 
   it('enforces local schedule, same-day budget, 20-hour cooldown and skips missed days without backlog', async () => {
-    await subscribe(); now = Date.parse('2026-10-27T02:29:00Z'); await service.tick(); expect(options.create).not.toHaveBeenCalled();
+    await service.activity(user); now = Date.parse('2026-10-27T02:29:00Z'); await service.tick(); expect(options.create).not.toHaveBeenCalled();
     now = Date.parse('2026-10-27T03:00:00Z'); await service.tick(); expect(options.create).toHaveBeenCalledTimes(1);
     now = Date.parse('2026-10-27T10:59:00Z'); await service.tick(); expect(options.create).toHaveBeenCalledTimes(1);
     now = Date.parse('2026-10-28T02:30:00Z'); await service.tick(); expect(options.create).toHaveBeenCalledTimes(2);
@@ -290,7 +343,7 @@ describe('Router-owned Tips', () => {
     }
     vi.mocked(options.isBound).mockResolvedValue(false);
     expect(await service.action(user, receipt.cardId!, payload)).toBe(ui.unbound);
-    expect((await state()).subscription).toBe('off');
+    expect((await state()).subscription).toBe('daily');
   });
 
   it('reports an unavailable view if its binding disappears before the update', async () => {
@@ -362,11 +415,11 @@ describe('Router-owned Tips', () => {
     expect(await click('show', 'unknown', receipt)).toBe(ui.invalid);
     expect(await click('show', 'tip-31', receipt)).toBe(ui.delivered);
     expect(await click('show', 'tip-31', receipt)).toBe(ui.already);
-    expect((await state()).subscription).toBe('off');
+    expect((await state()).subscription).toBe('daily');
   });
 
   it.each(['/tips mute 0', '/tips mute 366', '/tips mute -1', '/tips mute NaN', '/tips timezone Invalid/Zone', '/tips mystery', '/tips daily extra', '/tips mute 1 extra'])('provides bounded help for invalid command %s', async command => {
-    await service.command(user, command); expect((await state()).subscription).toBe('off');
+    await service.command(user, command); expect((await state()).subscription).toBe('daily');
     expect(options.create).toHaveBeenCalledTimes(1);
   });
 
