@@ -1,12 +1,14 @@
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
+import { randomUUID } from 'crypto';
 
 /**
  * PID file manager for the router server
  */
 export class PidManager {
   private pidFilePath: string;
+  private ownedRecord?: string;
 
   constructor(baseDir?: string) {
     const configDir = baseDir || path.join(os.homedir(), '.remote-cli-router');
@@ -17,10 +19,20 @@ export class PidManager {
    * Write the current process ID to the PID file
    */
   async writePid(pid: number): Promise<void> {
+    await this.writeRecord(pid.toString());
+  }
+
+  /** Keep the legacy first-line PID while identifying this startup attempt. */
+  async writeOwnedPid(pid: number): Promise<void> {
+    this.ownedRecord = `${pid}\n${randomUUID()}\n`;
+    await this.writeRecord(this.ownedRecord);
+  }
+
+  private async writeRecord(content: string): Promise<void> {
     try {
       const dir = path.dirname(this.pidFilePath);
       await fs.mkdir(dir, { recursive: true });
-      await fs.writeFile(this.pidFilePath, pid.toString(), 'utf-8');
+      await fs.writeFile(this.pidFilePath, content, 'utf-8');
     } catch (error: any) {
       throw new Error(`Failed to write PID file: ${error.message}`);
     }
@@ -65,6 +77,18 @@ export class PidManager {
       return true;
     } catch (error) {
       return false;
+    }
+  }
+
+  /** Preserve a replacement record, even when its PID matches this process. */
+  async removeOwnedPid(): Promise<void> {
+    if (!this.ownedRecord) return;
+    try {
+      const current = await fs.readFile(this.pidFilePath, 'utf-8');
+      // One Router owns each data directory; this is not a multiprocess lock.
+      if (current === this.ownedRecord) await fs.unlink(this.pidFilePath);
+    } catch (error: any) {
+      if (error.code !== 'ENOENT') throw new Error(`Failed to remove owned PID file: ${error.message}`);
     }
   }
 
