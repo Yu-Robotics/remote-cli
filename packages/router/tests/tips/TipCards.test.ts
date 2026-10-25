@@ -9,27 +9,35 @@ const tip = { id: 'tip-1', topic: 'Topic', title: 'Synthetic tutorial', problem:
   example: '/effort high', detail: 'Detail', image: 'synthetic.png' };
 
 describe('passive localized Tips cards', () => {
-  it('retains the illustration, summary, and inline usage note in both views with exactly four passive controls', () => {
-    for (const view of ['summary', 'example'] as const) {
-      const card = tipCard(tip, receipt, 'uploaded-key', view);
-      expect(card.header.title).toEqual({ tag: 'plain_text', content: tip.title });
-      expect(card.elements[0]).toMatchObject({ tag: 'img', img_key: 'uploaded-key', mode: 'fit_horizontal', preview: true });
-      expect(card.elements[1]).toEqual({ tag: 'markdown',
-        content: `**${ui.problem}**\n${tip.problem}\n\n**${ui.benefit}**\n${tip.benefit}\n\n**${ui.action}**\n${tip.action}` });
-      expect(card.elements[2]).toEqual({ tag: 'markdown', text_size: 'notation', content: `**${ui.usageNote}**\n${tip.detail}` });
-      const examples = card.elements.filter(element => element.content === tip.example);
-      expect(examples).toHaveLength(view === 'example' ? 1 : 0);
-      const rows = card.elements.filter(element => element.tag === 'column_set');
-      expect(rows.map(element => element.columns.length)).toEqual([2, 2]);
-      const buttons = rows.flatMap(element => element.columns).flatMap(column => column.elements);
-      expect(buttons.map(button => button.text.content)).toEqual([ui.example, ui.next, ui.mastered, ui.settings]);
-      expect(buttons.map(button => button.behaviors)).toEqual(['example', 'next', 'mastered', 'settings'].map(op => [
-        { type: 'callback', value: { action: 'tips', id: receipt.id, op } },
-      ]));
-      expect(JSON.stringify(card)).toContain(ui.passive);
-      expect(JSON.stringify(card)).not.toContain('open_url');
-      expect(JSON.stringify(card)).not.toContain('"op":"detail"');
-    }
+  it('shows the illustration, summary, one fenced example, and usage note with three passive controls', () => {
+    const card = tipCard(tip, receipt, 'uploaded-key');
+    expect(card.header.title).toEqual({ tag: 'plain_text', content: tip.title });
+    expect(card.elements[0]).toMatchObject({ tag: 'img', img_key: 'uploaded-key', mode: 'fit_horizontal', preview: true });
+    expect(card.elements[1]).toEqual({ tag: 'markdown',
+      content: `**${ui.problem}**\n${tip.problem}\n\n**${ui.benefit}**\n${tip.benefit}\n\n**${ui.action}**\n${tip.action}` });
+    expect(ui.example).toBe('\u793a\u4f8b');
+    expect(card.elements[2]).toEqual({ tag: 'markdown', content: `**${ui.example}**\n\`\`\`text\n${tip.example}\n\`\`\`` });
+    expect(card.elements[3]).toEqual({ tag: 'markdown', text_size: 'notation', content: `**${ui.usageNote}**\n${tip.detail}` });
+    expect(card.elements.filter(element => element.content?.includes(tip.example))).toHaveLength(1);
+    const rows = card.elements.filter(element => element.tag === 'column_set');
+    expect(rows.map(element => element.columns.length)).toEqual([3]);
+    const buttons = rows.flatMap(element => element.columns).flatMap(column => column.elements);
+    expect(buttons.map(button => button.text.content)).toEqual([ui.next, ui.mastered, ui.settings]);
+    expect(buttons.map(button => button.behaviors)).toEqual(['next', 'mastered', 'settings'].map(op => [
+      { type: 'callback', value: { action: 'tips', id: receipt.id, op } },
+    ]));
+    expect(JSON.stringify(card)).toContain(ui.passive);
+    expect(JSON.stringify(card)).not.toContain('open_url');
+    expect(JSON.stringify(card)).not.toMatch(/"op":"(?:detail|example)"/);
+  });
+
+  it.each([
+    { example: 'First instruction\nSecond instruction', fence: '```' },
+    { example: 'Keep this snippet unchanged:\n```text\nSynthetic instruction\n```', fence: '````' },
+  ])('preserves multiline example text inside a fence that cannot close early: $example', ({ example, fence }) => {
+    const card = tipCard({ ...tip, example }, receipt, 'uploaded-key');
+    expect(card.elements[2]).toEqual({ tag: 'markdown', content: `**${ui.example}**\n${fence}text\n${example}\n${fence}` });
+    expect(card.elements.filter(element => element.content?.includes(example))).toHaveLength(1);
   });
 
   it('shows default daily delivery with pause, stop, and frequency controls', () => {

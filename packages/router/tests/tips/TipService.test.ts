@@ -108,13 +108,12 @@ describe('Router-owned Tips', () => {
     expect(options.create).toHaveBeenCalledTimes(1);
     const [target, elements] = vi.mocked(options.create).mock.calls[0];
     expect(target).toBe(user); expect(elements[0]).toMatchObject({ tag: 'img', img_key: 'synthetic-image-key' });
-    expect(elements[2]).toMatchObject({ text_size: 'notation', content: `**${ui.usageNote}**\n${catalog[0].detail}` });
+    expect(elements[2]).toEqual({ tag: 'markdown', content: `**${ui.example}**\n\`\`\`text\n${catalog[0].example}\n\`\`\`` });
+    expect(elements[3]).toMatchObject({ text_size: 'notation', content: `**${ui.usageNote}**\n${catalog[0].detail}` });
     expect(await click('example')).toBe(ui.delivered);
-    const [updatedCardId, exampleElements] = vi.mocked(options.update).mock.calls[0];
+    const [updatedCardId, refreshedElements] = vi.mocked(options.update).mock.calls[0];
     expect(updatedCardId).toBe((await state()).cards.at(-1)!.cardId);
-    expect(exampleElements[0]).toMatchObject({ tag: 'img', img_key: 'synthetic-image-key' });
-    expect(exampleElements[1]).toEqual(elements[1]); expect(exampleElements[2]).toEqual(elements[2]);
-    expect(exampleElements[3]).toEqual({ tag: 'markdown', content: catalog[0].example });
+    expect(refreshedElements).toEqual(elements);
     expect(options.create).toHaveBeenCalledTimes(1);
     expect((await state()).subscription).toBe('daily');
     expect(options.canDeliver).not.toHaveBeenCalled();
@@ -352,42 +351,52 @@ describe('Router-owned Tips', () => {
     expect((await state()).subscription).toBe('daily');
   });
 
-  it('reports an unavailable view if its binding disappears before the update', async () => {
+  it.each(['detail', 'example'])('reports an unavailable legacy %s refresh if its binding disappears before the update', async op => {
     await service.command(user, '/tips');
     vi.mocked(options.isBound).mockResolvedValueOnce(true).mockResolvedValueOnce(false);
-    expect(await click('detail')).toBe(ui.unavailable);
+    expect(await click(op)).toBe(ui.unavailable);
     expect(options.update).not.toHaveBeenCalled();
   });
 
-  it('refreshes a legacy detail callback into the new summary across restart without changing progress or preferences', async () => {
+  it.each(['detail', 'example'])('refreshes a legacy %s callback into the same inline tutorial across restart without changing progress or preferences', async op => {
     await service.command(user, '/tips'); const receipt = (await state()).cards.at(-1)!;
-    expect(await click('example', undefined, receipt)).toBe(ui.delivered);
+    const originalElements = vi.mocked(options.create).mock.calls[0][1];
     await service.stop(); service = createService();
     vi.mocked(options.create).mockClear(); vi.mocked(options.update).mockClear();
     const before = await state(); now += 1000;
-    expect(await click('detail', undefined, receipt)).toBe(ui.delivered);
-    expect(options.create).not.toHaveBeenCalled(); expect(options.update).toHaveBeenCalledTimes(1);
+    expect(await click(op, undefined, receipt)).toBe(ui.delivered);
+    expect(await click(op, undefined, receipt)).toBe(ui.delivered);
+    expect(options.create).not.toHaveBeenCalled(); expect(options.update).toHaveBeenCalledTimes(2);
     const [cardId, elements] = vi.mocked(options.update).mock.calls[0];
     expect(cardId).toBe(receipt.cardId);
+    expect(vi.mocked(options.update).mock.calls[1]).toEqual(vi.mocked(options.update).mock.calls[0]);
+    expect(elements).toEqual(originalElements);
     expect(elements[0]).toMatchObject({ tag: 'img', img_key: 'synthetic-image-key' });
     expect(elements[1].content).toContain(catalog[0].action);
-    expect(elements[2]).toMatchObject({ text_size: 'notation', content: `**${ui.usageNote}**\n${catalog[0].detail}` });
-    expect(elements.some(element => element.content === catalog[0].example)).toBe(false);
+    expect(elements[2]).toEqual({ tag: 'markdown', content: `**${ui.example}**\n\`\`\`text\n${catalog[0].example}\n\`\`\`` });
+    expect(elements.filter(element => element.content?.includes(catalog[0].example))).toHaveLength(1);
+    expect(elements[3]).toMatchObject({ text_size: 'notation', content: `**${ui.usageNote}**\n${catalog[0].detail}` });
     const buttons = elements.flatMap(element => element.columns ?? []).flatMap(column => column.elements);
-    expect(buttons.map(button => button.behaviors[0].value.op)).toEqual(['example', 'next', 'mastered', 'settings']);
+    expect(buttons.map(button => button.behaviors[0].value.op)).toEqual(['next', 'mastered', 'settings']);
     expect(await state()).toEqual({ ...before, lastActivity: now });
     expect(options.canDeliver).not.toHaveBeenCalled();
   });
 
-  it.each(['foreign-user', 'forged-card', 'navigation-expired', 'control-expired'])('rejects a %s legacy detail callback before loading its image or updating any card', async scenario => {
-    await service.command(user, '/tips'); const receipt = (await state()).cards.at(-1)!;
+  it.each(['detail', 'example'].flatMap(op => [
+    'foreign-user', 'forged-card', 'unknown-receipt', 'navigation-expired', 'control-expired', 'invalid-payload', 'non-tip-card', 'unbound',
+  ].map(scenario => ({ op, scenario }))))('rejects a $scenario legacy $op callback before loading its image or updating any card', async ({ op, scenario }) => {
+    await service.command(user, scenario === 'non-tip-card' ? '/tips settings' : '/tips');
+    const receipt = (await state()).cards.at(-1)!;
     vi.mocked(options.create).mockClear(); vi.mocked(options.image).mockClear();
     const before = await state();
     if (scenario === 'navigation-expired') now += DAY;
     if (scenario === 'control-expired') now += 30 * DAY;
+    if (scenario === 'unbound') vi.mocked(options.isBound).mockResolvedValue(false);
+    const expected = scenario === 'unbound' ? ui.unbound : ['invalid-payload', 'non-tip-card'].includes(scenario) ? ui.invalid : ui.stale;
     expect(await service.action(scenario === 'foreign-user' ? 'foreign-user' : user,
       scenario === 'forged-card' ? 'forged-card' : receipt.cardId!,
-      { action: 'tips', id: receipt.id, op: 'detail' })).toBe(ui.stale);
+      { action: 'tips', id: scenario === 'unknown-receipt' ? randomUUID() : receipt.id, op,
+        ...(scenario === 'invalid-payload' ? { extra: true } : {}) })).toBe(expected);
     expect(options.image).not.toHaveBeenCalled(); expect(options.update).not.toHaveBeenCalled();
     expect(options.create).not.toHaveBeenCalled(); expect(await state()).toEqual(before);
   });

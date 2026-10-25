@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.181] - 2026-10-25
+
+### Changed
+- Remove the separate example button from illustrated Tips. Show copyable example instructions directly below usage, alongside the illustration and inline usage notes, with only Next, Mastered, and Settings controls.
+- Refresh previously delivered example and detail controls into the current card after normal ownership and expiry checks.
+
+### Tests
+- Cover inline examples, the three passive controls, and safe handling of both legacy callbacks without changing progress or preferences.
+
 ## [1.6.180] - 2026-10-25
 
 ### Changed

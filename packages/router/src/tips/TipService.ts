@@ -321,8 +321,8 @@ export class TipService {
             const image = await this.external(() => this.options.image(tip));
             if (!image) return ui.imageFailed;
             state.lastActivity = this.now(); await this.store.save(openId, state);
-            // Previously delivered detail buttons refresh the current summary without a separate view.
-            await this.update(openId, cardId, tipCard(tip, receipt, image, op === 'example' ? 'example' : 'summary')); return ui.delivered;
+            // Previously delivered detail and example buttons refresh the same inline tutorial.
+            await this.update(openId, cardId, tipCard(tip, receipt, image)); return ui.delivered;
           }
         }
         return ui.invalid;
