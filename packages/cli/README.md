@@ -224,13 +224,15 @@ Browsing works for bound users even while their CLI is offline.
 | `/tips off` | Disable automatic tips permanently until explicitly subscribed again |
 | `/tips timezone Asia/Shanghai` | Select the IANA timezone for this user's schedule |
 
-Automatic delivery is **off by default**. Subscribed tips are due at 10:30 in the
+Automatic delivery is **daily by default**. Tips are due at 10:30 in the
 user's timezone (default `Asia/Shanghai`), within 10:30-19:00 only, at most once per
 local day and at least 20 hours apart. Delivery requires a bound online device,
 bot activity within seven days, two minutes of quiet, and no task currently visible
 to the Router. This check cannot observe every backend-local operation or queue.
 Offline periods create no backlog; device registration never triggers tips.
 Settings cards offer 1/3/7/14-day mute controls. Seen or mastered tips are skipped.
+Existing default-off records adopt daily delivery; explicit opt-outs, mute deadlines,
+chosen frequencies, reading progress, and delivery cooldowns are preserved.
 
 The Router stores private per-user preferences and delivery intent beside its
 configuration. A send with an uncertain result is suppressed rather than replayed.

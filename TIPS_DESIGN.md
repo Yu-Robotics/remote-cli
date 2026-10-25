@@ -2,7 +2,8 @@
 
 ## Scope
 
-Version 1.6.178 adds 17 reviewed Chinese scenario tips. Each card teaches one
+Version 1.6.178 adds 17 reviewed Chinese scenario tips; 1.6.179 enables daily
+delivery by default. Each card teaches one
 small decision through a recognizable problem, a concrete benefit, a short action,
 a copyable example, and its own static PNG illustration. Content is bundled;
 there are no runtime model calls, translation, provider probes, or external content
@@ -11,8 +12,8 @@ fetches. The [preview gallery](docs/tips-preview.html) shows the complete librar
 ## Interaction
 
 `/tips`, `/tips next`, and `/tips list` provide on-demand reading. `/tips settings`
-opens subscription controls. Users explicitly choose `/tips daily` or `/tips weekly`,
-with weekly delivery on Tuesday and Thursday. Subscriptions default to off.
+opens subscription controls. Daily delivery is enabled by default. Users can choose
+`/tips daily` or `/tips weekly`, with weekly delivery on Tuesday and Thursday.
 `/tips mute N` accepts 1-365 days; settings buttons offer 1, 3, 7, or 14 days.
 `/tips unmute` only clears mute and cannot resubscribe an opted-out user.
 `/tips off` disables automatic delivery until a new explicit subscription.
@@ -77,6 +78,9 @@ the Router configuration directory's `tips/` subdirectory, under hashed names.
 Writes are serialized and atomic. Card controls are bound to owner, message,
 nonce, expiration, and current preference generation; stale controls cannot
 silently restore an old subscription.
+Existing records that were off only because of the previous default adopt daily
+delivery. Explicit opt-outs remain off; existing mute deadlines, chosen frequencies,
+timezones, progress, and delivery cooldowns are preserved.
 An old mute button cannot shorten a newer pause; deliberate shorter pauses require
 the current settings card or a fresh text command.
 
@@ -103,6 +107,7 @@ bounds, and Router command routing. No real user messages or provider calls are
 part of development verification. Package builds validate and copy all PNG assets.
 
 Deployment remains an operator action: install the new Router package and restart
-the Router manually. Existing users stay unsubscribed until choosing a cadence.
+the Router manually. Daily delivery is enabled for new users and legacy default-off
+records, while explicit opt-outs and existing mute deadlines remain effective.
 The runtime Feishu integration needs normal application message/image permissions;
 live tenant rendering and delivery are not established by mocked tests.

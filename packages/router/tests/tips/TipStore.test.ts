@@ -5,8 +5,8 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import os from 'os';
 import path from 'path';
-import { randomUUID } from 'crypto';
-import { newTipState, TipStore, validTimezone } from '../../src/tips/TipStore';
+import { createHash, randomUUID } from 'crypto';
+import { newTipState, TipStore, validTimezone, type TipUserState } from '../../src/tips/TipStore';
 import { TipService } from '../../src/tips/TipService';
 
 describe('private Tips persistence', () => {
@@ -14,15 +14,66 @@ describe('private Tips persistence', () => {
   let store: TipStore;
   const user = 'synthetic-store-user';
   const filename = async () => path.join(directory, (await fs.readdir(directory)).find(name => !name.endsWith('.off.json'))!);
-  beforeEach(async () => { directory = await fs.mkdtemp(path.join(os.tmpdir(), 'tips-store-test-')); store = new TipStore(directory); });
+  beforeEach(async () => { directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'tips-store-test-'))); store = new TipStore(directory); });
   afterEach(async () => { vi.restoreAllMocks(); await fs.rm(directory, { recursive: true, force: true }); });
 
-  it('defaults off, hashes filenames and only writes private bounded JSON', async () => {
-    const state = await store.load(user); expect(state.subscription).toBe('off'); expect(state.timezone).toBe('Asia/Shanghai');
+  it('defaults daily, hashes filenames and only writes private bounded JSON', async () => {
+    const state = await store.load(user); expect(state.subscription).toBe('daily'); expect(state.timezone).toBe('Asia/Shanghai');
     await store.save(user, state); const file = await filename();
     expect(path.basename(file)).toMatch(/^[a-f0-9]{64}\.json$/);
     expect((await fs.stat(file)).mode & 0o077).toBe(0); expect((await fs.stat(directory)).mode & 0o077).toBe(0);
     expect(await store.load(user)).toEqual(state); expect(await fs.readFile(file, 'utf8')).not.toContain(user);
+  });
+
+  it.each([0, 1800000000000])('durably migrates an implicit off default while retaining mute %i and all user history', async muteUntil => {
+    // Serialize the historical v1 shape independently of the current default-state factory.
+    const previous: TipUserState = { version: 1, subscription: 'off', timezone: 'America/Los_Angeles',
+      revision: randomUUID(), stopRevision: null, muteUntil: 0, lastActivity: 0, lastAutomaticAt: 0,
+      seen: [], mastered: [], deliveries: [], cards: [] };
+    previous.muteUntil = muteUntil; previous.lastActivity = 1000; previous.lastAutomaticAt = 500;
+    previous.seen = ['tip-1', 'tip-2']; previous.mastered = ['tip-1'];
+    previous.cards = [{ id: randomUUID(), cardId: 'synthetic-settings-card', kind: 'settings',
+      createdAt: 1000, revision: previous.revision, used: ['mute:7'] }];
+    previous.deliveries = [{ id: randomUUID(), tipId: 'tip-2', at: 500, automatic: true, state: 'unknown' }];
+    const legacyFile = path.join(directory, `${createHash('sha256').update(user).digest('hex')}.json`);
+    await fs.writeFile(legacyFile, JSON.stringify(previous), { mode: 0o600 });
+
+    const migrated = await new TipStore(directory, 'UTC').load(user);
+    expect(migrated).toEqual({ ...previous, subscription: 'daily', revision: expect.any(String) });
+    expect(migrated.revision).not.toBe(previous.revision);
+    expect(JSON.parse(await fs.readFile(await filename(), 'utf8'))).toEqual(migrated);
+    expect(await new TipStore(directory).load(user)).toEqual(migrated);
+  });
+
+  it.each(['daily', 'weekly'] as const)('preserves an existing %s preference and prior explicit-stop evidence', async subscription => {
+    const previous = newTipState('UTC'); previous.subscription = subscription;
+    previous.stopRevision = randomUUID(); previous.muteUntil = 1800000000000;
+    await store.save(user, previous);
+    expect(await new TipStore(directory).load(user)).toEqual(previous);
+  });
+
+  it('preserves a legacy explicit stop even when its separate marker is absent', async () => {
+    const previous = newTipState('UTC'); previous.subscription = 'off'; previous.stopRevision = randomUUID();
+    await store.save(user, previous);
+    expect(await new TipStore(directory).load(user)).toEqual(previous);
+    expect(await fs.readdir(directory)).toHaveLength(1);
+  });
+
+  it('keeps a durable opt-out effective across restart even without a main record', async () => {
+    await store.optOut(user);
+    const stopped = await new TipStore(directory).load(user);
+    expect(stopped.subscription).toBe('off'); expect(stopped.stopRevision).not.toBeNull();
+    await store.save(user, stopped);
+    expect(await new TipStore(directory).load(user)).toEqual(stopped);
+  });
+
+  it('fails closed when migration cannot persist and retries without losing the old record', async () => {
+    const previous = newTipState('UTC'); previous.subscription = 'off'; await store.save(user, previous);
+    vi.spyOn(fs, 'rename').mockRejectedValueOnce(new Error('synthetic migration rename failure'));
+    await expect(store.load(user)).rejects.toThrow('Tips storage is unavailable.');
+    expect(JSON.parse(await fs.readFile(await filename(), 'utf8'))).toEqual(previous);
+    expect(await fs.readdir(directory)).toHaveLength(1);
+    expect((await store.load(user)).subscription).toBe('daily');
   });
 
   it.skipIf(process.platform === 'win32').each(['state', 'opt-out'])('rejects a %s FIFO without blocking reads or shutdown', async kind => {
@@ -44,10 +95,10 @@ describe('private Tips persistence', () => {
   });
 
   it('captures queued snapshots, serializes writes, and leaves no temporary artifacts', async () => {
-    const first = newTipState('UTC'); const saving = store.save(user, first); first.subscription = 'daily';
-    await saving; expect((await store.load(user)).subscription).toBe('off');
-    await Promise.all([store.save(user, first), store.save(user, { ...first, subscription: 'weekly' })]);
-    expect((await store.load(user)).subscription).toBe('weekly'); expect(await fs.readdir(directory)).toHaveLength(1);
+    const first = newTipState('UTC'); const saving = store.save(user, first); first.subscription = 'weekly';
+    await saving; expect((await store.load(user)).subscription).toBe('daily');
+    await Promise.all([store.save(user, first), store.save(user, { ...first, subscription: 'daily' })]);
+    expect((await store.load(user)).subscription).toBe('daily'); expect(await fs.readdir(directory)).toHaveLength(1);
   });
 
   it('normalizes a crash during dispatch to unknown without dropping seen or cooldown', async () => {
@@ -92,7 +143,7 @@ describe('private Tips persistence', () => {
   it('preserves the old record and cleans up on atomic rename failure', async () => {
     const previous = newTipState('UTC'); await store.save(user, previous);
     vi.spyOn(fs, 'rename').mockRejectedValueOnce(new Error('synthetic rename failure'));
-    await expect(store.save(user, { ...previous, subscription: 'daily' })).rejects.toThrow();
+    await expect(store.save(user, { ...previous, subscription: 'weekly' })).rejects.toThrow();
     expect(await store.load(user)).toEqual(previous); expect(await fs.readdir(directory)).toHaveLength(1);
   });
 
@@ -106,9 +157,11 @@ describe('private Tips persistence', () => {
   });
 
   it('fails closed on an invalid stop marker instead of ignoring it', async () => {
-    await store.save(user, newTipState('UTC')); await store.optOut(user);
+    const previous = newTipState('UTC'); previous.subscription = 'off';
+    await store.save(user, previous); await store.optOut(user);
     const marker = (await fs.readdir(directory)).find(name => name.endsWith('.off.json'))!;
     await fs.writeFile(path.join(directory, marker), JSON.stringify({ version: 1, off: false }));
     await expect(store.load(user)).rejects.toThrow();
+    expect(JSON.parse(await fs.readFile(await filename(), 'utf8'))).toEqual(previous);
   });
 });

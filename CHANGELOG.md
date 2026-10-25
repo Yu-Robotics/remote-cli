@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.179] - 2026-10-25
+
+### Changed
+- Enable daily illustrated Tips by default for new users and legacy default-off records, without requiring manual subscription. Preserve explicit opt-outs, mute deadlines, chosen frequencies, reading progress, and delivery timing protections.
+- Update Tips settings and documentation to explain the default cadence and pause or stop controls.
+
+### Tests
+- Cover automatic delivery without enrollment, legacy preference migration, and preservation of explicit stops, pauses, progress, and restart behavior.
+
 ## [1.6.178] - 2026-10-25
 
 ### Added

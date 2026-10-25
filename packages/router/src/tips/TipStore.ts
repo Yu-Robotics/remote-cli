@@ -51,7 +51,7 @@ export function validTimezone(value: unknown): value is string {
 }
 
 export function newTipState(timezone: string): TipUserState {
-  return { version: 1, subscription: 'off', timezone, revision: randomUUID(), stopRevision: null, muteUntil: 0,
+  return { version: 1, subscription: 'daily', timezone, revision: randomUUID(), stopRevision: null, muteUntil: 0,
     lastActivity: 0, lastAutomaticAt: 0, seen: [], mastered: [], deliveries: [], cards: [] };
 }
 
@@ -126,6 +126,13 @@ export class TipStore {
       }
       // Dispatch was already budgeted and marked seen before the external call.
       for (const delivery of state.deliveries) if (delivery.state === 'dispatching') delivery.state = 'unknown';
+      if (override === undefined && state.subscription === 'off' && state.stopRevision === null) {
+        // Only the old implicit default migrates; either explicit-stop record keeps it off.
+        state.subscription = 'daily';
+        state.revision = randomUUID();
+        // Persist the migration and invalidate old settings cards before permitting delivery.
+        await this.save(openId, state);
+      }
       return state;
     } catch { throw new Error('Tips storage is unavailable.'); }
   }
