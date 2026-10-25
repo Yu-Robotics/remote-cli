@@ -3,7 +3,8 @@
 ## Scope
 
 Version 1.6.178 adds 17 reviewed Chinese scenario tips; 1.6.179 enables daily
-delivery by default. Each card teaches one
+delivery by default, and 1.6.180 shows concise usage notes directly in each card.
+Each card teaches one
 small decision through a recognizable problem, a concrete benefit, a short action,
 a copyable example, and its own static PNG illustration. Content is bundled;
 there are no runtime model calls, translation, provider probes, or external content
@@ -21,6 +22,9 @@ opens subscription controls. Daily delivery is enabled by default. Users can cho
 
 Tips actions only browse content, mark progress, or change Tips preferences.
 They never execute the examples or switch backend, model, effort, thread, or device.
+Cards show usage notes directly and offer four controls: Example, Next, Mastered,
+and Settings. Previously delivered detail controls refresh into the simplified
+summary after the usual ownership and expiry checks.
 Manual browsing requires a current binding but does not require an online CLI.
 Commands in examples retain their normal backend/version requirements; old clients
 receive a text-command alternative where settings-card support matters.

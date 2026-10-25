@@ -79,6 +79,7 @@ describe('reviewed illustrated tip catalog', () => {
       for (const field of ['title', 'problem', 'benefit', 'action', 'detail'] as const) {
         expect(tip[field]).toMatch(/\p{Script=Han}/u);
       }
+      expect([...tip.detail].length).toBeLessThanOrEqual(80);
       expect(tip.problem.match(/\u3002/g)).toHaveLength(1);
       expect(tip.benefit.match(/\u3002/g)).toHaveLength(1);
       expect(tip.image).toBe(`${tip.id}.png`);
@@ -165,7 +166,7 @@ describe('reviewed illustrated tip catalog', () => {
     expect(find('device-selection').example).toBe('/device\n/device <index>');
     expect(find('device-selection').detail).toMatch(/\u4e0d\u4f1a.*\u4efb\u52a1\u3001\u9879\u76ee\u6587\u4ef6\u6216\u4f1a\u8bdd\u5386\u53f2\u8fc1\u79fb/);
     expect(find('clear-thread-context').action).toMatch(/\u9000\u51fa\u5df2\u786e\u8ba4.*\/clear.*\/new/);
-    expect(find('clear-thread-context').detail).toMatch(/1\.6\.167.*\u5168\u90e8\u540e\u7aef\u548c\u6258\u7ba1\u52a9\u624b/);
+    expect(find('clear-thread-context').detail).toMatch(/1\.6\.177.*\u5168\u90e8\u540e\u7aef\u548c\u6258\u7ba1\u52a9\u624b/);
     expect(find('clear-thread-context').detail).toMatch(/\u5f52\u6863\u5386\u53f2\u3001\u767b\u5f55\u548c\u8bbe\u7f6e\u4fdd\u7559.*\u5176\u4ed6\u7ebf\u7a0b\u4e0d\u53d7\u5f71\u54cd/);
     expect(find('compact-backend').example).toBe('/compact');
     expect(find('compact-backend').detail).toMatch(/\u539f\u751f\u538b\u7f29\u6216\u6458\u8981\u540e\u91cd\u5f00.*\u4e0d\u4fdd\u8bc1\u4fdd\u7559\u5168\u90e8\u7ec6\u8282/);
@@ -330,9 +331,11 @@ describe('reviewed illustrated tip catalog', () => {
     const gallery = fs.readFileSync(path.join(root, 'docs/tips-preview.html'), 'utf8');
     expect(gallery.match(/<article /g)).toHaveLength(17);
     expect(gallery.match(/<img /g)).toHaveLength(17);
+    expect(gallery).not.toMatch(/<details(?:\s|>)/);
     expect(gallery).not.toMatch(/https?:\/\/|<script/);
     for (const tip of TIPS) {
       expect(gallery).toContain(`id="${tip.id}"`);
+      expect(gallery).toContain(tip.detail);
       expect(gallery).toContain(`alt="${tip.title}"`);
       const relativeImage = `../packages/router/src/tips/assets/${tip.image}`;
       expect(gallery).toContain(`src="${relativeImage}"`);
