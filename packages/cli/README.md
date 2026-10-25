@@ -210,12 +210,17 @@ Backend availability uses colored status badges: blue for the coordinator, green
 
 ### Illustrated Tips
 
-Use `/tips` to browse 17 short Chinese scenario cards, each with its own bundled
+Use `/tips` to browse 25 short Chinese scenario cards, each with its own bundled
 illustration based on the actual settings panels or task cards, a benefit, and a copyable example. Examples are educational text;
 card buttons never execute them or change backend, model, effort, device, or thread.
 Browsing works for bound users even while their CLI is offline.
-Usage notes appear directly in the card body. Cards offer Example, Next, Mastered,
-and Settings controls, with no separate detail button.
+Copyable examples appear directly below the usage instructions, followed by usage
+notes. Cards offer only Next, Mastered, and Settings controls.
+
+The library includes directory browsing, named project threads, tool-row details,
+managed delegation controls and worker resets, Codex speed and goals, and native
+command sandbox settings. Backend-specific tutorials explain their prerequisites;
+examples and illustrations never activate those features themselves.
 
 | Command | Result |
 | --- | --- |

@@ -24,6 +24,8 @@ const expectedIds = [
   'delegation-resolve-disagreement', 'backend-current-thread', 'effort-native-options',
   'queue-confirm', 'abort-consequences', 'file-needs-instruction', 'image-with-question',
   'device-selection', 'clear-thread-context', 'compact-backend', 'skills-by-backend',
+  'directory-browser', 'named-project-thread', 'tool-row-details', 'delegation-toggle',
+  'delegation-reset-backend', 'codex-model-speed', 'codex-native-goal', 'sandbox-thread-controls',
 ];
 const naturalInstructionIds = [
   'cross-backend-review', 'delegation-independent-checks', 'delegation-parallel-changes',
@@ -60,10 +62,10 @@ afterEach(() => {
 });
 
 describe('reviewed illustrated tip catalog', () => {
-  it('exposes 17 stable, frozen definitions with only contract fields', () => {
+  it('exposes 25 stable, frozen definitions with only contract fields', () => {
     expect(TIPS.map(tip => tip.id)).toEqual(expectedIds);
     expect(Object.isFrozen(TIPS)).toBe(true);
-    expect(new Set(TIPS.map(tip => tip.id)).size).toBe(17);
+    expect(new Set(TIPS.map(tip => tip.id)).size).toBe(25);
     expect(validateCatalog(catalog)).toBe(catalog);
     for (const tip of TIPS) {
       expect(Object.isFrozen(tip)).toBe(true);
@@ -84,19 +86,20 @@ describe('reviewed illustrated tip catalog', () => {
       expect(tip.benefit.match(/\u3002/g)).toHaveLength(1);
       expect(tip.image).toBe(`${tip.id}.png`);
     }
-    expect(new Set(catalog.map(tip => tip.illustration.layout)).size).toBe(17);
-    expect(new Set(TIPS.map(tip => tip.title)).size).toBe(17);
-    expect(new Set(TIPS.map(tip => tip.problem)).size).toBe(17);
+    expect(new Set(catalog.map(tip => tip.illustration.layout)).size).toBe(25);
+    expect(new Set(TIPS.map(tip => tip.title)).size).toBe(25);
+    expect(new Set(TIPS.map(tip => tip.problem)).size).toBe(25);
   });
 
-  it('keeps the accepted topics without restoring rejected subjects or invented commands', () => {
+  it('keeps unsupported commands out while allowing the newly approved thread workflow', () => {
     for (const id of ['named-thread', 'reply-old-card', 'queue-clear', 'queue-continue', 'same-backend-worker']) {
       expect(expectedIds).not.toContain(id);
     }
     for (const tip of TIPS) {
       const text = JSON.stringify(tip);
       expect(text).not.toMatch(/\/(?:agent|delegate|worker|integrate)(?:\s|["\\])/);
-      expect(text).not.toMatch(/\/thread\s+new|\/queue\s+(?:clear|continue)/);
+      expect(text).not.toMatch(/\/queue\s+(?:clear|continue)/);
+      if (tip.id !== 'named-project-thread') expect(text).not.toMatch(/\/thread\s+new/);
       expect(text).not.toMatch(/\/backend\s+\d/);
       expect(text).not.toMatch(/https?:\/\/|(?:\d{1,3}\.){3}\d{1,3}|\/home\/|\/Users\//);
     }
@@ -119,6 +122,47 @@ describe('reviewed illustrated tip catalog', () => {
       }
       expect(entry.illustration.takeaway).toMatch(/\p{Script=Han}/u);
       expect([...entry.illustration.takeaway].length).toBeLessThanOrEqual(40);
+    }
+  });
+
+  it('explains the operation boundaries of the eight newly approved workflows', () => {
+    const directory = find('directory-browser');
+    expect(directory.example).toBe('/cd');
+    expect(directory.action).toContain('Use this directory');
+    expect(directory.detail).toMatch(/\u4e3b\u52a9\u624b.*\u59d4\u6d3e\u52a9\u624b/);
+    const thread = find('named-project-thread');
+    expect(thread.example).toBe('/thread new website');
+    expect(thread.action).toContain('/cd');
+    expect(thread.detail).toMatch(/\+ New.*\/new/);
+    expect(find('tool-row-details').action).toMatch(/Input.*Result/);
+    expect(find('tool-row-details').detail).toMatch(/\u622a\u65ad/);
+    expect(find('delegation-toggle').action).toMatch(/On.*Off/);
+    expect(find('delegation-toggle').detail).toMatch(/\u539f\u751f\u5b50\u52a9\u624b/);
+    expect(find('delegation-reset-backend').example).toBe('/delegation reset opencode');
+    expect(find('delegation-reset-backend').detail).toContain('Clear context');
+    expect(find('codex-model-speed').detail).toMatch(/Standard.*Follow native config/);
+    const goal = find('codex-native-goal');
+    expect(goal.example).toMatch(/^\/delegation off\n\/goal --budget [1-9]\d* /);
+    expect(goal.action).toMatch(/\/goal pause.*\/goal resume/);
+    expect(goal.detail).toContain('/goal clear');
+    expect(find('sandbox-thread-controls').example).toBe('/sandbox\n/sandbox read-only');
+    expect(find('sandbox-thread-controls').detail).toMatch(/Bash.*Windows/);
+  });
+
+  it('illustrates each new workflow with its actual operation controls', () => {
+    const markers: Record<string, string[]> = {
+      'directory-browser': ['Use this directory', 'Parent', 'website'],
+      'named-project-thread': ['/thread new website', '/cd', '+ New'],
+      'tool-row-details': ['Input', 'Result', 'npm test'],
+      'delegation-toggle': ['Delegation', 'On', 'Off'],
+      'delegation-reset-backend': ['/delegation reset opencode', 'Clear context'],
+      'codex-model-speed': ['Speed', 'Standard', 'Follow native config'],
+      'codex-native-goal': ['/delegation off', '/goal', '40000'],
+      'sandbox-thread-controls': ['/sandbox', 'read-only'],
+    };
+    for (const [id, expected] of Object.entries(markers)) {
+      const svg = fs.readFileSync(path.join(root, 'docs/tips/svg', `${id}.svg`), 'utf8');
+      for (const marker of expected) expect(svg).toContain(marker);
     }
   });
 
@@ -184,7 +228,7 @@ describe('reviewed illustrated tip catalog', () => {
       hashes.add(createHash('sha256').update(image).digest('hex'));
       total += image.length;
     }
-    expect(hashes.size).toBe(17);
+    expect(hashes.size).toBe(25);
     expect(total).toBeLessThan(5 * 1024 * 1024);
   });
 
@@ -280,7 +324,7 @@ describe('reviewed illustrated tip catalog', () => {
   it('packages the JSON and all byte-identical images without a renderer dependency', () => {
     const outputDirectory = makeTemp();
     const result = buildTips({ sourceDirectory: source, outputDirectory });
-    expect(result.count).toBe(17);
+    expect(result.count).toBe(25);
     expect(result.bytes).toBeLessThan(5 * 1024 * 1024);
     expect(JSON.parse(fs.readFileSync(path.join(outputDirectory, 'catalog.zh-CN.json'), 'utf8'))).toEqual(catalog);
     for (const tip of TIPS) expect(fs.readFileSync(path.join(outputDirectory, 'assets', tip.image)))
@@ -325,12 +369,12 @@ describe('reviewed illustrated tip catalog', () => {
     }
   });
 
-  it('provides a 17-tip preview with local images and matching editable SVGs', () => {
+  it('provides a 25-tip preview with local images and matching editable SVGs', () => {
     const svgDirectory = path.join(root, 'docs/tips/svg');
     expect(fs.readdirSync(svgDirectory).sort()).toEqual(TIPS.map(tip => `${tip.id}.svg`).sort());
     const gallery = fs.readFileSync(path.join(root, 'docs/tips-preview.html'), 'utf8');
-    expect(gallery.match(/<article /g)).toHaveLength(17);
-    expect(gallery.match(/<img /g)).toHaveLength(17);
+    expect(gallery.match(/<article /g)).toHaveLength(25);
+    expect(gallery.match(/<img /g)).toHaveLength(25);
     expect(gallery).not.toMatch(/<details(?:\s|>)/);
     expect(gallery).not.toMatch(/https?:\/\/|<script/);
     for (const tip of TIPS) {

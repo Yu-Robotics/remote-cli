@@ -389,5 +389,189 @@
       ],
       "takeaway": "从手机请求复用当前后端已有的技能"
     }
+  },
+  {
+    "id": "directory-browser",
+    "topic": "workspace",
+    "title": "换个项目，先选目录再确认",
+    "problem": "想让助手处理另一个项目，却不确定它现在使用哪个文件夹。",
+    "benefit": "用目录卡片逐级选择项目，确认后再切换，减少输错路径的麻烦。",
+    "action": "发送 /cd，点击文件夹进入，或点 ↑ Parent 返回上一级；选好后点 Use this directory，等成功确认再发任务。",
+    "example": "/cd",
+    "detail": "只显示允许的目录；浏览不切换。换目录会重置本线程主助手和委派助手对话；文件不删，回原目录也不恢复旧对话；有任务、队列或委派助手在跑时不能应用。",
+    "image": "directory-browser.png",
+    "illustration": {
+      "layout": "directory-browser",
+      "labels": [
+        "选好目标文件夹",
+        "浏览时还没有切换",
+        "点 Use this directory",
+        "确认后才切换目录",
+        "先确认当前线程",
+        "换目录会重置当前对话"
+      ],
+      "takeaway": "先浏览选择，确认后才切换目录"
+    }
+  },
+  {
+    "id": "named-project-thread",
+    "topic": "threads",
+    "title": "新项目，单独开一个线程",
+    "problem": "两个项目交替处理时，讨论内容和当前目录容易混在一起。",
+    "benefit": "为项目创建有名字的独立线程，各自保留讨论、目录和任务队列。",
+    "action": "发送 /thread new website；回复新线程的创建卡，再用 /cd 选择项目目录并确认；也可点 + New 创建自动命名线程。",
+    "example": "/thread new website",
+    "detail": "新线程沿用原线程目录和后端，不会按名字寻找项目；+ New 创建线程，/new 清理当前线程对话。独立线程不隔离文件权限。",
+    "image": "named-project-thread.png",
+    "illustration": {
+      "layout": "named-project-thread",
+      "labels": [
+        "创建命名线程",
+        "发送 /thread new website",
+        "回复新线程卡片",
+        "再发送 /cd 选择目录",
+        "确认后开始任务",
+        "+ New 不等于 /new"
+      ],
+      "takeaway": "先创建独立线程，再选择项目目录"
+    }
+  },
+  {
+    "id": "tool-row-details",
+    "topic": "cards",
+    "title": "想看执行细节，点开工具那一行",
+    "problem": "卡片只显示工具名和一句摘要，你想知道具体执行了什么。",
+    "benefit": "展开工具记录，直接查看调用参数和返回内容，不用只猜摘要的意思。",
+    "action": "点击回复卡片中带圆点的工具行，例如 Bash 或 Read；展开后看 Input 和 Result，结果会更新在原行中。",
+    "example": "点击工具行 → 查看 Input 和 Result",
+    "detail": "这是执行内容的预览，不会再次执行工具；长内容可能截断，不能把预览当作完整日志。",
+    "image": "tool-row-details.png",
+    "illustration": {
+      "layout": "tool-row-details",
+      "labels": [
+        "找到工具记录",
+        "例如 Bash 或 Read",
+        "点开工具这一行",
+        "Input 查看调用参数",
+        "Result 查看返回内容",
+        "长内容可能只显示部分"
+      ],
+      "takeaway": "查看调用和结果，展开原工具行"
+    }
+  },
+  {
+    "id": "delegation-toggle",
+    "topic": "delegation",
+    "title": "这个线程要不要分工，由你决定",
+    "problem": "有时想让主助手安排额外助手，有时希望它自己完成任务。",
+    "benefit": "用当前线程的委派开关控制是否允许分工，保留已有讨论。",
+    "action": "任务和队列空闲后发送 /delegation，在设置卡点 On 或 Off 并等待确认；也可发送 /delegation on 或 /delegation off。",
+    "example": "/delegation",
+    "detail": "只影响当前线程，关闭不清历史；开启不立即启动助手，也不保证后端可用。开关不禁用后端自带的原生子助手，沙箱限制仍有效。",
+    "image": "delegation-toggle.png",
+    "illustration": {
+      "layout": "delegation-toggle",
+      "labels": [
+        "On 允许安排助手",
+        "不会立即启动助手",
+        "Off 关闭委派功能",
+        "保留已有助手历史",
+        "只调整当前线程",
+        "空闲后更改并等确认"
+      ],
+      "takeaway": "控制是否允许分工，不清理已有对话"
+    }
+  },
+  {
+    "id": "delegation-reset-backend",
+    "topic": "delegation",
+    "title": "让某种委派助手重新开始",
+    "problem": "某种委派助手还沿用旧讨论，你想让它重新开始但保留主助手的上下文。",
+    "benefit": "只清理指定后端的委派会话，主助手和其他后端继续保留讨论。",
+    "action": "等当前线程空闲且委派助手全部结束后，发送 /delegation reset opencode，清理这个线程内所有 OpenCode 委派助手的上下文。",
+    "example": "/delegation reset opencode",
+    "detail": "不会重置主助手或其他后端；省略后端名会清理本线程全部委派助手。助手卡的 Clear context 只清卡片对应的一个会话，不撤销文件修改。",
+    "image": "delegation-reset-backend.png",
+    "illustration": {
+      "layout": "delegation-reset-backend",
+      "labels": [
+        "按后端重新开始",
+        "清理本线程的 OpenCode 助手",
+        "单卡 Clear context",
+        "只清卡片对应的会话",
+        "主助手和其他后端不变",
+        "不撤销已经写入的文件"
+      ],
+      "takeaway": "按后端重置，与单卡清理范围不同"
+    }
+  },
+  {
+    "id": "codex-model-speed",
+    "topic": "models",
+    "title": "Codex 的处理速度，可以单独选",
+    "problem": "已经选好模型，还想看看它是否提供单独的处理速度档位。",
+    "benefit": "支持原生速度档位的 Codex 模型，可以在模型卡中单独选择速度。",
+    "action": "空闲时发送 /model，选择 Codex 和模型；如果出现 Speed 区域，按实际显示的档位选择并等待确认。",
+    "example": "/model",
+    "detail": "仅支持原生速度档位的 Codex 模型可用；Standard 明确标准档，Follow native config 跟随原生。速度与思考强度独立，额度依账号。",
+    "image": "codex-model-speed.png",
+    "illustration": {
+      "layout": "codex-model-speed",
+      "labels": [
+        "Standard 明确指定",
+        "使用标准处理档位",
+        "选择 Follow native config",
+        "撤销覆盖并跟随原生",
+        "以原生可用档位为准",
+        "速度与思考强度独立"
+      ],
+      "takeaway": "处理速度与思考强度分别设置"
+    }
+  },
+  {
+    "id": "codex-native-goal",
+    "topic": "goals",
+    "title": "给 Codex 一个持续推进的目标",
+    "problem": "任务需要多轮推进，你希望设置一个目标并随时查看或暂停。",
+    "benefit": "支持原生目标的 Codex 可以继续推进工作，并保留查看、暂停和恢复入口。",
+    "action": "使用支持原生目标的 Codex；线程和队列空闲后，先发 /delegation off，再用 /goal 设置目标；/goal 查看状态，/goal pause 暂停，/goal resume 恢复。",
+    "example": "/delegation off\n/goal --budget 40000 修复失败的测试并保持公开接口兼容",
+    "detail": "预算是正整数token上限，可省略；/goal clear清目标不清对话。中断后需显式恢复，不保证目标完成；附件请先单独发送。",
+    "image": "codex-native-goal.png",
+    "illustration": {
+      "layout": "codex-native-goal",
+      "labels": [
+        "设置明确目标",
+        "先关闭委派，再发 /goal",
+        "查看、暂停或恢复",
+        "用 /goal 及其子命令操作",
+        "预算限制 token 上限",
+        "清除目标保留对话"
+      ],
+      "takeaway": "目标交给 Codex 推进，状态由你掌握"
+    }
+  },
+  {
+    "id": "sandbox-thread-controls",
+    "topic": "sandbox",
+    "title": "需要限制命令执行，先查看沙箱",
+    "problem": "想限制当前线程运行命令时的权限，却不知道从哪里查看和设置。",
+    "benefit": "在支持的 Codex 或 Claude Code 线程里，查看并选择原生命令沙箱限制。",
+    "action": "空闲时先发送 /sandbox 查看状态；需要时用 /sandbox on 或 /sandbox read-only，按当前后端的实际支持设置；/sandbox default 恢复跟随本地配置。",
+    "example": "/sandbox\n/sandbox read-only",
+    "detail": "不隔离整个AI进程；Claude 的沙箱主要限制 Bash，不支持原生 Windows。/cd 目录白名单是另一项设置；额外授权可能放行越界操作。",
+    "image": "sandbox-thread-controls.png",
+    "illustration": {
+      "layout": "sandbox-thread-controls",
+      "labels": [
+        "查看当前沙箱状态",
+        "发送 /sandbox",
+        "按后端支持选择限制",
+        "只作用于当前线程",
+        "不等于整个进程隔离",
+        "与 /cd 目录白名单不同"
+      ],
+      "takeaway": "先看支持范围，再选择命令沙箱模式"
+    }
   }
 ]
