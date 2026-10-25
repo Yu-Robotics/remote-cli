@@ -58,10 +58,11 @@ describe('Router-owned Tips', () => {
     now += DAY; await service.tick(); expect(options.create).toHaveBeenCalledTimes(2);
   });
 
-  it('continues into the new tutorials without losing existing reading progress or opt-outs', async () => {
+  it.each([[17, 'directory-browser'], [25, 'codex-weekly-reset-notice']] as const)(
+    'continues after %i tutorials without losing existing reading progress or opt-outs', async (seenCount, nextId) => {
     options.catalog = TIPS;
     const previous = newTipState('Asia/Shanghai');
-    previous.seen = TIPS.slice(0, 17).map(tip => tip.id);
+    previous.seen = TIPS.slice(0, seenCount).map(tip => tip.id);
     previous.mastered = previous.seen.slice(0, 2);
     previous.subscription = 'off';
     previous.stopRevision = previous.revision;
@@ -73,9 +74,9 @@ describe('Router-owned Tips', () => {
     await service.tick();
     expect(options.create).not.toHaveBeenCalled();
     await service.command(user, '/tips next');
-    expect(options.image).toHaveBeenCalledWith(TIPS[17]);
+    expect(options.image).toHaveBeenCalledWith(TIPS[seenCount]);
     const current = await state();
-    expect(current.seen).toEqual([...previous.seen, 'directory-browser']);
+    expect(current.seen).toEqual([...previous.seen, nextId]);
     expect(current.mastered).toEqual(previous.mastered);
     expect(current.subscription).toBe('off');
   });
