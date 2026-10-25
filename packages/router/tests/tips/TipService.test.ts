@@ -6,6 +6,7 @@ import { randomUUID } from 'crypto';
 import { TipService, TIP_TRANSPORT_TIMEOUT } from '../../src/tips/TipService';
 import { newTipState, TipStore } from '../../src/tips/TipStore';
 import { ui } from '../../src/tips/TipCards';
+import { TIPS } from '../../src/tips/TipCatalog';
 import type { TipServiceOptions } from '../../src/tips/TipTypes';
 
 const DAY = 86400_000;
@@ -55,6 +56,28 @@ describe('Router-owned Tips', () => {
     await service.stop(); service = createService(); await service.tick();
     expect(options.create).toHaveBeenCalledTimes(1);
     now += DAY; await service.tick(); expect(options.create).toHaveBeenCalledTimes(2);
+  });
+
+  it('continues into the new tutorials without losing existing reading progress or opt-outs', async () => {
+    options.catalog = TIPS;
+    const previous = newTipState('Asia/Shanghai');
+    previous.seen = TIPS.slice(0, 17).map(tip => tip.id);
+    previous.mastered = previous.seen.slice(0, 2);
+    previous.subscription = 'off';
+    previous.stopRevision = previous.revision;
+    await store.save(user, previous);
+    await service.stop();
+    service = createService();
+    await service.activity(user);
+    quiet();
+    await service.tick();
+    expect(options.create).not.toHaveBeenCalled();
+    await service.command(user, '/tips next');
+    expect(options.image).toHaveBeenCalledWith(TIPS[17]);
+    const current = await state();
+    expect(current.seen).toEqual([...previous.seen, 'directory-browser']);
+    expect(current.mastered).toEqual(previous.mastered);
+    expect(current.subscription).toBe('off');
   });
 
   it.each([0, DAY])('migrates legacy implicit off and keeps mute %i, progress and cooldown through restart', async muteDuration => {

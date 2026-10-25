@@ -31,7 +31,7 @@ function bounded(value, limit) {
 }
 
 function validateCatalog(catalog) {
-  if (!Array.isArray(catalog) || catalog.length !== 17) throw new Error('Expected exactly 17 tips');
+  if (!Array.isArray(catalog) || catalog.length !== 25) throw new Error('Expected exactly 25 tips');
   const ids = new Set();
   const layouts = new Set();
   for (const tip of catalog) {

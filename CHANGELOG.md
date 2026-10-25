@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.182] - 2026-10-25
+
+### Added
+- Add eight illustrated tool-operation Tips for directory selection, named project threads, tool details, delegation controls and targeted worker resets, Codex speed and native goals, and backend-specific command sandboxing. Preserve the existing 17 topic IDs and reading progress.
+- Expand the bundled catalog and editable SVG/PNG gallery to 25 tutorials, with a complete dynamically sized contact sheet and downloadable bundle.
+
+### Tests
+- Cover the expanded catalog, operation-specific prerequisites and illustrations, complete gallery coverage, and byte-identical packaged assets.
+
 ## [1.6.181] - 2026-10-25
 
 ### Changed

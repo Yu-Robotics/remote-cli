@@ -66,14 +66,21 @@ const menus={
  backend:{...base,kind:'backend',snapshotId:'demo-backend',targetBackend:'claude',
   choices:[],supportsReset:false,followsGlobal:false}
 };
+menus.directory={...base,kind:'directory',targetBackend:'claude',snapshotId:'directory-demo',choices:[
+ {value:'demo-child',label:'website'}],directory:{currentPath:'/workspace/demo',
+ browsingPath:'/workspace',parent:'demo-parent',roots:'demo-roots',refresh:'demo-refresh',apply:'demo-apply'}};
+menus.delegation={...base,kind:'delegation',targetBackend:'claude',snapshotId:'demo-delegation',configuredValue:'on',
+ effectiveValue:'on',choices:[{value:'on',label:'On'},{value:'off',label:'Off'}]};
+menus.speed={...menus.model,snapshotId:'demo-speed',speed:{configuredValue:'priority',choices:[
+ {value:'default',label:'Standard'},{value:'priority',label:'Native Fast'}]}};
 const clean=value=>Array.isArray(value)?value.map(clean):value&&typeof value==='object'
  ?Object.fromEntries(Object.entries(value).filter(([key])=>key!=='behaviors').map(([key,item])=>[key,clean(item)])):value;
 const result={};
 for(const [key,menu] of Object.entries(menus)){
  const cards=new SettingsCards({ownsDevice:async()=>true,available:()=>true,
-  send:async()=>true,update:async()=>{}});
+  speedAvailable:()=>true,send:async()=>true,update:async()=>{}});
  const prepared=cards.present({openId:'demo-owner',deviceId:'demo-device',menu,requestMessageId:'demo-request'});
- if(!prepared) throw Error('Synthetic menu rejected');
+ if(!prepared) throw Error(`Synthetic menu rejected: ${key}`);
  result[key]=clean({schema:'2.0',header:cards['header']({menu}),body:{elements:prepared.elements}});
  prepared.discard();cards.destroy();
 }
@@ -158,13 +165,13 @@ class Canvas:
             self.text(128, 240 + index * 34, row, 22, '#1f3864')
         return 228 + height + 22
 
-    def task(self, y, dark=False, directory='/workspace/demo', bottom=954):
+    def task(self, y, dark=False, directory='/workspace/demo', bottom=954, thread_name='demo'):
         self.dark = dark
         self.ink = '#f0f1f3' if dark else '#1f2329'
         self.muted = '#b5b8bd' if dark else '#646a73'
         self.rule = '#45484d' if dark else '#dee0e3'
         self.rect(64, y, 936, bottom - y, '#292b2f' if dark else 'white', '#45484d' if dark else '#d9dce1', 12)
-        self.text(94, y + 20, 'demo', 23, self.ink, True)
+        self.text(94, y + 20, thread_name, 23, self.ink, True)
         self.rect(190, y + 21, 280, 36, '#202125' if dark else '#f3f4f5', radius=4)
         self.text(201, y + 24, directory, 19, self.ink)
         self.line(94, y + 79, 970, self.rule)
@@ -208,13 +215,16 @@ class Canvas:
         labels = self.tip['illustration']['labels']
         assert len(labels) == 6
         x = 1054
-        prerequisite = self.tip['id'].startswith('delegation-') or self.tip['id'] == 'cross-backend-review'
-        self.text(x, 236, UI['delegation'] if prerequisite else UI['command'], 21, '#646a73')
+        prerequisite = (self.tip['id'].startswith('delegation-')
+                        and self.tip['id'] not in ['delegation-toggle', 'delegation-reset-backend']) or self.tip['id'] == 'cross-backend-review'
+        caption = UI['interaction'] if self.tip['id'] == 'tool-row-details' else UI['delegation'] if prerequisite else UI['command']
+        self.text(x, 236, caption, 21, '#646a73')
         command = self.tip['example'].split('\n')[0] if self.tip['example'].startswith('/') else '/delegation'
-        if len(command) > 25:
+        if len(command) > 25 and self.tip['id'] != 'delegation-reset-backend':
             command = command.split(' ')[0]
         command = {'queue-confirm': UI['queue'], 'file-needs-instruction': UI['file'],
-                   'image-with-question': UI['image']}.get(self.tip['id'], command)
+                   'image-with-question': UI['image'],
+                   'tool-row-details': labels[2]}.get(self.tip['id'], command)
         self.rect(x, 280, 450, 72, 'white', '#dce2eb', 12)
         self.block(x + 22, 292, command, 406, 25, BLUE, True, max_lines=1)
         for number, top in [(1, 405), (2, 597)]:
@@ -242,18 +252,21 @@ def native_panel(canvas, fixture, kind):
     elements = fixture['body']['elements']
     for index, element in enumerate(elements):
         content = element.get('content', '')
-        if content.startswith('**3 '):
+        if content.startswith('**3 ') and kind != 'speed':
             break
         if index == 0:
-            cy = canvas.block(94, cy, plain(content.split('\n')[0]), 875, 21, bold=True) + 9
+            heading = content if kind == 'directory' else content.split('\n')[0]
+            cy = canvas.block(94, cy, plain(heading), 875, 21, bold=True) + 9
         elif element['tag'] == 'hr':
-            if index + 1 < len(elements) and elements[index + 1].get('content', '').startswith('**3 '):
+            if kind != 'speed' and index + 1 < len(elements) and elements[index + 1].get('content', '').startswith('**3 '):
                 break
             canvas.line(94, cy + 5, 970)
             cy += 27
         elif element['tag'] == 'markdown' and content.startswith('**'):
             group = content.startswith('**Main') or content.startswith('**Other')
             cy = canvas.block(94, cy, plain(content), 876, 19 if group else 22, bold=True) + 13
+        elif kind == 'directory' and content.startswith('Browsing:'):
+            cy = canvas.block(94, cy, plain(content), 876, 20, '#646a73') + 13
         elif element['tag'] == 'column_set':
             x = 94
             buttons = [button for column in element['columns'] for button in column['elements']]
@@ -276,6 +289,18 @@ def native_panel(canvas, fixture, kind):
                         canvas.highlight(x, cy, bw, 47, 1)
                     elif kind == 'effort' and 'high' in label:
                         canvas.highlight(x, cy, bw, 47, 2)
+                if kind == 'directory' and label.startswith('📁'):
+                    canvas.highlight(x, cy, bw, 47, 1)
+                elif kind == 'directory' and label == 'Use this directory':
+                    canvas.highlight(x, cy, bw, 47, 2)
+                elif kind == 'delegation' and 'On' in label:
+                    canvas.highlight(x, cy, bw, 47, 1)
+                elif kind == 'delegation' and 'Off' in label:
+                    canvas.highlight(x, cy, bw, 47, 2)
+                elif kind == 'speed' and 'Standard' in label:
+                    canvas.highlight(x, cy, bw, 47, 1)
+                elif kind == 'speed' and 'Follow native config' in label:
+                    canvas.highlight(x, cy, bw, 47, 2)
                 x += bw + 10
             cy += 64
     assert cy <= 950, f'Settings card overflows: {kind}'
@@ -403,9 +428,79 @@ def image_scene(c):
     c.text(98, 832, 'One message · text + image', 22, '#646a73')
 
 
+def focused_settings(c, fixture, kind):
+    """Crop the native synthetic card to the operation discussed by this tip."""
+    elements = fixture['body']['elements']
+    if kind == 'delegation':
+        stop = next(index for index, item in enumerate(elements)
+                    if item.get('content', '').startswith('**2 '))
+        elements = elements[:stop - 1]
+    elif kind == 'speed':
+        start = next(index for index, item in enumerate(elements)
+                     if item.get('content', '').startswith('**3 '))
+        elements = [elements[0], *elements[start:]]
+    native_panel(c, {**fixture, 'body': {'elements': elements}}, kind)
+
+
+def operation_scene(c, kind):
+    """Redraw documented task-card interactions with public synthetic examples."""
+    request = c.tip['example'].split('\n')[0]
+    y = c.task(c.user(request), thread_name='website' if kind == 'named-project-thread' else 'demo')
+    if kind == 'named-project-thread':
+        c.text(98, y, 'Thread "website" created.', 25, bold=True)
+        c.block(98, y + 55, 'Reply to this card to send the first command to the new thread.', 835, 22)
+        c.highlight(94, y - 5, 836, 115, 1)
+        c.rect(104, y + 180, 850, 90, '#e1ebff', radius=10)
+        c.text(128, y + 190, 'Reply to: website', 17, '#646a73')
+        c.text(128, y + 220, '/cd', 25, BLUE, True)
+        c.highlight(104, y + 180, 850, 90, 2)
+        c.text(98, y + 325, 'website · /workspace/demo · Codex', 21, '#646a73')
+        c.button(98, y + 395, '+ New')
+    elif kind == 'tool-row-details':
+        y = c.tool(y, 'Bash · Run project tests')
+        c.highlight(94, y - 47, 860, 43, 1)
+        c.rect(98, y + 16, 854, 342, '#f8f9fb', '#e0e3e8', 8)
+        for offset, value, size, bold in [(36, 'Status: Succeeded', 20, False),
+                                         (84, 'Input', 23, True), (126, 'npm test', 22, False),
+                                         (202, 'Result', 23, True), (248, 'Tests: 12 passed', 22, False)]:
+            c.text(122, y + offset, value, size, bold=bold)
+        c.highlight(112, y + 195, 810, 90, 2)
+    elif kind == 'delegation-reset-backend':
+        c.block(98, y, 'Reset OpenCode CLI worker context (1 lane removed).', 840, 24, bold=True)
+        c.highlight(94, y - 5, 843, 90, 1)
+        y += 145
+        c.worker(y, 'OpenCode', 1, 'A new task starts a fresh worker conversation.')
+        c.button(98, y + 215, 'Clear context')
+        c.highlight(94, y + 211, 175, 55, 2)
+    elif kind == 'codex-native-goal':
+        c.text(98, y, 'Delegation is off for this thread.', 23, bold=True)
+        c.rect(98, y + 70, 854, 100, '#e1ebff', radius=9)
+        c.block(120, y + 83, c.tip['example'].split('\n')[-1], 810, 22, '#1f3864', max_lines=2)
+        c.highlight(98, y + 70, 854, 100, 1)
+        c.text(98, y + 225, 'Codex goal', 25, bold=True)
+        c.text(98, y + 278, 'Status: active', 23)
+        c.text(98, y + 322, 'Token budget: 40000', 23)
+        c.text(98, y + 390, '/goal   /goal pause   /goal resume', 23, BLUE)
+        c.highlight(94, y + 382, 835, 55, 2)
+    elif kind == 'sandbox-thread-controls':
+        c.text(98, y, 'Codex sandbox', 25, bold=True)
+        c.text(98, y + 60, 'Mode: read-only', 24)
+        c.highlight(94, y + 51, 835, 55, 1)
+        c.rect(98, y + 160, 854, 85, '#e1ebff', radius=9)
+        c.text(122, y + 184, '/sandbox read-only', 25, BLUE, True)
+        c.highlight(98, y + 160, 854, 85, 2)
+        c.block(98, y + 310, 'Native command policy for this thread.\nNot whole-process isolation.', 830, 23, '#646a73')
+
+
 def render_svg(tip, number, fixtures):
     c = Canvas(tip, number)
-    if tip['id'] in ['model-within-backend', 'backend-current-thread', 'effort-native-options']:
+    if tip['id'] in ['directory-browser', 'delegation-toggle', 'codex-model-speed']:
+        kind = {'directory-browser': 'directory', 'delegation-toggle': 'delegation', 'codex-model-speed': 'speed'}[tip['id']]
+        focused_settings(c, fixtures[kind], kind)
+    elif tip['id'] in ['named-project-thread', 'tool-row-details', 'delegation-reset-backend',
+                       'codex-native-goal', 'sandbox-thread-controls']:
+        operation_scene(c, tip['id'])
+    elif tip['id'] in ['model-within-backend', 'backend-current-thread', 'effort-native-options']:
         kind = {'model-within-backend': 'model', 'backend-current-thread': 'backend', 'effort-native-options': 'effort'}[tip['id']]
         native_panel(c, fixtures[kind], kind)
     elif tip['id'].startswith('delegation-') or tip['id'] == 'cross-backend-review':
@@ -472,7 +567,7 @@ def gallery(catalog, portable=False):
 
 def main():
     catalog = json.loads((SOURCE / 'catalog.zh-CN.json').read_text())
-    assert len(catalog) == 17, 'Expected the approved 17-topic catalog'
+    assert len(catalog) == 25, 'Expected the approved 25-topic catalog'
     fixtures = settings_fixtures()
     svg_directory = DOCS / 'svg'
     svg_directory.mkdir(parents=True, exist_ok=True)
@@ -482,8 +577,13 @@ def main():
     for number, tip in enumerate(catalog, 1):
         svg = svg_directory / f'{tip["id"]}.svg'
         png = assets / tip['image']
-        svg.write_text(render_svg(tip, number, fixtures))
-        render_png(svg, png)
+        content = render_svg(tip, number, fixtures)
+        unchanged = svg.is_file() and svg.read_text() == content
+        if not unchanged:
+            svg.write_text(content)
+        # Keep reviewed bytes when only the local rasterizer/fonts have changed.
+        if not unchanged or not png.is_file():
+            render_png(svg, png)
         digest = hashlib.sha256(png.read_bytes()).hexdigest()
         assert digest not in hashes, 'Duplicate illustration'
         hashes.add(digest)
@@ -496,7 +596,8 @@ def main():
             if file.name not in expected:
                 file.unlink()
     (ROOT / 'docs/tips-preview.html').write_text(gallery(catalog))
-    sheet = Image.new('RGB', (1600, 6 * 382 + 24), '#edf1f7')
+    rows = (len(catalog) + 2) // 3
+    sheet = Image.new('RGB', (1600, rows * 382 + 24), '#edf1f7')
     for index, tip in enumerate(catalog):
         with Image.open(assets / tip['image']) as image:
             thumbnail = image.convert('RGB').resize((510, 357), Image.Resampling.LANCZOS)
