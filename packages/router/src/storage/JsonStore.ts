@@ -163,6 +163,11 @@ export class JsonStore {
     return this.data.userBindings[openId] || null;
   }
 
+  /** Return a detached snapshot of users with at least one bound device. */
+  listBoundUserIds(): string[] {
+    return Object.keys(this.data.userBindings).filter(id => this.data.userBindings[id].devices.length > 0);
+  }
+
   /**
    * Get user openId by device ID (reverse lookup)
    */

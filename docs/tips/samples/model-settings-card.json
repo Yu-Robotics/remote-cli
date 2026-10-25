@@ -1,0 +1,262 @@
+{
+  "schema": "2.0",
+  "header": {
+    "title": {
+      "tag": "plain_text",
+      "content": "🎯 Model settings"
+    },
+    "template": "blue"
+  },
+  "body": {
+    "elements": [
+      {
+        "tag": "markdown",
+        "content": "**Model** · Codex CLI \\(OpenAI\\) · demo\nConfigured: `gpt-5.2-codex` · Effective: `gpt-5.2-codex` (configured) · Default: `gpt-5.2-codex`"
+      },
+      {
+        "tag": "hr"
+      },
+      {
+        "tag": "markdown",
+        "content": "**1 · Target backend**"
+      },
+      {
+        "tag": "markdown",
+        "text_size": "notation",
+        "content": "Settings below belong to **Codex CLI \\(OpenAI\\)**. Viewing another target never switches the conversation's backend."
+      },
+      {
+        "tag": "markdown",
+        "text_size": "notation",
+        "content": "**Main backend · current thread**"
+      },
+      {
+        "tag": "column_set",
+        "flex_mode": "stretch",
+        "columns": [
+          {
+            "tag": "column",
+            "width": "auto",
+            "elements": [
+              {
+                "tag": "button",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "Claude Code"
+                },
+                "type": "default",
+                "disabled": false
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "tag": "hr"
+      },
+      {
+        "tag": "markdown",
+        "text_size": "notation",
+        "content": "**Other backends · worker preferences**"
+      },
+      {
+        "tag": "column_set",
+        "flex_mode": "stretch",
+        "columns": [
+          {
+            "tag": "column",
+            "width": "auto",
+            "elements": [
+              {
+                "tag": "button",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "✓ Codex CLI (OpenAI)"
+                },
+                "type": "primary",
+                "disabled": false
+              }
+            ]
+          },
+          {
+            "tag": "column",
+            "width": "auto",
+            "elements": [
+              {
+                "tag": "button",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "OpenCode CLI"
+                },
+                "type": "default",
+                "disabled": false
+              }
+            ]
+          },
+          {
+            "tag": "column",
+            "width": "auto",
+            "elements": [
+              {
+                "tag": "button",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "Kimi Code CLI"
+                },
+                "type": "default",
+                "disabled": false
+              }
+            ]
+          },
+          {
+            "tag": "column",
+            "width": "auto",
+            "elements": [
+              {
+                "tag": "button",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "ZCode"
+                },
+                "type": "default",
+                "disabled": false
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "tag": "column_set",
+        "flex_mode": "stretch",
+        "columns": [
+          {
+            "tag": "column",
+            "width": "auto",
+            "elements": [
+              {
+                "tag": "button",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "Pi"
+                },
+                "type": "default",
+                "disabled": true
+              }
+            ]
+          },
+          {
+            "tag": "column",
+            "width": "auto",
+            "elements": [
+              {
+                "tag": "button",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "AGY CLI (Antigravity)"
+                },
+                "type": "default",
+                "disabled": false
+              }
+            ]
+          },
+          {
+            "tag": "column",
+            "width": "auto",
+            "elements": [
+              {
+                "tag": "button",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "DeepSeek Harness (DSH)"
+                },
+                "type": "default",
+                "disabled": true
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "tag": "hr"
+      },
+      {
+        "tag": "markdown",
+        "content": "**2 · Model for Codex CLI \\(OpenAI\\)**"
+      },
+      {
+        "tag": "markdown",
+        "text_size": "notation",
+        "content": "Tap a choice to apply it immediately — it is saved per backend for this thread and used by future workers."
+      },
+      {
+        "tag": "column_set",
+        "flex_mode": "stretch",
+        "columns": [
+          {
+            "tag": "column",
+            "width": "auto",
+            "elements": [
+              {
+                "tag": "button",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "✓ gpt-5.2-codex"
+                },
+                "type": "primary",
+                "disabled": false
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "tag": "hr"
+      },
+      {
+        "tag": "markdown",
+        "content": "**3 · More actions**"
+      },
+      {
+        "tag": "markdown",
+        "text_size": "notation",
+        "content": "Refresh reloads the choices from the backend. Reset restores the default."
+      },
+      {
+        "tag": "column_set",
+        "flex_mode": "stretch",
+        "columns": [
+          {
+            "tag": "column",
+            "width": "auto",
+            "elements": [
+              {
+                "tag": "button",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "Refresh"
+                },
+                "type": "default",
+                "disabled": false
+              }
+            ]
+          },
+          {
+            "tag": "column",
+            "width": "auto",
+            "elements": [
+              {
+                "tag": "button",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "Reset to default"
+                },
+                "type": "default",
+                "disabled": false
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

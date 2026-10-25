@@ -41,6 +41,40 @@ Backend availability uses colored status badges: blue for the coordinator, green
 
 Choices use opaque stored tokens rather than command text or stale ordinals. Callback ownership includes the delivered card, original user/device/thread, connection, snapshot and page revision. Show all model/effort choices when the complete card fits its recursive tagged-node and serialized-byte budgets; only oversized catalogs paginate, using the capacity of each page rather than a fixed eight-choice limit. Include headers, groups, navigation, notices and pending/retry controls when packing and updating cards. Missing backends are disabled, native-unavailable states remain explicit, and expired or stale controls require a fresh menu. Socket changes invalidate action bindings. No native settings, credentials, installations or model inference run on the Router. Older peers retain text lists. See [Model and Reasoning Effort](../../README.md#model-and-reasoning-effort).
 
+## Illustrated Tips
+
+Use `/tips` to browse 17 short Chinese scenario cards, each with its own bundled
+illustration based on the actual settings panels or task cards, a benefit, and a copyable example. Examples are educational text;
+card buttons never execute them or change backend, model, effort, device, or thread.
+Browsing works for bound users even while their CLI is offline.
+
+| Command | Result |
+| --- | --- |
+| `/tips next` / `/tips list` | Read another tip or browse the library |
+| `/tips settings` | View subscription, mute, and timezone settings |
+| `/tips daily` / `/tips weekly` | Explicitly subscribe daily or on Tuesday and Thursday |
+| `/tips mute 7` | Pause automatic tips for seven days (1-365 supported) |
+| `/tips unmute` | Remove the pause without enabling a disabled subscription |
+| `/tips off` | Disable automatic tips permanently until explicitly subscribed again |
+| `/tips timezone Asia/Shanghai` | Select the IANA timezone for this user's schedule |
+
+Automatic delivery is **off by default**. Subscribed tips are due at 10:30 in the
+user's timezone (default `Asia/Shanghai`), within 10:30-19:00 only, at most once per
+local day and at least 20 hours apart. Delivery requires a bound online device,
+bot activity within seven days, two minutes of quiet, and no task currently visible
+to the Router. This check cannot observe every backend-local operation or queue.
+Offline periods create no backlog; device registration never triggers tips.
+Settings cards offer 1/3/7/14-day mute controls. Seen or mastered tips are skipped.
+
+The Router stores private per-user preferences and delivery intent beside its
+configuration. A send with an uncertain result is suppressed rather than replayed.
+Run one Router process per storage directory; this is not multi-replica delivery.
+Optional Router configuration `tips.enabled: false` disables automatic delivery
+globally while retaining browsing; `tips.timezone` sets the default IANA timezone.
+Tips use reviewed bundled content and static PNGs, with no model calls or catalog
+probes. Some examples require a compatible CLI; the backend tip includes the text
+command alternative for clients without settings cards.
+
 ## Maintenance Notices
 
 From CLI and Router 1.6.127, upgrade notices use concise Chinese summaries from `RELEASE_NOTES_ZH.md`, with one short title and bounded user-visible changes per release. `CHANGELOG.md` remains the English technical record. The CLI build requires matching current-version entries in both documents and bundles both, without online translation or model calls. New Routers show summaries directly and collapse technical details. Earlier maintenance-capable Routers show the summary in their existing collapsed panels; new Routers keep older CLI notes collapsed when no technical-details field is present. Cumulative ranges, silent first adoption, delivery acknowledgements, and protocol version 1 are unchanged.

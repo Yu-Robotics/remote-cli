@@ -1,0 +1,393 @@
+[
+  {
+    "id": "cross-backend-review",
+    "topic": "delegation",
+    "title": "代码改完，再请另一种AI检查",
+    "problem": "实现和自查都由同一种 AI 完成时，你还希望有人独立检查遗漏。",
+    "benefit": "让另一种 AI 检查实际交付的修改，再由主助手核实问题和依据，可以多获得一个独立视角。",
+    "action": "委派已启用且目标后端可用时，要求先完成并整合实现，再交给另一种 AI 审查。",
+    "example": "请先委派实现本次修改，结束后显式整合；再请另一种可用的 AI 只读审查整合后的代码，由你核实问题并报告验证结果。",
+    "detail": "Git 助手的修改不会自动合并；审查必须基于已整合的版本，不能假定能看到其他助手尚未交付的修改，换一种 AI 也不保证结论正确。",
+    "image": "cross-backend-review.png",
+    "illustration": {
+      "layout": "cross-backend-review",
+      "labels": [
+        "先完成实现",
+        "检查并整合实际修改",
+        "再独立审查",
+        "交给另一种可用助手",
+        "核实审查结论",
+        "主助手对照代码与证据"
+      ],
+      "takeaway": "先整合实现，再独立审查并核实"
+    }
+  },
+  {
+    "id": "delegation-independent-checks",
+    "topic": "delegation",
+    "title": "多项检查，分别安排助手处理",
+    "problem": "实现、测试和文档都需要核对，逐项处理容易遗漏某个方面。",
+    "benefit": "把互不依赖的检查分别交给助手，再由主助手汇总核实，可以让每项检查都有明确范围和结果。",
+    "action": "委派可用时，分别说明实现、测试和文档的检查范围，并要求各助手只读返回依据。",
+    "example": "请分别委派检查本次实现、测试覆盖和文档一致性，只读不改文件；各自返回问题与依据，由你汇总核实。",
+    "detail": "同一种后端也可使用独立助手会话，但复用会话可能保留它自己的历史；任务背景和其他助手的结论不会自动共享，“只读”是任务要求。",
+    "image": "delegation-independent-checks.png",
+    "illustration": {
+      "layout": "delegation-independent-checks",
+      "labels": [
+        "拆分检查范围",
+        "实现、测试、文档各自核对",
+        "分别收取结果",
+        "每项都附问题与依据",
+        "主助手汇总",
+        "同后端也可使用独立会话"
+      ],
+      "takeaway": "检查分别完成，结论统一核实"
+    }
+  },
+  {
+    "id": "delegation-parallel-changes",
+    "topic": "delegation",
+    "title": "几项独立修改，同时推进",
+    "problem": "几项修改互不依赖，却一直等待前一项完成后才开始下一项。",
+    "benefit": "在 Git 项目中把独立修改交给不同助手，可以按可用执行名额同时推进，再统一整合和验证。",
+    "action": "明确各项修改互不依赖，要求助手分别在 Git 工作树完成，全部结束后由主助手整合并验证。",
+    "example": "请把互不依赖的修改分给不同助手，在各自 Git 工作树中完成；全部结束后显式整合，检查冲突并运行必要测试。",
+    "detail": "Git 项目按可用执行名额并发，任务完成不等于自动合并；非 Git 目录串行执行，工作树不是系统沙箱，整合也不会自动提交或推送。",
+    "image": "delegation-parallel-changes.png",
+    "illustration": {
+      "layout": "delegation-parallel-changes",
+      "labels": [
+        "拆分独立修改",
+        "分别安排各自的工作范围",
+        "按名额同时执行",
+        "完成后整合并测试",
+        "确认实际交付",
+        "非 Git 目录仍按顺序执行"
+      ],
+      "takeaway": "独立修改可并行，交付仍需整合验证"
+    }
+  },
+  {
+    "id": "model-within-backend",
+    "topic": "models",
+    "title": "为不同分工选择合适的模型",
+    "problem": "主助手负责统筹，其他助手负责具体工作，你希望分别选择所用模型。",
+    "benefit": "在同一张模型卡中切换配置目标，可以为不同后端保存偏好，而不改变主助手所用后端。",
+    "action": "任务和队列空闲后发送 /model，先选主后端或其他后端的工作者偏好，再选可用模型并等待确认。",
+    "example": "/model",
+    "detail": "设置按当前线程和后端保存，供后续任务及助手启动使用；同后端主助手与工作者共享模型和思考强度偏好，不能逐个独立设置，查看其他目标不切换主后端。",
+    "image": "model-within-backend.png",
+    "illustration": {
+      "layout": "model-within-backend",
+      "labels": [
+        "选择配置目标",
+        "主后端或其他后端工作者",
+        "选择可用模型",
+        "等待应用成功回执",
+        "主助手保持原后端",
+        "同后端主助手与工作者共享偏好"
+      ],
+      "takeaway": "同一面板配置不同后端的模型偏好"
+    }
+  },
+  {
+    "id": "delegation-by-instruction",
+    "topic": "delegation",
+    "title": "调整委派对象，直接说出要求",
+    "problem": "下一项任务想交给另一种 AI，却不希望切换当前主助手。",
+    "benefit": "用文字明确后续委派对象，可以保留主助手继续统筹，同时调整下一项任务的执行安排。",
+    "action": "使用手机听写转成文字发送，明确后续任务要交给哪种已安装、已登录且可委派的后端。",
+    "example": "主助手保持不变，接下来的代码检查交给 Codex。",
+    "detail": "原始飞书语音消息不会被处理，必须先转成文字；要求针对后续委派，不切换主助手，也不把正在运行的任务迁移到另一后端。",
+    "image": "delegation-by-instruction.png",
+    "illustration": {
+      "layout": "delegation-by-instruction",
+      "labels": [
+        "听写转成文字",
+        "说明后续任务与目标助手",
+        "主助手安排委派",
+        "保留当前主助手继续统筹",
+        "只调整后续任务",
+        "原始语音不处理，运行任务不迁移"
+      ],
+      "takeaway": "用文字点名委派对象，主助手保持不变"
+    }
+  },
+  {
+    "id": "delegation-allowance",
+    "topic": "delegation",
+    "title": "根据可用额度，调整后续分工",
+    "problem": "某项服务的可用额度不足，后续任务仍需要继续安排。",
+    "benefit": "根据自己已确认的服务额度，手动把后续工作分配给其他可用后端，可以调整接下来的分工。",
+    "action": "确认目标服务还有可用额度及可用后端后，用文字说明后续任务的委派安排。",
+    "example": "后续资料检查改用 Kimi，你继续负责整体任务和结果汇总。",
+    "detail": "系统不会自动汇集各服务额度、转移余额或迁移运行中的任务；已安装不等于已登录或额度充足，实际接单还受后端与委派限制。",
+    "image": "delegation-allowance.png",
+    "illustration": {
+      "layout": "delegation-allowance",
+      "labels": [
+        "自行确认额度",
+        "核对目标服务是否可继续使用",
+        "调整后续分工",
+        "明确下一项交给哪个后端",
+        "额度不会自动汇集",
+        "不转移余额，也不中途迁移任务"
+      ],
+      "takeaway": "按已知额度手动安排后续工作"
+    }
+  },
+  {
+    "id": "delegation-resolve-disagreement",
+    "topic": "delegation",
+    "title": "意见存在分歧时，再核对依据",
+    "problem": "几位助手对同一问题得出不同结论，你需要知道分歧出在哪里。",
+    "benefit": "让主助手整理冲突结论和证据，再安排进一步复核，可以把讨论集中到具体依据上。",
+    "action": "要求主助手转述分歧、证据和相关代码，再交给可用助手复核，最后逐项验证。",
+    "example": "请把两位助手结论冲突的地方、各自依据和相关代码交给另一位可用助手复核，再由你逐项验证并给出结论。",
+    "detail": "由主助手显式转述分歧和证据，不是助手之间直接聊天；旧对话和其他助手的结果不会自动共享，多轮讨论也不保证正确。",
+    "image": "delegation-resolve-disagreement.png",
+    "illustration": {
+      "layout": "delegation-resolve-disagreement",
+      "labels": [
+        "整理冲突结论",
+        "列出各自依据与相关代码",
+        "转述后再复核",
+        "主助手收集进一步检查结果",
+        "按证据给出结论",
+        "助手之间没有直接聊天通道"
+      ],
+      "takeaway": "转述分歧，核对证据，再形成结论"
+    }
+  },
+  {
+    "id": "backend-current-thread",
+    "topic": "backends",
+    "title": "不同项目，保留各自的AI选择",
+    "problem": "不同项目需要不同的 AI，你不想每次切换项目都重新选择。",
+    "benefit": "为当前项目所在的线程保存后端选择，可以让其他项目继续沿用各自的设置。",
+    "action": "发送 /backend，保持 Current thread 后选择已安装、已登录的后端；旧版文本用 /backend <index> @。",
+    "example": "/backend\n/backend <index> @",
+    "detail": "只保存当前线程的选择，其他线程不变；<index> 使用本次列表的序号，切换需当前线程空闲，成功回执后再发任务。",
+    "image": "backend-current-thread.png",
+    "illustration": {
+      "layout": "backend-current-thread",
+      "labels": [
+        "打开后端设置",
+        "确认目标是当前项目的线程",
+        "仅应用当前线程",
+        "选择后等待成功回执",
+        "其他项目不变",
+        "每个线程保留自己的后端选择"
+      ],
+      "takeaway": "保存当前项目的选择，不影响其他线程"
+    }
+  },
+  {
+    "id": "effort-native-options",
+    "topic": "models",
+    "title": "复杂任务开始前，调整思考强度",
+    "problem": "准备处理复杂任务，希望先调整当前模型支持的思考强度。",
+    "benefit": "在任务开始前选择实际可用的档位，可以让后续任务使用明确保存的设置。",
+    "action": "任务和队列空闲后发送 /effort，按当前模型提供的选项设置；需要恢复默认时用 /effort auto。",
+    "example": "/effort\n/effort auto",
+    "detail": "可选档位取决于后端、版本和模型，auto 表示取消手动覆盖；设置不保证更准确或更快，也不是所有模型都有相同选项。",
+    "image": "effort-native-options.png",
+    "illustration": {
+      "layout": "effort-native-options",
+      "labels": [
+        "查看支持的档位",
+        "以当前模型实际选项为准",
+        "选择后等待确认",
+        "后续任务使用保存的偏好",
+        "需要时恢复默认",
+        "自动模式表示取消手动覆盖"
+      ],
+      "takeaway": "先查实际选项，再设置后续思考强度"
+    }
+  },
+  {
+    "id": "queue-confirm",
+    "topic": "queues",
+    "title": "当前任务没结束，先安排下一步",
+    "problem": "当前工作还在执行，你已经明确下一项任务，却不方便一直等着发送。",
+    "benefit": "先发送下一项要求并确认入队，可以让它按当前线程的等待顺序接续执行。",
+    "action": "当前线程忙时发送下一项任务，核对确认卡里的线程和内容，再点 Add to queue；可用 /queue 查看。",
+    "example": "完成当前修改后，请检查测试覆盖，并列出仍未覆盖的边界条件。",
+    "detail": "只发送消息不算入队，必须明确确认；未确认或确认过期不会执行，队列只保存在内存中，服务重启不保留。",
+    "image": "queue-confirm.png",
+    "illustration": {
+      "layout": "queue-confirm",
+      "labels": [
+        "发送下一项任务",
+        "当前任务继续执行",
+        "核对后确认入队",
+        "等待轮到这项任务",
+        "确认才算排队",
+        "发出消息不代表已经安排执行"
+      ],
+      "takeaway": "先发下一步，核对后明确确认入队"
+    }
+  },
+  {
+    "id": "abort-consequences",
+    "topic": "queues",
+    "title": "方向有变，及时停止当前任务",
+    "problem": "当前任务的方向已经改变，继续执行还可能带着旧计划往下处理。",
+    "benefit": "中止当前任务并清掉同线程的等待安排，可以在清理完成后重新布置工作。",
+    "action": "确认当前线程后发送 /abort，等待停止和清理结果，再安排新任务。",
+    "example": "/abort",
+    "detail": "中止会清除本线程已确认和待确认的队列，并取消未完成的委派工作；已经写入的文件不会回滚，其他线程不受影响。",
+    "image": "abort-consequences.png",
+    "illustration": {
+      "layout": "abort-consequences",
+      "labels": [
+        "确认需要停止的任务",
+        "核对当前线程与工作方向",
+        "发送中止命令",
+        "等清理完成再安排新工作",
+        "文件不会回滚",
+        "本线程旧队列和未完成委派会取消"
+      ],
+      "takeaway": "停止旧计划后再安排新任务，文件修改保留"
+    }
+  },
+  {
+    "id": "file-needs-instruction",
+    "topic": "attachments",
+    "title": "手机收到的文档，直接交给电脑处理",
+    "problem": "手机收到需要分析的文档，却还要等回到电脑前才能处理。",
+    "benefit": "把文档发到已授权接收文件的电脑，再说明分析要求，可以从手机继续处理资料。",
+    "action": "在已启用并完成文件接收授权的设备上，先向飞书机器人上传文件，再回复原文件或状态卡说明任务。",
+    "example": "请总结这份报告的三个结论，并标明依据；未能读取的内容请明确说明。",
+    "detail": "上传只暂存附件，不会自动启动任务或复制到项目目录；解析有范围限制，不包含扫描件 OCR 和加密文档，已保存不等于已完整读取。",
+    "image": "file-needs-instruction.png",
+    "illustration": {
+      "layout": "file-needs-instruction",
+      "labels": [
+        "上传文档",
+        "选择已完成文件接收授权的电脑",
+        "再发送分析要求",
+        "回复文件或状态卡说明任务",
+        "先看实际读取范围",
+        "上传不是任务，解析也可能不完整"
+      ],
+      "takeaway": "先传资料，再说明需要电脑完成的任务"
+    }
+  },
+  {
+    "id": "image-with-question",
+    "topic": "attachments",
+    "title": "遇到界面问题，把截图和问题一起发",
+    "problem": "界面出现问题时，仅靠文字很难说明具体位置和现象。",
+    "benefit": "把截图和明确的问题放在一起，可以让支持图像的助手结合画面检查，减少来回确认。",
+    "action": "确认当前后端支持图像后，在同一条飞书富文本消息中放入截图和问题，再一起发送。",
+    "example": "请看截图右下角的报错，解释可能原因，并说明还需要哪些信息，暂时不要修改文件。",
+    "detail": "需当前后端支持图像输入；AGY 只收文本，DSH 取决于连接能力和所选模型，单独发图会按默认的描述图片请求执行。",
+    "image": "image-with-question.png",
+    "illustration": {
+      "layout": "image-with-question",
+      "labels": [
+        "准备截图与问题",
+        "指出需要检查的位置和现象",
+        "放进同一条消息",
+        "用富文本一起发送图文",
+        "先确认支持图像",
+        "单独发图会作为描述图片的任务"
+      ],
+      "takeaway": "截图和具体问题放在同一条图文消息里"
+    }
+  },
+  {
+    "id": "device-selection",
+    "topic": "devices",
+    "title": "选择存放项目的电脑执行任务",
+    "problem": "已经绑定了多台电脑，当前项目却只在其中一台设备上。",
+    "benefit": "在同一个飞书聊天中选择目标电脑，可以把后续任务发送到实际存放项目的设备。",
+    "action": "先发送 /device 查看已绑定电脑和连接状态，再用 /device <index> 选择在线的目标电脑。",
+    "example": "/device\n/device <index>",
+    "detail": "<index> 使用本次列表显示的序号；切换只改变后续消息的目标设备，不会把正在运行的任务、项目文件或会话历史迁移到另一台电脑。",
+    "image": "device-selection.png",
+    "illustration": {
+      "layout": "device-selection",
+      "labels": [
+        "查看已绑定电脑",
+        "核对设备名称与连接状态",
+        "选择目标电脑",
+        "后续消息发往该设备",
+        "任务和历史不迁移",
+        "选择实际存放项目的在线电脑"
+      ],
+      "takeaway": "先选对电脑，再安排后续工作"
+    }
+  },
+  {
+    "id": "clear-thread-context",
+    "topic": "context",
+    "title": "旧讨论干扰新任务，清理当前上下文",
+    "problem": "准备开始新的工作，旧讨论和复用助手的历史却仍可能影响回答。",
+    "benefit": "清理当前线程各后端和托管助手的续聊关联，可以在保留项目文件与设置的情况下重新开始。",
+    "action": "等当前任务、队列和委派助手全部结束且退出已确认后，发送 /clear 或同义命令 /new。",
+    "example": "/clear\n/new",
+    "detail": "CLI 1.6.167 起清理本线程全部后端和托管助手的续聊关联；项目文件、Git 产物、归档历史、登录和设置保留，其他线程不受影响，失败处理后可重试。",
+    "image": "clear-thread-context.png",
+    "illustration": {
+      "layout": "clear-thread-context",
+      "labels": [
+        "等待任务全部结束",
+        "队列清空且助手退出已确认",
+        "清理当前上下文",
+        "当前线程主助手与委派一起重开",
+        "文件与设置保留",
+        "其他线程和归档历史不受影响"
+      ],
+      "takeaway": "清理续聊关联，保留项目文件与设置"
+    }
+  },
+  {
+    "id": "compact-backend",
+    "topic": "context",
+    "title": "对话已经很长，继续推进当前工作",
+    "problem": "当前任务还没完成，对话却已经很长，直接清空又可能丢失工作背景。",
+    "benefit": "可以尝试压缩已有对话，减少继续处理时携带的历史，具体效果由后端决定。",
+    "action": "任务和队列空闲后发送 /compact，在支持此功能的后端上尝试压缩后继续原任务。",
+    "example": "/compact",
+    "detail": "各后端可能使用原生压缩或摘要后重开，不保证保留全部细节；AGY 摘要失败可能直接重置，命令成功提示不等于摘要已保留，也不能保证失败后原会话仍在。",
+    "image": "compact-backend.png",
+    "illustration": {
+      "layout": "compact-backend",
+      "labels": [
+        "当前工作还需继续",
+        "对话已长但任务尚未结束",
+        "空闲后尝试压缩",
+        "按后端支持方式延续工作",
+        "信息可能不完整",
+        "压缩或摘要不保证保留全部细节"
+      ],
+      "takeaway": "长对话可尝试压缩，不能承诺无损保留"
+    }
+  },
+  {
+    "id": "skills-by-backend",
+    "topic": "capabilities",
+    "title": "电脑上配置好的Skill，手机上继续用",
+    "problem": "电脑上已经配置了常用 Skill，离开电脑后又要重新说明操作步骤。",
+    "benefit": "从飞书请求复用当前后端已有的 Skill，可以沿用既有流程和输出要求，不必重新描述整套步骤。",
+    "action": "先发送 /skills 查看当前后端的技能，再用普通文字点名已安装的实际技能并说明任务。",
+    "example": "/skills\n请使用已安装的「实际技能名」检查本次修改，并按该技能要求返回结果。",
+    "detail": "Claude 可透传实际技能命令；Codex 的 /skills 是本地发现，不支持 TUI 斜杠透传；列出不等于安装或已加载，也不会自动跨后端同步，DSH 不支持 /skills。",
+    "image": "skills-by-backend.png",
+    "illustration": {
+      "layout": "skills-by-backend",
+      "labels": [
+        "查看当前后端技能",
+        "以电脑实际安装的技能为准",
+        "点名技能与任务",
+        "请求复用既有步骤和输出要求",
+        "列出不等于安装",
+        "技能不会自动跨后端同步"
+      ],
+      "takeaway": "从手机请求复用当前后端已有的技能"
+    }
+  }
+]

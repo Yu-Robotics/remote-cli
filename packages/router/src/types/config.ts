@@ -3,6 +3,12 @@
  */
 
 export interface RouterConfig {
+  tips?: {
+    /** Disable automatic delivery globally; manual browsing remains available. */
+    enabled?: boolean;
+    /** Default user schedule timezone. Defaults to Asia/Shanghai. */
+    timezone?: string;
+  };
   files?: {
     /** Defaults to true. Downloads still require an owner-approved CLI identity. */
     enabled?: boolean;

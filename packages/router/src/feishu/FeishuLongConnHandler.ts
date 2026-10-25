@@ -144,6 +144,9 @@ export class FeishuLongConnHandler {
   /** Callback invoked when a user confirms or cancels a queued command. */
   onApprovalAction?: (openId: string, requestId: string, cardId: string, decision: string) => Promise<string>;
   onMaintenanceAction?: (openId: string, id: string, cardId: string, action: string, offset?: number) => Promise<string>;
+  onTipsCommand?: (openId: string, content: string) => Promise<void>;
+  onTipsAction?: (openId: string, cardId: string, payload: unknown) => Promise<string>;
+  onUserActivity?: (openId: string) => Promise<void>;
   onQueueAction?: (openId: string, action: 'confirm' | 'cancel', queueId: string, threadId: string, cardMessageId?: string) => Promise<'sent' | 'already_processed'>;
 
   /**
@@ -186,6 +189,7 @@ export class FeishuLongConnHandler {
 
       const openId = sender.sender_id.open_id;
       const messageId = message.message_id;
+      this.recordUserActivity(openId);
 
       // Extract parent_id for reply-based thread routing
       const parentId: string | undefined = message.parent_id || undefined;
@@ -371,6 +375,11 @@ export class FeishuLongConnHandler {
 
       case '/help':
         await this.handleHelpCommand(openId, messageId);
+        break;
+
+      case '/tips':
+        if (this.onTipsCommand) await this.onTipsCommand(openId, content);
+        else await this.replyToMessage(messageId, 'Tips are not available on this Router.');
         break;
 
       default:
@@ -769,6 +778,7 @@ Device management commands:
 /device <device-id-or-index> - Quick switch to device
 /device unbind <device-id-or-index> - Unbind a specific device
 /help - Show help information
+/tips - Browse illustrated tips and manage subscriptions or mute
 
 Backend and session commands (sent to active device):
 /cd <directory> - Change working directory
@@ -1396,6 +1406,33 @@ Examples:
     return this.createContinuationCard(openId, elements, undefined, true, header);
   }
 
+  /** A single passive send: never fall back, execute examples, or register task routes. */
+  async sendTipCard(openId: string, elements: any[], header: Record<string, unknown>, deliveryKey: string): Promise<string | null> {
+    const result = await this.client.im.message.create({
+      params: { receive_id_type: 'open_id' },
+      data: { receive_id: openId, msg_type: 'interactive', uuid: deliveryKey,
+        content: JSON.stringify({ schema: '2.0', header, body: { elements } }) },
+    });
+    return result?.code === 0 && result.data?.message_id ? result.data.message_id : null;
+  }
+
+  async updateTipCard(cardId: string, elements: any[], header: Record<string, unknown>): Promise<void> {
+    await this.withMessageLock(cardId, async () => {
+      const result = await this.client.im.message.patch({ path: { message_id: cardId },
+        data: { content: JSON.stringify({ schema: '2.0', header, body: { elements } }) } });
+      if (result?.code !== 0) throw new Error('Could not update tip card.');
+    });
+  }
+
+  private recordUserActivity(openId: string): void {
+    // Activity persistence must never delay task admission or expose private identifiers in logs.
+    try {
+      void this.onUserActivity?.(openId).catch(() => console.error('[Tips] Could not record user activity.'));
+    } catch {
+      console.error('[Tips] Could not record user activity.');
+    }
+  }
+
   async updateApprovalCard(cardId: string, elements: any[], header?: Record<string, unknown>): Promise<void> {
     await this.withMessageLock(cardId, async () => {
       await this.client.im.message.patch({ path: { message_id: cardId },
@@ -1909,6 +1946,20 @@ Examples:
       parsed = typeof actionValue === 'string' ? JSON.parse(actionValue) : actionValue;
     } catch {
       return;
+    }
+
+    if (!parsed || typeof parsed !== 'object') return;
+    this.recordUserActivity(openId);
+    if (parsed.action === 'tips') {
+      const cardId = data?.context?.open_message_id;
+      if (typeof cardId !== 'string' || !this.onTipsAction) {
+        return { toast: { type: 'error', content: 'This tip card is unavailable. Run /tips again.' } };
+      }
+      try {
+        return { toast: { type: 'info', content: await this.onTipsAction(openId, cardId, parsed) } };
+      } catch {
+        return { toast: { type: 'error', content: 'Could not update tips. Please try /tips again.' } };
+      }
     }
 
     if (parsed.action === 'settings') {
