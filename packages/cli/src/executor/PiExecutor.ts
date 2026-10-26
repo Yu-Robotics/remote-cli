@@ -240,6 +240,8 @@ export class PiExecutor implements IExecutor {
   private activeTurn: ActiveTurn | null = null;
   private readonly activityTracker = new ActivityTracker();
   private pendingUi: PendingUiRequest | null = null;
+  /** Pi's own dialog timeout (it sends no event when it resolves the dialog). */
+  private pendingUiExpiry: ReturnType<typeof setTimeout> | null = null;
   private destroyed = false;
   private delegation?: DelegationConnection;
   private readonly delegationWorker: boolean;
@@ -461,6 +463,9 @@ export class PiExecutor implements IExecutor {
       } catch {
         // Queue may already be empty.
       }
+      // A successor turn may own the session by now (this turn can settle while
+      // the queue request is pending); its abort belongs to that turn.
+      if (this.activeTurn !== active) return;
       try {
         await this.client.request({ type: 'abort' });
       } catch (error) {
@@ -1214,8 +1219,30 @@ export class PiExecutor implements IExecutor {
     this.activeTurn?.options.onStream?.(lines.join('\n'));
     this.pendingUi = { id, method, title, options };
     // The turn now waits for a human, not for Pi; suspend the watchdog until the
-    // reply re-arms it, so a slow answer is never reported as Pi inactivity.
-    if (this.activeTurn) this.clearTurnTimers(this.activeTurn);
+    // reply re-arms it, so a slow answer is never reported as Pi inactivity. The
+    // hard limit stays armed because it bounds the whole turn.
+    if (this.activeTurn) this.clearInactivityTimer(this.activeTurn);
+    this.schedulePendingUiExpiry(id, event.timeout);
+  }
+
+  /**
+   * Pi resolves a dialog that carries its own timeout and sends no event for it.
+   * Without this the watchdog would stay suspended for the rest of the turn.
+   */
+  private schedulePendingUiExpiry(id: string, timeoutMs: unknown): void {
+    this.clearPendingUiExpiry();
+    if (typeof timeoutMs !== 'number' || !Number.isFinite(timeoutMs) || timeoutMs <= 0) return;
+    this.pendingUiExpiry = setTimeout(() => {
+      this.pendingUiExpiry = null;
+      if (this.pendingUi?.id !== id) return;
+      this.pendingUi = null;
+      if (this.activeTurn) this.armInactivityTimer(this.activeTurn);
+    }, timeoutMs);
+  }
+
+  private clearPendingUiExpiry(): void {
+    if (this.pendingUiExpiry) clearTimeout(this.pendingUiExpiry);
+    this.pendingUiExpiry = null;
   }
 
   private async resolveModel(value: string): Promise<{ provider?: string; modelId: string } | null> {
@@ -1355,10 +1382,13 @@ export class PiExecutor implements IExecutor {
       clearTimeout(active.timeoutTimer);
       active.timeoutTimer = undefined;
     }
-    if (active.inactivityTimer) {
-      clearTimeout(active.inactivityTimer);
-      active.inactivityTimer = undefined;
-    }
+    this.clearInactivityTimer(active);
+  }
+
+  /** Clear only the inactivity watchdog; a hard deadline keeps running. */
+  private clearInactivityTimer(active: ActiveTurn): void {
+    if (active.inactivityTimer) clearTimeout(active.inactivityTimer);
+    active.inactivityTimer = undefined;
   }
 
   /**
@@ -1369,8 +1399,9 @@ export class PiExecutor implements IExecutor {
     // A claimed failure is already aborting this turn; do not re-arm behind it.
     if (active.programError) return;
     if (this.pendingUi) {
-      // A turn blocked on a user answer is not idle; the reply re-arms it.
-      this.clearTurnTimers(active);
+      // A turn blocked on a user answer is not idle; the reply re-arms it. Only
+      // the watchdog pauses: a caller-supplied hard limit still runs.
+      this.clearInactivityTimer(active);
       return;
     }
     const requested = active.options.inactivityTimeout ?? this.inactivityTimeoutMs;
@@ -1410,6 +1441,7 @@ export class PiExecutor implements IExecutor {
   private cancelPendingUi(cancel = false): void {
     const pending = this.pendingUi;
     this.pendingUi = null;
+    this.clearPendingUiExpiry();
     if (pending && cancel) {
       try {
         this.client.send({ type: 'extension_ui_response', id: pending.id, cancelled: true });

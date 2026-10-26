@@ -1550,7 +1550,7 @@ remote-cli config set executor.type pi
 remote-cli config set executor.pi.model google/gemini-3-flash
 ```
 
-当前 Pi 包要求 Node.js 22.19.0 或更高版本。Pi 后端为每个活跃 thread 运行一个持久化的 `pi --mode rpc` 进程。会话文件保存在 `~/.remote-cli/pi-sessions/`，避免占用交互式 `~/.pi` 会话。`/model` 使用 RPC 的 `get_available_models` / `set_model`，`/effort` 映射到 Pi 的 thinking 等级（`off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`），`/compact` 使用原生 RPC 压缩，`/abort` 发送 RPC `abort`，`/context` 使用 RPC `get_session_stats`，图片消息作为 Pi 图片内容发送。provider 自动重试时会显示进度，但不会把提示混入最终模型回答。由于 Pi 会把工作目录写入会话头，切换工作目录时会启动新的 Pi 会话。`autoApprove: true` 通过官方 `--approve` 参数信任项目本地资源；扩展 UI 对话框仍会转发给用户，并能显示兼容的结构化选择项中的标签与说明。Pi 单次任务默认只在连续 10 分钟没有任何 Pi 事件时才中断（扩展 UI 的提示与回复同样算事件，等待用户回答期间不计入超时），因此持续产生事件的长时间命令链可以继续执行；主动 `/abort` 或配置的硬上限会更早结束它，且都会给出明确原因，而不是 “Request aborted”。切换到该后端前需先用交互式 `pi` 完成登录。
+当前 Pi 包要求 Node.js 22.19.0 或更高版本。Pi 后端为每个活跃 thread 运行一个持久化的 `pi --mode rpc` 进程。会话文件保存在 `~/.remote-cli/pi-sessions/`，避免占用交互式 `~/.pi` 会话。`/model` 使用 RPC 的 `get_available_models` / `set_model`，`/effort` 映射到 Pi 的 thinking 等级（`off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`），`/compact` 使用原生 RPC 压缩，`/abort` 发送 RPC `abort`，`/context` 使用 RPC `get_session_stats`，图片消息作为 Pi 图片内容发送。provider 自动重试时会显示进度，但不会把提示混入最终模型回答。由于 Pi 会把工作目录写入会话头，切换工作目录时会启动新的 Pi 会话。`autoApprove: true` 通过官方 `--approve` 参数信任项目本地资源；扩展 UI 对话框仍会转发给用户，并能显示兼容的结构化选择项中的标签与说明。Pi 单次任务默认只在连续 10 分钟没有任何 Pi 事件时才中断（扩展 UI 的提示与回复同样算事件，等待用户回答期间不计入无活动超时、但硬上限仍然生效），因此持续产生事件的长时间命令链可以继续执行；主动 `/abort` 或调用方设置的硬上限会更早结束它，且都会给出明确原因，而不是 “Request aborted”。切换到该后端前需先用交互式 `pi` 完成登录。
 
 #### Using DeepSeek Harness (DSH)
 
