@@ -9,7 +9,7 @@ COPY packages/router/package.json packages/router/package.json
 RUN npm ci
 
 COPY packages/router packages/router
-RUN ./node_modules/.bin/tsc -p /app/packages/router/tsconfig.json
+RUN npm run build --workspace @yu_robotics/remote-cli-router
 
 FROM node:22-bookworm-slim AS runtime
 
