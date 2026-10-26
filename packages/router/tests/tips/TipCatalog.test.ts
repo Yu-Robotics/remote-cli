@@ -347,6 +347,18 @@ describe('reviewed illustrated tip catalog', () => {
       expect(() => validatePng(encodeChunks(good.subarray(0, 8), chunks))).toThrow(error);
     });
 
+  it('uses the asset-packaging workspace build before copying dist into the Docker runtime', () => {
+    const dockerfile = fs.readFileSync(path.join(root, 'Dockerfile'), 'utf8');
+    const [buildStage, runtimeStage] = dockerfile.split(/^FROM .+ AS runtime\s*$/m);
+    const workspaceBuild = /^RUN npm run build (?:--workspace[= ]|-w )@yu_robotics\/remote-cli-router\s*$/m;
+    const command = buildStage.match(workspaceBuild);
+    expect(command, 'Docker must run the complete workspace build, including Tips packaging').not.toBeNull();
+    const sourceCopy = buildStage.indexOf('COPY packages/router packages/router');
+    expect(sourceCopy).toBeGreaterThanOrEqual(0);
+    expect(sourceCopy).toBeLessThan(command!.index!);
+    expect(runtimeStage).toMatch(/^COPY --from=build \/app\/packages\/router\/dist packages\/router\/dist\s*$/m);
+  });
+
   it('packages the JSON and all byte-identical images without a renderer dependency', () => {
     const outputDirectory = makeTemp();
     const result = buildTips({ sourceDirectory: source, outputDirectory });
