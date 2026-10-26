@@ -157,19 +157,7 @@ export class BindingManager {
       if (!binding || deviceIndex < 0) return false;
       this.assertOwnership(deviceId, openId);
       await beforeUnbind?.(deviceId);
-      binding.devices.splice(deviceIndex, 1);
-      await this.store.removeDeviceToUserMap(deviceId);
-      if (binding.devices.length === 0) {
-        await this.store.deleteUserBinding(openId);
-        return true;
-      }
-      if (binding.activeDeviceId === deviceId) {
-        binding.devices[0] = { ...binding.devices[0], isActive: true };
-        binding.activeDeviceId = binding.devices[0].deviceId;
-      }
-      binding.updatedAt = Date.now();
-      await this.store.setUserBinding(openId, binding);
-      return true;
+      return this.store.unbindDevice(openId, deviceId);
     });
   }
 

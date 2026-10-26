@@ -251,6 +251,32 @@ export class JsonStore {
     });
   }
 
+  /** Remove both ownership representations and select any replacement active device in one snapshot. */
+  async unbindDevice(openId: string, deviceId: string): Promise<boolean> {
+    let removed = false;
+    await this.scheduleSave(current => {
+      const binding = current.userBindings[openId];
+      const deviceIndex = binding?.devices.findIndex(device => device.deviceId === deviceId) ?? -1;
+      if (!binding || deviceIndex < 0) return undefined;
+      const devices = binding.devices.filter(device => device.deviceId !== deviceId).map(device => ({ ...device }));
+      const deviceToUserMap = { ...current.deviceToUserMap };
+      if (deviceToUserMap[deviceId] === openId) delete deviceToUserMap[deviceId];
+      const userBindings = { ...current.userBindings };
+      if (devices.length === 0) delete userBindings[openId];
+      else {
+        let activeDeviceId = binding.activeDeviceId;
+        if (activeDeviceId === deviceId) {
+          devices[0] = { ...devices[0], isActive: true };
+          activeDeviceId = devices[0].deviceId;
+        }
+        userBindings[openId] = { ...binding, devices, activeDeviceId, updatedAt: Date.now() };
+      }
+      removed = true;
+      return { ...current, userBindings, deviceToUserMap };
+    });
+    return removed;
+  }
+
   async deleteUserBinding(openId: string): Promise<void> {
     await this.scheduleSave(current => {
       const binding = current.userBindings[openId];

@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.188] - 2026-10-26
+
+### Fixed
+- Apply each device unbind in one durable snapshot, covering the user record, reverse ownership mapping, active-device fallback, and last-device deletion. A failed replacement now preserves both ownership representations instead of leaving a listed device without its mapping.
+
+### Tests
+- Cover active, inactive, and last-device unbinds, pre-replacement failure coherence in memory and after reload, and queued storage mutations that must not resurrect removed ownership.
+
 ## [1.6.187] - 2026-10-26
 
 ### Fixed
