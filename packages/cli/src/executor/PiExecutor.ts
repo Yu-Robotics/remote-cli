@@ -41,6 +41,8 @@ export interface PiExecutorOptions {
   delegationWorker?: boolean;
   sessionBaseDir?: string;
   clientFactory?: (launch: PiLaunchOptions) => PiTransport;
+  /** Native inactivity limit in milliseconds; `0` disables the watchdog. */
+  inactivityTimeoutMs?: number;
 }
 
 interface ActiveTurn {
@@ -49,8 +51,13 @@ interface ActiveTurn {
   output: string[];
   error?: string;
   lastRetryError?: string;
+  /** remote-cli-owned reason that Pi's own aborted-turn events must not replace. */
+  programError?: string;
   sawAgentStart: boolean;
+  /** One-shot hard execution deadline from `ExecuteOptions.timeout`. */
   timeoutTimer?: ReturnType<typeof setTimeout>;
+  /** Re-armed inactivity watchdog; every Pi event resets it. */
+  inactivityTimer?: ReturnType<typeof setTimeout>;
   settle?: () => void;
   /** Fallback ids from tool_execution_start events lacking toolCallId, consumed FIFO by matching end events. */
   pendingToolFallbackIds: string[];
@@ -85,7 +92,11 @@ function sameFilePath(left: string, right: string): boolean {
   return canonical(left) === canonical(right);
 }
 
-const DEFAULT_TURN_TIMEOUT_MS = 10 * 60 * 1000;
+/**
+ * Default inactivity window: any Pi event re-arms it, so total duration alone
+ * never fails a turn. Matches the Agy and Codex backends.
+ */
+const DEFAULT_INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000;
 const COMPACT_TIMEOUT_MS = 10 * 60 * 1000;
 /** Grace period to distinguish immediate slash/extension commands from a real agent turn. */
 const IMMEDIATE_SETTLE_MS = 750;
@@ -204,6 +215,7 @@ export class PiExecutor implements IExecutor {
   private readonly provider?: string;
   private readonly autoApprove: boolean;
   private readonly threadId?: string;
+  private readonly inactivityTimeoutMs: number;
   private readonly sessionFilePath: string;
   private readonly sessionStoreDir: string;
   private readonly piCommand?: string;
@@ -244,6 +256,7 @@ export class PiExecutor implements IExecutor {
     this.provider = options.provider;
     this.autoApprove = options.autoApprove ?? true;
     this.threadId = options.threadId;
+    this.inactivityTimeoutMs = options.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS;
     this.delegationWorker = options.delegationWorker ?? false;
     this.piCommand = options.piCommand;
 
@@ -315,16 +328,8 @@ export class PiExecutor implements IExecutor {
         pendingToolFallbackIds: [],
         nextToolFallbackId: 0,
       };
-      if (options.timeout !== 0 && options.timeout && options.timeout > 0) {
-        active.timeoutTimer = setTimeout(() => {
-          void this.failActive(active, `Command timed out after ${options.timeout}ms`);
-        }, options.timeout);
-      } else if (options.timeout !== 0) {
-        active.timeoutTimer = setTimeout(() => {
-          void this.failActive(active, `Command timed out after ${DEFAULT_TURN_TIMEOUT_MS}ms`);
-        }, DEFAULT_TURN_TIMEOUT_MS);
-      }
       this.activeTurn = active;
+      this.armTurnDeadlines(active);
       this.activityTracker.setCallback(options.onActivity);
       this.activityTracker.reset();
 
@@ -434,6 +439,9 @@ export class PiExecutor implements IExecutor {
     }
     if (!this.client.isRunning()) return false;
     const active = this.activeTurn;
+    // Pi settles its own aborted turn before answering the abort RPC, so claim
+    // remote-cli's reason first; a deadline that already failed keeps its own.
+    if (active && !active.programError) active.programError = 'Aborted';
     try {
       await this.client.request({ type: 'clear_queue' });
     } catch {
@@ -447,8 +455,9 @@ export class PiExecutor implements IExecutor {
       catch (error) { cleanupError = error; }
     }
     if (active && this.activeTurn === active) {
-      this.completeActive({ success: false, error: cleanupError ? this.friendlyError(cleanupError) : 'Aborted',
-        sessionAbbr: this.sessionAbbr() });
+      const claimed = active.programError ?? 'Aborted';
+      active.programError = cleanupError ? `${claimed}; ${this.friendlyError(cleanupError)}` : claimed;
+      this.completeActive({ success: false, error: active.programError, sessionAbbr: this.sessionAbbr() });
     }
     this.cancelPendingUi(true);
     if (cleanupError) throw cleanupError;
@@ -504,6 +513,9 @@ export class PiExecutor implements IExecutor {
     const trimmed = input.trim();
     if (!trimmed) return false;
     this.pendingUi = null;
+    // The reply restarts the wait for Pi, so it re-arms the watchdog rather
+    // than inheriting the little time left from before the prompt.
+    if (this.activeTurn) this.armInactivityTimer(this.activeTurn);
 
     if (pending.method === 'confirm') {
       if (/^(n|no|cancel|false)$/i.test(trimmed)) {
@@ -1006,12 +1018,18 @@ export class PiExecutor implements IExecutor {
     }
 
     if (event.type === 'extension_ui_request') {
+      // A prompt is Pi activity, and the user may need a while to answer it.
+      if (this.activeTurn) this.armInactivityTimer(this.activeTurn);
       void this.handleUiRequest(event);
       return;
     }
 
     const active = this.activeTurn;
     if (!active) return;
+
+    // Pi is still working: re-arm the watchdog so many short tool calls cannot
+    // exhaust it by cumulative duration.
+    this.armInactivityTimer(active);
 
     if (event.type === 'agent_start') {
       active.sawAgentStart = true;
@@ -1277,13 +1295,60 @@ export class PiExecutor implements IExecutor {
     this.activityTracker.reset();
     this.activityTracker.setCallback(undefined);
     if (active.timeoutTimer) clearTimeout(active.timeoutTimer);
+    if (active.inactivityTimer) clearTimeout(active.inactivityTimer);
     active.settle?.();
     this.cancelPendingUi(true);
-    active.resolve(result);
+    // A claimed failure wins over any later result: Pi's own aborted turn would
+    // otherwise report a successful turn that merely raced the deadline.
+    active.resolve(active.programError
+      ? { ...result, success: false, error: active.programError }
+      : result);
+  }
+
+  /** Arm the one-shot hard deadline and the re-armable inactivity watchdog. */
+  private armTurnDeadlines(active: ActiveTurn): void {
+    const requested = active.options.timeout;
+    if (typeof requested === 'number' && requested > 0) {
+      active.timeoutTimer = setTimeout(() => {
+        void this.failActive(active, `Pi turn timed out after ${requested}ms (hard time limit)`);
+      }, requested);
+    }
+    this.armInactivityTimer(active);
+  }
+
+  /**
+   * Arm or re-arm the inactivity watchdog. `inactivityTimeout: 0` disables it
+   * (used by delegated workers, whose manager owns liveness).
+   */
+  private armInactivityTimer(active: ActiveTurn): void {
+    // A claimed failure is already aborting this turn; do not re-arm behind it.
+    if (active.programError) return;
+    const requested = active.options.inactivityTimeout ?? this.inactivityTimeoutMs;
+    if (active.inactivityTimer) {
+      clearTimeout(active.inactivityTimer);
+      active.inactivityTimer = undefined;
+    }
+    if (!Number.isFinite(requested) || requested <= 0) return;
+    active.inactivityTimer = setTimeout(() => {
+      void this.failActive(active, `Pi turn timed out after ${requested}ms of inactivity (no output or tool events)`);
+    }, requested);
   }
 
   private async failActive(active: ActiveTurn, error: string): Promise<void> {
-    if (this.activeTurn !== active) return;
+    // Claim the turn once: an event arriving while the abort RPC is in flight
+    // must not start a second failure or a duplicate abort.
+    if (this.activeTurn !== active || active.programError) return;
+    // Claim the reason before the RPC: Pi answers `abort` only after it persists
+    // its own aborted turn, and that event settles this turn first.
+    active.programError = error;
+    if (active.timeoutTimer) {
+      clearTimeout(active.timeoutTimer);
+      active.timeoutTimer = undefined;
+    }
+    if (active.inactivityTimer) {
+      clearTimeout(active.inactivityTimer);
+      active.inactivityTimer = undefined;
+    }
     let cleanupError: unknown;
     try {
       await this.client.request({ type: 'abort' });
@@ -1292,9 +1357,8 @@ export class PiExecutor implements IExecutor {
       catch (failure) { cleanupError = failure; }
     }
     if (this.activeTurn === active) {
-      this.completeActive({ success: false,
-        error: cleanupError ? `${error}; ${this.friendlyError(cleanupError)}` : error,
-        sessionAbbr: this.sessionAbbr() });
+      if (cleanupError) active.programError = `${active.programError}; ${this.friendlyError(cleanupError)}`;
+      this.completeActive({ success: false, error: active.programError, sessionAbbr: this.sessionAbbr() });
     }
   }
 
