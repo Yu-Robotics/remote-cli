@@ -205,9 +205,10 @@ describe('managed Git phases and native worker deadlines', { timeout: 30_000 }, 
     const scope = manager.begin(parent);
     vi.useFakeTimers();
     const starting = Array.from({ length: 5 }, (_, index) => start(scope, `queued-prepare-${index}`));
+    let queued: DelegatedTaskResult;
     try {
       await vi.waitFor(() => expect(prepare).toHaveBeenCalledTimes(5), PHASE_WAIT_OPTIONS);
-      const queued = await start(scope, 'sixth');
+      queued = await start(scope, 'sixth');
       expect(queued.state).toBe('queued');
       await vi.advanceTimersByTimeAsync(DELEGATION_LIMITS.storageTimeoutMs + 1);
       expect(workers).toHaveLength(0);
@@ -216,12 +217,38 @@ describe('managed Git phases and native worker deadlines', { timeout: 30_000 }, 
     const tasks = await Promise.all(starting);
     expect(tasks.every(task => task.state === 'running')).toBe(true);
     expect(new Set(workers.map(worker => worker.cwd)).size).toBe(5);
-    workers[0].finish({ success: true });
-    // Concurrent preparation may dispatch workers in a different order from
-    // admission. Observe slot-driven dispatch, not an unrelated task's result.
-    await vi.waitFor(() => expect(workers).toHaveLength(6), { timeout: 5000 });
-    workers.slice(1).forEach(worker => worker.finish({ success: true }));
-    expect((await scope.collectPendingResults()).every(task => task.state === 'succeeded')).toBe(true);
+    // Preparation may reorder dispatch. Match the finished executor's checkout
+    // to its task instead of assuming it belongs to the first admission.
+    const prepared = await Promise.all(prepare.mock.results.map(call => call.value));
+    const finishing = prepared.find(workspace => workspace?.cwd === workers[0].cwd);
+    expect(finishing).toBeDefined();
+    const collectionEntered = deferred();
+    const collectionGate = deferred();
+    const collect = manager.workspaceManager.collect.bind(manager.workspaceManager);
+    vi.spyOn(manager.workspaceManager, 'collect').mockImplementation(async (...args) => {
+      if (args[0].taskId === finishing!.taskId) {
+        collectionEntered.resolve();
+        await collectionGate.promise;
+      }
+      return collect(...args);
+    });
+    try {
+      workers[0].finish({ success: true });
+      await collectionEntered.promise;
+      expect(workers).toHaveLength(5);
+      expect((manager as any).running).toBe(5);
+      expect(await scope.invoke('remote_cli_result', { taskId: queued.taskId, waitSeconds: 0 }, 'queued-during-collection'))
+        .toMatchObject({ state: 'queued' });
+
+      // Native completion is not slot release: collection, reclamation and lane
+      // metadata must settle before the sixth task can prepare its checkout.
+      const finished = result(scope, finishing!.taskId);
+      collectionGate.resolve();
+      expect(await finished).toMatchObject({ state: 'succeeded' });
+      await vi.waitFor(() => expect(workers).toHaveLength(6), PHASE_WAIT_OPTIONS);
+      workers.slice(1).forEach(worker => worker.finish({ success: true }));
+      expect((await scope.collectPendingResults()).every(task => task.state === 'succeeded')).toBe(true);
+    } finally { collectionGate.resolve(); }
     expect((manager as any).running).toBe(0);
   });
 
