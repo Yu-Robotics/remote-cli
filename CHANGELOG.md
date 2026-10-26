@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.186] - 2026-10-26
+
+### Fixed
+- Make the Pi inactivity watchdog the `ExecuteOptions.inactivityTimeout` window (10 minutes by default), re-armed by every Pi event so a long tool chain no longer fails exactly 10 minutes after the prompt. An extension-UI prompt suspends the watchdog until the user answers while a positive hard limit stays armed, and a dialog that Pi resolves on its own timer re-arms the watchdog. A positive `ExecuteOptions.timeout` is a one-shot hard limit and a non-finite one arms nothing, while `inactivityTimeout: 0` / `timeout: 0` each disable only their own deadline, matching the Agy and Codex executors.
+- Claim remote-cli's own failure reason before Pi settles its aborted turn, so a deadline or an explicit `/abort` no longer surfaces Pi's raw `Request aborted`. A turn already failing is never failed twice, overlapping deadline and `/abort` paths send a single `abort`, `/abort` waits for the in-flight cleanup instead of releasing the turn early, and cleanup of a settled turn no longer aborts, recycles, or cancels the input dialog of a turn started afterwards.
+
+### Tests
+- Cover the deadline-versus-abort ordering, continuous tool activity that outlasts the watchdog window, the hard limit that events cannot extend, a single abort while the failure is in flight, a waiting input dialog that suspends the watchdog without cancelling the hard limit, a dialog that Pi resolves itself, a dialog still open when the turn settles, concurrent `/abort` cleanup, an `/abort` still clearing the queue when a successor starts, the cleared watchdog after a settled turn, the disabled, non-finite and default deadlines, and cleanup ownership after settlement.
+
 ## [1.6.185] - 2026-10-26
 
 ### Fixed
