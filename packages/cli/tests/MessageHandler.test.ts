@@ -2511,6 +2511,40 @@ describe('MessageHandler', () => {
       );
     });
 
+    it.each([false, true])('should reject an unconfirmed abort returning %s without clearing the busy fence', async aborted => {
+      ctx.mockThreadPool.isThreadBusy = vi.fn().mockReturnValue(true);
+      ctx.mockExecutor.abort = vi.fn().mockResolvedValue(aborted);
+      ctx.mockExecutor.hasUncertainShutdown = vi.fn().mockReturnValue(true);
+
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'msg-abort-retry', content: '/abort', timestamp: Date.now() });
+
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+        success: false, error: expect.stringContaining('remains busy'),
+      }));
+      expect(ctx.mockThreadPool.setThreadBusy).not.toHaveBeenCalledWith('default-thread-id', false);
+    });
+
+    it('should report uncertainty to a concurrent abort waiter', async () => {
+      let releaseAbort!: (result: boolean) => void;
+      ctx.mockThreadPool.isThreadBusy = vi.fn().mockReturnValue(true);
+      ctx.mockExecutor.abort = vi.fn().mockImplementation(() => new Promise<boolean>(resolve => { releaseAbort = resolve; }));
+      ctx.mockExecutor.hasUncertainShutdown = vi.fn().mockReturnValue(true);
+
+      const first = (ctx.handler as any).handleAbortCommand('abort-first', 'default-thread-id', ctx.mockExecutor);
+      await vi.waitFor(() => expect(ctx.mockExecutor.abort).toHaveBeenCalledOnce());
+      const second = (ctx.handler as any).handleAbortCommand('abort-waiter', 'default-thread-id', ctx.mockExecutor);
+      expect(ctx.mockExecutor.abort).toHaveBeenCalledOnce();
+      releaseAbort(true);
+      await Promise.all([first, second]);
+
+      for (const messageId of ['abort-first', 'abort-waiter']) {
+        expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+          messageId, success: false, error: expect.stringContaining('remains busy'),
+        }));
+      }
+      expect(ctx.mockThreadPool.setThreadBusy).not.toHaveBeenCalledWith('default-thread-id', false);
+    });
+
     it('should abort command on a specific thread (not default)', async () => {
       const otherThread = { id: 'other-id', name: 'thread-2', workingDirectory: '/tmp', sessionId: null, createdAt: 0, lastActiveAt: 0 };
       ctx.mockThreadManager.getThread = vi.fn().mockImplementation((id: string) =>

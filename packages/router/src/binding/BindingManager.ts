@@ -1,122 +1,124 @@
-import { DeviceBinding, UserBinding } from '../types';
+import { BindingCode, DeviceBinding, UserBinding } from '../types';
 import { JsonStore } from '../storage/JsonStore';
 import { randomInt } from 'crypto';
 
-/**
- * Binding Manager
- * Responsible for managing user and device binding relationships
- * Supports multiple devices per user with one active device
- */
+export interface BindingRedemption {
+  bindingCode: BindingCode;
+  alreadyBound: boolean;
+  isFirstDevice: boolean;
+}
+
+/** Serializes ownership mutations sharing one JsonStore, including key callbacks. */
 export class BindingManager {
   private store: JsonStore;
+  private mutationTail: Promise<void> = Promise.resolve();
 
   constructor(store: JsonStore) {
     this.store = store;
   }
 
-  /**
-   * Generate binding code
-   * @param deviceId Device unique identifier
-   * @param deviceName Device name
-   * @returns Binding code object
-   */
-  async generateBindingCode(deviceId: string, deviceName: string, devicePublicKey?: string): Promise<import('../types').BindingCode> {
-    // Generate binding code in format XXX-XXX-XXX
-    const code = this.generateRandomCode();
-    const now = Date.now();
-    const bindingCode = {
-      code,
-      deviceId,
-      ...(devicePublicKey ? { devicePublicKey } : {}),
-      createdAt: now,
-      expiresAt: now + 5 * 60 * 1000 // Expires after 5 minutes
-    };
-
-    // Store binding code
-    await this.store.setBindingCode(code, bindingCode);
-
-    return bindingCode;
+  private mutate<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.mutationTail.then(operation);
+    this.mutationTail = result.then(() => undefined, () => undefined);
+    return result;
   }
 
-  /**
-   * Verify binding code
-   * @param code Binding code
-   * @returns Binding code object, returns null if invalid or expired
-   */
-  async verifyBindingCode(code: string): Promise<import('../types').BindingCode | null> {
+  async generateBindingCode(deviceId: string, deviceName: string, devicePublicKey?: string): Promise<BindingCode> {
+    return this.mutate(async () => {
+      const code = this.generateRandomCode();
+      const now = Date.now();
+      const bindingCode: BindingCode = {
+        code,
+        deviceId,
+        ...(devicePublicKey ? { devicePublicKey } : {}),
+        createdAt: now,
+        expiresAt: now + 5 * 60 * 1000,
+      };
+      await this.store.setBindingCode(code, bindingCode);
+      return bindingCode;
+    });
+  }
+
+  async verifyBindingCode(code: string): Promise<BindingCode | null> {
     return this.store.getBindingCode(code);
   }
 
   async consumeBindingCode(code: string): Promise<void> {
-    await this.store.deleteBindingCode(code);
+    return this.mutate(() => this.store.deleteBindingCode(code));
   }
 
-  /**
-   * Bind user and device (supports multi-device)
-   * First device becomes active; subsequent devices are added as inactive.
-   */
-  async bindUser(openId: string, deviceId: string, deviceName: string): Promise<void> {
-    const now = Date.now();
-
-    // Security check: Prevent device from being bound to multiple users
-    // This prevents cross-user data leakage and routing confusion
-    const existingOwner = this.store.getUserByDeviceId(deviceId);
-    if (existingOwner && existingOwner !== openId) {
-      throw new Error(
-        `Device ${deviceId} is already bound to another user. ` +
-        `Please unbind it first or use a different device ID.`
-      );
-    }
-
-    const existingBinding = await this.getUserBinding(openId);
-
-    if (existingBinding) {
-      // Check if device already exists (rebinding scenario)
-      const deviceIndex = existingBinding.devices.findIndex(d => d.deviceId === deviceId);
-
-      if (deviceIndex >= 0) {
-        // Update existing device entry (same user rebinding their own device)
-        existingBinding.devices[deviceIndex].deviceName = deviceName;
-        existingBinding.devices[deviceIndex].lastActiveAt = now;
-      } else {
-        // Add new device as inactive
-        existingBinding.devices.push({
-          deviceId,
-          deviceName,
-          boundAt: now,
-          lastActiveAt: now,
-          isActive: false,
-        });
+  /** Validate, assign, enroll, and consume without admitting competing mutations. */
+  async redeemBindingCode(openId: string, code: string, deviceName: string,
+    approveDeviceKey?: (openId: string, deviceId: string, publicKey: string) => Promise<void>): Promise<BindingRedemption | null> {
+    return this.mutate(async () => {
+      const bindingCode = this.store.getBindingCode(code);
+      if (!bindingCode) return null;
+      if (bindingCode.devicePublicKey && !approveDeviceKey) throw new Error('Secure device enrollment is unavailable.');
+      this.assertOwnership(bindingCode.deviceId, openId);
+      const existingDevices = this.store.getUserBinding(openId)?.devices ?? [];
+      const alreadyBound = existingDevices.some(device => device.deviceId === bindingCode.deviceId);
+      if (alreadyBound && !bindingCode.devicePublicKey) {
+        return { bindingCode, alreadyBound, isFirstDevice: existingDevices.length === 0 };
       }
 
+      await this.bindUserLocked(openId, bindingCode.deviceId, deviceName);
+      if (bindingCode.devicePublicKey) {
+        await approveDeviceKey!(openId, bindingCode.deviceId, bindingCode.devicePublicKey);
+      }
+      await this.store.deleteBindingCode(code);
+      return { bindingCode, alreadyBound, isFirstDevice: existingDevices.length === 0 };
+    });
+  }
+
+  async bindUser(openId: string, deviceId: string, deviceName: string): Promise<void> {
+    return this.mutate(() => this.bindUserLocked(openId, deviceId, deviceName));
+  }
+
+  private async bindUserLocked(openId: string, deviceId: string, deviceName: string): Promise<void> {
+    this.assertOwnership(deviceId, openId);
+    const now = Date.now();
+    const existingBinding = this.store.getUserBinding(openId);
+    if (existingBinding) {
+      const deviceIndex = existingBinding.devices.findIndex(device => device.deviceId === deviceId);
+      if (deviceIndex >= 0) {
+        existingBinding.devices[deviceIndex] = {
+          ...existingBinding.devices[deviceIndex], deviceName, lastActiveAt: now,
+        };
+      } else {
+        existingBinding.devices.push({ deviceId, deviceName, boundAt: now, lastActiveAt: now, isActive: false });
+      }
       existingBinding.updatedAt = now;
       await this.store.setUserBinding(openId, existingBinding);
     } else {
-      // First device for this user - set as active
       const binding: UserBinding = {
         openId,
-        devices: [{
-          deviceId,
-          deviceName,
-          boundAt: now,
-          lastActiveAt: now,
-          isActive: true,
-        }],
+        devices: [{ deviceId, deviceName, boundAt: now, lastActiveAt: now, isActive: true }],
         activeDeviceId: deviceId,
         createdAt: now,
         updatedAt: now,
       };
-
       await this.store.setUserBinding(openId, binding);
     }
-
-    // Update device-to-user reverse mapping to ensure consistency
     await this.store.setDeviceToUserMap(deviceId, openId);
   }
 
-  /**
-   * Get user binding information
-   */
+  /** Detect conflicting records rather than silently choosing or repairing an owner. */
+  private assertOwnership(deviceId: string, openId: string): void {
+    const owners: string[] = [];
+    for (const candidate of this.store.listBoundUserIds()) {
+      if (this.store.getUserBinding(candidate)?.devices.some(device => device.deviceId === deviceId)) owners.push(candidate);
+    }
+    const mapped = this.store.getUserByDeviceId(deviceId);
+    const ambiguous = owners.length > 1 || Boolean(mapped && owners.length > 0 && !owners.includes(mapped));
+    if (ambiguous) {
+      throw new Error(`Device ${deviceId} has ambiguous historical ownership. Repair the binding records manually before changing them.`);
+    }
+    const owner = mapped ?? owners[0];
+    if (owner && owner !== openId) {
+      throw new Error(`Device ${deviceId} is already bound to another user. Please unbind it first or use a different device ID.`);
+    }
+  }
+
   async getUserBinding(openId: string): Promise<UserBinding | null> {
     return this.store.getUserBinding(openId);
   }
@@ -125,136 +127,84 @@ export class BindingManager {
     return this.store.listBoundUserIds();
   }
 
-  /**
-   * Get all devices for a user
-   */
   async getUserDevices(openId: string): Promise<DeviceBinding[]> {
-    const binding = this.store.getUserBinding(openId);
-    return binding?.devices || [];
+    return this.store.getUserBinding(openId)?.devices ?? [];
   }
 
-  /**
-   * Get the active device for a user
-   */
   async getActiveDevice(openId: string): Promise<DeviceBinding | null> {
     const binding = this.store.getUserBinding(openId);
-    if (!binding || !binding.activeDeviceId) {
-      return null;
-    }
-    return binding.devices.find(d => d.deviceId === binding.activeDeviceId) || null;
+    if (!binding?.activeDeviceId) return null;
+    return binding.devices.find(device => device.deviceId === binding.activeDeviceId) ?? null;
   }
 
-  /**
-   * Switch the active device for a user
-   * @returns true if switch was successful
-   */
   async switchActiveDevice(openId: string, deviceId: string): Promise<boolean> {
-    const binding = this.store.getUserBinding(openId);
-    if (!binding) {
-      return false;
-    }
-
-    const targetDevice = binding.devices.find(d => d.deviceId === deviceId);
-    if (!targetDevice) {
-      return false;
-    }
-
-    // Update isActive flags
-    for (const device of binding.devices) {
-      device.isActive = device.deviceId === deviceId;
-    }
-    binding.activeDeviceId = deviceId;
-    binding.updatedAt = Date.now();
-
-    await this.store.setUserBinding(openId, binding);
-    return true;
-  }
-
-  /**
-   * Unbind a specific device from a user
-   * If the active device is removed, promotes the first remaining device.
-   * If no devices remain, removes the entire user binding.
-   * @returns true if device was found and removed
-   */
-  async unbindDevice(openId: string, deviceId: string): Promise<boolean> {
-    const binding = this.store.getUserBinding(openId);
-    if (!binding) {
-      return false;
-    }
-
-    const deviceIndex = binding.devices.findIndex(d => d.deviceId === deviceId);
-    if (deviceIndex < 0) {
-      return false;
-    }
-
-    // Remove device
-    binding.devices.splice(deviceIndex, 1);
-    await this.store.removeDeviceToUserMap(deviceId);
-
-    if (binding.devices.length === 0) {
-      // No devices left, delete the entire binding
-      await this.store.deleteUserBinding(openId);
+    return this.mutate(async () => {
+      const binding = this.store.getUserBinding(openId);
+      if (!binding?.devices.some(device => device.deviceId === deviceId)) return false;
+      binding.devices = binding.devices.map(device => ({ ...device, isActive: device.deviceId === deviceId }));
+      binding.activeDeviceId = deviceId;
+      binding.updatedAt = Date.now();
+      await this.store.setUserBinding(openId, binding);
       return true;
-    }
-
-    // If the removed device was the active one, promote first remaining device
-    if (binding.activeDeviceId === deviceId) {
-      binding.devices[0].isActive = true;
-      binding.activeDeviceId = binding.devices[0].deviceId;
-    }
-
-    binding.updatedAt = Date.now();
-    await this.store.setUserBinding(openId, binding);
-    return true;
+    });
   }
 
-  /**
-   * Get device binding information via reverse lookup
-   */
+  async unbindDevice(openId: string, deviceId: string,
+    beforeUnbind?: (deviceId: string) => Promise<void>): Promise<boolean> {
+    return this.mutate(async () => {
+      const binding = this.store.getUserBinding(openId);
+      const deviceIndex = binding?.devices.findIndex(device => device.deviceId === deviceId) ?? -1;
+      if (!binding || deviceIndex < 0) return false;
+      this.assertOwnership(deviceId, openId);
+      await beforeUnbind?.(deviceId);
+      binding.devices.splice(deviceIndex, 1);
+      await this.store.removeDeviceToUserMap(deviceId);
+      if (binding.devices.length === 0) {
+        await this.store.deleteUserBinding(openId);
+        return true;
+      }
+      if (binding.activeDeviceId === deviceId) {
+        binding.devices[0] = { ...binding.devices[0], isActive: true };
+        binding.activeDeviceId = binding.devices[0].deviceId;
+      }
+      binding.updatedAt = Date.now();
+      await this.store.setUserBinding(openId, binding);
+      return true;
+    });
+  }
+
   async getDeviceBinding(deviceId: string): Promise<UserBinding | null> {
     const openId = this.store.getUserByDeviceId(deviceId);
-    if (!openId) {
-      return null;
-    }
-    return this.store.getUserBinding(openId);
+    return openId ? this.store.getUserBinding(openId) : null;
   }
 
-  /**
-   * Unbind all devices for a user
-   */
-  async unbindUser(openId: string): Promise<void> {
-    await this.store.deleteUserBinding(openId);
+  async unbindUser(openId: string, beforeUnbind?: (deviceId: string) => Promise<void>): Promise<void> {
+    return this.mutate(async () => {
+      const binding = this.store.getUserBinding(openId);
+      if (!binding) return;
+      for (const device of binding.devices) this.assertOwnership(device.deviceId, openId);
+      if (beforeUnbind) for (const device of binding.devices) await beforeUnbind(device.deviceId);
+      await this.store.deleteUserBinding(openId);
+    });
   }
 
-  /**
-   * Update user last active time
-   */
   async updateLastActive(openId: string): Promise<void> {
-    await this.store.updateLastActive(openId);
+    return this.mutate(() => this.store.updateLastActive(openId));
   }
 
-  /**
-   * Generate random binding code (format: XXX-XXX-XXX)
-   */
   private generateRandomCode(): string {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
     const segments = [];
-
     for (let i = 0; i < 3; i++) {
       let segment = '';
-      for (let j = 0; j < 3; j++) {
-        segment += chars.charAt(randomInt(chars.length));
-      }
+      for (let j = 0; j < 3; j++) segment += chars.charAt(randomInt(chars.length));
       segments.push(segment);
     }
-
     return segments.join('-');
   }
 
-  /**
-   * Close and flush data
-   */
   async close(): Promise<void> {
+    await this.mutationTail;
     await this.store.flush();
   }
 }

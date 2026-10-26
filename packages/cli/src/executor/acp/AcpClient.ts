@@ -278,28 +278,35 @@ export class AcpClient implements AcpTransport {
     id: number,
     params: { toolCall?: { title?: string }; options?: AcpPermissionOption[] }
   ): Promise<void> {
-    const options = params.options ?? [];
-    if (options.length === 0) {
+    const options = Array.isArray(params?.options) ? params.options : [];
+    if (options.length === 0 || !this.callbacks.onPermissionRequest) {
       this.sendResponse(id, { outcome: 'cancelled' });
       return;
     }
-    let index = 0;
-    if (this.callbacks.onPermissionRequest) {
-      try {
-        index = await this.callbacks.onPermissionRequest(params.toolCall?.title ?? 'Tool request', options);
-      } catch {
-        index = 0;
-      }
-    }
-    if (index < 0) {
+    let index: number;
+    try {
+      index = await this.callbacks.onPermissionRequest(params.toolCall?.title ?? 'Tool request', options);
+    } catch {
       this.sendResponse(id, { outcome: 'cancelled' });
       return;
     }
-    const selected = options[index] ?? options[0];
-    if (selected.kind.startsWith('reject')) {
+    if (!Number.isInteger(index) || index < 0 || index >= options.length) {
       this.sendResponse(id, { outcome: 'cancelled' });
-    } else {
+      return;
+    }
+    const selected = options[index];
+    if (!selected || typeof selected.kind !== 'string') {
+      this.sendResponse(id, { outcome: 'cancelled' });
+      return;
+    }
+    const rejected = selected.kind === 'reject_once' || selected.kind === 'reject_always';
+    const allowed = selected.kind === 'allow_once' || selected.kind === 'allow_always';
+    if (rejected) {
+      this.sendResponse(id, { outcome: 'cancelled' });
+    } else if (allowed && typeof selected.optionId === 'string' && selected.optionId) {
       this.sendResponse(id, { outcome: 'selected', optionId: selected.optionId });
+    } else {
+      this.sendResponse(id, { outcome: 'cancelled' });
     }
   }
 

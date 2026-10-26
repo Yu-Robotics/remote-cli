@@ -123,7 +123,7 @@ describe('RouterServer - generated image lifecycle', () => {
         return 'test-value';
       }),
     };
-    store = { initialize: vi.fn().mockResolvedValue(undefined) };
+    store = { initialize: vi.fn().mockResolvedValue(undefined), flush: vi.fn().mockResolvedValue(undefined) };
 
     const mockHttpServer = {
       listen: vi.fn().mockReturnThis(),
@@ -176,6 +176,7 @@ describe('RouterServer - generated image lifecycle', () => {
     };
     (ConnectionHub as unknown as any).mockImplementation(() => mockConnectionHub);
     (BindingManager as unknown as any).mockImplementation(() => ({
+      getDeviceBinding: vi.fn(async (deviceId: string) => deviceId === 'device-1' ? { openId: 'user-1' } : null),
       generateBindingCode: vi.fn().mockResolvedValue({ code: '123456', expiresAt: Date.now() + 60000 }),
     }));
 
@@ -380,6 +381,7 @@ describe('RouterServer - generated image lifecycle', () => {
     const image = sendImage(onMessage, 'pending', pngBytes(71));
     const receivedAt = Date.now();
     const response = sendResponse(onMessage, 'pending');
+    await vi.advanceTimersByTimeAsync(0);
     const route = (server as any).imageReplies.get('pending');
     expect(route.reply.closed).toBe(true);
     expect(route.reply.deadline).toBe(receivedAt + IMAGE_LIMITS.drainMs);
@@ -407,6 +409,7 @@ describe('RouterServer - generated image lifecycle', () => {
     const creating = kind === 'queued' ? sendQueueStarted(onMessage, 'pending') : sendTaskResume(onMessage, 'pending');
     const image = sendImage(onMessage, 'pending', pngBytes(73));
     const response = sendResponse(onMessage, 'pending');
+    await vi.advanceTimersByTimeAsync(0);
     const deadline = (server as any).imageReplies.get('pending').reply.deadline;
     await vi.advanceTimersByTimeAsync(31_000);
     await image;
@@ -455,6 +458,7 @@ describe('RouterServer - generated image lifecycle', () => {
     let upload!: (key: string) => void;
     mockFeishuHandler.uploadImage.mockReturnValueOnce(new Promise(done => { upload = done; }));
     const old = sendImage(onMessage, 'owned', pngBytes(77));
+    await vi.waitFor(() => expect(mockFeishuHandler.uploadImage).toHaveBeenCalledOnce());
     if (kind === 'disconnect') sockets[0].on.mock.calls.find(call => call[0] === 'close')[1]();
     if (kind === 'rebind') {
       await connectAndBind('device-1');

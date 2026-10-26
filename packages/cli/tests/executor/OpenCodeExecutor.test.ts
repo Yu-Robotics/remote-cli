@@ -8,7 +8,6 @@ import type { AcpEventCallbacks, AcpTransport } from '../../src/executor/acp/Acp
 import type { AcpConfigOption, AcpContentBlock, AcpSessionResult } from '../../src/executor/acp/AcpTypes';
 
 const originalHome = process.env.HOME;
-const originalHomedir = os.homedir();
 
 const options: AcpConfigOption[] = [
   {
@@ -42,10 +41,12 @@ describe('OpenCodeExecutor', () => {
   let executor: OpenCodeExecutor;
 
   beforeEach(async () => {
-    home = await fs.mkdtemp(path.join(originalHomedir, '.opencode-executor-test-'));
+    home = await fs.realpath(await fs.mkdtemp(path.join(process.cwd(), '.opencode-executor-test-')));
     project = path.join(home, 'project');
     await fs.mkdir(project);
     process.env.HOME = home;
+    vi.spyOn(os, 'homedir').mockReturnValue(home);
+    vi.spyOn(os, 'tmpdir').mockReturnValue(home);
     transport = new FakeTransport();
     callbacks = {};
     executor = new OpenCodeExecutor(new DirectoryGuard([home]), {
@@ -61,6 +62,7 @@ describe('OpenCodeExecutor', () => {
 
   afterEach(async () => {
     await executor.destroy();
+    vi.restoreAllMocks();
     await fs.rm(home, { recursive: true, force: true });
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
@@ -346,6 +348,20 @@ describe('OpenCodeExecutor', () => {
     expect(transport.destroy).toHaveBeenCalled();
     expect(replacement.loadSession).toHaveBeenCalledWith('ses-new', project);
     await recovering.destroy();
+  });
+
+  it('keeps configured ACP tool auto-approval on the first allow option', async () => {
+    let selected = -1;
+    transport.prompt.mockImplementationOnce(async () => {
+      selected = await callbacks.onPermissionRequest!('Run tests', [
+        { kind: 'allow_once', optionId: 'yes' },
+        { kind: 'reject_once', optionId: 'no' },
+      ]);
+      return { stopReason: 'end_turn' };
+    });
+
+    await expect(executor.execute('test', {})).resolves.toMatchObject({ success: true });
+    expect(selected).toBe(0);
   });
 
   it('relays ACP permission requests through executor input when auto-approve is disabled', async () => {

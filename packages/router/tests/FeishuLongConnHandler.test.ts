@@ -27,6 +27,7 @@ describe('FeishuLongConnHandler', () => {
     // Create mock instances
     mockBindingManager = {
       verifyBindingCode: vi.fn(),
+      redeemBindingCode: vi.fn(),
       bindUser: vi.fn(),
       getUserBinding: vi.fn(),
       unbindUser: vi.fn(),
@@ -120,17 +121,17 @@ describe('FeishuLongConnHandler', () => {
       } });
       expect(handler.onFileMessage).toHaveBeenCalledWith(expect.objectContaining({ deviceId: 'original', threadId: 'thread-1' }));
     });
-    it('approves enrollment only for the public key in the verified binding code and consumes it', async () => {
-      mockBindingManager.verifyBindingCode.mockResolvedValue({ deviceId: 'device', devicePublicKey: 'test-key' });
-      mockBindingManager.getUserDevices.mockResolvedValue([{ deviceId: 'device' }]);
-      mockBindingManager.consumeBindingCode = vi.fn(); handler.onApproveDeviceKey = vi.fn();
+    it('uses serialized redemption for enrollment and key approval', async () => {
+      const redemption = { bindingCode: { deviceId: 'device', devicePublicKey: 'test-key' }, alreadyBound: false, isFirstDevice: true };
+      mockBindingManager.redeemBindingCode.mockResolvedValue(redemption);
+      handler.onApproveDeviceKey = vi.fn();
+      const reply = vi.spyOn(handler as any, 'replyToMessage').mockResolvedValue(undefined);
       await (handler as any).handleBindCommand('owner', 'source', '123456');
-      expect(handler.onApproveDeviceKey).toHaveBeenCalledWith('owner', 'device', 'test-key');
-      expect(mockBindingManager.consumeBindingCode).toHaveBeenCalledWith('123456');
-      mockBindingManager.bindUser.mockRejectedValue(new Error('other owner'));
-      vi.mocked(handler.onApproveDeviceKey).mockClear();
+      expect(mockBindingManager.redeemBindingCode).toHaveBeenCalledWith('owner', '123456', 'Device', handler.onApproveDeviceKey);
+      expect(reply).toHaveBeenCalledWith('source', expect.stringContaining('Device key approved'));
+      mockBindingManager.redeemBindingCode.mockRejectedValue(new Error('other owner'));
       await (handler as any).handleBindCommand('stranger', 'source', '123456');
-      expect(handler.onApproveDeviceKey).not.toHaveBeenCalled();
+      expect(reply).toHaveBeenCalledWith('source', expect.stringContaining('Binding failed'));
     });
     it('should send text message successfully', async () => {
       mockClient.im.message.create.mockResolvedValue({ data: { message_id: 'msg_123' } });
@@ -2384,18 +2385,17 @@ describe('FeishuLongConnHandler', () => {
 
   describe('handleBindCommand', () => {
     it('should successfully bind a user with valid code', async () => {
-      mockBindingManager.verifyBindingCode.mockResolvedValue({ deviceId: 'dev_123' });
-      mockBindingManager.getUserDevices.mockResolvedValue([]);
+      mockBindingManager.redeemBindingCode.mockResolvedValue({ bindingCode: { deviceId: 'dev_123' }, alreadyBound: false, isFirstDevice: true });
       const replySpy = vi.spyOn(handler as any, 'replyToMessage').mockResolvedValue(undefined);
 
       await (handler as any).handleBindCommand('ou_123', 'msg_1', 'VALID-CODE');
 
-      expect(mockBindingManager.bindUser).toHaveBeenCalledWith('ou_123', 'dev_123', 'Device');
+      expect(mockBindingManager.redeemBindingCode).toHaveBeenCalledWith('ou_123', 'VALID-CODE', 'Device', undefined);
       expect(replySpy).toHaveBeenCalledWith('msg_1', expect.stringContaining('Binding successful'));
     });
 
     it('should fail with invalid code', async () => {
-      mockBindingManager.verifyBindingCode.mockResolvedValue(null);
+      mockBindingManager.redeemBindingCode.mockResolvedValue(null);
       const replySpy = vi.spyOn(handler as any, 'replyToMessage').mockResolvedValue(undefined);
 
       await (handler as any).handleBindCommand('ou_123', 'msg_1', 'INVALID');
@@ -2404,8 +2404,7 @@ describe('FeishuLongConnHandler', () => {
     });
 
     it('should fail if device already bound', async () => {
-      mockBindingManager.verifyBindingCode.mockResolvedValue({ deviceId: 'dev_123' });
-      mockBindingManager.getUserDevices.mockResolvedValue([{ deviceId: 'dev_123' }]);
+      mockBindingManager.redeemBindingCode.mockResolvedValue({ bindingCode: { deviceId: 'dev_123' }, alreadyBound: true, isFirstDevice: false });
       const replySpy = vi.spyOn(handler as any, 'replyToMessage').mockResolvedValue(undefined);
 
       await (handler as any).handleBindCommand('ou_123', 'msg_1', 'CODE');
@@ -2414,7 +2413,7 @@ describe('FeishuLongConnHandler', () => {
     });
 
     it('should handle errors', async () => {
-      mockBindingManager.verifyBindingCode.mockRejectedValue(new Error('DB Error'));
+      mockBindingManager.redeemBindingCode.mockRejectedValue(new Error('DB Error'));
       const replySpy = vi.spyOn(handler as any, 'replyToMessage').mockResolvedValue(undefined);
 
       await (handler as any).handleBindCommand('ou_123', 'msg_1', 'CODE');
@@ -2430,7 +2429,7 @@ describe('FeishuLongConnHandler', () => {
 
       await (handler as any).handleUnbindCommand('ou_123', 'msg_1');
 
-      expect(mockBindingManager.unbindUser).toHaveBeenCalledWith('ou_123');
+      expect(mockBindingManager.unbindUser).toHaveBeenCalledWith('ou_123', expect.any(Function));
       expect(replySpy).toHaveBeenCalledWith('msg_1', expect.stringContaining('Successfully unbound 2 device(s)'));
     });
 
@@ -2609,7 +2608,7 @@ describe('FeishuLongConnHandler', () => {
 
       await (handler as any).handleDeviceUnbind('ou_123', 'msg_1', 'd1');
 
-      expect(mockBindingManager.unbindDevice).toHaveBeenCalledWith('ou_123', 'd1');
+      expect(mockBindingManager.unbindDevice).toHaveBeenCalledWith('ou_123', 'd1', expect.any(Function));
       expect(replySpy).toHaveBeenCalledWith('msg_1', expect.stringContaining('has been unbound'));
     });
 
