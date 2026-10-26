@@ -439,27 +439,36 @@ export class PiExecutor implements IExecutor {
     }
     if (!this.client.isRunning()) return false;
     const active = this.activeTurn;
+    // A deadline that already claimed this turn owns its abort, so a second
+    // abort RPC (or a concurrent /abort) must not be sent for the same turn.
+    const alreadyClaimed = active?.programError !== undefined;
     // Pi settles its own aborted turn before answering the abort RPC, so claim
     // remote-cli's reason first; a deadline that already failed keeps its own.
-    if (active && !active.programError) active.programError = 'Aborted';
-    try {
-      await this.client.request({ type: 'clear_queue' });
-    } catch {
-      // Queue may already be empty.
-    }
+    if (active && !alreadyClaimed) active.programError = 'Aborted';
     let cleanupError: unknown;
-    try {
-      await this.client.request({ type: 'abort' });
-    } catch {
-      try { await this.recycleClient(); }
-      catch (error) { cleanupError = error; }
+    if (!alreadyClaimed) {
+      try {
+        await this.client.request({ type: 'clear_queue' });
+      } catch {
+        // Queue may already be empty.
+      }
+      try {
+        await this.client.request({ type: 'abort' });
+      } catch (error) {
+        // Only a turn that still owns the session may recycle its transport; a
+        // late failure must not stop the client of a turn started meanwhile.
+        if (!this.activeTurn || this.activeTurn === active) {
+          try { await this.recycleClient(); }
+          catch (failure) { cleanupError = failure; }
+        }
+      }
     }
     if (active && this.activeTurn === active) {
       const claimed = active.programError ?? 'Aborted';
       active.programError = cleanupError ? `${claimed}; ${this.friendlyError(cleanupError)}` : claimed;
       this.completeActive({ success: false, error: active.programError, sessionAbbr: this.sessionAbbr() });
     }
-    this.cancelPendingUi(true);
+    if (!this.activeTurn || this.activeTurn === active) this.cancelPendingUi(true);
     if (cleanupError) throw cleanupError;
     return true;
   }
@@ -1308,7 +1317,9 @@ export class PiExecutor implements IExecutor {
   /** Arm the one-shot hard deadline and the re-armable inactivity watchdog. */
   private armTurnDeadlines(active: ActiveTurn): void {
     const requested = active.options.timeout;
-    if (typeof requested === 'number' && requested > 0) {
+    // A non-finite or non-positive limit has no meaningful deadline; Node would
+    // otherwise clamp Infinity to an immediate timer.
+    if (typeof requested === 'number' && Number.isFinite(requested) && requested > 0) {
       active.timeoutTimer = setTimeout(() => {
         void this.failActive(active, `Pi turn timed out after ${requested}ms (hard time limit)`);
       }, requested);
@@ -1353,8 +1364,12 @@ export class PiExecutor implements IExecutor {
     try {
       await this.client.request({ type: 'abort' });
     } catch {
-      try { await this.recycleClient(); }
-      catch (failure) { cleanupError = failure; }
+      // Only the turn that still owns the session may recycle its transport; a
+      // late failure from a settled turn must not stop the next turn's client.
+      if (this.activeTurn === active) {
+        try { await this.recycleClient(); }
+        catch (failure) { cleanupError = failure; }
+      }
     }
     if (this.activeTurn === active) {
       if (cleanupError) active.programError = `${active.programError}; ${this.friendlyError(cleanupError)}`;
