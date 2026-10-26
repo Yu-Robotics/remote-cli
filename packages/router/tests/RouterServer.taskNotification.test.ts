@@ -40,7 +40,7 @@ describe('RouterServer - task_notification', () => {
   let mockFeishuHandler: any;
   let mockConnectionHub: any;
   let mockWss: any;
-  let resolveThreadCallback: ((feishuMessageId: string) => { threadId: string; deviceId: string } | undefined) | undefined;
+  let resolveThreadCallback: ((feishuMessageId: string, openId: string) => Promise<{ threadId: string; deviceId: string } | undefined>) | undefined;
 
   const connectAndBind = async (deviceId: string) => {
     await server.start();
@@ -116,6 +116,8 @@ describe('RouterServer - task_notification', () => {
       stop: vi.fn().mockResolvedValue(undefined),
       setConnectionHub: vi.fn(),
       setOnStartStreaming: vi.fn(),
+      setOnCaptureSelection: vi.fn(),
+      setOnValidateSelection: vi.fn(),
       setOnResolveThread: vi.fn((cb: any) => { resolveThreadCallback = cb; }),
       setOnResolveActiveThread: vi.fn(),
       handleCardAction: vi.fn().mockResolvedValue({ success: true }),
@@ -175,7 +177,7 @@ describe('RouterServer - task_notification', () => {
 
     // The new card is registered for reply-to-continue-thread routing
     expect(resolveThreadCallback).toBeDefined();
-    const resolved = resolveThreadCallback!('feishu-task-card-1');
+    const resolved = await resolveThreadCallback!('feishu-task-card-1', 'user-1');
     expect(resolved).toMatchObject({ threadId: 'thread-1', deviceId: 'device-1' });
   });
 
@@ -195,7 +197,7 @@ describe('RouterServer - task_notification', () => {
     await sendTaskNotification(onMessage, { threadId: undefined });
 
     expect(mockFeishuHandler.sendTaskNotificationCard).toHaveBeenCalledTimes(1);
-    expect(resolveThreadCallback!('feishu-task-card-1')).toBeUndefined();
+    expect(await resolveThreadCallback!('feishu-task-card-1', 'user-1')).toBeUndefined();
   });
 
   it('should skip cardThreadMap registration when card sending fails', async () => {
@@ -205,7 +207,7 @@ describe('RouterServer - task_notification', () => {
     await sendTaskNotification(onMessage);
 
     expect(mockFeishuHandler.sendTaskNotificationCard).toHaveBeenCalledTimes(1);
-    expect(resolveThreadCallback!('feishu-task-card-1')).toBeUndefined();
+    expect(await resolveThreadCallback!('feishu-task-card-1', 'user-1')).toBeUndefined();
   });
 
   it('should ignore messages with missing taskNotification payload', async () => {

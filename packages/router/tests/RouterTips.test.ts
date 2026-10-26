@@ -13,7 +13,7 @@ vi.mock('../src/tips/TipService', () => ({ TipService: vi.fn(() => ({
   activity: vi.fn().mockResolvedValue(undefined), start: vi.fn(), stop: vi.fn().mockResolvedValue(undefined),
 })) }));
 vi.mock('../src/feishu/FeishuLongConnHandler', () => ({ FeishuLongConnHandler: vi.fn(() => ({
-  setConnectionHub() {}, setOnStartStreaming() {}, setOnResolveThread() {}, setOnResolveActiveThread() {},
+  setConnectionHub() {}, setOnStartStreaming() {}, setOnCaptureSelection() {}, setOnValidateSelection() {}, setOnResolveThread() {}, setOnResolveActiveThread() {},
   sendTipCard: vi.fn().mockResolvedValue('card'), updateTipCard: vi.fn().mockResolvedValue(undefined),
 })) }));
 

@@ -110,6 +110,8 @@ describe('RouterServer', () => {
       stop: vi.fn().mockResolvedValue(undefined),
       setConnectionHub: vi.fn(),
       setOnStartStreaming: vi.fn(),
+      setOnCaptureSelection: vi.fn(),
+      setOnValidateSelection: vi.fn(),
       setOnResolveThread: vi.fn(),
       setOnResolveActiveThread: vi.fn(),
       handleCardAction: vi.fn().mockResolvedValue({ success: true }),
@@ -141,6 +143,10 @@ describe('RouterServer', () => {
         const openId = deviceId === 'device-1' ? 'user-1' : deviceId === 'd1' ? 'u1' : undefined;
         return openId ? { openId } : null;
       }),
+      getThreadSelection: vi.fn(() => ({ status: 'none' })),
+      selectThread: vi.fn().mockResolvedValue(true),
+      clearThreadSelection: vi.fn().mockResolvedValue(true),
+      getActiveDevice: vi.fn().mockResolvedValue({ deviceId: 'device-1', deviceName: 'Device' }),
     };
     (BindingManager as unknown as any).mockImplementation(() => mockBindingManager);
 
@@ -596,7 +602,7 @@ describe('RouterServer', () => {
       expect(mockFeishuHandler.sendStreamingStart.mock.calls[0][1]).toContain('was not retained');
       expect(replies().at(-1)).toMatchObject({ type: 'task_resume_ack', success: true, recoveryId: 'recovery-1' });
       const resolveThread = mockFeishuHandler.setOnResolveThread.mock.calls[0][0];
-      expect(resolveThread('execution-card')).toMatchObject({ threadId: 'thread-1', deviceId: 'device-1' });
+      expect(await resolveThread('execution-card', 'user-1')).toMatchObject({ threadId: 'thread-1', deviceId: 'device-1' });
       await send({ type: 'stream', messageId: resume.messageId, openId: 'user-1', chunk: 'tail\n```\n</raw>' });
       const result = { type: 'response', messageId: resume.messageId, openId: 'user-1', success: true };
       await send(result);
@@ -699,7 +705,7 @@ describe('RouterServer', () => {
       ready('obsolete-card');
       await pending;
       expect(replies().filter(message => message.type === 'task_resume_ack')).toHaveLength(0);
-      expect(mockFeishuHandler.setOnResolveThread.mock.calls[0][0]('obsolete-card')).toBeUndefined();
+      expect(await mockFeishuHandler.setOnResolveThread.mock.calls[0][0]('obsolete-card', 'user-1')).toBeUndefined();
     });
 
     it('keeps the current recovery card when an obsolete socket closes', async () => {
@@ -724,7 +730,7 @@ describe('RouterServer', () => {
       mockFeishuHandler.setOnStartStreaming.mock.calls[0][0](resume.messageId, 'user-1', 'old-card', 'device-1');
       await send(resume);
       expect(replies().at(-1).success).toBe(true);
-      expect(mockFeishuHandler.setOnResolveThread.mock.calls[0][0]('old-card'))
+      expect(await mockFeishuHandler.setOnResolveThread.mock.calls[0][0]('old-card', 'user-1'))
         .toMatchObject({ threadId: 'thread-1', deviceId: 'device-1' });
       // No replacement card: the surviving card is adopted and later finalized.
       expect(mockFeishuHandler.sendStreamingStart).not.toHaveBeenCalled();
@@ -889,7 +895,7 @@ describe('RouterServer', () => {
       expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenLastCalledWith(
         'early-card', expect.any(Array), 'user-1', 'thread-9', '/workspace/project',
       );
-      expect(mockFeishuHandler.setOnResolveThread.mock.calls[0][0]('early-card')).toMatchObject({ threadId: 'thread-1' });
+      expect(await mockFeishuHandler.setOnResolveThread.mock.calls[0][0]('early-card', 'user-1')).toMatchObject({ threadId: 'thread-1' });
       await send(context);
       expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenCalledTimes(1);
       // A header-only patch must not throttle the first short text token.
@@ -953,7 +959,7 @@ describe('RouterServer', () => {
       await send({ type: 'response', messageId: 'early-1', openId: 'user-1', threadId: 'new-thread', success: true,
         threads: [{ id: 'new-thread', name: 'thread-10', status: 'idle' }] });
       expect(mockFeishuHandler.finalizeStreamingMessage.mock.calls.at(-1)[5]).toBe('thread-10');
-      expect(mockFeishuHandler.setOnResolveThread.mock.calls[0][0]('early-card')).toMatchObject({ threadId: 'new-thread' });
+      expect(await mockFeishuHandler.setOnResolveThread.mock.calls[0][0]('early-card', 'user-1')).toMatchObject({ threadId: 'new-thread' });
     });
   });
 
@@ -995,14 +1001,15 @@ describe('RouterServer', () => {
       expect(intro).toContain('Remaining in queue:** 2');
       expect(mockFeishuHandler.markQueueCardStarted).toHaveBeenCalledWith('receipt-card');
       const resolveThread = mockFeishuHandler.setOnResolveThread.mock.calls[0][0];
-      expect(resolveThread('execution-card')).toMatchObject({ threadId: 'thread-1', deviceId: 'device-1' });
-      expect(mockFeishuHandler.setOnResolveActiveThread.mock.calls[0][0]('user-1')).toBeUndefined();
+      expect(await resolveThread('execution-card', 'user-1')).toMatchObject({ threadId: 'thread-1', deviceId: 'device-1' });
+      expect(await mockFeishuHandler.setOnResolveActiveThread.mock.calls[0][0]('user-1', 'device-1')).toBeUndefined();
       await send({ type: 'response', messageId: 'queued-1', openId: 'user-1', success: true });
       await send(started);
       expect(mockFeishuHandler.sendStreamingStart).toHaveBeenCalledOnce();
       expect(mockFeishuHandler.finalizeStreamingMessage).toHaveBeenCalledWith(
         'execution-card', expect.any(Array), undefined, 'user-1', '/workspace/project',
-        'thread-2', started.threads, 'thread-1', undefined, undefined,
+        'thread-2', started.threads, 'thread-1', undefined, undefined, true,
+        expect.objectContaining({ onDelivered: expect.any(Function) }),
       );
     });
 
@@ -1189,114 +1196,109 @@ describe('RouterServer', () => {
     expect(global.setInterval).toHaveBeenCalled();
   });
 
-  it('should handle Feishu start streaming callback', () => {
+  it('should handle Feishu start streaming callback with owned reply provenance', async () => {
     const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
     onStartStreaming('msg-1', 'user-1', 'feishu-msg-1', 'device-1', 'thread-1');
-    
-    // Test resolve thread callback
     const onResolveThread = mockFeishuHandler.setOnResolveThread.mock.calls[0][0];
-    const resolved = onResolveThread('feishu-msg-1');
-    expect(resolved).toEqual({ threadId: 'thread-1', deviceId: 'device-1', expiresAt: expect.any(Number) });
+    expect(await onResolveThread('feishu-msg-1', 'user-1')).toEqual({ threadId: 'thread-1', deviceId: 'device-1' });
+    expect(await onResolveThread('feishu-msg-1', 'other-user')).toBeUndefined();
   });
 
-  it('should handle Feishu resolve active thread callback', () => {
+  it('should persist a card selection before resolving it', async () => {
     const onResolveActiveThread = mockFeishuHandler.setOnResolveActiveThread.mock.calls[0][0];
-    const onCardSwitchThread = mockFeishuHandler.onCardSwitchThread;
-    
-    onCardSwitchThread('user-1', 'thread-1', 'Thread 1');
-    const resolved = onResolveActiveThread('user-1');
-    expect(resolved).toEqual({ threadId: 'thread-1', threadName: 'Thread 1' });
+    (server as any).cardThreadMap.set('card-1', { threadId: 'thread-1', deviceId: 'device-1', openId: 'user-1', epoch: 0, expiresAt: Date.now() + 1000 });
+    await mockFeishuHandler.onCardSwitchThread('user-1', 'card-1', 'thread-1', 'Thread 1');
+    expect(mockBindingManager.selectThread).toHaveBeenCalledWith('user-1', 'device-1', 'thread-1', expect.any(Function));
+    mockBindingManager.getThreadSelection.mockReturnValue({ status: 'valid', threadId: 'thread-1' });
+    expect(await onResolveActiveThread('user-1', 'device-1')).toEqual({ threadId: 'thread-1', threadName: 'Thread 1' });
   });
 
-  it('should handle Feishu card new thread callback', async () => {
-    const onCardNewThread = mockFeishuHandler.onCardNewThread;
-    await onCardNewThread('user-1');
-    expect(mockFeishuHandler.sendCommandFromCardAction).toHaveBeenCalledWith('user-1', '/thread new', true);
+  it('should bind a New Thread intent to its source device', async () => {
+    (server as any).cardThreadMap.set('card-1', { threadId: 'thread-1', deviceId: 'device-1', openId: 'user-1', epoch: 0, expiresAt: Date.now() + 1000 });
+    await mockFeishuHandler.onCardNewThread('user-1', 'card-1');
+    expect(mockFeishuHandler.sendCommandFromCardAction).toHaveBeenCalledWith('user-1', '/thread new', true, 'device-1',
+      expect.objectContaining({ deviceId: 'device-1', revision: expect.any(Number), epoch: expect.any(Number) }));
   });
 
-  it('should clear activeThreadMap when device is switched', () => {
+  it('retains durable per-device selection across a device switch', async () => {
     const onResolveActiveThread = mockFeishuHandler.setOnResolveActiveThread.mock.calls[0][0];
-    const onCardSwitchThread = mockFeishuHandler.onCardSwitchThread;
-    const onDeviceSwitch = mockFeishuHandler.onDeviceSwitch;
-
-    // Populate activeThreadMap for the user
-    onCardSwitchThread('user-1', 'thread-abc', 'My Thread');
-    expect(onResolveActiveThread('user-1')).toEqual({ threadId: 'thread-abc', threadName: 'My Thread' });
-
-    // Switch device — should clear the entry
-    onDeviceSwitch('user-1', 'old-device-id');
-    expect(onResolveActiveThread('user-1')).toBeUndefined();
+    mockBindingManager.getThreadSelection.mockReturnValue({ status: 'valid', threadId: 'thread-abc' });
+    mockFeishuHandler.onDeviceSwitch('user-1', 'device-1', 'device-2');
+    expect(await onResolveActiveThread('user-1', 'device-2')).toMatchObject({ threadId: 'thread-abc' });
   });
 
-  it('should not affect other users activeThreadMap when device is switched', () => {
+  it('does not change another user selection during a device switch', async () => {
     const onResolveActiveThread = mockFeishuHandler.setOnResolveActiveThread.mock.calls[0][0];
-    const onCardSwitchThread = mockFeishuHandler.onCardSwitchThread;
-    const onDeviceSwitch = mockFeishuHandler.onDeviceSwitch;
-
-    onCardSwitchThread('user-1', 'thread-1', 'Thread 1');
-    onCardSwitchThread('user-2', 'thread-2', 'Thread 2');
-
-    onDeviceSwitch('user-1', 'old-device-id');
-
-    expect(onResolveActiveThread('user-1')).toBeUndefined();
-    expect(onResolveActiveThread('user-2')).toEqual({ threadId: 'thread-2', threadName: 'Thread 2' });
+    mockBindingManager.getThreadSelection.mockImplementation((openId: string) => ({ status: 'valid', threadId: `${openId}-thread` }));
+    mockFeishuHandler.onDeviceSwitch('user-1', 'device-1', 'device-2');
+    expect(await onResolveActiveThread('user-1', 'device-2')).toMatchObject({ threadId: 'user-1-thread' });
+    expect(await onResolveActiveThread('user-2', 'device-1')).toMatchObject({ threadId: 'user-2-thread' });
   });
 
-  it('should remove cardThreadMap entries for old device when device is switched', () => {
+  it('should remove cardThreadMap entries for old device when device is switched', async () => {
     const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
     const onResolveThread = mockFeishuHandler.setOnResolveThread.mock.calls[0][0];
     const onDeviceSwitch = mockFeishuHandler.onDeviceSwitch;
+    mockBindingManager.getDeviceBinding.mockResolvedValue({ openId: 'user-1' });
 
     // Populate cardThreadMap via streaming session registrations
     onStartStreaming('msg-1', 'user-1', 'feishu-card-1', 'old-device', 'thread-1');
     onStartStreaming('msg-2', 'user-1', 'feishu-card-2', 'old-device', 'thread-2');
     onStartStreaming('msg-3', 'user-1', 'feishu-card-3', 'other-device', 'thread-3');
 
-    expect(onResolveThread('feishu-card-1')).toBeDefined();
-    expect(onResolveThread('feishu-card-2')).toBeDefined();
-    expect(onResolveThread('feishu-card-3')).toBeDefined();
+    expect(await onResolveThread('feishu-card-1', 'user-1')).toBeDefined();
+    expect(await onResolveThread('feishu-card-2', 'user-1')).toBeDefined();
+    expect(await onResolveThread('feishu-card-3', 'user-1')).toBeDefined();
 
     // Switch away from old-device — its card entries should be purged
-    onDeviceSwitch('user-1', 'old-device');
+    onDeviceSwitch('user-1', 'old-device', 'other-device');
 
-    expect(onResolveThread('feishu-card-1')).toBeUndefined();
-    expect(onResolveThread('feishu-card-2')).toBeUndefined();
+    expect(await onResolveThread('feishu-card-1', 'user-1')).toBeUndefined();
+    expect(await onResolveThread('feishu-card-2', 'user-1')).toBeUndefined();
     // Entry for other-device should be unaffected
-    expect(onResolveThread('feishu-card-3')).toBeDefined();
+    expect(await onResolveThread('feishu-card-3', 'user-1')).toBeDefined();
   });
 
-  it.each([true, false])('preserves reply routing after completion and changes selection only for a new thread (%s)', async (pendingNewThread) => {
+  it.each([true, false])('preserves reply routing and correlates New Thread selection (%s)', async (pendingNewThread) => {
     await server.start();
     const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
     const resolveThread = mockFeishuHandler.setOnResolveThread.mock.calls[0][0];
     const resolveActiveThread = mockFeishuHandler.setOnResolveActiveThread.mock.calls[0][0];
-    await mockFeishuHandler.onCardSwitchThread('u1', 'selected-thread', 'Selected Thread');
-    onStartStreaming('m1', 'u1', 'f1', 'd1', undefined, pendingNewThread);
+    let selected = 'selected-thread';
+    mockBindingManager.getThreadSelection.mockImplementation(() => ({ status: 'valid', threadId: selected }));
+    mockBindingManager.selectThread.mockImplementation(async (_openId, _deviceId, threadId, guard) => {
+      if (!guard()) return false;
+      selected = threadId;
+      return true;
+    });
+    (server as any).cardThreadMap.set('select-card', { threadId: 'selected-thread', deviceId: 'd1', openId: 'u1', epoch: 0, expiresAt: Date.now() + 1000 });
+    mockBindingManager.getActiveDevice.mockResolvedValue({ deviceId: 'd1' });
+    await mockFeishuHandler.onCardSwitchThread('u1', 'select-card', 'selected-thread', 'Selected Thread');
+    const intent = pendingNewThread ? (server as any).selections.beginIntent('u1', 'd1') : undefined;
+    onStartStreaming('m1', 'u1', 'f1', 'd1', undefined, pendingNewThread, undefined, undefined, intent);
 
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
     const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
     onConnection(mockWs, { socket: { remoteAddress: '1' } });
-    
     const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
     await onMessage(Buffer.from(JSON.stringify({ type: MessageType.BINDING_REQUEST, data: { deviceId: 'd1' } })));
     mockWs.send.mockClear();
     await onMessage(Buffer.from(JSON.stringify({
       type: MessageType.RESPONSE,
-      messageId: 'm1',
-      openId: 'u1',
-      success: true,
-      threadId: 'new-thread-1',
-      threads: [{ id: 'new-thread-1', name: 'New Thread', status: 'idle' }]
+      messageId: 'm1', openId: 'u1', success: true, threadId: 'new-thread-1',
+      threads: [{ id: 'new-thread-1', name: 'New Thread', status: 'idle' },
+        { id: 'selected-thread', name: 'Selected Thread', status: 'idle' },
+        { id: 'default-id', name: 'default', status: 'idle' }]
     })));
-    
+
     expect(mockFeishuHandler.finalizeStreamingMessage).toHaveBeenCalled();
-    expect(resolveThread('f1')).toMatchObject({ threadId: 'new-thread-1', deviceId: 'd1' });
-    expect(resolveActiveThread('u1')).toEqual(pendingNewThread
+    expect(await resolveThread('f1', 'u1')).toMatchObject({ threadId: 'new-thread-1', deviceId: 'd1' });
+    expect(await resolveActiveThread('u1', 'd1')).toEqual(pendingNewThread
       ? { threadId: 'new-thread-1', threadName: 'New Thread' }
       : { threadId: 'selected-thread', threadName: 'Selected Thread' });
-    expect(resolveThread('unknown-card')).toBeUndefined();
+    expect(await resolveThread('unknown-card', 'u1')).toBeUndefined();
     vi.setSystemTime(Date.now() + 7 * 24 * 60 * 60 * 1000 + 1);
-    expect(resolveThread('f1')).toBeUndefined();
+    expect(await resolveThread('f1', 'u1')).toBeUndefined();
   });
 
   it('accepts full 4 KiB worker summaries without losing the final 96 characters', () => {
@@ -1672,7 +1674,8 @@ describe('RouterServer', () => {
       undefined,
       undefined,
       undefined,
-      false
+      false,
+      expect.objectContaining({ onDelivered: expect.any(Function) })
     );
   });
 

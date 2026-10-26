@@ -75,6 +75,11 @@ function parseStoreData(content: string, currentVersion: number): ParsedStoreDat
 
 type Draft = (current: StoreData) => StoreData | undefined;
 
+export type DeviceThreadSelection =
+  | { status: 'none' }
+  | { status: 'valid'; threadId: string }
+  | { status: 'invalid' };
+
 interface PendingSave {
   createDraft: Draft;
   resolve: () => void;
@@ -227,6 +232,50 @@ export class JsonStore {
     return binding ? { ...binding, devices: binding.devices.map(device => ({ ...device })) } : null;
   }
 
+  getDeviceThreadSelection(openId: string, deviceId: string): DeviceThreadSelection {
+    this.assertReconciled();
+    const device = this.data.userBindings[openId]?.devices.find(item => item.deviceId === deviceId);
+    if (!device || !Object.hasOwn(device, 'selectedThreadId')) return { status: 'none' };
+    const value = (device as { selectedThreadId?: unknown }).selectedThreadId;
+    return typeof value === 'string' && value.length > 0 && value.length <= 200
+      ? { status: 'valid', threadId: value }
+      : { status: 'invalid' };
+  }
+
+  /** Prompt, FIFO preference mutation against the latest committed binding state. */
+  async setDeviceThreadSelection(openId: string, deviceId: string, threadId: string | null,
+    options: { expectedThreadId?: string; requireActive?: boolean; guard?: () => boolean } = {}): Promise<boolean> {
+    if (threadId !== null && (typeof threadId !== 'string' || threadId.length === 0 || threadId.length > 200)) {
+      throw new Error('Invalid selected thread ID.');
+    }
+    let matches = true;
+    await this.commitQueued(current => {
+      if (options.guard && !options.guard()) {
+        matches = false;
+        return undefined;
+      }
+      const binding = current.userBindings[openId];
+      const device = binding?.devices.find(item => item.deviceId === deviceId);
+      if (!binding || !device) throw new Error('Device is no longer bound to this user.');
+      if ((options.requireActive && binding.activeDeviceId !== deviceId)
+        || (options.expectedThreadId !== undefined && device.selectedThreadId !== options.expectedThreadId)) {
+        matches = false;
+        return undefined;
+      }
+      if (device.selectedThreadId === threadId
+        || (threadId === null && !Object.hasOwn(device, 'selectedThreadId'))) return undefined;
+      const devices = binding.devices.map(item => {
+        if (item.deviceId !== deviceId) return { ...item };
+        if (threadId !== null) return { ...item, selectedThreadId: threadId };
+        const { selectedThreadId: _removed, ...withoutSelection } = item;
+        return withoutSelection;
+      });
+      return { ...current, userBindings: { ...current.userBindings,
+        [openId]: { ...binding, devices, updatedAt: Date.now() } } };
+    });
+    return matches;
+  }
+
   listBoundUserIds(): string[] {
     this.assertReconciled();
     return Object.keys(this.data.userBindings).filter(id => this.data.userBindings[id].devices.length > 0);
@@ -339,12 +388,7 @@ export class JsonStore {
     const draining = (async () => {
       const errors: unknown[] = [];
       while (this.pendingSaves.length > 0) {
-        const batch = this.pendingSaves.splice(0);
-        const writes = batch.map(request => {
-          const write = this.enqueueWrite(request.createDraft);
-          void write.then(request.resolve, request.reject);
-          return write;
-        });
+        const writes = this.admitPendingSaves();
         const results = await Promise.allSettled(writes);
         for (const result of results) if (result.status === 'rejected') errors.push(result.reason);
       }
@@ -357,7 +401,26 @@ export class JsonStore {
     return draining;
   }
 
+  /** Move admitted debounced writes into the shared FIFO before an immediate write. */
+  private admitPendingSaves(): Promise<void>[] {
+    const batch = this.pendingSaves.splice(0);
+    return batch.map(request => {
+      const write = this.enqueueWrite(request.createDraft);
+      void write.then(request.resolve, request.reject);
+      return write;
+    });
+  }
+
   private commitImmediate(createDraft: Draft): Promise<void> {
+    return this.enqueueWrite(createDraft);
+  }
+
+  private commitQueued(createDraft: Draft): Promise<void> {
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
+    this.admitPendingSaves();
     return this.enqueueWrite(createDraft);
   }
 

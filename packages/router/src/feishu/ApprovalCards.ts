@@ -17,7 +17,7 @@ interface ApprovalCardTransport {
   sendToDevice(deviceId: string, message: object): Promise<boolean>;
   create(openId: string, elements: any[], header?: Record<string, unknown>): Promise<string | null>;
   update(cardId: string, elements: any[], header?: Record<string, unknown>): Promise<void>;
-  registerReplyRoute(cardId: string, threadId: string, deviceId: string): void;
+  registerReplyRoute(cardId: string, threadId: string, deviceId: string, openId: string): void;
 }
 
 /** A button answers one original request, independent of the user's active thread/device. */
@@ -46,7 +46,8 @@ export class ApprovalCards {
     entry.ready = (async () => {
       try {
         entry.cardId = await this.transport.create(request.openId, this.elements(entry), this.header(entry)) ?? undefined;
-        if (entry.cardId) this.transport.registerReplyRoute(entry.cardId, request.threadId, deviceId);
+        if (!current()) return;
+        if (entry.cardId) this.transport.registerReplyRoute(entry.cardId, request.threadId, deviceId, request.openId);
       } catch { /* Fall back to the existing text approval flow. */ }
       if (!entry.cardId) {
         if (this.pending.get(key) === entry) this.pending.delete(key);
