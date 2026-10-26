@@ -101,7 +101,8 @@ describe('JsonStore', () => {
       await fs.mkdir(path.dirname(storePath), { recursive: true });
       await fs.writeFile(storePath, 'not valid json');
 
-      await expect(store.initialize()).rejects.toThrow();
+      const invalidStore = new JsonStore(storePath, 0);
+      await expect(invalidStore.initialize()).rejects.toThrow();
       expect(await fs.readFile(storePath, 'utf8')).toBe('not valid json');
     });
   });

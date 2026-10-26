@@ -1403,6 +1403,13 @@ and does not start queued work. Retry `/abort` to confirm termination and releas
 the thread. An unsuccessful retry reports the uncertainty and keeps the thread
 blocked; it does not replay the failed prompt.
 
+From Router 1.6.187, binding files must have a supported version and valid record
+structure before they are loaded or migrated. Invalid files are preserved
+without replacement, and the rejected store instance blocks reads and writes.
+Correct or restore the file before restarting the Router. Valid version-1 files
+and versionless single-device files, including empty legacy collections, remain
+supported. The binding schema and protocol-v1 flow for existing CLIs are unchanged.
+
 ## 许可证
 
 MIT 许可证 - 详见 [LICENSE](LICENSE) 文件。

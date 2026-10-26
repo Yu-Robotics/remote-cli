@@ -1,4 +1,4 @@
-import { BindingCode, UserBinding, LegacyUserBinding } from '../types';
+import { BindingCode, DeviceBinding, UserBinding, LegacyUserBinding } from '../types';
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
@@ -9,6 +9,68 @@ interface StoreData {
   bindingCodes: Record<string, BindingCode>;
   userBindings: Record<string, UserBinding>;
   deviceToUserMap: Record<string, string>;
+}
+
+interface LegacyStoreData {
+  bindingCodes: Record<string, BindingCode>;
+  userBindings: Record<string, LegacyUserBinding>;
+}
+
+type ParsedStoreData = { kind: 'current'; data: StoreData } | { kind: 'legacy'; data: LegacyStoreData };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isIdentifier(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0;
+}
+
+function isTimestamp(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function isDictionary<T>(value: unknown, entry: (value: unknown) => value is T): value is Record<string, T> {
+  return isRecord(value) && Object.values(value).every(entry);
+}
+
+function isBindingCode(value: unknown): value is BindingCode {
+  return isRecord(value) && isIdentifier(value.code) && isIdentifier(value.deviceId)
+    && isTimestamp(value.createdAt) && isTimestamp(value.expiresAt)
+    && (!Object.hasOwn(value, 'devicePublicKey') || isIdentifier(value.devicePublicKey));
+}
+
+function isLegacyBinding(value: unknown): value is LegacyUserBinding {
+  return isRecord(value) && isIdentifier(value.openId) && isIdentifier(value.deviceId)
+    && typeof value.deviceName === 'string' && isTimestamp(value.boundAt) && isTimestamp(value.lastActiveAt)
+    && !Object.hasOwn(value, 'devices');
+}
+
+function isDeviceBinding(value: unknown): value is DeviceBinding {
+  return isRecord(value) && isIdentifier(value.deviceId) && typeof value.deviceName === 'string'
+    && isTimestamp(value.boundAt) && isTimestamp(value.lastActiveAt) && typeof value.isActive === 'boolean';
+}
+
+function isUserBinding(value: unknown): value is UserBinding {
+  return isRecord(value) && isIdentifier(value.openId) && Array.isArray(value.devices)
+    && value.devices.every(isDeviceBinding) && (value.activeDeviceId === null || isIdentifier(value.activeDeviceId))
+    && isTimestamp(value.createdAt) && isTimestamp(value.updatedAt);
+}
+
+function parseStoreData(content: string, currentVersion: number): ParsedStoreData {
+  const value: unknown = JSON.parse(content);
+  if (isRecord(value) && value.version === currentVersion
+    && isDictionary(value.bindingCodes, isBindingCode) && isDictionary(value.userBindings, isUserBinding)
+    && isDictionary(value.deviceToUserMap, isIdentifier)) {
+    return { kind: 'current', data: value as unknown as StoreData };
+  }
+  if (isRecord(value) && !Object.hasOwn(value, 'version')
+    && isDictionary(value.bindingCodes, isBindingCode) && isDictionary(value.userBindings, isLegacyBinding)
+    && (!Object.hasOwn(value, 'deviceBindings') || isDictionary(value.deviceBindings, isLegacyBinding))
+    && (!Object.hasOwn(value, 'deviceToUserMap') || isDictionary(value.deviceToUserMap, isIdentifier))) {
+    return { kind: 'legacy', data: value as unknown as LegacyStoreData };
+  }
+  throw new Error('Unsupported bindings data structure or version.');
 }
 
 type Draft = (current: StoreData) => StoreData | undefined;
@@ -34,6 +96,7 @@ export class JsonStore {
   private writeTail: Promise<void> = Promise.resolve();
   private draining?: Promise<void>;
   private uncertainty?: Error;
+  private invalidDataError?: Error;
   private readonly expiringCodes = new Set<string>();
   private readonly SAVE_DELAY: number;
   private static readonly CURRENT_VERSION = 1;
@@ -50,6 +113,7 @@ export class JsonStore {
 
   private assertReconciled(): void {
     if (this.uncertainty) throw this.uncertainty;
+    if (this.invalidDataError) throw this.invalidDataError;
   }
 
   /** Initialize without replacing an unreadable or damaged existing file. */
@@ -65,22 +129,26 @@ export class JsonStore {
       return;
     }
 
-    let rawData: any;
+    let parsed: ParsedStoreData;
     try {
-      rawData = JSON.parse(content);
-    } catch (error) {
-      throw new Error('Bindings data is invalid; the existing file was preserved.', { cause: error });
+      parsed = parseStoreData(content, JsonStore.CURRENT_VERSION);
+    } catch {
+      // Parser diagnostics can quote private values from the original input.
+      this.invalidDataError = new Error(
+        'Bindings data is invalid or unsupported; the existing file was preserved. Correct or restore the file and restart the Router.',
+      );
+      throw this.invalidDataError;
     }
-    if (!rawData?.version) await this.migrateFromLegacy(rawData);
-    else this.data = rawData as StoreData;
+    if (parsed.kind === 'legacy') await this.migrateFromLegacy(parsed.data);
+    else this.data = parsed.data;
     await this.commitImmediate(current => this.withoutExpiredBindingCodes(current));
   }
 
-  private async migrateFromLegacy(rawData: any): Promise<void> {
+  private async migrateFromLegacy(rawData: LegacyStoreData): Promise<void> {
     console.log('[JsonStore] Migrating legacy binding data to multi-device schema...');
-    const legacyUserBindings = (rawData?.userBindings || {}) as Record<string, LegacyUserBinding>;
-    const newUserBindings: Record<string, UserBinding> = {};
-    const deviceToUserMap: Record<string, string> = {};
+    const legacyUserBindings = rawData.userBindings;
+    const newUserBindings: Record<string, UserBinding> = Object.create(null);
+    const deviceToUserMap: Record<string, string> = Object.create(null);
     const now = Date.now();
 
     for (const [openId, legacy] of Object.entries(legacyUserBindings)) {
@@ -96,7 +164,7 @@ export class JsonStore {
     }
     const migrated: StoreData = {
       version: JsonStore.CURRENT_VERSION,
-      bindingCodes: { ...(rawData?.bindingCodes || {}) },
+      bindingCodes: { ...rawData.bindingCodes },
       userBindings: newUserBindings,
       deviceToUserMap,
     };
@@ -225,6 +293,7 @@ export class JsonStore {
 
   /** Capture inputs at admission, but compute drafts only against prior committed state. */
   private scheduleSave(createDraft: Draft): Promise<void> {
+    if (this.invalidDataError) return Promise.reject(this.invalidDataError);
     return new Promise<void>((resolve, reject) => {
       this.pendingSaves.push({ createDraft, resolve, reject });
       if (this.saveTimer) clearTimeout(this.saveTimer);
@@ -319,7 +388,8 @@ export class JsonStore {
 
   /** Drain accepted writes, including writes admitted while an earlier flush waits. */
   async flush(): Promise<void> {
-    const errors: unknown[] = this.uncertainty ? [this.uncertainty] : [];
+    const blocked = this.uncertainty ?? this.invalidDataError;
+    const errors: unknown[] = blocked ? [blocked] : [];
     do {
       if (this.saveTimer) {
         clearTimeout(this.saveTimer);
