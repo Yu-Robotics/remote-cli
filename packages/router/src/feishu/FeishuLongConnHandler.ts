@@ -474,41 +474,26 @@ export class FeishuLongConnHandler {
    */
   private async handleBindCommand(openId: string, messageId: string, code: string): Promise<void> {
     try {
-      // Verify binding code
-      const bindingCode = await this.bindingManager.verifyBindingCode(code);
-      if (!bindingCode) {
+      const redemption = await this.bindingManager.redeemBindingCode(openId, code, 'Device', this.onApproveDeviceKey);
+      if (!redemption) {
         await this.replyToMessage(messageId, '❌ Binding code is invalid or expired, please generate a new one');
         return;
       }
-
-      // Check if device is already bound
-      const existingDevices = await this.bindingManager.getUserDevices(openId);
-      const alreadyBound = existingDevices.some(d => d.deviceId === bindingCode.deviceId);
-
-      if (alreadyBound && !bindingCode.devicePublicKey) {
+      if (redemption.alreadyBound && !redemption.bindingCode.devicePublicKey) {
         await this.replyToMessage(messageId, '❌ This device is already bound to your account');
         return;
       }
-
-      // Bind user
-      const deviceName = 'Device'; // Will be updated by client later
-      await this.bindingManager.bindUser(openId, bindingCode.deviceId, deviceName);
-      if (bindingCode.devicePublicKey) {
-        if (!this.onApproveDeviceKey) throw new Error('Secure device enrollment is unavailable.');
-        await this.onApproveDeviceKey(openId, bindingCode.deviceId, bindingCode.devicePublicKey);
-        await this.bindingManager.consumeBindingCode(code);
+      if (redemption.bindingCode.devicePublicKey) {
         await this.replyToMessage(messageId, '🔐 Device key approved. Reconnect the upgraded CLI to receive files (up to 20 MiB). Older credentialless CLIs cannot connect as this device.');
         return;
       }
 
-      const isFirstDevice = existingDevices.length === 0;
-      const statusNote = isFirstDevice
+      const statusNote = redemption.isFirstDevice
         ? '\n\n📱 This is your first device and will be set as active.'
         : '\n\n📱 Use /device switch to activate this device.';
-
       await this.replyToMessage(
         messageId,
-        `✅ Binding successful!\n\nDevice ID: ${bindingCode.deviceId}\n\nYou can now control your device through Feishu.${statusNote}\n\nUse /device list to view all your devices.`
+        `✅ Binding successful!\n\nDevice ID: ${redemption.bindingCode.deviceId}\n\nYou can now control your device through Feishu.${statusNote}\n\nUse /device list to view all your devices.`
       );
     } catch (error) {
       console.error('Error binding user:', error);
@@ -529,11 +514,9 @@ export class FeishuLongConnHandler {
         return;
       }
 
+      // Unbind all devices; key revocation shares the ownership mutation queue.
       const deviceCount = binding.devices.length;
-
-      // Unbind all devices
-      for (const device of binding.devices) await this.onRevokeDevice?.(device.deviceId);
-      await this.bindingManager.unbindUser(openId);
+      await this.bindingManager.unbindUser(openId, async deviceId => { await this.onRevokeDevice?.(deviceId); });
       await this.replyToMessage(
         messageId,
         `✅ Successfully unbound ${deviceCount} device(s)`
@@ -736,8 +719,8 @@ export class FeishuLongConnHandler {
       }
 
       const wasActive = device.isActive;
-      await this.onRevokeDevice?.(deviceId);
-      const result = await this.bindingManager.unbindDevice(openId, deviceId);
+      const result = await this.bindingManager.unbindDevice(openId, deviceId,
+        async id => { await this.onRevokeDevice?.(id); });
 
       if (!result) {
         await this.replyToMessage(messageId, '❌ Failed to unbind device');

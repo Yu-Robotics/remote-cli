@@ -193,7 +193,7 @@ export class ThreadExecutorPool {
   // ── Per-thread locking ──────────────────────────────────────────────────
 
   isThreadBusy(threadId: string): boolean {
-    return this.busy.get(threadId) ?? false;
+    return (this.busy.get(threadId) ?? false) || this.executors.get(threadId)?.isBusy?.() === true;
   }
 
   setThreadBusy(threadId: string, busy: boolean): void {
@@ -213,7 +213,7 @@ export class ThreadExecutorPool {
 
   getStatus(threadId: string): ThreadStatus {
     if (this.errorFlag.get(threadId)) return 'error';
-    if (this.busy.get(threadId)) return 'running';
+    if (this.isThreadBusy(threadId)) return 'running';
     return 'idle';
   }
 

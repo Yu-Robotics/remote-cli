@@ -35,7 +35,13 @@ describe('Router wire compatibility', () => {
       getConfigPath: () => '/virtual-router-compat/config.json',
       get: (section: string, key: string) => section === 'files' ? { enabled: false } : key === 'heartbeatInterval' ? 30000 : 'test',
     };
-    server = new RouterServer(config as unknown as ConfigManager, {} as JsonStore);
+    server = new RouterServer(config as unknown as ConfigManager, { flush: vi.fn().mockResolvedValue(undefined) } as unknown as JsonStore);
+    vi.spyOn((server as any).bindingManager, 'getDeviceBinding').mockImplementation(async (deviceId: string) => {
+      const openId = deviceId === 'device-1' ? 'owner'
+        : deviceId === 'legacy-device' ? 'legacy-user'
+          : deviceId === 'current-device' ? 'current-user' : undefined;
+      return openId ? { openId } : null;
+    });
     await server.start();
 
     socket = Object.assign(new EventEmitter(), { send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN });

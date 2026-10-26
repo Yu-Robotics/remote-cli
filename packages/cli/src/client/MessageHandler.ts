@@ -896,6 +896,13 @@ export class MessageHandler {
     const existingAbort = this.abortOperations.get(threadId);
     if (existingAbort) {
       await existingAbort;
+      if (executor.hasUncertainShutdown?.()) {
+        this.sendResponse(messageId, threadId, {
+          success: false,
+          error: 'Executor shutdown could not be confirmed. This thread remains busy; retry /abort before changing context or sending more work.',
+        });
+        return;
+      }
       if (executor.isGoalRunning?.()) {
         this.sendResponse(messageId, threadId, {
           success: false,
@@ -917,6 +924,9 @@ export class MessageHandler {
     const operation = (async () => {
       if (isDelegationEnabled(this.threadManager.getThread(threadId))) await this.delegation.cancelThread(threadId);
       aborted = await executor.abort();
+      if (executor.hasUncertainShutdown?.()) {
+        throw new Error('Executor shutdown could not be confirmed. This thread remains busy; retry /abort before changing context or sending more work.');
+      }
       if (!aborted && executor.isGoalRunning?.()) {
         throw new Error('Native goal stop could not be confirmed. This thread remains busy; retry /goal pause or /abort.');
       }

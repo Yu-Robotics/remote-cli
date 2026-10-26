@@ -98,6 +98,21 @@ describe('ThreadExecutorPool', () => {
       expect(pool.isThreadBusy(defaultThread.id)).toBe(false);
     });
 
+    it('retains native cleanup ownership after the foreground busy flag clears', () => {
+      const nativeBusy = vi.fn().mockReturnValue(true);
+      mockExecutorFactory.mockReturnValue(makeMockExecutor({ isBusy: nativeBusy }));
+      const defaultThread = manager.getDefaultThread();
+      pool.getExecutor(defaultThread.id);
+      pool.setThreadBusy(defaultThread.id, true);
+      pool.setThreadBusy(defaultThread.id, false);
+
+      expect(pool.isThreadBusy(defaultThread.id)).toBe(true);
+      expect(pool.getStatus(defaultThread.id)).toBe('running');
+      nativeBusy.mockReturnValue(false);
+      expect(pool.isThreadBusy(defaultThread.id)).toBe(false);
+      expect(pool.getStatus(defaultThread.id)).toBe('idle');
+    });
+
     it('two threads can be busy simultaneously', async () => {
       const t2 = await manager.createThread('parallel', tmpDir);
       const defaultThread = manager.getDefaultThread();

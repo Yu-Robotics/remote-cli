@@ -74,6 +74,8 @@ interface StreamingMessageState {
   recoveryPlainText?: boolean;
   recoveryCwd?: string;
   updateInFlight?: Promise<void>;
+  /** Latest authenticated socket for final-dispatch revocation checks. */
+  currentConnection?: () => boolean;
   updatePending: boolean;
   finalizing: boolean;
   /** Set once a terminal response arrived; accepted image work still drains. */
@@ -556,6 +558,9 @@ export class RouterServer {
           const imageDevice = deviceId;
           const imageCurrent = () => !socketClosed && ws.readyState === WebSocket.OPEN
             && !!imageDevice && this.connectionHub.isCurrentConnection(imageDevice, ws);
+          if ([MessageType.RESPONSE, MessageType.NOTIFICATION, MessageType.TASK_NOTIFICATION,
+            'task_resume', 'stream', 'stream_context', 'queue_started'].includes(message.type)
+            && !await this.authorizeRecipientOutput(message, imageDevice, imageCurrent)) return;
           // Establish routing before card creation awaits. Payload admission and
           // response closure must occur before waiting for earlier operations.
           if (imageDevice && taskRecoveryEnabled && message.type === 'task_resume') {
@@ -615,7 +620,7 @@ export class RouterServer {
           switch (message.type) {
             case 'task_resume': {
               if (!taskRecoveryEnabled || !deviceId) break;
-              const current = () => this.connectionHub.isCurrentConnection(deviceId!, ws);
+              const current = imageCurrent;
               let success = false;
               try {
                 success = await this.handleTaskResume(message, deviceId, current);
@@ -1038,6 +1043,36 @@ export class RouterServer {
   private lastStreamUpdateTime: Map<string, number> = new Map();
   private readonly STREAM_UPDATE_INTERVAL_MS = 500; // Update at least every 500ms
   private readonly STREAM_UPDATE_MIN_LENGTH = 10;   // Update every 10 characters
+
+  private async authorizeRecipientOutput(message: any, deviceId: string | null, isCurrent: () => boolean): Promise<boolean> {
+    const openId = message.openId || message.data?.openId;
+    if (!deviceId || typeof openId !== 'string' || !openId || !isCurrent()) return false;
+    const messageId = typeof message.messageId === 'string' && message.messageId ? message.messageId : undefined;
+    const originalStream = messageId ? this.streamingMessages.get(messageId) : undefined;
+    const originalRoute = messageId ? this.imageReplies.get(messageId) : undefined;
+    const binding = await this.bindingManager.getDeviceBinding(deviceId);
+    // Registration alone is insufficient: a legacy device can bind or change
+    // owners after connecting, and a replacement socket may win during lookup.
+    if (!isCurrent() || binding?.openId !== openId) return false;
+    if (messageId) {
+      if (originalStream && this.streamingMessages.get(messageId) !== originalStream) return false;
+      if (originalRoute && this.imageReplies.get(messageId) !== originalRoute) return false;
+      const stream = this.streamingMessages.get(messageId);
+      if (stream && (stream.deviceId !== deviceId || stream.openId !== openId)) return false;
+      const route = this.imageReplies.get(messageId);
+      if (route && (route.deviceId !== deviceId || route.openId !== openId)) return false;
+      if (stream) stream.currentConnection = isCurrent;
+    }
+    return true;
+  }
+
+  private async canDispatchStreamOutput(messageId: string, stream: StreamingMessageState): Promise<boolean> {
+    const current = stream.currentConnection;
+    if (this.streamingMessages.get(messageId) !== stream || (current && !current())) return false;
+    const binding = await this.bindingManager.getDeviceBinding(stream.deviceId);
+    return this.streamingMessages.get(messageId) === stream && binding?.openId === stream.openId
+      && (!current || current());
+  }
 
   private matchesActivityStream(message: any, deviceId: string | null): boolean {
     if (!deviceId || typeof message.messageId !== 'string' || typeof message.openId !== 'string'
@@ -1981,6 +2016,7 @@ export class RouterServer {
     streamData.updatePending = false;
     this.clearDelegationProgressTimers(streamData);
     await streamData.updateInFlight;
+    if (!await this.canDispatchStreamOutput(messageId, streamData)) return;
 
     const { feishuMessageId, openId } = streamData;
 
@@ -2021,6 +2057,7 @@ export class RouterServer {
         );
         if (!finalized) {
           prepared.discard();
+          if (!await this.canDispatchStreamOutput(messageId, streamData)) return;
           const delivered = await this.feishuLongConnHandler.sendMessage(openId, output || '⚙️ Settings are unavailable as a card. Use the text command.');
           if (delivered === false) throw new Error('Failed to deliver settings result');
         }
@@ -2168,7 +2205,21 @@ export class RouterServer {
    */
   async stop(): Promise<void> {
     console.log('Stopping router server...');
-    await this.tips.stop();
+    let firstError: unknown;
+    let failed = false;
+    const attempt = async (label: string, operation: () => Promise<void> | void): Promise<void> => {
+      try { await operation(); }
+      catch (error) {
+        failed = true;
+        firstError ??= error;
+        console.error(`${label}:`, error);
+      }
+    };
+
+    // Drain accepted binding writes before any slow card or transfer cleanup.
+    // A failure must not skip the remaining resource cleanup or be hidden.
+    await attempt('Error flushing bindings during shutdown', () => this.store.flush());
+    await attempt('Error stopping Tips scheduler', () => this.tips.stop());
     for (const id of this.imageReplies.keys()) this.cancelImageReply(id);
     this.approvalCards.destroy();
     this.workerContextCards.destroy();
@@ -2177,17 +2228,13 @@ export class RouterServer {
     this.settingsConnections.clear();
     this.maintenanceCards.destroy();
     this.maintenanceConnections.clear();
-    await this.fileTransfers.destroy();
+    await attempt('Error destroying file transfers', () => this.fileTransfers.destroy());
 
-    // Stop cleanup interval
     if (this.cleanupInterval) {
       clearInterval(this.cleanupInterval);
       this.cleanupInterval = null;
     }
 
-    // Finalize in-flight streaming cards before losing the Feishu connection,
-    // so a graceful restart does not leave users with permanently unfinished
-    // cards. (A hard crash still cannot do this.)
     for (const [messageId, session] of Array.from(this.streamingMessages.entries())) {
       this.clearDelegationProgressTimers(session);
       if (session.finalizing) continue;
@@ -2196,44 +2243,45 @@ export class RouterServer {
           messageId, false, undefined, 'Router server is restarting — task was interrupted.'
         );
       } catch (error) {
+        failed = true;
+        firstError ??= error;
         console.error(`[RouterServer] Failed to finalize streaming card ${messageId} during shutdown:`, error);
       }
     }
     this.streamingMessages.clear();
     this.lastStreamUpdateTime.clear();
 
-    // Stop Feishu long connection
-    try {
-      await this.feishuLongConnHandler.stop();
-    } catch (error) {
-      console.error('Error stopping Feishu long connection:', error);
-    }
-
-    // Close all WebSocket connections
-    this.connectionHub.closeAllConnections();
-
-    // Close WebSocket server
+    await attempt('Error stopping Feishu long connection', () => this.feishuLongConnHandler.stop());
+    await attempt('Error closing WebSocket connections', () => this.connectionHub.closeAllConnections());
     if (this.wss) {
-      this.wss.close();
+      const wss = this.wss;
       this.wss = null;
+      await attempt('Error closing WebSocket server', () => wss.close());
     }
 
-    // Close HTTP server — with a 3s timeout so lingering sockets don't block shutdown
     if (this.httpServer) {
+      const httpServer = this.httpServer;
+      this.httpServer = null;
       await new Promise<void>((resolve) => {
         const timer = setTimeout(() => {
           console.warn('HTTP server close timed out, forcing shutdown');
+          failed = true;
+          firstError ??= new Error('HTTP server close timed out');
           resolve();
         }, 3000);
-        this.httpServer!.close((err) => {
+        httpServer.close((err) => {
           clearTimeout(timer);
-          if (err) console.error('HTTP server close error:', err);
+          if (err) {
+            failed = true;
+            firstError ??= err;
+            console.error('HTTP server close error:', err);
+          }
           resolve();
         });
       });
-      this.httpServer = null;
     }
 
+    if (failed) throw firstError;
     console.log('✅ Router server stopped');
   }
 

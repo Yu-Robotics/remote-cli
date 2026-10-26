@@ -97,17 +97,12 @@ describe('JsonStore', () => {
       expect(stats.devices).toBe(1);
     });
 
-    it('should handle corrupted JSON file gracefully', async () => {
-      // Write invalid JSON
+    it('should preserve corrupted JSON instead of destructively resetting it', async () => {
       await fs.mkdir(path.dirname(storePath), { recursive: true });
       await fs.writeFile(storePath, 'not valid json');
 
-      // Should not throw
-      await expect(store.initialize()).resolves.not.toThrow();
-
-      // Should start with empty data
-      const stats = store.getStats();
-      expect(stats.bindingCodes).toBe(0);
+      await expect(store.initialize()).rejects.toThrow();
+      expect(await fs.readFile(storePath, 'utf8')).toBe('not valid json');
     });
   });
 

@@ -6,6 +6,14 @@ import { CodexAppServerExecutor, CodexAppServerTransport } from '../../src/execu
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 import { ThreadManager } from '../../src/thread/ThreadManager';
 import { ThreadExecutorPool } from '../../src/thread/ThreadExecutorPool';
+import { MessageHandler } from '../../src/client/MessageHandler';
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
 
 class FakeTransport implements CodexAppServerTransport {
   running = false;
@@ -203,6 +211,7 @@ describe('CodexAppServerExecutor', () => {
       threadId, initialWorkingDirectory: projectDir, clientFactory: () => transport,
     });
     const pool = new ThreadExecutorPool(manager, guard, { type: 'codex' }, () => executor);
+    pool.getExecutor(threadId);
     const other = path.join(tempHome, 'other');
     await fs.mkdir(other);
     const pointers: string[] = [];
@@ -217,7 +226,7 @@ describe('CodexAppServerExecutor', () => {
     pointers.push(path.join(tempHome, '.remote-cli', 'codex-sessions', `${threadId}.json`));
     const before = await Promise.all(pointers.map(file => fs.readFile(file, 'utf8')));
 
-    expect(pool.isThreadBusy(threadId)).toBe(false);
+    expect(pool.isThreadBusy(threadId)).toBe(true);
     await expect(pool.setWorkingDirectory(threadId, other)).rejects.toThrow('busy');
     expect(await Promise.all(pointers.map(file => fs.readFile(file, 'utf8')))).toEqual(before);
     expect(manager.getThread(threadId)?.workingDirectory).toBe(projectDir);
@@ -1121,6 +1130,247 @@ describe('CodexAppServerExecutor', () => {
     expect(settled).toBe(false);
     transport.emit({ method: 'item/completed', params: { threadId: 'codex-thread-1', turnId: 'compact-turn', item: { type: 'contextCompaction', id: 'compact' } } });
     await expect(compact).resolves.toMatchObject({ success: true });
+  });
+
+  it('keeps an uncertain turn/start timeout fenced until transport exit is confirmed', async () => {
+    const start = deferred<any>();
+    const exit = deferred<void>();
+    const request = transport.request.bind(transport);
+    let delayed = true;
+    vi.spyOn(transport, 'request').mockImplementation((method, params) => {
+      if (method === 'turn/start' && delayed) {
+        delayed = false;
+        transport.running = true;
+        transport.requests.push({ method, params });
+        return start.promise;
+      }
+      return request(method, params);
+    });
+    const stop = vi.spyOn(transport, 'stop').mockImplementation(async () => {
+      await exit.promise;
+      transport.running = false;
+    });
+    const onStream = vi.fn();
+    const running = executor.execute('possibly accepted prompt', { timeout: 10, onStream });
+    let settled = false;
+    void running.then(() => { settled = true; });
+    try {
+      await vi.waitFor(() => expect(transport.requests.some(item => item.method === 'turn/start')).toBe(true));
+      await vi.waitFor(() => expect(stop).toHaveBeenCalledOnce());
+      expect(settled).toBe(false);
+      expect(executor.isBusy()).toBe(true);
+      await expect(executor.execute('must not race stopping', {})).resolves.toMatchObject({
+        success: false, error: expect.stringContaining('already running'),
+      });
+      expect(transport.requests.filter(item => item.method === 'turn/start')).toHaveLength(1);
+
+      start.resolve({ turn: { id: 'accepted-turn' } });
+      transport.emit({ method: 'item/agentMessage/delta', params: {
+        threadId: 'codex-thread-1', turnId: 'accepted-turn', delta: 'late uncertain output',
+      } });
+      await Promise.resolve();
+      expect(onStream).not.toHaveBeenCalled();
+      expect(transport.requests.filter(item => item.method === 'turn/start')).toHaveLength(1);
+
+      exit.resolve();
+      await expect(running).resolves.toMatchObject({ success: false, error: expect.stringContaining('timed out') });
+      await vi.waitFor(() => expect(executor.isBusy()).toBe(false));
+      expect(transport.running).toBe(false);
+      expect(executor.getSessionId()).toBe('codex-thread-1');
+
+      const fresh = executor.execute('explicit fresh request', {});
+      await vi.waitFor(() => expect(transport.requests.filter(item => item.method === 'turn/start')).toHaveLength(2));
+      transport.emit({ method: 'turn/completed', params: {
+        threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' },
+      } });
+      await expect(fresh).resolves.toMatchObject({ success: true });
+    } finally {
+      start.resolve({ turn: { id: 'accepted-turn' } });
+      exit.resolve();
+      transport.running = false;
+    }
+  });
+
+  it.each([
+    ['rejection', new Error('turn/start rejected')],
+    ['malformed success', { turn: { id: '' } }],
+  ])('stops the transport after turn/start %s before releasing ownership', async (_kind, outcome) => {
+    const start = deferred<any>();
+    const request = transport.request.bind(transport);
+    vi.spyOn(transport, 'request').mockImplementation((method, params) => {
+      if (method === 'turn/start') {
+        transport.running = true;
+        transport.requests.push({ method, params });
+        return start.promise;
+      }
+      return request(method, params);
+    });
+    const running = executor.execute('uncertain request', {});
+    await vi.waitFor(() => expect(transport.requests.some(item => item.method === 'turn/start')).toBe(true));
+    if (outcome instanceof Error) start.reject(outcome);
+    else start.resolve(outcome);
+    await expect(running).resolves.toMatchObject({ success: false });
+    await vi.waitFor(() => expect(executor.isBusy()).toBe(false));
+    expect(transport.running).toBe(false);
+    expect(executor.getSessionId()).toBe('codex-thread-1');
+  });
+
+  it('does not become idle or accept another turn when transport stop fails', async () => {
+    const start = deferred<any>();
+    const request = transport.request.bind(transport);
+    vi.spyOn(transport, 'request').mockImplementation((method, params) => {
+      if (method === 'turn/start') {
+        transport.running = true;
+        transport.requests.push({ method, params });
+        return start.promise;
+      }
+      return request(method, params);
+    });
+    const stop = vi.spyOn(transport, 'stop').mockRejectedValue(new Error('Synthetic exit unconfirmed'));
+    const running = executor.execute('uncertain request', {});
+    try {
+      await vi.waitFor(() => expect(transport.requests.some(item => item.method === 'turn/start')).toBe(true));
+      start.reject(new Error('turn/start timed out'));
+      await expect(running).resolves.toMatchObject({ success: false, error: 'turn/start timed out' });
+      expect(stop).toHaveBeenCalledOnce();
+      await Promise.resolve();
+      expect(executor.isBusy()).toBe(true);
+      await expect(executor.execute('still blocked', {})).resolves.toMatchObject({
+        success: false, error: expect.stringContaining('already running'),
+      });
+      expect(transport.requests.filter(item => item.method === 'turn/start')).toHaveLength(1);
+    } finally {
+      stop.mockImplementation(async () => { transport.running = false; });
+    }
+  });
+
+  it.each(['pending start', 'interrupt failure'])('does not confirm the first abort after a failed stop during %s', async kind => {
+    const start = deferred<any>();
+    const request = transport.request.bind(transport);
+    const stop = transport.stop.bind(transport);
+    vi.spyOn(transport, 'request').mockImplementation((method, params) => {
+      if (method === 'turn/start' && kind === 'pending start') {
+        transport.running = true;
+        transport.requests.push({ method, params });
+        return start.promise;
+      }
+      if (method === 'turn/interrupt') return Promise.reject(new Error('Synthetic interrupt failure'));
+      return request(method, params);
+    });
+    vi.spyOn(transport, 'stop').mockRejectedValueOnce(new Error('Synthetic stop failure')).mockImplementation(stop);
+    const running = executor.execute('request to abort', {});
+    try {
+      await vi.waitFor(() => expect(transport.requests.some(item => item.method === 'turn/start')).toBe(true));
+      if (kind === 'interrupt failure') {
+        await vi.waitFor(() => expect((executor as any).activeTurn?.turnId).toBeTruthy());
+      }
+      await expect(executor.abort()).resolves.toBe(false);
+      await expect(running).resolves.toMatchObject({ success: false });
+      expect(executor.hasUncertainShutdown()).toBe(true);
+      expect(executor.isBusy()).toBe(true);
+      await expect(executor.execute('must stay blocked', {})).resolves.toMatchObject({ success: false });
+      expect(transport.requests.filter(item => item.method === 'turn/start')).toHaveLength(1);
+    } finally {
+      start.resolve({ turn: { id: 'late-aborted-turn' } });
+      await running;
+    }
+  });
+
+  it('retries an uncertain transport stop through abort without replaying late work', async () => {
+    const start = deferred<any>();
+    const request = transport.request.bind(transport);
+    const onStream = vi.fn();
+    vi.spyOn(transport, 'request').mockImplementation((method, params) => {
+      if (method === 'turn/start') {
+        transport.running = true;
+        transport.requests.push({ method, params });
+        return start.promise;
+      }
+      return request(method, params);
+    });
+    vi.spyOn(transport, 'stop')
+      .mockRejectedValueOnce(new Error('Initial stop failed'))
+      .mockRejectedValueOnce(new Error('Retry stop failed'))
+      .mockImplementation(async () => { transport.running = false; });
+    const running = executor.execute('uncertain request', { onStream });
+    await vi.waitFor(() => expect(transport.requests.some(item => item.method === 'turn/start')).toBe(true));
+    start.reject(new Error('turn/start timed out'));
+    await expect(running).resolves.toMatchObject({ success: false });
+    expect(executor.isBusy()).toBe(true);
+
+    await expect(executor.abort()).resolves.toBe(false);
+    expect(executor.isBusy()).toBe(true);
+    await expect(executor.execute('must stay blocked', {})).resolves.toMatchObject({ success: false });
+    expect(transport.requests.filter(item => item.method === 'turn/start')).toHaveLength(1);
+
+    await expect(executor.abort()).resolves.toBe(true);
+    expect(executor.isBusy()).toBe(false);
+    expect(transport.running).toBe(false);
+    transport.emit({ method: 'item/agentMessage/delta', params: { threadId: 'codex-thread-1', turnId: 'turn-1', delta: 'late uncertain output' } });
+    expect(onStream).not.toHaveBeenCalled();
+    expect(transport.requests.filter(item => item.method === 'turn/start')).toHaveLength(1);
+  });
+
+  it('keeps queued work admitted when native exit is unconfirmed after foreground completion', async () => {
+    await executor.destroy();
+    const manager = await ThreadManager.initialize(tempHome);
+    const threadId = manager.getDefaultThread().id;
+    await manager.updateThread(threadId, { workingDirectory: projectDir });
+    const guard = new DirectoryGuard([tempHome]);
+    executor = new CodexAppServerExecutor(guard, {
+      threadId, initialWorkingDirectory: projectDir, clientFactory: () => transport,
+    });
+    const pool = new ThreadExecutorPool(manager, guard, { type: 'codex' }, () => executor);
+    pool.getExecutor(threadId);
+    const start = deferred<any>();
+    const request = transport.request.bind(transport);
+    vi.spyOn(transport, 'request').mockImplementation((method, params) => {
+      if (method === 'turn/start') {
+        transport.running = true;
+        transport.requests.push({ method, params });
+        return start.promise;
+      }
+      return request(method, params);
+    });
+    const stop = vi.spyOn(transport, 'stop').mockRejectedValue(new Error('Synthetic exit unconfirmed'));
+    pool.setThreadBusy(threadId, true);
+    const running = executor.execute('uncertain request', {});
+    const executeCommand = vi.fn().mockResolvedValue(undefined);
+    try {
+      await vi.waitFor(() => expect(transport.requests.some(item => item.method === 'turn/start')).toBe(true));
+      start.reject(new Error('turn/start timed out'));
+      await expect(running).resolves.toMatchObject({ success: false });
+      pool.setThreadBusy(threadId, false);
+
+      const command = { messageId: 'queued-command', content: 'retain me', openId: 'owner', timestamp: Date.now() };
+      const queue = [command];
+      const admission = {
+        settingsAdmission: { isBlocked: () => false },
+        threadPool: pool,
+        pausedQueues: new Set<string>(),
+        abortOperations: new Map(),
+        threadQueues: new Map([[threadId, queue]]),
+        threadManager: manager,
+        messageOpenIds: new Map(),
+        notificationAdapter: { setCurrentOpenId: vi.fn() },
+        wsClient: { send: vi.fn() },
+        currentOpenId: undefined,
+        beginThreadOperation: vi.fn(() => { pool.setThreadBusy(threadId, true); return Symbol('queued'); }),
+        finishThreadOperation: vi.fn(() => { pool.setThreadBusy(threadId, false); return false; }),
+        trackTask: vi.fn(),
+        expandCommandShortcuts: (content: string) => content,
+        executeCommand,
+      };
+      await (MessageHandler.prototype as any).startNextQueuedCommand.call(admission, threadId);
+
+      expect(pool.isThreadBusy(threadId)).toBe(true);
+      expect(queue).toEqual([command]);
+      expect(executeCommand).not.toHaveBeenCalled();
+      expect(transport.requests.filter(item => item.method === 'turn/start')).toHaveLength(1);
+    } finally {
+      pool.setThreadBusy(threadId, false);
+      stop.mockImplementation(async () => { transport.running = false; });
+    }
   });
 
   it('interrupts the active turn and preserves the session id', async () => {

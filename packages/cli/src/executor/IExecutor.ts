@@ -106,8 +106,10 @@ export interface IExecutor {
   execute(prompt: string, options: ExecuteOptions): Promise<ExecuteResult>;
   getCurrentWorkingDirectory(): string;
   setWorkingDirectory(targetPath: string): Promise<void>;
-  /** Native executor activity, checked before destructive session changes. */
+  /** Native activity, checked before destructive session changes. */
   isBusy?(): boolean;
+  /** A failed transport stop requires an explicit successful abort retry before admission. */
+  hasUncertainShutdown?(): boolean;
   resetContext(): void;
   abort(): Promise<boolean>;
   destroy(): Promise<void> | void;

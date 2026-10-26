@@ -80,7 +80,8 @@ describe('RouterServer', () => {
     };
 
     store = {
-      initialize: vi.fn().mockResolvedValue(undefined)
+      initialize: vi.fn().mockResolvedValue(undefined),
+      flush: vi.fn().mockResolvedValue(undefined),
     };
 
     mockHttpServer = {
@@ -135,6 +136,11 @@ describe('RouterServer', () => {
 
     mockBindingManager = {
       generateBindingCode: vi.fn().mockResolvedValue({ code: '123456', expiresAt: Date.now() + 600000 }),
+      // Output-bearing fixtures represent legitimately bound legacy devices.
+      getDeviceBinding: vi.fn().mockImplementation(async (deviceId: string) => {
+        const openId = deviceId === 'device-1' ? 'user-1' : deviceId === 'd1' ? 'u1' : undefined;
+        return openId ? { openId } : null;
+      }),
     };
     (BindingManager as unknown as any).mockImplementation(() => mockBindingManager);
 
@@ -156,6 +162,7 @@ describe('RouterServer', () => {
   describe('paired tool-call progress', () => {
     const envelope = { type: 'stream', messageId: 'tool-task', openId: 'owner', threadId: 'thread-1' };
     async function connect() {
+      mockBindingManager.getDeviceBinding.mockResolvedValue({ openId: 'owner' });
       const formatter = await vi.importActual<typeof import('../src/utils/ToolFormatter')>('../src/utils/ToolFormatter');
       vi.mocked(createToolUseElement).mockImplementation(formatter.createToolUseElement);
       vi.mocked(createToolResultElement).mockImplementation(formatter.createToolResultElement);
@@ -417,6 +424,7 @@ describe('RouterServer', () => {
     const envelope = { type: 'stream', streamType: 'activity', messageId: 'activity-task', openId: 'owner', threadId: 'thread-1' };
     const activity = { source: 'plan', text: 'Checking deadline propagation' };
     async function connect(capabilities: Record<string, boolean> = {}) {
+      mockBindingManager.getDeviceBinding.mockResolvedValue({ openId: 'owner' });
       await server.start();
       mockFeishuHandler.setOnStartStreaming.mock.calls[0][0]('activity-task', 'owner', 'activity-card', 'device-1', 'thread-1');
       const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
@@ -490,7 +498,7 @@ describe('RouterServer', () => {
       await send({ ...envelope, streamType: 'text', chunk: 'Public response' });
       expect(stream.updatePending).toBe(true);
       const final = send({ ...envelope, type: 'response', success: false, error: 'Task failed' });
-      expect(stream.finalizing).toBe(true);
+      await vi.waitFor(() => expect(stream.finalizing).toBe(true));
       await send({ ...envelope, activity: { ...activity, text: 'Too late' } });
       expect(mockFeishuHandler.finalizeStreamingMessage).not.toHaveBeenCalled();
       release();
@@ -699,7 +707,15 @@ describe('RouterServer', () => {
       await send(resume);
       mockConnectionHub.unregisterConnection.mockReturnValue(false);
       close();
-      await send({ type: 'response', messageId: resume.messageId, openId: 'user-1', success: true });
+
+      const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
+      const replacement = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
+      onConnection(replacement, { socket: { remoteAddress: '2' } });
+      const receive = replacement.on.mock.calls.find(call => call[0] === 'message')[1];
+      await receive(Buffer.from(JSON.stringify({
+        type: MessageType.BINDING_REQUEST, data: { deviceId: 'device-1', capabilities: { taskRecovery: true } },
+      })));
+      await receive(Buffer.from(JSON.stringify({ type: 'response', messageId: resume.messageId, openId: 'user-1', success: true })));
       expect(mockFeishuHandler.finalizeStreamingMessage).toHaveBeenCalledOnce();
     });
 
@@ -1604,7 +1620,7 @@ describe('RouterServer', () => {
     const firstUpdate = onMessage(Buffer.from(JSON.stringify({
       type: 'stream', streamType: 'text', messageId: 'm1', openId: 'u1', chunk: 'a'
     })));
-    expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(mockFeishuHandler.updateStreamingMessage).toHaveBeenCalledTimes(1));
 
     const deltaUpdates = Array.from({ length: 30 }, () => onMessage(Buffer.from(JSON.stringify({
       type: 'stream', streamType: 'text', messageId: 'm1', openId: 'u1', chunk: '0123456789'
@@ -1721,13 +1737,13 @@ describe('RouterServer', () => {
     // Should continue without crashing
   });
 
-  it('should handle stop errors', async () => {
+  it('should report stop errors after completing remaining cleanup', async () => {
     await server.start();
     mockFeishuHandler.stop.mockRejectedValue(new Error('Feishu stop failed'));
     mockHttpServer.close.mockImplementation((cb) => cb(new Error('HTTP close failed')));
-    
-    await server.stop();
-    // Should complete anyway
+
+    await expect(server.stop()).rejects.toThrow('Feishu stop failed');
+    expect(mockHttpServer.close).toHaveBeenCalledOnce();
   });
 
 
@@ -2092,11 +2108,40 @@ describe('RouterServer', () => {
   it('should stop the server gracefully', async () => {
     await server.start();
     await server.stop();
-    
+
     expect(mockFeishuHandler.stop).toHaveBeenCalled();
     expect(mockConnectionHub.closeAllConnections).toHaveBeenCalled();
     expect(mockWss.close).toHaveBeenCalled();
     expect(mockHttpServer.close).toHaveBeenCalled();
+  });
+
+  it('drains storage before slow card cleanup and reports failure after closing resources', async () => {
+    await server.start();
+    let releaseTips!: () => void;
+    const slowTips = new Promise<void>(resolve => { releaseTips = resolve; });
+    const tipsStop = vi.spyOn((server as any).tips, 'stop').mockImplementation(() => slowTips);
+    store.flush.mockRejectedValueOnce(new Error('Synthetic uncertain storage flush'));
+    const stopping = server.stop();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(store.flush).toHaveBeenCalledOnce();
+    expect(tipsStop).toHaveBeenCalledOnce();
+    expect(mockFeishuHandler.stop).not.toHaveBeenCalled();
+    releaseTips();
+    await expect(stopping).rejects.toThrow('uncertain storage flush');
+    expect(mockFeishuHandler.stop).toHaveBeenCalledOnce();
+    expect(mockConnectionHub.closeAllConnections).toHaveBeenCalledOnce();
+    expect(mockWss.close).toHaveBeenCalledOnce();
+    expect(mockHttpServer.close).toHaveBeenCalledOnce();
+  });
+
+  it('propagates Feishu shutdown failure without skipping socket cleanup', async () => {
+    await server.start();
+    mockFeishuHandler.stop.mockRejectedValueOnce(new Error('Synthetic handler flush failure'));
+    await expect(server.stop()).rejects.toThrow('handler flush failure');
+    expect(mockConnectionHub.closeAllConnections).toHaveBeenCalledOnce();
+    expect(mockWss.close).toHaveBeenCalledOnce();
+    expect(mockHttpServer.close).toHaveBeenCalledOnce();
   });
 
   it('should cleanup stale streaming sessions and expired cardThreadMap entries', async () => {
@@ -2189,6 +2234,7 @@ describe('RouterServer', () => {
     };
 
     async function connect(capabilities: Record<string, boolean> = {}) {
+      mockBindingManager.getDeviceBinding.mockResolvedValue({ openId: 'owner' });
       await server.start();
       const onConnection = mockWss.on.mock.calls.find((call: any[]) => call[0] === 'connection')[1];
       const ws = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };

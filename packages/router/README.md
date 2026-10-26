@@ -510,6 +510,29 @@ From CLI 1.6.165, Pi connection and detach confirmations exclude simultaneous se
 
 For full documentation, see the [project README](https://github.com/Yu-Robotics/remote-cli#readme).
 
+## Upgrade compatibility
+
+Router 1.6.185 retains protocol-v1 compatibility with existing CLIs, including
+legacy registration and response formats. Task output must belong to the
+connected device's bound user; binding requests and heartbeats remain available
+before binding. Device binding changes are serialized and persistence failures
+are reported rather than acknowledged as saved. Existing binding records keep
+their JSON format. Malformed binding files are preserved and stop initialization
+instead of being replaced with empty records. If a file replacement succeeds but
+its durability cannot be confirmed, binding reads and writes stop until the
+storage issue is resolved and the Router restarts to reconcile the saved file.
+
+The ACP permission-error and Codex turn-start cleanup fixes are CLI-side changes:
+upgrade the CLI to receive them. Older CLIs can continue using the updated Router
+while retaining their previous local behavior. Legacy credentialless device
+identification keeps its existing trust limitations; this release does not
+require every older CLI to enroll a signed device key.
+
+If Codex cannot confirm that its previous process stopped, the thread stays busy
+and does not start queued work. Retry `/abort` to confirm termination and release
+the thread. An unsuccessful retry reports the uncertainty and keeps the thread
+blocked; it does not replay the failed prompt.
+
 ## License
 
 MIT

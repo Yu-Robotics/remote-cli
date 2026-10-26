@@ -2,6 +2,7 @@ import { BindingCode, UserBinding, LegacyUserBinding } from '../types';
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
+import { randomUUID } from 'crypto';
 
 interface StoreData {
   version: number;
@@ -10,71 +11,74 @@ interface StoreData {
   deviceToUserMap: Record<string, string>;
 }
 
-/**
- * JSON file-based storage for bindings
- * Persists data across router restarts
- */
+type Draft = (current: StoreData) => StoreData | undefined;
+
+interface PendingSave {
+  createDraft: Draft;
+  resolve: () => void;
+  reject: (error: unknown) => void;
+}
+
+class ReplacementUncertainty extends Error {
+  constructor(cause: unknown) {
+    super('Bindings replacement completed, but durability could not be confirmed.', { cause });
+  }
+}
+
+/** JSON file-based storage with serialized, durable-before-visible mutations. */
 export class JsonStore {
   private storePath: string;
   private data: StoreData;
   private saveTimer: NodeJS.Timeout | null = null;
-  private pendingResolvers: Array<() => void> = [];
+  private pendingSaves: PendingSave[] = [];
+  private writeTail: Promise<void> = Promise.resolve();
+  private draining?: Promise<void>;
+  private uncertainty?: Error;
+  private readonly expiringCodes = new Set<string>();
   private readonly SAVE_DELAY: number;
   private static readonly CURRENT_VERSION = 1;
 
   constructor(storePath?: string, saveDelay = 1000) {
     this.storePath = storePath || path.join(os.homedir(), '.remote-cli-router', 'bindings.json');
     this.SAVE_DELAY = saveDelay;
-    this.data = {
-      version: JsonStore.CURRENT_VERSION,
-      bindingCodes: {},
-      userBindings: {},
-      deviceToUserMap: {},
-    };
+    this.data = this.emptyData();
   }
 
-  /**
-   * Initialize store by loading data from disk
-   */
+  private emptyData(): StoreData {
+    return { version: JsonStore.CURRENT_VERSION, bindingCodes: {}, userBindings: {}, deviceToUserMap: {} };
+  }
+
+  private assertReconciled(): void {
+    if (this.uncertainty) throw this.uncertainty;
+  }
+
+  /** Initialize without replacing an unreadable or damaged existing file. */
   async initialize(): Promise<void> {
+    this.assertReconciled();
+    await fs.mkdir(path.dirname(this.storePath), { recursive: true });
+    let content: string;
     try {
-      // Ensure directory exists
-      await fs.mkdir(path.dirname(this.storePath), { recursive: true });
-
-      // Try to load existing data
-      try {
-        const content = await fs.readFile(this.storePath, 'utf-8');
-        const rawData = JSON.parse(content);
-
-        // Check if migration is needed
-        if (!rawData.version) {
-          await this.migrateFromLegacy(rawData);
-        } else {
-          this.data = rawData;
-        }
-
-        // Clean up expired binding codes on startup
-        this.cleanupExpiredBindingCodes();
-      } catch (error: any) {
-        // File doesn't exist or is invalid, start with empty data
-        if (error.code !== 'ENOENT') {
-          console.warn('Failed to load bindings data, starting fresh:', error.message);
-        }
-        await this.save();
-      }
-    } catch (error) {
-      console.error('Failed to initialize JSON store:', error);
-      throw error;
+      content = await fs.readFile(this.storePath, 'utf-8');
+    } catch (error: any) {
+      if (error.code !== 'ENOENT') throw error;
+      await this.commitImmediate(current => current);
+      return;
     }
+
+    let rawData: any;
+    try {
+      rawData = JSON.parse(content);
+    } catch (error) {
+      throw new Error('Bindings data is invalid; the existing file was preserved.', { cause: error });
+    }
+    if (!rawData?.version) await this.migrateFromLegacy(rawData);
+    else this.data = rawData as StoreData;
+    await this.commitImmediate(current => this.withoutExpiredBindingCodes(current));
   }
 
-  /**
-   * Migrate from legacy single-device schema to multi-device schema
-   */
   private async migrateFromLegacy(rawData: any): Promise<void> {
     console.log('[JsonStore] Migrating legacy binding data to multi-device schema...');
-
-    const legacyUserBindings = (rawData.userBindings || {}) as Record<string, LegacyUserBinding>;
+    const legacyUserBindings = (rawData?.userBindings || {}) as Record<string, LegacyUserBinding>;
     const newUserBindings: Record<string, UserBinding> = {};
     const deviceToUserMap: Record<string, string> = {};
     const now = Date.now();
@@ -83,228 +87,255 @@ export class JsonStore {
       newUserBindings[openId] = {
         openId,
         devices: [{
-          deviceId: legacy.deviceId,
-          deviceName: legacy.deviceName,
-          boundAt: legacy.boundAt,
-          lastActiveAt: legacy.lastActiveAt,
-          isActive: true,
+          deviceId: legacy.deviceId, deviceName: legacy.deviceName, boundAt: legacy.boundAt,
+          lastActiveAt: legacy.lastActiveAt, isActive: true,
         }],
-        activeDeviceId: legacy.deviceId,
-        createdAt: legacy.boundAt,
-        updatedAt: now,
+        activeDeviceId: legacy.deviceId, createdAt: legacy.boundAt, updatedAt: now,
       };
-
       deviceToUserMap[legacy.deviceId] = openId;
     }
-
-    this.data = {
+    const migrated: StoreData = {
       version: JsonStore.CURRENT_VERSION,
-      bindingCodes: rawData.bindingCodes || {},
+      bindingCodes: { ...(rawData?.bindingCodes || {}) },
       userBindings: newUserBindings,
       deviceToUserMap,
     };
-
-    await this.save();
+    await this.commitImmediate(() => migrated);
     console.log(`[JsonStore] Migration complete. Migrated ${Object.keys(newUserBindings).length} user(s).`);
   }
 
-  /**
-   * Store binding code with expiration
-   */
   async setBindingCode(code: string, bindingCode: BindingCode): Promise<void> {
-    this.data.bindingCodes[code] = bindingCode;
-    await this.scheduleSave();
+    const copy = { ...bindingCode };
+    await this.scheduleSave(current => ({ ...current, bindingCodes: { ...current.bindingCodes, [code]: copy } }));
   }
 
-  /**
-   * Get binding code
-   */
   getBindingCode(code: string): BindingCode | null {
+    this.assertReconciled();
     const bindingCode = this.data.bindingCodes[code];
-
-    if (!bindingCode) {
-      return null;
-    }
-
-    // Check if expired
+    if (!bindingCode) return null;
     if (Date.now() > bindingCode.expiresAt) {
-      delete this.data.bindingCodes[code];
-      this.scheduleSave();
+      this.scheduleExpiry(code);
       return null;
     }
-
-    return bindingCode;
+    return { ...bindingCode };
   }
 
-  /**
-   * Delete binding code
-   */
+  private scheduleExpiry(code: string): void {
+    if (this.expiringCodes.has(code)) return;
+    this.expiringCodes.add(code);
+    const operation = this.scheduleSave(current => {
+      const candidate = current.bindingCodes[code];
+      if (!candidate || Date.now() <= candidate.expiresAt) return undefined;
+      const bindingCodes = { ...current.bindingCodes };
+      delete bindingCodes[code];
+      return { ...current, bindingCodes };
+    });
+    const settled = () => { this.expiringCodes.delete(code); };
+    void operation.then(settled, settled);
+    this.reportBackgroundSave(operation);
+  }
+
   async deleteBindingCode(code: string): Promise<void> {
-    delete this.data.bindingCodes[code];
-    await this.scheduleSave();
+    await this.scheduleSave(current => {
+      if (!current.bindingCodes[code]) return undefined;
+      const bindingCodes = { ...current.bindingCodes };
+      delete bindingCodes[code];
+      return { ...current, bindingCodes };
+    });
   }
 
-  /**
-   * Set user binding
-   */
   async setUserBinding(openId: string, binding: UserBinding): Promise<void> {
-    this.data.userBindings[openId] = binding;
-    // Rebuild deviceToUserMap entries for this user
-    for (const device of binding.devices) {
-      this.data.deviceToUserMap[device.deviceId] = openId;
-    }
-    await this.scheduleSave();
+    const copy: UserBinding = { ...binding, devices: binding.devices.map(device => ({ ...device })) };
+    await this.scheduleSave(current => {
+      const deviceToUserMap = { ...current.deviceToUserMap };
+      for (const device of copy.devices) deviceToUserMap[device.deviceId] = openId;
+      return { ...current, userBindings: { ...current.userBindings, [openId]: copy }, deviceToUserMap };
+    });
   }
 
-  /**
-   * Get user binding
-   */
   getUserBinding(openId: string): UserBinding | null {
-    return this.data.userBindings[openId] || null;
+    this.assertReconciled();
+    const binding = this.data.userBindings[openId];
+    return binding ? { ...binding, devices: binding.devices.map(device => ({ ...device })) } : null;
   }
 
-  /** Return a detached snapshot of users with at least one bound device. */
   listBoundUserIds(): string[] {
+    this.assertReconciled();
     return Object.keys(this.data.userBindings).filter(id => this.data.userBindings[id].devices.length > 0);
   }
 
-  /**
-   * Get user openId by device ID (reverse lookup)
-   */
   getUserByDeviceId(deviceId: string): string | null {
+    this.assertReconciled();
     return this.data.deviceToUserMap[deviceId] || null;
   }
 
-  /**
-   * Set device-to-user mapping
-   */
   async setDeviceToUserMap(deviceId: string, openId: string): Promise<void> {
-    this.data.deviceToUserMap[deviceId] = openId;
-    await this.scheduleSave();
+    await this.scheduleSave(current => ({ ...current,
+      deviceToUserMap: { ...current.deviceToUserMap, [deviceId]: openId } }));
   }
 
-  /**
-   * Remove device-to-user mapping
-   */
   async removeDeviceToUserMap(deviceId: string): Promise<void> {
-    delete this.data.deviceToUserMap[deviceId];
-    await this.scheduleSave();
+    await this.scheduleSave(current => {
+      if (!current.deviceToUserMap[deviceId]) return undefined;
+      const deviceToUserMap = { ...current.deviceToUserMap };
+      delete deviceToUserMap[deviceId];
+      return { ...current, deviceToUserMap };
+    });
   }
 
-  /**
-   * Delete user binding and all associated device mappings
-   */
   async deleteUserBinding(openId: string): Promise<void> {
-    const binding = this.data.userBindings[openId];
-    if (binding) {
-      // Remove all device-to-user mappings
+    await this.scheduleSave(current => {
+      const binding = current.userBindings[openId];
+      if (!binding) return undefined;
+      const deviceToUserMap = { ...current.deviceToUserMap };
       for (const device of binding.devices) {
-        delete this.data.deviceToUserMap[device.deviceId];
+        if (deviceToUserMap[device.deviceId] === openId) delete deviceToUserMap[device.deviceId];
       }
-      delete this.data.userBindings[openId];
-      await this.scheduleSave();
-    }
+      const userBindings = { ...current.userBindings };
+      delete userBindings[openId];
+      return { ...current, userBindings, deviceToUserMap };
+    });
   }
 
-  /**
-   * Update last active time for the active device of a user
-   */
   async updateLastActive(openId: string): Promise<void> {
-    const binding = this.data.userBindings[openId];
-    if (binding && binding.activeDeviceId) {
-      const device = binding.devices.find(d => d.deviceId === binding.activeDeviceId);
-      if (device) {
-        device.lastActiveAt = Date.now();
-        binding.updatedAt = Date.now();
-        await this.scheduleSave();
-      }
-    }
-  }
-
-  /**
-   * Clean up expired binding codes
-   */
-  private cleanupExpiredBindingCodes(): void {
     const now = Date.now();
-    let hasChanges = false;
-
-    for (const [code, bindingCode] of Object.entries(this.data.bindingCodes)) {
-      if (now > bindingCode.expiresAt) {
-        delete this.data.bindingCodes[code];
-        hasChanges = true;
-      }
-    }
-
-    if (hasChanges) {
-      this.scheduleSave();
-    }
+    await this.scheduleSave(current => {
+      const binding = current.userBindings[openId];
+      if (!binding?.activeDeviceId) return undefined;
+      const device = binding.devices.find(item => item.deviceId === binding.activeDeviceId);
+      if (!device) return undefined;
+      const updated: UserBinding = { ...binding, updatedAt: now,
+        devices: binding.devices.map(item => item.deviceId === device.deviceId ? { ...item, lastActiveAt: now } : { ...item }) };
+      return { ...current, userBindings: { ...current.userBindings, [openId]: updated } };
+    });
   }
 
-  /**
-   * Schedule a save operation (debounced).
-   * All callers share the same pending save — when the timer fires and the
-   * write completes, every awaiting caller is resolved at once.
-   */
-  private async scheduleSave(): Promise<void> {
-    if (this.saveTimer) {
-      clearTimeout(this.saveTimer);
+  private withoutExpiredBindingCodes(current: StoreData): StoreData | undefined {
+    const now = Date.now();
+    const bindingCodes = { ...current.bindingCodes };
+    let changed = false;
+    for (const [code, bindingCode] of Object.entries(bindingCodes)) {
+      if (now > bindingCode.expiresAt) {
+        delete bindingCodes[code];
+        changed = true;
+      }
     }
+    return changed ? { ...current, bindingCodes } : undefined;
+  }
 
-    return new Promise((resolve) => {
-      this.pendingResolvers.push(resolve);
-      this.saveTimer = setTimeout(async () => {
+  /** Capture inputs at admission, but compute drafts only against prior committed state. */
+  private scheduleSave(createDraft: Draft): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      this.pendingSaves.push({ createDraft, resolve, reject });
+      if (this.saveTimer) clearTimeout(this.saveTimer);
+      this.saveTimer = setTimeout(() => {
         this.saveTimer = null;
-        await this.save();
-        const resolvers = this.pendingResolvers.splice(0);
-        for (const r of resolvers) r();
+        this.reportBackgroundSave(this.drainSaves());
       }, this.SAVE_DELAY);
     });
   }
 
-  /**
-   * Save data to disk
-   */
-  private async save(): Promise<void> {
+  private reportBackgroundSave(operation: Promise<void>): void {
+    void operation.catch(error => console.error('Failed to save bindings data:', error));
+  }
+
+  private drainSaves(): Promise<void> {
+    if (this.draining) return this.draining;
+    const draining = (async () => {
+      const errors: unknown[] = [];
+      while (this.pendingSaves.length > 0) {
+        const batch = this.pendingSaves.splice(0);
+        const writes = batch.map(request => {
+          const write = this.enqueueWrite(request.createDraft);
+          void write.then(request.resolve, request.reject);
+          return write;
+        });
+        const results = await Promise.allSettled(writes);
+        for (const result of results) if (result.status === 'rejected') errors.push(result.reason);
+      }
+      await this.writeTail;
+      if (errors.length > 0) throw errors[0];
+    })();
+    this.draining = draining;
+    const clear = () => { if (this.draining === draining) this.draining = undefined; };
+    void draining.then(clear, clear);
+    return draining;
+  }
+
+  private commitImmediate(createDraft: Draft): Promise<void> {
+    return this.enqueueWrite(createDraft);
+  }
+
+  private enqueueWrite(createDraft: Draft): Promise<void> {
+    const write = this.writeTail.then(async () => {
+      this.assertReconciled();
+      const draft = createDraft(this.data);
+      if (!draft) return;
+      try {
+        await this.writeSnapshot(draft);
+      } catch (error) {
+        if (error instanceof ReplacementUncertainty) {
+          this.uncertainty = new Error(
+            'Bindings disk state is uncertain after replacement. Authentication and writes are blocked until a new JsonStore reconciles the file.',
+            { cause: error },
+          );
+          throw this.uncertainty;
+        }
+        throw error;
+      }
+      // Publication is authoritative only after replacement and required fsyncs succeed.
+      this.data = draft;
+    });
+    this.writeTail = write.catch(() => undefined);
+    return write;
+  }
+
+  /** Atomically replace the file, distinguishing pre-replacement and uncertain failures. */
+  private async writeSnapshot(snapshot: StoreData): Promise<void> {
+    const temporary = `${this.storePath}.${randomUUID()}.tmp`;
+    let handle: fs.FileHandle | undefined;
+    let replaced = false;
     try {
-      const content = JSON.stringify(this.data, null, 2);
-      await fs.writeFile(this.storePath, content, 'utf-8');
+      handle = await fs.open(temporary, 'wx', 0o600);
+      await handle.writeFile(JSON.stringify(snapshot, null, 2), 'utf-8');
+      await handle.sync();
+      await handle.close();
+      handle = undefined;
+      await fs.rename(temporary, this.storePath);
+      replaced = true;
+      // Windows does not support directory handles/fsync through this portable path.
+      if (process.platform !== 'win32') {
+        const directory = await fs.open(path.dirname(this.storePath), 'r');
+        try { await directory.sync(); } finally { await directory.close(); }
+      }
     } catch (error) {
-      console.error('Failed to save bindings data:', error);
+      if (replaced) throw new ReplacementUncertainty(error);
+      throw error;
+    } finally {
+      if (handle) await handle.close().catch(() => undefined);
+      await fs.rm(temporary, { force: true }).catch(() => undefined);
     }
   }
 
-  /**
-   * Force immediate save (for graceful shutdown)
-   */
+  /** Drain accepted writes, including writes admitted while an earlier flush waits. */
   async flush(): Promise<void> {
-    if (this.saveTimer) {
-      clearTimeout(this.saveTimer);
-      this.saveTimer = null;
-    }
-    await this.save();
+    const errors: unknown[] = this.uncertainty ? [this.uncertainty] : [];
+    do {
+      if (this.saveTimer) {
+        clearTimeout(this.saveTimer);
+        this.saveTimer = null;
+      }
+      try { await this.drainSaves(); } catch (error) { errors.push(error); }
+    } while (this.saveTimer || this.pendingSaves.length > 0);
+    if (errors.length > 0) throw errors[0];
   }
 
-  /**
-   * Clear all data
-   */
   async clear(): Promise<void> {
-    this.data = {
-      version: JsonStore.CURRENT_VERSION,
-      bindingCodes: {},
-      userBindings: {},
-      deviceToUserMap: {},
-    };
-    await this.save();
+    await this.scheduleSave(() => this.emptyData());
   }
 
-  /**
-   * Get statistics
-   */
-  getStats(): {
-    bindingCodes: number;
-    userBindings: number;
-    devices: number;
-  } {
+  getStats(): { bindingCodes: number; userBindings: number; devices: number } {
+    this.assertReconciled();
     return {
       bindingCodes: Object.keys(this.data.bindingCodes).length,
       userBindings: Object.keys(this.data.userBindings).length,

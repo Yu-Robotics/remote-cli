@@ -10,6 +10,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.185] - 2026-10-26
+
+### Fixed
+- Validate Router task-output recipients against current device ownership while retaining protocol-v1 registration, legacy response shapes, background notifications, and owner-validated result recovery.
+- Serialize competing device binding operations and binding-code consumption to prevent one device from being assigned to different users concurrently.
+- Publish binding changes only after serialized atomic persistence succeeds; reject failed drafts, block uncertain replacements, preserve damaged input, and drain accepted writes early during shutdown while propagating failures after resource cleanup.
+- Cancel ACP permission requests when the approval callback fails or returns an invalid selection instead of selecting the first option.
+- Keep Codex execution fenced after an ambiguous turn-start failure until transport termination is confirmed, without automatically replaying uncertain work; allow an explicit `/abort` retry to recover after an unconfirmed stop.
+
+### Tests
+- Add regressions for recipient ownership, bound legacy clients, binding and storage races, failed approvals, and ambiguous native-turn cleanup.
+
 ## [1.6.184] - 2026-10-25
 
 ### Fixed

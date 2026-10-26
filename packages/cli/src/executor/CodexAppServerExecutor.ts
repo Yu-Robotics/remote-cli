@@ -203,6 +203,7 @@ export class CodexAppServerExecutor implements IExecutor {
   private threadReady = false;
   private activeTurn: ActiveTurn | null = null;
   private compactWaiter: CompactWaiter | null = null;
+  private transportStop: Promise<void> | null = null;
   private pendingUserInputs: PendingUserInput[] = [];
   private inactivityTimer: ReturnType<typeof setTimeout> | null = null;
   private destroyed = false;
@@ -220,7 +221,7 @@ export class CodexAppServerExecutor implements IExecutor {
 
   async configureDelegation(connection?: DelegationConnection): Promise<void> {
     if (this.delegationConfigured && sameConnection(this.delegation, connection)) return;
-    if (this.activeTurn || this.compactWaiter) throw new Error('Cannot change delegation while Codex is busy');
+    if (this.isBusy()) throw new Error('Cannot change delegation while Codex is busy');
     await this.client.stop();
     this.threadReady = false;
     this.delegation = connection;
@@ -336,13 +337,13 @@ export class CodexAppServerExecutor implements IExecutor {
           this.captureReportedSettings(response);
           const turnId = response?.turn?.id;
           if (typeof turnId !== 'string' || !turnId) {
-            this.completeActive({ success: false, error: 'Codex app-server returned no turn ID' });
+            void this.failAndRestart('Codex app-server returned no turn ID');
             return;
           }
           active.turnId = turnId;
         }).catch((error) => {
           if (this.activeTurn === active) {
-            this.completeActive({ success: false, error: this.errorMessage(error) });
+            void this.failAndRestart(this.errorMessage(error));
           }
         });
       });
@@ -654,7 +655,12 @@ export class CodexAppServerExecutor implements IExecutor {
   }
 
   isBusy(): boolean {
-    return this.activeTurn !== null || this.compactWaiter !== null || this.goalControl !== null || this.threadLoads > 0;
+    return this.activeTurn !== null || this.compactWaiter !== null || this.transportStop !== null
+      || this.goalControl !== null || this.threadLoads > 0;
+  }
+
+  hasUncertainShutdown(): boolean {
+    return this.transportStop !== null;
   }
 
   async setWorkingDirectory(targetPath: string): Promise<void> {
@@ -675,7 +681,7 @@ export class CodexAppServerExecutor implements IExecutor {
   }
 
   async configureSandbox(command: string): Promise<ExecuteResult> {
-    if (this.activeTurn || this.compactWaiter) return { success: false, error: 'Wait for the running task before changing sandbox settings.' };
+    if (this.isBusy()) return { success: false, error: 'Wait for the running task before changing sandbox settings.' };
     try {
       const match = /^(\S+)(?:\s+([\s\S]*))?$/.exec(command.trim());
       const action = match?.[1] ?? '';
@@ -726,6 +732,19 @@ export class CodexAppServerExecutor implements IExecutor {
 
   async abort(): Promise<boolean> {
     if (this.goalRun) return (await this.pauseGoal()).success;
+    if (this.transportStop) {
+      await this.transportStop;
+      if (this.transportStop) {
+        // Only an explicit abort may retry a failed ordinary transport stop.
+        // Replace the settled fence synchronously so admission cannot slip through.
+        this.transportStop = null;
+        await this.stopOrdinaryTransport();
+      }
+      if (this.transportStop) return false;
+      this.completeActive({ success: false, error: 'Aborted by user' });
+      this.completeCompact({ success: false, error: 'Aborted by user' });
+      return true;
+    }
     const active = this.activeTurn;
     if (!active || !this.codexThreadId) return false;
 
@@ -743,7 +762,7 @@ export class CodexAppServerExecutor implements IExecutor {
 
     if (!active.turnId) {
       await this.failAndRestart('Aborted by user');
-      return true;
+      return !this.hasUncertainShutdown();
     }
 
     try {
@@ -754,7 +773,7 @@ export class CodexAppServerExecutor implements IExecutor {
     } catch {
       await this.failAndRestart('Aborted by user');
     }
-    return true;
+    return !this.hasUncertainShutdown();
   }
 
   async destroy(): Promise<void> {
@@ -1153,7 +1172,7 @@ export class CodexAppServerExecutor implements IExecutor {
   }
 
   async setEffort(effort: string): Promise<ExecuteResult> {
-    if (this.activeTurn || this.compactWaiter) {
+    if (this.isBusy()) {
       return { success: false, error: 'Cannot change reasoning effort while the Codex thread is busy' };
     }
 
@@ -1209,7 +1228,7 @@ export class CodexAppServerExecutor implements IExecutor {
 
   async compactWhenFull(_onStream?: (chunk: string) => void): Promise<ExecuteResult> {
     if (!this.codexThreadId) return { success: true, output: 'No active conversation to compact.' };
-    if (this.activeTurn || this.compactWaiter) {
+    if (this.isBusy()) {
       return { success: false, error: 'Cannot compact while the Codex thread is busy' };
     }
 
@@ -1328,7 +1347,7 @@ export class CodexAppServerExecutor implements IExecutor {
   }
 
   private handleMessage(message: AppServerMessage): void {
-    if (this.destroyed) return;
+    if (this.destroyed || this.transportStop) return;
     const method = message.method;
     if (!method) return;
     const params = message.params ?? {};
@@ -1794,11 +1813,42 @@ export class CodexAppServerExecutor implements IExecutor {
 
   private async failAndRestart(error: string): Promise<void> {
     if (this.goalRun) return this.failGoal(this.goalRun, error);
+    if (this.transportStop) {
+      await this.transportStop;
+      return;
+    }
     this.taskNotifications.clear();
     this.threadReady = false;
+    const stopping = this.stopOrdinaryTransport();
+    // The fence is installed before stop() emits client/disconnected. Keep the
+    // foreground operation active until shutdown settles so pool admission and
+    // queued work cannot overtake uncertain native execution.
+    await stopping;
     this.completeActive({ success: false, error });
     this.completeCompact({ success: false, error });
-    await this.client.stop();
+  }
+
+  private stopOrdinaryTransport(): Promise<void> {
+    if (this.transportStop) return this.transportStop;
+    let settle!: () => void;
+    const done = new Promise<void>(resolve => { settle = resolve; });
+    this.transportStop = done;
+    void (async () => {
+      let confirmed = false;
+      try {
+        await this.client.stop();
+        if (this.client.waitForExit) await this.client.waitForExit();
+        else if (this.client.isRunning()) throw new Error('Codex app-server process exit could not be confirmed');
+        confirmed = true;
+      } catch (stopError) {
+        console.error('[CodexAppServerExecutor] Transport stop could not be confirmed; keeping the executor busy:',
+          this.errorMessage(stopError));
+      } finally {
+        if (confirmed && this.transportStop === done) this.transportStop = null;
+        settle();
+      }
+    })();
+    return done;
   }
 
   private armInactivityTimer(): void {

@@ -51,7 +51,7 @@ describe('AcpClient', () => {
       onConfigOptions: vi.fn(),
       onPermissionRequest: vi.fn().mockResolvedValue(0),
     };
-    client = new AcpClient('opencode', ['acp'], '/tmp', callbacks);
+    client = new AcpClient('opencode', ['acp'], process.cwd(), callbacks);
   });
 
   afterEach(() => {
@@ -67,7 +67,7 @@ describe('AcpClient', () => {
     vi.mocked(spawn).mockReturnValue(fake.process);
     const signal = vi.spyOn(process, 'kill').mockReturnValue(true);
     try {
-      client = new AcpClient('opencode', ['acp'], '/tmp', callbacks, managed);
+      client = new AcpClient('opencode', ['acp'], process.cwd(), callbacks, managed);
       const grouped = managed && process.platform !== 'win32';
       expect(vi.mocked(spawn).mock.calls.at(-1)?.[2]?.detached).toBe(grouped ? true : undefined);
       client.destroy();
@@ -187,6 +187,51 @@ describe('AcpClient', () => {
     await new Promise((resolve) => setImmediate(resolve));
     const reply = fake.lines.map((line) => JSON.parse(line)).find((message) => message.id === 42);
     expect(reply.result).toEqual({ outcome: 'selected', optionId: 'allow' });
+  });
+
+  async function requestPermission(id: number, options: any[]): Promise<any> {
+    fake.process.push({
+      jsonrpc: '2.0', id, method: 'session/request_permission',
+      params: { sessionId: 'ses-1', toolCall: { title: 'Run pwd' }, options },
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    return fake.lines.map((line) => JSON.parse(line)).find((message) => message.id === id)?.result;
+  }
+
+  const allow = { kind: 'allow_once', optionId: 'allow', name: 'Allow' };
+  const reject = { kind: 'reject_once', optionId: 'reject', name: 'Reject' };
+
+  it('cancels an allow-first permission request when the callback throws', async () => {
+    vi.mocked(callbacks.onPermissionRequest!).mockRejectedValue(new Error('Mobile approval failed'));
+    await expect(requestPermission(43, [allow, reject])).resolves.toEqual({ outcome: 'cancelled' });
+  });
+
+  it.each([-1, Number.NaN, 0.5, 2, Number.POSITIVE_INFINITY])(
+    'cancels an invalid permission selection instead of defaulting to allow-first: %s',
+    async (index) => {
+      vi.mocked(callbacks.onPermissionRequest!).mockResolvedValue(index);
+      await expect(requestPermission(44, [allow, reject])).resolves.toEqual({ outcome: 'cancelled' });
+    },
+  );
+
+  it('cancels permission requests when no handler is configured', async () => {
+    callbacks.onPermissionRequest = undefined;
+    await expect(requestPermission(45, [allow])).resolves.toEqual({ outcome: 'cancelled' });
+  });
+
+  it('preserves valid allow and reject selections', async () => {
+    vi.mocked(callbacks.onPermissionRequest!).mockResolvedValueOnce(1).mockResolvedValueOnce(1);
+    await expect(requestPermission(46, [allow, reject])).resolves.toEqual({ outcome: 'cancelled' });
+    await expect(requestPermission(47, [reject, allow])).resolves.toEqual({ outcome: 'selected', optionId: 'allow' });
+  });
+
+  it.each([
+    [{ optionId: 'unknown', name: 'Future option' }],
+    [{ kind: 'future_kind', optionId: 'unknown', name: 'Future option' }],
+    [{ kind: 'allow_future', optionId: 'unknown', name: 'Future allow option' }],
+    [{ kind: 'allow_once', name: 'Missing option ID' }],
+  ])('cancels unknown or malformed selected permission options: %j', async (option) => {
+    await expect(requestPermission(48, [option])).resolves.toEqual({ outcome: 'cancelled' });
   });
 
   it('returns structured ACP errors to callers', async () => {
