@@ -540,6 +540,7 @@ export class PiExecutor implements IExecutor {
     const trimmed = input.trim();
     if (!trimmed) return false;
     this.pendingUi = null;
+    this.clearPendingUiExpiry();
     // The reply restarts the wait for Pi, so it re-arms the watchdog rather
     // than inheriting the little time left from before the prompt.
     if (this.activeTurn) this.armInactivityTimer(this.activeTurn);
