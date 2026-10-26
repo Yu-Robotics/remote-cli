@@ -121,4 +121,99 @@ describe('BindingManager serialized ownership mutations', () => {
     expect(reloaded.getUserBinding('user-b')).not.toBeNull();
     await reloaded.flush();
   });
+
+  it.each([
+    { scenario: 'active', remove: 'device-a', remaining: 'device-b' },
+    { scenario: 'inactive', remove: 'device-b', remaining: 'device-a' },
+    { scenario: 'last', remove: 'device-a', remaining: undefined },
+  ])('atomically unbinds the $scenario device and its reverse mapping', async ({ remove, remaining }) => {
+    await manager.bindUser('user-a', 'device-a', 'A');
+    if (remaining) await manager.bindUser('user-a', 'device-b', 'B');
+    const beforeUnbind = vi.fn(async () => { expect(store.getUserByDeviceId(remove)).toBe('user-a'); });
+    const rename = fs.rename.bind(fs);
+    let replacements = 0;
+    vi.spyOn(fs, 'rename').mockImplementation(async (oldPath, newPath) => {
+      replacements++;
+      if (replacements > 1) throw new Error('Unbind attempted a second snapshot replacement');
+      return rename(oldPath, newPath);
+    });
+
+    expect(await manager.unbindDevice('user-a', remove, beforeUnbind)).toBe(true);
+
+    expect(replacements).toBe(1);
+    expect(beforeUnbind).toHaveBeenCalledWith(remove);
+    expect(store.getUserByDeviceId(remove)).toBeNull();
+    await expect(manager.getDeviceBinding(remove)).resolves.toBeNull();
+    const binding = store.getUserBinding('user-a');
+    if (!remaining) expect(binding).toBeNull();
+    else {
+      expect(binding?.devices.map(device => device.deviceId)).toEqual([remaining]);
+      expect(binding?.activeDeviceId).toBe(remaining);
+      expect(binding?.devices[0].isActive).toBe(true);
+      expect(store.getUserByDeviceId(remaining)).toBe('user-a');
+    }
+    const reloaded = new JsonStore(path.join(directory, 'bindings.json'), 0);
+    await reloaded.initialize();
+    expect(reloaded.getUserByDeviceId(remove)).toBeNull();
+    expect(reloaded.getUserBinding('user-a')).toEqual(binding);
+    await reloaded.flush();
+  });
+
+  it('keeps both ownership representations unchanged when the atomic unbind replacement fails', async () => {
+    await manager.bindUser('user-a', 'device-a', 'A');
+    await manager.bindUser('user-a', 'device-b', 'B');
+    const before = JSON.parse(await fs.readFile(path.join(directory, 'bindings.json'), 'utf8'));
+    let calls = 0;
+    vi.spyOn(fs, 'rename').mockImplementation(async () => {
+      calls++;
+      throw new Error('synthetic unbind replacement failure');
+    });
+
+    await expect(manager.unbindDevice('user-a', 'device-a')).rejects.toThrow('unbind replacement failure');
+
+    expect(calls).toBe(1);
+    expect(store.getUserBinding('user-a')?.devices.map(device => device.deviceId)).toEqual(['device-a', 'device-b']);
+    expect(store.getUserByDeviceId('device-a')).toBe('user-a');
+    await expect(manager.getDeviceBinding('device-a')).resolves.toMatchObject({ openId: 'user-a' });
+    expect(JSON.parse(await fs.readFile(path.join(directory, 'bindings.json'), 'utf8'))).toEqual(before);
+    const reloaded = new JsonStore(path.join(directory, 'bindings.json'), 0);
+    await reloaded.initialize();
+    expect(reloaded.getUserBinding('user-a')?.devices.map(device => device.deviceId)).toEqual(['device-a', 'device-b']);
+    expect(reloaded.getUserByDeviceId('device-a')).toBe('user-a');
+    await reloaded.flush();
+  });
+
+  it('serializes an atomic unbind with independent writes without resurrecting removed ownership', async () => {
+    await manager.bindUser('user-a', 'device-a', 'A');
+    await manager.bindUser('user-a', 'device-b', 'B');
+    const rename = fs.rename.bind(fs);
+    let releaseFirst!: () => void;
+    const gate = new Promise<void>(resolve => { releaseFirst = resolve; });
+    let started!: () => void;
+    const firstStarted = new Promise<void>(resolve => { started = resolve; });
+    let calls = 0;
+    vi.spyOn(fs, 'rename').mockImplementation(async (oldPath, newPath) => {
+      if (++calls === 1) { started(); await gate; }
+      return rename(oldPath, newPath);
+    });
+
+    const unbindActive = store.unbindDevice('user-a', 'device-a');
+    await firstStarted;
+    const otherUser = store.setUserBinding('user-b', { openId: 'user-b', activeDeviceId: 'device-c',
+      createdAt: 1, updatedAt: 1,
+      devices: [{ deviceId: 'device-c', deviceName: 'C', boundAt: 1, lastActiveAt: 1, isActive: true }] });
+    const unbindLast = store.unbindDevice('user-a', 'device-b');
+    releaseFirst();
+    await Promise.all([unbindActive, otherUser, unbindLast]);
+
+    expect(store.getUserBinding('user-a')).toBeNull();
+    expect(store.getUserByDeviceId('device-a')).toBeNull();
+    expect(store.getUserByDeviceId('device-b')).toBeNull();
+    expect(store.getUserByDeviceId('device-c')).toBe('user-b');
+    const reloaded = new JsonStore(path.join(directory, 'bindings.json'), 0);
+    await reloaded.initialize();
+    expect(reloaded.getUserBinding('user-a')).toBeNull();
+    expect(reloaded.getUserBinding('user-b')?.activeDeviceId).toBe('device-c');
+    await reloaded.flush();
+  });
 });
