@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.187] - 2026-10-26
+
+### Fixed
+- Validate binding-file structure and supported versions before adopting data, migrating legacy records, or removing expired codes. Preserve malformed files without replacement and block reads and writes on the rejected instance instead of silently publishing empty bindings.
+- Retain valid version-1 records and versionless single-device migrations, including empty legacy stores and opaque dictionary keys. Keep parser input out of reported errors and preserve protocol-v1 CLI compatibility.
+
+### Tests
+- Cover malformed roots, collections, nested records, timestamps and versions, byte-preserving failure, blocked post-failure access, valid legacy/current reloads, private parser diagnostics, and recovery through a fresh instance after repair.
+
 ## [1.6.186] - 2026-10-26
 
 ### Fixed
