@@ -58,6 +58,8 @@ interface ActiveTurn {
   timeoutTimer?: ReturnType<typeof setTimeout>;
   /** Re-armed inactivity watchdog; every Pi event resets it. */
   inactivityTimer?: ReturnType<typeof setTimeout>;
+  /** In-flight failure cleanup, awaited by an /abort that arrives during it. */
+  failing?: Promise<void>;
   settle?: () => void;
   /** Fallback ids from tool_execution_start events lacking toolCallId, consumed FIFO by matching end events. */
   pendingToolFallbackIds: string[];
@@ -442,11 +444,18 @@ export class PiExecutor implements IExecutor {
     // A deadline that already claimed this turn owns its abort, so a second
     // abort RPC (or a concurrent /abort) must not be sent for the same turn.
     const alreadyClaimed = active?.programError !== undefined;
+    if (active) this.clearTurnTimers(active);
+    if (alreadyClaimed) {
+      // Wait for the in-flight failure instead of releasing the turn: Pi is still
+      // stopping, and its late aborted events would land on the next turn.
+      if (active?.failing) await active.failing;
+      return true;
+    }
     // Pi settles its own aborted turn before answering the abort RPC, so claim
-    // remote-cli's reason first; a deadline that already failed keeps its own.
-    if (active && !alreadyClaimed) active.programError = 'Aborted';
+    // remote-cli's reason first.
+    if (active) active.programError = 'Aborted';
     let cleanupError: unknown;
-    if (!alreadyClaimed) {
+    const cleanup = (async () => {
       try {
         await this.client.request({ type: 'clear_queue' });
       } catch {
@@ -456,19 +465,23 @@ export class PiExecutor implements IExecutor {
         await this.client.request({ type: 'abort' });
       } catch (error) {
         // Only a turn that still owns the session may recycle its transport; a
-        // late failure must not stop the client of a turn started meanwhile.
-        if (!this.activeTurn || this.activeTurn === active) {
+        // late failure must not stop the client of a turn starting or started
+        // meanwhile, including one still in preparation.
+        if (this.activeTurn === active || (!this.activeTurn && !this.preparingTurn)) {
           try { await this.recycleClient(); }
           catch (failure) { cleanupError = failure; }
         }
       }
-    }
+    })();
+    // A concurrent /abort waits for this cleanup instead of starting its own.
+    if (active) active.failing = cleanup;
+    await cleanup;
     if (active && this.activeTurn === active) {
       const claimed = active.programError ?? 'Aborted';
       active.programError = cleanupError ? `${claimed}; ${this.friendlyError(cleanupError)}` : claimed;
       this.completeActive({ success: false, error: active.programError, sessionAbbr: this.sessionAbbr() });
     }
-    if (!this.activeTurn || this.activeTurn === active) this.cancelPendingUi(true);
+    if ((!this.activeTurn && !this.preparingTurn) || this.activeTurn === active) this.cancelPendingUi(true);
     if (cleanupError) throw cleanupError;
     return true;
   }
@@ -1027,8 +1040,6 @@ export class PiExecutor implements IExecutor {
     }
 
     if (event.type === 'extension_ui_request') {
-      // A prompt is Pi activity, and the user may need a while to answer it.
-      if (this.activeTurn) this.armInactivityTimer(this.activeTurn);
       void this.handleUiRequest(event);
       return;
     }
@@ -1169,6 +1180,7 @@ export class PiExecutor implements IExecutor {
 
     const fireAndForget = ['notify', 'setStatus', 'setWidget', 'setTitle', 'set_editor_text'];
     if (fireAndForget.includes(method)) {
+      if (this.activeTurn) this.armInactivityTimer(this.activeTurn);
       if (method === 'notify' && event.message) {
         this.activeTurn?.options.onStream?.(`\n${event.message}\n`);
       }
@@ -1201,6 +1213,9 @@ export class PiExecutor implements IExecutor {
     }
     this.activeTurn?.options.onStream?.(lines.join('\n'));
     this.pendingUi = { id, method, title, options };
+    // The turn now waits for a human, not for Pi; suspend the watchdog until the
+    // reply re-arms it, so a slow answer is never reported as Pi inactivity.
+    if (this.activeTurn) this.clearTurnTimers(this.activeTurn);
   }
 
   private async resolveModel(value: string): Promise<{ provider?: string; modelId: string } | null> {
@@ -1321,10 +1336,29 @@ export class PiExecutor implements IExecutor {
     // otherwise clamp Infinity to an immediate timer.
     if (typeof requested === 'number' && Number.isFinite(requested) && requested > 0) {
       active.timeoutTimer = setTimeout(() => {
-        void this.failActive(active, `Pi turn timed out after ${requested}ms (hard time limit)`);
+        this.startFailure(active, `Pi turn timed out after ${requested}ms (hard time limit)`);
       }, requested);
     }
     this.armInactivityTimer(active);
+  }
+
+  /** Claim the turn once; the in-flight cleanup stays observable to /abort. */
+  private startFailure(active: ActiveTurn, error: string): void {
+    const failing = this.failActive(active, error);
+    active.failing = failing;
+    void failing;
+  }
+
+  /** Clear both deadlines; the turn either settled or already claimed a failure. */
+  private clearTurnTimers(active: ActiveTurn): void {
+    if (active.timeoutTimer) {
+      clearTimeout(active.timeoutTimer);
+      active.timeoutTimer = undefined;
+    }
+    if (active.inactivityTimer) {
+      clearTimeout(active.inactivityTimer);
+      active.inactivityTimer = undefined;
+    }
   }
 
   /**
@@ -1334,14 +1368,17 @@ export class PiExecutor implements IExecutor {
   private armInactivityTimer(active: ActiveTurn): void {
     // A claimed failure is already aborting this turn; do not re-arm behind it.
     if (active.programError) return;
-    const requested = active.options.inactivityTimeout ?? this.inactivityTimeoutMs;
-    if (active.inactivityTimer) {
-      clearTimeout(active.inactivityTimer);
-      active.inactivityTimer = undefined;
+    if (this.pendingUi) {
+      // A turn blocked on a user answer is not idle; the reply re-arms it.
+      this.clearTurnTimers(active);
+      return;
     }
+    const requested = active.options.inactivityTimeout ?? this.inactivityTimeoutMs;
+    if (active.inactivityTimer) clearTimeout(active.inactivityTimer);
+    active.inactivityTimer = undefined;
     if (!Number.isFinite(requested) || requested <= 0) return;
     active.inactivityTimer = setTimeout(() => {
-      void this.failActive(active, `Pi turn timed out after ${requested}ms of inactivity (no output or tool events)`);
+      this.startFailure(active, `Pi turn timed out after ${requested}ms of inactivity (no output or tool events)`);
     }, requested);
   }
 
@@ -1352,14 +1389,7 @@ export class PiExecutor implements IExecutor {
     // Claim the reason before the RPC: Pi answers `abort` only after it persists
     // its own aborted turn, and that event settles this turn first.
     active.programError = error;
-    if (active.timeoutTimer) {
-      clearTimeout(active.timeoutTimer);
-      active.timeoutTimer = undefined;
-    }
-    if (active.inactivityTimer) {
-      clearTimeout(active.inactivityTimer);
-      active.inactivityTimer = undefined;
-    }
+    this.clearTurnTimers(active);
     let cleanupError: unknown;
     try {
       await this.client.request({ type: 'abort' });
