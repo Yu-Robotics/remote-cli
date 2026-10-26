@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.189] - 2026-10-26
+
+### Fixed
+- Persist each Feishu user's selected thread per bound device with prompt FIFO durable writes, so Router restarts and A→B→A device switches restore selection without changing native sessions or the protocol-v1 CLI contract. Keep known replies independent, reject expired parent routes and stale card controls, and fence selection intents against late New Thread responses and ownership changes. Bind thread controls on actual delivered continuation cards and require a validated complete catalog before adopting a New Thread selection.
+- Reset a deleted selection only after a fresh authoritative catalog or an exactly correlated legacy missing-thread response; notify the user and never replay the failed message. Quarantine malformed optional preferences without disabling valid bindings or silently overwriting raw data, and preserve the previous selection when persistence fails. A narrow `/thread list` recovery path uses the existing legacy status response to refresh selection controls without executing a prompt.
+
+### Tests
+- Cover real Router/store reconstruction with legacy registration, per-user/device isolation and A→B→A restoration, `/clear` and reconnects, unbind/rebind, FIFO preference commits, stale intents and catalogs, card provenance, exact deletion handling without replay, durable uncertainty, malformed preferences, actual continuation finalization and replies, and New Thread creation versus selection persistence failures.
+
 ## [1.6.188] - 2026-10-26
 
 ### Fixed

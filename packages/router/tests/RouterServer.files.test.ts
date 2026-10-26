@@ -10,7 +10,7 @@ import { JsonStore } from '../src/storage/JsonStore';
 
 // Only the remote Feishu service is replaced: HTTP, WS, enrollment and storage are real.
 vi.mock('../src/feishu/FeishuLongConnHandler', () => ({ FeishuLongConnHandler: vi.fn(() => ({
-  setConnectionHub() {}, setOnStartStreaming() {}, setOnResolveThread() {}, setOnResolveActiveThread() {},
+  setConnectionHub() {}, setOnStartStreaming() {}, setOnCaptureSelection() {}, setOnValidateSelection() {}, setOnResolveThread() {}, setOnResolveActiveThread() {},
   start: async () => {}, stop: async () => {}, sendMessage: vi.fn(),
 })) }));
 

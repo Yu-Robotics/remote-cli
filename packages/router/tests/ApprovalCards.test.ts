@@ -35,7 +35,7 @@ describe('ApprovalCards', () => {
     expect(rows[0].columns.flatMap((column: any) => column.elements).map((button: any) => button.text.content))
       .toEqual(['Allow once', 'Deny', 'Always allow']);
     expect(JSON.stringify(elements)).toContain('Write <config> in another project');
-    expect(transport.registerReplyRoute).toHaveBeenCalledWith('card-1', 'thread-2', 'original-device');
+    expect(transport.registerReplyRoute).toHaveBeenCalledWith('card-1', 'thread-2', 'original-device', 'owner');
     await expect(cards.click('someone-else', 'approval-1', 'card-1', 'approve')).rejects.toThrow('belong');
     await expect(cards.click('owner', 'approval-1', 'wrong-card', 'approve')).rejects.toThrow('expired');
     await cards.click('owner', 'approval-1', 'card-1', 'remember');

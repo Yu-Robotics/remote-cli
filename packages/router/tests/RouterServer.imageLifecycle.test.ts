@@ -149,6 +149,8 @@ describe('RouterServer - generated image lifecycle', () => {
       stop: vi.fn().mockResolvedValue(undefined),
       setConnectionHub: vi.fn(),
       setOnStartStreaming: vi.fn(),
+      setOnCaptureSelection: vi.fn(),
+      setOnValidateSelection: vi.fn(),
       setOnResolveThread: vi.fn(),
       setOnResolveActiveThread: vi.fn(),
       handleCardAction: vi.fn().mockResolvedValue({ success: true }),

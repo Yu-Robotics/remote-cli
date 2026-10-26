@@ -88,6 +88,58 @@ describe('FeishuLongConnHandler', () => {
   });
 
   describe('sendMessage', () => {
+    it('captures a queued file destination before waiting for the previous upload', async () => {
+      let activeDevice = 'device-a';
+      let release!: () => void;
+      handler.onFileMessage = vi.fn().mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }))
+        .mockResolvedValue(undefined);
+      mockBindingManager.getActiveDevice.mockImplementation(async () => ({ deviceId: activeDevice }));
+      mockBindingManager.getUserDevices.mockResolvedValue([{ deviceId: 'device-a' }, { deviceId: 'device-b' }]);
+      handler.setOnResolveActiveThread(async (_openId, deviceId) => {
+        const threadId = deviceId === 'device-a' ? 'thread-a' : 'thread-b';
+        return { threadId, threadName: threadId };
+      });
+      const event = (id: string) => ({ sender: { sender_id: { open_id: 'owner' } }, message: {
+        message_type: 'file', message_id: id, content: JSON.stringify({ file_key: 'key', file_name: 'report.txt' }),
+      } });
+      const first = (handler as any).handleMessageEvent(event('first_file'));
+      await vi.waitFor(() => expect(handler.onFileMessage).toHaveBeenCalledOnce());
+      const second = (handler as any).handleMessageEvent(event('second_file'));
+      await Promise.resolve();
+      await Promise.resolve();
+      activeDevice = 'device-b';
+      release();
+      await Promise.all([first, second]);
+      expect(handler.onFileMessage).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(handler.onFileMessage!).mock.calls[1][0]).toMatchObject({ deviceId: 'device-a', threadId: 'thread-a' });
+    });
+
+    it('rejects a queued file invalidated by a later device-switch intent', async () => {
+      let revision = 0;
+      let release!: () => void;
+      const capture = vi.fn((openId: string, deviceId: string) => ({ openId, deviceId, revision, epoch: 0 }));
+      handler.setOnCaptureSelection(capture);
+      handler.setOnValidateSelection(fence => fence.revision === revision);
+      handler.setOnResolveActiveThread(async () => ({ threadId: 'thread-a', threadName: 'A' }));
+      mockBindingManager.getActiveDevice.mockResolvedValue({ deviceId: 'device-a' });
+      mockBindingManager.getUserDevices.mockResolvedValue([{ deviceId: 'device-a' }]);
+      const reply = vi.spyOn(handler as any, 'replyToMessage').mockResolvedValue(undefined);
+      handler.onFileMessage = vi.fn().mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }));
+      const event = (id: string) => ({ sender: { sender_id: { open_id: 'owner' } }, message: {
+        message_type: 'file', message_id: id, content: JSON.stringify({ file_key: 'key', file_name: 'report.txt' }),
+      } });
+      const first = (handler as any).handleMessageEvent(event('first_file'));
+      await vi.waitFor(() => expect(handler.onFileMessage).toHaveBeenCalledOnce());
+      const second = (handler as any).handleMessageEvent(event('second_file'));
+      try {
+        await vi.waitFor(() => expect(capture).toHaveBeenCalledTimes(2));
+        revision++;
+      } finally { release(); }
+      await Promise.all([first, second]);
+      expect(handler.onFileMessage).toHaveBeenCalledOnce();
+      expect(reply).toHaveBeenCalledWith('second_file', expect.stringContaining('superseded'));
+    });
+
     it('stages files without model execution and resolves replies after admission completes', async () => {
       const forwarded = vi.spyOn(handler as any, 'handleRegularCommand').mockResolvedValue(undefined);
       let complete!: () => void; let ready = false;
@@ -101,7 +153,7 @@ describe('FeishuLongConnHandler', () => {
       expect(forwarded).not.toHaveBeenCalled(); complete(); await Promise.all([file, reply]);
       expect(forwarded).toHaveBeenCalledOnce();
       expect(forwarded.mock.calls[0][3]).toBe('thread-1');
-      expect(forwarded.mock.calls[0].at(-1)).toMatchObject({ deviceId: 'original', id: 'a'.repeat(64) });
+      expect(forwarded.mock.calls[0][7]).toMatchObject({ deviceId: 'original', id: 'a'.repeat(64) });
     });
     it('does not let failed admission feedback poison subsequent files or abort commands', async () => {
       mockBindingManager.getActiveDevice.mockResolvedValue({ deviceId: 'device' });
@@ -1362,6 +1414,9 @@ describe('FeishuLongConnHandler', () => {
   });
 
   describe('finalizeStreamingMessage with chunking', () => {
+    beforeEach(() => {
+      mockBindingManager.getActiveDevice.mockResolvedValue({ deviceId: 'device' });
+    });
     const getRows = (elements: any[]) => elements.filter(element => element.tag === 'column_set'
       && element.columns?.some(column => ['switch_thread', 'new_thread'].includes(column.elements?.[0]?.behaviors?.[0]?.value?.action)));
     const getButtons = (elements: any[]) => getRows(elements)
@@ -1393,8 +1448,8 @@ describe('FeishuLongConnHandler', () => {
 
     it('routes new text to the non-default target from an actual generated button', async () => {
       let active = { threadId: 'default-id', threadName: 'default' };
-      handler.setOnResolveActiveThread(() => active);
-      handler.onCardSwitchThread = vi.fn(async (_owner, threadId, threadName) => { active = { threadId, threadName }; });
+      handler.setOnResolveActiveThread(async () => active);
+      handler.onCardSwitchThread = vi.fn(async (_owner, _cardId, threadId, threadName) => { active = { threadId, threadName }; });
       const threads = [
         { id: 'default-id', name: 'default', status: 'idle' as const },
         { id: 'review-id', name: 'review', status: 'idle' as const },
@@ -1412,7 +1467,7 @@ describe('FeishuLongConnHandler', () => {
       expect(refreshed).toContainEqual({ tag: 'markdown', content: 'Original answer' });
       expect(getButtons(refreshed)[1]).toMatchObject({ type: 'primary', text: { content: '✓ review' } });
       expect(refreshed).toContainEqual({ tag: 'markdown', content: '📍 **Reply from:** default · project' });
-      mockBindingManager.getUserBinding.mockResolvedValue({ openId: 'owner' });
+      mockBindingManager.getUserBinding.mockResolvedValue({ openId: 'owner', devices: [{ deviceId: 'device' }] });
       mockBindingManager.getActiveDevice.mockResolvedValue({ deviceId: 'device' });
       mockConnectionHub.isDeviceOnline.mockReturnValue(true);
       mockConnectionHub.sendToDevice.mockResolvedValue(true);
@@ -1500,7 +1555,7 @@ describe('FeishuLongConnHandler', () => {
         { id: 't2', name: replyName, workspaceName: 'project-b', status: 'idle' as const },
         { id: 't3', name: 'thread-3', workspaceName: 'project-c', status: 'idle' as const },
       ];
-      handler.setOnResolveActiveThread(() => ({ threadId: 't3', threadName: 'thread-3' }));
+      handler.setOnResolveActiveThread(async () => ({ threadId: 't3', threadName: 'thread-3' }));
       await handler.finalizeStreamingMessage('card-2', [], undefined, 'user', '/work/project-b', replyName, threads, 't2');
 
       const elements = JSON.parse(mockClient.im.message.patch.mock.calls[0][0].data.content).body.elements;
@@ -1517,7 +1572,7 @@ describe('FeishuLongConnHandler', () => {
     });
 
     it('highlights default for new messages even when replying to a different thread', async () => {
-      handler.setOnResolveActiveThread(() => undefined);
+      handler.setOnResolveActiveThread(async () => undefined);
       const threads = [
         { id: 'td', name: 'default', status: 'idle' as const },
         { id: 't2', name: 'thread-2', workspaceName: 'project-b', status: 'idle' as const },
@@ -1530,7 +1585,7 @@ describe('FeishuLongConnHandler', () => {
     });
 
     it('does not claim a different selection when the active thread is absent from the summary', async () => {
-      handler.setOnResolveActiveThread(() => ({ threadId: 'missing', threadName: 'thread-3' }));
+      handler.setOnResolveActiveThread(async () => ({ threadId: 'missing', threadName: 'thread-3' }));
       await handler.finalizeStreamingMessage('card', [], undefined, 'user', undefined, undefined, [
         { id: 'td', name: 'default', status: 'idle' },
       ], 'td');
@@ -1540,8 +1595,8 @@ describe('FeishuLongConnHandler', () => {
 
     it('keeps reply ownership fixed and updates only the clicked card', async () => {
       let active = { threadId: 't2', threadName: 'thread-2' };
-      handler.setOnResolveActiveThread(() => active);
-      handler.onCardSwitchThread = vi.fn(async (_openId, threadId, threadName) => {
+      handler.setOnResolveActiveThread(async () => active);
+      handler.onCardSwitchThread = vi.fn(async (_openId, _cardId, threadId, threadName) => {
         active = { threadId, threadName };
       });
       const threads = [
@@ -2193,7 +2248,10 @@ describe('FeishuLongConnHandler', () => {
         undefined,
         false,
         undefined,
-        [{ type: 'image', data: 'encoded-image', mimeType: 'image/png' }]
+        [{ type: 'image', data: 'encoded-image', mimeType: 'image/png' }],
+        undefined,
+        undefined,
+        true
       );
     });
 
@@ -2227,7 +2285,10 @@ describe('FeishuLongConnHandler', () => {
         undefined,
         false,
         undefined,
-        [{ type: 'image', data: 'second-image', mimeType: 'image/png' }]
+        [{ type: 'image', data: 'second-image', mimeType: 'image/png' }],
+        undefined,
+        undefined,
+        true
       );
     });
 
@@ -2268,7 +2329,7 @@ describe('FeishuLongConnHandler', () => {
 
       await (handler as any).handleMessageEvent(data);
 
-      expect(handleCommandSpy).toHaveBeenCalledWith('ou_123', 'msg_123', '/bind ABC', undefined, undefined);
+      expect(handleCommandSpy).toHaveBeenCalledWith('ou_123', 'msg_123', '/bind ABC', undefined, undefined, undefined, true);
     });
 
     it('should route regular messages to handleRegularCommand', async () => {
@@ -2281,23 +2342,22 @@ describe('FeishuLongConnHandler', () => {
 
       await (handler as any).handleMessageEvent(data);
 
-      expect(handleRegularCommandSpy).toHaveBeenCalledWith('ou_123', 'msg_123', 'hello', undefined, false, undefined, undefined);
+      expect(handleRegularCommandSpy).toHaveBeenCalledWith('ou_123', 'msg_123', 'hello', undefined, false, undefined, undefined, undefined, undefined, true);
     });
 
     it.each([
       ['reply card takes precedence over selection', 'known-card', 'selected-thread', 'reply-thread'],
       ['new message uses selection', undefined, 'selected-thread', 'selected-thread'],
-      ['unknown reply card falls back to CLI default', 'unknown-card', 'selected-thread', undefined],
       ['new message without selection falls back to CLI default', undefined, undefined, undefined],
     ])('routes the outgoing command: %s', async (_label, parentId, activeThreadId, expectedThreadId) => {
-      mockBindingManager.getUserBinding.mockResolvedValue({});
+      mockBindingManager.getUserBinding.mockResolvedValue({ devices: [{ deviceId: 'dev_1', deviceName: 'Device' }] });
       mockBindingManager.getActiveDevice.mockResolvedValue({ deviceId: 'dev_1', deviceName: 'Device' });
       mockConnectionHub.isDeviceOnline.mockReturnValue(true);
       mockConnectionHub.sendToDevice.mockResolvedValue(true);
       mockClient.im.message.create.mockResolvedValue({ data: { message_id: 'reply-card' } });
-      handler.setOnResolveThread(cardId => cardId === 'known-card'
+      handler.setOnResolveThread(async cardId => cardId === 'known-card'
         ? { threadId: 'reply-thread', deviceId: 'dev_1' } : undefined);
-      handler.setOnResolveActiveThread(() => activeThreadId
+      handler.setOnResolveActiveThread(async () => activeThreadId
         ? { threadId: activeThreadId, threadName: 'Selected' } : undefined);
       const onStartStreaming = vi.fn();
       handler.setOnStartStreaming(onStartStreaming);
@@ -2316,7 +2376,18 @@ describe('FeishuLongConnHandler', () => {
       }));
       const command = mockConnectionHub.sendToDevice.mock.calls[0][1];
       expect(onStartStreaming).toHaveBeenCalledWith(command.messageId, 'ou_123', 'reply-card', 'dev_1', expectedThreadId, false,
-        undefined, !parentId && activeThreadId ? 'Selected' : undefined);
+        undefined, !parentId && activeThreadId ? 'Selected' : undefined, undefined);
+    });
+
+    it('rejects an unknown parent card without sending to the selected or default thread', async () => {
+      handler.setOnResolveThread(async () => undefined);
+      const reply = vi.spyOn(handler as any, 'replyToMessage').mockResolvedValue(undefined);
+      await (handler as any).handleMessageEvent({
+        message: { message_type: 'text', content: JSON.stringify({ text: 'Do not reroute' }), message_id: 'incoming-message', parent_id: 'expired-card' },
+        sender: { sender_id: { open_id: 'ou_123' } },
+      });
+      expect(mockConnectionHub.sendToDevice).not.toHaveBeenCalled();
+      expect(reply).toHaveBeenCalledWith('incoming-message', expect.stringContaining('expired'));
     });
 
     it('should handle errors in handleMessageEvent', async () => {
@@ -2349,7 +2420,7 @@ describe('FeishuLongConnHandler', () => {
     it('should pass /status to the active CLI backend', async () => {
       const spy = vi.spyOn(handler as any, 'handleSlashCommandPassthrough').mockResolvedValue(undefined);
       await (handler as any).handleCommand('ou_123', 'msg_1', '/status', 'thread-2', 'Thread 2');
-      expect(spy).toHaveBeenCalledWith('ou_123', 'msg_1', '/status', '/status', 'thread-2', 'Thread 2');
+      expect(spy).toHaveBeenCalledWith('ou_123', 'msg_1', '/status', '/status', 'thread-2', 'Thread 2', undefined, false);
     });
 
     it('should route /unbind command', async () => {
@@ -2373,13 +2444,13 @@ describe('FeishuLongConnHandler', () => {
     it('forwards delegation controls to the selected device and thread', async () => {
       const spy = vi.spyOn(handler as any, 'handleSlashCommandPassthrough').mockResolvedValue(undefined);
       await (handler as any).handleCommand('ou_123', 'msg_1', '/delegation on', 'thread-2');
-      expect(spy).toHaveBeenCalledWith('ou_123', 'msg_1', '/delegation on', '/delegation', 'thread-2', undefined);
+      expect(spy).toHaveBeenCalledWith('ou_123', 'msg_1', '/delegation on', '/delegation', 'thread-2', undefined, undefined, false);
     });
 
     it('should passthrough unknown slash commands', async () => {
       const spy = vi.spyOn(handler as any, 'handleSlashCommandPassthrough').mockResolvedValue(undefined);
       await (handler as any).handleCommand('ou_123', 'msg_1', '/unknown arg1');
-      expect(spy).toHaveBeenCalledWith('ou_123', 'msg_1', '/unknown arg1', '/unknown', undefined, undefined);
+      expect(spy).toHaveBeenCalledWith('ou_123', 'msg_1', '/unknown arg1', '/unknown', undefined, undefined, undefined, false);
     });
   });
 
@@ -2552,7 +2623,7 @@ describe('FeishuLongConnHandler', () => {
 
       await (handler as any).handleDeviceSwitch('ou_123', 'msg_1', 'new-device');
 
-      expect(onDeviceSwitch).toHaveBeenCalledWith('ou_123', 'old-device');
+      expect(onDeviceSwitch).toHaveBeenCalledWith('ou_123', 'old-device', 'new-device');
     });
 
     it('should not invoke onDeviceSwitch callback when switch fails', async () => {
@@ -2638,7 +2709,7 @@ describe('FeishuLongConnHandler', () => {
 
   describe('handleRegularCommand', () => {
     it('should send message to active device', async () => {
-      mockBindingManager.getUserBinding.mockResolvedValue({});
+      mockBindingManager.getUserBinding.mockResolvedValue({ devices: [{ deviceId: 'dev_1', deviceName: 'D1' }] });
       mockBindingManager.getActiveDevice.mockResolvedValue({ deviceId: 'dev_1', deviceName: 'D1' });
       mockConnectionHub.isDeviceOnline.mockReturnValue(true);
       mockConnectionHub.sendToDevice.mockResolvedValue(true);
@@ -2676,7 +2747,7 @@ describe('FeishuLongConnHandler', () => {
     });
 
     it('should handle ConnectionHub not initialized', async () => {
-      mockBindingManager.getUserBinding.mockResolvedValue({});
+      mockBindingManager.getUserBinding.mockResolvedValue({ devices: [{ deviceId: 'dev_1' }] });
       mockBindingManager.getActiveDevice.mockResolvedValue({ deviceId: 'dev_1' });
       handler.setConnectionHub(null as any);
       const replySpy = vi.spyOn(handler as any, 'replyToMessage').mockResolvedValue(undefined);
@@ -2687,7 +2758,7 @@ describe('FeishuLongConnHandler', () => {
     });
 
     it('should fail if device is offline', async () => {
-      mockBindingManager.getUserBinding.mockResolvedValue({});
+      mockBindingManager.getUserBinding.mockResolvedValue({ devices: [{ deviceId: 'dev_1', deviceName: 'D1' }] });
       mockBindingManager.getActiveDevice.mockResolvedValue({ deviceId: 'dev_1', deviceName: 'D1' });
       mockConnectionHub.isDeviceOnline.mockReturnValue(false);
       const replySpy = vi.spyOn(handler as any, 'replyToMessage').mockResolvedValue(undefined);
@@ -2698,7 +2769,7 @@ describe('FeishuLongConnHandler', () => {
     });
 
     it('should handle send failure', async () => {
-      mockBindingManager.getUserBinding.mockResolvedValue({});
+      mockBindingManager.getUserBinding.mockResolvedValue({ devices: [{ deviceId: 'dev_1' }] });
       mockBindingManager.getActiveDevice.mockResolvedValue({ deviceId: 'dev_1' });
       mockConnectionHub.isDeviceOnline.mockReturnValue(true);
       mockConnectionHub.sendToDevice.mockResolvedValue(false);
@@ -2724,7 +2795,7 @@ describe('FeishuLongConnHandler', () => {
 
   describe('handleSlashCommandPassthrough', () => {
     it('should passthrough unknown command to device', async () => {
-      mockBindingManager.getUserBinding.mockResolvedValue({});
+      mockBindingManager.getUserBinding.mockResolvedValue({ devices: [{ deviceId: 'dev_1', deviceName: 'D1' }] });
       mockBindingManager.getActiveDevice.mockResolvedValue({ deviceId: 'dev_1', deviceName: 'D1' });
       mockConnectionHub.isDeviceOnline.mockReturnValue(true);
       mockConnectionHub.sendToDevice.mockResolvedValue(true);
@@ -2758,7 +2829,7 @@ describe('FeishuLongConnHandler', () => {
     });
 
     it('should handle ConnectionHub not initialized', async () => {
-      mockBindingManager.getUserBinding.mockResolvedValue({});
+      mockBindingManager.getUserBinding.mockResolvedValue({ devices: [{ deviceId: 'dev_1' }] });
       mockBindingManager.getActiveDevice.mockResolvedValue({ deviceId: 'dev_1' });
       handler.setConnectionHub(null as any);
       const replySpy = vi.spyOn(handler as any, 'replyToMessage').mockResolvedValue(undefined);
@@ -2769,7 +2840,7 @@ describe('FeishuLongConnHandler', () => {
     });
 
     it('should fail if device is offline', async () => {
-      mockBindingManager.getUserBinding.mockResolvedValue({});
+      mockBindingManager.getUserBinding.mockResolvedValue({ devices: [{ deviceId: 'dev_1', deviceName: 'D1' }] });
       mockBindingManager.getActiveDevice.mockResolvedValue({ deviceId: 'dev_1', deviceName: 'D1' });
       mockConnectionHub.isDeviceOnline.mockReturnValue(false);
       const replySpy = vi.spyOn(handler as any, 'replyToMessage').mockResolvedValue(undefined);
@@ -2780,7 +2851,7 @@ describe('FeishuLongConnHandler', () => {
     });
 
     it('should handle send failure', async () => {
-      mockBindingManager.getUserBinding.mockResolvedValue({});
+      mockBindingManager.getUserBinding.mockResolvedValue({ devices: [{ deviceId: 'dev_1' }] });
       mockBindingManager.getActiveDevice.mockResolvedValue({ deviceId: 'dev_1' });
       mockConnectionHub.isDeviceOnline.mockReturnValue(true);
       mockConnectionHub.sendToDevice.mockResolvedValue(false);
@@ -2847,7 +2918,7 @@ describe('FeishuLongConnHandler', () => {
 
       const result = await handler.handleCardAction(data);
 
-      expect(onCardSwitchThread).toHaveBeenCalledWith('ou_123', 't1', 'T1');
+      expect(onCardSwitchThread).toHaveBeenCalledWith('ou_123', 'card_1', 't1', 'T1');
       expect(refreshSpy).toHaveBeenCalledWith('card_1', 't1');
       expect(result).toEqual({ toast: expect.objectContaining({ content: 'Switched to: T1' }) });
     });
@@ -2871,12 +2942,13 @@ describe('FeishuLongConnHandler', () => {
 
       const data = {
         operator: { open_id: 'ou_123' },
-        action: { value: { action: 'new_thread' } }
+        action: { value: { action: 'new_thread' } },
+        context: { open_message_id: 'card_1' }
       };
 
       const result = await handler.handleCardAction(data);
 
-      expect(onCardNewThread).toHaveBeenCalledWith('ou_123');
+      expect(onCardNewThread).toHaveBeenCalledWith('ou_123', 'card_1');
       expect(result).toEqual({ toast: expect.objectContaining({ content: 'Creating new thread...' }) });
     });
 

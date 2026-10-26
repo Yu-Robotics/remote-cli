@@ -49,6 +49,8 @@ export interface DeviceBinding {
   boundAt: number;        // Binding time
   lastActiveAt: number;   // Last active time
   isActive: boolean;      // Whether this device is the active one
+  /** Optional Router-owned UI preference; never a native session pointer. */
+  selectedThreadId?: string;
 }
 
 // User binding record (supports multiple devices)

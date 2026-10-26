@@ -137,6 +137,28 @@ export class BindingManager {
     return binding.devices.find(device => device.deviceId === binding.activeDeviceId) ?? null;
   }
 
+  getThreadSelection(openId: string, deviceId: string) {
+    return this.store.getDeviceThreadSelection(openId, deviceId);
+  }
+
+  async selectThread(openId: string, deviceId: string, threadId: string,
+    guard: () => boolean = () => true): Promise<boolean> {
+    return this.mutate(async () => {
+      if (!guard()) return false;
+      this.assertOwnership(deviceId, openId);
+      return this.store.setDeviceThreadSelection(openId, deviceId, threadId, { requireActive: true, guard });
+    });
+  }
+
+  async clearThreadSelection(openId: string, deviceId: string, expectedThreadId: string,
+    guard: () => boolean = () => true): Promise<boolean> {
+    return this.mutate(async () => {
+      if (!guard()) return false;
+      this.assertOwnership(deviceId, openId);
+      return this.store.setDeviceThreadSelection(openId, deviceId, null, { expectedThreadId, guard });
+    });
+  }
+
   async switchActiveDevice(openId: string, deviceId: string): Promise<boolean> {
     return this.mutate(async () => {
       const binding = this.store.getUserBinding(openId);
