@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.186] - 2026-10-26
+
+### Fixed
+- Make the Pi inactivity watchdog the `ExecuteOptions.inactivityTimeout` window (10 minutes by default), re-armed by every Pi event and by extension-UI prompts and replies, so a long tool chain no longer fails exactly 10 minutes after the prompt. A positive `ExecuteOptions.timeout` stays a one-shot hard limit, and `inactivityTimeout: 0` / `timeout: 0` each disable only their own deadline, matching the Agy and Codex executors.
+- Claim remote-cli's own failure reason before Pi settles its aborted turn, so a deadline or an explicit `/abort` no longer surfaces Pi's raw `Request aborted`. A turn already failing is never failed twice, so a late Pi event cannot send a second `abort`.
+
+### Tests
+- Cover the deadline-versus-abort ordering, continuous tool activity that outlasts the watchdog window, the hard limit that events cannot extend, a single abort while the failure is in flight, the cleared watchdog after a settled turn, and the disabled deadlines.
+
 ## [1.6.185] - 2026-10-26
 
 ### Fixed

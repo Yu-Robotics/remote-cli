@@ -258,7 +258,7 @@ describe('PiExecutor', () => {
     await expect(executor.waitForExit()).resolves.toBeUndefined();
   });
 
-  it('allows an execution to disable Pi\'s default turn timeout', async () => {
+  it('allows an execution to disable both the hard and inactivity deadlines', async () => {
     let resolvePrompt!: (response: PiRpcResponse) => void;
     transport.request.mockImplementation((command: Record<string, unknown>) => {
       if (command.type === 'prompt') {
@@ -267,9 +267,10 @@ describe('PiExecutor', () => {
       return Promise.resolve({ type: 'response', command: String(command.type), success: true });
     });
 
-    const pending = executor.execute('long delegated task', { timeout: 0 });
+    const pending = executor.execute('long delegated task', { timeout: 0, inactivityTimeout: 0 });
     await vi.waitFor(() => expect(resolvePrompt).toBeTypeOf('function'));
     expect((executor as any).activeTurn.timeoutTimer).toBeUndefined();
+    expect((executor as any).activeTurn.inactivityTimer).toBeUndefined();
 
     await executor.abort();
     resolvePrompt({ type: 'response', command: 'prompt', success: true });
@@ -821,6 +822,202 @@ describe('PiExecutor', () => {
     } finally {
       stop.mockRestore();
     }
+  });
+
+  it('reports the inactivity deadline instead of Pi\'s raw abort text', async () => {
+    await executor.listModels();
+    transport.request.mockImplementation(async (command: Record<string, unknown>) => {
+      if (command.type === 'prompt') {
+        transport.emit({ type: 'agent_start' });
+        return { type: 'response', command: 'prompt', success: true };
+      }
+      if (command.type === 'abort') {
+        // Real Pi aborts the provider request, persists an `aborted` assistant
+        // message, settles the run, and only then answers the abort RPC.
+        transport.emit({
+          type: 'agent_end',
+          willRetry: false,
+          messages: [{ role: 'assistant', content: [], stopReason: 'aborted', errorMessage: 'Request aborted' }],
+        });
+        transport.emit({ type: 'agent_settled', aborted: true });
+        return { type: 'response', command: 'abort', success: true };
+      }
+      return { type: 'response', command: String(command.type), success: true };
+    });
+
+    const result = await executor.execute('long turn', { inactivityTimeout: 900 });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('inactivity');
+    expect(result.error).not.toContain('Request aborted');
+  });
+
+  it('keeps re-arming the inactivity watchdog while tool events keep arriving', async () => {
+    await executor.listModels();
+    transport.request.mockImplementation(async (command: Record<string, unknown>) => {
+      if (command.type === 'prompt') {
+        transport.emit({ type: 'agent_start' });
+        return { type: 'response', command: 'prompt', success: true };
+      }
+      return { type: 'response', command: String(command.type), success: true };
+    });
+
+    const running = executor.execute('long turn', { inactivityTimeout: 400 });
+    // Tool activity outlasts the watchdog window several times over; the turn
+    // must still finish instead of being killed by cumulative duration.
+    for (let index = 0; index < 10; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      transport.emit({ type: 'tool_execution_start', toolCallId: `tool-${index}`, toolName: 'bash', args: { command: 'sleep 1' } });
+      transport.emit({
+        type: 'tool_execution_end',
+        toolCallId: `tool-${index}`,
+        toolName: 'bash',
+        result: { content: [{ type: 'text', text: 'ok' }] },
+        isError: false,
+      });
+    }
+    transport.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'done' } });
+    transport.emit({ type: 'agent_settled' });
+
+    await expect(running).resolves.toMatchObject({ success: true, output: 'done' });
+  });
+
+  it('lets an executor default disable the inactivity watchdog', async () => {
+    let quietTransport!: FakePiTransport;
+    const quiet = new PiExecutor(new DirectoryGuard([home]), {
+      initialWorkingDirectory: project,
+      threadId: 'thread-pi-quiet',
+      sessionBaseDir: path.join(home, '.remote-cli', 'pi-sessions'),
+      inactivityTimeoutMs: 0,
+      clientFactory: (launch) => {
+        quietTransport = new FakePiTransport(launch);
+        return quietTransport;
+      },
+    });
+    let resolvePrompt!: (response: PiRpcResponse) => void;
+    quietTransport.request.mockImplementation((command: Record<string, unknown>) => {
+      if (command.type === 'prompt') {
+        return new Promise<PiRpcResponse>((resolve) => { resolvePrompt = resolve; });
+      }
+      return Promise.resolve({ type: 'response', command: String(command.type), success: true });
+    });
+
+    const pending = quiet.execute('quiet task');
+    await vi.waitFor(() => expect(resolvePrompt).toBeTypeOf('function'));
+    expect((quiet as any).activeTurn.inactivityTimer).toBeUndefined();
+
+    await quiet.abort();
+    resolvePrompt({ type: 'response', command: 'prompt', success: true });
+    await expect(pending).resolves.toMatchObject({ success: false, error: 'Aborted' });
+    await quiet.destroy();
+  });
+
+  it('re-arms the inactivity watchdog timer on each Pi event', async () => {
+    let resolvePrompt!: (response: PiRpcResponse) => void;
+    transport.request.mockImplementation((command: Record<string, unknown>) => {
+      if (command.type === 'prompt') {
+        return new Promise<PiRpcResponse>((resolve) => { resolvePrompt = resolve; });
+      }
+      return Promise.resolve({ type: 'response', command: String(command.type), success: true });
+    });
+
+    const pending = executor.execute('long turn', { inactivityTimeout: 60_000 });
+    await vi.waitFor(() => expect(resolvePrompt).toBeTypeOf('function'));
+    const armed = (executor as any).activeTurn.inactivityTimer;
+    expect(armed).toBeDefined();
+
+    transport.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'still working' } });
+    expect((executor as any).activeTurn.inactivityTimer).toBeDefined();
+    expect((executor as any).activeTurn.inactivityTimer).not.toBe(armed);
+
+    await executor.abort();
+    resolvePrompt({ type: 'response', command: 'prompt', success: true });
+    await expect(pending).resolves.toMatchObject({ success: false, error: 'Aborted' });
+  });
+
+  it('keeps a positive timeout as one hard limit that events cannot extend', async () => {
+    await executor.listModels();
+    transport.request.mockImplementation(async (command: Record<string, unknown>) => {
+      if (command.type === 'prompt') {
+        transport.emit({ type: 'agent_start' });
+        return { type: 'response', command: 'prompt', success: true };
+      }
+      return { type: 'response', command: String(command.type), success: true };
+    });
+
+    const running = executor.execute('long turn', { timeout: 120 });
+    for (let index = 0; index < 8; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      transport.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: '.' } });
+    }
+
+    await expect(running).resolves.toMatchObject({
+      success: false,
+      error: expect.stringContaining('hard time limit'),
+    });
+  });
+
+  it('starts a single abort when events arrive while the failure is still aborting', async () => {
+    await executor.listModels();
+    let resolveAbort!: (response: PiRpcResponse) => void;
+    transport.request.mockImplementation((command: Record<string, unknown>) => {
+      if (command.type === 'prompt') {
+        transport.emit({ type: 'agent_start' });
+        return Promise.resolve({ type: 'response', command: 'prompt', success: true });
+      }
+      if (command.type === 'abort') {
+        return new Promise<PiRpcResponse>((resolve) => { resolveAbort = resolve; });
+      }
+      return Promise.resolve({ type: 'response', command: String(command.type), success: true });
+    });
+
+    const running = executor.execute('long turn', { inactivityTimeout: 40 });
+    await vi.waitFor(() => expect(transport.request).toHaveBeenCalledWith({ type: 'abort' }));
+    transport.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'late' } });
+    await new Promise((resolve) => setTimeout(resolve, 120));
+
+    const abortCalls = transport.request.mock.calls.filter(([command]) => (command as Record<string, unknown>).type === 'abort');
+    expect(abortCalls).toHaveLength(1);
+
+    resolveAbort({ type: 'response', command: 'abort', success: true });
+    await expect(running).resolves.toMatchObject({ success: false, error: expect.stringContaining('inactivity') });
+  });
+
+  it('does not abort a turn that already settled', async () => {
+    await executor.listModels();
+
+    await expect(executor.execute('quick turn', { inactivityTimeout: 40 }))
+      .resolves.toMatchObject({ success: true });
+    await new Promise((resolve) => setTimeout(resolve, 120));
+
+    const abortCalls = transport.request.mock.calls.filter(([command]) => (command as Record<string, unknown>).type === 'abort');
+    expect(abortCalls).toHaveLength(0);
+  });
+
+  it('keeps Aborted when Pi reports its own aborted turn before answering', async () => {
+    await executor.listModels();
+    transport.request.mockImplementation(async (command: Record<string, unknown>) => {
+      if (command.type === 'prompt') {
+        transport.emit({ type: 'agent_start' });
+        return { type: 'response', command: 'prompt', success: true };
+      }
+      if (command.type === 'abort') {
+        transport.emit({
+          type: 'agent_end',
+          willRetry: false,
+          messages: [{ role: 'assistant', content: [], stopReason: 'aborted', errorMessage: 'Request aborted' }],
+        });
+        transport.emit({ type: 'agent_settled', aborted: true });
+        return { type: 'response', command: 'abort', success: true };
+      }
+      return { type: 'response', command: String(command.type), success: true };
+    });
+
+    const running = executor.execute('long turn');
+    await vi.waitFor(() => expect(transport.request).toHaveBeenCalledWith(expect.objectContaining({ type: 'prompt' })));
+    await expect(executor.abort()).resolves.toBe(true);
+
+    await expect(running).resolves.toMatchObject({ success: false, error: 'Aborted' });
   });
 
   it('settles an explicit abort even when process cleanup cannot confirm exit', async () => {
