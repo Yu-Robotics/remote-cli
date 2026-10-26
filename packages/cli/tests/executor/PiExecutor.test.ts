@@ -1153,15 +1153,17 @@ describe('PiExecutor', () => {
     const armed = (executor as any).activeTurn.inactivityTimer;
     expect(armed).toBeDefined();
 
-    transport.emit({ type: 'extension_ui_request', id: 'ui-1', method: 'select', title: 'Pick one', options: [{ label: 'A', value: 'a' }] });
+    transport.emit({ type: 'extension_ui_request', id: 'ui-1', method: 'select', title: 'Pick one', timeout: 60_000, options: [{ label: 'A', value: 'a' }] });
     expect(executor.isWaitingInput()).toBe(true);
     expect((executor as any).activeTurn.inactivityTimer).toBeUndefined();
+    expect((executor as any).pendingUiExpiry).not.toBeNull();
 
     // Stray activity while the dialog is open must not restart the watchdog.
     transport.emit({ type: 'tool_execution_start', toolCallId: 'tool-wait', toolName: 'bash', args: { command: 'ls' } });
     expect((executor as any).activeTurn.inactivityTimer).toBeUndefined();
 
     expect(executor.sendInput('1')).toBe(true);
+    expect((executor as any).pendingUiExpiry).toBeNull();
     expect((executor as any).activeTurn.inactivityTimer).toBeDefined();
     expect((executor as any).activeTurn.inactivityTimer).not.toBe(armed);
 
@@ -1227,11 +1229,15 @@ describe('PiExecutor', () => {
     await vi.waitFor(() => expect((executor as any).activeTurn?.timeoutTimer).toBeDefined());
 
     transport.emit({ type: 'extension_ui_request', id: 'ui-hard', method: 'confirm', title: 'ok?' });
-    expect((executor as any).activeTurn.timeoutTimer).toBeDefined();
+    const hardDeadline = (executor as any).activeTurn.timeoutTimer;
+    expect(hardDeadline).toBeDefined();
     expect((executor as any).activeTurn.inactivityTimer).toBeUndefined();
 
+    // Any Pi event during the dialog must not take the hard limit with it.
+    transport.emit({ type: 'tool_execution_start', toolCallId: 'tool-dialog', toolName: 'bash', args: { command: 'ls' } });
+    expect((executor as any).activeTurn.timeoutTimer).toBe(hardDeadline);
     expect(executor.sendInput('yes')).toBe(true);
-    expect((executor as any).activeTurn.timeoutTimer).toBeDefined();
+    expect((executor as any).activeTurn.timeoutTimer).toBe(hardDeadline);
 
     await expect(running).resolves.toMatchObject({
       success: false,
@@ -1311,6 +1317,27 @@ describe('PiExecutor', () => {
     transport.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'second done' } });
     transport.emit({ type: 'agent_settled' });
     await expect(second).resolves.toMatchObject({ success: true, output: 'second done' });
+  });
+
+  it('cancels a dialog that is still open when the turn settles', async () => {
+    await executor.listModels();
+    transport.request.mockImplementation(async (command: Record<string, unknown>) => {
+      if (command.type === 'prompt') {
+        transport.emit({ type: 'agent_start' });
+        return { type: 'response', command: 'prompt', success: true };
+      }
+      return { type: 'response', command: String(command.type), success: true };
+    });
+
+    const running = executor.execute('turn');
+    await vi.waitFor(() => expect(transport.request).toHaveBeenCalledWith(expect.objectContaining({ type: 'prompt' })));
+    transport.emit({ type: 'extension_ui_request', id: 'ui-open', method: 'confirm', title: 'ok?' });
+    expect(executor.isWaitingInput()).toBe(true);
+
+    transport.emit({ type: 'agent_settled' });
+    await expect(running).resolves.toMatchObject({ success: false });
+    expect(transport.send).toHaveBeenCalledWith({ type: 'extension_ui_response', id: 'ui-open', cancelled: true });
+    expect(executor.isWaitingInput()).toBe(false);
   });
 
   it('keeps Aborted when Pi reports its own aborted turn before answering', async () => {
