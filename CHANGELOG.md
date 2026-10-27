@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.190] - 2026-10-27
+
+### Fixed
+- Serialize shared Kimi and OpenCode permission decisions with the nested ACP v1 outcome for approvals, rejections, cancellations, and error paths. Preserve fail-closed validation, manual approval settings, interactive questions, and existing backend session bindings; native permission modes and the Router protocol are unchanged.
+
+### Tests
+- Exercise real Kimi/OpenCode executors and ACP NDJSON transport against a schema-validating synthetic agent, covering automatic approval, manual allow-once/allow-always, denial/cancellation, and interactive question selection/skip. Retain DSH interoperability checks and malformed-selection regression coverage.
+
 ## [1.6.189] - 2026-10-26
 
 ### Fixed
