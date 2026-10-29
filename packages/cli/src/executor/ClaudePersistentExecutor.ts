@@ -1,4 +1,5 @@
 import { spawn, ChildProcess } from 'child_process';
+import { ManagedProcessGroups } from './ManagedProcessGroups';
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import { claudeCodeHooks } from '../hooks/ClaudeCodeHooks';
 import { StructuredContent, ContentBlockUnion, ToolUseInfo, ToolResultInfo, Attachment, ApprovalRequestInfo, ApprovalAction, ApprovalStatus, ActivityProgressInfo } from '../types';
@@ -225,6 +226,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
 
   // Persistent process
   private claudeProcess: ChildProcess | null = null;
+  private readonly workerGroups = new ManagedProcessGroups();
   private isStarting = false;
   private isStopping = false; // Flag to indicate intentional process stop
   private isSessionError = false; // Flag to suppress auto-restart on session-not-found errors
@@ -588,6 +590,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
 
       // Spawn the process
       const child = spawn(this.claudeCommand, args, {
+        ...(this.delegationWorker && process.platform !== 'win32' ? { detached: true } : {}),
         cwd: this.currentWorkingDirectory,
         stdio: ['pipe', 'pipe', 'pipe'],
         env: {
@@ -600,6 +603,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       });
 
       this.claudeProcess = child;
+      if (this.delegationWorker) this.workerGroups.track(child);
 
       // Buffer for collecting stderr on startup (for error reporting)
       let stderrBuffer: string[] = [];
@@ -2428,6 +2432,11 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
   async waitForExit(): Promise<void> {
     if (!this.claudeProcess) return;
     await new Promise<void>(resolve => this.claudeProcess!.once('close', () => resolve()));
+  }
+
+  async waitForManagedProcessGroupExit(): Promise<void> {
+    if (!this.delegationWorker) throw new Error('Managed worker process-group tracking was not enabled');
+    await this.workerGroups.waitForExit();
   }
 
   consumeSessionResumeFailure(): boolean {

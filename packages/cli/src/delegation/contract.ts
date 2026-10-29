@@ -28,6 +28,7 @@ export const DELEGATION_TOOLS = [
     inputSchema: object({
       backend: { type: 'string', enum: DELEGATION_BACKENDS },
       objective: { type: 'string', minLength: 1, maxLength: 24000 },
+      exports: { type: 'array', maxItems: 16, items: { type: 'string', minLength: 1, maxLength: 4096 }, description: 'Optional required output files relative to the Git checkout root, including ignored reports/images. Saved outside the disposable checkout before cleanup; at most 16 MiB per file and 64 MiB total. Inspect the artifact to get durable local file locations.' },
       mode: { type: 'string', enum: ['inherit', 'read_only'], description: 'Defaults to inherit: an unrestricted coordinator launches unrestricted workers regardless of the target backend\'s saved sandbox. Sandboxed coordinators cannot launch managed workers, including on the same backend. read_only is retained as a compatibility value but is rejected by the inherit-only policy.' },
     }, ['backend', 'objective']),
   },
@@ -49,7 +50,7 @@ export const DELEGATION_TOOLS = [
   {
     name: 'remote_cli_integrate',
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
-    description: 'Manage an owned Git worker artifact after all accepted workers finish. inspect returns changed paths and a delivery revision. apply requires that exact expectedRevision, preflights conflicts in a separate worktree, and applies without staging, committing, or pushing. Conflicts leave the delivery workspace unchanged. A failed file application can partially change delivery files; inspect exposes preserved before/target recovery refs and automatic reapply is blocked. retain explicitly declines integration but preserves the immutable artifact; this permits lane reuse. Failed/cancelled changes require manual recovery or retain. Completion and integration are distinct; verify the combined result before delivery. Artifacts survive diagnostic record expiry and can be inspected by task ID in later turns of the same thread and workspace generation.',
+    description: 'Manage an owned Git worker artifact after all accepted workers finish. inspect returns changed paths and a delivery revision. apply requires that exact expectedRevision, preflights conflicts in a separate worktree, and applies without staging, committing, or pushing. Conflicts leave the delivery workspace unchanged. A failed file application can partially change delivery files; inspect exposes preserved before/target recovery refs and automatic reapply is blocked. retain explicitly declines integration but preserves the immutable artifact; this permits lane reuse. Verified failed/cancelled changes from disposable worktrees are automatically retained for recovery; legacy or uncertain recovery still requires explicit disposition. Retention preserves the artifact, not the temporary checkout. Completion and integration are distinct; verify the combined result before delivery. Artifacts survive diagnostic record expiry and can be inspected by task ID in later turns of the same thread and workspace generation.',
     inputSchema: object({ taskId: { type: 'string' },
       action: { type: 'string', enum: ['inspect', 'apply', 'retain'], default: 'inspect' },
       expectedRevision: { type: 'string', description: 'Required for apply or retain; use the revision from inspect.' },

@@ -75,9 +75,10 @@ describe('code-enforced delegated artifact closeout', { timeout: 30_000 }, () =>
     handler = new MessageHandler(socket, pool, threads, guard, config);
     (handler as any).delegation = new DelegationManager(guard, (_guard, _config, cwd) => ({
       execute: vi.fn(async () => { workerExecutions++; return workerWork(cwd); }),
-      abort: vi.fn(async () => true), destroy: vi.fn(async () => undefined), waitForExit: vi.fn(async () => undefined),
+      abort: vi.fn(async () => true), destroy: vi.fn(async () => undefined), waitForExit: vi.fn(async () => undefined), waitForManagedProcessGroupExit: vi.fn(async () => undefined),
       resetContext: vi.fn(), setWorkingDirectory: vi.fn(), getCurrentWorkingDirectory: () => cwd,
-    }), new BackendRegistry(async () => 'fixture 1.0'));
+    }), new BackendRegistry(async () => 'fixture 1.0'), undefined, undefined, undefined, undefined,
+      new DelegatedWorkspaceManager(undefined, true));
     main.execute.mockImplementationOnce(async () => { await delegate(); return { success: true }; });
   });
   afterEach(async () => {
@@ -179,19 +180,13 @@ describe('code-enforced delegated artifact closeout', { timeout: 30_000 }, () =>
     expect(workerExecutions).toBe(1);
   });
 
-  it('requires a deliberate retain for failed worker edits, without applying them', async () => {
+  it('retains verified failed worker edits without an extra model round or automatic application', async () => {
     workerWork = async cwd => {
       await fs.writeFile(path.join(cwd, 'source.txt'), 'partial failed work\n');
       return { success: false, error: 'Fixture failure' };
     };
-    main.execute.mockImplementationOnce(async () => {
-      const view = await call('remote_cli_integrate', { taskId, action: 'inspect' });
-      await expect(call('remote_cli_integrate', { taskId, action: 'apply', expectedRevision: view.revision })).rejects.toThrow('manual recovery');
-      await retain();
-      return { success: true };
-    });
     await run();
-    expect(main.execute).toHaveBeenCalledTimes(2);
+    expect(main.execute).toHaveBeenCalledOnce();
     expect(response()).toMatchObject({ success: true });
     expect(await artifact()).toMatchObject({ successful: false, disposition: 'retained' });
     expect(await fs.readFile(path.join(fixture.root, 'source.txt'), 'utf8')).toBe('first\nsecond\nthird\n');

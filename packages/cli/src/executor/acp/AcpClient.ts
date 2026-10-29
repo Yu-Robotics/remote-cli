@@ -1,6 +1,7 @@
 import { ChildProcess, spawn } from 'child_process';
 import * as readline from 'readline';
 import { assertWorkingDirectoryExists } from '../../utils/WorkingDirectory';
+import { ManagedProcessGroups } from '../ManagedProcessGroups';
 import type {
   AcpMcpServer,
   AcpConfigOption,
@@ -55,15 +56,19 @@ export interface AcpTransport {
   sendCancel(sessionId: string): void;
   destroy(): void;
   waitForExit?(): Promise<void>;
+  waitForManagedProcessGroupExit?(): Promise<void>;
 }
 
 /** Optional launch policy for specialized transports; existing ACP launches are unchanged. */
 export interface AcpLaunchOptions {
+  delegationWorker?: boolean;
   env?: NodeJS.ProcessEnv;
   onStderr?: (message: string) => void;
 }
 
 export class AcpClient implements AcpTransport {
+  private readonly workerGroups = new ManagedProcessGroups();
+  private readonly workerGroupEnabled: boolean;
   private readonly child: ChildProcess;
   private readonly callbacks: AcpEventCallbacks;
   private readonly pendingRequests = new Map<number, PendingRequest>();
@@ -75,6 +80,7 @@ export class AcpClient implements AcpTransport {
   private readonly exited: Promise<void>;
 
   constructor(command: string, args: string[], cwd: string, callbacks: AcpEventCallbacks, private readonly managedProcess = false, launch: AcpLaunchOptions = {}) {
+    this.workerGroupEnabled = launch.delegationWorker === true;
     this.callbacks = callbacks;
     assertWorkingDirectoryExists(cwd);
     this.child = spawn(command, args, {
@@ -84,6 +90,7 @@ export class AcpClient implements AcpTransport {
       ...(managedProcess && process.platform !== 'win32' ? { detached: true } : {}),
     });
     this.exited = new Promise(resolve => this.child.once('close', () => resolve()));
+    if (this.workerGroupEnabled) this.workerGroups.track(this.child);
 
     this.child.stdout!.on('error', () => {});
     this.child.stdin?.on('error', () => {});
@@ -157,6 +164,11 @@ export class AcpClient implements AcpTransport {
   }
 
   waitForExit(): Promise<void> { return this.exited; }
+
+  async waitForManagedProcessGroupExit(): Promise<void> {
+    if (!this.workerGroupEnabled) throw new Error('Managed worker process-group tracking was not enabled');
+    await this.workerGroups.waitForExit();
+  }
 
   private signalProcess(signal: NodeJS.Signals): void {
     if (this.managedProcess && process.platform !== 'win32' && this.child.pid) {

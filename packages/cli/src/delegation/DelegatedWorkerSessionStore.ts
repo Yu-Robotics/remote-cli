@@ -3,6 +3,7 @@ import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { DELEGATION_BACKENDS, type DelegationBackend } from './contract';
+import { hasLegacyDiscardTombstone } from './LegacyWorkspaceCleanup';
 import { ThreadContextReset } from '../thread/ThreadContextReset';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -29,6 +30,8 @@ export interface DelegatedWorkerLane {
   lastClearedGeneration?: number;
   /** Confirmed cleared and superseded; retained for stale cards but never reused. */
   contextRetired?: boolean;
+  /** Offline discard retires scheduling without claiming native context was cleared. */
+  workspaceDiscarded?: boolean;
   pooled?: boolean;
 }
 
@@ -102,6 +105,7 @@ function validateLane(value: unknown): value is DelegatedWorkerLane {
     && (lane.contextRetired === undefined || typeof lane.contextRetired === 'boolean')
     && (lane.contextRetired !== true || (lane.state === 'dirty' && lane.contextResetPending === false
       && validGeneration(lane.lastClearedGeneration) && lane.contextGeneration === lane.lastClearedGeneration + 1))
+    && (lane.workspaceDiscarded === undefined || (lane.workspaceDiscarded === true && lane.state === 'dirty'))
     && (lane.pooled === undefined || typeof lane.pooled === 'boolean')
     && (lane.cleanupError === undefined || typeof lane.cleanupError === 'string');
 }
@@ -112,16 +116,27 @@ function validateLane(value: unknown): value is DelegatedWorkerLane {
  */
 export class DelegatedWorkerSessionStore {
   private initialized?: Promise<void>;
+  private beforeInitialize?: () => Promise<void>;
   private readonly lanes = new Map<string, DelegatedWorkerLane>();
   private writes: Promise<void> = Promise.resolve();
 
   constructor(private readonly directory = path.join(os.homedir(), '.remote-cli', 'delegation-workers'),
     private readonly contextResets = new ThreadContextReset()) {}
 
+  get storageDirectory(): string { return this.directory; }
+
+  /** Install the lifetime owner before the first mutable inventory load. */
+  setInitializationGuard(guard: () => Promise<void>): void {
+    this.beforeInitialize = guard;
+  }
+
   assertContextReady(threadId: string): void { this.contextResets.assertReady(threadId); }
 
   initialize(): Promise<void> {
-    return this.initialized ??= this.load().catch(error => {
+    return this.initialized ??= Promise.resolve().then(async () => {
+      await this.beforeInitialize?.();
+      await this.load();
+    }).catch(error => {
       // Storage failures must block admission, but a repaired inventory can be
       // retried in this process instead of caching a rejected initialization.
       this.initialized = undefined;
@@ -135,8 +150,12 @@ export class DelegatedWorkerSessionStore {
     await this.initialize();
     return this.mutate(async () => {
       this.assertContextReady(identity.threadId);
+      const discarded = new Set<string>();
+      for (const lane of this.lanes.values()) {
+        if (sameIdentity(lane, identity) && await hasLegacyDiscardTombstone(this.directory, lane.id)) discarded.add(lane.id);
+      }
       const ready = [...this.lanes.values()]
-        .filter(lane => lane.state === 'ready' && !lane.contextRetired
+        .filter(lane => lane.state === 'ready' && !lane.contextRetired && !lane.workspaceDiscarded && !discarded.has(lane.id)
           && sameIdentity(lane, identity) && !options.excluded?.has(lane.id))
         .sort((a, b) => b.updatedAt - a.updatedAt);
 
@@ -350,6 +369,13 @@ export class DelegatedWorkerSessionStore {
         loaded.set(parsed.id, parsed);
       }
       for (const [id, lane] of loaded) {
+        if (await hasLegacyDiscardTombstone(this.directory, id)) {
+          const retired: DelegatedWorkerLane = { ...lane, state: 'dirty', workspaceDiscarded: true,
+            cleanupPending: false, cleanupError: 'Historical checkout was explicitly discarded; native history is preserved.', updatedAt: Date.now() };
+          await this.writeRecord(retired);
+          loaded.set(id, retired);
+          continue;
+        }
         // A process may have died between any write and terminal confirmation.
         // Only a ready lane is resumable after a CLI restart.
         if (lane.state !== 'ready') {

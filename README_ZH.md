@@ -659,10 +659,12 @@ tree and the intended result. An interrupted or failed application may have
 changed files: inspection exposes those refs and blocks automatic reapplication
 until manual recovery or explicit retention. Verify working and staged changes
 with `git status` before delivery; application does not update the index.
-Changes outside the selected subdirectory and failed/cancelled partial output
-require manual recovery or explicit retention. Retain declines integration but
-keeps the immutable artifact; it does not delete files. No-change tasks need no
-integration. Pending artifacts and unknown dirty files prevent lane reuse.
+Changes outside the selected subdirectory require manual recovery or retention.
+Failed/cancelled partial output remains recoverable; the disposable policy below
+automatically retains verified captures. Retain declines integration and keeps
+the immutable artifact, while eligible temporary checkouts may be reclaimed.
+No-change tasks need no integration. Pending artifacts and unknown dirty files
+prevent lane reuse.
 Before a reusable lane starts again, its checkout moves to a fresh baseline,
 including integrated sibling changes, while its native conversation continues.
 From CLI 1.6.135, a successful pending artifact also counts as delivered when its
@@ -673,27 +675,83 @@ observed HEAD. Admission only updates metadata; inspection and idle closure may
 attempt safe reclamation. Explicit retention and unknown/failed/recovery states
 are preserved. Copies, cherry-picks, squash merges, or matching files alone do
 not establish ancestry; patch-only apply remains the other delivery mechanism.
-From CLI 1.6.135, successful no-change tasks and successfully applied artifacts
-automatically reclaim their verified worker checkout directories. Native lane
-identity, conversation pointers, artifact records, and private Git refs remain.
-The next task recreates the checkout at the same path from fresh delivery input.
-Reclamation checks ownership, detached HEAD, delivery receipts, actual file bytes,
-modes, and symlinks; ignored files, extra directories, locked worktrees, and unknown
-state prevent deletion. Filters or line-ending transformations that prevent exact
-byte verification also retain the checkout. Failed/cancelled tasks, pending or
-retained artifacts, and unresolved recovery state are never reclaimed automatically.
-Cleanup failure does not change task success or undo integration. If checkout
-preparation fails, an existing lane's native context is also preserved:
-the lane is blocked for manual recovery, and other lanes can still run. Full byte
-verification does not hold the shared repository metadata guard.
-Persisted intent and receipt states allow interrupted cleanup to be resolved only when directory
-and Git registration agree; missing legacy checkouts, occupied reclaimed paths,
-or partial registrations require manual recovery. No force removal, repository
-pruning, historical sweep, or expiry-based checkout deletion is performed.
-Artifacts and recovery files remain beyond diagnostic expiry and native context
-reset/deletion; manually clean retained files only after confirming delivery.
+From CLI 1.6.191 on Linux, newly created managed Git worktrees are disposable
+execution storage. After confirmed native process-group exit, successful delivered output and failed
+no-change output can release the entire checkout, including ignored dependencies
+and temporary extras. Captured failed changes are retained as immutable Git
+artifacts for recovery without merging; explicit retention also permits checkout
+cleanup. Native conversation pointers, artifact records and private Git refs stay
+available. The next task recreates the same lane path from fresh delivery input.
+Pending successful changes wait for apply or retain. Uncertain process exit,
+uncaptured source edits, incomplete deliverables, unsafe paths and unresolved
+parent-application recovery remain explicit holds. Unknown legacy records do not
+silently inherit the disposable policy. Reusing a pre-upgrade checkout also
+keeps its original policy and ignored files; adoption requires strict reclamation
+and creation of a fresh checkout, or explicit offline historical disposal.
+On macOS and Windows, ordinary delegation keeps the existing conservative
+checkout policy; the new whole-checkout disposal is not enabled. Linux delegated
+workers use isolated process groups, including Codex, Claude and Pi. Group
+confirmation remains separate from transport exit and holds the checkout on
+uncertain identity, inventory or termination. Kernel-visible unreaped zombies
+also hold cleanup until the group disappears; an empty process snapshot alone
+is never sufficient. It covers members of that group;
+background processes that escape using `setsid` or `setpgid` are not covered and
+must not write into disposable worker checkouts.
+
+Cleanup uses durable intent and receipt records. Failed removals are retried on
+startup and while idle; cleanup failure does not undo integration or turn a
+successful task into a failed task. Failed/retained receipts support reconstruction
+as well as deletion. Required reports and images must be captured or durably
+exported before cleanup; merely returning a path in the temporary checkout does
+not deliver the file. Declare required relative file paths in the delegation
+tool's optional `exports` array (up to 16 files, 16 MiB each, 64 MiB total).
+Artifact inspection returns verified durable local file locations. Missing or
+changed exports hold cleanup instead of silently dropping the deliverable.
+Unsupported transformed or nested checkouts remain held.
+
+One owner coordinates mutable local delegation storage. Lane admission excludes
+cleanup, and cooperating CLI processes serialize shared Git metadata operations
+by canonical Git common directory. Independent workers still run concurrently.
+Unmanaged writers and old CLI versions do not participate in this ownership
+protocol. A stale owner or uncertain child exit requires a confirmed quiescent
+maintenance handoff; age or a missing parent PID alone never authorizes deletion.
+Historical disposal is an explicit offline operation, not an automatic upgrade
+sweep. It preserves parent projects, existing artifact refs and native sessions.
+
+Inspect locally with `remote-cli delegation storage scan`. Freeze a cleanup plan
+with `remote-cli delegation storage plan --out ./discard-plan.json`. After
+stopping the daemon, supervisors and all native workers, run
+`remote-cli delegation storage discard --plan ./discard-plan.json --discard-contents --confirm-workers-stopped`
+from an independent terminal. This permanently discards checkout contents,
+including unsubmitted and ignored files. The command never stops or restarts a
+service. Retained session records receive scheduler exclusion markers so a
+removed historical checkout is not resumed automatically. This explicit discard
+can lose uncaptured state even for a lane labelled ready; it preserves native
+history, not automatic continuation. Ordinary new-policy reclamation still
+recreates the same lane and preserves continuation.
+
+The inventory includes integration scratch and its receipts. Registered scratch
+with matching ownership evidence can enter the explicit frozen discard plan;
+unknown, conflicting-identity or unregistered directories stay listed with their
+exclusion reasons. Discarding scratch leaves its originating lane and native
+session unchanged. Conflict scratch is never deleted automatically. Completed discard
+markers bound to the original task and workspace retire unavailable checkout
+obligations without claiming successful delivery. Older, unbound or pending
+markers remain conservative. Incomplete inventories warn about unseen records;
+known pending tasks still require closeout and incomplete scans never authorize
+automatic deletion.
+
+The scan defaults to 100,000 entries, 1 GiB of hashed content and 120 seconds;
+use `--max-entries`, `--max-bytes` and `--max-seconds` to increase explicit budgets.
+An incomplete inventory cannot authorize deletion. Local output contains paths
+and identities and should not be forwarded to chat. Offline deletion currently
+requires Linux mount inspection; unsupported platforms refuse deletion. Ownership
+uncertainty, stale locks and ambiguous partial removal require manual quiescent
+recovery. Neither this command nor automatic cleanup prunes Git objects or refs.
+
 From CLI 1.6.136, successful coordinator completion also requires a code-enforced
-artifact closeout check for Git workers started in the current request. The CLI
+artifact closeout check for current Git workers and durable unresolved artifacts
+from the matching thread and workspace generation. The CLI
 waits for tool calls and worker cleanup, recognizes historical delivery, and reads
 validated durable receipts; reading a result or claiming completion is not enough.
 No-change, applied, and explicitly retained artifacts pass. Pending changes,
@@ -703,11 +761,10 @@ original request or attachments. New workers do not reset this budget. If unreso
 the final response fails with task IDs and available output commits; queued execution
 pauses and existing artifacts stay preserved. Coordinator failure, abort, or shutdown
 does not launch further closeout rounds. Retaining output is a deliberate decision
-not to integrate, not proof of delivery or permission to delete files. The check
+not to integrate, not proof of delivery. Disposable checkout cleanup preserves the retained artifact. The check
 does not certify functional correctness, force cleanup, or replay old requests.
-Worktree lifecycle operations are serialized within this CLI process, not against
-unmanaged programs writing to the same files; keep external writers out of worker
-checkouts. Native executor behavior, non-Git FIFO scheduling, and Router protocol
+Ownership coordinates cooperating CLI processes, not unmanaged programs; keep
+external writers out of worker checkouts. Native executor behavior, non-Git FIFO scheduling, and Router protocol
 remain unchanged; upgrading only the Router does not enable checkout reclamation.
 A worktree isolates checkout files, not OS permissions, Git configuration,
 external tools, or access to other directories. Git is never initialized

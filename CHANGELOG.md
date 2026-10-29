@@ -10,6 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.191] - 2026-10-29
+
+### Changed
+- Treat new Linux managed Git worktrees as disposable execution storage after confirmed managed process-group exit and durable artifact closeout. Reclaim delivered and retained output, including recoverable failed tasks and temporary dependencies, while preserving native conversations and Git artifact references.
+- Coordinate storage ownership and shared repository operations, resume eligible cleanup, and rediscover pending artifacts independently of expiring task diagnostics. Preserve explicit recovery holds for uncertain exit, unsafe identity, uncaptured content and unresolved parent application.
+- Add explicit offline delegation storage inventory and historical disposal with frozen identity checks, including receipt-backed integration scratch. Preserve lane/native recovery metadata when reclamation fails, and fence shutdown admission while allowing teardown retries. Bind completed offline discard to its original obligation and keep bounded inventory diagnostics separate from task closeout. Keep macOS/Windows on conservative checkout policy. Existing worktrees are never swept or silently opted into disposal on reuse after upgrade; Router protocol and native backend settings are unchanged.
+
+### Tests
+- Cover disposable success/failure closeout, pending delivery after restart, failed/retained recreation, ownership exclusion and scoped historical cleanup with isolated filesystem/Git fixtures. Require kernel-confirmed group absence across fork races and preserve group obligations during missing-session retries; retain imported disposable receipts on unsupported platforms.
+
 ## [1.6.190] - 2026-10-27
 
 ### Fixed

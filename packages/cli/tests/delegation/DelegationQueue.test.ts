@@ -18,7 +18,7 @@ function controlledWorker(cwd: string) {
   const completion = deferred<ExecuteResult>();
   const executor: IExecutor = {
     execute: vi.fn(() => completion.promise), abort: vi.fn().mockResolvedValue(true),
-    destroy: vi.fn().mockResolvedValue(undefined), waitForExit: vi.fn().mockResolvedValue(undefined),
+    destroy: vi.fn().mockResolvedValue(undefined), waitForExit: vi.fn().mockResolvedValue(undefined), waitForManagedProcessGroupExit: vi.fn().mockResolvedValue(undefined),
     resetContext: vi.fn(), getCurrentWorkingDirectory: () => cwd, setWorkingDirectory: vi.fn(),
   };
   return { executor, finish: completion.resolve };
@@ -28,11 +28,13 @@ describe('multiple accepted delegated tasks', () => {
   let directory: string;
   let guard: DirectoryGuard;
   let manager: DelegationManager;
+  let expectedShutdownFailure = false;
   let parent: DelegationParent;
   let workers: ReturnType<typeof controlledWorker>[];
   let factory: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
+    expectedShutdownFailure = false;
     directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'delegation-queue-test-')));
     vi.spyOn(os, 'homedir').mockReturnValue(directory);
     guard = new DirectoryGuard([directory]);
@@ -52,7 +54,7 @@ describe('multiple accepted delegated tasks', () => {
   });
 
   afterEach(async () => {
-    await manager.destroy();
+    if (expectedShutdownFailure) await expect(manager.destroy()).rejects.toThrow('storage ownership was retained'); else await manager.destroy();
     vi.useRealTimers();
     vi.restoreAllMocks();
     fs.rmSync(directory, { recursive: true, force: true });
@@ -187,6 +189,7 @@ describe('multiple accepted delegated tasks', () => {
   });
 
   it('quarantines uncertain exits and terminates queued siblings without starting them', async () => {
+    expectedShutdownFailure = true;
     manager = new DelegationManager(guard, factory as any, new BackendRegistry(async () => '1.0'), new DelegationStore(), 1000, 20);
     const scope = manager.begin(parent);
     await delegate(scope, 'first');
@@ -310,6 +313,7 @@ describe('multiple accepted delegated tasks', () => {
   });
 
   it('quarantines timed-out setup and prevents a late lane acquisition from constructing a worker', async () => {
+    expectedShutdownFailure = true;
     vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
     const release = deferred<Awaited<ReturnType<typeof manager.laneStore.acquire>>>();
     const acquire = manager.laneStore.acquire.bind(manager.laneStore);

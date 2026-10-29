@@ -17,14 +17,14 @@ export class DshAcpClient extends AcpClient {
   private stopped = false;
   private readonly permission: AcpEventCallbacks['onPermissionRequest'];
 
-  constructor(command: string, cwd: string, callbacks: AcpEventCallbacks, private readonly controlTimeout = 30_000) {
+  constructor(command: string, cwd: string, callbacks: AcpEventCallbacks, private readonly controlTimeout = 30_000, delegationWorker = false) {
     const launch = createDshPrivacyLaunch();
     try {
       super(command, launch.args, cwd, {
         ...callbacks,
         // DSH reports generic "other" kinds; preserve its actual tool name in cards.
         onToolCall: tool => callbacks.onToolCall?.({ ...tool, kind: tool.kind === 'other' ? undefined : tool.kind }),
-      }, true, { env: launch.env, onStderr: () => { /* Provider diagnostics may contain credentials or conversation data. */ } });
+      }, true, { delegationWorker, env: launch.env, onStderr: () => { /* Provider diagnostics may contain credentials or conversation data. */ } });
     } catch (error) {
       launch.dispose();
       throw error;

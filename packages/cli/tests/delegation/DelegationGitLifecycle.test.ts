@@ -1,3 +1,4 @@
+import { DelegatedWorkspaceManager } from '../../src/delegation/DelegatedWorkspaceManager';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs/promises';
 import os from 'os';
@@ -22,9 +23,11 @@ function deferred() {
 describe('managed Git phases and native worker deadlines', { timeout: 30_000 }, () => {
   let fixture: Awaited<ReturnType<typeof gitFixture>>;
   let manager: DelegationManager;
+  let expectedShutdownFailure = false;
   let parent: DelegationParent;
   let workers: { executor: IExecutor; cwd: string; finish: (result: ExecuteResult) => void }[];
   beforeEach(async () => {
+    expectedShutdownFailure = false;
     fixture = await gitFixture();
     vi.spyOn(os, 'homedir').mockReturnValue(fixture.directory);
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
@@ -34,12 +37,13 @@ describe('managed Git phases and native worker deadlines', { timeout: 30_000 }, 
       const completion = new Promise<ExecuteResult>(resolve => { finish = resolve; });
       const executor: IExecutor = {
         execute: vi.fn(() => completion), abort: vi.fn(async () => true), destroy: vi.fn(async () => undefined),
-        waitForExit: vi.fn(async () => undefined), resetContext: vi.fn(),
+        waitForExit: vi.fn(async () => undefined), waitForManagedProcessGroupExit: vi.fn(async () => undefined), resetContext: vi.fn(),
         getCurrentWorkingDirectory: () => cwd, setWorkingDirectory: vi.fn(),
       };
       workers.push({ executor, cwd, finish });
       return executor;
-    }, new BackendRegistry(async () => 'fixture 1.0'));
+    }, new BackendRegistry(async () => 'fixture 1.0'), undefined, undefined, undefined, undefined,
+      new DelegatedWorkspaceManager(undefined, true));
     parent = {
       thread: { id: 'fixture-owner', name: 'default', workingDirectory: fixture.root,
         sessionId: null, createdAt: 0, lastActiveAt: 0 },
@@ -50,7 +54,8 @@ describe('managed Git phases and native worker deadlines', { timeout: 30_000 }, 
   });
   afterEach(async () => {
     vi.useRealTimers();
-    await manager.destroy();
+    if (expectedShutdownFailure) await expect(manager.destroy()).rejects.toThrow('storage ownership was retained');
+    else await manager.destroy();
     vi.restoreAllMocks();
     await fs.rm(fixture.directory, { recursive: true, force: true });
   });
@@ -358,6 +363,7 @@ describe('managed Git phases and native worker deadlines', { timeout: 30_000 }, 
   });
 
   it('still quarantines an unconfirmed native exit and never starts artifact collection', async () => {
+    expectedShutdownFailure = true;
     const scope = manager.begin(parent);
     const task = await start(scope);
     const exit = vi.mocked(workers[0].executor.waitForExit!).mockImplementation(() => new Promise(() => undefined));

@@ -9,11 +9,13 @@ import { configCommand, ConfigAction } from './commands/config';
 import { serviceCommand, ServiceAction } from './commands/service';
 import { enableFiles } from './commands/files';
 import { sessionShowCommand } from './commands/session';
+import { registerDelegationStorage } from './commands/delegationStorage';
 import chalk from 'chalk';
 import path from 'path';
 import fs from 'fs';
 
 const program = new Command();
+registerDelegationStorage(program);
 
 program.command('files').description('Secure file reception')
   .command('enable')

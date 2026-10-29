@@ -1,4 +1,5 @@
 import { execFile, spawn, ChildProcess } from 'child_process';
+import { ManagedProcessGroups } from './ManagedProcessGroups';
 import { StringDecoder } from 'string_decoder';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -177,6 +178,7 @@ export class AgyExecutor implements IExecutor {
   private delegationConnection?: DelegationConnection;
   private readonly delegationWorker: boolean;
   private readonly managedProcesses = new WeakSet<ChildProcess>();
+  private readonly workerGroups = new ManagedProcessGroups();
   private delegationConfigured = false;
   private readonly pendingExits = new Set<Promise<void>>();
   /** Handoff summary from compactWhenFull, wrapped into the next prompt (consumed once). */
@@ -416,6 +418,11 @@ export class AgyExecutor implements IExecutor {
         timer = setTimeout(() => reject(new Error('AGY process exit could not be confirmed')), this.killEscalationMs + 5_000);
       })]);
     } finally { if (timer) clearTimeout(timer); }
+  }
+
+  async waitForManagedProcessGroupExit(): Promise<void> {
+    if (!this.delegationWorker) throw new Error('Managed worker process-group tracking was not enabled');
+    await this.workerGroups.waitForExit();
   }
 
   isProcessRunning(): boolean {
@@ -733,6 +740,7 @@ export class AgyExecutor implements IExecutor {
       ...((this.delegationWorker || this.delegationConnection) && process.platform !== 'win32' ? { detached: true } : {}),
     });
     if (this.delegationWorker || this.delegationConnection) this.managedProcesses.add(proc);
+    if (this.delegationWorker) this.workerGroups.track(proc);
     const exited = new Promise<void>(resolve => proc.once('close', () => resolve()));
     this.pendingExits.add(exited);
     void exited.then(() => this.pendingExits.delete(exited));

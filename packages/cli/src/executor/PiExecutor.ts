@@ -225,6 +225,7 @@ export class PiExecutor implements IExecutor {
 
   private client: PiTransport;
   private readonly retiredClients = new Set<PiTransport>();
+  private readonly workerClients = new Set<PiTransport>();
   private unsubscribe: (() => void) | null = null;
   private sessionId: string | null = null;
   private sessionFile: string | null = null;
@@ -287,6 +288,7 @@ export class PiExecutor implements IExecutor {
 
     this.createClient = options.clientFactory ?? ((launch) => new PiClient(launch));
     this.client = this.createClient(this.buildLaunch());
+    if (this.delegationWorker) this.workerClients.add(this.client);
     this.unsubscribe = this.client.onEvent((event) => this.handleEvent(event));
   }
 
@@ -527,6 +529,15 @@ export class PiExecutor implements IExecutor {
     await Promise.all(clients.map(async (client) => {
       if (client.waitForExit) await client.waitForExit();
       else if (client.isRunning()) throw new Error('Pi RPC process exit could not be confirmed');
+    }));
+  }
+
+  async waitForManagedProcessGroupExit(): Promise<void> {
+    if (!this.delegationWorker) throw new Error('Managed worker process-group tracking was not enabled');
+    await Promise.all([...this.workerClients].map(async client => {
+      if (!client.waitForManagedProcessGroupExit) throw new Error('Worker transport cannot confirm managed process-group exit');
+      await client.waitForManagedProcessGroupExit();
+      this.workerClients.delete(client);
     }));
   }
 
@@ -991,6 +1002,7 @@ export class PiExecutor implements IExecutor {
     const previous = this.client;
     this.retiredClients.add(previous);
     this.client = this.createClient(this.buildLaunch());
+    if (this.delegationWorker) this.workerClients.add(this.client);
     this.unsubscribe = this.client.onEvent((event) => this.handleEvent(event));
     void this.stopRetiredClient(previous).catch((error) => {
       console.warn('[PiExecutor] Failed to stop previous Pi RPC process', error);

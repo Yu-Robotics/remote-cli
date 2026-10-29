@@ -7,6 +7,7 @@ import type { AcpEventCallbacks, AcpToolCallUpdate, AcpTransport } from '../acp/
 import type { AcpConfigOption, AcpContentBlock, AcpMcpServer, AcpPermissionOption, AcpSessionResult } from '../acp/AcpTypes';
 import { resolveZCodeLaunch, type ZCodeLaunchSpec } from './ZCodeCommand';
 import { assertWorkingDirectoryExists } from '../../utils/WorkingDirectory';
+import { ManagedProcessGroups } from '../ManagedProcessGroups';
 
 interface PendingRequest {
   resolve: (value: any) => void;
@@ -38,6 +39,7 @@ interface PendingInteraction {
 }
 
 export interface ZCodeClientOptions {
+  delegationWorker?: boolean;
   cwd: string;
   command?: string;
   autoApprove?: boolean;
@@ -51,6 +53,8 @@ const REQUEST_TIMEOUT_MS = 30_000;
 
 /** Direct client for the official ZCode app-server line-delimited JSON protocol. */
 export class ZCodeClient implements AcpTransport {
+  private readonly workerGroups = new ManagedProcessGroups();
+  private readonly workerGroupEnabled: boolean;
   private readonly child: ChildProcess;
   private readonly callbacks: AcpEventCallbacks;
   private readonly cwd: string;
@@ -71,6 +75,7 @@ export class ZCodeClient implements AcpTransport {
   private readonly exited: Promise<void>;
 
   constructor(options: ZCodeClientOptions, callbacks: AcpEventCallbacks) {
+    this.workerGroupEnabled = options.delegationWorker === true;
     this.callbacks = callbacks;
     this.cwd = options.cwd;
     this.autoApprove = options.autoApprove ?? true;
@@ -85,6 +90,7 @@ export class ZCodeClient implements AcpTransport {
       detached: process.platform !== 'win32',
     });
     this.exited = new Promise(resolve => this.child.once('close', () => resolve()));
+    if (this.workerGroupEnabled) this.workerGroups.track(this.child);
     this.child.stdin?.on('error', () => {});
     this.child.stdout?.on('error', () => {});
     this.child.stderr?.on('data', (chunk: Buffer) => {
@@ -226,6 +232,11 @@ export class ZCodeClient implements AcpTransport {
   }
 
   waitForExit(): Promise<void> { return this.exited; }
+
+  async waitForManagedProcessGroupExit(): Promise<void> {
+    if (!this.workerGroupEnabled) throw new Error('Managed worker process-group tracking was not enabled');
+    await this.workerGroups.waitForExit();
+  }
 
   destroy(): void {
     if (this.destroyed) return;

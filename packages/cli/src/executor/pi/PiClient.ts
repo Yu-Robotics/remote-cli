@@ -2,6 +2,7 @@ import { ChildProcess, spawn } from 'child_process';
 import { StringDecoder } from 'string_decoder';
 import { buildPiRpcArgs, consumeJsonl, type PiLaunchOptions, type PiRpcResponse, type PiTransport } from './PiTypes';
 import { assertWorkingDirectoryExists } from '../../utils/WorkingDirectory';
+import { ManagedProcessGroups } from '../ManagedProcessGroups';
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_KILL_ESCALATION_MS = 3_000;
@@ -23,6 +24,7 @@ export interface PiClientOptions extends PiLaunchOptions {
  * Framing follows pi's RPC contract: split on LF only, never Node readline.
  */
 export class PiClient implements PiTransport {
+  private readonly workerGroups = new ManagedProcessGroups();
   private options: PiLaunchOptions;
   private readonly requestTimeoutMs: number;
   private readonly killEscalationMs: number;
@@ -170,6 +172,11 @@ export class PiClient implements PiTransport {
     }
   }
 
+  async waitForManagedProcessGroupExit(): Promise<void> {
+    if (!this.options.delegationWorker) throw new Error('Managed worker process-group tracking was not enabled');
+    await this.workerGroups.waitForExit();
+  }
+
   private async startInternal(): Promise<void> {
     assertWorkingDirectoryExists(this.options.cwd);
     this.stopping = false;
@@ -181,6 +188,7 @@ export class PiClient implements PiTransport {
     let proc: ChildProcess;
     try {
       proc = spawn(command, args, {
+        ...(this.options.delegationWorker && process.platform !== 'win32' ? { detached: true } : {}),
         cwd: this.options.cwd,
         env: { ...process.env,
           ...(this.options.delegation || this.options.delegationWorker ? {
@@ -195,6 +203,7 @@ export class PiClient implements PiTransport {
     }
 
     this.proc = proc;
+    if (this.options.delegationWorker) this.workerGroups.track(proc);
     proc.stdout?.on('data', (data: Buffer) => this.handleStdout(proc, data));
     proc.stderr?.on('data', (data: Buffer) => {
       if (proc !== this.proc) return;

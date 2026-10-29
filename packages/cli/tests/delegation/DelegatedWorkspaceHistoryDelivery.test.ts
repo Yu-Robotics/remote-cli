@@ -36,6 +36,9 @@ describe('historical worker delivery recognition', { timeout: 30_000 }, () => {
     const { lane } = await lanes.acquire({ ...owner(), backend: 'agy', workingDirectory: fixture.root });
     const source = (await manager.discover(fixture.root))!;
     workspace = await manager.prepare(lane, source, await manager.baseline(source), randomUUID());
+    // Historical delivery records predate exit receipts and keep legacy cleanup rules.
+    workspace.disposalPolicy = undefined;
+    await edit(lanePath(), { disposalPolicy: undefined });
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
   });
   afterEach(async () => { vi.restoreAllMocks(); await fs.rm(fixture.directory, { recursive: true, force: true }); });

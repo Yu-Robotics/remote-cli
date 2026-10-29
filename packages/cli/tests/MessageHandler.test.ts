@@ -3,7 +3,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'events';
 import { spawn } from 'child_process';
 import { mkdtemp, rm, writeFile } from 'fs/promises';
-import { mkdtempSync } from 'fs';
+import { mkdtempSync, realpathSync } from 'fs';
+import os from 'os';
 import { tmpdir } from 'os';
 import path from 'path';
 import { MessageHandler } from '../src/client/MessageHandler';
@@ -44,7 +45,8 @@ function fakeChild() {
  */
 function buildHandler(mockExecutorOverrides: Record<string, any> = {}) {
   // The working-directory guard stats this path, so the fixture must exist.
-  const workingDirectory = mkdtempSync(path.join(tmpdir(), 'message-handler-cwd-'));
+  const workingDirectory = realpathSync(mkdtempSync(path.join(tmpdir(), 'message-handler-cwd-')));
+  vi.spyOn(os, 'homedir').mockReturnValue(workingDirectory);
   const mockExecutor: any = {
     execute: vi.fn(),
     setWorkingDirectory: vi.fn().mockResolvedValue(undefined),
@@ -116,6 +118,7 @@ function buildHandler(mockExecutorOverrides: Record<string, any> = {}) {
     directoryGuard,
     mockConfig
   );
+  vi.spyOn((handler as any).delegation, 'pendingArtifactContext').mockResolvedValue('');
   vi.spyOn((handler as any).delegation, 'assertThreadContextResettable').mockResolvedValue(undefined);
   vi.spyOn((handler as any).delegation, 'clearThreadContexts').mockResolvedValue(undefined);
 
@@ -147,6 +150,41 @@ describe('MessageHandler', () => {
         await rm(workingDirectory, { recursive: true, force: true });
       }
     }));
+  });
+
+  it('keeps ordinary execution independent of delegation storage when delegation is disabled', async () => {
+    ctx.mockThreadManager.getDefaultThread().delegation = false;
+    ctx.mockExecutor.configureDelegation = vi.fn();
+    ctx.mockExecutor.execute.mockResolvedValue({ success: true, output: 'ordinary result' });
+    const inventory = vi.mocked((ctx.handler as any).delegation.pendingArtifactContext)
+      .mockRejectedValue(new Error('Synthetic unavailable delegation storage'));
+    await ctx.handler.handleMessage({ type: 'command', messageId: 'ordinary-without-storage', content: 'Inspect' });
+    expect(ctx.mockExecutor.execute).toHaveBeenCalledWith('Inspect', expect.anything());
+    expect(inventory).not.toHaveBeenCalled();
+    expect(ctx.mockExecutor.configureDelegation).not.toHaveBeenCalled();
+  });
+
+  it.each(['closed scope', 'handler shutdown'])('does not start a coordinator after %s during artifact inventory', async change => {
+    let closed = false;
+    const scope = {
+      isClosed: () => closed, hasPendingResults: () => false, getLaunchRevision: () => 0,
+      beginExecution: vi.fn(), finishExecution: vi.fn(), getRetainedResults: () => [],
+      close: vi.fn(async () => { closed = true; }), collectPendingResults: async () => [],
+      checkArtifactCloseout: async () => [], invoke: vi.fn(),
+    };
+    vi.spyOn((ctx.handler as any).delegation, 'begin').mockReturnValue(scope);
+    let release!: (value: string) => void;
+    const inventory = vi.mocked((ctx.handler as any).delegation.pendingArtifactContext)
+      .mockImplementation(() => new Promise<string>(resolve => { release = resolve; }));
+    ctx.mockExecutor.configureDelegation = vi.fn();
+    ctx.mockExecutor.execute.mockResolvedValue({ success: true });
+    const run = ctx.handler.handleMessage({ type: 'command', messageId: 'inventory-cancellation', content: 'Inspect' });
+    await vi.waitFor(() => expect(inventory).toHaveBeenCalled());
+    if (change === 'closed scope') await scope.close();
+    else await ctx.handler.destroy();
+    release('');
+    await run;
+    expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
   });
 
   it('keeps worker summary delivery bound to the current successful Router registration', async () => {

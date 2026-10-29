@@ -113,8 +113,12 @@ export interface IExecutor {
   resetContext(): void;
   abort(): Promise<boolean>;
   destroy(): Promise<void> | void;
-  /** Optional process-exit confirmation used before releasing a delegated workspace. */
+  /** Transport-exit confirmation; insufficient by itself for disposable worker cleanup. */
   waitForExit?(): Promise<void>;
+  /** Stronger managed-worker disposal gate: confirms no live members in owned process groups.
+   * Rejects when unavailable; does not cover descendants escaping their group with setsid/setpgid.
+   * Call after destroy() and waitForExit(); transport-exit consumers must keep using waitForExit(). */
+  waitForManagedProcessGroupExit?(): Promise<void>;
   /**
    * Reports and clears a backend-confirmed missing-session failure that happened
    * before the current objective was dispatched. Delegation may safely retry it

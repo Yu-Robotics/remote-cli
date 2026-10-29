@@ -26,7 +26,12 @@ describe('owned worktrees and explicit artifact integration', { timeout: 30_000 
   const prepare = async (selected = source) => {
     const { lane } = await lanes.acquire({ threadId: owner.threadId, workspaceGeneration: 0,
       backend: 'agy', workingDirectory: selected.cwd });
-    return { lane, workspace: await manager.prepare(lane, selected, await manager.baseline(selected), randomUUID()) };
+    const workspace = await manager.prepare(lane, selected, await manager.baseline(selected), randomUUID());
+    // Keep these integration compatibility cases on the legacy artifact policy.
+    workspace.disposalPolicy = undefined;
+    const file = path.join(fixture.directory, 'workspaces', 'lanes', `${lane.id}.json`);
+    await fs.writeFile(file, JSON.stringify(workspace));
+    return { lane, workspace };
   };
   const inspect = (workspace: DelegatedWorkspace) => manager.integrate({ ...owner, cwd: workspace.source.cwd }, workspace.taskId, 'inspect', undefined) as Promise<any>;
   const apply = async (workspace: DelegatedWorkspace) => manager.integrate({ ...owner, cwd: workspace.source.cwd },
@@ -209,6 +214,8 @@ describe('owned worktrees and explicit artifact integration', { timeout: 30_000 
     await expect(apply(workspace)).rejects.toThrow('Synthetic worktree setup failure');
     expect(warning).toHaveBeenCalledWith('[Delegation] Partial integration directory retained for manual cleanup');
     expect(await fs.readFile(path.join(partialDirectory, 'partial-checkout.txt'), 'utf8')).toBe('recoverable input\n');
+    expect(await manager.enumerateIntegrationScratch()).toMatchObject({ incomplete: false,
+      items: [{ taskId: workspace.taskId, directory: partialDirectory, state: 'cleanup-pending', holdReason: 'scratch-setup-incomplete' }] });
     expect((await inspect(workspace)).disposition).toBe('pending');
     expect(await fs.readFile(path.join(source.cwd, 'source.txt'), 'utf8')).toContain('first');
   });
