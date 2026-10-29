@@ -31,6 +31,37 @@ describe('DelegatedWorkerSessionStore', () => {
     await fs.rm(home, { recursive: true, force: true });
   });
 
+  it('checks ownership before creating or reconciling inventory and retries acquisition failures', async () => {
+    const store = new DelegatedWorkerSessionStore(directory);
+    let permitted = false;
+    store.setInitializationGuard(async () => {
+      if (!permitted) throw new Error('Another owner is active');
+    });
+    await expect(store.initialize()).rejects.toThrow('Another owner is active');
+    await expect(fs.stat(directory)).rejects.toMatchObject({ code: 'ENOENT' });
+    permitted = true;
+    await store.initialize();
+    expect((await fs.stat(directory)).isDirectory()).toBe(true);
+  });
+
+  it.each(['pending', 'removed'])('never resumes a %s historical discard, even with ready native metadata', async state => {
+    const store = new DelegatedWorkerSessionStore(directory);
+    const first = await store.acquire(identity(workspace));
+    await store.markReady(first.lane.id);
+    const tombstones = path.join(directory, 'legacy-discarded');
+    await fs.mkdir(tombstones);
+    await fs.writeFile(path.join(tombstones, `${first.lane.id}.json`), JSON.stringify({ state }));
+    const next = await store.acquire(identity(workspace));
+    expect(next.reused).toBe(false);
+    expect(next.lane.id).not.toBe(first.lane.id);
+    await store.markReady(next.lane.id);
+    const restarted = new DelegatedWorkerSessionStore(directory);
+    const lanes = await restarted.lanesForThread('parent-thread');
+    expect(lanes.find(lane => lane.id === first.lane.id)).toMatchObject({ workspaceDiscarded: true, cleanupPending: false });
+    expect((await restarted.acquire(identity(workspace))).lane.id).toBe(next.lane.id);
+    expect(await fs.readFile(path.join(tombstones, `${first.lane.id}.json`), 'utf8')).toBe(JSON.stringify({ state }));
+  });
+
   it('reuses only a ready lane with the same parent, backend, workspace, and generation', async () => {
     const store = new DelegatedWorkerSessionStore(directory);
     const first = await store.acquire(identity(workspace));

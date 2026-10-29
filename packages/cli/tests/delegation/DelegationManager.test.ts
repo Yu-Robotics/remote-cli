@@ -21,18 +21,20 @@ describe('managed agent delegation', () => {
   let home: string;
   let guard: DirectoryGuard;
   let manager: DelegationManager;
+  let expectedShutdownFailure = false;
   let parent: DelegationParent;
   let worker: IExecutor;
   let factory: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
+    expectedShutdownFailure = false;
     home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'delegation-test-')));
     vi.spyOn(os, 'homedir').mockReturnValue(home);
     guard = new DirectoryGuard([home]);
     worker = {
       execute: vi.fn().mockResolvedValue({ success: true, output: 'review complete' }),
       abort: vi.fn().mockResolvedValue(true), destroy: vi.fn().mockResolvedValue(undefined),
-      waitForExit: vi.fn().mockResolvedValue(undefined),
+      waitForExit: vi.fn().mockResolvedValue(undefined), waitForManagedProcessGroupExit: vi.fn().mockResolvedValue(undefined),
       deleteThreadData: vi.fn().mockResolvedValue(undefined), resetContext: vi.fn(),
       getCurrentWorkingDirectory: () => home, setWorkingDirectory: vi.fn(),
     };
@@ -46,7 +48,7 @@ describe('managed agent delegation', () => {
     onToolUse: vi.fn(), onToolResult: vi.fn(), onNotice: vi.fn(), onApproval: vi.fn(() => true), onApprovalResolved: vi.fn() };
   });
 
-  afterEach(async () => { await manager.destroy(); vi.restoreAllMocks(); fs.rmSync(home, { recursive: true, force: true }); });
+  afterEach(async () => { if (expectedShutdownFailure) await expect(manager.destroy()).rejects.toThrow('storage ownership was retained'); else await manager.destroy(); vi.restoreAllMocks(); fs.rmSync(home, { recursive: true, force: true }); });
 
   it.each([
     ['kimi', KimiExecutor], ['opencode', OpenCodeExecutor], ['zcode', ZCodeExecutor],
@@ -60,7 +62,7 @@ describe('managed agent delegation', () => {
         newSession: async () => ({ sessionId: 'worker-output', configOptions: [] }),
         loadSession: async () => ({ configOptions: [] }),
         setConfigOption: async () => ({ configOptions: [] }),
-        deleteSession: async () => {}, sendCancel: () => {}, destroy: () => {}, waitForExit: async () => {},
+        deleteSession: async () => {}, sendCancel: () => {}, destroy: () => {}, waitForExit: async () => {}, waitForManagedProcessGroupExit: async () => {},
         prompt: async () => {
           callbacks.onThoughtChunk?.({ type: 'text', text: 'PRIVATE_WORKER_REASONING' });
           callbacks.onTextChunk?.({ type: 'text', text: 'Public review result' });
@@ -1148,6 +1150,7 @@ describe('managed agent delegation', () => {
   });
 
   it('bounds stuck cleanup and blocks the workspace instead of allowing conflicting work', async () => {
+    expectedShutdownFailure = true;
     manager = new DelegationManager(guard, factory as any, new BackendRegistry(async () => '1.0'), new DelegationStore(), 1000, 10);
     vi.mocked(worker.execute).mockImplementation(() => new Promise(() => undefined));
     vi.mocked(worker.abort).mockImplementation(() => new Promise(() => undefined));
@@ -1292,7 +1295,7 @@ describe('managed agent delegation', () => {
       consumeSessionResumeFailure: vi.fn(() => true),
       getExecutionMetadata: vi.fn(() => ({ model: 'stale-attempt', modelSource: 'reported', reasoningEffort: 'high', effortSource: 'reported' })),
       destroy: vi.fn().mockResolvedValue(undefined),
-      waitForExit: vi.fn().mockResolvedValue(undefined),
+      waitForExit: vi.fn().mockResolvedValue(undefined), waitForManagedProcessGroupExit: vi.fn().mockResolvedValue(undefined),
     } as IExecutor;
     const second = {
       ...worker,
@@ -1304,7 +1307,7 @@ describe('managed agent delegation', () => {
       consumeSessionResumeFailure: vi.fn(() => false),
       getExecutionMetadata: vi.fn(() => ({ model: 'fresh-selection', modelSource: 'configured', effortSource: 'default' })),
       destroy: vi.fn().mockResolvedValue(undefined),
-      waitForExit: vi.fn().mockResolvedValue(undefined),
+      waitForExit: vi.fn().mockResolvedValue(undefined), waitForManagedProcessGroupExit: vi.fn().mockResolvedValue(undefined),
     } as IExecutor;
     factory.mockImplementationOnce((_guard, _config, _cwd, id) => {
       const pointer = path.join(home, '.remote-cli', 'codex-sessions', `${id}.json`);
@@ -1332,6 +1335,7 @@ describe('managed agent delegation', () => {
   });
 
   it('quarantines a lane when a worker backend cannot confirm process exit', async () => {
+    expectedShutdownFailure = true;
     const unconfirmed = { ...worker, waitForExit: undefined } as IExecutor;
     factory.mockImplementation(() => unconfirmed);
     const scope = manager.begin(parent);
@@ -1368,7 +1372,9 @@ describe('managed agent delegation', () => {
     fs.mkdirSync(path.dirname(pointer), { recursive: true });
     fs.writeFileSync(pointer, '{}');
 
+    await manager.destroy();
     const restored = new DelegationManager(guard, factory as any, new BackendRegistry(async () => 'test 1.0'));
+    manager = restored;
     await expect(restored.reconcilePendingWorkerLanes()).resolves.toEqual({ removed: 1, failed: 0 });
     expect(fs.existsSync(pointer)).toBe(false);
     await expect(restored.laneStore.lanesForThread(parent.thread.id)).resolves.toEqual([]);
@@ -1382,7 +1388,9 @@ describe('managed agent delegation', () => {
     const pointer = path.join(home, '.remote-cli', 'codex-sessions', `${acquired.lane.executorThreadId}.json`);
     fs.mkdirSync(pointer, { recursive: true });
 
+    await manager.destroy();
     const restored = new DelegationManager(guard, factory as any, new BackendRegistry(async () => 'test 1.0'));
+    manager = restored;
     await expect(restored.reconcilePendingWorkerLanes()).resolves.toEqual({ removed: 0, failed: 1 });
     await expect(restored.laneStore.cleanupCandidates()).resolves.toEqual([
       expect.objectContaining({ id: acquired.lane.id, cleanupPending: true, cleanupAttempts: 2 }),

@@ -45,6 +45,7 @@ export interface PiTransport {
   stop(): Promise<void>;
   /** Resolves only after a previously stopped process is known to have exited. */
   waitForExit?(): Promise<void>;
+  waitForManagedProcessGroupExit?(): Promise<void>;
   isRunning(): boolean;
   updateLaunch?(partial: Partial<PiLaunchOptions>): void;
 }

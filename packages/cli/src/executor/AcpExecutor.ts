@@ -166,6 +166,7 @@ export abstract class AcpExecutor implements IExecutor {
   private readonly transports = new Map<AcpTransport, boolean>();
   private readonly delegationWorker: boolean;
   private readonly pendingExits = new Set<Promise<void>>();
+  private readonly workerTransports = new Set<AcpTransport>();
   private delegationConnection?: DelegationConnection;
   private replayingSession = false;
   private sessionId: string | null = null;
@@ -197,7 +198,7 @@ export abstract class AcpExecutor implements IExecutor {
     const command = options.acpCommand;
     const args = options.acpArgs;
     this.clientFactory = options.clientFactory
-      ?? ((callbacks, cwd) => new AcpClient(command, args, cwd, callbacks, this.isDelegationManaged()));
+      ?? ((callbacks, cwd) => new AcpClient(command, args, cwd, callbacks, this.isDelegationManaged(), { delegationWorker: this.delegationWorker }));
 
     try {
       this.currentWorkingDirectory = options.initialWorkingDirectory
@@ -291,6 +292,15 @@ export abstract class AcpExecutor implements IExecutor {
         timer = setTimeout(() => reject(new Error('Backend process exit could not be confirmed')), 8_000);
       })]);
     } finally { if (timer) clearTimeout(timer); }
+  }
+
+  async waitForManagedProcessGroupExit(): Promise<void> {
+    if (!this.delegationWorker) throw new Error('Managed worker process-group tracking was not enabled');
+    await Promise.all([...this.workerTransports].map(async client => {
+      if (!client.waitForManagedProcessGroupExit) throw new Error('Worker transport cannot confirm managed process-group exit');
+      await client.waitForManagedProcessGroupExit();
+      this.workerTransports.delete(client);
+    }));
   }
 
   isWaitingInput(): boolean {
@@ -608,6 +618,7 @@ export abstract class AcpExecutor implements IExecutor {
     if (this.client && this.sessionId) return { client: this.client, sessionId: this.sessionId };
     this.reportedConfigOptions = [];
     const client = this.createClient();
+    if (this.delegationWorker) this.workerTransports.add(client);
     this.transports.set(client, managed);
     try {
       await client.initialize();

@@ -66,6 +66,18 @@ describe('CodexAppServerClient', () => {
   });
   afterEach(() => { vi.useRealTimers(); });
 
+  it.each([false, true])('isolates only worker launches and does not certify fake PIDs: %s', async delegationWorker => {
+    const child = fakeProcess();
+    mockSpawn.mockReturnValue(child);
+    const client = new CodexAppServerClient({ delegationWorker });
+    try {
+      await client.start();
+      expect(mockSpawn.mock.calls[0][2]?.detached).toBe(delegationWorker && process.platform !== 'win32' ? true : undefined);
+    } finally { await client.stop(); }
+    await client.waitForExit();
+    await expect(client.waitForManagedProcessGroupExit()).rejects.toThrow();
+  });
+
   it('retains a timed-out child until close, blocking shutdown retries and replacement startup', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const child = fakeProcess('test', false);

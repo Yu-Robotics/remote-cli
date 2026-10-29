@@ -1,3 +1,4 @@
+import { DelegatedWorkspaceManager } from '../../src/delegation/DelegatedWorkspaceManager';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs/promises';
 import os from 'os';
@@ -15,7 +16,7 @@ function controlledWorker(cwd: string) {
   let finish!: (result: ExecuteResult) => void;
   const completed = new Promise<ExecuteResult>(resolve => { finish = resolve; });
   const executor: IExecutor = { execute: vi.fn(() => completed), abort: vi.fn(async () => true),
-    destroy: vi.fn(async () => undefined), waitForExit: vi.fn(async () => undefined),
+    destroy: vi.fn(async () => undefined), waitForExit: vi.fn(async () => undefined), waitForManagedProcessGroupExit: vi.fn(async () => undefined),
     resetContext: vi.fn(), getCurrentWorkingDirectory: () => cwd, setWorkingDirectory: vi.fn() };
   return { executor, cwd, finish };
 }
@@ -35,7 +36,8 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
       const worker = controlledWorker(cwd); workers.push(worker); return worker.executor;
     });
     manager = new DelegationManager(new DirectoryGuard([fixture.directory]), factory as any,
-      new BackendRegistry(async () => 'fixture 1.0'));
+      new BackendRegistry(async () => 'fixture 1.0'), undefined, undefined, undefined, undefined,
+      new DelegatedWorkspaceManager(undefined, true));
     parent = { thread: { id: 'fixture-owner', name: 'default', workingDirectory: fixture.root,
       sessionId: null, createdAt: 0, lastActiveAt: 0 }, cwd: fixture.root, messageId: 'parent',
     backend: 'claude', config: { type: 'auto' }, onToolUse: vi.fn(), onToolResult: vi.fn(), onNotice: vi.fn(),
@@ -275,14 +277,14 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     await expect(fs.lstat(workers[0].cwd)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
-  it.each(['failed', 'cancelled'])('preserves a %s no-change checkout', async outcome => {
+  it.each(['failed', 'cancelled'])('reclaims a %s no-change checkout', async outcome => {
     const scope = manager.begin(parent);
     const first = await start(scope, 'first');
     if (outcome === 'failed') workers[0].finish({ success: false, error: 'Fixture failure' });
     else await scope.invoke('remote_cli_cancel', { taskId: first.taskId }, 'cancel');
     expect(await result(scope, first.taskId, 'r1')).toMatchObject({ state: outcome, artifact: { disposition: 'applied' } });
     expect(await manager.workspaceManager.describe(first.taskId)).toMatchObject({ successful: false });
-    expect((await fs.lstat(workers[0].cwd)).isDirectory()).toBe(true);
+    await expect(fs.lstat(workers[0].cwd)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it.each([false, true])('settles gated reclamation even after an early assertion failure (earlyFailure=%s)', async earlyFailure => {
@@ -400,7 +402,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     let refused = false;
     const original = gitCommands.runGit;
     vi.spyOn(gitCommands, 'runGit').mockImplementation(async (cwd, args, ...rest) => {
-      if (!refused && args[0] === 'worktree' && args[1] === 'remove' && args[2] === workers[0].cwd) {
+      if (!refused && args[0] === 'worktree' && args[1] === 'remove' && args.includes(workers[0].cwd)) {
         refused = true; throw new Error('Fixture removal refusal');
       }
       return original(cwd, args, ...rest);
@@ -529,13 +531,14 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     const first = await start(scope, 'first', parent.backend);
     await fs.writeFile(path.join(workers[0].cwd, 'partial.txt'), 'partial output\n');
     expect(await scope.invoke('remote_cli_cancel', { taskId: first.taskId }, 'cancel')).toMatchObject({
-      state: 'cancelled', artifact: { disposition: 'pending' } });
+      state: 'cancelled', artifact: { disposition: 'retained' } });
     const inspection: any = await scope.invoke('remote_cli_integrate', { taskId: first.taskId }, 'inspect');
     await expect(scope.invoke('remote_cli_integrate', { taskId: first.taskId, action: 'apply',
-      expectedRevision: inspection.revision }, 'apply')).rejects.toThrow('manual recovery');
+      expectedRevision: inspection.revision }, 'apply')).resolves.toMatchObject({ disposition: 'retained' });
     const other = manager.begin({ ...parent, thread: { ...parent.thread, id: 'other' } });
     await expect(other.invoke('remote_cli_integrate', { taskId: first.taskId }, 'foreign')).rejects.toThrow('foreign');
-    expect(await fs.readFile(path.join(workers[0].cwd, 'partial.txt'), 'utf8')).toContain('partial output');
+    expect(await gitText(fixture.root, ['show', `${inspection.outputCommit}:partial.txt`])).toContain('partial output');
+    await expect(fs.stat(workers[0].cwd)).rejects.toMatchObject({ code: 'ENOENT' });
     await expect(fs.stat(path.join(fixture.root, 'partial.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
     await other.close();
   });

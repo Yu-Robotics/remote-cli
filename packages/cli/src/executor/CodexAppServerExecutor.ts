@@ -26,6 +26,7 @@ export interface CodexAppServerTransport {
   onMessage(handler: (message: AppServerMessage) => void): () => void;
   stop(): Promise<void>;
   waitForExit?(): Promise<void>;
+  waitForManagedProcessGroupExit?(): Promise<void>;
   isRunning(): boolean;
   setWorkingDirectory(cwd: string): void;
   getServerVersion?(): string | null;
@@ -265,6 +266,7 @@ export class CodexAppServerExecutor implements IExecutor {
       : new CodexAppServerClient({
           command: options.codexCommand,
           cwd: this.currentWorkingDirectory,
+          delegationWorker: this.delegationWorker,
         });
     this.taskNotifications = new CodexTaskNotifications((method, params) => this.client.request(method, params));
     this.unsubscribeClient = this.client.onMessage((message) => this.handleMessage(message));
@@ -795,6 +797,13 @@ export class CodexAppServerExecutor implements IExecutor {
   async waitForExit(): Promise<void> {
     if (this.client.waitForExit) await this.client.waitForExit();
     else if (this.client.isRunning()) throw new Error('Codex app-server process exit could not be confirmed');
+  }
+
+  async waitForManagedProcessGroupExit(): Promise<void> {
+    if (!this.delegationWorker || !this.client.waitForManagedProcessGroupExit) {
+      throw new Error('Worker transport cannot confirm managed process-group exit');
+    }
+    await this.client.waitForManagedProcessGroupExit();
   }
 
   consumeSessionResumeFailure(): boolean {

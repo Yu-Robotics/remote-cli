@@ -17,6 +17,9 @@ export const realGitTestFiles = [
   'tests/delegation/DelegatedWorkspaceHistoryDelivery.test.ts',
   'tests/delegation/DelegationGitLifecycle.test.ts',
   'tests/delegation/DelegationWorktrees.test.ts',
+  'tests/delegation/DelegationDisposableLifecycle.test.ts',
+  'tests/delegation/DisposableWorkspace.test.ts',
+  'tests/delegation/LegacyWorkspaceCleanup.test.ts',
   'tests/delegation/NestedRepositories.test.ts',
   'tests/integration/delegation-closeout.test.ts',
 ];

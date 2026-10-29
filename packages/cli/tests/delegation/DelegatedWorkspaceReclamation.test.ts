@@ -9,7 +9,7 @@ import * as gitCommands from '../../src/delegation/GitCheckpoint';
 import { gitFixture } from './gitFixture';
 
 // Real-Git cases execute multiple bounded commands and need headroom on slower hosts.
-describe('verified worker checkout reclamation and recreation', { timeout: 30_000 }, () => {
+describe('legacy verified worker checkout reclamation and recreation', { timeout: 30_000 }, () => {
   let fixture: Awaited<ReturnType<typeof gitFixture>>;
   let manager: DelegatedWorkspaceManager;
   let lanes: DelegatedWorkerSessionStore;
@@ -25,7 +25,12 @@ describe('verified worker checkout reclamation and recreation', { timeout: 30_00
   const edit = async (file: string, changes: object) => {
     await fs.writeFile(file, JSON.stringify({ ...JSON.parse(await fs.readFile(file, 'utf8')), ...changes }));
   };
-  const complete = async (successful = true) => manager.collect(workspace, successful);
+  const complete = async (successful = true) => {
+    // Old records must retain their byte-exact, successful-only policy.
+    workspace.disposalPolicy = undefined;
+    await edit(recordPath(), { disposalPolicy: undefined });
+    return manager.collect(workspace, successful);
+  };
   const recreate = async () => manager.prepare(lane, workspace.source, await manager.baseline(workspace.source), randomUUID());
   const inspect = () => manager.integrate({ threadId: lane.threadId, cwd: fixture.root, workspaceGeneration: 0 },
     workspace.taskId, 'inspect', undefined) as Promise<any>;

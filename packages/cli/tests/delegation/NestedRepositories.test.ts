@@ -31,7 +31,11 @@ describe('local nested repository checkpoints and delivery', { timeout: 30_000 }
   const prepare = async () => {
     const source = (await manager.discover(fixture.root))!;
     const { lane } = await lanes.acquire({ ...owner, backend: 'agy', workingDirectory: fixture.root });
-    return { lane, workspace: await manager.prepare(lane, source, await manager.baseline(source), randomUUID()) };
+    const workspace = await manager.prepare(lane, source, await manager.baseline(source), randomUUID());
+    // Existing nested-artifact delivery remains compatible with legacy receipts.
+    workspace.disposalPolicy = undefined;
+    await fs.writeFile(path.join(fixture.directory, 'workspaces', 'lanes', `${lane.id}.json`), JSON.stringify(workspace));
+    return { lane, workspace };
   };
   const inspect = (workspace: DelegatedWorkspace) => manager.integrate({ ...owner, cwd: fixture.root }, workspace.taskId, 'inspect', undefined) as Promise<any>;
   const apply = async (workspace: DelegatedWorkspace) => manager.integrate({ ...owner, cwd: fixture.root }, workspace.taskId, 'apply', (await inspect(workspace)).revision) as Promise<any>;
@@ -101,7 +105,7 @@ describe('local nested repository checkpoints and delivery', { timeout: 30_000 }
     const next = await manager.prepare(lane, workspace.source, await manager.baseline(workspace.source), randomUUID());
     expect(next.cwd).toBe(workspace.cwd);
     expect(await fs.readFile(path.join(next.cwd, 'module/local.txt'), 'utf8')).toContain('worker');
-    expect((await manager.collect(next, true)).disposition).toBe('applied');
+    expect((await manager.collect(next, true, { exitConfirmed: true })).disposition).toBe('applied');
     expect(await manager.reclaim(next.taskId)).toBe(true);
   }, 30_000);
 
@@ -140,6 +144,9 @@ describe('local nested repository checkpoints and delivery', { timeout: 30_000 }
 
   it('integrates grandchild submodule files without changing nested HEADs or indexes', async () => {
     const child = await nestedGitFixture(fixture, 'module', true);
+    // Cloning a submodule does not copy the template's local author settings.
+    await runGit(child, ['config', 'user.name', 'Test User']);
+    await runGit(child, ['config', 'user.email', 'test@example.com']);
     const grandchild = await nestedGitFixture({ ...fixture, root: child }, 'inner', true);
     const before = await Promise.all([fixture.root, child, grandchild].map(repositoryState));
     const { workspace } = await prepare();

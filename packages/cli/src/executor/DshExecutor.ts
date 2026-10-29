@@ -68,7 +68,7 @@ export class DshExecutor extends AcpExecutor {
           }
         } };
         const transport = options.clientFactory?.(wrapped, cwd)
-          ?? new DshAcpClient(options.dshCommand ?? 'dsh', cwd, wrapped);
+          ?? new DshAcpClient(options.dshCommand ?? 'dsh', cwd, wrapped, undefined, options.delegationWorker);
         return {
           initialize: async () => {
             const result = await transport.initialize() as { agentCapabilities?: { promptCapabilities?: { image?: boolean } } };
@@ -99,6 +99,7 @@ export class DshExecutor extends AcpExecutor {
           sendCancel: id => transport.sendCancel(id),
           destroy: () => transport.destroy(),
           ...(transport.waitForExit ? { waitForExit: () => transport.waitForExit!() } : {}),
+          ...(transport.waitForManagedProcessGroupExit ? { waitForManagedProcessGroupExit: () => transport.waitForManagedProcessGroupExit!() } : {}),
           prompt: async (id, blocks) => {
             if (!state.images && blocks.some(block => block.type === 'image')) {
               throw new Error('This DSH ACP profile/model does not support image input. No part of this prompt was submitted.');

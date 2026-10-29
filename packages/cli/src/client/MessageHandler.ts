@@ -2422,7 +2422,8 @@ You can also use natural language commands to control Claude Code CLI.`,
         if (delegationScope.isClosed() || this.isDestroyed || this.abortOperations.has(threadId)) {
           throw new Error('Delegation was cancelled before the coordinator started');
         }
-        content = `${DELEGATION_INSTRUCTIONS}\n\nUser request:\n${content}`;
+        const pendingArtifacts = await this.delegation.pendingArtifactContext(thread!, executor.getCurrentWorkingDirectory());
+        content = `${DELEGATION_INSTRUCTIONS}${pendingArtifacts ? `\n\n${pendingArtifacts}` : ''}\n\nUser request:\n${content}`;
       } else if (thread?.delegationBackends?.includes(this.threadPool.getBackendKey(threadId)) && executor.configureDelegation) {
         await executor.configureDelegation(undefined);
       }

@@ -219,14 +219,82 @@ omitting hidden edits or treating missing sparse files as deletions. Resolve tho
 flags and sparse checkouts explicitly; the source index is never modified.
 These changes require a CLI upgrade; Router protocol and native backends are unchanged.
 
-From CLI 1.6.135, the local CLI automatically reclaims verified successful
-no-change or successfully applied worker checkout directories and recreates them
-at their stable lane paths when needed. Conversation pointers and artifact refs
-are retained. Unknown or unresolved files remain for manual recovery. Failed
-checkout recreation preserves existing native context; full byte audits do not
-hold other lanes' repository metadata admission guard. Router messages, native
-backends, and non-Git FIFO execution are unchanged; older
-CLIs retain their existing lifecycle even when connected to a newer Router.
+From CLI 1.6.191 on Linux, newly created managed Git worktrees are disposable
+execution storage. After confirmed native process-group exit, successful delivered output and failed
+no-change output can release the entire checkout, including ignored dependencies
+and temporary extras. Captured failed changes are retained as immutable Git
+artifacts for recovery without merging; explicit retention also permits checkout
+cleanup. Native conversation pointers, artifact records and private Git refs stay
+available. The next task recreates the same lane path from fresh delivery input.
+Pending successful changes wait for apply or retain. Uncertain process exit,
+uncaptured source edits, incomplete deliverables, unsafe paths and unresolved
+parent-application recovery remain explicit holds. Unknown legacy records do not
+silently inherit the disposable policy. Reusing a pre-upgrade checkout also
+keeps its original policy and ignored files; adoption requires strict reclamation
+and creation of a fresh checkout, or explicit offline historical disposal.
+On macOS and Windows, ordinary delegation keeps the existing conservative
+checkout policy; the new whole-checkout disposal is not enabled. Linux delegated
+workers use isolated process groups, including Codex, Claude and Pi. Group
+confirmation remains separate from transport exit and holds the checkout on
+uncertain identity, inventory or termination. Kernel-visible unreaped zombies
+also hold cleanup until the group disappears; an empty process snapshot alone
+is never sufficient. It covers members of that group;
+background processes that escape using `setsid` or `setpgid` are not covered and
+must not write into disposable worker checkouts.
+
+Cleanup uses durable intent and receipt records. Failed removals are retried on
+startup and while idle; cleanup failure does not undo integration or turn a
+successful task into a failed task. Failed/retained receipts support reconstruction
+as well as deletion. Required reports and images must be captured or durably
+exported before cleanup; merely returning a path in the temporary checkout does
+not deliver the file. Declare required relative file paths in the delegation
+tool's optional `exports` array (up to 16 files, 16 MiB each, 64 MiB total).
+Artifact inspection returns verified durable local file locations. Missing or
+changed exports hold cleanup instead of silently dropping the deliverable.
+Unsupported transformed or nested checkouts remain held.
+
+One owner coordinates mutable local delegation storage. Lane admission excludes
+cleanup, and cooperating CLI processes serialize shared Git metadata operations
+by canonical Git common directory. Independent workers still run concurrently.
+Unmanaged writers and old CLI versions do not participate in this ownership
+protocol. A stale owner or uncertain child exit requires a confirmed quiescent
+maintenance handoff; age or a missing parent PID alone never authorizes deletion.
+Historical disposal is an explicit offline operation, not an automatic upgrade
+sweep. It preserves parent projects, existing artifact refs and native sessions.
+
+Inspect locally with `remote-cli delegation storage scan`. Freeze a cleanup plan
+with `remote-cli delegation storage plan --out ./discard-plan.json`. After
+stopping the daemon, supervisors and all native workers, run
+`remote-cli delegation storage discard --plan ./discard-plan.json --discard-contents --confirm-workers-stopped`
+from an independent terminal. This permanently discards checkout contents,
+including unsubmitted and ignored files. The command never stops or restarts a
+service. Retained session records receive scheduler exclusion markers so a
+removed historical checkout is not resumed automatically. This explicit discard
+can lose uncaptured state even for a lane labelled ready; it preserves native
+history, not automatic continuation. Ordinary new-policy reclamation still
+recreates the same lane and preserves continuation.
+
+The inventory includes integration scratch and its receipts. Registered scratch
+with matching ownership evidence can enter the explicit frozen discard plan;
+unknown, conflicting-identity or unregistered directories stay listed with their
+exclusion reasons. Discarding scratch leaves its originating lane and native
+session unchanged. Conflict scratch is never deleted automatically. Completed discard
+markers bound to the original task and workspace retire unavailable checkout
+obligations without claiming successful delivery. Older, unbound or pending
+markers remain conservative. Incomplete inventories warn about unseen records;
+known pending tasks still require closeout and incomplete scans never authorize
+automatic deletion.
+
+The scan defaults to 100,000 entries, 1 GiB of hashed content and 120 seconds;
+use `--max-entries`, `--max-bytes` and `--max-seconds` to increase explicit budgets.
+An incomplete inventory cannot authorize deletion. Local output contains paths
+and identities and should not be forwarded to chat. Offline deletion currently
+requires Linux mount inspection; unsupported platforms refuse deletion. Ownership
+uncertainty, stale locks and ambiguous partial removal require manual quiescent
+recovery. Neither this command nor automatic cleanup prunes Git objects or refs.
+
+This lifecycle requires a local CLI upgrade. Router messages and the protocol
+remain unchanged; older CLIs keep their existing lifecycle with a newer Router.
 The upgraded CLI also recognizes successful worker snapshot commits already in
 delivery HEAD's ancestry. A later revert does not reopen historical delivery.
 Inspection, ready-lane admission, and idle closure reconcile only that thread's

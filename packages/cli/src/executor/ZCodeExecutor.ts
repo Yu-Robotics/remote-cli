@@ -26,6 +26,7 @@ export class ZCodeExecutor extends AcpExecutor {
       command: options.zcodeCommand,
       autoApprove,
       launch: options.launch,
+      delegationWorker: options.delegationWorker,
     }, callbacks));
     const baseOptions: AcpExecutorOptions = {
       model: options.model,

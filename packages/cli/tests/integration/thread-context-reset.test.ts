@@ -20,6 +20,7 @@ describe('thread-wide conversation reset', () => {
   let threads: ThreadManager;
   let pool: ThreadExecutorPool;
   let handler: MessageHandler;
+  let expectedShutdownFailure = false;
   let delegation: DelegationManager;
   let threadId: string;
   let siblingId: string;
@@ -95,6 +96,7 @@ describe('thread-wide conversation reset', () => {
   };
 
   beforeEach(async () => {
+    expectedShutdownFailure = false;
     home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'thread-context-reset-')));
     vi.stubEnv('HOME', home);
     vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || originalHomedir());
@@ -111,7 +113,8 @@ describe('thread-wide conversation reset', () => {
     attach();
   });
   afterEach(async () => {
-    await handler?.destroy();
+    if (expectedShutdownFailure) await expect(handler.destroy()).rejects.toThrow('storage ownership was retained');
+    else await handler?.destroy();
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
     await fs.rm(home, { recursive: true, force: true });
@@ -349,7 +352,10 @@ describe('thread-wide conversation reset', () => {
       current = pool.getExecutor(threadId);
       if (state === 'native-busy') current.isBusy = () => true;
       if (state === 'queued') vi.spyOn(delegation, 'hasActiveTasks').mockReturnValue(true);
-      if (state === 'quarantined') (delegation as any).workspaces.set(project, { id: 'lease', threadId, quarantined: true });
+      if (state === 'quarantined') {
+        expectedShutdownFailure = true;
+        (delegation as any).workspaces.set(project, { id: 'lease', threadId, quarantined: true });
+      }
       if (state === 'queue') (handler as any).threadQueues.set(threadId, [{ content: 'queued prompt' }]);
       if (state === 'queue-confirmation') (handler as any).pendingQueueConfirmations.set('pending', { info: { threadId } });
       if (state === 'busy') pool.setThreadBusy(threadId, true);

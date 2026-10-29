@@ -153,10 +153,12 @@ describe('PiClient process lifecycle', () => {
     try {
       await client.start();
       const launch = vi.mocked(spawn).mock.calls.at(-1)!;
+      expect(launch[2]?.detached).toBe(delegationWorker && process.platform !== 'win32' ? true : undefined);
       expect(launch[1]).not.toContain('--extension');
       expect(launch[2]?.env?.REMOTE_CLI_DELEGATION_TOKEN).toBe(delegationWorker ? undefined : 'parent-test-token');
       expect(launch[2]?.env?.REMOTE_CLI_DELEGATION_URL).toBe(delegationWorker ? undefined : 'http://127.0.0.1:12345/');
     } finally { await client.stop(); }
+    if (delegationWorker) await expect(client.waitForManagedProcessGroupExit()).rejects.toThrow();
   });
 
   it('does not resolve stop until the child process exits', async () => {
@@ -294,7 +296,10 @@ describe('PiClient process lifecycle', () => {
   });
 
   it('keeps a delegated Pi workspace blocked after abort and repeated cleanup fail', async () => {
-    const project = fs.mkdtempSync(path.join(os.homedir(), '.delegated-pi-stop-'));
+    const isolatedHome = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'delegated-pi-home-')));
+    vi.spyOn(os, 'homedir').mockReturnValue(isolatedHome);
+    const project = path.join(isolatedHome, 'project');
+    fs.mkdirSync(project);
     const guard = new DirectoryGuard([project]);
     const proc = Object.assign(new EventEmitter(), {
       stdin: {
@@ -336,10 +341,10 @@ describe('PiClient process lifecycle', () => {
       expect(manager.blocksWorkspace(project, 'other')).toBe(true);
       expect(proc.exitCode).toBeNull();
     } finally {
-      await manager.destroy();
+      await expect(manager.destroy()).rejects.toThrow('storage ownership was retained');
       proc.exitCode = 0;
       proc.emit('exit', 0, null);
-      fs.rmSync(project, { recursive: true, force: true });
+      fs.rmSync(isolatedHome, { recursive: true, force: true });
     }
   });
 

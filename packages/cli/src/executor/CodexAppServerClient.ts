@@ -1,8 +1,10 @@
 import { ChildProcess, spawn } from 'child_process';
 import { StringDecoder } from 'string_decoder';
 import { assertWorkingDirectoryExists } from '../utils/WorkingDirectory';
+import { ManagedProcessGroups } from './ManagedProcessGroups';
 
 export interface CodexAppServerClientOptions {
+  delegationWorker?: boolean;
   command?: string;
   cwd?: string;
   requestTimeoutMs?: number;
@@ -49,6 +51,8 @@ function parseCodexVersion(value: unknown): string | null {
  * so newer Codex versions remain additive instead of breaking the transport.
  */
 export class CodexAppServerClient {
+  private readonly workerGroups = new ManagedProcessGroups();
+  private readonly delegationWorker: boolean;
   private readonly command: string;
   private cwd?: string;
   private readonly requestTimeoutMs: number;
@@ -70,6 +74,7 @@ export class CodexAppServerClient {
   private readonly unclosedProcesses = new Set<ChildProcess>();
 
   constructor(options: CodexAppServerClientOptions = {}) {
+    this.delegationWorker = options.delegationWorker === true;
     this.command = options.command ?? 'codex';
     this.cwd = options.cwd;
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
@@ -159,6 +164,7 @@ export class CodexAppServerClient {
     let proc: ChildProcess;
     try {
       proc = spawn(this.command, ['app-server', '--stdio', ...this.launchArgs], {
+        ...(this.delegationWorker && process.platform !== 'win32' ? { detached: true } : {}),
         cwd: this.cwd,
         env: this.env ?? { ...process.env },
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -168,6 +174,7 @@ export class CodexAppServerClient {
     }
 
     this.proc = proc;
+    if (this.delegationWorker) this.workerGroups.track(proc);
     this.unclosedProcesses.add(proc);
     proc.once('close', () => this.unclosedProcesses.delete(proc));
     proc.stdout?.on('data', (data: Buffer) => this.handleStdout(proc, data));
@@ -295,6 +302,11 @@ export class CodexAppServerClient {
     if (this.unclosedProcesses.size) {
       throw new Error('Codex app-server process exit could not be confirmed');
     }
+  }
+
+  async waitForManagedProcessGroupExit(): Promise<void> {
+    if (!this.delegationWorker) throw new Error('Managed worker process-group tracking was not enabled');
+    await this.workerGroups.waitForExit();
   }
 
   private requestRaw(method: string, params?: any, timeoutMs = this.requestTimeoutMs): Promise<any> {
