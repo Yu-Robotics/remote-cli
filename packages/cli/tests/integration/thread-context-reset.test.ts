@@ -3,6 +3,7 @@ import fs from 'fs/promises';
 import { existsSync, readFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
+import { isMainThread } from 'worker_threads';
 import { MessageHandler } from '../../src/client/MessageHandler';
 import { ThreadManager } from '../../src/thread/ThreadManager';
 import { ThreadExecutorPool } from '../../src/thread/ThreadExecutorPool';
@@ -96,6 +97,7 @@ describe('thread-wide conversation reset', () => {
   };
 
   beforeEach(async () => {
+    expect(isMainThread).toBe(true);
     expectedShutdownFailure = false;
     home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'thread-context-reset-')));
     vi.stubEnv('HOME', home);
