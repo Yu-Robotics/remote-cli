@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.193] - 2026-10-30
+
+### Fixed
+- Disconnect and drain failed nested Git transfer pipes before waiting for child closure. Preserve the original failure, SIGTERM/SIGKILL escalation, and the requirement that both children close before removing this transfer's quarantine; leave unrelated temporary directories intact.
+
+### Tests
+- Reproduce backpressure with real subprocesses, including a producer that exits before a receiver ignoring SIGTERM. Verify deadline rejection, forced receiver exit, both-close cleanup ordering, and isolation of another quarantine. Bound fixture cleanup waits with process and stream diagnostics.
+
 ## [1.6.192] - 2026-10-30
 
 ### Fixed

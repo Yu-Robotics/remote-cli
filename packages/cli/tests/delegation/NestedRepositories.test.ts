@@ -491,9 +491,11 @@ describe('local nested repository checkpoints and delivery', { timeout: 30_000 }
     await runGit(fixture.root, ['fsck', '--no-reflogs', '--no-dangling']);
   });
 
-  it('cleans a timed-out partial transfer after both processes exit without removing another quarantine', async () => {
+  it.each([false, true])('cleans a timed-out partial transfer after both processes exit without removing another quarantine (backpressure=%s)', async (backpressure, context) => {
+    // Windows does not support a child deliberately ignoring SIGTERM.
+    if (backpressure && process.platform === 'win32') { context.skip(); return; }
     const child = await nestedGitFixture(fixture);
-    await fs.writeFile(path.join(child, 'payload.bin'), randomBytes(256 * 1024));
+    await fs.writeFile(path.join(child, 'payload.bin'), randomBytes(backpressure ? 8 * 1024 * 1024 : 256 * 1024));
     await runGit(child, ['add', '.']);
     const tree = await gitText(child, ['write-tree']);
     const pack = await runGit(child, ['pack-objects', '--stdout', '--revs'], `${tree}\n`);
@@ -513,14 +515,46 @@ describe('local nested repository checkpoints and delivery', { timeout: 30_000 }
     let transfer: Promise<void> | undefined;
     let expireTransfer: (() => void) | undefined;
     let restoreDeadline: (() => void) | undefined;
+    let producerProcess: childProcess.ChildProcess | undefined;
+    let receiverProcess: childProcess.ChildProcess | undefined;
+    let receiverReady = false;
+    const cleanupStates: string[][] = [];
+    const remove = fs.rm.bind(fs);
+    vi.spyOn(fs, 'rm').mockImplementation(async (target, options) => {
+      if (target === quarantine) cleanupStates.push([...closed].sort());
+      return remove(target, options);
+    });
     const nativeTimeout = globalThis.setTimeout;
+    const within = async <T>(operation: Promise<T>, phase: string): Promise<T> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([operation, new Promise<never>((_resolve, reject) => {
+          timer = nativeTimeout(() => reject(new Error(`Timed out waiting for ${phase}; children: ${JSON.stringify(
+            children.map(proc => ({ exitCode: proc.exitCode, signalCode: proc.signalCode,
+              stdoutPaused: proc.stdout?.isPaused(), stdoutBuffered: proc.stdout?.readableLength })),
+          )}; closed: ${closed.join(',')}`)), 5_000);
+        })]);
+      } finally { clearTimeout(timer); }
+    };
     spawning.mockImplementation((command, args, options) => {
       const producer = args?.includes('pack-objects');
       const receiver = args?.includes('index-pack');
       const spawned = producer
         ? actual.spawn(process.execPath, ['-e',
           "require('fs').createReadStream(process.argv[1]).pipe(process.stdout, {end:false});setInterval(()=>{},1000)", partial], options)
-        : actual.spawn(command, args, options);
+        : receiver && backpressure
+          ? actual.spawn(process.execPath, ['-e', [
+            "process.on('SIGTERM',()=>{});",
+            "process.stdin.once('data',chunk=>{process.stdin.pause();",
+            "require('fs').writeFileSync(require('path').join(process.env.GIT_OBJECT_DIRECTORY,'pack','tmp_pack_fixture'),chunk);",
+            "process.stderr.write('receiver-ready\\n');});setInterval(()=>{},1000);",
+          ].join('')], options)
+          : actual.spawn(command, args, options);
+      if (producer) producerProcess = spawned;
+      if (receiver) receiverProcess = spawned;
+      if (receiver && backpressure) {
+        spawned.stderr!.on('data', () => { receiverReady = true; });
+      }
       children.push(spawned);
       childCloses.push(new Promise(resolve => spawned.once('close', () => resolve())));
       if (producer || receiver) {
@@ -571,14 +605,24 @@ describe('local nested repository checkpoints and delivery', { timeout: 30_000 }
       expect(partialPack!.size).toBeGreaterThan(0);
       expect(partialPack!.size).toBeLessThan(pack.length);
       expect((await fs.readFile(partialPack!.file)).subarray(0, 4).toString()).toBe('PACK');
+      if (backpressure) {
+        // Exercise a real full pipe, not a sleep that assumes a platform's pipe capacity.
+        await vi.waitFor(() => {
+          expect(receiverReady).toBe(true);
+          expect(producerProcess!.stdout!.isPaused()).toBe(true);
+          expect(producerProcess!.stdout!.readableLength).toBeGreaterThan(0);
+        }, { timeout: 5_000 });
+      }
       expect(closed).toEqual([]);
       expect(expireTransfer).toBeTypeOf('function');
       expect(settled).toBe(false);
       expect(closed).toEqual([]);
       expireTransfer!();
-      await Promise.all(childCloses);
-      await rejected;
+      await within(Promise.all(childCloses), 'both transfer close events');
+      await within(rejected, 'transfer rejection and quarantine removal');
       expect(closed.sort()).toEqual(['producer', 'receiver']);
+      expect(cleanupStates).toEqual([['producer', 'receiver']]);
+      if (backpressure) expect(receiverProcess!.signalCode).toBe('SIGKILL');
       expect(await fs.readdir(path.join(objects, 'pack'))).toEqual([]);
       expect((await fs.readdir(objects)).filter(name => name.startsWith('tmp_objdir-'))).toEqual([unrelated]);
       expect(await fs.readFile(path.join(objects, unrelated, 'marker'), 'utf8')).toBe('keep\n');
@@ -586,10 +630,13 @@ describe('local nested repository checkpoints and delivery', { timeout: 30_000 }
       try {
         // Reap only children launched by this operation, even if readiness/assertions fail.
         for (const spawned of children) {
+          spawned.stdout?.unpipe();
+          spawned.stdout?.resume();
+          spawned.stdin?.destroy();
           if (spawned.exitCode === null && spawned.signalCode === null) spawned.kill('SIGKILL');
         }
-        await Promise.all(childCloses);
-        await transfer?.catch(() => undefined);
+        await within(Promise.all(childCloses), 'fixture child cleanup');
+        if (transfer) await within(transfer.catch(() => undefined), 'fixture transfer cleanup');
       } finally {
         restoreDeadline?.();
         spawning.mockImplementation(actual.spawn);

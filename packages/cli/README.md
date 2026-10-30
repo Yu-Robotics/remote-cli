@@ -395,6 +395,8 @@ no late worker is launched. Failed collection after confirmed exit preserves onl
 the affected lane and files for recovery rather than quarantining the source.
 Individual Git command deadlines remain; cancellation may wait for Git to settle.
 From CLI 1.6.159, delegated `git worktree add` and `git checkout` commands have a 120-second deadline per command. Other Git commands, including worktree listing/removal and nested object transfers, retain their 15-second deadlines. Git command timeout errors show the operation, elapsed milliseconds and deadline without paths or checkout references. Preparation remains pending until the Git child exits; cancellation can wait for this bounded cleanup, and the existing task ID remains available for polling.
+
+From CLI 1.6.193, a failed or timed-out nested Git transfer disconnects its input pipe and drains pending output before awaiting both child exits. This prevents a full pipe from keeping delegation cleanup pending after the processes have exited. Partial transfer data is removed only after both children close; unrelated temporary directories remain untouched. Upgrade the local CLI for this fix; a Router-only upgrade does not change local Git handling.
 Slow launch/cancel tools return the accepted task ID and a pending status before
 the adapter timeout; poll that ID with `remote_cli_result`, not a new delegation.
 The response does not claim cancellation cleanup or workspace release is complete.

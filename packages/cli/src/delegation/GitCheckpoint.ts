@@ -140,7 +140,15 @@ async function transferGitTree(source: string, destination: string, tree: string
     let failure: Error | undefined;
     let killTimer: ReturnType<typeof setTimeout> | undefined;
     const stop = (error: Error) => {
-      failure ??= error;
+      if (failure) return;
+      failure = error;
+      // A full receiver pipe can pause stdout again after the producer exits.
+      // Break that dependency and drain unread output so both close events can
+      // arrive, while still waiting for confirmed child exit before cleanup.
+      pack.stdout.unpipe(unpack.stdin);
+      pack.stdout.resume();
+      pack.stdin.destroy();
+      unpack.stdin.destroy();
       pack.kill('SIGTERM'); unpack.kill('SIGTERM');
       killTimer ??= setTimeout(() => { pack.kill('SIGKILL'); unpack.kill('SIGKILL'); }, 500);
     };
