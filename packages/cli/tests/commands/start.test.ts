@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { startCommand, checkBackendAvailability, getServerVersion, isNewerVersion } from '../../src/commands/start';
 import { ConfigManager } from '../../src/config/ConfigManager';
 import { WebSocketClient } from '../../src/client/WebSocketClient';
+import { MessageHandler } from '../../src/client/MessageHandler';
 import { MaintenanceClient } from '../../src/maintenance/MaintenanceClient';
 import { CLI_VERSION } from '../../src/types';
 import axios from 'axios';
@@ -74,6 +75,7 @@ vi.mock('../../src/client/MessageHandler', () => ({
   MessageHandler: vi.fn().mockImplementation(() => ({
     handleMessage: vi.fn().mockResolvedValue(undefined),
     reconcilePendingDelegatedWorkers: vi.fn().mockResolvedValue(undefined),
+    destroy: vi.fn().mockResolvedValue(undefined),
   })),
 }));
 
@@ -318,6 +320,55 @@ describe('start command', () => {
   });
 
   describe('connection handling', () => {
+    it('registers idempotent teardown before inventory initialization and shares it with updates', async () => {
+      let close!: () => Promise<void>;
+      const register = vi.fn((cleanup: () => Promise<void>) => { close = cleanup; return true; });
+      expect((await startCommand({ onShutdownReady: register })).success).toBe(true);
+      const handler = vi.mocked(MessageHandler).mock.results.at(-1)!.value;
+      const maintenance = vi.mocked(MaintenanceClient).mock.results.at(-1)!.value;
+      expect(register.mock.invocationCallOrder[0]).toBeLessThan(handler.reconcilePendingDelegatedWorkers.mock.invocationCallOrder[0]);
+      expect(vi.mocked(AutomaticUpdater).mock.calls.at(-1)![2].beforeRestart).toBe(close);
+      await Promise.all([close(), close()]);
+      expect(handler.destroy).toHaveBeenCalledTimes(1);
+      expect(maintenance.stop).toHaveBeenCalledTimes(1);
+      expect(mockWsClient.disconnect).toHaveBeenCalledTimes(1);
+    });
+
+    it('cancels startup before mutable inventory when shutdown was already requested', async () => {
+      const result = await startCommand({ onShutdownReady: () => false });
+      const handler = vi.mocked(MessageHandler).mock.results.at(-1)!.value;
+      expect(result).toMatchObject({ success: false, error: expect.stringContaining('interrupted') });
+      expect(handler.reconcilePendingDelegatedWorkers).not.toHaveBeenCalled();
+      expect(handler.destroy).toHaveBeenCalledTimes(1);
+      expect(mockWsClient.connect).not.toHaveBeenCalled();
+    });
+
+    it('does not reconnect after shutdown during inventory reconciliation', async () => {
+      let close!: () => Promise<void>;
+      const handler = { handleMessage: vi.fn(), destroy: vi.fn(async () => {}),
+        reconcilePendingDelegatedWorkers: vi.fn(async () => { await close(); }) };
+      vi.mocked(MessageHandler).mockImplementationOnce(() => handler as unknown as MessageHandler);
+      const result = await startCommand({ onShutdownReady: cleanup => { close = cleanup; return true; } });
+      expect(result.success).toBe(false);
+      expect(handler.destroy).toHaveBeenCalledTimes(1);
+      expect(mockWsClient.connect).not.toHaveBeenCalled();
+    });
+
+    it('preserves the connection error and reports teardown uncertainty without skipping other resources', async () => {
+      mockWsClient.connect.mockRejectedValue(new Error('Synthetic connection failure'));
+      const result = await startCommand({ onShutdownReady: () => {
+        vi.mocked(MessageHandler).mock.results.at(-1)!.value.destroy
+          .mockRejectedValue(new Error('Synthetic unconfirmed native exit'));
+        return true;
+      } });
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Synthetic connection failure');
+      expect(result.error).toContain('recovery state was preserved');
+      expect(mockWsClient.disconnect).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(MaintenanceClient).mock.results.at(-1)!.value.stop).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(MessageHandler).mock.results.at(-1)!.value.destroy).toHaveBeenCalledTimes(1);
+    });
+
     it('should handle connection errors', async () => {
       mockWsClient.connect.mockRejectedValue(new Error('Connection failed'));
 
@@ -327,6 +378,7 @@ describe('start command', () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toContain('Connection failed');
+      expect(vi.mocked(MessageHandler).mock.results.at(-1)!.value.destroy).toHaveBeenCalledTimes(1);
     });
 
     it('should setup event handlers', async () => {

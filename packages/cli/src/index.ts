@@ -13,6 +13,7 @@ import { registerDelegationStorage } from './commands/delegationStorage';
 import chalk from 'chalk';
 import path from 'path';
 import fs from 'fs';
+import { ProcessShutdown } from './utils/ProcessShutdown';
 
 const program = new Command();
 registerDelegationStorage(program);
@@ -91,11 +92,15 @@ program
   .option('-d, --daemon', 'Run as background daemon')
   .option('--non-interactive', 'Exit after automatic updates for a process supervisor to restart')
   .action(async (options) => {
+    const shutdown = new ProcessShutdown();
     try {
       const result = await startCommand({
         daemon: options.daemon,
         nonInteractive: options.nonInteractive,
+        onShutdownReady: cleanup => shutdown.attach(cleanup),
       });
+      shutdown.finishStartup();
+      if (shutdown.isStopping) return;
 
       if (result.success) {
         console.log(chalk.green('✅ Service started successfully!'));
@@ -103,19 +108,18 @@ program
           console.log(chalk.gray('Running in daemon mode'));
         } else {
           console.log(chalk.gray('Running in foreground mode (press Ctrl+C to stop)'));
-          // Keep process alive in foreground mode
-          process.on('SIGINT', () => {
-            console.log(chalk.yellow('\n⏹  Shutting down...'));
-            process.exit(0);
-          });
           // Wait indefinitely
           await new Promise(() => {});
         }
       } else {
+        shutdown.dispose();
         console.error(chalk.red('❌ Failed to start service:'), result.error);
         process.exit(1);
       }
     } catch (error) {
+      shutdown.finishStartup();
+      if (shutdown.isStopping) return;
+      shutdown.dispose();
       console.error(chalk.red('❌ Error:'), error);
       process.exit(1);
     }

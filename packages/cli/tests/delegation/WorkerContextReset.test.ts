@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
-import { DelegatedWorkerSessionStore } from '../../src/delegation/DelegatedWorkerSessionStore';
+import { DelegatedWorkerSessionStore, type DelegatedWorkerLaneIdentity } from '../../src/delegation/DelegatedWorkerSessionStore';
+import { hasLegacyDiscardTombstone } from '../../src/delegation/LegacyWorkspaceCleanup';
 import { clearDelegatedWorkerContext } from '../../src/delegation/DelegatedWorkerLaneCleanup';
 import { DELEGATION_BACKENDS } from '../../src/delegation/contract';
 import { ClaudePersistentExecutor } from '../../src/executor/ClaudePersistentExecutor';
@@ -11,12 +12,43 @@ import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 describe('Worker context reset', () => {
   let testHome: string;
   let store: DelegatedWorkerSessionStore;
-  const identity = { threadId: 'parent', backend: 'codex' as const, workingDirectory: '/workspace/project', workspaceGeneration: 0 };
+  let identity: DelegatedWorkerLaneIdentity;
   beforeEach(async () => {
-    testHome = await fs.mkdtemp(path.join(os.tmpdir(), 'worker-context-reset-'));
+    testHome = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'worker-context-reset-')));
+    vi.stubEnv('HOME', testHome);
+    vi.stubEnv('USERPROFILE', testHome);
+    vi.spyOn(os, 'homedir').mockReturnValue(testHome);
+    identity = { threadId: 'parent', backend: 'codex', workingDirectory: path.join(testHome, 'workspace'), workspaceGeneration: 0 };
+    await fs.mkdir(identity.workingDirectory);
     store = new DelegatedWorkerSessionStore(path.join(testHome, 'lanes'));
   });
   afterEach(async () => { vi.restoreAllMocks(); vi.unstubAllEnvs(); await fs.rm(testHome, { recursive: true, force: true }); });
+
+  it('canonicalizes a temporary-root alias before reset and reuse while retaining the production path guard', async context => {
+    const actual = path.join(testHome, 'temporary-root');
+    const alias = path.join(testHome, 'temporary-root-alias');
+    await fs.mkdir(actual);
+    try { await fs.symlink(actual, alias, process.platform === 'win32' ? 'junction' : 'dir'); }
+    catch (error) {
+      if (['EPERM', 'EACCES', 'ENOSYS', 'ENOTSUP'].includes((error as NodeJS.ErrnoException).code ?? '')) {
+        context.skip(); return;
+      }
+      throw error;
+    }
+    const aliasedHome = await fs.mkdtemp(path.join(alias, 'worker-context-reset-'));
+    const canonicalHome = await fs.realpath(aliasedHome);
+    const directory = path.join(canonicalHome, 'lanes');
+    const canonical = new DelegatedWorkerSessionStore(directory);
+    const { lane } = await canonical.acquire(identity);
+    await canonical.markReady(lane.id);
+    const clear = vi.fn(async () => {});
+    await canonical.clearContext(lane.id, 0, identity, clear);
+    const reloaded = new DelegatedWorkerSessionStore(directory);
+    expect((await reloaded.acquire(identity)).lane).toMatchObject({ id: lane.id, contextGeneration: 2 });
+    expect(clear).toHaveBeenCalledTimes(1);
+    await expect(hasLegacyDiscardTombstone(path.join(aliasedHome, 'lanes'), lane.id))
+      .rejects.toThrow('Noncanonical or symbolic-link directory');
+  });
 
   it('resets only the selected lane, persists its epoch, and rejects a card after reuse', async () => {
     const { lane } = await store.acquire(identity, { pooled: true });
@@ -66,7 +98,7 @@ describe('Worker context reset', () => {
     await store.markDirty(lane.id, 'Unconfirmed exit');
     await expect(store.clearContext(lane.id, 0, identity, clear)).rejects.toThrow('unconfirmed');
     await store.markReady(lane.id);
-    for (const change of [{ threadId: 'another' }, { workingDirectory: '/workspace/other' }, { workspaceGeneration: 1 }]) {
+    for (const change of [{ threadId: 'another' }, { workingDirectory: path.join(testHome, 'other') }, { workspaceGeneration: 1 }]) {
       await expect(store.clearContext(lane.id, 0, { ...identity, ...change }, clear)).rejects.toThrow('expired');
     }
     await expect(store.clearContext('../outside', 0, identity, clear)).rejects.toThrow('Invalid');
@@ -88,7 +120,7 @@ describe('Worker context reset', () => {
     const resetting = reloaded.clearContext(lane.id, 0, identity, async () => {
       entered(); await new Promise<void>(resolve => { finish = resolve; });
     });
-    await started;
+    await Promise.race([started, resetting.then(() => { throw new Error('Reset completed before entering cleanup'); })]);
     let acquired = false;
     const acquire = reloaded.acquire(identity).then(result => { acquired = true; return result; });
     await Promise.resolve(); expect(acquired).toBe(false);

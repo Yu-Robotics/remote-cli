@@ -10,6 +10,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.192] - 2026-10-30
+
+### Fixed
+- Replace existence-only delegation exclusion with persistent native kernel gates for storage and shared repositories. Record hashed host, boot, PID namespace and owner process identity, and durably journal managed backend and Git child launches before spawn. Recover dead idle owners and same-host rebooted owners without unlink races or PID-age heuristics; retain live or uncertain child groups and legacy ownership metadata. Keep normal execution outside ownership scopes unchanged and preserve disposal checks independently of lock recovery.
+- Restore delegation backend discovery and task admission in the published CommonJS runtime by avoiding a local name collision with module exports. Preserve required artifact-export validation and task closeout behavior.
+- Handle SIGTERM and SIGINT through a shared asynchronous shutdown path registered before worker inventory initialization. Await client, executor, and delegation teardown before exiting; release storage ownership only after verified cleanup. Clean up partial startup failures, preserve uncertain-exit recovery state, and share teardown with automatic updates.
+- Canonicalize worker-context reset test roots, isolate their home directories, and cover temporary-directory aliases without weakening runtime path checks. Surface reset initialization failures directly rather than leaving a test waiting for a callback that cannot run.
+
+### Tests
+- Exercise real process contention, SIGKILL and concurrent recovery, surviving child groups, interrupted metadata publication, legacy locks, PID reuse, reboot/namespace identity, durable launch failures and ordinary spawn compatibility. Native Linux execution does not establish native macOS/Windows acceptance.
+- Compile the CLI with its shipping TypeScript configuration and run backend discovery, export validation, and a complete synthetic delegated task in a separate Node process. Cover worker reset and reuse through a filesystem alias while retaining rejection of noncanonical storage paths.
+
 ## [1.6.191] - 2026-10-29
 
 ### Changed

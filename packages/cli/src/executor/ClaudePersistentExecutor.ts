@@ -1,4 +1,5 @@
-import { spawn, ChildProcess } from 'child_process';
+import { ownedSpawn as spawn } from '../delegation/OwnershipRuntime';
+import { ChildProcess } from 'child_process';
 import { ManagedProcessGroups } from './ManagedProcessGroups';
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import { claudeCodeHooks } from '../hooks/ClaudeCodeHooks';

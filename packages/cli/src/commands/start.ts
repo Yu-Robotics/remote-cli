@@ -29,6 +29,8 @@ export interface StartCommandOptions {
   daemon?: boolean;
   /** Exit after automatic updates so a process supervisor can restart the CLI. */
   nonInteractive?: boolean;
+  /** Let the CLI own process signals without exposing them to embedded callers. */
+  onShutdownReady?: (shutdown: () => Promise<void>) => boolean | void;
 }
 
 /**
@@ -128,6 +130,8 @@ export async function startCommand(
 ): Promise<StartCommandResult> {
   const spinner = ora('Starting remote CLI service...').start();
   let maintenance: MaintenanceClient | undefined;
+  let closeStartedClient: (() => Promise<void>) | undefined;
+  let stopping = false;
 
   try {
     const config = await ConfigManager.initialize();
@@ -237,16 +241,31 @@ export async function startCommand(
     });
 
     const messageHandler = new MessageHandler(wsClient, threadPool, threadManager, directoryGuard, config);
+    let shutdown: Promise<void> | undefined;
+    closeStartedClient = () => {
+      stopping = true;
+      return shutdown ??= (async () => {
+        const results = await Promise.allSettled([
+          Promise.resolve().then(() => maintenance?.stop()),
+          Promise.resolve().then(() => wsClient.disconnect()),
+          Promise.resolve().then(() => messageHandler.destroy()),
+        ]);
+        const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+        if (failure) throw failure.reason;
+      })();
+    };
+    const interrupted = async (): Promise<StartCommandResult> => {
+      await closeStartedClient!();
+      return { success: false, error: 'Service startup was interrupted by shutdown' };
+    };
+    if (options.onShutdownReady?.(closeStartedClient) === false) return interrupted();
     await messageHandler.reconcilePendingDelegatedWorkers();
+    if (stopping) return interrupted();
     maintenance = new MaintenanceClient(wsClient, config.getConfigDir(), serverUrl, deviceId,
       () => config.get('executor') as ExecutorConfig | undefined, allConfig.maintenance);
     const automaticUpdater = new AutomaticUpdater(CLI_VERSION, messageHandler, {
       restartAfterUpdate: options.nonInteractive === true,
-      beforeRestart: async () => {
-        await maintenance?.stop();
-        wsClient.disconnect();
-        await messageHandler.destroy();
-      },
+      beforeRestart: closeStartedClient,
     });
 
     // Setup event handlers
@@ -275,16 +294,8 @@ export async function startCommand(
 
     // Connect to server
     spinner.text = 'Connecting to server...';
-    try {
-      await wsClient.connect();
-    } catch (error) {
-      await maintenance?.stop();
-      spinner.fail('Connection failed');
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Connection failed',
-      };
-    }
+    await wsClient.connect();
+    if (stopping) return interrupted();
 
     // Save service state
     await config.set('service.running', true);
@@ -293,6 +304,7 @@ export async function startCommand(
       await config.set('service.pid', process.pid);
     }
     await maintenance.started(CLI_VERSION);
+    if (stopping) return interrupted();
 
     spinner.succeed(
       options.daemon
@@ -310,11 +322,14 @@ export async function startCommand(
       daemonMode: options.daemon,
     };
   } catch (error) {
-    await maintenance?.stop();
+    let cleanupFailure: unknown;
+    try { if (closeStartedClient) await closeStartedClient(); else await maintenance?.stop(); }
+    catch (failure) { cleanupFailure = failure; }
     spinner.fail('Failed to start service');
     return {
       success: false,
-      error: error instanceof Error ? error.message : 'Unknown error',
+      error: (error instanceof Error ? error.message : 'Unknown error')
+        + (cleanupFailure ? '; service teardown could not be confirmed and recovery state was preserved' : ''),
     };
   }
 }

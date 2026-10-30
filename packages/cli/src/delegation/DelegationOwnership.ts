@@ -1,13 +1,13 @@
-import { randomUUID } from 'crypto';
-import { constants, type Stats } from 'fs';
+import syncFs, { constants, type Stats } from 'fs';
 import fs from 'fs/promises';
 import path from 'path';
 import { performance } from 'perf_hooks';
 import { setTimeout as delay } from 'timers/promises';
+import { kernelGate, ownerRecord, encodeOwner, assertRecoverable, ProcessJournal, withProcessJournal, syncDirectory, type KernelGate } from './OwnershipRuntime';
 
 const REPOSITORY_WAIT_MS = 30_000;
 const POLL_MS = 50;
-const RECOVERY = 'Stop the other owner and confirm all of its delegated children have exited before controlled lock recovery. Locks are never stolen based on PID or age.';
+const RECOVERY = 'An active owner or unconfirmed legacy recovery blocks delegation. Retry after the owner and its children exit; never move a live ownership file.';
 
 interface DirectoryIdentity {
   path: string;
@@ -19,6 +19,9 @@ interface Lease {
   parent: DirectoryIdentity;
   stat: Stats;
   contents: Buffer;
+  gate: KernelGate;
+  journal: ProcessJournal;
+  ownerRemoved?: boolean;
 }
 
 interface StorageLease {
@@ -53,38 +56,83 @@ async function verifyDirectory(directory: DirectoryIdentity): Promise<void> {
 async function claim(parent: DirectoryIdentity, name: string): Promise<Lease | null> {
   await verifyDirectory(parent);
   const lockPath = path.join(parent.path, name);
-  let handle;
+  const gate = kernelGate(`${lockPath}.guard`);
+  if (!gate) return null;
+  let journal: ProcessJournal | undefined;
+  let temporary: string | undefined;
   try {
-    handle = await fs.open(lockPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
-  } catch (error) {
-    if (code(error) !== 'EEXIST') throw error;
-    // A contender can finish between exclusive open and lstat. Retry normally.
     const existing = await fs.lstat(lockPath).catch(error => {
-      if (code(error) === 'ENOENT') return null;
+      if (code(error) === 'ENOENT') return undefined;
       throw error;
     });
-    if (existing && (!existing.isFile() || existing.isSymbolicLink() || existing.nlink !== 1)) {
-      throw new Error(`Unsafe delegation lock entry; refusing to follow or remove it. ${RECOVERY}`);
+    if (existing) {
+      if (!existing.isFile() || existing.isSymbolicLink() || ![1, 2].includes(existing.nlink) || existing.size > 16 * 1024) {
+        throw new Error(`Unsafe delegation lock entry; refusing to follow or remove it. ${RECOVERY}`);
+      }
+      const contents = await fs.readFile(lockPath);
+      assertRecoverable(contents, `${lockPath}.children`);
+      if (existing.nlink === 2) {
+        const record = JSON.parse(contents.toString());
+        const staging = `${lockPath}.${record.token}.initializing`;
+        const staged = await fs.lstat(staging);
+        if (!staged.isFile() || staged.isSymbolicLink() || !sameIdentity(existing, staged) || staged.nlink !== 2) {
+          throw new Error('Unsafe delegation lock hard links');
+        }
+        await fs.unlink(staging);
+      }
+      gate.verify();
+      await verifyDirectory(parent);
+      const current = await fs.lstat(lockPath);
+      if (!sameIdentity(existing, current) || !(await fs.readFile(lockPath)).equals(contents)) {
+        throw new Error('Delegation ownership changed during recovery');
+      }
+      await fs.unlink(lockPath);
+      syncDirectory(parent.path);
     }
-    return null;
-  }
-  try {
-    const contents = Buffer.from(JSON.stringify({ version: 1, token: randomUUID(), pid: process.pid }) + '\n');
-    await handle.writeFile(contents);
-    await handle.sync();
-    const stat = await handle.stat();
-    if (!stat.isFile() || stat.nlink !== 1 || stat.size !== contents.length) throw new Error('Invalid delegation lock identity');
-    return { path: lockPath, parent, stat, contents };
+    // No owner record means no child launch was admitted. A journal left by
+    // initialization/release can be removed under the stable kernel gate.
+    const journalPath = `${lockPath}.children`;
+    const oldJournal = await fs.lstat(journalPath).catch(error => {
+      if (code(error) === 'ENOENT') return undefined;
+      throw error;
+    });
+    if (oldJournal) {
+      if (!oldJournal.isFile() || oldJournal.isSymbolicLink() || oldJournal.nlink !== 1) throw new Error('Unsafe delegation process journal');
+      await fs.unlink(journalPath);
+    }
+    const record = ownerRecord();
+    const contents = encodeOwner(record);
+    journal = new ProcessJournal(journalPath, record.token, () => {
+      gate.verify();
+      const directory = syncFs.lstatSync(parent.path);
+      const owner = syncFs.lstatSync(lockPath);
+      if (!sameIdentity(parent.stat, directory) || directory.isSymbolicLink()
+        || !owner.isFile() || owner.isSymbolicLink() || owner.nlink !== 1 || owner.size !== contents.length
+        || !syncFs.readFileSync(lockPath).equals(contents)) {
+        throw new Error('Delegation ownership changed before child launch');
+      }
+    });
+    temporary = `${lockPath}.${record.token}.initializing`;
+    const handle = await fs.open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
+    try { await handle.writeFile(contents); await handle.sync(); } finally { await handle.close(); }
+    // Publish complete metadata atomically without overwriting an old binary
+    // that raced us using exclusive create. All future native launches journal
+    // under the gate; an empty or torn owner record is never published.
+    await fs.link(temporary, lockPath);
+    await fs.unlink(temporary);
+    temporary = undefined;
+    syncDirectory(parent.path);
+    return { path: lockPath, parent, stat: await fs.lstat(lockPath), contents, gate, journal };
   } catch (error) {
-    // Partial initialization is deliberately retained: ownership has not been
-    // established, so an error cannot authorize unlinking the pathname.
-    throw new Error(`Delegation lock initialization failed and may require recovery. ${RECOVERY}`, { cause: error });
-  } finally {
-    await handle.close();
+    journal?.close();
+    if (temporary) await fs.unlink(temporary).catch(() => undefined);
+    gate.close();
+    throw error;
   }
 }
 
 async function verifyLease(lease: Lease): Promise<void> {
+  lease.gate.verify();
   await verifyDirectory(lease.parent);
   const before = await fs.lstat(lease.path);
   const valid = (stat: Stats) => stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1
@@ -110,22 +158,40 @@ async function verifyLease(lease: Lease): Promise<void> {
 }
 
 async function relinquish(lease: Lease): Promise<void> {
-  await verifyLease(lease);
-  // Cooperative owners never replace an occupied slot. Node has no portable
-  // compare-and-unlink syscall; this is not a sandbox against hostile OS writers.
-  await fs.unlink(lease.path);
+  if (!lease.ownerRemoved) {
+    await verifyLease(lease);
+    // Cooperative owners serialize on the stable kernel gate. This is not a
+    // sandbox against an OS writer that ignores or replaces the gate.
+    await fs.unlink(lease.path);
+    lease.ownerRemoved = true;
+  } else {
+    lease.gate.verify();
+    await verifyDirectory(lease.parent);
+    const replacement = await fs.lstat(lease.path).catch(error => {
+      if (code(error) === 'ENOENT') return undefined;
+      throw error;
+    });
+    if (replacement) throw new Error('Delegation owner record reappeared during release');
+  }
+  syncDirectory(lease.parent.path);
+  lease.journal.close();
+  await fs.unlink(lease.journal.filename).catch(error => { if (code(error) !== 'ENOENT') throw error; });
+  // Keep the gate through partial release failures, so the same owner can
+  // retry without racing a new owner or requiring a service restart.
+  lease.gate.close();
 }
 
 /**
  * Acquire before constructing mutable delegation stores. The storage lock is a
  * sibling `<canonical-root>.ownership` file, outside inventoried storage contents.
  * Repository locks live in the canonical Git common directory, shared by every
- * storage root. Neither lock is automatically recovered after a crash: parent
- * death (even a missing PID) does not establish delegated-child termination.
+ * storage root. Stable native gates serialize recovery; owner metadata and
+ * durable child journals distinguish a dead owner from surviving children.
  *
  * release() fences new/waiting operations and drains running callbacks. Callers
  * must also drain their other store writes and native workers before release.
- * Requires a filesystem providing atomic exclusive create to all participants.
+ * Requires local filesystems with native locking, atomic links and durable writes.
+ * Old version-1 placeholders require a quiescent migration; they lack child evidence.
  */
 export class DelegationOwnership {
   private readonly root: string;
@@ -134,6 +200,7 @@ export class DelegationOwnership {
   private releasing: Promise<void> | undefined;
   private closing = false;
   private readonly operations = new Set<Promise<unknown>>();
+  private readonly repositoryReleases = new Set<Lease>();
 
   constructor(root: string) {
     if (!root.trim()) throw new Error('Delegation storage root cannot be empty');
@@ -160,7 +227,7 @@ export class DelegationOwnership {
     if (directory.path === path.parse(directory.path).root) throw new Error('A filesystem root cannot be a delegation storage root');
     const parent = await directoryIdentity(path.dirname(directory.path));
     const lock = await claim(parent, `${path.basename(directory.path)}.ownership`);
-    if (!lock) throw new Error(`Delegation storage is already owned or has an abandoned lock. ${RECOVERY}`);
+    if (!lock) throw new Error(`Delegation storage is already owned by an active process (kernel lock held). ${RECOVERY}`);
     const storage = { directory, lock };
     try {
       await this.verifyStorage(storage);
@@ -185,6 +252,10 @@ export class DelegationOwnership {
     const attempt = (async () => {
       await this.acquiring?.catch(() => undefined);
       await Promise.allSettled([...this.operations]);
+      for (const lock of this.repositoryReleases) {
+        await relinquish(lock);
+        this.repositoryReleases.delete(lock);
+      }
       if (this.storage) {
         await relinquish(this.storage.lock);
         this.storage = undefined;
@@ -199,6 +270,15 @@ export class DelegationOwnership {
       // A failed release retains the fence. Retrying release is allowed.
     });
     return attempt;
+  }
+
+  /** Preserve ownership context through worker creation, execution and teardown. */
+  async withProcesses<T>(operation: () => Promise<T>): Promise<T> {
+    const storage = this.storage;
+    if (!storage) throw new Error('Acquire delegation ownership before launching processes');
+    const task = withProcessJournal(storage.lock.journal, operation);
+    this.operations.add(task);
+    try { return await task; } finally { this.operations.delete(task); }
   }
 
   /** Non-reentrant short repository exclusion; waiting never holds another selector. */
@@ -236,11 +316,12 @@ export class DelegationOwnership {
       await verifyLease(lock);
       if (await fs.realpath(requestedDirectory) !== directory.path) throw new Error('Delegation repository alias changed; operation is fenced');
       if (performance.now() >= deadline) throw new Error(`Timed out after ${REPOSITORY_WAIT_MS}ms waiting for delegation repository ownership`);
-      result = await operation();
+      result = await withProcessJournal(storage.lock.journal, () => withProcessJournal(lock!.journal, operation));
       await this.verifyStorage(storage);
       if (await fs.realpath(requestedDirectory) !== directory.path) throw new Error('Delegation repository alias changed during the operation');
     } catch (error) { failed = true; failure = error; }
-    try { await relinquish(lock); }
+    this.repositoryReleases.add(lock);
+    try { await relinquish(lock); this.repositoryReleases.delete(lock); }
     catch (cleanup) {
       this.closing = true;
       if (failed) throw new AggregateError([failure, cleanup], 'Delegation operation and lock cleanup failed; recovery is required');

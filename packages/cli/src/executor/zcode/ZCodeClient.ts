@@ -1,4 +1,5 @@
-import { ChildProcess, spawn } from 'child_process';
+import { ownedSpawn as spawn } from '../../delegation/OwnershipRuntime';
+import { ChildProcess } from 'child_process';
 import * as os from 'os';
 import * as path from 'path';
 import * as readline from 'readline';
