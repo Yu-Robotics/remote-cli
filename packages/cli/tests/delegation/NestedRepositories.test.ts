@@ -6,7 +6,7 @@ import path from 'path';
 import { promisify } from 'util';
 import { setTimeout as realDelay } from 'node:timers/promises';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { captureCheckpoint, checkpointRevision, gitText, importGitTree, runGit } from '../../src/delegation/GitCheckpoint';
+import { CHECKPOINT_LIMITS, captureCheckpoint, checkpointRevision, gitText, importGitTree, runGit } from '../../src/delegation/GitCheckpoint';
 import { DelegatedWorkspaceManager, type DelegatedWorkspace } from '../../src/delegation/DelegatedWorkspaceManager';
 import { DelegatedWorkerSessionStore } from '../../src/delegation/DelegatedWorkerSessionStore';
 import { gitFixture, nestedGitFixture, repositoryState } from './gitFixture';
@@ -511,6 +511,9 @@ describe('local nested repository checkpoints and delivery', { timeout: 30_000 }
     const childCloses: Promise<void>[] = [];
     let quarantine: string | undefined;
     let transfer: Promise<void> | undefined;
+    let expireTransfer: (() => void) | undefined;
+    let restoreDeadline: (() => void) | undefined;
+    const nativeTimeout = globalThis.setTimeout;
     spawning.mockImplementation((command, args, options) => {
       const producer = args?.includes('pack-objects');
       const receiver = args?.includes('index-pack');
@@ -526,9 +529,17 @@ describe('local nested repository checkpoints and delivery', { timeout: 30_000 }
       }
       if (receiver) {
         quarantine = options?.env?.GIT_OBJECT_DIRECTORY;
-        // Preflight Git has finished. Fake only the transfer deadline and its kill escalation.
-        // Real child streams and the readiness poll continue on the native event loop.
-        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+        // Capture only this transfer's deadline. Keep the native event loop,
+        // kill escalation, and filesystem cleanup timers running normally.
+        const timeout = vi.spyOn(globalThis, 'setTimeout').mockImplementation((callback, delay, ...args) => {
+          const timer = nativeTimeout(callback, delay, ...args);
+          if (delay === CHECKPOINT_LIMITS.commandMs && !expireTransfer) {
+            expireTransfer = () => { clearTimeout(timer); callback(...args); };
+            timeout.mockRestore();
+          }
+          return timer;
+        });
+        restoreDeadline = () => timeout.mockRestore();
       }
       return spawned;
     });
@@ -561,12 +572,10 @@ describe('local nested repository checkpoints and delivery', { timeout: 30_000 }
       expect(partialPack!.size).toBeLessThan(pack.length);
       expect((await fs.readFile(partialPack!.file)).subarray(0, 4).toString()).toBe('PACK');
       expect(closed).toEqual([]);
-      expect(vi.getTimerCount()).toBe(1);
-      await vi.advanceTimersByTimeAsync(14_999);
+      expect(expireTransfer).toBeTypeOf('function');
       expect(settled).toBe(false);
       expect(closed).toEqual([]);
-      await vi.advanceTimersByTimeAsync(1);
-      await vi.advanceTimersByTimeAsync(500);
+      expireTransfer!();
       await Promise.all(childCloses);
       await rejected;
       expect(closed.sort()).toEqual(['producer', 'receiver']);
@@ -579,11 +588,10 @@ describe('local nested repository checkpoints and delivery', { timeout: 30_000 }
         for (const spawned of children) {
           if (spawned.exitCode === null && spawned.signalCode === null) spawned.kill('SIGKILL');
         }
-        if (vi.isFakeTimers() && vi.getTimerCount()) await vi.advanceTimersByTimeAsync(15_500);
         await Promise.all(childCloses);
         await transfer?.catch(() => undefined);
       } finally {
-        vi.useRealTimers();
+        restoreDeadline?.();
         spawning.mockImplementation(actual.spawn);
       }
     }

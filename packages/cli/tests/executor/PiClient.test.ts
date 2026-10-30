@@ -10,11 +10,14 @@ import { PiExecutor } from '../../src/executor/PiExecutor';
 import { DelegationManager } from '../../src/delegation/DelegationManager';
 import { BackendRegistry } from '../../src/delegation/BackendRegistry';
 import { DelegationStore } from '../../src/delegation/DelegationStore';
+import type { DelegationOwnership } from '../../src/delegation/DelegationOwnership';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 
-vi.mock('child_process', () => ({
-  spawn: vi.fn(),
-}));
+vi.mock('child_process', async importOriginal => {
+  const actual = await importOriginal<typeof import('child_process')>();
+  // Ownership probes use execFileSync on macOS and Windows.
+  return { ...actual, spawn: vi.fn() };
+});
 
 describe('Pi RPC helpers', () => {
   it('builds RPC args with session, model, and thinking', () => {
@@ -82,6 +85,7 @@ describe('Pi RPC helpers', () => {
 describe('PiClient process lifecycle', () => {
   afterEach(() => {
     vi.mocked(spawn).mockReset();
+    vi.restoreAllMocks();
     vi.unstubAllEnvs();
   });
 
@@ -298,6 +302,8 @@ describe('PiClient process lifecycle', () => {
   it('keeps a delegated Pi workspace blocked after abort and repeated cleanup fail', async () => {
     const isolatedHome = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'delegated-pi-home-')));
     vi.spyOn(os, 'homedir').mockReturnValue(isolatedHome);
+    vi.stubEnv('HOME', isolatedHome);
+    vi.stubEnv('USERPROFILE', isolatedHome);
     const project = path.join(isolatedHome, 'project');
     fs.mkdirSync(project);
     const guard = new DirectoryGuard([project]);
@@ -340,11 +346,25 @@ describe('PiClient process lifecycle', () => {
       expect(result).toMatchObject({ state: 'interrupted' });
       expect(manager.blocksWorkspace(project, 'other')).toBe(true);
       expect(proc.exitCode).toBeNull();
-    } finally {
       await expect(manager.destroy()).rejects.toThrow('storage ownership was retained');
+    } finally {
       proc.exitCode = 0;
       proc.emit('exit', 0, null);
-      fs.rmSync(isolatedHome, { recursive: true, force: true });
+      proc.emit('close', 0, null);
+      try {
+        // Stop admission and maintenance even if an earlier assertion failed.
+        await manager.destroy().catch(error => {
+          if (!(error instanceof Error) || !error.message.includes('storage ownership was retained')) throw error;
+        });
+        for (const result of factory.mock.results) {
+          if (result.type === 'return') await result.value.destroy();
+        }
+        // The manager deliberately keeps a quarantined workspace blocked until
+        // restart. Release only this isolated fixture's lock after the fake
+        // child exits; do not turn production quarantine into automatic reuse.
+        await (manager as unknown as { ownership: DelegationOwnership }).ownership.release();
+      }
+      finally { fs.rmSync(isolatedHome, { recursive: true, force: true }); }
     }
   });
 
