@@ -6,6 +6,7 @@ import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { performance } from 'perf_hooks';
+import { isMainThread } from 'worker_threads';
 import { setImmediate as nextTurn } from 'timers/promises';
 import ts from 'typescript';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -148,6 +149,7 @@ function startChild(root: string, mode: 'root' | 'repository' | 'crash' | 'repos
 }
 
 beforeEach(async () => {
+  expect(isMainThread).toBe(true);
   directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'delegation-ownership-test-')));
   common = path.join(directory, 'git-common');
   await fs.mkdir(common);

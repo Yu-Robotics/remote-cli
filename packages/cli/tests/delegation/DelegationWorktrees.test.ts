@@ -77,15 +77,34 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     }
   }, 30_000);
 
+  // Four real-Git phases have independent deadlines. Do not make their combined
+  // filesystem/process cost compete for a single 30-second unit-test budget.
   it.each(['mixed', 'same-backend'] as const)('runs five isolated %s tasks concurrently and keeps a sixth queued', async mode => {
     const scope = manager.begin(parent);
-    expect(await scope.invoke('remote_cli_list_backends', {}, 'discover')).toMatchObject({
-      maxConcurrentChildren: 5, scheduling: 'isolated-worktrees', workspace: fixture.root });
+    const phases: { name: string; elapsedMs: number }[] = [];
+    const phase = async <T>(name: string, action: () => Promise<T>): Promise<T> => {
+      const began = Date.now();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([action(), new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error(
+            `Git scheduling phase timed out: ${name}; workers=${workers.length}; completed=${JSON.stringify(phases)}`,
+          )), 30_000);
+        })]);
+      } finally {
+        clearTimeout(timer);
+        phases.push({ name, elapsedMs: Date.now() - began });
+      }
+    };
     const tasks: DelegatedTaskResult[] = [];
     const backends = mode === 'mixed' ? ['codex', 'agy', 'dsh', 'kimi', 'agy', 'codex'] : Array(6).fill(parent.backend);
-    for (const [index, backend] of backends.entries()) {
-      tasks.push(await start(scope, `task-${index}`, backend));
-    }
+    await phase('prepare five workers and queue the sixth', async () => {
+      expect(await scope.invoke('remote_cli_list_backends', {}, 'discover')).toMatchObject({
+        maxConcurrentChildren: 5, scheduling: 'isolated-worktrees', workspace: fixture.root });
+      for (const [index, backend] of backends.entries()) {
+        tasks.push(await start(scope, `task-${index}`, backend));
+      }
+    });
     const first = tasks[0];
     expect(tasks.map(task => task.state)).toEqual(['running', 'running', 'running', 'running', 'running', 'queued']);
     expect(new Set(workers.map(worker => worker.cwd)).size).toBe(5);
@@ -97,18 +116,22 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     expect(await fs.readFile(path.join(fixture.root, 'source.txt'), 'utf8')).toContain('first\nsecond');
     await expect(scope.invoke('remote_cli_integrate', { taskId: first.taskId }, 'too-soon')).rejects.toThrow('finish');
     workers[0].finish({ success: true, output: 'Changed source' });
-    expect(await result(scope, first.taskId, 'first-result')).toMatchObject({ artifact: { disposition: 'pending' } });
-    await vi.waitFor(() => expect(workers).toHaveLength(6), { timeout: 10_000 });
+    await phase('collect the first result and dispatch the queued worker', async () => {
+      expect(await result(scope, first.taskId, 'first-result')).toMatchObject({ artifact: { disposition: 'pending' } });
+      await vi.waitFor(() => expect(workers).toHaveLength(6), { timeout: 10_000 });
+    });
     expect(workers[0].executor.waitForExit).toHaveBeenCalledOnce();
     workers.slice(1).forEach(worker => worker.finish({ success: true, output: 'Read-only review' }));
-    const terminal = await scope.collectPendingResults();
+    const terminal = await phase('collect and reclaim the remaining five workers', () => scope.collectPendingResults());
     expect(terminal.every(task => task.state === 'succeeded')).toBe(true);
     expect(await gitText(fixture.root, ['rev-parse', 'HEAD'])).toBe(fixture.head);
     expect(await gitText(fixture.root, ['for-each-ref', '--format=%(refname)', 'refs/heads'])).toBe('refs/heads/main');
-    const inspection: any = await scope.invoke('remote_cli_integrate', { taskId: first.taskId }, 'inspect');
-    await scope.invoke('remote_cli_integrate', { taskId: first.taskId, action: 'retain', expectedRevision: inspection.revision }, 'retain');
-    expect(await scope.checkArtifactCloseout()).toEqual([]);
-  }, 30_000);
+    await phase('retain the changed artifact and verify closeout', async () => {
+      const inspection: any = await scope.invoke('remote_cli_integrate', { taskId: first.taskId }, 'inspect');
+      await scope.invoke('remote_cli_integrate', { taskId: first.taskId, action: 'retain', expectedRevision: inspection.revision }, 'retain');
+      expect(await scope.checkArtifactCloseout()).toEqual([]);
+    });
+  }, 125_000);
 
   it('reuses native conversation and worktree after explicit integration, including sibling changes in the next baseline', async () => {
     const scope = manager.begin(parent);

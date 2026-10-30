@@ -3,7 +3,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import { isMainThread } from 'worker_threads';
-import config, { realGitTestFiles, testWorkerLimits } from '../vitest.config';
+import config, { processIsolatedTestFiles, realGitTestFiles, testWorkerLimits } from '../vitest.config';
 
 describe('CLI test scheduling', () => {
   it('bounds real Git suites separately without raising ordinary test deadlines', () => {
@@ -15,7 +15,7 @@ describe('CLI test scheduling', () => {
     });
     expect(config.test?.testTimeout).toBeUndefined();
     expect(config.test?.hookTimeout).toBeUndefined();
-    expect(config.test?.poolMatchGlobs).toEqual(realGitTestFiles.map(file => [`**/${file}`, 'forks']));
+    expect(config.test?.poolMatchGlobs).toEqual(processIsolatedTestFiles.map(file => [`**/${file}`, 'forks']));
   });
 
   it.each([

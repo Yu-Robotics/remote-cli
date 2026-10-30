@@ -5,6 +5,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { spawn as spawnProcess } from 'child_process';
+import { isMainThread } from 'worker_threads';
 vi.mock('child_process', async importOriginal => {
   const actual = await importOriginal<typeof import('child_process')>();
   return { ...actual, spawn: vi.fn(actual.spawn) };
@@ -18,6 +19,7 @@ const closed: Array<() => void> = [];
 const current = { host: 'synthetic-host', boot: 'synthetic-boot', namespace: 'synthetic-namespace' };
 let owner: OwnerRecord;
 beforeEach(() => {
+  expect(isMainThread).toBe(true);
   directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ownership-runtime-')));
   filename = path.join(directory, 'children');
   owner = { version: 2, token: randomUUID(), pid: 123456, ...current };
