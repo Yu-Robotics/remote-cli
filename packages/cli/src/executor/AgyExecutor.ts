@@ -1,4 +1,5 @@
-import { execFile, spawn, ChildProcess } from 'child_process';
+import { ownedSpawn as spawn } from '../delegation/OwnershipRuntime';
+import { execFile, ChildProcess } from 'child_process';
 import { ManagedProcessGroups } from './ManagedProcessGroups';
 import { StringDecoder } from 'string_decoder';
 import * as fs from 'fs';

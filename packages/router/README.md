@@ -219,6 +219,43 @@ omitting hidden edits or treating missing sparse files as deletions. Resolve tho
 flags and sparse checkouts explicitly; the source index is never modified.
 These changes require a CLI upgrade; Router protocol and native backends are unchanged.
 
+CLI 1.6.192 fixes a CommonJS runtime error introduced in 1.6.191 that prevented
+delegation backend discovery and task admission. Upgrade the local CLI to apply
+the fix. Router-only upgrades do not repair the installed CLI. Artifact export
+validation and canonical storage-path checks retain their existing behavior.
+On Linux and macOS, SIGTERM and SIGINT await client and worker teardown before process exit,
+including during startup. Verified normal shutdown releases the delegation storage
+owner before restart; failed or unconfirmed worker teardown retains recovery state
+and exits unsuccessfully.
+
+Ownership now uses a native OS lock held on a stable `.ownership.guard` file,
+plus checksummed owner identity and a durable `.ownership.children` process
+journal. Completed history is compacted atomically; unresolved launches remain
+recorded, and failed lock releases can be retried without restarting. The
+empty guard file intentionally remains after release: its existence does not
+mean the storage is busy. Never remove or rename it while a CLI may be running.
+Native binaries are bundled for supported Linux, macOS and Windows architectures;
+unsupported native-lock platforms fail explicitly rather than falling back to an
+age-based lock. Use local filesystems; shared/network storage is not supported.
+
+A crashed idle owner can be recovered automatically. On the same host after a
+reboot, old process evidence no longer blocks acquisition. On the same boot,
+recovery validates PID/start identity and checks each recorded POSIX process
+group with the kernel; surviving children, unknown launches, foreign hosts/PID
+namespaces and incomplete journals remain protected. No process is killed by
+recovery, and no worktree, artifact or conversation is deleted just to regain
+ownership. Recovery does not authorize workspace disposal; existing artifact
+and checkout checks still apply. Groups escaped via `setsid`/`setpgid` are outside
+the existing managed-process-group guarantee. Windows crash recovery with recorded
+children remains conservative because process-tree exit cannot be proved from a
+PID alone. A crash between spawning a child and saving its identity also remains
+protected until a proven reboot or controlled recovery.
+
+Version-1 lock files from 1.6.191 lack boot and child evidence. They require a
+one-time quiescent recovery if the old process did not shut down cleanly; the CLI
+never steals them based only on PID or age. Upgrade the local CLI to activate
+these changes; updating Router alone is insufficient.
+
 From CLI 1.6.191 on Linux, newly created managed Git worktrees are disposable
 execution storage. After confirmed native process-group exit, successful delivered output and failed
 no-change output can release the entire checkout, including ignored dependencies

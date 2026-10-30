@@ -1,4 +1,6 @@
 import { spawn, type ChildProcess } from 'child_process';
+import { once } from 'events';
+import { randomUUID } from 'crypto';
 import syncFs from 'fs';
 import fs from 'fs/promises';
 import os from 'os';
@@ -8,6 +10,7 @@ import { setImmediate as nextTurn } from 'timers/promises';
 import ts from 'typescript';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DelegationOwnership } from '../../src/delegation/DelegationOwnership';
+import { runGit } from '../../src/delegation/GitCheckpoint';
 
 function deferred() {
   let resolve!: () => void;
@@ -54,6 +57,13 @@ async function owner(name: string) {
 
 function startChild(root: string, mode: 'root' | 'repository' | 'crash' | 'repository-crash' = 'root', repository = common) {
   const script = `
+    const nativeLocks = require('fs-native-extensions');
+    const originalTryLock = nativeLocks.tryLock;
+    nativeLocks.tryLock = (...args) => {
+      const locked = originalTryLock(...args);
+      if (!locked) process.send({ type: 'contended' });
+      return locked;
+    };
     const fs = require('fs/promises');
     const originalOpen = fs.open;
     let reportedContention = false;
@@ -105,6 +115,7 @@ function startChild(root: string, mode: 'root' | 'repository' | 'crash' | 'repos
   `;
   const child = spawn(process.execPath, ['-e', script, implementation, root, mode, repository], {
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+    env: { ...process.env, NODE_PATH: path.resolve(__dirname, '../../../../node_modules') },
   });
   const messages: Array<{ type: string; message?: string }> = [];
   let stderr = '';
@@ -141,6 +152,10 @@ beforeEach(async () => {
   common = path.join(directory, 'git-common');
   await fs.mkdir(common);
   implementation = path.join(directory, 'ownership.cjs');
+  const runtime = await fs.readFile(path.resolve(__dirname, '../../src/delegation/OwnershipRuntime.ts'), 'utf8');
+  await fs.writeFile(path.join(directory, 'OwnershipRuntime.js'), ts.transpileModule(runtime, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true },
+  }).outputText);
   const source = await fs.readFile(path.resolve(__dirname, '../../src/delegation/DelegationOwnership.ts'), 'utf8');
   await fs.writeFile(implementation, ts.transpileModule(source, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true },
@@ -168,7 +183,7 @@ describe('DelegationOwnership', () => {
     expect(await fs.readdir(root)).toEqual([]);
     const bytes = await fs.readFile(rootLock(root));
     const metadata = JSON.parse(bytes.toString());
-    expect(metadata).toMatchObject({ version: 1, pid: process.pid });
+    expect(metadata).toMatchObject({ version: 2, pid: process.pid });
     expect(metadata.token).toMatch(/^[a-f0-9-]{36}$/);
     const second = new DelegationOwnership(root);
     await expect(second.acquire()).rejects.toThrow(/already owned/);
@@ -218,7 +233,7 @@ describe('DelegationOwnership', () => {
     const first = startChild(root);
     await first.wait('acquired');
     const second = startChild(root);
-    expect((await second.wait('failed')).message).toMatch(/already owned.*controlled lock recovery/);
+    expect((await second.wait('failed')).message).toMatch(/already owned/);
     expect(await second.closed).toBe(2);
     first.child.send('release');
     await first.wait('released');
@@ -229,7 +244,7 @@ describe('DelegationOwnership', () => {
     expect(await third.closed).toBe(0);
   });
 
-  it('does not steal a lock after the owning process exits', async () => {
+  it('recovers an idle owner after process exit without manual lock removal', async () => {
     const root = path.join(directory, 'abandoned-storage');
     const child = startChild(root, 'crash');
     await child.wait('acquired');
@@ -237,12 +252,82 @@ describe('DelegationOwnership', () => {
     child.child.send('crash');
     expect(await child.closed).toBe(0);
     const next = new DelegationOwnership(root);
-    await expect(next.acquire()).rejects.toThrow(/confirm all of its delegated children have exited/);
+    await next.acquire();
+    expect(await fs.readFile(rootLock(root))).not.toEqual(bytes);
     await next.release();
-    expect(await fs.readFile(rootLock(root))).toEqual(bytes);
+    await expect(fs.stat(rootLock(root))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
-  it('keeps abandoned repository ownership across storage roots after process exit', async () => {
+  it('admits exactly one concurrent contender after SIGKILL', async () => {
+    const root = path.join(directory, 'killed-owner');
+    const previous = startChild(root);
+    await previous.wait('acquired');
+    previous.child.kill('SIGKILL');
+    await previous.closed;
+    const contenders = [startChild(root), startChild(root)];
+    await vi.waitFor(() => {
+      expect(contenders.flatMap(child => child.messages).filter(message => ['acquired', 'failed'].includes(message.type))).toHaveLength(2);
+    });
+    const winner = contenders.find(child => child.messages.some(message => message.type === 'acquired'))!;
+    expect(contenders.filter(child => child.messages.some(message => message.type === 'acquired'))).toHaveLength(1);
+    winner.child.send('release');
+    await Promise.all(contenders.map(child => child.closed));
+  });
+
+  it.skipIf(process.platform === 'win32')('preserves a live recorded child group after parent death and recovers after kernel-confirmed exit', async () => {
+    // The test owns the writer as a sibling, so it can reap it deterministically
+    // even in containers whose PID 1 does not reap orphaned test processes.
+    const writer = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
+    const writerClosed = once(writer, 'close');
+    const root = path.join(directory, 'surviving-writer');
+    const previous = startChild(root);
+    try {
+      await previous.wait('acquired');
+      const id = randomUUID();
+      await fs.appendFile(rootLock(root) + '.children', JSON.stringify({ id, event: 'reserve' }) + '\n'
+        + JSON.stringify({ id, event: 'spawn', pid: writer.pid, group: true }) + '\n');
+      previous.child.kill('SIGKILL');
+      await previous.closed;
+      const bytes = await fs.readFile(rootLock(root));
+      const next = new DelegationOwnership(root);
+      await expect(next.acquire()).rejects.toThrow('still exists');
+      expect(await fs.readFile(rootLock(root))).toEqual(bytes);
+      writer.kill('SIGKILL');
+      await writerClosed;
+      await next.acquire();
+      await next.release();
+    } finally {
+      if (writer.exitCode === null && writer.signalCode === null) writer.kill('SIGKILL');
+      await writerClosed;
+    }
+  });
+
+  it('keeps legacy placeholders intact instead of guessing child exit from their PID', async () => {
+    const root = path.join(directory, 'legacy');
+    await fs.mkdir(root);
+    const bytes = JSON.stringify({ version: 1, token: randomUUID(), pid: 123456 });
+    await fs.writeFile(rootLock(root), bytes);
+    const next = new DelegationOwnership(root);
+    await expect(next.acquire()).rejects.toThrow('Legacy ownership has no crash-recovery evidence');
+    expect(await fs.readFile(rootLock(root), 'utf8')).toBe(bytes);
+  });
+
+  it('recovers an interrupted atomic publication with exactly its own staging hard link', async () => {
+    const root = path.join(directory, 'interrupted-publication');
+    const previous = startChild(root, 'crash');
+    await previous.wait('acquired');
+    previous.child.send('crash');
+    await previous.closed;
+    const record = JSON.parse(await fs.readFile(rootLock(root), 'utf8'));
+    const staging = `${rootLock(root)}.${record.token}.initializing`;
+    await fs.link(rootLock(root), staging);
+    const next = new DelegationOwnership(root);
+    await next.acquire();
+    await expect(fs.lstat(staging)).rejects.toMatchObject({ code: 'ENOENT' });
+    await next.release();
+  });
+
+  it('recovers abandoned repository ownership across storage roots after process exit', async () => {
     const root = path.join(directory, 'abandoned-storage');
     const child = startChild(root, 'repository-crash');
     await child.wait('entered');
@@ -250,12 +335,9 @@ describe('DelegationOwnership', () => {
     child.child.send('crash');
     expect(await child.closed).toBe(0);
     const next = await owner('new-storage');
-    const clock = vi.spyOn(performance, 'now').mockReturnValueOnce(0).mockReturnValue(30_001);
-    try {
-      await expect(next.ownership.withRepository(common, async () => undefined)).rejects.toThrow(/controlled lock recovery/);
-    } finally { clock.mockRestore(); }
+    await expect(next.ownership.withRepository(common, async () => 'recovered')).resolves.toBe('recovered');
     await next.ownership.release();
-    expect(await fs.readFile(repositoryLock(common))).toEqual(bytes);
+    await expect(fs.stat(repositoryLock(common))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it.skipIf(!supportsDirectoryAlias)('serializes real processes from different storage roots using the same canonical common directory', async () => {
@@ -276,7 +358,7 @@ describe('DelegationOwnership', () => {
     second.child.send('release');
     expect(await first.closed).toBe(0);
     expect(await second.closed).toBe(0);
-    expect(await fs.readdir(common)).toEqual([]);
+    expect(await fs.readdir(common)).toEqual(['remote-cli-delegation.ownership.guard']);
   });
 
   it('releases repository locks after success or thrown operations', async () => {
@@ -285,9 +367,24 @@ describe('DelegationOwnership', () => {
     const failure = new Error('Synthetic operation failure');
     await expect(ownership.withRepository(common, async () => { throw failure; })).rejects.toBe(failure);
     await expect(ownership.withRepository(common, async () => { throw undefined; })).rejects.toBeUndefined();
-    expect(await fs.readdir(common)).toEqual([]);
+    expect(await fs.readdir(common)).toEqual(['remote-cli-delegation.ownership.guard']);
     expect(await ownership.withRepository(common, async () => 'retry')).toBe('retry');
     await ownership.release();
+  });
+
+  it('journals real Git launches in both storage and repository ownership scopes', async () => {
+    const { ownership, root } = await owner('git-launch');
+    try {
+      await ownership.withRepository(common, async () => {
+        expect((await runGit(directory, ['--version'])).toString()).toContain('git version');
+        const entries = async (lock: string) => (await fs.readFile(lock + '.children', 'utf8')).trimEnd().split('\n').slice(1).map(line => JSON.parse(line));
+        const rootEntries = await entries(rootLock(root));
+        const repositoryEntries = await entries(repositoryLock(common));
+        expect(rootEntries).toEqual(repositoryEntries);
+        expect(rootEntries[0].event).toBe('reserve');
+        expect(rootEntries[1]).toMatchObject({ event: 'spawn', group: process.platform !== 'win32' });
+      });
+    } finally { await ownership.release(); }
   });
 
   it('drains running work, cancels waiters, and permits independent repositories while waiting', async () => {
@@ -315,7 +412,7 @@ describe('DelegationOwnership', () => {
     finish.resolve();
     await running;
     await release;
-    expect(await fs.readdir(common)).toEqual([]);
+    expect(await fs.readdir(common)).toEqual(['remote-cli-delegation.ownership.guard']);
   });
 
   it('leaves a contended repository lock untouched on bounded timeout', async () => {
@@ -327,13 +424,12 @@ describe('DelegationOwnership', () => {
     await entered.promise;
     const bytes = await fs.readFile(repositoryLock(common));
     const clock = vi.spyOn(performance, 'now').mockReturnValue(0);
-    const originalOpen = fs.open.bind(fs);
-    const open = vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
-      try { return await originalOpen(...args); }
-      catch (error) {
-        if (args[0] === repositoryLock(common) && (error as NodeJS.ErrnoException).code === 'EEXIST') clock.mockReturnValue(30_001);
-        throw error;
-      }
+    const nativeLocks = require('fs-native-extensions');
+    const originalTryLock = nativeLocks.tryLock;
+    const open = vi.spyOn(nativeLocks, 'tryLock').mockImplementation((...args: unknown[]) => {
+      const result = originalTryLock(...args);
+      if (!result) clock.mockReturnValue(30_001);
+      return result;
     });
     try {
       const callback = vi.fn(async () => undefined);
@@ -376,28 +472,39 @@ describe('DelegationOwnership', () => {
     await expect(ownership.release()).rejects.toThrow(/ownership changed|token changed/);
     expect(await fs.readFile(rootLock(root))).toEqual(contents);
     await expect(ownership.acquire()).rejects.toThrow(/releasing or requires recovery/);
+    if (replacement === 'inode') await fs.rename(path.join(directory, 'retired-lock'), rootLock(root));
+    else await fs.writeFile(rootLock(root), original);
+    await ownership.release();
   });
 
   it('retains foreign repository replacement and reports both operation and cleanup errors', async () => {
     const { ownership } = await owner('storage');
+    let original!: Buffer;
     const failure = new Error('Synthetic operation failure');
     const operation = ownership.withRepository(common, async () => {
+      original = await fs.readFile(repositoryLock(common));
       await fs.writeFile(repositoryLock(common), 'foreign repository lock');
       throw failure;
     });
     await expect(operation).rejects.toBeInstanceOf(AggregateError);
     expect(await fs.readFile(repositoryLock(common), 'utf8')).toBe('foreign repository lock');
     await expect(ownership.withRepository(common, async () => undefined)).rejects.toThrow(/release/);
+    await expect(ownership.release()).rejects.toThrow(/ownership changed/);
+    await fs.writeFile(repositoryLock(common), original);
     await ownership.release();
   });
 
   it('fails a successful callback if its repository lock was replaced', async () => {
     const { ownership } = await owner('storage');
+    let original!: Buffer;
     await expect(ownership.withRepository(common, async () => {
+      original = await fs.readFile(repositoryLock(common));
       await fs.writeFile(repositoryLock(common), 'foreign lock');
       return 'must not report success';
     })).rejects.toThrow(/ownership changed/);
     expect(await fs.readFile(repositoryLock(common), 'utf8')).toBe('foreign lock');
+    await expect(ownership.release()).rejects.toThrow(/ownership changed/);
+    await fs.writeFile(repositoryLock(common), original);
     await ownership.release();
   });
 
@@ -431,7 +538,7 @@ describe('DelegationOwnership', () => {
     const callback = vi.fn(async () => undefined);
     await expect(ownership.withRepository(link, callback)).rejects.toThrow(/repository alias changed/);
     expect(callback).not.toHaveBeenCalled();
-    expect(await fs.readdir(common)).toEqual([]);
+    expect(await fs.readdir(common)).toEqual(['remote-cli-delegation.ownership.guard']);
     expect(await fs.readdir(other)).toEqual([]);
     await ownership.release();
   });
@@ -453,7 +560,7 @@ describe('DelegationOwnership', () => {
     await expect(fs.lstat(rootLock(first))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
-  it('retains a partially initialized lock instead of unlocking after failed acquisition', async () => {
+  it('does not publish partial owner metadata after failed initialization', async () => {
     const originalOpen = fs.open.bind(fs);
     vi.spyOn(fs, 'open').mockImplementationOnce(async (...args) => {
       const handle = await originalOpen(...args);
@@ -462,10 +569,43 @@ describe('DelegationOwnership', () => {
     });
     const root = path.join(directory, 'storage');
     const ownership = new DelegationOwnership(root);
-    await expect(ownership.acquire()).rejects.toThrow(/initialization failed/);
+    await expect(ownership.acquire()).rejects.toThrow('Synthetic write failure');
     await ownership.release();
-    expect((await fs.lstat(rootLock(root))).isFile()).toBe(true);
-    await expect(new DelegationOwnership(root).acquire()).rejects.toThrow(/abandoned lock/);
+    await expect(fs.lstat(rootLock(root))).rejects.toMatchObject({ code: 'ENOENT' });
+    const next = new DelegationOwnership(root);
+    await next.acquire();
+    await next.release();
+  });
+
+  it('retries partial release without losing its kernel exclusion', async () => {
+    const { ownership, root } = await owner('partial-release');
+    const originalUnlink = fs.unlink.bind(fs);
+    let fail = true;
+    vi.spyOn(fs, 'unlink').mockImplementation(async filename => {
+      if (filename === rootLock(root) + '.children' && fail) { fail = false; throw new Error('Synthetic journal removal failure'); }
+      return originalUnlink(filename);
+    });
+    await expect(ownership.release()).rejects.toThrow('journal removal failure');
+    const next = new DelegationOwnership(root);
+    await expect(next.acquire()).rejects.toThrow('already owned');
+    await ownership.release();
+    await next.acquire();
+    await next.release();
+  });
+
+  it('retains a failed repository release for shutdown retry instead of abandoning its native descriptor', async () => {
+    const { ownership } = await owner('repository-release');
+    const originalUnlink = fs.unlink.bind(fs);
+    let fail = true;
+    vi.spyOn(fs, 'unlink').mockImplementation(async filename => {
+      if (filename === repositoryLock(common) + '.children' && fail) { fail = false; throw new Error('Synthetic repository journal removal failure'); }
+      return originalUnlink(filename);
+    });
+    await expect(ownership.withRepository(common, async () => 1)).rejects.toThrow('repository journal removal failure');
+    await ownership.release();
+    const next = await owner('next-root');
+    await expect(next.ownership.withRepository(common, async () => 2)).resolves.toBe(2);
+    await next.ownership.release();
   });
 
   it('waits for in-flight acquisition when releasing and rejects use before acquisition', async () => {

@@ -1,6 +1,6 @@
 {
   "name": "@yu_robotics/remote-cli",
-  "version": "1.6.191",
+  "version": "1.6.192",
   "description": "Remote control Claude Code CLI via mobile",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -46,19 +46,20 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "pdfjs-dist": "4.8.69",
-    "sax": "^1.6.1",
-    "yauzl": "^3.4.0",
     "@anthropic-ai/claude-agent-sdk": "^0.2.0",
     "axios": "^1.13.5",
     "chalk": "^5.3.0",
     "commander": "^12.0.0",
     "conf": "^12.0.0",
     "dotenv": "^16.4.1",
+    "fs-native-extensions": "1.5.2",
     "node-machine-id": "^1.1.12",
     "ora": "^8.0.1",
+    "pdfjs-dist": "4.8.69",
+    "sax": "^1.6.1",
     "uuid": "^13.0.0",
     "ws": "^8.18.0",
+    "yauzl": "^3.4.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {

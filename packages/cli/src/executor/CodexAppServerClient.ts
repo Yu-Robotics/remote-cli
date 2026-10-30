@@ -1,4 +1,5 @@
-import { ChildProcess, spawn } from 'child_process';
+import { ownedSpawn as spawn } from '../delegation/OwnershipRuntime';
+import { ChildProcess } from 'child_process';
 import { StringDecoder } from 'string_decoder';
 import { assertWorkingDirectoryExists } from '../utils/WorkingDirectory';
 import { ManagedProcessGroups } from './ManagedProcessGroups';

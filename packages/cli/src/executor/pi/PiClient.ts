@@ -1,4 +1,5 @@
-import { ChildProcess, spawn } from 'child_process';
+import { ownedSpawn as spawn } from '../../delegation/OwnershipRuntime';
+import { ChildProcess } from 'child_process';
 import { StringDecoder } from 'string_decoder';
 import { buildPiRpcArgs, consumeJsonl, type PiLaunchOptions, type PiRpcResponse, type PiTransport } from './PiTypes';
 import { assertWorkingDirectoryExists } from '../../utils/WorkingDirectory';

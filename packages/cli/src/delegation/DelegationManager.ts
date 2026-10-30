@@ -988,7 +988,7 @@ ${prompt}`));
       activeTasks.add(task);
       task.ownsSlot = true;
       this.running++;
-      void run(task).catch(() => undefined);
+      void this.ownership.withProcesses(() => run(task)).catch(() => undefined);
     };
     const pump = (): void => {
       if (closed || integrating || activeTasks.size >= maxChildren) return;
@@ -1102,7 +1102,7 @@ ${prompt}`));
             || path.isAbsolute(file) || /[:\0]/.test(file) || file.split(/[\\/]/).some(part => !part || part === '.' || part === '..' || part === '.git')))) {
           throw new Error('exports must contain at most 16 relative checkout file paths');
         }
-        const exports = args.exports as string[] | undefined;
+        const requiredExports = args.exports as string[] | undefined;
         const mode = args.mode ?? 'inherit';
         if (mode !== 'inherit' && mode !== 'read_only') throw new Error('Unsupported execution mode');
         const backend = args.backend as DelegationBackend;
@@ -1120,7 +1120,7 @@ ${prompt}`));
           const available = await discovery;
           if (!available.installed) throw new Error(`${backend}: ${available.reason}`);
           await discoverWorkspace();
-          if (exports?.length && !source) throw new Error('Artifact exports require an isolated Git worktree');
+          if (requiredExports?.length && !source) throw new Error('Artifact exports require an isolated Git worktree');
           if (integrating) throw new Error('Artifact integration is in progress; wait before delegating');
           await this.ensureOwnership();
           await deadline(() => this.store.initialize(), DELEGATION_LIMITS.storageTimeoutMs, 'Task record initialization timed out');
@@ -1141,7 +1141,7 @@ ${prompt}`));
           const interrupted = new Promise<ExecuteResult>(resolve => { interrupt = () => resolve({ success: false }); });
           const task: Task = { record: { id: randomUUID(), threadId: parent.thread.id,
             parentMessageId: parent.messageId, backend, objective: objective.slice(0, 1000),
-            state: 'queued', acceptedAt: Date.now() }, configuration, objective, exports,
+            state: 'queued', acceptedAt: Date.now() }, configuration, objective, exports: requiredExports,
             resultDelivered: false, settled: false, ownsSlot: first,
             textProgressEnabled: parent.onTextProgress !== undefined,
             activeToolIds: new Set(), done: new Promise<void>(resolve => { resolveDone = resolve; }),
@@ -1163,7 +1163,7 @@ ${prompt}`));
             if (task.ownsSlot) { this.running--; task.ownsSlot = false; activeTasks.delete(task); }
             await completeUnstarted(task, 'cancelled', 'Cancelled before the worker started.');
           } else if (task.ownsSlot) {
-            void run(task).catch(() => undefined);
+            void this.ownership.withProcesses(() => run(task)).catch(() => undefined);
           } else {
             armQueueTimer(task);
             notify(() => parent.onNotice(`\n\n⏳ ${backend} delegated task ${task.record.id.slice(0, 8)} queued. It will start after earlier tasks finish; queue wait is limited to ${formatDuration(this.timeouts.queueTimeoutMs)}.\n\n`));

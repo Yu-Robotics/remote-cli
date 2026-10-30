@@ -1,4 +1,4 @@
-import { spawn } from 'child_process';
+import { ownedSpawn as spawn } from './OwnershipRuntime';
 import { createHash, randomUUID } from 'crypto';
 import fs from 'fs/promises';
 import os from 'os';
