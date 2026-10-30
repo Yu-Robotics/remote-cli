@@ -19,6 +19,7 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
   let manager: DelegationManager;
   let parent: DelegationParent;
   let workers: { cwd: string; executor: IExecutor; finish: (result: ExecuteResult) => void }[];
+  let onWorkerCreated: ((worker: typeof workers[number]) => void) | undefined;
   let expectedShutdownFailure = false;
   const makeManager = (disposalSupported = true) => new DelegationManager(new DirectoryGuard([fixture.directory]), (_guard, _config, cwd) => {
     if (!cwd) throw new Error('Fixture worker requires a working directory');
@@ -29,6 +30,7 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
       resetContext: vi.fn(), getCurrentWorkingDirectory: () => cwd, setWorkingDirectory: vi.fn(),
     } as unknown as IExecutor;
     workers.push({ cwd, executor, finish });
+    onWorkerCreated?.(workers[workers.length - 1]);
     return executor;
   }, new BackendRegistry(async () => 'fixture 1.0'), undefined, undefined, undefined, undefined,
       new DelegatedWorkspaceManager(undefined, disposalSupported));
@@ -39,6 +41,7 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
     vi.stubEnv('HOME', fixture.directory);
     vi.stubEnv('USERPROFILE', fixture.directory);
     workers = [];
+    onWorkerCreated = undefined;
     manager = makeManager();
     parent = { thread: { id: 'fixture-owner', name: 'default', workingDirectory: fixture.root,
       sessionId: null, createdAt: 0, lastActiveAt: 0 }, cwd: fixture.root, messageId: 'message',
@@ -105,12 +108,26 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
     return { scope, original, lane, pointer };
   };
 
+  const observeReplacement = (scope: ReturnType<DelegationManager['begin']>) => {
+    const created = new Promise<typeof workers[number]>(resolve => { onWorkerCreated = resolve; });
+    const completed = scope.collectPendingResults();
+    // Real Git reclamation and fresh checkout creation are bounded by the test's
+    // deadline, not vi.waitFor's unrelated one-second default. Surface terminal
+    // task failures immediately instead of reporting only a missing worker.
+    const replacement = Promise.race([created, completed.then(results => {
+      throw new Error(`Task ended before replacement worker creation: ${JSON.stringify(results)}`);
+    })]);
+    void replacement.catch(() => undefined);
+    return { replacement, completed };
+  };
+
   it('defers missing-session replacement and native cleanup until managed group exit is confirmed', async () => {
     const { scope, original, lane, pointer } = await missingSessionTask();
     let confirm!: () => void;
     const proof = new Promise<void>(resolve => { confirm = resolve; });
     const group = vi.mocked(original.executor.waitForManagedProcessGroupExit!).mockReturnValue(proof);
     const remove = vi.spyOn(manager.laneStore, 'remove');
+    const { replacement, completed } = observeReplacement(scope);
     original.finish({ success: false, error: 'Stored native session is missing' });
     try {
       await vi.waitFor(() => expect(group).toHaveBeenCalledOnce());
@@ -121,12 +138,13 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
       expect(await fs.readFile(pointer, 'utf8')).toBe('synthetic native continuation');
       expect((await fs.stat(original.cwd)).isDirectory()).toBe(true);
     } finally { confirm(); }
-    await vi.waitFor(() => expect(workers).toHaveLength(2));
+    const next = await replacement;
+    expect(workers).toHaveLength(2);
     await expect(fs.stat(pointer)).rejects.toHaveProperty('code', 'ENOENT');
     expect(remove).toHaveBeenCalledWith(lane.id);
-    expect(workers[1].cwd).not.toBe(original.cwd);
-    workers[1].finish({ success: true });
-    expect((await scope.collectPendingResults())[0].state).toBe('succeeded');
+    expect(next.cwd).not.toBe(original.cwd);
+    next.finish({ success: true });
+    expect((await completed)[0].state).toBe('succeeded');
   });
 
   it.each(['missing', 'rejected'])('retains the missing-session executor and context when group evidence is %s', async failure => {
@@ -154,12 +172,14 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
     manager = makeManager(false);
     const { scope, original, lane, pointer } = await missingSessionTask();
     original.executor.waitForManagedProcessGroupExit = undefined;
+    const { replacement, completed } = observeReplacement(scope);
     original.finish({ success: false, error: 'Stored native session is missing' });
-    await vi.waitFor(() => expect(workers).toHaveLength(2));
+    const next = await replacement;
+    expect(workers).toHaveLength(2);
     await expect(fs.stat(pointer)).rejects.toHaveProperty('code', 'ENOENT');
     expect((await manager.laneStore.lanesForThread(parent.thread.id)).some(item => item.id === lane.id)).toBe(false);
-    workers[1].finish({ success: true });
-    expect((await scope.collectPendingResults())[0].state).toBe('succeeded');
+    next.finish({ success: true });
+    expect((await completed)[0].state).toBe('succeeded');
   });
 
   it.each([true, false])('cleans temporary dependencies after an unchanged task succeeds=%s', async success => {
