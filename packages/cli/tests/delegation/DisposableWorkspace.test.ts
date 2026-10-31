@@ -187,7 +187,14 @@ describe('versioned disposable workspace closeout', { timeout: 30_000 }, () => {
     expect((await read(laneFile())).checkoutState).toBe('present');
   });
 
-  it.each(['lfs', 'fixture-filter'])('records an actionable hold for unsupported %s materialization', async filter => {
+  it.each(['lfs', 'fixture-filter'])('records an actionable hold for malformed or unsupported %s materialization', async filter => {
+    // Keep the saved blob deliberately non-pointer, independent of host LFS installation.
+    if (filter === 'lfs') {
+      for (const option of ['process', 'clean', 'smudge']) {
+        await git.runGit(workspace.directory, ['config', `filter.lfs.${option}`, '']);
+      }
+      await git.runGit(workspace.directory, ['config', 'filter.lfs.required', 'false']);
+    }
     await fs.writeFile(path.join(workspace.directory, '.gitattributes'), `source.txt filter=${filter}\n`);
     await expect(collect(false)).rejects.toThrow(filter === 'lfs' ? 'lfs-payload-unverified' : 'unsupported-filter');
     expect(await manager.describe(workspace.taskId)).toMatchObject({ successful: false, disposition: 'pending' });
