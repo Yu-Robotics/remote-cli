@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.194] - 2026-10-31
+
+### Fixed
+- Verify supported Git LFS pointers and local payloads during disposable worker finalization instead of rejecting every LFS-managed path. Preserve checkout recovery holds for missing or mismatched payloads, unsafe object storage and unsupported transformations; keep child-exit and artifact-disposition requirements unchanged.
+- Keep LFS verification local and leave historical failed worker records untouched. Upgrade the local CLI; Router protocol and native backend configuration are unchanged.
+
+### Tests
+- Exercise real local Git LFS payloads, unchanged and changed output, empty files, pointer-only checkouts, conservative reclamation, custom storage, corrupted or missing objects, unsafe paths, file replacement, and successful manager closeout. Keep the new fixture suite in the bounded real-Git process pool.
+
 ## [1.6.193] - 2026-10-30
 
 ### Fixed

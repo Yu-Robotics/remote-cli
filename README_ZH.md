@@ -735,6 +735,18 @@ is never sufficient. It covers members of that group;
 background processes that escape using `setsid` or `setpgid` are not covered and
 must not write into disposable worker checkouts.
 
+From CLI 1.6.194, disposable worker finalization verifies supported Git LFS
+files against their saved pointers and locally available payloads outside the
+worker checkout. Unchanged LFS files no longer fail solely because they use
+`filter=lfs`. The same byte checks support conservative checkout reclamation
+without changing its stricter cleanup policy. Missing or mismatched payloads,
+unsafe storage paths and unsupported
+transformations retain the checkout for recovery. Verification does not download
+LFS objects or automatically repair previously failed worker records. Keep the
+shared local LFS objects needed for recovery: private Git artifact refs are not
+a separate payload backup, and external LFS pruning can remove those objects.
+Upgrade the local CLI to use this behavior; a Router-only upgrade does not enable it.
+
 Cleanup uses durable intent and receipt records. Failed removals are retried on
 startup and while idle; cleanup failure does not undo integration or turn a
 successful task into a failed task. Failed/retained receipts support reconstruction

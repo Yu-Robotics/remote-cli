@@ -9,6 +9,7 @@ import type { DelegatedWorkerLane } from './DelegatedWorkerSessionStore';
 import { captureCheckpoint, createCheckpointCommit, GIT_OID, GitCommandError, gitText, runGit,
   type GitCheckpoint } from './GitCheckpoint';
 import { checkFilesInBatches } from './BoundedFileChecks';
+import { LfsCheckoutVerifier } from './LfsCheckout';
 import { completedLegacyDiscard } from './LegacyWorkspaceCleanup';
 import { assertDisposableTree, exportWorkspaceFiles, verifyWorkspaceExports, type WorkspaceExport,
   WorkspaceCleanupError } from './WorkspaceDisposal';
@@ -923,13 +924,17 @@ export class DelegatedWorkspaceManager {
       let parent = path.posix.dirname(name);
       while (parent !== '.') { directories.add(parent); parent = path.posix.dirname(parent); }
     }
-    if (disposable) {
-      const attributes = (await runGit(workspace.directory, ['check-attr', '-z', '--stdin', 'filter'],
-        Buffer.from([...files.keys()].join('\0') + '\0'))).toString('utf8').split('\0');
-      for (let index = 2; index < attributes.length; index += 3) {
-        if (attributes[index] === 'lfs') throw new WorkspaceCleanupError('lfs-payload-unverified');
-        if (!['unspecified', 'unset'].includes(attributes[index])) throw new WorkspaceCleanupError('unsupported-filter');
+    const lfsPaths = new Set<string>();
+    const lfs = new LfsCheckoutVerifier(workspace.directory, workspace.source.root, this.directory);
+    const attributes = (await runGit(workspace.directory, ['check-attr', '-z', '--stdin', 'filter'],
+      Buffer.from([...files.keys()].join('\0') + '\0'))).toString('utf8').split('\0');
+    for (let index = 2; index < attributes.length; index += 3) {
+      if (attributes[index] === 'lfs') lfsPaths.add(attributes[index - 2]);
+      else if (disposable && !['unspecified', 'unset'].includes(attributes[index])) {
+        throw new WorkspaceCleanupError('unsupported-filter');
       }
+    }
+    if (disposable) {
       await assertDisposableTree(workspace.directory);
       await verifyWorkspaceExports(await this.exportDirectory(artifact.taskId), artifact.exports ?? [], workspace.directory);
     }
@@ -954,6 +959,11 @@ export class DelegatedWorkspaceManager {
         }
         if (process.platform !== 'win32' && expected.mode !== '120000'
           && Boolean(stat.mode & 0o111) !== (expected.mode === '100755')) throw new Error('Checkout file mode changed');
+        if (lfsPaths.has(child)) {
+          await lfs.verify(file, expected.oid, expected.mode);
+          files.delete(child);
+          return;
+        }
         const hash = createHash(expected.oid.length === 64 ? 'sha256' : 'sha1');
         hash.update(`blob ${stat.size}\0`);
         if (stat.isSymbolicLink()) hash.update(await fs.readlink(file, { encoding: 'buffer' }));
