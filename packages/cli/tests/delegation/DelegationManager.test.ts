@@ -816,9 +816,8 @@ describe('managed agent delegation', () => {
     await manager.cancelThread(parent.thread.id);
     expect(worker.abort).toHaveBeenCalledTimes(1);
     expect(worker.destroy).toHaveBeenCalledTimes(1);
-    expect(parent.onToolResult).toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringContaining('cancelled'), tool_use_id: task.taskId,
-    }));
+    expect(parent.onToolResult).not.toHaveBeenCalled();
+    expect(parent.onNotice).not.toHaveBeenCalled();
     await expect(scope.invoke('remote_cli_list_backends', {}, 'late')).rejects.toThrow('ended');
     const next = manager.begin(parent);
     await next.close();
@@ -1367,6 +1366,7 @@ describe('managed agent delegation', () => {
       threadId: parent.thread.id, backend: 'codex', workingDirectory: home, workspaceGeneration: 0,
     });
     await manager.laneStore.markReady(acquired.lane.id);
+    await manager.laneStore.markShutdownConfirmed(acquired.lane.id, acquired.lane.contextGeneration ?? 0);
     await manager.laneStore.markCleanupFailure(acquired.lane.id, 'Previous cleanup failed');
     const pointer = path.join(home, '.remote-cli', 'codex-sessions', `${acquired.lane.executorThreadId}.json`);
     fs.mkdirSync(path.dirname(pointer), { recursive: true });
@@ -1384,6 +1384,7 @@ describe('managed agent delegation', () => {
     const acquired = await manager.laneStore.acquire({
       threadId: parent.thread.id, backend: 'codex', workingDirectory: home, workspaceGeneration: 0,
     });
+    await manager.laneStore.markShutdownConfirmed(acquired.lane.id, acquired.lane.contextGeneration ?? 0);
     await manager.laneStore.markCleanupFailure(acquired.lane.id, 'Previous cleanup failed');
     const pointer = path.join(home, '.remote-cli', 'codex-sessions', `${acquired.lane.executorThreadId}.json`);
     fs.mkdirSync(pointer, { recursive: true });

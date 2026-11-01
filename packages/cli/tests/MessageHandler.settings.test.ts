@@ -14,6 +14,7 @@ const BACKENDS: SettingsBackend[] = ['claude', 'codex', 'opencode', 'kimi', 'zco
 async function fixture(temporaryRoot = tmpdir()) {
   // Temporary roots may contain platform aliases; the browser requires canonical roots.
   const cwd = await realpath(await mkdtemp(path.join(temporaryRoot, 'settings-handler-')));
+  vi.spyOn(os, 'homedir').mockReturnValue(cwd);
   const threads: Thread[] = ['thread-a', 'thread-b'].map(id => ({ id, name: id, workingDirectory: cwd, sessionId: null,
     createdAt: 0, lastActiveAt: 0, models: { codex: 'saved-codex', claude: 'saved-claude' }, efforts: { agy: 'low' } }));
   let config: any = { type: 'codex', claude: { model: 'global-claude' } };
@@ -163,8 +164,8 @@ describe('settings cards command integration', () => {
     const fields = { messageId: 'directory-apply-request', value: child.menu.directory.apply };
     const applied = await f.action(child.menu, fields);
     expect(applied.success).toBe(true);
-    expect(applied.notice).toContain('1 delegated worker lane(s)');
-    expect(cleanup).toHaveBeenCalledWith('thread-a', 1);
+    expect(applied.notice).toContain('Changed working directory');
+    expect(cleanup).not.toHaveBeenCalled();
     expect(f.pool.setWorkingDirectory).toHaveBeenCalledTimes(1);
     expect((await f.action(child.menu, fields)).success).toBe(true);
     expect(f.pool.setWorkingDirectory).toHaveBeenCalledTimes(1);
@@ -178,7 +179,7 @@ describe('settings cards command integration', () => {
     const cleanup = vi.spyOn((f.handler as any).delegation, 'invalidateWorkspaceGeneration').mockResolvedValue({ removed: 0, failed: 0 });
     await f.send(`/cd ${f.cwd}/child`);
     expect(f.pool.setWorkingDirectory).toHaveBeenCalledWith('thread-a', `${f.cwd}/child`);
-    expect(cleanup).toHaveBeenCalledWith('thread-a', 1);
+    expect(cleanup).not.toHaveBeenCalled();
   });
 
   it('permits browsing while the main thread is busy, rejects Apply, and ignores unnegotiated directory actions', async () => {

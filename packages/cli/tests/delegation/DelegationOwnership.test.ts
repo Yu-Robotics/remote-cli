@@ -174,6 +174,23 @@ afterEach(async () => {
 });
 
 describe('DelegationOwnership', () => {
+  it('checks foreign process evidence without opening inventory or acquiring storage', async () => {
+    const root = path.join(directory, 'read-only-check');
+    const observer = new DelegationOwnership(root);
+    await observer.assertNoForeignWriters();
+    expect(syncFs.existsSync(root)).toBe(false);
+    const active = await owner('read-only-check');
+    try {
+      await expect(observer.assertNoForeignWriters()).rejects.toThrow('still alive');
+      await active.ownership.assertNoForeignWriters();
+      expect(await fs.readdir(root)).toEqual([]);
+    } finally { await active.ownership.release(); }
+    await observer.assertNoForeignWriters();
+    await fs.writeFile(rootLock(root), 'unknown legacy owner');
+    await expect(observer.assertNoForeignWriters()).rejects.toThrow('legacy');
+    expect(await fs.readFile(rootLock(root), 'utf8')).toBe('unknown legacy owner');
+  });
+
   it('acquires once per instance, keeps metadata outside storage, and rejects independent owners', async () => {
     const root = path.join(directory, 'stores');
     const first = new DelegationOwnership(root);

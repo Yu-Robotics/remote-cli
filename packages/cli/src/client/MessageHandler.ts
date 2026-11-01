@@ -131,6 +131,8 @@ interface PendingQueueConfirmation {
 }
 
 interface ActiveThreadOperation {
+  messageId?: string;
+  recoverable?: boolean;
   token: symbol;
   done: Promise<void>;
   resolveDone: () => void;
@@ -216,6 +218,9 @@ export class MessageHandler {
     piBinding: threadId => readPiBinding(threadId),
   });
   private readonly activeThreadOperations = new Map<string, ActiveThreadOperation>();
+  private readonly conversationRevisions = new Map<string, number>();
+  private readonly cancelledOperations = new Set<symbol>();
+  private readonly coordinatorPreparations = new Map<string, Promise<void>>();
   private readonly abortOperations = new Map<string, Promise<void>>();
   private readonly pendingGoalActivations = new Map<string, { cancelled: boolean }>();
   private automaticUpdateInProgress = false;
@@ -464,9 +469,12 @@ export class MessageHandler {
     const threadId = message.threadId ?? this.threadManager.getDefaultThread().id;
     const content = message.content?.trim() ?? '';
     const clearing = content === '/clear' || content === '/new';
+    const management = content === '/abort' || /^\/thread(?:\s+list)?$/.test(content) || /^\/thread\s+new(?:\s|$)/.test(content);
+    let admissionCurrent = () => true;
     const body = () => {
-      if (!clearing) this.threadManager.contextResets.assertReady(threadId);
-      return this.handleAdmittedCommandMessage(message, fileOrder);
+      if (!admissionCurrent()) return Promise.resolve();
+      if (!clearing && !management) this.threadManager.contextResets.assertReady(threadId);
+      return this.handleAdmittedCommandMessage(message, fileOrder, () => admissionCurrent());
     };
     this.messageOpenIds.set(message.messageId, message.openId);
     if (isSessionControl(content)) {
@@ -498,9 +506,14 @@ export class MessageHandler {
       return;
     }
     try {
+      if (management) return await body();
+      if (clearing) {
+        await this.settingsAdmission.recovery(threadId, body);
+        return;
+      }
       // Abort and addressed human replies must remain available during native work.
       if (content === '/abort' || /^(?:yes|no)(?:\s|$)/.test(content) || content.startsWith('/input ')) return await body();
-      if (clearing || /^\/(?:backend|model|effort|cd)\s+\S/.test(content)) {
+      if (/^\/(?:backend|model|effort|cd)\s+\S/.test(content)) {
         const global = /^\/backend\s/.test(content) && !/\s@$/.test(content);
         await this.settingsAdmission.mutation(global ? '*' : threadId, async () => {
           this.settingsService.invalidate(global ? undefined : threadId);
@@ -508,17 +521,18 @@ export class MessageHandler {
           await body();
         });
       } else {
-        await this.settingsAdmission.command(threadId, message.messageId, async () => {
+        await this.settingsAdmission.command(threadId, message.messageId, async isCurrent => {
+          admissionCurrent = isCurrent;
           if (/^\/(?:clear|new|sandbox)(?:\s|$)/.test(content) || /^\/thread\s+delete(?:\s|$)/.test(content)) this.settingsService.invalidate(threadId);
           await body();
-        });
+        }, !content.startsWith('/') && !message.workingDirectory && !this.pendingReplaces.has(message.openId || message.messageId));
       }
     } catch (error) {
       this.sendResponse(message.messageId, threadId, { success: false, error: error instanceof Error ? error.message : 'Command admission failed.' }, clearing);
     }
   }
 
-  private async handleAdmittedCommandMessage(message: IncomingMessage, fileOrder?: number): Promise<void> {
+  private async handleAdmittedCommandMessage(message: IncomingMessage, fileOrder?: number, admissionCurrent = () => true): Promise<void> {
     const { messageId, content, attachments, workingDirectory, openId, isSlashCommand, threadId } = message;
 
     this.currentOpenId = openId;
@@ -551,6 +565,14 @@ export class MessageHandler {
     const settingsCommand = content?.trim() ?? '';
     if (settingsCommand === '/clear' || settingsCommand === '/new') {
       await this.clearThreadConversation(messageId, resolvedThreadId);
+      return;
+    }
+    if (/^\/thread(?:\s+list)?$/.test(settingsCommand) || /^\/thread\s+new(?:\s|$)/.test(settingsCommand)) {
+      await this.handleThreadCommand(messageId, resolvedThreadId, settingsCommand);
+      return;
+    }
+    if (settingsCommand === '/abort') {
+      await this.handleAbortCommand(messageId, resolvedThreadId, this.threadPool.getExistingExecutor(resolvedThreadId));
       return;
     }
     if (this.directoryCardsSupported && openId && settingsCommand === '/cd') {
@@ -588,7 +610,7 @@ export class MessageHandler {
       return;
     }
 
-    const executor = this.threadPool.getExecutor(resolvedThreadId);
+    let executor = this.threadPool.getExecutor(resolvedThreadId);
     this.sendStreamContext(messageId, resolvedThreadId, executor);
 
     const goalCommand = parseGoalCommand(settingsCommand);
@@ -637,12 +659,6 @@ export class MessageHandler {
       goalRequest = goalCommand.request;
     }
 
-    // Handle /abort for this specific thread (bypasses busy check)
-    if (content?.trim() === '/abort') {
-      await this.handleAbortCommand(messageId, resolvedThreadId, executor);
-      return;
-    }
-
     const abortOperation = this.abortOperations.get(resolvedThreadId);
     if (abortOperation) {
       this.sendStreamChunk(messageId, resolvedThreadId, '⏳ Waiting for the current abort to finish...\n');
@@ -656,22 +672,9 @@ export class MessageHandler {
       }
     }
 
+    if (!admissionCurrent()) return;
     if (content?.trim() === '/queue' || content?.trim().startsWith('/queue ')) {
       await this.handleQueueCommand(messageId, resolvedThreadId, content.trim());
-      return;
-    }
-
-    // /thread (list) and /thread new never touch the caller thread's execution
-    // context, so they bypass the busy check (like /abort and /queue). This also
-    // covers the router's "+ New" card button, which always arrives without a
-    // threadId and would otherwise be rejected whenever the default thread is busy.
-    // /thread delete is intentionally NOT exempted: it keeps its own busy/queue guards.
-    const trimmedForThreadCmd = content?.trim() ?? '';
-    if (
-      /^\/thread(?:\s+list)?$/.test(trimmedForThreadCmd)
-      || /^\/thread\s+new(?:\s|$)/.test(trimmedForThreadCmd)
-    ) {
-      await this.handleThreadCommand(messageId, resolvedThreadId, trimmedForThreadCmd);
       return;
     }
 
@@ -746,6 +749,7 @@ export class MessageHandler {
         return;
       }
     }
+    if (!admissionCurrent()) return;
     const threadBusy = this.threadPool.isThreadBusy(resolvedThreadId);
     const queuedCount = this.threadQueues.get(resolvedThreadId)?.length ?? 0;
     if (!threadBusy && !this.hasThreadQueueState(resolvedThreadId)) this.pausedQueues.delete(resolvedThreadId);
@@ -805,7 +809,8 @@ export class MessageHandler {
     }
     const goalActivation = goalRequest ? { cancelled: false } : undefined;
     if (goalActivation) this.pendingGoalActivations.set(resolvedThreadId, goalActivation);
-    const operationToken = this.beginThreadOperation(resolvedThreadId);
+    const operationToken = this.beginThreadOperation(resolvedThreadId, messageId,
+      !content?.trim().startsWith('/') && !workingDirectory && !this.pendingReplaces.has(openId || messageId));
 
     try {
       this.trackTask(messageId, resolvedThreadId, content || '');
@@ -824,18 +829,14 @@ export class MessageHandler {
         if (this.delegation.hasActiveTasks(resolvedThreadId)) {
           throw new Error('Cannot change working directory while a delegated worker is running. Wait for it to finish or send /abort first.');
         }
-        const generation = this.threadManager.getThread(resolvedThreadId)?.delegationWorkspaceGeneration ?? 0;
         const changedDirectory = await this.threadPool.setWorkingDirectory(resolvedThreadId, workingDirectory);
-        if (changedDirectory.changed) {
-          const cleanup = await this.delegation.invalidateWorkspaceGeneration(resolvedThreadId, generation + 1);
-          if (cleanup.failed) this.sendStreamChunk(messageId, resolvedThreadId,
-            `Working directory changed, but ${cleanup.failed} delegated worker lane(s) could not be cleaned up. Retry with /delegation reset after checking filesystem permissions.\n`);
-        }
+        if (changedDirectory.changed) executor = this.threadPool.getExecutor(resolvedThreadId);
       }
 
       // Update thread activity timestamp
       await this.threadManager.updateThread(resolvedThreadId, { lastActiveAt: Date.now() });
 
+      if (this.cancelledOperations.has(operationToken) || this.activeThreadOperations.get(resolvedThreadId)?.token !== operationToken) return;
       // Check for pending replace state (user sending file content)
       const pendingKey = openId || messageId;
       if (this.pendingReplaces.has(pendingKey) && content && !content.startsWith('/')) {
@@ -854,7 +855,7 @@ export class MessageHandler {
         content!,
         executor
       );
-      if (builtInResult) return;
+      if (builtInResult || this.cancelledOperations.has(operationToken) || this.activeThreadOperations.get(resolvedThreadId)?.token !== operationToken) return;
 
       if (isSlashCommand) {
         console.log(`[MessageHandler] Executing passthrough slash command: ${content}`);
@@ -866,12 +867,14 @@ export class MessageHandler {
       const processedContent = processFileReadContent(expandedContent);
       await this.executeCommand(messageId, resolvedThreadId, processedContent, executor, attachments);
     } catch (error) {
+      if (this.cancelledOperations.has(operationToken) || this.activeThreadOperations.get(resolvedThreadId)?.token !== operationToken) return;
       this.threadPool.setThreadError(resolvedThreadId, true);
       this.sendResponse(messageId, resolvedThreadId, {
         success: false,
         error: error instanceof Error ? error.message : 'Unknown error',
       });
     } finally {
+      this.cancelledOperations.delete(operationToken);
       if (goalActivation && this.pendingGoalActivations.get(resolvedThreadId) === goalActivation) {
         this.pendingGoalActivations.delete(resolvedThreadId);
       }
@@ -887,8 +890,10 @@ export class MessageHandler {
   private async handleAbortCommand(
     messageId: string,
     threadId: string,
-    executor: IExecutor
+    executor: IExecutor | undefined
   ): Promise<void> {
+    this.conversationRevisions.set(threadId, (this.conversationRevisions.get(threadId) ?? 0) + 1);
+    this.settingsAdmission.cancelRecoverable(threadId);
     this.fileInbox?.cancelThread(threadId);
     this.imageDeliveries.get(threadId)?.cancel();
     const pendingGoal = this.pendingGoalActivations.get(threadId);
@@ -896,14 +901,14 @@ export class MessageHandler {
     const existingAbort = this.abortOperations.get(threadId);
     if (existingAbort) {
       await existingAbort;
-      if (executor.hasUncertainShutdown?.()) {
+      if (executor?.hasUncertainShutdown?.()) {
         this.sendResponse(messageId, threadId, {
           success: false,
           error: 'Executor shutdown could not be confirmed. This thread remains busy; retry /abort before changing context or sending more work.',
         });
         return;
       }
-      if (executor.isGoalRunning?.()) {
+      if (executor?.isGoalRunning?.()) {
         this.sendResponse(messageId, threadId, {
           success: false,
           error: 'Native goal stop could not be confirmed. This thread remains busy; retry /goal pause or /abort.',
@@ -919,18 +924,25 @@ export class MessageHandler {
 
     const wasExecuting = this.threadPool.isThreadBusy(threadId);
     const clearedCount = this.clearThreadQueue(threadId);
-    const activeOperation = this.activeThreadOperations.get(threadId);
+    const activeOperation = this.cancelThreadOperation(threadId);
+    this.detachDelegationBridge(threadId);
+    for (const [id, approval] of this.pendingApprovalCards) {
+      if (approval.request.threadId === threadId) this.resolveApprovalCard(id, 'expired');
+    }
     let aborted = false;
     const operation = (async () => {
-      if (isDelegationEnabled(this.threadManager.getThread(threadId))) await this.delegation.cancelThread(threadId);
-      aborted = await executor.abort();
-      if (executor.hasUncertainShutdown?.()) {
+      const workers = this.delegation.cancelThread(threadId);
+      // Parent cancellation starts concurrently with worker cleanup.
+      [aborted] = await Promise.all([executor ? executor.abort() : Promise.resolve(false), workers]);
+      if (executor?.hasUncertainShutdown?.()) {
         throw new Error('Executor shutdown could not be confirmed. This thread remains busy; retry /abort before changing context or sending more work.');
       }
-      if (!aborted && executor.isGoalRunning?.()) {
+      if (!aborted && executor?.isGoalRunning?.()) {
         throw new Error('Native goal stop could not be confirmed. This thread remains busy; retry /goal pause or /abort.');
       }
-      if (activeOperation) await activeOperation.done;
+      if (activeOperation && !activeOperation.recoverable) await activeOperation.done;
+      if (activeOperation) this.finishThreadOperation(threadId, activeOperation.token);
+      else this.threadPool.setThreadBusy(threadId, false);
     })();
     const barrier = operation.then(() => undefined, () => undefined);
     this.abortOperations.set(threadId, barrier);
@@ -1012,26 +1024,54 @@ export class MessageHandler {
       success: !error, ...(error ? { error } : {}), timestamp: Date.now() });
   }
 
+  private detachDelegationBridge(threadId: string): void {
+    const bridge = this.delegationBridges.get(threadId);
+    if (!bridge) return;
+    bridge.activate(undefined);
+    this.delegationBridges.delete(threadId);
+    void bridge.close().catch(() => undefined);
+  }
+
   private async clearThreadConversation(messageId: string, threadId: string): Promise<void> {
-    if (this.threadPool.isThreadBusy(threadId) || this.hasThreadQueueState(threadId)
-      || this.abortOperations.has(threadId) || this.activeThreadOperations.has(threadId)) {
-      throw new Error('This thread is busy or has queued messages. Wait for it to finish and clear its queue before retrying /clear.');
+    this.conversationRevisions.set(threadId, (this.conversationRevisions.get(threadId) ?? 0) + 1);
+    this.settingsService.invalidate(threadId);
+    this.directoryBrowser.invalidate(threadId);
+    this.clearThreadQueue(threadId);
+    this.fileInbox?.cancelThread(threadId);
+    this.imageDeliveries.get(threadId)?.cancel();
+    for (const [id, approval] of this.pendingApprovalCards) {
+      if (approval.request.threadId === threadId) this.resolveApprovalCard(id, 'expired');
     }
-    this.threadPool.assertContextResettable(threadId);
-    const token = this.beginThreadOperation(threadId);
+    const active = this.cancelThreadOperation(threadId);
+    this.detachDelegationBridge(threadId);
+    // Closing the worker scope is synchronous; its cleanup remains manager-owned.
+    const workers = this.delegation.cancelThread(threadId);
+    void workers.catch(() => undefined);
     try {
-      await this.delegation.assertThreadContextResettable(threadId);
       await this.threadManager.contextResets.begin(threadId);
+      const thread = this.threadManager.getThread(threadId)!;
+      await this.threadManager.contextResets.advanceGeneration(threadId, thread.delegationWorkspaceGeneration);
+      const aborting = this.abortOperations.get(threadId);
+      if (aborting) throw new Error('Direct backend abort is still pending; retry after it settles');
+      const executor = this.threadPool.getExistingExecutor(threadId);
+      if (executor) {
+        await executor.abort();
+        if (executor.hasUncertainShutdown?.()) throw new Error('Direct backend shutdown is unconfirmed');
+      }
+      if (this.coordinatorPreparations.has(threadId)) throw new Error('Direct backend preparation is still pending; retry after it settles');
+      this.threadPool.assertContextResettable(threadId);
       await this.threadPool.clearThreadContext(threadId);
-      await this.delegation.clearThreadContexts(threadId);
+      if (this.abortOperations.has(threadId)) throw new Error('Direct backend abort is still pending; retry after it settles');
       await this.threadManager.contextResets.complete(threadId);
+      this.threadPool.setThreadBusy(threadId, false);
+      await workers;
       this.sendResponse(messageId, threadId, { success: true,
-        output: 'Conversation context cleared for all direct backends and managed workers in this thread.' }, true);
+        output: 'Started a fresh conversation for direct backends and managed workers. Historical worker contexts and artifacts are retained for explicit recovery. Pending native writers still block conflicting execution.' }, true);
     } catch (error) {
       const detail = error instanceof Error ? error.message : 'Local context storage is unavailable';
       throw new Error(`Could not clear thread conversation: ${detail}. Check local CLI storage and retry /clear or /new.`);
     } finally {
-      this.finishThreadOperation(threadId, token);
+      if (active) this.finishThreadOperation(threadId, active.token);
     }
   }
 
@@ -1290,6 +1330,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         });
         return true;
       }
+      await this.assertNativeCommandReady(threadId, executor);
       this.sendStreamChunk(messageId, threadId, '🗜️ Compressing conversation history...\n');
       const result = await executor.compactWhenFull!((chunk: string) => {
         this.sendStreamChunk(messageId, threadId, chunk);
@@ -1600,12 +1641,13 @@ You can also use natural language commands to control Claude Code CLI.`,
     this.currentOpenId = command.openId;
     this.messageOpenIds.set(command.messageId, command.openId);
     this.notificationAdapter.setCurrentOpenId(command.openId);
-    const operationToken = this.beginThreadOperation(threadId);
+    const operationToken = this.beginThreadOperation(threadId, command.messageId, true);
     console.log(`[MessageHandler] Starting queued message ${command.messageId} in thread ${threadId}: remaining=${this.threadQueues.get(threadId)?.length ?? 0}`);
     try {
       const executor = this.threadPool.getExecutor(threadId);
       this.trackTask(command.messageId, threadId, command.content);
       await this.threadManager.updateThread(threadId, { lastActiveAt: Date.now() });
+      if (this.cancelledOperations.has(operationToken) || this.activeThreadOperations.get(threadId)?.token !== operationToken) return;
       this.wsClient.send({
         type: 'queue_started',
         messageId: command.messageId,
@@ -1624,11 +1666,13 @@ You can also use natural language commands to control Claude Code CLI.`,
       const processedContent = processFileReadContent(this.expandCommandShortcuts(command.content));
       await this.executeCommand(command.messageId, threadId, processedContent, executor, command.attachments, true);
     } catch (error) {
+      if (this.cancelledOperations.has(operationToken) || this.activeThreadOperations.get(threadId)?.token !== operationToken) return;
       this.sendResponse(command.messageId, threadId, {
         success: false,
         error: this.pauseQueueAfterFailure(threadId, error instanceof Error ? error.message : 'Queued command failed'),
       });
     } finally {
+      this.cancelledOperations.delete(operationToken);
       if (this.finishThreadOperation(threadId, operationToken) && !this.pausedQueues.has(threadId)) {
         void this.startNextQueuedCommand(threadId);
       }
@@ -1645,11 +1689,22 @@ You can also use natural language commands to control Claude Code CLI.`,
     return `${error}\n\n⏸️ Queue paused after a failed task. Waiting: ${count} confirmed, ${pending} awaiting confirmation. Use /queue continue to resume, or /queue clear to discard pending messages.`;
   }
 
-  private beginThreadOperation(threadId: string): symbol {
+  private cancelThreadOperation(threadId: string): ActiveThreadOperation | undefined {
+    const active = this.activeThreadOperations.get(threadId);
+    if (active && !this.cancelledOperations.has(active.token)) {
+      this.cancelledOperations.add(active.token);
+      // Complete task-recovery bookkeeping before a newer request can be admitted.
+      if (active.messageId) this.sendResponse(active.messageId, threadId,
+        { success: false, error: 'Request cancelled by conversation recovery. Worker cleanup may continue in the background.' }, true);
+    }
+    return active;
+  }
+
+  private beginThreadOperation(threadId: string, messageId?: string, recoverable = false): symbol {
     const token = Symbol(threadId);
     let resolveDone!: () => void;
     const done = new Promise<void>((resolve) => { resolveDone = resolve; });
-    this.activeThreadOperations.set(threadId, { token, done, resolveDone });
+    this.activeThreadOperations.set(threadId, { token, done, resolveDone, messageId, recoverable });
     this.threadPool.setThreadBusy(threadId, true);
     return token;
   }
@@ -1744,8 +1799,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     if (sub === 'new') {
       const name = parts[2];
       const callerThread = this.threadManager.getThread(callerThreadId) || this.threadManager.getDefaultThread();
-      const callerExecutor = this.threadPool.getExecutor(callerThread.id);
-      const cwd = callerExecutor.getCurrentWorkingDirectory();
+      const cwd = callerThread.workingDirectory;
       try {
         const newThread = await this.threadManager.createThread(
           name || this.generateThreadName(),
@@ -2151,6 +2205,20 @@ You can also use natural language commands to control Claude Code CLI.`,
     return this.threadPool.getBackendKey(threadId);
   }
 
+  /** Native commands can execute model tools and must honor the same recovery barriers as chat. */
+  private async assertNativeCommandReady(threadId: string, executor: IExecutor): Promise<void> {
+    const token = this.activeThreadOperations.get(threadId)?.token;
+    if (this.coordinatorPreparations.has(threadId)) {
+      throw new Error('Previous backend preparation is still pending. Wait for it to settle, then retry /clear before sending more work.');
+    }
+    if (executor.hasUncertainShutdown?.()) throw new Error('Direct backend shutdown is unconfirmed. Retry /abort or /clear before sending more work.');
+    await this.delegation.assertExecutionSafe(executor.getCurrentWorkingDirectory(), threadId);
+    if (this.isDestroyed || this.abortOperations.has(threadId) || (token &&
+      (this.cancelledOperations.has(token) || this.activeThreadOperations.get(threadId)?.token !== token))) {
+      throw new Error('Conversation request was cancelled');
+    }
+  }
+
   /**
    * Execute passthrough slash command on the active backend's CLI.
    *
@@ -2172,6 +2240,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     executor: IExecutor
   ): Promise<void> {
     const backend = this.resolveSlashBackend(threadId);
+    await this.assertNativeCommandReady(threadId, executor);
 
     if (backend === 'dsh') {
       this.sendResponse(messageId, threadId, { success: false,
@@ -2320,6 +2389,22 @@ You can also use natural language commands to control Claude Code CLI.`,
     goalRequest?: ExecutorGoalRunRequest,
     goalActivation?: { cancelled: boolean },
   ): Promise<boolean> {
+    if (this.coordinatorPreparations.has(threadId)) {
+      throw new Error('Previous backend preparation is still pending. Wait for it to settle, then retry /clear before sending more work.');
+    }
+    if (executor.hasUncertainShutdown?.()) throw new Error('Direct backend shutdown is unconfirmed. Retry /abort or /clear before sending more work.');
+    const conversationRevision = this.conversationRevisions.get(threadId) ?? 0;
+    const operationToken = this.activeThreadOperations.get(threadId)?.token;
+    const isCurrent = () => !this.isDestroyed && (!operationToken ||
+      (!this.cancelledOperations.has(operationToken) && this.activeThreadOperations.get(threadId)?.token === operationToken));
+    let prepared!: () => void;
+    const preparation = new Promise<void>(resolve => { prepared = resolve; });
+    this.coordinatorPreparations.set(threadId, preparation);
+    const finishPreparation = () => {
+      prepared();
+      if (this.coordinatorPreparations.get(threadId) === preparation) this.coordinatorPreparations.delete(threadId);
+    };
+    const assertCurrent = () => { if (!isCurrent()) throw new Error('Conversation request was cancelled'); };
     this.sendStreamContext(messageId, threadId, executor);
     let delegationScope: DelegationScope | undefined;
     let delegationBridge: DelegationBridge | undefined;
@@ -2329,7 +2414,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     let executionActive = false;
     let lastProgramState: string | undefined;
     const activity = new ActivityProgress(snapshot => {
-      if (requestFinished || this.isDestroyed || this.abortOperations.has(threadId)
+      if (!isCurrent() || requestFinished || this.isDestroyed || this.abortOperations.has(threadId)
         || !this.activityProgressSupported || delegationScope?.isClosed()) return false;
       if (executor.isWaitingInput?.()) { showState('Waiting for your input'); return false; }
       if (!executionActive || delegationScope?.hasPendingResults()) return false;
@@ -2338,11 +2423,18 @@ You can also use natural language commands to control Claude Code CLI.`,
     });
     const showState = (text: string): void => {
       activity.clear();
-      if (text === lastProgramState || requestFinished || this.isDestroyed || this.abortOperations.has(threadId)
+      if (!isCurrent() || text === lastProgramState || requestFinished || this.isDestroyed || this.abortOperations.has(threadId)
         || !this.activityProgressSupported || delegationScope?.isClosed()) return;
       if (this.sendActivity(messageId, threadId, { source: 'state', text })) lastProgramState = text;
     };
     const complete = async (success: boolean, error?: string): Promise<boolean> => {
+      finishPreparation();
+      if (!isCurrent()) {
+        imageDelivery?.cancel();
+        activity.dispose();
+        void delegationScope?.close().catch(() => undefined);
+        return false;
+      }
       await imageDelivery?.finish();
       if (this.imageDeliveries.get(threadId) === imageDelivery) this.imageDeliveries.delete(threadId);
       requestFinished = true;
@@ -2352,6 +2444,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         && !this.isDestroyed && !this.abortOperations.has(threadId)
         ? delegationScope.getRetainedResults() : [];
       if (delegationScope) await delegationScope.close();
+      if (!isCurrent()) return false;
       if (retained.length && !this.isDestroyed && !this.abortOperations.has(threadId)) {
         const details = retained.map(task => [
           `${task.backend}: ${task.state} (${task.taskId})`, task.output,
@@ -2382,14 +2475,14 @@ You can also use natural language commands to control Claude Code CLI.`,
       if (goalRequest && thread && isDelegationEnabled(thread)) {
         throw new Error('Turn managed delegation off before starting a native goal.');
       }
+      await this.delegation.assertExecutionSafe(executor.getCurrentWorkingDirectory(), threadId);
+      assertCurrent();
       if (thread && isDelegationEnabled(thread) && executor.configureDelegation) {
-        if (this.delegation.blocksWorkspace(executor.getCurrentWorkingDirectory(), threadId)) {
-          throw new Error('A delegated worker holds this workspace. Wait for it to finish; if worker cleanup failed, stop the worker and restart the CLI.');
-        }
         const backend = this.threadPool.getBackendKey(threadId);
         if (!thread.delegationBackends?.includes(backend)) {
           await this.threadManager.updateThread(threadId, { delegationBackends: [...(thread.delegationBackends ?? []), backend] });
         }
+        assertCurrent();
         delegationScope = this.delegation.begin({ thread, messageId,
           backend: this.threadPool.getBackendKey(threadId),
           config: (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' },
@@ -2407,10 +2500,10 @@ You can also use natural language commands to control Claude Code CLI.`,
           onActivityProgress: this.delegationProgressSupported && this.activityProgressSupported
             ? progress => this.sendDelegationProgress(messageId, threadId, progress)
             : undefined,
-          onApproval: (request, child) => this.forwardApproval(request, child, messageId, threadId, true),
-          onApprovalResolved: (id, status) => this.resolveApprovalCard(id, status),
+          onApproval: (request, child) => isCurrent() && this.forwardApproval(request, child, messageId, threadId, true),
+          onApprovalResolved: (id, status) => { if (isCurrent()) this.resolveApprovalCard(id, status); },
           isWorkspaceBusy: cwd => this.threadManager.listThreads().some(other => {
-            if (other.id === threadId || !this.threadPool.isThreadBusy(other.id)) return false;
+            if (other.id === threadId && isCurrent() || !this.threadPool.isThreadBusy(other.id)) return false;
             try { return workspacesOverlap(realpathSync(this.threadPool.getExecutor(other.id).getCurrentWorkingDirectory()), cwd); }
             catch { return true; }
           }),
@@ -2418,17 +2511,20 @@ You can also use natural language commands to control Claude Code CLI.`,
         delegationBridge = this.delegationBridges.get(threadId) ?? new DelegationBridge();
         this.delegationBridges.set(threadId, delegationBridge);
         const connection = await delegationBridge.start();
+        assertCurrent();
         await executor.configureDelegation(connection);
+        assertCurrent();
         if (delegationScope.isClosed() || this.isDestroyed || this.abortOperations.has(threadId)) {
           throw new Error('Delegation was cancelled before the coordinator started');
         }
-        const pendingArtifacts = await this.delegation.pendingArtifactContext(thread!, executor.getCurrentWorkingDirectory());
-        content = `${DELEGATION_INSTRUCTIONS}${pendingArtifacts ? `\n\n${pendingArtifacts}` : ''}\n\nUser request:\n${content}`;
+        content = `${DELEGATION_INSTRUCTIONS}\n\nUser request:\n${content}`;
       } else if (thread?.delegationBackends?.includes(this.threadPool.getBackendKey(threadId)) && executor.configureDelegation) {
         await executor.configureDelegation(undefined);
       }
       const onTaskNotification = (notification: TaskNotificationInfo): void => {
-        if (this.isDestroyed || !this.threadManager.getThread(threadId)) return;
+        if (this.isDestroyed || !this.threadManager.getThread(threadId)
+          || (this.conversationRevisions.get(threadId) ?? 0) !== conversationRevision
+          || (this.threadManager.getThread(threadId)?.delegationWorkspaceGeneration ?? 0) !== (thread?.delegationWorkspaceGeneration ?? 0)) return;
         this.notificationAdapter.sendTaskNotification({ ...notification, threadId }, openId);
       };
       const imageCwd = thread?.workingDirectory ?? executor.getCurrentWorkingDirectory();
@@ -2469,10 +2565,11 @@ You can also use natural language commands to control Claude Code CLI.`,
       const executeOptions = {
         onActivity: this.activityProgressSupported ? (snapshot: ActivityProgressInfo) => activity.offer(snapshot) : undefined,
         onApprovalRequest: (approval: ApprovalRequestInfo) => {
+          if (!isCurrent()) return false;
           showState('Waiting for approval');
           return this.forwardApproval(approval, executor, messageId, threadId);
         },
-        onApprovalResolved: (requestId: string, status: ApprovalStatus) => this.resolveApprovalCard(requestId, status),
+        onApprovalResolved: (requestId: string, status: ApprovalStatus) => { if (isCurrent()) this.resolveApprovalCard(requestId, status); },
         onTaskNotification,
         onStream: (chunk: string) => {
           streamedAny = true;
@@ -2518,6 +2615,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         attachments,
       };
       const assertCoordinatorActive = (): void => {
+        assertCurrent();
         if (delegationScope && (delegationScope.isClosed() || this.isDestroyed || this.abortOperations.has(threadId))) {
           throw new Error('Delegation was cancelled');
         }
@@ -2543,20 +2641,20 @@ You can also use natural language commands to control Claude Code CLI.`,
           if (!active) return Promise.reject(new Error('The coordinator execution has ended'));
           return scope.invoke(...args);
         });
-        const canPublish = () => active && (!scope || (!scope.isClosed() && !scope.hasPendingResults()));
+        const canPublish = () => isCurrent() && active && (!scope || (!scope.isClosed() && !scope.hasPendingResults()));
         const guardedOptions: ExecuteOptions = {
           ...options,
           onActivity: options.onActivity ? snapshot => {
-            if (!active || requestFinished || this.isDestroyed || this.abortOperations.has(threadId)) return;
+            if (!isCurrent() || !active || requestFinished || this.isDestroyed || this.abortOperations.has(threadId)) return;
             if (executor.isWaitingInput?.()) {
               showState('Waiting for your input');
             } else if (canPublish()) options.onActivity?.(snapshot);
             else if (scope && !scope.isClosed()) showState('Waiting for worker results');
           } : undefined,
           onStream: chunk => {
-            if (!active || scope?.isClosed()) return;
+            if (!isCurrent() || !active || scope?.isClosed()) return;
             queueMicrotask(() => {
-              if (active && !requestFinished && executor.isWaitingInput?.()) showState('Waiting for your input');
+              if (isCurrent() && active && !requestFinished && executor.isWaitingInput?.()) showState('Waiting for your input');
             });
             if (canPublish()) options.onStream?.(chunk);
             else {
@@ -2564,7 +2662,7 @@ You can also use natural language commands to control Claude Code CLI.`,
               // ACP and Pi may set their pending-input flag just after emitting
               // the prompt. Keep real questions/approvals visible, not stale prose.
               queueMicrotask(() => {
-                if (active && !scope?.isClosed() && executor.isWaitingInput?.()) options.onStream?.(chunk);
+                if (isCurrent() && active && !scope?.isClosed() && executor.isWaitingInput?.()) options.onStream?.(chunk);
               });
             }
           },
@@ -2572,8 +2670,8 @@ You can also use natural language commands to control Claude Code CLI.`,
           onImage: image => { if (canPublish()) options.onImage?.(image); else suppressed = true; },
           onImageFile: filePath => { if (canPublish()) options.onImageFile?.(filePath); else suppressed = true; },
           onRedactedThinking: () => { if (canPublish()) options.onRedactedThinking?.(); },
-          onToolUse: tool => { if (active && !scope?.isClosed()) options.onToolUse?.(tool); },
-          onToolResult: tool => { if (active && !scope?.isClosed()) options.onToolResult?.(tool); },
+          onToolUse: tool => { if (isCurrent() && active && !scope?.isClosed()) options.onToolUse?.(tool); },
+          onToolResult: tool => { if (isCurrent() && active && !scope?.isClosed()) options.onToolResult?.(tool); },
         };
         const backend = this.threadPool.getBackendKey(threadId);
         const launchMetadata = captureExecutionMetadata(executor, backend);
@@ -2622,14 +2720,20 @@ You can also use natural language commands to control Claude Code CLI.`,
         }
       };
 
+      finishPreparation();
+      assertCurrent();
       let prompt = content;
       let options: ExecuteOptions = executeOptions;
       let closeoutRounds = 0;
       for (;;) {
         let result = await executeOnce(prompt, options);
+        assertCoordinatorActive();
         // Retry only an execution that accepted no new worker launch. Historical
         // completed tasks must not disable recovery of the result continuation.
-        if (mayRetry && await this.clearInvalidCodexModel(threadId, executor, result.error)) {
+        if (mayRetry && await this.withCoordinatorPreparation(threadId, () => {
+          assertCoordinatorActive();
+          return this.clearInvalidCodexModel(threadId, executor, result.error);
+        })) {
           assertCoordinatorActive();
           this.sendStreamChunk(messageId, threadId,
             '⚠️ The saved Codex model is unavailable for this account. Cleared it and retrying with the backend default...\n');
@@ -2641,8 +2745,11 @@ You can also use natural language commands to control Claude Code CLI.`,
           if ('compactWhenFull' in executor && typeof executor.compactWhenFull === 'function') {
             this.sendStreamChunk(messageId, threadId, '🔄 Context window full. Compacting conversation history, please wait...\n');
             showState('Compacting context');
-            const compactResult = await executor.compactWhenFull!((chunk: string) => {
-              this.sendStreamChunk(messageId, threadId, chunk);
+            const compactResult = await this.withCoordinatorPreparation(threadId, () => {
+              assertCoordinatorActive();
+              return executor.compactWhenFull!((chunk: string) => {
+                if (isCurrent()) this.sendStreamChunk(messageId, threadId, chunk);
+              });
             });
             assertCoordinatorActive();
             if (!compactResult.success) {
@@ -2696,6 +2803,22 @@ You can also use natural language commands to control Claude Code CLI.`,
       }
     } catch (error) {
       return complete(false, error instanceof Error ? error.message : 'Execution error');
+    } finally {
+      finishPreparation();
+      if (delegationBridge && this.delegationBridges.get(threadId) !== delegationBridge) {
+        void delegationBridge.close().catch(() => undefined);
+      }
+    }
+  }
+
+  /** Native retry/configuration work may outlive cancellation and still write stable pointers. */
+  private async withCoordinatorPreparation<T>(threadId: string, operation: () => Promise<T>): Promise<T> {
+    const pending = Promise.resolve().then(operation);
+    const barrier = pending.then(() => undefined, () => undefined);
+    this.coordinatorPreparations.set(threadId, barrier);
+    try { return await pending; }
+    finally {
+      if (this.coordinatorPreparations.get(threadId) === barrier) this.coordinatorPreparations.delete(threadId);
     }
   }
 
@@ -3025,18 +3148,16 @@ You can also use natural language commands to control Claude Code CLI.`,
   /** Shared card/text Apply path. Callers hold exclusive settings admission. */
   private async changeWorkingDirectory(threadId: string, targetDir: string): Promise<ExecuteResult> {
     if (this.isDestroyed || this.automaticUpdateInProgress || this.abortOperations.has(threadId)
-      || this.threadPool.isThreadBusy(threadId) || this.hasThreadQueueState(threadId)) {
+      || this.threadPool.isThreadBusy(threadId) || this.coordinatorPreparations.has(threadId) || this.hasThreadQueueState(threadId)) {
       throw new Error('Cannot change working directory while the thread has active or queued work. Retry when it is idle.');
     }
     if (this.delegation.hasActiveTasks(threadId)) {
       throw new Error('Cannot change working directory while a delegated worker is running. Wait for it to finish or send /abort first.');
     }
     this.settingsService.invalidate(threadId);
-    const generation = this.threadManager.getThread(threadId)?.delegationWorkspaceGeneration ?? 0;
     const { cwd, changed } = await this.threadPool.setWorkingDirectory(threadId, targetDir);
-    const cleanup = changed ? await this.delegation.invalidateWorkspaceGeneration(threadId, generation + 1) : { removed: 0, failed: 0 };
     this.directoryBrowser.invalidate(threadId);
-    return { success: true, output: `✅ Changed working directory to: ${cwd}${changed ? '\nConversation context cleared for all direct and delegated backends in this thread.' : ''}${cleanup.failed ? `\n⚠️ ${cleanup.failed} delegated worker lane(s) could not be cleaned up. Retry with /delegation reset after checking filesystem permissions.` : ''}` };
+    return { success: true, output: `✅ Changed working directory to: ${cwd}${changed ? '\nConversation context cleared for all direct and delegated backends in this thread.' : ''}` };
   }
 
   private settingsState(threadId: string): SettingsState | undefined {
@@ -3057,7 +3178,7 @@ You can also use natural language commands to control Claude Code CLI.`,
   private settingsBusy(threadId: string, exceptRequest?: string, includeQueue = true): boolean {
     return this.isDestroyed || this.automaticUpdateInProgress || this.threadPool.isThreadBusy(threadId)
       || this.delegation.hasActiveTasks(threadId) || this.abortOperations.has(threadId)
-      || this.settingsAdmission.hasCommand(threadId, exceptRequest) || (includeQueue && this.hasThreadQueueState(threadId));
+      || this.coordinatorPreparations.has(threadId) || this.settingsAdmission.hasCommand(threadId, exceptRequest) || (includeQueue && this.hasThreadQueueState(threadId));
   }
 
   private settingsFallback(menu: SettingsMenu): string {

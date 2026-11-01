@@ -81,6 +81,9 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
     expect((await scope.collectPendingResults())[0].state).toBe('interrupted');
     expect((await fs.stat(workers[0].cwd)).isDirectory()).toBe(true);
     expect(manager.blocksWorkspace(fixture.root, 'other')).toBe(true);
+    const [lane] = await manager.laneStore.lanesForThread(parent.thread.id);
+    expect(lane.shutdownConfirmedGeneration).toBeUndefined();
+    await expect(manager.laneStore.assertThreadContextResettable(parent.thread.id)).rejects.toThrow('unconfirmed');
   });
 
   it('keeps unsupported-platform delegation working under conservative checkout rules', async () => {
@@ -280,6 +283,38 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
     expect(await manager.resetWorkerLanes(parent.thread.id)).toBe(1);
   });
 
+  it('excludes old artifacts and lanes after durable conversation detachment and restart', async () => {
+    const scope = manager.begin(parent);
+    await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Old changes' }, 'old');
+    await fs.writeFile(path.join(workers[0].cwd, 'source.txt'), 'historical changes\n');
+    workers[0].finish({ success: true });
+    const [old] = await scope.collectPendingResults();
+    const [oldLane] = await manager.laneStore.lanesForThread(parent.thread.id);
+    await scope.close();
+    const resets = new ThreadContextReset(path.join(fixture.directory, 'reset-state'));
+    await resets.begin(parent.thread.id);
+    await resets.advanceGeneration(parent.thread.id);
+    await resets.complete(parent.thread.id);
+    await manager.destroy();
+    manager = makeManager();
+    parent.thread = { ...parent.thread, delegationWorkspaceGeneration: new ThreadContextReset(path.join(fixture.directory, 'reset-state')).generation(parent.thread.id) };
+    expect(await manager.pendingArtifactContext(parent.thread, fixture.root)).toBe('');
+    const historical = await manager.workspaceManager.enumerateArtifacts({ threadId: parent.thread.id });
+    expect(historical.items).toEqual(expect.arrayContaining([expect.objectContaining({ taskId: old.taskId })]));
+    const next = manager.begin(parent);
+    await next.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Fresh work' }, 'new');
+    const lanes = await manager.laneStore.lanesForThread(parent.thread.id);
+    expect(lanes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: oldLane.id, workspaceGeneration: 0 }),
+      expect.objectContaining({ workspaceGeneration: 1, state: 'running' }),
+    ]));
+    expect(workers[1].cwd).not.toBe(workers[0].cwd);
+    workers[1].finish({ success: true });
+    await next.collectPendingResults();
+    expect(await next.checkArtifactCloseout()).toEqual([]);
+    expect(await fs.readFile(path.join(workers[0].cwd, 'source.txt'), 'utf8')).toBe('historical changes\n');
+  });
+
   it('rediscovers pending output after restart without diagnostic task records', async () => {
     const scope = manager.begin(parent);
     await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Change fixture' }, 'launch');
@@ -294,7 +329,8 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
     manager = makeManager();
     expect(await manager.pendingArtifactContext(parent.thread, fixture.root)).toContain(result.taskId);
     const next = manager.begin(parent);
-    expect(await next.checkArtifactCloseout()).toMatchObject([{ taskId: result.taskId, status: 'pending' }]);
+    // Ordinary turns do not inherit mandatory managed-work closeout. Explicit inspection remains available.
+    expect(await next.checkArtifactCloseout()).toEqual([]);
     const inspected = await next.invoke('remote_cli_integrate', { taskId: result.taskId, action: 'inspect' }, 'inspect') as { revision: string };
     await next.invoke('remote_cli_integrate', { taskId: result.taskId, action: 'retain', expectedRevision: inspected.revision }, 'retain');
     expect(await next.checkArtifactCloseout()).toEqual([]);
@@ -335,7 +371,7 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
       manager = makeManager();
       expect(await manager.pendingArtifactContext(parent.thread, fixture.root)).toContain(result.taskId);
       const next = manager.begin(parent);
-      expect(await next.checkArtifactCloseout()).toMatchObject([{ taskId: result.taskId, status: 'unavailable' }]);
+      expect(await next.checkArtifactCloseout()).toEqual([]);
       await next.close();
       await manager.destroy();
     }
@@ -386,7 +422,7 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
     expect(context).not.toContain('storage-inventory');
     const scope = manager.begin(parent);
     expect(await scope.checkArtifactCloseout()).toEqual([]);
-    expect(parent.onNotice).toHaveBeenCalledWith(expect.stringContaining('inventory is incomplete'));
+    expect(parent.onNotice).not.toHaveBeenCalled();
     expect(await manager.workspaceManager.retryReclamation()).toMatchObject({ incomplete: true, attempted: 0 });
     // A real task in this turn is still checked even with global uncertainty.
     const capture = vi.spyOn(manager.workspaceManager, 'collect').mockRejectedValue(new Error('Synthetic capture failure before artifact persistence'));

@@ -23,7 +23,7 @@ export interface Thread {
   /** Backends that may retain managed tools and require opt-out cleanup on resume. */
   delegationBackends?: BackendKey[];
   /**
-   * Advances whenever this thread successfully changes working directory.
+   * Advances on conversation reset and working-directory changes.
    * Delegated worker lanes use it to prevent a return to an old path from
    * reviving a conversation that belonged to an earlier workspace visit.
    */

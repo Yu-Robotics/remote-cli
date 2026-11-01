@@ -53,6 +53,55 @@ describe('ThreadExecutorPool', () => {
     else process.env.HOME = previousHome;
   });
 
+  describe('directory recovery safety', () => {
+    it('confirms native shutdown before replacing pointers and publishes a durable workspace generation', async () => {
+      const thread = manager.getDefaultThread();
+      await manager.updateThread(thread.id, { workingDirectory: tmpDir, models: { codex: 'saved-model' } });
+      const target = path.join(tmpDir, 'next-project');
+      await fs.mkdir(target);
+      const pointer = manager.getSessionFilePath(thread.id);
+      await fs.writeFile(pointer, 'old direct pointer');
+      const executor = pool.getExecutor(thread.id);
+      vi.mocked(executor.getCurrentWorkingDirectory).mockReturnValue(tmpDir);
+      let confirm!: () => void;
+      executor.waitForExit = vi.fn(() => new Promise<void>(resolve => { confirm = resolve; }));
+      const changing = pool.setWorkingDirectory(thread.id, target);
+      await vi.waitFor(() => expect(executor.waitForExit).toHaveBeenCalledOnce());
+      expect(await fs.readFile(pointer, 'utf8')).toBe('old direct pointer');
+      expect(manager.getThread(thread.id)?.workingDirectory).toBe(tmpDir);
+      confirm();
+      expect(await changing).toEqual({ cwd: target, changed: true });
+      expect(executor.resetContext).toHaveBeenCalledOnce();
+      expect(pool.getExistingExecutor(thread.id)).toBeUndefined();
+      const loaded = await ThreadManager.initialize(tmpDir);
+      expect(loaded.getThread(thread.id)).toMatchObject({ workingDirectory: target,
+        delegationWorkspaceGeneration: 1, models: { codex: 'saved-model' } });
+      pool.getExecutor(thread.id);
+      expect(mockExecutorFactory.mock.calls.at(-1)?.[2]).toBe(target);
+    });
+
+    it('keeps the original directory and stable pointer when native shutdown is unconfirmed', async () => {
+      const thread = manager.getDefaultThread();
+      await manager.updateThread(thread.id, { workingDirectory: tmpDir });
+      const target = path.join(tmpDir, 'next-project');
+      await fs.mkdir(target);
+      const pointer = manager.getSessionFilePath(thread.id);
+      await fs.writeFile(pointer, 'old direct pointer');
+      const executor = pool.getExecutor(thread.id);
+      vi.mocked(executor.getCurrentWorkingDirectory).mockReturnValue(tmpDir);
+      executor.waitForExit = vi.fn().mockRejectedValue(new Error('Synthetic unconfirmed exit'));
+      await expect(pool.setWorkingDirectory(thread.id, target)).rejects.toThrow('unconfirmed exit');
+      expect(await fs.readFile(pointer, 'utf8')).toBe('old direct pointer');
+      expect(manager.getThread(thread.id)?.workingDirectory).toBe(tmpDir);
+      expect(() => pool.getExecutor(thread.id)).toThrow('incomplete');
+      expect(executor.resetContext).not.toHaveBeenCalled();
+      vi.mocked(executor.waitForExit).mockResolvedValue(undefined);
+      await manager.contextResets.advanceGeneration(thread.id);
+      await pool.clearThreadContext(thread.id);
+      await manager.contextResets.complete(thread.id);
+    });
+  });
+
   describe('lazy executor creation', () => {
     it('routes only the active backend speed preference, including explicit Follow, to the executor factory', async () => {
       const thread = manager.getDefaultThread();
@@ -96,6 +145,15 @@ describe('ThreadExecutorPool', () => {
       expect(pool.isThreadBusy(defaultThread.id)).toBe(true);
       pool.setThreadBusy(defaultThread.id, false);
       expect(pool.isThreadBusy(defaultThread.id)).toBe(false);
+    });
+
+    it('retains the busy fence for an uncertain shutdown even after the foreground operation finishes', () => {
+      const thread = manager.getDefaultThread();
+      const executor = pool.getExecutor(thread.id);
+      executor.isBusy = () => false;
+      executor.hasUncertainShutdown = () => true;
+      pool.setThreadBusy(thread.id, false);
+      expect(pool.isThreadBusy(thread.id)).toBe(true);
     });
 
     it('retains native cleanup ownership after the foreground busy flag clears', () => {

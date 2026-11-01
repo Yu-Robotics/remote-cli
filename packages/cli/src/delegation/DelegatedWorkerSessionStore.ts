@@ -26,9 +26,11 @@ export interface DelegatedWorkerLane {
   cleanupAttempts?: number;
   cleanupError?: string;
   contextGeneration?: number;
+  /** Native exit was confirmed for this exact acquisition, independently of artifact recovery. */
+  shutdownConfirmedGeneration?: number;
   contextResetPending?: boolean;
   lastClearedGeneration?: number;
-  /** Confirmed cleared and superseded; retained for stale cards but never reused. */
+  /** Cleared and retired; retained for stale cards and recovery, never reused. */
   contextRetired?: boolean;
   /** Offline discard retires scheduling without claiming native context was cleared. */
   workspaceDiscarded?: boolean;
@@ -79,6 +81,17 @@ function sameIdentity(lane: DelegatedWorkerLane, identity: DelegatedWorkerLaneId
     && lane.workspaceGeneration === identity.workspaceGeneration;
 }
 
+function shutdownConfirmed(lane: DelegatedWorkerLane): boolean {
+  return lane.shutdownConfirmedGeneration !== undefined
+    && lane.shutdownConfirmedGeneration === (lane.contextGeneration ?? 0);
+}
+
+function contextResettable(lane: DelegatedWorkerLane): boolean {
+  if (lane.state === 'dirty' && shutdownConfirmed(lane)) return true;
+  return !lane.cleanupPending && (lane.state === 'ready'
+    || lane.state === 'dirty' && Boolean(lane.contextResetPending || lane.contextRetired));
+}
+
 function validateLane(value: unknown): value is DelegatedWorkerLane {
   if (!value || typeof value !== 'object') return false;
   const lane = value as Partial<DelegatedWorkerLane>;
@@ -100,6 +113,8 @@ function validateLane(value: unknown): value is DelegatedWorkerLane {
     && (lane.cleanupPending === undefined || typeof lane.cleanupPending === 'boolean')
     && (lane.cleanupAttempts === undefined || validGeneration(lane.cleanupAttempts))
     && (lane.contextGeneration === undefined || validGeneration(lane.contextGeneration))
+    && (lane.shutdownConfirmedGeneration === undefined || (validGeneration(lane.shutdownConfirmedGeneration)
+      && lane.shutdownConfirmedGeneration === (lane.contextGeneration ?? 0)))
     && (lane.lastClearedGeneration === undefined || validGeneration(lane.lastClearedGeneration))
     && (lane.contextResetPending === undefined || typeof lane.contextResetPending === 'boolean')
     && (lane.contextRetired === undefined || typeof lane.contextRetired === 'boolean')
@@ -130,7 +145,31 @@ export class DelegatedWorkerSessionStore {
     this.beforeInitialize = guard;
   }
 
-  assertContextReady(threadId: string): void { this.contextResets.assertReady(threadId); }
+  assertContextReady(threadId: string, generation?: number): void {
+    this.contextResets.assertReady(threadId);
+    if (generation !== undefined && this.contextResets.generation(threadId, generation) !== generation) {
+      throw new Error('Managed conversation generation has changed; start a fresh request.');
+    }
+  }
+
+  /** Without an ownership journal, legacy lane state is the only available writer evidence. */
+  async assertLegacyWritersStopped(): Promise<void> {
+    let names: string[];
+    try { names = await fs.readdir(this.directory); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
+    if (names.length > 10_000) throw new Error('Legacy worker inventory is too large to verify safely');
+    for (const name of names) {
+      if (!name.endsWith('.json')) continue;
+      const filename = path.join(this.directory, name);
+      const stat = await fs.lstat(filename);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 64 * 1024) throw new Error('Legacy worker evidence is unavailable');
+      const lane: unknown = JSON.parse(await fs.readFile(filename, 'utf8'));
+      if (!validateLane(lane) || name !== `${lane.id}.json`) throw new Error('Legacy worker evidence is invalid');
+      if (lane.state !== 'ready' && !shutdownConfirmed(lane) && !lane.contextRetired) {
+        throw new Error('Legacy worker shutdown is unconfirmed; preserve its files and native pointer');
+      }
+    }
+  }
 
   initialize(): Promise<void> {
     return this.initialized ??= Promise.resolve().then(async () => {
@@ -149,7 +188,7 @@ export class DelegatedWorkerSessionStore {
     this.assertIdentity(identity);
     await this.initialize();
     return this.mutate(async () => {
-      this.assertContextReady(identity.threadId);
+      this.assertContextReady(identity.threadId, identity.workspaceGeneration);
       const discarded = new Set<string>();
       for (const lane of this.lanes.values()) {
         if (sameIdentity(lane, identity) && await hasLegacyDiscardTombstone(this.directory, lane.id)) discarded.add(lane.id);
@@ -167,6 +206,7 @@ export class DelegatedWorkerSessionStore {
           cleanupError: 'Multiple delegated worker lanes matched one identity.' });
       } else if (ready.length >= 1) {
         const lane = { ...ready[0], state: 'preparing' as const, updatedAt: Date.now(),
+          shutdownConfirmedGeneration: undefined,
           contextGeneration: (ready[0].contextGeneration ?? 0) + 1, pooled: options.pooled === true };
         await this.writeAndRemember(lane);
         return { lane: clone(lane), reused: true };
@@ -177,7 +217,8 @@ export class DelegatedWorkerSessionStore {
       const lane: DelegatedWorkerLane = {
         id,
         executorThreadId: workerLaneExecutorId(id),
-        ...identity,
+        threadId: identity.threadId, backend: identity.backend,
+        workingDirectory: identity.workingDirectory, workspaceGeneration: identity.workspaceGeneration,
         pooled: options.pooled === true,
         state: 'preparing',
         createdAt: now,
@@ -189,11 +230,24 @@ export class DelegatedWorkerSessionStore {
   }
 
   async markRunning(id: string): Promise<DelegatedWorkerLane> {
-    return this.transition(id, 'running');
+    return this.transition(id, 'running', { shutdownConfirmedGeneration: undefined });
   }
 
   async markReady(id: string): Promise<DelegatedWorkerLane> {
-    return this.transition(id, 'ready', { cleanupPending: false, cleanupError: undefined });
+    return this.transition(id, 'ready', { cleanupPending: false, cleanupError: undefined,
+      shutdownConfirmedGeneration: undefined });
+  }
+
+  async markShutdownConfirmed(id: string, generation: number): Promise<void> {
+    if (!validGeneration(generation)) throw new Error('Invalid worker shutdown generation');
+    await this.initialize();
+    await this.mutate(async () => {
+      const lane = this.lanes.get(id);
+      if (!lane || (lane.contextGeneration ?? 0) !== generation) {
+        throw new Error('Worker context changed before shutdown confirmation');
+      }
+      await this.writeAndRemember({ ...lane, shutdownConfirmedGeneration: generation, updatedAt: Date.now() });
+    });
   }
 
   async markDirty(id: string, error: string, cleanupPending = false): Promise<DelegatedWorkerLane | undefined> {
@@ -214,6 +268,7 @@ export class DelegatedWorkerSessionStore {
       const lane = this.lanes.get(id);
       if (!lane) return;
       await this.writeAndRemember({ ...lane, state: 'dirty', cleanupPending: true,
+        shutdownConfirmedGeneration: lane.state === 'ready' ? lane.contextGeneration ?? 0 : lane.shutdownConfirmedGeneration,
         cleanupAttempts: (lane.cleanupAttempts ?? 0) + 1, cleanupError: error.slice(0, 4_000), updatedAt: Date.now() });
     });
   }
@@ -252,6 +307,7 @@ export class DelegatedWorkerSessionStore {
       for (const lane of this.lanes.values()) {
         if (lane.threadId !== threadId || (backend && lane.backend !== backend)) continue;
         const next: DelegatedWorkerLane = { ...lane, state: 'dirty', cleanupPending: true,
+          shutdownConfirmedGeneration: lane.state === 'ready' ? lane.contextGeneration ?? 0 : lane.shutdownConfirmedGeneration,
           cleanupError: 'Delegated worker context was reset.', updatedAt: Date.now() };
         await this.writeAndRemember(next);
         changed.push(clone(next));
@@ -270,7 +326,7 @@ export class DelegatedWorkerSessionStore {
   }
 
   private async transition(id: string, state: DelegatedWorkerLaneState,
-    extra: Partial<Pick<DelegatedWorkerLane, 'cleanupPending' | 'cleanupError'>> = {}): Promise<DelegatedWorkerLane> {
+    extra: Partial<Pick<DelegatedWorkerLane, 'cleanupPending' | 'cleanupError' | 'shutdownConfirmedGeneration'>> = {}): Promise<DelegatedWorkerLane> {
     if (!UUID_RE.test(id)) throw new Error('Invalid delegated worker lane ID');
     await this.initialize();
     return this.mutate(async () => {
@@ -289,7 +345,7 @@ export class DelegatedWorkerSessionStore {
     if (!UUID_RE.test(id) || !validGeneration(generation)) throw new Error('Invalid worker context reference');
     await this.initialize();
     await this.mutate(async () => {
-      this.assertContextReady(identity.threadId);
+      this.assertContextReady(identity.threadId, identity.workspaceGeneration);
       await this.clearContextLocked(id, generation, identity, clear);
     });
   }
@@ -312,8 +368,7 @@ export class DelegatedWorkerSessionStore {
 
   private resettableLanes(threadId: string): DelegatedWorkerLane[] {
     const lanes = [...this.lanes.values()].filter(lane => lane.threadId === threadId);
-    if (lanes.some(lane => lane.cleanupPending || (lane.state !== 'ready'
-      && !(lane.state === 'dirty' && (lane.contextResetPending || lane.contextRetired))))) {
+    if (lanes.some(lane => !contextResettable(lane))) {
       throw new Error('Cannot clear thread context: a Worker is active or its shutdown is unconfirmed. Wait for confirmed exit before retrying /clear.');
     }
     return lanes.filter(lane => !lane.contextRetired);
@@ -332,9 +387,10 @@ export class DelegatedWorkerSessionStore {
       if (lane.lastClearedGeneration === generation) return;
       throw new Error('The Worker context has changed. Use the latest Worker card.');
     }
-    if (lane.cleanupPending || (lane.state !== 'ready' && !(lane.state === 'dirty' && lane.contextResetPending))) {
+    if (lane.contextRetired || !contextResettable(lane)) {
       throw new Error('The Worker is active or its shutdown is unconfirmed. Wait before clearing context.');
     }
+    const recoveryHeld = lane.state === 'dirty' && shutdownConfirmed(lane);
     // Persist intent before unlinking. A crash or partial failure must never resume old context.
     const pending: DelegatedWorkerLane = { ...lane, state: 'dirty', contextResetPending: true, updatedAt: Date.now() };
     await this.writeAndRemember(pending);
@@ -344,10 +400,13 @@ export class DelegatedWorkerSessionStore {
     // Legacy lanes have no mode; preserve them conservatively when ambiguous.
     const superseded = lane.pooled !== true && [...this.lanes.values()].some(other =>
       other.id !== lane.id && sameIdentity(other, lane) && other.state !== 'dirty');
-    await this.writeAndRemember({ ...pending, state: superseded ? 'dirty' : 'ready', contextGeneration: current + 1,
+    const retired = superseded || recoveryHeld;
+    await this.writeAndRemember({ ...pending, state: retired ? 'dirty' : 'ready', contextGeneration: current + 1,
+      shutdownConfirmedGeneration: recoveryHeld ? current + 1 : undefined,
       contextResetPending: false, lastClearedGeneration: generation,
-      contextRetired: superseded ? true : undefined,
-      cleanupError: superseded ? 'Worker context cleared; a replacement lane remains active.' : undefined,
+      contextRetired: retired ? true : undefined,
+      cleanupError: recoveryHeld ? lane.cleanupError
+        : superseded ? 'Worker context cleared; a replacement lane remains active.' : undefined,
       updatedAt: Date.now() });
   }
 

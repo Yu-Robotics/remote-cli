@@ -10,6 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.195] - 2026-11-01
+
+### Fixed
+- Separate managed-worker conversation recovery from process shutdown and artifact cleanup. `/clear` and `/new` detach historical worker context and closeout obligations while preserving recovery files, archives, ownership evidence, and unfinished cleanup.
+- Interrupt the coordinator independently of worker finalization, bound conversation-facing cancellation waits, and fence late output and completion against newer requests. Preserve direct-backend shutdown checks and restrictions on execution that conflicts with uncertain workers, including when delegation is disabled.
+- Keep recovery commands available without requiring healthy historical worker inventory. Upgrade the local CLI; native provider-resume behavior and the Router protocol are unchanged.
+
+### Tests
+- Cover interrupted worker cleanup, durable reset and restart, historical context separation, late callbacks, resource conflicts, failed persistence, and direct-executor shutdown safeguards with isolated fixtures.
+
 ## [1.6.194] - 2026-10-31
 
 ### Fixed

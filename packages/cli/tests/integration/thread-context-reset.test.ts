@@ -14,6 +14,7 @@ import { DELEGATION_BACKENDS, type DelegationBackend } from '../../src/delegatio
 import type { IExecutor } from '../../src/executor/IExecutor';
 import type { ExecutorConfig } from '../../src/types/config';
 import { DshExecutor } from '../../src/executor/DshExecutor';
+import { runGit } from '../../src/delegation/GitCheckpoint';
 
 describe('thread-wide conversation reset', () => {
   let home: string;
@@ -144,7 +145,7 @@ describe('thread-wide conversation reset', () => {
     expect(current.destroy).toHaveBeenCalledOnce();
     expect(current.waitForExit).toHaveBeenCalledOnce();
     expect(current.resetContext).toHaveBeenCalledOnce();
-    expect(current.abort).not.toHaveBeenCalled();
+    expect(current.abort).toHaveBeenCalled();
     expect(factory).toHaveBeenCalledTimes(1);
     for (const backend of DELEGATION_BACKENDS) {
       expect(existsSync(pointer(backend, threadId))).toBe(false);
@@ -152,32 +153,83 @@ describe('thread-wide conversation reset', () => {
     }
     expect(existsSync(pointer('dsh', threadId).replace('.json', '.handoff.json'))).toBe(false);
     for (const value of lanes) {
-      expect(existsSync(pointer(value.backend, value.executorThreadId))).toBe(false);
-      if (value.backend === 'dsh') expect(existsSync(pointer('dsh', value.executorThreadId).replace('.json', '.handoff.json'))).toBe(false);
+      expect(existsSync(pointer(value.backend, value.executorThreadId))).toBe(true);
+      if (value.backend === 'dsh') expect(existsSync(pointer('dsh', value.executorThreadId).replace('.json', '.handoff.json'))).toBe(true);
     }
     expect(await fs.readFile(pointer('codex', sibling.executorThreadId), 'utf8')).toBe('old worker conversation');
     for (const file of preserved) expect(await fs.readFile(file, 'utf8')).toBe('preserved fixture');
-    expect(threads.getThread(threadId)).toEqual({ ...metadata, sessionId: null });
+    expect(threads.getThread(threadId)).toEqual({ ...metadata, sessionId: null, delegationWorkspaceGeneration: 4 });
     expect(threads.getThread(siblingId)).toEqual(siblingMetadata);
     const reloaded = new DelegatedWorkerSessionStore(undefined, threads.contextResets);
     const saved = await reloaded.lanesForThread(threadId);
     expect(saved).toHaveLength(lanes.length);
-    expect(saved.every(value => value.state === 'ready' && value.contextGeneration === 1)).toBe(true);
-    const acquired: string[] = [];
+    expect(saved.every(value => value.state === 'ready' && value.workspaceGeneration === 3)).toBe(true);
     for (const value of lanes) {
-      const next = await reloaded.acquire(value, { pooled: true });
-      acquired.push(next.lane.id);
-      expect(next.reused).toBe(true);
-      expect(next.lane.contextGeneration).toBe(2);
+      await expect(reloaded.acquire(value, { pooled: true })).rejects.toThrow('generation has changed');
+      const next = await reloaded.acquire({ ...value, workspaceGeneration: 4 }, { pooled: true });
+      expect(next.reused).toBe(false);
+      expect(lanes.some(old => old.id === next.lane.id)).toBe(false);
       expect(existsSync(pointer(next.lane.backend, next.lane.executorThreadId))).toBe(false);
     }
-    expect(acquired.sort()).toEqual(lanes.map(value => value.id).sort());
-    const clear = vi.fn(async () => {});
-    // A duplicate old card is harmless even after a fresh context has been acquired.
-    await reloaded.clearContext(lanes[0].id, 0, lanes[0], clear);
-    expect(clear).not.toHaveBeenCalled();
-    await expect(reloaded.clearContext(lanes[0].id, 1, lanes[0], clear)).rejects.toThrow('has changed');
+    await expect(delegation.resetWorkerContext(threads.getThread(threadId)!, lanes[0].id, 0)).rejects.toThrow();
     expect((pool.getExecutor(threadId) as any).saved).toBeNull();
+  });
+
+  it.each(['/clear', '/new'])('recovers with %s after aborting a worker before its required export exists', async command => {
+    // Exercise export finalization with synthetic process-group evidence on every host.
+    (delegation.workspaceManager as any).disposalSupported = true;
+    await runGit(project, ['init', '-b', 'main']);
+    await runGit(project, ['config', 'user.name', 'Test User']);
+    await runGit(project, ['config', 'user.email', 'test@example.com']);
+    await write(path.join(project, 'source.txt'), 'original source\n');
+    await runGit(project, ['add', '.']);
+    await runGit(project, ['commit', '-m', 'Initial synthetic fixture']);
+    await threads.updateThread(threadId, { delegation: true });
+    await seedDirect();
+    current = pool.getExecutor(threadId);
+    vi.mocked(current.abort).mockResolvedValue(true);
+    const worker: IExecutor = {
+      execute: vi.fn(() => new Promise(() => {})), abort: vi.fn(async () => true),
+      destroy: vi.fn(async () => {}), waitForExit: vi.fn(async () => {}),
+      waitForManagedProcessGroupExit: vi.fn(async () => {}), resetContext: vi.fn(),
+      getCurrentWorkingDirectory: () => project, setWorkingDirectory: vi.fn(),
+    };
+    let workerDirectory = '';
+    (delegation as any).factory = vi.fn((_guard, _config, cwd) => {
+      workerDirectory = cwd;
+      worker.getCurrentWorkingDirectory = () => cwd;
+      return worker;
+    });
+    vi.spyOn((delegation as any).registry, 'get').mockResolvedValue({ backend: 'codex', installed: true });
+    const scope = delegation.begin({ thread: threads.getThread(threadId)!, cwd: project,
+      backend: 'codex', config: { type: 'codex' }, messageId: 'aborted-parent',
+      onToolUse: vi.fn(), onToolResult: vi.fn(), onNotice: vi.fn(),
+      onApproval: vi.fn(() => true), onApprovalResolved: vi.fn() });
+    const task: any = await scope.invoke('remote_cli_delegate', {
+      backend: 'codex', objective: 'Prepare a synthetic export', exports: ['unfinished.txt'],
+    }, 'start');
+    expect(task.state).toBe('running');
+    const workerLane = (await delegation.laneStore.lanesForThread(threadId))[0];
+    await write(pointer('codex', workerLane.executorThreadId), 'old worker conversation');
+    const retainedFile = await write(path.join(workerDirectory, 'partial.txt'), 'partial worker output\n');
+    const archive = await write(path.join(home, '.remote-cli', 'codex-archive', 'history.jsonl'));
+    pool.setThreadBusy(threadId, true);
+    expect(await send('/abort')).toMatchObject({ success: true });
+    expect(worker.waitForExit).toHaveBeenCalled();
+    expect(worker.waitForManagedProcessGroupExit).toHaveBeenCalled();
+    await scope.close();
+    expect((await delegation.laneStore.lanesForThread(threadId))[0]).toMatchObject({ state: 'dirty' });
+    const artifact = await delegation.workspaceManager.describe(task.taskId);
+
+    expect(await send(command)).toMatchObject({ success: true });
+    expect(existsSync(pointer('codex', threadId))).toBe(false);
+    expect(existsSync(pointer('codex', workerLane.executorThreadId))).toBe(true);
+    expect(await fs.readFile(retainedFile, 'utf8')).toBe('partial worker output\n');
+    expect(await fs.readFile(archive, 'utf8')).toBe('preserved fixture');
+    expect(await delegation.workspaceManager.describe(task.taskId)).toEqual(artifact);
+    expect((await delegation.laneStore.lanesForThread(threadId))[0])
+      .toMatchObject({ state: 'dirty', workspaceGeneration: 3, shutdownConfirmedGeneration: 0 });
+    expect(await send('/clear')).toMatchObject({ success: true });
   });
 
   it('blocks every old context after later direct-pointer cleanup fails, including reload, and allows an explicit retry', async () => {
@@ -198,12 +250,12 @@ describe('thread-wide conversation reset', () => {
     await reload();
     await assertBlocked();
     expect(await send('/new')).toMatchObject({ success: true });
-    expect(existsSync(pointer('codex', worker.executorThreadId))).toBe(false);
+    expect(existsSync(pointer('codex', worker.executorThreadId))).toBe(true);
     expect(factory).not.toHaveBeenCalled();
     expect((pool.getExecutor(threadId) as any).saved).toBeNull();
   });
 
-  it('blocks ready lanes after a later worker unlink fails, preserving the retry across restart', async () => {
+  it('detaches safely without unlinking old worker pointers, even when their storage is unwritable', async () => {
     const lanes = [await lane('codex'), await lane('codex'), await lane('dsh')];
     await ready(...lanes);
     const original = fs.unlink.bind(fs);
@@ -211,21 +263,18 @@ describe('thread-wide conversation reset', () => {
       if (String(file) === pointer('codex', lanes[1].executorThreadId)) throw new Error('Synthetic worker failure');
       return original(file);
     });
-    expect(await send('/clear')).toMatchObject({ success: false });
-    expect(existsSync(pointer('codex', lanes[0].executorThreadId))).toBe(false);
-    expect(existsSync(pointer('dsh', lanes[2].executorThreadId))).toBe(true);
+    expect(await send('/clear')).toMatchObject({ success: true });
     fail.mockRestore();
     await reload();
-    await assertBlocked();
-    expect(await send('/clear')).toMatchObject({ success: true });
-    expect((await delegation.laneStore.lanesForThread(threadId)).every(value => value.state === 'ready')).toBe(true);
-    for (const value of lanes) expect(existsSync(pointer(value.backend, value.executorThreadId))).toBe(false);
+    expect(threads.getThread(threadId)?.delegationWorkspaceGeneration).toBe(4);
+    expect(await send('Fresh direct chat')).toMatchObject({ success: true });
+    for (const value of lanes) expect(existsSync(pointer(value.backend, value.executorThreadId))).toBe(true);
   });
 
   it('does not touch any pointer when reset intent cannot be persisted, and retries safely', async () => {
     await seedDirect();
-    const original = fs.writeFile.bind(fs);
-    const fail = vi.spyOn(fs, 'writeFile').mockImplementation(async (file, ...args: any[]) => {
+    const original = fs.open.bind(fs);
+    const fail = vi.spyOn(fs, 'open').mockImplementation(async (file, ...args: any[]) => {
       if (String(file).endsWith('.pending')) throw new Error('Synthetic intent failure');
       return (original as any)(file, ...args);
     });
@@ -250,12 +299,14 @@ describe('thread-wide conversation reset', () => {
     expect(existsSync(pointer('codex', threadId))).toBe(false);
   });
 
-  it.each(['enumeration', 'record-read'] as const)('keeps an interrupted reset blocked after an inventory %s failure and permits retry', async operation => {
+  it.each(['enumeration', 'record-read'] as const)('completes an interrupted reset independently of an inventory %s failure', async operation => {
     const worker = await lane('codex');
     await ready(worker);
     await seedDirect();
     await threads.contextResets.begin(threadId);
     await reload();
+    // Establish verified native ownership before making legacy metadata inaccessible.
+    await delegation.reconcilePendingWorkerLanes();
     const directory = path.join(home, '.remote-cli', 'delegation-workers');
     const record = path.join(directory, `${worker.id}.json`);
     const readdir = fs.readdir.bind(fs);
@@ -271,23 +322,18 @@ describe('thread-wide conversation reset', () => {
         return (readFile as any)(...args);
       });
 
-    expect(await send('/clear')).toMatchObject({ success: false, error: expect.stringContaining('inventory') });
-    expect(threads.contextResets.isPending(threadId)).toBe(true);
-    expect(await readFile(pointer('codex', threadId), 'utf8')).toBe('old direct conversation');
+    expect(await send('/clear')).toMatchObject({ success: true });
+    expect(threads.contextResets.isPending(threadId)).toBe(false);
+    expect(existsSync(pointer('codex', threadId))).toBe(false);
     expect(await readFile(pointer('codex', worker.executorThreadId), 'utf8')).toBe('old worker conversation');
     expect(factory).not.toHaveBeenCalled();
+    expect(await send('ordinary prompt')).toMatchObject({ success: true });
     fault.mockRestore();
-    expect(await send('ordinary prompt')).toMatchObject({ success: false, error: expect.stringContaining('incomplete') });
-    expect(await send('/new')).toMatchObject({ success: true });
-    expect(existsSync(pointer('codex', worker.executorThreadId))).toBe(false);
-    expect(existsSync(pointer('codex', threadId))).toBe(false);
-    expect(threads.contextResets.isPending(threadId)).toBe(false);
-    expect(factory).not.toHaveBeenCalled();
     await reload();
     expect((pool.getExecutor(threadId) as any).saved).toBeNull();
   });
 
-  it('retains the whole-thread barrier when persisting a cleared lane fails', async () => {
+  it('does not require lane metadata writes to detach the conversation', async () => {
     const lanes = [await lane('codex'), await lane('codex'), await lane('pi')];
     await ready(...lanes);
     const original = fs.rename.bind(fs);
@@ -296,12 +342,12 @@ describe('thread-wide conversation reset', () => {
       if (String(destination).endsWith(`${lanes[1].id}.json`) && ++writes === 2) throw new Error('Synthetic lane persist failure');
       return original(source, destination);
     });
-    expect(await send('/clear')).toMatchObject({ success: false });
-    expect(existsSync(pointer('codex', lanes[1].executorThreadId))).toBe(false);
+    expect(await send('/clear')).toMatchObject({ success: true });
+    expect(existsSync(pointer('codex', lanes[1].executorThreadId))).toBe(true);
     expect(existsSync(pointer('pi', lanes[2].executorThreadId))).toBe(true);
     fail.mockRestore();
     await reload();
-    await assertBlocked();
+    expect(threads.getThread(threadId)?.delegationWorkspaceGeneration).toBe(4);
     expect(await send('/new')).toMatchObject({ success: true });
     expect((await delegation.laneStore.lanesForThread(threadId)).every(value => !value.contextResetPending && value.state === 'ready')).toBe(true);
   });
@@ -332,7 +378,7 @@ describe('thread-wide conversation reset', () => {
     await vi.waitFor(() => expect(finish).toBeDefined());
     const next = send('fresh task');
     expect(current.execute).not.toHaveBeenCalled();
-    expect(await send('/new')).toMatchObject({ success: false, error: expect.stringContaining('busy') });
+    expect(await send('/new')).toMatchObject({ success: false, error: expect.stringContaining('operation') });
     expect(await send('/resume')).toMatchObject({ success: false, error: expect.stringContaining('incomplete') });
     finish();
     expect(await resetting).toMatchObject({ success: true });
@@ -345,7 +391,7 @@ describe('thread-wide conversation reset', () => {
   });
 
   it.each(['preparing', 'running', 'dirty', 'cleanup-pending', 'queued', 'quarantined', 'native-busy', 'queue', 'queue-confirmation', 'busy'])(
-    'refuses an unsafe %s reset without aborting or detaching context', async state => {
+    'detaches %s worker obligations while retaining direct process safeguards', async state => {
       await seedDirect();
       const worker = await lane('codex');
       if (state === 'running') await delegation.laneStore.markRunning(worker.id);
@@ -361,15 +407,18 @@ describe('thread-wide conversation reset', () => {
       if (state === 'queue') (handler as any).threadQueues.set(threadId, [{ content: 'queued prompt' }]);
       if (state === 'queue-confirmation') (handler as any).pendingQueueConfirmations.set('pending', { info: { threadId } });
       if (state === 'busy') pool.setThreadBusy(threadId, true);
-      expect(await send('/clear')).toMatchObject({ success: false });
-      expect(threads.contextResets.isPending(threadId)).toBe(false);
-      expect(existsSync(pointer('codex', threadId))).toBe(true);
+      expect(await send('/clear')).toMatchObject({ success: state !== 'native-busy' });
+      expect(threads.contextResets.isPending(threadId)).toBe(state === 'native-busy');
+      expect(existsSync(pointer('codex', threadId))).toBe(state === 'native-busy');
       expect(existsSync(pointer('codex', worker.executorThreadId))).toBe(true);
-      expect(current.destroy).not.toHaveBeenCalled();
-      expect(current.abort).not.toHaveBeenCalled();
-      if (state === 'running' || state === 'preparing') {
-        await reload();
-        expect(await send('/new')).toMatchObject({ success: false, error: expect.stringContaining('shutdown is unconfirmed') });
+      expect(current.abort).toHaveBeenCalled();
+      if (state === 'native-busy') {
+        expect(current.destroy).not.toHaveBeenCalled();
+        current.isBusy = () => false;
+        expect(await send('/new')).toMatchObject({ success: true });
+      } else {
+        expect(current.destroy).toHaveBeenCalled();
+        expect(threads.getThread(threadId)?.delegationWorkspaceGeneration).toBe(4);
       }
     });
 
@@ -380,7 +429,7 @@ describe('thread-wide conversation reset', () => {
     expect(await send('/clear')).toMatchObject({ success: false });
     expect(existsSync(pointer('codex', threadId))).toBe(true);
     expect(() => pool.getExecutor(threadId)).toThrow('incomplete');
-    expect(current.abort).not.toHaveBeenCalled();
+    expect(current.abort).toHaveBeenCalled();
     expect(await send('/clear')).toMatchObject({ success: true });
   });
 
