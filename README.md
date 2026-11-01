@@ -1880,7 +1880,7 @@ npm run router:dev
 
 #### Publishing with GitHub Actions
 
-Releases use the manual **Publish npm packages** workflow in
+Releases use the **Publish npm packages** workflow in
 [`.github/workflows/npm-publish.yml`](.github/workflows/npm-publish.yml).
 It runs on GitHub-hosted Linux with Node.js 24 and npm 11.21.1; this does not
 change the packages' supported runtime Node.js versions.
@@ -1904,10 +1904,16 @@ Package repository attribution must match this GitHub repository. npm generates
 provenance automatically for supported public-repository/public-package releases;
 private repositories do not support that provenance flow.
 
-Commit the synchronized version, lockfile, and release notes to GitHub `main`.
-Then open **Actions -> Publish npm packages -> Run workflow**, select `main`,
-and enter the exact version (for example, `1.6.199`). Other branches and forks
-cannot run the publish job. Pushing code alone does not publish anything.
+Commit and push an increased, synchronized version, lockfile, and release notes
+to GitHub `main`. The workflow automatically releases both packages when the root
+`package.json` version increases relative to the revision before that push,
+including pushes containing multiple commits. Pushes without a version change
+skip publication; invalid versions, downgrades, or unreadable prior versions fail
+without publishing. Other branches and forks cannot run the publish job.
+
+The manual **Actions -> Publish npm packages -> Run workflow** entry remains
+available for recovery: select `main` and enter its exact committed version
+(for example, `1.6.200`). Normal releases do not require this button or a Git tag.
 The workflow installs locked dependencies, builds and tests both packages, then
 publishes the inspected tarballs. Tarball publishing skips lifecycle scripts
 because the workflow has already run the required build and test gates; direct
@@ -1924,7 +1930,7 @@ visibility is delayed, retry the original run after checking its result.
 Do not change source files and reuse a partially published version.
 
 For a local packaging check after `npm ci` and `npm run build`, run
-`node scripts/publish-npm.cjs --version 1.6.199 --check`. This does not publish;
+`node scripts/publish-npm.cjs --version 1.6.200 --check`. This does not publish;
 actual OIDC authorization still requires a configured GitHub Actions run.
 
 ### Support

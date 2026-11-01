@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.200] - 2026-11-01
+
+### Changed
+- Automatically publish both npm packages when a push to GitHub main increases the synchronized root package version. Compare against the push event's prior revision so multi-commit pushes are handled correctly.
+- Retain manual release recovery, skip unchanged versions, and reject invalid versions, downgrades, or unreadable prior revisions before publishing.
+
 ## [1.6.199] - 2026-11-01
 
 ### Added
