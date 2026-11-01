@@ -681,9 +681,13 @@ artifacts, native history, and pending cleanup records remain available for
 recovery; an uncertain worker is never treated as stopped or made reusable.
 Worker cleanup may continue after cancellation without holding the conversation
 open. Conflicting execution remains restricted while a worker may still write,
-including when delegation is disabled. Missing or unreadable legacy process
-evidence can still block execution after clearing; recovery commands remain
-available, and offline recovery must establish that old writers have stopped.
+including when delegation is disabled. From CLI 1.6.196, historical, missing,
+or unreadable worker metadata alone does not block ordinary chat, supported
+native commands, or compaction. Existing conversations and conversations after
+`/clear` or `/new` can continue without deleting recovery records. This does not
+confirm that historical workers exited or make their lanes reusable: managed
+worker storage, artifact integration, and cleanup retain their ownership checks.
+Identified live workers and current-process workspace conflicts remain protected.
 Direct-backend shutdown and durable reset storage must succeed before clearing
 is acknowledged. Upgrade the local CLI; a Router-only upgrade does not enable
 this recovery path.

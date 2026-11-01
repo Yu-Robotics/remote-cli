@@ -13,6 +13,9 @@ import type { ExecuteOptions, ExecuteResult, ExecutorExecutionMetadata, IExecuto
 import { KimiExecutor } from '../../src/executor/KimiExecutor';
 import { OpenCodeExecutor } from '../../src/executor/OpenCodeExecutor';
 import { ZCodeExecutor } from '../../src/executor/ZCodeExecutor';
+import { ThreadContextReset } from '../../src/thread/ThreadContextReset';
+import { DelegationOwnership } from '../../src/delegation/DelegationOwnership';
+import { ActiveDelegationWriterError } from '../../src/delegation/OwnershipRuntime';
 import type { AcpEventCallbacks, AcpTransport } from '../../src/executor/acp/AcpClient';
 
 const wait = (milliseconds: number) => new Promise<void>(resolve => setTimeout(resolve, milliseconds));
@@ -30,6 +33,8 @@ describe('managed agent delegation', () => {
     expectedShutdownFailure = false;
     home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'delegation-test-')));
     vi.spyOn(os, 'homedir').mockReturnValue(home);
+    vi.stubEnv('HOME', home);
+    vi.stubEnv('USERPROFILE', home);
     guard = new DirectoryGuard([home]);
     worker = {
       execute: vi.fn().mockResolvedValue({ success: true, output: 'review complete' }),
@@ -48,7 +53,93 @@ describe('managed agent delegation', () => {
     onToolUse: vi.fn(), onToolResult: vi.fn(), onNotice: vi.fn(), onApproval: vi.fn(() => true), onApprovalResolved: vi.fn() };
   });
 
-  afterEach(async () => { if (expectedShutdownFailure) await expect(manager.destroy()).rejects.toThrow('storage ownership was retained'); else await manager.destroy(); vi.restoreAllMocks(); fs.rmSync(home, { recursive: true, force: true }); });
+  afterEach(async () => { if (expectedShutdownFailure) await expect(manager.destroy()).rejects.toThrow('storage ownership was retained'); else await manager.destroy(); vi.restoreAllMocks(); vi.unstubAllEnvs(); fs.rmSync(home, { recursive: true, force: true }); });
+
+  it.each(['ready', 'dirty', 'corrupt', 'unreadable', 'legacy-owner'])(
+    'allows ordinary scopes and a fresh conversation with %s historical metadata while retaining recovery state', async state => {
+      const resets = new ThreadContextReset();
+      const lanes = new DelegatedWorkerSessionStore(undefined, resets);
+      const { lane } = await lanes.acquire({ threadId: 'historical-thread', backend: 'codex',
+        workingDirectory: home, workspaceGeneration: 0 });
+      if (state === 'ready') await lanes.markReady(lane.id);
+      else await lanes.markDirty(lane.id, 'Synthetic interrupted legacy worker');
+      const laneFile = path.join(lanes.storageDirectory, `${lane.id}.json`);
+      if (state === 'corrupt') fs.writeFileSync(laneFile, '{');
+      if (state === 'unreadable') {
+        fs.rmSync(laneFile);
+        fs.mkdirSync(laneFile);
+      }
+      if (state === 'legacy-owner') fs.writeFileSync(`${lanes.storageDirectory}.ownership`, 'legacy owner without exit evidence');
+      const pointer = path.join(home, 'native-history');
+      fs.writeFileSync(pointer, 'synthetic preserved transcript');
+      const snapshot = state === 'unreadable' ? undefined : fs.readFileSync(laneFile);
+      manager = new DelegationManager(guard, factory as any, new BackendRegistry(async () => 'test 1.0'),
+        new DelegationStore(), undefined, undefined, lanes);
+      for (const threadId of [parent.thread.id, 'unrelated-thread']) {
+        await expect(manager.assertExecutionSafe(home, threadId)).resolves.toBeUndefined();
+      }
+      // This is the managed side of /new: advance the durable conversation
+      // generation without loading or modifying historical worker inventory.
+      await resets.begin(parent.thread.id);
+      parent.thread.delegationWorkspaceGeneration = await resets.advanceGeneration(parent.thread.id);
+      await resets.complete(parent.thread.id);
+      await expect(manager.assertExecutionSafe(home, parent.thread.id)).resolves.toBeUndefined();
+      const scope = manager.begin(parent);
+      await expect(scope.collectPendingResults()).resolves.toEqual([]);
+      await expect(scope.checkArtifactCloseout()).resolves.toEqual([]);
+      if (state === 'ready') {
+        const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Synthetic review' }, 'launch');
+        await expect(scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result')).resolves.toMatchObject({ state: 'succeeded' });
+      } else {
+        await expect(scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Synthetic review' }, 'launch'))
+          .rejects.toThrow('Managed delegation storage');
+        expect(factory).not.toHaveBeenCalled();
+        await expect(scope.checkArtifactCloseout()).resolves.toEqual([]);
+      }
+      await scope.close();
+      if (snapshot) expect(fs.readFileSync(laneFile)).toEqual(snapshot);
+      else expect(fs.statSync(laneFile).isDirectory()).toBe(true);
+      expect(fs.readFileSync(pointer, 'utf8')).toBe('synthetic preserved transcript');
+      await expect(manager.assertExecutionSafe(home, 'unrelated-thread')).resolves.toBeUndefined();
+    });
+
+  it('keeps detached current workers fenced until exit while allowing unrelated workspaces', async () => {
+    const occupied = path.join(home, 'occupied');
+    const unrelated = path.join(home, 'unrelated');
+    fs.mkdirSync(occupied); fs.mkdirSync(unrelated);
+    parent.cwd = occupied;
+    parent.thread.workingDirectory = occupied;
+    worker.getCurrentWorkingDirectory = () => occupied;
+    let exit!: () => void;
+    const exited = new Promise<void>(resolve => { exit = resolve; });
+    vi.mocked(worker.execute).mockImplementation(() => new Promise(() => {}));
+    vi.mocked(worker.waitForExit!).mockReturnValue(exited);
+    const scope = manager.begin(parent);
+    await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Synthetic running worker' }, 'start');
+    await expect(manager.assertExecutionSafe(occupied, 'other')).rejects.toThrow('may still write files');
+    const closing = scope.close(true);
+    try {
+      await vi.waitFor(() => expect(worker.waitForExit).toHaveBeenCalled());
+      await expect(manager.assertExecutionSafe(occupied, parent.thread.id)).rejects.toThrow('may still write files');
+      await expect(manager.assertExecutionSafe(unrelated, 'other')).resolves.toBeUndefined();
+    } finally { exit(); await closing; }
+    await expect(manager.assertExecutionSafe(occupied, parent.thread.id)).resolves.toBeUndefined();
+  });
+
+  it('distinguishes unavailable evidence from observed writers without exposing storage details', async () => {
+    const detail = path.join(home, 'synthetic-private-storage');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const check = vi.spyOn(DelegationOwnership.prototype, 'assertNoKnownForeignWriters').mockRejectedValue(new Error(detail));
+    await expect(manager.assertExecutionSafe(home, parent.thread.id)).resolves.toBeUndefined();
+    await expect(manager.assertExecutionSafe(home, 'other')).resolves.toBeUndefined();
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn.mock.calls[0][0]).toContain('No worker exit was inferred');
+    expect(warn.mock.calls[0][0]).not.toContain(home);
+    check.mockRejectedValue(new ActiveDelegationWriterError(detail));
+    const failure = manager.assertExecutionSafe(home, parent.thread.id);
+    await expect(failure).rejects.toThrow('recorded native writer was detected');
+    await expect(failure).rejects.not.toThrow(home);
+  });
 
   it.each([
     ['kimi', KimiExecutor], ['opencode', OpenCodeExecutor], ['zcode', ZCodeExecutor],
@@ -1159,6 +1250,7 @@ describe('managed agent delegation', () => {
     await expect(scope.invoke('remote_cli_cancel', { taskId: task.taskId }, 'cancel')).resolves.toMatchObject({ state: 'interrupted' });
     expect(manager.blocksWorkspace(home, parent.thread.id)).toBe(true);
     expect(manager.blocksWorkspace(home, 'other')).toBe(true);
+    await expect(manager.assertExecutionSafe(home, parent.thread.id)).rejects.toThrow('may still write files');
     await expect(scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Next' }, 'next')).rejects.toThrow('busy');
   });
 
@@ -1342,6 +1434,7 @@ describe('managed agent delegation', () => {
 
     await expect(scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result')).resolves.toMatchObject({ state: 'interrupted' });
     expect(manager.blocksWorkspace(home, 'other')).toBe(true);
+    await expect(manager.assertExecutionSafe(home, 'other')).rejects.toThrow('may still write files');
     await expect(manager.laneStore.lanesForThread(parent.thread.id, 'codex')).resolves.toEqual([
       expect.objectContaining({ state: 'dirty' }),
     ]);

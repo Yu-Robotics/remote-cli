@@ -78,13 +78,68 @@ describe('managed conversation recovery', () => {
     expect(loaded.getThread(sibling.id)).toEqual(sibling);
     expect(await fs.readFile(retained, 'utf8')).toBe('uncollected changes');
     expect(await fs.readFile(ownership, 'utf8')).toBe('legacy unknown owner');
+    await handler.destroy();
+    manager = loaded;
+    const guard = new DirectoryGuard([home]);
+    pool = new ThreadExecutorPool(manager, guard, { type: 'codex' }, () => executor, 5);
+    handler = new MessageHandler({ send, trackTask: vi.fn(), onClose: vi.fn(), isConnected: () => true } as any,
+      pool, manager, guard, { get: vi.fn(), set: vi.fn(), getAll: () => ({}), getConfigDir: () => home } as any);
+    delegation = (handler as any).delegation;
     await command('Try execution');
-    expect(response('Try execution')).toMatchObject({ success: false, error: expect.stringContaining('may still write files') });
-    expect(executor.execute).not.toHaveBeenCalled();
+    expect(response('Try execution')).toMatchObject({ success: true });
+    expect(executor.execute).toHaveBeenCalledOnce();
     await command('/thread new recovered');
     expect(manager.getThreadByName('recovered')).toBeDefined();
-    // Synthetic proof that the owner evidence is gone; production never removes it here.
-    await fs.rm(ownership);
+    expect(await fs.readFile(ownership, 'utf8')).toBe('legacy unknown owner');
+  });
+
+  it.each([false, true])('keeps both threads usable with legacy storage before and after reset with delegation=%s', async enabled => {
+    await manager.updateThread(threadId, { delegation: enabled });
+    executor.configureDelegation = vi.fn();
+    const sibling = await manager.createThread('unaffected', home, 'codex');
+    await manager.updateThread(sibling.id, { delegation: enabled });
+    const ownership = `${delegation.laneStore.storageDirectory}.ownership`;
+    await fs.mkdir(path.dirname(ownership), { recursive: true });
+    await fs.writeFile(ownership, 'legacy unknown owner');
+
+    await command('Existing conversation', 'before-reset');
+    expect(response('before-reset')).toMatchObject({ success: true });
+    for (const reset of ['/clear', '/new']) {
+      await command(reset);
+      expect(response(reset)).toMatchObject({ success: true });
+      await command('Continue conversation', `after-${reset}`);
+      expect(response(`after-${reset}`)).toMatchObject({ success: true });
+    }
+    await handler.handleMessage({ type: 'command', messageId: 'sibling-chat', content: 'Existing sibling conversation', threadId: sibling.id });
+    expect(response('sibling-chat')).toMatchObject({ success: true });
+    expect(executor.execute).toHaveBeenCalledTimes(4);
+    expect(await fs.readFile(ownership, 'utf8')).toBe('legacy unknown owner');
+  });
+
+  it.each(['/skill:fixture', '/compact'])('allows supported native %s despite historical ownership metadata', async content => {
+    await manager.updateThread(threadId, { backend: 'pi', delegation: false });
+    executor.compactWhenFull = vi.fn().mockResolvedValue({ success: true });
+    const ownership = `${delegation.laneStore.storageDirectory}.ownership`;
+    await fs.mkdir(path.dirname(ownership), { recursive: true });
+    await fs.writeFile(ownership, 'legacy unknown owner');
+    await handler.handleMessage({ type: 'command', messageId: 'native-with-history', content, threadId, isSlashCommand: true });
+    expect(response('native-with-history')).toMatchObject({ success: true });
+    expect(content === '/compact' ? executor.compactWhenFull : executor.execute).toHaveBeenCalledOnce();
+    expect(await fs.readFile(ownership, 'utf8')).toBe('legacy unknown owner');
+  });
+
+  it('keeps corrupt worker inventory intact while starting a fresh conversation', async () => {
+    executor.configureDelegation = vi.fn();
+    const directory = delegation.laneStore.storageDirectory;
+    await fs.mkdir(directory, { recursive: true });
+    const record = path.join(directory, 'interrupted-worker.json');
+    await fs.writeFile(record, '{"state":');
+    await command('/new');
+    expect(response('/new')).toMatchObject({ success: true });
+    await command('Continue after interrupted storage');
+    expect(response('Continue after interrupted storage')).toMatchObject({ success: true });
+    expect(executor.execute).toHaveBeenCalledOnce();
+    expect(await fs.readFile(record, 'utf8')).toBe('{"state":');
   });
 
   it('starts ordinary managed-enabled chat without inventory or ownership initialization', async () => {
@@ -179,7 +234,7 @@ describe('managed conversation recovery', () => {
     await manager.updateThread(threadId, { delegation: false });
     (delegation as any).workspaces.set(home, { id: 'old-worker', threadId, quarantined: true, detached: true });
     await command('Run code');
-    expect(response('Run code')).toMatchObject({ success: false, error: expect.stringContaining('Worktrees are not OS sandboxes') });
+    expect(response('Run code')).toMatchObject({ success: false, error: expect.stringContaining('confirmed worker exit') });
     expect(executor.execute).not.toHaveBeenCalled();
     await command('/clear');
     await command('/thread list');

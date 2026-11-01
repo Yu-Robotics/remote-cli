@@ -155,14 +155,16 @@ describe('Integration: Message Flow', () => {
       );
     });
 
-    it('still rejects ordinary execution when the isolated home has uncertain worker ownership', async () => {
+    it('allows ordinary execution without deleting uncertain historical worker ownership', async () => {
       await fs.mkdir(path.join(home, '.remote-cli'));
       await fs.writeFile(path.join(home, '.remote-cli', 'delegation-workers.ownership'), 'synthetic unknown owner');
+      executor.execute.mockResolvedValue({ success: true, output: 'Ordinary response' });
       await handler.handleMessage({ type: 'command', messageId: 'uncertain-worker', content: 'Run a task' });
-      expect(executor.execute).not.toHaveBeenCalled();
+      expect(executor.execute).toHaveBeenCalledOnce();
       expect(wsClient.send).toHaveBeenCalledWith(expect.objectContaining({
-        messageId: 'uncertain-worker', success: false, error: expect.stringContaining('may still write files'),
+        messageId: 'uncertain-worker', success: true,
       }));
+      expect(await fs.readFile(path.join(home, '.remote-cli', 'delegation-workers.ownership'), 'utf8')).toBe('synthetic unknown owner');
     });
 
     it('should handle command with streaming progress', async () => {

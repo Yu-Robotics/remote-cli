@@ -25,6 +25,7 @@ import { DelegatedWorkspaceManager, WORKSPACE_INVENTORY_PAGE_LIMIT, type Delegat
   type DelegatedArtifactView } from './DelegatedWorkspaceManager';
 import type { GitCheckpoint } from './GitCheckpoint';
 import { DelegationOwnership } from './DelegationOwnership';
+import { ActiveDelegationWriterError } from './OwnershipRuntime';
 import { ActivityProgress } from '../utils/ActivityProgress';
 import { normalizeActivity } from '../executor/Activity';
 import { compareNoticeVersions, validNoticeVersion } from '../maintenance/Version';
@@ -247,6 +248,7 @@ export class DelegationManager {
   private shutdown?: Promise<void>;
   private stopping = false;
   private ownershipReleaseStarted = false;
+  private reportedUnavailableWriterEvidence = false;
   private readonly publicOperations = new Set<Promise<unknown>>();
   private maintenance?: Promise<unknown>;
   private maintenanceTimer?: ReturnType<typeof setTimeout>;
@@ -293,7 +295,9 @@ export class DelegationManager {
       await this.ownership.acquire();
     })().catch(error => {
       this.initialization = undefined;
-      throw error;
+      throw new Error('Managed delegation storage could not be verified. Worker launch and storage changes remain disabled; '
+        + 'ordinary chat can continue unless an active worker conflicts. Inspect local delegation ownership and inventory before retrying. '
+        + 'Existing files and native histories were preserved.', { cause: error });
     });
   }
 
@@ -1545,7 +1549,7 @@ ${prompt}`));
     const canonical = fs.realpathSync(cwd);
     return [...this.workspaces].some(([active, owner]) => (owner.quarantined || owner.detached || owner.threadId !== threadId) && workspacesOverlap(active, canonical));
   }
-  /** All execution modes must honor native writers, independently of inventory health. */
+  /** Chat and native commands honor observed writers without requiring healthy historical inventory. */
   async assertExecutionSafe(cwd: string, threadId: string): Promise<void> {
     const conflicting = () => {
       if (!this.workspaces.size) return false;
@@ -1554,15 +1558,25 @@ ${prompt}`));
         && (owner.quarantined || owner.detached || owner.threadId !== threadId)
         && !(owner.detached && !owner.quarantined && owner.permitsDirectExecution?.()));
     };
-    try {
-      if (conflicting()) throw new Error('A detached or active worker holds this workspace');
-      if (!await this.ownership.assertNoForeignWriters()) await this.laneStore.assertLegacyWritersStopped();
-      if (conflicting()) throw new Error('A worker acquired this workspace');
-    } catch {
-      throw new Error('A managed worker may still write files. Use /abort, then /clear or /new to detach its conversation. '
-        + 'Execution remains blocked in conflicting workspaces until native exit is confirmed; inspect remote-cli delegation storage scan and stop surviving workers before restarting the CLI. '
-        + 'Missing legacy exit evidence requires explicit offline recovery; restarting alone does not prove shutdown. '
-        + 'Worktrees are not OS sandboxes. Recovery commands remain available.');
+    const assertWorkspace = () => {
+      if (conflicting()) throw new Error('A managed worker may still write files in this workspace. Use /abort to request cancellation. '
+        + '/clear and /new detach conversation context; conflicting execution must wait for confirmed worker exit.');
+    };
+    assertWorkspace();
+    let evidence: 'checked' | 'unavailable';
+    try { evidence = await this.ownership.assertNoKnownForeignWriters(); }
+    catch (error) {
+      if (error instanceof ActiveDelegationWriterError) {
+        throw new Error('An active managed-worker owner or recorded native writer was detected. Stop that worker before retrying. '
+          + '/clear and /new reset conversation context but do not stop foreign writers.');
+      }
+      evidence = 'unavailable';
+    }
+    assertWorkspace();
+    if (evidence === 'unavailable' && !this.reportedUnavailableWriterEvidence) {
+      this.reportedUnavailableWriterEvidence = true;
+      console.warn('[Delegation] Historical process evidence is unavailable. Ordinary chat remains enabled; '
+        + 'managed storage operations still require ownership verification. No worker exit was inferred.');
     }
   }
 

@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.196] - 2026-11-01
+
+### Fixed
+- Separate ordinary execution admission from historical managed-worker storage recovery. Legacy or unavailable metadata no longer blocks existing chats, unrelated threads, supported native commands, or compaction after `/clear` and `/new`.
+- Preserve live-worker conflict checks and strict ownership requirements for managed-worker storage, artifact integration, lane reuse, and cleanup. Preserve historical records and files without claiming uncertain workers have exited.
+
+### Tests
+- Cover conversation recovery with retained legacy metadata, sibling threads, delegation enabled and disabled, native commands, and active worker conflicts using isolated temporary homes.
+
 ## [1.6.195] - 2026-11-01
 
 ### Fixed

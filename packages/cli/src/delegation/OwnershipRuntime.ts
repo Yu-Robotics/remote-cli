@@ -9,6 +9,9 @@ import { machineIdSync } from 'node-machine-id';
 // LockFileEx on Windows. Never unlink this gate: waiters must share its inode.
 export interface KernelGate { verify(): void; close(): void }
 
+/** Positive process/lock evidence, distinct from missing or invalid recovery metadata. */
+export class ActiveDelegationWriterError extends Error {}
+
 export function kernelGate(filename: string): KernelGate | undefined {
   // Loading is lazy: ordinary backend execution without delegation must not
   // depend on the availability of a native ownership implementation.
@@ -132,8 +135,9 @@ export function assertRecoverable(raw: Buffer, journalPath: string, current = bo
   if (owner.namespace !== current.namespace) throw new Error('Delegation ownership belongs to another PID namespace');
   try {
     process.kill(owner.pid, 0);
-    if (!owner.birth || processBirth(owner.pid) === owner.birth) throw new Error('Delegation owner process is still alive');
+    if (!owner.birth || processBirth(owner.pid) === owner.birth) throw new ActiveDelegationWriterError('Delegation owner process is still alive');
   } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EPERM') throw new ActiveDelegationWriterError('Delegation owner process exists but cannot be inspected');
     if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
   }
   const bytes = readRegular(journalPath);
@@ -150,13 +154,36 @@ export function assertRecoverable(raw: Buffer, journalPath: string, current = bo
     else if (record.event === 'absent' && launches.has(record.id)) launches.delete(record.id);
     else throw new Error('Invalid delegation process journal transition');
   }
+  let uncertain: string | undefined;
   for (const launch of launches.values()) {
-    if (launch.event !== 'spawn') throw new Error('Delegation child launch was interrupted before its identity was saved; preserve recovery state');
-    if (!launch.group || process.platform === 'win32') throw new Error('Delegation child-tree exit is unconfirmed on this platform');
+    if (launch.event !== 'spawn') {
+      uncertain ??= 'Delegation child launch was interrupted before its identity was saved; preserve recovery state';
+      continue;
+    }
+    if (!launch.group || process.platform === 'win32') {
+      // An absent leader cannot prove descendant exit. A live recorded leader
+      // still supplies a useful conflict even when tree recovery is unsupported.
+      try {
+        process.kill(launch.pid!, 0);
+        if (!launch.birth || processBirth(launch.pid!) === launch.birth) {
+          throw new ActiveDelegationWriterError('Delegation child process is still alive');
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EPERM') throw new ActiveDelegationWriterError('Delegation child process exists but cannot be inspected');
+        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+      }
+      uncertain ??= 'Delegation child-tree exit is unconfirmed on this platform';
+      continue;
+    }
     try { process.kill(-launch.pid!, 0); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') continue; throw error; }
-    throw new Error(`Delegation child process group ${launch.pid} still exists; recovery will retry after it exits`);
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ESRCH') continue;
+      if ((error as NodeJS.ErrnoException).code === 'EPERM') throw new ActiveDelegationWriterError('Delegation child process group exists but cannot be inspected');
+      throw error;
+    }
+    throw new ActiveDelegationWriterError(`Delegation child process group ${launch.pid} still exists; recovery will retry after it exits`);
   }
+  if (uncertain) throw new Error(uncertain);
 }
 
 export class ProcessJournal {
