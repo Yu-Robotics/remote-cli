@@ -54,6 +54,8 @@ describe('code-enforced delegated artifact closeout', { timeout: 30_000 }, () =>
   beforeEach(async () => {
     fixture = await gitFixture();
     vi.spyOn(os, 'homedir').mockReturnValue(fixture.directory);
+    vi.stubEnv('HOME', fixture.directory);
+    vi.stubEnv('USERPROFILE', fixture.directory);
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     threads = await ThreadManager.initialize(fixture.directory);
@@ -82,7 +84,7 @@ describe('code-enforced delegated artifact closeout', { timeout: 30_000 }, () =>
     main.execute.mockImplementationOnce(async () => { await delegate(); return { success: true }; });
   });
   afterEach(async () => {
-    await handler?.destroy(); vi.restoreAllMocks();
+    await handler?.destroy(); vi.restoreAllMocks(); vi.unstubAllEnvs();
     await fs.rm(fixture.directory, { recursive: true, force: true });
   });
 

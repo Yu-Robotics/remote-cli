@@ -4,15 +4,20 @@ import path from 'path';
 import net from 'net';
 import { spawn } from 'child_process';
 import ts from 'typescript';
+import os from 'os';
+import { createApprovalEndpoint } from '../../src/executor/claude/ApprovalEndpoint';
 
 describe('Claude file policy hook protocol', () => {
   let root: string;
   let socketPath: string;
   let script: string;
   let server: net.Server;
+  let socketDirectory: string | undefined;
   beforeEach(() => {
-    root = fs.mkdtempSync(path.join('/tmp', 'file-hook-'));
-    socketPath = path.join(root, 'policy.sock');
+    root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'file-hook-')));
+    const endpoint = createApprovalEndpoint();
+    socketPath = endpoint.socketPath;
+    socketDirectory = endpoint.directory;
     script = path.join(root, 'hook.cjs');
     const source = fs.readFileSync(path.resolve(__dirname, '../../src/executor/claude/filePolicyHook.ts'), 'utf8');
     fs.writeFileSync(script, ts.transpileModule(source, {
@@ -21,7 +26,8 @@ describe('Claude file policy hook protocol', () => {
     server = net.createServer();
   });
   afterEach(async () => {
-    if (server.listening) await new Promise<void>(resolve => server.close(() => resolve()));
+    if (server?.listening) await new Promise<void>(resolve => server.close(() => resolve()));
+    if (socketDirectory) fs.rmSync(socketDirectory, { recursive: true, force: true });
     fs.rmSync(root, { recursive: true, force: true });
   });
   async function run(event: unknown) {

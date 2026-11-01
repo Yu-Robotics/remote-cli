@@ -14,6 +14,9 @@ async function createRootTemplate() {
     await runGit(root, ['init', '-b', 'main']);
     await runGit(root, ['config', 'user.name', 'Test User']);
     await runGit(root, ['config', 'user.email', 'test@example.com']);
+    // Fixture bytes must not depend on the runner's checkout-wide CRLF policy.
+    await runGit(root, ['config', 'core.autocrlf', 'false']);
+    await runGit(root, ['config', 'core.eol', 'lf']);
     await fs.writeFile(path.join(root, '.gitignore'), 'node_modules/\n.env\n');
     await fs.writeFile(path.join(root, 'source.txt'), 'first\nsecond\nthird\n');
     await fs.mkdir(path.join(root, 'nested'));
@@ -63,6 +66,8 @@ export async function nestedGitFixture(fixture: Awaited<ReturnType<typeof gitFix
   await runGit(repository, ['init', '-b', 'main']);
   await runGit(repository, ['config', 'user.name', 'Test User']);
   await runGit(repository, ['config', 'user.email', 'test@example.com']);
+  await runGit(repository, ['config', 'core.autocrlf', 'false']);
+  await runGit(repository, ['config', 'core.eol', 'lf']);
   await fs.writeFile(path.join(repository, '.gitignore'), '.env\nignored/\n');
   await fs.writeFile(path.join(repository, 'local.txt'), 'first\nsecond\nthird\n');
   if (!unborn) {
@@ -71,6 +76,8 @@ export async function nestedGitFixture(fixture: Awaited<ReturnType<typeof gitFix
   }
   if (submodule) {
     await runGit(fixture.root, ['-c', 'protocol.file.allow=always', 'submodule', 'add', repository, relative]);
+    await runGit(path.join(fixture.root, relative), ['config', 'core.autocrlf', 'false']);
+    await runGit(path.join(fixture.root, relative), ['config', 'core.eol', 'lf']);
     await runGit(fixture.root, ['commit', '-m', 'Synthetic local submodule']);
   }
   return path.join(fixture.root, relative);

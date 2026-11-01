@@ -1,5 +1,5 @@
 import fs from 'fs/promises';
-import { createReadStream, openSync, constants } from 'fs';
+import { createReadStream, openSync, lstatSync, constants } from 'fs';
 import path from 'path';
 import { createHash, randomUUID } from 'crypto';
 import { Readable, Transform } from 'stream';
@@ -67,7 +67,7 @@ export async function saveStream(
   source.on('error', captureError);
   let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
   try {
-    handle = await fs.open(filename, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+    handle = await fs.open(filename, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0), 0o600);
     if (sourceError) throw sourceError;
     await pipeline(source, meter, handle.createWriteStream(), { signal });
     const sha256 = hash.digest('hex');
@@ -86,7 +86,9 @@ export async function saveStream(
 }
 
 export async function readPrivateJson(filename: string): Promise<any> {
-  const handle = await fs.open(filename, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const lstat = await fs.lstat(filename);
+  if (!lstat.isFile() || lstat.isSymbolicLink()) throw new Error('Unsafe attachment metadata.');
+  const handle = await fs.open(filename, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   try {
     const stat = await handle.stat();
     if (!stat.isFile() || stat.size > 64 * 1024 || (process.getuid && stat.uid !== process.getuid())) throw new Error('Unsafe attachment metadata.');
@@ -103,5 +105,7 @@ export async function readPrivateJson(filename: string): Promise<any> {
 }
 
 export function readOwnedFile(filename: string): Readable {
-  return createReadStream(filename, { fd: openSync(filename, constants.O_RDONLY | constants.O_NOFOLLOW), autoClose: true });
+  const stat = lstatSync(filename);
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Unsafe file read.');
+  return createReadStream(filename, { fd: openSync(filename, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)), autoClose: true });
 }

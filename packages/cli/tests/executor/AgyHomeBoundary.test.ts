@@ -12,7 +12,7 @@ describe('AGY HOME boundary', () => {
   });
 
   it('does not treat directory symlinks or a changed HOME as read isolation', () => {
-    root = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-boundary-test-'));
+    root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'agy-boundary-test-')));
     const sharedCli = path.join(root, 'shared', '.gemini', 'antigravity-cli');
     const threadHome = path.join(root, 'thread');
     const threadCli = path.join(threadHome, '.gemini', 'antigravity-cli');
@@ -23,9 +23,10 @@ describe('AGY HOME boundary', () => {
     fs.symlinkSync(path.join(sharedCli, 'cache'), path.join(threadCli, 'cache'), 'dir');
 
     const probe = spawnSync(process.execPath, ['-e', [
-      "const fs = require('fs');",
-      "const root = process.env.HOME + '/.gemini/antigravity-cli';",
-      "process.stdout.write(JSON.stringify({ home: process.env.HOME, reachable: fs.existsSync(root + '/cache/../conversations/other-thread.db') }));",
+      "const fs = require('fs'), path = require('path');",
+      "const root = path.join(process.env.HOME, '.gemini', 'antigravity-cli');",
+      "const cache = fs.realpathSync(path.join(root, 'cache'));",
+      "process.stdout.write(JSON.stringify({ home: process.env.HOME, reachable: fs.existsSync(path.join(cache, '..', 'conversations', 'other-thread.db')) }));",
     ].join(' ')], { env: { ...process.env, HOME: threadHome }, encoding: 'utf8' });
 
     expect(probe.status).toBe(0);

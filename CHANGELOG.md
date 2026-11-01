@@ -13,6 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.201] - 2026-11-01
+
+### Fixed
+- Handle Windows filesystem and Git path representations without relaxing canonical-path, symbolic-link, or ownership validation on Linux and macOS.
+- Apply POSIX permission-bit checks only where those bits represent filesystem permissions, retaining structural validation of private Router storage.
+- Use Windows named pipes for approval IPC tests and short private Unix socket paths, with cleanup and retry after failed listener startup. Native Windows Claude sandboxing remains unsupported.
+
+### Tests
+- Use native temporary paths, explicit symbolic-link types, and platform-appropriate executable and permission fixtures across the CLI and Router suites.
+- Keep native Linux, macOS, and Windows build/test jobs as the release gate.
+
 ## [1.6.200] - 2026-11-01
 
 ### Changed

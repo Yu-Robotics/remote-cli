@@ -7,7 +7,7 @@ import type { ExecuteResult } from '../executor/IExecutor';
 import type { SettingsActionMessage, SettingsBackend, SettingsMenu, SettingsResultMessage } from '../types/Settings';
 
 interface State { threadName: string; cwd: string; revision: string; backend: SettingsBackend }
-interface Identity { path: string; dev: number; ino: number }
+interface Identity { path: string; dev: bigint; ino: bigint }
 interface Selection { path: string; chain: Identity[] }
 interface Snapshot {
   menu: SettingsMenu; owner: string; revision: string; policy: string;
@@ -53,9 +53,8 @@ export class DirectoryBrowser {
   private policy(): string { return JSON.stringify(this.deps.guard.getAllowedDirectories()); }
 
   private async identity(target: string): Promise<Identity> {
-    const info = await fs.lstat(target);
-    if (!info.isDirectory() || info.isSymbolicLink() || !Number.isSafeInteger(info.ino) || info.ino <= 0
-      || !Number.isSafeInteger(info.dev) || info.dev < 0) throw new Error(stale);
+    const info = await fs.lstat(target, { bigint: true });
+    if (!info.isDirectory() || info.isSymbolicLink() || info.ino <= 0n || info.dev < 0n) throw new Error(stale);
     return { path: target, dev: info.dev, ino: info.ino };
   }
 

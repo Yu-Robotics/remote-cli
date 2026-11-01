@@ -1,5 +1,6 @@
 import { ownedSpawn as spawn } from './OwnershipRuntime';
 import { createHash, randomUUID } from 'crypto';
+import { constants } from 'fs';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
@@ -96,6 +97,31 @@ export function checkpointRevision(head: string, tree: string, index: Buffer,
   return hash.digest('hex');
 }
 
+async function packFileHash(file: string): Promise<string> {
+  const before = await fs.lstat(file, { bigint: true });
+  if (!before.isFile() || before.isSymbolicLink()) throw new Error('Unsafe existing Git pack entry');
+  const handle = await fs.open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    const same = (stat: typeof before) => stat.isFile() && stat.dev === before.dev && stat.ino === before.ino
+      && stat.size === before.size && stat.mtimeNs === before.mtimeNs && stat.ctimeNs === before.ctimeNs;
+    if (!same(await handle.stat({ bigint: true }))) throw new Error('Git pack identity changed');
+    const hash = createHash('sha256');
+    const buffer = Buffer.alloc(64 * 1024);
+    let size = 0n;
+    while (true) {
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+      if (!bytesRead) break;
+      size += BigInt(bytesRead);
+      if (size > before.size) throw new Error('Git pack grew during verification');
+      hash.update(buffer.subarray(0, bytesRead));
+    }
+    if (size !== before.size || !same(await handle.stat({ bigint: true })) || !same(await fs.lstat(file, { bigint: true }))) {
+      throw new Error('Git pack changed during verification');
+    }
+    return hash.digest('hex');
+  } finally { await handle.close(); }
+}
+
 /** Transfer local objects through a pipe, without buffering repository contents or fetching a remote. */
 export async function importGitTree(source: string, destination: string, tree: string): Promise<void> {
   if (!GIT_OID.test(tree)) throw new Error('Invalid nested checkpoint tree');
@@ -120,7 +146,21 @@ export async function importGitTree(source: string, destination: string, tree: s
     // Only complete packs leave quarantine. Publish indexes last so Git never
     // discovers a pack while its bytes are still being received or promoted.
     files.sort((left, right) => Number(left.endsWith('.idx')) - Number(right.endsWith('.idx')));
-    for (const file of files) await fs.rename(path.join(incoming, 'pack', file), path.join(published, file));
+    for (const file of files) {
+      const sourceFile = path.join(incoming, 'pack', file);
+      const targetFile = path.join(published, file);
+      try {
+        // Both directories are on the object-store volume. An exclusive hard
+        // link publishes complete bytes atomically, including on Windows where
+        // rename cannot replace an existing read-only Git pack.
+        await fs.link(sourceFile, targetFile);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        if (await packFileHash(sourceFile) !== await packFileHash(targetFile)) {
+          throw new Error('Existing Git pack differs from the completed transfer');
+        }
+      }
+    }
   } finally {
     // transferGitTree settles only after both children exit. Remove only this
     // operation's quarantine, never sweep another process's temporary packs.

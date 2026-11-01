@@ -1,23 +1,27 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { DirectoryGuard } from '../src/security/DirectoryGuard';
 import path from 'path';
 import os from 'os';
-
-// Mock os.homedir() to respect process.env.HOME for isolated tests
-const originalHomedir = os.homedir();
-vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || originalHomedir);
+import fs from 'fs';
 
 describe('DirectoryGuard', () => {
   let guard: DirectoryGuard;
-  const homeDir = os.homedir();
+  let homeDir: string;
 
   beforeEach(() => {
+    homeDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'directory-guard-')));
+    vi.spyOn(os, 'homedir').mockReturnValue(homeDir);
     const allowedDirs = [
       '~/projects',
       '~/work',
       './relative'
     ];
     guard = new DirectoryGuard(allowedDirs);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    fs.rmSync(homeDir, { recursive: true, force: true });
   });
 
   describe('path normalization', () => {
@@ -27,13 +31,13 @@ describe('DirectoryGuard', () => {
     });
 
     it('should resolve relative paths from cwd', () => {
-      const cwd = '/test/working/dir';
+      const cwd = path.join(homeDir, 'working', 'dir');
       const normalized = guard.normalizePath('./subdir', cwd);
       expect(normalized).toBe(path.join(cwd, 'subdir'));
     });
 
     it('should handle absolute paths', () => {
-      const absolutePath = '/absolute/path';
+      const absolutePath = path.join(homeDir, 'absolute', 'path');
       const normalized = guard.normalizePath(absolutePath);
       expect(normalized).toBe(absolutePath);
     });
@@ -214,7 +218,7 @@ describe('DirectoryGuard', () => {
         expect.fail('Should have thrown an error');
       } catch (error: any) {
         expect(error.message).toContain('not allowed');
-        expect(error.message).toContain('/etc');
+        expect(error.message).toContain(guard.normalizePath('/etc'));
       }
     });
 

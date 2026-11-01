@@ -207,7 +207,7 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
     const outside = path.join(fixture.directory, 'outside-dependency');
     await fs.writeFile(outside, 'keep outside data');
     await fs.mkdir(path.join(workers[0].cwd, 'node_modules'));
-    try { await fs.symlink(outside, path.join(workers[0].cwd, 'node_modules', 'tool')); }
+    try { await fs.symlink(outside, path.join(workers[0].cwd, 'node_modules', 'tool'), process.platform === 'win32' ? 'junction' : 'dir'); }
     catch (error) {
       if (!['EPERM', 'ENOTSUP', 'EACCES'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
       workers[0].finish({ success: true });

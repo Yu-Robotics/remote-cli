@@ -13,6 +13,7 @@
 
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 
 /**
  * Result of tool use validation
@@ -59,15 +60,13 @@ const PIPE_TO_SHELL_PATTERNS = [
 function resolvePath(filePath: string, cwd?: string): string {
   // Handle tilde expansion
   if (filePath.startsWith('~')) {
-    const home = process.env.HOME || '';
+    const home = process.env.HOME || process.env.USERPROFILE || os.homedir();
     filePath = path.join(home, filePath.slice(1));
   }
 
-  // Handle relative paths
-  if (!path.isAbsolute(filePath)) {
-    const basePath = cwd || process.cwd();
-    filePath = path.resolve(basePath, filePath);
-  }
+  // Handle relative and drive-relative paths
+  const basePath = cwd || process.cwd();
+  filePath = path.resolve(basePath, filePath);
 
   // Normalize to resolve .. and .
   return path.normalize(filePath);
@@ -78,7 +77,7 @@ function resolvePath(filePath: string, cwd?: string): string {
  */
 function resolveAllowedDir(dirPath: string): string {
   if (dirPath.startsWith('~')) {
-    const home = process.env.HOME || '';
+    const home = process.env.HOME || process.env.USERPROFILE || os.homedir();
     return path.normalize(path.join(home, dirPath.slice(1)));
   }
   return path.normalize(path.resolve(dirPath));
@@ -290,9 +289,10 @@ export function validateToolUse(hookData: HookData, allowedDirs: string[]): Vali
  * user-configured whitelist and the current working directory are permitted.
  */
 export function loadAllowedDirs(configPath?: string): string[] {
+  const home = process.env.HOME || process.env.USERPROFILE || os.homedir();
   const effectivePath = configPath ||
     process.env.REMOTE_CLI_CONFIG ||
-    path.join(process.env.HOME || '', '.remote-cli', 'config.json');
+    path.join(home, '.remote-cli', 'config.json');
 
   try {
     const config = JSON.parse(fs.readFileSync(effectivePath, 'utf8'));

@@ -712,6 +712,12 @@ A failed platform does not cancel the others, and all three must pass before the
 Linux publishing job can run. These checks do not exercise real AI provider
 sessions or every supported Node.js version.
 
+Windows filesystem operations use native paths. POSIX permission bits do not
+establish Windows ACL privacy; keep Router and client data in a user-protected
+directory. Symbolic-link, regular-file, and canonical-path checks remain
+applicable on every platform. Platform-specific process and mount features
+retain their documented limits.
+
 Both packages are released together automatically when a push to GitHub `main`
 increases the root package version. The GitHub Actions workflow `npm-publish.yml`
 uses npm Trusted Publishing instead of a stored npm token. Configure each package's trusted publisher for `Yu-Robotics/remote-cli`,

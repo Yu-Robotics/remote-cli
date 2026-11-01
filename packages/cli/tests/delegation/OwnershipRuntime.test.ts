@@ -178,6 +178,38 @@ describe('crash-recovery evidence', () => {
 });
 
 describe('durable launch admission', () => {
+  it.each([false, true])('closes publication handles before Windows journal replacement (failure=%s)', fail => {
+    const log = new ProcessJournal(filename, owner.token, () => {}, 128);
+    closed.push(() => log.close());
+    log.append({ id: randomUUID(), event: 'reserve' });
+    log.append({ id: randomUUID(), event: 'reserve' });
+    const original = fs.readFileSync(filename);
+    const close = vi.spyOn(fs, 'closeSync');
+    const rename = fs.renameSync.bind(fs);
+    const failure = new Error('Synthetic Windows publication failure');
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    vi.spyOn(fs, 'renameSync').mockImplementationOnce((from, to) => {
+      expect(close).toHaveBeenCalledTimes(2);
+      expect(fs.readFileSync(filename)).toEqual(original);
+      if (fail) throw failure;
+      rename(from, to);
+    });
+    if (fail) {
+      expect(() => log.append({ id: randomUUID(), event: 'reserve' })).toThrow(failure);
+      expect(fs.readFileSync(filename)).toEqual(original);
+      expect(() => log.append({ id: randomUUID(), event: 'reserve' })).toThrow('closed');
+    } else {
+      const id = randomUUID();
+      log.append({ id, event: 'reserve' });
+      log.append({ id, event: 'absent' });
+      expect(fs.readFileSync(filename, 'utf8')).toContain(id);
+      expect(fs.readFileSync(filename, 'utf8').startsWith(`${owner.token}\n`)).toBe(true);
+      vi.spyOn(process, 'kill').mockImplementation(absent);
+      expect(recover).toThrow('launch was interrupted');
+    }
+    expect(fs.readdirSync(directory)).toEqual(['children']);
+  });
+
   it('bounds completed history while retaining unresolved launch evidence through atomic compaction', () => {
     const log = new ProcessJournal(filename, owner.token, () => {}, 512);
     closed.push(() => log.close());

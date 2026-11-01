@@ -1,5 +1,5 @@
 import fs from 'fs/promises';
-import { createReadStream, openSync, constants } from 'fs';
+import { createReadStream, openSync, constants, lstatSync } from 'fs';
 import path from 'path';
 import { createHash, randomUUID } from 'crypto';
 import { Readable, Transform } from 'stream';
@@ -86,6 +86,8 @@ export async function saveStream(
 }
 
 export async function readPrivateJson(filename: string): Promise<any> {
+  const lstat = await fs.lstat(filename);
+  if (lstat.isSymbolicLink() || !lstat.isFile()) throw new Error('Unsafe attachment metadata.');
   const handle = await fs.open(filename, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const stat = await handle.stat();
@@ -103,5 +105,7 @@ export async function readPrivateJson(filename: string): Promise<any> {
 }
 
 export function readOwnedFile(filename: string): Readable {
+  const stat = lstatSync(filename);
+  if (stat.isSymbolicLink() || !stat.isFile()) throw new Error('Refusing to read symlink or non-regular file.');
   return createReadStream(filename, { fd: openSync(filename, constants.O_RDONLY | constants.O_NOFOLLOW), autoClose: true });
 }

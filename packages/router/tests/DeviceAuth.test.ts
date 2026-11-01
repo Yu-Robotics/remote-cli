@@ -56,6 +56,6 @@ describe('approved device authentication', () => {
     await Promise.all(['a', 'b', 'c'].map(id => auth.enroll(id, 'owner', keys().publicKey)));
     const restored = new DeviceAuth(path.join(root, 'auth.json'));
     for (const id of ['a', 'b', 'c']) expect(await restored.get(id)).toBeDefined();
-    expect((await fs.stat(path.join(root, 'auth.json'))).mode & 0o777).toBe(0o600);
+    expect((await fs.stat(path.join(root, 'auth.json'))).mode & 0o777).toBe(process.platform === 'win32' ? 0o666 : 0o600);
   });
 });

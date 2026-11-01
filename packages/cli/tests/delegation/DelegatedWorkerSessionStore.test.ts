@@ -23,6 +23,8 @@ describe('DelegatedWorkerSessionStore', () => {
   beforeEach(async () => {
     home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'delegated-worker-store-')));
     vi.spyOn(os, 'homedir').mockReturnValue(home);
+    vi.stubEnv('HOME', home);
+    vi.stubEnv('USERPROFILE', home);
     directory = path.join(home, 'lanes');
     workspace = path.join(home, 'workspace');
     await fs.mkdir(workspace);
@@ -30,6 +32,7 @@ describe('DelegatedWorkerSessionStore', () => {
 
   afterEach(async () => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
     await fs.rm(home, { recursive: true, force: true });
   });
 

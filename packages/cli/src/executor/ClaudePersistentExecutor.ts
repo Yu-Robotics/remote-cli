@@ -7,6 +7,7 @@ import { StructuredContent, ContentBlockUnion, ToolUseInfo, ToolResultInfo, Atta
 import { ActivityTracker } from './Activity';
 import { ClaudeSandbox } from './claude/ClaudeSandbox';
 import { evaluateFileWrite } from './claude/ClaudeFilePolicy';
+import { createApprovalEndpoint } from './claude/ApprovalEndpoint';
 import type { ClaudeSandboxConfig } from '../types/config';
 import { configuredExecutionMetadata } from './ExecutionMetadata';
 import type { IExecutor, ExecutorModelInfo, ExecutorEffortInfo } from './IExecutor';
@@ -281,6 +282,8 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
   private readonly claudeCommand: string;
   private approvalServer: net.Server | null = null;
   private approvalSocketPath?: string;
+  private approvalSocketDirectory?: string;
+  private approvalStartup?: Promise<string>;
   private approvalGeneration = 0;
   private approvalTurnActive = false;
   private pendingApprovals = new Map<string, {
@@ -864,13 +867,19 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
   }
 
   private async ensureApprovalServer(): Promise<string> {
+    if (this.isDestroyed) throw new Error('Executor has been destroyed');
     if (this.approvalServer && this.approvalSocketPath) return this.approvalSocketPath;
-    const directory = path.join(os.homedir(), '.remote-cli', 'claude-approval');
-    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-    const socketPath = path.join(directory, `${encodeURIComponent(this.threadId || randomUUID())}.sock`);
-    if (fs.existsSync(socketPath)) fs.unlinkSync(socketPath); // stale socket from a previous run
+    if (this.approvalStartup) return this.approvalStartup;
+    const startup = this.openApprovalServer().finally(() => {
+      if (this.approvalStartup === startup) this.approvalStartup = undefined;
+    });
+    this.approvalStartup = startup;
+    return startup;
+  }
 
-    this.approvalServer = net.createServer((socket) => {
+  private async openApprovalServer(): Promise<string> {
+    const { socketPath, directory } = createApprovalEndpoint();
+    const server = net.createServer((socket) => {
       const generation = this.approvalGeneration;
       let buffer = '';
       socket.on('error', () => { /* The close listener expires any pending request. */ });
@@ -890,13 +899,22 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
         }
       });
     });
-    await new Promise<void>((resolve, reject) => {
-      this.approvalServer!.once('error', reject);
-      this.approvalServer!.listen(socketPath, () => resolve());
-    });
-    fs.chmodSync(socketPath, 0o600);
-    this.approvalSocketPath = socketPath;
-    return socketPath;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(socketPath, () => resolve());
+      });
+      if (this.isDestroyed || this.isStopping) throw new Error('Executor was destroyed or stopped during approval startup');
+      if (directory) fs.chmodSync(socketPath, 0o600);
+      this.approvalServer = server;
+      this.approvalSocketDirectory = directory;
+      this.approvalSocketPath = socketPath;
+      return socketPath;
+    } catch (error) {
+      if (server.listening) await new Promise<void>(resolve => server.close(() => resolve()));
+      if (directory) fs.rmSync(directory, { recursive: true, force: true });
+      throw error;
+    }
   }
 
   private handleApprovalSocketRequest(payload: any, socket: net.Socket, generation: number): void {
@@ -2411,11 +2429,17 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     this.rejectPendingControlRequests('Executor has been destroyed');
     this.clearCatalogCache();
 
+    // Startup owns its unpublished listener until it has completed or cleaned up.
+    await this.approvalStartup?.catch(() => undefined);
     if (this.approvalServer) {
       const server = this.approvalServer;
       this.approvalServer = null;
       this.approvalSocketPath = undefined;
       await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+    if (this.approvalSocketDirectory) {
+      fs.rmSync(this.approvalSocketDirectory, { recursive: true, force: true });
+      this.approvalSocketDirectory = undefined;
     }
 
     if (this.currentCommandReject) {
