@@ -12,6 +12,7 @@ import ts from 'typescript';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DelegationOwnership } from '../../src/delegation/DelegationOwnership';
 import { runGit } from '../../src/delegation/GitCheckpoint';
+import { ActiveDelegationWriterError, encodeOwner, kernelGate, ownerRecord } from '../../src/delegation/OwnershipRuntime';
 
 function deferred() {
   let resolve!: () => void;
@@ -174,6 +175,76 @@ afterEach(async () => {
 });
 
 describe('DelegationOwnership', () => {
+  it('does not mistake concurrent ordinary readiness checks for active writers after clean release', async () => {
+    const previous = await owner('concurrent-probes');
+    await previous.ownership.release();
+    const observer = new DelegationOwnership(previous.root);
+    await expect(Promise.all(Array.from({ length: 8 }, () => observer.assertNoKnownForeignWriters())))
+      .resolves.toEqual(Array(8).fill('checked'));
+    await observer.release();
+  });
+
+  it('coordinates ordinary readiness with its own concurrent acquisition', async () => {
+    const previous = await owner('concurrent-acquisition');
+    await previous.ownership.release();
+    const observer = new DelegationOwnership(previous.root);
+    const inspect = observer.assertNoKnownForeignWriters();
+    const acquiring = observer.acquire();
+    try {
+      await expect(acquiring).resolves.toBeUndefined();
+      await expect(inspect).resolves.toBe('checked');
+      await expect(observer.assertNoKnownForeignWriters()).resolves.toBe('checked');
+      const foreign = new DelegationOwnership(previous.root);
+      await expect(foreign.assertNoKnownForeignWriters()).rejects.toBeInstanceOf(ActiveDelegationWriterError);
+    } finally { await observer.release(); }
+  });
+
+  it('separates ordinary execution from unknown metadata without granting managed ownership', async () => {
+    const root = path.join(directory, 'unknown-storage');
+    const observer = new DelegationOwnership(root);
+    await expect(observer.assertNoKnownForeignWriters()).resolves.toBe('checked');
+    expect(syncFs.existsSync(root)).toBe(false);
+    expect(syncFs.existsSync(rootLock(root) + '.guard')).toBe(false);
+    await fs.writeFile(rootLock(root), 'invalid legacy metadata');
+    await expect(observer.assertNoKnownForeignWriters()).resolves.toBe('unavailable');
+    await expect(observer.assertNoForeignWriters()).rejects.toThrow('legacy');
+    await expect(observer.acquire()).rejects.toThrow('legacy');
+    expect(await fs.readFile(rootLock(root), 'utf8')).toBe('invalid legacy metadata');
+    // A held native gate is positive ownership even if no usable record exists.
+    const gate = kernelGate(rootLock(root) + '.guard')!;
+    try {
+      await expect(observer.assertNoKnownForeignWriters()).rejects.toBeInstanceOf(ActiveDelegationWriterError);
+    } finally { gate.close(); }
+    await expect(observer.assertNoKnownForeignWriters()).resolves.toBe('unavailable');
+    await observer.release();
+  });
+
+  it('allows ordinary execution on an inaccessible evidence read while leaving managed admission fenced', async () => {
+    const root = path.join(directory, 'inaccessible-storage');
+    await fs.writeFile(rootLock(root), 'synthetic owner');
+    const read = fs.readFile.bind(fs);
+    vi.spyOn(fs, 'readFile').mockImplementation(((filename: any, ...args: any[]) => {
+      if (filename === rootLock(root)) return Promise.reject(Object.assign(new Error('Synthetic permission denial'), { code: 'EACCES' }));
+      return (read as any)(filename, ...args);
+    }) as any);
+    const observer = new DelegationOwnership(root);
+    await expect(observer.assertNoKnownForeignWriters()).resolves.toBe('unavailable');
+    await expect(observer.assertNoForeignWriters()).rejects.toMatchObject({ code: 'EACCES' });
+    await expect(observer.acquire()).rejects.toMatchObject({ code: 'EACCES' });
+    await observer.release();
+  });
+
+  it('still detects a recorded live process when its kernel gate cannot be inspected', async () => {
+    const root = path.join(directory, 'invalid-gate');
+    await fs.writeFile(rootLock(root), encodeOwner(ownerRecord()));
+    await fs.mkdir(rootLock(root) + '.guard');
+    const observer = new DelegationOwnership(root);
+    await expect(observer.assertNoKnownForeignWriters()).rejects.toBeInstanceOf(ActiveDelegationWriterError);
+    await expect(observer.acquire()).rejects.toThrow('Unsafe delegation kernel lock entry');
+    expect((await fs.stat(rootLock(root) + '.guard')).isDirectory()).toBe(true);
+    await observer.release();
+  });
+
   it('checks foreign process evidence without opening inventory or acquiring storage', async () => {
     const root = path.join(directory, 'read-only-check');
     const observer = new DelegationOwnership(root);
@@ -182,10 +253,13 @@ describe('DelegationOwnership', () => {
     const active = await owner('read-only-check');
     try {
       await expect(observer.assertNoForeignWriters()).rejects.toThrow('still alive');
+      await expect(observer.assertNoKnownForeignWriters()).rejects.toBeInstanceOf(ActiveDelegationWriterError);
+      await expect(active.ownership.assertNoKnownForeignWriters()).resolves.toBe('checked');
       await active.ownership.assertNoForeignWriters();
       expect(await fs.readdir(root)).toEqual([]);
     } finally { await active.ownership.release(); }
     await observer.assertNoForeignWriters();
+    await expect(observer.assertNoKnownForeignWriters()).resolves.toBe('checked');
     await fs.writeFile(rootLock(root), 'unknown legacy owner');
     await expect(observer.assertNoForeignWriters()).rejects.toThrow('legacy');
     expect(await fs.readFile(rootLock(root), 'utf8')).toBe('unknown legacy owner');
@@ -271,6 +345,7 @@ describe('DelegationOwnership', () => {
     child.child.send('crash');
     expect(await child.closed).toBe(0);
     const next = new DelegationOwnership(root);
+    await expect(next.assertNoKnownForeignWriters()).resolves.toBe('checked');
     await next.acquire();
     expect(await fs.readFile(rootLock(root))).not.toEqual(bytes);
     await next.release();
@@ -309,10 +384,12 @@ describe('DelegationOwnership', () => {
       await previous.closed;
       const bytes = await fs.readFile(rootLock(root));
       const next = new DelegationOwnership(root);
+      await expect(next.assertNoKnownForeignWriters()).rejects.toBeInstanceOf(ActiveDelegationWriterError);
       await expect(next.acquire()).rejects.toThrow('still exists');
       expect(await fs.readFile(rootLock(root))).toEqual(bytes);
       writer.kill('SIGKILL');
       await writerClosed;
+      await expect(next.assertNoKnownForeignWriters()).resolves.toBe('checked');
       await next.acquire();
       await next.release();
     } finally {

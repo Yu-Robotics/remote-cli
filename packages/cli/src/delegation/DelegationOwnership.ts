@@ -3,7 +3,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { performance } from 'perf_hooks';
 import { setTimeout as delay } from 'timers/promises';
-import { kernelGate, ownerRecord, encodeOwner, assertRecoverable, ProcessJournal, withProcessJournal, syncDirectory, type KernelGate } from './OwnershipRuntime';
+import { kernelGate, ownerRecord, encodeOwner, assertRecoverable, ActiveDelegationWriterError, ProcessJournal, withProcessJournal, syncDirectory, type KernelGate } from './OwnershipRuntime';
 
 const REPOSITORY_WAIT_MS = 30_000;
 const POLL_MS = 50;
@@ -210,6 +210,69 @@ export class DelegationOwnership {
   /** Read process evidence without acquiring ownership or opening worker inventory. */
   async assertNoForeignWriters(): Promise<boolean> {
     if (this.storage) { await this.verifyStorage(this.storage); return true; }
+    const filename = await this.ownerFilename();
+    let stat: Stats;
+    try { stat = await fs.lstat(filename); }
+    catch (error) { if (code(error) === 'ENOENT') return false; throw error; }
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > 16 * 1024) throw new Error('Unsafe delegation ownership evidence');
+    assertRecoverable(await fs.readFile(filename), `${filename}.children`);
+    return true;
+  }
+
+  /**
+   * Ordinary execution does not acquire or repair managed storage. Missing exit
+   * evidence is not a live-writer observation and never authorizes lane reuse.
+   */
+  async assertNoKnownForeignWriters(): Promise<'checked' | 'unavailable'> {
+    await this.acquiring?.catch(() => undefined);
+    let gate: KernelGate | undefined;
+    let unavailable = false;
+    try {
+      try {
+        if (!this.storage) {
+          const filename = `${await this.ownerFilename()}.guard`;
+          const existing = await fs.lstat(filename).catch(error => {
+            if (code(error) !== 'ENOENT') throw error;
+            return undefined;
+          });
+          // Acquisition may have started while resolving the probe path. Its
+          // gate belongs to this instance, not to a foreign writer.
+          if (this.acquiring) {
+            await this.acquiring.catch(() => undefined);
+            return this.assertNoKnownForeignWriters();
+          }
+          if (existing && !this.storage) {
+            // Do not create a gate for an ordinary first-use conversation. A held
+            // existing gate is an active owner even if its metadata is incomplete.
+            gate = kernelGate(filename);
+            if (!gate) throw new ActiveDelegationWriterError('Delegation storage has an active native lock');
+            // Never hold an exclusive observation gate across an await: sibling
+            // chats and this instance's acquisition must not conflict with it.
+            gate.close();
+            gate = undefined;
+          }
+        }
+      } catch (error) {
+        if (error instanceof ActiveDelegationWriterError) throw error;
+        unavailable = true;
+      }
+      // A native-lock probe failure must not hide independently readable
+      // process evidence, and vice versa.
+      try { await this.assertNoForeignWriters(); }
+      catch (error) {
+        if (error instanceof ActiveDelegationWriterError) {
+          // An acquisition may have installed our own owner record while the
+          // asynchronous metadata read was in flight. Recheck through its lease.
+          if (this.acquiring || this.storage) return this.assertNoKnownForeignWriters();
+          throw error;
+        }
+        unavailable = true;
+      }
+      return unavailable ? 'unavailable' : 'checked';
+    } finally { gate?.close(); }
+  }
+
+  private async ownerFilename(): Promise<string> {
     // Resolve existing aliases, but allow a first-use root which does not exist yet.
     let root: string;
     try { root = await fs.realpath(this.root); }
@@ -220,13 +283,7 @@ export class DelegationOwnership {
         return path.dirname(this.root);
       }), path.basename(this.root));
     }
-    const filename = `${root}.ownership`;
-    let stat: Stats;
-    try { stat = await fs.lstat(filename); }
-    catch (error) { if (code(error) === 'ENOENT') return false; throw error; }
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) throw new Error('Unsafe delegation ownership evidence');
-    assertRecoverable(await fs.readFile(filename), `${filename}.children`);
-    return true;
+    return `${root}.ownership`;
   }
 
   /** Reentrant, not reference counted; independent instances must contend. */

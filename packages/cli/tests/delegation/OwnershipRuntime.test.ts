@@ -10,7 +10,7 @@ vi.mock('child_process', async importOriginal => {
   const actual = await importOriginal<typeof import('child_process')>();
   return { ...actual, spawn: vi.fn(actual.spawn) };
 });
-import { assertRecoverable, bootIdentity, kernelGate, ownedSpawn, ownerRecord, encodeOwner, ProcessJournal,
+import { ActiveDelegationWriterError, assertRecoverable, bootIdentity, kernelGate, ownedSpawn, ownerRecord, encodeOwner, ProcessJournal,
   withProcessJournal, type OwnerRecord } from '../../src/delegation/OwnershipRuntime';
 
 let directory: string;
@@ -80,8 +80,9 @@ describe('crash-recovery evidence', () => {
     journal();
     const probe = vi.spyOn(process, 'kill').mockReturnValue(true);
     expect(recover).toThrow('still alive');
+    expect(recover).toThrow(ActiveDelegationWriterError);
     probe.mockImplementation(() => { throw Object.assign(new Error('Denied'), { code: 'EPERM' }); });
-    expect(recover).toThrow('Denied');
+    expect(recover).toThrow(ActiveDelegationWriterError);
   });
 
   it.skipIf(process.platform !== 'linux')('recognizes PID reuse using birth identity without signalling the process', () => {
@@ -146,6 +147,26 @@ describe('crash-recovery evidence', () => {
     journal([{ id, event: 'reserve' }, { id, event: 'spawn', pid: 234567, group: false }]);
     vi.spyOn(process, 'kill').mockImplementation(absent);
     expect(recover).toThrow('child-tree exit is unconfirmed');
+  });
+
+  it('distinguishes a live non-group child from unconfirmed descendant exit, including Windows', () => {
+    const id = randomUUID();
+    journal([{ id, event: 'reserve' }, { id, event: 'spawn', pid: 234567, group: false }]);
+    const probe = vi.spyOn(process, 'kill').mockImplementation(pid => pid === owner.pid ? absent() : true);
+    expect(recover).toThrow(ActiveDelegationWriterError);
+    expect(probe).toHaveBeenCalledWith(234567, 0);
+    probe.mockImplementation(absent);
+    expect(recover).toThrow('child-tree exit is unconfirmed');
+    expect(recover).not.toThrow(ActiveDelegationWriterError);
+  });
+
+  it.skipIf(process.platform === 'win32')('does not let an unresolved reservation hide a later live child group', () => {
+    const id = randomUUID();
+    journal([{ id: randomUUID(), event: 'reserve' }, { id, event: 'reserve' }, { id, event: 'spawn', pid: 234567, group: true }]);
+    const probe = vi.spyOn(process, 'kill').mockImplementation(pid => pid > 0 ? absent() : true);
+    expect(recover).toThrow(ActiveDelegationWriterError);
+    probe.mockImplementation(absent);
+    expect(recover).toThrow('launch was interrupted');
   });
 
   it('accepts a durably confirmed failed launch', () => {

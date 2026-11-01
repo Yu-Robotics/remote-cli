@@ -182,14 +182,15 @@ describe('/backend command', () => {
       expect(sentResponse().output).toBe('Summarized and reset; native DSH history retained.');
     });
 
-    it('still blocks native compaction when the isolated home has uncertain worker ownership', async () => {
+    it('allows native compaction without deleting uncertain historical worker ownership', async () => {
       await fs.mkdir(path.join(home, '.remote-cli'));
       await fs.writeFile(path.join(home, '.remote-cli', 'delegation-workers.ownership'), 'synthetic unknown owner');
       mockThreadPool.getBackendKey.mockReturnValue('dsh');
-      mockExecutor.compactWhenFull = vi.fn();
+      mockExecutor.compactWhenFull = vi.fn().mockResolvedValue({ success: true });
       await send('/compact');
-      expect(mockExecutor.compactWhenFull).not.toHaveBeenCalled();
-      expect(sentResponse()).toMatchObject({ success: false, error: expect.stringContaining('may still write files') });
+      expect(mockExecutor.compactWhenFull).toHaveBeenCalledOnce();
+      expect(sentResponse()).toMatchObject({ success: true });
+      expect(await fs.readFile(path.join(home, '.remote-cli', 'delegation-workers.ownership'), 'utf8')).toBe('synthetic unknown owner');
     });
 
     it('appends DSH without changing existing backend ordering and honors its custom command', async () => {
