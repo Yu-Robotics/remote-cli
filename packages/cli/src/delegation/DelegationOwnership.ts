@@ -207,6 +207,28 @@ export class DelegationOwnership {
     this.root = path.resolve(root);
   }
 
+  /** Read process evidence without acquiring ownership or opening worker inventory. */
+  async assertNoForeignWriters(): Promise<boolean> {
+    if (this.storage) { await this.verifyStorage(this.storage); return true; }
+    // Resolve existing aliases, but allow a first-use root which does not exist yet.
+    let root: string;
+    try { root = await fs.realpath(this.root); }
+    catch (error) {
+      if (code(error) !== 'ENOENT') throw error;
+      root = path.join(await fs.realpath(path.dirname(this.root)).catch(error => {
+        if (code(error) !== 'ENOENT') throw error;
+        return path.dirname(this.root);
+      }), path.basename(this.root));
+    }
+    const filename = `${root}.ownership`;
+    let stat: Stats;
+    try { stat = await fs.lstat(filename); }
+    catch (error) { if (code(error) === 'ENOENT') return false; throw error; }
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) throw new Error('Unsafe delegation ownership evidence');
+    assertRecoverable(await fs.readFile(filename), `${filename}.children`);
+    return true;
+  }
+
   /** Reentrant, not reference counted; independent instances must contend. */
   acquire(): Promise<void> {
     if (this.closing) return Promise.reject(new Error('Delegation ownership is releasing or requires recovery'));

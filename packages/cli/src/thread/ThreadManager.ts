@@ -130,14 +130,18 @@ export class ThreadManager {
    * Get a thread by ID.
    */
   getThread(id: string): Thread | undefined {
-    return this.store.threads[id];
+    const thread = this.store.threads[id];
+    if (!thread) return undefined;
+    const generation = this.contextResets.generation(id, thread.delegationWorkspaceGeneration);
+    return generation === (thread.delegationWorkspaceGeneration ?? 0) ? thread : { ...thread, delegationWorkspaceGeneration: generation };
   }
 
   /**
    * Get a thread by name.
    */
   getThreadByName(name: string): Thread | undefined {
-    return Object.values(this.store.threads).find(t => t.name === name);
+    const thread = Object.values(this.store.threads).find(t => t.name === name);
+    return thread && this.getThread(thread.id);
   }
 
   /**
@@ -213,7 +217,7 @@ export class ThreadManager {
   /**
    * List all threads sorted by createdAt ascending.
    */  listThreads(): Thread[] {
-    return Object.values(this.store.threads).sort((a, b) => a.createdAt - b.createdAt);
+    return Object.keys(this.store.threads).map(id => this.getThread(id)!).sort((a, b) => a.createdAt - b.createdAt);
   }
 
   /**

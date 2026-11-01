@@ -68,3 +68,37 @@ describe('settings command admission', () => {
     expect(admission.hasCommand('thread-a')).toBe(false);
   });
 });
+
+describe('recovery admission fencing', () => {
+  it('retires cancellable readers without allowing their late completion to release a newer reader', async () => {
+    const admission = new SettingsAdmission();
+    const old = gate();
+    const next = gate();
+    let current!: () => boolean;
+    const first = admission.command('thread', 'same-id', async isCurrent => { current = isCurrent; await old.wait; }, true);
+    expect(current()).toBe(true);
+    await admission.recovery('thread', async () => expect(current()).toBe(false));
+    const second = admission.command('thread', 'same-id', () => next.wait, true);
+    old.release();
+    await first;
+    expect(admission.hasCommand('thread')).toBe(true);
+    await expect(admission.mutation('thread', async () => undefined)).rejects.toBeInstanceOf(SettingsBusyError);
+    next.release();
+    await second;
+    expect(admission.hasCommand('thread')).toBe(false);
+  });
+
+  it('does not revoke native settings operations or allow overlapping recovery writers', async () => {
+    const admission = new SettingsAdmission();
+    const hold = gate();
+    const native = admission.command('thread', 'compact', () => hold.wait);
+    await expect(admission.recovery('thread', async () => undefined)).rejects.toBeInstanceOf(SettingsBusyError);
+    hold.release();
+    await native;
+    const reset = gate();
+    const recovery = admission.recovery('thread', () => reset.wait);
+    await expect(admission.recovery('thread', async () => undefined)).rejects.toBeInstanceOf(SettingsBusyError);
+    reset.release();
+    await recovery;
+  });
+});

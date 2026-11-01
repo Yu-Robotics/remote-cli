@@ -64,6 +64,43 @@ describe('managed Git phases and native worker deadlines', { timeout: 30_000 }, 
   const result = (scope: ReturnType<DelegationManager['begin']>, taskId: string) =>
     scope.invoke('remote_cli_result', { taskId, waitSeconds: 25 }, `result-${taskId}`) as Promise<DelegatedTaskResult>;
 
+  it('bounds cancellation during hanging collection while retaining the detached scope and source lease', async () => {
+    const scope = manager.begin(parent);
+    const task = await start(scope);
+    const gate = deferred();
+    const collect = manager.workspaceManager.collect.bind(manager.workspaceManager);
+    const held = vi.spyOn(manager.workspaceManager, 'collect').mockImplementation(async (...args) => {
+      await gate.promise;
+      return collect(...args);
+    });
+    workers[0].finish({ success: true });
+    await vi.waitFor(() => expect(held).toHaveBeenCalledOnce(), PHASE_WAIT_OPTIONS);
+    vi.mocked(parent.onProgress!).mockClear();
+    const history = vi.spyOn(manager.workspaceManager, 'reconcileHistoricalDelivery');
+    const cancelled = manager.cancelThread(parent.thread.id);
+    expect(scope.isClosed()).toBe(true);
+    await cancelled;
+    expect((manager as any).detachedScopes.size).toBe(1);
+    expect(manager.blocksWorkspace(fixture.root, parent.thread.id)).toBe(true);
+    await expect(manager.resetWorkerLanes(parent.thread.id)).rejects.toThrow('running');
+    await expect(manager.deleteWorkerLanes(parent.thread.id)).rejects.toThrow('running');
+    const next = manager.begin({ ...parent, messageId: 'new-turn' });
+    try {
+      // The checkout remains reserved for collection, but the native writer has stopped.
+      await expect(manager.assertExecutionSafe(fixture.root, parent.thread.id)).resolves.toBeUndefined();
+      await expect(scope.invoke('remote_cli_integrate', { taskId: task.taskId, action: 'apply' }, 'late')).rejects.toThrow('ended');
+    } finally {
+      gate.resolve();
+      await next.close();
+      await scope.close();
+    }
+    expect(history).not.toHaveBeenCalled();
+    expect(parent.onProgress).not.toHaveBeenCalled();
+    expect(parent.onToolResult).not.toHaveBeenCalled();
+    expect((manager as any).detachedScopes.size).toBe(0);
+    expect(manager.blocksWorkspace(fixture.root, parent.thread.id)).toBe(false);
+  });
+
   it.each(['baseline', 'prepare'] as const)('awaits slow %s without charging native startup or releasing its slot', async phase => {
     const gate = deferred();
     let entered = false;
@@ -346,6 +383,54 @@ describe('managed Git phases and native worker deadlines', { timeout: 30_000 }, 
     expect(await result(scope, next.taskId)).toMatchObject({ state: 'succeeded' });
   });
 
+  it('blocks clearing after shutdown evidence cannot be persisted while releasing the stopped task slot', async () => {
+    const scope = manager.begin(parent);
+    const task = await start(scope);
+    const collect = vi.spyOn(manager.workspaceManager, 'collect');
+    vi.spyOn(manager.laneStore, 'markShutdownConfirmed').mockRejectedValueOnce(new Error('Synthetic exit evidence write failure'));
+    workers[0].finish({ success: true });
+    expect(await result(scope, task.taskId)).toMatchObject({ state: 'failed',
+      error: expect.stringContaining('exit evidence write failure') });
+    await scope.close();
+    expect(collect).not.toHaveBeenCalled();
+    expect(workers[0].executor.waitForManagedProcessGroupExit).toHaveBeenCalledOnce();
+    const [lane] = await manager.laneStore.lanesForThread(parent.thread.id);
+    expect(lane.state).toBe('dirty');
+    expect(lane.shutdownConfirmedGeneration).toBeUndefined();
+    await expect(manager.assertThreadContextResettable(parent.thread.id)).rejects.toThrow('unconfirmed');
+    expect((await fs.stat(workers[0].cwd)).isDirectory()).toBe(true);
+    expect((manager as any).running).toBe(0);
+    expect(manager.blocksWorkspace(fixture.root, 'other')).toBe(false);
+  });
+
+  it('does not persist shutdown evidence for a quarantined setup that is still pending', async () => {
+    expectedShutdownFailure = true;
+    const gate = deferred();
+    const original = manager.laneStore.markRunning.bind(manager.laneStore);
+    const markRunning = vi.spyOn(manager.laneStore, 'markRunning').mockImplementation(async id => {
+      const lane = await original(id);
+      await gate.promise;
+      return lane;
+    });
+    const scope = manager.begin(parent);
+    vi.useFakeTimers();
+    const starting = start(scope);
+    try {
+      await vi.waitFor(() => expect(markRunning).toHaveBeenCalledOnce(), PHASE_WAIT_OPTIONS);
+      await vi.advanceTimersByTimeAsync(DELEGATION_LIMITS.storageTimeoutMs + 1);
+      const task = await starting;
+      expect(await result(scope, task.taskId)).toMatchObject({ state: 'interrupted' });
+      expect(workers[0].executor.execute).not.toHaveBeenCalled();
+      const [lane] = await manager.laneStore.lanesForThread(parent.thread.id);
+      expect(lane.shutdownConfirmedGeneration).toBeUndefined();
+      await expect(manager.laneStore.assertThreadContextResettable(parent.thread.id)).rejects.toThrow('unconfirmed');
+    } finally {
+      vi.useRealTimers();
+      gate.resolve();
+      await markRunning.mock.results[0]?.value;
+    }
+  });
+
   it('preserves hidden worker edits instead of publishing a stale no-change artifact', async () => {
     const scope = manager.begin(parent);
     const task = await start(scope);
@@ -375,8 +460,11 @@ describe('managed Git phases and native worker deadlines', { timeout: 30_000 }, 
       await vi.advanceTimersByTimeAsync(DELEGATION_LIMITS.storageTimeoutMs + 1);
       expect(await result(scope, task.taskId)).toMatchObject({ state: 'interrupted' });
       expect(collect).not.toHaveBeenCalled();
+      expect((await manager.laneStore.lanesForThread(parent.thread.id))[0].shutdownConfirmedGeneration).toBeUndefined();
+      await expect(manager.laneStore.assertThreadContextResettable(parent.thread.id)).rejects.toThrow('unconfirmed');
       expect((manager as any).running).toBe(1);
       expect(manager.blocksWorkspace(fixture.root, 'other')).toBe(true);
+      await expect(manager.assertExecutionSafe(fixture.root, 'other')).rejects.toThrow('may still write files');
     } finally { vi.useRealTimers(); }
   });
 });

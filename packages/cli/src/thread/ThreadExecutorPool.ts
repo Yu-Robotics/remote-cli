@@ -103,6 +103,9 @@ export class ThreadExecutorPool {
     return executor;
   }
 
+  /** Recovery may inspect an existing executor without resuming a blocked binding. */
+  getExistingExecutor(threadId: string): IExecutor | undefined { return this.executors.get(threadId); }
+
   assertContextResettable(threadId: string): void {
     if (!this.threadManager.getThread(threadId)) throw new Error(`Thread not found: ${threadId}`);
     if (this.executors.get(threadId)?.isBusy?.()) {
@@ -160,17 +163,14 @@ export class ThreadExecutorPool {
     if (!destination.isDirectory()) throw new Error(`Not a directory: ${cwd}`);
     if (executor.isBusy?.()) throw new Error('Cannot change working directory while this thread is busy');
 
-    await this.threadManager.clearBackendSessionPointers(threadId);
-    await executor.setWorkingDirectory(cwd);
-    const thread = this.threadManager.getThread(threadId);
-    if (!thread) throw new Error(`Thread not found: ${threadId}`);
-    // Persist the directory and delegation generation together. A lane can only
-    // be resumed when this authoritative thread generation still matches it.
+    await this.threadManager.contextResets.begin(threadId);
+    await this.clearThreadContext(threadId);
+    const thread = this.threadManager.getThread(threadId)!;
+    const generation = await this.threadManager.contextResets.advanceGeneration(threadId, thread.delegationWorkspaceGeneration);
     await this.threadManager.updateThread(threadId, {
-      workingDirectory: cwd,
-      sessionId: null,
-      delegationWorkspaceGeneration: (thread.delegationWorkspaceGeneration ?? 0) + 1,
+      workingDirectory: cwd, sessionId: null, delegationWorkspaceGeneration: generation,
     });
+    await this.threadManager.contextResets.complete(threadId);
     return { cwd, changed: true };
   }
 
@@ -193,7 +193,8 @@ export class ThreadExecutorPool {
   // ── Per-thread locking ──────────────────────────────────────────────────
 
   isThreadBusy(threadId: string): boolean {
-    return (this.busy.get(threadId) ?? false) || this.executors.get(threadId)?.isBusy?.() === true;
+    return (this.busy.get(threadId) ?? false) || this.executors.get(threadId)?.isBusy?.() === true
+      || this.executors.get(threadId)?.hasUncertainShutdown?.() === true;
   }
 
   setThreadBusy(threadId: string, busy: boolean): void {

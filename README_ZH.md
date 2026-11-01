@@ -917,14 +917,29 @@ managed worker conversation, across backends and parallel worker lanes. The
 working directory, files, Git artifacts, archived native transcripts, login,
 backend/model/effort selections, delegation preference, and sandbox grants are
 preserved. Other threads are unaffected. A later backend switch starts fresh
-instead of restoring a pre-clear binding. Busy tasks, queued work, and workers
-with unconfirmed shutdowns must settle before clearing. Reset intent is saved
+instead of restoring a pre-clear binding. Direct-backend shutdown must be
+confirmed before clearing; managed-worker recovery follows the rules below.
+Reset intent is saved
 before any session binding changes. A persisted reset intent blocks old
 conversations until clearing succeeds, including after a CLI restart. If
 clearing fails, resolve the reported problem and retry `/clear` or `/new`.
 Service shutdown waits for retained cleanup and reports unconfirmed native exits
 before acknowledging completion.
 Single-worker **Clear context** controls still reset only the selected worker.
+
+From CLI 1.6.195, `/clear` and `/new` separate conversation recovery from
+managed-worker cleanup. A fresh worker conversation generation excludes old
+worker contexts and artifact obligations from subsequent turns. Old files,
+artifacts, native history, and pending cleanup records remain available for
+recovery; an uncertain worker is never treated as stopped or made reusable.
+Worker cleanup may continue after cancellation without holding the conversation
+open. Conflicting execution remains restricted while a worker may still write,
+including when delegation is disabled. Missing or unreadable legacy process
+evidence can still block execution after clearing; recovery commands remain
+available, and offline recovery must establish that old writers have stopped.
+Direct-backend shutdown and durable reset storage must succeed before clearing
+is acknowledged. Upgrade the local CLI; a Router-only upgrade does not enable
+this recovery path.
 
 Backend switches and toggling `/delegation` preserve worker context unless
 `/clear` or `/new` was used. `/cd` starts a new workspace generation and discards

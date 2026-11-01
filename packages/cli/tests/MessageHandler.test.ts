@@ -93,6 +93,7 @@ function buildHandler(mockExecutorOverrides: Record<string, any> = {}) {
 
   const mockThreadPool = {
     getExecutor: vi.fn().mockReturnValue(mockExecutor),
+    getExistingExecutor: vi.fn().mockImplementation((id: string) => mockThreadPool.getExecutor(id)),
     assertContextResettable: vi.fn(),
     clearThreadContext: vi.fn(async () => { mockExecutor.resetContext(); }),
     setWorkingDirectory: vi.fn().mockResolvedValue({ cwd: '/home/user/test-project', changed: true }),
@@ -164,7 +165,7 @@ describe('MessageHandler', () => {
     expect(ctx.mockExecutor.configureDelegation).not.toHaveBeenCalled();
   });
 
-  it.each(['closed scope', 'handler shutdown'])('does not start a coordinator after %s during artifact inventory', async change => {
+  it.each(['closed scope', 'handler shutdown'])('does not start a coordinator after %s during backend preparation', async change => {
     let closed = false;
     const scope = {
       isClosed: () => closed, hasPendingResults: () => false, getLaunchRevision: () => 0,
@@ -174,12 +175,11 @@ describe('MessageHandler', () => {
     };
     vi.spyOn((ctx.handler as any).delegation, 'begin').mockReturnValue(scope);
     let release!: (value: string) => void;
-    const inventory = vi.mocked((ctx.handler as any).delegation.pendingArtifactContext)
-      .mockImplementation(() => new Promise<string>(resolve => { release = resolve; }));
-    ctx.mockExecutor.configureDelegation = vi.fn();
+    const preparation = vi.fn(() => new Promise<string>(resolve => { release = resolve; }));
+    ctx.mockExecutor.configureDelegation = preparation;
     ctx.mockExecutor.execute.mockResolvedValue({ success: true });
     const run = ctx.handler.handleMessage({ type: 'command', messageId: 'inventory-cancellation', content: 'Inspect' });
-    await vi.waitFor(() => expect(inventory).toHaveBeenCalled());
+    await vi.waitFor(() => expect(preparation).toHaveBeenCalled());
     if (change === 'closed scope') await scope.close();
     else await ctx.handler.destroy();
     release('');
@@ -783,7 +783,7 @@ describe('MessageHandler', () => {
         resolve({ path: '/tmp/chart.png', ...outputImage });
         await run;
         await abort;
-        await vi.waitFor(() => expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'response', messageId: 'stale-image' })));
+        if (change !== 'abort' && change !== 'destroy') await vi.waitFor(() => expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'response', messageId: 'stale-image' })));
         expect(ctx.mockWsClient.send).not.toHaveBeenCalledWith(expect.objectContaining({ streamType: 'image', messageId: 'stale-image' }));
       } finally { resolve?.(null); reader.mockRestore(); }
     });
@@ -1312,7 +1312,8 @@ describe('MessageHandler', () => {
 
       expect(ctx.mockExecutor.resetContext).toHaveBeenCalledOnce();
       expect(ctx.mockThreadPool.clearThreadContext).toHaveBeenCalledWith('default-thread-id');
-      expect((ctx.handler as any).delegation.clearThreadContexts).toHaveBeenCalledWith('default-thread-id');
+      expect((ctx.handler as any).delegation.clearThreadContexts).not.toHaveBeenCalled();
+      expect(ctx.mockThreadManager.contextResets.generation('default-thread-id')).toBe(1);
       expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
       expect(ctx.mockWsClient.send).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -1822,7 +1823,7 @@ describe('MessageHandler', () => {
   });
 
   describe('per-thread queue confirmation', () => {
-    it('should block /new while the thread has queued work', async () => {
+    it('discards queued work when /new starts a fresh conversation', async () => {
       (ctx.handler as any).threadQueues.set('default-thread-id', [{
         messageId: 'msg-queued',
         threadId: 'default-thread-id',
@@ -1837,11 +1838,11 @@ describe('MessageHandler', () => {
         timestamp: Date.now(),
       });
 
-      expect(ctx.mockExecutor.resetContext).not.toHaveBeenCalled();
+      expect(ctx.mockExecutor.resetContext).toHaveBeenCalled();
+      expect((ctx.handler as any).threadQueues.has('default-thread-id')).toBe(false);
       expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
         messageId: 'msg-new',
-        success: false,
-        error: expect.stringContaining('queued messages'),
+        success: true,
       }));
     });
 
@@ -1881,7 +1882,7 @@ describe('MessageHandler', () => {
       const active = ctx.handler.handleMessage({
         type: 'command', messageId: 'active-run', content: 'Active task', openId: 'owner', timestamp: Date.now(),
       });
-      await new Promise(resolve => setImmediate(resolve));
+      await vi.waitFor(() => expect(ctx.mockExecutor.execute).toHaveBeenCalledTimes(1));
 
       const attachments = [{ type: 'image' as const, data: 'aW1hZ2U=', mimeType: 'image/png' }];
       for (const command of [
@@ -1913,7 +1914,7 @@ describe('MessageHandler', () => {
       });
       finishActive({ success: true });
       await active;
-      await new Promise(resolve => setImmediate(resolve));
+      await vi.waitFor(() => expect(ctx.mockExecutor.execute).toHaveBeenCalledTimes(2));
 
       expect(ctx.mockExecutor.execute).toHaveBeenCalledWith('Review  the image', expect.objectContaining({ attachments }));
       expect(ctx.mockExecutor.execute).toHaveBeenCalledTimes(2);
@@ -2666,14 +2667,14 @@ describe('MessageHandler', () => {
   });
 
   describe('/cd command', () => {
-    it('reports a successful directory change with pending lane cleanup separately', async () => {
+    it('changes directory without requiring old worker lane cleanup', async () => {
       vi.mocked(ctx.mockThreadPool.setWorkingDirectory).mockResolvedValueOnce({ cwd: '/new/dir', changed: true });
       vi.spyOn((ctx.handler as any).delegation, 'invalidateWorkspaceGeneration').mockResolvedValue({ removed: 0, failed: 1 });
 
       await ctx.handler.handleMessage({ type: 'command', messageId: 'cd-pending', content: '/cd /new/dir', timestamp: Date.now() });
 
       expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
-        messageId: 'cd-pending', success: true, output: expect.stringContaining('1 delegated worker lane(s) could not be cleaned up'),
+        messageId: 'cd-pending', success: true, output: expect.stringContaining('Changed working directory'),
       }));
     });
 

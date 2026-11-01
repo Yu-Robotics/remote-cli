@@ -3,9 +3,14 @@ import { MessageHandler } from '../src/client/MessageHandler';
 import { ThreadExecutorPool } from '../src/thread/ThreadExecutorPool';
 import { DirectoryGuard } from '../src/security/DirectoryGuard';
 import { ConfigManager } from '../src/config/ConfigManager';
+import os from 'os';
+import path from 'path';
+import fs from 'fs';
+import { ThreadContextReset } from '../src/thread/ThreadContextReset';
 import { ThreadManager } from '../src/thread/ThreadManager';
 
 describe('MessageHandler Concurrency', () => {
+  let home: string;
   let handler: MessageHandler;
   let mockWsClient: any;
   let mockThreadPool: any;
@@ -16,6 +21,8 @@ describe('MessageHandler Concurrency', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'message-concurrency-')));
+    vi.spyOn(os, 'homedir').mockReturnValue(home);
 
     mockWsClient = {
       trackTask: vi.fn(),
@@ -31,13 +38,16 @@ describe('MessageHandler Concurrency', () => {
       })),
       resetContext: vi.fn(),
       abort: vi.fn().mockResolvedValue(true),
-      getCurrentWorkingDirectory: vi.fn().mockReturnValue('/mock/dir'),
+      getCurrentWorkingDirectory: vi.fn().mockReturnValue(home),
       setWorkingDirectory: vi.fn().mockResolvedValue(undefined),
     };
 
     let isBusy = false;
     mockThreadPool = {
       getExecutor: vi.fn().mockReturnValue(mockExecutor),
+      getExistingExecutor: vi.fn().mockReturnValue(mockExecutor),
+      assertContextResettable: vi.fn(),
+      clearThreadContext: vi.fn(async () => { mockExecutor.resetContext(); }),
       isThreadBusy: vi.fn().mockImplementation(() => isBusy),
       setThreadBusy: vi.fn().mockImplementation((id, busy) => { isBusy = busy; }),
       setThreadError: vi.fn(),
@@ -47,20 +57,20 @@ describe('MessageHandler Concurrency', () => {
     };
 
     mockThreadManager = {
-      getThread: vi.fn().mockReturnValue({ id: 'thread-1', name: 'Thread 1' }),
-      contextResets: { assertReady: vi.fn() },
-      getDefaultThread: vi.fn().mockReturnValue({ id: 'thread-1', name: 'Thread 1' }),
+      getThread: vi.fn().mockReturnValue({ id: 'thread-1', name: 'Thread 1', workingDirectory: home }),
+      contextResets: new ThreadContextReset(path.join(home, 'resets')),
+      getDefaultThread: vi.fn().mockReturnValue({ id: 'thread-1', name: 'Thread 1', workingDirectory: home }),
       updateThread: vi.fn().mockResolvedValue(undefined),
       createThread: vi.fn().mockResolvedValue({ id: 'thread-2', name: 'thread-2', sessionId: null }),
-      listThreads: vi.fn().mockReturnValue([{ id: 'thread-1', name: 'Thread 1' }]),
+      listThreads: vi.fn().mockReturnValue([{ id: 'thread-1', name: 'Thread 1', workingDirectory: home }]),
     };
 
-    mockGuard = new DirectoryGuard(['/mock/dir']);
+    mockGuard = new DirectoryGuard([home]);
 
     mockConfig = {
       get: vi.fn().mockReturnValue(undefined),
       set: vi.fn().mockResolvedValue(undefined),
-      getConfigDir: vi.fn().mockReturnValue('/mock/config/dir'),
+      getConfigDir: vi.fn().mockReturnValue(path.join(home, 'config')),
     };
 
     handler = new MessageHandler(
@@ -76,6 +86,8 @@ describe('MessageHandler Concurrency', () => {
     if (handler) {
       await handler.destroy();
     }
+    vi.restoreAllMocks();
+    fs.rmSync(home, { recursive: true, force: true });
   });
 
   it('should block concurrent commands while an executor is busy', async () => {
@@ -91,7 +103,7 @@ describe('MessageHandler Concurrency', () => {
     const p2 = handler.handleMessage({
       type: 'command',
       messageId: 'msg-2',
-      content: '/clear',
+      content: '/compact',
       timestamp: Date.now(),
     } as any);
 
@@ -171,7 +183,7 @@ describe('MessageHandler Concurrency', () => {
 
     expect(mockThreadManager.createThread).toHaveBeenCalledWith(
       'my-feature',
-      '/mock/dir',
+      home,
       'claude'
     );
   });
@@ -274,7 +286,7 @@ describe('MessageHandler Concurrency', () => {
     }));
   });
 
-  it('should wait for the interrupted command to settle when abort returns first', async () => {
+  it('fences an interrupted command while admitting a new turn after confirmed abort', async () => {
     let resolveFirst!: (result: any) => void;
     mockExecutor.execute
       .mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }))
@@ -303,7 +315,9 @@ describe('MessageHandler Concurrency', () => {
     } as any);
     await Promise.resolve();
 
-    expect(mockExecutor.execute).toHaveBeenCalledTimes(1);
+    await abort;
+    await next;
+    expect(mockExecutor.execute).toHaveBeenCalledTimes(2);
     resolveFirst({ success: false, error: 'Aborted by user' });
     await Promise.all([first, abort, next]);
 

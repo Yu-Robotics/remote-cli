@@ -128,6 +128,75 @@ describe('Worker context reset', () => {
     expect((await acquire).lane).toMatchObject({ id: lane.id, contextGeneration: 2, contextResetPending: false });
   });
 
+  it('preserves recovery holds and files when a stopped lane clear is interrupted and retried after restart', async () => {
+    const { lane } = await store.acquire(identity, { pooled: true });
+    await store.markRunning(lane.id);
+    await store.markShutdownConfirmed(lane.id, 0);
+    await store.markDirty(lane.id, 'Required export is missing', true);
+    const directory = path.join(testHome, '.remote-cli', 'codex-sessions');
+    await fs.mkdir(directory, { recursive: true });
+    const pointer = path.join(directory, `${lane.executorThreadId}.json`);
+    await fs.writeFile(pointer, 'old worker pointer');
+    const retained = path.join(identity.workingDirectory, 'partial.txt');
+    await fs.writeFile(retained, 'retained output');
+    await expect(store.clearContext(lane.id, 0, identity, async value => {
+      await clearDelegatedWorkerContext(value, testHome);
+      throw new Error('Synthetic interrupted clear');
+    })).rejects.toThrow('interrupted');
+    const restarted = new DelegatedWorkerSessionStore(path.join(testHome, 'lanes'));
+    await restarted.clearContext(lane.id, 0, identity, value => clearDelegatedWorkerContext(value, testHome));
+    expect((await restarted.lanesForThread('parent'))[0]).toMatchObject({
+      state: 'dirty', contextRetired: true, contextResetPending: false, cleanupPending: true,
+      shutdownConfirmedGeneration: 1, cleanupError: 'Required export is missing',
+    });
+    expect(await fs.readFile(retained, 'utf8')).toBe('retained output');
+    await expect(fs.stat(pointer)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(restarted.assertThreadContextResettable('parent')).resolves.toBeUndefined();
+    const clearAgain = vi.fn(async () => {});
+    await restarted.clearContext(lane.id, 0, identity, clearAgain);
+    await expect(restarted.clearContext(lane.id, 1, identity, clearAgain)).rejects.toThrow('unconfirmed');
+    expect(clearAgain).not.toHaveBeenCalled();
+    const next = await restarted.acquire(identity, { pooled: true });
+    expect(next.reused).toBe(false);
+    expect(next.lane.id).not.toBe(lane.id);
+    expect(next.lane.shutdownConfirmedGeneration).toBeUndefined();
+  });
+
+  it('invalidates shutdown confirmation on reuse and rejects confirmation for an earlier acquisition', async () => {
+    const { lane } = await store.acquire(identity);
+    await store.markRunning(lane.id);
+    await store.markShutdownConfirmed(lane.id, 0);
+    await expect(store.clearContext(lane.id, 0, identity, async () => {})).rejects.toThrow('active');
+    await store.markReady(lane.id);
+    const next = await store.acquire(identity);
+    expect(next.lane).toMatchObject({ id: lane.id, contextGeneration: 1 });
+    expect(next.lane.shutdownConfirmedGeneration).toBeUndefined();
+    await expect(store.markShutdownConfirmed(lane.id, 0)).rejects.toThrow('changed');
+    await store.markDirty(lane.id, 'New attempt has no confirmed exit');
+    await expect(store.clearContext(lane.id, 1, identity, async () => {})).rejects.toThrow('unconfirmed');
+  });
+
+  it('clears pointers after failed cleanup of a ready lane without removing its recovery hold', async () => {
+    const { lane } = await store.acquire(identity);
+    await store.markReady(lane.id);
+    await store.markForReset(identity.threadId);
+    await store.markCleanupFailure(lane.id, 'Checkout reclamation failed');
+    const clear = vi.fn(async () => {});
+    await store.clearContext(lane.id, 0, identity, clear);
+    expect(clear).toHaveBeenCalledOnce();
+    expect((await store.lanesForThread(identity.threadId))[0]).toMatchObject({
+      state: 'dirty', contextRetired: true, cleanupPending: true, cleanupError: 'Checkout reclamation failed',
+    });
+  });
+
+  it.each([-1, 1])('rejects a persisted shutdown confirmation for an invalid or stale acquisition (%s)', async generation => {
+    const { lane } = await store.acquire(identity);
+    const file = path.join(testHome, 'lanes', `${lane.id}.json`);
+    await fs.writeFile(file, JSON.stringify({ ...lane, shutdownConfirmedGeneration: generation }));
+    const restarted = new DelegatedWorkerSessionStore(path.join(testHome, 'lanes'));
+    await expect(restarted.assertThreadContextResettable('parent')).rejects.toThrow('Cannot load delegated worker inventory');
+  });
+
   it.each(['preparing', 'running', 'ready'] as const)(
     'does not revive a superseded shared lane or schedule its %s replacement for cleanup', async state => {
       const { lane } = await store.acquire(identity);

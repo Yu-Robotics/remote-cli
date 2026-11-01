@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, realpath, rm } from 'fs/promises';
-import { tmpdir } from 'os';
+import os, { tmpdir } from 'os';
 import path from 'path';
 import { MessageHandler } from '../src/client/MessageHandler';
 import { DirectoryGuard } from '../src/security/DirectoryGuard';
@@ -10,6 +10,7 @@ import { ThreadContextReset } from '../src/thread/ThreadContextReset';
 
 async function fixture() {
   const cwd = await realpath(await mkdtemp(path.join(tmpdir(), 'goal-handler-')));
+  vi.spyOn(os, 'homedir').mockReturnValue(cwd);
   const threads: Thread[] = ['thread-a', 'thread-b'].map(id => ({ id, name: id, workingDirectory: cwd,
     sessionId: null, createdAt: 0, lastActiveAt: 0, delegation: false }));
   let backend = 'codex';
@@ -32,6 +33,7 @@ async function fixture() {
   });
   const executors = new Map(threads.map(thread => [thread.id, makeExecutor(thread.id)]));
   const pool = {
+    getExistingExecutor: vi.fn((id: string) => executors.get(id)),
     getExecutor: vi.fn((id: string) => executors.get(id)), getBackendKey: vi.fn(() => backend),
     getSummaries: vi.fn(() => threads.map(thread => ({ id: thread.id, name: thread.name,
       status: busy.has(thread.id) ? 'running' : 'idle' }))),
@@ -248,7 +250,8 @@ describe('MessageHandler native goal commands', () => {
     release(); await Promise.all([starting, stopping]);
     expect(f.executor.executeGoal).not.toHaveBeenCalled();
     expect(f.executor.execute).not.toHaveBeenCalled();
-    expect(f.responses().some(response => response.error?.includes('activation was cancelled'))).toBe(true);
+    if (control === 'abort') expect(f.responses().at(-1)).toMatchObject({ success: true });
+    else expect(f.responses().some(response => response.error?.includes('activation was cancelled'))).toBe(true);
     expect(f.busy.size).toBe(0);
   });
 

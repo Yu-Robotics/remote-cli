@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
@@ -22,12 +22,14 @@ describe('DelegatedWorkerSessionStore', () => {
 
   beforeEach(async () => {
     home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'delegated-worker-store-')));
+    vi.spyOn(os, 'homedir').mockReturnValue(home);
     directory = path.join(home, 'lanes');
     workspace = path.join(home, 'workspace');
     await fs.mkdir(workspace);
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await fs.rm(home, { recursive: true, force: true });
   });
 
@@ -60,6 +62,27 @@ describe('DelegatedWorkerSessionStore', () => {
     expect(lanes.find(lane => lane.id === first.lane.id)).toMatchObject({ workspaceDiscarded: true, cleanupPending: false });
     expect((await restarted.acquire(identity(workspace))).lane.id).toBe(next.lane.id);
     expect(await fs.readFile(path.join(tombstones, `${first.lane.id}.json`), 'utf8')).toBe(JSON.stringify({ state }));
+  });
+
+  it('requires exit proof for legacy dirty lanes when no native ownership journal exists', async () => {
+    const store = new DelegatedWorkerSessionStore(directory);
+    const { lane } = await store.acquire(identity(workspace));
+    await store.markDirty(lane.id, 'Unknown legacy exit');
+    const snapshot = await fs.readFile(path.join(directory, `${lane.id}.json`), 'utf8');
+    await expect(store.assertLegacyWritersStopped()).rejects.toThrow('unconfirmed');
+    expect(await fs.readFile(path.join(directory, `${lane.id}.json`), 'utf8')).toBe(snapshot);
+    await store.markShutdownConfirmed(lane.id, lane.contextGeneration ?? 0);
+    await store.assertLegacyWritersStopped();
+  });
+
+  it('never copies a stale lane ID or native pointer into a fresh generation', async () => {
+    const store = new DelegatedWorkerSessionStore(directory);
+    const first = await store.acquire(identity(workspace));
+    await store.markReady(first.lane.id);
+    const next = await store.acquire({ ...first.lane, workspaceGeneration: 1 });
+    expect(next.lane.id).not.toBe(first.lane.id);
+    expect(next.lane.executorThreadId).not.toBe(first.lane.executorThreadId);
+    expect((await store.lanesForThread(first.lane.threadId))).toHaveLength(2);
   });
 
   it('reuses only a ready lane with the same parent, backend, workspace, and generation', async () => {

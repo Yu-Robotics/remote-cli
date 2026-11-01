@@ -33,7 +33,7 @@ export const DELEGATION_LIMITS = { launches: 12, concurrent: 5, closeoutRounds: 
   idleTimeoutMs: 15 * 60_000, toolIdleTimeoutMs: 45 * 60_000,
   queueTimeoutMs: 60 * 60_000,
   resultBytes: 32 * 1024, continuationBytes: 64 * 1024, summaryBytes: 4 * 1024,
-  storageTimeoutMs: 10_000, toolResponseWaitMs: 20_000, calls: 500 } as const;
+  storageTimeoutMs: 10_000, cancelWaitMs: 250, toolResponseWaitMs: 20_000, calls: 500 } as const;
 
 /** Bounds and cadence for optional display-only delegated-worker text. */
 export const DELEGATION_TEXT_PROGRESS = {
@@ -125,6 +125,8 @@ interface Task {
   workspacePreparationStarted?: boolean;
   /** A worker may have escaped lifecycle tracking; retain its workspace lease. */
   quarantineWorkspace?: boolean;
+  /** Process exit is independent of later artifact collection and storage cleanup. */
+  nativeExitConfirmed?: boolean;
   done: Promise<void>;
   settle: () => void;
   dispatched: Promise<void>;
@@ -175,7 +177,7 @@ export interface DelegationScope {
   getRetainedResults(): DelegatedTaskResult[];
   collectPendingResults(): Promise<DelegatedTaskResult[]>;
   checkArtifactCloseout(): Promise<DelegationCloseoutIssue[]>;
-  close(): Promise<void>;
+  close(cancelled?: boolean): Promise<void>;
   waitingExecutor(): IExecutor | undefined;
   waitingInputCount(): number;
 }
@@ -250,9 +252,12 @@ export class DelegationManager {
   private maintenanceTimer?: ReturnType<typeof setTimeout>;
   private admissionGate: Promise<void> = Promise.resolve();
   private running = 0;
-  private workspaces = new Map<string, { id: string; threadId: string; quarantined: boolean }>();
+  private workspaces = new Map<string, { id: string; threadId: string; quarantined: boolean; detached: boolean;
+    permitsDirectExecution?: () => boolean }>();
   private pumps = new Set<() => void>();
   private scopes = new Map<string, DelegationScope>();
+  private readonly detachedScopes = new Map<DelegationScope, Promise<void>>();
+  private readonly detachedThreads = new Map<DelegationScope, string>();
   private readonly timeouts: Required<DelegationTimeoutPolicy>;
 
   constructor(private readonly guard: DirectoryGuard,
@@ -283,7 +288,10 @@ export class DelegationManager {
       // Never acquire again once shutdown has begun, including after release.
       if (!this.stopping) return this.ownership.acquire();
     });
-    return this.initialization = this.ownership.acquire().catch(error => {
+    return this.initialization = (async () => {
+      if (!await this.ownership.assertNoForeignWriters()) await this.laneStore.assertLegacyWritersStopped();
+      await this.ownership.acquire();
+    })().catch(error => {
       this.initialization = undefined;
       throw error;
     });
@@ -323,7 +331,7 @@ export class DelegationManager {
 
   begin(parent: DelegationParent): DelegationScope {
     if (this.stopping) throw new Error('Delegation is shutting down');
-    this.laneStore.assertContextReady(parent.thread.id);
+    this.laneStore.assertContextReady(parent.thread.id, parent.thread.delegationWorkspaceGeneration ?? 0);
     if (this.scopes.has(parent.thread.id)) throw new Error('This thread already owns a delegation turn');
     // Fail with recovery guidance before realpathSync reports a raw ENOENT.
     // This must stay above scopes.set: a throw after registration would leave
@@ -343,7 +351,9 @@ export class DelegationManager {
     let sourcePromise: Promise<void> | undefined;
     let baseline: Promise<GitCheckpoint> | undefined;
     let maxChildren = 1;
-    const workspaceOwner = { id: randomUUID(), threadId: parent.thread.id, quarantined: false };
+    const workspaceOwner = { id: randomUUID(), threadId: parent.thread.id, quarantined: false, detached: false,
+      permitsDirectExecution: () => !integrating && !admissions
+        && [...tasks.values()].every(task => task.settled || task.nativeExitConfirmed === true) };
     const workspaceGeneration = parent.thread.delegationWorkspaceGeneration ?? 0;
     let execution = 0;
     let acceptingResults = true;
@@ -381,6 +391,7 @@ export class DelegationManager {
       console.warn('[Delegation] Could not persist task state:', error instanceof Error ? error.message : 'Storage failure');
     });
     const notify = (send: () => void) => {
+      if (closed) return;
       try { send(); } catch { console.warn('[Delegation] Progress could not be delivered'); }
     };
     const releaseWorkspaceIfIdle = (): void => {
@@ -423,6 +434,7 @@ export class DelegationManager {
       task: Task,
       progress: Omit<DelegationProgressInfo, 'taskId' | 'backend'>,
     ): boolean => {
+      if (closed) return false;
       try {
         if (task.record.state === 'running') captureWorkerMetadata(task);
         return parent.onProgress?.({ taskId: task.record.id, backend: task.record.backend, ...progress,
@@ -828,6 +840,7 @@ ${prompt}`));
                   description: `[${backend} delegated task] ${request.description}`, canRemember: false }, task.executor!);
               },
               onApprovalResolved: (id, status) => {
+                if (closed) return;
                 parent.onApprovalResolved(id, status);
                 if (acceptingActivity && task.executor === worker && worker.isWaitingInput?.() === false) {
                   task.waitingInputText = undefined;
@@ -891,6 +904,10 @@ ${prompt}`));
             await deadline(() => confirmGroup.call(task.executor), this.cleanupMs);
           }
           nativeExitConfirmed = true;
+          task.nativeExitConfirmed = released;
+          if (released && task.lane) {
+            await this.laneStore.markShutdownConfirmed(task.lane.id, task.lane.contextGeneration ?? 0);
+          }
           if (released && task.lane && task.preserveUnstartedLane) {
             if (!task.workspacePreparationStarted) {
               // Only acquisition changed: no checkout or executor was touched.
@@ -1195,6 +1212,8 @@ ${prompt}`));
       calls.set(callId, { signature, result });
       return result;
     };
+    let closing: Promise<void> | undefined;
+    let cancelledScope = false;
     const scope: DelegationScope = {
       invoke,
       isClosed: () => closed,
@@ -1232,6 +1251,8 @@ ${prompt}`));
       },
       checkArtifactCloseout: async () => {
         if (closed) throw new Error('Delegation was cancelled');
+        // Ordinary chat has no managed-work obligation and must not open inventory.
+        if (!launches) return [];
         // Unlike result acknowledgement, closeout also waits for native cleanup
         // and artifact collection of tasks whose results were already read.
         await Promise.allSettled([...calls.values()].map(call => call.result));
@@ -1307,24 +1328,44 @@ ${prompt}`));
       },
       waitingInputCount: () => closed ? 0 : [...activeTasks].filter(task =>
         task.record.state === 'running' && task.executor?.isWaitingInput?.()).length,
-      close: async () => {
+      close: (cancelled = false) => {
+        cancelledScope ||= cancelled;
+        if (closing) return closing;
+        // Fence callbacks and tool admission synchronously, before any cleanup await.
         closed = true;
+        workspaceOwner.detached = true;
         this.pumps.delete(pump);
-        await Promise.allSettled([...tasks.values()].map(cancel));
-        await integrationPending?.catch(() => undefined);
-        // Do not wait forever for a discovery-only admission. Its closed check
-        // prevents launch; defer reconciliation unless this scope is fully idle.
-        if (source && !admissions && !activeTasks.size && [...tasks.values()].every(task => task.settled)
-          && !workspaceOwner.quarantined && !parent.isWorkspaceBusy?.(leasePath)
-          && ![...this.workspaces].some(([active, owner]) => owner !== workspaceOwner && workspacesOverlap(active, leasePath))) {
-          this.workspaces.set(leasePath, workspaceOwner);
-          try { await reconcileHistory(true); }
-          catch { console.warn('[Delegation] Historical delivery reconciliation deferred; worker files were preserved'); }
-        }
-        releaseWorkspaceIfIdle();
-        // A version probe may still be pending. Its closed check prevents launch.
         if (this.scopes.get(parent.thread.id) === scope) this.scopes.delete(parent.thread.id);
-        this.scheduleMaintenance();
+        closing = (async () => {
+          await Promise.allSettled([...tasks.values()].map(cancel));
+          await integrationPending?.catch(() => undefined);
+          // Do not wait forever for a discovery-only admission. Its closed check
+          // prevents launch; defer reconciliation unless this scope is fully idle.
+          if (!cancelledScope && source && !admissions && !activeTasks.size && [...tasks.values()].every(task => task.settled)
+            && !workspaceOwner.quarantined && !parent.isWorkspaceBusy?.(leasePath)
+            && ![...this.workspaces].some(([active, owner]) => owner !== workspaceOwner && workspacesOverlap(active, leasePath))) {
+            this.workspaces.set(leasePath, workspaceOwner);
+            try {
+              await reconcileHistory(true, undefined, () => {
+                if (cancelledScope) throw new Error('Historical reconciliation was cancelled');
+                assertWorkspace();
+              });
+            }
+            catch { console.warn('[Delegation] Historical delivery reconciliation deferred; worker files were preserved'); }
+          }
+          releaseWorkspaceIfIdle();
+          // A version probe may still be pending. Its closed check prevents launch.
+          if (launches || this.initialization) this.scheduleMaintenance();
+        })();
+        this.detachedScopes.set(scope, closing);
+        this.detachedThreads.set(scope, parent.thread.id);
+        void closing.then(() => {
+          if (!workspaceOwner.quarantined) {
+            this.detachedScopes.delete(scope);
+            this.detachedThreads.delete(scope);
+          }
+        }, () => undefined);
+        return closing;
       },
     };
     this.pumps.add(pump);
@@ -1336,13 +1377,17 @@ ${prompt}`));
   hasAmbiguousInput(threadId: string): boolean { return (this.scopes.get(threadId)?.waitingInputCount() ?? 0) > 1; }
   hasActiveTasks(threadId: string): boolean { return this.scopes.get(threadId)?.hasTasks() ?? false; }
 
+  private hasWorkspaceLease(threadId: string): boolean {
+    return [...this.workspaces.values()].some(owner => owner.threadId === threadId);
+  }
+
   /** Retry previously confirmed cleanup requests without touching uncertain interrupted workers. */
   async reconcilePendingWorkerLanes(): Promise<{ removed: number; failed: number }> {
     this.assertAcceptingOperations();
     if (this.maintenance) return this.maintenance as Promise<{ removed: number; failed: number }>;
     const operation = this.withAdmission(async () => {
       await this.ensureOwnership();
-      if (this.scopes.size || this.running || this.workspaces.size) return { removed: 0, failed: 0 };
+      if (this.scopes.size || this.detachedScopes.size || this.running || this.workspaces.size) return { removed: 0, failed: 0 };
       await this.workspaceManager.retryReclamation({ limit: 25 });
       return this.removeWorkerLanes(await this.laneStore.cleanupCandidates(), true);
     });
@@ -1355,7 +1400,7 @@ ${prompt}`));
   async invalidateWorkspaceGeneration(threadId: string, currentGeneration: number): Promise<{ removed: number; failed: number }> {
     return this.publicOperation(async () => {
       await this.ensureOwnership();
-      if (this.hasActiveTasks(threadId)) {
+      if (this.hasActiveTasks(threadId) || this.hasWorkspaceLease(threadId)) {
         throw new Error('Cannot change working directory while a delegated worker is running. Wait for it to finish or send /abort first.');
       }
       return this.removeWorkerLanes(await this.laneStore.invalidateGeneration(threadId, currentGeneration), true);
@@ -1399,7 +1444,7 @@ ${prompt}`));
   async resetWorkerLanes(threadId: string, backend?: DelegationBackend): Promise<number> {
     return this.publicOperation(async () => {
       await this.ensureOwnership();
-      if (this.hasActiveTasks(threadId)) {
+      if (this.hasActiveTasks(threadId) || this.hasWorkspaceLease(threadId)) {
         throw new Error('Cannot reset delegated worker context while a delegated worker is running. Wait for it to finish or send /abort first.');
       }
       const result = await this.removeWorkerLanes(await this.laneStore.markForReset(threadId, backend));
@@ -1411,7 +1456,7 @@ ${prompt}`));
   async deleteWorkerLanes(threadId: string): Promise<number> {
     return this.publicOperation(async () => {
       await this.ensureOwnership();
-      if (this.hasActiveTasks(threadId)) {
+      if (this.hasActiveTasks(threadId) || this.hasWorkspaceLease(threadId)) {
         throw new Error('Cannot delete delegated worker context while a delegated worker is running.');
       }
       const result = await this.removeWorkerLanes(await this.laneStore.markForReset(threadId));
@@ -1498,10 +1543,38 @@ ${prompt}`));
   blocksWorkspace(cwd: string, threadId: string): boolean {
     if (this.workspaces.size === 0) return false;
     const canonical = fs.realpathSync(cwd);
-    return [...this.workspaces].some(([active, owner]) => (owner.quarantined || owner.threadId !== threadId) && workspacesOverlap(active, canonical));
+    return [...this.workspaces].some(([active, owner]) => (owner.quarantined || owner.detached || owner.threadId !== threadId) && workspacesOverlap(active, canonical));
   }
+  /** All execution modes must honor native writers, independently of inventory health. */
+  async assertExecutionSafe(cwd: string, threadId: string): Promise<void> {
+    const conflicting = () => {
+      if (!this.workspaces.size) return false;
+      const canonical = fs.realpathSync(cwd);
+      return [...this.workspaces].some(([active, owner]) => workspacesOverlap(active, canonical)
+        && (owner.quarantined || owner.detached || owner.threadId !== threadId)
+        && !(owner.detached && !owner.quarantined && owner.permitsDirectExecution?.()));
+    };
+    try {
+      if (conflicting()) throw new Error('A detached or active worker holds this workspace');
+      if (!await this.ownership.assertNoForeignWriters()) await this.laneStore.assertLegacyWritersStopped();
+      if (conflicting()) throw new Error('A worker acquired this workspace');
+    } catch {
+      throw new Error('A managed worker may still write files. Use /abort, then /clear or /new to detach its conversation. '
+        + 'Execution remains blocked in conflicting workspaces until native exit is confirmed; inspect remote-cli delegation storage scan and stop surviving workers before restarting the CLI. '
+        + 'Missing legacy exit evidence requires explicit offline recovery; restarting alone does not prove shutdown. '
+        + 'Worktrees are not OS sandboxes. Recovery commands remain available.');
+    }
+  }
+
+  /** Return promptly while the original scope retains all native and filesystem cleanup. */
   async cancelThread(threadId: string): Promise<void> {
-    return this.publicOperation(async () => { await this.scopes.get(threadId)?.close(); });
+    this.assertAcceptingOperations();
+    const scopes = new Set([...this.detachedThreads].filter(([, owner]) => owner === threadId).map(([scope]) => scope));
+    const active = this.scopes.get(threadId);
+    if (active) scopes.add(active);
+    if (!scopes.size) return;
+    const cleanup = Promise.all([...scopes].map(scope => scope.close(true)));
+    await deadline(() => cleanup, Math.min(DELEGATION_LIMITS.cancelWaitMs, this.cleanupMs)).catch(() => undefined);
   }
   async destroy(): Promise<void> {
     if (this.shutdown) return this.shutdown;
@@ -1509,7 +1582,8 @@ ${prompt}`));
     const shutdown = (async () => {
       clearTimeout(this.maintenanceTimer);
       this.maintenanceTimer = undefined;
-      const outcomes = await Promise.allSettled([...this.scopes.values()].map(scope => scope.close()));
+      const active = [...new Set([...this.scopes.values(), ...this.detachedScopes.keys()])].map(scope => scope.close(true));
+      const outcomes = await Promise.allSettled([...active, ...this.detachedScopes.values()]);
       await Promise.allSettled([...this.publicOperations]);
       await this.maintenance;
       await this.admissionGate;
