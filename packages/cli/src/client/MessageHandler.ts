@@ -133,6 +133,7 @@ interface PendingQueueConfirmation {
 interface ActiveThreadOperation {
   messageId?: string;
   recoverable?: boolean;
+  responseSent?: boolean;
   token: symbol;
   done: Promise<void>;
   resolveDone: () => void;
@@ -1689,13 +1690,14 @@ You can also use natural language commands to control Claude Code CLI.`,
     return `${error}\n\n⏸️ Queue paused after a failed task. Waiting: ${count} confirmed, ${pending} awaiting confirmation. Use /queue continue to resume, or /queue clear to discard pending messages.`;
   }
 
-  private cancelThreadOperation(threadId: string): ActiveThreadOperation | undefined {
+  private cancelThreadOperation(threadId: string,
+    reason = 'Request cancelled by conversation recovery. Worker cleanup may continue in the background.'): ActiveThreadOperation | undefined {
     const active = this.activeThreadOperations.get(threadId);
     if (active && !this.cancelledOperations.has(active.token)) {
       this.cancelledOperations.add(active.token);
       // Complete task-recovery bookkeeping before a newer request can be admitted.
       if (active.messageId) this.sendResponse(active.messageId, threadId,
-        { success: false, error: 'Request cancelled by conversation recovery. Worker cleanup may continue in the background.' }, true);
+        { success: false, error: reason }, true);
     }
     return active;
   }
@@ -2240,7 +2242,6 @@ You can also use natural language commands to control Claude Code CLI.`,
     executor: IExecutor
   ): Promise<void> {
     const backend = this.resolveSlashBackend(threadId);
-    await this.assertNativeCommandReady(threadId, executor);
 
     if (backend === 'dsh') {
       this.sendResponse(messageId, threadId, { success: false,
@@ -2252,6 +2253,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       // ZCode names its native skill-list command /skill, while remote-cli
       // exposes the cross-backend command as /skills.
       const backendCommand = backend === 'zcode' && command.trim() === '/skills' ? '/skill' : command;
+      await this.assertNativeCommandReady(threadId, executor);
       const result = await executor.execute(backendCommand, {
         onStream: (chunk) => this.sendStreamChunk(messageId, threadId, chunk),
         onToolUse: (toolUse) => this.sendToolUse(messageId, threadId, toolUse),
@@ -2302,7 +2304,7 @@ You can also use natural language commands to control Claude Code CLI.`,
    * Spawn a one-shot CLI process for a passthrough slash command and relay
    * its output back to the user.
    */
-  private spawnPassthroughCommand(
+  private async spawnPassthroughCommand(
     messageId: string,
     threadId: string,
     bin: string,
@@ -2311,6 +2313,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     backend: 'claude' | 'agy',
     extraEnv: Record<string, string> = {}
   ): Promise<void> {
+    await this.assertNativeCommandReady(threadId, executor);
     return new Promise((resolve) => {
       const label = backend === 'agy' ? 'AGY CLI' : 'Claude CLI';
       const chunks: string[] = [];
@@ -3102,6 +3105,11 @@ You can also use natural language commands to control Claude Code CLI.`,
     },
     metadataOnly = false,
   ): void {
+    const operation = threadId ? this.activeThreadOperations.get(threadId) : undefined;
+    if (operation && operation.messageId === messageId && !result.queueConfirmation) {
+      if (operation.responseSent) return;
+      operation.responseSent = true;
+    }
     if (!result.queueConfirmation) this.fileInbox?.release(messageId, !result.success);
     try {
       // Resolve CWD from thread executor if possible
@@ -3450,6 +3458,10 @@ You can also use natural language commands to control Claude Code CLI.`,
     this.directoryBrowser.destroy();
     this.settingsService.destroy();
     this.isDestroyed = true;
+    for (const threadId of this.activeThreadOperations.keys()) {
+      this.settingsAdmission.cancelRecoverable(threadId);
+      this.cancelThreadOperation(threadId, 'Request cancelled because the CLI is shutting down.');
+    }
     for (const delivery of this.imageDeliveries.values()) delivery.cancel();
     this.imageDeliveries.clear();
     await this.fileInbox?.destroy();
