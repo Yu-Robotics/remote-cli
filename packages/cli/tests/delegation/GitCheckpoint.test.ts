@@ -5,6 +5,7 @@ import * as childProcess from 'child_process';
 import { isMainThread } from 'worker_threads';
 import { captureCheckpoint, checkpointRevision, createCheckpointCommit, gitText, runGit } from '../../src/delegation/GitCheckpoint';
 import { gitFixture } from './gitFixture';
+import { supportsFileSymlinks } from './symlinkFixture';
 
 vi.mock('child_process', async importOriginal => {
   const actual = await importOriginal<typeof import('child_process')>();
@@ -159,10 +160,11 @@ describe('private Git checkpoints', () => {
     expect(await fs.readFile(path.join(fixture.root, '.git', 'index'))).toEqual(index);
   });
 
-  it('supports relative repository links but refuses links into shared external files', async () => {
-    await fs.symlink('source.txt', path.join(fixture.root, 'local-link'));
+  it.skipIf(!supportsFileSymlinks)('supports relative repository links but refuses links into shared external files', async () => {
+    await runGit(fixture.root, ['config', 'core.symlinks', 'true']);
+    await fs.symlink('source.txt', path.join(fixture.root, 'local-link'), 'file');
     await expect(captureCheckpoint(fixture.root)).resolves.toHaveProperty('tree');
-    await fs.symlink(fixture.root, path.join(fixture.root, 'external-link'));
+    await fs.symlink(fixture.root, path.join(fixture.root, 'external-link'), process.platform === 'win32' ? 'junction' : 'dir');
     await expect(captureCheckpoint(fixture.root)).rejects.toThrow('symbolic links');
   });
 

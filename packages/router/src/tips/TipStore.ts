@@ -89,15 +89,26 @@ export class TipStore {
   private async ready(): Promise<void> {
     await fs.mkdir(this.directory, { recursive: true, mode: 0o700 });
     const stat = await fs.lstat(this.directory);
-    if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) throw new Error('Unsafe Tips directory.');
+    // On POSIX systems, verify mode & 0o077 === 0 to restrict directory access to the owner.
+    // On Windows, Node emulates directory mode as 0o777 and NTFS ACLs are not mapped to
+    // POSIX mode bits, so POSIX mode checking is skipped on win32 without asserting restrictive ACLs.
+    if (!stat.isDirectory() || stat.isSymbolicLink() || (process.platform !== 'win32' && (stat.mode & 0o077) !== 0)) {
+      throw new Error('Unsafe Tips directory.');
+    }
   }
 
   private async readFile(filename: string): Promise<any | undefined> {
     let handle;
     try {
+      const lstat = await fs.lstat(filename);
+      if (lstat.isSymbolicLink() || !lstat.isFile()) throw new Error('Unsafe Tips file.');
       handle = await fs.open(filename, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
       const stat = await handle.stat();
-      if (!stat.isFile() || stat.size > MAX_BYTES || (stat.mode & 0o077) !== 0) throw new Error('Unsafe Tips file.');
+      // On POSIX systems, verify mode & 0o077 === 0. On Windows, Node emulates file mode as 0o666,
+      // so POSIX permission bit validation is skipped on win32 without asserting Windows ACL isolation.
+      if (!stat.isFile() || stat.size > MAX_BYTES || (process.platform !== 'win32' && (stat.mode & 0o077) !== 0)) {
+        throw new Error('Unsafe Tips file.');
+      }
       const text = await handle.readFile('utf8');
       if (Buffer.byteLength(text) > MAX_BYTES) throw new Error('Oversized Tips file.');
       return JSON.parse(text);
@@ -160,6 +171,8 @@ export class TipStore {
   }
 
   private async syncDirectory(): Promise<void> {
+    // Node.js cannot open or fsync directory handles on Windows.
+    if (process.platform === 'win32') return;
     const handle = await fs.open(this.directory, 'r');
     try { await handle.sync(); } finally { await handle.close(); }
   }

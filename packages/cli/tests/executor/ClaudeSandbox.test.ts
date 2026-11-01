@@ -5,6 +5,11 @@ import path from 'path';
 import { ClaudeSandbox } from '../../src/executor/claude/ClaudeSandbox';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 
+vi.mock('fs', async importOriginal => {
+  const actual = await importOriginal<typeof import('fs')>();
+  return { ...actual, accessSync: vi.fn(actual.accessSync), writeFileSync: vi.fn(actual.writeFileSync) };
+});
+
 describe('ClaudeSandbox', () => {
   let home: string;
   const threadId = 'sandbox-test';
@@ -12,6 +17,7 @@ describe('ClaudeSandbox', () => {
   let guard: DirectoryGuard;
 
   beforeEach(() => {
+    vi.clearAllMocks();
     home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'claude-sandbox-test-')));
     vi.spyOn(os, 'homedir').mockReturnValue(home);
     storePath = path.join(home, '.remote-cli', 'claude-sandbox', `${threadId}.json`);
@@ -77,6 +83,16 @@ describe('ClaudeSandbox', () => {
     fs.writeFileSync(path.join(home, 'socat'), '', { mode: 0o700 });
     expect(() => sandbox.assertAvailable(home)).not.toThrow();
     fs.chmodSync(path.join(home, 'socat'), 0o600);
+    if (process.platform === 'win32') {
+      // Model the Linux X_OK denial: Windows ignores POSIX execute bits.
+      const access = vi.mocked(fs.accessSync).getMockImplementation()!;
+      vi.spyOn(fs, 'accessSync').mockImplementation((file, mode) => {
+        if (file === path.join(home, 'socat') && mode === fs.constants.X_OK) {
+          throw Object.assign(new Error('Synthetic execute permission denial'), { code: 'EACCES' });
+        }
+        return access(file, mode);
+      });
+    }
     expect(() => sandbox.assertAvailable(home)).toThrow('socat');
   });
 
@@ -116,10 +132,12 @@ describe('ClaudeSandbox', () => {
   });
 
   it('persists per-thread overrides and reloads them', () => {
+    const write = vi.spyOn(fs, 'writeFileSync');
     const sandbox = new ClaudeSandbox(guard, undefined, threadId);
     sandbox.configure({ mode: 'read-only' });
     expect(fs.existsSync(storePath)).toBe(true);
-    expect(fs.statSync(storePath).mode & 0o777).toBe(0o600);
+    expect(write).toHaveBeenCalledWith(expect.stringContaining(`${storePath}.`), expect.any(String), { mode: 0o600 });
+    if (process.platform !== 'win32') expect(fs.statSync(storePath).mode & 0o777).toBe(0o600);
     const reloaded = new ClaudeSandbox(guard, undefined, threadId);
     expect(reloaded.getConfig()?.mode).toBe('read-only');
     reloaded.deleteData();

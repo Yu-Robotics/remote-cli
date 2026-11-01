@@ -2,6 +2,7 @@ import { createHash } from 'crypto';
 import { constants } from 'fs';
 import fs from 'fs/promises';
 import path from 'path';
+import { nativeGitPath } from './GitPaths';
 import { GIT_OID, gitText, runGit } from './GitCheckpoint';
 import { WorkspaceCleanupError } from './WorkspaceDisposal';
 
@@ -58,7 +59,7 @@ export class LfsCheckoutVerifier {
       const output = await gitText(cwd, ['lfs', 'env']);
       const matches = output.split(/\r?\n/).filter(line => line.startsWith('LocalMediaDir='));
       if (matches.length !== 1) hold();
-      const directory = matches[0].slice('LocalMediaDir='.length);
+      const directory = nativeGitPath(matches[0].slice('LocalMediaDir='.length));
       if (!path.isAbsolute(directory) || await fs.realpath(directory) !== directory) hold();
       return directory;
     };

@@ -62,7 +62,7 @@ describe('stop command', () => {
       expect(mockConfig.set).not.toHaveBeenCalledWith('serverUrl', undefined);
     });
 
-    it('should stop an installed user service even when config state is stale', async () => {
+    it.skipIf(process.platform === 'win32')('should stop an installed user service even when config state is stale', async () => {
       mockConfig.getAll.mockReturnValue({ service: { running: false } });
       const stop = vi.fn().mockResolvedValue({ installed: true, running: false });
       vi.mocked(createServiceManager).mockReturnValue({

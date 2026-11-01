@@ -178,14 +178,17 @@ describe('versioned disposable workspace closeout', { timeout: 30_000 }, () => {
     expect((await fs.lstat(workspace.directory)).isDirectory()).toBe(true);
   });
 
-  it.each(['tracked-bytes', 'hidden-index', 'executable-mode'])('refuses %s changes after capture', async condition => {
+  for (const condition of ['tracked-bytes', 'hidden-index', 'executable-mode']) {
+  // Windows does not expose POSIX executable bits. Keep its byte/index cases.
+  it.skipIf(condition === 'executable-mode' && process.platform === 'win32')(`refuses ${condition} changes after capture`, async () => {
     await collect();
     if (condition === 'hidden-index') await git.runGit(workspace.directory, ['update-index', '--assume-unchanged', 'source.txt']);
-    if (condition === 'executable-mode' && process.platform !== 'win32') await fs.chmod(path.join(workspace.directory, 'source.txt'), 0o755);
+    if (condition === 'executable-mode') await fs.chmod(path.join(workspace.directory, 'source.txt'), 0o755);
     else await fs.writeFile(path.join(workspace.directory, 'source.txt'), 'changed after capture\n');
     expect(await manager.reclaim(workspace.taskId)).toBe(false);
     expect((await read(laneFile())).checkoutState).toBe('present');
   });
+  }
 
   it.each(['lfs', 'fixture-filter'])('records an actionable hold for malformed or unsupported %s materialization', async filter => {
     // Keep the saved blob deliberately non-pointer, independent of host LFS installation.

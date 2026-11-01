@@ -8,6 +8,7 @@ import { ThreadContextReset } from '../../src/thread/ThreadContextReset';
 import { gitText, runGit } from '../../src/delegation/GitCheckpoint';
 import * as gitCommands from '../../src/delegation/GitCheckpoint';
 import { gitFixture } from './gitFixture';
+import { supportsFileSymlinks } from './symlinkFixture';
 
 // Real-Git cases execute multiple bounded commands and need headroom on slower hosts.
 describe('legacy verified worker checkout reclamation and recreation', { timeout: 30_000 }, () => {
@@ -151,17 +152,19 @@ describe('legacy verified worker checkout reclamation and recreation', { timeout
     expect(await exists(next.directory)).toBe(true);
   });
 
-  it.each(['.env', 'node_modules/local.txt', 'unknown.txt', 'empty-extra-directory', 'stray-symlink'])(
-    'preserves an unaccounted %s instead of trusting Git removal protection', async name => {
+  for (const name of ['.env', 'node_modules/local.txt', 'unknown.txt', 'empty-extra-directory', 'stray-symlink']) {
+  it.skipIf(name === 'stray-symlink' && !supportsFileSymlinks)(
+    `preserves an unaccounted ${name} instead of trusting Git removal protection`, async () => {
       await complete();
       const file = path.join(workspace.directory, name);
       if (name === 'empty-extra-directory') await fs.mkdir(file);
-      else if (name === 'stray-symlink') await fs.symlink('source.txt', file);
+      else if (name === 'stray-symlink') await fs.symlink('source.txt', file, 'file');
       else { await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, 'private fixture\n'); }
       expect(await manager.reclaim(workspace.taskId)).toBe(false);
       expect(await exists(file)).toBe(true);
       expect((await record()).checkoutState).toBe('present');
     });
+  }
 
   it.each(['--assume-unchanged', '--skip-worktree'])('detects hidden tracked changes with %s', async flag => {
     await complete();
@@ -174,9 +177,10 @@ describe('legacy verified worker checkout reclamation and recreation', { timeout
     expect(await fs.readFile(file, 'utf8')).toBe('hidden unsaved worker bytes\n');
   });
 
-  it('hashes tracked symlinks and executable modes without following link targets', async () => {
-    await fs.symlink('source.txt', path.join(workspace.directory, 'link'));
-    await fs.chmod(path.join(workspace.directory, 'source.txt'), 0o755);
+  it.skipIf(!supportsFileSymlinks)('hashes tracked symlinks and executable modes without following link targets', async () => {
+    await runGit(fixture.root, ['config', 'core.symlinks', 'true']);
+    await fs.symlink('source.txt', path.join(workspace.directory, 'link'), 'file');
+    if (process.platform !== 'win32') await fs.chmod(path.join(workspace.directory, 'source.txt'), 0o755);
     await complete();
     expect(await apply()).toMatchObject({ applied: true });
     expect(await exists(workspace.directory)).toBe(false);
@@ -251,15 +255,16 @@ describe('legacy verified worker checkout reclamation and recreation', { timeout
     await intent();
     await fs.rm(workspace.directory, { recursive: true });
     await expect(recreate()).rejects.toThrow('partially registered');
-    expect(await gitText(fixture.root, ['worktree', 'list', '--porcelain'])).toContain(workspace.directory);
+    expect(await gitText(fixture.root, ['worktree', 'list', '--porcelain'])).toContain(workspace.directory.split(path.sep).join('/'));
   });
 
   it('never overwrites an occupied reclaimed path, including a foreign symlink', async () => {
     await complete();
     expect(await manager.reclaim(workspace.taskId)).toBe(true);
-    await fs.symlink(fixture.root, workspace.directory);
+    await fs.symlink(fixture.root, workspace.directory, process.platform === 'win32' ? 'junction' : 'dir');
     await expect(recreate()).rejects.toThrow('occupied');
-    expect(await fs.readlink(workspace.directory)).toBe(fixture.root);
+    expect((await fs.lstat(workspace.directory)).isSymbolicLink()).toBe(true);
+    expect(await fs.realpath(workspace.directory)).toBe(fixture.root);
   });
 
   it.each(['task', 'output', 'history', 'receipt', 'lifecycle'])('rejects a corrupted %s identity before deletion', async corruption => {

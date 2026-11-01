@@ -2,6 +2,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import { randomUUID } from 'crypto';
+import { replaceAtomicFile } from './AtomicFile';
 
 export interface DelegatedTaskRecord {
   id: string;
@@ -73,7 +74,7 @@ export class DelegationStore {
       await fs.mkdir(this.directory, { recursive: true, mode: 0o700 });
       const file = path.join(this.directory, `${record.id}.json`);
       const temporary = `${file}.${randomUUID()}.tmp`;
-      try { await fs.writeFile(temporary, snapshot, { mode: 0o600 }); await fs.rename(temporary, file); }
+      try { await fs.writeFile(temporary, snapshot, { mode: 0o600 }); await replaceAtomicFile(temporary, file); }
       finally { await fs.unlink(temporary).catch(() => undefined); }
     });
     this.writes.set(record.id, pending);

@@ -4,6 +4,7 @@ import { constants } from 'fs';
 import fs from 'fs/promises';
 import path from 'path';
 import { gitText, runGit } from './GitCheckpoint';
+import { replaceAtomicFile } from './AtomicFile';
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const HASH = /^[a-f0-9]{64}$/;
@@ -85,20 +86,21 @@ async function localMountPoints(): Promise<string[]> {
 }
 
 async function canonicalDirectory(directory: string): Promise<void> {
-  const stat = await fs.lstat(directory);
-  if (!stat.isDirectory() || stat.isSymbolicLink() || !Number.isSafeInteger(stat.ino) || stat.ino <= 0
+  // NTFS file IDs can exceed Number.MAX_SAFE_INTEGER. Keep exact identities on every host.
+  const stat = await fs.lstat(directory, { bigint: true });
+  if (!stat.isDirectory() || stat.isSymbolicLink() || stat.ino <= 0n
     || await fs.realpath(directory) !== directory) {
     throw new Error('Noncanonical or symbolic-link directory');
   }
 }
 
 async function boundedRead(file: string, limit = RECORD_LIMIT, ordinary = true): Promise<Buffer> {
-  const before = await fs.lstat(file);
-  if (!before.isFile() || before.isSymbolicLink() || !Number.isSafeInteger(before.ino) || before.ino <= 0
-    || before.size > limit) throw new Error('Unsafe or oversized metadata file');
+  const before = await fs.lstat(file, { bigint: true });
+  if (!before.isFile() || before.isSymbolicLink() || before.ino <= 0n
+    || before.size > BigInt(limit)) throw new Error('Unsafe or oversized metadata file');
   const handle = await fs.open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
   try {
-    const opened = await handle.stat();
+    const opened = await handle.stat({ bigint: true });
     if (!opened.isFile() || before.dev !== opened.dev || before.ino !== opened.ino) throw new Error('Metadata identity changed');
     const buffer = Buffer.alloc(limit + 1);
     let size = 0;
@@ -107,8 +109,8 @@ async function boundedRead(file: string, limit = RECORD_LIMIT, ordinary = true):
       if (!bytesRead) break;
       size += bytesRead;
     }
-    const after = await handle.stat();
-    if (size > limit || (ordinary && (opened.size !== size || after.size !== opened.size || after.mtimeMs !== opened.mtimeMs))) {
+    const after = await handle.stat({ bigint: true });
+    if (size > limit || (ordinary && (opened.size !== BigInt(size) || after.size !== opened.size || after.mtimeNs !== opened.mtimeNs))) {
       throw new Error('Metadata changed or exceeded its bound');
     }
     return buffer.subarray(0, size);
@@ -130,7 +132,7 @@ async function durableWrite(file: string, value: unknown, exclusive = false): Pr
   const temporary = exclusive ? file : `${file}.${randomUUID()}.tmp`;
   const handle = await fs.open(temporary, 'wx', 0o600);
   try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
-  if (!exclusive) await fs.rename(temporary, file);
+  if (!exclusive) await replaceAtomicFile(temporary, file);
   // Directory fsync is supported on Unix; Windows rejects directory handles.
   if (process.platform !== 'win32') {
     const parent = await fs.open(path.dirname(file), 'r');
@@ -556,10 +558,14 @@ export class LegacyWorkspaceCleanup {
       || await fs.realpath(path.resolve(registration, common.toString('utf8').trim())) !== source.commonDirectory
       || !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(head.toString('utf8').trim())) throw new Error('Registration is not an owned detached worktree');
     if (!await this.registered(source.root, directory)) throw new Error('Worktree registration is missing');
+    // Version 1 POSIX plans freeze numeric identities and millisecond timestamps.
+    // Windows needs exact NTFS IDs and nanoseconds; its native discard remains disabled.
+    const statOptions = { bigint: process.platform === 'win32' };
     const hash = createHash('sha256').update(receipt).update(laneBytes).update(back).update(common).update(head);
     for (const location of [source.root, source.commonDirectory, registration]) {
-      const identity = await fs.lstat(location);
-      hash.update(JSON.stringify([location, identity.dev, identity.ino]));
+      const identity = await fs.lstat(location, statOptions);
+      hash.update(JSON.stringify([location, ...('mtimeNs' in identity
+        ? [identity.dev.toString(), identity.ino.toString()] : [identity.dev, identity.ino])]));
     }
     const artifactDirectory = path.join(this.workspaceRoot, 'artifacts');
     try {
@@ -567,15 +573,17 @@ export class LegacyWorkspaceCleanup {
       const artifact = await boundedRead(path.join(artifactDirectory, `${workspace.taskId}.json`));
       budget.check(0, artifact.length); hash.update(artifact);
     } catch (error) { if (!missing(error)) throw error; hash.update('no-artifact'); }
-    const rootStat = await fs.lstat(directory);
+    const rootStat = await fs.lstat(directory, statOptions);
     const beforeBytes = budget.bytes;
     const walk = async (current: string, depth: number, device = rootStat.dev): Promise<void> => {
       if (depth > 128) throw new Error('Inventory depth budget exhausted');
       budget.check();
-      const before = await fs.lstat(current);
-      if (!Number.isSafeInteger(before.ino) || before.ino <= 0 || before.dev !== device
+      const before = await fs.lstat(current, statOptions);
+      if ((typeof before.ino === 'number' && !Number.isSafeInteger(before.ino)) || before.ino <= 0 || before.dev !== device
         || (!before.isFile() && !before.isDirectory() && !before.isSymbolicLink())) throw new Error('Uncertain identity, device boundary, or special file is excluded');
-      hash.update(JSON.stringify([path.relative(directory, current), before.dev, before.ino, before.mode, before.size, before.mtimeMs, before.ctimeMs]));
+      hash.update(JSON.stringify([path.relative(directory, current), ...('mtimeNs' in before
+        ? [before.dev, before.ino, before.mode, before.size, before.mtimeNs, before.ctimeNs].map(value => value.toString())
+        : [before.dev, before.ino, before.mode, before.size, before.mtimeMs, before.ctimeMs])]));
       if (before.isSymbolicLink()) {
         // Git removes the link itself. Never enumerate or read its referent.
         hash.update(await fs.readlink(current));
@@ -589,7 +597,7 @@ export class LegacyWorkspaceCleanup {
       } else {
         const handle = await fs.open(current, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
         try {
-          const opened = await handle.stat();
+          const opened = await handle.stat(statOptions);
           if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino) throw new Error('Checkout identity changed');
           const buffer = Buffer.alloc(64 * 1024);
           while (true) {
@@ -600,14 +608,17 @@ export class LegacyWorkspaceCleanup {
           }
         } finally { await handle.close(); }
       }
-      const after = await fs.lstat(current);
+      const after = await fs.lstat(current, statOptions);
+      const timeChanged = 'mtimeNs' in before && 'mtimeNs' in after
+        ? before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs
+        : before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs;
       if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size
-        || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) throw new Error('Checkout changed during inventory');
+        || timeChanged) throw new Error('Checkout changed during inventory');
     };
     await walk(directory, 0);
     // Conflict stages and merge state can change without changing checkout bytes.
     // Freeze the owned Git administrative files as well as the visible contents.
-    await walk(registration, 0, (await fs.lstat(registration)).dev);
+    await walk(registration, 0, (await fs.lstat(registration, statOptions)).dev);
     return { ...item, registration, fingerprint: hash.digest('hex'), bytes: budget.bytes - beforeBytes };
   }
 

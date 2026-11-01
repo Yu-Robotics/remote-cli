@@ -491,9 +491,25 @@ describe('local nested repository checkpoints and delivery', { timeout: 30_000 }
     await runGit(fixture.root, ['fsck', '--no-reflogs', '--no-dangling']);
   });
 
-  it.each([false, true])('cleans a timed-out partial transfer after both processes exit without removing another quarantine (backpressure=%s)', async (backpressure, context) => {
-    // Windows does not support a child deliberately ignoring SIGTERM.
-    if (backpressure && process.platform === 'win32') { context.skip(); return; }
+  it('never replaces a differing existing pack during repeated publication', async () => {
+    const child = await nestedGitFixture(fixture);
+    const tree = await gitText(child, ['rev-parse', 'HEAD^{tree}']);
+    await importGitTree(child, fixture.root, tree);
+    const directory = path.join(fixture.root, '.git', 'objects', 'pack');
+    const pack = (await fs.readdir(directory)).find(file => file.endsWith('.pack'))!;
+    const file = path.join(directory, pack);
+    await fs.chmod(file, 0o600);
+    const corrupt = Buffer.from('synthetic corrupt existing pack');
+    await fs.writeFile(file, corrupt);
+    await expect(importGitTree(child, fixture.root, tree)).rejects.toThrow('Existing Git pack differs');
+    expect(await fs.readFile(file)).toEqual(corrupt);
+    expect((await fs.readdir(path.dirname(directory))).filter(name => name.startsWith('tmp_objdir-'))).toEqual([]);
+  });
+
+  // Only the SIGTERM-ignoring variant requires POSIX signal semantics. The
+  // ordinary timeout and drain case runs on Windows as well.
+  for (const backpressure of [false, true]) {
+  it.skipIf(backpressure && process.platform === 'win32')(`cleans a timed-out partial transfer after both processes exit without removing another quarantine (backpressure=${backpressure})`, async () => {
     const child = await nestedGitFixture(fixture);
     await fs.writeFile(path.join(child, 'payload.bin'), randomBytes(backpressure ? 8 * 1024 * 1024 : 256 * 1024));
     await runGit(child, ['add', '.']);
@@ -643,6 +659,8 @@ describe('local nested repository checkpoints and delivery', { timeout: 30_000 }
       }
     }
   });
+
+  }
 
   it('rejects a blocked pack directory and removes only its own quarantine', async () => {
     const child = await nestedGitFixture(fixture);

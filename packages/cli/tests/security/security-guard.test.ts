@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as path from 'path';
 import * as fs from 'fs';
+import os from 'os';
 
 // We'll test the validateToolUse function exported from security-guard
 // The module should export this function for testing
@@ -12,7 +13,7 @@ describe('security-guard', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    process.env = { ...originalEnv, HOME: mockHome };
+    process.env = { ...originalEnv, HOME: mockHome, USERPROFILE: mockHome };
   });
 
   afterEach(() => {
@@ -570,7 +571,7 @@ describe('security-guard', () => {
     let tmpConfig: string;
 
     beforeEach(() => {
-      tmpConfig = path.join('/tmp', '.remote-cli-test-config.json');
+      tmpConfig = path.join(os.tmpdir(), '.remote-cli-test-config.json');
     });
 
     afterEach(() => {

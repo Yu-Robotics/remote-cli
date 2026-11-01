@@ -231,7 +231,8 @@ describe.skipIf(!nativeLfs)('local LFS checkout recovery proof', { timeout: 30_0
       const link = location === 'object' ? object() : location === 'parent' ? path.dirname(object())
         : location === 'store' ? media() : file();
       await fs.rename(link, target);
-      try { await fs.symlink(target, link, location === 'object' || location === 'checkout-file' ? 'file' : 'dir'); }
+      try { await fs.symlink(target, link, location === 'object' || location === 'checkout-file'
+        ? 'file' : process.platform === 'win32' ? 'junction' : 'dir'); }
       catch (error) {
         if (process.platform === 'win32' && ['EPERM', 'EACCES'].includes((error as NodeJS.ErrnoException).code ?? '')) {
           context.skip(); return;

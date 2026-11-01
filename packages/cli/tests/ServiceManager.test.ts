@@ -49,9 +49,9 @@ describe('ServiceManager', () => {
 
     expect(status).toMatchObject({ platform: 'linux', installed: true, running: true, enabled: true, pid: 321 });
     expect(unit).toContain('ExecStart="/opt/node/bin/node" "/opt/remote cli/bin/remote-cli.js" start --non-interactive');
-    expect(unit).toContain(`WorkingDirectory=${homeDir}`);
-    expect(unit).toContain(`Environment="HOME=${homeDir}"`);
-    expect(unit).toContain(`StandardOutput=append:${path.join(homeDir, '.remote-cli', 'logs', 'service.log')}`);
+    expect(unit).toContain(`WorkingDirectory=${homeDir.replaceAll('\\', '\\x5c').replaceAll(' ', '\\x20')}`);
+    expect(unit).toContain(`Environment="HOME=${homeDir.replaceAll('\\', '\\\\')}"`);
+    expect(unit).toContain(`StandardOutput=append:${path.join(homeDir, '.remote-cli', 'logs', 'service.log').replaceAll('\\', '\\x5c').replaceAll(' ', '\\x20')}`);
     expect(calls).toContainEqual(['systemctl', '--user', 'enable', '--now', 'remote-cli']);
   });
 
@@ -70,11 +70,11 @@ describe('ServiceManager', () => {
     await manager.install();
     const unit = await fs.readFile(path.join(homeDir, '.config', 'systemd', 'user', 'remote-cli.service'), 'utf8');
 
-    expect(unit).toContain(`WorkingDirectory=${homeDir.replaceAll(' ', '\\x20')}`);
+    expect(unit).toContain(`WorkingDirectory=${homeDir.replaceAll('\\', '\\x5c').replaceAll(' ', '\\x20')}`);
     expect(unit).not.toContain(`WorkingDirectory="${homeDir}"`);
-    expect(unit).toContain(`Environment="HOME=${homeDir}"`);
+    expect(unit).toContain(`Environment="HOME=${homeDir.replaceAll('\\', '\\\\')}"`);
     expect(unit).toContain('Environment="PATH=/opt/node bin:/usr/bin"');
-    expect(unit).toContain(`StandardOutput=append:${path.join(homeDir, '.remote-cli', 'logs', 'service.log').replaceAll(' ', '\\x20')}`);
+    expect(unit).toContain(`StandardOutput=append:${path.join(homeDir, '.remote-cli', 'logs', 'service.log').replaceAll('\\', '\\x5c').replaceAll(' ', '\\x20')}`);
   });
 
   it('uninstalls a Linux service without removing user data', async () => {

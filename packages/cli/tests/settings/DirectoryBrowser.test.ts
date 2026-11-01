@@ -7,6 +7,11 @@ import { DirectoryBrowser, DIRECTORY_LIMITS } from '../../src/settings/Directory
 import { SettingsAdmission } from '../../src/settings/SettingsAdmission';
 import type { SettingsActionMessage, SettingsMenu } from '../../src/types/Settings';
 
+vi.mock('fs/promises', async importOriginal => {
+  const actual = await importOriginal<typeof import('fs/promises')>();
+  return { ...actual, lstat: vi.fn(actual.lstat) };
+});
+
 describe('directory browser snapshots and Apply admission', () => {
   let root: string;
   let other: string;
@@ -19,6 +24,8 @@ describe('directory browser snapshots and Apply admission', () => {
   let admission: SettingsAdmission;
   let serial: number;
   beforeEach(async () => {
+    const actual = await vi.importActual<typeof import('fs/promises')>('fs/promises');
+    vi.mocked(fs.lstat).mockImplementation(actual.lstat);
     root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'directory-browser-')));
     other = path.join(root, 'root-two');
     await fs.mkdir(other);
@@ -47,6 +54,27 @@ describe('directory browser snapshots and Apply admission', () => {
     expect(menu.choices.map(choice => choice.label)).toEqual(['.hidden', 'project-a', 'root-two']);
     expect(menu.directory?.parent).toBeUndefined();
     expect(menu.choices.every(choice => !choice.value.includes(root))).toBe(true);
+    expect(apply).not.toHaveBeenCalled();
+  });
+
+  it('detects an adjacent large file ID change without rounding NTFS identities', async () => {
+    const offset = 2n ** 60n;
+    expect(Number(offset)).toBe(Number(offset + 1n));
+    let replaced = false;
+    const actual = await vi.importActual<typeof import('fs/promises')>('fs/promises');
+    vi.mocked(fs.lstat).mockImplementation(async (...args: any[]) => {
+      const info = await Reflect.apply(actual.lstat, actual, args);
+      if (args[0] === other && typeof info.ino === 'bigint') {
+        Object.defineProperty(info, 'ino', { value: offset + (replaced ? 1n : 0n) });
+      }
+      return info;
+    });
+    const menu = await open();
+    const choice = menu.choices.find(entry => entry.label === 'root-two')!;
+    expect(choice).toBeDefined();
+    replaced = true;
+    const result = await browser.action(request(menu, 'apply', choice.value));
+    expect(result.success).toBe(false);
     expect(apply).not.toHaveBeenCalled();
   });
 

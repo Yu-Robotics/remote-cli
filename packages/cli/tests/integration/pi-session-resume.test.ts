@@ -69,6 +69,7 @@ describe('Integration: connecting a native Pi session from chat', () => {
   let threadManager: ThreadManager;
   let threadPool: ThreadExecutorPool;
   let threadId: string;
+  const originalHomedir = os.homedir.bind(os);
   const pointerFile = () => path.join(home, '.remote-cli', 'pi-sessions', `${threadId}.json`);
 
   const attach = () => {
@@ -94,9 +95,10 @@ describe('Integration: connecting a native Pi session from chat', () => {
   const tokenAfter = (text: string, verb: string) => new RegExp(`/${verb} ([A-Za-z0-9_-]{12})`).exec(text)![1];
 
   beforeEach(async () => {
-    home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'pi-resume-flow-')));
+    home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'pi-resume-flow-')));
     vi.stubEnv('HOME', home);
     vi.stubEnv('USERPROFILE', home);
+    vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || process.env.USERPROFILE || originalHomedir());
     project = path.join(home, 'project');
     fs.mkdirSync(project);
     const store = path.join(home, '.pi', 'agent', 'sessions', piProjectDirectoryName(project));

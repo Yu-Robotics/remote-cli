@@ -21,7 +21,9 @@ describe('private Tips persistence', () => {
     const state = await store.load(user); expect(state.subscription).toBe('daily'); expect(state.timezone).toBe('Asia/Shanghai');
     await store.save(user, state); const file = await filename();
     expect(path.basename(file)).toMatch(/^[a-f0-9]{64}\.json$/);
-    expect((await fs.stat(file)).mode & 0o077).toBe(0); expect((await fs.stat(directory)).mode & 0o077).toBe(0);
+    if (process.platform !== 'win32') {
+      expect((await fs.stat(file)).mode & 0o077).toBe(0); expect((await fs.stat(directory)).mode & 0o077).toBe(0);
+    }
     expect(await store.load(user)).toEqual(state); expect(await fs.readFile(file, 'utf8')).not.toContain(user);
   });
 
@@ -125,7 +127,9 @@ describe('private Tips persistence', () => {
     await store.save(user, newTipState('UTC')); const file = await filename();
     await fs.writeFile(file, '{'); await expect(store.load(user)).rejects.toThrow();
     await fs.writeFile(file, ' '.repeat(256 * 1024 + 1)); await expect(store.load(user)).rejects.toThrow();
-    await store.save(user, newTipState('UTC')); await fs.chmod(file, 0o644); await expect(store.load(user)).rejects.toThrow();
+    if (process.platform !== 'win32') {
+      await store.save(user, newTipState('UTC')); await fs.chmod(file, 0o644); await expect(store.load(user)).rejects.toThrow();
+    }
     await fs.rm(file); await fs.mkdir(file); await expect(store.load(user)).rejects.toThrow();
     await fs.rm(file, { recursive: true }); await fs.symlink(path.join(directory, 'missing'), file); await expect(store.load(user)).rejects.toThrow();
   });
@@ -133,8 +137,10 @@ describe('private Tips persistence', () => {
   it('rejects an unsafe directory and invalid configured timezone', async () => {
     expect(() => new TipStore(directory, 'Invalid/Zone')).toThrow('Invalid Tips timezone.');
     expect(validTimezone(null)).toBe(false); expect(validTimezone('')).toBe(false); expect(validTimezone('UTC')).toBe(true);
-    await fs.chmod(directory, 0o755); await expect(store.load(user)).rejects.toThrow();
-    await fs.chmod(directory, 0o700);
+    if (process.platform !== 'win32') {
+      await fs.chmod(directory, 0o755); await expect(store.load(user)).rejects.toThrow();
+      await fs.chmod(directory, 0o700);
+    }
     const target = path.join(directory, 'target'); await fs.mkdir(target, { mode: 0o700 });
     const link = path.join(directory, 'link'); await fs.symlink(target, link);
     await expect(new TipStore(link).load(user)).rejects.toThrow();
@@ -163,5 +169,36 @@ describe('private Tips persistence', () => {
     await fs.writeFile(path.join(directory, marker), JSON.stringify({ version: 1, off: false }));
     await expect(store.load(user)).rejects.toThrow();
     expect(JSON.parse(await fs.readFile(await filename(), 'utf8'))).toEqual(previous);
+  });
+
+  it('handles Windows platform behavior: skips directory sync and permits emulated mode bits while still rejecting symlinks', async () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    const open = vi.spyOn(fs, 'open');
+    try {
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      const state = newTipState('UTC');
+      await store.save(user, state);
+      // Directory fsync handle open should be skipped on Windows.
+      expect(open.mock.calls.some(([file, flags]) => file === directory && flags === 'r')).toBe(false);
+
+      const file = await filename();
+      // On Windows, store.load succeeds with emulated mode bits even if group/other bits are set.
+      await fs.chmod(file, 0o644);
+      expect(await store.load(user)).toEqual(state);
+
+      // Symlinks to files must still be rejected on win32.
+      await fs.rm(file);
+      await fs.symlink(path.join(directory, 'missing'), file);
+      await expect(store.load(user)).rejects.toThrow('Tips storage is unavailable.');
+
+      // Symlinked directories must still be rejected on win32.
+      const target = path.join(directory, 'target');
+      await fs.mkdir(target, { mode: 0o700 });
+      const link = path.join(directory, 'link');
+      await fs.symlink(target, link);
+      await expect(new TipStore(link).load(user)).rejects.toThrow('Tips storage is unavailable.');
+    } finally {
+      Object.defineProperty(process, 'platform', platform);
+    }
   });
 });

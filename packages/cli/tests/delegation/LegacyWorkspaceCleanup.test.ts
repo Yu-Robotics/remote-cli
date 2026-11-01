@@ -3,7 +3,7 @@ import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { LegacyWorkspaceCleanup, hasLegacyDiscardTombstone, completedLegacyDiscard, type CleanupOwnership } from '../../src/delegation/LegacyWorkspaceCleanup';
+import { LegacyWorkspaceCleanup, hasLegacyDiscardTombstone, completedLegacyDiscard, type CleanupOwnership, type LegacyCleanupItem } from '../../src/delegation/LegacyWorkspaceCleanup';
 import { gitText, runGit } from '../../src/delegation/GitCheckpoint';
 import { gitFixture } from './gitFixture';
 
@@ -11,6 +11,32 @@ const flags = { discardContents: true, confirmWorkersStopped: true };
 const exists = async (file: string) => fs.lstat(file).then(() => true, error => {
   if (error.code === 'ENOENT') return false; throw error;
 });
+
+/** Independent reference for the numeric/millisecond encoding of pre-upgrade POSIX plans. */
+async function preUpgradeFingerprint(item: LegacyCleanupItem, workspaceRoot: string, workerRoot: string): Promise<string> {
+  const hash = createHash('sha256');
+  for (const file of [path.join(workspaceRoot, 'lanes', `${item.laneId}.json`),
+    path.join(workerRoot, `${item.laneId}.json`), ...['gitdir', 'commondir', 'HEAD'].map(name => path.join(item.registration, name))]) {
+    hash.update(await fs.readFile(file));
+  }
+  for (const location of [item.sourceRoot, item.commonDirectory, item.registration]) {
+    const stat = await fs.lstat(location);
+    hash.update(JSON.stringify([location, stat.dev, stat.ino]));
+  }
+  hash.update(await fs.readFile(path.join(workspaceRoot, 'artifacts', `${item.taskId}.json`)));
+  const walk = async (current: string): Promise<void> => {
+    const stat = await fs.lstat(current);
+    hash.update(JSON.stringify([path.relative(item.directory, current), stat.dev, stat.ino,
+      stat.mode, stat.size, stat.mtimeMs, stat.ctimeMs]));
+    if (stat.isSymbolicLink()) hash.update(await fs.readlink(current));
+    else if (stat.isDirectory()) {
+      for (const name of (await fs.readdir(current)).sort()) await walk(path.join(current, name));
+    } else hash.update(await fs.readFile(current));
+  };
+  await walk(item.directory);
+  await walk(item.registration);
+  return hash.digest('hex');
+}
 
 describe('explicit offline legacy worktree discard', { timeout: 30_000 }, () => {
   let fixture: Awaited<ReturnType<typeof gitFixture>>;
@@ -95,6 +121,112 @@ describe('explicit offline legacy worktree discard', { timeout: 30_000 }, () => 
     const absent = path.join(fixture.directory, 'absent');
     expect((await new LegacyWorkspaceCleanup(absent).scan()).items).toEqual([]);
     expect(await exists(absent)).toBe(false);
+  });
+
+  const writePreUpgradePlan = async () => {
+    const inventory = await cleanup.scan();
+    expect(inventory.items).toHaveLength(1);
+    const item = { ...inventory.items[0], fingerprint: await preUpgradeFingerprint(inventory.items[0], workspaceRoot, workerRoot) };
+    const plan = { ...inventory, items: [item], id: randomUUID(), createdAt: new Date(0).toISOString() };
+    const bytes = JSON.stringify(plan);
+    await fs.writeFile(manifest, bytes, { flag: 'wx' });
+    return { item, bytes, planHash: createHash('sha256').update(bytes).digest('hex') };
+  };
+
+  it.skipIf(process.platform === 'win32').each(['linux', 'darwin'] as const)(
+    'preserves the pre-upgrade POSIX fingerprint and consumes its frozen plan on %s', async platform => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue(platform);
+      const { item, bytes } = await writePreUpgradePlan();
+      expect((await cleanup.scan()).items[0].fingerprint).toBe(item.fingerprint);
+      expect(await cleanup.discard(manifest, flags)).toEqual({ removed: 1, errors: [] });
+      expect(await fs.readFile(manifest, 'utf8')).toBe(bytes);
+    });
+
+  it.skipIf(process.platform === 'win32').each(['linux', 'darwin'] as const)(
+    'continues a pre-upgrade pending discard with the original frozen plan on %s', async platform => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue(platform);
+      const { item, bytes, planHash } = await writePreUpgradePlan();
+      const markers = path.join(workerRoot, 'legacy-discarded');
+      await fs.mkdir(markers);
+      const marker = path.join(markers, `${lane.id}.json`);
+      await fs.writeFile(marker, JSON.stringify({ ...item, version: 1, state: 'pending', planHash }));
+      await fs.writeFile(`${manifest}.progress.json`, JSON.stringify({ version: 1, planHash, items: { [lane.id]: 'removing' } }));
+      expect(await cleanup.discard(manifest, flags)).toEqual({ removed: 1, errors: [] });
+      expect(await fs.readFile(manifest, 'utf8')).toBe(bytes);
+      expect(JSON.parse(await fs.readFile(marker, 'utf8'))).toMatchObject({ fingerprint: item.fingerprint, planHash, state: 'removed' });
+      expect(await cleanup.discard(manifest, flags)).toEqual({ removed: 1, errors: [] });
+    });
+
+  it.each(['linux', 'darwin'] as const)('rejects unsafe numeric checkout identities on %s', async platform => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue(platform);
+    const lstat = fs.lstat.bind(fs);
+    vi.spyOn(fs, 'lstat').mockImplementation(async (...args) => {
+      const stat = await lstat(...args);
+      if (args[0] === lane.directory && typeof stat.ino === 'number') {
+        Object.defineProperty(stat, 'ino', { value: Number.MAX_SAFE_INTEGER + 1 });
+      }
+      return stat;
+    });
+    const inventory = await cleanup.scan();
+    expect(inventory.items).toEqual([]);
+    expect(inventory.excluded.some(item => item.reason.includes('Uncertain identity'))).toBe(true);
+  });
+
+  for (const platform of ['linux', 'darwin', 'win32'] as const) {
+    // Native NTFS numeric IDs need not be representable for the POSIX-only branch.
+    it.skipIf(process.platform === 'win32' && platform !== 'win32')(`rejects timestamps changing during inventory on ${platform}`, async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue(platform);
+      const lstat = fs.lstat.bind(fs);
+      let reads = 0;
+      vi.spyOn(fs, 'lstat').mockImplementation(async (...args) => {
+        const stat = await lstat(...args);
+        if (args[0] === path.join(lane.directory, 'source.txt') && ++reads > 1) {
+          if ('mtimeNs' in stat) Object.defineProperty(stat, 'mtimeNs', { value: stat.mtimeNs + 1n });
+          else Object.defineProperty(stat, 'mtimeMs', { value: stat.mtimeMs + 0.25 });
+        }
+        return stat;
+      });
+      const inventory = await cleanup.scan();
+      expect(inventory.items).toEqual([]);
+      expect(inventory.excluded.some(item => item.reason === 'Checkout changed during inventory')).toBe(true);
+    });
+  }
+
+  it('keeps native Windows cleanup disabled without supported mount verification', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    cleanup = new LegacyWorkspaceCleanup(root, { ownership, assertOffline: offline });
+    expect((await cleanup.scan()).incomplete).toBe(true);
+    await expect(cleanup.plan(manifest)).rejects.toThrow('Incomplete');
+    expect(ownership).not.toHaveBeenCalled();
+    expect(await exists(lane.directory)).toBe(true);
+  });
+
+  it.each(['ino', 'mtimeNs'] as const)('retains exact Windows file IDs and detects a one-unit %s change in frozen fingerprints', async field => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    const offset = 2n ** 60n;
+    let changed = false;
+    const exact = <T extends { ino: number | bigint; mtimeNs?: bigint }>(stat: T, file: unknown): T => {
+      if (typeof stat.ino === 'bigint') {
+        Object.defineProperty(stat, 'ino', { value: offset + stat.ino });
+        if (changed && file === lane.directory) Object.defineProperty(stat, field, { value: BigInt(stat[field]!) + 1n });
+      }
+      return stat;
+    };
+    const lstat = fs.lstat.bind(fs);
+    vi.spyOn(fs, 'lstat').mockImplementation(async (...args) => exact(await lstat(...args), args[0]));
+    const open = fs.open.bind(fs);
+    vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      const handle = await open(...args);
+      const stat = handle.stat.bind(handle);
+      handle.stat = (async (...options: Parameters<typeof handle.stat>) => exact(await stat(...options), args[0])) as typeof handle.stat;
+      return handle;
+    });
+    expect((await cleanup.plan(manifest)).items).toHaveLength(1);
+    changed = true;
+    const result = await cleanup.discard(manifest, flags);
+    expect(result.removed).toBe(0);
+    expect(result.errors).toHaveLength(1);
+    expect(await exists(lane.directory)).toBe(true);
   });
 
   it('discards planned tracked, untracked and ignored contents while preserving parent, artifacts, refs and native state', async () => {
@@ -250,7 +382,7 @@ describe('explicit offline legacy worktree discard', { timeout: 30_000 }, () => 
 
   it('fingerprints content links without walking them and preserves their outside target on discard', async ({ skip }) => {
     const target = path.join(fixture.directory, 'outside'); await fs.writeFile(target, 'must survive');
-    try { await fs.symlink(target, path.join(lane.directory, 'link')); }
+    try { await fs.symlink(target, path.join(lane.directory, 'link'), 'file'); }
     catch (error) { if (['EPERM', 'EACCES', 'ENOTSUP'].includes((error as NodeJS.ErrnoException).code!)) { skip(); return; } throw error; }
     expect((await cleanup.scan()).items).toHaveLength(1);
     await cleanup.plan(manifest);
@@ -261,7 +393,7 @@ describe('explicit offline legacy worktree discard', { timeout: 30_000 }, () => 
   it('excludes symbolic-link Git registrations', async ({ skip }) => {
     const gitfile = path.join(lane.directory, '.git'); const saved = path.join(fixture.directory, 'git-registration');
     await fs.rename(gitfile, saved);
-    try { await fs.symlink(saved, gitfile); }
+    try { await fs.symlink(saved, gitfile, 'file'); }
     catch (error) { if (['EPERM', 'EACCES', 'ENOTSUP'].includes((error as NodeJS.ErrnoException).code!)) { skip(); return; } throw error; }
     expect((await cleanup.scan()).items).toEqual([]);
     expect(await fs.readFile(saved, 'utf8')).toContain('gitdir:');

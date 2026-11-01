@@ -231,11 +231,35 @@ export class ProcessJournal {
       fs.writeFileSync(next, lines.join('\n') + '\n');
       fs.fsyncSync(next);
       this.verifyOwner();
-      fs.renameSync(temporary, this.filename);
-      const previous = this.fd;
-      this.fd = next;
-      next = undefined;
-      fs.closeSync(previous);
+      if (process.platform === 'win32') {
+        // Windows cannot replace the journal while either publication handle
+        // remains open. Keep the owner gate, close both handles, then publish
+        // the already flushed replacement atomically. A failed publication
+        // closes admission; the previous complete file remains recovery proof.
+        const staged = fs.fstatSync(next, { bigint: true });
+        fs.closeSync(next);
+        next = undefined;
+        fs.closeSync(this.fd);
+        this.closed = true;
+        fs.renameSync(temporary, this.filename);
+        next = fs.openSync(this.filename, constants.O_WRONLY | constants.O_APPEND | (constants.O_NOFOLLOW ?? 0));
+        const installed = fs.fstatSync(next, { bigint: true });
+        const current = fs.lstatSync(this.filename, { bigint: true });
+        if (!current.isFile() || current.isSymbolicLink() || current.nlink !== 1n
+          || installed.dev !== staged.dev || installed.ino !== staged.ino || installed.size !== staged.size
+          || current.dev !== installed.dev || current.ino !== installed.ino) {
+          throw new Error('Delegation process journal publication identity changed');
+        }
+        this.fd = next;
+        next = undefined;
+        this.closed = false;
+      } else {
+        fs.renameSync(temporary, this.filename);
+        const previous = this.fd;
+        this.fd = next;
+        next = undefined;
+        fs.closeSync(previous);
+      }
       this.pending.clear();
       for (const [id, record] of remaining) this.pending.set(id, record);
       syncDirectory(path.dirname(this.filename));

@@ -304,10 +304,12 @@ describe('DshExecutor', () => {
   });
 
   it('durably compacts by summary/reset and seeds exactly one successful turn after restart', async () => {
+    const write = vi.spyOn(fs, 'writeFileSync');
     await executor.execute('hi');
     expect(await executor.compactWhenFull()).toMatchObject({ success: true, output: expect.stringContaining('native DSH history is retained') });
     expect(fs.existsSync(pointer())).toBe(false);
-    expect(fs.statSync(handoff()).mode & 0o777).toBe(0o600);
+    expect(write).toHaveBeenCalledWith(expect.stringContaining(handoff()), expect.any(String), expect.objectContaining({ mode: 0o600 }));
+    if (process.platform !== 'win32') expect(fs.statSync(handoff()).mode & 0o777).toBe(0o600);
     expect(await executor.compactWhenFull()).toMatchObject({ success: true });
     await executor.destroy(); executor = create();
     expect(await executor.execute('continue')).toMatchObject({ success: true });

@@ -30,6 +30,8 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
   beforeEach(async () => {
     fixture = await gitFixture();
     vi.spyOn(os, 'homedir').mockReturnValue(fixture.directory);
+    vi.stubEnv('HOME', fixture.directory);
+    vi.stubEnv('USERPROFILE', fixture.directory);
     workers = [];
     factory = vi.fn((guard: DirectoryGuard, _config, cwd: string) => {
       expect(guard.resolveWorkingDirectory(cwd)).toBe(cwd);
@@ -43,7 +45,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     backend: 'claude', config: { type: 'auto' }, onToolUse: vi.fn(), onToolResult: vi.fn(), onNotice: vi.fn(),
     onProgress: vi.fn(() => true), onApproval: vi.fn(() => true), onApprovalResolved: vi.fn() };
   });
-  afterEach(async () => { await manager.destroy(); vi.restoreAllMocks(); await fs.rm(fixture.directory, { recursive: true, force: true }); });
+  afterEach(async () => { await manager.destroy(); vi.restoreAllMocks(); vi.unstubAllEnvs(); await fs.rm(fixture.directory, { recursive: true, force: true }); });
   const start = (scope: ReturnType<DelegationManager['begin']>, id: string, backend = 'codex') =>
     scope.invoke('remote_cli_delegate', { backend, objective: `Independent task ${id}` }, id) as Promise<DelegatedTaskResult>;
   const result = (scope: ReturnType<DelegationManager['begin']>, taskId: string, id: string) =>

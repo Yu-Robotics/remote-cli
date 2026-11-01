@@ -50,7 +50,7 @@ describe('shared read-only catalog primitives', () => {
       expect(head).toBe('x'.repeat(32));
       expect(readBoundedHead(path.join(root, 'missing'))).toBeUndefined();
       const link = path.join(root, 'link.jsonl');
-      fs.symlinkSync(file, link);
+      fs.symlinkSync(file, link, 'file');
       expect(readBoundedHead(link)).toBeUndefined();
       expect(SESSION_CATALOG_HEADER_BYTES).toBe(64 * 1024);
     } finally { fs.rmSync(root, { recursive: true, force: true }); }

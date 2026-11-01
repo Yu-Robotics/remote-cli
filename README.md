@@ -1890,6 +1890,12 @@ silently disable LFS coverage. This tests the selected Node.js version; it does
 not establish compatibility with every supported Node.js version or real AI
 provider sessions.
 
+Windows filesystem operations use native paths. POSIX permission bits do not
+establish Windows ACL privacy; keep Router and client data in a user-protected
+directory. Symbolic-link, regular-file, and canonical-path checks remain
+applicable on every platform. Platform-specific process and mount features
+retain their documented limits.
+
 Publishing runs only on Linux after all three platform jobs and release selection
 succeed. Pull requests have no publish authorization, and ordinary pushes without
 a version increase only run CI. The package runtime Node.js requirements remain

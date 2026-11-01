@@ -87,7 +87,7 @@ describe('file inbox lifecycle and references', () => {
     inbox = new FileInbox(path.join(root, 'files'), 'https://router.test', { thread: () => thread, send, extract: vi.fn() });
     await inbox.initialize(); inbox.claim('task', 'thread', 'owner'); expect(await inbox.prepare('task')).toContain('interrupted by restart');
     await inbox.destroy();
-    await fs.rename(manifest, path.join(root, 'external.json')); await fs.symlink(path.join(root, 'external.json'), manifest);
+    await fs.rename(manifest, path.join(root, 'external.json')); await fs.symlink(path.join(root, 'external.json'), manifest, 'file');
     inbox = new FileInbox(path.join(root, 'files'), 'https://router.test', { thread: () => thread, send, extract: vi.fn() });
     expect(await inbox.list('thread', 'owner')).toContain('No attachments');
   });

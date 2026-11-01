@@ -37,6 +37,8 @@ describe('multiple accepted delegated tasks', () => {
     expectedShutdownFailure = false;
     directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'delegation-queue-test-')));
     vi.spyOn(os, 'homedir').mockReturnValue(directory);
+    vi.stubEnv('HOME', directory);
+    vi.stubEnv('USERPROFILE', directory);
     guard = new DirectoryGuard([directory]);
     workers = [];
     factory = vi.fn((_guard, _config, cwd) => {
@@ -57,6 +59,7 @@ describe('multiple accepted delegated tasks', () => {
     if (expectedShutdownFailure) await expect(manager.destroy()).rejects.toThrow('storage ownership was retained'); else await manager.destroy();
     vi.useRealTimers();
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
     fs.rmSync(directory, { recursive: true, force: true });
   });
 

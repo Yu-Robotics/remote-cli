@@ -102,7 +102,8 @@ describe('thread-wide conversation reset', () => {
     expectedShutdownFailure = false;
     home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'thread-context-reset-')));
     vi.stubEnv('HOME', home);
-    vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || originalHomedir());
+    vi.stubEnv('USERPROFILE', home);
+    vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || process.env.USERPROFILE || originalHomedir());
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
