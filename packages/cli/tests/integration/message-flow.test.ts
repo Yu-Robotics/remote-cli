@@ -7,14 +7,13 @@ import { ThreadManager } from '../../src/thread/ThreadManager';
 import { IncomingMessage } from '../../src/types';
 import os from 'os';
 import path from 'path';
-
-// Mock os.homedir() to respect process.env.HOME for isolated tests
-const originalHomedir = os.homedir();
-vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || originalHomedir);
+import { promises as fs } from 'fs';
 
 vi.mock('../../src/client/WebSocketClient');
 
 describe('Integration: Message Flow', () => {
+  let home: string;
+  let projects: string;
   let wsClient: any;
   let executor: any;
   let guard: DirectoryGuard;
@@ -22,8 +21,23 @@ describe('Integration: Message Flow', () => {
   let mockThreadPool: any;
   let mockThreadManager: any;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
+    home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'message-flow-')));
+    projects = path.join(home, 'projects');
+    await fs.mkdir(path.join(projects, 'my-app'), { recursive: true });
+    await fs.mkdir(path.join(home, 'work'));
+    await fs.mkdir(path.join(home, 'restricted'));
+    vi.spyOn(os, 'homedir').mockReturnValue(home);
+    vi.stubEnv('HOME', home);
+    vi.stubEnv('USERPROFILE', home);
+    vi.stubEnv('HOMEDRIVE', path.parse(home).root.replace(/[\\/]$/, ''));
+    vi.stubEnv('HOMEPATH', home.slice(path.parse(home).root.length - 1));
+    // Native catalog overrides must not point outside this fixture's home.
+    vi.stubEnv('CODEX_HOME', path.join(home, '.codex'));
+    vi.stubEnv('CLAUDE_CONFIG_DIR', path.join(home, '.claude'));
+    vi.stubEnv('PI_CODING_AGENT_DIR', path.join(home, '.pi', 'agent'));
+    vi.stubEnv('PI_CODING_AGENT_SESSION_DIR', undefined);
 
     wsClient = {
       send: vi.fn(),
@@ -34,7 +48,7 @@ describe('Integration: Message Flow', () => {
 
     executor = {
       execute: vi.fn(),
-      getCurrentWorkingDirectory: vi.fn(() => '~/projects'),
+      getCurrentWorkingDirectory: vi.fn(() => projects),
       setWorkingDirectory: vi.fn().mockResolvedValue(undefined),
       abort: vi.fn().mockResolvedValue(true),
       resetContext: vi.fn(),
@@ -43,7 +57,7 @@ describe('Integration: Message Flow', () => {
 
     guard = new DirectoryGuard(['~/projects', '~/work']);
 
-    const defaultThread = { id: 'default-id', name: 'default', workingDirectory: '~/projects', sessionId: null, createdAt: 0, lastActiveAt: 0 };
+    const defaultThread = { id: 'default-id', name: 'default', workingDirectory: projects, sessionId: null, createdAt: 0, lastActiveAt: 0 };
 
     mockThreadManager = {
       contextResets: { assertReady: vi.fn() },
@@ -51,17 +65,26 @@ describe('Integration: Message Flow', () => {
       getThread: vi.fn().mockImplementation((id: string) => id === defaultThread.id ? defaultThread : undefined),
       getThreadByName: vi.fn().mockImplementation((name: string) => name === 'default' ? defaultThread : undefined),
       listThreads: vi.fn().mockReturnValue([defaultThread]),
-      createThread: vi.fn().mockResolvedValue({ id: 'new-id', name: 'thread-2', workingDirectory: '~/projects', sessionId: null, createdAt: Date.now(), lastActiveAt: Date.now() }),
+      createThread: vi.fn().mockResolvedValue({ id: 'new-id', name: 'thread-2', workingDirectory: projects, sessionId: null, createdAt: Date.now(), lastActiveAt: Date.now() }),
       deleteThread: vi.fn().mockResolvedValue(undefined),
-      updateThread: vi.fn().mockImplementation(async (_id: string, updates: any) => ({ ...defaultThread, ...updates })),
-      getSessionFilePath: vi.fn().mockReturnValue('/tmp/session.jsonl'),
+      updateThread: vi.fn().mockImplementation(async (_id: string, updates: any) => Object.assign(defaultThread, updates)),
+      getSessionFilePath: vi.fn().mockReturnValue(path.join(home, '.remote-cli', 'session.jsonl')),
     } as unknown as ThreadManager;
 
+    const busy = new Set<string>();
     mockThreadPool = {
       getExecutor: vi.fn().mockReturnValue(executor),
-      setWorkingDirectory: vi.fn().mockResolvedValue({ cwd: path.join(os.homedir(), 'projects'), changed: false }),
-      isThreadBusy: vi.fn().mockReturnValue(false),
-      setThreadBusy: vi.fn(),
+      getExistingExecutor: vi.fn().mockReturnValue(executor),
+      setWorkingDirectory: vi.fn(async (_id: string, target: string) => {
+        const previous = executor.getCurrentWorkingDirectory();
+        const cwd = guard.resolveWorkingDirectory(target, previous);
+        if (!(await fs.stat(cwd)).isDirectory()) throw new Error('Not a directory');
+        executor.getCurrentWorkingDirectory.mockReturnValue(cwd);
+        defaultThread.workingDirectory = cwd;
+        return { cwd, changed: cwd !== previous };
+      }),
+      isThreadBusy: vi.fn((id: string) => busy.has(id)),
+      setThreadBusy: vi.fn((id: string, value: boolean) => { if (value) busy.add(id); else busy.delete(id); }),
       setThreadError: vi.fn(),
       getStatus: vi.fn().mockReturnValue('idle'),
       getSummaries: vi.fn().mockReturnValue([{ id: defaultThread.id, name: 'default', status: 'idle' }]),
@@ -77,14 +100,19 @@ describe('Integration: Message Flow', () => {
       has: vi.fn(() => true),
       getAll: vi.fn(() => ({})),
       save: vi.fn().mockResolvedValue(undefined),
-      getConfigDir: vi.fn(() => '/tmp/test-config'),
+      getConfigDir: vi.fn(() => path.join(home, '.remote-cli')),
     };
 
     handler = new MessageHandler(wsClient, mockThreadPool, mockThreadManager, guard, mockConfig);
   });
 
-  afterEach(() => {
-    vi.clearAllMocks();
+  afterEach(async () => {
+    try { await handler?.destroy(); }
+    finally {
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
+      await fs.rm(home, { recursive: true, force: true });
+    }
   });
 
   describe('Command execution flow', () => {
@@ -114,8 +142,8 @@ describe('Integration: Message Flow', () => {
       const message: IncomingMessage = {
         type: 'command',
         messageId: 'msg_002',
-        content: 'Read /etc/passwd file',
-        workingDirectory: '/etc',
+        content: 'Read restricted file',
+        workingDirectory: path.join(home, 'restricted'),
         timestamp: Date.now(),
       };
 
@@ -125,6 +153,16 @@ describe('Integration: Message Flow', () => {
       expect(wsClient.send).toHaveBeenCalledWith(
         expect.objectContaining({ type: 'response', messageId: 'msg_002', success: false, error: expect.stringContaining('whitelist') })
       );
+    });
+
+    it('still rejects ordinary execution when the isolated home has uncertain worker ownership', async () => {
+      await fs.mkdir(path.join(home, '.remote-cli'));
+      await fs.writeFile(path.join(home, '.remote-cli', 'delegation-workers.ownership'), 'synthetic unknown owner');
+      await handler.handleMessage({ type: 'command', messageId: 'uncertain-worker', content: 'Run a task' });
+      expect(executor.execute).not.toHaveBeenCalled();
+      expect(wsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+        messageId: 'uncertain-worker', success: false, error: expect.stringContaining('may still write files'),
+      }));
     });
 
     it('should handle command with streaming progress', async () => {
@@ -207,19 +245,16 @@ describe('Integration: Message Flow', () => {
     it('rejects an unknown Pi session ID without constructing its executor', async () => {
       mockThreadPool.getBackendKey.mockReturnValue('pi');
       (handler as any).config.get.mockImplementation((key: string) => key === 'sessionSharing' ? { enabled: true } : undefined);
-      const guardSpy = vi.spyOn(guard, 'isSafePath').mockReturnValue(true);
       await handler.handleMessage({ type: 'command', messageId: 'resume-pi-id', content: '/resume id native-example',
         isSlashCommand: true, openId: 'owner-example', timestamp: Date.now() });
       expect(executor.execute).not.toHaveBeenCalled();
       expect(mockThreadPool.getExecutor).not.toHaveBeenCalled();
       expect(wsClient.send).toHaveBeenCalledWith(expect.objectContaining({ success: false, error: expect.stringContaining('No Pi session with that ID') }));
-      guardSpy.mockRestore();
     });
 
     it('lists Pi sessions read-only when sharing is enabled, without constructing an executor', async () => {
       mockThreadPool.getBackendKey.mockReturnValue('pi');
       (handler as any).config.get.mockImplementation((key: string) => key === 'sessionSharing' ? { enabled: true } : undefined);
-      const guardSpy = vi.spyOn(guard, 'isSafePath').mockReturnValue(true);
       await handler.handleMessage({ type: 'command', messageId: 'resume-list', content: '/resume', isSlashCommand: true, timestamp: Date.now() });
       expect(mockThreadPool.getExecutor).not.toHaveBeenCalled();
       expect(executor.execute).not.toHaveBeenCalled();
@@ -228,37 +263,31 @@ describe('Integration: Message Flow', () => {
       }));
       const sent = wsClient.send.mock.calls.map((call: any[]) => call[0]).find((m: any) => m.messageId === 'resume-list');
       expect(sent.output).toContain('nothing is loaded and no task is sent until you confirm');
-      guardSpy.mockRestore();
     });
 
     it('lists Codex sessions read-only on a Codex thread without constructing an executor', async () => {
-      // os.homedir() is pinned by the suite setup, so the adapter's default HOME is the real one.
+      // The native catalog is empty inside the isolated fixture home.
       mockThreadPool.getBackendKey.mockReturnValue('codex');
       (handler as any).config.get.mockImplementation((key: string) => key === 'sessionSharing' ? { enabled: true } : undefined);
-      const guardSpy = vi.spyOn(guard, 'isSafePath').mockReturnValue(true);
       await handler.handleMessage({ type: 'command', messageId: 'resume-codex', content: '/resume', isSlashCommand: true, timestamp: Date.now() });
       expect(mockThreadPool.getExecutor).not.toHaveBeenCalled();
       expect(executor.execute).not.toHaveBeenCalled();
       const sent = wsClient.send.mock.calls.map((call: any[]) => call[0]).find((m: any) => m.messageId === 'resume-codex');
       expect(sent.success).toBe(true);
       expect(sent.output).toContain('Codex sessions in this workspace');
-      expect(sent.output).toContain('not available yet');
-      guardSpy.mockRestore();
+      expect(sent.output).toContain('No Codex sessions were found');
     });
 
     it('lists Claude Code sessions read-only on a Claude thread without constructing an executor', async () => {
-      // The default backend for this suite is claude; the real project store for this
-      // workspace has no transcripts, so the answer is an explicit empty catalog.
+      // The fixture project has no transcripts, so the answer is an empty catalog.
       (handler as any).config.get.mockImplementation((key: string) => key === 'sessionSharing' ? { enabled: true } : undefined);
-      const guardSpy = vi.spyOn(guard, 'isSafePath').mockReturnValue(true);
       await handler.handleMessage({ type: 'command', messageId: 'resume-claude', content: '/resume', isSlashCommand: true, timestamp: Date.now() });
       expect(mockThreadPool.getExecutor).not.toHaveBeenCalled();
       expect(executor.execute).not.toHaveBeenCalled();
       const sent = wsClient.send.mock.calls.map((call: any[]) => call[0]).find((m: any) => m.messageId === 'resume-claude');
       expect(sent.success).toBe(true);
       expect(sent.output).toContain('Claude Code sessions in this workspace');
-      expect(sent.output).toContain('not available yet');
-      guardSpy.mockRestore();
+      expect(sent.output).toContain('No Claude Code sessions were found');
     });
 
     it('rejects a catalog request for a disallowed working directory', async () => {
@@ -300,6 +329,8 @@ describe('Integration: Message Flow', () => {
       await handler.handleMessage({ type: 'command', messageId: 'msg_006', content: '/continue', workingDirectory: '~/work', timestamp: Date.now() });
 
       expect(executor.execute).toHaveBeenCalledWith('Please continue from where we left off', expect.any(Object));
+      expect(executor.getCurrentWorkingDirectory()).toBe(path.join(home, 'work'));
+      expect(mockThreadManager.getDefaultThread().workingDirectory).toBe(path.join(home, 'work'));
     });
 
     it('should handle status query', async () => {
@@ -321,12 +352,11 @@ describe('Integration: Message Flow', () => {
 
   describe('Concurrent command handling (per-thread)', () => {
     it('should reject concurrent commands on same thread (one at a time)', async () => {
-      let callCount = 0;
-      mockThreadPool.isThreadBusy = vi.fn().mockImplementation(() => callCount++ > 0);
-
-      executor.execute.mockImplementationOnce(
-        () => new Promise((resolve) => setTimeout(() => resolve({ success: true, output: 'Done' }), 100))
-      );
+      let finish!: () => void;
+      const execution = new Promise<{ success: boolean; output: string }>(resolve => {
+        finish = () => resolve({ success: true, output: 'Done' });
+      });
+      executor.execute.mockReturnValueOnce(execution);
 
       const message1: IncomingMessage = {
         type: 'command', messageId: 'msg_008', content: 'Long running task', workingDirectory: '~/projects', timestamp: Date.now(),
@@ -336,15 +366,19 @@ describe('Integration: Message Flow', () => {
       };
 
       const promise1 = handler.handleMessage(message1);
-      await new Promise((r) => setTimeout(r, 10));
-      await handler.handleMessage(message2);
-
-      expect(wsClient.send).toHaveBeenCalledWith(
-        expect.objectContaining({ type: 'response', messageId: 'msg_009', success: false, queueConfirmation: expect.any(Object) })
-      );
-
-      await promise1;
+      try {
+        await vi.waitFor(() => expect(executor.execute).toHaveBeenCalledOnce());
+        expect(mockThreadPool.isThreadBusy('default-id')).toBe(true);
+        await handler.handleMessage(message2);
+        expect(wsClient.send).toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'response', messageId: 'msg_009', success: false, queueConfirmation: expect.any(Object) })
+        );
+      } finally {
+        finish();
+        await promise1;
+      }
       expect(executor.execute).toHaveBeenCalledTimes(1);
+      expect(mockThreadPool.isThreadBusy('default-id')).toBe(false);
     });
   });
 
@@ -355,16 +389,19 @@ describe('Integration: Message Flow', () => {
       await handler.handleMessage({ type: 'command', messageId: 'msg_010', content: 'Create file', workingDirectory: '~/projects', timestamp: Date.now() });
 
       expect(executor.execute).toHaveBeenCalledWith('Create file', expect.any(Object));
+      expect(executor.getCurrentWorkingDirectory()).toBe(projects);
+      expect(mockThreadManager.getDefaultThread().workingDirectory).toBe(projects);
     });
 
     it('should handle relative paths from allowed directories', async () => {
       executor.execute.mockResolvedValueOnce({ success: true, output: 'Task done' });
-      executor.getCurrentWorkingDirectory.mockReturnValue(path.join(os.homedir(), 'projects'));
 
       await handler.handleMessage({ type: 'command', messageId: 'msg_011', content: 'Execute task', workingDirectory: './my-app', timestamp: Date.now() });
 
       expect(mockThreadPool.setWorkingDirectory).toHaveBeenCalledWith('default-id', './my-app');
       expect(executor.execute).toHaveBeenCalledWith('Execute task', expect.any(Object));
+      expect(executor.getCurrentWorkingDirectory()).toBe(path.join(projects, 'my-app'));
+      expect(mockThreadManager.getDefaultThread().workingDirectory).toBe(path.join(projects, 'my-app'));
     });
 
     it('does not execute a prompt if the directory and session transition fails', async () => {
@@ -379,7 +416,7 @@ describe('Integration: Message Flow', () => {
     });
 
     it('should reject path traversal attempts', async () => {
-      await handler.handleMessage({ type: 'command', messageId: 'msg_012', content: 'Read file', workingDirectory: '~/projects/../../../etc', timestamp: Date.now() });
+      await handler.handleMessage({ type: 'command', messageId: 'msg_012', content: 'Read file', workingDirectory: '~/projects/../restricted', timestamp: Date.now() });
 
       expect(executor.execute).not.toHaveBeenCalled();
       expect(wsClient.send).toHaveBeenCalledWith(

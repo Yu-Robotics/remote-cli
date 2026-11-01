@@ -17,8 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Interrupt the coordinator independently of worker finalization, bound conversation-facing cancellation waits, and fence late output and completion against newer requests. Preserve direct-backend shutdown checks and restrictions on execution that conflicts with uncertain workers, including when delegation is disabled.
 - Keep recovery commands available without requiring healthy historical worker inventory. Upgrade the local CLI; native provider-resume behavior and the Router protocol are unchanged.
 
+- Restore one terminal cancellation response when the CLI shuts down an active request, while fencing late completions and retaining worker shutdown checks.
+- Return unsupported native-command errors before checking worker ownership; retain execution checks for supported native commands and compaction.
+
 ### Tests
 - Cover interrupted worker cleanup, durable reset and restart, historical context separation, late callbacks, resource conflicts, failed persistence, and direct-executor shutdown safeguards with isolated fixtures.
+- Isolate backend and message-flow fixtures from real home directories and worker state; cover recovery, shutdown responses, and directory/session reset semantics in the full CLI suite.
 
 ## [1.6.194] - 2026-10-31
 

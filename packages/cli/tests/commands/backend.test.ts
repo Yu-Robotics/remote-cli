@@ -4,6 +4,8 @@ import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 import { ThreadExecutorPool } from '../../src/thread/ThreadExecutorPool';
 import { ThreadManager } from '../../src/thread/ThreadManager';
 import os from 'os';
+import path from 'path';
+import { promises as fs } from 'fs';
 
 const { mockZCodeAvailable } = vi.hoisted(() => ({
   mockZCodeAvailable: vi.fn(),
@@ -12,10 +14,6 @@ const { mockZCodeAvailable } = vi.hoisted(() => ({
 vi.mock('../../src/executor/zcode/ZCodeCommand', () => ({
   isZCodeAvailable: mockZCodeAvailable,
 }));
-
-// Mock os.homedir() to respect process.env.HOME for isolated tests
-const originalHomedir = os.homedir();
-vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || originalHomedir);
 
 // Mock child_process so we can control which backends appear "installed"
 vi.mock('child_process', async (importOriginal) => {
@@ -43,6 +41,8 @@ function mockInstalled(...installedCmds: string[]) {
 }
 
 describe('/backend command', () => {
+  let home: string;
+  let project: string;
   let handler: MessageHandler;
   let mockWsClient: { send: ReturnType<typeof vi.fn>; isConnected: ReturnType<typeof vi.fn> };
   let mockExecutor: any;
@@ -50,8 +50,17 @@ describe('/backend command', () => {
   let mockThreadPool: any;
   let mockThreadManager: any;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
+    home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'backend-command-')));
+    project = path.join(home, 'project');
+    await fs.mkdir(project);
+    vi.spyOn(os, 'homedir').mockReturnValue(home);
+    vi.stubEnv('HOME', home);
+    vi.stubEnv('USERPROFILE', home);
+    vi.stubEnv('HOMEDRIVE', path.parse(home).root.replace(/[\\/]$/, ''));
+    vi.stubEnv('HOMEPATH', home.slice(path.parse(home).root.length - 1));
+    mockInstalled();
     mockZCodeAvailable.mockReturnValue(false);
 
     mockWsClient = {
@@ -62,7 +71,7 @@ describe('/backend command', () => {
     mockExecutor = {
       execute: vi.fn(),
       setWorkingDirectory: vi.fn().mockResolvedValue(undefined),
-      getCurrentWorkingDirectory: vi.fn(() => '/home/user/project'),
+      getCurrentWorkingDirectory: vi.fn(() => project),
       resetContext: vi.fn(),
       abort: vi.fn().mockResolvedValue(false),
       destroy: vi.fn().mockResolvedValue(undefined),
@@ -71,10 +80,10 @@ describe('/backend command', () => {
     mockConfig = {
       get: vi.fn().mockReturnValue(undefined),
       set: vi.fn().mockResolvedValue(undefined),
-      getConfigDir: vi.fn().mockReturnValue('/tmp/.remote-cli'),
+      getConfigDir: vi.fn().mockReturnValue(path.join(home, '.remote-cli')),
     };
 
-    const defaultThread = { id: 'default-id', name: 'default', workingDirectory: '/home/user/project', sessionId: null, createdAt: 0, lastActiveAt: 0 };
+    const defaultThread = { id: 'default-id', name: 'default', workingDirectory: project, sessionId: null, createdAt: 0, lastActiveAt: 0 };
 
     mockThreadManager = {
       contextResets: { assertReady: vi.fn() },
@@ -84,15 +93,17 @@ describe('/backend command', () => {
       listThreads: vi.fn().mockReturnValue([defaultThread]),
       createThread: vi.fn(),
       deleteThread: vi.fn(),
-      updateThread: vi.fn().mockImplementation(async (_id: string, updates: any) => ({ ...defaultThread, ...updates })),
+      updateThread: vi.fn().mockImplementation(async (_id: string, updates: any) => Object.assign(defaultThread, updates)),
       clearBackendOverrides: vi.fn().mockResolvedValue(undefined),
-      getSessionFilePath: vi.fn().mockReturnValue('/tmp/session.jsonl'),
+      getSessionFilePath: vi.fn().mockReturnValue(path.join(home, '.remote-cli', 'session.jsonl')),
     } as unknown as ThreadManager;
 
+    const busy = new Set<string>();
     mockThreadPool = {
       getExecutor: vi.fn().mockReturnValue(mockExecutor),
-      isThreadBusy: vi.fn().mockReturnValue(false),
-      setThreadBusy: vi.fn(),
+      getExistingExecutor: vi.fn().mockReturnValue(mockExecutor),
+      isThreadBusy: vi.fn((id: string) => busy.has(id)),
+      setThreadBusy: vi.fn((id: string, value: boolean) => { if (value) busy.add(id); else busy.delete(id); }),
       setThreadError: vi.fn(),
       getStatus: vi.fn().mockReturnValue('idle'),
       getSummaries: vi.fn().mockReturnValue([{ id: defaultThread.id, name: 'default', status: 'idle' }]),
@@ -109,7 +120,12 @@ describe('/backend command', () => {
   });
 
   afterEach(async () => {
-    await handler.destroy();
+    try { await handler?.destroy(); }
+    finally {
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
+      await fs.rm(home, { recursive: true, force: true });
+    }
   });
 
   function sentResponse() {
@@ -126,7 +142,7 @@ describe('/backend command', () => {
   describe('list mode (/backend with no args)', () => {
     it('uses every configured command and preserves ZCode optional discovery', async () => {
       const backends = ['claude', 'codex', 'opencode', 'kimi', 'pi', 'agy', 'dsh'];
-      const config = { type: 'auto', ...Object.fromEntries(backends.map(backend => [backend, { command: `/opt/example tools/${backend}` }])) };
+      const config = { type: 'auto', ...Object.fromEntries(backends.map(backend => [backend, { command: path.join(home, 'example tools', backend) }])) };
       mockConfig.get.mockReturnValue(config);
       mockInstalled(...backends.map(backend => config[backend].command));
       await send('/backend');
@@ -137,7 +153,7 @@ describe('/backend command', () => {
     });
 
     it('does not fall back to an installed default when a configured command fails', async () => {
-      mockConfig.get.mockReturnValue({ type: 'auto', claude: { command: '/nonexistent/example-claude' } });
+      mockConfig.get.mockReturnValue({ type: 'auto', claude: { command: path.join(home, 'nonexistent', 'example-claude') } });
       mockInstalled('claude');
       await send('/backend');
       expect(sentResponse().success).toBe(false);
@@ -145,7 +161,7 @@ describe('/backend command', () => {
       expect(sentResponse().error).toContain('executor.<backend>.command');
     });
 
-    it.each(['', '/opt/fixture\u0000command'])('isolates an invalid executable configuration from other backends: %j', async command => {
+    it.each(['', 'fixture\u0000command'])('isolates an invalid executable configuration from other backends: %j', async command => {
       mockConfig.get.mockReturnValue({ type: 'auto', claude: { command } });
       vi.mocked(execFile).mockImplementation(((binary: string, _args: string[], _options: object, callback: Function) => {
         if (binary === command) throw new Error('sensitive fixture diagnostic');
@@ -161,18 +177,31 @@ describe('/backend command', () => {
       mockThreadPool.getBackendKey.mockReturnValue('dsh');
       mockExecutor.compactWhenFull = vi.fn().mockResolvedValue({ success: true, output: 'Summarized and reset; native DSH history retained.' });
       await send('/compact');
+      expect(mockExecutor.compactWhenFull).toHaveBeenCalledOnce();
+      expect(sentResponse().success).toBe(true);
       expect(sentResponse().output).toBe('Summarized and reset; native DSH history retained.');
     });
 
+    it('still blocks native compaction when the isolated home has uncertain worker ownership', async () => {
+      await fs.mkdir(path.join(home, '.remote-cli'));
+      await fs.writeFile(path.join(home, '.remote-cli', 'delegation-workers.ownership'), 'synthetic unknown owner');
+      mockThreadPool.getBackendKey.mockReturnValue('dsh');
+      mockExecutor.compactWhenFull = vi.fn();
+      await send('/compact');
+      expect(mockExecutor.compactWhenFull).not.toHaveBeenCalled();
+      expect(sentResponse()).toMatchObject({ success: false, error: expect.stringContaining('may still write files') });
+    });
+
     it('appends DSH without changing existing backend ordering and honors its custom command', async () => {
-      mockInstalled('claude', 'agy', '/test/dsh');
-      mockConfig.get.mockReturnValue({ type: 'auto', dsh: { command: '/test/dsh' } });
+      const command = path.join(home, 'bin', 'dsh');
+      mockInstalled('claude', 'agy', command);
+      mockConfig.get.mockReturnValue({ type: 'auto', dsh: { command } });
       await send('/backend');
       const output = sentResponse().output;
       expect(output).toContain('DeepSeek Harness (DSH)');
       expect(output.indexOf('Claude Code')).toBeLessThan(output.indexOf('AGY CLI'));
       expect(output.indexOf('AGY CLI')).toBeLessThan(output.indexOf('DeepSeek Harness'));
-      expect(execFile).toHaveBeenCalledWith('/test/dsh', ['--version'], expect.anything(), expect.any(Function));
+      expect(execFile).toHaveBeenCalledWith(command, ['--version'], expect.anything(), expect.any(Function));
     });
 
     it('switches a thread to DSH and rejects unsupported native skills without Claude fallback', async () => {

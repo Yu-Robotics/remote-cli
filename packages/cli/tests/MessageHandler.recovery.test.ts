@@ -192,6 +192,35 @@ describe('managed conversation recovery', () => {
     (delegation as any).workspaces.clear();
   });
 
+  it.each(['dsh', 'codex'] as const)('reports unsupported %s native commands without requiring writer evidence', async backend => {
+    await manager.updateThread(threadId, { backend });
+    const safety = vi.spyOn(delegation, 'assertExecutionSafe').mockRejectedValue(new Error('Synthetic uncertain writer'));
+    await handler.handleMessage({ type: 'command', messageId: 'unsupported-native',
+      content: '/unsupported', threadId, isSlashCommand: true });
+    expect(response('unsupported-native')).toMatchObject({ success: false,
+      error: expect.stringContaining(backend === 'dsh' ? 'DSH' : 'Codex') });
+    expect(safety).not.toHaveBeenCalled();
+    expect(executor.execute).not.toHaveBeenCalled();
+  });
+
+  it.each(['chat', 'compact'] as const)('sends one cancellation response on shutdown before late %s completion', async mode => {
+    const result = deferred<ExecuteResult>();
+    const run = vi.fn(() => result.promise);
+    if (mode === 'chat') executor.execute = run;
+    else executor.compactWhenFull = run;
+    const active = command(mode === 'chat' ? 'Wait for shutdown' : '/compact', 'shutdown-request');
+    await vi.waitFor(() => expect(run).toHaveBeenCalledOnce());
+    try {
+      await handler.destroy();
+      await handler.destroy();
+      expect(response('shutdown-request')).toMatchObject({ success: false, error: expect.stringMatching(/cancel.*shutting down/i) });
+    } finally {
+      result.resolve({ success: true, output: 'Late native completion' });
+      await active;
+    }
+    expect(send.mock.calls.map(([value]) => value).filter(value => value.type === 'response' && value.messageId === 'shutdown-request')).toHaveLength(1);
+  });
+
   it.each([
     ['/skill:fixture', false], ['/skill:fixture', true], ['/compact', false], ['/compact', true],
   ] as const)('guards native %s after bounded abort with delegation=%s until worker exit is confirmed', async (content, enabled) => {

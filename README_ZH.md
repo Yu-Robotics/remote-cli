@@ -941,6 +941,11 @@ Direct-backend shutdown and durable reset storage must succeed before clearing
 is acknowledged. Upgrade the local CLI; a Router-only upgrade does not enable
 this recovery path.
 
+Shutting down an active request reports cancellation once.
+Unsupported native commands return their backend-specific error even while
+worker recovery is pending. Commands that execute backend work still honor
+the worker shutdown and workspace checks.
+
 Backend switches and toggling `/delegation` preserve worker context unless
 `/clear` or `/new` was used. `/cd` starts a new workspace generation and discards
 the old lanes. `/delegation reset` discards every lane in the current thread,

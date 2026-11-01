@@ -44,6 +44,7 @@ describe('Directory changes and backend session isolation', () => {
   beforeEach(async () => {
     home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'directory-session-test-')));
     vi.stubEnv('HOME', home);
+    vi.stubEnv('USERPROFILE', home);
     project = path.join(home, 'project');
     other = path.join(home, 'other');
     await fs.mkdir(project);
@@ -57,11 +58,17 @@ describe('Directory changes and backend session isolation', () => {
   });
 
   afterEach(async () => {
-    await pool.destroyAll({ deleteData: false });
-    for (const executor of executors.splice(0)) await executor.destroy();
-    vi.restoreAllMocks();
-    vi.unstubAllEnvs();
-    await fs.rm(home, { recursive: true, force: true });
+    try {
+      await pool.destroyAll({ deleteData: false, shutdown: true });
+      for (const executor of executors.splice(0)) {
+        await executor.destroy();
+        await executor.waitForExit?.();
+      }
+    } finally {
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
+      await fs.rm(home, { recursive: true, force: true });
+    }
   });
 
   it.each(backends)('keeps real %s coordinator and worker pointers independent without starting native processes', async backend => {
@@ -94,7 +101,12 @@ describe('Directory changes and backend session isolation', () => {
     for (const key of backends) await expect(fs.access(pointerPath(key))).resolves.toBeUndefined();
 
     expect(await pool.setWorkingDirectory(threadId, '../other')).toEqual({ cwd: other, changed: true });
-    expect(executor.getSessionId?.()).toBeNull();
+    expect(pool.getExistingExecutor(threadId)).toBeUndefined();
+    const replacement = pool.getExecutor(threadId);
+    expect(replacement).not.toBe(executor);
+    expect(replacement.getSessionId?.()).toBeNull();
+    expect(replacement.getCurrentWorkingDirectory()).toBe(other);
+    expect(manager.contextResets.isPending(threadId)).toBe(false);
     expect(manager.getThread(threadId)).toMatchObject({
       workingDirectory: other,
       sessionId: null,
@@ -166,15 +178,27 @@ describe('Directory changes and backend session isolation', () => {
     }
   });
 
-  it('fails a directory change when an inactive backend binding cannot be removed', async () => {
+  it('keeps a failed directory change blocked across restart when an inactive binding cannot be removed', async () => {
+    const executor = pool.getExecutor(threadId);
     await fs.rm(pointerPath('pi'));
     await fs.mkdir(pointerPath('pi'));
-    await expect(pool.setWorkingDirectory(threadId, other)).rejects.toThrow();
-    expect(pool.getExecutor(threadId).getCurrentWorkingDirectory()).toBe(project);
-    expect(manager.getThread(threadId)?.workingDirectory).toBe(project);
-    for (const backend of backends.filter(key => key !== 'pi')) {
+    await expect(pool.setWorkingDirectory(threadId, other)).rejects.toThrow('Session binding is not a file');
+    expect(pool.getExistingExecutor(threadId)).toBe(executor);
+    expect(() => pool.getExecutor(threadId)).toThrow('incomplete conversation reset');
+    expect(manager.contextResets.isPending(threadId)).toBe(true);
+    expect(manager.getThread(threadId)).toMatchObject({ workingDirectory: project, delegationWorkspaceGeneration: 0 });
+    // The stopped active backend may already have cleared its own pointer.
+    // Inactive bindings survive validation failure and must remain unavailable.
+    for (const backend of backends.filter(key => key !== 'pi' && key !== 'claude')) {
       expect(JSON.parse(await fs.readFile(pointerPath(backend), 'utf8')).id).toBe(`old-${backend}`);
     }
+
+    await pool.destroyAll({ deleteData: false, shutdown: true });
+    manager = await ThreadManager.initialize(home);
+    pool = new ThreadExecutorPool(manager, guard, configFor('claude'));
+    expect(manager.contextResets.isPending(threadId)).toBe(true);
+    expect(() => pool.getExecutor(threadId)).toThrow('incomplete conversation reset');
+    expect(manager.getThread(threadId)?.workingDirectory).toBe(project);
   });
 
   it('clears a Claude binding before the first command in the new directory even without a pool', async () => {

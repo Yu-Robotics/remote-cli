@@ -688,6 +688,11 @@ Direct-backend shutdown and durable reset storage must succeed before clearing
 is acknowledged. Upgrade the local CLI; a Router-only upgrade does not enable
 this recovery path.
 
+Shutting down an active request reports cancellation once.
+Unsupported native commands return their backend-specific error even while
+worker recovery is pending. Commands that execute backend work still honor
+the worker shutdown and workspace checks.
+
 ## Session Resume
 
 CLI 1.6.164 supports confirmed Pi native session connections and read-only Pi/Codex/Claude Code discovery. Adopted Pi history reloads before every remote turn; `/session detach` preserves it and `/session release` is removed. Foreground Pi `/new` and `/clear` also preserve old history and start independent IDs; new default names use native session IDs and persisted names are not overwritten on reopen. Worker/metadata cleanup is unchanged. Resume drafts keep ordinary messages in the current conversation until confirmation succeeds. Use only one side at a time. Local Pi windows may stay open but must use native `/resume` before their next local turn; automatic local refresh and writer locking are not provided. Existing Router command/response envelopes support the text workflow without a new wire capability. See the [session resume specification](../../SESSION_RESUME_SPEC.md).

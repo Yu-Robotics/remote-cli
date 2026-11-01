@@ -223,7 +223,7 @@ describe('delegation in the existing thread workflow', () => {
     expect(responseFor('unused')?.success).toBe(true);
   });
 
-  it('lets an opted-out thread execute in a workspace held by a delegated worker', async () => {
+  it('blocks an opted-out thread until the delegated writer releases its workspace', async () => {
     await handler.handleMessage(message('enable', '/delegation on'));
     const ordinaryThread = await threads.createThread('ordinary', home);
     await threads.updateThread(ordinaryThread.id, { delegation: false });
@@ -240,13 +240,17 @@ describe('delegation in the existing thread workflow', () => {
     const active = handler.handleMessage(message('managed', 'Review'));
     await vi.waitFor(() => expect(worker.execute).toHaveBeenCalledOnce());
     await handler.handleMessage({ ...message('ordinary', 'Ordinary work'), threadId: ordinaryThread.id });
-    expect(responseFor('ordinary')?.success).toBe(true);
-    expect(ordinary.execute).toHaveBeenCalledWith('Ordinary work', expect.anything());
+    expect(responseFor('ordinary')).toMatchObject({ success: false, error: expect.stringContaining('may still write files') });
+    expect(ordinary.execute).not.toHaveBeenCalled();
     expect(ordinary.configureDelegation).not.toHaveBeenCalled();
     expect(worker.abort).not.toHaveBeenCalled();
     finish({ success: true, output: 'Review complete' });
     await active;
     expect(responseFor('managed')?.success).toBe(true);
+    await handler.handleMessage({ ...message('ordinary-retry', 'Ordinary work'), threadId: ordinaryThread.id });
+    expect(responseFor('ordinary-retry')?.success).toBe(true);
+    expect(ordinary.execute).toHaveBeenCalledWith('Ordinary work', expect.anything());
+    expect(ordinary.configureDelegation).not.toHaveBeenCalled();
   });
 
   it('returns same-backend and cross-backend worker results without reentering the coordinator executor', async () => {

@@ -1,19 +1,23 @@
-import { ThreadContextReset } from '../../src/thread/ThreadContextReset';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
 vi.mock('../../src/client/WebSocketClient');
+vi.mock('os', async () => {
+  const actual = await vi.importActual<typeof import('os')>('os');
+  const homedir = () => process.env.HOME || actual.homedir();
+  return { ...actual, homedir, default: { ...actual, homedir } };
+});
 
 import { MessageHandler } from '../../src/client/MessageHandler';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 import { PiExecutor } from '../../src/executor/PiExecutor';
+import { ThreadManager } from '../../src/thread/ThreadManager';
+import { ThreadExecutorPool } from '../../src/thread/ThreadExecutorPool';
 import { piProjectDirectoryName } from '../../src/session/adapters/PiSessionCatalog';
 import type { PiLaunchOptions, PiRpcResponse, PiTransport } from '../../src/executor/pi/PiTypes';
 
-const originalHome = process.env.HOME;
-const originalHomedir = os.homedir.bind(os);
 const NATIVE_ID = '01900000-0000-7000-8000-0000000000bb';
 
 /** RPC stand-in: reports the identity of the file it was launched with, like Pi. */
@@ -46,6 +50,9 @@ class Transport implements PiTransport {
   send = vi.fn();
   async start(): Promise<void> { this.running = true; this.launches.push({ ...this.launch }); }
   async stop(): Promise<void> { this.running = false; }
+  async waitForExit(): Promise<void> {
+    if (this.running) throw new Error('Synthetic Pi transport is still running');
+  }
   isRunning(): boolean { return this.running; }
   updateLaunch(partial: Partial<PiLaunchOptions>): void { this.launch = { ...this.launch, ...partial }; }
   onEvent(handler: (event: Record<string, any>) => void): () => void { this.handlers.add(handler); return () => this.handlers.delete(handler); }
@@ -59,9 +66,24 @@ describe('Integration: connecting a native Pi session from chat', () => {
   let wsClient: any;
   let handler: MessageHandler;
   let transports: Transport[];
-  let executor: PiExecutor | undefined;
-  let busy: boolean;
-  const pointerFile = () => path.join(home, '.remote-cli', 'pi-sessions', 'thread-a.json');
+  let threadManager: ThreadManager;
+  let threadPool: ThreadExecutorPool;
+  let threadId: string;
+  const pointerFile = () => path.join(home, '.remote-cli', 'pi-sessions', `${threadId}.json`);
+
+  const attach = () => {
+    const guard = new DirectoryGuard([home]);
+    wsClient = { send: vi.fn(), on: vi.fn(), isConnected: vi.fn(() => true), trackTask: vi.fn() };
+    threadPool = new ThreadExecutorPool(threadManager, guard, { type: 'pi' }, (executorGuard, _config, cwd, id) =>
+      new PiExecutor(executorGuard, {
+        initialWorkingDirectory: cwd, threadId: id,
+        clientFactory: launch => { const t = new Transport(launch); transports.push(t); return t; },
+      }));
+    const config: any = { get: vi.fn((key: string) => (key === 'sessionSharing' ? { enabled: true }
+      : key === 'executor' ? { type: 'pi' } : undefined)),
+      set: vi.fn(), has: vi.fn(() => true), getAll: vi.fn(() => ({})), getConfigDir: vi.fn(() => path.join(home, '.remote-cli')) };
+    handler = new MessageHandler(wsClient, threadPool, threadManager, guard, config);
+  };
 
   const send = async (messageId: string, content: string, extra: Record<string, unknown> = {}) => {
     await handler.handleMessage({ type: 'command', messageId, content, isSlashCommand: content.startsWith('/'),
@@ -71,10 +93,10 @@ describe('Integration: connecting a native Pi session from chat', () => {
   };
   const tokenAfter = (text: string, verb: string) => new RegExp(`/${verb} ([A-Za-z0-9_-]{12})`).exec(text)![1];
 
-  beforeEach(() => {
+  beforeEach(async () => {
     home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'pi-resume-flow-')));
-    process.env.HOME = home;
-    vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || originalHomedir());
+    vi.stubEnv('HOME', home);
+    vi.stubEnv('USERPROFILE', home);
     project = path.join(home, 'project');
     fs.mkdirSync(project);
     const store = path.join(home, '.pi', 'agent', 'sessions', piProjectDirectoryName(project));
@@ -88,56 +110,35 @@ describe('Integration: connecting a native Pi session from chat', () => {
     fs.utimesSync(nativeFile, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
 
     transports = [];
-    busy = false;
-    executor = undefined;
-    const guard = new DirectoryGuard([home]);
-    wsClient = { send: vi.fn(), on: vi.fn(), isConnected: vi.fn(() => true), trackTask: vi.fn() };
-    const thread = { id: 'thread-a', name: 'default', workingDirectory: project, sessionId: null, delegation: false, createdAt: 0, lastActiveAt: 0 };
-    const threadManager: any = {
-      contextResets: new ThreadContextReset(),
-      getDefaultThread: vi.fn(() => thread), getThread: vi.fn((id: string) => (id === 'thread-a' ? thread : undefined)),
-      getThreadByName: vi.fn(), listThreads: vi.fn(() => [thread]), touchThread: vi.fn(), updateThread: vi.fn(),
-    };
-    const threadPool: any = {
-      assertContextResettable: vi.fn(),
-      clearThreadContext: vi.fn(async () => {
-        await executor?.destroy();
-        await executor?.waitForExit();
-        fs.rmSync(pointerFile(), { force: true });
-        executor = undefined;
-      }),
-      getExecutor: vi.fn(() => executor ??= new PiExecutor(guard, {
-        initialWorkingDirectory: project, threadId: 'thread-a',
-        clientFactory: launch => { const t = new Transport(launch); transports.push(t); return t; },
-      })),
-      isThreadBusy: vi.fn(() => busy),
-      setThreadBusy: vi.fn((_id: string, value: boolean) => { busy = value; }),
-      setThreadError: vi.fn(),
-      getSummaries: vi.fn(() => []),
-      getBackendKey: vi.fn(() => 'pi'),
-    };
-    const config: any = { get: vi.fn((key: string) => (key === 'sessionSharing' ? { enabled: true } : undefined)),
-      set: vi.fn(), has: vi.fn(() => true), getAll: vi.fn(() => ({})), getConfigDir: vi.fn(() => path.join(home, '.remote-cli')) };
-    handler = new MessageHandler(wsClient, threadPool, threadManager, guard, config);
+    threadManager = await ThreadManager.initialize(home);
+    threadId = threadManager.getDefaultThread().id;
+    await threadManager.updateThread(threadId, { workingDirectory: project, delegation: false, backend: 'pi' });
+    attach();
   });
 
   afterEach(async () => {
-    await executor?.destroy();
-    vi.restoreAllMocks();
-    fs.rmSync(home, { recursive: true, force: true });
-    if (originalHome === undefined) delete process.env.HOME;
-    else process.env.HOME = originalHome;
+    try { await handler.destroy(); }
+    finally {
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it('keeps foreground A and B after /new and switches back to A only after confirmation', async () => {
     expect((await send('ordinary-a', 'SYNTHETIC-A')).success).toBe(true);
     const a = JSON.parse(fs.readFileSync(pointerFile(), 'utf8'));
     const bytesA = fs.readFileSync(a.sessionFile, 'utf8');
+    const retired = threadPool.getExecutor(threadId);
     expect(a.adopted).toBeUndefined();
 
-    expect((await send('new', '/new')).success).toBe(true);
+    const reset = await send('new', '/new');
+    expect(reset.success, reset.error).toBe(true);
+    expect(threadPool.getExistingExecutor(threadId)).toBeUndefined();
+    expect(threadManager.contextResets.isPending(threadId)).toBe(false);
     expect(fs.readFileSync(a.sessionFile, 'utf8')).toBe(bytesA);
     expect((await send('ordinary-b', 'SYNTHETIC-B')).success).toBe(true);
+    expect(threadPool.getExecutor(threadId)).not.toBe(retired);
     const b = JSON.parse(fs.readFileSync(pointerFile(), 'utf8'));
     expect(b.id).not.toBe(a.id);
     expect(b.sessionFile).not.toBe(a.sessionFile);
@@ -163,6 +164,72 @@ describe('Integration: connecting a native Pi session from chat', () => {
     expect(catalog.output).toContain(b.id);
   });
 
+  it('retries /clear after an inactive pointer failure and restart without reopening or deleting Pi history', async () => {
+    expect((await send('ordinary', 'PRESERVED-HISTORY')).success).toBe(true);
+    const savedPointer = fs.readFileSync(pointerFile(), 'utf8');
+    const saved = JSON.parse(savedPointer);
+    const history = fs.readFileSync(saved.sessionFile, 'utf8');
+    const invalidPointer = path.join(home, '.remote-cli', 'claude-sessions', `${threadId}.json`);
+    fs.mkdirSync(invalidPointer, { recursive: true });
+
+    expect(await send('failed-clear', '/clear')).toMatchObject({
+      success: false, error: expect.stringContaining('Session binding is not a file'),
+    });
+    expect(threadManager.contextResets.isPending(threadId)).toBe(true);
+    expect(() => threadPool.getExecutor(threadId)).toThrow('incomplete conversation reset');
+    expect(fs.readFileSync(pointerFile(), 'utf8')).toBe(savedPointer);
+    expect(fs.readFileSync(saved.sessionFile, 'utf8')).toBe(history);
+
+    await handler.destroy();
+    threadManager = await ThreadManager.initialize(home);
+    attach();
+    expect(threadManager.contextResets.isPending(threadId)).toBe(true);
+    expect(await send('blocked', 'MUST-NOT-REOPEN')).toMatchObject({
+      success: false, error: expect.stringContaining('incomplete conversation reset'),
+    });
+    expect(threadPool.getExistingExecutor(threadId)).toBeUndefined();
+
+    fs.rmdirSync(invalidPointer);
+    const cleared = await send('retry-clear', '/clear');
+    expect(cleared.success, cleared.error).toBe(true);
+    expect(threadManager.contextResets.isPending(threadId)).toBe(false);
+    expect(fs.existsSync(pointerFile())).toBe(false);
+    expect((await send('fresh', 'FRESH-HISTORY')).success).toBe(true);
+    const fresh = JSON.parse(fs.readFileSync(pointerFile(), 'utf8'));
+    expect(fresh.id).not.toBe(saved.id);
+    expect(fresh.sessionFile).not.toBe(saved.sessionFile);
+    expect(fs.readFileSync(saved.sessionFile, 'utf8')).toBe(history);
+    expect(fs.readFileSync(fresh.sessionFile, 'utf8')).not.toContain('PRESERVED-HISTORY');
+  });
+
+  it('retains the Pi binding until exit is confirmed and /clear is retried', async () => {
+    expect((await send('ordinary', 'PRESERVED-HISTORY')).success).toBe(true);
+    const savedPointer = fs.readFileSync(pointerFile(), 'utf8');
+    const saved = JSON.parse(savedPointer);
+    const history = fs.readFileSync(saved.sessionFile, 'utf8');
+    const retired = threadPool.getExecutor(threadId);
+    const exit = vi.spyOn(transports.at(-1)!, 'waitForExit')
+      .mockRejectedValueOnce(new Error('Synthetic unconfirmed Pi exit'));
+
+    expect(await send('failed-clear', '/clear')).toMatchObject({
+      success: false, error: expect.stringContaining('Synthetic unconfirmed Pi exit'),
+    });
+    expect(exit).toHaveBeenCalledOnce();
+    expect(threadPool.getExistingExecutor(threadId)).toBe(retired);
+    expect(() => threadPool.getExecutor(threadId)).toThrow('incomplete conversation reset');
+    expect(fs.readFileSync(pointerFile(), 'utf8')).toBe(savedPointer);
+    expect(fs.readFileSync(saved.sessionFile, 'utf8')).toBe(history);
+
+    const cleared = await send('retry-clear', '/clear');
+    expect(cleared.success, cleared.error).toBe(true);
+    expect(exit).toHaveBeenCalledTimes(2);
+    expect(threadPool.getExistingExecutor(threadId)).toBeUndefined();
+    expect(fs.existsSync(pointerFile())).toBe(false);
+    expect(fs.readFileSync(saved.sessionFile, 'utf8')).toBe(history);
+    expect((await send('fresh', 'FRESH-HISTORY')).success).toBe(true);
+    expect(JSON.parse(fs.readFileSync(pointerFile(), 'utf8')).id).not.toBe(saved.id);
+  });
+
   it('lists, confirms and adopts the exact native file without sending a prompt', async () => {
     const list = await send('list', '/resume');
     expect(list.output).toContain('1. Local refactor');
@@ -182,7 +249,7 @@ describe('Integration: connecting a native Pi session from chat', () => {
     expect(transports[0].request.mock.calls.map(([c]) => c.type)).toEqual(['get_state']);
     expect(fs.readFileSync(nativeFile, 'utf8')).toBe(before);
     expect(JSON.parse(fs.readFileSync(pointerFile(), 'utf8'))).toMatchObject({ id: NATIVE_ID, sessionFile: nativeFile, adopted: true });
-    expect(busy).toBe(false);
+    expect(threadPool.isThreadBusy(threadId)).toBe(false);
 
     const status = await send('status', '/session');
     expect(status.output).toContain('reloads before every remote turn');
@@ -207,7 +274,7 @@ describe('Integration: connecting a native Pi session from chat', () => {
     const again = await send('list-2', '/resume');
     const pick = await send('select-2', `/resume select ${tokenAfter(again.output, 'resume select')} 1`);
     await send('confirm-2', `/resume confirm ${tokenAfter(pick.output, 'resume confirm')}`);
-    executor!.resetContext();
+    threadPool.getExecutor(threadId).resetContext();
     expect(fs.existsSync(nativeFile)).toBe(true);
   });
 
@@ -215,17 +282,17 @@ describe('Integration: connecting a native Pi session from chat', () => {
     const drain = vi.spyOn(handler as any, 'startNextQueuedCommand').mockResolvedValue(undefined);
     const list = await send('list', '/resume');
     const selected = await send('select', `/resume select ${tokenAfter(list.output, 'resume select')} 1`);
-    (handler as any).threadQueues.set('thread-a', [{ content: 'queued work' }]);
+    (handler as any).threadQueues.set(threadId, [{ content: 'queued work' }]);
     const blocked = await send('confirm', `/resume confirm ${tokenAfter(selected.output, 'resume confirm')}`);
     expect(blocked.error).toContain('running a task');
     expect(transports).toHaveLength(0);
 
-    (handler as any).threadQueues.delete('thread-a');
+    (handler as any).threadQueues.delete(threadId);
     const again = await send('select-2', `/resume select ${tokenAfter(list.output, 'resume select')} 1`);
     const confirmed = await send('confirm-2', `/resume confirm ${tokenAfter(again.output, 'resume confirm')}`);
     expect(confirmed.success).toBe(true);
-    expect(busy).toBe(false);
-    expect(drain).toHaveBeenCalledWith('thread-a');
+    expect(threadPool.isThreadBusy(threadId)).toBe(false);
+    expect(drain).toHaveBeenCalledWith(threadId);
   });
 
   it('reports a session-control failure without crashing the message handler', async () => {
