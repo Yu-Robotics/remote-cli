@@ -1840,8 +1840,18 @@ npm run router:dev
 
 Releases use the **Publish npm packages** workflow in
 [`.github/workflows/npm-publish.yml`](.github/workflows/npm-publish.yml).
-It runs on GitHub-hosted Linux with Node.js 24 and npm 11.21.1; this does not
-change the packages' supported runtime Node.js versions.
+Every push to `main` and pull request targeting `main` builds and tests both
+packages on GitHub-hosted Linux, macOS, and Windows with Node.js 24 and npm
+11.21.1. The matrix uses native runners and keeps the other platforms running
+when one fails. Git LFS is checked before testing so missing tooling cannot
+silently disable LFS coverage. This tests the selected Node.js version; it does
+not establish compatibility with every supported Node.js version or real AI
+provider sessions.
+
+Publishing runs only on Linux after all three platform jobs and release selection
+succeed. Pull requests have no publish authorization, and ordinary pushes without
+a version increase only run CI. The package runtime Node.js requirements remain
+unchanged.
 
 Configure an npm **Trusted Publisher** separately for `@yu_robotics/remote-cli`
 and `@yu_robotics/remote-cli-router` under each package's Settings page:

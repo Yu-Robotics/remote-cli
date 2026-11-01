@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Tests
+- Run both workspace builds and complete test suites on native Linux, macOS, and Windows GitHub runners for main pushes and pull requests. Require all platforms to pass before publishing, and keep other matrix jobs running after a failure.
+
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
