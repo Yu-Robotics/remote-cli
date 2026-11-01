@@ -8,7 +8,7 @@ import os from 'os';
 import { validateToolUse, loadAllowedDirs, ValidationResult } from '../../src/security/security-guard';
 
 describe('security-guard', () => {
-  const mockHome = '/home/testuser';
+  const mockHome = path.resolve(os.tmpdir(), 'security-guard-home');
   const originalEnv = process.env;
 
   beforeEach(() => {
@@ -92,7 +92,7 @@ describe('security-guard', () => {
         const hookData = {
           tool_name: 'Write',
           tool_input: {
-            file_path: '/home/testuser/projects/myapp/newfile.ts'
+            file_path: path.join(mockHome, 'projects', 'myapp', 'newfile.ts')
           }
         };
 
@@ -102,7 +102,7 @@ describe('security-guard', () => {
       });
 
       it('should handle tilde paths in file_path', () => {
-        const allowedDirs = ['/home/testuser/projects/myapp'];
+        const allowedDirs = [path.join(mockHome, 'projects', 'myapp')];
         const hookData = {
           tool_name: 'Read',
           tool_input: {

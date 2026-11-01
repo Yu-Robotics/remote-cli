@@ -165,7 +165,7 @@ describe('private Git checkpoints', () => {
     await fs.symlink('source.txt', path.join(fixture.root, 'local-link'), 'file');
     await expect(captureCheckpoint(fixture.root)).resolves.toHaveProperty('tree');
     await fs.symlink(fixture.root, path.join(fixture.root, 'external-link'), process.platform === 'win32' ? 'junction' : 'dir');
-    await expect(captureCheckpoint(fixture.root)).rejects.toThrow('symbolic links');
+    await expect(captureCheckpoint(fixture.root)).rejects.toThrow(/symbolic[- ]link/);
   });
 
   it.each(['committed', 'untracked'])('captures a %s file larger than the former 128 MiB limit', async kind => {

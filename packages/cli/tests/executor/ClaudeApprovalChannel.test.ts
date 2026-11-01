@@ -238,7 +238,9 @@ describe('ClaudePersistentExecutor approval channel', () => {
     expect(answer).toMatchObject({ behavior: 'allow' });
     const update = (answer.updatedPermissions as any[])[0];
     expect(update).toMatchObject({ type: 'addRules', behavior: 'allow', destination: 'localSettings' });
-    expect(JSON.stringify(update.rules)).toContain(`${fs.realpathSync(path.dirname(target))}/**`);
+    expect(update.rules.map((rule: any) => rule.ruleContent)).toEqual([
+      `${fs.realpathSync(path.dirname(target))}/**`, `${fs.realpathSync(path.dirname(target))}/**`,
+    ]);
     expect(update.rules.map((rule: any) => rule.toolName)).toEqual(expect.arrayContaining(['Write', 'Edit']));
     // The directory is also persisted for future Bash sandbox scope.
     expect((executor as any).sandbox.getConfig()?.writableRoots).toContain(fs.realpathSync(path.dirname(target)));
