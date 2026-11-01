@@ -4,6 +4,7 @@ import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DelegatedWorkspaceManager, type DelegatedWorkspace } from '../../src/delegation/DelegatedWorkspaceManager';
 import { DelegatedWorkerSessionStore } from '../../src/delegation/DelegatedWorkerSessionStore';
+import { ThreadContextReset } from '../../src/thread/ThreadContextReset';
 import { gitText, runGit } from '../../src/delegation/GitCheckpoint';
 import * as gitCommands from '../../src/delegation/GitCheckpoint';
 import { gitFixture } from './gitFixture';
@@ -47,7 +48,8 @@ describe('legacy verified worker checkout reclamation and recreation', { timeout
   beforeEach(async () => {
     fixture = await gitFixture();
     manager = new DelegatedWorkspaceManager(path.join(fixture.directory, 'workspaces'));
-    lanes = new DelegatedWorkerSessionStore(path.join(fixture.directory, 'lanes'));
+    lanes = new DelegatedWorkerSessionStore(path.join(fixture.directory, 'lanes'),
+      new ThreadContextReset(path.join(fixture.directory, 'resets')));
     ({ lane } = await lanes.acquire({ threadId: 'fixture-owner', backend: 'agy',
       workingDirectory: fixture.root, workspaceGeneration: 0 }));
     const source = (await manager.discover(fixture.root))!;
@@ -71,33 +73,61 @@ describe('legacy verified worker checkout reclamation and recreation', { timeout
     expect(await manager.reclaim(workspace.taskId)).toBe(false);
   });
 
-  it('drains active file readers before rejecting cleanup after another reader fails', async () => {
-    await complete();
+  it.each(['failure-first', 'reader-first'] as const)(
+    'drains active file readers before rejecting cleanup after another reader fails (%s)', async order => {
+    const artifact = await complete();
     const open = fs.open.bind(fs);
-    let release!: () => void;
-    let entered!: () => void;
-    const gate = new Promise<void>(resolve => { release = resolve; });
-    const reading = new Promise<void>(resolve => { entered = resolve; });
-    let failed = false;
+    const signal = () => {
+      let resolve!: () => void;
+      const promise = new Promise<void>(done => { resolve = done; });
+      return { promise, resolve };
+    };
+    const gate = signal();
+    const reading = signal();
+    const failing = signal();
+    const arrivals: string[] = [];
     vi.spyOn(fs, 'open').mockImplementation(async (file, ...args) => {
       if (file === path.join(workspace.directory, '.gitignore')) {
-        failed = true;
+        if (order === 'reader-first') await reading.promise;
+        arrivals.push('failure');
+        failing.resolve();
         throw new Error('Synthetic file reader failure');
       }
-      if (file === path.join(workspace.directory, 'source.txt')) { entered(); await gate; }
+      if (file === path.join(workspace.directory, 'source.txt')) {
+        if (order === 'failure-first') await failing.promise;
+        arrivals.push('reader');
+        reading.resolve();
+        await gate.promise;
+      }
       return open(file, ...args);
     });
     let settled = false;
     const reclaiming = manager.reclaim(workspace.taskId).finally(() => { settled = true; });
+    let deadline: ReturnType<typeof setTimeout> | undefined;
     try {
-      await reading;
-      expect(failed).toBe(true);
-      expect(settled).toBe(false);
+      // Neither reader's arrival implies that the other has reached fs.open.
+      // Fail before the test timeout, then release every gate and drain below.
+      await Promise.race([
+        Promise.all([reading.promise, failing.promise]),
+        reclaiming.then(() => { throw new Error('Reclamation finished before both file readers arrived'); }),
+        new Promise<never>((_resolve, reject) => {
+          deadline = setTimeout(() => reject(new Error('File readers did not reach their gates')), 5000);
+        }),
+      ]);
+      expect(arrivals).toEqual(order === 'failure-first' ? ['failure', 'reader'] : ['reader', 'failure']);
       expect(await exists(workspace.directory)).toBe(true);
-    } finally { release(); }
+      expect(settled).toBe(false);
+    } finally {
+      clearTimeout(deadline);
+      reading.resolve();
+      failing.resolve();
+      gate.resolve();
+      // Assertions and synchronization failures must not race afterEach's rm.
+      await reclaiming;
+    }
     expect(await reclaiming).toBe(false);
     expect(await exists(workspace.directory)).toBe(true);
-    expect((await manager.describe(workspace.taskId))?.disposition).toBe('applied');
+    expect(await manager.describe(workspace.taskId)).toEqual(artifact);
   });
 
   it('automatically reclaims applied output and recreates at the same path on a fresh delivery baseline', async () => {
