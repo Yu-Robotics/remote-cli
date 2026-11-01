@@ -290,14 +290,15 @@ export class DelegationManager {
       // Never acquire again once shutdown has begun, including after release.
       if (!this.stopping) return this.ownership.acquire();
     });
-    return this.initialization = (async () => {
-      if (!await this.ownership.assertNoForeignWriters()) await this.laneStore.assertLegacyWritersStopped();
-      await this.ownership.acquire();
-    })().catch(error => {
+    // Ownership and its process journal fence live writers. Historical lane
+    // metadata is not an ownership lease; missing newer fields must not block
+    // a fresh worker. Dirty lanes remain excluded from reuse by the lane store.
+    return this.initialization = this.ownership.acquire().catch(error => {
       this.initialization = undefined;
+      const detail = error instanceof Error ? error.message : 'Local ownership evidence is unavailable';
       throw new Error('Managed delegation storage could not be verified. Worker launch and storage changes remain disabled; '
         + 'ordinary chat can continue unless an active worker conflicts. Inspect local delegation ownership and inventory before retrying. '
-        + 'Existing files and native histories were preserved.', { cause: error });
+        + `Existing files and native histories were preserved. Cause: ${detail}`, { cause: error });
     });
   }
 

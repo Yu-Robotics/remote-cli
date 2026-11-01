@@ -472,6 +472,15 @@ export class MessageHandler {
     const clearing = content === '/clear' || content === '/new';
     const management = content === '/abort' || /^\/thread(?:\s+list)?$/.test(content) || /^\/thread\s+new(?:\s|$)/.test(content);
     let admissionCurrent = () => true;
+    let admissionCancelled = false;
+    const cancelAdmission = () => {
+      if (admissionCancelled || !this.messageOpenIds.has(message.messageId)) return;
+      // Registered operations own their terminal response, including shutdown reasons.
+      if (this.activeThreadOperations.get(threadId)?.messageId === message.messageId) return;
+      admissionCancelled = true;
+      this.sendResponse(message.messageId, threadId,
+        { success: false, error: 'Request cancelled by conversation recovery. Send it again to start new work.' }, true);
+    };
     const body = () => {
       if (!admissionCurrent()) return Promise.resolve();
       if (!clearing && !management) this.threadManager.contextResets.assertReady(threadId);
@@ -526,10 +535,15 @@ export class MessageHandler {
           admissionCurrent = isCurrent;
           if (/^\/(?:clear|new|sandbox)(?:\s|$)/.test(content) || /^\/thread\s+delete(?:\s|$)/.test(content)) this.settingsService.invalidate(threadId);
           await body();
-        }, !content.startsWith('/') && !message.workingDirectory && !this.pendingReplaces.has(message.openId || message.messageId));
+        }, !content.startsWith('/') && !message.workingDirectory && !this.pendingReplaces.has(message.openId || message.messageId), cancelAdmission);
       }
     } catch (error) {
-      this.sendResponse(message.messageId, threadId, { success: false, error: error instanceof Error ? error.message : 'Command admission failed.' }, clearing);
+      if (!admissionCancelled) this.sendResponse(message.messageId, threadId,
+        { success: false, error: error instanceof Error ? error.message : 'Command admission failed.' }, clearing);
+    } finally {
+      // Native readers retain their exclusion while settling, but an invalidated
+      // request that never acquired an operation still needs a terminal response.
+      if (!admissionCurrent()) cancelAdmission();
     }
   }
 
@@ -664,6 +678,7 @@ export class MessageHandler {
     if (abortOperation) {
       this.sendStreamChunk(messageId, resolvedThreadId, '⏳ Waiting for the current abort to finish...\n');
       await abortOperation;
+      if (!admissionCurrent()) return;
       if (this.isDestroyed) {
         this.sendResponse(messageId, resolvedThreadId, {
           success: false,
@@ -743,9 +758,11 @@ export class MessageHandler {
         if (message.fileIds?.length && !this.fileInbox) throw new Error('File support was not negotiated. Upgrade and enroll this CLI first.');
         if (this.fileInbox) {
           await this.fileInbox.initialize();
+          if (!admissionCurrent()) return;
           this.fileInbox.claim(messageId, resolvedThreadId, openId, message.fileIds, fileOrder);
         }
       } catch (error) {
+        if (!admissionCurrent()) return;
         this.sendResponse(messageId, resolvedThreadId, { success: false, error: error instanceof Error ? error.message : 'Attachment is unavailable.' });
         return;
       }

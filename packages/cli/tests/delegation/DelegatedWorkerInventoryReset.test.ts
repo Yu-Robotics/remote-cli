@@ -243,7 +243,7 @@ describe('durable worker inventory during thread context reset', () => {
       await expect(fs.stat(pointer(lane))).rejects.toMatchObject({ code: 'ENOENT' });
     });
 
-  it('keeps interrupted resets blocked when startup quarantine persistence fails, then permits an explicit retry', async () => {
+  it('preserves dirty startup metadata and blocks reset when its retry intent cannot persist', async () => {
     const original = createStore();
     const lane = await seed(original);
     await expect(original.clearContext(lane.id, 0, lane, async () => { throw new Error('Synthetic interruption'); }))
@@ -256,7 +256,7 @@ describe('durable worker inventory during thread context reset', () => {
     });
     const restarted = createStore();
     const cleanup = vi.fn(clear);
-    await expect(finishReset(restarted, cleanup)).rejects.toMatchObject({ cause: { code: 'EIO' } });
+    await expect(finishReset(restarted, cleanup)).rejects.toMatchObject({ code: 'EIO' });
     expect(cleanup).not.toHaveBeenCalled();
     expect(resets.isPending('parent-thread')).toBe(true);
     expect(await fs.readFile(pointer(lane), 'utf8')).toBe('old worker continuation');
@@ -267,6 +267,26 @@ describe('durable worker inventory during thread context reset', () => {
     expect(resets.isPending('parent-thread')).toBe(false);
     expect((await restarted.acquire(identity())).lane.id).toBe(lane.id);
     await expect(fs.stat(pointer(lane))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('rejects startup when quarantining an interrupted running lane cannot persist', async () => {
+    const original = createStore();
+    const lane = await seed(original);
+    await original.markRunning(lane.id);
+    const before = await fs.readFile(record(lane));
+    const rename = fs.rename.bind(fs);
+    const failure = vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
+      if (to === record(lane)) throw Object.assign(new Error('Synthetic quarantine failure'), { code: 'EIO' });
+      return rename(from, to);
+    });
+    const restarted = createStore();
+    await expect(restarted.acquire(identity())).rejects.toMatchObject({ cause: { code: 'EIO' } });
+    expect(await fs.readFile(record(lane))).toEqual(before);
+    expect(await fs.readFile(pointer(lane), 'utf8')).toBe('old worker continuation');
+    failure.mockRestore();
+    const next = await restarted.acquire(identity());
+    expect(next.reused).toBe(false);
+    expect(next.lane.id).not.toBe(lane.id);
   });
 
   it('does not promote an unconfirmed running lane after inventory recovery', async () => {

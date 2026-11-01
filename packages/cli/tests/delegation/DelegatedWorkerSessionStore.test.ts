@@ -64,15 +64,17 @@ describe('DelegatedWorkerSessionStore', () => {
     expect(await fs.readFile(path.join(tombstones, `${first.lane.id}.json`), 'utf8')).toBe(JSON.stringify({ state }));
   });
 
-  it('requires exit proof for legacy dirty lanes when no native ownership journal exists', async () => {
+  it('preserves legacy dirty records without interpreting missing shutdown fields as reusable context', async () => {
     const store = new DelegatedWorkerSessionStore(directory);
     const { lane } = await store.acquire(identity(workspace));
     await store.markDirty(lane.id, 'Unknown legacy exit');
     const snapshot = await fs.readFile(path.join(directory, `${lane.id}.json`), 'utf8');
-    await expect(store.assertLegacyWritersStopped()).rejects.toThrow('unconfirmed');
+    const restarted = new DelegatedWorkerSessionStore(directory);
+    const next = await restarted.acquire(identity(workspace));
+    expect(next.reused).toBe(false);
+    expect(next.lane.id).not.toBe(lane.id);
     expect(await fs.readFile(path.join(directory, `${lane.id}.json`), 'utf8')).toBe(snapshot);
-    await store.markShutdownConfirmed(lane.id, lane.contextGeneration ?? 0);
-    await store.assertLegacyWritersStopped();
+    expect((await restarted.lanesForThread('parent-thread')).find(entry => entry.id === lane.id)?.shutdownConfirmedGeneration).toBeUndefined();
   });
 
   it('never copies a stale lane ID or native pointer into a fresh generation', async () => {
