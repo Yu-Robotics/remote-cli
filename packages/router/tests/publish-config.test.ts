@@ -42,7 +42,7 @@ describe('Router package publish configuration', () => {
   it('provides repository attribution and package discovery metadata', () => {
     expect(pkg.repository).toBeDefined();
     expect(pkg.repository.type).toBe('git');
-    expect(pkg.repository.url).toBeTruthy();
+    expect(pkg.repository.url).toBe('git+https://github.com/Yu-Robotics/remote-cli.git');
     expect(pkg.repository.directory).toBe('packages/router');
     expect(pkg.author).toBeTruthy();
     expect(pkg.keywords).toBeDefined();

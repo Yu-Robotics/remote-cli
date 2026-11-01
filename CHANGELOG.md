@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.199] - 2026-11-01
+
+### Added
+- Add a manually triggered GitHub Actions workflow for npm trusted publishing of both public packages, with locked dependencies, build/test gates, synchronized release-version checks, and exact package-integrity checks before skipping an already published version.
+- Reconcile uncertain publish outcomes against the registry without automatically repeating a publish request; reject conflicting versions and ambiguous registry failures.
+
+### Changed
+- Correct package repository attribution to the public GitHub repository and document one-time trusted-publisher setup and partial-release recovery.
+
 ## [1.6.198] - 2026-11-01
 
 ### Fixed

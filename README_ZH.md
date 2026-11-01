@@ -1836,6 +1836,55 @@ npm run cli:dev
 npm run router:dev
 ```
 
+#### Publishing with GitHub Actions
+
+Releases use the manual **Publish npm packages** workflow in
+[`.github/workflows/npm-publish.yml`](.github/workflows/npm-publish.yml).
+It runs on GitHub-hosted Linux with Node.js 24 and npm 11.21.1; this does not
+change the packages' supported runtime Node.js versions.
+
+Configure an npm **Trusted Publisher** separately for `@yu_robotics/remote-cli`
+and `@yu_robotics/remote-cli-router` under each package's Settings page:
+
+| Field | Value |
+| --- | --- |
+| Provider | GitHub Actions |
+| Organization or user | `Yu-Robotics` |
+| Repository | `remote-cli` |
+| Workflow filename | `npm-publish.yml` |
+| Environment | Leave empty (the workflow does not declare an environment) |
+| Allowed actions | Allow direct publishing, rather than stage-only publishing |
+
+No `NPM_TOKEN` secret or repeated `npm login` is needed. The job requests
+`id-token: write` and npm exchanges the GitHub OIDC identity for publishing
+authorization. See [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/).
+Package repository attribution must match this GitHub repository. npm generates
+provenance automatically for supported public-repository/public-package releases;
+private repositories do not support that provenance flow.
+
+Commit the synchronized version, lockfile, and release notes to GitHub `main`.
+Then open **Actions -> Publish npm packages -> Run workflow**, select `main`,
+and enter the exact version (for example, `1.6.199`). Other branches and forks
+cannot run the publish job. Pushing code alone does not publish anything.
+The workflow installs locked dependencies, builds and tests both packages, then
+publishes the inspected tarballs. Tarball publishing skips lifecycle scripts
+because the workflow has already run the required build and test gates; direct
+workspace `npm publish` retains its existing `prepublishOnly` checks.
+
+The two package publications are not atomic. If only one succeeds, use
+**Re-run failed jobs** on the original run so the same source revision is used.
+The helper checks both exact versions before publishing either package and skips
+an existing version only when its registry integrity matches the local tarball.
+A different payload for the same version, a network error, or an unexpected
+registry response stops the release. An uncertain publish result is checked
+against the registry without automatically retrying the upload. If registry
+visibility is delayed, retry the original run after checking its result.
+Do not change source files and reuse a partially published version.
+
+For a local packaging check after `npm ci` and `npm run build`, run
+`node scripts/publish-npm.cjs --version 1.6.199 --check`. This does not publish;
+actual OIDC authorization still requires a configured GitHub Actions run.
+
 ### 支持
 
 - 问题反馈：请通过项目的 Issue 页面提交

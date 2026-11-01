@@ -1,0 +1,50 @@
+name: Publish npm packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Exact release version already committed on main (for example, 1.6.199)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.repository == 'Yu-Robotics/remote-cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      EXPECTED_VERSION: ${{ inputs.version }}
+    steps:
+      - name: Check out the requested revision
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Install npm with trusted publishing support
+        run: npm install --global npm@11.21.1
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Build both packages
+        run: npm run build
+      - name: Validate release versions and package contents
+        run: node scripts/publish-npm.cjs --version "$EXPECTED_VERSION" --check
+      - name: Test both packages
+        run: npm test --workspaces -- --poolOptions.forks.maxForks=1 --poolOptions.forks.minForks=1 --testTimeout=30000
+      - name: Publish verified packages using npm OIDC
+        run: node scripts/publish-npm.cjs --version "$EXPECTED_VERSION"

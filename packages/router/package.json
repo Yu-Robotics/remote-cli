@@ -1,6 +1,6 @@
 {
   "name": "@yu_robotics/remote-cli-router",
-  "version": "1.6.198",
+  "version": "1.6.199",
   "description": "Router server for remote CLI - message forwarding between Feishu and local clients",
   "main": "dist/cli.js",
   "types": "dist/cli.d.ts",
@@ -26,12 +26,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/xiaoyu/remote-cli.git",
+    "url": "git+https://github.com/Yu-Robotics/remote-cli.git",
     "directory": "packages/router"
   },
-  "homepage": "https://github.com/xiaoyu/remote-cli#readme",
+  "homepage": "https://github.com/Yu-Robotics/remote-cli#readme",
   "bugs": {
-    "url": "https://github.com/xiaoyu/remote-cli/issues"
+    "url": "https://github.com/Yu-Robotics/remote-cli/issues"
   },
   "keywords": [
     "claude",
