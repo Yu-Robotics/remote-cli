@@ -205,7 +205,9 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
     const scope = manager.begin(parent);
     await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Use fixture dependencies' }, 'launch');
     const outside = path.join(fixture.directory, 'outside-dependency');
-    await fs.writeFile(outside, 'keep outside data');
+    await fs.mkdir(outside);
+    const outsideFile = path.join(outside, 'keep.txt');
+    await fs.writeFile(outsideFile, 'keep outside data');
     await fs.mkdir(path.join(workers[0].cwd, 'node_modules'));
     try { await fs.symlink(outside, path.join(workers[0].cwd, 'node_modules', 'tool'), process.platform === 'win32' ? 'junction' : 'dir'); }
     catch (error) {
@@ -217,7 +219,7 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
     workers[0].finish({ success: true });
     await scope.collectPendingResults();
     await expect(fs.stat(workers[0].cwd)).rejects.toMatchObject({ code: 'ENOENT' });
-    expect(await fs.readFile(outside, 'utf8')).toBe('keep outside data');
+    expect(await fs.readFile(outsideFile, 'utf8')).toBe('keep outside data');
   });
 
   it('exports required ignored reports before deleting the checkout', async () => {

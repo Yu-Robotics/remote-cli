@@ -93,6 +93,7 @@ describe('ZCodeClient', () => {
 
   afterEach(async () => {
     client.destroy();
+    await client.waitForExit();
     await fs.rm(temporaryDirectory, { recursive: true, force: true });
   });
 

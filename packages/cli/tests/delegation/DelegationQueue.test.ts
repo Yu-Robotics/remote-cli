@@ -35,7 +35,8 @@ describe('multiple accepted delegated tasks', () => {
 
   beforeEach(() => {
     expectedShutdownFailure = false;
-    directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'delegation-queue-test-')));
+    // Match native async realpath checks, including Windows short-name expansion.
+    directory = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'delegation-queue-test-')));
     vi.spyOn(os, 'homedir').mockReturnValue(directory);
     vi.stubEnv('HOME', directory);
     vi.stubEnv('USERPROFILE', directory);

@@ -27,12 +27,14 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
   let parent: DelegationParent;
   let workers: ReturnType<typeof controlledWorker>[];
   let factory: ReturnType<typeof vi.fn>;
+  let pendingCalls: Set<Promise<unknown>>;
   beforeEach(async () => {
     fixture = await gitFixture();
     vi.spyOn(os, 'homedir').mockReturnValue(fixture.directory);
     vi.stubEnv('HOME', fixture.directory);
     vi.stubEnv('USERPROFILE', fixture.directory);
     workers = [];
+    pendingCalls = new Set();
     factory = vi.fn((guard: DirectoryGuard, _config, cwd: string) => {
       expect(guard.resolveWorkingDirectory(cwd)).toBe(cwd);
       const worker = controlledWorker(cwd); workers.push(worker); return worker.executor;
@@ -45,11 +47,65 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     backend: 'claude', config: { type: 'auto' }, onToolUse: vi.fn(), onToolResult: vi.fn(), onNotice: vi.fn(),
     onProgress: vi.fn(() => true), onApproval: vi.fn(() => true), onApprovalResolved: vi.fn() };
   });
-  afterEach(async () => { await manager.destroy(); vi.restoreAllMocks(); vi.unstubAllEnvs(); await fs.rm(fixture.directory, { recursive: true, force: true }); });
+  const settleFixture = async (): Promise<void> => {
+    // Settle controlled execution even when an assertion or phase deadline fired.
+    // Keep mocks, home and ownership intact until all admitted work has exited.
+    workers.forEach(worker => worker.finish({ success: false, error: 'Synthetic fixture teardown' }));
+    const shutdown = manager.destroy();
+    await Promise.allSettled([...pendingCalls, shutdown]);
+    await shutdown;
+  };
+  // The native Windows pooling failure also exceeded the ten-second hook.
+  // Keep a separate bounded window while tracked Git calls settle under ownership.
+  afterEach(async () => {
+    const ownedFixture = fixture;
+    let released = false;
+    try {
+      await settleFixture();
+      released = true;
+    } finally {
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
+      if (released) await fs.rm(ownedFixture.directory, { recursive: true, force: true });
+    }
+  }, 60_000);
+  const trackCall = <T>(call: Promise<T>): Promise<T> => {
+    pendingCalls.add(call);
+    void call.then(() => pendingCalls.delete(call), () => pendingCalls.delete(call));
+    return call;
+  };
   const start = (scope: ReturnType<DelegationManager['begin']>, id: string, backend = 'codex') =>
-    scope.invoke('remote_cli_delegate', { backend, objective: `Independent task ${id}` }, id) as Promise<DelegatedTaskResult>;
+    trackCall(scope.invoke('remote_cli_delegate', { backend, objective: `Independent task ${id}` }, id) as Promise<DelegatedTaskResult>);
   const result = (scope: ReturnType<DelegationManager['begin']>, taskId: string, id: string) =>
-    scope.invoke('remote_cli_result', { taskId, waitSeconds: 25 }, id) as Promise<DelegatedTaskResult>;
+    trackCall(scope.invoke('remote_cli_result', { taskId, waitSeconds: 25 }, id) as Promise<DelegatedTaskResult>);
+  const gitPhase = async <T>(name: string, action: () => Promise<T>): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([trackCall(Promise.resolve().then(action)), new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`Git lifecycle phase exceeded 30 seconds: ${name}`)), 30_000);
+      })]);
+    } finally { clearTimeout(timer); }
+  };
+
+  it('settles an unfinished worker and result call after an assertion failure before releasing fixture ownership', async () => {
+    const scope = manager.begin(parent);
+    const first = await start(scope, 'unfinished');
+    expect(first.state).toBe('running');
+    const collecting = result(scope, first.taskId, 'pending-result');
+    expect(pendingCalls.has(collecting)).toBe(true);
+    const failure = new Error('Synthetic assertion failure with an unfinished worker');
+    const exercise = async () => {
+      try { throw failure; }
+      finally { await settleFixture(); }
+    };
+    await expect(exercise()).rejects.toBe(failure);
+    const completed = await collecting;
+    expect(['succeeded', 'failed', 'cancelled']).toContain(completed.state);
+    expect(pendingCalls.size).toBe(0);
+    const ownership = path.join(fixture.directory, '.remote-cli', 'delegation-workers.ownership');
+    await expect(fs.lstat(ownership)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect((await fs.stat(fixture.directory)).isDirectory()).toBe(true);
+  });
 
   it('keeps concurrent worker metadata independent while bounding combined retained results', async () => {
     factory.mockImplementation((_guard, configuration, cwd) => {
@@ -443,9 +499,12 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     expect(await result(scope, second.taskId, 'r2')).toMatchObject({ state: 'succeeded' });
   }, 30_000);
 
+  // These multi-turn cases need separate deadlines for each real-Git phase.
+  // Preserve the 30-second phase limit; the outer budgets cover their sum.
   it('pools same-target conversations without reusing pending artifacts or routing ambiguous input', async () => {
     const scope = manager.begin(parent);
-    const [first, second] = await Promise.all([start(scope, 'first'), start(scope, 'second')]);
+    const [first, second] = await gitPhase('prepare two pooled workers', () => Promise.all([start(scope, 'first'), start(scope, 'second')]));
+    expect([first.state, second.state]).toEqual(['running', 'running']);
     workers.forEach(worker => { worker.executor.isWaitingInput = () => true; });
     expect(manager.hasAmbiguousInput(parent.thread.id)).toBe(true);
     expect(scope.waitingExecutor()).toBeUndefined();
@@ -453,41 +512,45 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     expect(scope.waitingExecutor()).toBe(workers[0].executor);
     await fs.writeFile(path.join(workers[0].cwd, 'pending.txt'), 'pending result\n');
     workers.forEach(worker => worker.finish({ success: true }));
-    await Promise.all([result(scope, first.taskId, 'r1'), result(scope, second.taskId, 'r2')]);
-    const third = await start(scope, 'third');
+    await gitPhase('collect both pooled workers', () => scope.collectPendingResults());
+    const third = await gitPhase('prepare the reusable pooled lane', () => start(scope, 'third'));
+    expect(third.state).toBe('running');
     expect(workers[2].cwd).toBe(workers[1].cwd);
     expect(workers[2].cwd).not.toBe(workers[0].cwd);
     expect((await manager.laneStore.lanesForThread(parent.thread.id)).some(lane => lane.state === 'dirty')).toBe(false);
     workers[2].finish({ success: true });
-    await result(scope, third.taskId, 'r3');
-  });
+    await gitPhase('collect the reused pooled worker', () => scope.collectPendingResults());
+  }, 125_000);
 
   it('returns an untouched reused lane to ready when baseline capture fails', async () => {
     const scope = manager.begin(parent);
-    const first = await start(scope, 'first');
+    const first = await gitPhase('prepare the baseline worker', () => start(scope, 'first'));
+    expect(first.state).toBe('running');
     const executorId = factory.mock.calls[0][3];
     const pointer = path.join(fixture.directory, '.remote-cli', 'codex-sessions', `${executorId}.json`);
     await fs.mkdir(path.dirname(pointer), { recursive: true });
     await fs.writeFile(pointer, 'retained context');
     workers[0].finish({ success: true });
-    await result(scope, first.taskId, 'first-result');
+    await gitPhase('collect the baseline worker', () => scope.collectPendingResults());
     const lane = (await manager.laneStore.lanesForThread(parent.thread.id))[0];
     const savedPath = path.join(fixture.directory, '.remote-cli', 'delegation-workspaces', 'lanes', `${lane.id}.json`);
     const saved = await fs.readFile(savedPath, 'utf8');
     const prepare = vi.spyOn(manager.workspaceManager, 'prepare');
     vi.spyOn(manager.workspaceManager, 'baseline').mockRejectedValueOnce(new Error('Synthetic baseline failure'));
-    const failed = await start(scope, 'failed-baseline');
-    expect(await result(scope, failed.taskId, 'failed-result')).toMatchObject({ state: 'failed' });
+    const failed = await gitPhase('reject the failed baseline', () => start(scope, 'failed-baseline'));
+    expect(failed).toMatchObject({ state: 'failed' });
     expect(prepare).not.toHaveBeenCalled();
     expect(await fs.readFile(savedPath, 'utf8')).toBe(saved);
     expect((await manager.laneStore.lanesForThread(parent.thread.id))[0]).toMatchObject({ id: lane.id, state: 'ready' });
     expect((await manager.workspaceManager.unavailableLanes()).has(lane.id)).toBe(false);
     expect(await fs.readFile(pointer, 'utf8')).toBe('retained context');
-    const next = await start(scope, 'retry-baseline');
+    const next = await gitPhase('prepare the baseline retry', () => start(scope, 'retry-baseline'));
+    expect(next.state).toBe('running');
     expect(factory.mock.calls[1][3]).toBe(executorId);
     workers[1].finish({ success: true });
-    expect(await result(scope, next.taskId, 'next-result')).toMatchObject({ state: 'succeeded' });
-  });
+    expect(await gitPhase('collect the baseline retry', () => scope.collectPendingResults()))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ taskId: next.taskId, state: 'succeeded' })]));
+  }, 155_000);
 
   it('retains a prepared lane on executor setup failure without blaming checkout preparation', async () => {
     const scope = manager.begin(parent);
