@@ -761,11 +761,11 @@ supported. The binding schema and protocol-v1 flow for existing CLIs are unchang
 
 ## Publishing
 
-Both packages are released together through the manually triggered GitHub Actions
-workflow `npm-publish.yml`, using npm Trusted Publishing instead of a stored npm
-token. Configure each package's trusted publisher for `Yu-Robotics/remote-cli`,
-workflow `npm-publish.yml`, no environment, and direct publishing. Select `main`
-and enter the committed release version when triggering the workflow. It builds,
+Both packages are released together automatically when a push to GitHub `main`
+increases the root package version. The GitHub Actions workflow `npm-publish.yml`
+uses npm Trusted Publishing instead of a stored npm token. Configure each package's trusted publisher for `Yu-Robotics/remote-cli`,
+workflow `npm-publish.yml`, no environment, and direct publishing. Normal releases
+need no manual button or Git tag; manual triggering remains available for recovery. It builds,
 tests, and checks both packages before publishing; a partial release can be
 retried from the original run only when already published content matches.
 See the [release setup and recovery instructions](../../README.md#publishing-with-github-actions).

@@ -1,32 +1,59 @@
 name: Publish npm packages
 
 on:
+  push:
+    branches: [main]
+    paths: [package.json]
   workflow_dispatch:
     inputs:
       version:
-        description: 'Exact release version already committed on main (for example, 1.6.199)'
+        description: 'Exact release version already committed on main (manual recovery)'
         required: true
         type: string
 
 permissions:
   contents: read
 
-concurrency:
-  group: npm-publish
-  cancel-in-progress: false
-
 jobs:
+  select:
+    if: github.repository == 'Yu-Robotics/remote-cli' && github.ref == 'refs/heads/main' && github.event.deleted != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      publish: ${{ steps.release.outputs.publish }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - name: Check out the requested revision
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Select a version increase or manual recovery
+        id: release
+        env:
+          RELEASE_BEFORE: ${{ github.event.before }}
+          RELEASE_DELETED: ${{ github.event.deleted }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: node scripts/select-npm-release.cjs
+
   publish:
-    if: github.repository == 'Yu-Robotics/remote-cli' && github.ref == 'refs/heads/main'
+    needs: select
+    if: needs.select.outputs.publish == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    concurrency:
+      group: npm-publish
+      cancel-in-progress: false
     permissions:
       contents: read
       id-token: write
-    env:
-      EXPECTED_VERSION: ${{ inputs.version }}
     steps:
-      - name: Check out the requested revision
+      - name: Check out the selected revision
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
@@ -43,8 +70,12 @@ jobs:
       - name: Build both packages
         run: npm run build
       - name: Validate release versions and package contents
+        env:
+          EXPECTED_VERSION: ${{ needs.select.outputs.version }}
         run: node scripts/publish-npm.cjs --version "$EXPECTED_VERSION" --check
       - name: Test both packages
         run: npm test --workspaces -- --poolOptions.forks.maxForks=1 --poolOptions.forks.minForks=1 --testTimeout=30000
       - name: Publish verified packages using npm OIDC
+        env:
+          EXPECTED_VERSION: ${{ needs.select.outputs.version }}
         run: node scripts/publish-npm.cjs --version "$EXPECTED_VERSION"
