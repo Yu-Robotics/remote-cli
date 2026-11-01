@@ -54,6 +54,22 @@ describe('ThreadExecutorPool', () => {
   });
 
   describe('directory recovery safety', () => {
+    it('reports unavailable recovery as error without hiding an active thread or creating an executor', async () => {
+      const thread = manager.getDefaultThread();
+      const sibling = await manager.createThread('healthy', tmpDir, 'codex');
+      await manager.contextResets.begin(thread.id);
+      await manager.contextResets.advanceGeneration(thread.id);
+      await manager.contextResets.complete(thread.id);
+      const filename = (manager.contextResets as any).file(thread.id) + '.generation';
+      await fs.writeFile(filename, '{');
+      expect(pool.getSummaries().find(entry => entry.id === thread.id)).toMatchObject({ status: 'error', backend: 'claude' });
+      expect(pool.getSummaries().find(entry => entry.id === sibling.id)).toMatchObject({ status: 'idle', backend: 'codex' });
+      pool.setThreadBusy(thread.id, true);
+      expect(pool.getSummaries().find(entry => entry.id === thread.id)?.status).toBe('running');
+      expect(mockExecutorFactory).not.toHaveBeenCalled();
+      expect(() => pool.getExecutor(thread.id)).toThrow('generation');
+    });
+
     it('confirms native shutdown before replacing pointers and publishes a durable workspace generation', async () => {
       const thread = manager.getDefaultThread();
       await manager.updateThread(thread.id, { workingDirectory: tmpDir, models: { codex: 'saved-model' } });

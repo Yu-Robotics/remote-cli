@@ -227,8 +227,8 @@ export class ThreadExecutorPool {
     return this.threadManager.listThreads().map(t => ({
       id: t.id,
       name: t.name,
-      status: this.getStatus(t.id),
-      backend: this.getBackendKey(t.id),
+      status: t.contextError ? (this.isThreadBusy(t.id) ? 'running' : 'error') : this.getStatus(t.id),
+      backend: t.backend ?? backendKeyOf(this.executorConfig.type as string),
       workspaceName: t.workingDirectory
         ? path.basename(path.normalize(t.workingDirectory)) || path.parse(path.normalize(t.workingDirectory)).root
         : undefined,
@@ -302,7 +302,10 @@ export class ThreadExecutorPool {
    * resumes the conversation that thread had on it.
    */
   async switchBackend(newConfig: ExecutorConfig): Promise<void> {
-    for (const thread of this.threadManager.listThreads()) this.threadManager.contextResets.assertReady(thread.id);
+    for (const thread of this.threadManager.listThreads()) {
+      this.threadManager.getThread(thread.id);
+      this.threadManager.contextResets.assertReady(thread.id);
+    }
     await this.destroyAll({ deleteData: false });
     this.executorConfig = newConfig;
   }

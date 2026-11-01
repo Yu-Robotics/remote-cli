@@ -58,6 +58,68 @@ describe('managed conversation recovery', () => {
   const command = async (content: string, id = content) => handler.handleMessage({ type: 'command', messageId: id, content, threadId });
   const response = (id: string) => send.mock.calls.map(([value]) => value).find(value => value.type === 'response' && value.messageId === id);
 
+  it.each(['/abort', '/clear', '/new'])('completes admission cancellation once during attachment initialization via %s', async recovery => {
+    const initialization = deferred<void>();
+    const inbox = {
+      initialize: vi.fn(() => initialization.promise), mark: vi.fn(() => 1), claim: vi.fn(),
+      cancelThread: vi.fn(), release: vi.fn(), destroy: vi.fn(), hasClaim: vi.fn(() => false),
+    };
+    (handler as any).fileInbox = inbox;
+    const original = command('Request before recovery', 'pending-admission');
+    await vi.waitFor(() => expect(inbox.initialize).toHaveBeenCalledOnce());
+    await command(recovery);
+    // Cancellation must not wait for attachment initialization to return.
+    expect(response('pending-admission')).toMatchObject({ success: false });
+    expect(inbox.release).toHaveBeenCalledWith('pending-admission', true);
+    initialization.resolve();
+    await original;
+    expect(inbox.claim).not.toHaveBeenCalled();
+    expect(executor.execute).not.toHaveBeenCalled();
+    expect(send.mock.calls.filter(([value]) => value.type === 'response' && value.messageId === 'pending-admission')).toHaveLength(1);
+    expect(response(recovery)).toMatchObject({ success: true });
+  });
+
+  it.each(['malformed', 'unreadable'])('isolates a %s sibling generation from healthy requests and preserves its execution barrier', async failure => {
+    await manager.updateThread(threadId, { delegation: false });
+    const sibling = await manager.createThread('broken-sibling', home, 'codex');
+    await manager.contextResets.begin(sibling.id);
+    await manager.contextResets.advanceGeneration(sibling.id);
+    await manager.contextResets.complete(sibling.id);
+    const filename = (manager.contextResets as any).file(sibling.id) + '.generation';
+    if (failure === 'malformed') await fs.writeFile(filename, '{');
+    else {
+      await fs.rm(filename);
+      await fs.mkdir(filename);
+    }
+    await command('Independent conversation', 'healthy');
+    expect(response('healthy')).toMatchObject({ success: true });
+    expect(executor.execute).toHaveBeenCalledOnce();
+    expect(pool.getSummaries().find(thread => thread.id === sibling.id)).toMatchObject({ status: 'error' });
+    expect(() => pool.getExecutor(sibling.id)).toThrow('generation');
+    await command('/thread list');
+    expect(response('/thread list')).toMatchObject({ success: true });
+    await expect(pool.switchBackend({ type: 'pi' })).rejects.toThrow('generation');
+    expect(executor.destroy).not.toHaveBeenCalled();
+    const loaded = await ThreadManager.initialize(home);
+    expect(loaded.listThreads()).toHaveLength(2);
+    expect(() => loaded.getThread(sibling.id)).toThrow('generation');
+  });
+
+  it.each(['Ordinary request', '/status'])('finishes an invalidated %s waiting for abort cleanup exactly once', async content => {
+    const cleanup = deferred<void>();
+    (handler as any).abortOperations.set(threadId, cleanup.promise);
+    const original = command(content, 'waiting-for-abort');
+    await vi.waitFor(() => expect(send.mock.calls.some(([value]) => value.messageId === 'waiting-for-abort')).toBe(true));
+    const abort = command('/abort', 'repeat-abort');
+    await handler.destroy();
+    cleanup.resolve();
+    await Promise.all([original, abort]);
+    (handler as any).abortOperations.delete(threadId);
+    expect(response('waiting-for-abort')).toMatchObject({ success: false });
+    expect(send.mock.calls.filter(([value]) => value.type === 'response' && value.messageId === 'waiting-for-abort')).toHaveLength(1);
+    expect(executor.execute).not.toHaveBeenCalled();
+  });
+
   it('detaches legacy unknown lanes despite inaccessible ownership, preserving preferences, files and sibling threads across restart', async () => {
     await manager.updateThread(threadId, { delegation: false, backend: 'codex', models: { codex: 'model' }, efforts: { codex: 'high' } });
     const sibling = await manager.createThread('sibling', home, 'pi');
@@ -157,7 +219,7 @@ describe('managed conversation recovery', () => {
 
   it('uses verified native ownership evidence without depending on legacy inventory health', async () => {
     await (delegation as any).ownership.acquire();
-    const inventory = vi.spyOn(delegation.laneStore, 'assertLegacyWritersStopped').mockRejectedValue(new Error('Metadata unreadable'));
+    const inventory = vi.spyOn(delegation.laneStore, 'initialize').mockRejectedValue(new Error('Metadata unreadable'));
     await manager.updateThread(threadId, { delegation: false });
     await command('Direct chat after proven shutdown');
     expect(response('Direct chat after proven shutdown')).toMatchObject({ success: true });

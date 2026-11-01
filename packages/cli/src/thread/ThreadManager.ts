@@ -61,7 +61,7 @@ export class ThreadManager {
     const manager = new ThreadManager(storePath, sessionsDir, store);
 
     // Ensure default thread always exists
-    if (!manager.getThreadByName(DEFAULT_THREAD_NAME)) {
+    if (!Object.values(store.threads).some(thread => thread.name === DEFAULT_THREAD_NAME)) {
       const sessionId = await manager.readLegacySessionId(baseDir);
       const defaultThread: Thread = {
         id: randomUUID(),
@@ -215,9 +215,15 @@ export class ThreadManager {
   }
 
   /**
-   * List all threads sorted by createdAt ascending.
-   */  listThreads(): Thread[] {
-    return Object.keys(this.store.threads).map(id => this.getThread(id)!).sort((a, b) => a.createdAt - b.createdAt);
+   * List metadata without letting one broken reset overlay hide sibling threads.
+   * Execution must still resolve its target through getThread(), which fails closed.
+   */  listThreads(): Array<Thread & { contextError?: string }> {
+    return Object.values(this.store.threads).map(thread => {
+      try { return this.getThread(thread.id)!; }
+      catch (error) {
+        return { ...thread, contextError: error instanceof Error ? error.message : 'Thread recovery state is unavailable' };
+      }
+    }).sort((a, b) => a.createdAt - b.createdAt);
   }
 
   /**

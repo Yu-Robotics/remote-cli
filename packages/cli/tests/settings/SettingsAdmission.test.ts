@@ -70,6 +70,23 @@ describe('settings command admission', () => {
 });
 
 describe('recovery admission fencing', () => {
+  it('notifies cancelled admissions once before their work settles, retaining native settings readers', async () => {
+    const admission = new SettingsAdmission();
+    const hold = gate();
+    const cancelled: string[] = [];
+    const ordinary = admission.command('thread', 'ordinary', () => hold.wait, true, () => cancelled.push('ordinary'));
+    const native = admission.command('thread', 'native', () => hold.wait, false, () => cancelled.push('native'));
+    admission.cancelRecoverable('thread');
+    admission.cancelRecoverable('thread');
+    expect(cancelled).toEqual(['ordinary']);
+    expect(admission.hasCommand('thread', 'native')).toBe(false);
+    expect(admission.hasCommand('thread')).toBe(true);
+    hold.release();
+    await Promise.all([ordinary, native]);
+    expect(cancelled).toEqual(['ordinary']);
+    expect(admission.hasCommand('thread')).toBe(false);
+  });
+
   it('retires cancellable readers without allowing their late completion to release a newer reader', async () => {
     const admission = new SettingsAdmission();
     const old = gate();

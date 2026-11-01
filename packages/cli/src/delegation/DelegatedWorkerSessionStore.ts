@@ -152,25 +152,6 @@ export class DelegatedWorkerSessionStore {
     }
   }
 
-  /** Without an ownership journal, legacy lane state is the only available writer evidence. */
-  async assertLegacyWritersStopped(): Promise<void> {
-    let names: string[];
-    try { names = await fs.readdir(this.directory); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
-    if (names.length > 10_000) throw new Error('Legacy worker inventory is too large to verify safely');
-    for (const name of names) {
-      if (!name.endsWith('.json')) continue;
-      const filename = path.join(this.directory, name);
-      const stat = await fs.lstat(filename);
-      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 64 * 1024) throw new Error('Legacy worker evidence is unavailable');
-      const lane: unknown = JSON.parse(await fs.readFile(filename, 'utf8'));
-      if (!validateLane(lane) || name !== `${lane.id}.json`) throw new Error('Legacy worker evidence is invalid');
-      if (lane.state !== 'ready' && !shutdownConfirmed(lane) && !lane.contextRetired) {
-        throw new Error('Legacy worker shutdown is unconfirmed; preserve its files and native pointer');
-      }
-    }
-  }
-
   initialize(): Promise<void> {
     return this.initialized ??= Promise.resolve().then(async () => {
       await this.beforeInitialize?.();
@@ -437,7 +418,7 @@ export class DelegatedWorkerSessionStore {
         }
         // A process may have died between any write and terminal confirmation.
         // Only a ready lane is resumable after a CLI restart.
-        if (lane.state !== 'ready') {
+        if (lane.state === 'preparing' || lane.state === 'running') {
           const dirty: DelegatedWorkerLane = { ...lane, state: 'dirty', cleanupPending: lane.cleanupPending === true,
             cleanupError: lane.cleanupError ?? 'The CLI stopped before worker cleanup was confirmed.', updatedAt: Date.now() };
           await this.writeRecord(dirty);

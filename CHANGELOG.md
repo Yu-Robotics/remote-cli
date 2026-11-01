@@ -10,6 +10,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.197] - 2026-11-01
+
+### Fixed
+- Complete requests cancelled during admission exactly once, without waiting for attachment initialization or leaving a late attachment claim behind.
+- Isolate unreadable thread-generation metadata in thread listings and result summaries. Healthy threads keep working, while affected threads remain unavailable for execution and global backend changes.
+- Allow fresh delegation when historical dirty lanes lack newer shutdown fields. Keep native ownership and live-writer checks, preserve dirty metadata, files and sessions, and never reuse those lanes automatically. No offline migration is required.
+- Include the underlying ownership failure in managed-delegation errors.
+
+### Tests
+- Cover admission cancellation, sibling and default-thread recovery failures, unchanged historical records across restarts, and fresh-worker admission without relaxing native ownership checks.
+
 ## [1.6.196] - 2026-11-01
 
 ### Fixed

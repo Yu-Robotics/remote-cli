@@ -74,7 +74,7 @@ describe('managed agent delegation', () => {
       fs.writeFileSync(pointer, 'synthetic preserved transcript');
       const snapshot = state === 'unreadable' ? undefined : fs.readFileSync(laneFile);
       manager = new DelegationManager(guard, factory as any, new BackendRegistry(async () => 'test 1.0'),
-        new DelegationStore(), undefined, undefined, lanes);
+        new DelegationStore(), undefined, undefined, new DelegatedWorkerSessionStore(lanes.storageDirectory, resets));
       for (const threadId of [parent.thread.id, 'unrelated-thread']) {
         await expect(manager.assertExecutionSafe(home, threadId)).resolves.toBeUndefined();
       }
@@ -87,14 +87,20 @@ describe('managed agent delegation', () => {
       const scope = manager.begin(parent);
       await expect(scope.collectPendingResults()).resolves.toEqual([]);
       await expect(scope.checkArtifactCloseout()).resolves.toEqual([]);
-      if (state === 'ready') {
+      if (state === 'ready' || state === 'dirty') {
         const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Synthetic review' }, 'launch');
         await expect(scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result')).resolves.toMatchObject({ state: 'succeeded' });
-      } else {
+      } else if (state === 'legacy-owner') {
         await expect(scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Synthetic review' }, 'launch'))
           .rejects.toThrow('Managed delegation storage');
         expect(factory).not.toHaveBeenCalled();
         await expect(scope.checkArtifactCloseout()).resolves.toEqual([]);
+      } else {
+        const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Synthetic review' }, 'launch');
+        await expect(scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result')).resolves.toMatchObject({
+          state: 'failed', error: expect.stringContaining('Cannot load delegated worker inventory'),
+        });
+        expect(factory).not.toHaveBeenCalled();
       }
       await scope.close();
       if (snapshot) expect(fs.readFileSync(laneFile)).toEqual(snapshot);
@@ -102,6 +108,45 @@ describe('managed agent delegation', () => {
       expect(fs.readFileSync(pointer, 'utf8')).toBe('synthetic preserved transcript');
       await expect(manager.assertExecutionSafe(home, 'unrelated-thread')).resolves.toBeUndefined();
     });
+
+  it('starts fresh workers after clean ownership release without reusing legacy dirty lanes or rewriting their history', async () => {
+    const lanes = new DelegatedWorkerSessionStore();
+    const ownership = new DelegationOwnership(lanes.storageDirectory);
+    await ownership.acquire();
+    const { lane } = await lanes.acquire({ threadId: parent.thread.id, backend: 'codex', workingDirectory: home, workspaceGeneration: 0 });
+    await lanes.markDirty(lane.id, 'Historical artifact finalization failed after shutdown');
+    const laneFile = path.join(lanes.storageDirectory, `${lane.id}.json`);
+    const record = JSON.parse(fs.readFileSync(laneFile, 'utf8'));
+    delete record.contextGeneration;
+    delete record.shutdownConfirmedGeneration;
+    fs.writeFileSync(laneFile, JSON.stringify(record));
+    const snapshot = fs.readFileSync(laneFile);
+    const pointer = path.join(home, 'legacy-native-history');
+    fs.writeFileSync(pointer, 'retained history');
+    await ownership.release();
+    for (let restart = 0; restart < 2; restart++) {
+      manager = new DelegationManager(guard, factory as any, new BackendRegistry(async () => 'test 1.0'));
+      const scope = manager.begin(parent);
+      const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Independent fresh task' }, 'launch');
+      await expect(scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result')).resolves.toMatchObject({ state: 'succeeded' });
+      expect(factory.mock.calls.at(-1)?.[3]).not.toBe(lane.executorThreadId);
+      expect(fs.readFileSync(laneFile)).toEqual(snapshot);
+      expect(fs.readFileSync(pointer, 'utf8')).toBe('retained history');
+      expect(worker.deleteThreadData).not.toHaveBeenCalled();
+      await scope.close();
+      await manager.destroy();
+    }
+  });
+
+  it('still blocks fresh delegation when native ownership acquisition detects a live writer', async () => {
+    const ownership = (manager as any).ownership as DelegationOwnership;
+    vi.spyOn(ownership, 'acquire').mockRejectedValue(new ActiveDelegationWriterError('Delegation child process group still exists'));
+    const scope = manager.begin(parent);
+    await expect(scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Must not run' }, 'launch'))
+      .rejects.toThrow('Cause: Delegation child process group still exists');
+    expect(factory).not.toHaveBeenCalled();
+    await scope.close();
+  });
 
   it('keeps detached current workers fenced until exit while allowing unrelated workspaces', async () => {
     const occupied = path.join(home, 'occupied');

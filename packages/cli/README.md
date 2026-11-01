@@ -692,6 +692,15 @@ Direct-backend shutdown and durable reset storage must succeed before clearing
 is acknowledged. Upgrade the local CLI; a Router-only upgrade does not enable
 this recovery path.
 
+From CLI 1.6.197, historical dirty worker records without newer shutdown fields
+no longer block fresh delegation. Native ownership locks and recorded live-worker
+checks still apply. Old dirty lanes remain excluded from reuse; their metadata,
+files, and native sessions are retained. No offline migration is required.
+Cancellation during request admission sends one terminal response and releases
+attachment claims. An unreadable thread-generation file marks that thread as
+unavailable without failing other threads' results; execution on the affected
+thread remains blocked until its recovery state is repaired.
+
 Shutting down an active request reports cancellation once.
 Unsupported native commands return their backend-specific error even while
 worker recovery is pending. Commands that execute backend work still honor

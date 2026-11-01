@@ -29,6 +29,26 @@ describe('ThreadManager', () => {
   });
 
   describe('initialization', () => {
+    it('preserves a default thread with broken reset metadata while listing unaffected siblings', async () => {
+      const original = manager.getDefaultThread();
+      const sibling = await manager.createThread('healthy', tmpDir);
+      await manager.contextResets.begin(original.id);
+      await manager.contextResets.advanceGeneration(original.id);
+      await manager.contextResets.complete(original.id);
+      const filename = (manager.contextResets as any).file(original.id) + '.generation';
+      await fs.writeFile(filename, '{');
+      const metadata = await fs.readFile(path.join(tmpDir, '.remote-cli', 'threads.json'));
+      const loaded = await ThreadManager.initialize(tmpDir);
+      expect(loaded.listThreads()).toHaveLength(2);
+      expect(loaded.listThreads().find(thread => thread.id === original.id)).toMatchObject({ contextError: expect.stringContaining('generation') });
+      expect(loaded.getThread(sibling.id)).toEqual(sibling);
+      expect(() => loaded.getThread(original.id)).toThrow('generation');
+      expect(await fs.readFile(path.join(tmpDir, '.remote-cli', 'threads.json'))).toEqual(metadata);
+      await fs.writeFile(filename, '2');
+      expect(loaded.listThreads().find(thread => thread.id === original.id)).toMatchObject({ delegationWorkspaceGeneration: 2 });
+      expect(loaded.listThreads().find(thread => thread.id === original.id)).not.toHaveProperty('contextError');
+    });
+
     it('persists native speed overrides and explicit Follow markers independently of model and effort', async () => {
       const thread = manager.getDefaultThread();
       await manager.updateThread(thread.id, { models: { codex: 'native-model' }, efforts: { codex: 'high' }, speeds: { codex: 'priority' } });
