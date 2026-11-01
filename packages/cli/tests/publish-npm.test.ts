@@ -77,13 +77,15 @@ describe('npm release orchestration (synthetic processes and registry only)', ()
       const parsed = new URL(url);
       expect(parsed.origin).toBe(REGISTRY);
       expect(parsed.pathname.endsWith(`/${version}`)).toBe(true);
-      expect(options.headers).toEqual({ accept: 'application/json' });
+      expect(options.headers).toEqual({ accept: 'application/json', 'cache-control': 'no-cache' });
+      expect([...parsed.searchParams.keys()]).toEqual(['release_check']);
+      expect(parsed.searchParams.get('release_check')).toMatch(/^[0-9a-f-]{36}$/);
       expect(options.redirect).toBe('error');
       const name = decodeURIComponent(parsed.pathname.slice(1, -version.length - 1));
       events.push(`get:${name}`);
       return registry.has(name) ? response(200, registry.get(name)) : response(404);
     });
-    const dependencies = { runNpm, fetch, log: vi.fn(), environment: {} };
+    const dependencies = { runNpm, fetch, sleep: vi.fn(async (_milliseconds: number) => {}), log: vi.fn(), environment: {} };
     return { registry, events, archives, dependencies, runNpm, fetch,
       temporary: () => temporary,
       onPublish: (callback: (name: string) => void) => { onPublish = callback; },
@@ -210,7 +212,45 @@ describe('npm release orchestration (synthetic processes and registry only)', ()
     expect((await h.run()).map((item: any) => item.status)).toEqual(['reconciled', 'reconciled']);
     expect(h.events.filter(event => event.startsWith('publish:'))).toHaveLength(2);
     expect(h.fetch).toHaveBeenCalledTimes(4);
+    expect(h.dependencies.sleep).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ['success', 2], ['uncertain', 2], ['success', 12], ['uncertain', 12],
+  ] as const)('confirms a %s publish after %i stale 404s without repeating publication', async (outcome, misses) => {
+    const h = harness();
+    h.registry.set(names[1], metadata(names[1]));
+    h.onPublish(name => {
+      h.registry.set(name, metadata(name));
+      for (let index = 0; index < misses; index++) h.fetch.mockResolvedValueOnce(response(404));
+      if (outcome === 'uncertain') throw new Error('Synthetic lost publish response');
+    });
+    const result = await h.run();
+    expect(result.map((item: any) => item.status)).toEqual([outcome === 'success' ? 'published' : 'reconciled', 'existing']);
+    expect(h.events.filter(event => event.startsWith('publish:'))).toEqual([`publish:${names[0]}`]);
+    expect(h.fetch).toHaveBeenCalledTimes(2 + misses + 1);
+    expect(h.dependencies.sleep.mock.calls).toEqual(Array.from({ length: misses }, () => [5000]));
+    const urls = h.fetch.mock.calls.map(([url]) => url);
+    expect(new Set(urls).size).toBe(urls.length);
+  });
+
+  it.each(['conflict', 'auth', 'server', 'network', 'json', 'schema'])(
+    'stops polling immediately on %s after a transient 404', async outcome => {
+      const h = harness();
+      h.onPublish(() => {
+        h.fetch.mockResolvedValueOnce(response(404));
+        if (outcome === 'conflict') h.fetch.mockResolvedValueOnce(response(200, metadata(names[0], integrity(Buffer.from('different synthetic bytes')))));
+        if (outcome === 'auth') h.fetch.mockResolvedValueOnce(response(403));
+        if (outcome === 'server') h.fetch.mockResolvedValueOnce(response(503));
+        if (outcome === 'network') h.fetch.mockRejectedValueOnce(new Error('Synthetic network failure'));
+        if (outcome === 'json') h.fetch.mockResolvedValueOnce({ status: 200, json: async () => { throw new Error('Synthetic invalid JSON'); } });
+        if (outcome === 'schema') h.fetch.mockResolvedValueOnce(response(200, { error: 'Synthetic invalid metadata' }));
+      });
+      await expect(h.run()).rejects.toThrow('No publish retry was made');
+      expect(h.events.filter(event => event.startsWith('publish:'))).toEqual([`publish:${names[0]}`]);
+      expect(h.fetch).toHaveBeenCalledTimes(4);
+      expect(h.dependencies.sleep.mock.calls).toEqual([[5000]]);
+    });
 
   it.each(['missing', 'conflict', 'lookup-failed'])('stops after an uncertain publish with %s reconciliation', async outcome => {
     const h = harness();
@@ -221,7 +261,8 @@ describe('npm release orchestration (synthetic processes and registry only)', ()
     });
     await expect(h.run()).rejects.toThrow('No publish retry was made');
     expect(h.events.filter(event => event.startsWith('publish:'))).toEqual([`publish:${names[0]}`]);
-    expect(h.fetch).toHaveBeenCalledTimes(3);
+    expect(h.fetch).toHaveBeenCalledTimes(outcome === 'missing' ? 15 : 3);
+    expect(h.dependencies.sleep).toHaveBeenCalledTimes(outcome === 'missing' ? 12 : 0);
   });
 
   it('does not accept a successful process exit without matching registry confirmation', async () => {
@@ -229,6 +270,8 @@ describe('npm release orchestration (synthetic processes and registry only)', ()
     h.onPublish(() => {});
     await expect(h.run()).rejects.toThrow('not confirmed with matching integrity');
     expect(h.events.filter(event => event.startsWith('publish:'))).toHaveLength(1);
+    expect(h.fetch).toHaveBeenCalledTimes(15); // Two preflight reads plus thirteen confirmation reads.
+    expect(h.dependencies.sleep.mock.calls).toEqual(Array.from({ length: 12 }, () => [5000]));
   });
 
   it.each(['error', 'ERR!'])('reports safe npm %s diagnostics without raw authentication output', prefix => {
@@ -250,7 +293,7 @@ describe('npm release orchestration (synthetic processes and registry only)', ()
     h.onPublish(() => { throw npmFailure({ code: 1, stderr: 'npm error code ENEEDAUTH' }, 'publish'); });
     await expect(h.run()).rejects.toThrow('ENEEDAUTH; exit 1');
     expect(h.events.filter(event => event.startsWith('publish:'))).toHaveLength(1);
-    expect(h.fetch).toHaveBeenCalledTimes(3);
+    expect(h.fetch).toHaveBeenCalledTimes(15);
   });
 
   it('leaves an acknowledged first package resumable when the second publish fails', async () => {
@@ -286,6 +329,24 @@ describe('npm release orchestration (synthetic processes and registry only)', ()
   it('accepts a definitive 404 without interpreting an error body as metadata', async () => {
     const fetch = vi.fn(async () => ({ status: 404, json: async () => { throw new Error('Not JSON'); } }));
     expect(await registryVersion(names[0], version, fetch)).toBeNull();
+  });
+
+  it('uses fresh anonymous cache-bypassing URLs for every exact-version lookup', async () => {
+    const fetch = vi.fn(async (_url: string, _options: any) => response(404));
+    await registryVersion(names[0], version, fetch);
+    await registryVersion(names[0], version, fetch);
+    const urls = fetch.mock.calls.map(([url]) => new URL(url));
+    expect(urls[0].href).not.toBe(urls[1].href);
+    for (const [url, options] of fetch.mock.calls) {
+      const parsed = new URL(url);
+      expect(parsed.origin).toBe(REGISTRY);
+      expect(parsed.username).toBe('');
+      expect(parsed.password).toBe('');
+      expect(parsed.pathname).toBe(`/${encodeURIComponent(names[0])}/${version}`);
+      expect([...parsed.searchParams.keys()]).toEqual(['release_check']);
+      expect(options.headers).toEqual({ accept: 'application/json', 'cache-control': 'no-cache' });
+      expect(options.redirect).toBe('error');
+    }
   });
 
   it('requires an OIDC-capable npm before a publish attempt', async () => {

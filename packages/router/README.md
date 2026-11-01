@@ -713,6 +713,8 @@ workflow `npm-publish.yml`, no environment, and direct publishing. Normal releas
 need no manual button or Git tag; manual triggering remains available for recovery. It builds,
 tests, and checks both packages before publishing; a partial release can be
 retried from the original run only when already published content matches.
+Confirmation requests fresh registry metadata and tolerates a bounded visibility
+delay without repeating the upload.
 See the [release setup and recovery instructions](../../README.md#publishing-with-github-actions).
 
 ## License
