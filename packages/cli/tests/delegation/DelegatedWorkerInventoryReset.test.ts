@@ -39,6 +39,7 @@ describe('durable worker inventory during thread context reset', () => {
   beforeEach(async () => {
     home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'worker-inventory-reset-')));
     vi.stubEnv('HOME', home);
+    vi.stubEnv('USERPROFILE', home);
     vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || originalHomedir());
     directory = path.join(home, 'lanes');
     workspace = path.join(home, 'project');
@@ -225,7 +226,7 @@ describe('durable worker inventory during thread context reset', () => {
         const target = path.join(home, 'external-record');
         if (invalid === 'symlink') await fs.writeFile(target, saved);
         await fs.rm(file);
-        try { await fs.symlink(target, file); }
+        try { await fs.symlink(target, file, 'file'); }
         catch (error) {
           if (process.platform === 'win32' && ['EPERM', 'EACCES', 'ENOTSUP'].includes((error as NodeJS.ErrnoException).code ?? '')) {
             context.skip();

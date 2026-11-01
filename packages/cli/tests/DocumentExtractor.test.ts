@@ -102,7 +102,7 @@ describe.each(['worker', 'parser'])('bounded document extraction (%s)', mode => 
     await expect(extractDocument(filename, 'file.txt', new AbortController().signal, 1)).rejects.toThrow('time limit');
   });
   it('does not follow a symlink passed as parser input', async () => {
-    const filename = path.join(root, 'file'); await fs.writeFile(filename, 'secret'); await fs.symlink(filename, path.join(root, 'link'));
+    const filename = path.join(root, 'file'); await fs.writeFile(filename, 'secret'); await fs.symlink(filename, path.join(root, 'link'), 'file');
     await expect(extractDocument(path.join(root, 'link'), 'file.txt', new AbortController().signal)).rejects.toThrow();
   });
 });

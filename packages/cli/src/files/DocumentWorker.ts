@@ -178,7 +178,9 @@ async function pdf(data: Buffer): Promise<ExtractionResult> {
 }
 
 export async function parseDocument(filename: string, name: string): Promise<ExtractionResult> {
-  const handle = await fs.promises.open(filename, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const lstat = await fs.promises.lstat(filename);
+  if (!lstat.isFile() || lstat.isSymbolicLink()) throw new Error('Document input must be a regular file.');
+  const handle = await fs.promises.open(filename, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   let data: Buffer;
   try {
     const stat = await handle.stat();

@@ -30,6 +30,8 @@ describe('managed Git phases and native worker deadlines', { timeout: 30_000 }, 
     expectedShutdownFailure = false;
     fixture = await gitFixture();
     vi.spyOn(os, 'homedir').mockReturnValue(fixture.directory);
+    vi.stubEnv('HOME', fixture.directory);
+    vi.stubEnv('USERPROFILE', fixture.directory);
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     workers = [];
     manager = new DelegationManager(new DirectoryGuard([fixture.directory]), (_guard, _config, cwd) => {
@@ -57,6 +59,7 @@ describe('managed Git phases and native worker deadlines', { timeout: 30_000 }, 
     if (expectedShutdownFailure) await expect(manager.destroy()).rejects.toThrow('storage ownership was retained');
     else await manager.destroy();
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
     await fs.rm(fixture.directory, { recursive: true, force: true });
   });
   const start = (scope: ReturnType<DelegationManager['begin']>, id = 'task') =>

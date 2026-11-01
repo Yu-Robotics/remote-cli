@@ -30,8 +30,10 @@ describe('device identities', () => {
     expect(verify(null, Buffer.from(`remote-cli-device-v1\ndevice-1\n${nonce}`), key.publicKey, Buffer.from(signDeviceProof(key, 'device-1', nonce), 'base64'))).toBe(true);
     const dir = path.join(root, 'device-identities');
     const [name] = await fs.readdir(dir);
-    expect((await fs.stat(path.join(dir, name))).mode & 0o777).toBe(0o600);
-    expect((await fs.stat(dir)).mode & 0o777).toBe(0o700);
+    if (process.platform !== 'win32') {
+      expect((await fs.stat(path.join(dir, name))).mode & 0o777).toBe(0o600);
+      expect((await fs.stat(dir)).mode & 0o777).toBe(0o700);
+    }
     expect((await ensureIdentity(root, 'https://router.test', 'device-1', true)).publicKey).not.toBe(key.publicKey);
   });
   it('refuses a symlinked credential or a public credential file', async () => {
@@ -39,10 +41,12 @@ describe('device identities', () => {
     const dir = path.join(root, 'device-identities');
     const [name] = await fs.readdir(dir);
     const filename = path.join(dir, name);
-    await fs.chmod(filename, 0o644);
-    await expect(loadIdentity(root, 'https://router.test', 'device')).rejects.toThrow('private');
+    if (process.platform !== 'win32') {
+      await fs.chmod(filename, 0o644);
+      await expect(loadIdentity(root, 'https://router.test', 'device')).rejects.toThrow('private');
+    }
     await fs.rename(filename, `${filename}.real`);
-    await fs.symlink(`${filename}.real`, filename);
+    await fs.symlink(`${filename}.real`, filename, 'file');
     await expect(loadIdentity(root, 'https://router.test', 'device')).rejects.toThrow('private');
   });
   it('does not treat corrupt identities as permission to fall back to legacy registration', async () => {

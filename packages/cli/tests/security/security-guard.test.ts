@@ -1,18 +1,19 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as path from 'path';
 import * as fs from 'fs';
+import os from 'os';
 
 // We'll test the validateToolUse function exported from security-guard
 // The module should export this function for testing
 import { validateToolUse, loadAllowedDirs, ValidationResult } from '../../src/security/security-guard';
 
 describe('security-guard', () => {
-  const mockHome = '/home/testuser';
+  const mockHome = path.resolve(os.tmpdir(), 'security-guard-home');
   const originalEnv = process.env;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    process.env = { ...originalEnv, HOME: mockHome };
+    process.env = { ...originalEnv, HOME: mockHome, USERPROFILE: mockHome };
   });
 
   afterEach(() => {
@@ -91,7 +92,7 @@ describe('security-guard', () => {
         const hookData = {
           tool_name: 'Write',
           tool_input: {
-            file_path: '/home/testuser/projects/myapp/newfile.ts'
+            file_path: path.join(mockHome, 'projects', 'myapp', 'newfile.ts')
           }
         };
 
@@ -101,7 +102,7 @@ describe('security-guard', () => {
       });
 
       it('should handle tilde paths in file_path', () => {
-        const allowedDirs = ['/home/testuser/projects/myapp'];
+        const allowedDirs = [path.join(mockHome, 'projects', 'myapp')];
         const hookData = {
           tool_name: 'Read',
           tool_input: {
@@ -570,7 +571,7 @@ describe('security-guard', () => {
     let tmpConfig: string;
 
     beforeEach(() => {
-      tmpConfig = path.join('/tmp', '.remote-cli-test-config.json');
+      tmpConfig = path.join(os.tmpdir(), '.remote-cli-test-config.json');
     });
 
     afterEach(() => {

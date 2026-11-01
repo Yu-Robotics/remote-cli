@@ -31,7 +31,8 @@ describe('managed agent delegation', () => {
 
   beforeEach(() => {
     expectedShutdownFailure = false;
-    home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'delegation-test-')));
+    // Match native async realpath checks, including Windows short-name expansion.
+    home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'delegation-test-')));
     vi.spyOn(os, 'homedir').mockReturnValue(home);
     vi.stubEnv('HOME', home);
     vi.stubEnv('USERPROFILE', home);

@@ -7,11 +7,22 @@ vi.mock('os', async importOriginal => {
   const homedir = () => process.env.REMOTE_CLI_TEST_AGY_HOME ?? actual.homedir();
   return { ...actual, homedir, default: { ...actual, homedir } };
 });
+// Execute only our synthetic JavaScript fixture through Node on every OS.
+// Windows does not execute extensionless shebang scripts through execFile.
+vi.mock('child_process', async importOriginal => {
+  const actual = await importOriginal<typeof import('child_process')>();
+  const fixtureCommand = (command: string) => command.endsWith('fixture-agy.cjs');
+  return { ...actual,
+    spawn: (command: string, args: string[], options: any) => fixtureCommand(command)
+      ? actual.spawn(process.execPath, [command, ...args], options) : actual.spawn(command, args, options),
+    execFile: (command: string, args: string[], options: any, callback: any) => fixtureCommand(command)
+      ? actual.execFile(process.execPath, [command, ...args], options, callback) : actual.execFile(command, args, options, callback),
+  };
+});
 import { configureAgyDelegation } from '../../src/executor/agy/AgyDelegationConfig';
 import { AgyExecutor } from '../../src/executor/AgyExecutor';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 
-const originalHome = os.homedir();
 const fixture = String.raw`
 const fs = require('fs'),path = require('path');
 const file = path.join(process.env.HOME,'.gemini/config/mcp_config.json');
@@ -41,9 +52,9 @@ describe('AGY thread-local delegation configuration', () => {
   let original: string;
   const executors: AgyExecutor[] = [];
   beforeEach(() => {
-    home = fs.realpathSync(fs.mkdtempSync(path.join(originalHome, '.agy-delegation-test-')));
+    home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'agy-delegation-test-')));
     vi.stubEnv('REMOTE_CLI_TEST_AGY_HOME', home);
-    command = path.join(home, 'agy');
+    command = path.join(home, 'fixture-agy.cjs');
     fs.writeFileSync(command, `#!${process.execPath}\n${fixture}`, { mode: 0o700 });
     fs.mkdirSync(path.join(home, '.gemini/config'), { recursive: true });
     original = JSON.stringify({ mcpServers: { personal: { command: '/personal', enabledTools: ['read'] } }, custom: true });
@@ -63,6 +74,7 @@ describe('AGY thread-local delegation configuration', () => {
   };
 
   it('registers only in the coordinator HOME and restores the original config on opt-out', async () => {
+    const write = vi.spyOn(fs, 'writeFileSync');
     const executor = makeExecutor(home, command, 'coordinator');
     const connection = { url: 'http://127.0.0.1:1/', token: 'never-persist-this' };
     await executor.configureDelegation(connection);
@@ -71,7 +83,8 @@ describe('AGY thread-local delegation configuration', () => {
     expect(config.mcpServers.personal).toEqual(JSON.parse(original).mcpServers.personal);
     expect(config.mcpServers['remote-cli-delegation'].command).toBe(process.execPath);
     expect(fs.readFileSync(privateConfig, 'utf8')).not.toContain(connection.token);
-    expect(fs.statSync(privateConfig).mode & 0o777).toBe(0o600);
+    expect(write).toHaveBeenCalledWith(privateConfig, expect.any(String), expect.objectContaining({ mode: 0o600 }));
+    if (process.platform !== 'win32') expect(fs.statSync(privateConfig).mode & 0o777).toBe(0o600);
     expect(await executor.execute('hello')).toMatchObject({ success: true, output: 'delegation enabled' });
     expect(await makeExecutor(home, command, 'worker').execute('hello')).toMatchObject({ success: true, output: 'delegation disabled' });
     await executor.configureDelegation(undefined);
@@ -87,7 +100,7 @@ describe('AGY thread-local delegation configuration', () => {
   it('removes stale registration after recreation with delegation disabled', async () => {
     const threadHome = path.join(home, 'thread');
     fs.mkdirSync(path.join(threadHome, '.gemini'), { recursive: true });
-    fs.symlinkSync(path.join(home, '.gemini/config'), path.join(threadHome, '.gemini/config'));
+    fs.symlinkSync(path.join(home, '.gemini/config'), path.join(threadHome, '.gemini/config'), 'dir');
     await configureAgyDelegation(command, threadHome, true);
     await configureAgyDelegation(command, threadHome, true);
     await configureAgyDelegation(command, threadHome, false);

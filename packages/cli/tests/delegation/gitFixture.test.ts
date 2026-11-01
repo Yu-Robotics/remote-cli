@@ -85,7 +85,7 @@ describe('pristine real-Git fixture templates', { timeout: 30_000 }, () => {
     const first = await ownedFixture();
     const second = await ownedFixture();
     const third = await ownedFixture();
-    expect(gitCalls()).toHaveLength(6);
+    expect(gitCalls()).toHaveLength(8);
     expect(gitCalls().filter(([, args]) => args?.includes('init'))).toHaveLength(1);
     expect(gitCalls().filter(([, args]) => args?.includes('commit'))).toHaveLength(1);
     expect(scratch).toHaveBeenCalledTimes(4);
@@ -100,13 +100,15 @@ describe('pristine real-Git fixture templates', { timeout: 30_000 }, () => {
     expect(await gitText(first.root, ['rev-parse', 'HEAD'])).toBe(first.head);
     expect(await gitText(first.root, ['symbolic-ref', '--short', 'HEAD'])).toBe('main');
     expect(await gitText(first.root, ['config', '--local', 'user.email'])).toBe('test@example.com');
+    expect(await gitText(first.root, ['config', '--local', 'core.autocrlf'])).toBe('false');
+    expect(await gitText(first.root, ['config', '--local', 'core.eol'])).toBe('lf');
     expect(await gitText(first.root, ['status', '--porcelain'])).toBe('');
   });
 
   it('shares simultaneous first setup while giving every caller its own writable copy', async () => {
     const scratch = trackScratchDirectories();
     const fixtures = await Promise.all(Array.from({ length: 4 }, () => ownedFixture()));
-    expect(gitCalls()).toHaveLength(6);
+    expect(gitCalls()).toHaveLength(8);
     expect(scratch).toHaveBeenCalledTimes(5);
     expect(new Set(fixtures.map(fixture => fixture.directory)).size).toBe(4);
     expect(new Set(fixtures.map(fixture => fixture.head)).size).toBe(1);
@@ -119,7 +121,7 @@ describe('pristine real-Git fixture templates', { timeout: 30_000 }, () => {
     }
     const next = await ownedFixture();
     expect(await treeBytes(next.root)).toEqual(baseline);
-    expect(gitCalls()).toHaveLength(6);
+    expect(gitCalls()).toHaveLength(8);
   });
 
   it('keeps files, index, config, HEAD, objects, worktrees and ignored data independent', async () => {
@@ -148,14 +150,14 @@ describe('pristine real-Git fixture templates', { timeout: 30_000 }, () => {
     await fs.writeFile(path.join(changed.root, '.env'), 'SYNTHETIC_IGNORED=fixture\n');
     await fs.mkdir(path.join(changed.root, 'node_modules'));
     await fs.writeFile(path.join(changed.root, 'node_modules', 'synthetic.txt'), 'Synthetic ignored data\n');
-    await fs.symlink(path.join(changed.root, 'source.txt'), path.join(changed.root, 'absolute-alias'));
+    await fs.symlink(path.join(changed.root, 'nested'), path.join(changed.root, 'absolute-alias'), process.platform === 'win32' ? 'junction' : 'dir');
     expect(await treeBytes(untouched.root)).toEqual(baseline);
     const next = await ownedFixture();
     expect(await treeBytes(next.root)).toEqual(baseline);
     for (const fixture of [untouched, next]) {
-      expect(await gitText(fixture.root, ['rev-parse', '--show-toplevel'])).toBe(fixture.root);
+      expect(path.normalize(await gitText(fixture.root, ['rev-parse', '--show-toplevel']))).toBe(fixture.root);
       expect(await gitText(fixture.root, ['worktree', 'list', '--porcelain'])).toBe(
-        `worktree ${fixture.root}\nHEAD ${fixture.head}\nbranch refs/heads/main`);
+        `worktree ${fixture.root.split(path.sep).join('/')}\nHEAD ${fixture.head}\nbranch refs/heads/main`);
       expect(await gitText(fixture.root, ['config', '--local', 'user.name'])).toBe('Test User');
       expect(await gitText(fixture.root, ['status', '--porcelain'])).toBe('');
     }
@@ -205,7 +207,7 @@ describe('pristine real-Git fixture templates', { timeout: 30_000 }, () => {
     write.mockRestore();
     vi.mocked(childProcess.spawn).mockClear();
     const fixtures = await Promise.all([ownedFixture(), ownedFixture()]);
-    expect(gitCalls()).toHaveLength(6);
+    expect(gitCalls()).toHaveLength(8);
     expect(fixtures[0].directory).not.toBe(fixtures[1].directory);
     expect(await treeBytes(fixtures[0].root)).toEqual(await treeBytes(fixtures[1].root));
   });
@@ -253,7 +255,7 @@ describe('pristine real-Git fixture templates', { timeout: 30_000 }, () => {
     const fixture = await ownedFixture();
     expect(path.dirname(fixture.directory)).toBe(target);
     expect(await fs.realpath(fixture.directory)).toBe(fixture.directory);
-    expect(await gitText(fixture.root, ['rev-parse', '--show-toplevel'])).toBe(fixture.root);
+    expect(path.normalize(await gitText(fixture.root, ['rev-parse', '--show-toplevel']))).toBe(fixture.root);
   });
 
   it('cleans only its private template, preserving callers and similarly named directories', async () => {

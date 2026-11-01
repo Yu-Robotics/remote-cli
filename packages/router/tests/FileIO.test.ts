@@ -27,7 +27,8 @@ describe('bounded attachment IO', () => {
     try { expect(await readPrivateJson(filename)).toEqual({ name: 'complete metadata' }); }
     finally { spy.mockRestore(); }
     await fs.writeFile(filename, 'x'.repeat(64 * 1024 + 1)); await expect(readPrivateJson(filename)).rejects.toThrow('Unsafe');
-    await fs.symlink(filename, path.join(root, 'link.json')); await expect(readPrivateJson(path.join(root, 'link.json'))).rejects.toThrow();
+    await fs.symlink(filename, path.join(root, 'link.json')); await expect(readPrivateJson(path.join(root, 'link.json'))).rejects.toThrow('Unsafe attachment metadata.');
+    await expect(readPrivateJson(root)).rejects.toThrow('Unsafe attachment metadata.');
   });
 
   it('accepts exactly 20 MiB with streaming SHA-256 and restrictive permissions', async () => {
@@ -35,7 +36,7 @@ describe('bounded attachment IO', () => {
     const result = await saveStream(chunks(), filename, FILE_MAX_BYTES, new AbortController().signal);
     expect(result.size).toBe(FILE_MAX_BYTES);
     expect(result.sha256).toMatch(/^[a-f0-9]{64}$/);
-    expect((await fs.stat(filename)).mode & 0o777).toBe(0o600);
+    expect((await fs.stat(filename)).mode & 0o777).toBe(process.platform === 'win32' ? 0o666 : 0o600);
     const hash = createHash('sha256');
     for await (const chunk of readOwnedFile(filename)) hash.update(chunk);
     expect(result.sha256).toBe(hash.digest('hex'));
@@ -67,7 +68,8 @@ describe('bounded attachment IO', () => {
     expect(await fs.readFile(original, 'utf8')).toBe('keep');
     const link = path.join(root, 'link');
     await fs.symlink(original, link);
-    expect(() => readOwnedFile(link)).toThrow();
+    expect(() => readOwnedFile(link)).toThrow('Refusing to read symlink or non-regular file.');
+    expect(() => readOwnedFile(root)).toThrow('Refusing to read symlink or non-regular file.');
     await expect(saveStream(Readable.from(['bad']), link, FILE_MAX_BYTES, new AbortController().signal)).rejects.toThrow();
     expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
   });
