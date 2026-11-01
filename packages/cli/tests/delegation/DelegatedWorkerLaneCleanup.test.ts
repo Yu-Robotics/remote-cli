@@ -13,7 +13,7 @@ function lane(backend: DelegatedWorkerLane['backend']): DelegatedWorkerLane {
     executorThreadId: workerLaneExecutorId(id),
     threadId: 'parent-thread',
     backend,
-    workingDirectory: '/tmp/workspace',
+    workingDirectory: path.join(os.tmpdir(), 'synthetic-workspace'),
     workspaceGeneration: 0,
     state: 'dirty',
     createdAt: 1,

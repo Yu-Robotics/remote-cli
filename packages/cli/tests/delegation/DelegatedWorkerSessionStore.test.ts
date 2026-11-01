@@ -23,6 +23,8 @@ describe('DelegatedWorkerSessionStore', () => {
   beforeEach(async () => {
     home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'delegated-worker-store-')));
     vi.spyOn(os, 'homedir').mockReturnValue(home);
+    vi.stubEnv('HOME', home);
+    vi.stubEnv('USERPROFILE', home);
     directory = path.join(home, 'lanes');
     workspace = path.join(home, 'workspace');
     await fs.mkdir(workspace);
@@ -30,6 +32,7 @@ describe('DelegatedWorkerSessionStore', () => {
 
   afterEach(async () => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
     await fs.rm(home, { recursive: true, force: true });
   });
 
@@ -166,6 +169,37 @@ describe('DelegatedWorkerSessionStore', () => {
     await expect(store.markReady(first.lane.id)).rejects.toThrow('quarantined');
     await expect(store.markDirty(first.lane.id, 'Must not overwrite history')).rejects.toThrow('quarantined');
     expect(await fs.readFile(file)).toEqual(before);
+  });
+
+  it.each(['reuse', 'reload'] as const)('preserves a noncanonical Windows alias during %s instead of relaxing discard checks', async operation => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    const original = new DelegatedWorkerSessionStore(directory);
+    const { lane } = await original.acquire(identity(workspace));
+    await original.markReady(lane.id);
+    const file = path.join(directory, `${lane.id}.json`);
+    const snapshot = await fs.readFile(file);
+    const realpath = fs.realpath.bind(fs);
+    // Model native Windows realpath expanding a short-name alias. The inode is
+    // still regular; a lexical alias alone must not satisfy canonical identity.
+    const expanded = path.join(home, 'expanded-lanes');
+    const aliases = vi.spyOn(fs, 'realpath').mockImplementation(async (...args) => {
+      if (args[0] === directory) return expanded;
+      return realpath(...args);
+    });
+    const store = operation === 'reuse' ? original : new DelegatedWorkerSessionStore(directory);
+    if (operation === 'reuse') expect((await store.acquire(identity(workspace))).reused).toBe(false);
+    else expect(await store.lanesForThread('parent-thread')).toEqual([]);
+    expect(await store.getInventoryStatus()).toEqual({ complete: false, quarantinedRecords: 1 });
+    await expect(store.cleanupCandidates()).rejects.toThrow('inventory is incomplete');
+    await expect(store.remove(lane.id)).rejects.toThrow('preserved');
+    expect(await fs.readFile(file)).toEqual(snapshot);
+    aliases.mockRestore();
+    // Canonical fixtures remain healthy. An already quarantined store stays
+    // fenced; only a fresh, complete inventory can reuse the preserved record.
+    expect((await store.getInventoryStatus()).complete).toBe(false);
+    const canonical = new DelegatedWorkerSessionStore(directory);
+    expect((await canonical.acquire(identity(workspace))).lane.id).toBe(lane.id);
+    expect(await canonical.getInventoryStatus()).toEqual({ complete: true, quarantinedRecords: 0 });
   });
 
   it('retains known lane identity when exact removal fails so cleanup can retry', async () => {

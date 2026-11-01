@@ -21,6 +21,9 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
   let workers: { cwd: string; executor: IExecutor; finish: (result: ExecuteResult) => void }[];
   let onWorkerCreated: ((worker: typeof workers[number]) => void) | undefined;
   let expectedShutdownFailure = false;
+  let settlingFixture = false;
+  let pendingPhases: Set<Promise<unknown>>;
+  let phaseTimings: { name: string; elapsedMs: number }[];
   const makeManager = (disposalSupported = true) => new DelegationManager(new DirectoryGuard([fixture.directory]), (_guard, _config, cwd) => {
     if (!cwd) throw new Error('Fixture worker requires a working directory');
     let finish!: (result: ExecuteResult) => void;
@@ -30,12 +33,16 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
       resetContext: vi.fn(), getCurrentWorkingDirectory: () => cwd, setWorkingDirectory: vi.fn(),
     } as unknown as IExecutor;
     workers.push({ cwd, executor, finish });
+    if (settlingFixture) finish({ success: false, error: 'Synthetic fixture teardown' });
     onWorkerCreated?.(workers[workers.length - 1]);
     return executor;
   }, new BackendRegistry(async () => 'fixture 1.0'), undefined, undefined, undefined, undefined,
       new DelegatedWorkspaceManager(undefined, disposalSupported));
   beforeEach(async () => {
     expectedShutdownFailure = false;
+    settlingFixture = false;
+    pendingPhases = new Set();
+    phaseTimings = [];
     fixture = await gitFixture();
     vi.spyOn(os, 'homedir').mockReturnValue(fixture.directory);
     vi.stubEnv('HOME', fixture.directory);
@@ -48,12 +55,106 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
       backend: 'codex', config: { type: 'auto' }, onToolUse: vi.fn(), onToolResult: vi.fn(), onNotice: vi.fn(),
       onApproval: vi.fn(), onApprovalResolved: vi.fn() };
   });
-  afterEach(async () => {
+  const settleFixture = async (): Promise<void> => {
+    settlingFixture = true;
+    workers.forEach(worker => worker.finish({ success: false, error: 'Synthetic fixture teardown' }));
+    // A deadline rejects the phase waiter, not its filesystem/Git operation.
+    // Drain that operation before destroy can release storage ownership.
+    while (pendingPhases.size) await Promise.allSettled([...pendingPhases]);
     if (expectedShutdownFailure) await expect(manager.destroy()).rejects.toThrow('storage ownership was retained');
     else await manager.destroy();
-    vi.restoreAllMocks();
-    vi.unstubAllEnvs();
-    await fs.rm(fixture.directory, { recursive: true, force: true });
+  };
+  afterEach(async () => {
+    const ownedFixture = fixture;
+    let settled = false;
+    try {
+      await settleFixture();
+      settled = true;
+    } finally {
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
+      if (settled) await fs.rm(ownedFixture.directory, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  const lifecyclePhase = async <T>(name: string, action: () => Promise<T>, timeoutMs = 30_000): Promise<T> => {
+    const began = Date.now();
+    const operation = Promise.resolve().then(action);
+    pendingPhases.add(operation);
+    void operation.then(() => pendingPhases.delete(operation), () => pendingPhases.delete(operation));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([operation, new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`Phase exceeded ${timeoutMs}ms`)), timeoutMs);
+      })]);
+    } catch (error) {
+      throw new Error(`Git lifecycle phase failed: ${name}; elapsedMs=${Date.now() - began}; workers=${workers.length}; `
+        + `completed=${JSON.stringify(phaseTimings)}`, { cause: error });
+    } finally {
+      clearTimeout(timer);
+      phaseTimings.push({ name, elapsedMs: Date.now() - began });
+    }
+  };
+
+  it.each(['assertion', 'deadline'] as const)('drains unfinished phase work before fixture ownership release after a %s failure', async failure => {
+    await manager.reconcilePendingWorkerLanes();
+    const scope = manager.begin(parent);
+    let resume!: () => void;
+    const gate = new Promise<void>(resolve => { resume = resolve; });
+    const marker = path.join(fixture.directory, 'settled-phase.txt');
+    const ownership = `${manager.laneStore.storageDirectory}.ownership`;
+    const collecting = lifecyclePhase('gated result collection', async () => {
+      await gate;
+      // Exercise a launch which finishes preparation only after teardown starts.
+      await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Read the fixture' }, 'launch');
+      const results = await scope.collectPendingResults();
+      expect((await fs.lstat(ownership)).isFile()).toBe(true);
+      await fs.writeFile(marker, 'phase settled before ownership release');
+      return results;
+    }, failure === 'deadline' ? 10 : 30_000);
+    // Observe rejection immediately; a deadline leaves the original action tracked.
+    const outcome = collecting.catch(error => error as Error);
+    const destroy = vi.spyOn(manager, 'destroy');
+    const release = vi.spyOn(DelegationOwnership.prototype, 'release');
+    let entered!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const exercise = (async () => {
+      try {
+        if (failure === 'deadline') await collecting;
+        else expect(workers).toHaveLength(1);
+      } finally {
+        const shutdown = settleFixture();
+        entered();
+        await shutdown;
+      }
+    })().catch(error => error as Error);
+    await started;
+    try {
+      expect(pendingPhases.size).toBe(1);
+      expect(destroy).not.toHaveBeenCalled();
+      expect(release).not.toHaveBeenCalled();
+      expect((await fs.lstat(ownership)).isFile()).toBe(true);
+      await expect(fs.lstat(marker)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      resume();
+      await exercise;
+    }
+    const error = await exercise;
+    expect(error).toBeInstanceOf(Error);
+    if (failure === 'deadline') {
+      expect((error as Error).message).toContain('gated result collection');
+      expect((error as Error).cause).toMatchObject({ message: 'Phase exceeded 10ms' });
+    } else {
+      expect((error as Error).message).toContain('to have a length of 1');
+      expect(await outcome).toHaveLength(1);
+    }
+    expect(pendingPhases.size).toBe(0);
+    expect(workers).toHaveLength(1);
+    expect(workers[0].executor.waitForManagedProcessGroupExit).toHaveBeenCalled();
+    expect(await fs.readFile(marker, 'utf8')).toBe('phase settled before ownership release');
+    expect(release).toHaveBeenCalledOnce();
+    await expect(fs.lstat(ownership)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect((await fs.stat(fixture.directory)).isDirectory()).toBe(true);
   });
 
   it('waits for managed group confirmation after direct transport exit before collecting or deleting', async () => {
@@ -201,13 +302,13 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
     expect(task.taskId).toBe(result.taskId);
   });
 
-  it('removes dependency links without removing their outside targets', async context => {
+  it('removes dependency file links without removing their outside targets', async context => {
     const scope = manager.begin(parent);
     await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Use fixture dependencies' }, 'launch');
     const outside = path.join(fixture.directory, 'outside-dependency');
     await fs.writeFile(outside, 'keep outside data');
     await fs.mkdir(path.join(workers[0].cwd, 'node_modules'));
-    try { await fs.symlink(outside, path.join(workers[0].cwd, 'node_modules', 'tool')); }
+    try { await fs.symlink(outside, path.join(workers[0].cwd, 'node_modules', 'tool'), 'file'); }
     catch (error) {
       if (!['EPERM', 'ENOTSUP', 'EACCES'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
       workers[0].finish({ success: true });
@@ -215,9 +316,13 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
       context.skip(); return;
     }
     workers[0].finish({ success: true });
-    await scope.collectPendingResults();
-    await expect(fs.stat(workers[0].cwd)).rejects.toMatchObject({ code: 'ENOENT' });
+    const [result] = await scope.collectPendingResults();
+    expect(result).toMatchObject({ state: 'succeeded', artifact: { disposition: 'applied' } });
+    const summary = (await manager.workspaceManager.enumerateArtifacts()).items.find(item => item.taskId === result.taskId);
+    expect(summary?.cleanup).toBeUndefined();
+    expect(summary?.checkoutState).toBe('reclaimed');
     expect(await fs.readFile(outside, 'utf8')).toBe('keep outside data');
+    await expect(fs.lstat(workers[0].cwd)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('exports required ignored reports before deleting the checkout', async () => {
@@ -259,29 +364,41 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
     ]);
   });
 
+  // Four real-Git phases retain their individual 30-second deadlines. The outer
+  // budget covers their sum and diagnostic overhead, rather than all work competing
+  // for one 30-second window on native Windows. Teardown has its own drain window.
   it('preserves a failed code snapshot, removes its directory and recreates the lane', async () => {
     let scope = manager.begin(parent);
-    await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Change the fixture' }, 'launch');
-    const directory = workers[0].cwd;
-    await fs.writeFile(path.join(directory, 'source.txt'), 'recoverable failure\n');
-    workers[0].finish({ success: false, error: 'Fixture test failed' });
-    const [failed] = await scope.collectPendingResults();
-    expect(failed.state).toBe('failed');
-    expect(failed.artifact?.disposition).toBe('retained');
-    await expect(fs.stat(directory)).rejects.toMatchObject({ code: 'ENOENT' });
-    expect(await scope.checkArtifactCloseout()).toEqual([]);
-    const artifact = await scope.invoke('remote_cli_integrate', { taskId: failed.taskId, action: 'inspect' }, 'inspect') as { changedFiles: string[] };
-    expect(artifact.changedFiles).toContain('source.txt');
-    await scope.close();
-    scope = manager.begin(parent);
-    await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Read fresh input' }, 'second');
-    expect(workers[1].cwd).toBe(directory);
-    expect(await fs.readFile(path.join(directory, 'source.txt'), 'utf8')).toContain('first');
-    workers[1].finish({ success: true });
-    await scope.collectPendingResults();
-    await scope.close();
-    expect(await manager.resetWorkerLanes(parent.thread.id)).toBe(1);
-  });
+    const directory = await lifecyclePhase('prepare and edit the first checkout', async () => {
+      await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Change the fixture' }, 'launch');
+      const cwd = workers[0].cwd;
+      await fs.writeFile(path.join(cwd, 'source.txt'), 'recoverable failure\n');
+      return cwd;
+    });
+    await lifecyclePhase('capture the failed snapshot, reclaim and inspect it', async () => {
+      workers[0].finish({ success: false, error: 'Fixture test failed' });
+      const [failed] = await scope.collectPendingResults();
+      expect(failed.state).toBe('failed');
+      expect(failed.artifact?.disposition).toBe('retained');
+      await expect(fs.stat(directory)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(await scope.checkArtifactCloseout()).toEqual([]);
+      const artifact = await scope.invoke('remote_cli_integrate', { taskId: failed.taskId, action: 'inspect' }, 'inspect') as { changedFiles: string[] };
+      expect(artifact.changedFiles).toContain('source.txt');
+      await scope.close();
+    });
+    await lifecyclePhase('recreate the same lane with fresh input', async () => {
+      scope = manager.begin(parent);
+      await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Read fresh input' }, 'second');
+      expect(workers[1].cwd).toBe(directory);
+      expect(await fs.readFile(path.join(directory, 'source.txt'), 'utf8')).toContain('first');
+    });
+    await lifecyclePhase('collect the second worker and reset the lane', async () => {
+      workers[1].finish({ success: true });
+      await scope.collectPendingResults();
+      await scope.close();
+      expect(await manager.resetWorkerLanes(parent.thread.id)).toBe(1);
+    });
+  }, 125_000);
 
   it('excludes old artifacts and lanes after durable conversation detachment and restart', async () => {
     const scope = manager.begin(parent);

@@ -5,6 +5,7 @@ import path from 'path';
 import { DELEGATION_BACKENDS, type DelegationBackend } from './contract';
 import { hasLegacyDiscardTombstone } from './LegacyWorkspaceCleanup';
 import { ThreadContextReset } from '../thread/ThreadContextReset';
+import { replaceAtomicFile } from './AtomicFile';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const STATES = new Set<DelegatedWorkerLaneState>(['preparing', 'running', 'ready', 'dirty']);
@@ -510,7 +511,7 @@ export class DelegatedWorkerSessionStore {
     const temporary = `${file}.${randomUUID()}.tmp`;
     try {
       await fs.writeFile(temporary, JSON.stringify(lane), { mode: 0o600 });
-      await fs.rename(temporary, file);
+      await replaceAtomicFile(temporary, file);
     } finally {
       await fs.rm(temporary, { force: true }).catch(() => undefined);
     }

@@ -10,6 +10,8 @@ import { captureCheckpoint, createCheckpointCommit, GIT_OID, GitCommandError, gi
   type GitCheckpoint } from './GitCheckpoint';
 import { checkFilesInBatches } from './BoundedFileChecks';
 import { LfsCheckoutVerifier } from './LfsCheckout';
+import { nativeGitPath } from './GitPaths';
+import { replaceAtomicFile } from './AtomicFile';
 import { completedLegacyDiscard } from './LegacyWorkspaceCleanup';
 import { assertDisposableTree, exportWorkspaceFiles, verifyWorkspaceExports, type WorkspaceExport,
   WorkspaceCleanupError } from './WorkspaceDisposal';
@@ -1015,7 +1017,7 @@ export class DelegatedWorkspaceManager {
         try { decoded = encoded.startsWith('"') ? JSON.parse(encoded) : encoded; }
         catch { throw new Error('Unsupported Git worktree path encoding; manual recovery is required'); }
         if (typeof decoded !== 'string') throw new Error('Invalid Git worktree path');
-        selected = decoded === directory;
+        selected = nativeGitPath(decoded) === directory;
         if (selected) result = { locked: false };
       } else if (selected && result) {
         if (field.startsWith('HEAD ')) result.head = field.slice(5);
@@ -1188,7 +1190,7 @@ export class DelegatedWorkspaceManager {
       throw new Error('Owned worker checkout is missing; an explicit reclamation receipt is required');
     }
     if (await fs.realpath(workspace.directory) !== workspace.directory
-      || await gitText(workspace.directory, ['rev-parse', '--show-toplevel']) !== workspace.directory
+      || nativeGitPath(await gitText(workspace.directory, ['rev-parse', '--show-toplevel'])) !== workspace.directory
       || await fs.realpath(path.resolve(workspace.directory, await gitText(workspace.directory,
         ['rev-parse', '--git-common-dir']))) !== workspace.source.commonDirectory) {
       throw new Error('Owned worker worktree identity changed');
@@ -1303,6 +1305,6 @@ export class DelegatedWorkspaceManager {
     const target = path.join(this.directory, kind, `${id}.json`);
     const temporary = `${target}.${randomUUID()}.tmp`;
     await fs.writeFile(temporary, data, { mode: 0o600, flag: 'wx' });
-    try { await fs.rename(temporary, target); } finally { await fs.rm(temporary, { force: true }); }
+    try { await replaceAtomicFile(temporary, target); } finally { await fs.rm(temporary, { force: true }); }
   }
 }

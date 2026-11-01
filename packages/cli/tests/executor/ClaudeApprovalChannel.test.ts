@@ -32,8 +32,7 @@ describe('ClaudePersistentExecutor approval channel', () => {
   }
 
   beforeEach(async () => {
-    // Keep Unix socket paths below the macOS length limit and isolate stored data.
-    home = fs.realpathSync(fs.mkdtempSync(path.join('/tmp', 'claude-approval-')));
+    home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'claude-approval-')));
     vi.spyOn(os, 'homedir').mockReturnValue(home);
     executor = new ClaudePersistentExecutor(
       new DirectoryGuard([home]),
@@ -48,9 +47,94 @@ describe('ClaudePersistentExecutor approval channel', () => {
   });
 
   afterEach(async () => {
-    await executor.destroy();
+    await executor?.destroy();
     vi.restoreAllMocks();
     fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  it('owns and removes its IPC endpoint without removing unrelated files', async () => {
+    const endpointDirectory = (executor as any).approvalSocketDirectory;
+    const unrelated = path.join(home, 'keep.txt');
+    fs.writeFileSync(unrelated, 'fixture');
+    if (process.platform === 'win32') {
+      expect(socketPath.startsWith('\\\\.\\pipe\\')).toBe(true);
+      expect(endpointDirectory).toBeUndefined();
+    } else {
+      expect(fs.statSync(endpointDirectory).mode & 0o777).toBe(0o700);
+      expect(fs.statSync(socketPath).mode & 0o777).toBe(0o600);
+    }
+    await executor.destroy();
+    if (endpointDirectory) expect(fs.existsSync(endpointDirectory)).toBe(false);
+    expect(fs.readFileSync(unrelated, 'utf8')).toBe('fixture');
+    await expect(requestApproval({})).rejects.toThrow();
+  });
+
+  it('cleans up a failed listener and can allocate a fresh endpoint on retry', async () => {
+    await executor.destroy();
+    executor = new ClaudePersistentExecutor(new DirectoryGuard([home]), home, 'retry-test');
+    let failedEndpoint = '';
+    vi.spyOn(net.Server.prototype, 'listen').mockImplementationOnce(function (this: net.Server, endpoint: any) {
+      failedEndpoint = endpoint;
+      queueMicrotask(() => this.emit('error', new Error('Synthetic listener failure')));
+      return this;
+    });
+    await expect((executor as any).ensureApprovalServer()).rejects.toThrow('Synthetic listener failure');
+    expect((executor as any).approvalServer).toBeNull();
+    if (process.platform !== 'win32') expect(fs.existsSync(path.dirname(failedEndpoint))).toBe(false);
+    socketPath = await (executor as any).ensureApprovalServer();
+    expect(socketPath).not.toBe(failedEndpoint);
+    expect((executor as any).approvalServer.listening).toBe(true);
+  });
+
+  it('waits for pending listener startup and removes its endpoint when destroyed', async () => {
+    await executor.destroy();
+    executor = new ClaudePersistentExecutor(new DirectoryGuard([home]), home, 'startup-destroy-test');
+    const listen = net.Server.prototype.listen;
+    let release!: () => void;
+    const listening = new Promise<net.Server>(resolve => {
+      vi.spyOn(net.Server.prototype, 'listen').mockImplementationOnce(function (this: net.Server, endpoint: any, callback: any) {
+        return Reflect.apply(listen, this, [endpoint, () => { release = callback; resolve(this); }]);
+      });
+    });
+    const startup = (executor as any).ensureApprovalServer();
+    const rejected = expect(startup).rejects.toThrow('destroyed');
+    const server = await listening;
+    const endpoint = server.address() as string;
+    let finished = false;
+    const destruction = executor.destroy().then(() => { finished = true; });
+    await Promise.resolve();
+    expect(finished).toBe(false);
+    release();
+    await Promise.all([rejected, destruction]);
+    expect(server.listening).toBe(false);
+    expect((executor as any).approvalServer).toBeNull();
+    if (process.platform !== 'win32') expect(fs.existsSync(path.dirname(endpoint))).toBe(false);
+    await expect((executor as any).ensureApprovalServer()).rejects.toThrow('destroyed');
+  });
+
+  it('shares a pending listener between simultaneous startup requests', async () => {
+    await executor.destroy();
+    executor = new ClaudePersistentExecutor(new DirectoryGuard([home]), home, 'shared-startup-test');
+    const listen = vi.spyOn(net.Server.prototype, 'listen');
+    const endpoints = await Promise.all([(executor as any).ensureApprovalServer(), (executor as any).ensureApprovalServer()]);
+    expect(endpoints[0]).toBe(endpoints[1]);
+    expect(listen).toHaveBeenCalledTimes(1);
+    socketPath = endpoints[0];
+  });
+
+  it.skipIf(process.platform === 'win32')('closes the Unix listener when private socket permissions cannot be set', async () => {
+    await executor.destroy();
+    executor = new ClaudePersistentExecutor(new DirectoryGuard([home]), home, 'permissions-test');
+    let failedEndpoint = '';
+    vi.spyOn(fs, 'chmodSync').mockImplementationOnce(endpoint => {
+      failedEndpoint = String(endpoint);
+      throw new Error('Synthetic socket permission failure');
+    });
+    await expect((executor as any).ensureApprovalServer()).rejects.toThrow('Synthetic socket permission failure');
+    expect(fs.existsSync(path.dirname(failedEndpoint))).toBe(false);
+    expect((executor as any).approvalServer).toBeNull();
+    socketPath = await (executor as any).ensureApprovalServer();
+    expect(fs.statSync(socketPath).mode & 0o777).toBe(0o600);
   });
 
   it('keeps native approval requests interactive even after the file hook allows an ordinary edit', async () => {
@@ -154,7 +238,9 @@ describe('ClaudePersistentExecutor approval channel', () => {
     expect(answer).toMatchObject({ behavior: 'allow' });
     const update = (answer.updatedPermissions as any[])[0];
     expect(update).toMatchObject({ type: 'addRules', behavior: 'allow', destination: 'localSettings' });
-    expect(JSON.stringify(update.rules)).toContain(`${fs.realpathSync(path.dirname(target))}/**`);
+    expect(update.rules.map((rule: any) => rule.ruleContent)).toEqual([
+      `${fs.realpathSync(path.dirname(target))}/**`, `${fs.realpathSync(path.dirname(target))}/**`,
+    ]);
     expect(update.rules.map((rule: any) => rule.toolName)).toEqual(expect.arrayContaining(['Write', 'Edit']));
     // The directory is also persisted for future Bash sandbox scope.
     expect((executor as any).sandbox.getConfig()?.writableRoots).toContain(fs.realpathSync(path.dirname(target)));

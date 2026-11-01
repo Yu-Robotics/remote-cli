@@ -101,7 +101,7 @@ describe('Integration: Full Workflow', () => {
 
       expect(initResult.success).toBe(true);
       expect(initResult.bindingCode).toBe('ABC-123-XYZ');
-      expect(initResult.deviceId).toMatch(/^dev_[a-z]+_[a-z0-9\-]+$/);
+      expect(initResult.deviceId).toMatch(/^dev_[a-z0-9]+_[a-z0-9\-]+$/);
 
       // Verify config was created
       const config = await ConfigManager.initialize();

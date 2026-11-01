@@ -10,7 +10,7 @@ describe('ZCodeCommand', () => {
   let originalZCodeHome: string | undefined;
 
   beforeEach(async () => {
-    temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'zcode-command-test-'));
+    temporaryDirectory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'zcode-command-test-')));
     originalZCodeHome = process.env.ZCODE_HOME;
   });
 
@@ -28,7 +28,7 @@ describe('ZCodeCommand', () => {
     if (pathKind === 'aliased') {
       await fs.symlink(commandDirectory, discoveryDirectory, process.platform === 'win32' ? 'junction' : 'dir');
     }
-    const native = path.join(discoveryDirectory, 'zcode');
+    const native = path.join(discoveryDirectory, process.platform === 'win32' ? 'zcode.exe' : 'zcode');
     const envEntry = path.join(discoveryDirectory, 'environment-zcode.cjs');
     await fs.writeFile(native, '#!/usr/bin/env node\n', { mode: 0o755 });
     await fs.writeFile(envEntry, '// Synthetic environment entry.\n');
@@ -68,7 +68,7 @@ describe('ZCodeCommand', () => {
       '--stdio',
     ]));
     expect(launch.env.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE).toBe(resolvedBuiltin);
-    expect(launch.env.ZCODE_PERSONAL_PROVIDER_CONFIG_FILE).toBe(personal);
+    expect(launch.env.ZCODE_PERSONAL_PROVIDER_CONFIG_FILE).toBe(await fs.realpath(personal));
     expect(findZCodeEntry(entry)).toBe(entry);
     expect(isZCodeAvailable(entry)).toBe(true);
   });

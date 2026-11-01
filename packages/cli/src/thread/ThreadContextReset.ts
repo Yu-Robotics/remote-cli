@@ -13,7 +13,14 @@ export class ThreadContextReset {
 
   isPending(threadId: string): boolean {
     if (this.pending.has(threadId)) return true;
-    try { lstatSync(this.file(threadId)); return true; }
+    try {
+      const dirStat = lstatSync(this.directory, { throwIfNoEntry: false });
+      if (dirStat && !dirStat.isDirectory()) {
+        throw new Error('Cannot verify thread context reset state. Check local CLI storage and retry /clear.');
+      }
+      lstatSync(this.file(threadId));
+      return true;
+    }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
       throw new Error('Cannot verify thread context reset state. Check local CLI storage and retry /clear.');
@@ -48,6 +55,10 @@ export class ThreadContextReset {
   generation(threadId: string, fallback = 0): number {
     if (!Number.isSafeInteger(fallback) || fallback < 0) throw new Error('Invalid managed conversation generation');
     try {
+      const dirStat = lstatSync(this.directory, { throwIfNoEntry: false });
+      if (dirStat && !dirStat.isDirectory()) {
+        throw new Error('Cannot verify managed conversation generation. Check local reset storage and retry /clear.');
+      }
       const filename = this.file(threadId) + '.generation';
       if (!lstatSync(filename).isFile()) throw new Error('Invalid generation file');
       const value: unknown = JSON.parse(readFileSync(filename, 'utf8'));

@@ -77,6 +77,8 @@ export function safeSessionLabel(value: string): string | undefined {
 export function readBoundedHead(file: string, bytes = SESSION_CATALOG_HEADER_BYTES): string | undefined {
   let fd: number | undefined;
   try {
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink()) return undefined;
     fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
     const buffer = Buffer.alloc(bytes);
     const length = fs.readSync(fd, buffer, 0, bytes, 0);

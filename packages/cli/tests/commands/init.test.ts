@@ -57,8 +57,8 @@ describe('init command', () => {
 
       expect(result.success).toBe(true);
       expect(result.bindingCode).toBe('ABC-123-XYZ');
-      expect(result.deviceId).toMatch(/^dev_[a-z]+_[a-z0-9\-]+$/);
-      expect(mockConfig.set).toHaveBeenCalledWith('deviceId', expect.stringMatching(/^dev_[a-z]+_[a-z0-9\-]+$/));
+      expect(result.deviceId).toMatch(/^dev_[a-z0-9]+_[a-z0-9\-]+$/);
+      expect(mockConfig.set).toHaveBeenCalledWith('deviceId', expect.stringMatching(/^dev_[a-z0-9]+_[a-z0-9\-]+$/));
       expect(mockConfig.set).toHaveBeenCalledWith('serverUrl', 'https://test-server.com');
     });
 
@@ -167,7 +167,7 @@ describe('init command', () => {
 
       expect(mockConfig.set).toHaveBeenCalledWith(
         'security.allowedDirectories',
-        expect.arrayContaining([expect.stringMatching(/^~?\//)])
+        expect.arrayContaining([expect.stringMatching(/^~?[/\\]|^[a-zA-Z]:[/\\]/)])
       );
     });
   });

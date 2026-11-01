@@ -90,7 +90,7 @@ describe('local read-only session inspection', () => {
     fs.mkdirSync(directory, { recursive: true });
     const target = path.join(home, 'target.json');
     fs.writeFileSync(target, JSON.stringify({ id: 'native' }), { mode: 0o600 });
-    fs.symlinkSync(target, file);
+    fs.symlinkSync(target, file, 'file');
     expect(readLocalSessionInfo({ ...base(), backend: 'pi' }).record).toBe('unreadable');
   });
 
@@ -105,7 +105,7 @@ describe('local read-only session inspection', () => {
       const stat = original(fd);
       calls++;
       // Only the pointer record read may simulate a swapped file identity.
-      return calls === 1 ? { ...stat, ino: stat.ino + 1 } : stat;
+      return calls === 1 ? { ...stat, dev: (stat.dev || 0) + 1, ino: (stat.ino || 0) + 100000000 } : stat;
     }) as typeof fs.fstatSync);
     try { expect(readLocalSessionInfo({ ...base(), backend: 'pi' }).record).toBe('unreadable'); }
     finally { replaced.mockRestore(); }
