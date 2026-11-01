@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.198] - 2026-11-01
+
+### Fixed
+- Allow fresh worker allocation despite unreadable or incompatible individual historical lane records. Preserve excluded records and native history, report incomplete inventory, and retain ownership, live-writer, and destructive-cleanup safeguards.
+- Reject attempts to delete the default thread before cancelling work, closing bridges, removing worker records, or deleting native session data.
+
+### Tests
+- Cover fresh allocation beside incompatible history, preservation and reuse boundaries, and default-thread deletion rejection through the command entry point without cleanup side effects.
+
 ## [1.6.197] - 2026-11-01
 
 ### Fixed

@@ -125,7 +125,7 @@ describe('durable worker inventory during thread context reset', () => {
     expect(await restarted.cleanupCandidates()).toEqual([expect.objectContaining({ id: old.id, cleanupPending: true })]);
   });
 
-  it.each(['enumeration', 'metadata', 'read'] as const)('blocks incomplete %s inventory and retries in the same process after access recovery', async operation => {
+  it.each(['enumeration', 'metadata', 'read'] as const)('blocks history-wide operations with incomplete %s inventory', async operation => {
     const original = createStore();
     const first = await seed(original);
     const omitted = await seed(original, 'dsh');
@@ -140,12 +140,17 @@ describe('durable worker inventory during thread context reset', () => {
         if (args[0] === record(omitted)) throw error;
         return readFile(...args);
       });
-    const restarted = createStore();
+    let restarted = createStore();
     const cleanup = vi.fn(clear);
-    await expect(restarted.initialize()).rejects.toMatchObject({ message: expect.stringContaining('inventory'), cause: { code: 'EACCES' } });
+    if (operation === 'enumeration') {
+      await expect(restarted.initialize()).rejects.toMatchObject({ cause: { code: 'EACCES' } });
+    } else {
+      await restarted.initialize();
+      expect(await restarted.getInventoryStatus()).toMatchObject({ complete: false });
+    }
     await expect(restarted.cleanupCandidates()).rejects.toThrow('inventory');
     await expect(finishReset(restarted, cleanup)).rejects.toThrow('inventory');
-    await expect(restarted.acquire(identity())).rejects.toThrow('inventory');
+    await expect(restarted.acquire(identity())).rejects.toThrow(operation === 'enumeration' ? 'inventory' : 'incomplete');
     expect(cleanup).not.toHaveBeenCalled();
     expect(resets.isPending('parent-thread')).toBe(true);
     expect(await readFile(pointer(first), 'utf8')).toBe('old worker continuation');
@@ -153,7 +158,8 @@ describe('durable worker inventory during thread context reset', () => {
     expect(await readFile(record(omitted), 'utf8')).toBe(saved);
     failure.mockRestore();
 
-    // Failed initialization must neither cache rejection nor publish a partial inventory.
+    // Directory failures retry in place; quarantined history requires a fresh store.
+    if (operation !== 'enumeration') restarted = createStore();
     await expect(restarted.acquire(identity())).rejects.toThrow('incomplete');
     await finishReset(restarted, cleanup);
     expect(cleanup.mock.calls.map(([lane]) => lane.id).sort()).toEqual([first.id, omitted.id].sort());
@@ -177,21 +183,22 @@ describe('durable worker inventory during thread context reset', () => {
       try { return await readFile(...args); }
       finally { await fs.rename(held, file); }
     });
-    const restarted = createStore();
+    let restarted = createStore();
     const cleanup = vi.fn(clear);
-    await expect(finishReset(restarted, cleanup)).rejects.toMatchObject({ cause: { code: 'ENOENT' } });
+    await expect(finishReset(restarted, cleanup)).rejects.toThrow('inventory is incomplete');
     expect(resets.isPending('parent-thread')).toBe(true);
     expect(cleanup).not.toHaveBeenCalled();
     expect(await readFile(pointer(lane), 'utf8')).toBe('old worker continuation');
     failure.mockRestore();
+    restarted = createStore();
     await expect(restarted.acquire(identity())).rejects.toThrow('incomplete');
     await finishReset(restarted, cleanup);
     expect((await restarted.acquire(identity())).lane.id).toBe(lane.id);
     await expect(fs.stat(pointer(lane))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
-  it.each(['json', 'schema', 'oversized', 'wrong-id', 'unknown-name', 'directory', 'symlink', 'dangling-symlink', 'retirement'] as const)(
-    'quarantines %s inventory without rewriting or deleting unknown records', async invalid => {
+  for (const invalid of ['json', 'schema', 'missing-field', 'oversized', 'wrong-id', 'unknown-name', 'directory', 'symlink', 'dangling-symlink', 'retirement'] as const) {
+    it(`quarantines ${invalid} inventory without rewriting or deleting unknown records`, async context => {
       const original = createStore();
       const lane = await seed(original);
       const file = record(lane);
@@ -200,6 +207,10 @@ describe('durable worker inventory during thread context reset', () => {
       let unknown = file;
       if (invalid === 'json') await fs.writeFile(file, '{');
       if (invalid === 'schema') await fs.writeFile(file, JSON.stringify({ ...parsed, backend: 'unknown-backend' }));
+      if (invalid === 'missing-field') {
+        delete parsed.workspaceGeneration;
+        await fs.writeFile(file, JSON.stringify(parsed));
+      }
       if (invalid === 'oversized') await fs.writeFile(file, `${saved}${' '.repeat(64 * 1024)}`);
       if (invalid === 'wrong-id') {
         unknown = path.join(directory, `${randomUUID()}.json`);
@@ -214,7 +225,14 @@ describe('durable worker inventory during thread context reset', () => {
         const target = path.join(home, 'external-record');
         if (invalid === 'symlink') await fs.writeFile(target, saved);
         await fs.rm(file);
-        await fs.symlink(target, file);
+        try { await fs.symlink(target, file); }
+        catch (error) {
+          if (process.platform === 'win32' && ['EPERM', 'EACCES', 'ENOTSUP'].includes((error as NodeJS.ErrnoException).code ?? '')) {
+            context.skip();
+            return;
+          }
+          throw error;
+        }
       }
       if (invalid === 'retirement') {
         // A retirement claim without confirmed clearing must not bypass the guard.
@@ -223,11 +241,16 @@ describe('durable worker inventory during thread context reset', () => {
       const before = await fs.lstat(unknown);
       const contents = before.isFile() ? await fs.readFile(unknown, 'utf8') : undefined;
       await resets.begin('parent-thread');
-      const restarted = createStore();
+      let restarted = createStore();
       const cleanup = vi.fn(clear);
       await expect(finishReset(restarted, cleanup)).rejects.toThrow('inventory');
       await expect(restarted.cleanupCandidates()).rejects.toThrow('inventory');
-      await expect(restarted.acquire(identity())).rejects.toThrow('inventory');
+      await expect(restarted.acquire(identity())).rejects.toThrow('incomplete');
+      const fresh = await restarted.acquire({ ...identity(), threadId: 'healthy-unrelated-thread' });
+      expect(fresh.reused).toBe(false);
+      expect(fresh.lane.id).not.toBe(lane.id);
+      expect(await restarted.getInventoryStatus()).toEqual({ complete: false, quarantinedRecords: 1 });
+      await expect(restarted.remove(lane.id)).rejects.toThrow('preserved');
       expect(cleanup).not.toHaveBeenCalled();
       expect(resets.isPending('parent-thread')).toBe(true);
       expect(await fs.readFile(pointer(lane), 'utf8')).toBe('old worker continuation');
@@ -238,10 +261,12 @@ describe('durable worker inventory during thread context reset', () => {
       // Only an explicit repair restores inventory authority; the store never deletes it.
       await fs.rm(unknown, { recursive: true, force: true });
       await fs.writeFile(file, saved);
+      restarted = createStore();
       await finishReset(restarted, cleanup);
       expect((await restarted.acquire(identity())).lane.id).toBe(lane.id);
       await expect(fs.stat(pointer(lane))).rejects.toMatchObject({ code: 'ENOENT' });
     });
+  }
 
   it('preserves dirty startup metadata and blocks reset when its retry intent cannot persist', async () => {
     const original = createStore();
@@ -269,7 +294,7 @@ describe('durable worker inventory during thread context reset', () => {
     await expect(fs.stat(pointer(lane))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
-  it('rejects startup when quarantining an interrupted running lane cannot persist', async () => {
+  it('allocates independently when quarantining an interrupted running lane cannot persist', async () => {
     const original = createStore();
     const lane = await seed(original);
     await original.markRunning(lane.id);
@@ -280,7 +305,11 @@ describe('durable worker inventory during thread context reset', () => {
       return rename(from, to);
     });
     const restarted = createStore();
-    await expect(restarted.acquire(identity())).rejects.toMatchObject({ cause: { code: 'EIO' } });
+    const fresh = await restarted.acquire(identity());
+    expect(fresh.reused).toBe(false);
+    expect(fresh.lane.id).not.toBe(lane.id);
+    expect(await restarted.getInventoryStatus()).toEqual({ complete: false, quarantinedRecords: 1 });
+    await expect(restarted.cleanupCandidates()).rejects.toThrow('inventory is incomplete');
     expect(await fs.readFile(record(lane))).toEqual(before);
     expect(await fs.readFile(pointer(lane), 'utf8')).toBe('old worker continuation');
     failure.mockRestore();

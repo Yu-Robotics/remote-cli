@@ -87,20 +87,14 @@ describe('managed agent delegation', () => {
       const scope = manager.begin(parent);
       await expect(scope.collectPendingResults()).resolves.toEqual([]);
       await expect(scope.checkArtifactCloseout()).resolves.toEqual([]);
-      if (state === 'ready' || state === 'dirty') {
+      if (state !== 'legacy-owner') {
         const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Synthetic review' }, 'launch');
         await expect(scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result')).resolves.toMatchObject({ state: 'succeeded' });
-      } else if (state === 'legacy-owner') {
+      } else {
         await expect(scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Synthetic review' }, 'launch'))
           .rejects.toThrow('Managed delegation storage');
         expect(factory).not.toHaveBeenCalled();
         await expect(scope.checkArtifactCloseout()).resolves.toEqual([]);
-      } else {
-        const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Synthetic review' }, 'launch');
-        await expect(scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result')).resolves.toMatchObject({
-          state: 'failed', error: expect.stringContaining('Cannot load delegated worker inventory'),
-        });
-        expect(factory).not.toHaveBeenCalled();
       }
       await scope.close();
       if (snapshot) expect(fs.readFileSync(laneFile)).toEqual(snapshot);
@@ -108,6 +102,38 @@ describe('managed agent delegation', () => {
       expect(fs.readFileSync(pointer, 'utf8')).toBe('synthetic preserved transcript');
       await expect(manager.assertExecutionSafe(home, 'unrelated-thread')).resolves.toBeUndefined();
     });
+
+  it('passes optional Git history reconciliation with quarantined lane metadata before fresh allocation', async () => {
+    const directory = manager.laneStore.storageDirectory;
+    fs.mkdirSync(directory, { recursive: true });
+    const historicalFile = path.join(directory, 'unknown-history.json');
+    fs.writeFileSync(historicalFile, '{');
+    const source = { cwd: home, root: home, commonDirectory: home, relativeCwd: '' };
+    const checkpoint = { head: 'a'.repeat(40), tree: 'b'.repeat(40), commit: 'c'.repeat(40), revision: 'synthetic-revision' };
+    // Only metadata/control flow is exercised: no Git command or backend process runs.
+    vi.spyOn(manager.workspaceManager, 'discover').mockResolvedValue(source);
+    vi.spyOn(manager.workspaceManager, 'baseline').mockResolvedValue(checkpoint);
+    const reconcile = vi.spyOn(manager.workspaceManager, 'reconcileHistoricalDelivery').mockResolvedValue([]);
+    vi.spyOn(manager.workspaceManager, 'unavailableLanes').mockResolvedValue(new Set());
+    vi.spyOn(manager.workspaceManager, 'prepare').mockImplementation(async (lane, _source, input, taskId) => ({
+      laneId: lane.id, threadId: lane.threadId, workspaceGeneration: 0, source, input,
+      directory: home, cwd: home, taskId, taskRef: `refs/remote-cli/tasks/${taskId}`,
+    }));
+    vi.spyOn(manager.workspaceManager, 'collect').mockImplementation(async workspace => ({
+      taskId: workspace.taskId, disposition: 'applied', successful: true,
+      baseCommit: checkpoint.commit, outputCommit: checkpoint.commit, changedFiles: [], filesTruncated: false,
+    }));
+    vi.spyOn(manager.workspaceManager, 'reclaim').mockResolvedValue(true);
+    const scope = manager.begin(parent);
+    const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Synthetic Git admission' }, 'launch');
+    await expect(scope.invoke('remote_cli_result', { taskId: task.taskId, waitSeconds: 1 }, 'result'))
+      .resolves.toMatchObject({ state: 'succeeded' });
+    expect(factory).toHaveBeenCalledOnce();
+    expect(reconcile.mock.calls[0][1]).toEqual([]);
+    expect(await manager.laneStore.getInventoryStatus()).toEqual({ complete: false, quarantinedRecords: 1 });
+    expect(fs.readFileSync(historicalFile, 'utf8')).toBe('{');
+    await scope.close();
+  });
 
   it('starts fresh workers after clean ownership release without reusing legacy dirty lanes or rewriting their history', async () => {
     const lanes = new DelegatedWorkerSessionStore();

@@ -133,6 +133,9 @@ export class DelegatedWorkerSessionStore {
   private initialized?: Promise<void>;
   private beforeInitialize?: () => Promise<void>;
   private readonly lanes = new Map<string, DelegatedWorkerLane>();
+  // Quarantine is sticky for this store lifetime; never reload over active lanes.
+  private readonly quarantinedRecords = new Set<string>();
+  private readonly allocatedLanes = new Set<string>();
   private writes: Promise<void> = Promise.resolve();
 
   constructor(private readonly directory = path.join(os.homedir(), '.remote-cli', 'delegation-workers'),
@@ -164,6 +167,27 @@ export class DelegatedWorkerSessionStore {
     });
   }
 
+  /** Completeness is separate from permission to allocate an independent lane. */
+  async getInventoryStatus(): Promise<{ complete: boolean; quarantinedRecords: number }> {
+    await this.initialize();
+    return { complete: this.quarantinedRecords.size === 0, quarantinedRecords: this.quarantinedRecords.size };
+  }
+
+  private assertCompleteInventory(): void {
+    if (this.quarantinedRecords.size) {
+      throw new Error('Delegated worker inventory is incomplete. Historical reuse, reset and cleanup are disabled; '
+        + 'fresh independent workers remain available. Preserved records require inspection before restarting the CLI.');
+    }
+  }
+
+  private quarantine(name: string): void {
+    if (!this.quarantinedRecords.size) {
+      console.warn('[Delegation] Worker inventory is incomplete. Unavailable historical records are preserved; '
+        + 'only fresh independent lanes may be allocated. Historical reset and cleanup remain disabled.');
+    }
+    this.quarantinedRecords.add(name);
+  }
+
   async acquire(identity: DelegatedWorkerLaneIdentity,
     options: { pooled?: boolean; excluded?: ReadonlySet<string> } = {}): Promise<DelegatedWorkerLaneAcquireResult> {
     this.assertIdentity(identity);
@@ -171,10 +195,13 @@ export class DelegatedWorkerSessionStore {
     return this.mutate(async () => {
       this.assertContextReady(identity.threadId, identity.workspaceGeneration);
       const discarded = new Set<string>();
-      for (const lane of this.lanes.values()) {
-        if (sameIdentity(lane, identity) && await hasLegacyDiscardTombstone(this.directory, lane.id)) discarded.add(lane.id);
+      for (const lane of this.quarantinedRecords.size ? [] : this.lanes.values()) {
+        if (lane.state !== 'ready' || !sameIdentity(lane, identity)) continue;
+        try {
+          if (await hasLegacyDiscardTombstone(this.directory, lane.id)) discarded.add(lane.id);
+        } catch { this.quarantine(`${lane.id}.json`); }
       }
-      const ready = [...this.lanes.values()]
+      const ready = (this.quarantinedRecords.size ? [] : [...this.lanes.values()])
         .filter(lane => lane.state === 'ready' && !lane.contextRetired && !lane.workspaceDiscarded && !discarded.has(lane.id)
           && sameIdentity(lane, identity) && !options.excluded?.has(lane.id))
         .sort((a, b) => b.updatedAt - a.updatedAt);
@@ -206,6 +233,7 @@ export class DelegatedWorkerSessionStore {
         updatedAt: now,
       };
       await this.writeAndRemember(lane);
+      this.allocatedLanes.add(id);
       return { lane: clone(lane), reused: false };
     });
   }
@@ -254,21 +282,30 @@ export class DelegatedWorkerSessionStore {
     });
   }
 
+  /**
+   * Lanes eligible for optional reconciliation; check getInventoryStatus() for completeness.
+   * Incomplete history is excluded, including from reclamation by listing callers.
+   * Only lanes allocated by this instance remain visible in that case.
+   */
   async lanesForThread(threadId: string, backend?: DelegationBackend): Promise<DelegatedWorkerLane[]> {
     await this.initialize();
     return [...this.lanes.values()]
+      .filter(lane => !this.quarantinedRecords.has(`${lane.id}.json`)
+        && (!this.quarantinedRecords.size || this.allocatedLanes.has(lane.id)))
       .filter(lane => lane.threadId === threadId && (!backend || lane.backend === backend))
       .map(clone);
   }
 
   async cleanupCandidates(): Promise<DelegatedWorkerLane[]> {
     await this.initialize();
+    this.assertCompleteInventory();
     return [...this.lanes.values()].filter(lane => lane.state === 'dirty' && lane.cleanupPending).map(clone);
   }
 
   async invalidateGeneration(threadId: string, currentGeneration: number): Promise<DelegatedWorkerLane[]> {
     await this.initialize();
     return this.mutate(async () => {
+      this.assertCompleteInventory();
       const changed: DelegatedWorkerLane[] = [];
       for (const lane of this.lanes.values()) {
         if (lane.threadId !== threadId || lane.workspaceGeneration >= currentGeneration) continue;
@@ -284,6 +321,7 @@ export class DelegatedWorkerSessionStore {
   async markForReset(threadId: string, backend?: DelegationBackend): Promise<DelegatedWorkerLane[]> {
     await this.initialize();
     return this.mutate(async () => {
+      this.assertCompleteInventory();
       const changed: DelegatedWorkerLane[] = [];
       for (const lane of this.lanes.values()) {
         if (lane.threadId !== threadId || (backend && lane.backend !== backend)) continue;
@@ -301,8 +339,12 @@ export class DelegatedWorkerSessionStore {
     if (!UUID_RE.test(id)) throw new Error('Invalid delegated worker lane ID');
     await this.initialize();
     await this.mutate(async () => {
-      this.lanes.delete(id);
+      if (!this.lanes.has(id) || this.quarantinedRecords.has(`${id}.json`)) {
+        throw new Error('Delegated worker lane is unavailable; its historical record was preserved');
+      }
+      if (!this.allocatedLanes.has(id)) this.assertCompleteInventory();
       await fs.rm(path.join(this.directory, `${id}.json`), { force: true });
+      this.lanes.delete(id);
     });
   }
 
@@ -326,6 +368,7 @@ export class DelegatedWorkerSessionStore {
     if (!UUID_RE.test(id) || !validGeneration(generation)) throw new Error('Invalid worker context reference');
     await this.initialize();
     await this.mutate(async () => {
+      this.assertCompleteInventory();
       this.assertContextReady(identity.threadId, identity.workspaceGeneration);
       await this.clearContextLocked(id, generation, identity, clear);
     });
@@ -348,6 +391,7 @@ export class DelegatedWorkerSessionStore {
   }
 
   private resettableLanes(threadId: string): DelegatedWorkerLane[] {
+    this.assertCompleteInventory();
     const lanes = [...this.lanes.values()].filter(lane => lane.threadId === threadId);
     if (lanes.some(lane => !contextResettable(lane))) {
       throw new Error('Cannot clear thread context: a Worker is active or its shutdown is unconfirmed. Wait for confirmed exit before retrying /clear.');
@@ -392,38 +436,41 @@ export class DelegatedWorkerSessionStore {
   }
 
   private async load(): Promise<void> {
-    // Publish only a complete inventory. Silently omitting even one unreadable
-    // record could allow a thread reset to finish with its old pointer intact.
+    // Per-record failures quarantine history, not independent fresh allocation.
+    // Directory failures still reject admission; no partial directory scan is used.
     const loaded = new Map<string, DelegatedWorkerLane>();
     try {
       await fs.mkdir(this.directory, { recursive: true, mode: 0o700 });
       const names = await fs.readdir(this.directory);
       for (const name of names) {
         if (!name.endsWith('.json')) continue;
-        if (!UUID_RE.test(name.slice(0, -5))) throw new Error('Invalid worker lane filename');
-        const file = path.join(this.directory, name);
-        const stat = await fs.lstat(file);
-        if (!stat.isFile() || stat.size > 64 * 1024) throw new Error('Invalid worker lane file');
-        const parsed = JSON.parse(await fs.readFile(file, 'utf8')) as unknown;
-        if (!validateLane(parsed) || name !== `${parsed.id}.json`) throw new Error('Invalid worker lane record');
-        loaded.set(parsed.id, parsed);
-      }
-      for (const [id, lane] of loaded) {
-        if (await hasLegacyDiscardTombstone(this.directory, id)) {
-          const retired: DelegatedWorkerLane = { ...lane, state: 'dirty', workspaceDiscarded: true,
-            cleanupPending: false, cleanupError: 'Historical checkout was explicitly discarded; native history is preserved.', updatedAt: Date.now() };
-          await this.writeRecord(retired);
-          loaded.set(id, retired);
-          continue;
-        }
-        // A process may have died between any write and terminal confirmation.
-        // Only a ready lane is resumable after a CLI restart.
-        if (lane.state === 'preparing' || lane.state === 'running') {
-          const dirty: DelegatedWorkerLane = { ...lane, state: 'dirty', cleanupPending: lane.cleanupPending === true,
-            cleanupError: lane.cleanupError ?? 'The CLI stopped before worker cleanup was confirmed.', updatedAt: Date.now() };
-          await this.writeRecord(dirty);
-          loaded.set(id, dirty);
-        }
+        try {
+          if (!UUID_RE.test(name.slice(0, -5))) throw new Error('Invalid worker lane filename');
+          const file = path.join(this.directory, name);
+          const stat = await fs.lstat(file);
+          if (!stat.isFile() || stat.size > 64 * 1024) throw new Error('Invalid worker lane file');
+          const parsed = JSON.parse(await fs.readFile(file, 'utf8')) as unknown;
+          if (!validateLane(parsed) || name !== `${parsed.id}.json`) throw new Error('Invalid worker lane record');
+          const lane = parsed;
+          const id = lane.id;
+          if (await hasLegacyDiscardTombstone(this.directory, id)) {
+            const retired: DelegatedWorkerLane = { ...lane, state: 'dirty', workspaceDiscarded: true,
+              cleanupPending: false, cleanupError: 'Historical checkout was explicitly discarded; native history is preserved.', updatedAt: Date.now() };
+            await this.writeRecord(retired);
+            loaded.set(id, retired);
+            continue;
+          }
+          // A process may have died between any write and terminal confirmation.
+          // Only a ready lane is resumable after a CLI restart.
+          if (lane.state === 'preparing' || lane.state === 'running') {
+            const dirty: DelegatedWorkerLane = { ...lane, state: 'dirty', cleanupPending: lane.cleanupPending === true,
+              cleanupError: lane.cleanupError ?? 'The CLI stopped before worker cleanup was confirmed.', updatedAt: Date.now() };
+            await this.writeRecord(dirty);
+            loaded.set(id, dirty);
+          } else {
+            loaded.set(id, lane);
+          }
+        } catch { this.quarantine(name); }
       }
     } catch (cause) {
       // Missing records during enumeration are also uncertain. Retry a fresh
@@ -449,6 +496,9 @@ export class DelegatedWorkerSessionStore {
   }
 
   private async writeAndRemember(lane: DelegatedWorkerLane): Promise<void> {
+    if (this.quarantinedRecords.has(`${lane.id}.json`)) {
+      throw new Error('Delegated worker lane is quarantined; its historical record was preserved');
+    }
     await this.writeRecord(lane);
     this.lanes.set(lane.id, lane);
   }

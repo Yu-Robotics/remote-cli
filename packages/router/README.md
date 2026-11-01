@@ -642,6 +642,14 @@ Direct-backend shutdown and durable reset storage must succeed before clearing
 is acknowledged. Upgrade the local CLI; a Router-only upgrade does not enable
 this recovery path.
 
+From CLI 1.6.198, unreadable or incompatible individual worker records no longer
+prevent fresh delegation. Those records and their native history are preserved
+and excluded from reuse. While inventory is incomplete, every delegation uses a
+fresh lane and historical reset/cleanup remains unavailable. Repairing the old
+records and restarting the CLI restores reuse; new delegation needs neither.
+Ownership and live-writer checks continue to apply. Attempts to delete the default thread are rejected before
+worker cleanup, executor shutdown, or session-data deletion.
+
 From CLI 1.6.197, historical dirty worker records without newer shutdown fields
 no longer block fresh delegation. Native ownership locks and recorded live-worker
 checks still apply. Old dirty lanes remain excluded from reuse; their metadata,

@@ -87,6 +87,99 @@ describe('DelegatedWorkerSessionStore', () => {
     expect((await store.lanesForThread(first.lane.threadId))).toHaveLength(2);
   });
 
+  it.each(['json', 'backend', 'missing-field', 'read-error'])(
+    'allocates fresh lanes without reusing or clearing incomplete %s history', async failure => {
+      const original = new DelegatedWorkerSessionStore(directory);
+      const healthy = await original.acquire(identity(workspace));
+      await original.markReady(healthy.lane.id);
+      const historical = await original.acquire({ ...identity(workspace), threadId: 'historical-thread' });
+      await original.markReady(historical.lane.id);
+      const file = path.join(directory, `${historical.lane.id}.json`);
+      const parsed = JSON.parse(await fs.readFile(file, 'utf8'));
+      if (failure === 'backend') parsed.backend = 'future-backend';
+      if (failure === 'missing-field') delete parsed.workspaceGeneration;
+      await fs.writeFile(file, failure === 'json' ? '{' : JSON.stringify(parsed));
+      const before = await fs.readFile(file);
+      const healthyFile = path.join(directory, `${healthy.lane.id}.json`);
+      const healthyBefore = await fs.readFile(healthyFile);
+      const readFile = fs.readFile.bind(fs);
+      if (failure === 'read-error') vi.spyOn(fs, 'readFile').mockImplementation(async (...args: Parameters<typeof fs.readFile>) => {
+        if (args[0] === file) throw Object.assign(new Error('Synthetic inaccessible record'), { code: 'EACCES' });
+        return readFile(...args);
+      });
+      const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const store = new DelegatedWorkerSessionStore(directory);
+      const acquired = await store.acquire(identity(workspace));
+      expect(acquired.reused).toBe(false);
+      expect(acquired.lane.id).not.toBe(healthy.lane.id);
+      expect(acquired.lane.id).not.toBe(historical.lane.id);
+      expect(await store.getInventoryStatus()).toEqual({ complete: false, quarantinedRecords: 1 });
+      expect(warning).toHaveBeenCalledWith(expect.stringContaining('inventory is incomplete'));
+      // A Git launch reconciles this listing before acquisition. Old ready lanes
+      // must not leak into that caller's optional reclamation pass.
+      expect(await store.lanesForThread('historical-thread')).toEqual([]);
+      expect(await store.lanesForThread('parent-thread')).toEqual([acquired.lane]);
+      await store.markRunning(acquired.lane.id);
+      await store.markShutdownConfirmed(acquired.lane.id, 0);
+      await store.markReady(acquired.lane.id);
+      expect((await store.acquire(identity(workspace))).reused).toBe(false);
+      const clear = vi.fn();
+      await expect(store.cleanupCandidates()).rejects.toThrow('inventory is incomplete');
+      await expect(store.markForReset('parent-thread')).rejects.toThrow('inventory is incomplete');
+      await expect(store.invalidateGeneration('parent-thread', 1)).rejects.toThrow('inventory is incomplete');
+      await expect(store.assertThreadContextResettable('parent-thread')).rejects.toThrow('inventory is incomplete');
+      await expect(store.clearContext(healthy.lane.id, 0, healthy.lane, clear)).rejects.toThrow('inventory is incomplete');
+      await expect(store.remove(healthy.lane.id)).rejects.toThrow('inventory is incomplete');
+      await expect(store.remove(historical.lane.id)).rejects.toThrow('preserved');
+      expect(clear).not.toHaveBeenCalled();
+      expect(await readFile(file)).toEqual(before);
+      expect(await readFile(healthyFile)).toEqual(healthyBefore);
+      // Exact cleanup of a newly allocated, known lane remains possible.
+      await store.remove(acquired.lane.id);
+      await expect(fs.stat(path.join(directory, `${acquired.lane.id}.json`))).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+  it('does not admit a fresh lane when its own record cannot persist', async () => {
+    await fs.mkdir(directory);
+    await fs.writeFile(path.join(directory, 'unknown.json'), '{');
+    const store = new DelegatedWorkerSessionStore(directory);
+    const rename = vi.spyOn(fs, 'rename').mockRejectedValue(Object.assign(new Error('Synthetic write failure'), { code: 'EIO' }));
+    await expect(store.acquire(identity(workspace))).rejects.toMatchObject({ code: 'EIO' });
+    expect(await store.lanesForThread('parent-thread')).toEqual([]);
+    rename.mockRestore();
+    expect((await store.acquire(identity(workspace))).reused).toBe(false);
+  });
+
+  it('quarantines a newly unavailable discard check without reusing or reclaiming that lane', async () => {
+    const store = new DelegatedWorkerSessionStore(directory);
+    const first = await store.acquire(identity(workspace));
+    await store.markReady(first.lane.id);
+    const file = path.join(directory, `${first.lane.id}.json`);
+    const before = await fs.readFile(file);
+    const tombstones = path.join(directory, 'legacy-discarded');
+    await fs.writeFile(tombstones, 'synthetic invalid tombstone directory');
+    const next = await store.acquire(identity(workspace));
+    expect(next.reused).toBe(false);
+    expect(await store.getInventoryStatus()).toEqual({ complete: false, quarantinedRecords: 1 });
+    expect(await store.lanesForThread('parent-thread')).toEqual([next.lane]);
+    await expect(store.remove(first.lane.id)).rejects.toThrow('preserved');
+    await expect(store.markReady(first.lane.id)).rejects.toThrow('quarantined');
+    await expect(store.markDirty(first.lane.id, 'Must not overwrite history')).rejects.toThrow('quarantined');
+    expect(await fs.readFile(file)).toEqual(before);
+  });
+
+  it('retains known lane identity when exact removal fails so cleanup can retry', async () => {
+    const store = new DelegatedWorkerSessionStore(directory);
+    const { lane } = await store.acquire(identity(workspace));
+    const file = path.join(directory, `${lane.id}.json`);
+    const remove = vi.spyOn(fs, 'rm').mockRejectedValue(Object.assign(new Error('Synthetic removal failure'), { code: 'EACCES' }));
+    await expect(store.remove(lane.id)).rejects.toMatchObject({ code: 'EACCES' });
+    expect(await store.lanesForThread('parent-thread')).toEqual([lane]);
+    remove.mockRestore();
+    await store.remove(lane.id);
+    await expect(fs.stat(file)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('reuses only a ready lane with the same parent, backend, workspace, and generation', async () => {
     const store = new DelegatedWorkerSessionStore(directory);
     const first = await store.acquire(identity(workspace));

@@ -508,4 +508,71 @@ describe('managed conversation recovery', () => {
     expect(response('retry')).toMatchObject({ success: true });
     await expect(fs.stat(pointer)).rejects.toMatchObject({ code: 'ENOENT' });
   });
+
+  it('rejects /thread delete default early without mutating target, workers, bridges or native executor data', async () => {
+    const defaultExecutor = pool.getExecutor(threadId);
+    const pointer = path.join(home, 'protected-default-session.json');
+    await fs.writeFile(pointer, 'preserved default conversation');
+    (defaultExecutor as any).deleteThreadData = vi.fn(async () => fs.rm(pointer));
+    expect(pool.isThreadBusy(threadId)).toBe(false);
+    const before = { ...manager.getThread(threadId)! };
+    const bridge = { close: vi.fn().mockResolvedValue(undefined) };
+    (handler as any).delegationBridges.set(threadId, bridge);
+
+    const sibling = await manager.createThread('healthy-sibling', home, 'codex');
+
+    const poolDestroySpy = vi.spyOn(pool, 'destroyThread');
+    const managerDeleteSpy = vi.spyOn(manager, 'deleteThread');
+    const cancelThreadSpy = vi.spyOn(delegation, 'cancelThread');
+    const deleteWorkerLanesSpy = vi.spyOn(delegation, 'deleteWorkerLanes');
+    const deleteDelegationThreadSpy = vi.spyOn(delegation.store, 'deleteThread');
+    const configSetSpy = vi.spyOn((handler as any).config, 'set');
+
+    await handler.handleMessage({
+      type: 'command',
+      messageId: 'del-default-attempt',
+      content: '/thread delete default',
+      threadId: sibling.id,
+    });
+
+    expect(response('del-default-attempt')).toMatchObject({
+      success: false,
+      error: 'Cannot delete the default thread.',
+    });
+
+    expect((defaultExecutor as any).deleteThreadData).not.toHaveBeenCalled();
+    expect(defaultExecutor.destroy).not.toHaveBeenCalled();
+    expect(poolDestroySpy).not.toHaveBeenCalled();
+    expect(managerDeleteSpy).not.toHaveBeenCalled();
+    expect(cancelThreadSpy).not.toHaveBeenCalled();
+    expect(deleteWorkerLanesSpy).not.toHaveBeenCalled();
+    expect(deleteDelegationThreadSpy).not.toHaveBeenCalled();
+    expect(configSetSpy).not.toHaveBeenCalled();
+    expect(bridge.close).not.toHaveBeenCalled();
+    expect((handler as any).delegationBridges.get(threadId)).toBe(bridge);
+    expect(await fs.readFile(pointer, 'utf8')).toBe('preserved default conversation');
+    expect((await ThreadManager.initialize(home)).getThread(threadId)).toEqual(before);
+
+    expect(manager.getDefaultThread().id).toBe(threadId);
+    expect(manager.getThread(threadId)).toBeDefined();
+    expect(pool.getExistingExecutor(threadId)).toBe(defaultExecutor);
+    expect(pool.isThreadBusy(threadId)).toBe(false);
+    expect(manager.listThreads().map(t => t.name)).toContain('default');
+
+    await handler.handleMessage({
+      type: 'command',
+      messageId: 'del-sibling-allowed',
+      content: '/thread delete healthy-sibling',
+      threadId,
+    });
+
+    expect(response('del-sibling-allowed')).toMatchObject({
+      success: true,
+      output: expect.stringContaining('healthy-sibling'),
+    });
+    expect(managerDeleteSpy).toHaveBeenCalledWith(sibling.id);
+    expect(poolDestroySpy).toHaveBeenCalledWith(sibling.id);
+    expect(manager.getThread(sibling.id)).toBeUndefined();
+    expect(manager.listThreads().map(t => t.name)).not.toContain('healthy-sibling');
+  });
 });
