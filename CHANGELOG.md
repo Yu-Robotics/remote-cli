@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Automatically publish both npm packages when a push to GitHub main increases the synchronized root package version. Compare against the push event's prior revision so multi-commit pushes are handled correctly.
 - Retain manual release recovery, skip unchanged versions, and reject invalid versions, downgrades, or unreadable prior revisions before publishing.
+- Bypass registry caches and poll for bounded post-publish visibility so a temporarily missing version does not immediately abort a successful upload; retain exact integrity matching and never automatically repeat the upload.
 
 ## [1.6.199] - 2026-11-01
 

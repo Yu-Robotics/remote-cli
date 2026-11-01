@@ -1925,8 +1925,10 @@ The helper checks both exact versions before publishing either package and skips
 an existing version only when its registry integrity matches the local tarball.
 A different payload for the same version, a network error, or an unexpected
 registry response stops the release. An uncertain publish result is checked
-against the registry without automatically retrying the upload. If registry
-visibility is delayed, retry the original run after checking its result.
+against freshly requested registry metadata without automatically retrying the
+upload. Confirmation polls for a bounded period when the version is not yet
+visible, avoiding stale cache responses immediately after publishing. If the
+visibility delay exceeds that period, retry the original run after checking its result.
 Do not change source files and reuse a partially published version.
 
 For a local packaging check after `npm ci` and `npm run build`, run

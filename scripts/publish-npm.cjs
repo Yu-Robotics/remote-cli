@@ -4,11 +4,14 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
-const { createHash } = require('node:crypto');
+const { createHash, randomUUID } = require('node:crypto');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
+const { setTimeout: sleep } = require('node:timers/promises');
 
 const REGISTRY = 'https://registry.npmjs.org';
+const CONFIRMATION_ATTEMPTS = 13;
+const CONFIRMATION_INTERVAL_MS = 5_000;
 const REPOSITORY = 'git+https://github.com/Yu-Robotics/remote-cli.git';
 const PACKAGES = [
   { directory: 'packages/cli', name: '@yu_robotics/remote-cli' },
@@ -145,8 +148,8 @@ async function pack(root, entry, version, temporary, invoke, environment) {
 async function registryVersion(name, version, fetchImpl = globalThis.fetch) {
   let response;
   try {
-    response = await fetchImpl(`${REGISTRY}/${encodeURIComponent(name)}/${encodeURIComponent(version)}`, {
-      headers: { accept: 'application/json' }, redirect: 'error', signal: AbortSignal.timeout(30_000),
+    response = await fetchImpl(`${REGISTRY}/${encodeURIComponent(name)}/${encodeURIComponent(version)}?release_check=${randomUUID()}`, {
+      headers: { accept: 'application/json', 'cache-control': 'no-cache' }, redirect: 'error', signal: AbortSignal.timeout(30_000),
     });
   } catch { throw new Error(`Registry lookup failed for ${name}@${version}; publication status is unknown.`); }
   if (response.status === 404) return null;
@@ -165,6 +168,7 @@ async function publishRelease({ version, check = false, root = path.resolve(__di
   await preflight(root, version);
   const invoke = dependencies.runNpm || runNpm;
   const lookup = (name) => registryVersion(name, version, dependencies.fetch || globalThis.fetch);
+  const wait = dependencies.sleep || sleep;
   const log = dependencies.log || console.log;
   const temporary = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'remote-cli-npm-release-')));
   try {
@@ -205,9 +209,16 @@ async function publishRelease({ version, check = false, root = path.resolve(__di
             { cwd: temporary, env: environment });
         } catch (error) { failure = npmFailure(error, 'publish').message; }
         const diagnostic = failure ? ` ${failure}` : '';
+        // Poll only absent metadata: publication may precede registry visibility.
         // Never retry the publish command, even after a timeout or lost response.
         let confirmed;
-        try { confirmed = await lookup(artifact.name); }
+        try {
+          for (let attempt = 0; attempt < CONFIRMATION_ATTEMPTS; attempt++) {
+            confirmed = await lookup(artifact.name);
+            if (confirmed !== null) break;
+            if (attempt + 1 < CONFIRMATION_ATTEMPTS) await wait(CONFIRMATION_INTERVAL_MS);
+          }
+        }
         catch {
           throw new Error(`Cannot verify ${artifact.name}@${version} after its publish attempt.${diagnostic} No publish retry was made; earlier packages may be published. Reconcile from the same source before retrying.`);
         }
@@ -223,7 +234,8 @@ async function publishRelease({ version, check = false, root = path.resolve(__di
   } finally { await fs.rm(temporary, { recursive: true, force: true }); }
 }
 
-module.exports = { parseArguments, preflight, registryVersion, publishRelease, isolatedEnvironment, npmFailure, REGISTRY, REPOSITORY };
+module.exports = { parseArguments, preflight, registryVersion, publishRelease, isolatedEnvironment, npmFailure,
+  REGISTRY, REPOSITORY, CONFIRMATION_ATTEMPTS, CONFIRMATION_INTERVAL_MS };
 
 if (require.main === module) {
   Promise.resolve().then(() => publishRelease(parseArguments(process.argv.slice(2)))).catch(error => {
