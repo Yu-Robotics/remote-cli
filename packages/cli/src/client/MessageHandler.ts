@@ -1860,6 +1860,14 @@ You can also use natural language commands to control Claude Code CLI.`,
         return;
       }
 
+      if (target.name === DEFAULT_THREAD_NAME) {
+        this.sendResponse(messageId, callerThreadId, {
+          success: false,
+          error: 'Cannot delete the default thread.',
+        });
+        return;
+      }
+
       if (this.threadPool.isThreadBusy(target.id)) {
         this.sendResponse(messageId, callerThreadId, {
           success: false,

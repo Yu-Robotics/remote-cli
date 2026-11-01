@@ -193,8 +193,14 @@ describe('Worker context reset', () => {
     const { lane } = await store.acquire(identity);
     const file = path.join(testHome, 'lanes', `${lane.id}.json`);
     await fs.writeFile(file, JSON.stringify({ ...lane, shutdownConfirmedGeneration: generation }));
+    const preserved = await fs.readFile(file);
     const restarted = new DelegatedWorkerSessionStore(path.join(testHome, 'lanes'));
-    await expect(restarted.assertThreadContextResettable('parent')).rejects.toThrow('Cannot load delegated worker inventory');
+    await expect(restarted.assertThreadContextResettable('parent')).rejects.toThrow('inventory is incomplete');
+    expect(await restarted.getInventoryStatus()).toEqual({ complete: false, quarantinedRecords: 1 });
+    const fresh = await restarted.acquire(identity);
+    expect(fresh.reused).toBe(false);
+    expect(fresh.lane.id).not.toBe(lane.id);
+    expect(await fs.readFile(file)).toEqual(preserved);
   });
 
   it.each(['preparing', 'running', 'ready'] as const)(
