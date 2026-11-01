@@ -201,15 +201,13 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
     expect(task.taskId).toBe(result.taskId);
   });
 
-  it('removes dependency links without removing their outside targets', async context => {
+  it('removes dependency file links without removing their outside targets', async context => {
     const scope = manager.begin(parent);
     await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Use fixture dependencies' }, 'launch');
     const outside = path.join(fixture.directory, 'outside-dependency');
-    await fs.mkdir(outside);
-    const outsideFile = path.join(outside, 'keep.txt');
-    await fs.writeFile(outsideFile, 'keep outside data');
+    await fs.writeFile(outside, 'keep outside data');
     await fs.mkdir(path.join(workers[0].cwd, 'node_modules'));
-    try { await fs.symlink(outside, path.join(workers[0].cwd, 'node_modules', 'tool'), process.platform === 'win32' ? 'junction' : 'dir'); }
+    try { await fs.symlink(outside, path.join(workers[0].cwd, 'node_modules', 'tool'), 'file'); }
     catch (error) {
       if (!['EPERM', 'ENOTSUP', 'EACCES'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
       workers[0].finish({ success: true });
@@ -217,9 +215,13 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
       context.skip(); return;
     }
     workers[0].finish({ success: true });
-    await scope.collectPendingResults();
-    await expect(fs.stat(workers[0].cwd)).rejects.toMatchObject({ code: 'ENOENT' });
-    expect(await fs.readFile(outsideFile, 'utf8')).toBe('keep outside data');
+    const [result] = await scope.collectPendingResults();
+    expect(result).toMatchObject({ state: 'succeeded', artifact: { disposition: 'applied' } });
+    const summary = (await manager.workspaceManager.enumerateArtifacts()).items.find(item => item.taskId === result.taskId);
+    expect(summary?.cleanup).toBeUndefined();
+    expect(summary?.checkoutState).toBe('reclaimed');
+    expect(await fs.readFile(outside, 'utf8')).toBe('keep outside data');
+    await expect(fs.lstat(workers[0].cwd)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('exports required ignored reports before deleting the checkout', async () => {
