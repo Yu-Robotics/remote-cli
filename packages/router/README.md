@@ -706,6 +706,12 @@ supported. The binding schema and protocol-v1 flow for existing CLIs are unchang
 
 ## Publishing
 
+Every main push and pull request targeting main builds and tests both packages
+on native GitHub-hosted Linux, macOS, and Windows runners with Node.js 24.
+A failed platform does not cancel the others, and all three must pass before the
+Linux publishing job can run. These checks do not exercise real AI provider
+sessions or every supported Node.js version.
+
 Both packages are released together automatically when a push to GitHub `main`
 increases the root package version. The GitHub Actions workflow `npm-publish.yml`
 uses npm Trusted Publishing instead of a stored npm token. Configure each package's trusted publisher for `Yu-Robotics/remote-cli`,
