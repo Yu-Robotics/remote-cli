@@ -36,6 +36,8 @@ const DEFAULT_KILL_ESCALATION_MS = 3_000;
 const STDERR_TAIL_LIMIT = 4_000;
 const VERSION_PROBE_TIMEOUT_MS = 3_000;
 const VERSION_PROBE_OUTPUT_LIMIT = 1_000;
+// Native Codex exempts this backend name from originator and User-Agent rewriting.
+const NATIVE_BACKEND_CLIENT_NAME = 'codex-backend';
 
 function parseCodexVersion(value: unknown): string | null {
   if (typeof value !== 'string') return null;
@@ -210,13 +212,23 @@ export class CodexAppServerClient {
     try {
       const initialized = await this.requestRaw('initialize', {
         clientInfo: {
-          name: 'remote_cli',
+          name: NATIVE_BACKEND_CLIENT_NAME,
           title: 'Remote CLI',
           version: this.getClientVersion(),
         },
         capabilities: { experimentalApi: true },
       });
-      this.serverVersion = parseCodexVersion(initialized?.userAgent);
+      const userAgent = initialized?.userAgent;
+      const environment = this.env ?? process.env;
+      const originatorKey = Object.keys(environment).sort().find(key =>
+        (process.platform === 'win32' ? key.toUpperCase() : key) === 'CODEX_INTERNAL_ORIGINATOR_OVERRIDE');
+      const inheritedOriginator = originatorKey ? environment[originatorKey] : undefined;
+      if (typeof userAgent !== 'string' || !userAgent.trim()
+        || userAgent.includes(`(${NATIVE_BACKEND_CLIENT_NAME};`)
+        || (userAgent.startsWith(`${NATIVE_BACKEND_CLIENT_NAME}/`) && inheritedOriginator !== NATIVE_BACKEND_CLIENT_NAME)) {
+        throw new Error('Codex app-server could not confirm native User-Agent preservation. Upgrade Codex and retry; no task was sent.');
+      }
+      this.serverVersion = parseCodexVersion(userAgent);
       this.notify('initialized');
     } catch (error) {
       try { await this.stop(); } catch { /* Retain child ownership and the original initialization error. */ }
