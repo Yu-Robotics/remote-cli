@@ -475,7 +475,8 @@ The CLI supports OpenCode through a persistent `opencode acp` child process. `Ac
 - Session pointers are stored per thread under `~/.remote-cli/opencode-sessions/` and loaded after process recreation or backend switches.
 - `/model` and `/effort` read and update ACP session configuration options.
 - `/compact` is sent through the ACP prompt protocol, `/abort` sends `session/cancel`, and image inputs use ACP image content blocks.
-- Tool permission requests choose an allow option when `executor.opencode.autoApprove` is true and are relayed through the mobile input flow when it is false. Ask-user choices are always relayed and accept an option name or number.
+- With `executor.opencode.autoApprove: true` (the default), tool permission requests choose an allow option. The managed child process merges valid inherited `OPENCODE_PERMISSION` rules with a final `question: 'deny'` rule and sets `OPENCODE_ENABLE_QUESTION_TOOL=false`; invalid inherited rules fail startup explicitly. This does not modify global or project configuration or the parent environment. With `false`, remote-cli adds no question override and relays permissions through mobile input, preserving native interactive behavior.
+- Any recognized ACP ask-user choices that still arrive remain interactive and accept an option name or number; they are never automatically answered. OpenCode ACP normally omits the question tool, and explicitly enabling it does not establish native question-event support. Ordinary assistant text can still contain questions.
 - OpenCode-specific slash commands, including `/skills`, are sent through ACP.
 
 Architecture:
@@ -495,6 +496,8 @@ The CLI supports Kimi Code through its official persistent `kimi acp` server. `K
 - Install with `npm install --global @moonshot-ai/kimi-code` and authenticate with `kimi login`.
 - Session pointers are stored per thread under `~/.remote-cli/kimi-sessions/`.
 - `/model` uses the ACP model option; `/effort` maps to Kimi's `thinking` option, where `auto` sends `on` so Kimi chooses the model's default effort.
+- After every new or restored session, and after applying configured model/effort settings, remote-cli requires an advertised ACP `mode` option and confirms the returned mode before prompting. `executor.kimi.autoApprove: true` (the default) selects native Never Ask mode (`auto`); `false` selects Kimi's interactive mode (`default`), including when restoring a previously automatic session. Unsupported, rejected, or unconfirmed mode setup fails before a task is sent. Adding a root `--auto` flag to `kimi acp` alone does not apply this policy.
+- Native Never Ask disables Kimi's question tool and exits plan mode, but does not guarantee question-free assistant text. Recognized ACP ask-user choices that still arrive use the interactive fallback rather than automatic answers.
 - Image inputs, slash commands, tool events, permission requests, ask-user choices, and cancellation use ACP.
 
 Architecture:
@@ -693,15 +696,32 @@ captured tree entries after clean filters and both endpoints of renames at scope
 Native executor behavior and Router protocol version 1 remain unchanged. Multiple
 waiting workers must not receive an ambiguously addressed plain-text reply.
 
-From CLI 1.6.135, reclaim only a successful no-change artifact or a durable applied
-artifact with verified lane/task identity, refs, detached HEAD, and checkout bytes.
-Keep native context pointers, lane IDs, artifacts, and private history refs.
-Independent filesystem/hash verification must account for ignored files,
-extra directories, symlinks, file modes, and Git index flags; Git status and even
-non-forced worktree removal do not protect ignored files. Never force removal or
-prune registrations automatically. Persist present/reclaiming/reclaimed state and
-an exact output receipt before/after removal. Recreate only an absent, unregistered
-owned path with a valid receipt; legacy missing paths and partial state fail closed.
+Legacy checkouts without `disposalPolicy: 1` retain the conservative reclamation
+policy introduced in CLI 1.6.135: reclaim only successful no-change output or a
+durably applied successful artifact, with verified lane/task identity, refs,
+detached HEAD, and checkout bytes. Audit ignored files, extra directories,
+symlinks, file modes, and Git index flags; Git status and non-forced worktree
+removal alone do not protect ignored files. Never force automatic legacy removal.
+
+From CLI 1.6.191 on Linux, newly created checkouts may carry `disposalPolicy: 1`.
+Only this policy permits guarded `git worktree remove --force` to remove the
+entire disposable checkout, including ignored dependencies and temporary extras.
+Require confirmed native managed-process-group exit, matching durable closeout
+and applied/retained artifact receipts, recoverable captured output and declared
+exports, canonical ownership/path and mount-boundary checks, verified refs,
+detached HEAD, tracked bytes, and Git index flags. Failed captured changes become
+retained immutable artifacts for recovery without automatic merging; their checkout
+may then be reclaimed under the same checks. Pending successful changes wait for
+apply or explicit retention. Unconfirmed exit, uncaptured edits, incomplete
+exports, unsafe boundaries, or unresolved parent-application recovery hold cleanup.
+macOS and Windows retain the conservative policy; existing legacy checkouts never
+implicitly adopt disposal policy 1.
+
+For both policies, keep native context pointers, lane IDs, artifacts, and private
+history refs. Never prune registrations automatically. Persist
+present/reclaiming/reclaimed state and an exact output receipt before/after removal.
+Recreate only an absent, unregistered owned path with a valid receipt; legacy
+missing paths and partial state fail closed.
 Serialize lane lifecycle operations and repository worktree metadata operations
 in process. Do not mark a lane ready until awaited best-effort reclamation settles;
 never race removal against the worker-stop deadline or change task success when

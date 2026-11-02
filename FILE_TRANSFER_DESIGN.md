@@ -1,6 +1,6 @@
 # File Transfer Design Plan
 
-> **Status: HISTORICAL PROPOSAL / PARTIALLY IMPLEMENTED.** Ordinary file attachments remain unsupported. Image input for supported backends, Codex native image output, and local image output from all backends are implemented; see [Image Input](README.md#image-input) for current behavior and limits. The remaining design, including its transfer APIs and security assumptions, is a proposal rather than the current protocol.
+> **Status: HISTORICAL PROPOSAL / PARTIALLY IMPLEMENTED.** Ordinary Feishu file reception, verified local storage, and bounded preview extraction are implemented; see [File Attachments](README.md#file-attachments) for current enrollment, transport, usage, and size/retention limits. Image input for supported backends, Codex native image output, and local image output from all backends are also implemented; see [Image Input](README.md#image-input). The architecture descriptions, transfer APIs, security assumptions, and remaining proposals below are historical design material, not a specification of the current protocol or a claim that the entire proposal is implemented.
 
 ## Executive Summary
 

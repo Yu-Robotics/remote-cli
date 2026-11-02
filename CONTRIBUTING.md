@@ -269,10 +269,12 @@ vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || originalHom
 ## Release Process
 
 1. Keep the version synchronized in the root, CLI, and Router `package.json` files and `package-lock.json`. Runtime behavior changes require a version bump; documentation-only and test-only changes do not.
-2. Review both root README files and update them together when user-visible behavior changes. Update `CHANGELOG.md` with release notes.
+2. Review both root README files and update them together when user-visible behavior changes. Add matching, nonempty version entries to `CHANGELOG.md` and `RELEASE_NOTES_ZH.md`, following the release-summary requirements in `CLAUDE.md`.
 3. From the repository root, run `npm ci`, `npm run build`, and `npm test`.
-4. Commit the verified changes. When publishing a release, an authorized maintainer runs `npm publish -w @yu_robotics/remote-cli` and `npm publish -w @yu_robotics/remote-cli-router`; each package also runs its build and tests in `prepublishOnly`.
-5. Record the release with the corresponding Git tag and push it. This repository has no GitHub Actions publishing workflow; pushing a tag alone does not publish either package.
+4. Review the exact staged changes and outgoing commit range for secrets and private information before an authorized commit and push. The [publishing workflow](.github/workflows/npm-publish.yml) builds and tests both packages on native Linux, macOS, and Windows for pushes to `main` and pull requests targeting `main`. Pull requests do not publish. A push to the upstream `main` selects publication only when the root version increases relative to the revision before that push; unchanged versions skip publication, while invalid versions, downgrades, or unreadable prior versions fail closed. A Git tag is not required and does not trigger publication.
+5. After all native jobs succeed, the workflow uses npm Trusted Publishing (OIDC) and [scripts/publish-npm.cjs](scripts/publish-npm.cjs) to validate synchronized versions, pack both packages, check both exact registry versions for integrity conflicts, and publish missing packages. Existing versions are skipped only when their integrity matches the local tarball. The helper confirms each publication against registry metadata with bounded polling; an uncertain result never triggers an automatic upload retry. Publication of the two packages is not atomic.
+
+For partial or uncertain publication, reconcile the registry result and use **Re-run failed jobs** on the original run to preserve its source revision and integrity checks. Do not change the source and reuse a partially published version. Explicit `workflow_dispatch` recovery is also available on upstream `main` with its exact committed version; it runs the same native validation and publication gates. Direct workspace `npm publish` retains `prepublishOnly` build/test checks but is not the normal release procedure. See [Publishing with GitHub Actions](README.md#publishing-with-github-actions) for trusted-publisher setup and recovery details.
 
 ## Questions?
 
