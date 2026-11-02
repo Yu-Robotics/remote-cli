@@ -118,6 +118,12 @@ npm run test:coverage -w @yu_robotics/remote-cli
 npm test -w @yu_robotics/remote-cli -- DirectoryGuard.test.ts
 ```
 
+Native CI splits the complete CLI suite across two independent runners per OS
+with Vitest's `--shard=1/2` and `--shard=2/2`. Each runner keeps real Git suites
+in a single fork; the Router suite runs once per OS. Every shard on Linux,
+macOS, and Windows must pass before publication. Local `npm test` still runs
+the complete suite without sharding.
+
 ### Test-Driven Development
 
 We follow TDD principles:
