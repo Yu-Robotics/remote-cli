@@ -2,6 +2,8 @@
 
 Remote control Claude Code, AGY CLI, Codex CLI, OpenCode CLI, Kimi Code CLI, ZCode, or Pi from anywhere using your mobile phone through Feishu (Lark) messaging.
 
+From CLI 1.6.204, Claude Code model aliases show the alias name followed by the native resolved model ID, preserving provider prefixes. If the resolved ID is unavailable, the native display name is used. Direct model and Default labels, selection values, and other backends remain unchanged.
+
 ![Remote CLI architecture](../../docs/images/remote-cli-architecture.png)
 
 ## Features

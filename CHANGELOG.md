@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.204] - 2026-11-03
+
+### Changed
+- Show Claude Code model aliases alongside their native resolved model IDs, preserving provider prefixes and falling back to native names when resolution is unavailable. Keep direct/default labels, selection values, native metadata, and other backends unchanged.
+
+### Tests
+- Cover alias labels, provider preservation, fallback and bounds handling, and unchanged model selection and native metadata.
+
 ## [1.6.203] - 2026-11-02
 
 ### Changed

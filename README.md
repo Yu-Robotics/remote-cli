@@ -1301,6 +1301,8 @@ Model listing uses native metadata: Claude Code control initialization, bounded 
 
 From CLI 1.6.190, Kimi and OpenCode permission decisions use the standard nested ACP v1 response, so automatic or explicit approvals and cancellations can be interpreted correctly by the backend. Upgrade the local CLI; a Router-only upgrade does not apply this fix.
 
+From CLI 1.6.204, Claude Code model aliases show the alias name followed by the native resolved model ID, preserving provider prefixes. If the resolved ID is unavailable, the native display name is used. Direct model and Default labels, selection values, and other backends remain unchanged.
+
 From CLI 1.6.203, Codex integration uses the native app-server handshake path that preserves its default User-Agent instead of adding a remote-cli identity to that header. Native Codex still determines the version, platform details, and inherited environment behavior; remote-cli does not replace the header or change global Codex configuration. This is app-server behavior, not a promise to match the interactive TUI. The native exemption was checked against Codex 0.166.0. Missing User-Agent metadata or an unexpected backend identity rewrite stops startup before a task is sent; upgrade native Codex if this check fails. Upgrade the local CLI; a Router-only upgrade does not apply this change.
 
 From CLI 1.6.202, default automatic approval enables Kimi native Never Ask mode after creating or restoring a session and disables the OpenCode question tool for the managed process. Native mode setup must succeed before a Kimi task starts. Explicit manual approval retains interactive behavior. These policies do not prevent ordinary questions in assistant text, change other backends, or require a Router upgrade.

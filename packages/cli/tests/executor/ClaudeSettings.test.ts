@@ -56,6 +56,87 @@ describe('ClaudeSettings', () => {
       });
     });
 
+    it('distinguishes same-name aliases and direct models without changing native metadata or order', () => {
+      const resolvedModel = 'synthetic-provider/model-pro';
+      const raw = [
+        { value: 'default', resolvedModel, displayName: 'Default (recommended)' },
+        { value: 'opus', resolvedModel, displayName: 'Friendly model', description: 'Native description',
+          supportsEffort: true, supportedEffortLevels: ['low', 'high'], supportsAdaptiveThinking: true, supportsAutoMode: true },
+        { value: 'fable', resolvedModel, displayName: 'Friendly model' },
+        { value: resolvedModel, resolvedModel, displayName: 'Friendly model' },
+      ];
+      const original = structuredClone(raw);
+      const { models, rawEntries } = parseClaudeModelsCatalog(raw, 'opus');
+      expect(models.map(model => model.id)).toEqual(raw.map(entry => entry.value));
+      expect(models.map(model => model.displayName)).toEqual([
+        'Default (recommended)', `Opus · ${resolvedModel}`, `Fable · ${resolvedModel}`, 'Friendly model',
+      ]);
+      expect(models.map(model => model.isCurrent)).toEqual([undefined, true, undefined, undefined]);
+      expect(parseClaudeModelsCatalog(raw, resolvedModel).models.map(model => model.isCurrent))
+        .toEqual([undefined, undefined, undefined, true]);
+      expect(rawEntries.map(entry => entry.displayName)).toEqual(raw.map(entry => entry.displayName));
+      expect(rawEntries[1]).toEqual(raw[1]);
+      expect(raw).toEqual(original);
+      expect(resolveClaudeEfforts(rawEntries, 'opus', 'high').choices.map(choice => choice.value)).toEqual(['low', 'high']);
+      expect(resolveClaudeEfforts(rawEntries, 'fable').unavailableReason).toBe('Reasoning effort is not supported for Friendly model.');
+      expect(parseClaudeModelsCatalog(rawEntries, 'opus').models).toEqual(models);
+    });
+
+    it.each([
+      ['opus', 'Opus'], ['fable', 'Fable'], ['sonnet', 'Sonnet'], ['haiku', 'Haiku'],
+      ['opus[1m]', 'Opus[1m]'], ['fable[1m]', 'Fable[1m]'],
+      ['sonnet[1m]', 'Sonnet[1m]'], ['haiku[1m]', 'Haiku[1m]'],
+    ])('prefers the exact resolved model over a friendly name for %s', (value, label) => {
+      const resolvedModel = 'Synthetic Provider/full-model[1m]';
+      const { models, rawEntries } = parseClaudeModelsCatalog([
+        { value, resolvedModel, displayName: 'A different friendly name' },
+      ], resolvedModel);
+      expect(models[0]).toMatchObject({ id: value, displayName: `${label} · ${resolvedModel}`, isCurrent: true });
+      expect(rawEntries[0]).toMatchObject({ value, resolvedModel, displayName: 'A different friendly name' });
+    });
+
+    it.each([undefined, null, 42, '', 'invalid\nmodel', 'x'.repeat(513)])(
+      'uses a sanitized native name when the resolved model is invalid (%j)', resolvedModel => {
+        const { models, rawEntries } = parseClaudeModelsCatalog([
+          { value: 'sonnet', resolvedModel, displayName: 'Friendly\nmodel' },
+        ]);
+        expect(models[0].displayName).toBe('Sonnet · Friendly model');
+        expect(rawEntries[0]).toMatchObject({ value: 'sonnet', displayName: 'Friendly model' });
+        expect(rawEntries[0].resolvedModel).toBeUndefined();
+      },
+    );
+
+    it.each([undefined, null, 42, ''])('keeps an alias marker when no usable native name is supplied (%j)', displayName => {
+      const { models, rawEntries } = parseClaudeModelsCatalog([{ value: 'haiku', displayName }]);
+      expect(models[0].displayName).toBe('Haiku · haiku');
+      expect(rawEntries[0].displayName).toBe('haiku');
+    });
+
+    it('bounds annotated labels by code points while preserving the native resolved identifier', () => {
+      const resolvedModel = 'synthetic-provider/' + '\ud83d\ude80'.repeat(180);
+      const nativeName = 'Friendly\n' + 'x'.repeat(150);
+      const { models, rawEntries } = parseClaudeModelsCatalog([
+        { value: 'opus', resolvedModel, displayName: 'Friendly model' },
+        { value: 'sonnet', displayName: nativeName },
+      ]);
+      expect(models[0].displayName).toBe(Array.from(`Opus · ${resolvedModel}`).slice(0, 128).join(''));
+      expect(Array.from(models[0].displayName)).toHaveLength(128);
+      expect(rawEntries[0].resolvedModel).toBe(resolvedModel);
+      expect(rawEntries[0].displayName).toBe('Friendly model');
+      expect(models[1].displayName).toBe(('Sonnet · Friendly ' + 'x'.repeat(150)).slice(0, 128));
+      expect(rawEntries[1].displayName).toBe(('Friendly ' + 'x'.repeat(150)).slice(0, 128));
+    });
+
+    it('leaves default, direct identifiers and names outside the explicit alias set unchanged', () => {
+      const values = ['default', 'synthetic-provider/opus', 'claude-sonnet-5', 'best', 'opusplan',
+        'Opus', 'sonnet[2m]', 'custom-alias', 'constructor'];
+      const { models } = parseClaudeModelsCatalog(values.map(value => ({
+        value, resolvedModel: 'synthetic-provider/model', displayName: 'Native\nlabel',
+      })));
+      expect(models.map(model => model.id)).toEqual(values);
+      expect(models.map(model => model.displayName)).toEqual(values.map(() => 'Native label'));
+    });
+
     it('preserves all bounded choices and rejects oversized catalogs explicitly', () => {
       const largeList = Array.from({ length: 60 }, (_, i) => ({
         value: `model-${i}`,
