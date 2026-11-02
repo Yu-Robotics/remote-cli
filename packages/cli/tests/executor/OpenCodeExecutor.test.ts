@@ -165,6 +165,22 @@ describe('OpenCodeExecutor', () => {
     await restored.destroy();
   });
 
+  it('does not reuse a retired cached client after configured initialization fails', async () => {
+    const replacement = new FakeTransport();
+    transport.setConfigOption.mockRejectedValueOnce(new Error('Synthetic configuration failure'));
+    await executor.destroy();
+    const factory = vi.fn().mockReturnValueOnce(transport).mockReturnValue(replacement);
+    executor = new OpenCodeExecutor(new DirectoryGuard([home]), { model: 'opencode/free-b',
+      initialWorkingDirectory: project, sessionBaseDir: path.join(home, 'retry-sessions'), clientFactory: factory });
+    await expect(executor.listModels()).rejects.toThrow('Synthetic configuration failure');
+    expect(executor.isProcessRunning()).toBe(false);
+    await expect(executor.listModels()).resolves.toHaveLength(2);
+    expect(factory).toHaveBeenCalledTimes(2);
+    expect(replacement.loadSession).toHaveBeenCalledWith('ses-new', project);
+    expect(replacement.newSession).not.toHaveBeenCalled();
+    expect(transport.prompt).not.toHaveBeenCalled();
+  });
+
   it('passes image attachments as native ACP content blocks', async () => {
     await executor.execute('inspect', {
       attachments: [{ type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' }],

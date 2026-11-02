@@ -91,6 +91,19 @@ describe('AcpClient', () => {
     await expect(pending).resolves.toMatchObject({ protocolVersion: 1 });
   });
 
+  it.each([false, true])('passes an isolated environment through managed=%s launches', managed => {
+    client.destroy();
+    fake.process.emit('close', 0, null);
+    fake = fakeProcess();
+    vi.mocked(spawn).mockReturnValue(fake.process);
+    const environment = { SYNTHETIC_ACP_ENV: 'child-only' };
+    client = new AcpClient('synthetic-acp', ['acp'], process.cwd(), callbacks, managed, { env: environment });
+    expect(vi.mocked(spawn).mock.calls.at(-1)?.[2]?.env).toEqual(environment);
+    expect(process.env.SYNTHETIC_ACP_ENV).toBeUndefined();
+    client.destroy();
+    fake.process.emit('close', 0, null);
+  });
+
   it('creates and loads sessions with the working directory', async () => {
     const creating = client.newSession('/repo');
     const createdRequest = request(fake.lines, 'session/new');

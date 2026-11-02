@@ -11,6 +11,7 @@ import { PiExecutor } from '../../src/executor/PiExecutor';
 import { CodexAppServerExecutor } from '../../src/executor/CodexAppServerExecutor';
 import type { AcpTransport } from '../../src/executor/acp/AcpClient';
 import type { IExecutor } from '../../src/executor/IExecutor';
+import { withKimiModes } from './kimiAcpFixture';
 
 class AcpFixture implements AcpTransport {
   initialize = vi.fn(async () => ({}));
@@ -47,7 +48,8 @@ describe('managed executor group-exit contracts', () => {
     const second = new AcpFixture();
     let uncertain = true;
     first.waitForManagedProcessGroupExit.mockImplementation(async () => { if (uncertain) throw new Error('Synthetic group still alive'); });
-    const factory = vi.fn().mockReturnValueOnce(first).mockReturnValue(second);
+    const factory = vi.fn().mockReturnValueOnce(Executor === KimiExecutor ? withKimiModes(first) : first)
+      .mockReturnValue(Executor === KimiExecutor ? withKimiModes(second) : second);
     executor = new Executor(guard, { initialWorkingDirectory: root, threadId: 'synthetic-worker',
       delegationWorker: true, sessionBaseDir: path.join(root, 'sessions'), clientFactory: factory });
     expect((await executor.execute('fixture')).success).toBe(true);
