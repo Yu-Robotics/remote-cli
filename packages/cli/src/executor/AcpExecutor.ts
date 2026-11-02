@@ -34,6 +34,10 @@ export interface AcpExecutorOptions {
   preserveSessionOnResumeError?: boolean;
   /** Opt-in to track and cancel a transport even before session initialization finishes. */
   managedLifecycle?: boolean;
+  /** Native approval modes, for backends whose tool policy is separate from ACP permissions. */
+  approvalModes?: { automatic: string; manual: string };
+  /** Build a process-local environment immediately before spawning the transport. */
+  spawnEnvironment?: () => NodeJS.ProcessEnv;
 }
 
 interface QueuedCommand {
@@ -198,7 +202,9 @@ export abstract class AcpExecutor implements IExecutor {
     const command = options.acpCommand;
     const args = options.acpArgs;
     this.clientFactory = options.clientFactory
-      ?? ((callbacks, cwd) => new AcpClient(command, args, cwd, callbacks, this.isDelegationManaged(), { delegationWorker: this.delegationWorker }));
+      ?? ((callbacks, cwd) => new AcpClient(command, args, cwd, callbacks, this.isDelegationManaged(), {
+        delegationWorker: this.delegationWorker, env: options.spawnEnvironment?.(),
+      }));
 
     try {
       this.currentWorkingDirectory = options.initialWorkingDirectory
@@ -258,7 +264,7 @@ export abstract class AcpExecutor implements IExecutor {
 
   async abort(): Promise<boolean> {
     if (!this.client || !this.sessionId || !this.isProcessing) {
-      if (this.options.managedLifecycle && this.isProcessing) {
+      if ((this.options.managedLifecycle || this.options.approvalModes) && this.isProcessing) {
         this.destroyClient();
         return true;
       }
@@ -485,9 +491,11 @@ export abstract class AcpExecutor implements IExecutor {
     }
     try {
       this.updateConfigOptions(await client.setConfigOption(sessionId, 'model', model));
+      await this.applyApprovalMode(client, sessionId);
       this.model = model;
       return { success: true, output: `Model set to ${model}.` };
     } catch (error) {
+      if (this.options.approvalModes) this.destroyClient();
       return { success: false, error: this.friendlyError(error) };
     }
   }
@@ -503,9 +511,11 @@ export abstract class AcpExecutor implements IExecutor {
     }
     try {
       this.updateConfigOptions(await client.setConfigOption(sessionId, this.effortConfigId, value));
+      await this.applyApprovalMode(client, sessionId);
       this.effort = effort === 'auto' ? undefined : effort;
       return { success: true, output: `Reasoning effort set to ${effort}.` };
     } catch (error) {
+      if (this.options.approvalModes) this.destroyClient();
       return { success: false, error: this.friendlyError(error) };
     }
   }
@@ -617,12 +627,22 @@ export abstract class AcpExecutor implements IExecutor {
     assertWorkingDirectoryExists(this.currentWorkingDirectory);
     if (this.client && this.sessionId) return { client: this.client, sessionId: this.sessionId };
     this.reportedConfigOptions = [];
+    // A previous process cannot advertise native approval capabilities for its replacement.
+    if (this.options.approvalModes) this.configOptions = this.configOptions.filter(option => option.id !== 'mode');
     const client = this.createClient();
     if (this.delegationWorker) this.workerTransports.add(client);
-    this.transports.set(client, managed);
+    const trackInitialization = managed || this.options.approvalModes !== undefined;
+    this.transports.set(client, trackInitialization);
+    const revision = this.catalogLifecycleRevision;
+    const assertCurrent = () => {
+      selection?.assertCurrent();
+      if (trackInitialization && (this.isDestroyed || revision !== this.catalogLifecycleRevision || !this.transports.has(client))) {
+        throw new Error(`${this.backendLabel} session initialization was cancelled.`);
+      }
+    };
     try {
       await client.initialize();
-      selection?.assertCurrent();
+      assertCurrent();
       const servers = delegationSessionServers(this.delegationConnection);
       const extra: [AcpMcpServer[]?] = servers.length ? [servers] : [];
       let result;
@@ -630,8 +650,9 @@ export abstract class AcpExecutor implements IExecutor {
         try {
           this.replayingSession = managed;
           result = await client.loadSession(this.sessionId, this.currentWorkingDirectory, ...extra);
-          selection?.assertCurrent();
+          assertCurrent();
         } catch (error) {
+          assertCurrent();
           const missingSession = /\bsession (?:not found|does not exist|no longer exists|is missing)\b/i
             .test(error instanceof Error ? error.message : String(error));
           if (selection || ((this.delegationConnection || this.options.preserveSessionOnResumeError) && !missingSession)) throw error;
@@ -641,21 +662,23 @@ export abstract class AcpExecutor implements IExecutor {
       }
       if (!this.sessionId) {
         result = await client.newSession(this.currentWorkingDirectory, ...extra);
-        selection?.assertCurrent();
+        assertCurrent();
         if (!result.sessionId) throw new Error(`${this.backendLabel} did not return a session ID`);
         this.sessionId = result.sessionId;
         this.saveSessionPointer();
       }
       this.updateConfigOptions(result);
-      selection?.assertCurrent();
-      if (this.isDestroyed && managed) throw new Error('Executor has been destroyed');
+      assertCurrent();
+      // Preserve cancellation through the cached client for existing transports.
+      // Native approval policy must be confirmed before its client becomes reusable.
+      if (!this.options.approvalModes) this.client = client;
+      await this.applyConfiguredOptions(client, this.sessionId!, selection?.model, assertCurrent);
+      assertCurrent();
       this.client = client;
-      await this.applyConfiguredOptions(client, this.sessionId!, selection);
-      selection?.assertCurrent();
       return { client, sessionId: this.sessionId! };
     } catch (error) {
       this.retireClient(client);
-      if (selection && this.client === client) this.client = null;
+      if (this.client === client) this.client = null;
       throw error;
     }
   }
@@ -730,17 +753,39 @@ export abstract class AcpExecutor implements IExecutor {
   }
 
   private async applyConfiguredOptions(client: AcpTransport, sessionId: string,
-    selection?: { model: string; assertCurrent: () => void }): Promise<void> {
-    const model = selection?.model ?? this.model;
+    selectedModel?: string, assertCurrent: () => void = () => {}): Promise<void> {
+    const model = selectedModel ?? this.model;
     if (model) {
       const result = await client.setConfigOption(sessionId, 'model', model);
-      selection?.assertCurrent();
+      assertCurrent();
       this.updateConfigOptions(result);
     }
     if (this.effort) {
       const result = await client.setConfigOption(sessionId, this.effortConfigId, this.effort);
-      selection?.assertCurrent();
+      assertCurrent();
       this.updateConfigOptions(result);
+    }
+    await this.applyApprovalMode(client, sessionId, assertCurrent);
+  }
+
+  private async applyApprovalMode(client: AcpTransport, sessionId: string, assertCurrent: () => void = () => {}): Promise<void> {
+    const modes = this.options.approvalModes;
+    if (!modes) return;
+    const value = this.autoApprove ? modes.automatic : modes.manual;
+    const failure = `${this.backendLabel} could not confirm native ${this.autoApprove ? 'Never Ask' : 'manual approval'} mode. Upgrade the native CLI and retry; no prompt was sent.`;
+    try {
+      const option = this.findConfigOption('mode');
+      if (option?.type !== 'select' || !parseAcpSelectOptions(option.options).some(entry => entry.value === value)) {
+        throw new Error(failure);
+      }
+      const result = await client.setConfigOption(sessionId, 'mode', value);
+      assertCurrent();
+      const confirmed = result?.configOptions?.find(entry => entry.id === 'mode');
+      if (confirmed?.type !== 'select' || confirmed.currentValue !== value) throw new Error(failure);
+      this.updateConfigOptions(result);
+    } catch {
+      assertCurrent();
+      throw new Error(failure);
     }
   }
 

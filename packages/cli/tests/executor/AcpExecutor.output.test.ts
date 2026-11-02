@@ -9,6 +9,7 @@ import { ZCodeExecutor } from '../../src/executor/ZCodeExecutor';
 import { DshExecutor } from '../../src/executor/DshExecutor';
 import type { AcpEventCallbacks, AcpTransport } from '../../src/executor/acp/AcpClient';
 import type { AcpContentBlock, AcpSessionResult } from '../../src/executor/acp/AcpTypes';
+import { withKimiModes } from './kimiAcpFixture';
 
 class FakeTransport implements AcpTransport {
   initialize = vi.fn().mockResolvedValue({});
@@ -35,7 +36,7 @@ describe.each([
     initialWorkingDirectory: directory, threadId: 'output-test', autoApprove: false,
     delegationWorker,
     sessionBaseDir: path.join(directory, 'sessions'),
-    clientFactory: next => { callbacks = next; return transport; },
+    clientFactory: next => { callbacks = next; return _backend === 'Kimi' ? withKimiModes(transport) : transport; },
     // Kimi listing refreshes its native managed catalog; this shared fixture
     // must never start a local server or reach an authenticated provider.
     ...(_backend === 'Kimi' ? { modelCatalogQuery: vi.fn(async () => [{ id: 'previous-model', displayName: 'Previous model' }]) } : {}),
@@ -69,7 +70,7 @@ describe.each([
     expect(result).toMatchObject({ success: true, output: 'Thinking about **documentation**.' });
     expect(stream.mock.calls).toEqual([['Thinking about '], ['**documentation**.']]);
     expect(display.mock.calls).toEqual(stream.mock.calls);
-    expect(transport.setConfigOption).not.toHaveBeenCalled();
+    expect(transport.setConfigOption.mock.calls.filter(([, id]) => id !== 'mode')).toEqual([]);
   });
 
   it('reads cached native model/effort options without starting or querying a backend', async () => {
@@ -84,7 +85,7 @@ describe.each([
     expect(executor.getExecutionMetadata()).toMatchObject({ model: 'native-model', modelSource: 'reported' });
     expect(executor.getExecutionMetadata()).toMatchObject({ reasoningEffort: _backend === 'Kimi' ? 'on' : 'high', effortSource: 'reported' });
     expect(transport.prompt.mock.calls.length).toBe(before);
-    expect(transport.setConfigOption).not.toHaveBeenCalled();
+    expect(transport.setConfigOption.mock.calls.filter(([, id]) => id !== 'mode')).toEqual([]);
     callbacks.onConfigOptions?.([{ id: 'model', currentValue: 'updated-model' }]);
     expect(executor.getExecutionMetadata()).toMatchObject({ model: 'updated-model', modelSource: 'reported' });
   });
@@ -101,7 +102,7 @@ describe.each([
     await executor.execute('second', {});
     expect(executor.getExecutionMetadata()).toMatchObject({ model: undefined, modelSource: 'default', reasoningEffort: undefined, effortSource: 'default' });
     expect(await executor.listModels()).toMatchObject([{ id: 'previous-model' }]);
-    expect(transport.setConfigOption).not.toHaveBeenCalled();
+    expect(transport.setConfigOption.mock.calls.filter(([, id]) => id !== 'mode')).toEqual([]);
   });
 
   it('finishes a thought-only turn with empty output', async () => {

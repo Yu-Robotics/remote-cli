@@ -45,6 +45,8 @@ export class KimiExecutor extends AcpExecutor {
       sessionNamespace: 'kimi-sessions',
       effortConfigId: 'thinking',
       effortAutoValue: 'on',
+      // Kimi ACP's "default" mode maps to native manual approvals, not "manual".
+      approvalModes: { automatic: 'auto', manual: 'default' },
       installCommand: 'npm install --global @moonshot-ai/kimi-code',
       authCommand: 'kimi login',
     });

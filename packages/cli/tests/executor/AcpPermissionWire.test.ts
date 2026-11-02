@@ -15,6 +15,7 @@ import type { AcpPermissionOption } from '../../src/executor/acp/AcpTypes';
 import { KimiExecutor } from '../../src/executor/KimiExecutor';
 import { OpenCodeExecutor } from '../../src/executor/OpenCodeExecutor';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
+import { kimiModeOption } from './kimiAcpFixture';
 
 const toolOptions: AcpPermissionOption[] = [
   { optionId: 'approve-once', kind: 'allow_once', name: 'Once' },
@@ -64,7 +65,9 @@ class PermissionAgent extends EventEmitter {
     if (frame.method === 'initialize') {
       this.send({ jsonrpc: '2.0', id: frame.id, result: { protocolVersion: 1 } });
     } else if (frame.method === 'session/new' || frame.method === 'session/load') {
-      this.send({ jsonrpc: '2.0', id: frame.id, result: { sessionId: 'synthetic-session', configOptions: [] } });
+      this.send({ jsonrpc: '2.0', id: frame.id, result: { sessionId: 'synthetic-session', configOptions: [kimiModeOption()] } });
+    } else if (frame.method === 'session/set_config_option') {
+      this.send({ jsonrpc: '2.0', id: frame.id, result: { configOptions: [kimiModeOption(frame.params.value)] } });
     } else if (frame.method === 'session/prompt') {
       this.promptId = frame.id;
       this.send({ jsonrpc: '2.0', id: 900, method: 'session/request_permission', params: {

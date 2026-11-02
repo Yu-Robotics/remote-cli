@@ -566,7 +566,9 @@ curl https://your-domain.com/health
 
 ## Advanced Usage
 
-From CLI 1.6.190, Kimi and OpenCode permission decisions use the standard nested ACP v1 response, so automatic or explicit approvals and cancellations can be interpreted correctly by the backend. Upgrade the local CLI; a Router-only upgrade does not apply this fix. Existing approval policies are preserved: disabling automatic approval still requires user input, and model questions remain interactive. This does not enable Kimi native Never Ask mode or change global backend configuration or saved conversations.
+From CLI 1.6.190, Kimi and OpenCode permission decisions use the standard nested ACP v1 response, so automatic or explicit approvals and cancellations can be interpreted correctly by the backend. Upgrade the local CLI; a Router-only upgrade does not apply this fix.
+
+From CLI 1.6.202, default automatic approval enables Kimi native Never Ask mode after creating or restoring a session and disables the OpenCode question tool for the managed process. Native mode setup must succeed before a Kimi task starts. Explicit manual approval retains interactive behavior. These policies do not prevent ordinary questions in assistant text, change other backends, or require a Router upgrade.
 
 From CLI 1.6.175, opening or refreshing Kimi's `/model` list also refreshes the native OAuth-managed model catalog through Kimi's authenticated loopback server. Manual terminal refresh and repeated sign-in are not required. Kimi must expose the native model-refresh endpoint; account permissions and upstream availability still determine the returned choices. Failed or timed-out refreshes are reported rather than treated as a successful refresh of an old list. Upgrade the local CLI to use this behavior; the Router protocol is unchanged. Applying a discovered model to an idle Kimi thread reloads the native ACP process and resumes the same conversation binding, so its process-local catalog cannot reject the new alias.
 
