@@ -452,6 +452,7 @@ CodexAppServerExecutor keeps one app-server process per active thread. It uses a
 
 - `/model` stores the selection under `thread.models.codex`; bare `/model` queries the app-server model catalog. `/effort` stores the per-thread override under `thread.efforts.codex`; `auto` clears it and restores the selected model's default reasoning effort.
 - Startup verifies that the installed Codex CLI exposes `codex app-server --help` and prints an upgrade command when it does not.
+- Initialization uses the native `codex-backend` exemption to preserve app-server User-Agent construction rather than assigning the integration name as its originator or appending a remote-cli suffix. Keep truthful product title/version metadata and the required handshake. Do not hard-code a replacement HTTP User-Agent, copy the TUI identity, or change global Codex configuration. This relies on a native internal-name convention verified against Codex 0.166.0; recheck it when changing supported native versions.
 - Configurations from remote-cli 1.6.30 or earlier are migrated on load: `claude-spawn` becomes `claude-persistent`, and `executor.codex.transport` is removed.
 
 Known gaps vs Claude backend: no native Claude hook events. The app-server path supports Codex image inputs.

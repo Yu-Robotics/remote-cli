@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.203] - 2026-11-02
+
+### Changed
+- Preserve native Codex app-server User-Agent construction during initialization instead of adding the remote-cli client identity. Keep product metadata and global Codex configuration unchanged.
+
+### Tests
+- Cover native-preserving initialization, inherited process settings, Codex version detection, and rejected-handshake cleanup/retry without model requests.
+
 ## [1.6.202] - 2026-11-02
 
 ### Changed

@@ -2,6 +2,11 @@
 
 这里只记录用户能感知的变化；英文技术细节见 CHANGELOG.md。
 
+## [1.6.203] - 2026-11-02
+
+### 保留 Codex 原生请求标识
+- [codex-user-agent|Codex 请求标识] 使用 Codex 后端时保留原生 app-server 的 User-Agent，不再附加 remote-cli 标识；无需升级 Router。
+
 ## [1.6.202] - 2026-11-02
 
 ### 自动执行时减少提问打断

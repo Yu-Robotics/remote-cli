@@ -17,7 +17,7 @@ vi.mock('child_process', async (importActual) => {
 
 const mockSpawn = vi.mocked(spawn);
 
-function fakeProcess(userAgent = 'test', closesOnKill = true) {
+function fakeProcess(userAgent: unknown = 'codex_cli_rs/0.166.0 (TestOS; synthetic) native-terminal', closesOnKill = true) {
   const process: any = new EventEmitter();
   process.exitCode = null;
   process.signalCode = null;
@@ -211,7 +211,10 @@ describe('CodexAppServerClient', () => {
     const messages = process.stdin.writes.map((line: string) => JSON.parse(line));
     expect(messages[0]).toMatchObject({
       method: 'initialize',
-      params: { clientInfo: { name: 'remote_cli' }, capabilities: { experimentalApi: true } },
+      params: {
+        clientInfo: { name: 'codex-backend', title: 'Remote CLI', version: expect.any(String) },
+        capabilities: { experimentalApi: true },
+      },
     });
     expect(messages[1]).toEqual({ method: 'initialized' });
     await client.stop();
@@ -305,7 +308,7 @@ describe('CodexAppServerClient', () => {
   });
 
   it('records the version reported by the running app-server', async () => {
-    const process = fakeProcess('remote_cli/0.159.2 (Linux; aarch64)');
+    const process = fakeProcess('codex_cli_rs/0.159.2 (TestOS; synthetic) native-terminal');
     mockSpawn.mockReturnValue(process);
     const client = new CodexAppServerClient();
 
@@ -313,6 +316,68 @@ describe('CodexAppServerClient', () => {
 
     expect(client.getServerVersion()).toBe('0.159.2');
     await client.stop();
+  });
+
+  it('preserves inherited native originator settings without adding a User-Agent override', async () => {
+    vi.stubEnv('CODEX_INTERNAL_ORIGINATOR_OVERRIDE', 'example_native_client');
+    const child = fakeProcess('example_native_client/0.166.0 (TestOS; synthetic) native-terminal');
+    mockSpawn.mockReturnValue(child);
+    const client = new CodexAppServerClient();
+    try {
+      await client.start();
+      const environment = mockSpawn.mock.calls[0][2]?.env;
+      expect(environment?.CODEX_INTERNAL_ORIGINATOR_OVERRIDE).toBe('example_native_client');
+      expect(Object.keys(environment ?? {}).sort()).toEqual(Object.keys(process.env).sort());
+      expect(process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE).toBe('example_native_client');
+      expect(client.getServerVersion()).toBe('0.166.0');
+    } finally {
+      await client.stop();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it.each(['CODEX_INTERNAL_ORIGINATOR_OVERRIDE', 'codex_internal_originator_override'])
+    ('respects native environment key casing for an inherited backend originator: %s', async key => {
+    const child = fakeProcess('codex-backend/0.166.0 (TestOS; synthetic) native-terminal');
+    mockSpawn.mockReturnValue(child);
+    const env = { [key]: 'codex-backend' };
+    const client = new CodexAppServerClient({ env });
+    try {
+      if (key === 'CODEX_INTERNAL_ORIGINATOR_OVERRIDE' || process.platform === 'win32') {
+        await client.start();
+        expect(client.getServerVersion()).toBe('0.166.0');
+      } else {
+        await expect(client.start()).rejects.toThrow('could not confirm native User-Agent preservation');
+      }
+      expect(mockSpawn.mock.calls[0][2]?.env).toBe(env);
+    } finally { await client.stop(); }
+  });
+
+  it.each(['', ' ', null, 42, 'codex-backend/0.166.0 (TestOS; synthetic)',
+    'codex-backend/0.166.0 (TestOS; synthetic) (codex-backend; 1.6.203)'])
+    ('rejects an unconfirmed native User-Agent before accepting further requests: %s', async userAgent => {
+      const child = fakeProcess(userAgent);
+      mockSpawn.mockReturnValue(child);
+      const client = new CodexAppServerClient({ env: {} });
+      await expect(client.request('thread/start', {})).rejects.toThrow('could not confirm native User-Agent preservation');
+      expect(child.stdin.writes.map((line: string) => JSON.parse(line).method)).toEqual(['initialize']);
+      expect(child.kill).toHaveBeenCalled();
+      expect(client.isRunning()).toBe(false);
+      await client.waitForExit();
+    });
+
+  it('retries rejected User-Agent setup on a fresh transport', async () => {
+    const rejected = fakeProcess('codex-backend/0.166.0 (TestOS; synthetic) (codex-backend; 1.6.203)');
+    const accepted = fakeProcess();
+    mockSpawn.mockReturnValueOnce(rejected).mockReturnValueOnce(accepted);
+    const client = new CodexAppServerClient();
+    await expect(client.start()).rejects.toThrow('could not confirm native User-Agent preservation');
+    try {
+      await client.start();
+      expect(mockSpawn).toHaveBeenCalledTimes(2);
+      expect(client.getServerVersion()).toBe('0.166.0');
+      expect(accepted.stdin.writes.map((line: string) => JSON.parse(line).method)).toEqual(['initialize', 'initialized']);
+    } finally { await client.stop(); }
   });
 
   it('reads the version that a fresh Codex command would run', async () => {
