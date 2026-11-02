@@ -16,6 +16,7 @@ const fixture = String.raw`
 const fs = require('fs');
 const readline = require('readline');
 let servers = [];
+const mode = value => ({id:'mode',name:'Mode',type:'select',currentValue:value,options:['default','auto'].map(value=>({value,name:value}))});
 const send = value => process.stdout.write(JSON.stringify({jsonrpc:'2.0',...value}) + '\n');
 readline.createInterface({ input: process.stdin }).on('line', line => {
   const {id,method,params} = JSON.parse(line);
@@ -26,8 +27,9 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     if (['session/new','session/load'].includes(method) && !Array.isArray(params.mcpServers)) throw new Error('ACP MCP servers must be explicit');
     servers = params.mcpServers || [];
     if (method === 'session/load') send({method:'session/update',params:{sessionId:'session',update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'OLD HISTORY'}}}});
-    return reply(method === 'session/new' || method === 'session/load' ? {sessionId:'session'} : {session:{sessionId:'session'}});
+    return reply(method === 'session/new' || method === 'session/load' ? {sessionId:'session',configOptions:[mode('default')]} : {session:{sessionId:'session'}});
   }
+  if (method === 'session/set_config_option') return reply({configOptions:[mode(params.value)]});
   if (method === 'session/subscribe') return reply({eventSeq:0});
   if (method === 'session/send') {
     reply({accepted:true});

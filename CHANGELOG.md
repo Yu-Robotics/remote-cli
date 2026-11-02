@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.202] - 2026-11-02
+
+### Changed
+- Apply Kimi native Never Ask mode before new and restored automatically approved sessions receive a task; preserve explicit manual approval behavior and reject unconfirmed mode setup.
+- Disable the OpenCode question tool for automatically approved managed processes without changing global backend configuration or other backends.
+
+### Tests
+- Cover native mode configuration, resumed sessions, initialization failures, and process-local question policies with synthetic ACP fixtures.
+
 ## [1.6.201] - 2026-11-01
 
 ### Fixed

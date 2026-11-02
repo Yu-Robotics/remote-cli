@@ -1299,7 +1299,9 @@ From CLI 1.6.120, Claude SDK `[claude-code:unrecognized_model]` diagnostics are 
 
 Model listing uses native metadata: Claude Code control initialization, bounded `agy models` two-column rows, Codex app-server `model/list`, ACP session options for OpenCode/Kimi/DSH, ZCode's official app-server catalog, and Pi RPC `get_available_models`. AGY accepts tab-delimited and formatted multi-space columns, preserves exact native IDs, and rejects empty, unusable or oversized catalogs instead of showing an unexplained empty list. Effort choices are scoped to the selected model and exposed native controls; unavailable controls remain explicit. `auto` clears the thread's override rather than guessing a default.
 
-From CLI 1.6.190, Kimi and OpenCode permission decisions use the standard nested ACP v1 response, so automatic or explicit approvals and cancellations can be interpreted correctly by the backend. Upgrade the local CLI; a Router-only upgrade does not apply this fix. Existing approval policies are preserved: disabling automatic approval still requires user input, and model questions remain interactive. This does not enable Kimi native Never Ask mode or change global backend configuration or saved conversations.
+From CLI 1.6.190, Kimi and OpenCode permission decisions use the standard nested ACP v1 response, so automatic or explicit approvals and cancellations can be interpreted correctly by the backend. Upgrade the local CLI; a Router-only upgrade does not apply this fix.
+
+From CLI 1.6.202, default automatic approval enables Kimi native Never Ask mode after creating or restoring a session and disables the OpenCode question tool for the managed process. Native mode setup must succeed before a Kimi task starts. Explicit manual approval retains interactive behavior. These policies do not prevent ordinary questions in assistant text, change other backends, or require a Router upgrade.
 
 From CLI 1.6.175, opening or refreshing Kimi's `/model` list also refreshes the native OAuth-managed model catalog through Kimi's authenticated loopback server. Manual terminal refresh and repeated sign-in are not required. Kimi must expose the native model-refresh endpoint; account permissions and upstream availability still determine the returned choices. Failed or timed-out refreshes are reported rather than treated as a successful refresh of an old list. Upgrade the local CLI to use this behavior; the Router protocol is unchanged. Applying a discovered model to an idle Kimi thread reloads the native ACP process and resumes the same conversation binding, so its process-local catalog cannot reject the new alias.
 
@@ -1643,11 +1645,11 @@ MIT License - see [LICENSE](LICENSE) file for details.
     - `command`: agy binary to invoke (default `agy`).
 - `executor.opencode`:
     - `model`: Provider/model identifier exposed by `/model`. Unset = OpenCode session default.
-    - `autoApprove`: Automatically choose the first allow option for ACP tool permission requests (default true); false relays the request through the mobile input flow.
+    - `autoApprove`: Automatically approve tool permissions and disable the question tool for this process (default true); false preserves interactive permissions without adding a question override.
     - `command`: OpenCode binary to invoke (default `opencode`).
 - `executor.kimi`:
     - `model`: Model alias exposed by `/model`. Unset = Kimi Code session default.
-    - `autoApprove`: Automatically choose the first allow option for ACP tool permission requests (default true); false relays the request through the mobile input flow.
+    - `autoApprove`: Enable native Never Ask mode before new or restored sessions run (default true); false selects interactive mode. Unsupported mode setup fails before task execution.
     - `command`: Kimi Code binary to invoke (default `kimi`).
 - `executor.zcode`:
     - `model`: Model ID exposed by the authenticated ZCode catalog. Unset = ZCode session default.
@@ -1701,7 +1703,7 @@ remote-cli config set executor.type opencode
 remote-cli config set executor.opencode.model opencode/nemotron-3.5-lightning-free
 ```
 
-The OpenCode backend runs one persistent `opencode acp` process per active thread. It preserves the ACP session id across messages, backend switches, and service restarts. `/model` and `/effort` use ACP session options, `/compact` uses OpenCode's native command, `/abort` sends ACP cancellation, and image messages are sent as native ACP image content. With `autoApprove: true`, tool permission requests select the first allow option; with `false`, users answer them through the mobile input flow. Model questions are always relayed to the user and can be answered by option name or number.
+The OpenCode backend runs one persistent `opencode acp` process per active thread. It preserves the ACP session id across messages, backend switches, and service restarts. `/model` and `/effort` use ACP session options, `/compact` uses OpenCode's native command, `/abort` sends ACP cancellation, and image messages are sent as native ACP image content. With `autoApprove: true` (the default), tool permissions are automatically approved and a process-local policy disables the question tool. With `false`, remote-cli does not add that question policy and permission requests use mobile input. OpenCode ACP normally omits the question tool; enabling it explicitly does not establish native question-event support. Ordinary assistant text can still contain questions.
 
 #### Using Kimi Code CLI
 
@@ -1717,7 +1719,7 @@ remote-cli config set executor.type kimi
 # Use /model in Feishu to see the authenticated catalog.
 ```
 
-The Kimi Code backend runs one persistent `kimi acp` process per active thread. It stores resumable session pointers under `~/.remote-cli/kimi-sessions/`, sends image inputs through ACP, maps `/effort` to Kimi's `thinking` session option, forwards native slash commands, and uses ACP cancellation for `/abort`. Model questions are relayed to the mobile input flow even when tool permissions are auto-approved. Run `kimi login` before selecting the backend.
+The Kimi Code backend runs one persistent `kimi acp` process per active thread. It stores resumable session pointers under `~/.remote-cli/kimi-sessions/`, sends image inputs through ACP, maps `/effort` to Kimi's `thinking` session option, forwards native slash commands, and uses ACP cancellation for `/abort`. With `autoApprove: true` (the default), remote-cli selects and confirms native Never Ask mode after creating or restoring a session and before sending a task. This disables the question tool and exits plan mode; it does not guarantee that ordinary assistant text contains no questions. With `false`, remote-cli selects the supported interactive mode instead, including for sessions previously using Never Ask. Unsupported or unconfirmed mode setup reports an error before task execution. This requires a compatible Kimi ACP mode option (verified against Kimi 2.3.3); adding `--auto` to `kimi acp` alone does not apply it. Run `kimi login` before selecting the backend.
 
 #### Using ZCode
 
