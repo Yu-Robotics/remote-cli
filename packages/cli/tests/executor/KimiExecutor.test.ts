@@ -8,11 +8,12 @@ import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 import { KimiExecutor } from '../../src/executor/KimiExecutor';
 import type { AcpEventCallbacks, AcpTransport } from '../../src/executor/acp/AcpClient';
 import type { AcpConfigOption, AcpContentBlock, AcpSessionResult } from '../../src/executor/acp/AcpTypes';
+import { kimiModeOption } from './kimiAcpFixture';
 
 const originalHome = process.env.HOME;
-const originalHomedir = os.homedir();
 
 const configOptions: AcpConfigOption[] = [
+  kimiModeOption('auto'),
   {
     id: 'model', name: 'Model', type: 'select', currentValue: 'kimi-k2.7',
     options: [{ value: 'kimi-k2.7', name: 'Kimi K2.7' }],
@@ -28,7 +29,9 @@ class FakeKimiTransport implements AcpTransport {
   newSession = vi.fn(async (): Promise<AcpSessionResult> => ({ sessionId: 'session-kimi', configOptions }));
   loadSession = vi.fn(async (): Promise<AcpSessionResult> => ({ configOptions }));
   prompt = vi.fn(async (_sessionId: string, _blocks: AcpContentBlock[]) => ({ stopReason: 'end_turn' }));
-  setConfigOption = vi.fn(async (): Promise<AcpSessionResult> => ({ configOptions }));
+  setConfigOption = vi.fn(async (_sessionId: string, id: string, value: string): Promise<AcpSessionResult> => ({
+    configOptions: configOptions.map(option => option.id === id ? { ...option, currentValue: value } : option),
+  }));
   deleteSession = vi.fn().mockResolvedValue(undefined);
   sendCancel = vi.fn();
   destroy = vi.fn();
@@ -44,7 +47,8 @@ describe('KimiExecutor', () => {
   let modelCatalogQuery: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
-    home = await fs.mkdtemp(path.join(originalHomedir, '.kimi-executor-test-'));
+    home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'kimi-executor-test-')));
+    vi.spyOn(os, 'homedir').mockReturnValue(home);
     project = path.join(home, 'project');
     await fs.mkdir(project);
     process.env.HOME = home;
@@ -68,6 +72,7 @@ describe('KimiExecutor', () => {
 
   afterEach(async () => {
     await executor.destroy();
+    vi.restoreAllMocks();
     await fs.rm(home, { recursive: true, force: true });
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
@@ -131,7 +136,7 @@ describe('KimiExecutor', () => {
     }
     confirmExit();
     expect(await changing).toMatchObject({ success: false });
-    expect(transport.setConfigOption).not.toHaveBeenCalled();
+    expect(transport.setConfigOption.mock.calls.filter(([, id]) => id !== 'mode')).toEqual([]);
     expect(transport.loadSession).not.toHaveBeenCalled();
   });
 
@@ -142,7 +147,7 @@ describe('KimiExecutor', () => {
     expect(await executor.setModel('kimi-k2.7')).toMatchObject({ success: false });
     expect(executor.getSessionId()).toBe('session-kimi');
     expect(transport.newSession).toHaveBeenCalledOnce();
-    expect(transport.setConfigOption).not.toHaveBeenCalled();
+    expect(transport.setConfigOption.mock.calls.filter(([, id]) => id !== 'mode')).toEqual([]);
     expect(executor.isProcessRunning()).toBe(false);
     const stored = JSON.parse(await fs.readFile(path.join(home, '.remote-cli', 'kimi-sessions', 'thread-kimi.json'), 'utf8'));
     expect(stored.id).toBe('session-kimi');
@@ -158,7 +163,7 @@ describe('KimiExecutor', () => {
       return { configOptions };
     });
     expect(await executor.setModel('kimi-code/k3.1-pro')).toMatchObject({ success: true });
-    expect(transport.setConfigOption.mock.calls).toEqual([['session-kimi', 'model', 'kimi-code/k3.1-pro']]);
+    expect(transport.setConfigOption.mock.calls).toEqual([['session-kimi', 'model', 'kimi-code/k3.1-pro'], ['session-kimi', 'mode', 'auto']]);
     expect(executor.getSessionId()).toBe('session-kimi');
   });
 
@@ -179,7 +184,7 @@ describe('KimiExecutor', () => {
     initialize({ protocolVersion: 1 });
     expect(await changing).toMatchObject({ success: false });
     expect(transport.destroy).toHaveBeenCalledTimes(2);
-    expect(transport.setConfigOption).not.toHaveBeenCalled();
+    expect(transport.setConfigOption.mock.calls.filter(([, id]) => id !== 'mode')).toEqual([]);
     expect(transport.loadSession).not.toHaveBeenCalled();
     expect(executor.isProcessRunning()).toBe(false);
   });

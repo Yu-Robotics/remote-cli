@@ -17,6 +17,7 @@ import { ThreadContextReset } from '../../src/thread/ThreadContextReset';
 import { DelegationOwnership } from '../../src/delegation/DelegationOwnership';
 import { ActiveDelegationWriterError } from '../../src/delegation/OwnershipRuntime';
 import type { AcpEventCallbacks, AcpTransport } from '../../src/executor/acp/AcpClient';
+import { withKimiModes } from '../executor/kimiAcpFixture';
 
 const wait = (milliseconds: number) => new Promise<void>(resolve => setTimeout(resolve, milliseconds));
 
@@ -234,7 +235,7 @@ describe('managed agent delegation', () => {
       };
       return new Executor(guard, {
         initialWorkingDirectory: cwd, threadId, delegationWorker: true, sessionBaseDir: path.join(home, 'worker-sessions'),
-        clientFactory: next => { callbacks = next; return transport; },
+        clientFactory: next => { callbacks = next; return backend === 'kimi' ? withKimiModes(transport) : transport; },
       });
     });
     const scope = manager.begin(parent);
