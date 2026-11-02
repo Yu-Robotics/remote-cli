@@ -19,6 +19,13 @@ export interface ClaudeControlModelEntry {
 const MAX_CATALOG_MODELS = 512;
 const MAX_STRING_LENGTH = 512;
 
+const MODEL_ALIAS_LABELS = new Map([
+  ['opus', 'Opus'], ['opus[1m]', 'Opus[1m]'],
+  ['fable', 'Fable'], ['fable[1m]', 'Fable[1m]'],
+  ['sonnet', 'Sonnet'], ['sonnet[1m]', 'Sonnet[1m]'],
+  ['haiku', 'Haiku'], ['haiku[1m]', 'Haiku[1m]'],
+]);
+
 function sanitizeString(val: unknown, maxLength = MAX_STRING_LENGTH): string {
   if (typeof val !== 'string') return '';
   return Array.from(val.replace(/[\x00-\x1f\x7f]/g, ' ')).slice(0, maxLength).join('');
@@ -85,7 +92,10 @@ export function parseClaudeModelsCatalog(
 
     modelInfos.push({
       id: value,
-      displayName,
+      // Annotate only the UI label; native metadata still drives effort and identity matching.
+      displayName: MODEL_ALIAS_LABELS.has(value)
+        ? sanitizeString(`${MODEL_ALIAS_LABELS.get(value)} · ${resolvedModel ?? displayName}`, 128)
+        : displayName,
       description,
       isDefault: undefined, // Do not infer default
       isCurrent: undefined,
