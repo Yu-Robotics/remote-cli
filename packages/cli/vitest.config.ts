@@ -11,6 +11,7 @@ const workers = testWorkerLimits(os.availableParallelism?.() ?? os.cpus().length
 
 export const realGitTestFiles = [
   'tests/delegation/GitCheckpoint.test.ts',
+  'tests/delegation/SharedSymlinks.test.ts',
   'tests/delegation/gitFixture.test.ts',
   'tests/delegation/DelegatedWorkspaceManager.test.ts',
   'tests/delegation/DelegatedWorkspaceReclamation.test.ts',

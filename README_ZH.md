@@ -572,6 +572,26 @@ thread buttons, and native backend subagent tools remain unchanged.
 /delegation reset codex
 ```
 
+From CLI 1.6.206, managed Git checkpoints preserve repository-local symbolic links when they replace tracked directories, without traversing stale indexed children or changing the source index. This is a local CLI change; the Router protocol remains unchanged. External links remain disabled unless the local configuration grants the exact repository root, link path, and canonical shared target. Granted links keep their original text in Git artifacts and point to the original shared target in worker checkouts; target contents are never copied. Changes through a shared link affect the original target directly and are not captured, merged, reverted, or backed up by delegation artifacts. Concurrent workers may access the same shared target. Worktrees are not an OS sandbox.
+
+Configure shared links through the local CLI setting `delegation.sharedSymlinks`; `remote-cli config set delegation.sharedSymlinks <json-array>` accepts the array below the `sharedSymlinks` key. Use your host's absolute canonical paths for `root` and `target`, and a Git-relative path with forward slashes for `path`:
+
+```json
+{
+  "delegation": {
+    "sharedSymlinks": [
+      {
+        "root": "/path/to/project",
+        "path": "skills/shared-resource",
+        "target": "/path/to/shared-resource"
+      }
+    ]
+  }
+}
+```
+
+Each grant names one existing native symbolic link and one existing canonical shared target; wildcards, directory-prefix grants, dangling links, and grants inside nested repositories are not supported. File and directory targets are supported. Git metadata, managed worker storage, and targets overlapping the project root are rejected. Configuration accepts at most 64 grants and 16 KiB of serialized grant data; recorded link bindings are limited to 32 KiB so tasks retain readable recovery records. The example paths are placeholders. Windows JSON paths require escaped backslashes, native symlink privileges, and Git `core.symlinks=true`; no regular-file or junction fallback is created. After changing this setting, restart the local CLI when active tasks have finished so it reloads the configuration before starting new workers; saved tasks retain their recorded link bindings for artifact closeout. Shared-target content remains live and outside artifact review and rollback. Changing or staging the shared link node holds the checkout for recovery. Conservative cleanup can retain a mapped checkout when safe removal cannot be confirmed.
+
 From CLI 1.6.121, delegation is **on by default** for new and existing threads
 without a saved preference. A saved `false` remains off; `/delegation off`
 explicitly opts out and `/delegation on` enables it again. No historical thread

@@ -1,3 +1,4 @@
+import { supportsFileSymlinks } from './symlinkFixture';
 import { DelegatedWorkspaceManager } from '../../src/delegation/DelegatedWorkspaceManager';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs/promises';
@@ -86,6 +87,27 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
       })]);
     } finally { clearTimeout(timer); }
   };
+
+  it.skipIf(!supportsFileSymlinks)('warns a managed worker and its result about direct shared-data edits', async () => {
+    await manager.destroy();
+    const target = path.join(fixture.directory, 'shared.txt'); await fs.writeFile(target, 'synthetic shared bytes\n');
+    await runGit(fixture.root, ['config', 'core.symlinks', 'true']);
+    await fs.symlink(path.relative(fixture.root, target), path.join(fixture.root, 'shared-link'), 'file');
+    manager = new DelegationManager(new DirectoryGuard([fixture.directory]), factory as any,
+      new BackendRegistry(async () => 'fixture 1.0'), undefined, undefined, undefined, undefined,
+      new DelegatedWorkspaceManager(undefined, true, () => [{ root: fixture.root, path: 'shared-link', target }]));
+    const scope = manager.begin(parent);
+    const task = await start(scope, 'shared-warning');
+    expect(task.state).toBe('running');
+    const prompt = vi.mocked(workers[0].executor.execute).mock.calls[0][0];
+    expect(prompt).toContain('Explicit shared links: "shared-link"');
+    expect(prompt).toContain('NOT captured, merged, reverted, or backed up');
+    workers[0].finish({ success: true, output: 'Synthetic result' });
+    const completed = await result(scope, task.taskId, 'shared-result');
+    expect(completed.artifact?.sharingWarning).toContain('shared original data');
+    await scope.close();
+    expect(await fs.readFile(target, 'utf8')).toBe('synthetic shared bytes\n');
+  });
 
   it('settles an unfinished worker and result call after an assertion failure before releasing fixture ownership', async () => {
     const scope = manager.begin(parent);

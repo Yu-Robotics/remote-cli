@@ -156,7 +156,7 @@ export interface DelegatedTaskResult {
   error?: string;
   statusDetail?: string;
   truncated: boolean;
-  artifact?: Pick<DelegatedArtifactView, 'taskId' | 'disposition' | 'outputCommit'>;
+  artifact?: Pick<DelegatedArtifactView, 'taskId' | 'disposition' | 'outputCommit' | 'sharingWarning'>;
   executionMetadata?: ExecutionMetadata;
 }
 
@@ -387,7 +387,8 @@ export class DelegationManager {
       truncated: task.record.truncated ?? false,
       ...(task.executionMetadata ? { executionMetadata: { ...task.executionMetadata } } : {}),
       ...(task.artifact ? { artifact: { taskId: task.artifact.taskId,
-        disposition: task.artifact.disposition, outputCommit: task.artifact.outputCommit } } : {}) });
+        disposition: task.artifact.disposition, outputCommit: task.artifact.outputCommit,
+        ...(task.artifact.sharingWarning ? { sharingWarning: task.artifact.sharingWarning } : {}) } } : {}) });
     const receive = (task: Task, requestedDuring: number): DelegatedTaskResult => {
       if (task.record.finishedAt !== undefined && acceptingResults && requestedDuring === execution) stagedResults.add(task.record.id);
       return view(task);
@@ -778,7 +779,7 @@ export class DelegationManager {
           let acceptingActivity = true;
           const execution = worker.execute(
             `You are executing one delegated task in an isolated worker session. This session may contain context from earlier delegated tasks in this thread and workspace. Complete only this objective and return a concise result with verification and remaining issues. Do not delegate to other agents.${task.workspace
-              ? `\nThis task runs in an owned Git worktree at ${task.workspace.cwd}, with a fresh detached task checkout based on checkpoint ${task.workspace.input.commit}. Previous task changes are NOT implicitly present. Re-read current files; earlier conversation context may be stale. Stay within this checkout. Do not merge into or edit the delivery directory, push, change branches, or remove the worktree. Your file changes will be captured as an artifact for explicit coordinator integration. Ignored files and dependencies are not copied from the delivery directory. This checkout is disposable: after delivery or retention it may be removed, including ignored files and dependencies. Include required source changes and deliverables in the captured Git artifact; never treat a path in this checkout as durable delivery. Failed captured changes are retained for recovery without automatic merging. A worktree is not an OS sandbox.` : ''}
+              ? `\nThis task runs in an owned Git worktree at ${task.workspace.cwd}, with a fresh detached task checkout based on checkpoint ${task.workspace.input.commit}. Previous task changes are NOT implicitly present. Re-read current files; earlier conversation context may be stale. Stay within this checkout. Do not merge into or edit the delivery directory, push, change branches, or remove the worktree. Your file changes will be captured as an artifact for explicit coordinator integration. Ignored files and dependencies are not copied from the delivery directory. This checkout is disposable: after delivery or retention it may be removed, including ignored files and dependencies. Include required source changes and deliverables in the captured Git artifact; never treat a path in this checkout as durable delivery. Failed captured changes are retained for recovery without automatic merging. A worktree is not an OS sandbox.${task.workspace.input.sharedLinks?.length ? `\nExplicit shared links: ${task.workspace.input.sharedLinks.map(b => JSON.stringify(b.path)).join(', ')}. These links reach shared original data. Edits there are direct and are NOT captured, merged, reverted, or backed up by worktree artifacts. Do not stage or change the shared link nodes themselves.` : ''}` : ''}
 
 ${objective}${task.exports?.length ? `\nRequired durable output paths (relative to checkout root): ${JSON.stringify(task.exports)}` : ''}`,
             {

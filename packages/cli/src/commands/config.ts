@@ -1,3 +1,4 @@
+import { parseSharedSymlinkGrants, validateSharedLocations } from '../delegation/SharedSymlinks';
 import { ConfigManager } from '../config/ConfigManager';
 import { SESSION_BACKENDS, validateSessionSharing } from '../session/SessionResumeService';
 
@@ -192,6 +193,14 @@ async function handleSetConfig(
       success: false,
       error: `Cannot modify protected key: ${key}`,
     };
+  }
+
+  if (key === 'delegation' || key.startsWith('delegation.')) {
+    if (key !== 'delegation.sharedSymlinks') return { success: false, error: 'Only delegation.sharedSymlinks is supported.' };
+    const grants = parseSharedSymlinkGrants(JSON.parse(value));
+    await validateSharedLocations(grants);
+    await config.set('delegation', { sharedSymlinks: grants });
+    return { success: true, value: grants };
   }
 
   // Validate specific keys

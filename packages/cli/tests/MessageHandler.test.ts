@@ -153,6 +153,17 @@ describe('MessageHandler', () => {
     }));
   });
 
+  it('resolves shared-link policy through ConfigManager only when managed admission asks for it', async () => {
+    const resolve = vi.fn(() => []);
+    (ctx.mockConfig as any).getSharedSymlinks = resolve;
+    const workspaces = (ctx.handler as any).delegation.workspaceManager;
+    expect(resolve).not.toHaveBeenCalled();
+    expect(await workspaces.sharedSymlinks()).toEqual([]);
+    expect(resolve).toHaveBeenCalledOnce();
+    resolve.mockImplementation(() => { throw new Error('Synthetic invalid managed policy'); });
+    expect(() => workspaces.sharedSymlinks()).toThrow('invalid managed policy');
+  });
+
   it('keeps ordinary execution independent of delegation storage when delegation is disabled', async () => {
     ctx.mockThreadManager.getDefaultThread().delegation = false;
     ctx.mockExecutor.configureDelegation = vi.fn();

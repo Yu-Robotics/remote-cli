@@ -1,3 +1,4 @@
+import { SharedLinkCapture, parseSharedSymlinkGrants, validateSharedLocations, readNativeSharedLink, sharedLinkBlob, type SharedLinkOptions } from './SharedSymlinks';
 import { AsyncLocalStorage } from 'async_hooks';
 import type { DelegationOwnership } from './DelegationOwnership';
 import { createHash, randomUUID } from 'crypto';
@@ -91,6 +92,8 @@ export interface DelegatedWorkspace {
   taskId: string;
   taskRef: string;
   input: GitCheckpoint;
+  /** Identity of the owned link node, never the mutable shared target. */
+  sharedLinkIdentities?: { path: string; identity: string }[];
   pendingTaskId?: string;
   blocked?: boolean;
   checkoutState?: 'present' | 'reclaiming' | 'reclaimed';
@@ -129,6 +132,8 @@ export interface DelegatedArtifactView {
   outputCommit: string;
   changedFiles: string[];
   filesTruncated: boolean;
+  sharedLinkPaths?: string[];
+  sharingWarning?: string;
   deliveredAtHead?: string;
   recovery?: { beforeRef: string; targetRef: string };
   exports?: WorkspaceExport[];
@@ -158,7 +163,8 @@ export class DelegatedWorkspaceManager {
     this.beforeMutation = beforeMutation;
   }
   constructor(private readonly directory = path.join(os.homedir(), '.remote-cli', 'delegation-workspaces'),
-    private readonly disposalSupported = process.platform === 'linux') {}
+    private readonly disposalSupported = process.platform === 'linux',
+    private readonly sharedSymlinks: () => unknown | Promise<unknown> = () => undefined) {}
 
   async discover(cwd: string): Promise<DelegatedWorkspaceSource | undefined> {
     // Avoid starting Git for ordinary directories (including environments without Git).
@@ -185,7 +191,9 @@ export class DelegatedWorkspaceManager {
 
   async baseline(source: DelegatedWorkspaceSource): Promise<GitCheckpoint> {
     await this.validateSource(source);
-    return captureCheckpoint(source.root);
+    const grants = parseSharedSymlinkGrants(await this.sharedSymlinks()).filter(grant => grant.root === source.root);
+    await validateSharedLocations(grants);
+    return captureCheckpoint(source.root, { sharedSymlinks: grants, forbiddenTargets: [path.resolve(this.directory), source.commonDirectory] });
   }
 
   async unavailableLanes(): Promise<Set<string>> {
@@ -219,6 +227,7 @@ export class DelegatedWorkspaceManager {
     if (!GIT_OID.test(input.head) || !GIT_OID.test(input.tree) || !GIT_OID.test(input.commit)) {
       throw new Error('Invalid worker input checkpoint');
     }
+    if (input.sharedSymlinkPolicy && input.sharedSymlinkPolicy.root !== source.root) throw new Error('Shared-link policy belongs to another source repository');
     const directory = this.worktreeDirectory(source, lane.id);
     const taskRef = `refs/remote-cli/tasks/${taskId}`;
     let previous = await this.read<DelegatedWorkspace>('lanes', lane.id);
@@ -234,10 +243,17 @@ export class DelegatedWorkspaceManager {
     }
     if (previous && previous.checkoutState !== 'reclaimed') {
       await this.validateWorkspace(previous);
-      await this.assertClean(previous.directory);
+      await this.verifySavedSharedLinks(previous);
+      await this.assertClean(previous.directory, previous.input);
       const indexEntries = (await runGit(previous.directory, ['ls-files', '-v', '-z'])).toString('utf8').split('\0').filter(Boolean);
       if (indexEntries.some(entry => !entry.startsWith('H '))) {
         throw new Error('Worker checkout has hidden index state; manual recovery is required');
+      }
+      // Persist a hold before any partial remapping inside this owned checkout.
+      if (previous.input.sharedLinks?.length) {
+        await this.write('lanes', previous.laneId, { ...previous, blocked: true });
+        await this.validateWorkspace(previous);
+        await this.mapSharedLinks(previous.directory, previous.input, false);
       }
       // Never reset unknown files, including ignored files that checkout could overwrite.
       await runGit(directory, ['checkout', '--detach', '--no-overwrite-ignore', input.commit]);
@@ -263,6 +279,11 @@ export class DelegatedWorkspaceManager {
       workspaceGeneration: lane.workspaceGeneration, source, directory,
       cwd: path.join(directory, source.relativeCwd), taskId, taskRef, input, checkoutState: 'present',
       disposalPolicy, checkoutIdentity: { dev: identity.dev, ino: identity.ino } };
+    if (input.sharedLinks?.length) {
+      await this.write('lanes', lane.id, { ...workspace, blocked: true });
+      await this.validateWorkspace(workspace);
+      workspace.sharedLinkIdentities = await this.mapSharedLinks(directory, input, true);
+    }
     await this.write('lanes', lane.id, workspace);
     await this.validateWorkspace(workspace);
     return workspace;
@@ -287,6 +308,9 @@ export class DelegatedWorkspaceManager {
       throw new Error('Worker workspace task changed before collection');
     }
     await this.validateWorkspace(workspace);
+    if (JSON.stringify([record.input.sharedLinks, record.input.sharedSymlinkPolicy]) !== JSON.stringify([workspace.input.sharedLinks, workspace.input.sharedSymlinkPolicy])) throw new Error('Saved shared-link task policy changed');
+    await this.verifySavedSharedLinks(record);
+    await this.verifySharedCheckout(workspace.directory, workspace.input);
     const saved = await this.read<Artifact>('artifacts', workspace.taskId);
     if (saved && record.disposalPolicy === 1) {
       await this.validateArtifact(saved, { threadId: record.threadId, cwd: record.source.cwd, workspaceGeneration: record.workspaceGeneration });
@@ -299,7 +323,7 @@ export class DelegatedWorkspaceManager {
       return this.finishCollection(record, saved, options);
     }
     const artifact = await this.withRepository(workspace.source, async () => {
-    const checkpoint = await captureCheckpoint(workspace.directory);
+    const checkpoint = await captureCheckpoint(workspace.directory, this.sharedOptions(workspace.input, true));
     const opaque = (await runGit(workspace.directory, ['ls-tree', '-r', '-z', workspace.input.tree]))
       .toString('utf8').split('\0').filter(entry => entry.startsWith('160000 commit '))
       .map(entry => entry.slice(entry.indexOf('\t') + 1));
@@ -335,7 +359,7 @@ export class DelegatedWorkspaceManager {
     // Mixed reset only updates OUR index/branch to the preserved working files. Never touches the parent index.
     await runGit(workspace.directory, ['reset', '--mixed', output]);
     await runGit(workspace.directory, ['update-ref', workspace.taskRef, output]);
-    await this.assertClean(workspace.directory);
+    await this.assertClean(workspace.directory, workspace.input);
     // Persist pending before proof/export, so a failed proof cannot hide changed output.
     await this.write('lanes', workspace.laneId, { ...record,
       pendingTaskId: artifact.disposition === 'pending' ? artifact.taskId : undefined });
@@ -391,7 +415,7 @@ export class DelegatedWorkspaceManager {
     if (action !== 'inspect' && action !== 'apply' && action !== 'retain') {
       throw new Error('Artifact action must be inspect, apply, or retain');
     }
-    const current = await captureCheckpoint(artifact.source.root);
+    const current = await captureCheckpoint(artifact.source.root, this.sharedOptions(artifact.input, false));
     if (action !== 'inspect' && (typeof expectedRevision !== 'string' || expectedRevision !== current.revision)) {
       throw new Error('Delivery workspace changed; inspect the artifact again before integrating');
     }
@@ -894,6 +918,7 @@ export class DelegatedWorkspaceManager {
 
   private async verifyCheckout(workspace: DelegatedWorkspace, artifact: Artifact): Promise<void> {
     await this.validateWorkspace(workspace);
+    await this.verifySavedSharedLinks(workspace);
     const disposable = workspace.disposalPolicy === 1 && artifact.disposalPolicy === 1;
     const registered = await this.registration(workspace.source, workspace.directory);
     if (!registered || registered.locked || registered.head !== artifact.output
@@ -903,12 +928,13 @@ export class DelegatedWorkspaceManager {
       throw new Error('Worker checkout is locked, unresolved, or no longer at its saved output');
     }
     if (disposable) {
-      if ((await runGit(workspace.directory, ['status', '--porcelain=v1', '-z', '--untracked-files=no'])).length) {
+      if (workspace.input.sharedLinks?.length) await this.assertClean(workspace.directory, workspace.input, true);
+      else if ((await runGit(workspace.directory, ['status', '--porcelain=v1', '-z', '--untracked-files=no'])).length) {
         throw new WorkspaceCleanupError('tracked-files-changed');
       }
       const entries = (await runGit(workspace.directory, ['ls-files', '-v', '-z'])).toString('utf8').split('\0').filter(Boolean);
       if (entries.some(entry => !entry.startsWith('H '))) throw new WorkspaceCleanupError('hidden-index-state');
-    } else await this.assertClean(workspace.directory);
+    } else await this.assertClean(workspace.directory, workspace.input);
     // Git status and a copied index can hide changed bytes behind assume-unchanged,
     // skip-worktree, or stat-cache flags. Hash actual bytes without filters or index metadata.
     const files = new Map<string, { mode: string; oid: string }>();
@@ -940,6 +966,8 @@ export class DelegatedWorkspaceManager {
       await assertDisposableTree(workspace.directory);
       await verifyWorkspaceExports(await this.exportDirectory(artifact.taskId), artifact.exports ?? [], workspace.directory);
     }
+    const shared = new Map((workspace.input.sharedLinks ?? []).map(b => [b.path, b]));
+    await this.verifySharedCheckout(workspace.directory, workspace.input, artifact.tree);
     const walk = async (relative: string): Promise<void> => {
       const absolute = path.join(workspace.directory, relative);
       if (await fs.realpath(absolute) !== absolute) throw new Error('Checkout directory changed during verification');
@@ -967,8 +995,11 @@ export class DelegatedWorkspaceManager {
           return;
         }
         const hash = createHash(expected.oid.length === 64 ? 'sha256' : 'sha1');
-        hash.update(`blob ${stat.size}\0`);
-        if (stat.isSymbolicLink()) hash.update(await fs.readlink(file, { encoding: 'buffer' }));
+        const binding = shared.get(child);
+        const linkBytes = binding ? Buffer.from(binding.linkText) : undefined;
+        hash.update(`blob ${linkBytes?.length ?? stat.size}\0`);
+        if (linkBytes) hash.update(linkBytes);
+        else if (stat.isSymbolicLink()) hash.update(await fs.readlink(file, { encoding: 'buffer' }));
         else {
           // Each concurrent reader owns its buffer; hash every byte without filters.
           const buffer = Buffer.alloc(Math.min(1024 * 1024, Math.max(1, stat.size)));
@@ -1001,6 +1032,7 @@ export class DelegatedWorkspaceManager {
     };
     await walk('');
     if (files.size) throw new Error('Saved checkout files are missing');
+    await this.verifySavedSharedLinks(workspace);
   }
 
   private async registration(source: DelegatedWorkspaceSource, directory: string): Promise<{ head?: string; locked: boolean } | undefined> {
@@ -1043,6 +1075,11 @@ export class DelegatedWorkspaceManager {
     // Never replace a live repository directory with a worker file or symbolic link.
     const changes = (await runGit(artifact.source.root, ['diff', '--name-only', '--no-renames', '-z',
       artifact.input.tree, artifact.tree, '--'])).toString('utf8').split('\0').filter(Boolean);
+    for (const binding of artifact.input.sharedLinks ?? []) {
+      if (changes.some(file => file === binding.path || file.startsWith(`${binding.path}/`) || binding.path.startsWith(`${file}/`))) {
+        throw new Error('Shared link-node changes require manual integration; shared target edits are never included in artifacts.');
+      }
+    }
     for (const name of currentRepositories.keys()) {
       if (!expectedRepositories.has(name) && changes.some(file => file.startsWith(`${name}/`))
         || changes.some(file => name === file || name.startsWith(`${file}/`))) {
@@ -1084,7 +1121,7 @@ export class DelegatedWorkspaceManager {
       const mergedTree = await gitText(integrationDirectory, ['write-tree']);
       const patch = await runGit(artifact.source.root, ['diff', '--binary', '--no-ext-diff', '--no-textconv',
         current.tree, mergedTree, '--']);
-      if ((await captureCheckpoint(artifact.source.root)).revision !== current.revision) {
+      if ((await captureCheckpoint(artifact.source.root, this.sharedOptions(artifact.input, false))).revision !== current.revision) {
         throw new Error('Delivery workspace changed during integration; no patch was applied');
       }
       if (patch.length) {
@@ -1148,7 +1185,9 @@ export class DelegatedWorkspaceManager {
       changedFiles: files.slice(0, 60), filesTruncated: files.length > 60,
       ...(artifact.deliveredAtHead ? { deliveredAtHead: artifact.deliveredAtHead } : {}),
       ...(artifact.recovery ? { recovery: artifact.recovery } : {}),
-      ...(artifact.exports ? { exports: artifact.exports } : {}) };
+      ...(artifact.exports ? { exports: artifact.exports } : {}),
+      ...(artifact.input.sharedLinks?.length ? { sharedLinkPaths: artifact.input.sharedLinks.map(b => b.path),
+        sharingWarning: 'These links reach shared original data. Target edits are direct and are not captured, merged, reverted, or backed up by worktree artifacts.' } : {}) };
   }
 
   private async assertSelectedScope(artifact: Artifact): Promise<void> {
@@ -1169,6 +1208,7 @@ export class DelegatedWorkspaceManager {
       || artifact.deliveredAtHead !== undefined && (!GIT_OID.test(artifact.deliveredAtHead) || artifact.disposition !== 'applied')) {
       throw new Error('Invalid or foreign worker artifact');
     }
+    if (artifact.input.sharedSymlinkPolicy && artifact.input.sharedSymlinkPolicy.root !== artifact.source.root) throw new Error('Saved shared-link policy belongs to another repository');
     await this.validateSource(artifact.source);
     if (await gitText(artifact.source.root, ['rev-parse', this.outputRef(artifact.taskId)]) !== artifact.output
       || await gitText(artifact.source.root, ['rev-parse', this.inputRef(artifact.taskId)]) !== artifact.input.commit
@@ -1228,8 +1268,67 @@ export class DelegatedWorkspaceManager {
     }
   }
 
-  private async assertClean(directory: string): Promise<void> {
-    if ((await runGit(directory, ['status', '--porcelain=v1', '-z', '--untracked-files=all'])).length) {
+  private sharedOptions(input: GitCheckpoint, physical: boolean): SharedLinkOptions {
+    if (input.sharedLinks === undefined && input.sharedSymlinkPolicy === undefined) return {};
+    if (!input.sharedLinks?.length || !input.sharedSymlinkPolicy) throw new Error('Invalid saved shared-link policy');
+    return { policy: input.sharedSymlinkPolicy, bindings: input.sharedLinks, physical,
+      forbiddenTargets: [path.resolve(this.directory)] };
+  }
+
+  private async verifySharedCheckout(directory: string, input: GitCheckpoint, tree = input.tree): Promise<void> {
+    const options = this.sharedOptions(input, true);
+    if (!input.sharedLinks?.length) return;
+    const common = await fs.realpath(path.resolve(directory, await gitText(directory, ['rev-parse', '--git-common-dir'])));
+    const context = new SharedLinkCapture(directory, { ...options, forbiddenTargets: [path.resolve(this.directory), common] });
+    await context.initialize();
+    const entries = (await runGit(directory, ['ls-tree', '-r', '-z', tree])).toString('utf8').split('\0');
+    const indexed = (await runGit(directory, ['ls-files', '--stage', '-z'])).toString('utf8').split('\0');
+    for (const b of context.bindings) {
+      const entry = entries.find(e => e.slice(e.indexOf('\t') + 1) === b.path);
+      const oid = entry && /^120000 blob ([a-f0-9]+)\t/.exec(entry)?.[1];
+      if (!oid || sharedLinkBlob(b.linkText, oid.length) !== oid) throw new Error('Saved logical shared link changed; manual recovery is required');
+      if (!indexed.includes(`120000 ${oid} 0\t${b.path}`)) throw new Error('Shared link-node staged index changes require manual recovery');
+    }
+  }
+
+  private async verifySavedSharedLinks(workspace: DelegatedWorkspace): Promise<void> {
+    if (!workspace.input.sharedLinks?.length) return;
+    const identities = workspace.sharedLinkIdentities;
+    if (!Array.isArray(identities) || identities.length !== workspace.input.sharedLinks.length
+      || new Set(identities.map(item => item.path)).size !== identities.length) throw new Error('Saved shared-link node identities are unavailable');
+    for (const binding of workspace.input.sharedLinks) {
+      const expected = identities.find(item => item.path === binding.path);
+      const actual = await readNativeSharedLink(workspace.directory, binding.path);
+      if (!expected || expected.identity !== actual.identity || actual.text !== binding.target) throw new Error('Owned shared-link node was replaced; the checkout is retained for recovery');
+    }
+  }
+
+  private async mapSharedLinks(directory: string, input: GitCheckpoint, install: boolean): Promise<{ path: string; identity: string }[]> {
+    const options = this.sharedOptions(input, true);
+    const common = await fs.realpath(path.resolve(directory, await gitText(directory, ['rev-parse', '--git-common-dir'])));
+    const context = new SharedLinkCapture(directory, { ...options, forbiddenTargets: [path.resolve(this.directory), common] });
+    await context.verifyTargets();
+    if (!install) await this.verifySharedCheckout(directory, input);
+    for (const binding of context.bindings) {
+      const current = await readNativeSharedLink(directory, binding.path);
+      if (current.text !== (install ? binding.linkText : binding.target)) throw new Error('Shared-link checkout pointer changed; manual recovery is required');
+      await fs.unlink(path.join(directory, binding.path));
+      await fs.symlink(install ? binding.target : binding.linkText, path.join(directory, binding.path), binding.kind);
+    }
+    if (install) await this.verifySharedCheckout(directory, input);
+    return Promise.all(context.bindings.map(async binding => ({ path: binding.path, identity: (await readNativeSharedLink(directory, binding.path)).identity })));
+  }
+
+  private async assertClean(directory: string, input?: GitCheckpoint, trackedOnly = false): Promise<void> {
+    const status = await runGit(directory, ['status', '--porcelain=v1', '-z', `--untracked-files=${trackedOnly ? 'no' : 'all'}`]);
+    if (!input?.sharedLinks?.length) {
+      if (status.length) throw new Error('Worker worktree contains unaccounted changes; manual recovery is required');
+      return;
+    }
+    await this.verifySharedCheckout(directory, input);
+    if ((await runGit(directory, ['diff', '--cached', '--name-only', '-z', 'HEAD', '--'])).length) throw new Error('Shared-link checkout has staged changes');
+    const allowed = new Set(input.sharedLinks.map(b => ` M ${b.path}`));
+    if (status.toString('utf8').split('\0').filter(Boolean).some(entry => !allowed.has(entry))) {
       throw new Error('Worker worktree contains unaccounted changes; manual recovery is required');
     }
   }
