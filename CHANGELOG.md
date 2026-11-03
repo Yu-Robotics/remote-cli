@@ -13,6 +13,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.206] - 2026-11-03
+
+### Added
+- Add exact local grants for shared external symbolic links, preserving original link text in artifacts and mapping owned worker links to their original targets without copying target contents.
+- Snapshot link policy with worker artifacts and disclose that shared-target edits occur directly outside artifact collection and rollback.
+
+### Fixed
+- Preserve repository-local symbolic links when a tracked directory is replaced, without traversing stale indexed child paths or modifying the source index.
+
+### Tests
+- Cover symbolic-link replacements, ignored tracked replacements, unchanged source state, and rejected external targets.
+- Verify explicit shared-link grants, direct content edits, logical artifact trees, restart and lane reuse, protected cleanup, bounded policy records, and typed configuration repair.
+- Reject shared-link directory races without staging payload blobs or enumerating shared paths, and keep unrelated project grants independent.
+
 ## [1.6.205] - 2026-11-03
 
 ### Security

@@ -1,3 +1,4 @@
+import { DelegatedWorkspaceManager } from '../delegation/DelegatedWorkspaceManager';
 import type { ApprovalRequestInfo, ApprovalRequestMessage, ApprovalResponseMessage, ApprovalResolvedMessage, ApprovalStatus } from '../types';
 import { WebSocketClient } from './WebSocketClient';
 import { FileInbox } from '../files/FileInbox';
@@ -266,7 +267,8 @@ export class MessageHandler {
       for (const delivery of this.imageDeliveries.values()) delivery.invalidatePending();
     });
     this.delegation = new DelegationManager(directoryGuard, undefined, undefined, undefined, undefined, undefined,
-      new DelegatedWorkerSessionStore(undefined, threadManager.contextResets));
+      new DelegatedWorkerSessionStore(undefined, threadManager.contextResets),
+      new DelegatedWorkspaceManager(undefined, undefined, () => this.config.getSharedSymlinks()));
     this.settingsCatalogReader = new SettingsCatalogReader(directoryGuard);
     this.settingsService = new SettingsService({
       state: id => this.settingsState(id),

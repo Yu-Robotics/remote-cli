@@ -57,6 +57,7 @@ describe('thread-wide conversation reset', () => {
     requestNumber = 0;
     handler = new MessageHandler({ send: message => sent.push(message), isConnected: () => true } as any,
       pool, threads, guard, { get: key => key === 'executor' ? config : undefined,
+        getSharedSymlinks: () => [],
         getConfigDir: () => path.join(home, '.remote-cli') } as any);
     delegation = (handler as any).delegation;
   };

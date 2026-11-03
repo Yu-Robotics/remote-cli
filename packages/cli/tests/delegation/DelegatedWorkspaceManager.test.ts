@@ -37,6 +37,30 @@ describe('owned worktrees and explicit artifact integration', { timeout: 30_000 
   const apply = async (workspace: DelegatedWorkspace) => manager.integrate({ ...owner, cwd: workspace.source.cwd },
     workspace.taskId, 'apply', (await inspect(workspace)).revision) as Promise<any>;
 
+  it('ignores stale filesystem grants belonging to an unrelated project', async () => {
+    const before = await fs.readFile(path.join(fixture.root, '.git', 'index'));
+    const unrelated = { root: path.join(fixture.directory, 'missing-project'), path: 'shared-link', target: path.join(fixture.directory, 'missing-target') };
+    const selected = new DelegatedWorkspaceManager(path.join(fixture.directory, 'workspaces'), false, () => [unrelated]);
+    const checkpoint = await selected.baseline(source);
+    expect(checkpoint.tree).toBe(await gitText(fixture.root, ['rev-parse', 'HEAD^{tree}']));
+    expect(checkpoint.sharedLinks).toBeUndefined();
+    expect(await fs.readFile(path.join(fixture.root, '.git', 'index'))).toEqual(before);
+  });
+
+  it('still rejects a stale target selected for the current project', async () => {
+    const before = await fs.readFile(path.join(fixture.root, '.git', 'index'));
+    const stale = { root: source.root, path: 'shared-link', target: path.join(fixture.directory, 'missing-target') };
+    const selected = new DelegatedWorkspaceManager(path.join(fixture.directory, 'workspaces'), false, () => [stale]);
+    await expect(selected.baseline(source)).rejects.toThrow();
+    expect(await fs.readFile(path.join(fixture.root, '.git', 'index'))).toEqual(before);
+  });
+
+  it('rejects malformed unrelated grants before selecting a project', async () => {
+    const malformed = { root: path.join(fixture.directory, 'missing-project'), path: '../unsafe', target: path.join(fixture.directory, 'missing-target') };
+    const selected = new DelegatedWorkspaceManager(path.join(fixture.directory, 'workspaces'), false, () => [malformed]);
+    await expect(selected.baseline(source)).rejects.toThrow('Invalid or changed');
+  });
+
   it('isolates dirty input, collects durable output and applies without staging or committing', async () => {
     await fs.writeFile(path.join(source.root, 'source.txt'), 'first\nstaged input\nthird\n');
     await runGit(source.root, ['add', 'source.txt']);

@@ -1,3 +1,4 @@
+import { delegationSharedSymlinks } from '../delegation/SharedSymlinks';
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
@@ -134,10 +135,10 @@ export class ConfigManager {
     );
   }
 
-  /**
-   * Get current configuration
-   * @returns Configuration object (deep copy)
-   */
+  /** Validate managed-only policy lazily so malformed grants do not disable ordinary chat. */
+  getSharedSymlinks() { return delegationSharedSymlinks(this.config.delegation); }
+
+  /** Return an independent configuration snapshot. */
   getConfig(): Config {
     return JSON.parse(JSON.stringify(this.config));
   }
