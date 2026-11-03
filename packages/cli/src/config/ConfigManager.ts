@@ -135,8 +135,24 @@ export class ConfigManager {
     );
   }
 
-  /** Validate managed-only policy lazily so malformed grants do not disable ordinary chat. */
-  getSharedSymlinks() { return delegationSharedSymlinks(this.config.delegation); }
+  /** Read current managed-only grants without replacing runtime configuration or migrating disk data. */
+  async getSharedSymlinks() {
+    let content: string;
+    try {
+      content = await fs.readFile(this.configFile, 'utf-8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw new Error('Unable to load shared-symlink grants; managed admission is denied.');
+    }
+    try {
+      const saved: unknown = JSON.parse(content);
+      if (!saved || typeof saved !== 'object' || Array.isArray(saved)) throw new Error();
+      return delegationSharedSymlinks((saved as Record<string, unknown>).delegation);
+    } catch {
+      // Parser and filesystem details can contain private configuration data.
+      throw new Error('Invalid shared-symlink configuration; managed admission is denied.');
+    }
+  }
 
   /** Return an independent configuration snapshot. */
   getConfig(): Config {
@@ -162,8 +178,27 @@ export class ConfigManager {
   /**
    * Save configuration to file
    */
-  private async saveConfig(): Promise<void> {
-    await fs.writeFile(this.configFile, JSON.stringify(this.config, null, 2), 'utf-8');
+  private async saveConfig(replaceDelegation = false): Promise<void> {
+    const saved: Record<string, unknown> = { ...this.config };
+    if (!replaceDelegation) {
+      // Runtime instances may outlive external grant edits. An unrelated save
+      // must neither erase a new grant nor resurrect one that was revoked.
+      let content: string;
+      try { content = await fs.readFile(this.configFile, 'utf-8'); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('Unable to preserve shared-symlink policy while saving configuration.');
+        content = '{}';
+      }
+      let current: Record<string, unknown>;
+      try {
+        const parsed: unknown = JSON.parse(content);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error();
+        current = parsed as Record<string, unknown>;
+      } catch { throw new Error('Invalid configuration; shared-symlink policy was not overwritten.'); }
+      if (Object.hasOwn(current, 'delegation')) saved.delegation = current.delegation;
+      else delete saved.delegation;
+    }
+    await fs.writeFile(this.configFile, JSON.stringify(saved, null, 2), 'utf-8');
   }
 
   /**
@@ -253,7 +288,7 @@ export class ConfigManager {
    */
   async resetToDefaults(): Promise<void> {
     this.config = { ...DEFAULT_CONFIG };
-    await this.saveConfig();
+    await this.saveConfig(true);
   }
 
   /**
@@ -277,7 +312,7 @@ export class ConfigManager {
       }
 
       this.config = config;
-      await this.saveConfig();
+      await this.saveConfig(true);
     } catch (error) {
       if (error instanceof SyntaxError) {
         throw new Error('Invalid JSON format');
@@ -341,7 +376,7 @@ export class ConfigManager {
     target[lastKey] = value;
 
     // Save configuration
-    await this.saveConfig();
+    await this.saveConfig(keyPath === 'delegation' || keyPath.startsWith('delegation.'));
   }
 
   /**

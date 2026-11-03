@@ -5,7 +5,8 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 
-const { parseArguments, publishRelease, registryVersion, npmFailure, REGISTRY, REPOSITORY } =
+const { parseArguments, publishRelease, registryVersion, npmFailure, REGISTRY, REPOSITORY,
+  CONFIRMATION_ATTEMPTS, CONFIRMATION_INTERVAL_MS } =
   createRequire(import.meta.url)('../../../scripts/publish-npm.cjs');
 const version = '2.3.4';
 const names = ['@yu_robotics/remote-cli', '@yu_robotics/remote-cli-router'];
@@ -252,6 +253,24 @@ describe('npm release orchestration (synthetic processes and registry only)', ()
       expect(h.dependencies.sleep.mock.calls).toEqual([[5000]]);
     });
 
+  it('confirms both packages after minutes of stale 404s, including the final allowed lookup, with one upload each', async () => {
+    const h = harness();
+    const misses = [60, CONFIRMATION_ATTEMPTS - 1];
+    h.onPublish(name => {
+      h.registry.set(name, metadata(name));
+      for (let index = 0; index < misses[names.indexOf(name)]; index++) h.fetch.mockResolvedValueOnce(response(404));
+    });
+    const results = await h.run();
+    expect(results).toEqual(names.map(name => ({ name, version, integrity: integrity(bytes(name)), status: 'published' })));
+    expect(h.events.filter(event => event.startsWith('publish:'))).toEqual(names.map(name => `publish:${name}`));
+    expect(h.fetch).toHaveBeenCalledTimes(2 + misses.reduce((sum, count) => sum + count + 1, 0));
+    expect(h.dependencies.sleep.mock.calls).toEqual(Array.from({ length: misses[0] + misses[1] }, () => [CONFIRMATION_INTERVAL_MS]));
+    // A fresh invocation sees matching versions and must not upload again.
+    h.events.length = 0;
+    expect((await h.run()).map((item: any) => item.status)).toEqual(['existing', 'existing']);
+    expect(h.events.some(event => event.startsWith('publish:'))).toBe(false);
+  });
+
   it.each(['missing', 'conflict', 'lookup-failed'])('stops after an uncertain publish with %s reconciliation', async outcome => {
     const h = harness();
     h.onPublish(name => {
@@ -261,17 +280,20 @@ describe('npm release orchestration (synthetic processes and registry only)', ()
     });
     await expect(h.run()).rejects.toThrow('No publish retry was made');
     expect(h.events.filter(event => event.startsWith('publish:'))).toEqual([`publish:${names[0]}`]);
-    expect(h.fetch).toHaveBeenCalledTimes(outcome === 'missing' ? 15 : 3);
-    expect(h.dependencies.sleep).toHaveBeenCalledTimes(outcome === 'missing' ? 12 : 0);
+    expect(h.fetch).toHaveBeenCalledTimes(outcome === 'missing' ? 2 + CONFIRMATION_ATTEMPTS : 3);
+    expect(h.dependencies.sleep).toHaveBeenCalledTimes(outcome === 'missing' ? CONFIRMATION_ATTEMPTS - 1 : 0);
   });
 
   it('does not accept a successful process exit without matching registry confirmation', async () => {
     const h = harness();
     h.onPublish(() => {});
+    expect(CONFIRMATION_ATTEMPTS).toBe(121);
+    expect(CONFIRMATION_INTERVAL_MS).toBe(5000);
+    expect((CONFIRMATION_ATTEMPTS - 1) * CONFIRMATION_INTERVAL_MS).toBe(10 * 60_000);
     await expect(h.run()).rejects.toThrow('not confirmed with matching integrity');
     expect(h.events.filter(event => event.startsWith('publish:'))).toHaveLength(1);
-    expect(h.fetch).toHaveBeenCalledTimes(15); // Two preflight reads plus thirteen confirmation reads.
-    expect(h.dependencies.sleep.mock.calls).toEqual(Array.from({ length: 12 }, () => [5000]));
+    expect(h.fetch).toHaveBeenCalledTimes(2 + CONFIRMATION_ATTEMPTS);
+    expect(h.dependencies.sleep.mock.calls).toEqual(Array.from({ length: CONFIRMATION_ATTEMPTS - 1 }, () => [CONFIRMATION_INTERVAL_MS]));
   });
 
   it.each(['error', 'ERR!'])('reports safe npm %s diagnostics without raw authentication output', prefix => {
@@ -293,7 +315,7 @@ describe('npm release orchestration (synthetic processes and registry only)', ()
     h.onPublish(() => { throw npmFailure({ code: 1, stderr: 'npm error code ENEEDAUTH' }, 'publish'); });
     await expect(h.run()).rejects.toThrow('ENEEDAUTH; exit 1');
     expect(h.events.filter(event => event.startsWith('publish:'))).toHaveLength(1);
-    expect(h.fetch).toHaveBeenCalledTimes(15);
+    expect(h.fetch).toHaveBeenCalledTimes(2 + CONFIRMATION_ATTEMPTS);
   });
 
   it('leaves an acknowledged first package resumable when the second publish fails', async () => {

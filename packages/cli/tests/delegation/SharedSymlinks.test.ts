@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs/promises';
 import path from 'path';
+import os from 'os';
 import { randomUUID, createHash } from 'crypto';
 import { captureCheckpoint, checkpointRevision, gitText, runGit } from '../../src/delegation/GitCheckpoint';
 import { SharedLinkCapture, delegationSharedSymlinks, parseSharedSymlinkGrants, validateSharedLocations } from '../../src/delegation/SharedSymlinks';
@@ -44,6 +45,16 @@ describe('explicit project shared links', { timeout: 60_000 }, () => {
     const workspace = await manager.prepare(lane, source, input, randomUUID());
     const owner = { threadId: lane.threadId, cwd: fixture.root, workspaceGeneration: 0 };
     return { manager, source, lane, input, workspace, owner, configure: (value: unknown) => { configured = value; } };
+  }
+  async function savedConfig() {
+    const home = path.join(fixture.directory, 'synthetic-home');
+    const directory = path.join(home, '.remote-cli');
+    await fs.mkdir(directory, { recursive: true });
+    const file = path.join(directory, 'config.json');
+    await fs.writeFile(file, JSON.stringify({ deviceId: 'synthetic-runtime-device', executor: { type: 'agy' },
+      delegation: { sharedSymlinks: [] } }));
+    vi.spyOn(os, 'homedir').mockReturnValue(home);
+    return { config: await ConfigManager.initialize(), file };
   }
 
   it.each([null, {}, '[]', [null], [{ root: 'relative', path: 'x', target: 'relative' }], Array(65).fill({}),
@@ -97,8 +108,152 @@ describe('explicit project shared links', { timeout: 60_000 }, () => {
     expect(set).not.toHaveBeenCalled();
     const config = Object.create(ConfigManager.prototype);
     config.config = { delegation: { sharedSymlinks: 'invalid' } };
+    config.configFile = path.join(fixture.directory, 'invalid-config.json');
+    await fs.writeFile(config.configFile, JSON.stringify(config.config));
     expect(config.getConfig().delegation.sharedSymlinks).toBe('invalid');
-    expect(() => config.getSharedSymlinks()).toThrow();
+    await expect(config.getSharedSymlinks()).rejects.toThrow('Invalid shared-symlink configuration');
+  });
+  it('reloads grants on the same instance after config set and direct edits without changing runtime configuration', async () => {
+    const { config, file } = await savedConfig();
+    const runtime = config.getConfig();
+    await expect(config.getSharedSymlinks()).resolves.toEqual([]);
+    expect((await configCommand({ action: 'set', key: 'delegation.sharedSymlinks', value: JSON.stringify([grant()]) })).success).toBe(true);
+    await expect(config.getSharedSymlinks()).resolves.toEqual([grant()]);
+    for (const saved of [{ delegation: { sharedSymlinks: [] } }, {}, { delegation: {} }]) {
+      await fs.writeFile(file, JSON.stringify(saved));
+      await expect(config.getSharedSymlinks()).resolves.toEqual([]);
+      await fs.writeFile(file, JSON.stringify({ executor: { type: 'codex' }, deviceId: 'synthetic-disk-device',
+        delegation: { sharedSymlinks: [grant()] } }));
+      const grants = await config.getSharedSymlinks();
+      expect(grants).toEqual([grant()]);
+      grants.length = 0;
+      await expect(config.getSharedSymlinks()).resolves.toEqual([grant()]);
+      expect(config.getConfig()).toEqual(runtime);
+    }
+    await fs.unlink(file);
+    await expect(config.getSharedSymlinks()).resolves.toEqual([]);
+    await expect(fs.lstat(file)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(config.getConfig()).toEqual(runtime);
+  });
+  it.each(['{ "synthetic-private-marker":', 'null', '[]', 'true', '"synthetic-private-marker"',
+    '{"delegation":null}', '{"delegation":{"sharedSymlinks":"synthetic-private-marker"}}',
+    '{"delegation":{"unexpected":"synthetic-private-marker"}}'])('rejects invalid current policy without leaking or rewriting data: %s', async content => {
+    const { config, file } = await savedConfig();
+    const runtime = config.getConfig();
+    await fs.writeFile(file, content);
+    const initialize = vi.spyOn(ConfigManager, 'initialize');
+    const write = vi.spyOn(fs, 'writeFile');
+    await expect(config.getSharedSymlinks()).rejects.toEqual(new Error('Invalid shared-symlink configuration; managed admission is denied.'));
+    expect(await fs.readFile(file, 'utf8')).toBe(content);
+    expect(config.getConfig()).toEqual(runtime);
+    expect(initialize).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
+  });
+  it('sanitizes read failures and never falls back to cached grants', async () => {
+    const { config, file } = await savedConfig();
+    const runtime = config.getConfig();
+    await fs.writeFile(file, JSON.stringify({ delegation: { sharedSymlinks: [grant()] } }));
+    await expect(config.getSharedSymlinks()).resolves.toEqual([grant()]);
+    const bytes = await fs.readFile(file);
+    const read = fs.readFile.bind(fs);
+    const reading = vi.spyOn(fs, 'readFile').mockImplementation(((name: any, ...args: any[]) => {
+      if (name === file) return Promise.reject(Object.assign(new Error('synthetic-private-marker'), { code: 'EACCES' }));
+      return (read as any)(name, ...args);
+    }) as any);
+    const write = vi.spyOn(fs, 'writeFile');
+    await expect(config.getSharedSymlinks()).rejects.toEqual(new Error('Unable to load shared-symlink grants; managed admission is denied.'));
+    expect(config.getConfig()).toEqual(runtime);
+    expect(write).not.toHaveBeenCalled();
+    reading.mockRestore();
+    expect(await fs.readFile(file)).toEqual(bytes);
+  });
+  it.each(['added', 'revoked', 'removed', 'deleted', 'invalid'])(
+    'preserves the latest %s policy when a stale runtime instance saves an unrelated setting', async kind => {
+      const { config, file } = await savedConfig();
+      const cached = kind === 'added' ? [] : [grant()];
+      (config as any).config.delegation = { sharedSymlinks: cached };
+      const saved = kind === 'added' ? { sharedSymlinks: [grant()] }
+        : kind === 'revoked' ? { sharedSymlinks: [] } : { sharedSymlinks: 'synthetic-invalid-policy' };
+      if (kind === 'deleted') await fs.unlink(file);
+      else await fs.writeFile(file, JSON.stringify(kind === 'removed' ? {} : { delegation: saved }));
+      await config.set('executor.agy.model', 'synthetic-model');
+      const disk = JSON.parse(await fs.readFile(file, 'utf8'));
+      expect(disk.executor.agy.model).toBe('synthetic-model');
+      if (kind === 'removed' || kind === 'deleted') expect(disk).not.toHaveProperty('delegation');
+      else expect(disk.delegation).toEqual(saved);
+      expect(config.getConfig().delegation).toEqual({ sharedSymlinks: cached });
+      if (kind === 'invalid') await expect(config.getSharedSymlinks()).rejects.toThrow('Invalid shared-symlink configuration');
+      else await expect(config.getSharedSymlinks()).resolves.toEqual(kind === 'added' ? [grant()] : []);
+    });
+  it('does not overwrite malformed disk policy during unrelated saves and permits explicit grant replacement', async () => {
+    const { config, file } = await savedConfig();
+    const content = '{"synthetic-private-marker":';
+    await fs.writeFile(file, content);
+    await expect(config.set('executor.agy.model', 'synthetic-model')).rejects.toEqual(new Error('Invalid configuration; shared-symlink policy was not overwritten.'));
+    expect(await fs.readFile(file, 'utf8')).toBe(content);
+    await fs.writeFile(file, JSON.stringify({ delegation: { sharedSymlinks: [] } }));
+    await config.set('delegation', { sharedSymlinks: [grant()] });
+    await expect(config.getSharedSymlinks()).resolves.toEqual([grant()]);
+    await config.set('delegation.sharedSymlinks', []);
+    await expect(config.getSharedSymlinks()).resolves.toEqual([]);
+  });
+  it('does not resurrect cached grants when current policy cannot be read during an unrelated save', async () => {
+    const { config, file } = await savedConfig();
+    (config as any).config.delegation = { sharedSymlinks: [grant()] };
+    const bytes = await fs.readFile(file);
+    const read = fs.readFile.bind(fs);
+    const reading = vi.spyOn(fs, 'readFile').mockImplementation(((name: any, ...args: any[]) => {
+      if (name === file) return Promise.reject(Object.assign(new Error('synthetic-private-marker'), { code: 'EACCES' }));
+      return (read as any)(name, ...args);
+    }) as any);
+    const write = vi.spyOn(fs, 'writeFile');
+    await expect(config.set('executor.agy.model', 'synthetic-model')).rejects.toEqual(new Error('Unable to preserve shared-symlink policy while saving configuration.'));
+    expect(write).not.toHaveBeenCalled();
+    reading.mockRestore();
+    expect(await fs.readFile(file)).toEqual(bytes);
+  });
+  it('honors explicit full configuration resets and imports rather than retaining old grants', async () => {
+    const { config, file } = await savedConfig();
+    await fs.writeFile(file, JSON.stringify({ delegation: { sharedSymlinks: [grant()] } }));
+    await config.resetToDefaults();
+    await expect(config.getSharedSymlinks()).resolves.toEqual([]);
+    const imported = config.getConfig();
+    imported.delegation = { sharedSymlinks: [grant()] };
+    await config.importConfig(JSON.stringify(imported));
+    await expect(config.getSharedSymlinks()).resolves.toEqual([grant()]);
+    delete imported.delegation;
+    await config.importConfig(JSON.stringify(imported));
+    await expect(config.getSharedSymlinks()).resolves.toEqual([]);
+    expect(JSON.parse(await fs.readFile(file, 'utf8'))).not.toHaveProperty('delegation');
+  });
+  it.skipIf(!supportsFileSymlinks)('admits newly granted links through a live manager and closes out pinned work after disk revocation', async () => {
+    const { config, file } = await savedConfig();
+    await link();
+    const manager = new DelegatedWorkspaceManager(storage(), true, () => config.getSharedSymlinks());
+    const source = (await manager.discover(fixture.root))!;
+    await expect(manager.baseline(source)).rejects.toThrow(/symbolic[- ]link/);
+    await fs.writeFile(file, JSON.stringify({ delegation: { sharedSymlinks: [grant()] } }));
+    const input = await manager.baseline(source);
+    expect(input.sharedSymlinkPolicy?.grants).toEqual([grant()]);
+    const lanes = new DelegatedWorkerSessionStore(path.join(fixture.directory, 'lanes'));
+    const { lane } = await lanes.acquire({ threadId: 'synthetic-owner', backend: 'agy', workingDirectory: fixture.root, workspaceGeneration: 0 });
+    const workspace = await manager.prepare(lane, source, input, randomUUID());
+    await fs.writeFile(path.join(workspace.directory, 'ordinary.txt'), 'synthetic ordinary output\n');
+    await fs.writeFile(file, JSON.stringify({ delegation: { sharedSymlinks: [] } }));
+    await expect(manager.baseline(source)).rejects.toThrow(/symbolic[- ]link/);
+    const view = await manager.collect(workspace, true, { exitConfirmed: true });
+    expect(view.changedFiles).toEqual(['ordinary.txt']);
+    // Closeout after restart must use the saved policy even if current admission fails.
+    await fs.writeFile(file, '{ "synthetic-private-marker":');
+    const restarted = new DelegatedWorkspaceManager(storage(), true, () => config.getSharedSymlinks());
+    const owner = { threadId: lane.threadId, cwd: fixture.root, workspaceGeneration: 0 };
+    const inspected = await restarted.integrate(owner, workspace.taskId, 'inspect', undefined) as any;
+    await restarted.integrate(owner, workspace.taskId, 'apply', inspected.revision);
+    expect(await fs.readFile(path.join(fixture.root, 'ordinary.txt'), 'utf8')).toBe('synthetic ordinary output\n');
+    expect(await fs.readlink(path.join(fixture.root, 'shared-link'))).toBe(input.sharedLinks![0].linkText);
+    expect(await fs.readFile(target, 'utf8')).toBe('synthetic shared bytes\n');
+    expect(await fs.readFile(file, 'utf8')).toBe('{ "synthetic-private-marker":');
+    await expect(fs.lstat(workspace.directory)).rejects.toMatchObject({ code: 'ENOENT' });
   });
   it('allows a valid typed replacement to repair malformed saved grants', async () => {
     const set = vi.fn();
