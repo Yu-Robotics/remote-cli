@@ -13,6 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.208] - 2026-11-04
+
+### Fixed
+- Read shared-symlink grants from the current local configuration before each new managed Git task without requiring a CLI or conversation restart.
+- Keep running tasks and saved artifacts pinned to their recorded policy, and reject invalid or unreadable policy without falling back to stale grants or rewriting configuration.
+- Preserve current on-disk grants during unrelated configuration saves, including additions, revocations, and invalid policy, instead of restoring stale runtime grants.
+- Allow ten minutes of post-upload registry confirmation polling for npm publish-time scanning while retaining single uploads, integrity checks, and immediate failure on lookup errors.
+
+### Tests
+- Cover same-instance grant addition and removal, missing and malformed configuration, sanitized failures, and unchanged in-memory settings and configuration files.
+
 ## [1.6.207] - 2026-11-03
 
 ### Fixed

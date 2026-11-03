@@ -280,7 +280,7 @@ Configure shared links through the local CLI setting `delegation.sharedSymlinks`
 }
 ```
 
-Each grant names one existing native symbolic link and one existing canonical shared target; wildcards, directory-prefix grants, dangling links, and grants inside nested repositories are not supported. File and directory targets are supported. Git metadata, managed worker storage, and targets overlapping the project root are rejected. Configuration accepts at most 64 grants and 16 KiB of serialized grant data; recorded link bindings are limited to 32 KiB so tasks retain readable recovery records. The example paths are placeholders. Windows JSON paths require escaped backslashes, native symlink privileges, and Git `core.symlinks=true`; no regular-file or junction fallback is created. After changing this setting, restart the local CLI when active tasks have finished so it reloads the configuration before starting new workers; saved tasks retain their recorded link bindings for artifact closeout. Shared-target content remains live and outside artifact review and rollback. Changing or staging the shared link node holds the checkout for recovery. Conservative cleanup can retain a mapped checkout when safe removal cannot be confirmed.
+Each grant names one existing native symbolic link and one existing canonical shared target; wildcards, directory-prefix grants, dangling links, and grants inside nested repositories are not supported. File and directory targets are supported. Git metadata, managed worker storage, and targets overlapping the project root are rejected. Configuration accepts at most 64 grants and 16 KiB of serialized grant data; recorded link bindings are limited to 32 KiB so tasks retain readable recovery records. The example paths are placeholders. Windows JSON paths require escaped backslashes, native symlink privileges, and Git `core.symlinks=true`; no regular-file or junction fallback is created. From CLI 1.6.208, each new managed Git task reads the current shared-link grants from the local configuration, so adding or removing grants takes effect without restarting the CLI or conversation. CLI 1.6.207 requires a restart after configuration changes. Running tasks and saved artifacts retain their recorded link bindings for execution and closeout; a policy change cannot revoke access already held by an active process. Invalid or unreadable policy prevents new managed admission rather than reusing stale grants. Shared-target content remains live and outside artifact review and rollback. Changing or staging the shared link node holds the checkout for recovery. Conservative cleanup can retain a mapped checkout when safe removal cannot be confirmed.
 
 From CLI 1.6.121, new and existing threads without a saved preference enable
 delegation by default. Their selected backend can assign bounded tasks to eligible
@@ -810,8 +810,9 @@ workflow `npm-publish.yml`, no environment, and direct publishing. Normal releas
 need no manual button or Git tag; manual triggering remains available for recovery. It builds,
 tests, and checks both packages before publishing; a partial release can be
 retried from the original run only when already published content matches.
-Confirmation requests fresh registry metadata and tolerates a bounded visibility
-delay without repeating the upload.
+Confirmation requests fresh registry metadata with up to ten minutes of polling
+delays for npm publish-time scanning, without repeating the upload; registry
+request time is additional.
 See the [release setup and recovery instructions](../../README.md#publishing-with-github-actions).
 
 ## License

@@ -10,7 +10,7 @@ const { promisify } = require('node:util');
 const { setTimeout: sleep } = require('node:timers/promises');
 
 const REGISTRY = 'https://registry.npmjs.org';
-const CONFIRMATION_ATTEMPTS = 13;
+const CONFIRMATION_ATTEMPTS = 121;
 const CONFIRMATION_INTERVAL_MS = 5_000;
 const REPOSITORY = 'git+https://github.com/Yu-Robotics/remote-cli.git';
 const PACKAGES = [
@@ -209,6 +209,7 @@ async function publishRelease({ version, check = false, root = path.resolve(__di
             { cwd: temporary, env: environment });
         } catch (error) { failure = npmFailure(error, 'publish').message; }
         const diagnostic = failure ? ` ${failure}` : '';
+        // Allow ten minutes between the first and final confirmation lookups.
         // Poll only absent metadata: publication may precede registry visibility.
         // Never retry the publish command, even after a timeout or lost response.
         let confirmed;
