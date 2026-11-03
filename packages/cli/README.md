@@ -2,6 +2,10 @@
 
 Remote control Claude Code, AGY CLI, Codex CLI, OpenCode CLI, Kimi Code CLI, ZCode, or Pi from anywhere using your mobile phone through Feishu (Lark) messaging.
 
+From Router 1.6.205, public `/health` responses expose health and connection counts without device identifiers. The unauthenticated HTTP `/api/feishu/card-callback` endpoint is retired; card actions use the existing Feishu long connection. Binding requests and unregistered WebSocket connections have bounded admission. Existing CLI registration, enrolled-device proofs, and protocol version 1 remain supported. This does not introduce message encryption or require device rebinding.
+
+Rate-limited binding requests return HTTP 429 with `Retry-After`. Admission uses the direct socket peer and ignores `X-Forwarded-For`; devices behind a shared proxy or NAT share a peer budget. Unregistered connections have a fixed 30-second registration deadline that heartbeats cannot extend, a 16 KiB message limit, and limits of 64 pending connections per peer and 512 globally. Registered WebSocket messages have a 16 MiB limit, including cumulative fragmented messages. Existing monitoring should use the health status and connection count instead of the removed device list.
+
 From CLI 1.6.204, Claude Code model aliases show the alias name followed by the native resolved model ID, preserving provider prefixes. If the resolved ID is unavailable, the native display name is used. Direct model and Default labels, selection values, and other backends remain unchanged.
 
 ![Remote CLI architecture](../../docs/images/remote-cli-architecture.png)

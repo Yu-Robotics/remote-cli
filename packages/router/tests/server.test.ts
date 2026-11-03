@@ -1801,17 +1801,9 @@ describe('RouterServer', () => {
     expect(ctx.body.success).toBe(false);
   });
 
-  it('should handle feishu card callback route', async () => {
-    const cardRoute = mockRouter.post.mock.calls.find(call => call[0] === '/api/feishu/card-callback')[1];
-    const ctx = {
-      request: { body: { event: { some: 'data' } } },
-      body: {},
-      status: 0
-    } as any;
-    
-    await cardRoute(ctx);
-    expect(mockFeishuHandler.handleCardAction).toHaveBeenCalledWith({ some: 'data' });
-    expect(ctx.status).toBe(200);
+  it('does not expose an unauthenticated HTTP card callback', () => {
+    expect(mockRouter.post.mock.calls.some(call => call[0] === '/api/feishu/card-callback')).toBe(false);
+    expect(mockFeishuHandler.handleCardAction).not.toHaveBeenCalled();
   });
 
   it('should handle WebSocket connection', async () => {
@@ -2198,7 +2190,7 @@ describe('RouterServer', () => {
 
 
   it('should handle Koa error middleware', async () => {
-    const errorMiddleware = mockKoa.use.mock.calls[1][0]; // Assuming second middleware is error handling
+    const errorMiddleware = mockKoa.use.mock.calls[2][0]; // Error handler follows admission and body parsing
     const ctx = { status: 0, body: {} } as any;
     const next = vi.fn().mockRejectedValue(new Error('Test error'));
     
@@ -2209,7 +2201,7 @@ describe('RouterServer', () => {
   });
 
   it('should handle Koa logging middleware', async () => {
-    const logMiddleware = mockKoa.use.mock.calls[2][0]; // Assuming third middleware is logging
+    const logMiddleware = mockKoa.use.mock.calls[3][0]; // Logging follows the error handler
     const ctx = { method: 'GET', url: '/test', status: 200 } as any;
     const next = vi.fn().mockResolvedValue(undefined);
     

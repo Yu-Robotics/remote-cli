@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.205] - 2026-11-03
+
+### Security
+- Remove device identifiers from public health responses and retire the unauthenticated HTTP card callback; Feishu card actions continue through the native long connection.
+- Bound binding requests and unregistered WebSocket admission while retaining legacy device registration and existing enrolled-device proofs.
+
+### Tests
+- Cover health redaction, rejected HTTP callback ingress, bounded admission, registration deadlines, resource release, and legacy reconnect compatibility.
+
 ## [1.6.204] - 2026-11-03
 
 ### Changed
