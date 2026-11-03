@@ -142,6 +142,7 @@ describe('local nested repository checkpoints and delivery', { timeout: 30_000 }
     expect(await gitText(fixture.root, ['show', `${snapshot.tree}:vendor/component/local.txt`])).toContain('first');
   });
 
+  // Three repository levels accumulate real Git subprocess costs on Windows.
   it('integrates grandchild submodule files without changing nested HEADs or indexes', async () => {
     const child = await nestedGitFixture(fixture, 'module', true);
     // Cloning a submodule does not copy the template's local author settings.
@@ -155,7 +156,7 @@ describe('local nested repository checkpoints and delivery', { timeout: 30_000 }
     expect(await apply(workspace)).toMatchObject({ applied: true });
     expect(await fs.readFile(path.join(grandchild, 'local.txt'), 'utf8')).toBe('deep worker edit\n');
     expect(await Promise.all([fixture.root, child, grandchild].map(repositoryState))).toEqual(before);
-  });
+  }, 90_000);
 
   it('streams nested objects larger than the Git command output buffer', async () => {
     const child = await nestedGitFixture(fixture);
