@@ -44,7 +44,7 @@ describe('Router wire compatibility', () => {
     });
     await server.start();
 
-    socket = Object.assign(new EventEmitter(), { send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN });
+    socket = Object.assign(new EventEmitter(), { terminate: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN });
     wss.emit('connection', socket, { socket: { remoteAddress: '127.0.0.1' } });
     const onMessage = socket.listeners('message')[0];
     receive = async (message) => { await onMessage(Buffer.from(JSON.stringify(message))); };

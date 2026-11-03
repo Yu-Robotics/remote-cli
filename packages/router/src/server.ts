@@ -1,3 +1,4 @@
+import { IngressAdmission, IngressLimitError, INGRESS_LIMITS, PendingFrameBudget } from './security/IngressAdmission';
 import { ApprovalCards } from './feishu/ApprovalCards';
 import { WorkerContextCards } from './feishu/WorkerContextCards';
 import { SettingsCards } from './feishu/SettingsCards';
@@ -99,6 +100,9 @@ interface StreamingMessageState {
  */
 export class RouterServer {
   private app: Koa;
+  private readonly ingress = new IngressAdmission();
+  private readonly pendingSockets = new Map<WebSocket, () => void>();
+  private stopping = false;
   private httpServer: HttpServer | null = null;
   private wss: WebSocketServer | null = null;
   private config: ConfigManager;
@@ -402,7 +406,19 @@ export class RouterServer {
    * Setup Koa middleware
    */
   private setupMiddleware(): void {
-    this.app.use(bodyParser());
+    this.app.use(async (ctx, next) => {
+      if (ctx.path === '/api/bind/request' && ctx.method === 'POST') {
+        if (this.stopping) { ctx.status = 503; return; }
+        if (!this.ingress.bindingPeer(ctx.req.socket.remoteAddress ?? 'unknown')) {
+          ctx.status = 429;
+          ctx.set('Retry-After', '300');
+          ctx.body = { success: false, error: 'Binding request limit exceeded. Retry later.' };
+          return;
+        }
+      }
+      await next();
+    });
+    this.app.use(bodyParser({ jsonLimit: '16kb', formLimit: '16kb', textLimit: '16kb' }));
 
     // Error handling
     this.app.use(async (ctx, next) => {
@@ -439,8 +455,7 @@ export class RouterServer {
       ctx.body = {
         status: 'ok',
         timestamp: Date.now(),
-        connections: stats.totalConnections,
-        devices: stats.deviceIds
+        connections: stats.totalConnections
       };
     });
 
@@ -458,7 +473,7 @@ export class RouterServer {
 
     // Binding code request endpoint
     router.post('/api/bind/request', async (ctx) => {
-      const { deviceId, deviceName, platform } = ctx.request.body as {
+      const { deviceId, deviceName, platform } = (ctx.request.body ?? {}) as {
         deviceId: string;
         deviceName?: string;
         platform?: string;
@@ -474,6 +489,16 @@ export class RouterServer {
         return;
       }
 
+      if (this.stopping) { ctx.status = 503; return; }
+      if (!this.ingress.bindingDevice(deviceId)) {
+        ctx.status = 429;
+        ctx.set('Retry-After', '300');
+        ctx.body = { success: false, error: 'Binding request limit exceeded. Retry later.' };
+        return;
+      }
+      if (deviceName !== undefined && (typeof deviceName !== 'string' || deviceName.length > 200)) {
+        ctx.status = 400; ctx.body = { success: false, error: 'Invalid device name.' }; return;
+      }
       try {
         const { devicePublicKey, nonce, signature } = ctx.request.body as any;
         if (devicePublicKey && !this.fileTransfers.enabled) {
@@ -501,22 +526,13 @@ export class RouterServer {
         };
       } catch (error: any) {
         console.error('Failed to generate binding code:', error);
-        ctx.status = 500;
+        ctx.status = error instanceof IngressLimitError ? 429 : 500;
+        if (error instanceof IngressLimitError) ctx.set('Retry-After', String(error.retryAfter));
         ctx.body = {
           success: false,
           error: error.message || 'Failed to generate binding code'
         };
       }
-    });
-
-    // Feishu card callback endpoint — receives button click events from Feishu
-    router.post('/api/feishu/card-callback', async (ctx) => {
-      const body = ctx.request.body as any;
-      // Feishu card callback wraps the action data under body.event
-      const eventData = body?.event ?? body;
-      const result = await this.feishuLongConnHandler.handleCardAction(eventData);
-      ctx.status = 200;
-      ctx.body = result ?? {};
     });
 
     this.app.use(router.routes());
@@ -529,11 +545,36 @@ export class RouterServer {
   private setupWebSocket(server: HttpServer): void {
     this.wss = new WebSocketServer({
       server,
-      path: '/ws'
+      path: '/ws',
+      maxPayload: INGRESS_LIMITS.payloadBytes
     });
 
     this.wss.on('connection', (ws: WebSocket, req) => {
-      console.log('New WebSocket connection from:', req.socket.remoteAddress);
+      const admission = this.stopping ? undefined : this.ingress.admit(req.socket.remoteAddress ?? 'unknown');
+      if (!admission) {
+        ws.on('error', () => {});
+        ws.terminate();
+        return;
+      }
+      let registered = false;
+      const wireBudget = new PendingFrameBudget(bytes => admission.receive(bytes));
+      const inspectFrames = (chunk: Buffer) => {
+        if (!registered && !wireBudget.receive(chunk)) { releaseAdmission(); ws.terminate(); }
+      };
+      // Public net.Socket API; prepend so refused frames cannot reach ws parsing first.
+      const observesWire = typeof req.socket.prependListener === 'function';
+      if (observesWire) req.socket.prependListener('data', inspectFrames);
+      const releaseAdmission = () => {
+        admission.release();
+        clearTimeout(registrationTimer);
+        this.pendingSockets.delete(ws);
+        if (observesWire) req.socket.removeListener('data', inspectFrames);
+      };
+      const registrationTimer = setTimeout(() => {
+        releaseAdmission();
+        ws.terminate();
+      }, INGRESS_LIMITS.registrationMs);
+      this.pendingSockets.set(ws, releaseAdmission);
 
       let deviceId: string | null = null;
       let socketClosed = false;
@@ -573,7 +614,12 @@ export class RouterServer {
       ws.on('message', async (data: Buffer) => {
         let finishQueueMessage: (() => void) | undefined;
         try {
+          if (this.stopping || socketClosed || (!registered && (data.byteLength > INGRESS_LIMITS.preauthBytes
+            || !admission.active() || (!observesWire && !admission.receive(data.byteLength))))) {
+            releaseAdmission(); ws.terminate(); return;
+          }
           const message = JSON.parse(data.toString());
+          if (!message || typeof message !== 'object') return;
 
           if (!deviceId && message.type !== MessageType.BINDING_REQUEST && message.type !== MessageType.HEARTBEAT) return;
 
@@ -711,6 +757,7 @@ export class RouterServer {
                   const enrolled = await this.deviceAuth.get(requestedId);
                   if (enrolled) {
                     if (!message.data.deviceSignature && !enrolled.revoked) {
+                      if (this.stopping || socketClosed || !admission.active() || ws.readyState !== WebSocket.OPEN) break;
                       const nonce = this.deviceAuth.challenge(ws, requestedId);
                       ws.send(JSON.stringify({ type: 'device_challenge', data: { nonce } }));
                       if (challengeTimer) clearTimeout(challengeTimer);
@@ -726,14 +773,13 @@ export class RouterServer {
                     }
                     authenticatedOwner = proof.openId;
                   }
-                  if (ws.readyState !== WebSocket.OPEN) break;
+                  if (this.stopping || socketClosed || !admission.active() || ws.readyState !== WebSocket.OPEN) break;
                 } catch {
                   ws.send(JSON.stringify({ type: 'error', data: { code: 'DEVICE_AUTH_REQUIRED', message: 'Device authentication is unavailable. Ask the Router administrator to check the authentication store.' } }));
                   ws.close();
                   break;
                 } finally { authenticationPending = false; }
                 if (challengeTimer) clearTimeout(challengeTimer);
-                deviceId = requestedId;
                 // Version check: missing protocolVersion defaults to 1 (current baseline)
                 const clientVersion: number = message.data?.protocolVersion ?? 1;
                 if (clientVersion < MIN_SUPPORTED_CLI_VERSION) {
@@ -753,6 +799,9 @@ export class RouterServer {
                   break;
                 }
 
+                deviceId = requestedId;
+                registered = true;
+                releaseAdmission();
                 this.cancelDeviceImages(deviceId);
                 this.approvalCards.disconnect(deviceId);
                 this.maintenanceCards.disconnect(deviceId);
@@ -1051,9 +1100,16 @@ export class RouterServer {
         }
       });
 
+      // Control frames also consume the pending connection budget.
+      for (const event of ['ping', 'pong'] as const) ws.on(event, (data: Buffer) => {
+        if (!registered && (data.byteLength > INGRESS_LIMITS.preauthBytes
+            || !admission.active() || (!observesWire && !admission.receive(data.byteLength)))) { releaseAdmission(); ws.terminate(); }
+      });
+
       // Handle connection close
       ws.on('close', () => {
         socketClosed = true;
+        releaseAdmission();
         for (const [id, route] of this.imageReplies) {
           if (!route.current()) this.cancelImageReply(id);
         }
@@ -1075,6 +1131,11 @@ export class RouterServer {
 
       // Handle errors
       ws.on('error', (error) => {
+        socketClosed = true;
+        releaseAdmission();
+        if (challengeTimer) clearTimeout(challengeTimer);
+        if (heartbeatTimeout) clearTimeout(heartbeatTimeout);
+        ws.terminate();
         console.error('WebSocket error:', error);
       });
     });
@@ -1092,6 +1153,8 @@ export class RouterServer {
 
     // Create HTTP server
     this.httpServer = this.app.listen(port, host);
+    this.httpServer.requestTimeout = 30_000;
+    this.httpServer.headersTimeout = 15_000;
 
     // Setup WebSocket server
     this.setupWebSocket(this.httpServer);
@@ -2335,6 +2398,8 @@ export class RouterServer {
    */
   async stop(): Promise<void> {
     console.log('Stopping router server...');
+    this.stopping = true;
+    for (const [ws, release] of this.pendingSockets) { release(); ws.terminate(); }
     let firstError: unknown;
     let failed = false;
     const attempt = async (label: string, operation: () => Promise<void> | void): Promise<void> => {

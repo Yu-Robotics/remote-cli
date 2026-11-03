@@ -30,6 +30,27 @@ remote-cli-router config setup
 
 Enable Feishu **Long Connection** mode and subscribe to `im.message.receive_v1` and `card.action.trigger`. No public webhook endpoint is required. Clients must be able to reach the Router's HTTP and `/ws` endpoints; use TLS for public deployments.
 
+From Router 1.6.205, `/api/feishu/card-callback` is removed; configure card actions through the native long connection. Public `/health` responses contain status, timestamp, and connection count without device identifiers. Binding requests and unregistered WebSocket connections use bounded admission, including a fixed registration deadline. HTTP 429 binding refusals include `Retry-After`. Peer budgets use the direct socket address, ignoring `X-Forwarded-For`, so clients behind one proxy share a budget. Existing configuration and legacy CLI registration remain supported.
+
+### Public Ingress Budgets
+
+Router 1.6.205 uses fixed budgets without requiring new configuration fields:
+
+| Resource | Limit |
+|---|---|
+| HTTP request body | 16 KiB |
+| HTTP request / request headers | 30 seconds / 15 seconds |
+| WebSocket message, including fragmented assembly | 16 MiB |
+| Unregistered WebSocket message / registration deadline | 16 KiB / 30 seconds, independent of heartbeats |
+| Pending WebSocket connections | 512 globally / 64 per direct peer |
+| New WebSocket connections per minute | 4096 globally / 256 per direct peer |
+| Unregistered wire frames | 64 total / 16 per second per connection, including control and continuation frames |
+| Binding attempts per 5 minutes | 4096 globally / 128 per direct peer / 3 per device ID |
+| Unexpired persisted binding codes | 4096 globally / 3 per device ID |
+| Rate-counter entries | 8192; live entries are never evicted to admit a new key |
+
+Binding refusals return HTTP 429 and `Retry-After: 300`; exceeding WebSocket admission or frame budgets terminates the connection. Counters are process-local; persisted binding-code caps survive restarts. Expired codes are reclaimed during successful binding-code writes. Device IDs select target budgets, not authenticated identities. Shared proxies and NATs share the direct-peer budgets; forwarded headers cannot create additional peer allowances.
+
 ### View Current Configuration
 
 ```bash

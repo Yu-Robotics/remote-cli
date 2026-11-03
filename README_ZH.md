@@ -1485,6 +1485,10 @@ remote-cli does not install a global Claude Code `PreToolUse` hook. Backend proc
 
 ### 设备认证
 
+From Router 1.6.205, public `/health` responses expose health and connection counts without device identifiers. The unauthenticated HTTP `/api/feishu/card-callback` endpoint is retired; card actions use the existing Feishu long connection. Binding requests and unregistered WebSocket connections have bounded admission. Existing CLI registration, enrolled-device proofs, and protocol version 1 remain supported. This does not introduce message encryption or require device rebinding.
+
+Rate-limited binding requests return HTTP 429 with `Retry-After`. Admission uses the direct socket peer and ignores `X-Forwarded-For`; devices behind a shared proxy or NAT share a peer budget. Unregistered connections have a fixed 30-second registration deadline that heartbeats cannot extend, a 16 KiB message limit, and limits of 64 pending connections per peer and 512 globally. Registered WebSocket messages have a 16 MiB limit, including cumulative fragmented messages. Existing monitoring should use the health status and connection count instead of the removed device list.
+
 - 每台设备基于机器硬件生成**唯一 ID**
 - 绑定码**5 分钟后过期**
 - 每个用户只能控制**自己绑定的设备**

@@ -1,3 +1,4 @@
+import { IngressLimitError, INGRESS_LIMITS } from '../security/IngressAdmission';
 import { BindingCode, DeviceBinding, UserBinding, LegacyUserBinding } from '../types';
 import fs from 'fs/promises';
 import path from 'path';
@@ -179,7 +180,15 @@ export class JsonStore {
 
   async setBindingCode(code: string, bindingCode: BindingCode): Promise<void> {
     const copy = { ...bindingCode };
-    await this.scheduleSave(current => ({ ...current, bindingCodes: { ...current.bindingCodes, [code]: copy } }));
+    await this.scheduleSave(current => {
+      const live = this.withoutExpiredBindingCodes(current) ?? current;
+      const codes = Object.values(live.bindingCodes);
+      if (codes.length >= INGRESS_LIMITS.bindings
+        || codes.filter(item => item.deviceId === copy.deviceId).length >= INGRESS_LIMITS.bindingsPerDevice) {
+        throw new IngressLimitError();
+      }
+      return { ...live, bindingCodes: { ...live.bindingCodes, [code]: copy } };
+    });
   }
 
   getBindingCode(code: string): BindingCode | null {
