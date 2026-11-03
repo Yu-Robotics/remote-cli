@@ -10,10 +10,36 @@ import * as gitCommands from '../../src/delegation/GitCheckpoint';
 import { gitFixture } from './gitFixture';
 import { supportsFileSymlinks } from './symlinkFixture';
 
+// A phase deadline reports failure without cancelling the underlying Git work.
+// Retain admitted calls until teardown can safely release the fixture.
+function fixturePhases() {
+  const pending = new Set<Promise<unknown>>();
+  let closing = false;
+  return {
+    async run<T>(name: string, action: () => Promise<T>, timeoutMs = 30_000): Promise<T> {
+      if (closing) throw new Error('Fixture is draining; no new Git phases may start');
+      const call = Promise.resolve().then(action);
+      pending.add(call);
+      void call.then(() => pending.delete(call), () => pending.delete(call));
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([call, new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error(`Git lifecycle phase exceeded ${timeoutMs / 1000} seconds: ${name}`)), timeoutMs);
+        })]);
+      } finally { clearTimeout(timer); }
+    },
+    async drain(): Promise<void> {
+      closing = true;
+      await Promise.allSettled([...pending]);
+    },
+  };
+}
+
 // Real-Git cases execute multiple bounded commands and need headroom on slower hosts.
 describe('legacy verified worker checkout reclamation and recreation', { timeout: 30_000 }, () => {
   let fixture: Awaited<ReturnType<typeof gitFixture>>;
   let manager: DelegatedWorkspaceManager;
+  let phases: ReturnType<typeof fixturePhases>;
   let lanes: DelegatedWorkerSessionStore;
   let lane: Awaited<ReturnType<DelegatedWorkerSessionStore['acquire']>>['lane'];
   let workspace: DelegatedWorkspace;
@@ -47,6 +73,7 @@ describe('legacy verified worker checkout reclamation and recreation', { timeout
   };
 
   beforeEach(async () => {
+    phases = fixturePhases();
     fixture = await gitFixture();
     manager = new DelegatedWorkspaceManager(path.join(fixture.directory, 'workspaces'));
     lanes = new DelegatedWorkerSessionStore(path.join(fixture.directory, 'lanes'),
@@ -58,9 +85,47 @@ describe('legacy verified worker checkout reclamation and recreation', { timeout
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
   }, 30_000);
   afterEach(async () => {
+    // Keep mocks and the fixture intact while timed-out calls finish.
+    await phases.drain();
     vi.restoreAllMocks();
     await fs.rm(fixture.directory, { recursive: true, force: true });
-  }, 30_000);
+  }, 60_000);
+
+  it.each([['fulfilled', 30_000], ['rejected', 30_000], ['fulfilled', 120_000], ['rejected', 120_000]] as const)(
+    'drains a timed-out %s phase before fixture removal with a %i ms deadline', async (outcome, timeoutMs) => {
+      let release!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const lateFile = path.join(fixture.directory, 'late-phase.txt');
+      let drained = false;
+      let draining: Promise<void> | undefined;
+      vi.useFakeTimers();
+      try {
+        const running = phases.run('synthetic delayed write', async () => {
+          await gate;
+          await fs.writeFile(lateFile, 'synthetic phase completion\n');
+          if (outcome === 'rejected') throw new Error('Synthetic admitted work failure');
+        }, timeoutMs === 30_000 ? undefined : timeoutMs);
+        const timedOut = expect(running).rejects.toThrow(`Git lifecycle phase exceeded ${timeoutMs / 1000} seconds: synthetic delayed write`);
+        await vi.advanceTimersByTimeAsync(timeoutMs);
+        await timedOut;
+        draining = phases.drain().then(() => { drained = true; });
+        await Promise.resolve();
+        expect(drained).toBe(false);
+        expect(await exists(fixture.directory)).toBe(true);
+        const unadmitted = vi.fn(async () => undefined);
+        await expect(phases.run('late admission', unadmitted)).rejects.toThrow('Fixture is draining');
+        expect(unadmitted).not.toHaveBeenCalled();
+        release();
+        await draining;
+        expect(drained).toBe(true);
+        expect(await fs.readFile(lateFile, 'utf8')).toBe('synthetic phase completion\n');
+      } finally {
+        release();
+        vi.useRealTimers();
+        await draining;
+        await phases.drain();
+      }
+    });
 
   it('removes only a verified no-change checkout while preserving every artifact and history ref', async () => {
     const artifact = await complete();
@@ -279,39 +344,52 @@ describe('legacy verified worker checkout reclamation and recreation', { timeout
   });
 
   it('collects, applies, reclaims and reuses repositories beyond the former size and file-count limits', async () => {
-    await complete();
-    expect(await manager.reclaim(workspace.taskId)).toBe(true);
-    const largeFile = path.join(fixture.root, 'large.dat');
+    await phases.run('collect the initial checkout', () => complete());
+    expect(await phases.run('reclaim the initial checkout', () => manager.reclaim(workspace.taskId))).toBe(true);
     const size = 129 * 1024 * 1024;
-    await fs.writeFile(largeFile, 'synthetic large file\n');
-    await fs.truncate(largeFile, size);
-    await fs.mkdir(path.join(fixture.root, 'many'));
-    const count = 10_001;
-    for (let offset = 0; offset < count; offset += 128) {
-      await Promise.all(Array.from({ length: Math.min(128, count - offset) }, (_, index) =>
-        fs.writeFile(path.join(fixture.root, 'many', `${offset + index}.txt`), 'fixture\n')));
-    }
+    await phases.run('seed the large repository', async () => {
+      const largeFile = path.join(fixture.root, 'large.dat');
+      await fs.writeFile(largeFile, 'synthetic large file\n');
+      await fs.truncate(largeFile, size);
+      await fs.mkdir(path.join(fixture.root, 'many'));
+      const count = 10_001;
+      for (let offset = 0; offset < count; offset += 128) {
+        // A failed write must not leave sibling writes racing fixture removal.
+        const writes = await Promise.allSettled(Array.from({ length: Math.min(128, count - offset) }, (_, index) =>
+          fs.writeFile(path.join(fixture.root, 'many', `${offset + index}.txt`), 'fixture\n')));
+        for (const write of writes) if (write.status === 'rejected') throw write.reason;
+      }
+    });
     const index = await fs.readFile(path.join(fixture.root, '.git', 'index'));
     const directory = workspace.directory;
-    workspace = await recreate();
+    const baseline = await phases.run('capture the large delivery baseline', () => manager.baseline(workspace.source));
+    workspace = await phases.run('prepare the large checkout', () => manager.prepare(lane, workspace.source, baseline, randomUUID()), gitCommands.CHECKPOINT_LIMITS.checkoutMs);
     expect(workspace.directory).toBe(directory);
     expect((await fs.stat(path.join(workspace.cwd, 'large.dat'))).size).toBe(size);
     expect(await fs.readFile(path.join(workspace.cwd, 'many', '10000.txt'), 'utf8')).toBe('fixture\n');
     await fs.writeFile(path.join(workspace.cwd, 'source.txt'), 'large repository worker result\n');
-    expect(await complete()).toMatchObject({ disposition: 'pending', changedFiles: ['source.txt'] });
-    expect(await apply()).toMatchObject({ applied: true, disposition: 'applied' });
+    expect(await phases.run('collect the large worker output', () => complete()))
+      .toMatchObject({ disposition: 'pending', changedFiles: ['source.txt'] });
+    const inspection = await phases.run('inspect the large worker output', () => inspect());
+    expect(await phases.run('apply and reclaim the large worker output', () => manager.integrate(
+      { threadId: lane.threadId, cwd: fixture.root, workspaceGeneration: 0 }, workspace.taskId, 'apply', inspection.revision), gitCommands.CHECKPOINT_LIMITS.checkoutMs))
+      .toMatchObject({ applied: true, disposition: 'applied' });
     expect(await fs.readFile(path.join(fixture.root, 'source.txt'), 'utf8')).toBe('large repository worker result\n');
     expect(await fs.readFile(path.join(fixture.root, '.git', 'index'))).toEqual(index);
-    expect(await gitText(fixture.root, ['rev-parse', 'HEAD'])).toBe(fixture.head);
+    expect(await phases.run('verify the unchanged delivery HEAD', () => gitText(fixture.root, ['rev-parse', 'HEAD']))).toBe(fixture.head);
     expect(await exists(directory)).toBe(false);
-    workspace = await recreate();
+    const nextBaseline = await phases.run('capture the integrated delivery baseline', () => manager.baseline(workspace.source));
+    workspace = await phases.run('recreate the integrated large checkout', () =>
+      manager.prepare(lane, workspace.source, nextBaseline, randomUUID()), gitCommands.CHECKPOINT_LIMITS.checkoutMs);
     expect(workspace.directory).toBe(directory);
     expect((await fs.stat(path.join(workspace.cwd, 'large.dat'))).size).toBe(size);
     expect(await fs.readFile(path.join(workspace.cwd, 'source.txt'), 'utf8')).toBe('large repository worker result\n');
-    await complete();
-    expect(await manager.reclaim(workspace.taskId)).toBe(true);
+    await phases.run('collect the unchanged large checkout', () => complete());
+    expect(await phases.run('reclaim the unchanged large checkout', () => manager.reclaim(workspace.taskId))).toBe(true);
     expect(await exists(directory)).toBe(false);
-  }, 120_000);
+    // Keep ordinary phases at 30 seconds and honor the existing native checkout
+    // bound for the three phases that materialize the large working tree.
+  }, 10 * 30_000 + 3 * gitCommands.CHECKPOINT_LIMITS.checkoutMs + 30_000);
 
   it('serializes prepare behind a removal and shares the guard across manager instances', async () => {
     await complete();

@@ -5,7 +5,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import * as childProcess from 'child_process';
 import { isMainThread } from 'worker_threads';
-import { captureCheckpoint, checkpointRevision, createCheckpointCommit, gitText, runGit } from '../../src/delegation/GitCheckpoint';
+import { captureCheckpoint, checkpointRevision, createCheckpointCommit, gitLinkTarget, gitText, runGit } from '../../src/delegation/GitCheckpoint';
 import { gitFixture, nestedGitFixture } from './gitFixture';
 import { supportsFileSymlinks } from './symlinkFixture';
 
@@ -18,6 +18,12 @@ describe('private Git checkpoints', () => {
   let fixture: Awaited<ReturnType<typeof gitFixture>>;
   beforeEach(async () => { fixture = await gitFixture(); });
   afterEach(async () => { vi.restoreAllMocks(); await fs.rm(fixture.directory, { recursive: true, force: true }); });
+
+  it.each(['win32', 'linux', 'darwin'] as const)('preserves alias components using the %s Git link representation', platform => {
+    const native = ['alias', '..', 'nested', 'file.txt'].join(path.win32.sep);
+    expect(gitLinkTarget(native, platform)).toBe(platform === 'win32' ? 'alias/../nested/file.txt' : native);
+    expect(gitLinkTarget('alias/../nested/file.txt', platform)).toBe('alias/../nested/file.txt');
+  });
 
   it('bounds Git subprocesses while preserving both capture passes and source state', async () => {
     expect(isMainThread).toBe(true);
@@ -305,6 +311,7 @@ describe('private Git checkpoints', () => {
     }
     await fs.rm(path.join(fixture.root, 'nested'), { recursive: true });
     await fs.symlink('ignored-alias/../external.txt', path.join(fixture.root, 'nested'), 'file');
+    const linkText = await fs.readlink(path.join(fixture.root, 'nested'));
     const index = await fs.readFile(path.join(fixture.root, '.git', 'index'));
     const canonical = await fs.realpath(path.join(fixture.root, 'nested'));
     const relative = path.relative(fixture.root, canonical);
@@ -313,10 +320,56 @@ describe('private Git checkpoints', () => {
     } else {
       // Some native filesystems normalize parent components before following
       // an alias; an actually contained target remains permitted there.
-      await expect(captureCheckpoint(fixture.root)).resolves.toHaveProperty('tree');
+      const snapshot = await captureCheckpoint(fixture.root);
+      expect(await runGit(fixture.root, ['show', `${snapshot.tree}:nested`])).toEqual(Buffer.from(gitLinkTarget(linkText)));
+      expect(await gitText(fixture.root, ['ls-tree', snapshot.tree, '--', 'nested'])).toMatch(/^120000 blob /);
     }
     expect(await fs.readFile(path.join(fixture.root, '.git', 'index'))).toEqual(index);
+    expect(await gitText(fixture.root, ['rev-parse', 'HEAD'])).toBe(fixture.head);
+    expect(await fs.readlink(path.join(fixture.root, 'nested'))).toBe(linkText);
     expect(await fs.readFile(path.join(outside, 'external.txt'), 'utf8')).toBe('synthetic outside bytes\n');
+  });
+
+  it.skipIf(!supportsFileSymlinks).each(['untracked', 'tracked-directory'])('preserves native link semantics after Git separator conversion for %s links', async kind => {
+    await runGit(fixture.root, ['config', 'core.symlinks', 'true']);
+    await fs.mkdir(path.join(fixture.root, 'ignored-alias'));
+    await fs.appendFile(path.join(fixture.root, '.gitignore'), 'ignored-alias\n');
+    const name = kind === 'tracked-directory' ? 'nested' : 'native-link';
+    if (kind === 'tracked-directory') await fs.rm(path.join(fixture.root, name), { recursive: true });
+    // Model native Node text and Git for Windows parsing without removing the
+    // alias/.. components. Native canonical containment is tested above.
+    const nativeText = ['ignored-alias', '..', 'source.txt'].join(path.win32.sep);
+    const gitTextTarget = nativeText.split(path.win32.sep).join(path.posix.sep);
+    expect(gitTextTarget).toBe('ignored-alias/../source.txt');
+    await fs.symlink(nativeText, path.join(fixture.root, name), 'file');
+    expect(await fs.readlink(path.join(fixture.root, name))).toBe(nativeText);
+    const index = await fs.readFile(path.join(fixture.root, '.git', 'index'));
+    const { spawn } = await vi.importActual<typeof import('child_process')>('child_process');
+    let conversions = 0;
+    const nativeAdd = [
+      "const { execFileSync } = require('child_process');",
+      'const [args, name, target] = JSON.parse(process.argv[1]);',
+      "execFileSync('git', args);",
+      "const blob = execFileSync('git', ['hash-object', '-w', '--stdin'], { input: target, encoding: 'utf8' }).trim();",
+      "execFileSync('git', ['update-index', '-z', '--index-info'], { input: `120000 ${blob}\\t${name}\\0` });",
+    ].join('\n');
+    vi.mocked(childProcess.spawn).mockImplementation(((command: any, args: any, options: any) => {
+      if (command === 'git' && args.includes('add')) {
+        // Convert only the private index, just as the native Git parser does.
+        expect(options.env.GIT_INDEX_FILE).not.toBe(path.join(fixture.root, '.git', 'index'));
+        expect(options.env.GIT_INDEX_FILE).toBeTruthy();
+        conversions++;
+        return spawn(process.execPath, ['-e', nativeAdd, JSON.stringify([args, name, gitTextTarget])], options);
+      }
+      return (spawn as any)(command, args, options);
+    }) as typeof childProcess.spawn);
+    const snapshot = await captureCheckpoint(fixture.root);
+    expect(conversions).toBe(2);
+    expect(await runGit(fixture.root, ['show', `${snapshot.tree}:${name}`])).toEqual(Buffer.from(gitLinkTarget(nativeText)));
+    expect(await gitText(fixture.root, ['ls-tree', snapshot.tree, '--', name])).toMatch(/^120000 blob /);
+    expect(await fs.readlink(path.join(fixture.root, name))).toBe(nativeText);
+    expect(await fs.readFile(path.join(fixture.root, '.git', 'index'))).toEqual(index);
+    expect(await gitText(fixture.root, ['rev-parse', 'HEAD'])).toBe(fixture.head);
   });
 
   it('preserves safe Git symlink entries materialized as regular files with core.symlinks=false', async () => {
@@ -332,7 +385,7 @@ describe('private Git checkpoints', () => {
     expect((await fs.lstat(path.join(fixture.root, 'materialized-link'))).isFile()).toBe(true);
   });
 
-  it.skipIf(!supportsFileSymlinks).each(['scanning', 'staging'])('rejects link replacement during %s instead of capturing a different entry', async phase => {
+  it.skipIf(!supportsFileSymlinks).each(['scanning', 'staging', 'opaque insertion'])('rejects link replacement during %s instead of capturing a different entry', async phase => {
     await runGit(fixture.root, ['config', 'core.symlinks', 'true']);
     const link = path.join(fixture.root, 'nested');
     await fs.rm(link, { recursive: true });
@@ -352,8 +405,12 @@ describe('private Git checkpoints', () => {
     } else {
       const { spawn } = await vi.importActual<typeof import('child_process')>('child_process');
       let adding = false;
+      let added = false;
       vi.mocked(childProcess.spawn).mockImplementation(((command: any, args: any, options: any) => {
-        if (command === 'git' && args.includes('add')) adding = true;
+        if (command === 'git') {
+          if (args.includes('add')) added = true;
+          if (added && (phase === 'staging' || args.includes('hash-object'))) adding = true;
+        }
         return (spawn as any)(command, args, options);
       }) as typeof childProcess.spawn);
       const lstat = fs.lstat.bind(fs);
@@ -493,6 +550,22 @@ describe('private Git checkpoints', () => {
       sharedSymlinks: [{ root: fixture.root, path: 'module/shared-link', target }],
     })).rejects.toThrow('inside nested repositories');
     expect(vi.mocked(childProcess.spawn).mock.calls.some(([command, args]) => command === 'git' && args?.includes('ls-files'))).toBe(false);
+  });
+
+  it.skipIf(!supportsFileSymlinks)('keeps an outer shared binding separate from a same-name internal nested link', async () => {
+    await runGit(fixture.root, ['config', 'core.symlinks', 'true']);
+    const nested = await nestedGitFixture(fixture, 'module');
+    await runGit(nested, ['config', 'core.symlinks', 'true']);
+    await fs.writeFile(path.join(nested, 'local.txt'), 'synthetic nested target\n');
+    await fs.symlink('local.txt', path.join(nested, 'shared-link'), 'file');
+    const target = path.join(fixture.directory, 'shared.txt');
+    await fs.writeFile(target, 'synthetic shared target\n');
+    const text = path.relative(fixture.root, target);
+    await fs.symlink(text, path.join(fixture.root, 'shared-link'), 'file');
+    const checkpoint = await captureCheckpoint(fixture.root, { sharedSymlinks: [{ root: fixture.root, path: 'shared-link', target }] });
+    expect(await gitText(fixture.root, ['show', `${checkpoint.tree}:shared-link`])).toBe(text);
+    expect(await gitText(fixture.root, ['show', `${checkpoint.tree}:module/shared-link`])).toBe('local.txt');
+    expect(await fs.readFile(target, 'utf8')).toBe('synthetic shared target\n');
   });
 
   it.each(['committed', 'untracked'])('captures a %s file larger than the former 128 MiB limit', async kind => {

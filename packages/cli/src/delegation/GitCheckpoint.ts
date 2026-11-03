@@ -10,6 +10,11 @@ import { checkFilesInBatches } from './BoundedFileChecks';
 export const CHECKPOINT_LIMITS = { commandMs: 15_000, checkoutMs: 120_000, outputBytes: 32 * 1024 * 1024 } as const;
 export const GIT_OID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 
+/** Match Git for Windows without folding alias/.. components or changing POSIX names. */
+export function gitLinkTarget(target: string, platform: NodeJS.Platform = process.platform): string {
+  return platform === 'win32' ? target.replace(/\\/g, '/') : target;
+}
+
 export interface GitCheckpoint {
   head: string;
   tree: string;
@@ -516,7 +521,8 @@ async function validateTree(root: string, scope: string, tree: string, links: Ma
       const target = bytes.toString('utf8');
       if (!Buffer.from(target).equals(bytes) || !target || target.includes('\0')) throw new Error('Invalid checkpoint symbolic-link target');
       await validateLinkTarget(root, scope, name, target, shared, true);
-      if (links.has(name) && (shared?.bindings.find(b => b.path === name)?.linkText ?? links.get(name)!.target) !== target) throw new Error('Checkpoint symbolic link changed during capture');
+      const binding = root === scope ? shared?.bindings.find(b => b.path === name) : undefined;
+      if (links.has(name) && (binding?.linkText ?? gitLinkTarget(links.get(name)!.target)) !== target) throw new Error('Checkpoint symbolic link changed during capture');
       capturedLinks.add(name);
     }
   }
@@ -609,7 +615,7 @@ async function captureTree(root: string, scope: string, nested: boolean, importe
       const replacements: string[] = [];
       for (const [file, link] of links) {
         if (!shadowingLinks.has(file)) continue;
-        const blob = await gitText(root, ['hash-object', '-w', '--stdin'], link.target);
+        const blob = await gitText(root, ['hash-object', '-w', '--stdin'], gitLinkTarget(link.target));
         if (!GIT_OID.test(blob)) throw new Error('Git returned an invalid symbolic-link blob');
         replacements.push(`120000 ${blob}\t${file}\0`);
       }
@@ -625,16 +631,22 @@ async function captureTree(root: string, scope: string, nested: boolean, importe
     await verifyLinks();
     await runGit(root, ['add', '--all', '--', '.', ...inventory.repositories.map(directory => `:(top,exclude,literal)${directory}`), ...exclusions], undefined, env);
     await verifyLinks();
-    if (root === scope && shared?.bindings.length) {
-      await shared.verify();
+    if (links.size || root === scope && shared?.bindings.length) {
+      await shared?.verify();
+      // Ordinary links use Git's Windows separator representation so an
+      // unchanged checkout remains clean after index refresh. Preserve raw
+      // component order and the recorded logical text of mapped shared links.
+      const targets = new Map([...links].map(([file, link]) => [file, gitLinkTarget(link.target)]));
+      if (root === scope) for (const binding of shared?.bindings ?? []) targets.set(binding.path, binding.linkText);
       const normalized: string[] = [];
-      for (const binding of shared.bindings) {
-        const blob = await gitText(root, ['hash-object', '-w', '--stdin'], binding.linkText);
-        if (!GIT_OID.test(blob)) throw new Error('Invalid shared-link blob');
-        normalized.push(`120000 ${blob}\t${binding.path}\0`);
+      for (const [file, target] of targets) {
+        const blob = await gitText(root, ['hash-object', '-w', '--stdin'], target);
+        if (!GIT_OID.test(blob)) throw new Error('Git returned an invalid symbolic-link blob');
+        normalized.push(`120000 ${blob}\t${file}\0`);
       }
       await runGit(root, ['update-index', '-z', '--index-info'], normalized.join(''), env);
-      await shared.verify();
+      await verifyLinks();
+      await shared?.verify();
     }
     const repositories: NestedRepositoryCheckpoint[] = [];
     for (const relative of inventory.repositories) {
