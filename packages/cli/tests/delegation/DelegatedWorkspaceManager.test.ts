@@ -7,6 +7,7 @@ import { DelegatedWorkerSessionStore } from '../../src/delegation/DelegatedWorke
 import { gitText, runGit } from '../../src/delegation/GitCheckpoint';
 import * as gitCommands from '../../src/delegation/GitCheckpoint';
 import { gitFixture } from './gitFixture';
+import { supportsFileSymlinks } from './symlinkFixture';
 
 // Real-Git cases execute multiple bounded commands and need headroom on slower hosts.
 describe('owned worktrees and explicit artifact integration', { timeout: 30_000 }, () => {
@@ -36,6 +37,28 @@ describe('owned worktrees and explicit artifact integration', { timeout: 30_000 
   const inspect = (workspace: DelegatedWorkspace) => manager.integrate({ ...owner, cwd: workspace.source.cwd }, workspace.taskId, 'inspect', undefined) as Promise<any>;
   const apply = async (workspace: DelegatedWorkspace) => manager.integrate({ ...owner, cwd: workspace.source.cwd },
     workspace.taskId, 'apply', (await inspect(workspace)).revision) as Promise<any>;
+
+  it.skipIf(!supportsFileSymlinks)('collects, reclaims and reuses an internal native link containing separators', async () => {
+    await runGit(fixture.root, ['config', 'core.symlinks', 'true']);
+    await fs.mkdir(path.join(fixture.root, 'internal-target'));
+    await fs.writeFile(path.join(fixture.root, 'internal-target', 'target.txt'), 'synthetic internal target\n');
+    const file = path.join(fixture.root, 'native-link');
+    await fs.symlink('internal-target/target.txt', file, 'file');
+    const physicalText = await fs.readlink(file);
+    const index = await fs.readFile(path.join(fixture.root, '.git', 'index'));
+    const { lane, workspace } = await prepare();
+    await fs.writeFile(path.join(workspace.directory, 'source.txt'), 'native link worker output\n');
+    expect(await manager.collect(workspace, true)).toMatchObject({ changedFiles: ['source.txt'] });
+    expect(await apply(workspace)).toMatchObject({ applied: true });
+    await expect(fs.lstat(workspace.directory)).rejects.toMatchObject({ code: 'ENOENT' });
+    const reused = await manager.prepare(lane, source, await manager.baseline(source), randomUUID());
+    expect(await fs.readFile(path.join(reused.directory, 'native-link'), 'utf8')).toBe('synthetic internal target\n');
+    expect(await manager.collect(reused, true, { exitConfirmed: true })).toMatchObject({ changedFiles: [] });
+    expect(await manager.reclaim(reused.taskId)).toBe(true);
+    expect(await fs.readlink(file)).toBe(physicalText);
+    expect(await fs.readFile(path.join(fixture.root, '.git', 'index'))).toEqual(index);
+    expect(await gitText(fixture.root, ['rev-parse', 'HEAD'])).toBe(fixture.head);
+  }, 60_000);
 
   it('ignores stale filesystem grants belonging to an unrelated project', async () => {
     const before = await fs.readFile(path.join(fixture.root, '.git', 'index'));

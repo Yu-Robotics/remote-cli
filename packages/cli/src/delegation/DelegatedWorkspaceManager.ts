@@ -7,7 +7,7 @@ import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import type { DelegatedWorkerLane } from './DelegatedWorkerSessionStore';
-import { captureCheckpoint, createCheckpointCommit, GIT_OID, GitCommandError, gitText, runGit,
+import { captureCheckpoint, createCheckpointCommit, GIT_OID, GitCommandError, gitLinkTarget, gitText, runGit,
   type GitCheckpoint } from './GitCheckpoint';
 import { checkFilesInBatches } from './BoundedFileChecks';
 import { LfsCheckoutVerifier } from './LfsCheckout';
@@ -996,10 +996,12 @@ export class DelegatedWorkspaceManager {
         }
         const hash = createHash(expected.oid.length === 64 ? 'sha256' : 'sha1');
         const binding = shared.get(child);
-        const linkBytes = binding ? Buffer.from(binding.linkText) : undefined;
+        const nativeLink = !binding && stat.isSymbolicLink() ? await fs.readlink(file, { encoding: 'buffer' }) : undefined;
+        if (nativeLink && !Buffer.from(nativeLink.toString('utf8')).equals(nativeLink)) throw new Error('Invalid checkout symbolic-link text');
+        const linkBytes = binding ? Buffer.from(binding.linkText)
+          : nativeLink ? Buffer.from(gitLinkTarget(nativeLink.toString('utf8'))) : undefined;
         hash.update(`blob ${linkBytes?.length ?? stat.size}\0`);
         if (linkBytes) hash.update(linkBytes);
-        else if (stat.isSymbolicLink()) hash.update(await fs.readlink(file, { encoding: 'buffer' }));
         else {
           // Each concurrent reader owns its buffer; hash every byte without filters.
           const buffer = Buffer.alloc(Math.min(1024 * 1024, Math.max(1, stat.size)));

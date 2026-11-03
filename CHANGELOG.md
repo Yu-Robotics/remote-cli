@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.207] - 2026-11-03
+
+### Fixed
+- Preserve native symbolic-link semantics using Git-compatible Windows separators in checkpoint indexes and checkout verification, retaining alias components, canonical containment, and link-identity checks.
+
+### Tests
+- Cover native link-text conversion, replacement during opaque index insertion, and internal-link collection, reclamation, and lane reuse.
+- Bound each large-repository lifecycle test phase separately and drain unfinished work before removing its fixture.
+
 ## [1.6.206] - 2026-11-03
 
 ### Added
