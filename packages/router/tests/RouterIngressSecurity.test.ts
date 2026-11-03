@@ -192,6 +192,36 @@ describe('Router public ingress security with real HTTP and WebSocket transports
     const replacement = synthetic();
     expect(replacement.terminate).not.toHaveBeenCalled();
   });
+  it.each([
+    { registered: true, state: WebSocket.CLOSING, terminate: false },
+    { registered: true, state: WebSocket.CLOSED, terminate: false },
+    { registered: true, state: WebSocket.OPEN, terminate: true },
+    { registered: false, state: WebSocket.CLOSING, terminate: true },
+    { registered: false, state: WebSocket.OPEN, terminate: true },
+  ])('cleans up an error without aborting a registered close handshake: %j', async scenario => {
+    vi.useFakeTimers();
+    const ws = synthetic();
+    if (scenario.registered) {
+      await ws.listeners('message')[0](Buffer.from('{"type":"binding_request","data":{"deviceId":"closing-device"}}'));
+      expect(server.connectionHub.isDeviceOnline('closing-device')).toBe(true);
+    }
+    // The receiver starts close(1009) before emitting its payload error. Its
+    // close frame may still be buffered; the Router must let ws finish sending it.
+    ws.readyState = scenario.state;
+    if (scenario.state === WebSocket.CLOSED) ws.emit('close');
+    ws.emit('error', new Error('Synthetic receiver payload error'));
+    expect(ws.terminate).toHaveBeenCalledTimes(scenario.terminate ? 1 : 0);
+    expect(server.pendingSockets.size).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+    if (scenario.registered && scenario.state === WebSocket.CLOSING) {
+      expect(server.connectionHub.isCurrentConnection('closing-device', ws)).toBe(true);
+      // The transport owns its bounded close handshake; the eventual close event
+      // still removes the current connection and performs Router cleanup.
+      ws.readyState = WebSocket.CLOSED;
+      ws.emit('close');
+      expect(server.connectionHub.getConnectionStats().totalConnections).toBe(0);
+    }
+  });
   it.each(['close', 'error', 'deadline', 'stop'])('does not register after an authentication lookup loses its admission: %s', async mode => {
     let release!: (value: undefined) => void;
     vi.spyOn(server.deviceAuth, 'get').mockReturnValue(new Promise(resolve => { release = resolve; }));

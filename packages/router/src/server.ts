@@ -1135,7 +1135,11 @@ export class RouterServer {
         releaseAdmission();
         if (challengeTimer) clearTimeout(challengeTimer);
         if (heartbeatTimeout) clearTimeout(heartbeatTimeout);
-        ws.terminate();
+        // Receiver errors start a bounded ws close handshake before emitting error.
+        // Preserve its close frame (for example 1009) for registered connections.
+        if (!registered || (ws.readyState !== WebSocket.CLOSING && ws.readyState !== WebSocket.CLOSED)) {
+          ws.terminate();
+        }
         console.error('WebSocket error:', error);
       });
     });
