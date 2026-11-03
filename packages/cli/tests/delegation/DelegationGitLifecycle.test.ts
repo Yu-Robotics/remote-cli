@@ -241,6 +241,7 @@ describe('managed Git phases and native worker deadlines', { timeout: 30_000 }, 
     expect(manager.blocksWorkspace(fixture.root, 'other')).toBe(false);
   });
 
+  // Queued admission, dispatch and collection accumulate real Git costs on Windows.
   it('keeps five preparation slots while repository metadata admission is queued', async () => {
     const gate = deferred();
     const source = (await manager.workspaceManager.discover(fixture.root))!;
@@ -259,7 +260,21 @@ describe('managed Git phases and native worker deadlines', { timeout: 30_000 }, 
       expect(workers).toHaveLength(0);
       expect((manager as any).running).toBe(5);
     } finally { vi.useRealTimers(); gate.resolve(); await holding; }
-    const tasks = await Promise.all(starting);
+    const waitForRunning = async (initial: DelegatedTaskResult[], phase: string): Promise<DelegatedTaskResult[]> => {
+      let snapshots = initial;
+      const dispatchDeadline = Date.now() + 45_000;
+      for (let poll = 0; poll < 45 && !snapshots.every(task => task.state === 'running'); poll++) {
+        if (Date.now() >= dispatchDeadline) break;
+        snapshots = await Promise.all(snapshots.map(task => scope.invoke('remote_cli_result',
+          { taskId: task.taskId, waitSeconds: 0 }, `${phase}-${task.taskId}-${poll}`) as Promise<DelegatedTaskResult>));
+        const terminal = snapshots.find(task => task.state !== 'queued' && task.state !== 'running');
+        if (terminal) throw new Error(`Worker ended during ${phase}: ${JSON.stringify(terminal)}`);
+        if (!snapshots.every(task => task.state === 'running')) await realDelay(1000);
+      }
+      expect(snapshots.every(task => task.state === 'running'), `${phase} snapshots: ${JSON.stringify(snapshots)}`).toBe(true);
+      return snapshots;
+    };
+    const tasks = await waitForRunning(await Promise.all(starting), 'initial-dispatch');
     expect(tasks.every(task => task.state === 'running')).toBe(true);
     expect(new Set(workers.map(worker => worker.cwd)).size).toBe(5);
     // Preparation may reorder dispatch. Match the finished executor's checkout
@@ -290,12 +305,13 @@ describe('managed Git phases and native worker deadlines', { timeout: 30_000 }, 
       const finished = result(scope, finishing!.taskId);
       collectionGate.resolve();
       expect(await finished).toMatchObject({ state: 'succeeded' });
-      await vi.waitFor(() => expect(workers).toHaveLength(6), PHASE_WAIT_OPTIONS);
+      await waitForRunning([queued], 'sixth-dispatch');
+      expect(workers).toHaveLength(6);
       workers.slice(1).forEach(worker => worker.finish({ success: true }));
       expect((await scope.collectPendingResults()).every(task => task.state === 'succeeded')).toBe(true);
     } finally { collectionGate.resolve(); }
     expect((manager as any).running).toBe(0);
-  });
+  }, 120_000);
 
   it('preserves an untouched warm lane after cancellation during slow baseline capture', async () => {
     const scope = manager.begin(parent);

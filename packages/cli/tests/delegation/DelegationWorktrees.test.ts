@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
+import { setTimeout as realDelay } from 'node:timers/promises';
 import { DELEGATION_LIMITS, DelegationManager, type DelegationParent, type DelegatedTaskResult } from '../../src/delegation/DelegationManager';
 import { configuredExecutionMetadata } from '../../src/executor/ExecutionMetadata';
 import { BackendRegistry } from '../../src/delegation/BackendRegistry';
@@ -129,6 +130,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     expect((await fs.stat(fixture.directory)).isDirectory()).toBe(true);
   });
 
+  // Acceptance, bounded dispatch polling and real Git collection have cumulative costs on Windows.
   it('keeps concurrent worker metadata independent while bounding combined retained results', async () => {
     factory.mockImplementation((_guard, configuration, cwd) => {
       const worker = controlledWorker(cwd);
@@ -138,8 +140,18 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     });
     const scope = manager.begin(parent);
     const backends = ['codex', 'agy', 'dsh'];
-    const tasks = await Promise.all(backends.map(backend => start(scope, backend, backend)));
-    expect(tasks.every(task => task.state === 'running')).toBe(true);
+    let tasks = await Promise.all(backends.map(backend => start(scope, backend, backend)));
+    // A bounded acceptance response can precede real Git preparation and dispatch.
+    const dispatchDeadline = Date.now() + 45_000;
+    for (let poll = 0; poll < 45 && !tasks.every(task => task.state === 'running'); poll++) {
+      if (Date.now() >= dispatchDeadline) break;
+      tasks = await Promise.all(tasks.map(task => trackCall(scope.invoke('remote_cli_result',
+        { taskId: task.taskId, waitSeconds: 0 }, `metadata-dispatch-${task.taskId}-${poll}`) as Promise<DelegatedTaskResult>)));
+      const terminal = tasks.find(task => task.state !== 'queued' && task.state !== 'running');
+      if (terminal) throw new Error(`Worker ended before metadata dispatch: ${JSON.stringify(terminal)}`);
+      if (!tasks.every(task => task.state === 'running')) await realDelay(1000);
+    }
+    expect(tasks.every(task => task.state === 'running'), `Dispatch snapshots: ${JSON.stringify(tasks)}`).toBe(true);
     tasks.forEach(task => expect(task.executionMetadata).toMatchObject({ backend: task.backend, model: `${task.backend}-selected`, modelSource: 'configured' }));
     workers.forEach(worker => {
       const backend = worker.executor.getExecutionMetadata!().model!.replace(/-selected$/, '');
@@ -155,7 +167,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     for (const task of results) {
       expect(parent.onProgress).toHaveBeenCalledWith(expect.objectContaining({ taskId: task.taskId, phase: 'succeeded', executionMetadata: task.executionMetadata }));
     }
-  }, 30_000);
+  }, 120_000);
 
   // Four real-Git phases have independent deadlines. Do not make their combined
   // filesystem/process cost compete for a single 30-second unit-test budget.
