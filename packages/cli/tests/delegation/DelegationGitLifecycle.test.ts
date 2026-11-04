@@ -439,7 +439,7 @@ describe('managed Git phases and native worker deadlines', { timeout: 30_000 }, 
       await vi.advanceTimersByTimeAsync(DELEGATION_LIMITS.storageTimeoutMs + 1);
       const task = await starting;
       expect(await result(scope, task.taskId)).toMatchObject({ state: 'interrupted' });
-      expect(workers[0].executor.execute).not.toHaveBeenCalled();
+      expect(workers).toHaveLength(0);
       const [lane] = await manager.laneStore.lanesForThread(parent.thread.id);
       expect(lane.shutdownConfirmedGeneration).toBeUndefined();
       await expect(manager.laneStore.assertThreadContextResettable(parent.thread.id)).rejects.toThrow('unconfirmed');
@@ -447,7 +447,9 @@ describe('managed Git phases and native worker deadlines', { timeout: 30_000 }, 
       vi.useRealTimers();
       gate.resolve();
       await markRunning.mock.results[0]?.value;
+      await starting;
     }
+    expect(workers).toHaveLength(0);
   });
 
   it('preserves hidden worker edits instead of publishing a stale no-change artifact', async () => {

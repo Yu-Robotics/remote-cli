@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.213] - 2026-11-04
+
+### Fixed
+- Preserve managed worker metadata durability with file handles that support flushing on Windows, without suppressing write or synchronization failures.
+
+### Tests
+- Keep host-native storage and ownership behavior in cleanup fixtures, and verify quarantined initialization before any worker is constructed.
+
 ## [1.6.212] - 2026-11-04
 
 ### Changed

@@ -702,11 +702,15 @@ export class DelegatedWorkerSessionStore {
     try {
       const serialized = JSON.stringify(lane);
       if (Buffer.byteLength(serialized) > 64 * 1024) throw new Error('Delegated worker record exceeds its retained metadata limit');
-      await fs.writeFile(temporary, serialized, { mode: 0o600 });
-      if (lane.nativeSession || lane.nativeSessionHistory?.length || lane.nativeDeleteRequested || lane.nativeGroupExitGeneration !== undefined) {
-        const handle = await fs.open(temporary, 'r');
-        try { await handle.sync(); } finally { await handle.close(); }
-      }
+      // Windows FlushFileBuffers requires a writable handle. Keep the exclusive
+      // creation handle through writing and syncing, before publishing the record.
+      const handle = await fs.open(temporary, 'wx', 0o600);
+      try {
+        await handle.writeFile(serialized);
+        if (lane.nativeSession || lane.nativeSessionHistory?.length || lane.nativeDeleteRequested || lane.nativeGroupExitGeneration !== undefined) {
+          await handle.sync();
+        }
+      } finally { await handle.close(); }
       await replaceAtomicFile(temporary, file);
       if (lane.nativeSession || lane.nativeSessionHistory?.length || lane.nativeDeleteRequested || lane.nativeGroupExitGeneration !== undefined) syncDirectory(this.directory);
     } finally {

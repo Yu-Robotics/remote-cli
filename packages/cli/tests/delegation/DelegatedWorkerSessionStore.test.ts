@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { promises as fs } from 'fs';
+import { constants, promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
 import { randomUUID } from 'crypto';
@@ -36,6 +36,49 @@ describe('DelegatedWorkerSessionStore', () => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
     await fs.rm(home, { recursive: true, force: true });
+  });
+
+  it.each([false, true])('syncs writable records before publishing exit proof (sync failure: %s)', async failSync => {
+    const store = new DelegatedWorkerSessionStore(directory);
+    const { lane } = await store.acquire(identity(workspace));
+    const filename = path.join(directory, `${lane.id}.json`);
+    const previous = await fs.readFile(filename, 'utf8');
+    const open = fs.open.bind(fs);
+    let syncCalls = 0;
+    const closes: ReturnType<typeof vi.spyOn>[] = [];
+    const openSpy = vi.spyOn(fs, 'open').mockImplementation(async (file, flags, mode) => {
+      const handle = await open(file, flags, mode);
+      const sync = handle.sync.bind(handle);
+      closes.push(vi.spyOn(handle, 'close'));
+      vi.spyOn(handle, 'sync').mockImplementation(async () => {
+        syncCalls++;
+        // Model FlushFileBuffers access requirements without changing the host platform.
+        const writable = typeof flags === 'string' ? /[wa+]/.test(flags)
+          : Boolean(flags & (constants.O_WRONLY | constants.O_RDWR));
+        if (!writable || failSync) throw Object.assign(new Error('Synthetic flush failure'), { code: 'EPERM' });
+        expect(await fs.readFile(filename, 'utf8')).toBe(previous);
+        expect(JSON.parse(await fs.readFile(file, 'utf8')).nativeGroupExitGeneration).toBe(0);
+        await sync();
+      });
+      return handle;
+    });
+    const operation = store.markShutdownConfirmed(lane.id, 0, true);
+    if (failSync) {
+      await expect(operation).rejects.toMatchObject({ code: 'EPERM' });
+      expect(await fs.readFile(filename, 'utf8')).toBe(previous);
+      expect((await store.lanesForThread('parent-thread'))[0].nativeGroupExitGeneration).toBeUndefined();
+    } else {
+      await operation;
+    }
+    expect(syncCalls).toBe(1);
+    expect(closes.length).toBeGreaterThan(0);
+    for (const close of closes) expect(close).toHaveBeenCalledOnce();
+    expect(await fs.readdir(directory)).toEqual([`${lane.id}.json`]);
+    openSpy.mockRestore();
+    if (!failSync) {
+      const restarted = new DelegatedWorkerSessionStore(directory);
+      expect((await restarted.lanesForThread('parent-thread'))[0].nativeGroupExitGeneration).toBe(0);
+    }
   });
 
   it('preserves strong exit proof until native startup and never revives a deletion target', async () => {
