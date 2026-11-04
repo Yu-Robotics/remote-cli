@@ -476,38 +476,130 @@ describe('managed conversation recovery', () => {
     expect(response('Fresh request')).toMatchObject({ success: true });
   });
 
-  it('keeps reset pending when a concurrent abort can still rewrite the direct pointer', async () => {
+  async function withConcurrentResetFixture(run: (fixture: {
+    clearing: Promise<void>;
+    initializationEntered: Promise<void>;
+    destructionEntered: Promise<void>;
+    abortEntered: Promise<void>;
+    releaseInitialization: () => void;
+    releaseDestruction: () => void;
+    startAbort: () => Promise<void>;
+    phase: (entered: Promise<void>, operation: Promise<void>, name: string) => Promise<void>;
+  }) => Promise<void>): Promise<void> {
     pool.getExecutor(threadId);
     (pool as any).contextResetShutdownTimeoutMs = 2_000;
     const pointer = manager.getSessionFilePath(threadId);
     await fs.writeFile(pointer, 'old pointer');
+    const initialization = deferred<void>();
+    const initializationEntered = deferred<void>();
+    const destructionEntered = deferred<void>();
+    const abortEntered = deferred<void>();
     const destruction = deferred<void>();
     const abortion = deferred<boolean>();
-    vi.mocked(executor.destroy).mockReturnValueOnce(destruction.promise);
+    const begin = manager.contextResets.begin.bind(manager.contextResets);
+    vi.spyOn(manager.contextResets, 'begin').mockImplementationOnce(async id => {
+      initializationEntered.resolve();
+      await initialization.promise;
+      await begin(id);
+    });
+    vi.mocked(executor.destroy).mockImplementationOnce(() => {
+      destructionEntered.resolve();
+      return destruction.promise;
+    });
     vi.mocked(executor.abort).mockResolvedValueOnce(true).mockImplementationOnce(async () => {
+      abortEntered.resolve();
       await abortion.promise;
       await fs.writeFile(pointer, 'late abort write');
       return true;
     });
-    const clearing = command('/clear', 'clearing');
-    await vi.waitFor(() => expect(executor.destroy).toHaveBeenCalled());
-    const aborting = command('/abort', 'concurrent-abort');
-    await vi.waitFor(() => expect(executor.abort).toHaveBeenCalledTimes(2));
+    const operations: Promise<void>[] = [];
+    const start = (content: string, id: string) => {
+      const operation = command(content, id);
+      operations.push(operation);
+      return operation;
+    };
+    // Keep the cleanup watchdog live even while a scenario controls its clock.
+    const setPhaseTimeout = setTimeout;
+    const clearPhaseTimeout = clearTimeout;
+    const phase = async (entered: Promise<void>, operation: Promise<void>, name: string) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        // Fail inside the existing five-second test budget so finally can drain.
+        await Promise.race([entered, operation.then(() => {
+          throw new Error(`Command completed before ${name}`);
+        }), new Promise<never>((_, reject) => {
+          timer = setPhaseTimeout(() => reject(new Error(`Fixture did not enter ${name}`)), 4_000);
+        })]);
+      } finally { if (timer) clearPhaseTimeout(timer); }
+    };
     try {
-      destruction.resolve();
-      await clearing;
-      expect(response('clearing')).toMatchObject({ success: false, error: expect.stringContaining('abort is still pending') });
-      expect(manager.contextResets.isPending(threadId)).toBe(true);
+      const clearing = start('/clear', 'clearing');
+      await run({ clearing, initializationEntered: initializationEntered.promise,
+        destructionEntered: destructionEntered.promise, abortEntered: abortEntered.promise,
+        releaseInitialization: () => initialization.resolve(), releaseDestruction: () => destruction.resolve(),
+        startAbort: () => start('/abort', 'concurrent-abort'), phase });
     } finally {
+      initialization.resolve();
       destruction.resolve();
       abortion.resolve(true);
-      await aborting;
+      const settled = await Promise.allSettled(operations);
+      for (const result of settled) if (result.status === 'rejected') throw result.reason;
     }
+  }
+
+  it('keeps reset pending when a concurrent abort can still rewrite the direct pointer', async () => {
+    // Advance only the fixture clock while initialization is blocked: no real
+    // filesystem operation needs to finish within the old one-second poll.
+    await withConcurrentResetFixture(async fixture => {
+      await fixture.phase(fixture.initializationEntered, fixture.clearing, 'reset initialization');
+      const destroying = fixture.phase(fixture.destructionEntered, fixture.clearing, 'executor shutdown');
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        await vi.advanceTimersByTimeAsync(1_001);
+        expect(executor.destroy).not.toHaveBeenCalled();
+      } finally { vi.useRealTimers(); }
+      fixture.releaseInitialization();
+      await destroying;
+      expect(executor.destroy).toHaveBeenCalledOnce();
+      const aborting = fixture.startAbort();
+      await fixture.phase(fixture.abortEntered, aborting, 'concurrent abort');
+      expect(executor.abort).toHaveBeenCalledTimes(2);
+      fixture.releaseDestruction();
+      await fixture.clearing;
+      expect(response('clearing')).toMatchObject({ success: false, error: expect.stringContaining('abort is still pending') });
+      expect(manager.contextResets.isPending(threadId)).toBe(true);
+    });
+    const pointer = manager.getSessionFilePath(threadId);
+    expect(response('concurrent-abort')).toMatchObject({ success: true });
     expect(await fs.readFile(pointer, 'utf8')).toBe('late abort write');
     await command('/new', 'retry');
     expect(response('retry')).toMatchObject({ success: true });
     await expect(fs.stat(pointer)).rejects.toMatchObject({ code: 'ENOENT' });
+    await command('/clear', 'later-clear');
+    expect(response('later-clear')).toMatchObject({ success: true });
   });
+
+  it.each(['initialization', 'shutdown', 'abort'] as const)(
+    'drains admitted reset work when the fixture fails during %s', async failurePhase => {
+      await expect(withConcurrentResetFixture(async fixture => {
+        await fixture.phase(fixture.initializationEntered, fixture.clearing, 'reset initialization');
+        if (failurePhase !== 'initialization') {
+          fixture.releaseInitialization();
+          await fixture.phase(fixture.destructionEntered, fixture.clearing, 'executor shutdown');
+          if (failurePhase === 'abort') {
+            const aborting = fixture.startAbort();
+            await fixture.phase(fixture.abortEntered, aborting, 'concurrent abort');
+          }
+        }
+        throw new Error('Synthetic fixture assertion failure');
+      })).rejects.toThrow('Synthetic fixture assertion failure');
+      expect(response('clearing')).toBeDefined();
+      expect(executor.destroy).toHaveBeenCalledOnce();
+      if (failurePhase === 'abort') expect(response('concurrent-abort')).toMatchObject({ success: true });
+      await command('/new', 'after-fixture-failure');
+      expect(response('after-fixture-failure')).toMatchObject({ success: true });
+      await expect(fs.stat(manager.getSessionFilePath(threadId))).rejects.toMatchObject({ code: 'ENOENT' });
+    });
 
   it('rejects /thread delete default early without mutating target, workers, bridges or native executor data', async () => {
     const defaultExecutor = pool.getExecutor(threadId);
