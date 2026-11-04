@@ -156,6 +156,31 @@ describe('PiExecutor', () => {
     else process.env.HOME = originalHome;
   });
 
+  it('resolves prompt context after native state refresh rather than using a stale pointer', async () => {
+    const resolvePrompt = vi.fn((id: string | null) => `Task for ${id}`);
+    expect(executor.getSessionId()).toBeNull();
+    expect(await executor.execute('fallback', { resolvePrompt })).toMatchObject({ success: true });
+    expect(resolvePrompt).toHaveBeenCalledWith('sess-pi-1');
+    expect(transport.request).toHaveBeenCalledWith({ type: 'prompt', message: 'Task for sess-pi-1' });
+  });
+
+  it.each(['missing-history', 'unconfirmed-state'])('keeps full prompt context for %s despite a saved native ID', async failure => {
+    await executor.execute('initialize', {});
+    await transport.stop();
+    if (failure === 'unconfirmed-state') {
+      const sessionFile = path.join(home, 'native-history.jsonl');
+      await fs.writeFile(sessionFile, 'synthetic history');
+      (executor as any).sessionFile = sessionFile;
+      const request = transport.request.getMockImplementation()!;
+      transport.request.mockImplementation(command => command.type === 'get_state'
+        ? Promise.resolve({ type: 'response', command: 'get_state', success: false }) : request(command));
+    }
+    const resolvePrompt = vi.fn((id: string | null) => id ? 'task only' : 'instructions and task');
+    expect(await executor.execute('fallback', { resolvePrompt })).toMatchObject({ success: true });
+    expect(resolvePrompt).toHaveBeenCalledWith(null);
+    expect(transport.request).toHaveBeenLastCalledWith({ type: 'prompt', message: 'instructions and task' });
+  });
+
   it('reads model and effort from already-required state responses without adding RPC calls', async () => {
     expect(executor.getExecutionMetadata()).toMatchObject({ modelSource: 'default', effortSource: 'default' });
     expect(transport.request).not.toHaveBeenCalled();

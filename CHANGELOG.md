@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.210] - 2026-11-04
+
+### Changed
+- Send fixed delegated-worker instructions once per confirmed native conversation while refreshing task objectives, workspace/checkpoint details, external-link warnings, and export requirements on every task.
+- Restore full instructions for fresh or unconfirmed contexts, including missing-history fallback and failed initialization, without disabling worker conversation reuse.
+
+### Tests
+- Cover prompt initialization across executor recreation, manager restart, context reset, missing pointers, native fallback, and refreshed Git task metadata.
+
 ## [1.6.209] - 2026-11-04
 
 ### Changed

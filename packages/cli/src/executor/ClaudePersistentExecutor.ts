@@ -156,6 +156,8 @@ interface ClaudeOutputMessage {
  * Persistent Claude Executor options
  */
 export interface PersistentClaudeOptions {
+  /** Resolve delegated task text against the conversation selected for dispatch. */
+  resolvePrompt?: (sessionId: string | null) => string;
   /** Stream output callback (for backward compatibility) */
   onStream?: (chunk: string) => void;
   /** Assistant response text only; excludes thinking and process notices. */
@@ -1891,6 +1893,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       }, command.options.timeout);
     }
 
+    command.prompt = command.options.resolvePrompt?.(this.sessionId) ?? command.prompt;
     let content: any = command.prompt;
     if (command.options.attachments && command.options.attachments.length > 0) {
       const blocks: any[] = [];

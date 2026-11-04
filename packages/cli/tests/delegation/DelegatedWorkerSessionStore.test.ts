@@ -36,6 +36,37 @@ describe('DelegatedWorkerSessionStore', () => {
     await fs.rm(home, { recursive: true, force: true });
   });
 
+  it('persists prompt initialization for native reuse and forgets it on context reset', async () => {
+    const store = new DelegatedWorkerSessionStore(directory);
+    const { lane } = await store.acquire(identity(workspace));
+    await store.markRunning(lane.id);
+    await store.markPromptInitialized(lane.id, 'native-worker', 'git');
+    await store.markReady(lane.id);
+    const restarted = new DelegatedWorkerSessionStore(directory);
+    const reused = await restarted.acquire(identity(workspace));
+    expect(reused.lane.initializedPrompt).toEqual({ sessionId: 'native-worker', workspaceKind: 'git' });
+    await restarted.markRunning(lane.id);
+    expect((await restarted.lanesForThread('parent-thread'))[0].initializedPrompt).toBeUndefined();
+    expect(reused.lane.initializedPrompt).toEqual({ sessionId: 'native-worker', workspaceKind: 'git' });
+    await restarted.markPromptInitialized(lane.id, 'native-worker', 'git');
+    await restarted.markReady(lane.id);
+    await restarted.clearContext(lane.id, reused.lane.contextGeneration!, identity(workspace), async () => {});
+    expect((await restarted.acquire(identity(workspace))).lane.initializedPrompt).toBeUndefined();
+  });
+
+  it.each([null, {}, { sessionId: '', workspaceKind: 'git' }, { sessionId: 'native', workspaceKind: 'unknown' }])(
+    'quarantines malformed persisted prompt initialization: %j', async initializedPrompt => {
+      const store = new DelegatedWorkerSessionStore(directory);
+      const { lane } = await store.acquire(identity(workspace));
+      await store.markReady(lane.id);
+      const file = path.join(directory, `${lane.id}.json`);
+      const saved = JSON.parse(await fs.readFile(file, 'utf8'));
+      await fs.writeFile(file, JSON.stringify({ ...saved, initializedPrompt }));
+      const restarted = new DelegatedWorkerSessionStore(directory);
+      expect((await restarted.acquire(identity(workspace))).reused).toBe(false);
+      expect(await restarted.getInventoryStatus()).toMatchObject({ complete: false });
+    });
+
   it('checks ownership before creating or reconciling inventory and retries acquisition failures', async () => {
     const store = new DelegatedWorkerSessionStore(directory);
     let permitted = false;

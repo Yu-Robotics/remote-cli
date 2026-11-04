@@ -36,6 +36,8 @@ export interface DelegatedWorkerLane {
   /** Offline discard retires scheduling without claiming native context was cleared. */
   workspaceDiscarded?: boolean;
   pooled?: boolean;
+  /** Fixed worker instructions confirmed by a successful turn in this native context. */
+  initializedPrompt?: { sessionId: string; workspaceKind: 'git' | 'shared' };
 }
 
 export interface DelegatedWorkerLaneIdentity {
@@ -122,6 +124,10 @@ function validateLane(value: unknown): value is DelegatedWorkerLane {
     && (lane.contextRetired !== true || (lane.state === 'dirty' && lane.contextResetPending === false
       && validGeneration(lane.lastClearedGeneration) && lane.contextGeneration === lane.lastClearedGeneration + 1))
     && (lane.workspaceDiscarded === undefined || (lane.workspaceDiscarded === true && lane.state === 'dirty'))
+    && (lane.initializedPrompt === undefined || (lane.initializedPrompt !== null
+      && typeof lane.initializedPrompt.sessionId === 'string' && lane.initializedPrompt.sessionId.length > 0
+      && lane.initializedPrompt.sessionId.length <= 1024
+      && ['git', 'shared'].includes(lane.initializedPrompt.workspaceKind)))
     && (lane.pooled === undefined || typeof lane.pooled === 'boolean')
     && (lane.cleanupError === undefined || typeof lane.cleanupError === 'string');
 }
@@ -240,7 +246,15 @@ export class DelegatedWorkerSessionStore {
   }
 
   async markRunning(id: string): Promise<DelegatedWorkerLane> {
-    return this.transition(id, 'running', { shutdownConfirmedGeneration: undefined });
+    // The caller retains the acquired snapshot for prompt selection. Withhold
+    // durable initialization until restoration/dispatch confirms that context;
+    // a failed fresh session can otherwise reuse an old native ID and marker.
+    return this.transition(id, 'running', { shutdownConfirmedGeneration: undefined, initializedPrompt: undefined });
+  }
+
+  async markPromptInitialized(id: string, sessionId: string, workspaceKind: 'git' | 'shared'): Promise<void> {
+    if (!sessionId || sessionId.length > 1024) return;
+    await this.transition(id, 'running', { initializedPrompt: { sessionId, workspaceKind } });
   }
 
   async markReady(id: string): Promise<DelegatedWorkerLane> {
@@ -350,7 +364,7 @@ export class DelegatedWorkerSessionStore {
   }
 
   private async transition(id: string, state: DelegatedWorkerLaneState,
-    extra: Partial<Pick<DelegatedWorkerLane, 'cleanupPending' | 'cleanupError' | 'shutdownConfirmedGeneration'>> = {}): Promise<DelegatedWorkerLane> {
+    extra: Partial<Pick<DelegatedWorkerLane, 'cleanupPending' | 'cleanupError' | 'shutdownConfirmedGeneration' | 'initializedPrompt'>> = {}): Promise<DelegatedWorkerLane> {
     if (!UUID_RE.test(id)) throw new Error('Invalid delegated worker lane ID');
     await this.initialize();
     return this.mutate(async () => {
@@ -429,7 +443,7 @@ export class DelegatedWorkerSessionStore {
     const retired = superseded || recoveryHeld;
     await this.writeAndRemember({ ...pending, state: retired ? 'dirty' : 'ready', contextGeneration: current + 1,
       shutdownConfirmedGeneration: recoveryHeld ? current + 1 : undefined,
-      contextResetPending: false, lastClearedGeneration: generation,
+      contextResetPending: false, lastClearedGeneration: generation, initializedPrompt: undefined,
       contextRetired: retired ? true : undefined,
       cleanupError: recoveryHeld ? lane.cleanupError
         : superseded ? 'Worker context cleared; a replacement lane remains active.' : undefined,

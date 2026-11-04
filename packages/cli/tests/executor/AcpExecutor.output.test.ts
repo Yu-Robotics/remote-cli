@@ -56,6 +56,41 @@ describe.each([
     await fs.rm(directory, { recursive: true, force: true });
   });
 
+  it('resolves delegated prompts after resume, missing-session fallback and reset', async () => {
+    await executor.destroy();
+    executor = create(true);
+    let initialized: string | undefined;
+    const resolvePrompt = vi.fn((id: string | null) => id === initialized ? 'task only' : 'instructions and task');
+    const run = async () => {
+      expect(await executor.execute('fallback', { resolvePrompt })).toMatchObject({ success: true });
+      initialized = executor.getSessionId()!;
+      return transport.prompt.mock.calls.at(-1)?.[1];
+    };
+    expect(await run()).toEqual([{ type: 'text', text: 'instructions and task' }]);
+    await executor.destroy();
+    executor = create(true);
+    expect(await run()).toEqual([{ type: 'text', text: 'task only' }]);
+    await executor.destroy();
+    transport.loadSession.mockRejectedValueOnce(new Error('Session not found'));
+    transport.newSession.mockResolvedValueOnce({ sessionId: 'replacement' });
+    executor = create(true);
+    expect(await run()).toEqual([{ type: 'text', text: 'instructions and task' }]);
+    expect(resolvePrompt).toHaveBeenLastCalledWith('replacement');
+    executor.resetContext();
+    transport.newSession.mockResolvedValueOnce({ sessionId: 'after-reset' });
+    expect(await run()).toEqual([{ type: 'text', text: 'instructions and task' }]);
+  });
+
+  it('does not resolve or dispatch a prompt when native startup fails', async () => {
+    transport.initialize.mockRejectedValueOnce(new Error('Synthetic startup failure'));
+    const resolvePrompt = vi.fn(() => 'instructions');
+    expect(await executor.execute('task', { resolvePrompt })).toMatchObject({ success: false });
+    expect(resolvePrompt).not.toHaveBeenCalled();
+    expect(transport.prompt).not.toHaveBeenCalled();
+    expect(await executor.execute('task', { resolvePrompt })).toMatchObject({ success: true });
+    expect(transport.prompt).toHaveBeenCalledWith('output-session', [{ type: 'text', text: 'instructions' }]);
+  });
+
   it('excludes interleaved thoughts without filtering ordinary response wording', async () => {
     transport.prompt.mockImplementationOnce(async () => {
       callbacks.onThoughtChunk?.({ type: 'text', text: 'PRIVATE_BEFORE' });

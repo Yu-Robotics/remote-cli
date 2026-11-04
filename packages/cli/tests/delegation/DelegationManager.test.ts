@@ -1422,6 +1422,144 @@ describe('managed agent delegation', () => {
     ]);
   });
 
+  it('deduplicates only confirmed native context across recreated workers and manager restarts', async () => {
+    let nativeId: string | null = null;
+    let failBeforePrompt = false;
+    const prompts: string[] = [];
+    factory.mockImplementation(() => ({ ...worker,
+      getSessionId: () => nativeId,
+      execute: vi.fn(async (prompt: string, options: ExecuteOptions) => {
+        if (failBeforePrompt) {
+          // Some backends recreate an empty native history under the saved ID.
+          options.resolvePrompt?.(null);
+          nativeId ??= 'native-first';
+          return { success: false, error: 'Synthetic startup failure' };
+        }
+        prompts.push(options.resolvePrompt?.(nativeId) ?? prompt);
+        nativeId ??= 'native-first';
+        return { success: true, output: 'done' };
+      }),
+    }));
+    const run = async (objective: string, state = 'succeeded') => {
+      const scope = manager.begin(parent);
+      const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective }, 'start');
+      await expect(scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result')).resolves.toMatchObject({ state });
+      await scope.close();
+    };
+    await run('First objective');
+    await manager.destroy();
+    manager = new DelegationManager(guard, factory as any, new BackendRegistry(async () => 'test 1.0'));
+    await run('Second objective');
+    expect(factory.mock.calls[1][3]).toBe(factory.mock.calls[0][3]);
+    expect(prompts[0]).toContain('You are executing one delegated task');
+    expect(prompts[1]).not.toContain('You are executing one delegated task');
+    expect(prompts[1]).toContain('Second objective');
+    expect(prompts[1]).toContain(home);
+    expect(prompts[1]).toContain('Do not delegate');
+
+    // A reused lane with a lost pointer must send the full instructions again.
+    nativeId = null;
+    failBeforePrompt = true;
+    await run('Never dispatched', 'failed');
+    failBeforePrompt = false;
+    await run('Missing pointer');
+    expect(prompts[2]).toContain('You are executing one delegated task');
+    // A different native session is never initialized by the previous lane use.
+    nativeId = 'native-after-reset';
+    await run('After reset');
+    expect(prompts[3]).toContain('You are executing one delegated task');
+    await run('After reset follow-up');
+    expect(prompts[4]).not.toContain('You are executing one delegated task');
+  });
+
+  it('reinitializes a fresh ACP fallback inside the same lane and preserves the next resume', async () => {
+    let missingSession = false;
+    let sequence = 0;
+    const prompts: string[] = [];
+    factory.mockImplementation((_guard, _config, cwd, threadId) => new OpenCodeExecutor(guard, {
+      threadId, initialWorkingDirectory: cwd, sessionBaseDir: path.join(home, 'native-pointers'), delegationWorker: true,
+      clientFactory: () => ({
+        initialize: vi.fn().mockResolvedValue({}),
+        newSession: vi.fn(async () => ({ sessionId: `native-${++sequence}` })),
+        loadSession: vi.fn(async () => {
+          if (missingSession) throw new Error('Session not found');
+          return {};
+        }),
+        prompt: vi.fn(async (_id, blocks) => {
+          prompts.push(blocks.filter(block => block.type === 'text').map(block => block.text).join(''));
+          return { stopReason: 'end_turn' };
+        }),
+        setConfigOption: vi.fn().mockResolvedValue({}), sendCancel: vi.fn(), destroy: vi.fn(),
+        waitForExit: vi.fn().mockResolvedValue(undefined),
+        waitForManagedProcessGroupExit: vi.fn().mockResolvedValue(undefined),
+      } as AcpTransport),
+    }));
+    for (let index = 0; index < 4; index++) {
+      missingSession = index === 2;
+      const scope = manager.begin(parent);
+      const task: any = await scope.invoke('remote_cli_delegate', { backend: 'opencode', objective: `Task ${index}` }, 'start');
+      await expect(scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result')).resolves.toMatchObject({ state: 'succeeded' });
+      await scope.close();
+    }
+    expect(factory.mock.calls.map(call => call[3])).toEqual(Array(4).fill(factory.mock.calls[0][3]));
+    expect(prompts.map(prompt => prompt.includes('You are executing one delegated task'))).toEqual([true, false, true, false]);
+    expect(sequence).toBe(2);
+  });
+
+  it('refreshes Git baseline, shared links and exports while reusing initialized native context', async () => {
+    const source = { root: home, commonDirectory: home, relativeCwd: '' };
+    let revision = 0;
+    const prompts: string[] = [];
+    vi.spyOn(manager.workspaceManager, 'discover').mockResolvedValue(source);
+    vi.spyOn(manager.workspaceManager, 'baseline').mockImplementation(async () => ({
+      head: 'a'.repeat(40), tree: 'b'.repeat(40), commit: String(++revision).repeat(40), revision: `revision-${revision}`,
+      sharedLinks: [{ path: `shared-${revision}`, target: home, linkText: home, kind: 'dir' as const }],
+    }));
+    vi.spyOn(manager.workspaceManager, 'reconcileHistoricalDelivery').mockResolvedValue([]);
+    vi.spyOn(manager.workspaceManager, 'unavailableLanes').mockResolvedValue(new Set());
+    vi.spyOn(manager.workspaceManager, 'prepare').mockImplementation(async (lane, _source, input, taskId) => ({
+      laneId: lane.id, threadId: lane.threadId, workspaceGeneration: 0, source, input,
+      directory: home, cwd: home, taskId, taskRef: `refs/remote-cli/tasks/${taskId}`,
+    }));
+    vi.spyOn(manager.workspaceManager, 'collect').mockImplementation(async workspace => ({
+      taskId: workspace.taskId, disposition: 'applied', successful: true,
+      baseCommit: workspace.input.commit, outputCommit: workspace.input.commit, changedFiles: [], filesTruncated: false,
+    }));
+    vi.spyOn(manager.workspaceManager, 'reclaim').mockResolvedValue(true);
+    factory.mockImplementation(() => ({ ...worker, getSessionId: () => 'git-session',
+      execute: vi.fn(async (prompt: string, options: ExecuteOptions) => {
+        prompts.push(options.resolvePrompt?.('git-session') ?? prompt);
+        return { success: true, output: 'done' };
+      }),
+    }));
+    for (let index = 1; index <= 3; index++) {
+      const scope = manager.begin(parent);
+      const task: any = await scope.invoke('remote_cli_delegate', {
+        backend: 'codex', objective: `Objective ${index}. Do not modify source files.`, exports: [`report-${index}.txt`],
+      }, 'start');
+      await expect(scope.invoke('remote_cli_result', { taskId: task.taskId }, 'result')).resolves.toMatchObject({ state: 'succeeded' });
+      await scope.close();
+    }
+    expect(factory.mock.calls.map(call => call[3])).toEqual(Array(3).fill(factory.mock.calls[0][3]));
+    expect(prompts[0]).toContain('This checkout is disposable');
+    for (let index = 1; index <= 3; index++) {
+      const prompt = prompts[index - 1];
+      expect(prompt).toContain(home);
+      expect(prompt).toContain(`checkpoint ${String(index).repeat(40)}`);
+      expect(prompt).toContain('Previous task changes are NOT implicitly present');
+      expect(prompt).toContain('Do not merge into or edit the delivery directory');
+      expect(prompt).toContain(`Shared external links: "shared-${index}"`);
+      expect(prompt).toContain('NOT captured, merged, reverted, or backed up');
+      expect(prompt).toContain(`Objective ${index}. Do not modify source files.`);
+      expect(prompt).toContain(`Required durable output paths (relative to checkout root): ["report-${index}.txt"]`);
+      if (index > 1) {
+        expect(prompt).not.toContain('This checkout is disposable');
+        expect(prompt).not.toContain(`shared-${index - 1}`);
+        expect(prompt).not.toContain(`report-${index - 1}.txt`);
+      }
+    }
+  });
+
   it('invalidates only worker state when the parent workspace generation changes', async () => {
     const scope = manager.begin(parent);
     const task: any = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Inspect' }, 'start');

@@ -309,7 +309,8 @@ export class PiExecutor implements IExecutor {
       // every remote turn; the user must keep other writers idle.
       if (this.adopted) await this.recycleClient();
       if (preparation.cancelled || this.destroyed) return { success: false, error: 'Pi command cancelled before startup' };
-      await this.ensureClient();
+      const sessionId = await this.ensureClient();
+      prompt = options.resolvePrompt?.(sessionId) ?? prompt;
       if (preparation.cancelled || this.destroyed) {
         await this.recycleClient();
         return { success: false, error: 'Pi command cancelled before dispatch' };
@@ -842,7 +843,7 @@ export class PiExecutor implements IExecutor {
     }
   }
 
-  private async ensureClient(): Promise<void> {
+  private async ensureClient(): Promise<string | null> {
     if (this.destroyed) throw new Error('Executor has been destroyed');
     if (this.adopted && (!this.sessionFile || !fs.existsSync(this.sessionFile))) throw new Error(MISSING_ADOPTED_ERROR);
     assertWorkingDirectoryExists(this.currentWorkingDirectory);
@@ -854,11 +855,13 @@ export class PiExecutor implements IExecutor {
     if (!this.client.isRunning()) {
       this.reportedModel = undefined;
       this.reportedEffort = undefined;
+      const missingHistory = Boolean(this.sessionId && (!this.sessionFile || !fs.existsSync(this.sessionFile)));
       this.client.updateLaunch?.(this.buildLaunch());
       await this.client.start();
       if (!this.adopted) {
-        await this.refreshSessionPointer();
-        return;
+        const sessionId = await this.refreshSessionPointer();
+        // Pi can create empty history using the old ID when its file is gone.
+        return missingHistory ? null : sessionId;
       }
       // Adopted sessions never follow a silently substituted identity after a restart.
       const mismatch = await this.checkAdoptedIdentity({ sessionId: this.sessionId!, sessionFile: this.sessionFile! });
@@ -867,6 +870,7 @@ export class PiExecutor implements IExecutor {
         throw new Error(`${mismatch} ${MISSING_ADOPTED_ERROR}`);
       }
     }
+    return this.sessionId;
   }
 
   /**
@@ -1290,7 +1294,7 @@ export class PiExecutor implements IExecutor {
     }
   }
 
-  private async refreshSessionPointer(): Promise<void> {
+  private async refreshSessionPointer(): Promise<string | null> {
     try {
       const response = await this.client.request({ type: 'get_state' });
       if (response.success && response.data) {
@@ -1303,10 +1307,12 @@ export class PiExecutor implements IExecutor {
         if (typeof response.data.sessionId === 'string') this.sessionId = response.data.sessionId;
         if (typeof response.data.sessionFile === 'string') this.sessionFile = response.data.sessionFile;
         this.savePointer();
+        return typeof response.data.sessionId === 'string' && response.data.sessionId ? response.data.sessionId : null;
       }
     } catch (error) {
       console.warn('[PiExecutor] Failed to refresh Pi session pointer', error);
     }
+    return null;
   }
 
   private loadPointer(): void {
