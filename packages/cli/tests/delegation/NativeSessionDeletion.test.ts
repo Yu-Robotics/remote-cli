@@ -195,11 +195,61 @@ describe('permanent native session deletion', () => {
     expect(await fs.readFile(foreign, 'utf8')).toBe(content);
   });
 
-  it.each(['bad-json', 'missing-id', 'oversized', 'directory', 'symlink'])(
+  it.each(['codex-thread-1', 'another_fixture', 'synthetic-session-Z9'])(
+    'preserves the non-native label %s while deleting each fresh owned target once', async id => {
+      const foreign = path.join(path.dirname(pointer), 'foreign.json');
+      const bytes = JSON.stringify({ id, savedAt: '2000-01-01T00:00:00.000Z' });
+      await fs.writeFile(foreign, bytes);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (attempt) {
+          const executorThreadId = `delegate-lane-${randomUUID()}`;
+          const sessionId = randomUUID();
+          pointer = path.join(path.dirname(pointer), `${executorThreadId}.json`);
+          await fs.writeFile(pointer, JSON.stringify({ id: sessionId }));
+          target = await captureCodexDeletionTarget({ sessionId, executorThreadId, home,
+            nativeHome: path.join(home, '.codex'), cwd: home, command: 'synthetic-codex' });
+          root = metadata(sessionId, { cwd: home });
+        }
+        client.request.mockClear();
+        expect(await deleteOwnedCodexSession(target, factory)).toMatchObject({ state: 'deleted' });
+        expect(client.request.mock.calls.filter(([method]) => method === 'thread/delete'))
+          .toEqual([['thread/delete', { threadId: target.sessionId }]]);
+        expect(await fs.readFile(foreign, 'utf8')).toBe(bytes);
+      }
+    });
+
+  it.each(['upper', 'compact', 'compact-upper', 'urn', 'urn-upper-id', 'braces', 'braces-upper-id'])(
+    'holds a foreign %s UUID spelling before transport construction', async spelling => {
+      const id = target.sessionId;
+      const aliases: Record<string, string> = { upper: id.toUpperCase(), compact: id.replace(/-/g, ''),
+        'compact-upper': id.replace(/-/g, '').toUpperCase(), urn: `urn:uuid:${id}`,
+        'urn-upper-id': `urn:uuid:${id.toUpperCase()}`, braces: `{${id}}`, 'braces-upper-id': `{${id.toUpperCase()}}` };
+      const foreign = path.join(path.dirname(pointer), 'alias.json');
+      const bytes = JSON.stringify({ id: aliases[spelling] });
+      await fs.writeFile(foreign, bytes);
+      expect(await deleteOwnedCodexSession(target, factory)).toEqual({ state: 'held', reason: 'Native pointer inventory verification failed' });
+      expect(factory).not.toHaveBeenCalled();
+      expect(await fs.readFile(foreign, 'utf8')).toBe(bytes);
+    });
+
+  it.each(['', ' ', ' padded-label ', 'label\u0000', 'label\n', 'label\r\n', 'label\u2028', 'label'.repeat(26),
+    'urn:uuid:not-a-uuid', '{invalid}', 'deadbeef', 42, null, {}, []].map(id => [id]))(
+    'holds ambiguous foreign ID %j without exposing its contents', async id => {
+      await fs.writeFile(path.join(path.dirname(pointer), 'ambiguous.json'), JSON.stringify({ id }));
+      expect(await deleteOwnedCodexSession(target, factory)).toEqual({ state: 'held', reason: 'Native pointer inventory verification failed' });
+      expect(factory).not.toHaveBeenCalled();
+    });
+
+  it.each(['bad-json', 'missing-id', 'oversized', 'directory', 'symlink', 'hardlink'])(
     'holds ambiguous pointer inventory: %s', async fault => {
       const foreign = path.join(path.dirname(pointer), `${randomUUID()}.json`);
       if (fault === 'directory') await fs.mkdir(foreign);
       else if (fault === 'symlink') await fs.symlink(home, foreign, process.platform === 'win32' ? 'junction' : 'dir');
+      else if (fault === 'hardlink') {
+        const original = path.join(home, 'foreign-original');
+        await fs.writeFile(original, JSON.stringify({ id: 'codex-thread-1' }));
+        await fs.link(original, foreign);
+      }
       else await fs.writeFile(foreign, fault === 'bad-json' ? '{' : fault === 'oversized' ? 'x'.repeat(65537) : '{}');
       expect(await deleteOwnedCodexSession(target, factory)).toMatchObject({ state: 'held' });
       expect(factory).not.toHaveBeenCalled();
@@ -225,6 +275,80 @@ describe('permanent native session deletion', () => {
     expect(await deleteOwnedCodexSession(target, factory)).toMatchObject({ state: 'held' });
     expect(requestedBytes).toBe(65537);
     expect(factory).not.toHaveBeenCalled();
+  });
+
+  it.each(['unreadable', 'missing', 'owner', 'inventory-race', 'content-race'])(
+    'does not exempt an unsafe non-native label: %s', async fault => {
+      const foreign = path.join(path.dirname(pointer), 'foreign.json');
+      const bytes = JSON.stringify({ id: 'codex-thread-1' });
+      await fs.writeFile(foreign, bytes);
+      const getuid = Object.getOwnPropertyDescriptor(process, 'getuid');
+      try {
+        if (fault === 'unreadable' || fault === 'missing') {
+          const open = fs.open.bind(fs);
+          vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+            if (String(args[0]) === foreign) {
+              throw Object.assign(new Error(`Private detail ${foreign}`), { code: fault === 'missing' ? 'ENOENT' : 'EACCES' });
+            }
+            return open(...args);
+          });
+        } else if (fault === 'owner') {
+          // Exercise the UID guard on every host without relying on chmod or root privileges.
+          Object.defineProperty(process, 'getuid', { configurable: true, value: () => 1234 });
+          const lstat = fs.lstat.bind(fs);
+          vi.spyOn(fs, 'lstat').mockImplementation(async (...args) => {
+            const stat = await lstat(...args);
+            return Object.assign(stat, { uid: String(args[0]) === foreign ? 1235n : 1234n });
+          });
+        } else {
+          const lstat = fs.lstat.bind(fs);
+          let reads = 0;
+          vi.spyOn(fs, 'lstat').mockImplementation(async (...args) => {
+            const stat = await lstat(...args);
+            const watched = fault === 'content-race' ? foreign : path.dirname(pointer);
+            if (String(args[0]) === watched && ++reads === 2) {
+              return Object.assign(stat, { mtimeNs: (stat as any).mtimeNs + 1n });
+            }
+            return stat;
+          });
+        }
+        expect(await deleteOwnedCodexSession(target, factory)).toEqual({ state: 'held', reason: 'Native pointer inventory verification failed' });
+        expect(factory).not.toHaveBeenCalled();
+        expect(await fs.readFile(foreign, 'utf8')).toBe(bytes);
+      } finally {
+        if (getuid) Object.defineProperty(process, 'getuid', getuid);
+        else delete (process as Partial<NodeJS.Process>).getuid;
+      }
+    });
+
+  it('rechecks a foreign label that becomes a target alias during native inspection', async () => {
+    const foreign = path.join(path.dirname(pointer), 'foreign.json');
+    await fs.writeFile(foreign, JSON.stringify({ id: 'codex-thread-1' }));
+    const bytes = JSON.stringify({ id: target.sessionId.replace(/-/g, '') });
+    respond.mockImplementation(async (method, params) => {
+      if (method === 'thread/read') {
+        await fs.writeFile(foreign, bytes);
+        return { thread: root };
+      }
+      return list(params.archived ? [] : [unrelated, root]);
+    });
+    expect(await deleteOwnedCodexSession(target, factory)).toEqual({ state: 'held', reason: 'Native pointer inventory verification failed' });
+    expect(factory).toHaveBeenCalledTimes(1);
+    expect(wasDeleted()).toBe(false);
+    expect(await fs.readFile(foreign, 'utf8')).toBe(bytes);
+  });
+
+  it('distinguishes target, native inspection and preparation failures without persisting private errors', async () => {
+    const ownBytes = await fs.readFile(pointer);
+    await fs.writeFile(pointer, JSON.stringify({ id: 'codex-thread-1' }));
+    expect(await deleteOwnedCodexSession(target, factory)).toEqual({ state: 'held', reason: 'Native target identity verification failed' });
+    expect(factory).not.toHaveBeenCalled();
+    await fs.writeFile(pointer, ownBytes);
+    client.start.mockRejectedValueOnce(new Error(`Private detail ${home}`));
+    expect(await deleteOwnedCodexSession(target, factory)).toEqual({ state: 'held', reason: 'Native inventory, root, inactivity or descendant verification failed' });
+    expect(await deleteOwnedCodexSession(target, factory, { persistPrepared: async () => { throw new Error(`Private detail ${home}`); } }))
+      .toEqual({ state: 'held', reason: 'Native deletion preparation verification failed' });
+    expect(wasDeleted()).toBe(false);
   });
 
   it('bounds local pointer inventory before any native process starts', async () => {

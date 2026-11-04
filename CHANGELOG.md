@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.216] - 2026-11-04
+
+### Fixed
+- Prevent provably unrelated non-native Codex pointer IDs from blocking eligible managed-worker cleanup while preserving target identity, alias, filesystem, shutdown, and retry checks.
+- Report bounded cleanup validation stages without exposing private paths or raw backend errors.
+
+### Tests
+- Isolate activity fixtures from real backend homes and cover unrelated pointers, ambiguous ownership, and cleanup recovery with synthetic data.
+
 ## [1.6.215] - 2026-11-04
 
 ### Fixed

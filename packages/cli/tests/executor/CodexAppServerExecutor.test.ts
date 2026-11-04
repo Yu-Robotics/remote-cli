@@ -68,12 +68,15 @@ describe('CodexAppServerExecutor', () => {
   let projectDir: string;
   let transport: FakeTransport;
   let executor: CodexAppServerExecutor;
-  let originalHome: string | undefined;
 
   beforeEach(async () => {
     tempHome = await fs.realpath(await fs.mkdtemp(path.join(process.cwd(), '.codex-app-executor-test-')));
-    originalHome = process.env.HOME;
-    process.env.HOME = tempHome;
+    const drive = process.platform === 'win32' ? path.parse(tempHome).root.replace(/[\\/]$/, '') : '';
+    vi.stubEnv('HOME', tempHome);
+    vi.stubEnv('USERPROFILE', tempHome);
+    vi.stubEnv('HOMEDRIVE', drive);
+    vi.stubEnv('HOMEPATH', tempHome.slice(drive.length));
+    vi.stubEnv('CODEX_HOME', path.join(tempHome, '.codex'));
     projectDir = path.join(tempHome, 'project');
     await fs.mkdir(projectDir);
     vi.spyOn(os, 'homedir').mockReturnValue(tempHome);
@@ -89,11 +92,14 @@ describe('CodexAppServerExecutor', () => {
   });
 
   afterEach(async () => {
-    await executor.destroy();
-    vi.restoreAllMocks();
-    if (originalHome === undefined) delete process.env.HOME;
-    else process.env.HOME = originalHome;
-    await fs.rm(tempHome, { recursive: true, force: true });
+    try {
+      await executor.destroy();
+      await executor.waitForExit();
+      await fs.rm(tempHome, { recursive: true, force: true });
+    } finally {
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
+    }
   });
 
   it('persists a managed creation receipt before its first turn and never observes a foreground session', async () => {
