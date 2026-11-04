@@ -174,14 +174,14 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
   it.each(['mixed', 'same-backend'] as const)('runs five isolated %s tasks concurrently and keeps a sixth queued', async mode => {
     const scope = manager.begin(parent);
     const phases: { name: string; elapsedMs: number }[] = [];
-    const phase = async <T>(name: string, action: () => Promise<T>): Promise<T> => {
+    const phase = async <T>(name: string, action: () => Promise<T>, timeoutMs = 30_000): Promise<T> => {
       const began = Date.now();
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
-        return await Promise.race([action(), new Promise<never>((_resolve, reject) => {
+        return await Promise.race([trackCall(Promise.resolve().then(action)), new Promise<never>((_resolve, reject) => {
           timer = setTimeout(() => reject(new Error(
             `Git scheduling phase timed out: ${name}; workers=${workers.length}; completed=${JSON.stringify(phases)}`,
-          )), 30_000);
+          )), timeoutMs);
         })]);
       } finally {
         clearTimeout(timer);
@@ -214,7 +214,9 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     });
     expect(workers[0].executor.waitForExit).toHaveBeenCalledOnce();
     workers.slice(1).forEach(worker => worker.finish({ success: true, output: 'Read-only review' }));
-    const terminal = await phase('collect and reclaim the remaining five workers', () => scope.collectPendingResults());
+    // Five serialized captures plus repeated full-byte proofs and removals are
+    // substantially more work than the single-worker phases on native runners.
+    const terminal = await phase('collect and reclaim the remaining five workers', () => scope.collectPendingResults(), 90_000);
     expect(terminal.every(task => task.state === 'succeeded')).toBe(true);
     expect(await gitText(fixture.root, ['rev-parse', 'HEAD'])).toBe(fixture.head);
     expect(await gitText(fixture.root, ['for-each-ref', '--format=%(refname)', 'refs/heads'])).toBe('refs/heads/main');
@@ -223,7 +225,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
       await scope.invoke('remote_cli_integrate', { taskId: first.taskId, action: 'retain', expectedRevision: inspection.revision }, 'retain');
       expect(await scope.checkArtifactCloseout()).toEqual([]);
     });
-  }, 125_000);
+  }, 185_000);
 
   it('reuses native conversation and worktree after explicit integration, including sibling changes in the next baseline', async () => {
     const scope = manager.begin(parent);
@@ -442,30 +444,82 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     expect((await fs.lstat(workers[0].cwd)).isDirectory()).toBe(true);
   });
 
-  it('admits a different lane while full byte verification is waiting', async () => {
+  it.each([false, true])('admits a different lane during byte verification and drains a released gate (earlyFailure=%s)', async earlyFailure => {
     const scope = manager.begin(parent);
-    const first = await start(scope, 'first');
+    const phase = async <T>(name: string, pending: Promise<T>): Promise<T> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([pending, new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error(`Byte verification fixture phase timed out: ${name}; workers=${workers.length}`)), 45_000);
+        })]);
+      } finally { clearTimeout(timer); }
+    };
+    let entered!: () => void;
+    const verifying = new Promise<void>(resolve => { entered = resolve; });
+    let firstDispatched!: () => void;
+    const firstDispatch = new Promise<void>(resolve => { firstDispatched = resolve; });
+    let dispatched!: () => void;
+    const followerDispatched = new Promise<void>(resolve => { dispatched = resolve; });
     let release!: () => void;
-    let verifying = false;
-    const gate = new Promise<void>(resolve => { release = resolve; });
+    let released = false;
+    const gate = new Promise<void>(resolve => { release = () => { released = true; resolve(); }; });
+    // Signal actual executor dispatch, not a bounded acceptance response that
+    // may still report queued while native Git preparation continues.
+    const create = factory.getMockImplementation()!;
+    factory.mockImplementation((...args) => {
+      const executor = create(...args);
+      const workerNumber = workers.length;
+      if (workerNumber <= 2) {
+        const execute = vi.mocked(executor.execute).getMockImplementation()!;
+        vi.mocked(executor.execute).mockImplementation((...executionArgs) => {
+          if (workerNumber === 1) firstDispatched(); else dispatched();
+          return execute(...executionArgs);
+        });
+      }
+      return executor;
+    });
+    const first = await phase('prepare and dispatch the first worker', (async () => {
+      const accepted = await start(scope, 'first');
+      await firstDispatch;
+      return accepted;
+    })());
     const original = gitCommands.runGit;
     vi.spyOn(gitCommands, 'runGit').mockImplementation(async (cwd, args, ...rest) => {
-      if (args[0] === 'ls-tree' && args.includes('--full-tree')) { verifying = true; await gate; }
+      if (args[0] === 'ls-tree' && args.includes('--full-tree')) { entered(); await gate; }
       return original(cwd, args, ...rest);
     });
     workers[0].finish({ success: true });
     let following: Promise<DelegatedTaskResult> | undefined;
-    try {
-      await vi.waitFor(() => expect(verifying).toBe(true), { timeout: 10_000 });
-      following = start(scope, 'follower');
-      await vi.waitFor(() => expect(workers).toHaveLength(2), { timeout: 10_000 });
-    } finally { release(); workers.forEach(worker => worker.finish({ success: true })); }
-    const second = (await following)!;
-    expect(workers[1].cwd).not.toBe(workers[0].cwd);
-    workers[1].finish({ success: true });
+    const assertionFailure = new Error('Synthetic assertion before follower admission');
+    const exercise = async () => {
+      try {
+        // Reaching verification includes a real capture, reset and index audit.
+        // Its duration is independent of the admission concurrency contract.
+        await phase('reach full byte verification', verifying);
+        if (earlyFailure) throw assertionFailure;
+        following = start(scope, 'follower');
+        await phase('dispatch another lane while verification is held', followerDispatched);
+        expect(released).toBe(false);
+        expect(workers).toHaveLength(2);
+        expect(workers[1].cwd).not.toBe(workers[0].cwd);
+      } finally {
+        release();
+        // Track collection before teardown, including any unfinished admission.
+        await phase('drain admitted workers after releasing verification', trackCall((async () => {
+          try { if (following) await following; }
+          finally { workers.forEach(worker => worker.finish({ success: true })); }
+          const terminal = await scope.collectPendingResults();
+          expect(terminal).toHaveLength(earlyFailure ? 1 : 2);
+          expect(terminal.every(task => task.state === 'succeeded')).toBe(true);
+        })()));
+      }
+    };
+    if (earlyFailure) await expect(exercise()).rejects.toBe(assertionFailure);
+    else await exercise();
+    expect(released).toBe(true);
     expect(await result(scope, first.taskId, 'r1')).toMatchObject({ state: 'succeeded' });
-    expect(await result(scope, second.taskId, 'r2')).toMatchObject({ state: 'succeeded' });
-  }, 30_000);
+    if (following) expect(await result(scope, (await following).taskId, 'r2')).toMatchObject({ state: 'succeeded' });
+  }, 185_000);
 
   it.each(['occupied', 'partial-registration', 'corrupt-receipt'])(
     'preserves existing context and isolates a %s checkout instead of discarding the lane', async condition => {
