@@ -264,6 +264,7 @@ async function validateLinkTarget(root: string, scope: string, file: string, tar
   if (shared && await shared.accept(root, scope, file, target, logical)) return;
   const resolved = path.resolve(root, path.dirname(file), target);
   if (path.isAbsolute(target) || !within(scope, resolved)) {
+    if (root !== scope && shared?.policy.mode === 'external') throw new Error('External symbolic links inside nested repositories are not supported; move the link to the outer repository.');
     throw new Error(`Checkpoint symbolic links must remain relative and inside the repository: ${JSON.stringify(relativeName(scope, root, file))}`);
   }
   try {
@@ -687,6 +688,56 @@ async function captureTree(root: string, scope: string, nested: boolean, importe
   } finally { await fs.rm(directory, { recursive: true, force: true }); }
 }
 
+/** Discover link nodes before Git inventories untracked paths or stages files.
+ * Ignore rules prune ordinary directories; tracked ancestors still expose ignored
+ * directory-to-link replacements. No symbolic-link directory is walked.
+ */
+async function discoverExternalLinks(root: string, shared: SharedLinkCapture): Promise<void> {
+  const cached = entries(await runGit(root, ['ls-files', '--cached', '-z']));
+  const tracked = new Set<string>();
+  for (const file of cached) {
+    if (!file || path.isAbsolute(file) || file.split('/').some(part => part === '..' || part.toLowerCase() === '.git')) {
+      throw new Error('Unsafe path in the Git checkpoint');
+    }
+    for (let name = file; name !== '.'; name = path.posix.dirname(name)) tracked.add(name);
+  }
+  let inventoryBytes = 0;
+  const walk = async (directory: string): Promise<void> => {
+    const absolute = path.join(root, directory);
+    const before = await fs.lstat(absolute, { bigint: true });
+    if (!before.isDirectory() || before.isSymbolicLink() || await fs.realpath(absolute) !== absolute) {
+      throw new Error('Checkpoint discovery directory changed');
+    }
+    const names = (await fs.readdir(absolute)).filter(name => name.toLowerCase() !== '.git')
+      .map(name => directory ? `${directory}/${name}` : name);
+    inventoryBytes += Buffer.byteLength(names.join('\0'));
+    if (inventoryBytes > CHECKPOINT_LIMITS.outputBytes) throw new Error('Checkpoint discovery exceeds the inventory limit');
+    const after = await fs.lstat(absolute, { bigint: true });
+    if (!after.isDirectory() || after.isSymbolicLink() || before.dev !== after.dev || before.ino !== after.ino
+      || await fs.realpath(absolute) !== absolute) throw new Error('Checkpoint discovery directory changed');
+    const ignored = new Set<string>();
+    const untracked = names.filter(name => !tracked.has(name));
+    if (untracked.length) {
+      try {
+        for (const name of entries(await runGit(root, ['check-ignore', '--no-index', '-z', '--stdin'], untracked.join('\0') + '\0'))) ignored.add(name);
+      } catch (error) { if (!(error instanceof GitCommandError && error.code === 1)) throw error; }
+    }
+    for (const name of names) {
+      if (ignored.has(name) && !tracked.has(name)) continue;
+      const file = path.join(root, name);
+      const stat = await fs.lstat(file);
+      if (stat.isSymbolicLink()) await shared.discover(name);
+      else if (stat.isDirectory()) {
+        // Nested repositories retain their independent policy and inventory.
+        try { await fs.lstat(path.join(file, '.git')); continue; }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+        await walk(name);
+      }
+    }
+  };
+  await walk('');
+}
+
 /** Flatten nested working files in private trees; never alter any source HEAD or index. */
 export async function captureCheckpoint(root: string, options: SharedLinkOptions = {}): Promise<GitCheckpoint> {
   root = await fs.realpath(root);
@@ -697,8 +748,11 @@ export async function captureCheckpoint(root: string, options: SharedLinkOptions
   const common = await fs.realpath(path.resolve(root, await gitText(root, ['rev-parse', '--git-common-dir'])));
   const gitDirectory = await fs.realpath(await gitText(root, ['rev-parse', '--absolute-git-dir']));
   const ancestors = [...new Set([common, gitDirectory])];
-  const shared = options.policy || options.bindings || options.sharedSymlinks !== undefined
+  const shared = options.policy || options.bindings || options.sharedSymlinks !== undefined || options.discoverExternal
     ? new SharedLinkCapture(root, { ...options, forbiddenTargets: [...(options.forbiddenTargets ?? []), common, gitDirectory] }) : undefined;
+  // Explicit grants are checked before discovery can encounter nested paths.
+  await sharedPathspecs(root, root, shared);
+  if (shared?.discoversExternal) await discoverExternalLinks(root, shared);
   await shared?.initialize();
   const first = await captureTree(root, root, false, imported, validatedTrees, ancestors, shared);
   const second = await captureTree(root, root, false, imported, validatedTrees, ancestors, shared);

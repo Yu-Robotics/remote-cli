@@ -4,9 +4,11 @@ import { createHash } from 'crypto';
 
 export interface SharedSymlinkGrant { root: string; path: string; target: string }
 export interface SharedLinkBinding { path: string; linkText: string; target: string; kind: 'file' | 'dir' }
-export interface SharedSymlinkPolicy { root: string; grants: SharedSymlinkGrant[] }
+export interface SharedSymlinkPolicy { root: string; grants: SharedSymlinkGrant[]; mode?: 'external' }
 export interface SharedLinkOptions {
   sharedSymlinks?: unknown;
+  /** New admissions only. Pinned policies never discover additional bindings. */
+  discoverExternal?: boolean;
   policy?: SharedSymlinkPolicy;
   bindings?: SharedLinkBinding[];
   physical?: boolean;
@@ -92,6 +94,21 @@ export async function readNativeSharedLink(root: string, name: string): Promise<
   if (!after.isSymbolicLink() || identity(before) !== identity(after)) fail();
   return { text, identity: identity(before) };
 }
+/** Missing internal directories remain valid; unresolved aliases never establish containment. */
+async function danglingInternalTarget(root: string, raw: string): Promise<boolean> {
+  try { await fs.lstat(raw); return false; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false; }
+  for (let parent = path.dirname(raw); ; parent = path.dirname(parent)) {
+    try {
+      const resolved = await fs.realpath(parent);
+      return inside(root, resolved) && inside(root, path.join(resolved, raw.slice(parent.length)));
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false; }
+    // A dangling link is an existing entry, not an absent directory to skip.
+    try { await fs.lstat(parent); return false; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false; }
+    if (path.dirname(parent) === parent) return false;
+  }
+}
 export class SharedLinkCapture {
   readonly bindings: SharedLinkBinding[] = [];
   readonly policy: SharedSymlinkPolicy;
@@ -99,10 +116,10 @@ export class SharedLinkCapture {
   constructor(readonly root: string, private readonly options: SharedLinkOptions) {
     this.pinned = options.bindings !== undefined;
     if (options.policy) {
-      if (!object(options.policy) || !keys(options.policy as unknown as Record<string, unknown>, ['root', 'grants']) || !absolute(options.policy.root)) fail();
-      this.policy = { root: options.policy.root, grants: parseSharedSymlinkGrants(options.policy.grants) };
+      if (!object(options.policy) || !keys(options.policy as unknown as Record<string, unknown>, options.policy.mode === 'external' ? ['root', 'grants', 'mode'] : ['root', 'grants']) || !absolute(options.policy.root)) fail();
+      this.policy = { root: options.policy.root, grants: parseSharedSymlinkGrants(options.policy.grants), ...(options.policy.mode === 'external' ? { mode: 'external' as const } : {}) };
       if (this.policy.grants.some(g => g.root !== this.policy.root)) fail();
-    } else this.policy = { root, grants: parseSharedSymlinkGrants(options.sharedSymlinks).filter(g => g.root === root) };
+    } else this.policy = { root, grants: parseSharedSymlinkGrants(options.sharedSymlinks).filter(g => g.root === root), ...(options.discoverExternal ? { mode: 'external' as const } : {}) };
     if (options.bindings !== undefined) {
       if (!Array.isArray(options.bindings) || options.bindings.length > 64) fail();
       for (const item of options.bindings) {
@@ -115,6 +132,37 @@ export class SharedLinkCapture {
       if (this.bindings.length !== this.policy.grants.length) fail();
       boundSharedMetadata(this.bindings, 32 * 1024);
     }
+  }
+  get discoversExternal(): boolean { return this.options.discoverExternal === true && !this.options.policy && !this.pinned; }
+  /** Resolve the live link, retaining alias/.. semantics without reading target bytes. */
+  async discover(name: string): Promise<void> {
+    if (!this.discoversExternal || this.paths.includes(name)) return;
+    const file = path.join(this.root, name);
+    let target: string;
+    try { target = await fs.realpath(file); }
+    catch (error) {
+      // Preserve legacy support for dangling internal relative links only.
+      const text = await fs.readlink(file);
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT' && !path.isAbsolute(text)
+        && inside(this.root, path.resolve(path.dirname(file), text))) {
+        try {
+          // Do not normalize alias/.. before checking a missing leaf's parent.
+          const raw = `${path.dirname(file)}${path.sep}${text}`;
+          if (await danglingInternalTarget(this.root, raw)) return;
+        } catch { /* An unresolved parent cannot establish an internal target. */ }
+      }
+      throw new Error('External symbolic-link targets must exist and resolve without cycles.');
+    }
+    if (inside(this.root, target)) return;
+    const link = await readNativeSharedLink(this.root, name);
+    const kind = await targetKind(this.root, target, this.options.forbiddenTargets ?? []);
+    if (await fs.realpath(file) !== target) fail();
+    const after = await readNativeSharedLink(this.root, name);
+    if (link.text !== after.text || link.identity !== after.identity) fail();
+    const grant = { root: this.root, path: name, target };
+    this.policy.grants = parseSharedSymlinkGrants([...this.policy.grants, grant]);
+    this.bindings.push({ path: name, linkText: link.text, target, kind });
+    boundSharedMetadata(this.bindings, 32 * 1024);
   }
   get physical(): boolean { return this.options.physical === true; }
   get paths(): string[] { return this.policy.grants.map(g => g.path); }

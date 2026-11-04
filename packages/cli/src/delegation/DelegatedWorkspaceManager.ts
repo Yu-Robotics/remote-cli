@@ -193,7 +193,7 @@ export class DelegatedWorkspaceManager {
     await this.validateSource(source);
     const grants = parseSharedSymlinkGrants(await this.sharedSymlinks()).filter(grant => grant.root === source.root);
     await validateSharedLocations(grants);
-    return captureCheckpoint(source.root, { sharedSymlinks: grants, forbiddenTargets: [path.resolve(this.directory), source.commonDirectory] });
+    return captureCheckpoint(source.root, { sharedSymlinks: grants, discoverExternal: true, forbiddenTargets: [path.resolve(this.directory), source.commonDirectory] });
   }
 
   async unavailableLanes(): Promise<Set<string>> {

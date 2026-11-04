@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.209] - 2026-11-04
+
+### Changed
+- Admit ordinary external symbolic links in new managed Git tasks without requiring per-link grants. Preserve original link text in checkpoints and the original external target in worker checkouts without copying target contents.
+- Keep external target edits outside artifact review, integration, and rollback. Retain link identity, protected-target, and automatic write and cleanup checks, including recorded policies for existing artifacts.
+
+### Tests
+- Cover automatic external-link admission, target-preserving checkout mapping, link-only artifacts, and guarded closeout and lane reuse.
+
 ## [1.6.208] - 2026-11-04
 
 ### Fixed
