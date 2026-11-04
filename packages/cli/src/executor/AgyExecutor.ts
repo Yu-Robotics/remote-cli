@@ -15,6 +15,8 @@ import { configureAgyDelegation } from './agy/AgyDelegationConfig';
 import { delegationEnvironment, sameConnection, type DelegationConnection } from '../delegation/contract';
 import { ActivityTracker, sanitizeActivityText } from './Activity';
 import { parseAgyModels } from './agy/AgyModels';
+import type { AgyDeletionTarget } from '../delegation/AgySessionDeletion';
+import type { NativeDirectoryIdentity } from '../delegation/NativeSessionDeletion';
 
 export interface AgyExecutorOptions {
   /** Model slug passed as --model. Leave unset to use agy's default. */
@@ -185,6 +187,16 @@ export class AgyExecutor implements IExecutor {
   /** Handoff summary from compactWhenFull, wrapped into the next prompt (consumed once). */
   private pendingContextSeed: string | null = null;
   private readonly activityTracker = new ActivityTracker();
+  private nativeObserver?: (target: AgyDeletionTarget) => Promise<void>;
+  private nativeCaptureFailure?: () => Promise<void>;
+  private nativeReceiptOperations: Promise<void> = Promise.resolve();
+  private nativeReceiptPending = 0;
+  private nativeCaptureUnconfirmed = false;
+  private nativeCaptureFailed = false;
+  private nativeCreationScope?: NativeDirectoryIdentity;
+  private preexistingNativeIds = new Set<string>();
+  private observedNativeIds = new Set<string>();
+  private resettingNativeContext = false;
 
   constructor(directoryGuard: DirectoryGuard, options: AgyExecutorOptions = {}) {
     this.directoryGuard = directoryGuard;
@@ -254,7 +266,12 @@ export class AgyExecutor implements IExecutor {
     const threadCli = path.join(threadGemini, 'antigravity-cli');
     fs.mkdirSync(threadCli, { recursive: true });
     for (const name of AGY_CLI_SHARED_FILES) this.linkShared(realCli, threadCli, name, 'file');
-    for (const name of AGY_CLI_SHARED_DIRS) this.linkShared(realCli, threadCli, name, 'dir');
+    for (const name of AGY_CLI_SHARED_DIRS) {
+      if (this.delegationWorker && name === 'cache') {
+        // Never replace a legacy shared link. Such lanes cannot receive deletion receipts.
+        if (!fs.existsSync(path.join(threadCli, name))) fs.mkdirSync(path.join(threadCli, name));
+      } else this.linkShared(realCli, threadCli, name, 'dir');
+    }
   }
 
   /**
@@ -364,15 +381,20 @@ export class AgyExecutor implements IExecutor {
     const resolved = this.directoryGuard.resolveWorkingDirectory(targetPath, this.currentWorkingDirectory);
     if (resolved === this.currentWorkingDirectory) return;
     if (this.isBusy()) throw new Error('Cannot change working directory while AGY is busy');
-    this.resetContext();
+    await this.resetContext();
     this.currentWorkingDirectory = resolved;
   }
 
-  resetContext(): void {
+  async resetContext(): Promise<void> {
     this.killProcess();
-    this.clearConversationId();
     // /clear means a real fresh start — drop any carried-over compact seed
     this.pendingContextSeed = null;
+    this.resettingNativeContext = true;
+    try {
+      // Keep the old pointer until admitted observations finish. The caller must await reset.
+      if (this.nativeObserver) await this.nativeReceiptOperations;
+      this.clearConversationId();
+    } finally { this.resettingNativeContext = false; }
   }
 
   async abort(): Promise<boolean> {
@@ -403,6 +425,7 @@ export class AgyExecutor implements IExecutor {
       } catch { /* already closed */ }
     }
     this.killProcess('Executor destroyed');
+    if (this.nativeObserver) await this.nativeReceiptOperations;
     if (this.agyHome && this.delegationConnection) {
       await configureAgyDelegation(this.agyCommand, this.agyHome, false);
       this.delegationConnection = undefined;
@@ -410,6 +433,15 @@ export class AgyExecutor implements IExecutor {
   }
 
   // ─── IExecutor optional ───────────────────────────────────────────────────
+
+  /** Coordinator bridges this typed hook into the shared native-target union. */
+  observeNativeSessionCreation(observer: (target: AgyDeletionTarget) => Promise<void>, onFailure?: () => Promise<void>): void {
+    if (!this.delegationWorker || !this.threadId?.startsWith('delegate-lane-') || this.proc) {
+      throw new Error('AGY native observation requires an unstarted managed worker');
+    }
+    this.nativeObserver = observer;
+    this.nativeCaptureFailure = onFailure;
+  }
 
   async waitForExit(): Promise<void> {
     if (!this.pendingExits.size) return;
@@ -423,6 +455,7 @@ export class AgyExecutor implements IExecutor {
 
   async waitForManagedProcessGroupExit(): Promise<void> {
     if (!this.delegationWorker) throw new Error('Managed worker process-group tracking was not enabled');
+    if (this.nativeReceiptPending || this.nativeCaptureUnconfirmed) throw new Error('AGY native creation coverage could not be persisted');
     await this.workerGroups.waitForExit();
   }
 
@@ -562,7 +595,7 @@ export class AgyExecutor implements IExecutor {
       console.warn('[AgyExecutor] Handoff summary failed, falling back to plain reset:', error);
     }
 
-    this.resetContext();
+    await this.resetContext();
     if (summary) {
       this.pendingContextSeed = summary;
       return {
@@ -584,6 +617,8 @@ export class AgyExecutor implements IExecutor {
    */
   async deleteThreadData(_threadId: string): Promise<void> {
     await this.destroy();
+    // Managed lanes retain brain deliverables and recovery evidence. Parent reset owns history cleanup.
+    if (this.delegationWorker) return;
     this.clearConversationId();
     if (this.agyHome) {
       fs.rmSync(this.agyHome, { recursive: true, force: true });
@@ -678,7 +713,23 @@ export class AgyExecutor implements IExecutor {
     if (result.success) {
       result.sessionAbbr = this.conversationId?.slice(0, 8);
     }
-    active.resolve(result);
+    if (this.nativeObserver) {
+      // AGY can emit init only after the first prompt. Do not report success ahead of its durable receipt.
+      if (!this.conversationId && !this.nativeCaptureFailed) {
+        this.nativeReceiptPending++;
+        this.nativeReceiptOperations = this.nativeReceiptOperations.then(() => this.reportNativeCaptureFailure())
+          .catch(() => { this.nativeCaptureUnconfirmed = true; })
+          .finally(() => { this.nativeReceiptPending--; });
+      }
+      const admitted = this.nativeReceiptOperations;
+      void (async () => {
+        await admitted;
+        if (result.success && this.nativeCaptureFailed) {
+          result = { ...result, success: false, error: 'AGY native creation receipt could not be confirmed' };
+        }
+        active.resolve(result);
+      })().catch(() => active.resolve({ ...result, success: false, error: 'AGY native creation coverage could not be persisted' }));
+    } else active.resolve(result);
 
     // A model or effort switch requested mid-command takes effect now that
     // the command has finished — recycle the process (conversation preserved).
@@ -716,10 +767,25 @@ export class AgyExecutor implements IExecutor {
     if (this.isDestroyed) {
       throw new Error('Executor has been destroyed');
     }
+    if (this.resettingNativeContext) throw new Error('AGY context reset is still draining native receipts');
     assertWorkingDirectoryExists(this.currentWorkingDirectory);
     if (this.proc) return this.proc;
 
     const env = this.buildEnv();
+    if (this.nativeObserver && this.agyHome) {
+      const scope = path.join(this.agyHome, '.gemini', 'antigravity-cli');
+      if (fs.realpathSync.native(scope) !== scope) {
+        throw new Error('AGY managed history is redirected');
+      }
+      const stat = fs.lstatSync(scope, { bigint: true });
+      this.nativeCreationScope = { path: scope, dev: String(stat.dev), ino: String(stat.ino) };
+      const conversations = path.join(scope, 'conversations');
+      if (fs.existsSync(conversations) && fs.realpathSync.native(conversations) !== conversations) throw new Error('AGY conversations are redirected');
+      const names = fs.existsSync(conversations) ? fs.readdirSync(conversations) : [];
+      if (names.length > 4096) throw new Error('AGY creation inventory exceeds the inspection limit');
+      this.preexistingNativeIds = new Set(names.map(name => name.replace(/\.db(?:-wal|-shm|-journal)?$/, '')));
+      if (this.conversationId) this.preexistingNativeIds.add(this.conversationId);
+    }
     if (this.agyHome && this.conversationId) {
       const conversationsDir = path.join(this.agyHome, '.gemini', 'antigravity-cli', 'conversations');
       if (path.basename(this.conversationId) !== this.conversationId ||
@@ -846,6 +912,7 @@ export class AgyExecutor implements IExecutor {
     const lines = this.stdoutBuffer.split('\n');
     this.stdoutBuffer = lines.pop() ?? '';
     for (const line of lines) {
+      if (proc !== this.proc) break;
       if (line.trim()) this.handleLine(line);
     }
   }
@@ -981,12 +1048,44 @@ export class AgyExecutor implements IExecutor {
   }
 
   private setConversationId(conversationId: string): void {
+    if (this.conversationId === conversationId) return;
     this.conversationId = conversationId;
+    let persisted = true;
     try {
       const data = JSON.stringify({ id: conversationId, savedAt: new Date().toISOString() });
       fs.writeFileSync(this.sessionFilePath, data, 'utf-8');
     } catch (error) {
+      persisted = false;
       console.error('[AgyExecutor] Failed to save conversation ID:', error);
+    }
+    if (this.nativeObserver && !this.observedNativeIds.has(conversationId)) {
+      const scope = this.nativeCreationScope;
+      const observer = this.nativeObserver;
+      const cwd = this.currentWorkingDirectory;
+      const home = os.homedir();
+      const preexisting = this.preexistingNativeIds.has(conversationId);
+      this.observedNativeIds.add(conversationId);
+      this.nativeReceiptPending++;
+      this.nativeReceiptOperations = this.nativeReceiptOperations.then(async () => {
+        try {
+          if (!persisted || preexisting || !scope || !this.threadId) throw new Error('AGY native creation is unconfirmed');
+          const { captureAgyDeletionTarget } = await import('../delegation/AgySessionDeletion');
+          const target = await captureAgyDeletionTarget({ sessionId: conversationId, executorThreadId: this.threadId,
+            home, cwd, command: this.agyCommand });
+          if (target.scope.dev !== scope.dev || target.scope.ino !== scope.ino) throw new Error('AGY creation root changed');
+          await observer(target);
+        } catch { await this.reportNativeCaptureFailure(); }
+        finally { this.nativeReceiptPending--; }
+      }).catch(() => { this.nativeCaptureUnconfirmed = true; });
+    }
+  }
+
+  private async reportNativeCaptureFailure(): Promise<void> {
+    this.nativeCaptureFailed = true;
+    this.nativeCaptureUnconfirmed = true;
+    if (this.nativeCaptureFailure) {
+      await this.nativeCaptureFailure();
+      this.nativeCaptureUnconfirmed = false;
     }
   }
 

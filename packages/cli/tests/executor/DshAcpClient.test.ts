@@ -3,6 +3,7 @@ import { EventEmitter } from 'events';
 import { Readable, Writable } from 'stream';
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import { spawn } from 'child_process';
 import { DshAcpClient, dshErrorMessage } from '../../src/executor/dsh/DshAcpClient';
 import type { AcpEventCallbacks } from '../../src/executor/acp/AcpClient';
@@ -37,6 +38,7 @@ function processFixture() {
 }
 
 describe('DshAcpClient', () => {
+  let home: string;
   let fixture: ReturnType<typeof processFixture>;
   let clients: DshAcpClient[];
   const create = (callbacks: AcpEventCallbacks = {}, timeout = 1000) => {
@@ -44,12 +46,31 @@ describe('DshAcpClient', () => {
     clients.push(client); return client;
   };
   beforeEach(() => {
+    home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-acp-isolation-')));
+    vi.spyOn(os, 'homedir').mockReturnValue(home);
+    vi.spyOn(os, 'tmpdir').mockReturnValue(home);
+    for (const key of ['HOME', 'USERPROFILE', 'DSH_HOME', 'CODEX_HOME']) vi.stubEnv(key, home);
     clients = []; fixture = processFixture();
     vi.mocked(spawn).mockReturnValue(fixture.child);
   });
   afterEach(async () => {
-    for (const client of clients) { client.destroy(); await client.waitForExit(); }
-    vi.restoreAllMocks(); vi.unstubAllEnvs();
+    try {
+      for (const client of clients) { client.destroy(); await client.waitForExit(); }
+      fs.rmSync(home, { recursive: true, force: true });
+    } finally { vi.restoreAllMocks(); vi.unstubAllEnvs(); }
+  });
+
+  it('adds a managed history overlay without changing tool HOME or the ordinary privacy overlay', async () => {
+    const historyPatch = '- id: session-persistence-jsonl\n  config:\n    root: "synthetic-owned-root"\n';
+    expect(() => new DshAcpClient('synthetic-dsh', home, {}, 1000, false, historyPatch)).toThrow('managed worker');
+    expect(spawn).not.toHaveBeenCalled();
+    const client = new DshAcpClient('synthetic-dsh', home, {}, 1000, true, historyPatch);
+    clients.push(client);
+    const [, args, options] = vi.mocked(spawn).mock.calls[0] as any[];
+    expect(fs.readFileSync(args[3], 'utf8')).toContain(historyPatch);
+    expect(options.env.HOME).toBe(home);
+    expect(options.env.DSH_HOME).toBe(home);
+    expect(fs.readFileSync(args[3], 'utf8')).toContain('mode: DISABLED');
   });
 
   it('uses a private per-process overlay for both upload paths without modifying the parent environment', async () => {

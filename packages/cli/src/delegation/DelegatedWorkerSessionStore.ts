@@ -141,8 +141,8 @@ function validateLane(value: unknown): value is DelegatedWorkerLane {
     && (lane.nativeDeletionPreparations === undefined || lane.nativeDeletionPreparations
       && typeof lane.nativeDeletionPreparations === 'object' && !Array.isArray(lane.nativeDeletionPreparations)
       && Object.entries(lane.nativeDeletionPreparations).length <= 64
-      && Object.entries(lane.nativeDeletionPreparations).every(([id, prepared]) => UUID_RE.test(id)
-        && prepared?.version === 1 && [lane.nativeSession, ...(lane.nativeSessionHistory ?? [])].some(target =>
+      && Object.entries(lane.nativeDeletionPreparations).every(([id, prepared]) =>
+        prepared?.version === 1 && [lane.nativeSession, ...(lane.nativeSessionHistory ?? [])].some(target =>
           target?.sessionId === id && validDeletionPreparation(target, prepared))))
     && (lane.nativeGroupExitGeneration === undefined || validGeneration(lane.nativeGroupExitGeneration)
       && lane.nativeGroupExitGeneration === (lane.contextGeneration ?? 0))

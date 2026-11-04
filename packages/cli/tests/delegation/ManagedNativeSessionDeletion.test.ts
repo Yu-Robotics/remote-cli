@@ -22,6 +22,7 @@ describe('managed child native deletion lifecycle', () => {
   let execution: ReturnType<typeof gate>;
   let exit: ReturnType<typeof gate>;
   let deletion: ReturnType<typeof vi.fn>;
+  let maintenanceExit: ReturnType<typeof vi.fn>;
   let targets: NativeSessionDeletionTarget[];
   let factory: ReturnType<typeof vi.fn>;
   beforeEach(async () => {
@@ -31,6 +32,7 @@ describe('managed child native deletion lifecycle', () => {
     await fs.mkdir(path.join(home, '.codex'));
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     creation = gate(); execution = gate(); exit = gate(); targets = [];
+    maintenanceExit = vi.fn(async () => {});
     factory = vi.fn((_guard, _config, cwd, executorThreadId) => {
       let observer: ((target: NativeSessionDeletionTarget) => Promise<void>) | undefined;
       let sessionId: string | undefined;
@@ -65,7 +67,7 @@ describe('managed child native deletion lifecycle', () => {
       : method === 'thread/list' ? { data: params.archived ? [] : targets.map(target => nativeThread(target.sessionId)), nextCursor: null } : {});
     manager = new DelegationManager(new DirectoryGuard([home]), factory as any,
       new BackendRegistry(async () => 'synthetic 1.0'), undefined, undefined, 1000, undefined, undefined,
-      () => ({ start: async () => {}, stop: async () => {}, getServerVersion: () => '0.166.0', request: deletion }));
+      () => ({ start: async () => {}, stop: async () => {}, waitForManagedProcessGroupExit: maintenanceExit, getServerVersion: () => '0.166.0', request: deletion }));
     parent = { thread: { id: 'parent', name: 'parent', workingDirectory: home, sessionId: null, createdAt: 0, lastActiveAt: 0 },
       cwd: home, backend: 'codex', config: { type: 'codex' }, messageId: 'synthetic',
       onToolUse: vi.fn(), onToolResult: vi.fn(), onNotice: vi.fn(), onApproval: vi.fn(() => true), onApprovalResolved: vi.fn() };
@@ -265,6 +267,31 @@ describe('managed child native deletion lifecycle', () => {
     expect((await manager.laneStore.lanesForThread('parent'))[0].nativeDeletion?.state).toBe('waiting-exit');
   });
 
+  it('retains uncertain maintenance fencing across reconciliation and restart', async () => {
+    creation.resolve(); execution.resolve(); exit.resolve();
+    await finish(await launch());
+    maintenanceExit.mockRejectedValue(new Error('Synthetic surviving maintenance writer'));
+    await manager.requestNativeSessionDeletion('parent', 0);
+    await manager.reconcileNativeSessionDeletions();
+    expect((await manager.laneStore.lanesForThread('parent'))[0]).toMatchObject({
+      nativeMaintenanceExitUnconfirmed: true, nativeDeletion: { state: 'uncertain' },
+    });
+    deletion.mockClear();
+    maintenanceExit.mockResolvedValue(undefined);
+    await manager.reconcileNativeSessionDeletions();
+    expect(deletion).not.toHaveBeenCalled();
+    await manager.destroy();
+    manager = new DelegationManager(new DirectoryGuard([home]), factory as any,
+      new BackendRegistry(async () => 'synthetic 1.0'), undefined, undefined, 1000, undefined, undefined,
+      () => ({ start: async () => {}, stop: async () => {}, waitForManagedProcessGroupExit: maintenanceExit,
+        getServerVersion: () => 'synthetic', request: deletion }));
+    await manager.reconcileNativeSessionDeletions();
+    expect(deletion).not.toHaveBeenCalled();
+    expect((await manager.laneStore.lanesForThread('parent'))[0]).toMatchObject({
+      nativeMaintenanceExitUnconfirmed: true, nativeDeletion: { state: 'waiting-exit' },
+    });
+  });
+
   it('persists exact deletion preparation and recovers lost acknowledgement after restart', async () => {
     creation.resolve(); execution.resolve(); exit.resolve();
     await finish(await launch());
@@ -285,7 +312,7 @@ describe('managed child native deletion lifecycle', () => {
     await manager.destroy();
     manager = new DelegationManager(new DirectoryGuard([home]), factory as any,
       new BackendRegistry(async () => 'synthetic 1.0'), undefined, undefined, 1000, undefined, undefined,
-      () => ({ start: async () => {}, stop: async () => {}, getServerVersion: () => '0.165.0', request: deletion }));
+      () => ({ start: async () => {}, stop: async () => {}, waitForManagedProcessGroupExit: maintenanceExit, getServerVersion: () => '0.165.0', request: deletion }));
     await manager.reconcileNativeSessionDeletions();
     expect((await manager.laneStore.lanesForThread('parent'))[0].nativeDeletion?.state).toBe('deleted');
   });
@@ -310,7 +337,7 @@ describe('managed child native deletion lifecycle', () => {
     });
     manager = new DelegationManager(new DirectoryGuard([home]), factory as any,
       new BackendRegistry(async () => 'synthetic 1.0'), undefined, undefined, 1000, undefined, undefined,
-      () => ({ start: async () => {}, stop: async () => {}, getServerVersion: () => '0.165.0', request: deletion }));
+      () => ({ start: async () => {}, stop: async () => {}, waitForManagedProcessGroupExit: maintenanceExit, getServerVersion: () => '0.165.0', request: deletion }));
     const persistPrepared = vi.spyOn(manager.laneStore, 'prepareNativeDeletion');
     await manager.reconcileNativeSessionDeletions();
     expect(await manager.laneStore.getInventoryStatus()).toEqual({ complete: true, quarantinedRecords: 0 });
@@ -324,18 +351,19 @@ describe('managed child native deletion lifecycle', () => {
     expect(saved.nativeDeletionPreparations[target.sessionId]).toEqual(legacy);
   });
 
-  it('reports unaudited backends unsupported without removing their lane evidence', async () => {
+  it('holds newly supported backends without creation receipts and preserves their lane evidence', async () => {
     const lanes = [];
     for (const backend of DELEGATION_BACKENDS.filter(value => !['codex', 'kimi', 'pi', 'claude'].includes(value))) {
       const { lane } = await manager.laneStore.acquire({ threadId: 'parent', backend, workingDirectory: home, workspaceGeneration: 0 });
       lanes.push(lane);
+      await manager.laneStore.markShutdownConfirmed(lane.id, 0, true);
       await manager.laneStore.markReady(lane.id);
     }
     await manager.requestNativeSessionDeletion('parent', 0);
     await manager.reconcileNativeSessionDeletions();
     expect(deletion).not.toHaveBeenCalled();
     expect(await manager.laneStore.lanesForThread('parent')).toEqual(expect.arrayContaining(lanes.map(lane => expect.objectContaining({
-      id: lane.id, nativeDeletion: expect.objectContaining({ state: 'unsupported' }),
+      id: lane.id, nativeDeletion: expect.objectContaining({ state: 'held' }),
     }))));
   });
 });

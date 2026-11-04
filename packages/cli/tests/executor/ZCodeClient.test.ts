@@ -70,7 +70,9 @@ describe('ZCodeClient', () => {
   let client: ZCodeClient;
 
   beforeEach(async () => {
-    temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'zcode-client-test-'));
+    temporaryDirectory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'zcode-client-test-')));
+    vi.spyOn(os, 'homedir').mockReturnValue(temporaryDirectory);
+    for (const key of ['HOME', 'USERPROFILE', 'ZCODE_HOME', 'ZCODE_STORAGE_DIR', 'CODEX_HOME']) vi.stubEnv(key, temporaryDirectory);
     fixturePath = path.join(temporaryDirectory, 'server.cjs');
     await fs.writeFile(fixturePath, fixture);
     callbacks = {
@@ -92,9 +94,11 @@ describe('ZCodeClient', () => {
   });
 
   afterEach(async () => {
-    client.destroy();
-    await client.waitForExit();
-    await fs.rm(temporaryDirectory, { recursive: true, force: true });
+    try {
+      client.destroy();
+      await client.waitForExit();
+      await fs.rm(temporaryDirectory, { recursive: true, force: true });
+    } finally { vi.restoreAllMocks(); vi.unstubAllEnvs(); }
   });
 
   it('drives the official app-server protocol directly', async () => {

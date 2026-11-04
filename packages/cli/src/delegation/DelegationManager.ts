@@ -1,6 +1,11 @@
 import { NativeSessionDeletionQueue, deleteOwnedCodexSession, type NativeDeletionClientFactory, type NativeDeletionResult, type NativeDeletionRequest } from './NativeSessionDeletion';
 import { deleteOwnedHistoryFiles } from './NativeHistoryFiles';
 import { deleteOwnedKimiSession, type KimiDeletionFactory } from './KimiSessionDeletion';
+import { deleteOwnedOpenCodeSession, type OpenCodeDeletionPreparation } from './OpenCodeSessionDeletion';
+import { deleteOwnedDshSession, type DshDeletionPreparation, type DshDeletionTarget } from './DshSessionDeletion';
+import { deleteOwnedAgySession, type AgyDeletionPreparation, type AgyDeletionTarget } from './AgySessionDeletion';
+import { deleteOwnedZCodeHistory, validZCodeOwnedTarget } from './ZCodeOwnedHistory';
+import type { ZCodeDeletionPreparation } from './ZCodeSessionDeletion';
 import { randomUUID } from 'crypto';
 import fs from 'fs';
 import path from 'path';
@@ -1489,7 +1494,7 @@ ${prompt}`));
         let result: NativeDeletionResult;
         if (!requests.some(request => request.threadId === lane.threadId && lane.workspaceGeneration <= request.throughGeneration)) {
           result = { state: 'held', reason: 'Durable parent reset authorization is unavailable' };
-        } else if (!['codex', 'kimi', 'pi', 'claude'].includes(lane.backend)) {
+        } else if (!['codex', 'kimi', 'pi', 'claude', 'opencode', 'dsh', 'agy', 'zcode'].includes(lane.backend)) {
           result = { state: 'unsupported', reason: `${lane.backend} has no verified permanent deletion adapter; native history was retained` };
         } else if (lane.nativeMaintenanceExitUnconfirmed) {
           result = { state: 'waiting-exit', reason: 'An earlier native maintenance writer exit is unconfirmed' };
@@ -1502,11 +1507,16 @@ ${prompt}`));
         } else {
           result = { state: 'deleted', reason: 'All owned native session identities were deleted' };
           const targets = [...(lane.nativeSessionHistory ?? []), ...(lane.nativeSession ? [lane.nativeSession] : [])];
+          // Scope-backed adapters can remove shared indexes. Check every recorded
+          // identity before the first mutation, not only the current root.
+          const exclusive = (await Promise.all(targets.map(target => this.laneStore.isNativeIdentityExclusive(lane.id, target)))).every(Boolean);
+          const clearedDshScopes = new Set<string>();
           for (const target of targets) {
-            if (!await this.laneStore.isNativeIdentityExclusive(lane.id, target)) {
+            if (!exclusive) {
               result = { state: 'held', reason: 'Native session identity is referenced by another worker' };
               break;
             }
+            if (target.backend === 'dsh' && clearedDshScopes.has(target.scope.path)) continue;
             const recovery = {
               detachedPointer: target !== lane.nativeSession || lane.contextRetired === true || lane.contextResetPending === true,
               prepared: lane.nativeDeletionPreparations?.[target.sessionId],
@@ -1515,10 +1525,24 @@ ${prompt}`));
               persistMaintenanceState: (unconfirmed: boolean) =>
                 this.laneStore.recordNativeMaintenance(lane.id, lane.contextGeneration ?? 0, unconfirmed),
             };
-            const outcome = await this.ownership.withProcesses(() => target.backend === 'codex'
-              ? deleteOwnedCodexSession(target, this.nativeDeletionClientFactory, recovery)
-              : target.backend === 'kimi' ? deleteOwnedKimiSession(target, recovery, this.kimiDeletionClientFactory) : deleteOwnedHistoryFiles(target, recovery));
+            const outcome = await this.ownership.withProcesses(() => {
+              if (target.backend === 'codex') return deleteOwnedCodexSession(target, this.nativeDeletionClientFactory, recovery);
+              if (target.backend === 'kimi') return deleteOwnedKimiSession(target, recovery, this.kimiDeletionClientFactory);
+              if (target.backend === 'opencode') return deleteOwnedOpenCodeSession(target, { ...recovery,
+                prepared: recovery.prepared as OpenCodeDeletionPreparation | undefined });
+              if (target.backend === 'dsh') return deleteOwnedDshSession(target, { ...recovery,
+                ownedTargets: targets.filter((value): value is DshDeletionTarget => value.backend === 'dsh' && value.scope.path === target.scope.path),
+                prepared: recovery.prepared as DshDeletionPreparation | undefined });
+              if (target.backend === 'agy') return deleteOwnedAgySession(target, { ...recovery, confirmedProcessGroupExit: true,
+                ownedTargets: targets.filter((value): value is AgyDeletionTarget => value.backend === 'agy' && value.scope.path === target.scope.path),
+                prepared: recovery.prepared as AgyDeletionPreparation | undefined });
+              if (target.backend === 'zcode') return validZCodeOwnedTarget(target)
+                ? deleteOwnedZCodeHistory(target, { ...recovery, prepared: recovery.prepared as ZCodeDeletionPreparation | undefined })
+                : Promise.resolve({ state: 'held' as const, reason: 'ZCode owned storage receipt is unavailable' });
+              return deleteOwnedHistoryFiles(target, recovery);
+            });
             if (outcome.state !== 'deleted') { result = outcome; break; }
+            if (target.backend === 'dsh') clearedDshScopes.add(target.scope.path);
           }
         }
         await this.laneStore.recordNativeDeletion(lane.id, lane.contextGeneration ?? 0, result);

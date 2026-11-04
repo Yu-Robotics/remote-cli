@@ -164,6 +164,28 @@ describe('DelegatedWorkerSessionStore', () => {
     expect((await restarted.lanesForThread('parent-thread'))[0].nativeDeletionPreparations?.[target.sessionId]).toEqual(prepared);
   });
 
+  it('reloads an exact native non-UUID preparation and rejects an unrelated key', async () => {
+    const store = new DelegatedWorkerSessionStore(directory);
+    const { lane } = await store.acquire({ ...identity(workspace), backend: 'opencode' });
+    const target: NativeSessionDeletionTarget = { version: 1, backend: 'opencode', sessionId: 'ses_ownedFixture123',
+      executorThreadId: lane.executorThreadId, home: { path: home, dev: '1', ino: '1' },
+      database: { path: path.join(home, 'sessions.sqlite'), dev: '1', ino: '2' },
+      pointer: path.join(home, '.remote-cli', 'opencode-sessions', `${lane.executorThreadId}.json`),
+      pointerHash: 'a'.repeat(64), cwd: workspace, command: 'synthetic-opencode', projectId: 'synthetic-project', createdAt: 1 };
+    await store.captureNativeSession(lane.id, 0, target);
+    await store.requestNativeDeletion('parent-thread', 0);
+    const prepared = deletionPreparation(target);
+    await store.prepareNativeDeletion(lane.id, 0, target, prepared);
+    const restarted = new DelegatedWorkerSessionStore(directory);
+    expect(await restarted.getInventoryStatus()).toEqual({ complete: true, quarantinedRecords: 0 });
+    expect((await restarted.lanesForThread('parent-thread'))[0].nativeDeletionPreparations?.[target.sessionId]).toEqual(prepared);
+    const file = path.join(directory, `${lane.id}.json`);
+    const saved = JSON.parse(await fs.readFile(file, 'utf8'));
+    saved.nativeDeletionPreparations.ses_foreignFixture = prepared;
+    await fs.writeFile(file, JSON.stringify(saved));
+    expect(await new DelegatedWorkerSessionStore(directory).getInventoryStatus()).toEqual({ complete: false, quarantinedRecords: 1 });
+  });
+
   it.each(['contract', 'target', 'format', 'extra-field'])(
     'quarantines a corrupted Codex preparation %s after restart', async fault => {
     const store = new DelegatedWorkerSessionStore(directory);

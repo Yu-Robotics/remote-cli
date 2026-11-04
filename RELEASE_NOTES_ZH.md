@@ -2,6 +2,14 @@
 
 这里只记录用户能感知的变化；英文技术细节见 CHANGELOG.md。
 
+## [1.6.217] - 2026-11-05
+
+### 扩展子代理会话清理
+- [delegation-sessions|子代理会话] Linux 上为新建的 OpenCode、AGY、DSH 和 ZCode 子会话增加清理支持，主会话 clear 或 new 后按归属和退出状态清理。
+- [delegation-sessions|子代理会话] 保留子代理的代码和交付物，清理条件不足时保留记录并说明原因。
+- [delegation-sessions|子代理会话] 修复清理维护进程退出状态和不同后端会话标识的持久化处理。
+- [delegation-sessions|子代理会话] 旧 AGY 子会话即使暂时无法清理，也能继续正常执行任务。
+
 ## [1.6.216] - 2026-11-04
 
 ### 修复子会话清理被无关记录阻塞

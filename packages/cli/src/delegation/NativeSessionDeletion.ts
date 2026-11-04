@@ -6,6 +6,11 @@ import path from 'path';
 import { CodexAppServerClient, type CodexAppServerClientOptions } from '../executor/CodexAppServerClient';
 import { replaceAtomicFile } from './AtomicFile';
 import { syncDirectory } from './OwnershipRuntime';
+import { validOpenCodeDeletionTarget, openCodeDeletionPreparation, type OpenCodeDeletionTarget } from './OpenCodeSessionDeletion';
+import { validDshDeletionTarget, validDshDeletionPreparation, type DshDeletionTarget } from './DshSessionDeletion';
+import { validAgyDeletionTarget, validAgyDeletionPreparation, type AgyDeletionTarget } from './AgySessionDeletion';
+import { validZCodeDeletionPreparation, type ZCodeArtifactReceipt } from './ZCodeSessionDeletion';
+import { validZCodeOwnedTarget, type ZCodeOwnedTarget } from './ZCodeOwnedHistory';
 import { validOwnedHistoryTarget, stableHistoryHash, validHistoryPreparation,
   type OwnedHistoryTarget, type HistoryEntry } from './NativeHistoryFiles';
 
@@ -24,7 +29,7 @@ export interface CodexDeletionTarget {
   cwd: string;
   command: string;
 }
-export type NativeSessionDeletionTarget = CodexDeletionTarget | OwnedHistoryTarget;
+export type NativeSessionDeletionTarget = CodexDeletionTarget | OwnedHistoryTarget | OpenCodeDeletionTarget | DshDeletionTarget | AgyDeletionTarget | ZCodeOwnedTarget;
 export type NativeDeletionState = 'pending' | 'waiting-exit' | 'held' | 'unsupported' | 'uncertain' | 'deleted';
 export interface NativeDeletionResult { state: NativeDeletionState; reason: string }
 export interface NativeDeletionRequest {
@@ -34,6 +39,10 @@ const safeGeneration = (value: unknown): value is number => Number.isSafeInteger
 const validDirectory = (value: any): value is NativeDirectoryIdentity => value && typeof value.path === 'string'
   && path.isAbsolute(value.path) && typeof value.dev === 'string' && typeof value.ino === 'string' && /^\d+$/.test(value.dev) && /^\d+$/.test(value.ino) && value.ino !== '0';
 export function validNativeTarget(value: any): value is NativeSessionDeletionTarget {
+  if (value?.backend === 'opencode') return validOpenCodeDeletionTarget(value);
+  if (value?.backend === 'dsh') return validDshDeletionTarget(value);
+  if (value?.backend === 'agy') return validAgyDeletionTarget(value);
+  if (value?.backend === 'zcode') return validZCodeOwnedTarget(value);
   if (value?.backend !== 'codex') return validOwnedHistoryTarget(value);
   return value?.version === 1 && value.backend === 'codex' && typeof value.sessionId === 'string' && UUID.test(value.sessionId)
     && typeof value.executorThreadId === 'string' && LANE.test(value.executorThreadId)
@@ -255,10 +264,13 @@ function verifyNoDescendants(threads: Map<string, NativeThreadMetadata>, root: s
 export interface NativeDeletionPreparation {
   version: 1;
   /** Adapter protocol/layout contract; old package strings remain immutable legacy receipt markers. */
-  nativeVersion: 'codex-thread-delete-v1' | '0.166.0' | OwnedHistoryTarget['nativeVersion'];
+  nativeVersion: 'codex-thread-delete-v1' | '0.166.0' | OwnedHistoryTarget['nativeVersion']
+    | 'opencode-session-delete-v1' | 'dsh-owned-jsonl-v1' | 'agy-owned-sqlite-v1' | 'zcode-session-data-v4';
   targetHash: string;
   /** Exact immutable pre-delete manifest for file-backed adapters. */
   files?: HistoryEntry[];
+  sessionIds?: string[];
+  artifacts?: ZCodeArtifactReceipt;
 }
 /** Recovery never replaces the caller's parent-reset authorization and current exit proof. */
 export interface NativeDeletionRecovery {
@@ -272,6 +284,7 @@ export interface NativeDeletionRecovery {
   persistMaintenanceState?: (unconfirmed: boolean) => Promise<void>;
 }
 export function deletionPreparation(target: NativeSessionDeletionTarget): NativeDeletionPreparation {
+  if (target.backend === 'opencode') return openCodeDeletionPreparation(target);
   if (target.backend !== 'codex') return { version: 1, nativeVersion: target.nativeVersion, targetHash: stableHistoryHash(target) };
   // Explicit field order makes this stable across JSON persistence and object reconstruction.
   const directory = (value: NativeDirectoryIdentity) => [value.path, value.dev, value.ino];
@@ -280,6 +293,10 @@ export function deletionPreparation(target: NativeSessionDeletionTarget): Native
   return { version: 1, nativeVersion: 'codex-thread-delete-v1', targetHash: createHash('sha256').update(JSON.stringify(identity)).digest('hex') };
 }
 export function validDeletionPreparation(target: NativeSessionDeletionTarget, prepared: NativeDeletionPreparation): boolean {
+  if (target.backend === 'opencode') return JSON.stringify(openCodeDeletionPreparation(target)) === JSON.stringify(prepared);
+  if (target.backend === 'dsh') return validDshDeletionPreparation(target, prepared);
+  if (target.backend === 'agy') return validAgyDeletionPreparation(target, prepared);
+  if (target.backend === 'zcode') return validZCodeDeletionPreparation(target, prepared);
   if (target.backend === 'pi' || target.backend === 'claude') return validHistoryPreparation(target, prepared);
   const expected = deletionPreparation(target);
   // Previously persisted Codex receipts remain valid and immutable across CLI versions.
@@ -292,6 +309,7 @@ export interface NativeDeletionTransport {
   getServerVersion(): string | null;
   request(method: string, params: unknown): Promise<any>;
   stop(): Promise<void>;
+  waitForManagedProcessGroupExit(): Promise<void>;
 }
 export type NativeDeletionClientFactory = (options: CodexAppServerClientOptions) => NativeDeletionTransport;
 /** No archive, resume, new session, model turn, or direct database writes. */
@@ -300,6 +318,7 @@ export async function deleteOwnedCodexSession(target: NativeSessionDeletionTarge
   recovery: NativeDeletionRecovery = {}): Promise<NativeDeletionResult> {
   let client: NativeDeletionTransport | undefined;
   let deleting = false;
+  let fenced = false;
   let result: NativeDeletionResult;
   let failureReason = 'Native target identity verification failed';
   const verifyLocalIdentity = async (codex: CodexDeletionTarget) => {
@@ -311,8 +330,12 @@ export async function deleteOwnedCodexSession(target: NativeSessionDeletionTarge
   try {
     if (target.backend !== 'codex') throw new Error('Not a Codex deletion target');
     await verifyLocalIdentity(target);
+    failureReason = 'Durable native maintenance fencing is required';
+    if (!recovery.persistMaintenanceState) throw new Error(failureReason);
+    await recovery.persistMaintenanceState(true);
+    fenced = true;
     failureReason = 'Native inventory, root, inactivity or descendant verification failed';
-    client = factory({ command: target.command, cwd: target.nativeHome.path,
+    client = factory({ delegationWorker: true, command: target.command, cwd: target.nativeHome.path,
       env: { ...process.env, HOME: target.home.path, CODEX_HOME: target.nativeHome.path },
       launchArgs: ['-c', 'mcp_servers={}'] });
     await client.start();
@@ -365,8 +388,14 @@ export async function deleteOwnedCodexSession(target: NativeSessionDeletionTarge
         ? 'Native deletion outcome is uncertain; the exact target is retained for retry'
         : failureReason };
   } finally {
-    if (client) {
-      try { await client.stop(); }
+    if (fenced) {
+      try {
+        if (client) {
+          await client.stop();
+          await client.waitForManagedProcessGroupExit();
+        }
+        await recovery.persistMaintenanceState!(false);
+      }
       catch { result = { state: 'uncertain', reason: 'Native maintenance transport exit is unconfirmed' }; }
     }
   }
