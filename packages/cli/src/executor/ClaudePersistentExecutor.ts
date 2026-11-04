@@ -1,4 +1,6 @@
 import { ownedSpawn as spawn } from '../delegation/OwnershipRuntime';
+import { captureHistoryTarget, claudeProjectName, validClaudeProjectOverride, type OwnedHistoryTarget } from '../delegation/NativeHistoryFiles';
+import type { NativeSessionDeletionTarget } from '../delegation/NativeSessionDeletion';
 import { ChildProcess } from 'child_process';
 import { ManagedProcessGroups } from './ManagedProcessGroups';
 import { DirectoryGuard } from '../security/DirectoryGuard';
@@ -116,6 +118,7 @@ interface ClaudeOutputMessage {
   model?: string;
   /** Session ID (for system/init and system/task_notification) */
   session_id?: string;
+  claude_code_version?: string;
   /** Background task ID (for system/task_notification, Claude Code 2.x) */
   task_id?: string;
   /** Background task terminal status (for system/task_notification) */
@@ -210,6 +213,12 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
   private isDestroyed = false;
   private defaultTimeout = 600000; // 10 minutes default, but will extend on activity
   private sessionId: string | null = null;
+  private nativeObserver?: (target: NativeSessionDeletionTarget) => Promise<void>;
+  private nativeCaptureFailure?: () => Promise<void>;
+  private nativeCaptureUnconfirmed = false;
+  private nativeCreation?: OwnedHistoryTarget;
+  private nativeObservation: Promise<void> = Promise.resolve();
+  private nativeCreationEpoch = 0;
   private sessionFilePath: string;
   /** Thread this executor belongs to (undefined for the legacy default thread) */
   private threadId?: string;
@@ -382,6 +391,10 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
    */
   private saveSessionId(sessionId: string): void {
     try {
+      if (this.delegationWorker) {
+        try { if (JSON.parse(fs.readFileSync(this.sessionFilePath, 'utf8')).id === sessionId) return; }
+        catch { /* A fresh identity creates its pointer below. */ }
+      }
       const data = JSON.stringify({
         id: sessionId,
         savedAt: new Date().toISOString(),
@@ -512,6 +525,21 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
   /**
    * Start the persistent Claude process
    */
+  /** Keep exit proof blocked if even the durable coverage-failure receipt could not be written. */
+  private async reportNativeCaptureFailure(): Promise<void> {
+    this.nativeCaptureUnconfirmed = true;
+    if (this.nativeCaptureFailure) {
+      await this.nativeCaptureFailure();
+      this.nativeCaptureUnconfirmed = false;
+    }
+  }
+
+  observeNativeSessionCreation(observer: (target: NativeSessionDeletionTarget) => Promise<void>, onFailure?: () => Promise<void>): void {
+    if (!this.delegationWorker || !this.threadId?.startsWith('delegate-lane-')) throw new Error('Native observation requires a managed worker');
+    this.nativeObserver = observer;
+    this.nativeCaptureFailure = onFailure;
+  }
+
   private async startProcess(): Promise<void> {
     if (this.isDestroyed || (this.isStopping && this.claudeProcess)) throw new Error('Claude process is unavailable or its exit is unconfirmed');
     if (this.claudeProcess || this.isStarting) {
@@ -519,6 +547,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     }
 
     this.isStarting = true;
+    const creationEpoch = this.nativeCreationEpoch;
     this.reportedModel = undefined;
 
     try {
@@ -587,6 +616,36 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
         console.log(`[ClaudePersistent] Resuming session: ${this.sessionId}`);
       } else {
         console.log('[ClaudePersistent] Starting new session');
+        if (this.nativeObserver && this.threadId) {
+          const sessionId = randomUUID();
+          args.push('--session-id', sessionId);
+          this.nativeCreation = undefined;
+          let target: OwnedHistoryTarget | undefined;
+          try {
+            const cwd = fs.realpathSync(this.currentWorkingDirectory).normalize('NFC');
+            const configRoot = process.env.CLAUDE_CONFIG_DIR;
+            const nativeHome = path.resolve(this.currentWorkingDirectory, configRoot ?? path.join(os.homedir(), '.claude')).normalize('NFC');
+            const override = configRoot ? process.env.CLAUDE_CODE_PROJECT_DIR_NAME : undefined;
+            if (override && !validClaudeProjectOverride(override)) throw new Error('Invalid Claude project override');
+            const scope = path.join(nativeHome, 'projects', override || claudeProjectName(cwd));
+            fs.mkdirSync(scope, { recursive: true });
+            const transcript = path.join(scope, `${sessionId}.jsonl`);
+            // lstat detects dangling symlinks as well as existing native identities.
+            for (const candidate of [transcript, path.join(scope, sessionId)]) {
+              try { fs.lstatSync(candidate); throw new Error('Claude identity already exists'); }
+              catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+            }
+            this.saveSessionId(sessionId);
+            target = await captureHistoryTarget({ backend: 'claude', sessionId, executorThreadId: this.threadId,
+              home: fs.realpathSync(os.homedir()), nativeHome, scope, pointer: this.sessionFilePath,
+              cwd, command: this.claudeCommand, transcript, ...(override ? { projectOverride: override } : {}) });
+          } catch { await this.reportNativeCaptureFailure(); }
+          if (target) {
+            try { await this.nativeObserver(target); this.nativeCreation = target; }
+            catch (error) { await this.reportNativeCaptureFailure(); throw error; }
+          }
+          if (this.isDestroyed || creationEpoch !== this.nativeCreationEpoch) throw new Error('Claude creation was cancelled');
+        }
       }
 
       const loggedArgs = args.map((arg, index) => ['--mcp-config', '--settings'].includes(args[index - 1])
@@ -1298,6 +1357,17 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
             this.reportedModel = message.model;
           }
           if (message.subtype === 'init' && message.session_id) {
+            const creation = this.nativeCreation;
+            if (creation) {
+              this.nativeCreation = undefined;
+              this.nativeObservation = this.nativeObservation.then(async () => {
+                if (message.session_id !== creation.sessionId || message.cwd !== creation.cwd
+                  || message.claude_code_version !== creation.nativeVersion) await this.reportNativeCaptureFailure();
+                else await this.nativeObserver?.({ ...creation, confirmed: true });
+              });
+              // Retain the rejected promise for lifecycle fencing without an unhandled rejection.
+              void this.nativeObservation.catch(() => {});
+            }
             console.log(`[ClaudePersistent] Session initialized: ${message.session_id}`);
             this.sessionId = message.session_id;
             this.saveSessionId(message.session_id);
@@ -2045,6 +2115,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
    * create a new session automatically when the next command is executed.
    */
   resetContext(): void {
+    this.nativeCreationEpoch++;
     console.log('[ClaudePersistent] Resetting session context');
     this.sessionId = null;
 
@@ -2464,6 +2535,8 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
 
   async waitForManagedProcessGroupExit(): Promise<void> {
     if (!this.delegationWorker) throw new Error('Managed worker process-group tracking was not enabled');
+    if (this.nativeCaptureUnconfirmed || this.nativeObserver && this.isStarting) throw new Error('Native creation coverage could not be persisted');
+    await this.nativeObservation;
     await this.workerGroups.waitForExit();
   }
 
@@ -2478,6 +2551,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
    * Called by ThreadExecutorPool before removing this executor from the pool.
    */
   async deleteThreadData(threadId: string): Promise<void> {
+    if (this.delegationWorker) return;
     const sessionPath = this.sessionFilePath;
     try {
       await fs.promises.unlink(sessionPath);

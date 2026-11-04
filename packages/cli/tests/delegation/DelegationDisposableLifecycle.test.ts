@@ -231,6 +231,7 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
     const proof = new Promise<void>(resolve => { confirm = resolve; });
     const group = vi.mocked(original.executor.waitForManagedProcessGroupExit!).mockReturnValue(proof);
     const remove = vi.spyOn(manager.laneStore, 'remove');
+    const saveExit = vi.spyOn(manager.laneStore, 'markShutdownConfirmed');
     const { replacement, completed } = observeReplacement(scope);
     original.finish({ success: false, error: 'Stored native session is missing' });
     try {
@@ -246,6 +247,8 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
     expect(workers).toHaveLength(2);
     await expect(fs.stat(pointer)).rejects.toHaveProperty('code', 'ENOENT');
     expect(remove).toHaveBeenCalledWith(lane.id);
+    expect(saveExit).toHaveBeenCalledWith(lane.id, lane.contextGeneration ?? 0, true);
+    expect(saveExit.mock.invocationCallOrder[0]).toBeLessThan(remove.mock.invocationCallOrder[0]);
     expect(next.cwd).not.toBe(original.cwd);
     next.finish({ success: true });
     expect((await completed)[0].state).toBe('succeeded');

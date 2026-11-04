@@ -5,7 +5,10 @@ import path from 'path';
 import { DELEGATION_BACKENDS, type DelegationBackend } from './contract';
 import { hasLegacyDiscardTombstone } from './LegacyWorkspaceCleanup';
 import { ThreadContextReset } from '../thread/ThreadContextReset';
+import { syncDirectory } from './OwnershipRuntime';
 import { replaceAtomicFile } from './AtomicFile';
+import { validNativeTarget, validDeletionPreparation, type NativeSessionDeletionTarget, type NativeDeletionResult,
+  type NativeDeletionPreparation } from './NativeSessionDeletion';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const STATES = new Set<DelegatedWorkerLaneState>(['preparing', 'running', 'ready', 'dirty']);
@@ -24,6 +27,19 @@ export interface DelegatedWorkerLane {
   createdAt: number;
   updatedAt: number;
   cleanupPending?: boolean;
+  /** Permanent deletion is authorized only by a durable parent clear/new fence. */
+  nativeDeleteRequested?: boolean;
+  nativeDeletion?: NativeDeletionResult;
+  nativeSession?: NativeSessionDeletionTarget;
+  /** Earlier native identities remain owned after fallback or a worker-only reset. */
+  nativeSessionHistory?: NativeSessionDeletionTarget[];
+  /** A later executor cannot prove exit of an earlier unconfirmed native writer. */
+  nativeHistoryExitUnconfirmed?: boolean;
+  nativeDeletionPreparations?: Record<string, NativeDeletionPreparation>;
+  nativeSessionConflict?: boolean;
+  nativeMaintenanceExitUnconfirmed?: boolean;
+  /** Strong process-group proof, distinct from legacy transport-only shutdown. */
+  nativeGroupExitGeneration?: number;
   cleanupAttempts?: number;
   cleanupError?: string;
   contextGeneration?: number;
@@ -74,7 +90,7 @@ function validGeneration(value: unknown): value is number {
 }
 
 function clone(lane: DelegatedWorkerLane): DelegatedWorkerLane {
-  return { ...lane };
+  return structuredClone(lane);
 }
 
 function sameIdentity(lane: DelegatedWorkerLane, identity: DelegatedWorkerLaneIdentity): boolean {
@@ -113,6 +129,25 @@ function validateLane(value: unknown): value is DelegatedWorkerLane {
     && STATES.has(lane.state as DelegatedWorkerLaneState)
     && validTime(lane.createdAt)
     && validTime(lane.updatedAt)
+    && (lane.nativeDeleteRequested === undefined || typeof lane.nativeDeleteRequested === 'boolean')
+    && (lane.nativeSessionConflict === undefined || typeof lane.nativeSessionConflict === 'boolean')
+    && (lane.nativeMaintenanceExitUnconfirmed === undefined || typeof lane.nativeMaintenanceExitUnconfirmed === 'boolean')
+    && (lane.nativeHistoryExitUnconfirmed === undefined || typeof lane.nativeHistoryExitUnconfirmed === 'boolean')
+    && (lane.nativeSession === undefined || validNativeTarget(lane.nativeSession)
+      && lane.nativeSession.executorThreadId === lane.executorThreadId && lane.backend === lane.nativeSession.backend)
+    && (lane.nativeSessionHistory === undefined || Array.isArray(lane.nativeSessionHistory)
+      && lane.nativeSessionHistory.length <= 64 && lane.nativeSessionHistory.every(target => validNativeTarget(target)
+        && target.executorThreadId === lane.executorThreadId && lane.backend === target.backend))
+    && (lane.nativeDeletionPreparations === undefined || lane.nativeDeletionPreparations
+      && typeof lane.nativeDeletionPreparations === 'object' && !Array.isArray(lane.nativeDeletionPreparations)
+      && Object.entries(lane.nativeDeletionPreparations).length <= 64
+      && Object.entries(lane.nativeDeletionPreparations).every(([id, prepared]) => UUID_RE.test(id)
+        && prepared?.version === 1 && [lane.nativeSession, ...(lane.nativeSessionHistory ?? [])].some(target =>
+          target?.sessionId === id && validDeletionPreparation(target, prepared))))
+    && (lane.nativeGroupExitGeneration === undefined || validGeneration(lane.nativeGroupExitGeneration)
+      && lane.nativeGroupExitGeneration === (lane.contextGeneration ?? 0))
+    && (lane.nativeDeletion === undefined || lane.nativeDeletion && typeof lane.nativeDeletion.reason === 'string'
+      && ['pending', 'waiting-exit', 'held', 'unsupported', 'uncertain', 'deleted'].includes(lane.nativeDeletion.state))
     && (lane.cleanupPending === undefined || typeof lane.cleanupPending === 'boolean')
     && (lane.cleanupAttempts === undefined || validGeneration(lane.cleanupAttempts))
     && (lane.contextGeneration === undefined || validGeneration(lane.contextGeneration))
@@ -209,7 +244,7 @@ export class DelegatedWorkerSessionStore {
         } catch { this.quarantine(`${lane.id}.json`); }
       }
       const ready = (this.quarantinedRecords.size ? [] : [...this.lanes.values()])
-        .filter(lane => lane.state === 'ready' && !lane.contextRetired && !lane.workspaceDiscarded && !discarded.has(lane.id)
+        .filter(lane => lane.state === 'ready' && !lane.nativeDeleteRequested && !lane.contextRetired && !lane.workspaceDiscarded && !discarded.has(lane.id)
           && sameIdentity(lane, identity) && !options.excluded?.has(lane.id))
         .sort((a, b) => b.updatedAt - a.updatedAt);
 
@@ -222,6 +257,13 @@ export class DelegatedWorkerSessionStore {
       } else if (ready.length >= 1) {
         const lane = { ...ready[0], state: 'preparing' as const, updatedAt: Date.now(),
           shutdownConfirmedGeneration: undefined,
+          // Preparation starts no native worker. Carry the last exit proof
+          // until markRunning durably invalidates it before executor creation.
+          nativeGroupExitGeneration: ready[0].nativeGroupExitGeneration === (ready[0].contextGeneration ?? 0)
+            ? (ready[0].contextGeneration ?? 0) + 1 : undefined,
+          nativeHistoryExitUnconfirmed: ready[0].nativeHistoryExitUnconfirmed ||
+            (!!ready[0].nativeSession || !!ready[0].nativeSessionHistory?.length)
+              && ready[0].nativeGroupExitGeneration !== (ready[0].contextGeneration ?? 0),
           contextGeneration: (ready[0].contextGeneration ?? 0) + 1, pooled: options.pooled === true };
         await this.writeAndRemember(lane);
         return { lane: clone(lane), reused: true };
@@ -249,7 +291,8 @@ export class DelegatedWorkerSessionStore {
     // The caller retains the acquired snapshot for prompt selection. Withhold
     // durable initialization until restoration/dispatch confirms that context;
     // a failed fresh session can otherwise reuse an old native ID and marker.
-    return this.transition(id, 'running', { shutdownConfirmedGeneration: undefined, initializedPrompt: undefined });
+    return this.transition(id, 'running', { shutdownConfirmedGeneration: undefined,
+      nativeGroupExitGeneration: undefined, initializedPrompt: undefined });
   }
 
   async markPromptInitialized(id: string, sessionId: string, workspaceKind: 'git' | 'shared'): Promise<void> {
@@ -258,11 +301,10 @@ export class DelegatedWorkerSessionStore {
   }
 
   async markReady(id: string): Promise<DelegatedWorkerLane> {
-    return this.transition(id, 'ready', { cleanupPending: false, cleanupError: undefined,
-      shutdownConfirmedGeneration: undefined });
+    return this.transition(id, 'ready', { cleanupPending: false, cleanupError: undefined });
   }
 
-  async markShutdownConfirmed(id: string, generation: number): Promise<void> {
+  async markShutdownConfirmed(id: string, generation: number, processGroupConfirmed = false): Promise<void> {
     if (!validGeneration(generation)) throw new Error('Invalid worker shutdown generation');
     await this.initialize();
     await this.mutate(async () => {
@@ -270,7 +312,117 @@ export class DelegatedWorkerSessionStore {
       if (!lane || (lane.contextGeneration ?? 0) !== generation) {
         throw new Error('Worker context changed before shutdown confirmation');
       }
-      await this.writeAndRemember({ ...lane, shutdownConfirmedGeneration: generation, updatedAt: Date.now() });
+      await this.writeAndRemember({ ...lane, shutdownConfirmedGeneration: generation,
+        ...(processGroupConfirmed ? { nativeGroupExitGeneration: generation } : {}), updatedAt: Date.now() });
+    });
+  }
+
+  /** Creation callbacks may arrive after reset, but never replace another acquisition's identity. */
+  async captureNativeSession(id: string, generation: number, target: NativeSessionDeletionTarget): Promise<void> {
+    await this.initialize();
+    await this.mutate(async () => {
+      const lane = this.lanes.get(id);
+      if (!lane || (lane.contextGeneration ?? 0) !== generation || target.executorThreadId !== lane.executorThreadId
+        || !validNativeTarget(target) || lane.backend !== target.backend) throw new Error('Native worker identity changed');
+      const history = lane.nativeSessionHistory ?? [];
+      const previous = [lane.nativeSession, ...history].find(value => value?.sessionId === target.sessionId);
+      if (previous) {
+        if (previous.backend === 'claude' && target.backend === 'claude' && !previous.confirmed && target.confirmed
+          && JSON.stringify({ ...previous, confirmed: true }) === JSON.stringify(target)) {
+          await this.writeAndRemember({ ...lane,
+            nativeSession: lane.nativeSession === previous ? structuredClone(target) : lane.nativeSession,
+            nativeSessionHistory: history.map(value => value === previous ? structuredClone(target) : value), updatedAt: Date.now() });
+          return;
+        }
+        await this.writeAndRemember({ ...lane,
+          nativeSessionConflict: lane.nativeSessionConflict || JSON.stringify(previous) !== JSON.stringify(target), updatedAt: Date.now() });
+        return;
+      }
+      const nextHistory = lane.nativeSession ? [...history, lane.nativeSession] : history;
+      const next: DelegatedWorkerLane = { ...lane, nativeSession: structuredClone(target),
+        nativeSessionHistory: nextHistory, updatedAt: Date.now() };
+      // Reserve room for one durable preparation per identity and later status.
+      if (nextHistory.length >= 64 || Buffer.byteLength(JSON.stringify(next)) + (nextHistory.length + 1) * 200 > 60 * 1024) {
+        await this.writeAndRemember({ ...lane, nativeSessionConflict: true, updatedAt: Date.now() });
+        throw new Error('Native worker identity history exceeded its retained metadata limit');
+      }
+      await this.writeAndRemember(next);
+    });
+  }
+
+  async recordNativeCaptureFailure(id: string, generation: number): Promise<void> {
+    await this.initialize();
+    await this.mutate(async () => {
+      const lane = this.lanes.get(id);
+      if (!lane || (lane.contextGeneration ?? 0) !== generation) throw new Error('Native capture generation changed');
+      await this.writeAndRemember({ ...lane, nativeSessionConflict: true, updatedAt: Date.now() });
+    });
+  }
+
+  async recordNativeMaintenance(id: string, generation: number, unconfirmed: boolean): Promise<void> {
+    await this.initialize();
+    await this.mutate(async () => {
+      const lane = this.lanes.get(id);
+      if (!lane?.nativeDeleteRequested || (lane.contextGeneration ?? 0) !== generation) throw new Error('Native maintenance generation changed');
+      await this.writeAndRemember({ ...lane, nativeMaintenanceExitUnconfirmed: unconfirmed, updatedAt: Date.now() });
+    });
+  }
+
+  /** Retire exact old generations without disposing artifacts, pointers or lane evidence. */
+  async requestNativeDeletion(threadId: string, throughGeneration: number): Promise<void> {
+    if (!validGeneration(throughGeneration)) throw new Error('Invalid native deletion generation');
+    await this.initialize();
+    await this.mutate(async () => {
+      this.assertCompleteInventory();
+      for (const lane of this.lanes.values()) {
+        if (lane.threadId !== threadId || lane.workspaceGeneration > throughGeneration || lane.nativeDeleteRequested) continue;
+        await this.writeAndRemember({ ...lane, state: 'dirty', cleanupPending: false, nativeDeleteRequested: true,
+          nativeDeletion: { state: 'pending', reason: 'Parent reset requested permanent native session deletion' }, updatedAt: Date.now() });
+      }
+    });
+  }
+
+  async nativeDeletionCandidates(includeCompleted = false): Promise<DelegatedWorkerLane[]> {
+    await this.initialize();
+    this.assertCompleteInventory();
+    return [...this.lanes.values()].filter(lane => lane.nativeDeleteRequested && (includeCompleted || lane.nativeDeletion?.state !== 'deleted')).map(clone);
+  }
+
+  async isNativeIdentityExclusive(id: string, target: NativeSessionDeletionTarget): Promise<boolean> {
+    await this.initialize();
+    this.assertCompleteInventory();
+    return ![...this.lanes.values()].some(lane => lane.id !== id && lane.backend === target.backend
+      && (lane.nativeSession?.sessionId === target.sessionId || lane.initializedPrompt?.sessionId === target.sessionId
+        || lane.nativeSessionHistory?.some(previous => previous.sessionId === target.sessionId)));
+  }
+
+  async recordNativeDeletion(id: string, generation: number, result: NativeDeletionResult): Promise<void> {
+    await this.initialize();
+    await this.mutate(async () => {
+      const lane = this.lanes.get(id);
+      if (!lane?.nativeDeleteRequested || (lane.contextGeneration ?? 0) !== generation) throw new Error('Native deletion acquisition changed');
+      await this.writeAndRemember({ ...lane, nativeDeletion: result, updatedAt: Date.now() });
+    });
+  }
+
+  async prepareNativeDeletion(id: string, generation: number, target: NativeSessionDeletionTarget,
+    prepared: NativeDeletionPreparation): Promise<void> {
+    await this.initialize();
+    await this.mutate(async () => {
+      const lane = this.lanes.get(id);
+      if (!lane?.nativeDeleteRequested || (lane.contextGeneration ?? 0) !== generation
+        || ![lane.nativeSession, ...(lane.nativeSessionHistory ?? [])].some(value =>
+          value && JSON.stringify(value) === JSON.stringify(target))
+        || !validDeletionPreparation(target, prepared)) {
+        throw new Error('Native deletion preparation identity changed');
+      }
+      const previous = lane.nativeDeletionPreparations?.[target.sessionId];
+      if (previous && JSON.stringify(previous) !== JSON.stringify(prepared)) throw new Error('Native deletion preparation cannot be replaced');
+      const next = { ...lane, nativeDeletionPreparations: {
+        ...lane.nativeDeletionPreparations, [target.sessionId]: prepared,
+      }, updatedAt: Date.now() };
+      if (Buffer.byteLength(JSON.stringify(next)) > 60 * 1024) throw new Error('Native deletion preparation exceeds its retained metadata limit');
+      await this.writeAndRemember(next);
     });
   }
 
@@ -314,7 +466,7 @@ export class DelegatedWorkerSessionStore {
   async cleanupCandidates(): Promise<DelegatedWorkerLane[]> {
     await this.initialize();
     this.assertCompleteInventory();
-    return [...this.lanes.values()].filter(lane => lane.state === 'dirty' && lane.cleanupPending).map(clone);
+    return [...this.lanes.values()].filter(lane => lane.state === 'dirty' && lane.cleanupPending && !lane.nativeDeleteRequested).map(clone);
   }
 
   async invalidateGeneration(threadId: string, currentGeneration: number): Promise<DelegatedWorkerLane[]> {
@@ -323,7 +475,7 @@ export class DelegatedWorkerSessionStore {
       this.assertCompleteInventory();
       const changed: DelegatedWorkerLane[] = [];
       for (const lane of this.lanes.values()) {
-        if (lane.threadId !== threadId || lane.workspaceGeneration >= currentGeneration) continue;
+        if (lane.nativeDeleteRequested || lane.threadId !== threadId || lane.workspaceGeneration >= currentGeneration) continue;
         const next: DelegatedWorkerLane = { ...lane, state: 'dirty', cleanupPending: true,
           cleanupError: 'Working directory changed; delegated worker context was invalidated.', updatedAt: Date.now() };
         await this.writeAndRemember(next);
@@ -339,7 +491,7 @@ export class DelegatedWorkerSessionStore {
       this.assertCompleteInventory();
       const changed: DelegatedWorkerLane[] = [];
       for (const lane of this.lanes.values()) {
-        if (lane.threadId !== threadId || (backend && lane.backend !== backend)) continue;
+        if (lane.nativeDeleteRequested || lane.threadId !== threadId || (backend && lane.backend !== backend)) continue;
         const next: DelegatedWorkerLane = { ...lane, state: 'dirty', cleanupPending: true,
           shutdownConfirmedGeneration: lane.state === 'ready' ? lane.contextGeneration ?? 0 : lane.shutdownConfirmedGeneration,
           cleanupError: 'Delegated worker context was reset.', updatedAt: Date.now() };
@@ -357,21 +509,38 @@ export class DelegatedWorkerSessionStore {
       if (!this.lanes.has(id) || this.quarantinedRecords.has(`${id}.json`)) {
         throw new Error('Delegated worker lane is unavailable; its historical record was preserved');
       }
+      if (this.lanes.get(id)?.nativeDeleteRequested) throw new Error('Native deletion receipts and artifacts must be retained');
       if (!this.allocatedLanes.has(id)) this.assertCompleteInventory();
+      const lane = this.lanes.get(id)!;
+      if (lane.nativeSession || lane.nativeSessionHistory?.length) {
+        // Pool reset, directory changes and failed-turn cleanup may detach the
+        // continuation, but parent reset still owns these native identities.
+        const generation = lane.contextGeneration ?? 0;
+        await this.writeAndRemember({ ...lane, state: 'dirty', contextRetired: true,
+          contextResetPending: false, cleanupPending: false, initializedPrompt: undefined,
+          lastClearedGeneration: generation, contextGeneration: generation + 1,
+          shutdownConfirmedGeneration: lane.shutdownConfirmedGeneration === generation ? generation + 1 : undefined,
+          nativeGroupExitGeneration: lane.nativeGroupExitGeneration === generation ? generation + 1 : undefined,
+          nativeHistoryExitUnconfirmed: lane.nativeHistoryExitUnconfirmed || lane.nativeGroupExitGeneration !== generation,
+          updatedAt: Date.now() });
+        return;
+      }
       await fs.rm(path.join(this.directory, `${id}.json`), { force: true });
       this.lanes.delete(id);
     });
   }
 
   private async transition(id: string, state: DelegatedWorkerLaneState,
-    extra: Partial<Pick<DelegatedWorkerLane, 'cleanupPending' | 'cleanupError' | 'shutdownConfirmedGeneration' | 'initializedPrompt'>> = {}): Promise<DelegatedWorkerLane> {
+    extra: Partial<Pick<DelegatedWorkerLane, 'cleanupPending' | 'cleanupError' | 'shutdownConfirmedGeneration' | 'nativeGroupExitGeneration' | 'initializedPrompt'>> = {}): Promise<DelegatedWorkerLane> {
     if (!UUID_RE.test(id)) throw new Error('Invalid delegated worker lane ID');
     await this.initialize();
     return this.mutate(async () => {
       const lane = this.lanes.get(id);
       if (!lane) throw new Error('Delegated worker lane not found');
       if (lane.contextRetired) throw new Error('The Worker context has been retired and cannot be reused.');
-      const next: DelegatedWorkerLane = { ...lane, ...extra, state, updatedAt: Date.now() };
+      if (lane.nativeDeleteRequested && state === 'running') throw new Error('Worker native context is retired for deletion');
+      const next: DelegatedWorkerLane = { ...lane, ...extra, state: lane.nativeDeleteRequested ? 'dirty' : state,
+        ...(lane.nativeDeleteRequested ? { cleanupPending: false } : {}), updatedAt: Date.now() };
       await this.writeAndRemember(next);
       return clone(next);
     });
@@ -427,12 +596,15 @@ export class DelegatedWorkerSessionStore {
       if (lane.lastClearedGeneration === generation) return;
       throw new Error('The Worker context has changed. Use the latest Worker card.');
     }
-    if (lane.contextRetired || !contextResettable(lane)) {
+    if (lane.nativeDeleteRequested || lane.contextRetired || !contextResettable(lane)) {
       throw new Error('The Worker is active or its shutdown is unconfirmed. Wait before clearing context.');
     }
     const recoveryHeld = lane.state === 'dirty' && shutdownConfirmed(lane);
     // Persist intent before unlinking. A crash or partial failure must never resume old context.
-    const pending: DelegatedWorkerLane = { ...lane, state: 'dirty', contextResetPending: true, updatedAt: Date.now() };
+    const pending: DelegatedWorkerLane = { ...lane, state: 'dirty', contextResetPending: true,
+      nativeHistoryExitUnconfirmed: lane.nativeHistoryExitUnconfirmed ||
+        (!!lane.nativeSession || !!lane.nativeSessionHistory?.length) && lane.nativeGroupExitGeneration !== current,
+      updatedAt: Date.now() };
     await this.writeAndRemember(pending);
     await clear(clone(pending));
     // A failed reset can be superseded by a new shared-directory lane. Clearing
@@ -444,6 +616,10 @@ export class DelegatedWorkerSessionStore {
     await this.writeAndRemember({ ...pending, state: retired ? 'dirty' : 'ready', contextGeneration: current + 1,
       shutdownConfirmedGeneration: recoveryHeld ? current + 1 : undefined,
       contextResetPending: false, lastClearedGeneration: generation, initializedPrompt: undefined,
+      nativeGroupExitGeneration: lane.nativeGroupExitGeneration === current ? current + 1 : undefined,
+      nativeSession: undefined,
+      nativeSessionHistory: lane.nativeSession
+        ? [...(lane.nativeSessionHistory ?? []), lane.nativeSession] : lane.nativeSessionHistory,
       contextRetired: retired ? true : undefined,
       cleanupError: recoveryHeld ? lane.cleanupError
         : superseded ? 'Worker context cleared; a replacement lane remains active.' : undefined,
@@ -524,8 +700,15 @@ export class DelegatedWorkerSessionStore {
     const file = path.join(this.directory, `${lane.id}.json`);
     const temporary = `${file}.${randomUUID()}.tmp`;
     try {
-      await fs.writeFile(temporary, JSON.stringify(lane), { mode: 0o600 });
+      const serialized = JSON.stringify(lane);
+      if (Buffer.byteLength(serialized) > 64 * 1024) throw new Error('Delegated worker record exceeds its retained metadata limit');
+      await fs.writeFile(temporary, serialized, { mode: 0o600 });
+      if (lane.nativeSession || lane.nativeSessionHistory?.length || lane.nativeDeleteRequested || lane.nativeGroupExitGeneration !== undefined) {
+        const handle = await fs.open(temporary, 'r');
+        try { await handle.sync(); } finally { await handle.close(); }
+      }
       await replaceAtomicFile(temporary, file);
+      if (lane.nativeSession || lane.nativeSessionHistory?.length || lane.nativeDeleteRequested || lane.nativeGroupExitGeneration !== undefined) syncDirectory(this.directory);
     } finally {
       await fs.rm(temporary, { force: true }).catch(() => undefined);
     }

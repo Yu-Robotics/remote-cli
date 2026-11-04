@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
+import { randomUUID } from 'crypto';
+import { deletionPreparation, type NativeSessionDeletionTarget } from '../../src/delegation/NativeSessionDeletion';
 import {
   DelegatedWorkerSessionStore,
   workerLaneExecutorId,
@@ -36,6 +38,27 @@ describe('DelegatedWorkerSessionStore', () => {
     await fs.rm(home, { recursive: true, force: true });
   });
 
+  it('preserves strong exit proof until native startup and never revives a deletion target', async () => {
+    const store = new DelegatedWorkerSessionStore(directory);
+    const { lane } = await store.acquire(identity(workspace));
+    await store.markShutdownConfirmed(lane.id, 0, true);
+    await store.markReady(lane.id);
+    const restarted = new DelegatedWorkerSessionStore(directory);
+    expect((await restarted.lanesForThread('parent-thread'))[0].nativeGroupExitGeneration).toBe(0);
+    const reused = await restarted.acquire(identity(workspace));
+    expect(reused.reused).toBe(true);
+    expect(reused.lane.nativeGroupExitGeneration).toBe(1);
+    await restarted.markRunning(lane.id);
+    expect((await restarted.lanesForThread('parent-thread'))[0].nativeGroupExitGeneration).toBeUndefined();
+    await expect(restarted.markShutdownConfirmed(lane.id, 0, true)).rejects.toThrow('changed');
+    await restarted.requestNativeDeletion('parent-thread', 0);
+    await restarted.markReady(lane.id);
+    expect((await restarted.lanesForThread('parent-thread'))[0]).toMatchObject({ state: 'dirty', nativeDeleteRequested: true });
+    await expect(restarted.markRunning(lane.id)).rejects.toThrow('retired');
+    expect((await restarted.acquire(identity(workspace))).reused).toBe(false);
+    await expect(restarted.remove(lane.id)).rejects.toThrow('retained');
+  });
+
   it('persists prompt initialization for native reuse and forgets it on context reset', async () => {
     const store = new DelegatedWorkerSessionStore(directory);
     const { lane } = await store.acquire(identity(workspace));
@@ -52,6 +75,30 @@ describe('DelegatedWorkerSessionStore', () => {
     await restarted.markReady(lane.id);
     await restarted.clearContext(lane.id, reused.lane.contextGeneration!, identity(workspace), async () => {});
     expect((await restarted.acquire(identity(workspace))).lane.initializedPrompt).toBeUndefined();
+  });
+
+  it('reserves preparation space so bounded identity history remains readable after restart', async () => {
+    const store = new DelegatedWorkerSessionStore(directory);
+    const { lane } = await store.acquire(identity(workspace));
+    let bounded = false;
+    for (let index = 0; index < 66; index++) {
+      const target: NativeSessionDeletionTarget = { version: 1, backend: 'codex', sessionId: randomUUID(),
+        executorThreadId: lane.executorThreadId, home: { path: home, dev: '1', ino: '1' },
+        nativeHome: { path: path.join(home, '.codex'), dev: '1', ino: '2' },
+        pointerHash: 'a'.repeat(64), cwd: workspace, command: `synthetic-${'x'.repeat(750)}` };
+      try { await store.captureNativeSession(lane.id, 0, target); }
+      catch (error) { expect(String(error)).toContain('metadata limit'); bounded = true; break; }
+    }
+    expect(bounded).toBe(true);
+    await store.requestNativeDeletion('parent-thread', 0);
+    const current = (await store.lanesForThread('parent-thread'))[0];
+    const targets = [...current.nativeSessionHistory!, current.nativeSession!];
+    expect(targets.length).toBeGreaterThan(1);
+    for (const target of targets) await store.prepareNativeDeletion(lane.id, 0, target, deletionPreparation(target));
+    expect((await fs.stat(path.join(directory, `${lane.id}.json`))).size).toBeLessThanOrEqual(64 * 1024);
+    const reloaded = new DelegatedWorkerSessionStore(directory);
+    expect(await reloaded.getInventoryStatus()).toEqual({ complete: true, quarantinedRecords: 0 });
+    expect(Object.keys((await reloaded.lanesForThread('parent-thread'))[0].nativeDeletionPreparations!)).toHaveLength(targets.length);
   });
 
   it.each([null, {}, { sessionId: '', workspaceKind: 'git' }, { sessionId: 'native', workspaceKind: 'unknown' }])(

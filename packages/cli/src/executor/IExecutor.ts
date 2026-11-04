@@ -1,3 +1,4 @@
+import type { NativeSessionDeletionTarget } from '../delegation/NativeSessionDeletion';
 import { ToolUseInfo, ToolResultInfo, Attachment, ImageBlock, TaskNotificationInfo, ApprovalRequestInfo, ApprovalAction, ApprovalStatus, ExecutionMetadata, ActivityProgressInfo } from '../types';
 import type { DelegationConnection } from '../delegation/contract';
 
@@ -113,6 +114,8 @@ export interface IExecutor {
   isBusy?(): boolean;
   /** A failed transport stop requires an explicit successful abort retry before admission. */
   hasUncertainShutdown?(): boolean;
+  /** Managed workers only: persist a fresh native identity before dispatching its first turn. */
+  observeNativeSessionCreation?(observer: (target: NativeSessionDeletionTarget) => Promise<void>, onFailure?: () => Promise<void>): void;
   resetContext(): void;
   abort(): Promise<boolean>;
   destroy(): Promise<void> | void;

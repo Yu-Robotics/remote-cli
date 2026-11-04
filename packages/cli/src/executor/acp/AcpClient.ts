@@ -243,7 +243,9 @@ export class AcpClient implements AcpTransport {
     if (pending.timer) clearTimeout(pending.timer);
     if ('error' in message) {
       const data = message.error.data === undefined ? '' : ` (${JSON.stringify(message.error.data)})`;
-      pending.reject(new Error(`ACP error ${message.error.code}: ${message.error.message}${data}`));
+      pending.reject(Object.assign(new Error(`ACP error ${message.error.code}: ${message.error.message}${data}`), {
+        code: message.error.code, data: message.error.data, rpcMessage: message.error.message,
+      }));
     } else {
       pending.resolve(message.result);
     }

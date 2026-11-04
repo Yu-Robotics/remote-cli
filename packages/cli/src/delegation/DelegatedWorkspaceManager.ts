@@ -38,6 +38,8 @@ export interface WorkspaceCollectionOptions {
   exitConfirmed?: boolean;
   /** Files relative to the checkout root, copied outside it before disposal. */
   exports?: readonly string[];
+  /** Parent reset preserves pending output without automatic disposition changes. */
+  preserveForRecovery?: () => Promise<boolean>;
 }
 
 export interface WorkspaceArtifactSummary {
@@ -385,7 +387,7 @@ export class DelegatedWorkspaceManager {
       }
       await this.verifyCheckout(record, artifact);
       artifact = { ...artifact, closeout: { ...closeout, recoverable: true },
-        disposition: !artifact.successful && artifact.disposition === 'pending' ? 'retained' : artifact.disposition };
+        disposition: !artifact.successful && artifact.disposition === 'pending' && !await options.preserveForRecovery?.() ? 'retained' : artifact.disposition };
       await this.write('artifacts', artifact.taskId, artifact);
       await this.write('lanes', record.laneId, { ...record, cleanup: undefined,
         pendingTaskId: artifact.disposition === 'pending' ? artifact.taskId : undefined });

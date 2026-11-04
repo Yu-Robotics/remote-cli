@@ -1,3 +1,6 @@
+import { NativeSessionDeletionQueue, deleteOwnedCodexSession, type NativeDeletionClientFactory, type NativeDeletionResult, type NativeDeletionRequest } from './NativeSessionDeletion';
+import { deleteOwnedHistoryFiles } from './NativeHistoryFiles';
+import { deleteOwnedKimiSession, type KimiDeletionFactory } from './KimiSessionDeletion';
 import { randomUUID } from 'crypto';
 import fs from 'fs';
 import path from 'path';
@@ -251,6 +254,9 @@ export class DelegationManager {
   private reportedUnavailableWriterEvidence = false;
   private readonly publicOperations = new Set<Promise<unknown>>();
   private maintenance?: Promise<unknown>;
+  readonly nativeSessionDeletions: NativeSessionDeletionQueue;
+  private nativeMaintenance?: Promise<void>;
+  private readonly nativeResetFences = new Map<string, number>();
   private maintenanceTimer?: ReturnType<typeof setTimeout>;
   private admissionGate: Promise<void> = Promise.resolve();
   private running = 0;
@@ -269,11 +275,14 @@ export class DelegationManager {
     private readonly cleanupMs = 10_000,
     laneStore = new DelegatedWorkerSessionStore(),
     workspaceManager = new DelegatedWorkspaceManager(),
+    private readonly nativeDeletionClientFactory?: NativeDeletionClientFactory,
+    private readonly kimiDeletionClientFactory?: KimiDeletionFactory,
   ) {
     this.registry = registry;
     this.store = store;
     this.laneStore = laneStore;
     this.workspaceManager = workspaceManager;
+    this.nativeSessionDeletions = new NativeSessionDeletionQueue(path.join(path.dirname(laneStore.storageDirectory), 'native-session-deletions'));
     this.timeouts = timeoutPolicy(timeoutInput);
     this.ownership = new DelegationOwnership(laneStore.storageDirectory);
     this.laneStore.setInitializationGuard(() => this.ensureOwnership());
@@ -537,6 +546,7 @@ export class DelegationManager {
     };
     const discardLane = async (lane: DelegatedWorkerLane): Promise<boolean> => {
       try {
+        if (await this.isNativeDeletionRequested(lane)) return false;
         if (source) await this.workspaceManager.preserveLane(lane.id);
         await cleanupDelegatedWorkerLane(lane);
         await this.laneStore.remove(lane.id);
@@ -692,14 +702,21 @@ export class DelegationManager {
           if (!task.lane) throw new Error('Worker lane is unavailable before native startup');
           const executionCwd = task.workspace?.cwd ?? cwd;
           const workerGuard = task.workspace ? new DirectoryGuard([...this.guard.getAllowedDirectories(), executionCwd]) : this.guard;
+          // Invalidate inherited exit evidence before the factory can launch
+          // any native process, including a constructor that later throws.
+          await this.laneStore.markRunning(task.lane.id);
+          assertStartable();
           worker = this.factory(workerGuard, configuration, executionCwd, task.lane.executorThreadId,
             resolveThreadModel(parent.thread, configuration), parent.thread.efforts?.[backend],
             { lifecycleHooks: false, delegationWorker: true, ...(parent.thread.speeds?.[backend] !== undefined ? { speed: parent.thread.speeds[backend] } : {}) });
           task.executor = worker;
+          const observedLane = task.lane;
+          worker.observeNativeSessionCreation?.(target => this.laneStore.captureNativeSession(
+            observedLane.id, observedLane.contextGeneration ?? 0, target),
+          () => this.laneStore.recordNativeCaptureFailure(observedLane.id, observedLane.contextGeneration ?? 0));
           if (fs.realpathSync(worker.getCurrentWorkingDirectory()) !== fs.realpathSync(executionCwd)) {
             throw new Error('Worker refused the delegated workspace; refusing a fallback directory');
           }
-          await this.laneStore.markRunning(task.lane.id);
           assertStartable();
           task.preserveUnstartedLane = false;
           return worker;
@@ -723,6 +740,7 @@ export class DelegationManager {
             const confirmGroup = worker.waitForManagedProcessGroupExit;
             if (!confirmGroup) throw new Error('Worker backend cannot confirm managed process-group exit; preserve the checkout');
             await deadline(() => confirmGroup.call(worker), this.cleanupMs);
+            await this.laneStore.markShutdownConfirmed(lane.id, lane.contextGeneration ?? 0, true);
           }
         } catch (error) {
           task.quarantineWorkspace = true;
@@ -924,15 +942,25 @@ ${prompt}`));
             // reserving the workspace indefinitely.
             task.discardLane = true;
           }
-          if (task.workspace?.disposalPolicy === 1 && task.executor) {
+          let groupConfirmed = false;
+          if (source && task.executor?.waitForManagedProcessGroupExit) {
             const confirmGroup = task.executor.waitForManagedProcessGroupExit;
-            if (!confirmGroup) throw new Error('Worker backend cannot confirm managed process-group exit; preserve the checkout');
-            await deadline(() => confirmGroup.call(task.executor), this.cleanupMs);
+            try {
+              await deadline(() => confirmGroup.call(task.executor), this.cleanupMs);
+              groupConfirmed = true;
+            } catch (error) {
+              if (task.workspace?.disposalPolicy === 1) throw error;
+              // Preserve the existing shared/legacy task lifecycle, but never
+              // convert transport exit into permission to delete native history.
+              console.warn('[Delegation] Native session deletion remains held: managed process-group exit is unconfirmed.');
+            }
+          } else if (task.workspace?.disposalPolicy === 1 && task.executor) {
+            throw new Error('Worker backend cannot confirm managed process-group exit; preserve the checkout');
           }
           nativeExitConfirmed = true;
           task.nativeExitConfirmed = released;
           if (released && task.lane) {
-            await this.laneStore.markShutdownConfirmed(task.lane.id, task.lane.contextGeneration ?? 0);
+            await this.laneStore.markShutdownConfirmed(task.lane.id, task.lane.contextGeneration ?? 0, groupConfirmed);
           }
           if (released && task.lane && task.preserveUnstartedLane) {
             if (!task.workspacePreparationStarted) {
@@ -954,7 +982,8 @@ ${prompt}`));
           if (released && task.lane && !task.preserveUnstartedLane) {
             try {
               if (task.workspace) {
-                task.artifact = await this.workspaceManager.collect(task.workspace, task.record.state === 'succeeded', { exitConfirmed: true, exports: task.exports });
+                task.artifact = await this.workspaceManager.collect(task.workspace, task.record.state === 'succeeded', { exitConfirmed: true, exports: task.exports,
+                  preserveForRecovery: () => this.isNativeDeletionRequested(task.lane!) });
                 readyWorkspaceLane = task.lane;
               } else {
                 await this.laneStore.markReady(task.lane.id);
@@ -1001,10 +1030,20 @@ ${prompt}`));
           }
           console.warn('[Delegation] Worker cleanup failed:', error instanceof Error ? error.message : 'Cleanup failure');
         }
+        // Shared-directory finalization keeps its original deadline. Optional
+        // history-deletion evidence must not turn completed work into a failure.
+        if (!source && released && task.lane && task.executor?.waitForManagedProcessGroupExit) {
+          try {
+            await deadline(() => task.executor!.waitForManagedProcessGroupExit!(), this.cleanupMs);
+            await this.laneStore.markShutdownConfirmed(task.lane.id, task.lane.contextGeneration ?? 0, true);
+          } catch {
+            console.warn('[Delegation] Native session deletion remains held: managed process-group exit is unconfirmed.');
+          }
+        }
         if (released && readyWorkspaceLane) {
           // Reclamation awaits subprocess exit; a timeout race must not release a live removal.
           // The lane stays non-ready until its checkout state is settled.
-          if (task.artifact && task.artifact.disposition !== 'pending') {
+          if (task.artifact && task.artifact.disposition !== 'pending' && !await this.isNativeDeletionRequested(readyWorkspaceLane)) {
             await this.workspaceManager.reclaim(task.record.id);
           }
           try { await this.laneStore.markReady(readyWorkspaceLane.id); }
@@ -1407,6 +1446,89 @@ ${prompt}`));
     return [...this.workspaces.values()].some(owner => owner.threadId === threadId);
   }
 
+  /** Persist before advancing the parent generation; no backend is started on the reset path. */
+  async requestNativeSessionDeletion(threadId: string, throughGeneration: number): Promise<void> {
+    if (!threadId || threadId.length > 200 || !Number.isSafeInteger(throughGeneration) || throughGeneration < 0) {
+      throw new Error('Invalid native deletion reset fence');
+    }
+    // Reserve preservation synchronously: in-flight finalizers must not discard
+    // evidence while the durable request is being written. No Git admission wait.
+    this.nativeResetFences.set(threadId, Math.max(this.nativeResetFences.get(threadId) ?? 0, throughGeneration));
+    return this.publicOperation(async () => {
+      await this.nativeSessionDeletions.enqueue(threadId, throughGeneration);
+      // An unreadable legacy inventory must not prevent fresh direct context.
+      // The separate durable fence retains the whole request for later retry.
+      try { await this.ensureOwnership(); await this.laneStore.requestNativeDeletion(threadId, throughGeneration); }
+      catch { console.warn('[Delegation] Native deletion is held: worker inventory is unavailable; reset intent was retained.'); }
+      this.scheduleMaintenance();
+    });
+  }
+
+  private async isNativeDeletionRequested(lane: DelegatedWorkerLane): Promise<boolean> {
+    return lane.nativeDeleteRequested === true || lane.workspaceGeneration <= (this.nativeResetFences.get(lane.threadId) ?? -1)
+      || (await this.nativeSessionDeletions.requests())
+      .some(request => request.threadId === lane.threadId && lane.workspaceGeneration <= request.throughGeneration);
+  }
+
+  private async retireRequestedNativeSessions(): Promise<NativeDeletionRequest[]> {
+    const requests = await this.nativeSessionDeletions.requests();
+    for (const request of requests) {
+      this.nativeResetFences.set(request.threadId, Math.max(this.nativeResetFences.get(request.threadId) ?? 0, request.throughGeneration));
+      await this.laneStore.requestNativeDeletion(request.threadId, request.throughGeneration);
+    }
+    return requests;
+  }
+
+  /** Independent maintenance retains ownership until the native transport has stopped. */
+  async reconcileNativeSessionDeletions(): Promise<void> {
+    if (this.nativeMaintenance) return this.nativeMaintenance;
+    const operation = this.publicOperation(async () => {
+      await this.ensureOwnership();
+      const requests = await this.retireRequestedNativeSessions();
+      for (const lane of await this.laneStore.nativeDeletionCandidates()) {
+        let result: NativeDeletionResult;
+        if (!requests.some(request => request.threadId === lane.threadId && lane.workspaceGeneration <= request.throughGeneration)) {
+          result = { state: 'held', reason: 'Durable parent reset authorization is unavailable' };
+        } else if (!['codex', 'kimi', 'pi', 'claude'].includes(lane.backend)) {
+          result = { state: 'unsupported', reason: `${lane.backend} has no verified permanent deletion adapter; native history was retained` };
+        } else if (lane.nativeMaintenanceExitUnconfirmed) {
+          result = { state: 'waiting-exit', reason: 'An earlier native maintenance writer exit is unconfirmed' };
+        } else if (lane.nativeHistoryExitUnconfirmed) {
+          result = { state: 'waiting-exit', reason: 'An earlier native worker exit is unconfirmed; a later executor cannot authorize its deletion' };
+        } else if (lane.nativeGroupExitGeneration !== (lane.contextGeneration ?? 0)) {
+          result = { state: 'waiting-exit', reason: 'Owned worker process-group exit is unconfirmed' };
+        } else if ((!lane.nativeSession && !lane.nativeSessionHistory?.length) || lane.nativeSessionConflict) {
+          result = { state: 'held', reason: 'Exact owned native session creation identity is unavailable or conflicting' };
+        } else {
+          result = { state: 'deleted', reason: 'All owned native session identities were deleted' };
+          const targets = [...(lane.nativeSessionHistory ?? []), ...(lane.nativeSession ? [lane.nativeSession] : [])];
+          for (const target of targets) {
+            if (!await this.laneStore.isNativeIdentityExclusive(lane.id, target)) {
+              result = { state: 'held', reason: 'Native session identity is referenced by another worker' };
+              break;
+            }
+            const recovery = {
+              detachedPointer: target !== lane.nativeSession || lane.contextRetired === true || lane.contextResetPending === true,
+              prepared: lane.nativeDeletionPreparations?.[target.sessionId],
+              persistPrepared: (prepared: import('./NativeSessionDeletion').NativeDeletionPreparation) =>
+                this.laneStore.prepareNativeDeletion(lane.id, lane.contextGeneration ?? 0, target, prepared),
+              persistMaintenanceState: (unconfirmed: boolean) =>
+                this.laneStore.recordNativeMaintenance(lane.id, lane.contextGeneration ?? 0, unconfirmed),
+            };
+            const outcome = await this.ownership.withProcesses(() => target.backend === 'codex'
+              ? deleteOwnedCodexSession(target, this.nativeDeletionClientFactory, recovery)
+              : target.backend === 'kimi' ? deleteOwnedKimiSession(target, recovery, this.kimiDeletionClientFactory) : deleteOwnedHistoryFiles(target, recovery));
+            if (outcome.state !== 'deleted') { result = outcome; break; }
+          }
+        }
+        await this.laneStore.recordNativeDeletion(lane.id, lane.contextGeneration ?? 0, result);
+        if (result.state !== 'deleted') console.warn(`[Delegation] Native session deletion ${result.state}: ${result.reason}`);
+      }
+    });
+    this.nativeMaintenance = operation;
+    try { await operation; } finally { this.nativeMaintenance = undefined; }
+  }
+
   /** Retry previously confirmed cleanup requests without touching uncertain interrupted workers. */
   async reconcilePendingWorkerLanes(): Promise<{ removed: number; failed: number }> {
     this.assertAcceptingOperations();
@@ -1414,12 +1536,17 @@ ${prompt}`));
     const operation = this.withAdmission(async () => {
       await this.ensureOwnership();
       if (this.scopes.size || this.detachedScopes.size || this.running || this.workspaces.size) return { removed: 0, failed: 0 };
-      await this.workspaceManager.retryReclamation({ limit: 25 });
+      await this.retireRequestedNativeSessions();
+      await this.workspaceManager.retryReclamation({ limit: 25,
+        excludedLaneIds: new Set((await this.laneStore.nativeDeletionCandidates(true)).map(lane => lane.id)) });
       return this.removeWorkerLanes(await this.laneStore.cleanupCandidates(), true);
     });
     this.maintenance = operation;
-    try { return await operation; }
-    finally { this.maintenance = undefined; this.scheduleMaintenance(); }
+    try {
+      const result = await operation;
+      await this.reconcileNativeSessionDeletions();
+      return result;
+    } finally { this.maintenance = undefined; this.scheduleMaintenance(); }
   }
 
   /** Remove all lanes older than the new workspace generation after a successful `/cd`. */
@@ -1495,6 +1622,7 @@ ${prompt}`));
     let failed = 0;
     for (const lane of lanes) {
       try {
+        if (await this.isNativeDeletionRequested(lane)) continue;
         await this.closeoutRemovedLane(lane);
         await cleanupDelegatedWorkerLane(lane);
         await this.laneStore.remove(lane.id);

@@ -1,3 +1,4 @@
+import { captureCodexDeletionTarget, type NativeSessionDeletionTarget } from '../delegation/NativeSessionDeletion';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -200,6 +201,10 @@ export class CodexAppServerExecutor implements IExecutor {
   private readonly activityTracker = new ActivityTracker();
   private unsubscribeClient: (() => void) | null = null;
 
+  private nativeSessionObserver?: (target: NativeSessionDeletionTarget) => Promise<void>;
+  private readonly nativeDeletionHome = process.env.HOME || os.homedir();
+  private readonly nativeDeletionRoot = process.env.CODEX_HOME || path.join(this.nativeDeletionHome, '.codex');
+  private readonly nativeDeletionCommand: string;
   private codexThreadId: string | null = null;
   private threadReady = false;
   private activeTurn: ActiveTurn | null = null;
@@ -259,6 +264,7 @@ export class CodexAppServerExecutor implements IExecutor {
     } else {
       this.sessionFilePath = path.join(this.currentWorkingDirectory, '.codex-session');
     }
+    this.nativeDeletionCommand = options.codexCommand ?? 'codex';
     this.loadThreadId();
 
     this.client = options.clientFactory
@@ -270,6 +276,13 @@ export class CodexAppServerExecutor implements IExecutor {
         });
     this.taskNotifications = new CodexTaskNotifications((method, params) => this.client.request(method, params));
     this.unsubscribeClient = this.client.onMessage((message) => this.handleMessage(message));
+  }
+
+  observeNativeSessionCreation(observer: (target: NativeSessionDeletionTarget) => Promise<void>): void {
+    if (!this.delegationWorker || !this.remoteThreadId?.startsWith('delegate-lane-')) {
+      throw new Error('Native session deletion observation requires a managed worker');
+    }
+    this.nativeSessionObserver = observer;
   }
 
   async execute(prompt: string, options: ExecuteOptions = {}): Promise<ExecuteResult> {
@@ -1348,6 +1361,17 @@ export class CodexAppServerExecutor implements IExecutor {
       if (typeof id !== 'string' || !id) throw new Error('Codex app-server returned no thread ID');
       this.captureReportedSettings(response);
       this.setThreadId(id);
+      if (this.nativeSessionObserver && this.remoteThreadId) {
+        let target: NativeSessionDeletionTarget | undefined;
+        try {
+          target = await captureCodexDeletionTarget({ sessionId: id, executorThreadId: this.remoteThreadId,
+            home: this.nativeDeletionHome, nativeHome: this.nativeDeletionRoot,
+            cwd: this.currentWorkingDirectory, command: this.nativeDeletionCommand });
+        } catch {
+          console.warn('[Codex] Native deletion ownership could not be recorded; history cleanup will remain held.');
+        }
+        if (target) await this.nativeSessionObserver(target);
+      }
       this.legacyFollowReady = this.speed === null && !Object.prototype.hasOwnProperty.call(common, 'serviceTier');
     }
     if (typeof this.speed === 'string') await this.assertReportedSpeed(this.speed);

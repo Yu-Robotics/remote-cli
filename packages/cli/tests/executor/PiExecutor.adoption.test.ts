@@ -407,7 +407,7 @@ describe('PiExecutor native session adoption', () => {
   it.each([
     { threadId: 'delegate-lane-synthetic', delegationWorker: true },
     { threadId: 'settings-meta-synthetic', delegationWorker: false },
-  ])('retains disposable reset behavior for synthetic runtime $threadId', async options => {
+  ])('preserves managed history while metadata runtimes remain disposable: $threadId', async options => {
     await executor.destroy();
     executor = new PiExecutor(new DirectoryGuard([home]), {
       initialWorkingDirectory: project, sessionBaseDir: pointerDir, ...options,
@@ -419,7 +419,7 @@ describe('PiExecutor native session adoption', () => {
     await fs.mkdir(path.dirname(owned), { recursive: true });
     await fs.writeFile(owned, '{}\n');
     executor.resetContext();
-    expect(existsSync(owned)).toBe(false);
+    expect(existsSync(owned)).toBe(options.delegationWorker);
     expect(latest().launch.sessionId).not.toBe(previousId);
     expect(latest().launch.sessionId).not.toBe(options.threadId);
   });

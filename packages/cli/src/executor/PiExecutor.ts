@@ -2,6 +2,8 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
+import { captureHistoryTarget, piHistoryHeaders, historyIdentity, verifyHistoryDirectory, type HistoryEntry } from '../delegation/NativeHistoryFiles';
+import type { NativeSessionDeletionTarget } from '../delegation/NativeSessionDeletion';
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import type { Attachment } from '../types';
 import { configuredExecutionMetadata } from './ExecutionMetadata';
@@ -228,6 +230,13 @@ export class PiExecutor implements IExecutor {
   private readonly workerClients = new Set<PiTransport>();
   private unsubscribe: (() => void) | null = null;
   private sessionId: string | null = null;
+  private nativeObserver?: (target: NativeSessionDeletionTarget) => Promise<void>;
+  private nativeCaptureFailure?: () => Promise<void>;
+  private nativeCaptureUnconfirmed = false;
+  private nativeReceiptOperations = 0;
+  private nativeStoreIdentity?: HistoryEntry;
+  private readonly observedNativeIds = new Set<string>();
+  private readonly preexistingNativeFiles = new Set<string>();
   private sessionFile: string | null = null;
   /** Fresh foreground identity, distinct from the stable remote thread. */
   private freshSessionId = randomUUID();
@@ -279,8 +288,10 @@ export class PiExecutor implements IExecutor {
     const baseDir = options.sessionBaseDir
       ?? path.join(process.env.HOME || os.homedir(), '.remote-cli', 'pi-sessions');
     fs.mkdirSync(baseDir, { recursive: true });
-    this.sessionStoreDir = path.join(baseDir, 'store');
+    this.sessionStoreDir = this.delegationWorker && /^delegate-lane-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(this.threadId ?? '')
+      ? path.join(baseDir, 'store', this.threadId!) : path.join(baseDir, 'store');
     fs.mkdirSync(this.sessionStoreDir, { recursive: true });
+    if (this.delegationWorker) for (const name of fs.readdirSync(this.sessionStoreDir)) this.preexistingNativeFiles.add(path.join(this.sessionStoreDir, name));
     this.sessionFilePath = this.threadId
       ? path.join(baseDir, `${this.threadId}.json`)
       : path.join(this.currentWorkingDirectory, '.pi-session');
@@ -389,11 +400,34 @@ export class PiExecutor implements IExecutor {
           this.completeActive({ success: false, error: this.friendlyError(error) });
         }
       });
+    }).then(async result => {
+      if (this.nativeObserver && !this.destroyed && this.client.isRunning()) {
+        this.nativeSessionCleanup++;
+        try { await this.refreshSessionPointer(); await this.capturePiForks(); }
+        catch { await this.reportNativeCaptureFailure(); }
+        finally { this.nativeSessionCleanup--; }
+      }
+      return result;
     });
   }
 
   getCurrentWorkingDirectory(): string {
     return this.currentWorkingDirectory;
+  }
+
+  /** Keep exit proof blocked if even the durable coverage-failure receipt could not be written. */
+  private async reportNativeCaptureFailure(): Promise<void> {
+    this.nativeCaptureUnconfirmed = true;
+    if (this.nativeCaptureFailure) {
+      await this.nativeCaptureFailure();
+      this.nativeCaptureUnconfirmed = false;
+    }
+  }
+
+  observeNativeSessionCreation(observer: (target: NativeSessionDeletionTarget) => Promise<void>, onFailure?: () => Promise<void>): void {
+    if (!this.delegationWorker || !this.threadId?.startsWith('delegate-lane-')) throw new Error('Native observation requires a managed worker');
+    this.nativeObserver = observer;
+    this.nativeCaptureFailure = onFailure;
   }
 
   isBusy(): boolean {
@@ -535,11 +569,13 @@ export class PiExecutor implements IExecutor {
 
   async waitForManagedProcessGroupExit(): Promise<void> {
     if (!this.delegationWorker) throw new Error('Managed worker process-group tracking was not enabled');
+    if (this.nativeCaptureUnconfirmed || this.nativeObserver && this.nativeReceiptOperations > 0) throw new Error('Native creation coverage could not be persisted');
     await Promise.all([...this.workerClients].map(async client => {
       if (!client.waitForManagedProcessGroupExit) throw new Error('Worker transport cannot confirm managed process-group exit');
       await client.waitForManagedProcessGroupExit();
       this.workerClients.delete(client);
     }));
+    await this.capturePiForks();
   }
 
   isWaitingInput(): boolean {
@@ -789,6 +825,7 @@ export class PiExecutor implements IExecutor {
   }
 
   async deleteThreadData(threadId: string): Promise<void> {
+    if (this.delegationWorker) return;
     const pointerPath = path.join(path.dirname(this.sessionFilePath), `${threadId}.json`);
     let sessionFile = this.sessionFile;
     let adopted = threadId === this.threadId && this.adopted;
@@ -856,10 +893,21 @@ export class PiExecutor implements IExecutor {
       this.reportedModel = undefined;
       this.reportedEffort = undefined;
       const missingHistory = Boolean(this.sessionId && (!this.sessionFile || !fs.existsSync(this.sessionFile)));
+      if (missingHistory && this.nativeObserver) this.clearPointer();
+      const created = !this.sessionId;
       this.client.updateLaunch?.(this.buildLaunch());
-      await this.client.start();
+      if (this.nativeObserver) {
+        const startingClient = this.client;
+        try {
+          if (this.nativeStoreIdentity) await verifyHistoryDirectory(this.nativeStoreIdentity);
+          else this.nativeStoreIdentity = await historyIdentity(this.sessionStoreDir, 'directory');
+        } catch { await this.reportNativeCaptureFailure(); }
+        if (this.destroyed || this.client !== startingClient || this.preparingTurn?.cancelled) throw new Error('Pi creation was cancelled');
+      }
+      try { await this.client.start(); }
+      catch (error) { if (created && this.nativeObserver) await this.reportNativeCaptureFailure(); throw error; }
       if (!this.adopted) {
-        const sessionId = await this.refreshSessionPointer();
+        const sessionId = await this.refreshSessionPointer(created);
         // Pi can create empty history using the old ID when its file is gone.
         return missingHistory ? null : sessionId;
       }
@@ -1019,7 +1067,7 @@ export class PiExecutor implements IExecutor {
 
   private forgetSession(): void {
     const sessionFile = this.sessionFile;
-    const preserveHistory = this.adopted || this.isForegroundSession();
+    const preserveHistory = this.delegationWorker || this.adopted || this.isForegroundSession();
     this.clearPointer();
     // Reset changes the foreground association, never deletes resumable history.
     if (sessionFile && !preserveHistory) {
@@ -1294,25 +1342,71 @@ export class PiExecutor implements IExecutor {
     }
   }
 
-  private async refreshSessionPointer(): Promise<string | null> {
+  private async refreshSessionPointer(created = false): Promise<string | null> {
+    this.nativeReceiptOperations++;
+    try { return await this.refreshSessionPointerInternal(created); }
+    finally { this.nativeReceiptOperations--; }
+  }
+
+  private async refreshSessionPointerInternal(created: boolean): Promise<string | null> {
     try {
       const response = await this.client.request({ type: 'get_state' });
       if (response.success && response.data) {
+        if (created && this.nativeObserver && (typeof response.data.sessionId !== 'string' || typeof response.data.sessionFile !== 'string')) {
+          await this.reportNativeCaptureFailure();
+        }
         const model = response.data.model;
         if (typeof model?.id === 'string' && model.id.trim()) {
           this.reportedModel = typeof model.provider === 'string' && model.provider
             ? `${model.provider}/${model.id}` : model.id;
         }
         if (typeof response.data.thinkingLevel === 'string' && response.data.thinkingLevel.trim()) this.reportedEffort = response.data.thinkingLevel;
+        const previousId = this.sessionId;
         if (typeof response.data.sessionId === 'string') this.sessionId = response.data.sessionId;
         if (typeof response.data.sessionFile === 'string') this.sessionFile = response.data.sessionFile;
         this.savePointer();
+        if (this.nativeObserver && !this.adopted && this.sessionId && this.sessionFile && this.threadId
+          && (created || previousId !== this.sessionId) && !this.observedNativeIds.has(this.sessionId)) {
+          let target: NativeSessionDeletionTarget | undefined;
+          try {
+            if (!this.nativeStoreIdentity) throw new Error('Pi creation root is unconfirmed');
+            await verifyHistoryDirectory(this.nativeStoreIdentity);
+            if (this.preexistingNativeFiles.has(this.sessionFile) || path.dirname(this.sessionFile) !== this.sessionStoreDir) {
+              throw new Error('Pi returned pre-existing or foreign history');
+            }
+            target = await captureHistoryTarget({ backend: 'pi', sessionId: this.sessionId, executorThreadId: this.threadId,
+              home: fs.realpathSync(process.env.HOME || os.homedir()), nativeHome: this.sessionStoreDir,
+              scope: this.sessionStoreDir, pointer: this.sessionFilePath, cwd: this.currentWorkingDirectory,
+              command: this.piCommand ?? 'pi', transcript: this.sessionFile });
+          } catch { await this.reportNativeCaptureFailure(); }
+          if (target) { await this.nativeObserver(target); this.observedNativeIds.add(this.sessionId); }
+        }
         return typeof response.data.sessionId === 'string' && response.data.sessionId ? response.data.sessionId : null;
       }
+      if (created && this.nativeObserver) await this.reportNativeCaptureFailure();
     } catch (error) {
+      if (this.nativeObserver) { await this.reportNativeCaptureFailure(); throw error; }
       console.warn('[PiExecutor] Failed to refresh Pi session pointer', error);
     }
     return null;
+  }
+
+  /** Exclusive managed roots also retain forks that are no longer the active RPC state. */
+  private async capturePiForks(): Promise<void> {
+    if (!this.nativeObserver || !this.threadId || this.adopted || !this.sessionId) return;
+    try {
+      if (!this.nativeStoreIdentity) throw new Error('Pi creation root is unconfirmed');
+      await verifyHistoryDirectory(this.nativeStoreIdentity);
+      for (const header of await piHistoryHeaders(this.sessionStoreDir)) {
+        if (this.observedNativeIds.has(header.id) || this.preexistingNativeFiles.has(header.file)) continue;
+        if (header.cwd !== this.currentWorkingDirectory) throw new Error('Pi fork working directory changed');
+        const target = await captureHistoryTarget({ backend: 'pi', sessionId: header.id, executorThreadId: this.threadId,
+          home: fs.realpathSync(process.env.HOME || os.homedir()), nativeHome: this.sessionStoreDir, scope: this.sessionStoreDir,
+          pointer: this.sessionFilePath, pointerSessionId: this.sessionId, cwd: header.cwd,
+          command: this.piCommand ?? 'pi', transcript: header.file });
+        await this.nativeObserver(target); this.observedNativeIds.add(header.id);
+      }
+    } catch { await this.reportNativeCaptureFailure(); }
   }
 
   private loadPointer(): void {

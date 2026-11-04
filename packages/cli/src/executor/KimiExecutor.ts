@@ -1,4 +1,6 @@
 import { DirectoryGuard } from '../security/DirectoryGuard';
+import os from 'os';
+import path from 'path';
 import { AcpExecutor } from './AcpExecutor';
 import type { AcpEventCallbacks, AcpTransport } from './acp/AcpClient';
 import { queryKimiAccountUsage } from './kimi/KimiAccountUsage';
@@ -30,6 +32,8 @@ export class KimiExecutor extends AcpExecutor {
 
   constructor(directoryGuard: DirectoryGuard, options: KimiExecutorOptions = {}) {
     const kimiCommand = options.kimiCommand ?? 'kimi';
+    const launchEnvironment = { ...process.env };
+    const nativeHome = launchEnvironment.KIMI_CODE_HOME || path.join(os.homedir(), '.kimi-code');
     super(directoryGuard, {
       model: options.model,
       effort: options.effort,
@@ -41,6 +45,10 @@ export class KimiExecutor extends AcpExecutor {
       clientFactory: options.clientFactory,
       acpCommand: kimiCommand,
       acpArgs: ['acp'],
+      ...(options.delegationWorker ? {
+        spawnEnvironment: () => ({ ...launchEnvironment }),
+        nativeDeletion: { home: os.homedir(), root: nativeHome },
+      } : {}),
       backendLabel: 'Kimi Code',
       sessionNamespace: 'kimi-sessions',
       effortConfigId: 'thinking',
