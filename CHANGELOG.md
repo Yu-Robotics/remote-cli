@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.214] - 2026-11-04
+
+### Fixed
+- Determine managed Codex session cleanup compatibility from native protocol behavior and validated metadata instead of rejecting every server version except 0.166.0.
+- Preserve exact ownership and shutdown checks, and retain existing deletion preparations when retrying cleanup after an upgrade.
+
+### Tests
+- Cover compatible version labels, unavailable methods, invalid acknowledgements, legacy receipt recovery, and ambiguous deletion failures.
+- Verify Codex 0.165.0 list/read/delete and exact missing-target responses using isolated synthetic histories without model calls or real user history access.
+
 ## [1.6.213] - 2026-11-04
 
 ### Fixed

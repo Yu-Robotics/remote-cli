@@ -144,6 +144,52 @@ describe('DelegatedWorkerSessionStore', () => {
     expect(Object.keys((await reloaded.lanesForThread('parent-thread'))[0].nativeDeletionPreparations!)).toHaveLength(targets.length);
   });
 
+  it.each(['codex-thread-delete-v1', '0.166.0'] as const)(
+    'reloads immutable Codex preparation marker %s and rejects replacement', async nativeVersion => {
+    const store = new DelegatedWorkerSessionStore(directory);
+    const { lane } = await store.acquire(identity(workspace));
+    const target: NativeSessionDeletionTarget = { version: 1, backend: 'codex', sessionId: randomUUID(),
+      executorThreadId: lane.executorThreadId, home: { path: home, dev: '1', ino: '1' },
+      nativeHome: { path: path.join(home, '.codex'), dev: '1', ino: '2' },
+      pointerHash: 'a'.repeat(64), cwd: workspace, command: 'synthetic-codex' };
+    await store.captureNativeSession(lane.id, 0, target);
+    await store.requestNativeDeletion('parent-thread', 0);
+    const prepared = { ...deletionPreparation(target), nativeVersion };
+    await store.prepareNativeDeletion(lane.id, 0, target, prepared);
+    const restarted = new DelegatedWorkerSessionStore(directory);
+    expect(await restarted.getInventoryStatus()).toEqual({ complete: true, quarantinedRecords: 0 });
+    const replacement = { ...prepared,
+      nativeVersion: nativeVersion === '0.166.0' ? 'codex-thread-delete-v1' as const : '0.166.0' as const };
+    await expect(restarted.prepareNativeDeletion(lane.id, 0, target, replacement)).rejects.toThrow('cannot be replaced');
+    expect((await restarted.lanesForThread('parent-thread'))[0].nativeDeletionPreparations?.[target.sessionId]).toEqual(prepared);
+  });
+
+  it.each(['contract', 'target', 'format', 'extra-field'])(
+    'quarantines a corrupted Codex preparation %s after restart', async fault => {
+    const store = new DelegatedWorkerSessionStore(directory);
+    const { lane } = await store.acquire(identity(workspace));
+    const target: NativeSessionDeletionTarget = { version: 1, backend: 'codex', sessionId: randomUUID(),
+      executorThreadId: lane.executorThreadId, home: { path: home, dev: '1', ino: '1' },
+      nativeHome: { path: path.join(home, '.codex'), dev: '1', ino: '2' },
+      pointerHash: 'a'.repeat(64), cwd: workspace, command: 'synthetic-codex' };
+    await store.captureNativeSession(lane.id, 0, target);
+    await store.requestNativeDeletion('parent-thread', 0);
+    await store.prepareNativeDeletion(lane.id, 0, target, deletionPreparation(target));
+    const file = path.join(directory, `${lane.id}.json`);
+    const saved = JSON.parse(await fs.readFile(file, 'utf8'));
+    const prepared = saved.nativeDeletionPreparations[target.sessionId];
+    if (fault === 'contract') prepared.nativeVersion = 'codex-thread-delete-v2';
+    if (fault === 'target') prepared.targetHash = deletionPreparation({ ...target, sessionId: randomUUID() }).targetHash;
+    if (fault === 'format') prepared.version = 2;
+    if (fault === 'extra-field') prepared.files = [];
+    const corrupt = JSON.stringify(saved);
+    await fs.writeFile(file, corrupt);
+    const restarted = new DelegatedWorkerSessionStore(directory);
+    expect(await restarted.getInventoryStatus()).toEqual({ complete: false, quarantinedRecords: 1 });
+    await expect(restarted.nativeDeletionCandidates()).rejects.toThrow();
+    expect(await fs.readFile(file, 'utf8')).toBe(corrupt);
+  });
+
   it.each([null, {}, { sessionId: '', workspaceKind: 'git' }, { sessionId: 'native', workspaceKind: 'unknown' }])(
     'quarantines malformed persisted prompt initialization: %j', async initializedPrompt => {
       const store = new DelegatedWorkerSessionStore(directory);

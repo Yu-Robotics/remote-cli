@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DelegationManager, type DelegationParent } from '../../src/delegation/DelegationManager';
 import { BackendRegistry } from '../../src/delegation/BackendRegistry';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
-import { captureCodexDeletionTarget, type NativeSessionDeletionTarget } from '../../src/delegation/NativeSessionDeletion';
+import { captureCodexDeletionTarget, deletionPreparation, type NativeSessionDeletionTarget } from '../../src/delegation/NativeSessionDeletion';
 import { DELEGATION_BACKENDS } from '../../src/delegation/contract';
 
 function gate() { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; }
@@ -281,13 +281,47 @@ describe('managed child native deletion lifecycle', () => {
     await manager.reconcileNativeSessionDeletions();
     const lane = (await manager.laneStore.lanesForThread('parent'))[0];
     expect(lane.nativeDeletion?.state).toBe('uncertain');
-    expect(lane.nativeDeletionPreparations?.[targets[0].sessionId]).toMatchObject({ version: 1, nativeVersion: '0.166.0' });
+    expect(lane.nativeDeletionPreparations?.[targets[0].sessionId]).toMatchObject({ version: 1, nativeVersion: 'codex-thread-delete-v1' });
     await manager.destroy();
     manager = new DelegationManager(new DirectoryGuard([home]), factory as any,
       new BackendRegistry(async () => 'synthetic 1.0'), undefined, undefined, 1000, undefined, undefined,
-      () => ({ start: async () => {}, stop: async () => {}, getServerVersion: () => '0.166.0', request: deletion }));
+      () => ({ start: async () => {}, stop: async () => {}, getServerVersion: () => '0.165.0', request: deletion }));
     await manager.reconcileNativeSessionDeletions();
     expect((await manager.laneStore.lanesForThread('parent'))[0].nativeDeletion?.state).toBe('deleted');
+  });
+
+  it.each(['present', 'absent'])(
+    'retries an immutable legacy preparation after restart with the root %s', async state => {
+    creation.resolve(); execution.resolve(); exit.resolve();
+    await finish(await launch());
+    await manager.requestNativeSessionDeletion('parent', 0);
+    const lane = (await manager.laneStore.lanesForThread('parent'))[0];
+    const target = targets[0];
+    const legacy = { ...deletionPreparation(target), nativeVersion: '0.166.0' as const };
+    await manager.laneStore.prepareNativeDeletion(lane.id, lane.contextGeneration ?? 0, target, legacy);
+    await manager.destroy();
+    const normal = deletion.getMockImplementation()!;
+    deletion.mockImplementation(async (method, params) => {
+      if (state === 'absent') {
+        if (method === 'thread/list') return { data: [], nextCursor: null };
+        if (method === 'thread/delete') throw Object.assign(new Error(`no rollout found for thread id ${target.sessionId}`), { code: -32600 });
+      }
+      return normal(method, params);
+    });
+    manager = new DelegationManager(new DirectoryGuard([home]), factory as any,
+      new BackendRegistry(async () => 'synthetic 1.0'), undefined, undefined, 1000, undefined, undefined,
+      () => ({ start: async () => {}, stop: async () => {}, getServerVersion: () => '0.165.0', request: deletion }));
+    const persistPrepared = vi.spyOn(manager.laneStore, 'prepareNativeDeletion');
+    await manager.reconcileNativeSessionDeletions();
+    expect(await manager.laneStore.getInventoryStatus()).toEqual({ complete: true, quarantinedRecords: 0 });
+    const current = (await manager.laneStore.lanesForThread('parent'))[0];
+    expect(current.nativeDeletion?.state).toBe('deleted');
+    expect(current.nativeDeletionPreparations?.[target.sessionId]).toEqual(legacy);
+    expect(persistPrepared).not.toHaveBeenCalled();
+    expect(deletion.mock.calls.map(([method]) => method)).toEqual(state === 'present'
+      ? ['thread/list', 'thread/list', 'thread/read', 'thread/delete'] : ['thread/list', 'thread/list', 'thread/delete']);
+    const saved = JSON.parse(await fs.readFile(path.join(manager.laneStore.storageDirectory, `${lane.id}.json`), 'utf8'));
+    expect(saved.nativeDeletionPreparations[target.sessionId]).toEqual(legacy);
   });
 
   it('reports unaudited backends unsupported without removing their lane evidence', async () => {

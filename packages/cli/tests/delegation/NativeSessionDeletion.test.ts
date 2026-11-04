@@ -3,11 +3,11 @@ import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { captureCodexDeletionTarget, deleteOwnedCodexSession, NativeSessionDeletionQueue,
+import { captureCodexDeletionTarget, deleteOwnedCodexSession, deletionPreparation, NativeSessionDeletionQueue,
   type NativeSessionDeletionTarget, type NativeDeletionPreparation } from '../../src/delegation/NativeSessionDeletion';
 
 // Synthetic values with the required Thread fields and source variants from the
-// installed Codex 0.166.0 generate-json-schema v2/ThreadListResponse.json.
+// Codex 0.165.0/0.166.0 generate-json-schema v2/ThreadListResponse.json.
 function metadata(id = randomUUID(), extra: Record<string, unknown> = {}) {
   return { id, sessionId: id, parentThreadId: null, source: 'appServer', cwd: '',
     cliVersion: '0.166.0', createdAt: 1, updatedAt: 1, ephemeral: false,
@@ -47,7 +47,7 @@ describe('permanent native session deletion', () => {
       : method === 'thread/list' ? list(params.archived ? [] : [unrelated, root]) : {});
     client = { start: vi.fn(async () => {}), stop: vi.fn(async () => {}), getServerVersion: vi.fn(() => '0.166.0'),
       request: vi.fn(async (method: string, params: any) => {
-        // Exact allowed request keys: 0.166.0 has NO ancestorThreadId filter.
+        // Exact protocol request keys; no unsupported ancestorThreadId filter.
         if (method === 'thread/list') {
           expect(Object.keys(params).sort()).toEqual(['archived', 'cursor', 'limit', 'modelProviders', 'sortDirection', 'sortKey', 'sourceKinds']);
           expect(params).toMatchObject({ sourceKinds, modelProviders: [], limit: 100, sortKey: 'created_at', sortDirection: 'asc' });
@@ -254,10 +254,36 @@ describe('permanent native session deletion', () => {
     expect(wasDeleted()).toBe(false);
   });
 
-  it.each(['version', 'method'])('reports unsupported %s explicitly without archive fallback', async fault => {
-    if (fault === 'version') client.getServerVersion.mockReturnValue('0.165.0');
-    else respond.mockRejectedValue(Object.assign(new Error('Synthetic unsupported method'), { code: -32601 }));
-    expect(await deleteOwnedCodexSession(target, factory)).toMatchObject({ state: 'unsupported' });
+  it.each(['0.165.0', '0.166.0', '0.167.0', null])('accepts compatible protocol responses with diagnostic version %s', async version => {
+    client.getServerVersion.mockReturnValue(version);
+    const persistPrepared = vi.fn(async (_receipt: NativeDeletionPreparation) => {});
+    expect(await deleteOwnedCodexSession(target, factory, { persistPrepared })).toMatchObject({ state: 'deleted' });
+    expect(client.request.mock.calls.map(([method]) => method)).toEqual(['thread/list', 'thread/list', 'thread/read', 'thread/delete']);
+    expect(persistPrepared).toHaveBeenCalledWith({ version: 1, nativeVersion: 'codex-thread-delete-v1',
+      targetHash: expect.stringMatching(/^[a-f0-9]{64}$/) });
+    expect(client.stop).toHaveBeenCalledOnce();
+  });
+
+  it.each(['thread/list', 'thread/read', 'thread/delete'])(
+    'reports unsupported %s explicitly without archive fallback', async unsupported => {
+    const normal = respond.getMockImplementation()!;
+    respond.mockImplementation(async (method, params) => {
+      if (method === unsupported) throw Object.assign(new Error('Synthetic unsupported method'), { code: -32601 });
+      return normal(method, params);
+    });
+    expect(await deleteOwnedCodexSession(target, factory, { persistPrepared: async () => {} })).toMatchObject({ state: 'unsupported' });
+    expect(client.request.mock.calls.some(([method]) => method === unsupported)).toBe(true);
+    expect(client.stop).toHaveBeenCalledOnce();
+  });
+
+  it.each([undefined, null, [], true, 'deleted', { deleted: true }])(
+    'keeps a malformed delete acknowledgement uncertain: %j', async acknowledgement => {
+    const normal = respond.getMockImplementation()!;
+    respond.mockImplementation(async (method, params) => method === 'thread/delete' ? acknowledgement : normal(method, params));
+    const persistPrepared = vi.fn(async (_receipt: NativeDeletionPreparation) => {});
+    expect(await deleteOwnedCodexSession(target, factory, { persistPrepared })).toMatchObject({ state: 'uncertain' });
+    expect(wasDeleted()).toBe(true);
+    expect(persistPrepared).toHaveBeenCalledOnce();
     expect(client.stop).toHaveBeenCalledOnce();
   });
 
@@ -284,6 +310,8 @@ describe('permanent native session deletion', () => {
       expect(await deleteOwnedCodexSession(target, factory, { persistPrepared }))
         .toMatchObject({ state: fault === 'lost-ack' ? 'uncertain' : 'deleted' });
       const prepared = JSON.parse(await fs.readFile(receiptFile, 'utf8'));
+      expect(prepared.nativeVersion).toBe('codex-thread-delete-v1');
+      client.getServerVersion.mockReturnValue(null);
       expect(await deleteOwnedCodexSession(target, factory, { prepared })).toMatchObject({ state: 'deleted' });
       expect(deletes).toBe(2);
       expect(client.request.mock.calls.filter(([method]) => method === 'thread/read')).toHaveLength(1);
@@ -306,14 +334,14 @@ describe('permanent native session deletion', () => {
     expect(wasDeleted()).toBe(false);
   });
 
-  it.each(['missing', 'wrong-hash', 'wrong-version', 'changed-target', 'descendant', 'missing-ack'])(
+  it.each(['missing', 'wrong-hash', 'wrong-contract', 'changed-target', 'descendant', 'missing-ack'])(
     'does not claim an absent target deleted with %s recovery evidence', async fault => {
       let prepared: NativeDeletionPreparation | undefined;
       await deleteOwnedCodexSession(target, factory, { persistPrepared: async value => { prepared = value; } });
       client.request.mockClear();
       if (fault === 'missing') prepared = undefined;
       if (fault === 'wrong-hash') prepared!.targetHash = '0'.repeat(64);
-      if (fault === 'wrong-version') (prepared as any).nativeVersion = '0.165.0';
+      if (fault === 'wrong-contract') (prepared as any).nativeVersion = 'codex-thread-delete-v2';
       respond.mockImplementation(async method => {
         if (method === 'thread/list') return list(fault === 'descendant'
           ? [metadata(randomUUID(), { cwd: home, parentThreadId: target.sessionId })] : []);
@@ -323,6 +351,36 @@ describe('permanent native session deletion', () => {
         .toMatchObject({ state: fault === 'missing-ack' ? 'uncertain' : 'held' });
       if (fault !== 'missing-ack') expect(wasDeleted()).toBe(false);
     });
+
+  it.each(['wrong-hash', 'foreign-target', 'wrong-contract', 'wrong-format', 'extra-field', 'null'])(
+    'rejects %s preparation even while the root is still present', async fault => {
+    let prepared: any = deletionPreparation(target);
+    if (fault === 'wrong-hash') prepared.targetHash = '0'.repeat(64);
+    if (fault === 'foreign-target') prepared = deletionPreparation({ ...target, sessionId: randomUUID() });
+    if (fault === 'wrong-contract') prepared.nativeVersion = '0.165.0';
+    if (fault === 'wrong-format') prepared.version = 2;
+    if (fault === 'extra-field') prepared.files = [];
+    if (fault === 'null') prepared = null;
+    const persistPrepared = vi.fn(async () => {});
+    expect(await deleteOwnedCodexSession(target, factory, { prepared, persistPrepared })).toMatchObject({ state: 'held' });
+    expect(wasDeleted()).toBe(false);
+    expect(persistPrepared).not.toHaveBeenCalled();
+  });
+
+  it.each(['wrong-code', 'wrong-target', 'generic-message', 'present-root'])(
+    'does not treat %s deletion errors as confirmed absence', async fault => {
+    const normal = respond.getMockImplementation()!;
+    respond.mockImplementation(async (method, params) => {
+      if (method === 'thread/list' && fault !== 'present-root') return list([]);
+      if (method !== 'thread/delete') return normal(method, params);
+      throw Object.assign(new Error(fault === 'generic-message' ? 'Thread not found; already deleted'
+        : `no rollout found for thread id ${fault === 'wrong-target' ? randomUUID() : target.sessionId}`),
+      { code: fault === 'wrong-code' ? -32603 : -32600 });
+    });
+    expect(await deleteOwnedCodexSession(target, factory, { prepared: deletionPreparation(target) }))
+      .toMatchObject({ state: 'uncertain' });
+    expect(wasDeleted()).toBe(true);
+  });
 
   it.each(['ENOENT', -32600, -32603])('does not classify a read error %s as an already deleted target', async code => {
     const normal = respond.getMockImplementation()!;
