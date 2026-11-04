@@ -777,12 +777,24 @@ export class DelegationManager {
           // Native session IDs are distinct; policy was resolved against the real
           // parent thread before passing the synthetic worker identity to the factory.
           let acceptingActivity = true;
-          const execution = worker.execute(
-            `You are executing one delegated task in an isolated worker session. This session may contain context from earlier delegated tasks in this thread and workspace. Complete only this objective and return a concise result with verification and remaining issues. Do not delegate to other agents.${task.workspace
-              ? `\nThis task runs in an owned Git worktree at ${task.workspace.cwd}, with a fresh detached task checkout based on checkpoint ${task.workspace.input.commit}. Previous task changes are NOT implicitly present. Re-read current files; earlier conversation context may be stale. Stay within this checkout. Do not merge into or edit the delivery directory, push, change branches, or remove the worktree. Your file changes will be captured as an artifact for explicit coordinator integration. Ignored files and dependencies are not copied from the delivery directory. This checkout is disposable: after delivery or retention it may be removed, including ignored files and dependencies. Include required source changes and deliverables in the captured Git artifact; never treat a path in this checkout as durable delivery. Failed captured changes are retained for recovery without automatic merging. A worktree is not an OS sandbox.${task.workspace.input.sharedLinks?.length ? `\nShared external links: ${task.workspace.input.sharedLinks.map(b => JSON.stringify(b.path)).join(', ')}. These links reach shared original data. Edits there are direct and are NOT captured, merged, reverted, or backed up by worktree artifacts. Do not stage or change the shared link nodes themselves.` : ''}` : ''}
-
-${objective}${task.exports?.length ? `\nRequired durable output paths (relative to checkout root): ${JSON.stringify(task.exports)}` : ''}`,
+          const workspaceKind = task.workspace ? 'git' : 'shared';
+          const fixedInstructions = 'You are executing one delegated task in an isolated worker session. This session may contain context from earlier delegated tasks in this thread and workspace.'
+            + (task.workspace ? '\nYour file changes will be captured as an artifact for explicit coordinator integration. Ignored files and dependencies are not copied from the delivery directory. This checkout is disposable: after delivery or retention it may be removed, including ignored files and dependencies. Include required source changes and deliverables in the captured Git artifact; never treat a path in this checkout as durable delivery. Failed captured changes are retained for recovery without automatic merging. A worktree is not an OS sandbox.' : '');
+          const taskInstructions = 'Complete only this objective and return a concise result with verification and remaining issues. Do not delegate to other agents.'
+            + (task.workspace
+              ? `\nThis task runs in an owned Git worktree at ${task.workspace.cwd}, with a fresh detached task checkout based on checkpoint ${task.workspace.input.commit}. Previous task changes are NOT implicitly present. Re-read current files; earlier conversation context may be stale. Stay within this checkout. Do not merge into or edit the delivery directory, push, change branches, or remove the worktree.${task.workspace.input.sharedLinks?.length ? `\nShared external links: ${task.workspace.input.sharedLinks.map(b => JSON.stringify(b.path)).join(', ')}. These links reach shared original data. Edits there are direct and are NOT captured, merged, reverted, or backed up by worktree artifacts. Do not stage or change the shared link nodes themselves.` : ''}`
+              : `\nCurrent working directory: ${cwd}. Re-read current files; earlier conversation context may be stale.`)
+            + `\n\n${objective}${task.exports?.length ? `\nRequired durable output paths (relative to checkout root): ${JSON.stringify(task.exports)}` : ''}`;
+          const fullPrompt = `${fixedInstructions}\n${taskInstructions}`;
+          let includedFixedInstructions = true;
+          const execution = worker.execute(fullPrompt,
             {
+              resolvePrompt: sessionId => {
+                const initialized = task.lane?.initializedPrompt;
+                includedFixedInstructions = !sessionId || initialized?.sessionId !== sessionId
+                  || initialized.workspaceKind !== workspaceKind;
+                return includedFixedInstructions ? fullPrompt : taskInstructions;
+              },
               // The manager owns delegated-task liveness. Zero disables optional
               // backend-local limits that would otherwise ignore tool callbacks.
               timeout: 0,
@@ -860,6 +872,14 @@ ${prompt}`));
           armIdleTimer(task);
           try { result = await Promise.race([task.interrupted, execution]); }
           finally { acceptingActivity = false; }
+          // A failed first turn cannot establish context. A confirmed resume may
+          // retain its earlier initialization even when this task itself fails.
+          const sessionId = worker.getSessionId?.();
+          const confirmedContext = result.success || (!includedFixedInstructions
+            && sessionId === task.lane?.initializedPrompt?.sessionId);
+          if (confirmedContext && sessionId && task.lane && !isTerminalTaskState(task.record.state)) {
+            await this.laneStore.markPromptInitialized(task.lane.id, sessionId, workspaceKind);
+          }
           captureWorkerMetadata(task);
           metadataCaptured = true;
           if (!result.success && attempt === 0 && worker.consumeSessionResumeFailure?.()) {

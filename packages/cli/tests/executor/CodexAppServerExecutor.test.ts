@@ -95,6 +95,18 @@ describe('CodexAppServerExecutor', () => {
     await fs.rm(tempHome, { recursive: true, force: true });
   });
 
+  it('resolves prompt context using the native thread created or resumed before dispatch', async () => {
+    const resolvePrompt = vi.fn((id: string | null) => `Task for ${id}`);
+    expect(executor.getSessionId()).toBeNull();
+    const running = executor.execute('fallback', { resolvePrompt });
+    await vi.waitFor(() => expect(transport.requests.some(item => item.method === 'turn/start')).toBe(true));
+    expect(resolvePrompt).toHaveBeenCalledWith('codex-thread-1');
+    expect(transport.requests.find(item => item.method === 'turn/start')?.params.input)
+      .toEqual([{ type: 'text', text: 'Task for codex-thread-1', text_elements: [] }]);
+    transport.emit({ method: 'turn/completed', params: { threadId: transport.nextThreadId, turn: { id: 'turn-1', status: 'completed' } } });
+    expect(await running).toMatchObject({ success: true });
+  });
+
   it('keeps text and tool callbacks isolated between independent Codex executors', async () => {
     const otherTransport = new FakeTransport();
     otherTransport.nextThreadId = 'codex-worker';

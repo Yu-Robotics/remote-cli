@@ -6,6 +6,8 @@ From Router 1.6.205, public `/health` responses expose health and connection cou
 
 Rate-limited binding requests return HTTP 429 with `Retry-After`. Admission uses the direct socket peer and ignores `X-Forwarded-For`; devices behind a shared proxy or NAT share a peer budget. Unregistered connections have a fixed 30-second registration deadline that heartbeats cannot extend, a 16 KiB message limit, and limits of 64 pending connections per peer and 512 globally. Registered WebSocket messages have a 16 MiB limit, including cumulative fragmented messages. Existing monitoring should use the health status and connection count instead of the removed device list.
 
+From CLI 1.6.210, managed workers receive fixed delegation instructions once per confirmed native conversation. Follow-up tasks keep their own objective, current workspace and checkpoint, external-link warnings, and required outputs. Fresh or unconfirmed contexts receive the full instructions again. Worker conversation reuse is preserved; this does not archive or delete sessions.
+
 From CLI 1.6.204, Claude Code model aliases show the alias name followed by the native resolved model ID, preserving provider prefixes. If the resolved ID is unavailable, the native display name is used. Direct model and Default labels, selection values, and other backends remain unchanged.
 
 ![Remote CLI architecture](../../docs/images/remote-cli-architecture.png)

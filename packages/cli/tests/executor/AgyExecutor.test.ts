@@ -226,6 +226,21 @@ describe('AgyExecutor', () => {
 
   // ── Process spawning ──────────────────────────────────────────────────────
 
+  it('resolves task context for fresh and initialized conversations at dispatch', async () => {
+    const resolvePrompt = vi.fn((id: string | null) => id ? 'task only' : 'instructions and task');
+    const first = executor.execute('fallback', { resolvePrompt });
+    expect(resolvePrompt).toHaveBeenLastCalledWith(null);
+    expect(JSON.parse(proc.stdin.write.mock.calls.at(-1)[0]).message.content).toBe('instructions and task');
+    emitInit();
+    emitResult();
+    await first;
+    const second = executor.execute('fallback', { resolvePrompt });
+    expect(resolvePrompt).toHaveBeenLastCalledWith('conv-aaa');
+    expect(JSON.parse(proc.stdin.write.mock.calls.at(-1)[0]).message.content).toBe('task only');
+    emitResult();
+    await second;
+  });
+
   it('spawns agy with stream-json flags and skip-permissions by default', async () => {
     const p = executor.execute('hello');
     await waitForSpawn();

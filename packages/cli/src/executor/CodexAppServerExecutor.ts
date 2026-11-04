@@ -291,7 +291,7 @@ export class CodexAppServerExecutor implements IExecutor {
       // Resolve paths before marking a turn active so a rejected policy cannot
       // leave the executor busy without an actual app-server turn.
       const sandboxOptions = this.sandbox.turnOptions(this.currentWorkingDirectory);
-      const input = await this.buildInput(prompt, options.attachments, temporaryFiles);
+      const input = await this.buildInput(options.resolvePrompt?.(this.codexThreadId) ?? prompt, options.attachments, temporaryFiles);
       const speedOptions = await this.speedOptions();
       if (this.isBusy()) {
         await this.cleanupTemporaryFiles(temporaryFiles);

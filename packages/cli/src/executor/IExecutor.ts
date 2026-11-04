@@ -2,6 +2,9 @@ import { ToolUseInfo, ToolResultInfo, Attachment, ImageBlock, TaskNotificationIn
 import type { DelegationConnection } from '../delegation/contract';
 
 export interface ExecuteOptions {
+  /** Resolve task text after native session restoration, immediately before dispatch.
+   * Null means conversation identity is not yet known; callers must include full context. */
+  resolvePrompt?: (sessionId: string | null) => string;
   onStream?: (chunk: string) => void;
   /** Assistant response text only; excludes reasoning, tool output, and status messages. */
   onDisplayText?: (chunk: string) => void;

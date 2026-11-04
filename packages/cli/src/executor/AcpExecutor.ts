@@ -606,6 +606,11 @@ export abstract class AcpExecutor implements IExecutor {
       onImage: options.onImage,
     };
     const { client, sessionId } = await this.ensureSession();
+    if (options.resolvePrompt) {
+      const resolved = options.resolvePrompt(sessionId);
+      if (prompt) blocks.shift();
+      if (resolved) blocks.unshift({ type: 'text', text: resolved });
+    }
     // Native session restoration may replay history for legacy transcript consumers.
     // Only events from the new prompt belong to its public activity snapshot.
     this.activityTracker.reset();

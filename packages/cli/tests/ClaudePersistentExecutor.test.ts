@@ -96,6 +96,22 @@ describe('ClaudePersistentExecutor', () => {
     expect(child.listenerCount('close')).toBeGreaterThan(0);
   };
 
+  it('resolves task context after native initialization and before writing the user message', async () => {
+    const resolvePrompt = vi.fn((id: string | null) => `Task for ${id}`);
+    const running = executor.execute('fallback', { resolvePrompt });
+    await vi.advanceTimersByTimeAsync(0);
+    const emit = (message: object) => mockChildProcess.stdout.emit('data', Buffer.from(`${JSON.stringify(message)}\n`));
+    emit({ type: 'system', subtype: 'init', session_id: 'resumed-worker' });
+    await advanceStartup();
+    expect(resolvePrompt).toHaveBeenCalledWith('resumed-worker');
+    const sent = mockChildProcess.stdin.write.mock.calls.map(([line]: [string]) => JSON.parse(line));
+    expect(sent.find((message: any) => message.type === 'user').message.content).toBe('Task for resumed-worker');
+    emit({ type: 'result', subtype: 'success', result: 'Done', is_error: false });
+    expect(await running).toMatchObject({ success: true });
+    mockChildProcess.emit('exit', 0, null);
+    mockChildProcess.emit('close', 0, null);
+  });
+
   describe('initialization', () => {
     it.each(['nested', 'top-level'])('does not log raw %s tool-result content', async shape => {
       const onToolResult = vi.fn();

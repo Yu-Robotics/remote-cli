@@ -564,6 +564,8 @@ independent cross-review. Keep talking to your existing thread; its selected
 backend collects worker results and answers you. Workers do not create extra
 thread buttons, and native backend subagent tools remain unchanged.
 
+From CLI 1.6.210, managed workers receive fixed delegation instructions once per confirmed native conversation. Follow-up tasks keep their own objective, current workspace and checkpoint, external-link warnings, and required outputs. Fresh or unconfirmed contexts receive the full instructions again. Worker conversation reuse is preserved; this does not archive or delete sessions.
+
 ```text
 /delegation
 /delegation on

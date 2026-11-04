@@ -620,6 +620,7 @@ export class AgyExecutor implements IExecutor {
       let proc: ChildProcess;
       try {
         proc = this.ensureProcess();
+        prompt = options.resolvePrompt?.(this.conversationId) ?? prompt;
       } catch (error) {
         resolve({
           success: false,
