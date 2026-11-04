@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import type { BindingManager } from './BindingManager';
 import type { ThreadSummary } from '../types';
 
@@ -15,7 +16,7 @@ export interface SelectionFence {
   openId: string;
   deviceId: string;
   revision: number;
-  epoch: number;
+  epoch: string;
 }
 
 interface ThreadSelectionOptions {
@@ -26,14 +27,16 @@ interface ThreadSelectionOptions {
 /** Router-owned UI selection with per-user intent and per-device ownership fences. */
 export class ThreadSelectionManager {
   private readonly revisions = new Map<string, number>();
-  private readonly epochs = new Map<string, number>();
+  private readonly epochs = new Map<string, string>();
   private readonly names = new Map<string, { threadId: string; name: string }>();
 
   constructor(private readonly bindings: BindingManager, private readonly options: ThreadSelectionOptions) {}
 
   private key(openId: string, deviceId: string): string { return `${openId}\n${deviceId}`; }
   private revision(openId: string): number { return this.revisions.get(openId) ?? 0; }
-  private epoch(openId: string, deviceId: string): number { return this.epochs.get(this.key(openId, deviceId)) ?? 0; }
+  private epoch(openId: string, deviceId: string): string {
+    return this.epochs.get(this.key(openId, deviceId)) ?? this.bindings.getCardThreadEpoch(openId, deviceId);
+  }
 
   capture(openId: string, deviceId: string): SelectionFence {
     return { openId, deviceId, revision: this.revision(openId), epoch: this.epoch(openId, deviceId) };
@@ -56,14 +59,17 @@ export class ThreadSelectionManager {
 
   isCurrent(fence: SelectionFence): boolean { return this.current(fence); }
 
-  isOwnershipCurrent(openId: string, deviceId: string, epoch: number): boolean {
+  isOwnershipCurrent(openId: string, deviceId: string, epoch: string): boolean {
     return epoch === this.epoch(openId, deviceId);
   }
 
-  invalidateDevice(openId: string, deviceId: string): void {
+  async invalidateDevice(openId: string, deviceId: string): Promise<void> {
     const key = this.key(openId, deviceId);
-    this.epochs.set(key, this.epoch(openId, deviceId) + 1);
+    const blocked = randomUUID();
+    this.epochs.set(key, blocked);
     this.revisions.set(openId, this.revision(openId) + 1);
+    await this.bindings.invalidateDeviceCards(deviceId);
+    if (this.epochs.get(key) === blocked) this.epochs.delete(key);
   }
 
   private current(fence: SelectionFence): boolean {
@@ -83,10 +89,15 @@ export class ThreadSelectionManager {
         ?? this.options.names(openId, deviceId, selection.threadId) ?? selection.threadId };
   }
 
+  /**
+   * Admission means a guarded snapshot write has begun. After that callback, a
+   * fulfilled call confirms durability even if its routing fence is now stale;
+   * rejection may represent an uncertain replacement. Callers must not undo it.
+   */
   async select(openId: string, deviceId: string, threadId: string, threadName?: string,
-    fence?: SelectionFence): Promise<'selected' | 'stale'> {
+    fence?: SelectionFence, current?: () => boolean, onCommitAdmitted?: () => void): Promise<'selected' | 'stale'> {
     const intent = fence ?? this.beginIntent(openId, deviceId);
-    const result = await this.commit(intent, threadId);
+    const result = await this.commit(intent, threadId, current, onCommitAdmitted);
     if (result === 'selected' && threadName) this.names.set(this.key(openId, deviceId), { threadId, name: threadName });
     return result;
   }
@@ -95,11 +106,14 @@ export class ThreadSelectionManager {
     return this.commit(fence, threadId, current);
   }
 
-  private async commit(fence: SelectionFence, threadId: string, current?: () => boolean): Promise<'selected' | 'stale'> {
+  private async commit(fence: SelectionFence, threadId: string, current?: () => boolean,
+    onCommitAdmitted?: () => void): Promise<'selected' | 'stale'> {
     const allowed = () => this.current(fence) && (!current || current());
     if (!allowed()) return 'stale';
     if ((await this.bindings.getDeviceBinding(fence.deviceId))?.openId !== fence.openId || !allowed()) return 'stale';
-    const committed = await this.bindings.selectThread(fence.openId, fence.deviceId, threadId, allowed);
+    const committed = onCommitAdmitted
+      ? await this.bindings.selectThread(fence.openId, fence.deviceId, threadId, allowed, onCommitAdmitted)
+      : await this.bindings.selectThread(fence.openId, fence.deviceId, threadId, allowed);
     if (!committed || !allowed()) return 'stale';
     return 'selected';
   }

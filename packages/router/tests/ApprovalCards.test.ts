@@ -35,7 +35,7 @@ describe('ApprovalCards', () => {
     expect(rows[0].columns.flatMap((column: any) => column.elements).map((button: any) => button.text.content))
       .toEqual(['Allow once', 'Deny', 'Always allow']);
     expect(JSON.stringify(elements)).toContain('Write <config> in another project');
-    expect(transport.registerReplyRoute).toHaveBeenCalledWith('card-1', 'thread-2', 'original-device', 'owner');
+    expect(transport.registerReplyRoute).toHaveBeenCalledWith('card-1', 'thread-2', 'original-device', 'owner', expect.any(Function));
     await expect(cards.click('someone-else', 'approval-1', 'card-1', 'approve')).rejects.toThrow('belong');
     await expect(cards.click('owner', 'approval-1', 'wrong-card', 'approve')).rejects.toThrow('expired');
     await cards.click('owner', 'approval-1', 'card-1', 'remember');
@@ -129,4 +129,31 @@ describe('ApprovalCards', () => {
     expect(transport.create).not.toHaveBeenCalled();
     expect(transport.sendToDevice).toHaveBeenCalledTimes(2);
   });
+  it('captures ownership before card creation and awaits durable reply registration', async () => {
+    let generation = 'initial';
+    const registered: string[] = [];
+    let release!: (id: string) => void;
+    let entered!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const guardedTransport = { ...transport, captureReplyRoute: () => {
+      const captured = generation;
+      return () => captured === generation;
+    } };
+    transport.create.mockImplementationOnce(() => {
+      entered();
+      return new Promise(resolve => { release = resolve; });
+    });
+    transport.registerReplyRoute.mockImplementation(async (id, _thread, _device, _owner, current) => {
+      if (current()) registered.push(id);
+    });
+    cards = new ApprovalCards(guardedTransport);
+    const pending = cards.receive(request(), 'device', () => true);
+    await started;
+    generation = 'rebound';
+    release('late-card');
+    await pending;
+    expect(transport.registerReplyRoute).toHaveBeenCalledOnce();
+    expect(registered).toEqual([]);
+  });
+
 });

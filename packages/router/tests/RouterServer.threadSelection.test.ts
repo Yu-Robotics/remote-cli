@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'events';
+import { generateKeyPairSync } from 'crypto';
 import { createServer as createHttpServer, type Server as HttpServer } from 'http';
 import { promises as fs } from 'fs';
 import os from 'os';
@@ -43,10 +44,15 @@ describe('Router durable selected-thread integration', () => {
   });
 
   afterEach(async () => {
+    for (const server of servers) {
+      for (const pending of (server as any).threadInventoryRequests.values()) clearTimeout(pending.timer);
+      (server as any).threadInventoryRequests.clear();
+    }
     for (const socket of sockets) if (socket.readyState === WebSocket.OPEN) socket.close();
     for (const server of servers) (server as any).wss?.close();
     for (const server of httpServers) server.close();
     for (const store of stores) await store.flush().catch(() => undefined);
+    stores.length = servers.length = sockets.length = httpServers.length = 0;
     vi.restoreAllMocks();
     if (previousHome === undefined) delete process.env.HOME;
     else process.env.HOME = previousHome;
@@ -88,8 +94,32 @@ describe('Router durable selected-thread integration', () => {
   }
 
   async function select(context: any, cardId: string, deviceId: string, threadId: string, openId = 'user-a') {
-    (context.server as any).cardThreadMap.set(cardId, { threadId, deviceId, openId, epoch: 0, expiresAt: Date.now() + 60_000 });
-    await context.feishu.onCardSwitchThread(openId, cardId, threadId, threadId);
+    await register(context, cardId, threadId, deviceId, openId);
+    await (context.server as any).selections.select(openId, deviceId, threadId, threadId);
+  }
+
+  async function register(context: any, cardId: string, threadId = 'default-id', deviceId = 'device-a', openId = 'user-a',
+    expiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000) {
+    await (context.server as any).registerCardThread(cardId, { threadId, deviceId, openId,
+      epoch: context.store.getCardThreadEpoch(openId, deviceId), expiresAt });
+  }
+
+  async function answerSelection(context: any, socket: SyntheticSocket, threads: any[]) {
+    let request: any;
+    await vi.waitFor(() => {
+      request = socket.sent.find(message => message.type === 'status'
+        && (context.server as any).threadInventoryRequests.get(message.messageId)?.selection);
+      expect(request).toBeDefined();
+    });
+    await socket.receive({ type: 'status', messageId: request.messageId, status: { threads } });
+  }
+
+  async function click(context: any, socket: SyntheticSocket, cardId: string, threadId: string,
+    threads = [{ id: 'default-id', name: 'default', status: 'idle' }, { id: threadId, name: 'Verified name', status: 'idle' }]) {
+    const pending = context.feishu.handleCardAction({ operator: { open_id: 'user-a' },
+      context: { open_message_id: cardId }, action: { value: { action: 'switch_thread', threadId, threadName: 'Untrusted label' } } });
+    await answerSelection(context, socket, threads);
+    return pending;
   }
 
   async function text(context: any, content: string, parentId?: string, openId = 'user-a') {
@@ -102,6 +132,37 @@ describe('Router durable selected-thread integration', () => {
   function commands(socket: SyntheticSocket): any[] {
     return socket.sent.filter(message => message.type === MessageType.COMMAND);
   }
+
+  it.each(['provenance', 'selection'] as const)(
+    'keeps a card switch valid when unrelated routing metadata is saved during %s validation', async stage => {
+      const context = await createRouter();
+      await context.bindings.bindUser('user-a', 'device-a', 'A');
+      await register(context, 'original-card');
+      const socket = await startLegacy(context.server);
+      let release!: () => void;
+      let entered!: () => void;
+      const blocked = new Promise<void>(resolve => { release = resolve; });
+      const started = new Promise<void>(resolve => { entered = resolve; });
+      const method = stage === 'provenance' ? 'getDeviceBinding' : 'selectThread';
+      const original = context.bindings[method].bind(context.bindings);
+      vi.spyOn(context.bindings, method).mockImplementationOnce(async (...args: unknown[]) => {
+        entered();
+        await blocked;
+        return original(...args);
+      });
+      const pending = click(context, socket, 'original-card', 'target');
+      try {
+        await started;
+        await register(context, 'unrelated-card', 'another-thread');
+      } finally {
+        release();
+      }
+      expect((await pending).toast.type).toBe('success');
+      expect(context.store.getDeviceThreadSelection('user-a', 'device-a')).toMatchObject({ threadId: 'target' });
+      await text(context, 'continue-after-concurrent-card');
+      expect(commands(socket).at(-1)).toMatchObject({ threadId: 'target' });
+    },
+  );
 
   it('routes through a restored selection after fresh storage and legacy registration', async () => {
     const first = await createRouter();
@@ -138,7 +199,7 @@ describe('Router durable selected-thread integration', () => {
     const socketA = await startLegacy(context.server, 'device-a');
     await context.bindings.switchActiveDevice('user-a', 'device-a');
     context.feishu.onDeviceSwitchIntent('user-a', 'device-a');
-    context.feishu.onDeviceSwitch('user-a', 'device-b', 'device-a');
+    await context.feishu.onDeviceSwitch?.('user-a', 'device-b', 'device-a');
     await text(context, 'back-on-a');
     expect(commands(socketB).map(command => command.threadId)).toEqual(['thread-b']);
     expect(commands(socketA).map(command => command.threadId)).toEqual(['thread-a']);
@@ -154,7 +215,7 @@ describe('Router durable selected-thread integration', () => {
     await select(context, 'select-card', 'device-a', 'selected-thread');
     const socket = await startLegacy(context.server);
     const start = (context.feishu as any).onStartStreaming;
-    start('other-command', 'user-a', 'other-card', 'device-a', 'other-thread');
+    await start('other-command', 'user-a', 'other-card', 'device-a', 'other-thread');
 
     await text(context, 'reply-only', 'other-card');
     await text(context, 'top-level');
@@ -172,7 +233,7 @@ describe('Router durable selected-thread integration', () => {
     await select(context, 'select-card', 'device-a', 'selected-thread');
     const socket = await startLegacy(context.server);
     const start = (context.feishu as any).onStartStreaming;
-    start('missing-command', 'user-a', 'missing-card', 'device-a', 'selected-thread');
+    await start('missing-command', 'user-a', 'missing-card', 'device-a', 'selected-thread');
     await socket.receive({ type: MessageType.RESPONSE, messageId: 'missing-command', openId: 'user-a',
       success: false, error: 'Thread not found: selected-thread' });
 
@@ -190,22 +251,22 @@ describe('Router durable selected-thread integration', () => {
     await select(context, 'select-card', 'device-a', 'selected-thread');
     const socket = await startLegacy(context.server);
     const start = (context.feishu as any).onStartStreaming;
-    start('stale-command', 'user-a', 'stale-card', 'device-a', 'selected-thread');
+    await start('stale-command', 'user-a', 'stale-card', 'device-a', 'selected-thread');
     (context.server as any).selections.beginIntent('user-a', 'device-a');
     await socket.receive({ type: MessageType.RESPONSE, messageId: 'stale-command', openId: 'user-a', success: true,
       threads: [{ id: 'default-id', name: 'default', status: 'idle' }] });
     expect((await context.bindings.getThreadSelection('user-a', 'device-a')).threadId).toBe('selected-thread');
 
-    start('no-list-command', 'user-a', 'no-list-card', 'device-a', 'selected-thread');
+    await start('no-list-command', 'user-a', 'no-list-card', 'device-a', 'selected-thread');
     await socket.receive({ type: MessageType.RESPONSE, messageId: 'no-list-command', openId: 'user-a', success: true });
     expect((await context.bindings.getThreadSelection('user-a', 'device-a')).threadId).toBe('selected-thread');
 
-    start('incomplete-command', 'user-a', 'incomplete-card', 'device-a', 'selected-thread');
+    await start('incomplete-command', 'user-a', 'incomplete-card', 'device-a', 'selected-thread');
     await socket.receive({ type: MessageType.RESPONSE, messageId: 'incomplete-command', openId: 'user-a', success: true, threads: [] });
     expect(context.bindings.getThreadSelection('user-a', 'device-a')).toEqual({ status: 'valid', threadId: 'selected-thread' });
     expect(context.feishu.sendMessage).not.toHaveBeenCalled();
 
-    start('deleted-command', 'user-a', 'deleted-card', 'device-a', 'selected-thread');
+    await start('deleted-command', 'user-a', 'deleted-card', 'device-a', 'selected-thread');
     const current = (context.server as any).selections.capture('user-a', 'device-a');
     (context.server as any).streamingMessages.get('deleted-command').selectionFence = current;
     await socket.receive({ type: MessageType.RESPONSE, messageId: 'deleted-command', openId: 'user-a', success: true,
@@ -256,9 +317,7 @@ describe('Router durable selected-thread integration', () => {
       status: { threads: [{ id: 'default-id', name: 'default', status: 'idle' },
         { id: 'recovered-thread', name: 'Recovered', status: 'idle' }] } });
     const refreshedCard = restored.feishu.finalizeStreamingMessage.mock.calls.at(-1)[0];
-    const recovered = await restored.feishu.handleCardAction({ operator: { open_id: 'user-a' },
-      context: { open_message_id: refreshedCard },
-      action: { value: { action: 'switch_thread', threadId: 'recovered-thread', threadName: 'Recovered' } } });
+    const recovered = await click(restored, socket, refreshedCard, 'recovered-thread');
     expect(recovered.toast.type).toBe('success');
     await text(restored, 'after-recovery');
     expect(commands(socket)).toHaveLength(1);
@@ -306,7 +365,7 @@ describe('Router durable selected-thread integration', () => {
     const socket = await startLegacy(context.server);
     const intent = (context.server as any).selections.beginIntent('user-a', 'device-a');
     const start = (context.feishu as any).onStartStreaming;
-    start('late-new-command', 'user-a', 'late-new-card', 'device-a', undefined, true, undefined, undefined, intent);
+    await start('late-new-command', 'user-a', 'late-new-card', 'device-a', undefined, true, undefined, undefined, intent);
     await select(context, 'explicit-card', 'device-a', 'explicit-selection');
     await socket.receive({ type: MessageType.RESPONSE, messageId: 'late-new-command', openId: 'user-a', success: true,
       threadId: 'created-thread', threads: [{ id: 'created-thread', name: 'Created', status: 'idle' },
@@ -322,7 +381,7 @@ describe('Router durable selected-thread integration', () => {
     await context.bindings.switchActiveDevice('user-a', 'device-b');
     await select(context, 'current-b-card', 'device-b', 'thread-b');
     context.feishu.onDeviceSwitchIntent('user-a', 'device-b');
-    context.feishu.onDeviceSwitch('user-a', 'device-a', 'device-b');
+    await context.feishu.onDeviceSwitch?.('user-a', 'device-a', 'device-b');
 
     const result = await context.feishu.handleCardAction({ operator: { open_id: 'user-a' },
       context: { open_message_id: 'old-a-card' }, action: { value: { action: 'switch_thread', threadId: 'thread-a' } } });
@@ -360,7 +419,7 @@ describe('Router durable selected-thread integration', () => {
     expect((await context.bindings.getThreadSelection('user-a', 'device-a')).status).toBe('none');
 
     const start = (context.feishu as any).onStartStreaming;
-    start('late-card-command', 'user-a', 'late-card', 'device-a', 'old-thread', false, undefined, undefined, lateFence);
+    await start('late-card-command', 'user-a', 'late-card', 'device-a', 'old-thread', false, undefined, undefined, lateFence);
     expect(await (context.server as any).resolveCardThread('late-card', 'user-a')).toBeUndefined();
   });
 
@@ -368,15 +427,19 @@ describe('Router durable selected-thread integration', () => {
     const context = await createRouter();
     await context.bindings.bindUser('user-a', 'device-a', 'A');
     for (const cardId of ['first-card', 'second-card']) {
-      (context.server as any).cardThreadMap.set(cardId, { threadId: 'source', deviceId: 'device-a', openId: 'user-a', epoch: 0, expiresAt: Date.now() + 60_000 });
+      await register(context, cardId, 'source');
     }
+    const socket = await startLegacy(context.server);
     let release!: () => void;
     const original = (context.server as any).requireCurrentCardDevice.bind(context.server);
     const validation = vi.spyOn(context.server as any, 'requireCurrentCardDevice')
       .mockImplementationOnce(() => new Promise(resolve => { release = () => resolve(original('first-card', 'user-a')); }));
     const first = context.feishu.onCardSwitchThread('user-a', 'first-card', 'first-selection', 'First');
     await vi.waitFor(() => expect(validation).toHaveBeenCalledOnce());
-    await context.feishu.onCardSwitchThread('user-a', 'second-card', 'second-selection', 'Second');
+    const second = context.feishu.onCardSwitchThread('user-a', 'second-card', 'second-selection', 'Second');
+    await answerSelection(context, socket, [{ id: 'default-id', name: 'default', status: 'idle' },
+      { id: 'second-selection', name: 'Second', status: 'idle' }]);
+    await second;
     release();
     await expect(first).rejects.toThrow('superseded');
     expect((await context.bindings.getThreadSelection('user-a', 'device-a')).threadId).toBe('second-selection');
@@ -418,7 +481,7 @@ describe('Router durable selected-thread integration', () => {
     } } };
     feishu.finalizeStreamingMessage.mockImplementation(FeishuLongConnHandler.prototype.finalizeStreamingMessage);
     const start = feishu.onStartStreaming;
-    start('chunked-command', 'user-a', 'root-card', 'device-a', 'default-id');
+    await start('chunked-command', 'user-a', 'root-card', 'device-a', 'default-id');
     const stream = (context.server as any).streamingMessages.get('chunked-command');
     stream.elements = Array.from({ length: 350 }, (_, index) => ({ tag: 'markdown', content: `Body ${index}` }));
     stream.threads = [{ id: 'default-id', name: 'default', status: 'idle' },
@@ -431,9 +494,10 @@ describe('Router durable selected-thread integration', () => {
     const tailContent = JSON.parse(feishu.client.im.message.create.mock.calls.at(-1)[0].data.content);
     expect(JSON.stringify(tailContent)).toContain('switch_thread');
     expect(JSON.stringify(tailContent)).toContain('new_thread');
+    const reloaded = await createRouter();
+    expect(await (reloaded.server as any).resolveCardThread(tailCard, 'user-a')).toEqual({ threadId: 'default-id', deviceId: 'device-a' });
 
-    const switched = await feishu.handleCardAction({ operator: { open_id: 'user-a' },
-      context: { open_message_id: tailCard }, action: { value: { action: 'switch_thread', threadId: 'other-thread', threadName: 'Other' } } });
+    const switched = await click(context, socket, tailCard, 'other-thread');
     expect(switched.toast.type).toBe('success');
     expect((await context.bindings.getThreadSelection('user-a', 'device-a')).threadId).toBe('other-thread');
 
@@ -445,7 +509,7 @@ describe('Router durable selected-thread integration', () => {
 
     await context.bindings.switchActiveDevice('user-a', 'device-b');
     context.feishu.onDeviceSwitchIntent('user-a', 'device-b');
-    context.feishu.onDeviceSwitch('user-a', 'device-a', 'device-b');
+    await context.feishu.onDeviceSwitch?.('user-a', 'device-a', 'device-b');
     const foreign = await feishu.handleCardAction({ operator: { open_id: 'user-a' },
       context: { open_message_id: tailCard }, action: { value: { action: 'switch_thread', threadId: 'other-thread' } } });
     expect(foreign.toast.type).toBe('error');
@@ -466,7 +530,7 @@ describe('Router durable selected-thread integration', () => {
     await context.bindings.bindUser('user-a', 'device-a', 'A');
     const socket = await startLegacy(context.server);
     const intent = (context.server as any).selections.beginIntent('user-a', 'device-a');
-    (context.feishu as any).onStartStreaming('valid-new-command', 'user-a', 'valid-new-card', 'device-a', undefined, true, undefined, undefined, intent);
+    await (context.feishu as any).onStartStreaming('valid-new-command', 'user-a', 'valid-new-card', 'device-a', undefined, true, undefined, undefined, intent);
     await socket.receive({ type: MessageType.RESPONSE, messageId: 'valid-new-command', openId: 'user-a', success: true,
       threadId: 'created-thread', threads: [{ id: 'default-id', name: 'default', status: 'idle' },
         { id: 'created-thread', name: 'Created', status: 'idle' }] });
@@ -484,7 +548,7 @@ describe('Router durable selected-thread integration', () => {
     await select(context, 'select-card', 'device-a', 'old-selection');
     const socket = await startLegacy(context.server);
     const intent = (context.server as any).selections.beginIntent('user-a', 'device-a');
-    (context.feishu as any).onStartStreaming('invalid-new-command', 'user-a', 'invalid-new-card', 'device-a', undefined, true, undefined, undefined, intent);
+    await (context.feishu as any).onStartStreaming('invalid-new-command', 'user-a', 'invalid-new-card', 'device-a', undefined, true, undefined, undefined, intent);
     if (_label === 'oversized') (threads as any[]).push({ id: 'created-thread', name: 'Created', status: 'idle' });
     await socket.receive({ type: MessageType.RESPONSE, messageId: 'invalid-new-command', openId: 'user-a', success: true,
       threadId: 'created-thread', threads });
@@ -512,7 +576,7 @@ describe('Router durable selected-thread integration', () => {
     const socket = await startLegacy(context.server);
     const intent = (context.server as any).selections.beginIntent('user-a', 'device-a');
     const start = (context.feishu as any).onStartStreaming;
-    start('new-command', 'user-a', 'new-card', 'device-a', undefined, true, undefined, undefined, intent);
+    await start('new-command', 'user-a', 'new-card', 'device-a', undefined, true, undefined, undefined, intent);
     vi.spyOn(context.store, 'setDeviceThreadSelection').mockRejectedValueOnce(new Error('Synthetic write failure'));
     await socket.receive({ type: MessageType.RESPONSE, messageId: 'new-command', openId: 'user-a', success: true,
       threadId: 'created-thread', threads: [{ id: 'default-id', name: 'default', status: 'idle' },
@@ -523,4 +587,467 @@ describe('Router durable selected-thread integration', () => {
     expect((await context.bindings.getThreadSelection('user-a', 'device-a')).threadId).toBe('old-selection');
     expect(commands(socket)).toHaveLength(0);
   });
+  it('switches a persisted old card after Router recreation using only the current authenticated catalog', async () => {
+    const first = await createRouter();
+    await first.bindings.bindUser('user-a', 'device-a', 'A');
+    const socket = await startLegacy(first.server);
+    await text(first, '/thread list');
+    const request = socket.sent.find(message => message.type === 'status');
+    await socket.receive({ type: 'status', messageId: request.messageId, status: { threads: [
+      { id: 'default-id', name: 'default', status: 'idle' }, { id: 'target', name: 'Original', status: 'idle' },
+    ] } });
+    const cardId = first.feishu.finalizeStreamingMessage.mock.calls.at(-1)[0];
+    const original = first.store.getCardThread(cardId);
+    expect(original).toBeDefined();
+    socket.close();
+    await first.store.flush();
+
+    const restored = await createRouter();
+    const currentSocket = await startLegacy(restored.server);
+    const result = await click(restored, currentSocket, cardId, 'target');
+    expect(result.toast).toEqual({ type: 'success', content: 'Switched to: Verified name' });
+    expect(restored.store.getCardThread(cardId)).toEqual(original);
+    await text(restored, 'after-old-card-switch');
+    await text(restored, 'reply-to-original', cardId);
+    expect(commands(currentSocket).map(command => command.threadId)).toEqual(['target', 'default-id']);
+  });
+
+  it('rejects missing targets, malformed inventories, unknown cards, wrong users and offline devices after recreation', async () => {
+    const first = await createRouter();
+    await first.bindings.bindUser('user-a', 'device-a', 'A');
+    await select(first, 'old-card', 'device-a', 'target');
+    const restored = await createRouter();
+    await expect(restored.feishu.onCardSwitchThread('user-a', 'old-card', 'target', 'Target')).rejects.toThrow('Could not verify');
+    const socket = await startLegacy(restored.server);
+    await expect(restored.feishu.onCardSwitchThread('user-b', 'old-card', 'target', 'Target')).rejects.toThrow('expired');
+    await expect(restored.feishu.onCardSwitchThread('user-a', 'lost-pre-upgrade-card', 'target', 'Target')).rejects.toThrow('expired');
+    expect(socket.sent.filter(message => message.type === 'status')).toHaveLength(0);
+    const malformed = await click(restored, socket, 'old-card', 'target', []);
+    expect(malformed.toast.type).toBe('error');
+    expect(restored.store.getDeviceThreadSelection('user-a', 'device-a')).toMatchObject({ threadId: 'target' });
+    const missing = await click(restored, socket, 'old-card', 'target', [{ id: 'default-id', name: 'default', status: 'idle' }]);
+    expect(missing.toast.content).toContain('no longer exists');
+    expect(restored.store.getDeviceThreadSelection('user-a', 'device-a')).toEqual({ status: 'none' });
+    expect(commands(socket)).toHaveLength(0);
+  });
+
+  it.each(['switch', 'unbind', 'unbind-all', 'revoke', 'enroll'])('keeps %s invalidation across Router recreation', async action => {
+    const first = await createRouter();
+    await first.bindings.bindUser('user-a', 'device-a', 'A');
+    await first.bindings.bindUser('user-a', 'device-b', 'B');
+    await register(first, 'old-card');
+    const lateFence = (first.server as any).selections.capture('user-a', 'device-a');
+    if (action === 'switch') {
+      await first.bindings.switchActiveDevice('user-a', 'device-b');
+      await first.bindings.switchActiveDevice('user-a', 'device-a');
+    } else if (action === 'revoke') await first.feishu.onRevokeDevice('device-a');
+    else if (action === 'enroll') {
+      const { publicKey } = generateKeyPairSync('ed25519');
+      await first.feishu.onApproveDeviceKey('user-a', 'device-a', publicKey.export({ type: 'spki', format: 'pem' }).toString());
+    } else {
+      if (action === 'unbind') await first.bindings.unbindDevice('user-a', 'device-a');
+      else await first.bindings.unbindUser('user-a');
+      await first.bindings.bindUser('user-a', 'device-a', 'A');
+      await first.bindings.switchActiveDevice('user-a', 'device-a');
+    }
+    await first.feishu.onStartStreaming('late-command', 'user-a', 'late-card', 'device-a', 'target', false,
+      undefined, undefined, lateFence);
+    const restored = await createRouter();
+    for (const cardId of ['old-card', 'late-card']) {
+      await expect(restored.feishu.onCardSwitchThread('user-a', cardId, 'target', 'Target')).rejects.toThrow('expired');
+      expect(await (restored.server as any).resolveCardThread(cardId, 'user-a')).toBeUndefined();
+    }
+  });
+
+  it('does not register a notification that completes after unbind and rebind', async () => {
+    const first = await createRouter();
+    await first.bindings.bindUser('user-a', 'device-a', 'A');
+    let release!: (id: string) => void;
+    const create = vi.spyOn(first.feishu, 'sendTaskNotificationCard').mockImplementationOnce(() =>
+      new Promise<string>(resolve => { release = resolve; }));
+    const pending = (first.server as any).handleTaskNotification('user-a',
+      { taskId: 'synthetic-task', status: 'completed', summary: 'Done' }, 'target', 'device-a');
+    await vi.waitFor(() => expect(create).toHaveBeenCalledOnce());
+    await first.bindings.unbindDevice('user-a', 'device-a');
+    await first.bindings.bindUser('user-a', 'device-a', 'A');
+    release('late-notification');
+    await pending;
+    const restored = await createRouter();
+    expect(await (restored.server as any).resolveCardThread('late-notification', 'user-a')).toBeUndefined();
+  });
+
+  it('rejects a pending switch when ownership changes before its catalog arrives', async () => {
+    const context = await createRouter();
+    await context.bindings.bindUser('user-a', 'device-a', 'A');
+    await register(context, 'old-card');
+    const socket = await startLegacy(context.server);
+    const pending = context.feishu.handleCardAction({ operator: { open_id: 'user-a' }, context: { open_message_id: 'old-card' },
+      action: { value: { action: 'switch_thread', threadId: 'target' } } });
+    await vi.waitFor(() => expect(socket.sent.some(message => message.type === 'status')).toBe(true));
+    await context.bindings.unbindDevice('user-a', 'device-a');
+    await context.bindings.bindUser('user-a', 'device-a', 'A');
+    await answerSelection(context, socket, [{ id: 'default-id', name: 'default', status: 'idle' },
+      { id: 'target', name: 'Target', status: 'idle' }]);
+    expect((await pending).toast.type).toBe('error');
+    const restored = await createRouter();
+    expect(restored.store.getDeviceThreadSelection('user-a', 'device-a')).toEqual({ status: 'none' });
+  });
+
+  it.each(['expired', 'malformed', 'missing'])('rejects %s stored associations after Router recreation', async kind => {
+    const first = await createRouter();
+    await first.bindings.bindUser('user-a', 'device-a', 'A');
+    await register(first, 'old-card');
+    const raw = JSON.parse(await fs.readFile(storePath, 'utf8'));
+    if (kind === 'expired') raw.cardThreads.cards['old-card'].expiresAt = Date.now() - 1;
+    else if (kind === 'malformed') raw.cardThreads.cards['old-card'].epoch = 0;
+    else delete raw.cardThreads;
+    await fs.writeFile(storePath, JSON.stringify(raw));
+    const restored = await createRouter();
+    const socket = await startLegacy(restored.server);
+    await expect(restored.feishu.onCardSwitchThread('user-a', 'old-card', 'target', 'Target')).rejects.toThrow('expired');
+    await text(restored, 'ordinary-work');
+    expect(commands(socket)).toHaveLength(1);
+    expect(commands(socket)[0].threadId).toBeUndefined();
+    expect(socket.sent.some(message => message.type === 'status')).toBe(false);
+  });
+
+  it('requires the active device even for a valid persisted card from another bound device', async () => {
+    const first = await createRouter();
+    await first.bindings.bindUser('user-a', 'device-a', 'A');
+    await first.bindings.bindUser('user-a', 'device-b', 'B');
+    await register(first, 'inactive-card', 'target', 'device-b');
+    const restored = await createRouter();
+    expect(await (restored.server as any).resolveCardThread('inactive-card', 'user-a')).toMatchObject({ deviceId: 'device-b' });
+    await expect(restored.feishu.onCardSwitchThread('user-a', 'inactive-card', 'target', 'Target')).rejects.toThrow('different device');
+    expect(restored.store.getDeviceThreadSelection('user-a', 'device-a')).toEqual({ status: 'none' });
+  });
+
+  it('persists stream removal before a delayed delivered-card callback can revive it', async () => {
+    const first = await createRouter();
+    await first.bindings.bindUser('user-a', 'device-a', 'A');
+    await first.feishu.onStartStreaming('pending-task', 'user-a', 'root-card', 'device-a', 'default-id');
+    const stream = (first.server as any).streamingMessages.get('pending-task');
+    await (first.server as any).cleanupStreamingSessionsForDevice('device-a');
+    await (first.server as any).registerDeliveredThreadCards('pending-task', stream, ['root-card', 'late-continuation']);
+    const restored = await createRouter();
+    expect(await (restored.server as any).resolveCardThread('root-card', 'user-a')).toBeUndefined();
+    expect(await (restored.server as any).resolveCardThread('late-continuation', 'user-a')).toBeUndefined();
+  });
+
+  it.each(['disconnect', 'timeout'])('removes every active continuation route on %s and preserves completed cards', async reason => {
+    const first = await createRouter();
+    await first.bindings.bindUser('user-a', 'device-a', 'A');
+    await register(first, 'completed-card');
+    await first.feishu.onStartStreaming('pending-task', 'user-a', 'root-card', 'device-a', 'default-id');
+    const server = first.server as any;
+    const stream = server.streamingMessages.get('pending-task');
+    await server.registerDeliveredThreadCards('pending-task', stream, ['root-card', 'tail-card']);
+    expect(first.store.getCardThread('tail-card')).toBeDefined();
+    if (reason === 'disconnect') await server.cleanupStreamingSessionsForDevice('device-a');
+    else {
+      stream.createdAt = Date.now() - server.STREAMING_SESSION_TIMEOUT_MS - 1;
+      await server.cleanupStaleStreamingSessions();
+    }
+    await server.registerDeliveredThreadCards('pending-task', stream, ['late-card']);
+    const restored = await createRouter();
+    for (const id of ['root-card', 'tail-card', 'late-card']) {
+      expect(restored.store.getCardThread(id)).toBeUndefined();
+    }
+    expect(restored.store.getCardThread('completed-card')).toBeDefined();
+  });
+
+  it('revokes the entire continuation batch when disconnect interrupts its first write', async () => {
+    const first = await createRouter();
+    await first.bindings.bindUser('user-a', 'device-a', 'A');
+    await first.feishu.onStartStreaming('pending-task', 'user-a', 'root-card', 'device-a', 'default-id');
+    const server = first.server as any;
+    const stream = server.streamingMessages.get('pending-task');
+    const write = (first.store as any).writeSnapshot.bind(first.store);
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    vi.spyOn(first.store as any, 'writeSnapshot').mockImplementationOnce(async (snapshot: unknown) => {
+      entered();
+      await gate;
+      return write(snapshot);
+    });
+    const registration = server.registerDeliveredThreadCards('pending-task', stream, ['root-card', 'tail-card']);
+    await started;
+    const cleanup = server.cleanupStreamingSessionsForDevice('device-a');
+    release();
+    await Promise.all([registration, cleanup]);
+    const restored = await createRouter();
+    expect(restored.store.getCardThread('root-card')).toBeUndefined();
+    expect(restored.store.getCardThread('tail-card')).toBeUndefined();
+  });
+
+  it('keeps a later click authoritative when the earlier catalog arrives last', async () => {
+    const context = await createRouter();
+    await context.bindings.bindUser('user-a', 'device-a', 'A');
+    await register(context, 'old-card');
+    const socket = await startLegacy(context.server);
+    const first = context.feishu.onCardSwitchThread('user-a', 'old-card', 'first', 'First');
+    const rejected = expect(first).rejects.toThrow('superseded');
+    await vi.waitFor(() => expect((context.server as any).threadInventoryRequests.size).toBe(1));
+    const second = context.feishu.onCardSwitchThread('user-a', 'old-card', 'second', 'Second');
+    await vi.waitFor(() => expect((context.server as any).threadInventoryRequests.size).toBe(2));
+    const requests = socket.sent.filter(message => message.type === 'status');
+    const threads = [{ id: 'default-id', name: 'default', status: 'idle' },
+      { id: 'first', name: 'First', status: 'idle' }, { id: 'second', name: 'Second', status: 'idle' }];
+    await socket.receive({ type: 'status', messageId: requests[1].messageId, status: { threads } });
+    await second;
+    await socket.receive({ type: 'status', messageId: requests[0].messageId, status: { threads } });
+    await rejected;
+    const restored = await createRouter();
+    expect(restored.store.getDeviceThreadSelection('user-a', 'device-a')).toMatchObject({ threadId: 'second' });
+  });
+
+  it.each(['timeout', 'disconnect', 'replacement', 'stop'] as const)(
+    'keeps in-flight inventory validation fenced until %s and drains late work', async action => {
+      const context = await createRouter();
+      await context.bindings.bindUser('user-a', 'device-a', 'A');
+      await register(context, 'source-card');
+      const socket = await startLegacy(context.server);
+      const result = context.feishu.onCardSwitchThread('user-a', 'source-card', 'target')
+        .then((name: string) => name, (error: Error) => error);
+      await vi.waitFor(() => expect((context.server as any).threadInventoryRequests.size).toBe(1));
+      const request = socket.sent.find(message => message.type === 'status');
+      let release!: () => void;
+      let entered!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const started = new Promise<void>(resolve => { entered = resolve; });
+      const original = (context.server as any).requireCurrentCardDevice.bind(context.server);
+      const validation = vi.spyOn(context.server as any, 'requireCurrentCardDevice').mockImplementationOnce(async (...args: unknown[]) => {
+        entered();
+        await gate;
+        return original(...args);
+      });
+      const response = { type: 'status', messageId: request.messageId, status: { threads: [
+        { id: 'default-id', name: 'default', status: 'idle' }, { id: 'target', name: 'Target', status: 'idle' },
+      ] } };
+      const responding = socket.receive(response);
+      try {
+        await started;
+        expect((context.server as any).threadInventoryRequests.has(request.messageId)).toBe(true);
+        await socket.receive(response);
+        expect(validation).toHaveBeenCalledTimes(1);
+        if (action === 'disconnect') socket.close();
+        if (action === 'replacement') await startLegacy(context.server);
+        if (action === 'stop') await context.server.stop();
+        // The real two-second callback deadline covers asynchronous validation too.
+        await expect(result).resolves.toBeInstanceOf(Error);
+        expect((context.server as any).threadInventoryRequests.size).toBe(0);
+      } finally {
+        release();
+        await Promise.allSettled([responding, result]);
+      }
+      expect(context.store.getDeviceThreadSelection('user-a', 'device-a')).toEqual({ status: 'none' });
+    },
+  );
+
+  it('bounds recovery inventories as well as card selections', async () => {
+    const context = await createRouter();
+    await context.bindings.bindUser('user-a', 'device-a', 'A');
+    const socket = await startLegacy(context.server);
+    for (let i = 0; i < 101; i++) await context.feishu.onRecoverThreads('user-a', 'device-a');
+    expect((context.server as any).threadInventoryRequests.size).toBe(100);
+    expect(socket.sent.filter(message => message.type === 'status')).toHaveLength(100);
+    expect(context.feishu.sendMessage).toHaveBeenCalledWith('user-a', expect.stringContaining('busy'));
+    socket.close();
+    expect((context.server as any).threadInventoryRequests.size).toBe(0);
+  });
+
+  it('does not let a delayed switch notification invalidate cards from a later A-B-A switch', async () => {
+    const context = await createRouter();
+    await context.bindings.bindUser('user-a', 'device-a', 'A');
+    await context.bindings.bindUser('user-a', 'device-b', 'B');
+    await register(context, 'original-card');
+    await context.bindings.switchActiveDevice('user-a', 'device-b');
+    await context.bindings.switchActiveDevice('user-a', 'device-a');
+    await register(context, 'fresh-card');
+    await context.feishu.onDeviceSwitch?.('user-a', 'device-a', 'device-b');
+    expect(context.store.getCardThread('original-card')).toBeUndefined();
+    expect(context.store.getCardThread('fresh-card')).toBeDefined();
+    const restored = await createRouter();
+    expect(await (restored.server as any).resolveCardThread('fresh-card', 'user-a')).toMatchObject({ deviceId: 'device-a' });
+  });
+
+  it.each(['timeout', 'disconnect', 'replacement', 'stop', 'notice-failure'] as const)(
+    'acknowledges an admitted selection as pending during snapshot I/O on %s', async action => {
+      const context = await createRouter();
+      await context.bindings.bindUser('user-a', 'device-a', 'A');
+      await register(context, 'source-card');
+      const socket = await startLegacy(context.server);
+      let release!: () => void;
+      let entered!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const started = new Promise<void>(resolve => { entered = resolve; });
+      const original = (context.store as any).writeSnapshot.bind(context.store);
+      vi.spyOn(context.store as any, 'writeSnapshot').mockImplementationOnce(async snapshot => {
+        entered();
+        await gate;
+        return original(snapshot);
+      });
+      const result = context.feishu.onCardSwitchThread('user-a', 'source-card', 'target')
+        .then((value: unknown) => value, (error: Error) => error);
+      const responding = answerSelection(context, socket, [
+        { id: 'default-id', name: 'default', status: 'idle' }, { id: 'target', name: 'Target', status: 'idle' },
+      ]);
+      let stopping: Promise<void> | undefined;
+      try {
+        await started;
+        if (action === 'disconnect') socket.close();
+        if (action === 'replacement') await startLegacy(context.server);
+        if (action === 'stop') stopping = context.server.stop();
+        if (action === 'notice-failure') {
+          context.feishu.sendMessage.mockRejectedValueOnce(new Error('Synthetic delivery failure'));
+          socket.close();
+        }
+        await expect(result).resolves.toEqual({ notice: expect.stringContaining('still being saved') });
+        expect(context.store.getDeviceThreadSelection('user-a', 'device-a')).toEqual({ status: 'none' });
+        expect((context.server as any).threadInventoryRequests.size).toBe(1);
+      } finally {
+        release();
+        await Promise.allSettled([responding, result, stopping]);
+      }
+      expect(context.store.getDeviceThreadSelection('user-a', 'device-a')).toMatchObject({ threadId: 'target' });
+      expect(context.feishu.sendMessage).toHaveBeenCalledWith('user-a', expect.stringContaining('was saved'));
+      expect((context.server as any).threadInventoryRequests.size).toBe(0);
+      const restored = await createRouter();
+      expect(restored.store.getDeviceThreadSelection('user-a', 'device-a')).toMatchObject({ threadId: 'target' });
+    },
+  );
+
+  it.each(['timeout', 'disconnect'] as const)('cancels a selection queued behind another snapshot before admission on %s', async action => {
+    const context = await createRouter();
+    await context.bindings.bindUser('user-a', 'device-a', 'A');
+    await register(context, 'source-card');
+    const socket = await startLegacy(context.server);
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const original = (context.store as any).writeSnapshot.bind(context.store);
+    const writes = vi.spyOn(context.store as any, 'writeSnapshot').mockImplementationOnce(async snapshot => {
+      entered();
+      await gate;
+      return original(snapshot);
+    });
+    const unrelated = register(context, 'unrelated-card');
+    await started;
+    const selecting = vi.spyOn(context.store, 'setDeviceThreadSelection');
+    const result = context.feishu.onCardSwitchThread('user-a', 'source-card', 'target')
+      .then((value: unknown) => value, (error: Error) => error);
+    const responding = answerSelection(context, socket, [
+      { id: 'default-id', name: 'default', status: 'idle' }, { id: 'target', name: 'Target', status: 'idle' },
+    ]);
+    try {
+      await vi.waitFor(() => expect(selecting).toHaveBeenCalled());
+      if (action === 'disconnect') socket.close();
+      await expect(result).resolves.toBeInstanceOf(Error);
+    } finally {
+      release();
+      await Promise.allSettled([unrelated, responding, result]);
+    }
+    expect(writes).toHaveBeenCalledTimes(1);
+    expect(context.store.getDeviceThreadSelection('user-a', 'device-a')).toEqual({ status: 'none' });
+    const restored = await createRouter();
+    expect(restored.store.getDeviceThreadSelection('user-a', 'device-a')).toEqual({ status: 'none' });
+  });
+
+  it.each([false, true])('reports a snapshot failure without claiming a saved selection (pending acknowledgement: %s)', async pending => {
+    const context = await createRouter();
+    await context.bindings.bindUser('user-a', 'device-a', 'A');
+    await register(context, 'source-card');
+    const socket = await startLegacy(context.server);
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    vi.spyOn(context.store as any, 'writeSnapshot').mockImplementationOnce(async () => {
+      entered();
+      await gate;
+      throw new Error('Synthetic snapshot failure');
+    });
+    const result = context.feishu.onCardSwitchThread('user-a', 'source-card', 'target')
+      .then((value: unknown) => value, (error: Error) => error);
+    const responding = answerSelection(context, socket, [
+      { id: 'default-id', name: 'default', status: 'idle' }, { id: 'target', name: 'Target', status: 'idle' },
+    ]);
+    try {
+      await started;
+      if (pending) {
+        socket.close();
+        await expect(result).resolves.toMatchObject({ notice: expect.stringContaining('still being saved') });
+      }
+    } finally {
+      release();
+      await responding;
+    }
+    if (pending) expect(context.feishu.sendMessage).toHaveBeenCalledWith('user-a', expect.stringContaining('could not be confirmed durably'));
+    else await expect(result).resolves.toMatchObject({ message: 'Synthetic snapshot failure' });
+    expect(context.feishu.sendMessage).not.toHaveBeenCalledWith('user-a', expect.stringContaining('was saved'));
+    expect(context.store.getDeviceThreadSelection('user-a', 'device-a')).toEqual({ status: 'none' });
+    expect((context.server as any).threadInventoryRequests.size).toBe(0);
+  });
+
+  it('reports a completed save honestly when a later intent supersedes it during snapshot I/O', async () => {
+    const context = await createRouter();
+    await context.bindings.bindUser('user-a', 'device-a', 'A');
+    await register(context, 'source-card');
+    const socket = await startLegacy(context.server);
+    const original = (context.store as any).writeSnapshot.bind(context.store);
+    vi.spyOn(context.store as any, 'writeSnapshot').mockImplementationOnce(async snapshot => {
+      (context.server as any).selections.reserveIntent('user-a');
+      return original(snapshot);
+    });
+    const outcome = await click(context, socket, 'source-card', 'target');
+    expect(outcome.toast).toMatchObject({ type: 'info', content: expect.stringContaining('was saved') });
+    expect(context.store.getDeviceThreadSelection('user-a', 'device-a')).toMatchObject({ threadId: 'target' });
+  });
+
+  // Directory fsync is a POSIX durability step; Windows intentionally does not use it.
+  it.skipIf(process.platform === 'win32')('holds routing after rename when directory fsync fails following a pending acknowledgement', async () => {
+    const context = await createRouter();
+    await context.bindings.bindUser('user-a', 'device-a', 'A');
+    await register(context, 'source-card');
+    const socket = await startLegacy(context.server);
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const open = fs.open.bind(fs);
+    const opened = vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      const handle = await open(...args);
+      if (args[0] === home && args[1] === 'r') vi.spyOn(handle, 'sync').mockImplementationOnce(async () => {
+        entered();
+        await gate;
+        throw new Error('Synthetic directory sync failure');
+      });
+      return handle;
+    });
+    const result = context.feishu.onCardSwitchThread('user-a', 'source-card', 'target')
+      .then((value: unknown) => value, (error: Error) => error);
+    const responding = answerSelection(context, socket, [
+      { id: 'default-id', name: 'default', status: 'idle' }, { id: 'target', name: 'Target', status: 'idle' },
+    ]);
+    try {
+      await started;
+      expect(JSON.parse(await fs.readFile(storePath, 'utf8')).userBindings['user-a'].devices[0].selectedThreadId).toBe('target');
+      expect(context.store.getDeviceThreadSelection('user-a', 'device-a')).toEqual({ status: 'none' });
+      socket.close();
+      await expect(result).resolves.toMatchObject({ notice: expect.stringContaining('still being saved') });
+    } finally {
+      release();
+      await Promise.allSettled([responding, result]);
+      opened.mockRestore();
+    }
+    expect(context.feishu.sendMessage).toHaveBeenCalledWith('user-a', expect.stringContaining('could not be confirmed durably'));
+    expect(() => context.store.getDeviceThreadSelection('user-a', 'device-a')).toThrow('uncertain');
+    await expect(context.store.flush()).rejects.toThrow('uncertain');
+    const restored = await createRouter();
+    expect(restored.store.getDeviceThreadSelection('user-a', 'device-a')).toMatchObject({ threadId: 'target' });
+  });
+
 });

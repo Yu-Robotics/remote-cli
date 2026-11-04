@@ -24,6 +24,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { Server as HttpServer } from 'http';
 import { ConfigManager } from './config/ConfigManager';
 import { JsonStore } from './storage/JsonStore';
+import { CARD_THREAD_TTL_MS, type CardThreadAssociation } from './storage/CardThreadState';
 import { FeishuLongConnHandler } from './feishu/FeishuLongConnHandler';
 import { ConnectionHub } from './websocket/ConnectionHub';
 import { BindingManager } from './binding/BindingManager';
@@ -57,6 +58,8 @@ const DELEGATION_PROGRESS_EVENT_LIMIT = 5;
 interface StreamingMessageState {
   openId: string;
   feishuMessageId: string | null;
+  /** Includes continuation routes until this execution completes. */
+  deliveredCardIds?: Set<string>;
   elements: FeishuCardElement[];
   currentTextContent: string;
   /** Mutable shell state, never transcript content or a completion signal. */
@@ -131,15 +134,14 @@ export class RouterServer {
   }>();
   private readonly STREAMING_SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes timeout
   private readonly DELEGATION_PROGRESS_HEARTBEAT_MS = 30 * 1000;
-  // TTL for cardThreadMap entries: 7 days (allows users to reply to old cards)
-  private readonly CARD_THREAD_MAP_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-  // Map from Feishu card message_id to threadId for parent_id-based routing.
-  // Entries are NOT removed on finalize so users can reply to completed cards.
-  // Each entry carries an expiresAt timestamp for TTL-based eviction.
-  private cardThreadMap = new Map<string, { threadId: string; deviceId: string; openId: string; epoch: number; expiresAt: number }>();
+  private readonly CARD_THREAD_MAP_TTL_MS = CARD_THREAD_TTL_MS;
   private readonly selections: ThreadSelectionManager;
   private readonly threadInventoryRequests = new Map<string, {
-    openId: string; deviceId: string; fence: SelectionFence; timer: NodeJS.Timeout;
+    openId: string; deviceId: string; fence: SelectionFence; timer: NodeJS.Timeout; processing?: boolean;
+    selection?: {
+      cardId: string; threadId: string; commitAdmitted?: boolean; acknowledgedPending?: boolean;
+      resolve(result: string | { notice: string }): void; reject(error: Error): void;
+    };
   }>();
   private readonly deviceAuth: DeviceAuth;
   private readonly fileTransfers: FileTransfers;
@@ -214,17 +216,17 @@ export class RouterServer {
     this.feishuLongConnHandler.onResolveFile = (openId, sourceId) => this.fileTransfers.resolve(openId, sourceId);
     this.feishuLongConnHandler.onApproveDeviceKey = async (openId, deviceId, publicKey) => {
       if ((await this.bindingManager.getDeviceBinding(deviceId))?.openId !== openId) throw new Error('Device ownership changed.');
+      await this.selections.invalidateDevice(openId, deviceId);
       await this.deviceAuth.enroll(deviceId, openId, publicKey);
-      this.selections.invalidateDevice(openId, deviceId);
-      this.expireDeviceCards(deviceId);
+      this.cancelThreadInventories(deviceId);
       this.connectionHub.disconnectDevice(deviceId);
       this.fileTransfers.disconnect(deviceId);
     };
     this.feishuLongConnHandler.onRevokeDevice = async deviceId => {
       const owner = await this.bindingManager.getDeviceBinding(deviceId);
-      if (owner?.openId) this.selections.invalidateDevice(owner.openId, deviceId);
-      this.expireDeviceCards(deviceId);
+      if (owner?.openId) await this.selections.invalidateDevice(owner.openId, deviceId);
       await this.deviceAuth.revoke(deviceId);
+      this.cancelThreadInventories(deviceId);
       this.connectionHub.disconnectDevice(deviceId);
       this.fileTransfers.disconnect(deviceId);
     };
@@ -233,8 +235,12 @@ export class RouterServer {
       sendToDevice: (deviceId, message) => this.connectionHub.sendToDevice(deviceId, message),
       create: (openId, elements, header) => this.feishuLongConnHandler.sendTaskNotificationCard(openId, elements, header),
       update: (cardId, elements, header) => this.feishuLongConnHandler.updateApprovalCard(cardId, elements, header),
-      registerReplyRoute: (cardId, threadId, deviceId, openId) => {
-        this.cardThreadMap.set(cardId, { threadId, deviceId, openId, epoch: this.selections.capture(openId, deviceId).epoch, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS });
+      registerReplyRoute: async (cardId, threadId, deviceId, openId, current) => {
+        await this.registerCardThread(cardId, { threadId, deviceId, openId, epoch: this.selections.capture(openId, deviceId).epoch, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS }, current);
+      },
+      captureReplyRoute: (openId, deviceId) => {
+        const fence = this.selections.capture(openId, deviceId);
+        return () => this.selections.isOwnershipCurrent(openId, deviceId, fence.epoch);
       },
     });
     this.feishuLongConnHandler.onApprovalAction = (openId, requestId, cardId, decision) =>
@@ -271,7 +277,7 @@ export class RouterServer {
     // Register callback for streaming message start
     this.feishuLongConnHandler.setOnCaptureSelection((openId, deviceId) => this.selections.capture(openId, deviceId));
     this.feishuLongConnHandler.setOnValidateSelection(fence => this.selections.isCurrent(fence));
-    this.feishuLongConnHandler.setOnStartStreaming((messageId: string, openId: string, feishuMessageId: string | null, deviceId: string, threadId?: string, pendingNewThread?: boolean, queueCardId?: string, threadName?: string, selectionIntent?: SelectionFence) => {
+    this.feishuLongConnHandler.setOnStartStreaming(async (messageId: string, openId: string, feishuMessageId: string | null, deviceId: string, threadId?: string, pendingNewThread?: boolean, queueCardId?: string, threadName?: string, selectionIntent?: SelectionFence) => {
       console.log(`[RouterServer] Registering streaming session: msgId=${messageId}, feishuMsgId=${feishuMessageId}, deviceId=${deviceId}, threadId=${threadId}, pendingNewThread=${pendingNewThread}`);
       this.cancelImageReply(messageId);
       const previous = this.streamingMessages.get(messageId);
@@ -296,9 +302,10 @@ export class RouterServer {
         delegationProgress: new Map(),
         toolCalls: new Map(),
       });
-      // Populate cardThreadMap for parent_id-based routing
+      // Populate card associations for parent_id-based routing
       if (feishuMessageId && threadId) {
-        this.cardThreadMap.set(feishuMessageId, { threadId, deviceId, openId, epoch: selectionIntent?.epoch ?? this.selections.capture(openId, deviceId).epoch, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS });
+        await this.registerCardThread(feishuMessageId, { threadId, deviceId, openId, epoch: selectionIntent?.epoch ?? this.selections.capture(openId, deviceId).epoch, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS },
+          () => this.streamingMessages.get(messageId)?.feishuMessageId === feishuMessageId);
       }
       console.log(`[RouterServer] Total streaming sessions: ${this.streamingMessages.size}`);
     });
@@ -313,6 +320,10 @@ export class RouterServer {
       return this.selections.resolve(openId, deviceId);
     });
     this.feishuLongConnHandler.onRecoverThreads = async (openId, deviceId) => {
+      if (this.stopping || this.threadInventoryRequests.size >= 100) {
+        await this.feishuLongConnHandler.sendMessage(openId, 'Thread controls are busy. Retry shortly.');
+        return true;
+      }
       const messageId = randomUUID();
       const fence = this.selections.beginIntent(openId, deviceId);
       const timer = setTimeout(() => {
@@ -331,20 +342,33 @@ export class RouterServer {
     };
 
     // Register callback for card button thread switching
-    this.feishuLongConnHandler.onCardSwitchThread = async (openId: string, cardId: string, threadId: string, threadName: string) => {
+    this.feishuLongConnHandler.onCardSwitchThread = async (openId: string, cardId: string, threadId: string) => {
       const revision = this.selections.reserveIntent(openId);
       const source = await this.requireCurrentCardDevice(cardId, openId);
-      const intent = this.selections.intent(openId, source.deviceId, revision);
-      const selected = await this.selections.select(openId, source.deviceId, threadId, threadName, intent);
-      if (selected !== 'selected') throw new Error('This selection was superseded or the device changed. Use a fresh thread card.');
-      console.log(`[RouterServer] Durable thread selection saved for ${openId}: ${threadName} (${threadId})`);
+      const fence = { ...this.selections.intent(openId, source.deviceId, revision), epoch: source.epoch };
+      if (!this.selections.isCurrent(fence)) throw new Error('This selection was superseded. Use a fresh thread card.');
+      if (typeof threadId !== 'string' || !threadId || threadId.length > 200) throw new Error('Invalid target thread.');
+      if (this.stopping || this.threadInventoryRequests.size >= 100) throw new Error('Thread controls are busy. Retry shortly.');
+      const messageId = randomUUID();
+      return new Promise<string | { notice: string }>((resolve, reject) => {
+        const fail = () => {
+          this.cancelThreadInventory(messageId,
+            new Error('Could not verify the target thread. Reconnect the device and retry /thread list.'));
+        };
+        const timer = setTimeout(fail, 2000);
+        timer.unref?.();
+        this.threadInventoryRequests.set(messageId, { openId, deviceId: source.deviceId, fence, timer,
+          selection: { cardId, threadId, resolve, reject } });
+        void this.connectionHub.sendToDevice(source.deviceId, { type: 'status', messageId, timestamp: Date.now() })
+          .then(sent => { if (!sent) fail(); }, fail);
+      });
     };
 
     // Register callback for creating a new thread via card button
     this.feishuLongConnHandler.onCardNewThread = async (openId: string, cardId: string) => {
       const revision = this.selections.reserveIntent(openId);
       const source = await this.requireCurrentCardDevice(cardId, openId);
-      const intent = this.selections.intent(openId, source.deviceId, revision);
+      const intent = { ...this.selections.intent(openId, source.deviceId, revision), epoch: source.epoch };
       console.log(`[RouterServer] Creating new thread for ${openId} via card button`);
       await this.feishuLongConnHandler.sendCommandFromCardAction(openId, '/thread new', true, source.deviceId, intent);
     };
@@ -356,50 +380,39 @@ export class RouterServer {
     this.feishuLongConnHandler.onDeviceSwitchIntent = (openId, newDeviceId) => {
       this.selections.beginIntent(openId, newDeviceId);
     };
-    // Device switches retain independent durable selections and invalidate older intents.
-    this.feishuLongConnHandler.onDeviceSwitch = (openId: string, oldDeviceId: string | undefined, newDeviceId: string) => {
-      if (oldDeviceId) {
-        for (const [feishuMessageId, entry] of this.cardThreadMap.entries()) {
-          if (entry.deviceId === oldDeviceId) this.cardThreadMap.delete(feishuMessageId);
-        }
-        console.log(`[RouterServer] Cleared cardThreadMap entries for old device ${oldDeviceId}`);
-      }
-    };
+    // JsonStore invalidates both devices atomically with the binding switch. Do not
+    // invalidate again in an asynchronous notification: a later switch may have won.
 
     this.setupMiddleware();
     this.setupRoutes();
   }
 
-  private expireDeviceCards(deviceId: string): void {
-    for (const [cardId, entry] of this.cardThreadMap) {
-      if (entry.deviceId === deviceId) this.cardThreadMap.delete(cardId);
-    }
+  private async registerCardThread(cardId: string, entry: CardThreadAssociation,
+    current: () => boolean = () => true): Promise<void> {
+    await this.store.setCardThread(cardId, entry, () => current()
+      && this.selections.isOwnershipCurrent(entry.openId, entry.deviceId, entry.epoch));
   }
 
   private async resolveCardThread(cardId: string, openId: string): Promise<{ threadId: string; deviceId: string } | undefined> {
-    const entry = this.cardThreadMap.get(cardId);
+    const entry = this.store.getCardThread(cardId);
     if (!entry) return undefined;
-    if (Date.now() > entry.expiresAt) {
-      this.cardThreadMap.delete(cardId);
-      return undefined;
-    }
     if (entry.openId !== openId || !this.selections.isOwnershipCurrent(openId, entry.deviceId, entry.epoch)) return undefined;
     if ((await this.bindingManager.getDeviceBinding(entry.deviceId))?.openId !== openId
-      || this.cardThreadMap.get(cardId) !== entry
+      || this.store.getCardThread(cardId) !== entry
       || !this.selections.isOwnershipCurrent(openId, entry.deviceId, entry.epoch)) return undefined;
     return { threadId: entry.threadId, deviceId: entry.deviceId };
   }
 
-  private async requireCurrentCardDevice(cardId: string, openId: string): Promise<{ threadId: string; deviceId: string }> {
-    const entry = this.cardThreadMap.get(cardId);
+  private async requireCurrentCardDevice(cardId: string, openId: string): Promise<{ threadId: string; deviceId: string; epoch: string }> {
+    const entry = this.store.getCardThread(cardId);
     const source = await this.resolveCardThread(cardId, openId);
     if (!source) throw new Error('This thread card has expired. Run /thread list for a fresh card.');
     const active = await this.bindingManager.getActiveDevice(openId);
-    if (!active || active.deviceId !== source.deviceId || !entry || this.cardThreadMap.get(cardId) !== entry
+    if (!active || active.deviceId !== source.deviceId || !entry || this.store.getCardThread(cardId) !== entry
       || !this.selections.isOwnershipCurrent(openId, entry.deviceId, entry.epoch)) {
       throw new Error('This card belongs to a different device. Switch back to that device or use a fresh card.');
     }
-    return source;
+    return { ...source, epoch: entry.epoch };
   }
 
   /**
@@ -806,6 +819,7 @@ export class RouterServer {
                 this.approvalCards.disconnect(deviceId);
                 this.maintenanceCards.disconnect(deviceId);
                 this.settingsCards.disconnect(deviceId);
+                if (!this.connectionHub.isCurrentConnection(deviceId, ws)) this.cancelThreadInventories(deviceId);
                 if (message.data.capabilities?.queueStarted === true) {
                   this.connectionHub.registerConnection(deviceId, ws, { queueStarted: true });
                 } else {
@@ -920,7 +934,8 @@ export class RouterServer {
                 if (responseThreadId) {
                   if (responseSession.feishuMessageId && responseSession.threadId !== responseThreadId) {
                     responseSession.threadId = responseThreadId;
-                    this.cardThreadMap.set(responseSession.feishuMessageId, { threadId: responseThreadId, deviceId: responseSession.deviceId, openId: responseSession.openId, epoch: responseSession.selectionFence?.epoch ?? this.selections.capture(responseSession.openId, responseSession.deviceId).epoch, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS });
+                    await this.registerCardThread(responseSession.feishuMessageId, { threadId: responseThreadId, deviceId: responseSession.deviceId, openId: responseSession.openId, epoch: responseSession.selectionFence?.epoch ?? this.selections.capture(responseSession.openId, responseSession.deviceId).epoch, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS },
+                      () => this.streamingMessages.get(responseMessageId) === responseSession && imageCurrent());
                   }
                   if (responseThreads) {
                     const match = responseThreads.find(t => t.id === responseThreadId);
@@ -1084,7 +1099,7 @@ export class RouterServer {
               // Background task terminal-state event (Claude Code 2.x).
               // Not tied to any streaming session — rendered as a standalone card.
               if (message.openId && message.taskNotification) {
-                await this.handleTaskNotification(message.openId, message.taskNotification, message.threadId, deviceId, message.threadName);
+                await this.handleTaskNotification(message.openId, message.taskNotification, message.threadId, deviceId, message.threadName, imageCurrent);
               } else {
                 console.log('[RouterServer] Ignoring task_notification with missing openId or payload');
               }
@@ -1124,7 +1139,7 @@ export class RouterServer {
           this.settingsConnections.delete(deviceId);
           this.maintenanceConnections.delete(deviceId);
           this.workerContextConnections.delete(deviceId);
-          this.cleanupStreamingSessionsForDevice(deviceId);
+          void this.cleanupStreamingSessionsForDevice(deviceId).catch(() => console.error('Failed to expire disconnected streaming cards.'));
           console.log('Device disconnected:', deviceId);
         }
       });
@@ -1178,7 +1193,7 @@ export class RouterServer {
       // Cleanup connections that haven't sent heartbeat in 3x interval
       this.connectionHub.cleanupStaleConnections(heartbeatInterval * 3);
       // Cleanup stale streaming sessions
-      this.cleanupStaleStreamingSessions();
+      void this.cleanupStaleStreamingSessions().catch(() => console.error('Failed to expire stale streaming cards.'));
     }, heartbeatInterval);
 
     console.log(`\n🚀 Router server started successfully!`);
@@ -1223,35 +1238,107 @@ export class RouterServer {
       && (!current || current());
   }
 
-  private async handleThreadInventoryResponse(message: any, deviceId: string | null, ws: WebSocket): Promise<void> {
-    const pending = this.threadInventoryRequests.get(message.messageId);
+  /** Cancellation is definitive only before the storage FIFO admits the guarded draft. */
+  private cancelThreadInventory(id: string, error: Error): void {
+    const pending = this.threadInventoryRequests.get(id);
     if (!pending) return;
-    const current = () => deviceId === pending.deviceId && this.connectionHub.isCurrentConnection(pending.deviceId, ws)
-      && this.selections.isCurrent(pending.fence);
-    if (!current()) return;
-    const binding = await this.bindingManager.getDeviceBinding(pending.deviceId);
-    if (!current() || binding?.openId !== pending.openId) return;
     clearTimeout(pending.timer);
-    this.threadInventoryRequests.delete(message.messageId);
-    const threads = message.status?.threads;
-    if (!isCompleteThreadCatalog(threads)) {
-      await this.feishuLongConnHandler.sendMessage(pending.openId, 'The device returned an invalid thread inventory. Retry /thread list.');
+    if (pending.selection?.commitAdmitted) {
+      pending.selection.acknowledgedPending = true;
+      pending.selection.resolve({ notice: 'The thread selection is still being saved. Do not retry; wait for confirmation or check /thread list after Router recovery.' });
+      // Retain the bounded request slot and its completion handler until I/O settles.
       return;
     }
-    const defaultThread = threads.find((thread: ThreadSummary) => thread.name === 'default')!;
+    this.threadInventoryRequests.delete(id);
+    pending.selection?.reject(error);
+  }
+
+  private cancelThreadInventories(deviceId: string): void {
+    for (const [id, pending] of this.threadInventoryRequests) {
+      if (pending.deviceId === deviceId) this.cancelThreadInventory(id,
+        new Error('Device connection changed. Retry /thread list.'));
+    }
+  }
+
+  private async sendSelectionOutcome(openId: string, message: string): Promise<void> {
+    try { await this.feishuLongConnHandler.sendMessage(openId, message); }
+    catch { console.error('Could not deliver the thread selection outcome notice.'); }
+  }
+
+  private async handleThreadInventoryResponse(message: any, deviceId: string | null, ws: WebSocket): Promise<void> {
+    const pending = this.threadInventoryRequests.get(message.messageId);
+    if (!pending || pending.processing || deviceId !== pending.deviceId
+      || !this.connectionHub.isCurrentConnection(pending.deviceId, ws)) return;
+    pending.processing = true;
+    const current = () => !this.stopping && this.threadInventoryRequests.get(message.messageId) === pending
+      && this.connectionHub.isCurrentConnection(pending.deviceId, ws) && this.selections.isCurrent(pending.fence);
     try {
-      const reconciled = await this.selections.observeCatalog(pending.openId, pending.deviceId, pending.fence, threads, current);
-      if (reconciled === 'stale' || reconciled === 'failed' || !current()) return;
-      const cardId = await this.feishuLongConnHandler.sendStreamingStart(pending.openId,
-        '🗂️ Thread controls refreshed. Choose a thread for future top-level messages.');
-      if (!cardId || !current()) return;
-      const finalized = await this.feishuLongConnHandler.finalizeStreamingMessage(cardId, [], undefined,
-        pending.openId, undefined, 'Thread selection', threads, defaultThread.id);
-      if (!finalized || !current()) return;
-      this.cardThreadMap.set(cardId, { threadId: defaultThread.id, deviceId: pending.deviceId,
-        openId: pending.openId, epoch: pending.fence.epoch, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS });
-    } catch {
-      await this.feishuLongConnHandler.sendMessage(pending.openId, 'Could not create thread controls. Retry /thread list.');
+      if (pending.selection) {
+        const { selection } = pending;
+        try {
+          if (!current()) throw new Error('This selection was superseded or the device changed.');
+          await this.requireCurrentCardDevice(selection.cardId, pending.openId);
+          const entry = this.store.getCardThread(selection.cardId);
+          const threads = message.status?.threads;
+          if (!isCompleteThreadCatalog(threads)) throw new Error('The device returned an invalid thread inventory. Retry /thread list.');
+          const target = threads.find(thread => thread.id === selection.threadId);
+          if (!target) {
+            await this.selections.observeCatalog(pending.openId, pending.deviceId, pending.fence, threads, current);
+            throw new Error('This thread no longer exists. Run /thread list for a fresh card.');
+          }
+          const selected = await this.selections.select(pending.openId, pending.deviceId, target.id, target.name, pending.fence,
+            () => current() && !!entry && this.store.getCardThread(selection.cardId) === entry,
+            () => { selection.commitAdmitted = true; });
+          // A stale post-write guard cannot undo a committed snapshot. Report the
+          // historical save without claiming it is still the user's active choice.
+          if (selection.commitAdmitted) {
+            const notice = `Thread preference was saved: ${target.name}. Check /thread list before sending work if the connection or selection changed.`;
+            if (selection.acknowledgedPending) await this.sendSelectionOutcome(pending.openId, notice);
+            else if (selected !== 'selected' || !current()) selection.resolve({ notice });
+            else selection.resolve(target.name);
+          } else {
+            if (selected !== 'selected') throw new Error('This selection was superseded or the device changed.');
+            selection.resolve(target.name);
+          }
+        } catch (error) {
+          if (selection.acknowledgedPending) await this.sendSelectionOutcome(pending.openId,
+            'The thread selection could not be confirmed durably. Do not assume it changed or remained unchanged. Check /thread list after Router storage recovers; no action was replayed.');
+          else selection.reject(error instanceof Error ? error : new Error('Could not save the thread selection.'));
+        }
+        return;
+      }
+      if (!current()) return;
+      const binding = await this.bindingManager.getDeviceBinding(pending.deviceId);
+      if (!current() || binding?.openId !== pending.openId) return;
+      const threads = message.status?.threads;
+      if (!isCompleteThreadCatalog(threads)) {
+        await this.feishuLongConnHandler.sendMessage(pending.openId, 'The device returned an invalid thread inventory. Retry /thread list.');
+        return;
+      }
+      const defaultThread = threads.find((thread: ThreadSummary) => thread.name === 'default')!;
+      try {
+        const reconciled = await this.selections.observeCatalog(pending.openId, pending.deviceId, pending.fence, threads, current);
+        if (reconciled === 'stale' || reconciled === 'failed' || !current()) return;
+        const cardId = await this.feishuLongConnHandler.sendStreamingStart(pending.openId,
+          '🗂️ Thread controls refreshed. Choose a thread for future top-level messages.');
+        if (!cardId || !current()) return;
+        const finalized = await this.feishuLongConnHandler.finalizeStreamingMessage(cardId, [], undefined,
+          pending.openId, undefined, 'Thread selection', threads, defaultThread.id, undefined, undefined, true,
+          { onDelivered: async cardIds => {
+            for (const deliveredId of cardIds) await this.registerCardThread(deliveredId, {
+              threadId: defaultThread.id, deviceId: pending.deviceId, openId: pending.openId,
+              epoch: pending.fence.epoch, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS,
+            }, current);
+          } });
+        if (!finalized || !current()) return;
+        await this.registerCardThread(cardId, { threadId: defaultThread.id, deviceId: pending.deviceId,
+          openId: pending.openId, epoch: pending.fence.epoch, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS }, current);
+      } catch {
+        if (current()) await this.feishuLongConnHandler.sendMessage(pending.openId, 'Could not create thread controls. Retry /thread list.');
+      }
+    } finally {
+      clearTimeout(pending.timer);
+      if (this.threadInventoryRequests.get(message.messageId) === pending) this.threadInventoryRequests.delete(message.messageId);
     }
   }
 
@@ -1288,9 +1375,9 @@ export class RouterServer {
     stream.threadName = threadName;
     stream.cwd = cwd;
     if (stream.feishuMessageId) {
-      this.cardThreadMap.set(stream.feishuMessageId, {
+      await this.registerCardThread(stream.feishuMessageId, {
         threadId, deviceId, openId: stream.openId, epoch: stream.selectionFence?.epoch ?? this.selections.capture(stream.openId, deviceId).epoch, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS,
-      });
+      }, () => this.streamingMessages.get(messageId) === stream);
       await this.updateStreamingText(messageId, openId, stream);
     }
   }
@@ -1986,6 +2073,7 @@ export class RouterServer {
       || !['running', 'completed', 'failed'].includes(info.state)
       || (info.error !== undefined && (typeof info.error !== 'string' || info.error.length > 500))) return false;
     if (this.isCompletedTask(messageId, deviceId)) return true;
+    const selectionFence = this.selections.capture(openId, deviceId);
     const previous = this.streamingMessages.get(messageId);
     if (previous && (previous.deviceId !== deviceId || previous.openId !== openId
       || (previous.threadId && previous.threadId !== threadId))) return false;
@@ -2028,7 +2116,8 @@ export class RouterServer {
         previous.lastRenderedTextLength = textLength;
         this.lastStreamUpdateTime.set(messageId, Date.now());
       }
-      this.cardThreadMap.set(previous.feishuMessageId!, { threadId, deviceId, openId, epoch: previous.selectionFence?.epoch ?? this.selections.capture(openId, deviceId).epoch, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS });
+      await this.registerCardThread(previous.feishuMessageId!, { threadId, deviceId, openId, epoch: previous.selectionFence?.epoch ?? this.selections.capture(openId, deviceId).epoch, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS },
+        () => isCurrent() && this.streamingMessages.get(messageId) === previous);
     } else {
       const escape = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
       const intro = `🔄 **${info.state === 'running' ? 'Connection restored — task continues' : 'Task status recovered'}**\n\n`
@@ -2044,9 +2133,9 @@ export class RouterServer {
         createdAt: Date.now(), updatePending: false, finalizing: false, lastRenderedTextLength: 0,
         delegationProgress: new Map(),
         toolCalls: new Map(),
-        recoveryId: info.recoveryId, recoveryPlainText: true, recoveryCwd: info.cwd,
+        recoveryId: info.recoveryId, recoveryPlainText: true, recoveryCwd: info.cwd, selectionFence,
       });
-      this.cardThreadMap.set(cardId, { threadId, deviceId, openId, epoch: this.selections.capture(openId, deviceId).epoch, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS });
+      await this.registerCardThread(cardId, { threadId, deviceId, openId, epoch: selectionFence.epoch, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS }, isCurrent);
     }
     this.bindImageStream(messageId);
     if (info.state !== 'running') {
@@ -2067,6 +2156,7 @@ export class RouterServer {
       || !info || typeof info.threadName !== 'string' || typeof info.backend !== 'string'
       || typeof info.cwd !== 'string' || typeof info.preview !== 'string'
       || !Number.isInteger(info.remainingCount) || info.remainingCount < 0) return;
+    const selectionFence = this.selections.capture(openId, deviceId);
     const previous = this.streamingMessages.get(messageId);
     if (previous && (previous.deviceId !== deviceId || previous.openId !== openId
       || (previous.threadId && previous.threadId !== threadId))) return;
@@ -2112,13 +2202,14 @@ export class RouterServer {
         delegationProgress: new Map(),
         toolCalls: new Map(),
         queueStarted: info,
+        selectionFence,
         threads: Array.isArray(message.threads) ? message.threads : undefined,
       });
       this.bindImageStream(messageId);
       if (cardId || fallbackCardId) {
-        this.cardThreadMap.set((cardId || fallbackCardId)!, {
-          threadId, deviceId, openId, epoch: this.selections.capture(openId, deviceId).epoch, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS,
-        });
+        await this.registerCardThread((cardId || fallbackCardId)!, {
+          threadId, deviceId, openId, epoch: selectionFence.epoch, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS,
+        }, isCurrent);
       }
       if (cardId) {
         const oldCards = new Set([previous?.queueCardId, previous?.feishuMessageId]);
@@ -2150,10 +2241,10 @@ export class RouterServer {
    * Sent as a standalone one-shot card — the event may arrive while no
    * streaming session exists (the originating command's card is often
    * already finalized), so it deliberately never touches streamingMessages.
-   * The new card is registered in cardThreadMap so the user can reply to it
+   * The new card has a durable association so the user can reply to it
    * to continue working in the originating thread.
    */
-  private async handleTaskNotification(openId: string, info: TaskNotificationInfo, threadId?: string, deviceId?: string | null, threadName?: string): Promise<void> {
+  private async handleTaskNotification(openId: string, info: TaskNotificationInfo, threadId?: string, deviceId?: string | null, threadName?: string, current = () => true): Promise<void> {
     // Boundary validation — the WS message is external data, never trust it.
     // Required for rendering: a non-empty taskId and a string summary.
     // Unknown status values are allowed through (forward compatibility);
@@ -2167,11 +2258,12 @@ export class RouterServer {
 
     const threadLabel = typeof threadName === 'string' && threadName.trim()
       ? threadName : typeof threadId === 'string' && threadId.trim() ? threadId : undefined;
+    const selectionFence = deviceId ? this.selections.capture(openId, deviceId) : undefined;
     const elements = createTaskNotificationElement(info, threadLabel);
     const feishuMessageId = await this.feishuLongConnHandler.sendTaskNotificationCard(openId, elements);
 
-    if (feishuMessageId && threadId && deviceId) {
-      this.cardThreadMap.set(feishuMessageId, { threadId, deviceId, openId, epoch: this.selections.capture(openId, deviceId).epoch, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS });
+    if (feishuMessageId && threadId && deviceId && selectionFence) {
+      await this.registerCardThread(feishuMessageId, { threadId, deviceId, openId, epoch: selectionFence.epoch, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS }, current);
       console.log(`[RouterServer] Registered task notification card ${feishuMessageId} for thread ${threadId}`);
     }
   }
@@ -2179,16 +2271,20 @@ export class RouterServer {
   /**
    * Finalize streaming message
    */
-  private registerDeliveredThreadCards(messageId: string, streamData: StreamingMessageState, cardIds: string[]): void {
+  private async registerDeliveredThreadCards(messageId: string, streamData: StreamingMessageState, cardIds: string[]): Promise<void> {
     if (!streamData.threadId || this.streamingMessages.get(messageId) !== streamData) return;
     const fence = streamData.selectionFence;
     if (streamData.currentConnection && !streamData.currentConnection()) return;
     const epoch = fence?.epoch ?? this.selections.capture(streamData.openId, streamData.deviceId).epoch;
     if (!this.selections.isOwnershipCurrent(streamData.openId, streamData.deviceId, epoch)) return;
-    for (const cardId of cardIds) {
-      if (typeof cardId !== 'string' || !cardId) continue;
-      this.cardThreadMap.set(cardId, { threadId: streamData.threadId, deviceId: streamData.deviceId,
-        openId: streamData.openId, epoch, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS });
+    const delivered = cardIds.filter(id => typeof id === 'string' && id.length > 0);
+    streamData.deliveredCardIds ??= new Set();
+    // Track the whole batch before disk I/O so interruption revokes pending writes too.
+    for (const cardId of delivered) streamData.deliveredCardIds.add(cardId);
+    for (const cardId of delivered) {
+      await this.registerCardThread(cardId, { threadId: streamData.threadId, deviceId: streamData.deviceId,
+        openId: streamData.openId, epoch, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS },
+        () => this.streamingMessages.get(messageId) === streamData && (!streamData.currentConnection || streamData.currentConnection()));
     }
   }
 
@@ -2308,21 +2404,24 @@ export class RouterServer {
       if (delivered === false) throw new Error('Failed to deliver task result');
     }
 
-    // Clean up streaming session state (but NOT cardThreadMap — keep it alive
-    // so users can reply to the completed card and route to the same thread).
+    // Keep durable card associations after removing the completed streaming session.
     if (this.streamingMessages.get(messageId) === streamData) {
       this.streamingMessages.delete(messageId);
       this.lastStreamUpdateTime.delete(messageId);
     }
   }
 
-  /**
-   * Cleanup stale streaming sessions that have timed out
-   * This prevents memory leaks when devices disconnect without sending a response
-   */
-  private cleanupStaleStreamingSessions(): void {
+  private removeActiveCardRoutes(session: StreamingMessageState): Promise<void>[] {
+    const ids = new Set(session.deliveredCardIds);
+    if (session.feishuMessageId) ids.add(session.feishuMessageId);
+    return [...ids].map(id => this.store.removeCardThread(id));
+  }
+
+  /** Clean up timed-out executions without discarding completed card routes. */
+  private async cleanupStaleStreamingSessions(): Promise<void> {
     const now = Date.now();
     let cleanedCount = 0;
+    const removals: Promise<void>[] = [];
     for (const [messageId, route] of this.imageReplies) {
       if (!route.current() || (!this.streamingMessages.has(messageId)
         && now - route.createdAt > this.STREAMING_SESSION_TIMEOUT_MS)) this.cancelImageReply(messageId);
@@ -2331,14 +2430,12 @@ export class RouterServer {
     for (const [messageId, session] of this.streamingMessages.entries()) {
       if (now - session.createdAt > this.STREAMING_SESSION_TIMEOUT_MS) {
         console.log(`[RouterServer] Cleaning up stale streaming session: ${messageId}`);
-        // Stale in-flight sessions have their cardThreadMap entry removed;
+        // Stale in-flight sessions lose their card association;
         // completed sessions deliberately keep theirs (see finalizeStreamingMessage).
-        if (session.feishuMessageId) {
-          this.cardThreadMap.delete(session.feishuMessageId);
-        }
+        this.streamingMessages.delete(messageId);
+        removals.push(...this.removeActiveCardRoutes(session));
         this.clearDelegationProgressTimers(session);
         this.cancelImageReply(messageId);
-        this.streamingMessages.delete(messageId);
         this.lastStreamUpdateTime.delete(messageId);
         cleanedCount++;
       }
@@ -2350,13 +2447,10 @@ export class RouterServer {
       }
     }
 
-    // Evict expired cardThreadMap entries (TTL-based, independent of streaming sessions)
-    for (const [feishuMessageId, entry] of this.cardThreadMap.entries()) {
-      if (now > entry.expiresAt) {
-        this.cardThreadMap.delete(feishuMessageId);
-      }
-    }
-
+    const results = await Promise.allSettled(removals);
+    await this.store.pruneCardThreads();
+    const failed = results.find(result => result.status === 'rejected');
+    if (failed?.status === 'rejected') throw failed.reason;
     if (cleanedCount > 0) {
       console.log(`[RouterServer] Cleaned up ${cleanedCount} stale streaming sessions, remaining: ${this.streamingMessages.size}`);
     }
@@ -2366,32 +2460,30 @@ export class RouterServer {
    * Cleanup streaming sessions for a specific device when it disconnects
    * @param deviceId Device ID that disconnected
    */
-  private cleanupStreamingSessionsForDevice(deviceId: string): void {
+  private async cleanupStreamingSessionsForDevice(deviceId: string): Promise<void> {
+    this.cancelThreadInventories(deviceId);
     this.cancelDeviceImages(deviceId);
     let cleanedCount = 0;
+    const removals: Promise<void>[] = [];
 
     for (const [messageId, session] of this.streamingMessages.entries()) {
       if (session.deviceId === deviceId) {
         console.log(`[RouterServer] Cleaning up streaming session for disconnected device: ${messageId}`);
-        // Also clean up any cardThreadMap entries associated with this session's feishuMessageId
-        if (session.feishuMessageId) {
-          this.cardThreadMap.delete(session.feishuMessageId);
-        }
+        // Remove the session identity before awaiting durable card removal.
+        this.streamingMessages.delete(messageId);
+        removals.push(...this.removeActiveCardRoutes(session));
         this.clearDelegationProgressTimers(session);
         this.cancelImageReply(messageId);
-        this.streamingMessages.delete(messageId);
         this.lastStreamUpdateTime.delete(messageId);
         cleanedCount++;
       }
     }
 
-    // Clean up any orphaned cardThreadMap entries for this device
-    for (const [feishuMessageId, entry] of this.cardThreadMap.entries()) {
-      if (entry.deviceId === deviceId) {
-        this.cardThreadMap.delete(feishuMessageId);
-      }
-    }
+    // Completed cards survive ordinary disconnects and Router shutdown.
 
+    const results = await Promise.allSettled(removals);
+    const failed = results.find(result => result.status === 'rejected');
+    if (failed?.status === 'rejected') throw failed.reason;
     if (cleanedCount > 0) {
       console.log(`[RouterServer] Cleaned up ${cleanedCount} streaming sessions for device ${deviceId}, remaining: ${this.streamingMessages.size}`);
     }
@@ -2417,8 +2509,9 @@ export class RouterServer {
 
     // Drain accepted binding writes before any slow card or transfer cleanup.
     // A failure must not skip the remaining resource cleanup or be hidden.
-    for (const pending of this.threadInventoryRequests.values()) clearTimeout(pending.timer);
-    this.threadInventoryRequests.clear();
+    for (const id of this.threadInventoryRequests.keys()) {
+      this.cancelThreadInventory(id, new Error('Router is stopping. Retry the thread selection.'));
+    }
     await attempt('Error flushing bindings during shutdown', () => this.store.flush());
     await attempt('Error stopping Tips scheduler', () => this.tips.stop());
     for (const id of this.imageReplies.keys()) this.cancelImageReply(id);
@@ -2482,6 +2575,7 @@ export class RouterServer {
       });
     }
 
+    await attempt('Error flushing card routes during shutdown', () => this.store.flush());
     if (failed) throw firstError;
     console.log('✅ Router server stopped');
   }

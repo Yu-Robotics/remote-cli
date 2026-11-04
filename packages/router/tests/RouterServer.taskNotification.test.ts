@@ -1,3 +1,4 @@
+import { cardThreadStorage } from './helpers/cardThreadStorage';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import Koa from 'koa';
 import Router from '@koa/router';
@@ -91,7 +92,7 @@ describe('RouterServer - task_notification', () => {
       })
     };
 
-    store = { initialize: vi.fn().mockResolvedValue(undefined), flush: vi.fn().mockResolvedValue(undefined) };
+    store = { ...cardThreadStorage(), initialize: vi.fn().mockResolvedValue(undefined), flush: vi.fn().mockResolvedValue(undefined) };
 
     const mockHttpServer = {
       listen: vi.fn().mockReturnThis(),
@@ -140,6 +141,8 @@ describe('RouterServer - task_notification', () => {
     };
     (ConnectionHub as unknown as any).mockImplementation(() => mockConnectionHub);
     (BindingManager as unknown as any).mockImplementation(() => ({
+      getCardThreadEpoch: store.getCardThreadEpoch,
+      invalidateDeviceCards: store.invalidateDeviceCards,
       getDeviceBinding: vi.fn(async (deviceId: string) => deviceId === 'device-1' ? { openId: 'user-1' } : null),
       generateBindingCode: vi.fn().mockResolvedValue({ code: '123456', expiresAt: Date.now() + 60000 }),
     }));

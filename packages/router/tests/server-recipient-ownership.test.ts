@@ -1,3 +1,4 @@
+import { cardThreadStorage } from './helpers/cardThreadStorage';
 import { EventEmitter } from 'events';
 import fs from 'fs/promises';
 import os from 'os';
@@ -53,7 +54,7 @@ describe('Router recipient ownership', () => {
       get: (section: string, key: string) => section === 'files' ? { enabled: false } : key === 'heartbeatInterval' ? 30000 : 'test',
     };
     owners = new Map();
-    server = new RouterServer(config as unknown as ConfigManager, { flush: vi.fn().mockResolvedValue(undefined) } as unknown as JsonStore);
+    server = new RouterServer(config as unknown as ConfigManager, { ...cardThreadStorage(), flush: vi.fn().mockResolvedValue(undefined) } as unknown as JsonStore);
     bindingLookup = vi.spyOn((server as any).bindingManager, 'getDeviceBinding').mockImplementation(
       async (deviceId: string) => owners.has(deviceId) ? { openId: owners.get(deviceId) } : null,
     );
@@ -149,7 +150,7 @@ describe('Router recipient ownership', () => {
 
     expect(feishu.sendMessage).toHaveBeenCalledWith('owner', '**🔒 Authorization Required**\n\nApprove?');
     expect(feishu.sendTaskNotificationCard).toHaveBeenCalledWith('owner', expect.any(Array));
-    expect((server as any).cardThreadMap.get('background-card')).toMatchObject({ deviceId: 'device-1', threadId: 'thread-1' });
+    expect((server as any).store.getCardThread('background-card')).toMatchObject({ deviceId: 'device-1', threadId: 'thread-1' });
   });
 
   it.each([
@@ -168,7 +169,7 @@ describe('Router recipient ownership', () => {
 
     expect(feishu.sendMessage).not.toHaveBeenCalled();
     expect(feishu.sendTaskNotificationCard).not.toHaveBeenCalled();
-    expect((server as any).cardThreadMap.size).toBe(0);
+    expect((server as any).store.cards.size).toBe(0);
   });
 
   it.each([
@@ -226,7 +227,7 @@ describe('Router recipient ownership', () => {
     const socket = connect();
     await register(socket, { taskRecovery: true });
     const startStreaming = feishu.setOnStartStreaming.mock.calls[0][0];
-    startStreaming('shared-task', 'victim', 'victim-card', 'device-1', 'thread-1');
+    await startStreaming('shared-task', 'victim', 'victim-card', 'device-1', 'thread-1');
     const stream = (server as any).streamingMessages.get('shared-task');
     const before = JSON.stringify(stream);
     socket.send.mockClear();
@@ -245,12 +246,12 @@ describe('Router recipient ownership', () => {
     const socket = connect();
     await register(socket);
     const startStreaming = feishu.setOnStartStreaming.mock.calls[0][0];
-    startStreaming('shared-task', 'owner', 'original-card', 'device-1', 'thread-1');
+    await startStreaming('shared-task', 'owner', 'original-card', 'device-1', 'thread-1');
     let resolveLookup!: (value: { openId: string }) => void;
     bindingLookup.mockImplementationOnce(() => new Promise(resolve => { resolveLookup = resolve; }));
 
     const pending = receive(socket, { type: 'stream', messageId: 'shared-task', openId: 'owner', chunk: 'Old output' });
-    startStreaming('shared-task', 'owner', 'replacement-card', 'device-1', 'thread-2');
+    await startStreaming('shared-task', 'owner', 'replacement-card', 'device-1', 'thread-2');
     const replacement = (server as any).streamingMessages.get('shared-task');
     const before = JSON.stringify(replacement);
     resolveLookup({ openId: 'owner' });
@@ -299,7 +300,7 @@ describe('Router recipient ownership', () => {
     const socket = connect();
     await register(socket, { taskRecovery: true });
     const startStreaming = feishu.setOnStartStreaming.mock.calls[0][0];
-    startStreaming('delayed-final', 'owner', 'delayed-card', 'device-1', 'thread-1');
+    await startStreaming('delayed-final', 'owner', 'delayed-card', 'device-1', 'thread-1');
     const stream = (server as any).streamingMessages.get('delayed-final');
     let releaseUpdate!: () => void;
     stream.updateInFlight = new Promise<void>(resolve => { releaseUpdate = resolve; });

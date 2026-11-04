@@ -4,9 +4,11 @@ import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import { randomUUID } from 'crypto';
+import { reconcileCardThreads, validCardThread, type CardThreadAssociation, type CardThreadState } from './CardThreadState';
 
 interface StoreData {
   version: number;
+  cardThreads?: CardThreadState;
   bindingCodes: Record<string, BindingCode>;
   userBindings: Record<string, UserBinding>;
   deviceToUserMap: Record<string, string>;
@@ -104,6 +106,8 @@ export class JsonStore {
   private uncertainty?: Error;
   private invalidDataError?: Error;
   private readonly expiringCodes = new Set<string>();
+  private readonly removingCards = new Set<string>();
+  private readonly cardRemovalWrites = new Map<string, Promise<void>>();
   private readonly SAVE_DELAY: number;
   private static readonly CURRENT_VERSION = 1;
 
@@ -147,7 +151,11 @@ export class JsonStore {
     }
     if (parsed.kind === 'legacy') await this.migrateFromLegacy(parsed.data);
     else this.data = parsed.data;
-    await this.commitImmediate(current => this.withoutExpiredBindingCodes(current));
+    await this.commitImmediate(current => {
+      const live = this.withoutExpiredBindingCodes(current) ?? current;
+      const reconciled = this.withCardThreads(live);
+      return JSON.stringify(reconciled) === JSON.stringify(current) ? undefined : reconciled;
+    });
   }
 
   private async migrateFromLegacy(rawData: LegacyStoreData): Promise<void> {
@@ -231,7 +239,13 @@ export class JsonStore {
     await this.scheduleSave(current => {
       const deviceToUserMap = { ...current.deviceToUserMap };
       for (const device of copy.devices) deviceToUserMap[device.deviceId] = openId;
-      return { ...current, userBindings: { ...current.userBindings, [openId]: copy }, deviceToUserMap };
+      const previous = current.userBindings[openId];
+      const invalidate = new Set<string>();
+      if (previous && previous.activeDeviceId !== copy.activeDeviceId) {
+        if (previous.activeDeviceId) invalidate.add(previous.activeDeviceId);
+        if (copy.activeDeviceId) invalidate.add(copy.activeDeviceId);
+      }
+      return this.withCardThreads({ ...current, userBindings: { ...current.userBindings, [openId]: copy }, deviceToUserMap }, invalidate);
     });
   }
 
@@ -253,7 +267,7 @@ export class JsonStore {
 
   /** Prompt, FIFO preference mutation against the latest committed binding state. */
   async setDeviceThreadSelection(openId: string, deviceId: string, threadId: string | null,
-    options: { expectedThreadId?: string; requireActive?: boolean; guard?: () => boolean } = {}): Promise<boolean> {
+    options: { expectedThreadId?: string; requireActive?: boolean; guard?: () => boolean; onCommitAdmitted?: () => void } = {}): Promise<boolean> {
     if (threadId !== null && (typeof threadId !== 'string' || threadId.length === 0 || threadId.length > 200)) {
       throw new Error('Invalid selected thread ID.');
     }
@@ -279,8 +293,13 @@ export class JsonStore {
         const { selectedThreadId: _removed, ...withoutSelection } = item;
         return withoutSelection;
       });
-      return { ...current, userBindings: { ...current.userBindings,
+      const draft = { ...current, userBindings: { ...current.userBindings,
         [openId]: { ...binding, devices, updatedAt: Date.now() } } };
+      // All guards ran inside the FIFO. No await separates admission from writeSnapshot.
+      // From here cancellation cannot undo the eventual rename/fsync; consumers must
+      // await durability or acknowledge an uncertain outcome instead of claiming cancellation.
+      options.onCommitAdmitted?.();
+      return draft;
     });
     return matches;
   }
@@ -296,7 +315,7 @@ export class JsonStore {
   }
 
   async setDeviceToUserMap(deviceId: string, openId: string): Promise<void> {
-    await this.scheduleSave(current => ({ ...current,
+    await this.scheduleSave(current => this.withCardThreads({ ...current,
       deviceToUserMap: { ...current.deviceToUserMap, [deviceId]: openId } }));
   }
 
@@ -305,7 +324,7 @@ export class JsonStore {
       if (!current.deviceToUserMap[deviceId]) return undefined;
       const deviceToUserMap = { ...current.deviceToUserMap };
       delete deviceToUserMap[deviceId];
-      return { ...current, deviceToUserMap };
+      return this.withCardThreads({ ...current, deviceToUserMap });
     });
   }
 
@@ -330,7 +349,7 @@ export class JsonStore {
         userBindings[openId] = { ...binding, devices, activeDeviceId, updatedAt: Date.now() };
       }
       removed = true;
-      return { ...current, userBindings, deviceToUserMap };
+      return this.withCardThreads({ ...current, userBindings, deviceToUserMap });
     });
     return removed;
   }
@@ -345,7 +364,79 @@ export class JsonStore {
       }
       const userBindings = { ...current.userBindings };
       delete userBindings[openId];
-      return { ...current, userBindings, deviceToUserMap };
+      return this.withCardThreads({ ...current, userBindings, deviceToUserMap });
+    });
+  }
+
+  private withCardThreads(current: StoreData, invalidate?: Set<string>): StoreData {
+    return { ...current, cardThreads: reconcileCardThreads(current.cardThreads, current.userBindings,
+      current.deviceToUserMap, invalidate) };
+  }
+
+  getCardThreadEpoch(openId: string, deviceId: string): string {
+    this.assertReconciled();
+    const owner = this.data.cardThreads?.generations[deviceId];
+    return owner?.openId === openId ? owner.epoch : '';
+  }
+
+  getCardThread(cardId: string): Readonly<CardThreadAssociation> | undefined {
+    this.assertReconciled();
+    if (this.removingCards.has(cardId)) return undefined;
+    const cards = this.data.cardThreads?.cards;
+    const entry = cards && Object.hasOwn(cards, cardId) ? cards[cardId] : undefined;
+    if (!entry || !validCardThread(cardId, entry) || this.getCardThreadEpoch(entry.openId, entry.deviceId) !== entry.epoch) return undefined;
+    return entry;
+  }
+
+  async setCardThread(cardId: string, entry: CardThreadAssociation, guard: () => boolean = () => true): Promise<void> {
+    const copy = { ...entry };
+    await this.commitQueued(current => {
+      if (this.removingCards.has(cardId) || !guard() || !validCardThread(cardId, copy)) return undefined;
+      const state = current.cardThreads;
+      const owner = state?.generations[copy.deviceId];
+      if (!state || owner?.openId !== copy.openId || owner.epoch !== copy.epoch) return undefined;
+      const previous = Object.hasOwn(state.cards, cardId) ? state.cards[cardId] : undefined;
+      if (previous && (previous.openId !== copy.openId || previous.deviceId !== copy.deviceId || previous.epoch !== copy.epoch)) return undefined;
+      const card = { ...copy, expiresAt: Math.min(previous?.expiresAt ?? copy.expiresAt, copy.expiresAt) };
+      return this.withCardThreads({ ...current, cardThreads: { ...state, cards: { ...state.cards, [cardId]: card } } });
+    });
+  }
+
+  removeCardThread(cardId: string): Promise<void> {
+    const existing = this.cardRemovalWrites.get(cardId);
+    if (existing) return existing;
+    this.removingCards.add(cardId);
+    const write = this.commitQueued(current => {
+      const state = current.cardThreads;
+      if (!state || !Object.hasOwn(state.cards, cardId)) return undefined;
+      const cards = { ...state.cards };
+      delete cards[cardId];
+      return { ...current, cardThreads: { ...state, cards } };
+    }).then(() => {
+      this.removingCards.delete(cardId);
+    }).finally(() => {
+      this.cardRemovalWrites.delete(cardId);
+    });
+    this.cardRemovalWrites.set(cardId, write);
+    return write;
+  }
+
+  /** Keep failed removals unreadable, and retry them at maintenance/shutdown boundaries. */
+  private async retryCardRemovals(): Promise<void> {
+    const results = await Promise.allSettled([...this.removingCards].map(id => this.removeCardThread(id)));
+    const failed = results.find(result => result.status === 'rejected');
+    if (failed?.status === 'rejected') throw failed.reason;
+  }
+
+  async invalidateDeviceCards(deviceId: string): Promise<void> {
+    await this.commitQueued(current => this.withCardThreads(current, new Set([deviceId])));
+  }
+
+  async pruneCardThreads(): Promise<void> {
+    await this.retryCardRemovals();
+    await this.commitQueued(current => {
+      const next = this.withCardThreads(current);
+      return JSON.stringify(next.cardThreads) === JSON.stringify(current.cardThreads) ? undefined : next;
     });
   }
 
@@ -495,6 +586,7 @@ export class JsonStore {
       }
       try { await this.drainSaves(); } catch (error) { errors.push(error); }
     } while (this.saveTimer || this.pendingSaves.length > 0);
+    try { await this.retryCardRemovals(); } catch (error) { errors.push(error); }
     if (errors.length > 0) throw errors[0];
   }
 

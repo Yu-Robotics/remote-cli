@@ -1,3 +1,4 @@
+import { cardThreadStorage } from './helpers/cardThreadStorage';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import Koa from 'koa';
 import Router from '@koa/router';
@@ -80,6 +81,7 @@ describe('RouterServer', () => {
     };
 
     store = {
+      ...cardThreadStorage(),
       initialize: vi.fn().mockResolvedValue(undefined),
       flush: vi.fn().mockResolvedValue(undefined),
     };
@@ -126,6 +128,7 @@ describe('RouterServer', () => {
     (FeishuLongConnHandler as unknown as any).mockImplementation(() => mockFeishuHandler);
 
     mockConnectionHub = {
+      sendToDevice: vi.fn().mockResolvedValue(true),
       registerConnection: vi.fn(),
       unregisterConnection: vi.fn().mockReturnValue(true),
       isCurrentConnection: vi.fn().mockReturnValue(true),
@@ -137,6 +140,8 @@ describe('RouterServer', () => {
     (ConnectionHub as unknown as any).mockImplementation(() => mockConnectionHub);
 
     mockBindingManager = {
+      getCardThreadEpoch: store.getCardThreadEpoch,
+      invalidateDeviceCards: store.invalidateDeviceCards,
       generateBindingCode: vi.fn().mockResolvedValue({ code: '123456', expiresAt: Date.now() + 600000 }),
       // Output-bearing fixtures represent legitimately bound legacy devices.
       getDeviceBinding: vi.fn().mockImplementation(async (deviceId: string) => {
@@ -173,7 +178,7 @@ describe('RouterServer', () => {
       vi.mocked(createToolUseElement).mockImplementation(formatter.createToolUseElement);
       vi.mocked(createToolResultElement).mockImplementation(formatter.createToolResultElement);
       await server.start();
-      mockFeishuHandler.setOnStartStreaming.mock.calls[0][0]('tool-task', 'owner', 'tool-card', 'device-1', 'thread-1');
+      await mockFeishuHandler.setOnStartStreaming.mock.calls[0][0]('tool-task', 'owner', 'tool-card', 'device-1', 'thread-1');
       const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
       const ws = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
       onConnection(ws, { socket: { remoteAddress: '127.0.0.1' } });
@@ -400,7 +405,7 @@ describe('RouterServer', () => {
 
     it('scopes the same tool ID to its request and retains only rendered previews', async () => {
       const { send, stream } = await connect();
-      mockFeishuHandler.setOnStartStreaming.mock.calls[0][0]('other-task', 'owner', 'other-card', 'device-1', 'thread-1');
+      await mockFeishuHandler.setOnStartStreaming.mock.calls[0][0]('other-task', 'owner', 'other-card', 'device-1', 'thread-1');
       await send(use('shared-1', 'Bash', { command: 'x'.repeat(10_000) }));
       await send({ ...result('shared-1', 'Other request'), messageId: 'other-task' });
       expect(stream.elements[0].header.title.content).toContain("<font color='blue'>•</font>");
@@ -432,7 +437,7 @@ describe('RouterServer', () => {
     async function connect(capabilities: Record<string, boolean> = {}) {
       mockBindingManager.getDeviceBinding.mockResolvedValue({ openId: 'owner' });
       await server.start();
-      mockFeishuHandler.setOnStartStreaming.mock.calls[0][0]('activity-task', 'owner', 'activity-card', 'device-1', 'thread-1');
+      await mockFeishuHandler.setOnStartStreaming.mock.calls[0][0]('activity-task', 'owner', 'activity-card', 'device-1', 'thread-1');
       const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
       const ws = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
       onConnection(ws, { socket: { remoteAddress: '127.0.0.1' } });
@@ -727,7 +732,7 @@ describe('RouterServer', () => {
 
     it('adopts a surviving old card even if its thread had not yet been resolved', async () => {
       const { send, replies } = await connect();
-      mockFeishuHandler.setOnStartStreaming.mock.calls[0][0](resume.messageId, 'user-1', 'old-card', 'device-1');
+      await mockFeishuHandler.setOnStartStreaming.mock.calls[0][0](resume.messageId, 'user-1', 'old-card', 'device-1');
       await send(resume);
       expect(replies().at(-1).success).toBe(true);
       expect(await mockFeishuHandler.setOnResolveThread.mock.calls[0][0]('old-card', 'user-1'))
@@ -740,7 +745,7 @@ describe('RouterServer', () => {
 
     it('creates a recovery card when the surviving session has no card and retries failed delivery', async () => {
       const { send, replies } = await connect();
-      mockFeishuHandler.setOnStartStreaming.mock.calls[0][0](resume.messageId, 'user-1', null, 'device-1');
+      await mockFeishuHandler.setOnStartStreaming.mock.calls[0][0](resume.messageId, 'user-1', null, 'device-1');
       const completed = { ...resume, taskResume: { ...resume.taskResume, state: 'completed' } };
       mockFeishuHandler.sendStreamingStart.mockResolvedValueOnce(null);
       await send(completed);
@@ -758,7 +763,7 @@ describe('RouterServer', () => {
 
     it('creates a fresh recovery card when the surviving card is already finalizing', async () => {
       const { send, replies } = await connect();
-      mockFeishuHandler.setOnStartStreaming.mock.calls[0][0](resume.messageId, 'user-1', 'old-card', 'device-1');
+      await mockFeishuHandler.setOnStartStreaming.mock.calls[0][0](resume.messageId, 'user-1', 'old-card', 'device-1');
       let finish!: (success: boolean) => void;
       mockFeishuHandler.finalizeStreamingMessage.mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
       const stoppingCard = (server as any).finalizeStreamingMessage(resume.messageId, false, undefined, 'Connection lost');
@@ -774,7 +779,7 @@ describe('RouterServer', () => {
 
     it('isolates interrupted Markdown from the recovery notice and resumed text when adopting a card', async () => {
       const { send } = await connect();
-      mockFeishuHandler.setOnStartStreaming.mock.calls[0][0](resume.messageId, 'user-1', 'old-card', 'device-1', 'thread-1');
+      await mockFeishuHandler.setOnStartStreaming.mock.calls[0][0](resume.messageId, 'user-1', 'old-card', 'device-1', 'thread-1');
       await send({ type: 'stream', messageId: resume.messageId, openId: 'user-1', chunk: '```ts\nconst before = 1;' });
       await send(resume);
       await send(resume);
@@ -793,7 +798,7 @@ describe('RouterServer', () => {
 
     it('adopts a surviving streaming card and continues it with a gap separator', async () => {
       const { send, replies } = await connect();
-      mockFeishuHandler.setOnStartStreaming.mock.calls[0][0](resume.messageId, 'user-1', 'old-card', 'device-1', 'thread-1');
+      await mockFeishuHandler.setOnStartStreaming.mock.calls[0][0](resume.messageId, 'user-1', 'old-card', 'device-1', 'thread-1');
       await send({ type: 'stream', messageId: resume.messageId, openId: 'user-1', chunk: 'kept output' });
       await send(resume);
       expect(mockFeishuHandler.sendStreamingStart).not.toHaveBeenCalled();
@@ -812,7 +817,7 @@ describe('RouterServer', () => {
 
     it.each(['rejected request', 'failed update'])('retries a %s when adopting a card without acknowledging success early', async failure => {
       const { send, replies } = await connect();
-      mockFeishuHandler.setOnStartStreaming.mock.calls[0][0](resume.messageId, 'user-1', 'old-card', 'device-1', 'thread-1');
+      await mockFeishuHandler.setOnStartStreaming.mock.calls[0][0](resume.messageId, 'user-1', 'old-card', 'device-1', 'thread-1');
       await send({ type: 'stream', messageId: resume.messageId, openId: 'user-1', chunk: 'kept output' });
       mockFeishuHandler.updateStreamingMessage.mockClear();
       if (failure === 'rejected request') {
@@ -884,7 +889,7 @@ describe('RouterServer', () => {
       const send = (message: any) => onMessage(Buffer.from(JSON.stringify(message)));
       await send({ type: 'binding_request', data: { deviceId: 'device-1', capabilities } });
       const start = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
-      start('early-1', 'user-1', 'early-card', 'device-1');
+      await start('early-1', 'user-1', 'early-card', 'device-1');
       return { send, start, ws };
     }
 
@@ -919,8 +924,8 @@ describe('RouterServer', () => {
 
     it('keeps thread metadata isolated and rejects malformed or mismatched context', async () => {
       const { send, start } = await connect();
-      start('other-1', 'user-1', 'other-card', 'device-1', 'thread-2', false, undefined, 'thread-2');
-      start('foreign-1', 'user-1', 'foreign-card', 'device-2');
+      await start('other-1', 'user-1', 'other-card', 'device-1', 'thread-2', false, undefined, 'thread-2');
+      await start('foreign-1', 'user-1', 'foreign-card', 'device-2');
       for (const invalid of [
         { ...context, openId: 'other-user' }, { ...context, messageId: 'foreign-1' },
         { ...context, messageId: 'other-1' }, { ...context, messageId: 'unknown' },
@@ -938,9 +943,14 @@ describe('RouterServer', () => {
     it('waits for an in-flight header patch before finalization and ignores late metadata', async () => {
       const { send } = await connect();
       let release!: (value: boolean) => void;
-      mockFeishuHandler.updateStreamingMessage.mockReturnValueOnce(new Promise(resolve => { release = resolve; }));
+      let entered!: () => void;
+      const started = new Promise<void>(resolve => { entered = resolve; });
+      mockFeishuHandler.updateStreamingMessage.mockImplementationOnce(() => {
+        entered();
+        return new Promise(resolve => { release = resolve; });
+      });
       const patch = send(context);
-      await Promise.resolve();
+      await started;
       const finish = send({ type: 'response', messageId: 'early-1', openId: 'user-1', threadId: 'thread-1', success: true, output: 'Done' });
       await Promise.resolve();
       expect(mockFeishuHandler.finalizeStreamingMessage).not.toHaveBeenCalled();
@@ -954,7 +964,7 @@ describe('RouterServer', () => {
 
     it('uses the final created or renamed thread instead of retaining the earlier caller header', async () => {
       const { send, start } = await connect();
-      start('early-1', 'user-1', 'early-card', 'device-1', undefined, true);
+      await start('early-1', 'user-1', 'early-card', 'device-1', undefined, true);
       await send(context);
       await send({ type: 'response', messageId: 'early-1', openId: 'user-1', threadId: 'new-thread', success: true,
         threads: [{ id: 'new-thread', name: 'thread-10', status: 'idle' }] });
@@ -1076,7 +1086,7 @@ describe('RouterServer', () => {
 
     it('renders a final-only local image reference safely for a CLI without image events', async () => {
       const send = await connect();
-      mockFeishuHandler.setOnStartStreaming.mock.calls[0][0](
+      await mockFeishuHandler.setOnStartStreaming.mock.calls[0][0](
         'queued-1', 'user-1', 'legacy-card', 'device-1', 'thread-1',
       );
       await send({ type: 'response', messageId: 'queued-1', openId: 'user-1', success: true,
@@ -1132,7 +1142,7 @@ describe('RouterServer', () => {
 
     it('falls back to the receipt if the new card cannot be created', async () => {
       const send = await connect();
-      mockFeishuHandler.setOnStartStreaming.mock.calls[0][0](
+      await mockFeishuHandler.setOnStartStreaming.mock.calls[0][0](
         'queued-1', 'user-1', null, 'device-1', 'thread-1', false, 'receipt-card',
       );
       mockFeishuHandler.sendStreamingStart.mockResolvedValue(null);
@@ -1158,7 +1168,7 @@ describe('RouterServer', () => {
       const send = await connect();
       await send(started);
       expect(mockFeishuHandler.sendStreamingStart).toHaveBeenCalledOnce();
-      mockFeishuHandler.setOnStartStreaming.mock.calls[0][0](
+      await mockFeishuHandler.setOnStartStreaming.mock.calls[0][0](
         'queued-2', 'user-1', 'waiting-card', 'device-1', 'thread-1', false, 'receipt-card',
       );
       mockFeishuHandler.markQueueCardStarted.mockRejectedValue(new Error('Card expired'));
@@ -1170,7 +1180,7 @@ describe('RouterServer', () => {
     it('ignores malformed events and events that conflict with the registered session', async () => {
       const send = await connect();
       await send({ ...started, queueStarted: { ...started.queueStarted, remainingCount: -1 } });
-      mockFeishuHandler.setOnStartStreaming.mock.calls[0][0](
+      await mockFeishuHandler.setOnStartStreaming.mock.calls[0][0](
         'queued-1', 'different-user', 'old-card', 'other-device', 'thread-1',
       );
       await send(started);
@@ -1198,7 +1208,7 @@ describe('RouterServer', () => {
 
   it('should handle Feishu start streaming callback with owned reply provenance', async () => {
     const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
-    onStartStreaming('msg-1', 'user-1', 'feishu-msg-1', 'device-1', 'thread-1');
+    await onStartStreaming('msg-1', 'user-1', 'feishu-msg-1', 'device-1', 'thread-1');
     const onResolveThread = mockFeishuHandler.setOnResolveThread.mock.calls[0][0];
     expect(await onResolveThread('feishu-msg-1', 'user-1')).toEqual({ threadId: 'thread-1', deviceId: 'device-1' });
     expect(await onResolveThread('feishu-msg-1', 'other-user')).toBeUndefined();
@@ -1206,57 +1216,24 @@ describe('RouterServer', () => {
 
   it('should persist a card selection before resolving it', async () => {
     const onResolveActiveThread = mockFeishuHandler.setOnResolveActiveThread.mock.calls[0][0];
-    (server as any).cardThreadMap.set('card-1', { threadId: 'thread-1', deviceId: 'device-1', openId: 'user-1', epoch: 0, expiresAt: Date.now() + 1000 });
-    await mockFeishuHandler.onCardSwitchThread('user-1', 'card-1', 'thread-1', 'Thread 1');
-    expect(mockBindingManager.selectThread).toHaveBeenCalledWith('user-1', 'device-1', 'thread-1', expect.any(Function));
+    await store.setCardThread('card-1', { threadId: 'thread-1', deviceId: 'device-1', openId: 'user-1', epoch: store.getCardThreadEpoch(), expiresAt: Date.now() + 1000 });
+    const selecting = mockFeishuHandler.onCardSwitchThread('user-1', 'card-1', 'thread-1', 'Untrusted name');
+    await vi.waitFor(() => expect((server as any).threadInventoryRequests.size).toBe(1));
+    const [messageId] = (server as any).threadInventoryRequests.keys();
+    await (server as any).handleThreadInventoryResponse({ messageId, status: { threads: [
+      { id: 'default-id', name: 'default', status: 'idle' }, { id: 'thread-1', name: 'Thread 1', status: 'idle' },
+    ] } }, 'device-1', {});
+    await selecting;
+    expect(mockBindingManager.selectThread).toHaveBeenCalledWith('user-1', 'device-1', 'thread-1', expect.any(Function), expect.any(Function));
     mockBindingManager.getThreadSelection.mockReturnValue({ status: 'valid', threadId: 'thread-1' });
     expect(await onResolveActiveThread('user-1', 'device-1')).toEqual({ threadId: 'thread-1', threadName: 'Thread 1' });
   });
 
   it('should bind a New Thread intent to its source device', async () => {
-    (server as any).cardThreadMap.set('card-1', { threadId: 'thread-1', deviceId: 'device-1', openId: 'user-1', epoch: 0, expiresAt: Date.now() + 1000 });
+    await store.setCardThread('card-1', { threadId: 'thread-1', deviceId: 'device-1', openId: 'user-1', epoch: store.getCardThreadEpoch(), expiresAt: Date.now() + 1000 });
     await mockFeishuHandler.onCardNewThread('user-1', 'card-1');
     expect(mockFeishuHandler.sendCommandFromCardAction).toHaveBeenCalledWith('user-1', '/thread new', true, 'device-1',
-      expect.objectContaining({ deviceId: 'device-1', revision: expect.any(Number), epoch: expect.any(Number) }));
-  });
-
-  it('retains durable per-device selection across a device switch', async () => {
-    const onResolveActiveThread = mockFeishuHandler.setOnResolveActiveThread.mock.calls[0][0];
-    mockBindingManager.getThreadSelection.mockReturnValue({ status: 'valid', threadId: 'thread-abc' });
-    mockFeishuHandler.onDeviceSwitch('user-1', 'device-1', 'device-2');
-    expect(await onResolveActiveThread('user-1', 'device-2')).toMatchObject({ threadId: 'thread-abc' });
-  });
-
-  it('does not change another user selection during a device switch', async () => {
-    const onResolveActiveThread = mockFeishuHandler.setOnResolveActiveThread.mock.calls[0][0];
-    mockBindingManager.getThreadSelection.mockImplementation((openId: string) => ({ status: 'valid', threadId: `${openId}-thread` }));
-    mockFeishuHandler.onDeviceSwitch('user-1', 'device-1', 'device-2');
-    expect(await onResolveActiveThread('user-1', 'device-2')).toMatchObject({ threadId: 'user-1-thread' });
-    expect(await onResolveActiveThread('user-2', 'device-1')).toMatchObject({ threadId: 'user-2-thread' });
-  });
-
-  it('should remove cardThreadMap entries for old device when device is switched', async () => {
-    const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
-    const onResolveThread = mockFeishuHandler.setOnResolveThread.mock.calls[0][0];
-    const onDeviceSwitch = mockFeishuHandler.onDeviceSwitch;
-    mockBindingManager.getDeviceBinding.mockResolvedValue({ openId: 'user-1' });
-
-    // Populate cardThreadMap via streaming session registrations
-    onStartStreaming('msg-1', 'user-1', 'feishu-card-1', 'old-device', 'thread-1');
-    onStartStreaming('msg-2', 'user-1', 'feishu-card-2', 'old-device', 'thread-2');
-    onStartStreaming('msg-3', 'user-1', 'feishu-card-3', 'other-device', 'thread-3');
-
-    expect(await onResolveThread('feishu-card-1', 'user-1')).toBeDefined();
-    expect(await onResolveThread('feishu-card-2', 'user-1')).toBeDefined();
-    expect(await onResolveThread('feishu-card-3', 'user-1')).toBeDefined();
-
-    // Switch away from old-device — its card entries should be purged
-    onDeviceSwitch('user-1', 'old-device', 'other-device');
-
-    expect(await onResolveThread('feishu-card-1', 'user-1')).toBeUndefined();
-    expect(await onResolveThread('feishu-card-2', 'user-1')).toBeUndefined();
-    // Entry for other-device should be unaffected
-    expect(await onResolveThread('feishu-card-3', 'user-1')).toBeDefined();
+      expect.objectContaining({ deviceId: 'device-1', revision: expect.any(Number), epoch: expect.any(String) }));
   });
 
   it.each([true, false])('preserves reply routing and correlates New Thread selection (%s)', async (pendingNewThread) => {
@@ -1271,11 +1248,11 @@ describe('RouterServer', () => {
       selected = threadId;
       return true;
     });
-    (server as any).cardThreadMap.set('select-card', { threadId: 'selected-thread', deviceId: 'd1', openId: 'u1', epoch: 0, expiresAt: Date.now() + 1000 });
+    await store.setCardThread('select-card', { threadId: 'selected-thread', deviceId: 'd1', openId: 'u1', epoch: store.getCardThreadEpoch(), expiresAt: Date.now() + 1000 });
     mockBindingManager.getActiveDevice.mockResolvedValue({ deviceId: 'd1' });
-    await mockFeishuHandler.onCardSwitchThread('u1', 'select-card', 'selected-thread', 'Selected Thread');
+    await (server as any).selections.select('u1', 'd1', 'selected-thread', 'Selected Thread');
     const intent = pendingNewThread ? (server as any).selections.beginIntent('u1', 'd1') : undefined;
-    onStartStreaming('m1', 'u1', 'f1', 'd1', undefined, pendingNewThread, undefined, undefined, intent);
+    await onStartStreaming('m1', 'u1', 'f1', 'd1', undefined, pendingNewThread, undefined, undefined, intent);
 
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
     const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
@@ -1313,7 +1290,7 @@ describe('RouterServer', () => {
   it('renders supported worker progress as stable visible content and folded diagnostics', async () => {
     await server.start();
     const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
-    onStartStreaming('m1', 'u1', 'f1', 'd1');
+    await onStartStreaming('m1', 'u1', 'f1', 'd1');
 
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
     const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
@@ -1347,7 +1324,7 @@ describe('RouterServer', () => {
 
   it.each([false, true])('negotiates worker context controls without exposing them to legacy peers: %s', async supported => {
     await server.start();
-    mockFeishuHandler.setOnStartStreaming.mock.calls[0][0]('m1', 'u1', 'f1', 'd1', 'thread-1');
+    await mockFeishuHandler.setOnStartStreaming.mock.calls[0][0]('m1', 'u1', 'f1', 'd1', 'thread-1');
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
     const ws = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
     onConnection(ws, { socket: { remoteAddress: '1' } });
@@ -1377,7 +1354,7 @@ describe('RouterServer', () => {
 
   it('renders terminal worker Markdown received over the existing wire protocol', async () => {
     await server.start();
-    mockFeishuHandler.setOnStartStreaming.mock.calls[0][0]('m1', 'u1', 'f1', 'd1');
+    await mockFeishuHandler.setOnStartStreaming.mock.calls[0][0]('m1', 'u1', 'f1', 'd1');
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
     const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
     onConnection(mockWs, { socket: { remoteAddress: '1' } });
@@ -1407,7 +1384,7 @@ describe('RouterServer', () => {
   it('negotiates bounded worker text and refreshes an active panel without extending stream liveness', async () => {
     await server.start();
     const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
-    onStartStreaming('m1', 'u1', 'f1', 'd1');
+    await onStartStreaming('m1', 'u1', 'f1', 'd1');
 
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
     const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
@@ -1452,7 +1429,7 @@ describe('RouterServer', () => {
 
   it('keeps two interleaved worker sections and coordinator text stable across heartbeat and terminal updates', async () => {
     await server.start();
-    mockFeishuHandler.setOnStartStreaming.mock.calls[0][0]('m1', 'u1', 'f1', 'd1');
+    await mockFeishuHandler.setOnStartStreaming.mock.calls[0][0]('m1', 'u1', 'f1', 'd1');
     const stream = (server as any).streamingMessages.get('m1');
     const send = (taskId: string, phase: string, fields: any = {}) => (server as any).handleDelegationProgress(
       'm1', 'u1', { taskId, backend: 'claude', phase, ...fields }, true);
@@ -1492,7 +1469,7 @@ describe('RouterServer', () => {
 
   it('isolates worker execution notes through live updates, heartbeats and terminal replacement', async () => {
     await server.start();
-    mockFeishuHandler.setOnStartStreaming.mock.calls[0][0]('m1', 'u1', 'f1', 'd1');
+    await mockFeishuHandler.setOnStartStreaming.mock.calls[0][0]('m1', 'u1', 'f1', 'd1');
     const stream = (server as any).streamingMessages.get('m1');
     const metadata = (backend: string, model: string, source = 'reported') => ({ backend, model, modelSource: source, reasoningEffort: 'high', effortSource: 'reported' });
     const send = (taskId: string, backend: string, phase: string, executionMetadata?: any) => (server as any).handleDelegationProgress(
@@ -1521,7 +1498,7 @@ describe('RouterServer', () => {
 
   it('coalesces tool outcomes and keeps tool issues visible after their log entries are evicted', async () => {
     await server.start();
-    mockFeishuHandler.setOnStartStreaming.mock.calls[0][0]('m1', 'u1', 'f1', 'd1');
+    await mockFeishuHandler.setOnStartStreaming.mock.calls[0][0]('m1', 'u1', 'f1', 'd1');
     const send = (phase: string, fields: any = {}) => (server as any).handleDelegationProgress(
       'm1', 'u1', { taskId: 'worker', backend: 'agy', phase, ...fields }, true);
     await send('started');
@@ -1544,7 +1521,7 @@ describe('RouterServer', () => {
   it('ignores delegated worker progress from a client that did not advertise support', async () => {
     await server.start();
     const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
-    onStartStreaming('m1', 'u1', 'f1', 'd1');
+    await onStartStreaming('m1', 'u1', 'f1', 'd1');
 
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
     const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
@@ -1565,7 +1542,7 @@ describe('RouterServer', () => {
   it('should handle text chunk streaming with throttled updates', async () => {
     await server.start();
     const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
-    onStartStreaming('m1', 'u1', 'f1', 'd1');
+    await onStartStreaming('m1', 'u1', 'f1', 'd1');
 
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
     const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
@@ -1598,7 +1575,7 @@ describe('RouterServer', () => {
   it.each([false, true])('coalesces text while a patch is pending (queued: %s)', async (queued) => {
     await server.start();
     const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
-    onStartStreaming('m1', 'u1', 'f1', 'd1');
+    await onStartStreaming('m1', 'u1', 'f1', 'd1');
 
     let resolveFirstUpdate: (() => void) | undefined;
     mockFeishuHandler.updateStreamingMessage
@@ -1646,7 +1623,7 @@ describe('RouterServer', () => {
   it('should handle finalize streaming message with error', async () => {
     await server.start();
     const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
-    onStartStreaming('m1', 'u1', 'f1', 'd1');
+    await onStartStreaming('m1', 'u1', 'f1', 'd1');
 
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
     const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
@@ -1682,7 +1659,7 @@ describe('RouterServer', () => {
   it('should handle finalize streaming message without feishuMessageId', async () => {
     await server.start();
     const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
-    onStartStreaming('m1', 'u1', null, 'd1'); // No feishuMessageId
+    await onStartStreaming('m1', 'u1', null, 'd1'); // No feishuMessageId
 
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
     const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
@@ -1873,7 +1850,7 @@ describe('RouterServer', () => {
     
     // First register streaming session via callback
     const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
-    onStartStreaming('m1', 'u1', 'f1', 'd1');
+    await onStartStreaming('m1', 'u1', 'f1', 'd1');
 
     const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
     await onMessage(Buffer.from(JSON.stringify({ type: MessageType.BINDING_REQUEST, data: { deviceId: 'd1' } })));
@@ -1902,7 +1879,7 @@ describe('RouterServer', () => {
     onConnection(mockWs, { socket: { remoteAddress: '1' } });
     
     const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
-    onStartStreaming('m1', 'u1', 'f1', 'd1');
+    await onStartStreaming('m1', 'u1', 'f1', 'd1');
 
     const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
     await onMessage(Buffer.from(JSON.stringify({ type: MessageType.BINDING_REQUEST, data: { deviceId: 'd1' } })));
@@ -1944,7 +1921,7 @@ describe('RouterServer', () => {
     onConnection(mockWs, { socket: { remoteAddress: '1' } });
     
     const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
-    onStartStreaming('m1', 'u1', 'f1', 'd1');
+    await onStartStreaming('m1', 'u1', 'f1', 'd1');
 
     const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
     await onMessage(Buffer.from(JSON.stringify({ type: MessageType.BINDING_REQUEST, data: { deviceId: 'd1' } })));
@@ -1967,7 +1944,7 @@ describe('RouterServer', () => {
     onConnection(mockWs, { socket: { remoteAddress: '1' } });
     
     const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
-    onStartStreaming('m1', 'u1', 'f1', 'd1');
+    await onStartStreaming('m1', 'u1', 'f1', 'd1');
 
     const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
     await onMessage(Buffer.from(JSON.stringify({ type: MessageType.BINDING_REQUEST, data: { deviceId: 'd1' } })));
@@ -1998,7 +1975,7 @@ describe('RouterServer', () => {
     onConnection(mockWs, { socket: { remoteAddress: '1' } });
     
     const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
-    onStartStreaming('m1', 'u1', 'f1', 'd1');
+    await onStartStreaming('m1', 'u1', 'f1', 'd1');
 
     const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
     await onMessage(Buffer.from(JSON.stringify({ type: MessageType.BINDING_REQUEST, data: { deviceId: 'd1' } })));
@@ -2021,7 +1998,7 @@ describe('RouterServer', () => {
     onConnection(mockWs, { socket: { remoteAddress: '1' } });
 
     const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
-    onStartStreaming('m1', 'u1', 'f1', 'd1');
+    await onStartStreaming('m1', 'u1', 'f1', 'd1');
 
     const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
     await onMessage(Buffer.from(JSON.stringify({ type: MessageType.BINDING_REQUEST, data: { deviceId: 'd1' } })));
@@ -2045,7 +2022,7 @@ describe('RouterServer', () => {
     onConnection(mockWs, { socket: { remoteAddress: '1' } });
     
     const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
-    onStartStreaming('m1', 'u1', 'f1', 'd1');
+    await onStartStreaming('m1', 'u1', 'f1', 'd1');
 
     const onMessage = mockWs.on.mock.calls.find(call => call[0] === 'message')[1];
     await onMessage(Buffer.from(JSON.stringify({ type: MessageType.BINDING_REQUEST, data: { deviceId: 'd1' } })));
@@ -2143,11 +2120,11 @@ describe('RouterServer', () => {
     await server.start();
     
     const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
-    onStartStreaming('m1', 'u1', 'f1', 'd1');
+    await onStartStreaming('m1', 'u1', 'f1', 'd1');
     
     // Also trigger some cardThreadMap entries via streaming sessions
     // (Already done in onStartStreaming if feishuMessageId and threadId are provided)
-    onStartStreaming('m2', 'u2', 'f2', 'd2', 't2');
+    await onStartStreaming('m2', 'u2', 'f2', 'd2', 't2');
 
     // Advance time by 31 minutes (timeout is 30) for streaming session
     vi.advanceTimersByTime(31 * 60 * 1000);
@@ -2165,7 +2142,7 @@ describe('RouterServer', () => {
   it('should trigger update when enough characters are accumulated', async () => {
     await server.start();
     const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
-    onStartStreaming('m1', 'u1', 'f1', 'd1');
+    await onStartStreaming('m1', 'u1', 'f1', 'd1');
 
     const onConnection = mockWss.on.mock.calls.find(call => call[0] === 'connection')[1];
     const mockWs = { on: vi.fn(), send: vi.fn(), close: vi.fn(), readyState: WebSocket.OPEN };
@@ -2244,7 +2221,7 @@ describe('RouterServer', () => {
 
     async function respondWithMenu(send: (message: any) => Promise<void>, menu: any) {
       const onStartStreaming = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
-      onStartStreaming('m-settings', 'owner', 'feishu-card-1', 'device-1', 'thread-1', undefined, undefined, 'default');
+      await onStartStreaming('m-settings', 'owner', 'feishu-card-1', 'device-1', 'thread-1', undefined, undefined, 'default');
       await send({
         type: MessageType.RESPONSE, messageId: 'm-settings', openId: 'owner', threadId: 'thread-1',
         success: true, output: 'Backend list fallback text', settingsMenu: menu,

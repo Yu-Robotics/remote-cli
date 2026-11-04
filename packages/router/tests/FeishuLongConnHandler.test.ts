@@ -117,7 +117,7 @@ describe('FeishuLongConnHandler', () => {
     it('rejects a queued file invalidated by a later device-switch intent', async () => {
       let revision = 0;
       let release!: () => void;
-      const capture = vi.fn((openId: string, deviceId: string) => ({ openId, deviceId, revision, epoch: 0 }));
+      const capture = vi.fn((openId: string, deviceId: string) => ({ openId, deviceId, revision, epoch: 'synthetic-epoch' }));
       handler.setOnCaptureSelection(capture);
       handler.setOnValidateSelection(fence => fence.revision === revision);
       handler.setOnResolveActiveThread(async () => ({ threadId: 'thread-a', threadName: 'A' }));
@@ -2952,6 +2952,15 @@ describe('FeishuLongConnHandler', () => {
       expect(result).toEqual({ toast: expect.objectContaining({ content: 'Creating new thread...' }) });
     });
 
+    it('acknowledges a pending selection without rendering success or updating selected buttons', async () => {
+      handler.onCardSwitchThread = vi.fn().mockResolvedValue({ notice: 'The selection is still being saved.' });
+      const refresh = vi.spyOn(handler as any, 'refreshThreadSwitchButtons');
+      const result = await handler.handleCardAction({ operator: { open_id: 'user-a' },
+        context: { open_message_id: 'card-a' }, action: { value: { action: 'switch_thread', threadId: 'target' } } });
+      expect(result).toEqual({ toast: { type: 'info', content: 'The selection is still being saved.' } });
+      expect(refresh).not.toHaveBeenCalled();
+    });
+
     it('should route queue confirmation actions to the CLI callback', async () => {
       const onQueueAction = vi.fn().mockResolvedValue(undefined);
       handler.onQueueAction = onQueueAction;
@@ -3025,7 +3034,7 @@ describe('FeishuLongConnHandler', () => {
       await handler.sendQueueActionFromCardAction('ou_123', 'confirm', 'q-1', 't1', 'card-1');
 
       expect(mockClient.im.message.create).not.toHaveBeenCalled();
-      expect(onStart).toHaveBeenCalledWith(expect.any(String), 'ou_123', null, 'device-1', 't1', false, 'card-1');
+      expect(onStart).toHaveBeenCalledWith(expect.any(String), 'ou_123', null, 'device-1', 't1', false, 'card-1', undefined, undefined);
       const executionId = onStart.mock.calls[0][0];
       expect(mockConnectionHub.sendToDevice).toHaveBeenCalledWith('device-1', expect.objectContaining({
         content: `/queue confirm q-1 ${executionId}`,
@@ -3034,6 +3043,35 @@ describe('FeishuLongConnHandler', () => {
       const card = JSON.parse(mockClient.im.message.patch.mock.calls.at(-1)[0].data.content);
       expect(card.body.elements[0].content).toContain('Queued task started');
       expect(card.body.elements[0].content).toContain('bottom of the chat');
+    });
+
+    it('fences a queue card created across an ownership change before dispatch', async () => {
+      mockBindingManager.getUserBinding.mockResolvedValue({});
+      mockBindingManager.getActiveDevice.mockResolvedValue({ deviceId: 'device-1' });
+      mockConnectionHub.isDeviceOnline.mockReturnValue(true);
+      mockConnectionHub.supportsQueueStarted.mockReturnValue(false);
+      const fence = { openId: 'ou_123', deviceId: 'device-1', revision: 1, epoch: 'original-generation' };
+      handler.setOnCaptureSelection(() => fence);
+      let current = true;
+      handler.setOnValidateSelection(() => current);
+      let release!: (id: string) => void;
+      let entered!: () => void;
+      const started = new Promise<void>(resolve => { entered = resolve; });
+      vi.spyOn(handler, 'sendStreamingStart').mockImplementationOnce(() => {
+        entered();
+        return new Promise(resolve => { release = resolve; });
+      });
+      const onStart = vi.fn();
+      handler.setOnStartStreaming(onStart);
+      const action = handler.sendQueueActionFromCardAction('ou_123', 'confirm', 'q-1', 't1', 'card-1');
+      const rejected = expect(action).rejects.toThrow('device changed');
+      await started;
+      current = false;
+      release('late-card');
+      await rejected;
+      expect(onStart).toHaveBeenCalledWith(expect.any(String), 'ou_123', 'late-card', 'device-1', 't1', false,
+        'card-1', undefined, fence);
+      expect(mockConnectionHub.sendToDevice).not.toHaveBeenCalled();
     });
 
     it('keeps a fast start from being overwritten by the confirmation receipt', async () => {
@@ -3053,6 +3091,24 @@ describe('FeishuLongConnHandler', () => {
       await Promise.all([confirmation, started]);
       expect(mockClient.im.message.patch.mock.calls[0][0].data.content).toContain('Added to queue');
       expect(mockClient.im.message.patch.mock.calls[1][0].data.content).toContain('Queued task started');
+    });
+
+    it('allows queue confirmation retry after durable card registration fails', async () => {
+      mockBindingManager.getUserBinding.mockResolvedValue({});
+      mockBindingManager.getActiveDevice.mockResolvedValue({ deviceId: 'device-1' });
+      mockConnectionHub.isDeviceOnline.mockReturnValue(true);
+      mockConnectionHub.sendToDevice.mockResolvedValue(true);
+      mockClient.im.message.create.mockResolvedValue({ data: { message_id: 'queued-card' } });
+      mockClient.im.message.patch.mockResolvedValue({});
+      const onStart = vi.fn().mockRejectedValueOnce(new Error('Synthetic persistence failure')).mockResolvedValue(undefined);
+      handler.setOnStartStreaming(onStart);
+      await expect(handler.sendQueueActionFromCardAction('ou_123', 'confirm', 'q-1', 't1', 'card-1'))
+        .rejects.toThrow('Synthetic persistence failure');
+      expect(mockConnectionHub.sendToDevice).not.toHaveBeenCalled();
+      expect(mockClient.im.message.patch).not.toHaveBeenCalled();
+      await expect(handler.sendQueueActionFromCardAction('ou_123', 'confirm', 'q-1', 't1', 'card-1')).resolves.toBe('sent');
+      expect(onStart).toHaveBeenCalledTimes(2);
+      expect(mockConnectionHub.sendToDevice).toHaveBeenCalledTimes(1);
     });
 
     it('preserves confirmation buttons and allows retry after a send failure', async () => {

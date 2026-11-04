@@ -129,7 +129,7 @@ describe('ThreadSelectionManager', () => {
     expect((await selections.resolve('user-a', 'device-a'))?.threadId).toBe('explicit-later');
 
     const pending = selections.beginIntent('user-a', 'device-a');
-    selections.invalidateDevice('user-a', 'device-a');
+    await selections.invalidateDevice('user-a', 'device-a');
     expect(await selections.completeNew(pending, 'created-after-rebind')).toBe('stale');
   });
 
