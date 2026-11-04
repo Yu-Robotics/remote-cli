@@ -19,6 +19,13 @@ describe('CLI test scheduling', () => {
   });
 
   it.each([
+    'tests/delegation/ManagedNativeSessionDeletion.test.ts',
+    'tests/delegation/ManagedHistoryBackends.test.ts',
+  ])('isolates native lock release and reacquisition in %s', file => {
+    expect(config.test?.poolMatchGlobs).toContainEqual([`**/${file}`, 'forks']);
+  });
+
+  it.each([
     [1, 1, 1], [2, 1, 1], [3, 1, 2], [4, 2, 2], [7, 2, 4], [8, 4, 4], [64, 4, 4],
     [0, 1, 1], [-1, 1, 1], [NaN, 1, 1], [Infinity, 1, 1],
   ])('bounds both pools for %s available CPUs', (cpus, gitForks, threads) => {

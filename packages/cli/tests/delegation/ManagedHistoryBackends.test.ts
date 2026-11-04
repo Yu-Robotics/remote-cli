@@ -1,6 +1,7 @@
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
+import { isMainThread } from 'worker_threads';
 import { randomUUID } from 'crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DelegationManager } from '../../src/delegation/DelegationManager';
@@ -15,6 +16,9 @@ const nativeLinux = process.platform === 'linux';
 const linuxIt = nativeLinux ? it : it.skip;
 
 describe('durable managed Kimi/Pi/Claude deletion integration', () => {
+  it('runs native ownership lifecycle in an isolated process', () => {
+    expect(isMainThread).toBe(true);
+  });
   let home: string;
   let manager: DelegationManager;
   let kimiDelete: ReturnType<typeof vi.fn>;
