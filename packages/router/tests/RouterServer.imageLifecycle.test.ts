@@ -1,3 +1,4 @@
+import { cardThreadStorage } from './helpers/cardThreadStorage';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import Koa from 'koa';
 import Router from '@koa/router';
@@ -59,9 +60,9 @@ describe('RouterServer - generated image lifecycle', () => {
 
   // Streaming sessions are established through the setOnStartStreaming callback
   // the server registers on the Feishu handler (mirrors command dispatch).
-  const startSession = (messageId: string, threadName = 'default') => {
+  const startSession = async (messageId: string, threadName = 'default') => {
     const callback = mockFeishuHandler.setOnStartStreaming.mock.calls[0][0];
-    callback(messageId, 'user-1', 'card-1', 'device-1', undefined, false, undefined, threadName);
+    await callback(messageId, 'user-1', 'card-1', 'device-1', undefined, false, undefined, threadName);
   };
 
   const sendQueueStarted = (onMessage: (data: Buffer) => Promise<void>, messageId: string) =>
@@ -123,7 +124,7 @@ describe('RouterServer - generated image lifecycle', () => {
         return 'test-value';
       }),
     };
-    store = { initialize: vi.fn().mockResolvedValue(undefined), flush: vi.fn().mockResolvedValue(undefined) };
+    store = { ...cardThreadStorage(), initialize: vi.fn().mockResolvedValue(undefined), flush: vi.fn().mockResolvedValue(undefined) };
 
     const mockHttpServer = {
       listen: vi.fn().mockReturnThis(),
@@ -178,6 +179,8 @@ describe('RouterServer - generated image lifecycle', () => {
     };
     (ConnectionHub as unknown as any).mockImplementation(() => mockConnectionHub);
     (BindingManager as unknown as any).mockImplementation(() => ({
+      getCardThreadEpoch: store.getCardThreadEpoch,
+      invalidateDeviceCards: store.invalidateDeviceCards,
       getDeviceBinding: vi.fn(async (deviceId: string) => deviceId === 'device-1' ? { openId: 'user-1' } : null),
       generateBindingCode: vi.fn().mockResolvedValue({ code: '123456', expiresAt: Date.now() + 60000 }),
     }));
@@ -196,7 +199,7 @@ describe('RouterServer - generated image lifecycle', () => {
 
   it('delivers an accepted image that arrives before the terminal response', async () => {
     const onMessage = await connectAndBind('device-1');
-    startSession('m1');
+    await startSession('m1');
     await sendText(onMessage, 'm1', 'working on it');
     await sendImage(onMessage, 'm1', pngBytes(1));
     await sendResponse(onMessage, 'm1');
@@ -209,7 +212,7 @@ describe('RouterServer - generated image lifecycle', () => {
   it('drains an in-flight upload across the response instead of discarding it', async () => {
     mockFeishuHandler.setUploadDelay(120);
     const onMessage = await connectAndBind('device-1');
-    startSession('m1');
+    await startSession('m1');
     // Fire both without awaiting either: the response must drain the accepted
     // upload before the terminal patch instead of discarding it.
     const imagePromise = sendImage(onMessage, 'm1', pngBytes(2));
@@ -226,7 +229,7 @@ describe('RouterServer - generated image lifecycle', () => {
     vi.useFakeTimers();
     try {
       const onMessage = await connectAndBind('device-1');
-      startSession('m1');
+      await startSession('m1');
       await sendText(onMessage, 'm1', 'answer text');
       await sendResponse(onMessage, 'm1');
       await vi.advanceTimersByTimeAsync(31_000);
@@ -248,7 +251,7 @@ describe('RouterServer - generated image lifecycle', () => {
         return 'image-key-1';
       });
       const onMessage = await connectAndBind('device-1');
-      startSession('m1');
+      await startSession('m1');
       // Never await the image/response before advancing fake timers: the
       // upload timeout only settles via the timer queue.
       const imagePromise = sendImage(onMessage, 'm1', pngBytes(4));
@@ -266,7 +269,7 @@ describe('RouterServer - generated image lifecycle', () => {
 
   it('coalesces duplicate bytes within one reply but delivers distinct images', async () => {
     const onMessage = await connectAndBind('device-1');
-    startSession('m1');
+    await startSession('m1');
     await sendImage(onMessage, 'm1', pngBytes(5));
     await sendImage(onMessage, 'm1', pngBytes(5)); // duplicate
     await sendImage(onMessage, 'm1', pngBytes(6)); // distinct
@@ -278,7 +281,7 @@ describe('RouterServer - generated image lifecycle', () => {
 
   it('enforces the per-reply delivered-image cap and reports the omission', async () => {
     const onMessage = await connectAndBind('device-1');
-    startSession('m1');
+    await startSession('m1');
     for (let index = 0; index < 10; index++) await sendImage(onMessage, 'm1', pngBytes(10 + index));
     await sendResponse(onMessage, 'm1');
     await new Promise(resolve => setTimeout(resolve, 30));
@@ -289,7 +292,7 @@ describe('RouterServer - generated image lifecycle', () => {
 
   it('rejects an oversized payload before enqueueing and hints without private paths', async () => {
     const onMessage = await connectAndBind('device-1');
-    startSession('m1');
+    await startSession('m1');
     const oversized = Buffer.alloc(3 * 1024 * 1024, 7).toString('base64');
     await sendImage(onMessage, 'm1', oversized);
     await sendResponse(onMessage, 'm1');
@@ -302,7 +305,7 @@ describe('RouterServer - generated image lifecycle', () => {
   it('keeps image ordering FIFO across uploads', async () => {
     mockFeishuHandler.setUploadDelay(15);
     const onMessage = await connectAndBind('device-1');
-    startSession('m1');
+    await startSession('m1');
     const first = sendImage(onMessage, 'm1', pngBytes(21));
     const second = sendImage(onMessage, 'm1', pngBytes(22));
     await Promise.all([first, second]);
@@ -315,8 +318,8 @@ describe('RouterServer - generated image lifecycle', () => {
   it('does not serialize independent streams or stall text updates', async () => {
     mockFeishuHandler.setUploadDelay(100);
     const onMessage = await connectAndBind('device-1');
-    startSession('m1', 'thread-a');
-    startSession('m2', 'thread-b');
+    await startSession('m1', 'thread-a');
+    await startSession('m2', 'thread-b');
     const imagePromise = sendImage(onMessage, 'm1', pngBytes(31));
     // m2 text is handled while m1's upload is still draining.
     await sendText(onMessage, 'm2', 'independent text');
@@ -332,12 +335,12 @@ describe('RouterServer - generated image lifecycle', () => {
       return 'image-key-1';
     });
     const onMessage = await connectAndBind('device-1');
-    startSession('m1');
+    await startSession('m1');
     // Replace the stream state (same messageId) while the terminal response
     // is still draining the accepted upload.
     const imagePromise = sendImage(onMessage, 'm1', pngBytes(41));
     const responsePromise = sendResponse(onMessage, 'm1');
-    startSession('m1');
+    await startSession('m1');
     await imagePromise;
     await responsePromise;
     expect(imageElements().length).toBe(0);
@@ -434,7 +437,7 @@ describe('RouterServer - generated image lifecycle', () => {
     const onMessage = await connectAndBind('device-1');
     const resolve: Array<(key: string) => void> = [];
     mockFeishuHandler.uploadImage.mockImplementation(() => new Promise(done => resolve.push(done)));
-    startSession('first'); startSession('second'); startSession('third');
+    await startSession('first'); await startSession('second'); await startSession('third');
     const first = sendImage(onMessage, 'first', pngBytes(74));
     const second = sendImage(onMessage, 'second', pngBytes(75));
     await vi.advanceTimersByTimeAsync(15_000);
@@ -455,7 +458,7 @@ describe('RouterServer - generated image lifecycle', () => {
 
   it.each(['disconnect', 'rebind', 'owner'])('fences an actual late upload after %s, including a surviving stream object', async kind => {
     const onMessage = await connectAndBind('device-1');
-    startSession('owned');
+    await startSession('owned');
     const stream = (server as any).streamingMessages.get('owned');
     let upload!: (key: string) => void;
     mockFeishuHandler.uploadImage.mockReturnValueOnce(new Promise(done => { upload = done; }));
@@ -478,7 +481,7 @@ describe('RouterServer - generated image lifecycle', () => {
 
   it('preserves reply admission and deduplication budgets when rebind keeps the same card', async () => {
     let onMessage = await connectAndBind('device-1');
-    startSession('budget');
+    await startSession('budget');
     const stream = (server as any).streamingMessages.get('budget');
     for (let index = 0; index < 4; index++) await sendImage(onMessage, 'budget', pngBytes(80 + index));
     onMessage = await connectAndBind('device-1');

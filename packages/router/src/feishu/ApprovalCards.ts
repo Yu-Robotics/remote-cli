@@ -17,7 +17,8 @@ interface ApprovalCardTransport {
   sendToDevice(deviceId: string, message: object): Promise<boolean>;
   create(openId: string, elements: any[], header?: Record<string, unknown>): Promise<string | null>;
   update(cardId: string, elements: any[], header?: Record<string, unknown>): Promise<void>;
-  registerReplyRoute(cardId: string, threadId: string, deviceId: string, openId: string): void;
+  captureReplyRoute?(openId: string, deviceId: string): () => boolean;
+  registerReplyRoute(cardId: string, threadId: string, deviceId: string, openId: string, current: () => boolean): void | Promise<void>;
 }
 
 /** A button answers one original request, independent of the user's active thread/device. */
@@ -28,6 +29,7 @@ export class ApprovalCards {
   constructor(private readonly transport: ApprovalCardTransport) {}
 
   async receive(request: ApprovalRequestMessage, deviceId: string, current: () => boolean): Promise<void> {
+    const routeCurrent = this.transport.captureReplyRoute?.(request?.openId, deviceId) ?? current;
     if (!request || typeof request.messageId !== 'string' || typeof request.openId !== 'string'
       || !(await this.transport.ownsDevice(request.openId, deviceId)) || !current()) return;
     if (!this.validRequest(request)) {
@@ -47,7 +49,8 @@ export class ApprovalCards {
       try {
         entry.cardId = await this.transport.create(request.openId, this.elements(entry), this.header(entry)) ?? undefined;
         if (!current()) return;
-        if (entry.cardId) this.transport.registerReplyRoute(entry.cardId, request.threadId, deviceId, request.openId);
+        if (entry.cardId) await this.transport.registerReplyRoute(entry.cardId, request.threadId, deviceId, request.openId,
+          () => current() && routeCurrent());
       } catch { /* Fall back to the existing text approval flow. */ }
       if (!entry.cardId) {
         if (this.pending.get(key) === entry) this.pending.delete(key);

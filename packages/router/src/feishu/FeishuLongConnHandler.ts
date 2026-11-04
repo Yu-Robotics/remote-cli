@@ -110,7 +110,7 @@ export class FeishuLongConnHandler {
    * pendingNewThread=true signals that this command will create a new thread,
    * so the server can persist its selection when the correlated response arrives.
    */
-  private onStartStreaming?: (messageId: string, openId: string, feishuMessageId: string | null, deviceId: string, threadId?: string, pendingNewThread?: boolean, queueCardId?: string, threadName?: string, selectionIntent?: SelectionFence) => void;
+  private onStartStreaming?: (messageId: string, openId: string, feishuMessageId: string | null, deviceId: string, threadId?: string, pendingNewThread?: boolean, queueCardId?: string, threadName?: string, selectionIntent?: SelectionFence) => void | Promise<void>;
   private onCaptureSelection?: (openId: string, deviceId: string) => SelectionFence;
   private onValidateSelection?: (fence: SelectionFence) => boolean;
 
@@ -125,7 +125,7 @@ export class FeishuLongConnHandler {
   /**
    * Set streaming start callback
    */
-  setOnStartStreaming(callback: (messageId: string, openId: string, feishuMessageId: string | null, deviceId: string, threadId?: string, pendingNewThread?: boolean, queueCardId?: string, threadName?: string, selectionIntent?: SelectionFence) => void): void {
+  setOnStartStreaming(callback: (messageId: string, openId: string, feishuMessageId: string | null, deviceId: string, threadId?: string, pendingNewThread?: boolean, queueCardId?: string, threadName?: string, selectionIntent?: SelectionFence) => void | Promise<void>): void {
     this.onStartStreaming = callback;
   }
 
@@ -145,7 +145,7 @@ export class FeishuLongConnHandler {
    * Callback invoked when a user clicks a thread switch button on a Feishu card.
    * RouterServer sets this directly after construction.
    */
-  onCardSwitchThread?: (openId: string, cardId: string, threadId: string, threadName: string) => Promise<void>;
+  onCardSwitchThread?: (openId: string, cardId: string, threadId: string, threadName: string) => Promise<string | void | { notice: string }>;
 
   /**
    * Callback invoked when a user clicks the "+ New" thread button on a Feishu card.
@@ -165,7 +165,7 @@ export class FeishuLongConnHandler {
    * RouterServer uses this to clear stale thread state tied to the old device.
    */
   onDeviceSwitchIntent?: (openId: string, newDeviceId: string) => void;
-  onDeviceSwitch?: (openId: string, oldDeviceId: string | undefined, newDeviceId: string) => void;
+  onDeviceSwitch?: (openId: string, oldDeviceId: string | undefined, newDeviceId: string) => void | Promise<void>;
   onApproveDeviceKey?: (openId: string, deviceId: string, publicKey: string) => Promise<void>;
   onRevokeDevice?: (deviceId: string) => Promise<void>;
   onFileMessage?: (input: FileInput) => Promise<void>;
@@ -507,9 +507,12 @@ export class FeishuLongConnHandler {
       }
       console.log(`[FeishuHandler] Created card ${feishuMessageId} for slash command ${commandMessageId}`);
       if (this.onStartStreaming) {
-        this.onStartStreaming(commandMessageId, openId, feishuMessageId, activeDevice.deviceId, threadId, false, undefined, threadName, selectionFence);
+        await this.onStartStreaming(commandMessageId, openId, feishuMessageId, activeDevice.deviceId, threadId, false, undefined, threadName, selectionFence);
       }
 
+      if (selectionFence && this.onValidateSelection && !this.onValidateSelection(selectionFence)) {
+        throw new Error('This command was superseded or the device changed before it could be sent.');
+      }
       // Send slash command to device - the client will execute it locally
       const success = await this.connectionHub.sendToDevice(activeDevice.deviceId, {
         type: MessageType.COMMAND,
@@ -739,7 +742,7 @@ export class FeishuLongConnHandler {
       }
 
       // Notify RouterServer to clear stale thread state for the old device
-      this.onDeviceSwitch?.(openId, oldDeviceId, deviceId);
+      await this.onDeviceSwitch?.(openId, oldDeviceId, deviceId);
 
       await this.replyToMessage(
         messageId,
@@ -942,9 +945,12 @@ Examples:
       }
       console.log(`[FeishuHandler] Created card ${feishuMessageId} for command ${commandMessageId}`);
       if (this.onStartStreaming) {
-        this.onStartStreaming(commandMessageId, openId, feishuMessageId, activeDevice.deviceId, threadId, pendingNewThread, undefined, threadName, selectionFence);
+        await this.onStartStreaming(commandMessageId, openId, feishuMessageId, activeDevice.deviceId, threadId, pendingNewThread, undefined, threadName, selectionFence);
       }
 
+      if (selectionFence && this.onValidateSelection && !this.onValidateSelection(selectionFence)) {
+        throw new Error('This command was superseded or the device changed before it could be sent.');
+      }
       // Send command to device
       const success = await this.connectionHub.sendToDevice(activeDevice.deviceId, {
         type: MessageType.COMMAND,
@@ -1722,11 +1728,11 @@ Examples:
    * @param openId User's open_id for creating continuation messages
    * @param replyThreadId Thread that produced the reply, independent of the selected thread
    */
-  async finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string, threads?: ThreadSummary[], replyThreadId?: string, queueConfirmation?: QueueConfirmationInfo, executionMetadata?: ExecutionMetadata, success = true, options?: { bare?: boolean; onDelivered?: (cardIds: string[]) => void }): Promise<boolean> {
+  async finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string, threads?: ThreadSummary[], replyThreadId?: string, queueConfirmation?: QueueConfirmationInfo, executionMetadata?: ExecutionMetadata, success = true, options?: { bare?: boolean; onDelivered?: (cardIds: string[]) => void | Promise<void> }): Promise<boolean> {
     return this.withMessageLock(messageId, () => this._finalizeStreamingMessage(messageId, elements, sessionAbbr, openId, cwd, threadName, threads, replyThreadId, queueConfirmation, executionMetadata, success, options));
   }
 
-  private async _finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string, threads?: ThreadSummary[], replyThreadId?: string, queueConfirmation?: QueueConfirmationInfo, executionMetadata?: ExecutionMetadata, success = true, options?: { bare?: boolean; onDelivered?: (cardIds: string[]) => void }): Promise<boolean> {
+  private async _finalizeStreamingMessage(messageId: string, elements: any[], sessionAbbr?: string, openId?: string, cwd?: string, threadName?: string, threads?: ThreadSummary[], replyThreadId?: string, queueConfirmation?: QueueConfirmationInfo, executionMetadata?: ExecutionMetadata, success = true, options?: { bare?: boolean; onDelivered?: (cardIds: string[]) => void | Promise<void> }): Promise<boolean> {
     try {
       const shell = this.activityShells.get(messageId);
       if (shell) shell.finishedAt = Date.now();
@@ -1785,7 +1791,7 @@ Examples:
       // card IDs before any callback can arrive.
       if (options?.onDelivered) {
         const delivered = this.messageChains.get(messageId);
-        if (delivered && delivered.length > 0) options.onDelivered([...delivered]);
+        if (delivered && delivered.length > 0) await options.onDelivered([...delivered]);
       }
 
       // Store thread switch card state for later refresh (before cleanup)
@@ -2091,11 +2097,14 @@ Examples:
       const openMessageId = data?.context?.open_message_id;
       if (typeof openMessageId !== 'string') return { toast: { type: 'error', content: 'This thread card has expired. Run /thread list for a fresh card.' } };
       try {
-        await this.onCardSwitchThread?.(openId, openMessageId, parsed.threadId, parsed.threadName ?? parsed.threadId);
+        const selectedName = await this.onCardSwitchThread?.(openId, openMessageId, parsed.threadId, parsed.threadName ?? parsed.threadId);
+        if (selectedName && typeof selectedName === 'object') {
+          return { toast: { type: 'info', content: selectedName.notice } };
+        }
         this.refreshThreadSwitchButtons(openMessageId, parsed.threadId).catch((err) =>
           console.error('[FeishuLongConnHandler] Failed to refresh thread switch buttons:', err)
         );
-        return { toast: { type: 'success', content: `Switched to: ${parsed.threadName ?? parsed.threadId}` } };
+        return { toast: { type: 'success', content: `Switched to: ${selectedName ?? parsed.threadName ?? parsed.threadId}` } };
       } catch (error) {
         console.error('[FeishuLongConnHandler] Card action switch_thread failed:', error);
         return { toast: { type: 'error', content: error instanceof Error ? error.message : 'Thread selection failed.' } };
@@ -2162,15 +2171,26 @@ Examples:
       throw new Error('No active online device found');
     }
 
+    const selectionFence = this.onCaptureSelection?.(openId, activeDevice.deviceId);
     let executionMessageId: string | undefined;
     if (action === 'confirm') {
       executionMessageId = uuidv4();
       const feishuMessageId = this.connectionHub!.supportsQueueStarted(activeDevice.deviceId)
         ? null
         : await this.sendStreamingStart(openId, '🤔 Queued message confirmed. Waiting for the current task to finish...');
-      this.onStartStreaming?.(executionMessageId, openId, feishuMessageId, activeDevice.deviceId, threadId, false, cardMessageId);
+      try {
+        await this.onStartStreaming?.(executionMessageId, openId, feishuMessageId, activeDevice.deviceId, threadId, false, cardMessageId, undefined, selectionFence);
+      } catch (error) {
+        // No command was sent. A failed durable route must not consume the confirmation.
+        this.queueActionStates.delete(queueId);
+        throw error;
+      }
     }
 
+    if (selectionFence && this.onValidateSelection && !this.onValidateSelection(selectionFence)) {
+      this.queueActionStates.delete(queueId);
+      throw new Error('This queue action was superseded or the device changed before it could be sent.');
+    }
     const controlMessageId = uuidv4();
     const suffix = executionMessageId ? ` ${executionMessageId}` : '';
     // An idle thread can start immediately. Its receipt must not be patched

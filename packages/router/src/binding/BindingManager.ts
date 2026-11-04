@@ -137,16 +137,25 @@ export class BindingManager {
     return binding.devices.find(device => device.deviceId === binding.activeDeviceId) ?? null;
   }
 
+  getCardThreadEpoch(openId: string, deviceId: string): string {
+    return this.store.getCardThreadEpoch(openId, deviceId);
+  }
+
+  async invalidateDeviceCards(deviceId: string): Promise<void> {
+    // May run inside an ownership mutation's beforeUnbind callback.
+    await this.store.invalidateDeviceCards(deviceId);
+  }
+
   getThreadSelection(openId: string, deviceId: string) {
     return this.store.getDeviceThreadSelection(openId, deviceId);
   }
 
   async selectThread(openId: string, deviceId: string, threadId: string,
-    guard: () => boolean = () => true): Promise<boolean> {
+    guard: () => boolean = () => true, onCommitAdmitted?: () => void): Promise<boolean> {
     return this.mutate(async () => {
       if (!guard()) return false;
       this.assertOwnership(deviceId, openId);
-      return this.store.setDeviceThreadSelection(openId, deviceId, threadId, { requireActive: true, guard });
+      return this.store.setDeviceThreadSelection(openId, deviceId, threadId, { requireActive: true, guard, onCommitAdmitted });
     });
   }
 

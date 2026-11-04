@@ -1,3 +1,4 @@
+import { cardThreadStorage } from '../helpers/cardThreadStorage';
 /**
  * Exercise RouterServer's actual WebSocket handlers without opening sockets.
  * Wire-contract failures require reviewing CLAUDE.md's protocol versioning rules.
@@ -35,7 +36,7 @@ describe('Router wire compatibility', () => {
       getConfigPath: () => '/virtual-router-compat/config.json',
       get: (section: string, key: string) => section === 'files' ? { enabled: false } : key === 'heartbeatInterval' ? 30000 : 'test',
     };
-    server = new RouterServer(config as unknown as ConfigManager, { flush: vi.fn().mockResolvedValue(undefined) } as unknown as JsonStore);
+    server = new RouterServer(config as unknown as ConfigManager, { ...cardThreadStorage(), flush: vi.fn().mockResolvedValue(undefined) } as unknown as JsonStore);
     vi.spyOn((server as any).bindingManager, 'getDeviceBinding').mockImplementation(async (deviceId: string) => {
       const openId = deviceId === 'device-1' ? 'owner'
         : deviceId === 'legacy-device' ? 'legacy-user'
@@ -88,7 +89,7 @@ describe('Router wire compatibility', () => {
       type: 'binding_confirm', data: { success: true, minCliVersion: 1, capabilities: { streamingContext: true } },
     });
     const feishu = vi.mocked(FeishuLongConnHandler).mock.instances[0];
-    vi.mocked(feishu.setOnStartStreaming).mock.calls[0][0]('early', 'owner', 'card', 'device-1');
+    await vi.mocked(feishu.setOnStartStreaming).mock.calls[0][0]('early', 'owner', 'card', 'device-1');
     await receive({ type: 'stream_context', messageId: 'early', openId: 'owner',
       threadId: 'thread-id', threadName: 'thread-9', cwd: '/project' });
     expect(feishu.updateStreamingMessage).toHaveBeenCalledWith('card', expect.any(Array), 'owner', 'thread-9', '/project');
@@ -112,7 +113,7 @@ describe('Router wire compatibility', () => {
     expect(notice).toHaveBeenCalledWith(update, 'device-1', expect.any(Function));
     expect(reminder).toHaveBeenCalledTimes(1);
     expect((server as any).streamingMessages.size).toBe(0);
-    expect((server as any).cardThreadMap.size).toBe(0);
+    expect((server as any).store.cards.size).toBe(0);
   });
   it('does not send maintenance messages or capabilities to a legacy client', async () => {
     const maintenance = (server as any).maintenanceCards;
@@ -153,7 +154,7 @@ describe('Router wire compatibility', () => {
     const message = { type: 'subscription_reminder', reminder: { kind: 'banked_reset_increase' } };
     await receive(message); expect(reminder).toHaveBeenCalledTimes(enabled ? 1 : 0);
     expect((server as any).streamingMessages.size).toBe(0);
-    expect((server as any).cardThreadMap.size).toBe(0);
+    expect((server as any).store.cards.size).toBe(0);
     expect(PROTOCOL_VERSION).toBe(1);
   });
 

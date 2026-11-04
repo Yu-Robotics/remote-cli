@@ -13,6 +13,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.218] - 2026-11-05
+
+### Fixed
+- Preserve bounded card-to-thread routing associations across Router restarts within their original seven-day lifetime.
+- Validate thread-switch destinations against the connected device's current catalog and retain ownership checks and durable invalidation.
+- Keep asynchronous thread validation cancellable through timeout and disconnect, and avoid invalidating fresh cards after delayed device-switch notifications.
+- Remove all active continuation-card routes on interruption, retry failed removals, and preserve queue confirmations when route persistence fails before dispatch.
+- Distinguish cancellation before selection-save admission from pending or uncertain persistence, and report late durable outcomes without replaying a switch.
+
+### Tests
+- Cover persisted Router recreation, card expiry, ownership changes, invalidation, and ordinary thread routing with isolated fixtures.
+
 ## [1.6.217] - 2026-11-05
 
 ### Added
