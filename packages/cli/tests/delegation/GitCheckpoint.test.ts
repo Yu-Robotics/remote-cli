@@ -297,7 +297,7 @@ describe('private Git checkpoints', () => {
     expect(await fs.readFile(outside, 'utf8')).toBe('synthetic external bytes\n');
   });
 
-  it.skipIf(!supportsFileSymlinks)('checks alias-parent chains against native canonical containment', async context => {
+  it.skipIf(!supportsFileSymlinks).each([false, true])('checks native alias-parent semantics (automatic=%s)', async (automatic, context) => {
     await runGit(fixture.root, ['config', 'core.symlinks', 'true']);
     const outside = path.join(fixture.directory, 'outside');
     await fs.mkdir(path.join(outside, 'child'), { recursive: true });
@@ -316,11 +316,15 @@ describe('private Git checkpoints', () => {
     const canonical = await fs.realpath(path.join(fixture.root, 'nested'));
     const relative = path.relative(fixture.root, canonical);
     if (path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`)) {
-      await expect(captureCheckpoint(fixture.root)).rejects.toThrow('chain escapes');
+      if (automatic) {
+        const snapshot = await captureCheckpoint(fixture.root, { discoverExternal: true });
+        expect(snapshot.sharedLinks).toEqual([{ path: 'nested', linkText, target: canonical, kind: 'file' }]);
+        expect(await runGit(fixture.root, ['show', `${snapshot.tree}:nested`])).toEqual(Buffer.from(linkText));
+      } else await expect(captureCheckpoint(fixture.root)).rejects.toThrow('chain escapes');
     } else {
       // Some native filesystems normalize parent components before following
       // an alias; an actually contained target remains permitted there.
-      const snapshot = await captureCheckpoint(fixture.root);
+      const snapshot = await captureCheckpoint(fixture.root, { discoverExternal: automatic });
       expect(await runGit(fixture.root, ['show', `${snapshot.tree}:nested`])).toEqual(Buffer.from(gitLinkTarget(linkText)));
       expect(await gitText(fixture.root, ['ls-tree', snapshot.tree, '--', 'nested'])).toMatch(/^120000 blob /);
     }
@@ -464,7 +468,8 @@ describe('private Git checkpoints', () => {
     expect(await fs.readFile(path.join(fixture.root, '.git', 'index'))).toEqual(index);
   });
 
-  it.skipIf(!supportsFileSymlinks).each(['untracked', 'add'])('never copies a shared payload when its link becomes a directory before Git %s', async phase => {
+  it.skipIf(!supportsFileSymlinks).each([{ phase: 'untracked', automatic: false }, { phase: 'add', automatic: false },
+    { phase: 'untracked', automatic: true }, { phase: 'add', automatic: true }])('never copies a shared payload during a link-to-directory race %j', async ({ phase, automatic }) => {
     await runGit(fixture.root, ['config', 'core.symlinks', 'true']);
     const target = path.join(fixture.directory, 'shared.txt');
     await fs.writeFile(target, 'synthetic shared target\n');
@@ -494,7 +499,7 @@ describe('private Git checkpoints', () => {
       if (command === 'git' && untracked) child.stdout.on('data', (chunk: Buffer) => scanOutput.push(chunk));
       return child;
     }) as typeof childProcess.spawn);
-    await expect(captureCheckpoint(fixture.root, {
+    await expect(captureCheckpoint(fixture.root, automatic ? { discoverExternal: true } : {
       sharedSymlinks: [{ root: fixture.root, path: 'shared-link', target }],
     })).rejects.toThrow(/symbolic[- ]link|symbolic link/i);
     expect(swapped).toBe(true);

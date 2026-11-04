@@ -14,7 +14,7 @@ import { gitFixture, nestedGitFixture } from './gitFixture';
 import { supportsFileSymlinks } from './symlinkFixture';
 
 // All targets, keys, stores and repositories in this suite are synthetic and owned.
-describe('explicit project shared links', { timeout: 60_000 }, () => {
+describe('repository external shared links', { timeout: 60_000 }, () => {
   let fixture: Awaited<ReturnType<typeof gitFixture>>;
   let target: string;
   const grant = () => ({ root: fixture.root, path: 'shared-link', target });
@@ -34,9 +34,9 @@ describe('explicit project shared links', { timeout: 60_000 }, () => {
     await fs.symlink(text, path.join(fixture.root, name), 'file');
     return { name, text };
   }
-  async function setup(disposable = true) {
-    await link();
-    let configured: unknown = [grant()];
+  async function setup(disposable = true, absolute = false) {
+    await link(absolute);
+    let configured: unknown = [];
     const manager = new DelegatedWorkspaceManager(storage(), disposable, () => configured);
     const source = (await manager.discover(fixture.root))!;
     const lanes = new DelegatedWorkerSessionStore(path.join(fixture.directory, 'lanes'));
@@ -226,12 +226,12 @@ describe('explicit project shared links', { timeout: 60_000 }, () => {
     await expect(config.getSharedSymlinks()).resolves.toEqual([]);
     expect(JSON.parse(await fs.readFile(file, 'utf8'))).not.toHaveProperty('delegation');
   });
-  it.skipIf(!supportsFileSymlinks)('admits newly granted links through a live manager and closes out pinned work after disk revocation', async () => {
+  it.skipIf(!supportsFileSymlinks)('admits external links without grants through a live manager and closes out pinned work after disk revocation', async () => {
     const { config, file } = await savedConfig();
     await link();
     const manager = new DelegatedWorkspaceManager(storage(), true, () => config.getSharedSymlinks());
     const source = (await manager.discover(fixture.root))!;
-    await expect(manager.baseline(source)).rejects.toThrow(/symbolic[- ]link/);
+    expect((await manager.baseline(source)).sharedLinks).toHaveLength(1);
     await fs.writeFile(file, JSON.stringify({ delegation: { sharedSymlinks: [grant()] } }));
     const input = await manager.baseline(source);
     expect(input.sharedSymlinkPolicy?.grants).toEqual([grant()]);
@@ -240,7 +240,7 @@ describe('explicit project shared links', { timeout: 60_000 }, () => {
     const workspace = await manager.prepare(lane, source, input, randomUUID());
     await fs.writeFile(path.join(workspace.directory, 'ordinary.txt'), 'synthetic ordinary output\n');
     await fs.writeFile(file, JSON.stringify({ delegation: { sharedSymlinks: [] } }));
-    await expect(manager.baseline(source)).rejects.toThrow(/symbolic[- ]link/);
+    expect((await manager.baseline(source)).sharedLinks).toHaveLength(1);
     const view = await manager.collect(workspace, true, { exitConfirmed: true });
     expect(view.changedFiles).toEqual(['ordinary.txt']);
     // Closeout after restart must use the saved policy even if current admission fails.
@@ -265,6 +265,7 @@ describe('explicit project shared links', { timeout: 60_000 }, () => {
     const good = { policy: { root: fixture.root, grants: [grant()] }, bindings: [{ path: 'shared-link', linkText: '../shared.txt', target, kind: 'file' as const }] };
     for (const options of [
       { ...good, policy: { root: 'relative', grants: [grant()] } },
+      { ...good, policy: { ...good.policy, mode: 'unknown' } },
       { ...good, policy: { root: fixture.root, grants: [{ ...grant(), root: fixture.directory }] } },
       { ...good, bindings: [] },
       { ...good, bindings: [good.bindings[0], good.bindings[0]] },
@@ -304,11 +305,15 @@ describe('explicit project shared links', { timeout: 60_000 }, () => {
     await runGit(bare, ['init', '--bare']);
     await expect(validateSharedLocations([{ ...grant(), target: path.join(bare, 'HEAD') }])).rejects.toThrow();
   });
-  it.skipIf(!supportsFileSymlinks).each([false, true])('captures only the original link node with an exact grant (absolute=%s)', async absolute => {
+  it.skipIf(!supportsFileSymlinks).each([{ absolute: false, automatic: false }, { absolute: true, automatic: false },
+    { absolute: false, automatic: true }, { absolute: true, automatic: true }])('captures only the original link node %j', async ({ absolute, automatic }) => {
     const { text } = await link(absolute);
     const index = await fs.readFile(path.join(fixture.root, '.git', 'index'));
     await expect(captureCheckpoint(fixture.root)).rejects.toThrow(/symbolic[- ]link/);
-    const checkpoint = await captureCheckpoint(fixture.root, { sharedSymlinks: [grant()] });
+    const checkpoint = await captureCheckpoint(fixture.root, automatic ? { discoverExternal: true } : { sharedSymlinks: [grant()] });
+    const payload = await gitText(fixture.root, ['hash-object', '--stdin'], 'synthetic shared bytes\n');
+    await expect(runGit(fixture.root, ['cat-file', '-e', payload])).rejects.toThrow();
+    expect(checkpoint.sharedSymlinkPolicy?.mode).toBe(automatic ? 'external' : undefined);
     expect(checkpoint.sharedLinks).toEqual([{ path: 'shared-link', linkText: text, target, kind: 'file' }]);
     expect(await gitText(fixture.root, ['show', `${checkpoint.tree}:shared-link`])).toBe(text);
     expect(await gitText(fixture.root, ['ls-tree', checkpoint.tree, '--', 'shared-link'])).toMatch(/^120000 blob /);
@@ -318,12 +323,12 @@ describe('explicit project shared links', { timeout: 60_000 }, () => {
     expect(await gitText(fixture.root, ['rev-parse', 'HEAD'])).toBe(fixture.head);
     expect(checkpoint.revision).not.toBe(checkpointRevision(checkpoint.head, checkpoint.tree, index));
   });
-  it.skipIf(!supportsFileSymlinks)('allows an external replacement of cached children only with the matching grant', async () => {
+  it.skipIf(!supportsFileSymlinks)('automatically captures an ignored external replacement of cached children', async () => {
     const { text } = await link(false, true);
     const index = await fs.readFile(path.join(fixture.root, '.git', 'index'));
     await expect(captureCheckpoint(fixture.root)).rejects.toThrow(/symbolic[- ]link/);
     await fs.appendFile(path.join(fixture.root, '.gitignore'), 'nested\n');
-    const result = await captureCheckpoint(fixture.root, { sharedSymlinks: [{ ...grant(), path: 'nested' }] });
+    const result = await captureCheckpoint(fixture.root, { discoverExternal: true });
     expect(await gitText(fixture.root, ['show', `${result.tree}:nested`])).toBe(text);
     expect(await fs.readFile(path.join(fixture.root, '.git', 'index'))).toEqual(index);
   });
@@ -341,7 +346,7 @@ describe('explicit project shared links', { timeout: 60_000 }, () => {
       if (file === target || String(file).startsWith(`${path.join(fixture.root, 'shared-link')}${path.sep}`)) throw new Error('Shared directory was enumerated');
       return (readdir as any)(file, ...args);
     }) as any);
-    const manager = new DelegatedWorkspaceManager(storage(), true, () => [grant()]);
+    const manager = new DelegatedWorkspaceManager(storage(), true);
     const source = (await manager.discover(fixture.root))!;
     const input = await manager.baseline(source);
     expect(input.sharedLinks?.[0].kind).toBe('dir');
@@ -400,8 +405,8 @@ describe('explicit project shared links', { timeout: 60_000 }, () => {
     expect(await fs.readFile(target, 'utf8')).toBe('synthetic shared bytes\n');
     await expect(manager.prepare(lane, source, input, randomUUID())).rejects.toThrow('unresolved');
   });
-  it.skipIf(!supportsFileSymlinks)('normalizes worker pointers in the temporary index and allows shared content replacement', async () => {
-    const { manager, workspace, input } = await setup();
+  it.skipIf(!supportsFileSymlinks).each([false, true])('normalizes worker pointers and allows shared content replacement (absolute=%s)', async absolute => {
+    const { manager, workspace, input } = await setup(true, absolute);
     const physical = path.join(workspace.directory, 'shared-link');
     expect(await fs.readlink(physical)).toBe(target);
     const replacement = path.join(fixture.directory, 'replacement.txt');
@@ -422,7 +427,7 @@ describe('explicit project shared links', { timeout: 60_000 }, () => {
     await fs.writeFile(path.join(workspace.directory, 'ordinary.txt'), 'synthetic ordinary output\n');
     await manager.collect(workspace, true, { exitConfirmed: true });
     configure([]);
-    await expect(manager.baseline(source)).rejects.toThrow(/symbolic[- ]link/);
+    expect((await manager.baseline(source)).sharedLinks).toHaveLength(1);
     const restarted = new DelegatedWorkspaceManager(storage(), true, () => { throw new Error('Current policy must not broaden existing artifacts'); });
     const view = await restarted.integrate(owner, workspace.taskId, 'inspect', undefined) as any;
     expect(view.changedFiles).toEqual(['ordinary.txt']);
@@ -503,7 +508,7 @@ describe('explicit project shared links', { timeout: 60_000 }, () => {
   });
   it.skipIf(!supportsFileSymlinks)('does not use a regular-file fallback when Git has core.symlinks=false', async () => {
     await link(); await runGit(fixture.root, ['config', 'core.symlinks', 'false']);
-    const manager = new DelegatedWorkspaceManager(storage(), true, () => [grant()]);
+    const manager = new DelegatedWorkspaceManager(storage(), true);
     const lanes = new DelegatedWorkerSessionStore(path.join(fixture.directory, 'lanes'));
     const source = (await manager.discover(fixture.root))!;
     const { lane } = await lanes.acquire({ threadId: 'owner', backend: 'agy', workingDirectory: fixture.root, workspaceGeneration: 0 });
@@ -525,6 +530,90 @@ describe('explicit project shared links', { timeout: 60_000 }, () => {
     await fs.symlink(path.relative(nested, target), path.join(nested, 'shared-link'), 'file');
     if (ignored) await fs.appendFile(path.join(nested, '.gitignore'), 'shared-link\n');
     await expect(captureCheckpoint(fixture.root, { sharedSymlinks: [{ ...grant(), path: 'module/shared-link' }] })).rejects.toThrow('inside nested repositories');
+  });
+  it.skipIf(!supportsFileSymlinks)('keeps legacy grant snapshots usable and does not broaden pinned artifacts', async () => {
+    await link();
+    const manager = new DelegatedWorkspaceManager(storage(), true);
+    const source = (await manager.discover(fixture.root))!;
+    const input = await captureCheckpoint(fixture.root, { sharedSymlinks: [grant()] });
+    expect(input.sharedSymlinkPolicy).not.toHaveProperty('mode');
+    const lanes = new DelegatedWorkerSessionStore(path.join(fixture.directory, 'lanes'));
+    const { lane } = await lanes.acquire({ threadId: 'legacy-owner', backend: 'agy', workingDirectory: fixture.root, workspaceGeneration: 0 });
+    const workspace = await manager.prepare(lane, source, input, randomUUID());
+    await fs.writeFile(path.join(workspace.directory, 'ordinary.txt'), 'legacy output\n');
+    const result = await manager.collect(workspace, true, { exitConfirmed: true });
+    expect(result.changedFiles).toEqual(['ordinary.txt']);
+    const owner = { threadId: lane.threadId, cwd: fixture.root, workspaceGeneration: 0 };
+    const view = await manager.integrate(owner, workspace.taskId, 'inspect', undefined) as any;
+    await manager.integrate(owner, workspace.taskId, 'apply', view.revision);
+    expect(await fs.readFile(path.join(fixture.root, 'ordinary.txt'), 'utf8')).toBe('legacy output\n');
+    await fs.symlink(target, path.join(fixture.root, 'new-link'), 'file');
+    await expect(captureCheckpoint(fixture.root, { policy: input.sharedSymlinkPolicy, bindings: input.sharedLinks,
+      discoverExternal: true })).rejects.toThrow(/symbolic[- ]link/);
+    expect((await manager.baseline(source)).sharedLinks).toHaveLength(2);
+  });
+  it.skipIf(!supportsFileSymlinks)('does not grant new external worker links to a legacy artifact without bindings', async () => {
+    const manager = new DelegatedWorkspaceManager(storage(), true);
+    const source = (await manager.discover(fixture.root))!;
+    const input = await captureCheckpoint(fixture.root);
+    const lanes = new DelegatedWorkerSessionStore(path.join(fixture.directory, 'lanes'));
+    const { lane } = await lanes.acquire({ threadId: 'legacy-owner', backend: 'agy', workingDirectory: fixture.root, workspaceGeneration: 0 });
+    const workspace = await manager.prepare(lane, source, input, randomUUID());
+    await fs.symlink(target, path.join(workspace.directory, 'new-link'), 'file');
+    await expect(manager.collect(workspace, true)).rejects.toThrow(/symbolic[- ]link/);
+    expect(await fs.readFile(target, 'utf8')).toBe('synthetic shared bytes\n');
+  });
+  it.skipIf(!supportsFileSymlinks)('keeps internal links ordinary and ignores unrelated ignored external links', async () => {
+    await fs.symlink('source.txt', path.join(fixture.root, 'internal'), 'file');
+    await fs.symlink(target, path.join(fixture.root, 'ignored-link'), 'file');
+    await fs.appendFile(path.join(fixture.root, '.gitignore'), 'ignored-link\n');
+    const result = await captureCheckpoint(fixture.root, { discoverExternal: true });
+    expect(result.sharedLinks).toBeUndefined();
+    expect(await gitText(fixture.root, ['show', `${result.tree}:internal`])).toBe('source.txt');
+    expect(await gitText(fixture.root, ['ls-tree', '-r', '--name-only', result.tree])).not.toContain('ignored-link');
+  });
+  it.skipIf(!supportsFileSymlinks).each(['missing.txt', 'missing-parent/missing.txt', 'missing-parent/deeper/missing.txt'])(
+    'preserves dangling internal target %s but refuses a dangling external alias', async text => {
+    await fs.symlink(text, path.join(fixture.root, 'internal'), 'file');
+    const input = await captureCheckpoint(fixture.root, { discoverExternal: true });
+    expect(await gitText(fixture.root, ['show', `${input.tree}:internal`])).toBe(text);
+    await fs.symlink(path.relative(fixture.root, target), path.join(fixture.root, 'alias'), 'file');
+    await fs.symlink('alias', path.join(fixture.root, 'external'), 'file');
+    await fs.appendFile(path.join(fixture.root, '.gitignore'), 'alias\n');
+    await fs.unlink(target);
+    await expect(captureCheckpoint(fixture.root, { discoverExternal: true })).rejects.toThrow('must exist');
+  });
+  it.skipIf(!supportsFileSymlinks)('does not skip a dangling external directory alias while resolving missing parents', async () => {
+    const missing = path.join(fixture.directory, 'missing-external');
+    await fs.symlink(missing, path.join(fixture.root, 'alias'), 'dir');
+    await fs.appendFile(path.join(fixture.root, '.gitignore'), 'alias\n');
+    await fs.symlink('alias/missing-parent/leaf.txt', path.join(fixture.root, 'external'), 'file');
+    await expect(captureCheckpoint(fixture.root, { discoverExternal: true })).rejects.toThrow('must exist');
+  });
+  it.skipIf(!supportsFileSymlinks).each(['missing', 'cycle', 'git', 'repository', 'storage'])(
+    'rejects automatic discovery of a %s target without capturing target content', async kind => {
+      if (kind === 'missing') await fs.unlink(target);
+      if (kind === 'cycle') { await fs.unlink(target); await fs.symlink(target, target, 'file'); }
+      if (kind === 'git') {
+        const repository = path.join(fixture.directory, 'external-repo'); await fs.mkdir(repository);
+        await runGit(repository, ['init']); target = path.join(repository, '.git', 'config');
+      }
+      if (kind === 'repository') {
+        target = path.join(fixture.directory, 'external-repo'); await fs.mkdir(target); await runGit(target, ['init']);
+      }
+      if (kind === 'storage') { target = storage(); await fs.mkdir(target); }
+      await fs.symlink(target, path.join(fixture.root, 'shared-link'), kind === 'repository' || kind === 'storage' ? 'dir' : 'file');
+      const manager = new DelegatedWorkspaceManager(storage(), true);
+      const source = (await manager.discover(fixture.root))!;
+      await expect(manager.baseline(source)).rejects.toThrow();
+    });
+  it.skipIf(!supportsFileSymlinks)('rejects automatically discovered external links inside nested repositories', async () => {
+    const nested = await nestedGitFixture(fixture, 'module');
+    await fs.symlink(path.relative(nested, target), path.join(nested, 'shared-link'), 'file');
+    const manager = new DelegatedWorkspaceManager(storage(), true);
+    const source = (await manager.discover(fixture.root))!;
+    await expect(manager.baseline(source)).rejects.toThrow('inside nested repositories are not supported');
+    expect(await fs.readFile(target, 'utf8')).toBe('synthetic shared bytes\n');
   });
   it('preserves the exact legacy revision encoding without shared metadata', async () => {
     const old = createHash('sha256').update('head').update('\0').update('tree').update('\0').update(Buffer.from('index')).digest('hex');

@@ -96,12 +96,12 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     await fs.symlink(path.relative(fixture.root, target), path.join(fixture.root, 'shared-link'), 'file');
     manager = new DelegationManager(new DirectoryGuard([fixture.directory]), factory as any,
       new BackendRegistry(async () => 'fixture 1.0'), undefined, undefined, undefined, undefined,
-      new DelegatedWorkspaceManager(undefined, true, () => [{ root: fixture.root, path: 'shared-link', target }]));
+      new DelegatedWorkspaceManager(undefined, true));
     const scope = manager.begin(parent);
     const task = await start(scope, 'shared-warning');
     expect(task.state).toBe('running');
     const prompt = vi.mocked(workers[0].executor.execute).mock.calls[0][0];
-    expect(prompt).toContain('Explicit shared links: "shared-link"');
+    expect(prompt).toContain('Shared external links: "shared-link"');
     expect(prompt).toContain('NOT captured, merged, reverted, or backed up');
     workers[0].finish({ success: true, output: 'Synthetic result' });
     const completed = await result(scope, task.taskId, 'shared-result');
