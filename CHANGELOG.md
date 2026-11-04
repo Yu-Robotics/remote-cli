@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.215] - 2026-11-04
+
+### Fixed
+- Determine managed Kimi and Claude session cleanup compatibility from deletion capabilities and validated history formats instead of exact installed backend versions.
+- Preserve existing owned-session identities and immutable deletion receipts across compatible backend upgrades; retain ownership, shutdown, path, and retry safeguards.
+
+### Tests
+- Cover compatible version labels, incompatible capabilities and history layouts, and recovery with legacy deletion records using isolated synthetic fixtures.
+
 ## [1.6.214] - 2026-11-04
 
 ### Fixed

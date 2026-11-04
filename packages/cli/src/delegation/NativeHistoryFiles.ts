@@ -25,16 +25,24 @@ interface OwnedHistoryBase {
   /** Present only when the native writer had already materialized the file. */
   createdFile?: HistoryEntry;
   projectOverride?: string;
-  /** Claude system/init matched the reserved ID, cwd and audited native version. */
+  /** Claude system/init matched the reserved ID and cwd. */
   confirmed?: boolean;
 }
-export type KimiHistoryTarget = OwnedHistoryBase & { backend: 'kimi'; nativeVersion: '2.3.3'; transcript?: never };
+// The old package-version strings are immutable legacy receipt markers, never
+// requirements on the installed executable. Do not normalize persisted targets:
+// their complete serialized identity is covered by existing preparation hashes.
+const HISTORY_CONTRACTS = {
+  kimi: ['kimi-acp-delete-v1', '2.3.3'],
+  pi: ['pi-jsonl-v3', '1.5.0'],
+  claude: ['claude-history-v1', '2.1.308'],
+} as const;
+export type KimiHistoryTarget = OwnedHistoryBase & { backend: 'kimi'; nativeVersion: typeof HISTORY_CONTRACTS.kimi[number]; transcript?: never };
 /**
  * Pi session-manager.ts at earendil-works/pi@676af1d777ef6f04b6bc8daf4cf3b9b1799cff4d.
- * nativeVersion names the audited upstream format; the gate uses its v3 header, not an installed binary.
+ * Compatibility uses the v3 JSONL header, not the installed package version.
  */
-export type PiHistoryTarget = OwnedHistoryBase & { backend: 'pi'; nativeVersion: '1.5.0'; transcript: string };
-export type ClaudeHistoryTarget = OwnedHistoryBase & { backend: 'claude'; nativeVersion: '2.1.308'; transcript: string };
+export type PiHistoryTarget = OwnedHistoryBase & { backend: 'pi'; nativeVersion: typeof HISTORY_CONTRACTS.pi[number]; transcript: string };
+export type ClaudeHistoryTarget = OwnedHistoryBase & { backend: 'claude'; nativeVersion: typeof HISTORY_CONTRACTS.claude[number]; transcript: string };
 export type OwnedHistoryTarget = KimiHistoryTarget | PiHistoryTarget | ClaudeHistoryTarget;
 export interface HistoryEntry extends NativeDirectoryIdentity {
   kind: 'file' | 'directory';
@@ -48,7 +56,7 @@ export const validHistoryDirectory = (value: any): value is NativeDirectoryIdent
 export function validOwnedHistoryTarget(value: any): value is OwnedHistoryTarget {
   return !!value && value.version === 1 && value.provenance === 'created'
     && ['kimi', 'pi', 'claude'].includes(value.backend)
-    && ({ kimi: '2.3.3', pi: '1.5.0', claude: '2.1.308' } as Record<string, string>)[value.backend] === value.nativeVersion
+    && (HISTORY_CONTRACTS as Record<string, readonly string[]>)[value.backend].includes(value.nativeVersion)
     && typeof value.sessionId === 'string' && UUID.test(value.sessionId)
     && typeof value.executorThreadId === 'string' && value.executorThreadId.startsWith('delegate-lane-')
     && UUID.test(value.executorThreadId.slice(14))
@@ -139,7 +147,7 @@ export async function captureHistoryTarget(input: {
   pointerSessionId?: string;
 }): Promise<OwnedHistoryTarget> {
   const target = { ...input, version: 1, provenance: 'created',
-    nativeVersion: ({ kimi: '2.3.3', pi: '1.5.0', claude: '2.1.308' } as const)[input.backend],
+    nativeVersion: HISTORY_CONTRACTS[input.backend][0],
     home: await historyDirectory(input.home), nativeHome: await historyDirectory(input.nativeHome),
     scope: await historyDirectory(input.scope), pointerRoot: await historyDirectory(path.dirname(input.pointer)), pointerHash: '' } as OwnedHistoryTarget;
   const pointer = await pointerBytes(target.pointer);
@@ -231,7 +239,13 @@ async function verifyTranscript(target: OwnedHistoryTarget): Promise<void> {
       || typeof header.timestamp !== 'string') throw new Error('Pi session header changed');
   } else {
     const records = lines.filter(Boolean).map(line => JSON.parse(line));
-    if (!records.some(record => record.sessionId === target.sessionId && record.cwd === target.cwd && record.version === target.nativeVersion)
+    // Package versions are diagnostic metadata. The supported layout is JSONL
+    // with native message records carrying this exact session and cwd identity.
+    if (records.some(record => !record || typeof record !== 'object' || Array.isArray(record))
+      || !records.some(record => ['user', 'assistant'].includes(record.type)
+        && record.sessionId === target.sessionId && record.cwd === target.cwd
+        && record.message && typeof record.message === 'object' && !Array.isArray(record.message)
+        && (typeof record.message.content === 'string' || Array.isArray(record.message.content)))
       || records.some(record => record.sessionId && record.sessionId !== target.sessionId)) throw new Error('Claude transcript identity is unconfirmed');
   }
 }

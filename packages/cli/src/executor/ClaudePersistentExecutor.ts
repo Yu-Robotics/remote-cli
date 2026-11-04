@@ -1361,8 +1361,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
             if (creation) {
               this.nativeCreation = undefined;
               this.nativeObservation = this.nativeObservation.then(async () => {
-                if (message.session_id !== creation.sessionId || message.cwd !== creation.cwd
-                  || message.claude_code_version !== creation.nativeVersion) await this.reportNativeCaptureFailure();
+                if (message.session_id !== creation.sessionId || message.cwd !== creation.cwd) await this.reportNativeCaptureFailure();
                 else await this.nativeObserver?.({ ...creation, confirmed: true });
               });
               // Retain the rejected promise for lifecycle fencing without an unhandled rejection.

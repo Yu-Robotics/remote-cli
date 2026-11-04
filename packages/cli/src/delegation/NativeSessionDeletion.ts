@@ -242,8 +242,8 @@ function verifyNoDescendants(threads: Map<string, NativeThreadMetadata>, root: s
 
 export interface NativeDeletionPreparation {
   version: 1;
-  /** Codex stores the adapter contract, not a CLI version; 0.166.0 is a legacy receipt marker. */
-  nativeVersion: 'codex-thread-delete-v1' | '0.166.0' | '2.3.3' | '1.5.0' | '2.1.308';
+  /** Adapter protocol/layout contract; old package strings remain immutable legacy receipt markers. */
+  nativeVersion: 'codex-thread-delete-v1' | '0.166.0' | OwnedHistoryTarget['nativeVersion'];
   targetHash: string;
   /** Exact immutable pre-delete manifest for file-backed adapters. */
   files?: HistoryEntry[];

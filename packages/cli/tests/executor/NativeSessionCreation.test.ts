@@ -64,9 +64,27 @@ describe('managed executor native creation receipts', () => {
     const { executor, transport } = kimi(lane); transport.prompt.mockImplementation(async () => ({ stopReason: 'end_turn' }));
     await executor.execute('resume'); expect(transport.loadSession).toHaveBeenCalledOnce(); expect(targets).toHaveLength(0);
   });
-  it('persists capture failure before allowing a Kimi prompt with an unaudited version', async () => {
+  it.each(['2.3.4', '9.0.0', undefined])('records Kimi creation with diagnostic version %s', async version => {
     const { executor, transport } = kimi();
-    transport.initialize.mockResolvedValue({ protocolVersion: 1, agentInfo: { version: '9.0.0' }, agentCapabilities: { sessionCapabilities: { delete: {} } } });
+    transport.initialize.mockResolvedValue({ protocolVersion: 1, agentInfo: { version }, agentCapabilities: { sessionCapabilities: { delete: {} } } } as any);
+    expect((await executor.execute('create')).success).toBe(true);
+    expect(targets).toHaveLength(1); expect(targets[0]).toMatchObject({ nativeVersion: 'kimi-acp-delete-v1' });
+    expect(failure).not.toHaveBeenCalled();
+  });
+  it('resumes the same owned Kimi ID after a version change without recapturing or reporting a conflict', async () => {
+    const first = kimi(); await first.executor.execute('create');
+    const saved = JSON.stringify(targets); await first.executor.destroy();
+    const next = kimi(first.threadId);
+    next.transport.initialize.mockResolvedValue({ protocolVersion: 1, agentInfo: { version: '9.0.0' },
+      agentCapabilities: { sessionCapabilities: { delete: {} } } });
+    expect((await next.executor.execute('resume')).success).toBe(true);
+    expect(next.transport.loadSession).toHaveBeenCalledWith(targets[0].sessionId, home);
+    expect(next.transport.newSession).not.toHaveBeenCalled();
+    expect(JSON.stringify(targets)).toBe(saved); expect(failure).not.toHaveBeenCalled();
+  });
+  it('persists capture failure before allowing a Kimi prompt with missing deletion capability', async () => {
+    const { executor, transport } = kimi();
+    transport.initialize.mockResolvedValue({ protocolVersion: 1, agentInfo: { version: '9.0.0' }, agentCapabilities: { sessionCapabilities: {} } } as any);
     transport.prompt.mockImplementation(async () => { expect(failure).toHaveBeenCalledOnce(); return { stopReason: 'end_turn' }; });
     expect((await executor.execute('safe continuation')).success).toBe(true); expect(targets).toHaveLength(0);
   });
@@ -185,26 +203,43 @@ describe('managed executor native creation receipts', () => {
     executor.observeNativeSessionCreation(observer, failure); executors.push(executor);
     return { executor, child };
   }
-  it('durably reserves Claude identity before spawn and confirms the native init', async () => {
+  it.each(['2.1.308', '2.1.309', '9.0.0', undefined])('reserves Claude identity and confirms init with diagnostic version %s', async version => {
     const { executor } = claude(); await (executor as any).startProcess();
     const target = targets[0]; expect(target.backend).toBe('claude');
     if (target.backend !== 'claude') throw new Error('Unexpected fixture backend');
     expect(target.projectOverride).toBe('fixture_project'); expect(target.confirmed).toBeUndefined();
+    expect(target.nativeVersion).toBe('claude-history-v1');
     expect(vi.mocked(spawn).mock.calls[0][1]).toContain(target.sessionId);
     const before = await fs.readFile(target.pointer, 'utf8');
     (executor as any).handleOutputLine(JSON.stringify({ type: 'system', subtype: 'init', session_id: target.sessionId,
-      cwd: home, claude_code_version: '2.1.308' }));
+      cwd: home, claude_code_version: version }));
     await (executor as any).nativeObservation;
     expect(targets[1]).toEqual({ ...target, confirmed: true }); expect(await fs.readFile(target.pointer, 'utf8')).toBe(before);
     if (targets[1].backend === 'claude') await verifyHistoryTarget(targets[1]);
+    expect(failure).not.toHaveBeenCalled();
     await executor.deleteThreadData(target.executorThreadId); expect((await fs.stat(target.pointer)).isFile()).toBe(true);
   });
-  it('holds a mismatched Claude native init and drains its durable observation before exit proof', async () => {
+  it.each(['id', 'cwd'])('holds a mismatched Claude init %s and drains its observation before exit proof', async mismatch => {
     const { executor } = claude(); await (executor as any).startProcess();
-    (executor as any).handleOutputLine(JSON.stringify({ type: 'system', subtype: 'init', session_id: targets[0].sessionId,
-      cwd: home, claude_code_version: '9.0.0' }));
+    (executor as any).handleOutputLine(JSON.stringify({ type: 'system', subtype: 'init', session_id: mismatch === 'id' ? randomUUID() : targets[0].sessionId,
+      cwd: mismatch === 'cwd' ? path.join(home, 'foreign') : home, claude_code_version: '9.0.0' }));
     const proof = vi.spyOn((executor as any).workerGroups, 'waitForExit').mockImplementation(async () => { expect(failure).toHaveBeenCalledOnce(); });
     await executor.waitForManagedProcessGroupExit(); expect(proof).toHaveBeenCalledOnce(); expect(targets).toHaveLength(1);
+  });
+  it('resumes owned Claude history after a version change without replacing its creation receipt', async () => {
+    const first = claude(); await (first.executor as any).startProcess();
+    const target = targets[0];
+    (first.executor as any).handleOutputLine(JSON.stringify({ type: 'system', subtype: 'init', session_id: target.sessionId,
+      cwd: home, claude_code_version: '2.1.308' }));
+    await (first.executor as any).nativeObservation;
+    const saved = JSON.stringify(targets); await first.executor.destroy();
+    const next = claude(target.executorThreadId); vi.mocked(spawn).mockImplementation(() => next.child);
+    await (next.executor as any).startProcess();
+    expect(vi.mocked(spawn).mock.calls.at(-1)?.[1]).toContain('--resume');
+    (next.executor as any).handleOutputLine(JSON.stringify({ type: 'system', subtype: 'init', session_id: target.sessionId,
+      cwd: home, claude_code_version: '9.0.0' }));
+    await (next.executor as any).nativeObservation;
+    expect(JSON.stringify(targets)).toBe(saved); expect(failure).not.toHaveBeenCalled();
   });
   it('never records a pre-existing Claude pointer as a native creation', async () => {
     const threadId = `delegate-lane-${randomUUID()}`; const pointers = path.join(home, '.remote-cli', 'claude-sessions');
