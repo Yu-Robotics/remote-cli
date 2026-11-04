@@ -34,8 +34,11 @@ describe('delegation in the existing thread workflow', () => {
   };
 
   beforeEach(async () => {
-    home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'delegation-workflow-')));
+    // Use the same native canonicalization as durable queue ownership checks.
+    home = await fs.promises.realpath(await fs.promises.mkdtemp(path.join(os.tmpdir(), 'delegation-workflow-')));
     vi.spyOn(os, 'homedir').mockReturnValue(home);
+    vi.stubEnv('HOME', home);
+    vi.stubEnv('USERPROFILE', home);
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
     threads = await ThreadManager.initialize(home);
     await threads.updateThread(threads.getDefaultThread().id, { workingDirectory: home });
@@ -57,7 +60,13 @@ describe('delegation in the existing thread workflow', () => {
     (handler as any).delegation = new DelegationManager(guard, () => worker, new BackendRegistry(async () => 'test 1.0'));
   });
 
-  afterEach(async () => { await handler?.destroy(); vi.restoreAllMocks(); fs.rmSync(home, { recursive: true, force: true }); });
+  afterEach(async () => {
+    try { await handler?.destroy(); }
+    finally {
+      vi.restoreAllMocks(); vi.unstubAllEnvs();
+    }
+    await fs.promises.rm(home, { recursive: true, force: true });
+  });
 
   const message = (id: string, content: string) => ({ type: 'command' as const, messageId: id, content, openId: 'owner', timestamp: Date.now() });
   const responseFor = (id: string) => socket.send.mock.calls.map(([value]: any[]) => value).reverse().find((value: any) => value.type === 'response' && value.messageId === id);
@@ -183,6 +192,10 @@ describe('delegation in the existing thread workflow', () => {
     const pointer = path.join(home, '.remote-cli', 'codex-sessions', `${acquired.lane.executorThreadId}.json`);
     await fs.promises.mkdir(path.dirname(pointer), { recursive: true });
     await fs.promises.writeFile(pointer, '{"id":"worker"}');
+    // An unrelated reset fence must stay owned by this fixture, not the host home.
+    await delegated.nativeSessionDeletions.enqueue('other-parent', 0);
+    const fences = await delegated.nativeSessionDeletions.requests();
+    expect(fences).toMatchObject([{ threadId: 'other-parent', home: { path: home } }]);
 
     await handler.handleMessage(message('reset', '/delegation reset codex'));
 
@@ -192,6 +205,7 @@ describe('delegation in the existing thread workflow', () => {
     expect(threads.getDefaultThread().delegation).toBeUndefined();
     expect(isDelegationEnabled(threads.getDefaultThread())).toBe(true);
     expect(main.configureDelegation).not.toHaveBeenCalled();
+    expect(await delegated.nativeSessionDeletions.requests()).toEqual(fences);
   });
 
   it('restores owned cleanup across a CLI restart without touching an unused backend', async () => {
