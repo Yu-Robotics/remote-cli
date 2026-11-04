@@ -32,6 +32,8 @@ export const realGitTestFiles = [
 export const nativeOwnershipTestFiles = [
   'tests/delegation/DelegationOwnership.test.ts',
   'tests/delegation/OwnershipRuntime.test.ts',
+  'tests/delegation/ManagedNativeSessionDeletion.test.ts',
+  'tests/delegation/ManagedHistoryBackends.test.ts',
   'tests/integration/thread-context-reset.test.ts',
 ];
 export const processIsolatedTestFiles = [...realGitTestFiles, ...nativeOwnershipTestFiles];

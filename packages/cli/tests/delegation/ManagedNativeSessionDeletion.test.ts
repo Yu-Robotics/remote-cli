@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
+import { isMainThread } from 'worker_threads';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DelegationManager, type DelegationParent } from '../../src/delegation/DelegationManager';
 import { BackendRegistry } from '../../src/delegation/BackendRegistry';
@@ -11,6 +12,9 @@ import { DELEGATION_BACKENDS } from '../../src/delegation/contract';
 
 function gate() { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; }
 describe('managed child native deletion lifecycle', () => {
+  it('runs native ownership lifecycle in an isolated process', () => {
+    expect(isMainThread).toBe(true);
+  });
   let home: string;
   let manager: DelegationManager;
   let parent: DelegationParent;
