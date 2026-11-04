@@ -14,11 +14,6 @@ async function unlinkFile(file: string): Promise<void> {
   }
 }
 
-function isInside(candidate: string, root: string): boolean {
-  const relative = path.relative(root, candidate);
-  return relative !== '' && !relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative);
-}
-
 async function cleanupAtHome(lane: DelegatedWorkerLane, home: string): Promise<void> {
   const root = path.join(home, '.remote-cli');
   const id = lane.executorThreadId;
@@ -52,19 +47,8 @@ async function cleanupAtHome(lane: DelegatedWorkerLane, home: string): Promise<v
       await unlinkFile(path.join(root, 'dsh-sessions', `${id}.handoff.json`));
       return;
     case 'pi': {
-      const pointerPath = pointer('pi');
-      let sessionFile: string | undefined;
-      try {
-        const parsed = JSON.parse(await fs.readFile(pointerPath, 'utf8')) as { sessionFile?: unknown };
-        if (typeof parsed.sessionFile === 'string') sessionFile = parsed.sessionFile;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      }
-      await unlinkFile(pointerPath);
-      if (!sessionFile) return;
-      const store = path.join(root, 'pi-sessions', 'store');
-      const resolved = path.resolve(sessionFile);
-      if (isInside(resolved, store)) await unlinkFile(resolved);
+      // Native files require the durable reset queue, creation receipts and writer proof.
+      await unlinkFile(pointer('pi'));
       return;
     }
   }

@@ -13,6 +13,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.212] - 2026-11-04
+
+### Changed
+- Extend parent-reset cleanup to newly owned Kimi, Pi, and Claude delegated sessions, retaining context reuse until `/clear` or `/new` and preserving task artifacts and recovery records.
+- Use backend-specific native deletion or exact owned history paths, with durable ownership receipts and retry state instead of archiving or deleting shared session stores.
+- Keep unsupported platforms, unconfirmed shutdown, adopted sessions, and ambiguous ownership outside automatic deletion.
+
+### Tests
+- Cover managed creation receipts, parent-reset generations, adopted-history conflicts, partial deletion recovery, and maintenance exit fencing with isolated synthetic fixtures.
+- Reproduce parent-directory substitution and detached-pointer file conflicts; verify descriptor-anchored removal, procfs failure handling, and handle cleanup.
+
+## [1.6.211] - 2026-11-04
+
+### Changed
+- Initially support newly recorded Codex 0.166.0 sessions on Linux with confirmed process-group exit and no native descendants. Preserve explicit holds for legacy identities, unsupported versions/platforms/backends, and uncertain ownership.
+- Request permanent deletion of owned delegated-worker native sessions when the parent conversation is cleared with `/clear` or `/new`, while preserving context reuse before reset and retaining task artifacts and recovery records.
+- Track deferred cleanup separately from conversation reset; require confirmed shutdown and supported native deletion, and retain explicit failure or unsupported state instead of archiving or claiming pointer removal deleted native history.
+
+### Tests
+- Cover parent reset races, native ownership retained across worker resets, incomplete exit evidence, bounded recovery receipts, and lost deletion acknowledgements with realistic native metadata fixtures.
+- Verify Codex 0.166.0 deletion and missing-target retry against synthetic histories in an isolated native home without model calls or real user history access.
+
 ## [1.6.210] - 2026-11-04
 
 ### Changed

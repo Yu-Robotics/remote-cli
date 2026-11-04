@@ -1064,12 +1064,15 @@ export class MessageHandler {
     }
     const active = this.cancelThreadOperation(threadId);
     this.detachDelegationBridge(threadId);
-    // Closing the worker scope is synchronous; its cleanup remains manager-owned.
-    const workers = this.delegation.cancelThread(threadId);
-    void workers.catch(() => undefined);
+    // Persist deletion intent before closing workers or detaching their context.
+    let workers = Promise.resolve();
     try {
       await this.threadManager.contextResets.begin(threadId);
       const thread = this.threadManager.getThread(threadId)!;
+      await this.delegation.requestNativeSessionDeletion(threadId,
+        this.threadManager.contextResets.generation(threadId, thread.delegationWorkspaceGeneration ?? 0));
+      workers = this.delegation.cancelThread(threadId);
+      void workers.catch(() => undefined);
       await this.threadManager.contextResets.advanceGeneration(threadId, thread.delegationWorkspaceGeneration);
       const aborting = this.abortOperations.get(threadId);
       if (aborting) throw new Error('Direct backend abort is still pending; retry after it settles');
@@ -1086,7 +1089,7 @@ export class MessageHandler {
       this.threadPool.setThreadBusy(threadId, false);
       await workers;
       this.sendResponse(messageId, threadId, { success: true,
-        output: 'Started a fresh conversation for direct backends and managed workers. Historical worker contexts and artifacts are retained for explicit recovery. Pending native writers still block conflicting execution.' }, true);
+        output: 'Started a fresh conversation for direct backends and managed workers. Permanent deletion of old managed child native sessions is queued. Verified Codex, Kimi, Pi, and Claude child sessions are supported on Linux; unsupported versions, layouts, backends, platforms, and unconfirmed targets remain pending. Task artifacts and recovery evidence are retained. Pending native writers still block conflicting execution.' }, true);
     } catch (error) {
       const detail = error instanceof Error ? error.message : 'Local context storage is unavailable';
       throw new Error(`Could not clear thread conversation: ${detail}. Check local CLI storage and retry /clear or /new.`);

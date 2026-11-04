@@ -9,6 +9,7 @@ vi.mock('child_process', async (importOriginal) => {
 
 import { spawn } from 'child_process';
 import { AcpClient, type AcpEventCallbacks } from '../../src/executor/acp/AcpClient';
+import { KimiDeletionClient } from '../../src/delegation/KimiSessionDeletion';
 
 function fakeProcess() {
   const lines: string[] = [];
@@ -57,6 +58,29 @@ describe('AcpClient', () => {
   afterEach(() => {
     client.destroy();
     vi.clearAllMocks();
+  });
+
+  it('preserves exact native missing-ID error data for deletion reconciliation', async () => {
+    const pending = client.deleteSession('synthetic-session');
+    const sent = request(fake.lines, 'session/delete');
+    fake.process.push({ jsonrpc: '2.0', id: sent.id, error: { code: -32602,
+      message: 'Unknown sessionId: synthetic-session', data: { sessionId: 'synthetic-session' } } });
+    await expect(pending).rejects.toMatchObject({ code: -32602, rpcMessage: 'Unknown sessionId: synthetic-session',
+      data: { sessionId: 'synthetic-session' } });
+  });
+
+  it('rejects model and session activation methods in the Kimi maintenance transport', async () => {
+    client.destroy(); fake.process.emit('close', 0, null); fake = fakeProcess();
+    vi.mocked(spawn).mockReturnValue(fake.process);
+    client = new KimiDeletionClient('synthetic-kimi', ['acp'], process.cwd(), {});
+    await expect(client.newSession(process.cwd())).rejects.toThrow('Disallowed');
+    await expect(client.loadSession('synthetic', process.cwd())).rejects.toThrow('Disallowed');
+    await expect(client.prompt('synthetic', [])).rejects.toThrow('Disallowed');
+    await expect(client.setConfigOption('synthetic', 'model', 'synthetic')).rejects.toThrow('Disallowed');
+    expect(fake.lines).toEqual([]);
+    fake.process.push({ jsonrpc: '2.0', id: 99, method: 'authenticate', params: {} });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(fake.lines.map(line => JSON.parse(line))).toEqual([{ jsonrpc: '2.0', id: 99, error: { code: -32601, message: 'Method not found' } }]);
   });
 
   it.each([false, true])('uses process-group cleanup only for managed ACP processes: %s', async managed => {

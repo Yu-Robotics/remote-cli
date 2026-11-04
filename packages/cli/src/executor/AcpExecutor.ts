@@ -9,6 +9,9 @@ import type { AcpConfigOption, AcpConfigOptionValue, AcpContentBlock, AcpMcpServ
 import { delegationSessionServers, sameConnection, type DelegationConnection } from '../delegation/contract';
 import { assertWorkingDirectoryExists } from '../utils/WorkingDirectory';
 import { ActivityTracker, extractTodoPlan } from './Activity';
+import { captureHistoryTarget, historyIdentity, verifyHistoryDirectory, type HistoryEntry } from '../delegation/NativeHistoryFiles';
+import { kimiDeletionCapability } from '../delegation/KimiSessionDeletion';
+import type { NativeSessionDeletionTarget } from '../delegation/NativeSessionDeletion';
 
 const CANCEL_GRACE_MS = 3_000;
 
@@ -38,6 +41,8 @@ export interface AcpExecutorOptions {
   approvalModes?: { automatic: string; manual: string };
   /** Build a process-local environment immediately before spawning the transport. */
   spawnEnvironment?: () => NodeJS.ProcessEnv;
+  /** Only Kimi's audited ACP creation path opts into native deletion receipts. */
+  nativeDeletion?: { home: string; root: string };
 }
 
 interface QueuedCommand {
@@ -174,6 +179,10 @@ export abstract class AcpExecutor implements IExecutor {
   private delegationConnection?: DelegationConnection;
   private replayingSession = false;
   private sessionId: string | null = null;
+  private nativeObserver?: (target: NativeSessionDeletionTarget) => Promise<void>;
+  private nativeCaptureFailure?: () => Promise<void>;
+  private nativeCaptureUnconfirmed = false;
+  private nativeReceiptOperations = 0;
   private configOptions: AcpConfigOption[] = [];
   private catalogLifecycleRevision = 0;
   private refreshedModelOption?: AcpConfigOption;
@@ -256,6 +265,22 @@ export abstract class AcpExecutor implements IExecutor {
     this.clearSessionPointer();
   }
 
+  /** Keep exit proof blocked if even the durable coverage-failure receipt could not be written. */
+  private async reportNativeCaptureFailure(): Promise<void> {
+    this.nativeCaptureUnconfirmed = true;
+    if (this.nativeCaptureFailure) {
+      await this.nativeCaptureFailure();
+      this.nativeCaptureUnconfirmed = false;
+    }
+  }
+
+  observeNativeSessionCreation(observer: (target: NativeSessionDeletionTarget) => Promise<void>, onFailure?: () => Promise<void>): void {
+    if (!this.options.nativeDeletion) return;
+    if (!this.delegationWorker || !this.threadId?.startsWith('delegate-lane-')) throw new Error('Native observation requires a managed worker');
+    this.nativeObserver = observer;
+    this.nativeCaptureFailure = onFailure;
+  }
+
   resetContext(): void {
     this.cancelPendingPermission();
     this.destroyClient();
@@ -302,6 +327,7 @@ export abstract class AcpExecutor implements IExecutor {
 
   async waitForManagedProcessGroupExit(): Promise<void> {
     if (!this.delegationWorker) throw new Error('Managed worker process-group tracking was not enabled');
+    if (this.nativeCaptureUnconfirmed || this.nativeObserver && this.nativeReceiptOperations > 0) throw new Error('Native creation coverage could not be persisted');
     await Promise.all([...this.workerTransports].map(async client => {
       if (!client.waitForManagedProcessGroupExit) throw new Error('Worker transport cannot confirm managed process-group exit');
       await client.waitForManagedProcessGroupExit();
@@ -545,6 +571,7 @@ export abstract class AcpExecutor implements IExecutor {
   }
 
   async deleteThreadData(_threadId: string): Promise<void> {
+    if (this.delegationWorker && this.options.nativeDeletion) { this.destroyClient(); return; }
     const stored = this.sessionId;
     try {
       if (stored && (!this.isDestroyed || !this.delegationWorker)) {
@@ -626,6 +653,12 @@ export abstract class AcpExecutor implements IExecutor {
   }
 
   private async ensureSession(selection?: { model: string; assertCurrent: () => void }): Promise<{ client: AcpTransport; sessionId: string }> {
+    this.nativeReceiptOperations++;
+    try { return await this.ensureSessionInternal(selection); }
+    finally { this.nativeReceiptOperations--; }
+  }
+
+  private async ensureSessionInternal(selection?: { model: string; assertCurrent: () => void }): Promise<{ client: AcpTransport; sessionId: string }> {
     const managed = this.isDelegationManaged() || selection !== undefined;
     selection?.assertCurrent();
     if (this.isDestroyed && managed) throw new Error('Executor has been destroyed');
@@ -646,7 +679,7 @@ export abstract class AcpExecutor implements IExecutor {
       }
     };
     try {
-      await client.initialize();
+      const initialized = await client.initialize();
       assertCurrent();
       const servers = delegationSessionServers(this.delegationConnection);
       const extra: [AcpMcpServer[]?] = servers.length ? [servers] : [];
@@ -666,11 +699,41 @@ export abstract class AcpExecutor implements IExecutor {
         } finally { this.replayingSession = false; }
       }
       if (!this.sessionId) {
-        result = await client.newSession(this.currentWorkingDirectory, ...extra);
-        assertCurrent();
-        if (!result.sessionId) throw new Error(`${this.backendLabel} did not return a session ID`);
+        let nativeRoot: HistoryEntry | undefined;
+        if (this.nativeObserver && this.options.nativeDeletion) {
+          try { nativeRoot = await historyIdentity(path.resolve(this.currentWorkingDirectory, this.options.nativeDeletion.root), 'directory'); }
+          catch { await this.reportNativeCaptureFailure(); }
+          assertCurrent();
+        }
+        try { result = await client.newSession(this.currentWorkingDirectory, ...extra); }
+        catch (error) { if (this.nativeObserver) await this.reportNativeCaptureFailure(); throw error; }
+        try { assertCurrent(); }
+        catch (error) { if (this.nativeObserver) await this.reportNativeCaptureFailure(); throw error; }
+        if (!result.sessionId) {
+          if (this.nativeObserver) await this.reportNativeCaptureFailure();
+          throw new Error(`${this.backendLabel} did not return a session ID`);
+        }
         this.sessionId = result.sessionId;
-        this.saveSessionPointer();
+        try { this.saveSessionPointer(); }
+        catch (error) { if (this.nativeObserver) await this.reportNativeCaptureFailure(); throw error; }
+        if (this.nativeObserver && this.options.nativeDeletion && this.threadId) {
+          let target: NativeSessionDeletionTarget | undefined;
+          try {
+            if (!kimiDeletionCapability(initialized)) throw new Error('Unaudited Kimi ACP capability');
+            if (!nativeRoot) throw new Error('Kimi creation root is unconfirmed');
+            await verifyHistoryDirectory(nativeRoot);
+            const root = path.resolve(this.currentWorkingDirectory, this.options.nativeDeletion.root);
+            target = await captureHistoryTarget({ backend: 'kimi', sessionId: this.sessionId, executorThreadId: this.threadId,
+              home: this.options.nativeDeletion.home, nativeHome: root,
+              scope: root, pointer: this.sessionFilePath,
+              cwd: this.currentWorkingDirectory, command: this.options.acpCommand });
+          } catch { await this.reportNativeCaptureFailure(); }
+          if (target) {
+            try { await this.nativeObserver(target); }
+            catch (error) { await this.reportNativeCaptureFailure(); throw error; }
+          }
+          assertCurrent();
+        }
       }
       this.updateConfigOptions(result);
       assertCurrent();

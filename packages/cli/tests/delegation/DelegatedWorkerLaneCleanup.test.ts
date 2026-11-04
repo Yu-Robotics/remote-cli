@@ -68,7 +68,7 @@ describe('cleanupDelegatedWorkerLane', () => {
     expect(await fs.readFile(direct, 'utf8')).toBe('{}');
   });
 
-  it('removes a Pi lane session file only when it is inside the lane-owned store', async () => {
+  it('retains Pi native files for the durable reset queue even inside the managed store', async () => {
     const worker = lane('pi');
     const root = path.join(home, '.remote-cli');
     const pointer = path.join(root, 'pi-sessions', `${worker.executorThreadId}.json`);
@@ -84,7 +84,7 @@ describe('cleanupDelegatedWorkerLane', () => {
     await cleanupDelegatedWorkerLane(worker, home);
 
     await expect(fs.access(pointer)).rejects.toMatchObject({ code: 'ENOENT' });
-    await expect(fs.access(owned)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fs.readFile(owned, 'utf8')).resolves.toBe('worker history');
     await expect(fs.readFile(external, 'utf8')).resolves.toBe('external history');
   });
 });

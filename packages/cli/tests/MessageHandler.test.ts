@@ -122,6 +122,7 @@ function buildHandler(mockExecutorOverrides: Record<string, any> = {}) {
   vi.spyOn((handler as any).delegation, 'pendingArtifactContext').mockResolvedValue('');
   vi.spyOn((handler as any).delegation, 'assertThreadContextResettable').mockResolvedValue(undefined);
   vi.spyOn((handler as any).delegation, 'clearThreadContexts').mockResolvedValue(undefined);
+  vi.spyOn((handler as any).delegation, 'requestNativeSessionDeletion').mockResolvedValue(undefined);
 
   const context = { handler, mockExecutor, mockWsClient, mockThreadPool, mockThreadManager, mockConfig, workingDirectory };
   testContexts.add(context);
@@ -1854,7 +1855,12 @@ describe('MessageHandler', () => {
       expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
         messageId: 'msg-new',
         success: true,
+        output: expect.stringContaining('Permanent deletion of old managed child native sessions is queued.'),
       }));
+      const resetResponse = ctx.mockWsClient.send.mock.calls.map(call => call[0])
+        .find(response => response.messageId === 'msg-new' && response.success === true);
+      expect(resetResponse.output).toContain('Codex, Kimi, Pi, and Claude');
+      expect(resetResponse.output).toContain('supported on Linux');
     });
 
     it('should ask before queueing a command on a busy thread', async () => {

@@ -1,3 +1,5 @@
+import { randomUUID } from 'crypto';
+import { captureCodexDeletionTarget } from '../../src/delegation/NativeSessionDeletion';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs/promises';
 import { existsSync, readFileSync } from 'fs';
@@ -125,6 +127,82 @@ describe('thread-wide conversation reset', () => {
     await fs.rm(home, { recursive: true, force: true });
   });
 
+  it.each(['/clear', '/new'])('queues A and B for permanent deletion on %s without touching main, siblings or newer generations', async command => {
+    const a = await lane('codex');
+    const b = await lane('codex');
+    const sibling = await lane('codex', siblingId);
+    const future = await lane('codex', threadId, 4);
+    await ready(a, b, sibling, future);
+    const nativeHome = path.join(home, '.codex');
+    await fs.mkdir(nativeHome);
+    vi.stubEnv('CODEX_HOME', nativeHome);
+    const ids = new Map<string, string>();
+    for (const value of [a, b, sibling, future]) {
+      const sessionId = randomUUID(); ids.set(value.id, sessionId);
+      await write(pointer('codex', value.executorThreadId), JSON.stringify({ id: sessionId }));
+      await delegation.laneStore.captureNativeSession(value.id, 0, await captureCodexDeletionTarget({
+        sessionId, executorThreadId: value.executorThreadId, home, nativeHome, cwd: project, command: 'synthetic-codex' }));
+      await delegation.laneStore.markShutdownConfirmed(value.id, 0, true);
+    }
+    const nativeThread = (id: string) => ({ id, sessionId: id, cwd: project, source: 'appServer',
+      status: { type: 'notLoaded' }, ephemeral: false, turns: [], cliVersion: '0.166.0',
+      createdAt: 1, updatedAt: 1, modelProvider: 'synthetic', preview: '', projectId: null });
+    const request = vi.fn(async (method: string, params: any) => method === 'thread/read'
+      ? { thread: nativeThread(params.threadId) }
+      : method === 'thread/list' ? { data: params.archived ? [] : [...ids.values()].map(nativeThread), nextCursor: null } : {});
+    const maintenance = vi.fn(() => ({ start: vi.fn(async () => {}), stop: vi.fn(async () => {}),
+      getServerVersion: () => '0.166.0', request }));
+    (delegation as any).nativeDeletionClientFactory = maintenance;
+    const artifacts = await write(path.join(home, 'immutable-export'), 'preserved result');
+    await seedDirect();
+    const foregroundPointer = JSON.stringify({ id: randomUUID() });
+    await write(pointer('codex', siblingId), foregroundPointer);
+    expect(await send(command)).toMatchObject({ success: true, output: expect.stringContaining('queued') });
+    expect(maintenance).not.toHaveBeenCalled();
+    expect(threads.contextResets.isPending(threadId)).toBe(false);
+    expect(await delegation.nativeSessionDeletions.requests()).toEqual([expect.objectContaining({ threadId, throughGeneration: 3 })]);
+    // Simulate a restart after the reset marker was removed but before cleanup.
+    await reload();
+    (delegation as any).nativeDeletionClientFactory = maintenance;
+    await delegation.reconcileNativeSessionDeletions();
+    expect(request.mock.calls.filter(([method]) => method === 'thread/delete').map(([, params]) => params.threadId).sort())
+      .toEqual([ids.get(a.id), ids.get(b.id)].sort());
+    await delegation.reconcileNativeSessionDeletions();
+    expect(request.mock.calls.filter(([method]) => method === 'thread/delete')).toHaveLength(2);
+    expect(await fs.readFile(artifacts, 'utf8')).toBe('preserved result');
+    expect(await fs.readFile(pointer('codex', siblingId), 'utf8')).toBe(foregroundPointer);
+    expect((await delegation.laneStore.lanesForThread(siblingId))[0].nativeDeleteRequested).toBeUndefined();
+    expect((await delegation.laneStore.lanesForThread(threadId)).find(value => value.id === future.id)?.nativeDeleteRequested).toBeUndefined();
+  });
+
+  it('keeps a durable deletion request through a failed main reset and a retry after restart', async () => {
+    const worker = await lane('codex');
+    current = pool.getExecutor(threadId);
+    vi.mocked(current.waitForExit!).mockRejectedValueOnce(new Error('Synthetic exit failure'));
+    expect(await send('/clear')).toMatchObject({ success: false });
+    expect(await delegation.nativeSessionDeletions.requests()).toHaveLength(1);
+    expect((await delegation.laneStore.lanesForThread(threadId))[0].nativeDeleteRequested).toBe(true);
+    await reload();
+    expect(await send('/new')).toMatchObject({ success: true });
+    await delegation.reconcileNativeSessionDeletions();
+    expect((await delegation.laneStore.lanesForThread(threadId)).find(value => value.id === worker.id)?.nativeDeletion?.state).toBe('waiting-exit');
+  });
+
+  it('does not cross the reset boundary if the separate native deletion intent cannot be persisted', async () => {
+    const worker = await lane('codex');
+    await ready(worker);
+    await seedDirect();
+    const failure = vi.spyOn(delegation.nativeSessionDeletions, 'enqueue').mockRejectedValueOnce(new Error('Synthetic queue failure'));
+    expect(await send('/clear')).toMatchObject({ success: false });
+    expect(threads.contextResets.generation(threadId, 3)).toBe(3);
+    expect(existsSync(pointer('codex', threadId))).toBe(true);
+    expect(existsSync(pointer('codex', worker.executorThreadId))).toBe(true);
+    expect(threads.contextResets.isPending(threadId)).toBe(true);
+    failure.mockRestore();
+    expect(await send('/new')).toMatchObject({ success: true });
+    expect(await delegation.nativeSessionDeletions.requests()).toHaveLength(1);
+  });
+
   it.each(['/clear', '/new'])('detaches every direct backend and pooled worker with %s, preserving files and sibling state', async command => {
     const lanes = [await lane('codex'), ...await Promise.all(DELEGATION_BACKENDS.map(backend => lane(backend)))];
     const sibling = await lane('codex', siblingId);
@@ -165,7 +243,7 @@ describe('thread-wide conversation reset', () => {
     const reloaded = new DelegatedWorkerSessionStore(undefined, threads.contextResets);
     const saved = await reloaded.lanesForThread(threadId);
     expect(saved).toHaveLength(lanes.length);
-    expect(saved.every(value => value.state === 'ready' && value.workspaceGeneration === 3)).toBe(true);
+    expect(saved.every(value => value.state === 'dirty' && value.nativeDeleteRequested && value.workspaceGeneration === 3)).toBe(true);
     for (const value of lanes) {
       await expect(reloaded.acquire(value, { pooled: true })).rejects.toThrow('generation has changed');
       const next = await reloaded.acquire({ ...value, workspaceGeneration: 4 }, { pooled: true });
@@ -341,17 +419,19 @@ describe('thread-wide conversation reset', () => {
     const original = fs.rename.bind(fs);
     let writes = 0;
     const fail = vi.spyOn(fs, 'rename').mockImplementation(async (source, destination) => {
-      if (String(destination).endsWith(`${lanes[1].id}.json`) && ++writes === 2) throw new Error('Synthetic lane persist failure');
+      if (String(destination).endsWith(`${lanes[1].id}.json`) && ++writes === 1) throw new Error('Synthetic lane persist failure');
       return original(source, destination);
     });
     expect(await send('/clear')).toMatchObject({ success: true });
+    expect(writes).toBe(1);
+    expect(await delegation.nativeSessionDeletions.requests()).toHaveLength(1);
     expect(existsSync(pointer('codex', lanes[1].executorThreadId))).toBe(true);
     expect(existsSync(pointer('pi', lanes[2].executorThreadId))).toBe(true);
     fail.mockRestore();
     await reload();
     expect(threads.getThread(threadId)?.delegationWorkspaceGeneration).toBe(4);
     expect(await send('/new')).toMatchObject({ success: true });
-    expect((await delegation.laneStore.lanesForThread(threadId)).every(value => !value.contextResetPending && value.state === 'ready')).toBe(true);
+    expect((await delegation.laneStore.lanesForThread(threadId)).every(value => !value.contextResetPending && value.nativeDeleteRequested && value.state === 'dirty')).toBe(true);
   });
 
   it('retains reset intent when thread metadata persistence fails without changing unrelated persistence semantics', async () => {

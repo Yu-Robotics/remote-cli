@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
@@ -93,6 +94,40 @@ describe('CodexAppServerExecutor', () => {
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
     await fs.rm(tempHome, { recursive: true, force: true });
+  });
+
+  it('persists a managed creation receipt before its first turn and never observes a foreground session', async () => {
+    expect(() => executor.observeNativeSessionCreation(async () => {})).toThrow('managed worker');
+    await executor.destroy();
+    const nativeHome = path.join(tempHome, '.codex');
+    await fs.mkdir(nativeHome);
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = nativeHome;
+    const persisted = deferred<void>();
+    transport.nextThreadId = randomUUID();
+    executor = new CodexAppServerExecutor(new DirectoryGuard([projectDir]), {
+      threadId: `delegate-lane-${randomUUID()}`, delegationWorker: true,
+      initialWorkingDirectory: projectDir, clientFactory: () => transport,
+    });
+    const observer = vi.fn(() => persisted.promise);
+    executor.observeNativeSessionCreation(observer);
+    const running = executor.execute('Synthetic owned task');
+    try {
+      await vi.waitFor(() => expect(observer).toHaveBeenCalledOnce());
+      expect(observer.mock.calls[0][0]).toMatchObject({ sessionId: transport.nextThreadId, backend: 'codex',
+        nativeHome: { path: nativeHome } });
+      expect(transport.requests.some(item => item.method === 'turn/start')).toBe(false);
+      persisted.resolve();
+      await vi.waitFor(() => expect(transport.requests.some(item => item.method === 'turn/start')).toBe(true));
+      transport.emit({ method: 'turn/completed', params: { threadId: transport.nextThreadId, turn: { id: 'turn-1', status: 'completed' } } });
+      expect(await running).toMatchObject({ success: true });
+    } finally {
+      persisted.resolve();
+      await executor.destroy();
+      await running;
+      if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previousCodexHome;
+    }
   });
 
   it('resolves prompt context using the native thread created or resumed before dispatch', async () => {

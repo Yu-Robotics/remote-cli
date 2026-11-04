@@ -46,10 +46,12 @@ describe('Pi RPC helpers', () => {
   });
 
   it('prefers a concrete session file and omits provider when the model already includes one', () => {
+    const sessionFile = path.join(os.tmpdir(), 'session.jsonl');
+    const sessionDir = path.join(os.tmpdir(), 'pi-store');
     expect(buildPiRpcArgs({
       approveProject: false,
-      sessionFile: '/tmp/session.jsonl',
-      sessionDir: '/tmp/pi-store',
+      sessionFile,
+      sessionDir,
       sessionId: 'ignored',
       provider: 'google',
       model: 'anthropic/claude-sonnet-4',
@@ -58,7 +60,8 @@ describe('Pi RPC helpers', () => {
       args: [
         '--mode', 'rpc',
         '--no-approve',
-        '--session', '/tmp/session.jsonl',
+        '--session-dir', sessionDir,
+        '--session', sessionFile,
         '--model', 'anthropic/claude-sonnet-4',
       ],
     });
@@ -327,7 +330,7 @@ describe('PiClient process lifecycle', () => {
     });
     vi.mocked(spawn).mockReturnValue(proc as any);
     const factory = vi.fn((_guard, _config, cwd, threadId) => new PiExecutor(guard, {
-      initialWorkingDirectory: cwd, threadId, sessionBaseDir: path.join(project, 'sessions'),
+      initialWorkingDirectory: cwd, threadId, delegationWorker: true, sessionBaseDir: path.join(project, 'sessions'),
       clientFactory: launch => new PiClient({ ...launch, killEscalationMs: 10 }),
     }));
     const manager = new DelegationManager(guard, factory as any, new BackendRegistry(async () => '1.0'),

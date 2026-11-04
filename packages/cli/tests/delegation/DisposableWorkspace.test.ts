@@ -41,6 +41,19 @@ describe('versioned disposable workspace closeout', { timeout: 30_000 }, () => {
     await fs.writeFile(laneFile(), JSON.stringify(workspace));
   };
 
+  it('preserves pending output and immutable exports when a parent reset requests native cleanup', async () => {
+    await fs.writeFile(path.join(workspace.directory, 'source.txt'), 'partial synthetic output');
+    await fs.writeFile(path.join(workspace.directory, 'export.txt'), 'immutable export');
+    const artifact = await manager.collect(workspace, false, { exitConfirmed: true,
+      exports: ['export.txt'], preserveForRecovery: async () => true });
+    expect(artifact.disposition).toBe('pending');
+    expect(await fs.readFile(path.join(workspace.directory, 'source.txt'), 'utf8')).toBe('partial synthetic output');
+    const before = await fs.readFile(artifactFile());
+    expect(await manager.retryReclamation({ excludedLaneIds: new Set([lane.id]) })).toMatchObject({ attempted: 0 });
+    expect(await fs.readFile(artifactFile())).toEqual(before);
+    expect(await manager.describe(workspace.taskId)).toEqual(artifact);
+  });
+
   it('holds existing disposable receipts when opened on an unsupported platform', async () => {
     const extra = path.join(workspace.directory, 'node_modules', 'scratch.txt');
     await fs.mkdir(path.dirname(extra), { recursive: true });

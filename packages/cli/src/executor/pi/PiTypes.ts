@@ -74,10 +74,10 @@ export function buildPiRpcArgs(options: PiLaunchOptions): { command: string; arg
   if (options.delegation) args.push('--extension', path.join(__dirname, '../../delegation/piExtension.js'));
   if (options.approveProject === true) args.push('--approve');
   else if (options.approveProject === false) args.push('--no-approve');
+  if (options.sessionDir) args.push('--session-dir', options.sessionDir);
   if (options.sessionFile) {
     args.push('--session', options.sessionFile);
   } else {
-    if (options.sessionDir) args.push('--session-dir', options.sessionDir);
     if (options.sessionId) args.push('--session-id', options.sessionId);
   }
   if (options.sessionName) args.push('--name', options.sessionName);
