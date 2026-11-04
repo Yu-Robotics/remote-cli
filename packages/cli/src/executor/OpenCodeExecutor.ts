@@ -1,6 +1,8 @@
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import { AcpExecutor } from './AcpExecutor';
 import type { AcpEventCallbacks, AcpTransport } from './acp/AcpClient';
+import os from 'os';
+import { captureOpenCodeDeletionTarget } from '../delegation/OpenCodeSessionDeletion';
 
 /** Disable the native question tool without changing user or project configuration. */
 function noQuestionEnvironment(): NodeJS.ProcessEnv {
@@ -69,6 +71,8 @@ export class OpenCodeExecutor extends AcpExecutor {
       delegationWorker: options.delegationWorker,
       sessionBaseDir: options.sessionBaseDir,
       clientFactory: options.clientFactory,
+      nativeSessionCapture: options.delegationWorker && process.platform === 'linux'
+        ? session => captureOpenCodeDeletionTarget({ ...session, home: os.homedir() }) : undefined,
       acpCommand: options.openCodeCommand ?? 'opencode',
       acpArgs: ['acp'],
       spawnEnvironment: (options.autoApprove ?? true) ? noQuestionEnvironment : undefined,

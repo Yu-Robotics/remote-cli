@@ -90,6 +90,11 @@ describe('DshExecutor', () => {
     expect(current().loadSession).not.toHaveBeenCalled();
   });
 
+  it('rejects owned history overlays on ordinary foreground executors', () => {
+    expect(() => create({ managedHistoryPatch: '- id: synthetic-owned-scope\n' })).toThrow('managed worker');
+    expect(transports).toHaveLength(0);
+  });
+
   it('fails before creating a process when the requested working directory is not allowed', () => {
     expect(() => create({ initialWorkingDirectory: '/outside-dsh-test' })).toThrow();
     expect(transports).toHaveLength(0);

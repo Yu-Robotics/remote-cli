@@ -9,6 +9,7 @@ import type { ExecuteOptions, ExecuteResult, ExecutorContextUsage, ExecutorModel
 import { COMPACT_HANDOFF_PROMPT, seedPromptWithHandoff } from './compactHandoff';
 import { DshAcpClient } from './dsh/DshAcpClient';
 import { queryDshAccountUsage } from './dsh/DshAccountUsage';
+import { DshManagedHistory } from '../delegation/DshManagedHistory';
 
 export interface DshExecutorOptions {
   model?: string;
@@ -18,6 +19,8 @@ export interface DshExecutorOptions {
   dshCommand?: string;
   threadId?: string;
   delegationWorker?: boolean;
+  /** Produced by dshHistoryPatch for a durably recorded, newly owned scope. */
+  managedHistoryPatch?: string;
   sessionBaseDir?: string;
   clientFactory?: (callbacks: AcpEventCallbacks, cwd: string) => AcpTransport;
   accountUsageQuery?: (command: string, cwd: string) => Promise<string | null>;
@@ -43,10 +46,14 @@ export class DshExecutor extends AcpExecutor {
   private readonly accountUsageQuery: NonNullable<DshExecutorOptions['accountUsageQuery']>;
 
   constructor(guard: DirectoryGuard, options: DshExecutorOptions = {}) {
+    if (options.managedHistoryPatch && !options.delegationWorker) throw new Error('DSH owned history requires a managed worker');
     // Do not silently launch a DSH task in a different workspace when admission fails.
     if (options.initialWorkingDirectory) guard.resolveWorkingDirectory(options.initialWorkingDirectory, process.cwd());
     const state: DshState = { images: false, usage: null, recoveryNotice: false, compacting: false, generation: 0 };
     const directory = options.sessionBaseDir ?? path.join(os.homedir(), '.remote-cli', 'dsh-sessions');
+    const history = options.delegationWorker && process.platform === 'linux' && options.threadId
+      && /^delegate-lane-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(options.threadId) && !options.managedHistoryPatch
+      ? new DshManagedHistory(os.homedir(), options.threadId, path.join(directory, `${options.threadId}.json`)) : undefined;
     const handoffFile = path.join(directory, `${options.threadId ?? 'default'}.handoff.json`);
     const clearHandoff = () => {
       fs.rmSync(handoffFile, { force: true });
@@ -54,6 +61,8 @@ export class DshExecutor extends AcpExecutor {
     };
     super(guard, {
       ...options,
+      prepareNativeSession: history ? cwd => history.prepare(cwd) : undefined,
+      nativeSessionCapture: history ? session => history.capture(session.sessionId) : undefined,
       acpCommand: options.dshCommand ?? 'dsh', acpArgs: ['acp'],
       backendLabel: 'DeepSeek Harness', sessionNamespace: 'dsh-sessions',
       effortConfigId: 'reasoning_effort', effortAutoValue: '',
@@ -68,7 +77,7 @@ export class DshExecutor extends AcpExecutor {
           }
         } };
         const transport = options.clientFactory?.(wrapped, cwd)
-          ?? new DshAcpClient(options.dshCommand ?? 'dsh', cwd, wrapped, undefined, options.delegationWorker);
+          ?? new DshAcpClient(options.dshCommand ?? 'dsh', cwd, wrapped, undefined, options.delegationWorker, history?.patch || options.managedHistoryPatch);
         return {
           initialize: async () => {
             const result = await transport.initialize() as { agentCapabilities?: { promptCapabilities?: { image?: boolean } } };

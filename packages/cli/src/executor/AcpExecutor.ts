@@ -43,6 +43,13 @@ export interface AcpExecutorOptions {
   spawnEnvironment?: () => NodeJS.ProcessEnv;
   /** Only Kimi's audited ACP creation path opts into native deletion receipts. */
   nativeDeletion?: { home: string; root: string };
+  /** Persist an owned native storage scope before the corresponding transport starts. */
+  prepareNativeSession?: (cwd: string) => Promise<void>;
+  /** Capture backend-specific ownership only after newSession and pointer persistence. */
+  nativeSessionCapture?: (session: {
+    sessionId: string; executorThreadId: string; pointer: string; cwd: string;
+    command: string; initialized: unknown;
+  }) => Promise<NativeSessionDeletionTarget>;
 }
 
 interface QueuedCommand {
@@ -275,7 +282,7 @@ export abstract class AcpExecutor implements IExecutor {
   }
 
   observeNativeSessionCreation(observer: (target: NativeSessionDeletionTarget) => Promise<void>, onFailure?: () => Promise<void>): void {
-    if (!this.options.nativeDeletion) return;
+    if (!this.options.nativeDeletion && !this.options.nativeSessionCapture) return;
     if (!this.delegationWorker || !this.threadId?.startsWith('delegate-lane-')) throw new Error('Native observation requires a managed worker');
     this.nativeObserver = observer;
     this.nativeCaptureFailure = onFailure;
@@ -664,6 +671,14 @@ export abstract class AcpExecutor implements IExecutor {
     if (this.isDestroyed && managed) throw new Error('Executor has been destroyed');
     assertWorkingDirectoryExists(this.currentWorkingDirectory);
     if (this.client && this.sessionId) return { client: this.client, sessionId: this.sessionId };
+    const revision = this.catalogLifecycleRevision;
+    if (this.options.prepareNativeSession) {
+      await this.options.prepareNativeSession(this.currentWorkingDirectory);
+      selection?.assertCurrent();
+      if (managed && (this.isDestroyed || revision !== this.catalogLifecycleRevision)) {
+        throw new Error(`${this.backendLabel} session initialization was cancelled.`);
+      }
+    }
     this.reportedConfigOptions = [];
     // A previous process cannot advertise native approval capabilities for its replacement.
     if (this.options.approvalModes) this.configOptions = this.configOptions.filter(option => option.id !== 'mode');
@@ -671,7 +686,6 @@ export abstract class AcpExecutor implements IExecutor {
     if (this.delegationWorker) this.workerTransports.add(client);
     const trackInitialization = managed || this.options.approvalModes !== undefined;
     this.transports.set(client, trackInitialization);
-    const revision = this.catalogLifecycleRevision;
     const assertCurrent = () => {
       selection?.assertCurrent();
       if (trackInitialization && (this.isDestroyed || revision !== this.catalogLifecycleRevision || !this.transports.has(client))) {
@@ -716,17 +730,23 @@ export abstract class AcpExecutor implements IExecutor {
         this.sessionId = result.sessionId;
         try { this.saveSessionPointer(); }
         catch (error) { if (this.nativeObserver) await this.reportNativeCaptureFailure(); throw error; }
-        if (this.nativeObserver && this.options.nativeDeletion && this.threadId) {
+        if (this.nativeObserver && (this.options.nativeDeletion || this.options.nativeSessionCapture) && this.threadId) {
           let target: NativeSessionDeletionTarget | undefined;
           try {
-            if (!kimiDeletionCapability(initialized)) throw new Error('Unaudited Kimi ACP capability');
-            if (!nativeRoot) throw new Error('Kimi creation root is unconfirmed');
-            await verifyHistoryDirectory(nativeRoot);
-            const root = path.resolve(this.currentWorkingDirectory, this.options.nativeDeletion.root);
-            target = await captureHistoryTarget({ backend: 'kimi', sessionId: this.sessionId, executorThreadId: this.threadId,
-              home: this.options.nativeDeletion.home, nativeHome: root,
-              scope: root, pointer: this.sessionFilePath,
-              cwd: this.currentWorkingDirectory, command: this.options.acpCommand });
+            if (this.options.nativeSessionCapture) {
+              target = await this.options.nativeSessionCapture({ sessionId: this.sessionId,
+                executorThreadId: this.threadId, pointer: this.sessionFilePath, cwd: this.currentWorkingDirectory,
+                command: this.options.acpCommand, initialized });
+            } else if (this.options.nativeDeletion) {
+              if (!kimiDeletionCapability(initialized)) throw new Error('Unaudited Kimi ACP capability');
+              if (!nativeRoot) throw new Error('Kimi creation root is unconfirmed');
+              await verifyHistoryDirectory(nativeRoot);
+              const root = path.resolve(this.currentWorkingDirectory, this.options.nativeDeletion.root);
+              target = await captureHistoryTarget({ backend: 'kimi', sessionId: this.sessionId, executorThreadId: this.threadId,
+                home: this.options.nativeDeletion.home, nativeHome: root,
+                scope: root, pointer: this.sessionFilePath,
+                cwd: this.currentWorkingDirectory, command: this.options.acpCommand });
+            }
           } catch { await this.reportNativeCaptureFailure(); }
           if (target) {
             try { await this.nativeObserver(target); }

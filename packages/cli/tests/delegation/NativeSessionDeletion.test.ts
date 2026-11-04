@@ -3,7 +3,7 @@ import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { captureCodexDeletionTarget, deleteOwnedCodexSession, deletionPreparation, NativeSessionDeletionQueue,
+import { captureCodexDeletionTarget, deleteOwnedCodexSession as deleteNativeSession, deletionPreparation, NativeSessionDeletionQueue,
   type NativeSessionDeletionTarget, type NativeDeletionPreparation } from '../../src/delegation/NativeSessionDeletion';
 
 // Synthetic values with the required Thread fields and source variants from the
@@ -17,17 +17,21 @@ const sourceKinds = ['cli', 'vscode', 'exec', 'appServer', 'subAgent', 'subAgent
   'subAgentCompact', 'subAgentThreadSpawn', 'subAgentOther', 'unknown'];
 
 describe('permanent native session deletion', () => {
+  let maintenanceFence: ReturnType<typeof vi.fn>;
+  const deleteOwnedCodexSession: typeof deleteNativeSession = (target, factory, recovery = {}) =>
+    deleteNativeSession(target, factory, { persistMaintenanceState: maintenanceFence, ...recovery });
   let home: string;
   let pointer: string;
   let target: NativeSessionDeletionTarget;
   let root: ReturnType<typeof metadata>;
   let unrelated: ReturnType<typeof metadata>;
   let respond: ReturnType<typeof vi.fn>;
-  let client: { start: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn>; getServerVersion: ReturnType<typeof vi.fn>; request: ReturnType<typeof vi.fn> };
+  let client: { start: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn>; waitForManagedProcessGroupExit: ReturnType<typeof vi.fn>; getServerVersion: ReturnType<typeof vi.fn>; request: ReturnType<typeof vi.fn> };
   let factory: ReturnType<typeof vi.fn>;
   const list = (data: unknown[], nextCursor: string | null = null) => ({ data, nextCursor, backwardsCursor: null });
   const wasDeleted = () => client.request.mock.calls.some(([method]) => method === 'thread/delete');
   beforeEach(async () => {
+    maintenanceFence = vi.fn(async () => {});
     home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'native-deletion-')));
     vi.spyOn(os, 'homedir').mockReturnValue(home);
     vi.stubEnv('HOME', home);
@@ -45,7 +49,7 @@ describe('permanent native session deletion', () => {
     unrelated = metadata(randomUUID(), { cwd: home, source: 'cli', status: { type: 'active', activeFlags: [] } });
     respond = vi.fn(async (method: string, params: any) => method === 'thread/read' ? { thread: root }
       : method === 'thread/list' ? list(params.archived ? [] : [unrelated, root]) : {});
-    client = { start: vi.fn(async () => {}), stop: vi.fn(async () => {}), getServerVersion: vi.fn(() => '0.166.0'),
+    client = { start: vi.fn(async () => {}), stop: vi.fn(async () => {}), waitForManagedProcessGroupExit: vi.fn(async () => {}), getServerVersion: vi.fn(() => '0.166.0'),
       request: vi.fn(async (method: string, params: any) => {
         // Exact protocol request keys; no unsupported ancestorThreadId filter.
         if (method === 'thread/list') {
@@ -61,6 +65,29 @@ describe('permanent native session deletion', () => {
     factory = vi.fn(() => client);
   });
   afterEach(async () => { vi.restoreAllMocks(); vi.unstubAllEnvs(); await fs.rm(home, { recursive: true, force: true }); });
+
+  it('persists maintenance admission before startup and clears it only after group exit', async () => {
+    expect(await deleteOwnedCodexSession(target, factory)).toMatchObject({ state: 'deleted' });
+    expect(maintenanceFence.mock.calls).toEqual([[true], [false]]);
+    expect(maintenanceFence.mock.invocationCallOrder[0]).toBeLessThan(factory.mock.invocationCallOrder[0]);
+    expect(client.stop.mock.invocationCallOrder[0]).toBeLessThan(client.waitForManagedProcessGroupExit.mock.invocationCallOrder[0]);
+    expect(client.waitForManagedProcessGroupExit.mock.invocationCallOrder[0]).toBeLessThan(maintenanceFence.mock.invocationCallOrder[1]);
+    expect(factory.mock.calls[0][0].delegationWorker).toBe(true);
+  });
+
+  it.each(['stop', 'waitForManagedProcessGroupExit'] as const)('retains maintenance fencing when %s cannot prove shutdown', async method => {
+    client[method].mockRejectedValue(new Error('Synthetic shutdown uncertainty'));
+    expect(await deleteOwnedCodexSession(target, factory)).toMatchObject({ state: 'uncertain' });
+    expect(maintenanceFence.mock.calls).toEqual([[true]]);
+  });
+
+  it('does not launch maintenance without durable fencing', async () => {
+    expect(await deleteNativeSession(target, factory)).toMatchObject({ state: 'held' });
+    expect(factory).not.toHaveBeenCalled();
+    maintenanceFence.mockRejectedValue(new Error('Synthetic persistence failure'));
+    expect(await deleteOwnedCodexSession(target, factory)).toMatchObject({ state: 'held' });
+    expect(factory).not.toHaveBeenCalled();
+  });
 
   it('allows root and unrelated entries, deletes only the owned identity and preserves pointers/artifacts', async () => {
     const artifact = path.join(home, 'immutable-artifact');

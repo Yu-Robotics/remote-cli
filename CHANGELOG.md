@@ -13,6 +13,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.217] - 2026-11-05
+
+### Added
+- Extend managed child-session retirement to OpenCode, AGY, DSH, and ZCode using recorded creation ownership and backend-specific history or protocol checks, without pinning installed package versions.
+- Preserve native deliverables independently before ZCode history deletion and isolate new managed DSH history storage while retaining normal authentication and configuration sources.
+
+### Fixed
+- Persist maintenance-writer fences for Codex cleanup and retain them when process-group shutdown cannot be confirmed.
+- Persist deletion preparations for backend-native session identifiers rather than requiring every backend to use UUIDs.
+- Preserve ordinary AGY execution in legacy shared-cache lanes while holding cleanup, and reject case-only aliases of adopted native identities.
+
+### Tests
+- Cover native creation, reused worker contexts, durable cleanup recovery, retained outputs, and synthetic filesystem boundaries.
+
 ## [1.6.216] - 2026-11-04
 
 ### Fixed

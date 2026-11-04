@@ -40,6 +40,8 @@ interface PendingInteraction {
 }
 
 export interface ZCodeClientOptions {
+  /** Restrict a separate cleanup transport to read-only measurement and native purge. */
+  maintenance?: boolean;
   delegationWorker?: boolean;
   cwd: string;
   command?: string;
@@ -56,6 +58,7 @@ const REQUEST_TIMEOUT_MS = 30_000;
 export class ZCodeClient implements AcpTransport {
   private readonly workerGroups = new ManagedProcessGroups();
   private readonly workerGroupEnabled: boolean;
+  private readonly maintenance: boolean;
   private readonly child: ChildProcess;
   private readonly callbacks: AcpEventCallbacks;
   private readonly cwd: string;
@@ -76,6 +79,7 @@ export class ZCodeClient implements AcpTransport {
   private readonly exited: Promise<void>;
 
   constructor(options: ZCodeClientOptions, callbacks: AcpEventCallbacks) {
+    this.maintenance = options.maintenance === true;
     this.workerGroupEnabled = options.delegationWorker === true;
     this.callbacks = callbacks;
     this.cwd = options.cwd;
@@ -96,7 +100,7 @@ export class ZCodeClient implements AcpTransport {
     this.child.stdout?.on('error', () => {});
     this.child.stderr?.on('data', (chunk: Buffer) => {
       const message = chunk.toString().trimEnd();
-      if (message) console.error(`[ZCodeClient stderr] ${message}`);
+      if (message && !this.maintenance) console.error(`[ZCodeClient stderr] ${message}`);
     });
     this.reader = readline.createInterface({ input: this.child.stdout! });
     this.reader.on('line', (line) => this.handleLine(line));
@@ -110,6 +114,14 @@ export class ZCodeClient implements AcpTransport {
 
   async initialize(): Promise<unknown> {
     return {};
+  }
+
+  requestSessionData(action: 'measure' | 'purge', sessionId: string): Promise<unknown> {
+    if (!this.maintenance || !['measure', 'purge'].includes(action) || !sessionId
+      || sessionId.length > 128 || /[^A-Za-z0-9_-]/.test(sessionId)) {
+      return Promise.reject(new Error('Invalid ZCode maintenance request'));
+    }
+    return this.request(`v4/storage/sessionData/${action}`, { sessionIds: [sessionId], directories: [] }, 15_000);
   }
 
   async newSession(cwd: string, mcpServers?: AcpMcpServer[]): Promise<AcpSessionResult> {
@@ -264,6 +276,9 @@ export class ZCodeClient implements AcpTransport {
   }
 
   private request(method: string, params: Record<string, unknown>, timeoutMs = this.requestTimeoutMs): Promise<any> {
+    if (this.maintenance && !['v4/storage/sessionData/measure', 'v4/storage/sessionData/purge'].includes(method)) {
+      return Promise.reject(new Error('Disallowed ZCode maintenance request'));
+    }
     return new Promise((resolve, reject) => {
       const id = this.nextId++;
       const timer = setTimeout(() => {
@@ -303,7 +318,9 @@ export class ZCodeClient implements AcpTransport {
       if (!pending) return;
       this.pending.delete(Number(id));
       clearTimeout(pending.timer);
-      if (message.error) pending.reject(new Error(this.formatError(message.error)));
+      if (message.error) pending.reject(this.maintenance
+        ? Object.assign(new Error('ZCode maintenance RPC failed'), { code: message.error.code })
+        : new Error(this.formatError(message.error)));
       else pending.resolve(message.result);
       return;
     }
@@ -316,6 +333,11 @@ export class ZCodeClient implements AcpTransport {
   }
 
   private async handleServerRequest(id: number | string, method: string, params: Record<string, any>): Promise<void> {
+    if (this.maintenance) {
+      // Never look up provider credentials or run an interactive action during cleanup.
+      this.write({ id, error: { code: -32601, message: 'Unavailable during maintenance' } });
+      return;
+    }
     if (method === 'session/requestRuntimePreferences') {
       this.respond(id, {
         nativeSearchEnhancementsEnabled: false,

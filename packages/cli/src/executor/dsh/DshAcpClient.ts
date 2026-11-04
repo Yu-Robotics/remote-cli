@@ -17,8 +17,9 @@ export class DshAcpClient extends AcpClient {
   private stopped = false;
   private readonly permission: AcpEventCallbacks['onPermissionRequest'];
 
-  constructor(command: string, cwd: string, callbacks: AcpEventCallbacks, private readonly controlTimeout = 30_000, delegationWorker = false) {
-    const launch = createDshPrivacyLaunch();
+  constructor(command: string, cwd: string, callbacks: AcpEventCallbacks, private readonly controlTimeout = 30_000, delegationWorker = false, managedHistoryPatch = '') {
+    if (managedHistoryPatch && !delegationWorker) throw new Error('DSH owned history requires a managed worker');
+    const launch = createDshPrivacyLaunch(managedHistoryPatch);
     try {
       super(command, launch.args, cwd, {
         ...callbacks,
