@@ -130,6 +130,17 @@ const nativeId = (value: unknown): string => {
   return value.toLowerCase();
 };
 
+/** Only opaque ASCII labels are provably unrelated; other malformed values still hold. */
+function nonNativePointerLabel(value: unknown): boolean {
+  // Codex ThreadId::from_string delegates to uuid::Uuid::parse_str (openai/codex
+  // 6ff1e1ca3b30fc8b914720681fcf5fe62e95f856, protocol/src/thread_id.rs).
+  // uuid 1.20 accepts hex in hyphenated, compact, braced and urn:uuid: forms.
+  // Requiring a non-hex letter/underscore and excluding wrapper punctuation keeps all
+  // those spellings out of this exception. Noncanonical UUIDs remain held.
+  return typeof value === 'string' && value.length <= 128 && /^[a-z]/i.test(value)
+    && !/[^a-z0-9_-]/i.test(value) && /[g-z_]/i.test(value);
+}
+
 /** Every JSON binding is relevant, including direct/foreground and adopted sessions. */
 async function verifyExclusivePointer(target: CodexDeletionTarget, detachedPointer = false): Promise<void> {
   const directory = path.dirname(pointerFile(target));
@@ -144,6 +155,7 @@ async function verifyExclusivePointer(target: CodexDeletionTarget, detachedPoint
     const file = path.join(directory, entry.name);
     const value = JSON.parse((await readMetadata(file, target.home.path)).toString());
     if (!isObject(value)) throw new Error('Ambiguous native pointer metadata');
+    if (file !== pointerFile(target) && nonNativePointerLabel(value.id)) continue;
     const id = nativeId(value.id);
     if (file === pointerFile(target)) found = true;
     else if (id === nativeId(target.sessionId)) throw new Error('Another native pointer references this session');
@@ -289,10 +301,17 @@ export async function deleteOwnedCodexSession(target: NativeSessionDeletionTarge
   let client: NativeDeletionTransport | undefined;
   let deleting = false;
   let result: NativeDeletionResult;
+  let failureReason = 'Native target identity verification failed';
+  const verifyLocalIdentity = async (codex: CodexDeletionTarget) => {
+    failureReason = 'Native target identity verification failed';
+    await verifyNativeTarget(codex, recovery.detachedPointer);
+    failureReason = 'Native pointer inventory verification failed';
+    await verifyExclusivePointer(codex, recovery.detachedPointer);
+  };
   try {
     if (target.backend !== 'codex') throw new Error('Not a Codex deletion target');
-    await verifyNativeTarget(target, recovery.detachedPointer);
-    await verifyExclusivePointer(target, recovery.detachedPointer);
+    await verifyLocalIdentity(target);
+    failureReason = 'Native inventory, root, inactivity or descendant verification failed';
     client = factory({ command: target.command, cwd: target.nativeHome.path,
       env: { ...process.env, HOME: target.home.path, CODEX_HOME: target.nativeHome.path },
       launchArgs: ['-c', 'mcp_servers={}'] });
@@ -302,10 +321,12 @@ export async function deleteOwnedCodexSession(target: NativeSessionDeletionTarge
     const rootId = nativeId(target.sessionId);
     verifyNoDescendants(threads, rootId);
     const root = threads.get(rootId);
+    failureReason = 'Native deletion preparation verification failed';
     if (recovery.prepared !== undefined && !validDeletionPreparation(target, recovery.prepared)) {
       throw new Error('Native deletion preparation identity changed');
     }
     const preparation = recovery.prepared ?? deletionPreparation(target);
+    failureReason = 'Native inventory, root, inactivity or descendant verification failed';
     if (root) {
       if (root.sessionId !== rootId || root.parent || root.cwd !== target.cwd || root.ephemeral || root.status !== 'notLoaded') {
         throw new Error('Native root identity or inactivity is unconfirmed');
@@ -316,12 +337,11 @@ export async function deleteOwnedCodexSession(target: NativeSessionDeletionTarge
     } else if (!recovery.prepared) {
       throw new Error('Missing native root has no exact durable deletion preparation');
     }
-    await verifyNativeTarget(target, recovery.detachedPointer);
-    await verifyExclusivePointer(target, recovery.detachedPointer);
+    await verifyLocalIdentity(target);
     if (root && !recovery.prepared && recovery.persistPrepared) {
+      failureReason = 'Native deletion preparation verification failed';
       await recovery.persistPrepared(preparation);
-      await verifyNativeTarget(target, recovery.detachedPointer);
-      await verifyExclusivePointer(target, recovery.detachedPointer);
+      await verifyLocalIdentity(target);
     }
     // Only an exact prepared attempt may retry an absent root. Accept only the
     // target-specific missing-rollout response; generic errors and unprepared
@@ -343,7 +363,7 @@ export async function deleteOwnedCodexSession(target: NativeSessionDeletionTarge
       ? { state: 'unsupported', reason: 'Native permanent deletion protocol is unavailable' }
       : { state: deleting ? 'uncertain' : 'held', reason: deleting
         ? 'Native deletion outcome is uncertain; the exact target is retained for retry'
-        : 'Native identity, pointer, root, inactivity or descendant verification failed' };
+        : failureReason };
   } finally {
     if (client) {
       try { await client.stop(); }

@@ -13,6 +13,7 @@ import type { AcpEventCallbacks, AcpTransport } from '../../src/executor/acp/Acp
 import type { AcpContentBlock, AcpSessionResult } from '../../src/executor/acp/AcpTypes';
 import type { PiLaunchOptions, PiRpcResponse, PiTransport } from '../../src/executor/pi/PiTypes';
 import type { ActivityProgressInfo } from '../../src/types';
+import type { IExecutor } from '../../src/executor/IExecutor';
 
 // Mock child_process for AGY tests
 vi.mock('child_process', () => ({
@@ -113,25 +114,80 @@ class FakeCodexTransport {
 
 describe('Executor Activity Signal Integration', () => {
   let tempDir: string;
+  let executors: IExecutor[];
+  const track = <T extends IExecutor>(executor: T): T => {
+    executors.push(executor);
+    return executor;
+  };
+  const isolateHome = (home: string) => {
+    const drive = process.platform === 'win32' ? path.parse(home).root.replace(/[\\/]$/, '') : '';
+    vi.stubEnv('HOME', home);
+    vi.stubEnv('USERPROFILE', home);
+    vi.stubEnv('HOMEDRIVE', drive);
+    vi.stubEnv('HOMEPATH', home.slice(drive.length));
+    vi.stubEnv('CODEX_HOME', path.join(home, '.codex'));
+    vi.spyOn(os, 'homedir').mockReturnValue(home);
+  };
 
   beforeEach(async () => {
     tempDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'remote-cli-activity-test-')));
-    vi.spyOn(os, 'homedir').mockReturnValue(tempDir);
+    executors = [];
+    isolateHome(tempDir);
   });
 
   afterEach(async () => {
-    vi.restoreAllMocks();
-    await fs.rm(tempDir, { recursive: true, force: true });
+    try {
+      const stopped = await Promise.allSettled(executors.map(async executor => {
+        await executor.destroy();
+        await executor.waitForExit?.();
+      }));
+      for (const result of stopped) if (result.status === 'rejected') throw result.reason;
+      await fs.rm(tempDir, { recursive: true, force: true });
+    } finally {
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('isolates Codex and Pi from competing inherited home sources', async () => {
+    const inherited = path.join(tempDir, 'inherited');
+    const fixture = path.join(tempDir, 'fixture');
+    await fs.mkdir(inherited);
+    await fs.mkdir(fixture);
+    isolateHome(inherited);
+    vi.spyOn(os, 'homedir').mockReturnValue(fixture);
+    isolateHome(fixture);
+
+    const transport = new FakeCodexTransport();
+    const executor = track(new CodexAppServerExecutor(new DirectoryGuard([fixture]), {
+      initialWorkingDirectory: fixture, threadId: 'isolated-codex', clientFactory: () => transport as any,
+    }));
+    track(new PiExecutor(new DirectoryGuard([fixture]), {
+      initialWorkingDirectory: fixture, threadId: 'isolated-pi',
+      clientFactory: launch => new FakePiTransport(launch),
+    }));
+    const result = executor.execute('Synthetic home isolation check');
+    await vi.waitFor(() => expect(transport.requests.some(request => request.method === 'turn/start')).toBe(true));
+    transport.emit({ method: 'turn/completed', params: { turn: { id: 'turn-1', status: 'completed' } } });
+    expect((await result).success).toBe(true);
+    const pointer = path.join(fixture, '.remote-cli', 'codex-sessions', 'isolated-codex.json');
+    expect(JSON.parse(await fs.readFile(pointer, 'utf8')).id).toBe('codex-thread-1');
+    expect((await fs.stat(path.join(fixture, '.remote-cli', 'pi-sessions', 'store'))).isDirectory()).toBe(true);
+    expect(process.env.HOME).toBe(fixture);
+    expect(process.env.USERPROFILE).toBe(fixture);
+    expect(process.env.CODEX_HOME).toBe(path.join(fixture, '.codex'));
+    expect(os.homedir()).toBe(fixture);
+    expect(await fs.readdir(inherited)).toEqual([]);
   });
 
   describe('CodexAppServerExecutor', () => {
     it('emits commentary in agentMessage/delta but skips final_answer', async () => {
       const transport = new FakeCodexTransport();
-      const executor = new CodexAppServerExecutor(new DirectoryGuard([tempDir]), {
+      const executor = track(new CodexAppServerExecutor(new DirectoryGuard([tempDir]), {
         initialWorkingDirectory: tempDir,
         threadId: 'test-codex',
         clientFactory: () => transport as any,
-      });
+      }));
 
       const activities: ActivityProgressInfo[] = [];
       const streamChunks: string[] = [];
@@ -194,11 +250,11 @@ describe('Executor Activity Signal Integration', () => {
 
     it('emits public reasoning summaries separated by itemId and excludes them from final output', async () => {
       const transport = new FakeCodexTransport();
-      const executor = new CodexAppServerExecutor(new DirectoryGuard([tempDir]), {
+      const executor = track(new CodexAppServerExecutor(new DirectoryGuard([tempDir]), {
         initialWorkingDirectory: tempDir,
         threadId: 'test-codex-reasoning',
         clientFactory: () => transport as any,
-      });
+      }));
 
       const activities: ActivityProgressInfo[] = [];
       const streamChunks: string[] = [];
@@ -251,9 +307,9 @@ describe('Executor Activity Signal Integration', () => {
 
     it('emits current native plan steps and preserves unfinished work when the turn ends', async () => {
       const transport = new FakeCodexTransport();
-      const executor = new CodexAppServerExecutor(new DirectoryGuard([tempDir]), {
+      const executor = track(new CodexAppServerExecutor(new DirectoryGuard([tempDir]), {
         initialWorkingDirectory: tempDir, threadId: 'codex-plan', clientFactory: () => transport as any,
-      });
+      }));
       const activities: ActivityProgressInfo[] = [];
       const run = executor.execute('Follow a plan', { onActivity: value => activities.push(value) });
       await vi.waitFor(() => expect(transport.requests.some(request => request.method === 'turn/start')).toBe(true));
@@ -272,11 +328,11 @@ describe('Executor Activity Signal Integration', () => {
 
     it('emits safe command descriptions without leaking raw commands or sensitive arguments', async () => {
       const transport = new FakeCodexTransport();
-      const executor = new CodexAppServerExecutor(new DirectoryGuard([tempDir]), {
+      const executor = track(new CodexAppServerExecutor(new DirectoryGuard([tempDir]), {
         initialWorkingDirectory: tempDir,
         threadId: 'test-codex-command',
         clientFactory: () => transport as any,
-      });
+      }));
 
       const activities: ActivityProgressInfo[] = [];
 
@@ -322,7 +378,7 @@ describe('Executor Activity Signal Integration', () => {
     it('emits public text, excludes thoughts, and emits native plan mode and todo tool plans', async () => {
       let callbacks: AcpEventCallbacks = {};
       const transport = new FakeAcpTransport();
-      const executor = new OpenCodeExecutor(new DirectoryGuard([tempDir]), {
+      const executor = track(new OpenCodeExecutor(new DirectoryGuard([tempDir]), {
         initialWorkingDirectory: tempDir,
         threadId: 'test-acp',
         sessionBaseDir: path.join(tempDir, 'sessions'),
@@ -330,7 +386,7 @@ describe('Executor Activity Signal Integration', () => {
           callbacks = cb;
           return transport;
         },
-      });
+      }));
 
       const activities: ActivityProgressInfo[] = [];
 
@@ -409,16 +465,20 @@ describe('Executor Activity Signal Integration', () => {
       mockChild.stdin = Object.assign(new EventEmitter(), { write: vi.fn(), end: vi.fn() });
       mockChild.stdout = new EventEmitter();
       mockChild.stderr = new EventEmitter();
-      mockChild.kill = vi.fn();
+      mockChild.kill = vi.fn(() => {
+        mockChild.emit('exit', 0, null);
+        mockChild.emit('close', 0, null);
+        return true;
+      });
       mockChild.pid = 12345;
 
       (spawn as any).mockReturnValue(mockChild);
 
       const threadId = `test-agy-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-      const executor = new AgyExecutor(new DirectoryGuard([tempDir]), {
+      const executor = track(new AgyExecutor(new DirectoryGuard([tempDir]), {
         initialWorkingDirectory: tempDir,
         threadId,
-      });
+      }));
 
       const activities: ActivityProgressInfo[] = [];
 
@@ -466,7 +526,7 @@ describe('Executor Activity Signal Integration', () => {
   describe('PiExecutor', () => {
     it('emits text_delta and excludes private thoughts', async () => {
       let transport: FakePiTransport;
-      const executor = new PiExecutor(new DirectoryGuard([tempDir]), {
+      const executor = track(new PiExecutor(new DirectoryGuard([tempDir]), {
         initialWorkingDirectory: tempDir,
         threadId: 'test-pi',
         clientFactory: (launch) => {
@@ -496,7 +556,7 @@ describe('Executor Activity Signal Integration', () => {
           });
           return transport;
         },
-      });
+      }));
 
       const activities: ActivityProgressInfo[] = [];
 
@@ -525,12 +585,16 @@ describe('Executor Activity Signal Integration', () => {
       mockChild.stdin = Object.assign(new EventEmitter(), { write: vi.fn(), end: vi.fn() });
       mockChild.stdout = new EventEmitter();
       mockChild.stderr = new EventEmitter();
-      mockChild.kill = vi.fn();
+      mockChild.kill = vi.fn(() => {
+        mockChild.emit('exit', 0, null);
+        mockChild.emit('close', 0, null);
+        return true;
+      });
       mockChild.pid = 23456;
 
       (spawn as any).mockReturnValue(mockChild);
 
-      const executor = new ClaudePersistentExecutor(new DirectoryGuard([tempDir]), tempDir);
+      const executor = track(new ClaudePersistentExecutor(new DirectoryGuard([tempDir]), tempDir));
 
       const activities: ActivityProgressInfo[] = [];
 
