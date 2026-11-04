@@ -5,7 +5,7 @@ import { deletionPreparation, validDeletionPreparation, type NativeDeletionRecov
 /** MoonshotAI/kimi-code@ec495f0cb00f6db9a9118bf979112886f4264a41, packages/acp-server/src/server.ts. */
 export function kimiDeletionCapability(value: any): boolean {
   const capability = value?.agentCapabilities?.sessionCapabilities?.delete;
-  return value?.protocolVersion === 1 && value.agentInfo?.version === '2.3.3'
+  return value?.protocolVersion === 1
     && !!capability && typeof capability === 'object' && !Array.isArray(capability);
 }
 export interface KimiDeletionTransport {
@@ -49,7 +49,7 @@ export async function deleteOwnedKimiSession(target: OwnedHistoryTarget, recover
     await recovery.persistMaintenanceState(true);
     client = factory(target);
     if (!kimiDeletionCapability(await bounded(client.initialize()))) {
-      result = { state: 'unsupported', reason: 'Kimi 2.3.3 permanent deletion capability is unavailable' };
+      result = { state: 'unsupported', reason: 'Kimi ACP permanent deletion capability is unavailable' };
     } else {
       if (!recovery.prepared) {
         if (!recovery.persistPrepared) throw new Error('Durable preparation is required');

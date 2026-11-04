@@ -48,11 +48,34 @@ describe('Kimi deletion-only maintenance', () => {
     expect(fence).toBe(false);
   });
   it.each([
-    {}, { protocolVersion: 1, agentInfo: { version: '2.3.4' }, agentCapabilities: { sessionCapabilities: { delete: {} } } },
+    {}, { protocolVersion: 2, agentCapabilities: { sessionCapabilities: { delete: {} } } },
     { protocolVersion: 1, agentInfo: { version: '2.3.3' }, agentCapabilities: { sessionCapabilities: { delete: true } } },
-  ])('fails closed on unaudited capabilities %j', async initialize => {
+    { protocolVersion: 1, agentCapabilities: { sessionCapabilities: { delete: [] } } },
+    { protocolVersion: 1, agentCapabilities: { sessionCapabilities: { delete: null } } },
+    { protocolVersion: 1, agentCapabilities: { sessionCapabilities: {} } },
+  ])('fails closed on unsupported capabilities %j', async initialize => {
     vi.mocked(client.initialize).mockResolvedValue(initialize);
     expect((await remove()).state).toBe('unsupported'); expect(client.permanentDelete).not.toHaveBeenCalled(); expect(fence).toBe(false);
+  });
+  it.each(['2.3.4', '9.0.0', undefined])('uses the ACP contract regardless of diagnostic version %s', async version => {
+    vi.mocked(client.initialize).mockResolvedValue({ protocolVersion: 1,
+      ...(version ? { agentInfo: { version } } : {}), agentCapabilities: { sessionCapabilities: { delete: {} } } });
+    expect((await remove()).state).toBe('deleted');
+    expect(prepared?.nativeVersion).toBe('kimi-acp-delete-v1');
+    expect(client.permanentDelete).toHaveBeenCalledWith(target.sessionId);
+  });
+  it.each(['2.3.3', 'kimi-acp-delete-v1'] as const)('preserves %s target and receipt after lost ACK and reload', async nativeVersion => {
+    if (target.backend !== 'kimi') throw new Error('Unexpected fixture backend');
+    target.nativeVersion = nativeVersion;
+    vi.mocked(client.permanentDelete).mockRejectedValueOnce(new Error('Synthetic lost acknowledgement'));
+    expect((await remove()).state).toBe('uncertain');
+    const saved = JSON.stringify({ target, prepared });
+    ({ target, prepared } = JSON.parse(saved));
+    vi.mocked(client.initialize).mockResolvedValue({ protocolVersion: 1, agentCapabilities: { sessionCapabilities: { delete: {} } } });
+    vi.mocked(client.permanentDelete).mockRejectedValue({ code: -32602, rpcMessage: `Unknown sessionId: ${target.sessionId}`,
+      data: { sessionId: target.sessionId } });
+    expect((await remove()).state).toBe('deleted');
+    expect(JSON.stringify({ target, prepared })).toBe(saved);
   });
   it('accepts only exact prepared missing-ID responses after a lost ACK', async () => {
     vi.mocked(client.permanentDelete).mockRejectedValue({ code: -32602, rpcMessage: `Unknown sessionId: ${target.sessionId}`,

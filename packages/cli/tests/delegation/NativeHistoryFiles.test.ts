@@ -43,6 +43,50 @@ describe('exact owned native history deletion', () => {
     return { result, prepared: prepared! };
   }
 
+  linuxIt.each(['2.1.309', '9.0.0', undefined])('deletes the supported Claude layout with diagnostic version %s', async version => {
+    const target = await fixture('claude');
+    await fs.writeFile(target.transcript!, JSON.stringify({ type: 'user', sessionId: target.sessionId,
+      cwd: home, version, message: { content: 'synthetic' } }) + '\n');
+    expect((await remove(target)).result.state).toBe('deleted');
+  });
+  it.each(['unknown-type', 'missing-message', 'invalid-message', 'foreign-cwd', 'foreign-id', 'non-object'])(
+    'holds unrecognized Claude transcript layout %s', async fault => {
+    const target = await fixture('claude');
+    const record: any = { type: 'user', sessionId: target.sessionId, cwd: home, message: { content: 'synthetic' } };
+    if (fault === 'unknown-type') record.type = 'unknown-format';
+    if (fault === 'missing-message') delete record.message;
+    if (fault === 'invalid-message') record.message.content = 123;
+    if (fault === 'foreign-cwd') record.cwd = path.join(home, 'foreign');
+    if (fault === 'foreign-id') record.sessionId = randomUUID();
+    await fs.writeFile(target.transcript!, JSON.stringify(fault === 'non-object' ? null : record) + '\n');
+    expect((await remove(target)).result.state).toBe('held');
+    expect((await fs.stat(target.transcript!)).isFile()).toBe(true);
+  });
+  it.each([undefined, 2, 4, '3'])('retains Pi histories with unsupported JSONL format %s', async version => {
+    const target = await fixture('pi');
+    expect(target.nativeVersion).toBe('pi-jsonl-v3');
+    await fs.writeFile(target.transcript!, JSON.stringify({ type: 'session', version, id: target.sessionId,
+      cwd: home, timestamp: '2026-01-01T00:00:00.000Z' }) + '\n');
+    expect((await remove(target)).result.state).toBe('held');
+    expect((await fs.stat(target.transcript!)).isFile()).toBe(true);
+  });
+  linuxIt.each(['pi', 'claude'] as const)('keeps legacy %s target hashes and manifests unchanged during missing-file retries', async backend => {
+    const target = await fixture(backend);
+    if (target.backend === 'pi') target.nativeVersion = '1.5.0';
+    if (target.backend === 'claude') target.nativeVersion = '2.1.308';
+    const originalTarget = JSON.stringify(target);
+    const first = await remove(target);
+    expect(first.result.state).toBe('deleted');
+    expect(first.prepared.nativeVersion).toBe(target.nativeVersion);
+    expect(first.prepared.targetHash).toBe(stableHistoryHash(target));
+    const originalPreparation = JSON.stringify(first.prepared);
+    const restored = JSON.parse(originalTarget);
+    const prepared = JSON.parse(originalPreparation);
+    expect((await remove(restored, prepared)).result.state).toBe('deleted');
+    expect(JSON.stringify(restored)).toBe(originalTarget);
+    expect(JSON.stringify(prepared)).toBe(originalPreparation);
+  });
+
   linuxIt.each(['pi', 'claude'] as const)('deletes only %s history and idempotently reconciles a lost acknowledgement', async backend => {
     const target = await fixture(backend);
     const other = await fixture(backend);
