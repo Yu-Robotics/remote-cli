@@ -9,6 +9,8 @@ import { captureHistoryTarget, claudeProjectName, type OwnedHistoryTarget } from
 import { DelegatedWorkerSessionStore, type DelegatedWorkerLane } from '../../src/delegation/DelegatedWorkerSessionStore';
 import { deletionPreparation } from '../../src/delegation/NativeSessionDeletion';
 
+// Manager ownership needs the real host's locking and boot identity. Only the
+// native deletion adapters require Linux; do not spoof the manager's platform.
 const nativeLinux = process.platform === 'linux';
 const linuxIt = nativeLinux ? it : it.skip;
 
@@ -27,7 +29,7 @@ describe('durable managed Kimi/Pi/Claude deletion integration', () => {
   beforeEach(async () => {
     home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'managed-history-')));
     vi.spyOn(os, 'homedir').mockReturnValue(home); vi.stubEnv('HOME', home); vi.stubEnv('USERPROFILE', home);
-    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux'); vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
     kimiDelete = vi.fn(async () => ({})); kimiExit = vi.fn(async () => {}); manager = createManager();
   });
   afterEach(async () => { await manager.destroy(); vi.restoreAllMocks(); vi.unstubAllEnvs(); await fs.rm(home, { recursive: true, force: true }); });
@@ -63,8 +65,7 @@ describe('durable managed Kimi/Pi/Claude deletion integration', () => {
   }
   async function current(id: string) { return (await manager.laneStore.lanesForThread('parent')).find(lane => lane.id === id)!; }
 
-  it.each(['kimi', 'pi', 'claude'] as const)('keeps %s reusable until reset and deletes only the cutoff generation', async (backend, context) => {
-    if (backend !== 'kimi' && !nativeLinux) { context.skip(); return; }
+  it.each(['kimi', 'pi', 'claude'] as const)('keeps %s reusable until reset and limits deletion to supported cutoff generations', async backend => {
     const old = await lane(backend); const first = await target(old); await ready(old);
     const reused = await manager.laneStore.acquire({ threadId: 'parent', backend, workingDirectory: home, workspaceGeneration: 0 });
     expect(reused.lane.id).toBe(old.id); await ready(reused.lane);
@@ -72,8 +73,13 @@ describe('durable managed Kimi/Pi/Claude deletion integration', () => {
     const artifact = path.join(home, 'result.txt'); await fs.writeFile(artifact, 'keep result and recovery');
     await manager.reconcileNativeSessionDeletions(); expect((await current(old.id)).nativeDeletion).toBeUndefined();
     await manager.requestNativeSessionDeletion('parent', 0); await manager.reconcileNativeSessionDeletions();
-    expect((await current(old.id)).nativeDeletion?.state).toBe('deleted'); expect((await current(future.id)).nativeDeleteRequested).not.toBe(true);
-    if (first.transcript) await expect(fs.stat(first.transcript)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect((await current(old.id)).nativeDeletion?.state).toBe(nativeLinux ? 'deleted' : 'unsupported');
+    expect((await current(future.id)).nativeDeleteRequested).not.toBe(true);
+    if (!nativeLinux) expect(kimiDelete).not.toHaveBeenCalled();
+    if (first.transcript) {
+      if (nativeLinux) await expect(fs.stat(first.transcript)).rejects.toMatchObject({ code: 'ENOENT' });
+      else expect((await fs.stat(first.transcript)).isFile()).toBe(true);
+    }
     if (next.transcript) expect((await fs.stat(next.transcript)).isFile()).toBe(true);
     expect(await fs.readFile(artifact, 'utf8')).toBe('keep result and recovery');
   });
@@ -95,13 +101,22 @@ describe('durable managed Kimi/Pi/Claude deletion integration', () => {
     await manager.destroy(); manager = createManager(); await manager.reconcileNativeSessionDeletions();
     expect((await current(worker.id)).nativeDeletion?.state).toBe('deleted');
   });
-  it('keeps an interrupted Kimi maintenance writer fenced across restart', async () => {
+  linuxIt('keeps an interrupted Kimi maintenance writer fenced across restart', async () => {
     const worker = await lane('kimi'); await target(worker); await ready(worker);
     kimiExit.mockRejectedValue(new Error('synthetic surviving writer'));
     await manager.requestNativeSessionDeletion('parent', 0); await manager.reconcileNativeSessionDeletions();
     expect((await current(worker.id)).nativeMaintenanceExitUnconfirmed).toBe(true);
     await manager.destroy(); manager = createManager(); await manager.reconcileNativeSessionDeletions();
     expect((await current(worker.id)).nativeDeletion?.state).toBe('waiting-exit'); expect(kimiDelete).toHaveBeenCalledOnce();
+  });
+  it('retains a persisted Kimi maintenance fence across restart on every host', async () => {
+    const worker = await lane('kimi'); await target(worker); await ready(worker);
+    await manager.requestNativeSessionDeletion('parent', 0);
+    await manager.laneStore.recordNativeMaintenance(worker.id, 0, true);
+    await manager.destroy(); manager = createManager(); await manager.reconcileNativeSessionDeletions();
+    expect((await current(worker.id)).nativeMaintenanceExitUnconfirmed).toBe(true);
+    expect((await current(worker.id)).nativeDeletion?.state).toBe('waiting-exit');
+    expect(kimiDelete).not.toHaveBeenCalled();
   });
   it.each(['kimi', 'pi', 'claude'] as const)('holds %s old identities and missing writer proof', async backend => {
     const worker = await lane(backend); await target(worker); await ready(worker, false);
