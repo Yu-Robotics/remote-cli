@@ -247,7 +247,7 @@ export class AgyExecutor implements IExecutor {
       : this.delegationWorker ? { REMOTE_CLI_DELEGATION_URL: undefined, REMOTE_CLI_DELEGATION_TOKEN: undefined } : {};
     if (!this.agyHome) return { ...process.env, ...delegationEnv };
     this.ensureThreadHome();
-    return { ...process.env, HOME: this.agyHome, ...(process.platform === 'win32' ? { USERPROFILE: this.agyHome } : {}), ...delegationEnv };
+    return { ...process.env, HOME: this.agyHome, ...(this.delegationWorker && process.platform === 'win32' ? { USERPROFILE: this.agyHome } : {}), ...delegationEnv };
   }
 
   /**
