@@ -40,6 +40,26 @@ describe('WebSocketClient', () => {
   });
 
   describe('connection management', () => {
+    it('logs actual close codes and per-socket epochs without close text or identities', async () => {
+      const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+      vi.useFakeTimers();
+      try {
+        const connect = client.connect();
+        mockWs.on.mock.calls.find((c: any) => c[0] === 'open')[1]();
+        await connect;
+        const closed = mockWs.on.mock.calls.find((c: any) => c[0] === 'close')[1];
+        closed(1009, Buffer.from('private-close-sentinel'));
+        expect(info).toHaveBeenCalledWith('[TaskDiagnostics]', expect.objectContaining({ event: 'socket_close', connectionEpoch: 1, code: 1009, reasonBytes: 22 }));
+        mockWs.on.mockClear();
+        client.disconnect();
+        const again = client.connect();
+        mockWs.on.mock.calls.find((c: any) => c[0] === 'open')[1]();
+        await again;
+        expect(info).toHaveBeenCalledWith('[TaskDiagnostics]', expect.objectContaining({ event: 'socket_open', connectionEpoch: 2 }));
+        expect(JSON.stringify(info.mock.calls)).not.toMatch(/private-close-sentinel|test-device-id|localhost/);
+      } finally { client.disconnect(); vi.useRealTimers(); info.mockRestore(); }
+    });
+
     it('signs fresh Router challenges without exposing the private key', async () => {
       const identity = generateKeyPairSync('ed25519', { publicKeyEncoding: { type: 'spki', format: 'pem' }, privateKeyEncoding: { type: 'pkcs8', format: 'pem' } });
       client = new WebSocketClient(serverUrl, deviceId, { identityLoader: async () => identity });

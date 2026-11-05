@@ -1,3 +1,4 @@
+import { CardDeliveryDiagnostics, type CardDiagnosticContext, deliveryEvent, safeCardError, safeSdkLogger } from '../utils/DeliveryDiagnostics';
 import * as lark from '@larksuiteoapi/node-sdk';
 import { v4 as uuidv4 } from 'uuid';
 import { BindingManager } from '../binding/BindingManager';
@@ -45,6 +46,8 @@ interface ToolPageRemainder {
  * Uses Feishu SDK's WSClient for WebSocket long connection
  */
 export class FeishuLongConnHandler {
+  private readonly cardDiagnostics = new CardDeliveryDiagnostics();
+  bindDiagnosticTask(cardId: string, taskId: string): void { this.cardDiagnostics.bind(cardId, taskId); }
   workerContexts?: WorkerContextCards;
   settingsCards?: SettingsCards;
   private client: lark.Client;
@@ -95,6 +98,7 @@ export class FeishuLongConnHandler {
       appSecret: config.appSecret,
       appType: lark.AppType.SelfBuild,
       domain: lark.Domain.Feishu,
+      logger: safeSdkLogger(),
     });
   }
 
@@ -497,7 +501,7 @@ export class FeishuLongConnHandler {
       const commandMessageId = uuidv4();
 
       // Register streaming session BEFORE sending command
-      const feishuMessageId = await this.sendStreamingStart(openId, `🤔 Executing ${command}...`, threadName);
+      const feishuMessageId = await this.sendStreamingStart(openId, `🤔 Executing ${command}...`, threadName, undefined, commandMessageId);
       const currentBinding = await this.bindingManager.getUserBinding(openId);
       if (!currentBinding?.devices.some((device: any) => device.deviceId === activeDevice.deviceId)) {
         throw new Error('Device ownership changed before the command could be sent.');
@@ -935,7 +939,7 @@ Examples:
 
       // Register streaming session BEFORE sending command to avoid race condition
       // where stream chunks arrive before registration
-      const feishuMessageId = await this.sendStreamingStart(openId, attachments ? '🖼️ Processing image...' : '🤔 Processing...', threadName);
+      const feishuMessageId = await this.sendStreamingStart(openId, attachments ? '🖼️ Processing image...' : '🤔 Processing...', threadName, undefined, commandMessageId);
       const currentBinding = await this.bindingManager.getUserBinding(openId);
       if (!currentBinding?.devices.some((device: any) => device.deviceId === activeDevice.deviceId)) {
         throw new Error('Device ownership changed before the command could be sent.');
@@ -1068,7 +1072,7 @@ Examples:
         },
       });
     } catch (error: any) {
-      console.error('Failed to reply to message:', error?.message || error);
+      deliveryEvent('text_reply_failed', safeCardError(error));
     }
   }
 
@@ -1087,7 +1091,7 @@ Examples:
       });
       return true;
     } catch (error: any) {
-      console.error('Failed to send message:', error?.message || error);
+      deliveryEvent('text_message_failed', safeCardError(error));
       return false;
     }
   }
@@ -1096,26 +1100,26 @@ Examples:
    * Send streaming message with card update support
    * Returns message_id for updating
    */
-  async sendStreamingStart(openId: string, initialText: string = '🤔 Thinking...', threadName?: string, cwd?: string): Promise<string | null> {
-    console.log(`[FeishuHandler] Creating interactive card v2 for ${openId}`);
+  async sendStreamingStart(openId: string, initialText: string = '🤔 Thinking...', threadName?: string, cwd?: string, diagnosticTaskId?: string): Promise<string | null> {
+    let attempted = false;
     try {
       const elements = this.createResponseHeaderElements(threadName || 'Resolving thread...', cwd);
       elements.push({ tag: 'markdown', content: initialText });
 
-      const result = await this.client.im.message.create({
+      const content = JSON.stringify({ schema: '2.0', body: { elements } });
+      attempted = true;
+      const result = await this.cardDiagnostics.deliver({ operation: 'create', taskId: diagnosticTaskId }, content, () => this.client.im.message.create({
         params: { receive_id_type: 'open_id' },
         data: {
           receive_id: openId,
           msg_type: 'interactive',
-          content: JSON.stringify({
-            schema: '2.0',
-            body: { elements },
-          }),
+          content,
         },
-      });
+      }));
       return result?.data?.message_id || null;
     } catch (error: any) {
-      console.error('Failed to send streaming start:', error?.message || error);
+      // Actual request failures are already aggregated at the send boundary.
+      if (!attempted) deliveryEvent('card_preparation_failed', safeCardError(error));
       return null;
     }
   }
@@ -1410,7 +1414,7 @@ Examples:
     const jsonSize = JSON.stringify(cardData).length;
     const sizeLimit = this.CARD_DATA_SIZE_LIMIT - this.CARD_SIZE_BUFFER;
 
-    console.log(`[FeishuHandler] Card data size: ${jsonSize} bytes, limit: ${sizeLimit} bytes`);
+    console.log(`[FeishuHandler] Card preflight size: ${jsonSize} UTF-16 units, limit: ${sizeLimit} units`);
 
     // Use buffer for safety (2.9MB instead of 3MB)
     if (jsonSize > sizeLimit) {
@@ -1429,9 +1433,11 @@ Examples:
    * @param elements Array of Feishu Card 2.0 elements
    * @returns The new message ID, or null on error
    */
-  private async createContinuationCard(openId: string, elements: any[], onTextFallback?: () => void, allowFallback = true, header?: Record<string, unknown>, rootId?: string): Promise<string | null> {
+  private async createContinuationCard(openId: string, elements: any[], onTextFallback?: () => void, allowFallback = true, header?: Record<string, unknown>, rootId?: string, diagnosticIndex?: number): Promise<string | null> {
+    let attempted = false;
     try {
       const content = JSON.stringify({ schema: '2.0', ...(header ? { header } : {}), body: { elements: limitCardTables(elements) } });
+      attempted = true;
       const result = await this.sendCardRequest(content, async body => {
         const response = await this.client.im.message.create({
           params: { receive_id_type: 'open_id' },
@@ -1444,19 +1450,21 @@ Examples:
         if (!response.code && response.data?.message_id) this.workerContexts?.remember(response.data.message_id,
           rootId ?? response.data.message_id, body);
         return response;
-      }, onTextFallback, allowFallback);
+      }, onTextFallback, allowFallback, { operation: 'create', rootId, index: diagnosticIndex });
 
       return result.data?.message_id || null;
     } catch (error: any) {
-      console.error('Failed to create continuation card:', error?.message || error);
+      // Actual request failures are already aggregated at the send boundary.
+      if (!attempted) deliveryEvent('card_preparation_failed', safeCardError(error));
       return null;
     }
   }
 
   /** Retry a confirmed table-limit or Markdown parse rejection once with readable text. */
-  private async sendCardRequest(content: string, send: (body: string) => Promise<any>, onTextFallback?: () => void, allowFallback = true): Promise<any> {
+  private async sendCardRequest(content: string, send: (body: string) => Promise<any>, onTextFallback?: () => void, allowFallback = true, context: CardDiagnosticContext = { operation: 'update' }): Promise<any> {
     const checkedSend = async (body: string) => {
-      const result = await send(this.workerContexts?.decorate(body) ?? body);
+      const decorated = this.workerContexts?.decorate(body) ?? body;
+      const result = await this.cardDiagnostics.deliver(context, decorated, () => send(decorated));
       if (result?.code) throw result;
       return result;
     };
@@ -1571,9 +1579,7 @@ Examples:
     });
   }
 
-  private async _updateStreamingMessage(messageId: string, elements: any[], openId?: string, continuationHeaderElements: any[] = [], trailingElements: any[] = [], keepCompletionWithBody = false): Promise<boolean> {
-    let updatingMessageId = messageId;
-    let updatingCardIndex = 0;
+  private async _updateStreamingMessage(messageId: string, elements: any[], openId?: string, continuationHeaderElements: any[] = [], trailingElements: any[] = [], keepCompletionWithBody = false, diagnosticOperation: 'update' | 'finalize' = 'update'): Promise<boolean> {
     try {
       // Get or initialize message chain
       let chain = this.messageChains.get(messageId);
@@ -1604,15 +1610,13 @@ Examples:
       const nextToolIds = chunks.map(chunk => new Set<string>(chunk.filter(isTool).map(element => element.element_id)));
       const clearDeliveredPage = async (index: number, elements: any[]) => {
         const cardId = chain[index];
-        updatingMessageId = cardId;
-        updatingCardIndex = index;
         const fallback = fallbackCards.has(index);
         const content = JSON.stringify({ schema: '2.0', body: { elements: fallback ? plainTextCard(elements) : elements } });
         await this.sendCardRequest(content, async body => {
           const result = await this.client.im.message.patch({ path: { message_id: cardId }, data: { content: body } });
           if (!result?.code) this.workerContexts?.remember(cardId, messageId, body);
           return result;
-        }, () => fallbackCards.add(index), !fallback);
+        }, () => fallbackCards.add(index), !fallback, { operation: 'tail-clear', cardId, rootId: messageId, index });
         hashes[index] = '';
       };
       // Remove previous owners before publishing moved tools, including still-active
@@ -1655,14 +1659,15 @@ Examples:
         nextHashes[index] = createHash('sha256').update(payloads[index]).digest('hex');
       };
       const patchCard = async (index: number): Promise<void> => {
-        if (hashes[index] === nextHashes[index]) return;
-        updatingMessageId = chain[index];
-        updatingCardIndex = index;
+        if (hashes[index] === nextHashes[index]) {
+          this.cardDiagnostics.skip({ operation: diagnosticOperation, cardId: chain[index], rootId: messageId, index });
+          return;
+        }
         await this.sendCardRequest(payloads[index], async content => {
           const result = await this.client.im.message.patch({ path: { message_id: chain[index] }, data: { content } });
           if (!result?.code) this.workerContexts?.remember(chain[index], messageId, content);
           return result;
-        }, () => usePlainText(index), !fallbackCards.has(index));
+        }, () => usePlainText(index), !fallbackCards.has(index), { operation: diagnosticOperation, cardId: chain[index], rootId: messageId, index });
         // Failed requests must remain eligible for retry.
         hashes[index] = nextHashes[index];
         rememberPage(index);
@@ -1690,7 +1695,7 @@ Examples:
             const chunkIndex = i + 1;
             const newMessageId = await this.createContinuationCard(openId,
               fallbackCards.has(chunkIndex) ? plainTextCard(chunks[chunkIndex]) : chunks[chunkIndex],
-              () => usePlainText(chunkIndex), !fallbackCards.has(chunkIndex), undefined, messageId);
+              () => usePlainText(chunkIndex), !fallbackCards.has(chunkIndex), undefined, messageId, chunkIndex);
             if (newMessageId) {
               chain.push(newMessageId);
               hashes[chunkIndex] = nextHashes[chunkIndex];
@@ -1707,13 +1712,8 @@ Examples:
 
       return true;
     } catch (error: any) {
-      const detail = error?.response?.data ?? error;
-      console.error('Failed to update streaming message:', {
-        rootMessageId: messageId, messageId: updatingMessageId, cardNumber: updatingCardIndex + 1,
-        code: detail?.code,
-        subCode: typeof detail?.msg === 'string' ? /ErrCode:\s*(\d+)/.exec(detail.msg)?.[1] : undefined,
-        logId: detail?.log_id, message: error?.message || 'Card update failed',
-      });
+      // Attempt errors are recorded and rate-limited at the exact send boundary.
+      // Do not print the SDK error again here (it can contain the entire card).
       return false;
     }
   }
@@ -1782,7 +1782,7 @@ Examples:
       // Repack changed previews and clear obsolete tool copies without retracting messages.
       const trailingElements = !queueConfirmation ? [...footerElements, ...threadSwitchElements] : threadSwitchElements;
       const keepCompletionWithBody = !bare && !queueConfirmation;
-      const updated = await this._updateStreamingMessage(messageId, finalElements, openId, headerElements, trailingElements, keepCompletionWithBody);
+      const updated = await this._updateStreamingMessage(messageId, finalElements, openId, headerElements, trailingElements, keepCompletionWithBody, 'finalize');
       if (!updated) {
         return false;
       }
@@ -1821,7 +1821,7 @@ Examples:
 
       return true;
     } catch (error: any) {
-      console.error('Failed to finalize streaming message:', error?.message || error);
+      deliveryEvent('card_finalize_failed', safeCardError(error));
       return false;
     }
   }
@@ -1995,7 +1995,7 @@ Examples:
         const result = await this.client.im.message.patch({ path: { message_id: cardMessageId }, data: { content } });
         if (!result?.code) this.workerContexts?.remember(cardMessageId, rootId, content);
         return result;
-      });
+      }, undefined, true, { operation: 'controls', cardId: cardMessageId, rootId });
       this.threadSwitchCardState.set(cardMessageId, { ...state, activeThreadId: newActiveThreadId });
     });
   }
@@ -2008,7 +2008,7 @@ Examples:
         const result = await this.client.im.message.patch({ path: { message_id: cardId }, data: { content: body } });
         if (!result?.code) this.workerContexts?.remember(cardId, rootId, body);
         return result;
-      });
+      }, undefined, true, { operation: 'controls', cardId, rootId });
       // A concurrent reset can change controls without changing the streaming source elements.
       this.cardContentHashes.delete(rootId);
     });
@@ -2102,11 +2102,11 @@ Examples:
           return { toast: { type: 'info', content: selectedName.notice } };
         }
         this.refreshThreadSwitchButtons(openMessageId, parsed.threadId).catch((err) =>
-          console.error('[FeishuLongConnHandler] Failed to refresh thread switch buttons:', err)
+          deliveryEvent('card_controls_failed', safeCardError(err))
         );
         return { toast: { type: 'success', content: `Switched to: ${selectedName ?? parsed.threadName ?? parsed.threadId}` } };
       } catch (error) {
-        console.error('[FeishuLongConnHandler] Card action switch_thread failed:', error);
+        deliveryEvent('card_switch_failed', safeCardError(error));
         return { toast: { type: 'error', content: error instanceof Error ? error.message : 'Thread selection failed.' } };
       }
     }
@@ -2118,7 +2118,7 @@ Examples:
         await this.onCardNewThread?.(openId, openMessageId);
         return { toast: { type: 'info', content: 'Creating new thread...' } };
       } catch (error) {
-        console.error('[FeishuLongConnHandler] Card action new_thread failed:', error);
+        deliveryEvent('card_new_thread_failed', safeCardError(error));
         return { toast: { type: 'error', content: error instanceof Error ? error.message : 'Could not create a thread.' } };
       }
     }
@@ -2137,7 +2137,7 @@ Examples:
         }
         return { toast: { type: 'success', content: parsed.action === 'queue_confirm' ? 'Queue confirmation sent' : 'Queue request cancelled' } };
       } catch (error) {
-        console.error('[FeishuLongConnHandler] Queue action failed:', error);
+        deliveryEvent('card_queue_action_failed', safeCardError(error));
         return { toast: { type: 'error', content: 'Queue action failed' } };
       }
     }
@@ -2177,7 +2177,7 @@ Examples:
       executionMessageId = uuidv4();
       const feishuMessageId = this.connectionHub!.supportsQueueStarted(activeDevice.deviceId)
         ? null
-        : await this.sendStreamingStart(openId, '🤔 Queued message confirmed. Waiting for the current task to finish...');
+        : await this.sendStreamingStart(openId, '🤔 Queued message confirmed. Waiting for the current task to finish...', undefined, undefined, executionMessageId);
       try {
         await this.onStartStreaming?.(executionMessageId, openId, feishuMessageId, activeDevice.deviceId, threadId, false, cardMessageId, undefined, selectionFence);
       } catch (error) {
@@ -2260,7 +2260,7 @@ Examples:
         });
       });
     } catch (error: any) {
-      console.error('[FeishuLongConnHandler] Failed to update queue confirmation card:', error?.message || error);
+      deliveryEvent('card_queue_update_failed', safeCardError(error));
     }
   }
 
@@ -2315,6 +2315,7 @@ Examples:
    * Stop the Feishu connection
    */
   async stop(): Promise<void> {
+    this.cardDiagnostics.close();
     try {
       console.log('Stopping Feishu WebSocket connection...');
 

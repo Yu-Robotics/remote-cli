@@ -118,6 +118,8 @@ round without duplicating the notice. Router update-failure logs identify the
 affected card and Feishu error codes without logging the card body. This works
 with older recovery-capable CLIs and requires only a Router upgrade.
 
+Version 1.6.220 adds bounded card-delivery and task-recovery diagnostics. Update both CLI and Router to correlate result acknowledgement waits, recovery attempts, and socket closure events. Router diagnostics include serialized UTF-8 sizes and component-change metadata without card contents or request credentials. A recovery card does not by itself prove a socket disconnected. Inspect service logs (or `docker logs` for the Router), and redact logs before sharing them.
+
 ```bash
 npm install -g @yu_robotics/remote-cli
 ```

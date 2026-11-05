@@ -154,9 +154,10 @@ this fallback requires only a Router upgrade.
 
 Router 1.6.92 requires successful recovery-notice delivery before acknowledging
 reuse of a surviving card. A failed update can retry within the same recovery
-round without duplicating the notice. Update-failure logs identify the root
-reply, affected card ID and number, and Feishu error and trace codes without
-logging the card body. Older recovery-capable CLIs remain compatible.
+round without duplicating the notice. Update-failure logs correlate affected cards using pseudonymous identifiers
+and report Feishu error and trace codes without logging the card body. Older recovery-capable CLIs remain compatible.
+
+Version 1.6.220 adds bounded card-delivery and task-recovery diagnostics. Update both CLI and Router to correlate result acknowledgement waits, recovery attempts, and socket closure events. Router diagnostics include serialized UTF-8 sizes and component-change metadata without card contents or request credentials. A recovery card does not by itself prove a socket disconnected. Inspect service logs (or `docker logs` for the Router), and redact logs before sharing them.
 
 Router 1.6.90 checks tool parameters before using specialized card formatting.
 Missing or incompatible fields fall back to a bounded parameter summary;
