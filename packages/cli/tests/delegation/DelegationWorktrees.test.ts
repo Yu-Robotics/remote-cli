@@ -663,37 +663,53 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     expect(await manager.laneStore.cleanupCandidates()).toEqual([]);
   });
 
-  it('resets preparation tracking before reusing a replacement for a missing native session', async () => {
-    const scope = manager.begin(parent);
-    const first = await start(scope, 'warm-first');
-    const second = await start(scope, 'warm-second');
-    workers[0].finish({ success: true });
-    workers[1].finish({ success: true });
-    await result(scope, first.taskId, 'first-result');
-    await result(scope, second.taskId, 'second-result');
-    const retrying = await start(scope, 'missing-session');
-    workers[2].executor.consumeSessionResumeFailure = () => true;
-    const staleId = factory.mock.calls[2][3];
-    const healthyId = factory.mock.calls.slice(0, 2).map(call => call[3]).find(id => id !== staleId);
-    const acquire = manager.laneStore.acquire.bind(manager.laneStore);
-    const acquisition = vi.spyOn(manager.laneStore, 'acquire').mockImplementationOnce(async (...args) => {
-      const acquired = await acquire(...args);
-      expect(acquired.reused).toBe(true);
-      expect(acquired.lane.executorThreadId).toBe(healthyId);
-      parent.isWorkspaceBusy = () => true;
-      return acquired;
+  describe('missing native session replacement', () => {
+    let scope: ReturnType<DelegationManager['begin']>;
+
+    beforeEach(async () => {
+      scope = manager.begin(parent);
+      // Warm both lanes before completing either worker so this is not one reused lane.
+      await gitPhase('prepare two idle replacement lanes', async () => {
+        const first = await start(scope, 'warm-first');
+        const second = await start(scope, 'warm-second');
+        expect(first.state).toBe('running');
+        expect(second.state).toBe('running');
+        workers[0].finish({ success: true });
+        workers[1].finish({ success: true });
+        expect(await result(scope, first.taskId, 'first-result')).toMatchObject({ state: 'succeeded' });
+        expect(await result(scope, second.taskId, 'second-result')).toMatchObject({ state: 'succeeded' });
+        const lanes = await manager.laneStore.lanesForThread(parent.thread.id);
+        expect(lanes).toHaveLength(2);
+        expect(new Set(lanes.map(lane => lane.executorThreadId)).size).toBe(2);
+        expect(lanes.every(lane => lane.state === 'ready')).toBe(true);
+      });
+    }, 30_000);
+
+    it('resets preparation tracking before reusing a replacement for a missing native session', async () => {
+      const retrying = await start(scope, 'missing-session');
+      workers[2].executor.consumeSessionResumeFailure = () => true;
+      const staleId = factory.mock.calls[2][3];
+      const healthyId = factory.mock.calls.slice(0, 2).map(call => call[3]).find(id => id !== staleId);
+      const acquire = manager.laneStore.acquire.bind(manager.laneStore);
+      const acquisition = vi.spyOn(manager.laneStore, 'acquire').mockImplementationOnce(async (...args) => {
+        const acquired = await acquire(...args);
+        expect(acquired.reused).toBe(true);
+        expect(acquired.lane.executorThreadId).toBe(healthyId);
+        parent.isWorkspaceBusy = () => true;
+        return acquired;
+      });
+      workers[2].finish({ success: false, error: 'Stored native session is missing' });
+      expect(await result(scope, retrying.taskId, 'retry-result')).toMatchObject({ state: 'failed' });
+      expect(acquisition).toHaveBeenCalledOnce();
+      const healthy = (await manager.laneStore.lanesForThread(parent.thread.id)).find(lane => lane.executorThreadId === healthyId);
+      expect(healthy).toMatchObject({ state: 'ready', cleanupPending: false });
+      expect((await manager.workspaceManager.unavailableLanes()).has(healthy!.id)).toBe(false);
+      parent.isWorkspaceBusy = () => false;
+      const recovered = await start(scope, 'retry-after-busy');
+      expect(factory.mock.calls[3][3]).toBe(healthyId);
+      workers[3].finish({ success: true });
+      expect(await result(scope, recovered.taskId, 'recovered-result')).toMatchObject({ state: 'succeeded' });
     });
-    workers[2].finish({ success: false, error: 'Stored native session is missing' });
-    expect(await result(scope, retrying.taskId, 'retry-result')).toMatchObject({ state: 'failed' });
-    expect(acquisition).toHaveBeenCalledOnce();
-    const healthy = (await manager.laneStore.lanesForThread(parent.thread.id)).find(lane => lane.executorThreadId === healthyId);
-    expect(healthy).toMatchObject({ state: 'ready', cleanupPending: false });
-    expect((await manager.workspaceManager.unavailableLanes()).has(healthy!.id)).toBe(false);
-    parent.isWorkspaceBusy = () => false;
-    const recovered = await start(scope, 'retry-after-busy');
-    expect(factory.mock.calls[3][3]).toBe(healthyId);
-    workers[3].finish({ success: true });
-    expect(await result(scope, recovered.taskId, 'recovered-result')).toMatchObject({ state: 'succeeded' });
   });
 
   it('captures fresh input for a later idle cohort even when the earlier review changed no files', async () => {
