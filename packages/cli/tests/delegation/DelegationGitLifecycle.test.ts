@@ -11,6 +11,12 @@ import type { ExecuteResult, IExecutor } from '../../src/executor/IExecutor';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 import { gitFixture } from './gitFixture';
 
+vi.mock('../../src/delegation/OwnershipRuntime', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../src/delegation/OwnershipRuntime')>();
+  const { syntheticOwnershipRuntime } = await import('./syntheticOwnershipRuntime');
+  return syntheticOwnershipRuntime(actual);
+});
+
 // Git and filesystem phases still use wall-clock I/O while worker deadlines are virtual.
 const PHASE_WAIT_OPTIONS = { timeout: 10_000 };
 
