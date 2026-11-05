@@ -15,6 +15,12 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+vi.mock('../src/delegation/OwnershipRuntime', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/delegation/OwnershipRuntime')>();
+  const { syntheticOwnershipRuntime } = await import('./delegation/syntheticOwnershipRuntime');
+  return syntheticOwnershipRuntime(actual);
+});
+
 describe('managed conversation recovery', () => {
   let home: string;
   let manager: ThreadManager;

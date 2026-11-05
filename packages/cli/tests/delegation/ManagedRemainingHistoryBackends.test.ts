@@ -10,6 +10,12 @@ import { captureAgyDeletionTarget } from '../../src/delegation/AgySessionDeletio
 import { captureDshDeletionTarget, createDshHistoryScope, type DshHistoryScope } from '../../src/delegation/DshSessionDeletion';
 import type { DelegatedWorkerLane } from '../../src/delegation/DelegatedWorkerSessionStore';
 
+vi.mock('../../src/delegation/OwnershipRuntime', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../src/delegation/OwnershipRuntime')>();
+  const { syntheticOwnershipRuntime } = await import('./syntheticOwnershipRuntime');
+  return syntheticOwnershipRuntime(actual);
+});
+
 describe('managed AGY and DSH reset cleanup delivery', () => {
   let home: string;
   let manager: DelegationManager;
