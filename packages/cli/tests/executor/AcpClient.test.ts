@@ -2,6 +2,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'events';
 import { Readable, Writable } from 'stream';
 
+
+// These tests supply EventEmitter processes, not OS workers. Native admission and
+// containment are exercised by ManagedSpawn.native.test.ts on each native runner.
+vi.mock('../../src/executor/ManagedSpawn', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../src/executor/ManagedSpawn')>();
+  const { ownedSpawn } = await import('../../src/delegation/OwnershipRuntime');
+  return { ...actual, spawnManaged: (_enabled: boolean, ...args: Parameters<typeof ownedSpawn>) => ownedSpawn(...args) };
+});
+
 vi.mock('child_process', async (importOriginal) => {
   const original = await importOriginal<typeof import('child_process')>();
   return { ...original, spawn: vi.fn() };

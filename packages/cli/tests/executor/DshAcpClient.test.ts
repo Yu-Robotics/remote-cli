@@ -8,6 +8,14 @@ import { spawn } from 'child_process';
 import { DshAcpClient, dshErrorMessage } from '../../src/executor/dsh/DshAcpClient';
 import type { AcpEventCallbacks } from '../../src/executor/acp/AcpClient';
 
+// These tests supply EventEmitter processes, not OS workers. Native admission and
+// containment are exercised by ManagedSpawn.native.test.ts on each native runner.
+vi.mock('../../src/executor/ManagedSpawn', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../src/executor/ManagedSpawn')>();
+  const { ownedSpawn } = await import('../../src/delegation/OwnershipRuntime');
+  return { ...actual, spawnManaged: (_enabled: boolean, ...args: Parameters<typeof ownedSpawn>) => ownedSpawn(...args) };
+});
+
 vi.mock('child_process', async original => ({ ...await original<typeof import('child_process')>(), spawn: vi.fn() }));
 
 function processFixture() {

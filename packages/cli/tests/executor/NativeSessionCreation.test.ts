@@ -5,6 +5,15 @@ import path from 'path';
 import { randomUUID } from 'crypto';
 import { EventEmitter } from 'events';
 import { PassThrough } from 'stream';
+
+// These tests supply EventEmitter processes, not OS workers. Native admission and
+// containment are exercised by ManagedSpawn.native.test.ts on each native runner.
+vi.mock('../../src/executor/ManagedSpawn', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../src/executor/ManagedSpawn')>();
+  const { ownedSpawn } = await import('../../src/delegation/OwnershipRuntime');
+  return { ...actual, spawnManaged: (_enabled: boolean, ...args: Parameters<typeof ownedSpawn>) => ownedSpawn(...args) };
+});
+
 vi.mock('child_process', async original => ({ ...await original<typeof import('child_process')>(), spawn: vi.fn() }));
 import { spawn } from 'child_process';
 import { PiExecutor } from '../../src/executor/PiExecutor';

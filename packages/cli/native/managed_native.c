@@ -8,6 +8,9 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <winternl.h>
+/* MS-FSCC FileDispositionInformationEx flags are not exposed by every user-mode SDK. */
+#define RC_FILE_DISPOSITION_DELETE 0x00000001UL
+#define RC_FILE_DISPOSITION_POSIX_SEMANTICS 0x00000002UL
 #else
 #include <unistd.h>
 #include <fcntl.h>
@@ -213,7 +216,7 @@ static napi_value remove_child(napi_env env,napi_callback_info info) {
 #endif
   if(!valid){close_resource(r);free(r);free(name);return fail(env,"Prepared native entry changed","ESTALE");}
 #ifdef _WIN32
-  FILE_DISPOSITION_INFO_EX disposition = { FILE_DISPOSITION_DELETE | FILE_DISPOSITION_POSIX_SEMANTICS };
+  FILE_DISPOSITION_INFO_EX disposition = { RC_FILE_DISPOSITION_DELETE | RC_FILE_DISPOSITION_POSIX_SEMANTICS };
   int ok=SetFileInformationByHandle(r->value,FileDispositionInfoEx,&disposition,sizeof(disposition));
 #else
   /* As on the existing Linux path, leaf comparison/unlink is not atomic against same-UID mutation. */

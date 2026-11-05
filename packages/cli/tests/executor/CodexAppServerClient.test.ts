@@ -10,6 +10,15 @@ import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 import { ThreadExecutorPool } from '../../src/thread/ThreadExecutorPool';
 import { ThreadManager } from '../../src/thread/ThreadManager';
 
+
+// These tests supply EventEmitter processes, not OS workers. Native admission and
+// containment are exercised by ManagedSpawn.native.test.ts on each native runner.
+vi.mock('../../src/executor/ManagedSpawn', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../src/executor/ManagedSpawn')>();
+  const { ownedSpawn } = await import('../../src/delegation/OwnershipRuntime');
+  return { ...actual, spawnManaged: (_enabled: boolean, ...args: Parameters<typeof ownedSpawn>) => ownedSpawn(...args) };
+});
+
 vi.mock('child_process', async (importActual) => {
   const actual = await importActual<typeof import('child_process')>();
   return { ...actual, spawn: vi.fn() };
