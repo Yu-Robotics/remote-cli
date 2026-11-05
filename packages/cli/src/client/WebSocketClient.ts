@@ -1,3 +1,4 @@
+import { taskEvent } from './TaskDiagnostics';
 import WebSocket from 'ws';
 import { v4 as uuidv4 } from 'uuid';
 import { PROTOCOL_VERSION, CLI_VERSION } from '../types';
@@ -41,6 +42,7 @@ export class WebSocketClient {
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private manualDisconnect = false;
   private connected = false;
+  private connectionEpoch = 0;
   private lastReceivedAt = 0;
   private identity?: DeviceIdentity;
   private readonly identityLoader?: () => Promise<DeviceIdentity | undefined>;
@@ -70,10 +72,12 @@ export class WebSocketClient {
       try {
         const socket = new WebSocket(this.serverUrl, { handshakeTimeout: 15000 });
         this.ws = socket;
+        const connectionEpoch = ++this.connectionEpoch;
 
         const onOpen = () => {
           if (this.ws !== socket) return;
           this.connected = true;
+          taskEvent('socket_open', { connectionEpoch });
           this.lastReceivedAt = Date.now();
           this.startHeartbeat();
           void this.registerSocket(socket);
@@ -92,6 +96,7 @@ export class WebSocketClient {
         const onClose = (code: number, reason: Buffer) => {
           if (this.ws !== socket) return;
           this.connected = false;
+          taskEvent('socket_close', { connectionEpoch, code, reasonBytes: reason.length, manual: this.manualDisconnect });
           this.taskRecovery.disconnected();
           this.stopHeartbeat();
           const reasonStr = reason.toString();
@@ -118,7 +123,7 @@ export class WebSocketClient {
               return;
             }
             if (message.type === 'binding_confirm' && message.data?.success === true) {
-              this.taskRecovery.registered(message.data?.capabilities?.taskRecovery === true);
+              this.taskRecovery.registered(message.data?.capabilities?.taskRecovery === true, connectionEpoch);
             }
             if (message.type === 'task_resume_ack' || message.type === 'task_result_ack') {
               this.taskRecovery.acknowledge(message);

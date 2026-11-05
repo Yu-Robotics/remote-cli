@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.220] - 2026-11-05
+
+### Changed
+- Add bounded, metadata-only diagnostics for Feishu card delivery, including serialized UTF-8 sizes, delivery outcomes, and changes since the last successful update.
+- Correlate task-result acknowledgements, recovery timers, and WebSocket closure events to distinguish card delivery failures from connection interruptions.
+- Redact SDK delivery error logging so diagnostic events do not include card contents or request credentials.
+
 ## [1.6.219] - 2026-11-05
 
 ### Added

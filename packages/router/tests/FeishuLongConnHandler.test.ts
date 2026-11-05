@@ -23,6 +23,7 @@ describe('FeishuLongConnHandler', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'info').mockImplementation(() => {});
 
     // Create mock instances
     mockBindingManager = {
@@ -85,6 +86,49 @@ describe('FeishuLongConnHandler', () => {
   afterEach(() => {
     handler.workerContexts?.destroy();
     vi.clearAllMocks();
+  });
+
+  it('measures the decorated wire content and installs a privacy-safe SDK logger', async () => {
+    const decorate = vi.fn((content: string) => {
+      const payload = JSON.parse(content);
+      payload.body.elements.push({ tag: 'markdown', content: '\u00e9\ud83d\ude80 decoration-sentinel' });
+      return JSON.stringify(payload);
+    });
+    (handler as any).workerContexts = { decorate, remember: vi.fn(), destroy: vi.fn() };
+    mockClient.im.message.patch.mockResolvedValue({ code: 0 });
+    expect(await handler.updateStreamingMessage('safe-card', [{ tag: 'markdown', content: 'prompt-sentinel' }], 'user')).toBe(true);
+    const wire = mockClient.im.message.patch.mock.calls[0][0].data.content;
+    expect(console.info).toHaveBeenCalledWith('[DeliveryDiagnostics]', expect.objectContaining({
+      status: 'success', payload: expect.objectContaining({ utf8Bytes: Buffer.byteLength(wire), utf16Units: wire.length }),
+    }));
+    const logger = vi.mocked(lark.Client).mock.calls[0][0].logger!;
+    const failure = { config: { headers: { Authorization: 'credential-sentinel' }, data: 'tool-command-sentinel' }, response: { status: 400,
+      data: { code: 230099, msg: 'private-error-sentinel', error: { log_id: 'nested-trace' } } } };
+    mockClient.im.message.patch.mockImplementationOnce(async () => { logger.error(failure); throw failure; });
+    expect(await handler.updateStreamingMessage('safe-card', [{ tag: 'markdown', content: 'next-prompt-sentinel' }], 'user')).toBe(false);
+    expect(console.info).toHaveBeenCalledWith('[DeliveryDiagnostics]', expect.objectContaining({ event: 'sdk_error', traceId: 'nested-trace' }));
+    const logs = [console.info, console.error, console.warn, console.log].flatMap(log => vi.mocked(log).mock.calls);
+    expect(JSON.stringify(logs)).not.toMatch(/prompt-sentinel|decoration-sentinel|credential-sentinel|private-error-sentinel|tool-command-sentinel/);
+    vi.mocked(console.info).mockImplementation(() => { throw new Error('synthetic logger failure'); });
+    expect(await handler.updateStreamingMessage('safe-card', [{ tag: 'markdown', content: 'next-prompt-sentinel' }], 'user')).toBe(true);
+  });
+
+  it('does not duplicate aggregated initial-card request failures in the outer catch', async () => {
+    mockClient.im.message.create.mockRejectedValue({ response: { status: 400, data: { code: 230099, msg: 'ErrCode: 200800' } } });
+    expect(await handler.sendStreamingStart('user', 'text', undefined, undefined, 'task')).toBeNull();
+    expect(await handler.sendStreamingStart('user', 'text', undefined, undefined, 'task')).toBeNull();
+    const events = vi.mocked(console.info).mock.calls.map(call => call[1] as any);
+    expect(events.filter(e => e.event === 'card_delivery' && e.status === 'failure')).toHaveLength(1);
+    expect(events.filter(e => e.event === 'card_create_failed' || e.event === 'card_preparation_failed')).toHaveLength(0);
+  });
+
+  it('diagnoses create and finalization separately without treating absent API codes as success', async () => {
+    mockClient.im.message.create.mockResolvedValue({ data: { message_id: 'created-card' } });
+    expect(await handler.sendStreamingStart('user', 'text', undefined, undefined, 'task')).toBe('created-card');
+    expect(console.info).toHaveBeenCalledWith('[DeliveryDiagnostics]', expect.objectContaining({ operation: 'create', status: 'unknown' }));
+    mockClient.im.message.patch.mockResolvedValue({ code: 0 });
+    expect(await handler.finalizeStreamingMessage('created-card', [{ tag: 'markdown', content: 'done' }], undefined, 'user')).toBe(true);
+    expect(console.info).toHaveBeenCalledWith('[DeliveryDiagnostics]', expect.objectContaining({ operation: 'finalize', status: 'success' }));
   });
 
   describe('sendMessage', () => {
@@ -444,10 +488,10 @@ describe('FeishuLongConnHandler', () => {
 
       expect(await handler.updateStreamingMessage('root', elements, 'user')).toBe(false);
       expect(mockClient.im.message.patch).toHaveBeenCalledOnce();
-      expect(console.error).toHaveBeenCalledWith('Failed to update streaming message:', expect.objectContaining({
-        rootMessageId: 'root', messageId: 'continuation', cardNumber: 2, code: 230099, subCode: '200800', logId: 'trace-1',
+      expect(console.info).toHaveBeenCalledWith('[DeliveryDiagnostics]', expect.objectContaining({
+        operation: 'update', index: 1, status: 'failure', apiCode: 230099, subCode: 200800, traceId: 'trace-1',
       }));
-      expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain('Later private output');
+      expect(JSON.stringify(vi.mocked(console.info).mock.calls)).not.toContain('Later private output');
       expect(await handler.updateStreamingMessage('root', elements, 'user')).toBe(true);
       expect(mockClient.im.message.patch).toHaveBeenCalledTimes(2);
       expect(mockClient.im.message.create).toHaveBeenCalledOnce();

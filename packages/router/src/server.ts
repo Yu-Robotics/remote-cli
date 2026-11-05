@@ -1,3 +1,4 @@
+import { deliveryEvent, safeCardError, taskCorrelation } from './utils/DeliveryDiagnostics';
 import { IngressAdmission, IngressLimitError, INGRESS_LIMITS, PendingFrameBudget } from './security/IngressAdmission';
 import { ApprovalCards } from './feishu/ApprovalCards';
 import { WorkerContextCards } from './feishu/WorkerContextCards';
@@ -278,6 +279,7 @@ export class RouterServer {
     this.feishuLongConnHandler.setOnCaptureSelection((openId, deviceId) => this.selections.capture(openId, deviceId));
     this.feishuLongConnHandler.setOnValidateSelection(fence => this.selections.isCurrent(fence));
     this.feishuLongConnHandler.setOnStartStreaming(async (messageId: string, openId: string, feishuMessageId: string | null, deviceId: string, threadId?: string, pendingNewThread?: boolean, queueCardId?: string, threadName?: string, selectionIntent?: SelectionFence) => {
+      if (feishuMessageId) this.feishuLongConnHandler.bindDiagnosticTask?.(feishuMessageId, messageId);
       console.log(`[RouterServer] Registering streaming session: msgId=${messageId}, feishuMsgId=${feishuMessageId}, deviceId=${deviceId}, threadId=${threadId}, pendingNewThread=${pendingNewThread}`);
       this.cancelImageReply(messageId);
       const previous = this.streamingMessages.get(messageId);
@@ -552,6 +554,8 @@ export class RouterServer {
     this.app.use(router.allowedMethods());
   }
 
+  private diagnosticConnectionEpoch = 0;
+
   /**
    * Setup WebSocket server
    */
@@ -563,6 +567,7 @@ export class RouterServer {
     });
 
     this.wss.on('connection', (ws: WebSocket, req) => {
+      const connectionEpoch = ++this.diagnosticConnectionEpoch;
       const admission = this.stopping ? undefined : this.ingress.admit(req.socket.remoteAddress ?? 'unknown');
       if (!admission) {
         ws.on('error', () => {});
@@ -616,7 +621,7 @@ export class RouterServer {
         // If no heartbeat received within 3x interval, consider connection dead
         const interval = this.config.get('websocket', 'heartbeatInterval');
         heartbeatTimeout = setTimeout(() => {
-          console.log('Heartbeat timeout for device:', deviceId);
+          deliveryEvent('socket_heartbeat_timeout', { connectionEpoch });
           ws.close();
         }, interval * 3);
       };
@@ -748,14 +753,18 @@ export class RouterServer {
               if (!taskRecoveryEnabled || !deviceId) break;
               const current = imageCurrent;
               let success = false;
+              deliveryEvent('task_resume_received', { task: taskCorrelation(message.messageId), connectionEpoch });
               try {
                 success = await this.handleTaskResume(message, deviceId, current);
               } catch (error) {
-                console.error('[RouterServer] Failed to recover task card:', error);
+                deliveryEvent('task_resume_failed', { task: taskCorrelation(message.messageId), connectionEpoch, ...safeCardError(error) });
               }
               if (!success && current()) this.cancelImageReply(message.messageId);
-              if (current()) ws.send(JSON.stringify({ type: 'task_resume_ack', messageId: message.messageId,
-                recoveryId: message.taskResume?.recoveryId, state: message.taskResume?.state, success, timestamp: Date.now() }));
+              if (current()) {
+                ws.send(JSON.stringify({ type: 'task_resume_ack', messageId: message.messageId,
+                  recoveryId: message.taskResume?.recoveryId, state: message.taskResume?.state, success, timestamp: Date.now() }));
+                deliveryEvent('resume_ack_send', { task: taskCorrelation(message.messageId), connectionEpoch, success, acceptedLocally: true });
+              }
               break;
             }
 
@@ -903,8 +912,10 @@ export class RouterServer {
               break;
 
             case MessageType.RESPONSE:
+              deliveryEvent('task_result_received', { task: taskCorrelation(message.messageId), connectionEpoch });
               if (taskRecoveryEnabled && deviceId && this.isCompletedTask(message.messageId, deviceId)) {
                 ws.send(JSON.stringify({ type: 'task_result_ack', messageId: message.messageId, timestamp: Date.now() }));
+                deliveryEvent('result_ack_send', { task: taskCorrelation(message.messageId), connectionEpoch, acceptedLocally: true, duplicate: true });
                 break;
               }
               // Device sends response to command - forward to Feishu via long connection
@@ -1014,6 +1025,7 @@ export class RouterServer {
                 this.rememberCompletedTask(responseMessageId, deviceId);
                 if (this.connectionHub.isCurrentConnection(deviceId, ws)) {
                   ws.send(JSON.stringify({ type: 'task_result_ack', messageId: responseMessageId, timestamp: Date.now() }));
+                  deliveryEvent('result_ack_send', { task: taskCorrelation(responseMessageId), connectionEpoch, acceptedLocally: true, duplicate: false });
                 }
               }
               break;
@@ -1039,7 +1051,7 @@ export class RouterServer {
                       // Text is accumulated synchronously. Let subsequent deltas
                       // coalesce while the card patch runs; finalization still
                       // waits for updateInFlight before rendering the result.
-                      void update.catch(error => console.error('[RouterServer] Failed to update queued text:', error));
+                      void update.catch(error => deliveryEvent('queued_text_failed', safeCardError(error)));
                     } else {
                       await update;
                     }
@@ -1109,7 +1121,7 @@ export class RouterServer {
               console.log('Unknown message type:', message.type);
           }
         } catch (error) {
-          console.error('Error processing message:', error);
+          deliveryEvent('router_message_failed', { connectionEpoch, ...safeCardError(error) });
         } finally {
           finishQueueMessage?.();
         }
@@ -1122,7 +1134,8 @@ export class RouterServer {
       });
 
       // Handle connection close
-      ws.on('close', () => {
+      ws.on('close', (code: number, reason: Buffer) => {
+        deliveryEvent('socket_close', { connectionEpoch, code, reasonBytes: reason?.length, registered });
         socketClosed = true;
         releaseAdmission();
         for (const [id, route] of this.imageReplies) {
@@ -1140,7 +1153,7 @@ export class RouterServer {
           this.maintenanceConnections.delete(deviceId);
           this.workerContextConnections.delete(deviceId);
           void this.cleanupStreamingSessionsForDevice(deviceId).catch(() => console.error('Failed to expire disconnected streaming cards.'));
-          console.log('Device disconnected:', deviceId);
+          deliveryEvent('registered_socket_removed', { connectionEpoch });
         }
       });
 
@@ -1155,7 +1168,7 @@ export class RouterServer {
         if (!registered || (ws.readyState !== WebSocket.CLOSING && ws.readyState !== WebSocket.CLOSED)) {
           ws.terminate();
         }
-        console.error('WebSocket error:', error);
+        deliveryEvent('socket_error', { connectionEpoch, ...safeCardError(error) });
       });
     });
 
@@ -1697,7 +1710,7 @@ export class RouterServer {
         try {
           await this.updateStreamingText(messageId, streamData.openId, streamData);
         } catch (error) {
-          console.error('[RouterServer] Failed to refresh delegated worker progress:', error);
+          deliveryEvent('worker_progress_failed', safeCardError(error));
         } finally {
           if (this.isLiveDelegationProgress(messageId, streamData, state)) {
             this.scheduleDelegationProgressHeartbeat(messageId, streamData, state);
@@ -2083,6 +2096,8 @@ export class RouterServer {
     const reusable = previous?.feishuMessageId && (!previous.finalizing
       || (previous.recoveryId === info.recoveryId && info.state !== 'running'));
     if (previous && reusable) {
+      deliveryEvent('resume_card_reused', { task: taskCorrelation(messageId), card: taskCorrelation(previous.feishuMessageId),
+        reason: previous.finalizing ? 'same_recovery_terminal_retry' : 'existing_active_card' });
       if (previous.recoveryId !== info.recoveryId) {
         await previous.updateInFlight;
         if (!isCurrent() || this.streamingMessages.get(messageId) !== previous || previous.finalizing) return false;
@@ -2124,8 +2139,11 @@ export class RouterServer {
         + `Output before this card, including output during disconnection, was not retained.\n\n`
         + `**Thread:** <raw>${escape(info.threadName)}</raw> · **Backend:** <raw>${escape(info.backend)}</raw>\n`
         + `**Working directory:** <raw>${escape(info.cwd)}</raw>\n**Task:** <raw>${escape(info.preview)}</raw>`;
-      const cardId = await this.feishuLongConnHandler.sendStreamingStart(openId, intro, info.threadName, info.cwd);
+      const cardId = await this.feishuLongConnHandler.sendStreamingStart(openId, intro, info.threadName, info.cwd, messageId);
       if (!cardId || !isCurrent()) return false;
+      this.feishuLongConnHandler.bindDiagnosticTask?.(cardId, messageId);
+      deliveryEvent('resume_card_created', { task: taskCorrelation(messageId), card: taskCorrelation(cardId),
+        reason: previous?.finalizing ? 'previous_card_finalizing' : previous ? 'previous_card_missing' : 'no_previous_stream' });
       if (previous) this.clearDelegationProgressTimers(previous);
       this.streamingMessages.set(messageId, {
         openId, deviceId, threadId, threadName: info.threadName, cwd: info.cwd, feishuMessageId: cardId,
@@ -2176,9 +2194,10 @@ export class RouterServer {
 **Remaining in queue:** ${info.remainingCount}`;
       let cardId: string | null = null;
       try {
-        cardId = await this.feishuLongConnHandler.sendStreamingStart(openId, intro, info.threadName, info.cwd);
+        cardId = await this.feishuLongConnHandler.sendStreamingStart(openId, intro, info.threadName, info.cwd, messageId);
+        if (cardId) this.feishuLongConnHandler.bindDiagnosticTask?.(cardId, messageId);
       } catch (error) {
-        console.error('[RouterServer] Failed to create queued execution card:', error);
+        deliveryEvent('queued_card_create_failed', { task: taskCorrelation(messageId), ...safeCardError(error) });
       }
       if (!isCurrent() || (imageRoute && this.imageReplies.get(messageId) !== imageRoute)) return;
       const fallbackCardId = previous?.feishuMessageId || previous?.queueCardId || null;
@@ -2220,7 +2239,7 @@ export class RouterServer {
             await this.feishuLongConnHandler.markQueueCardStarted(oldCard);
           } catch (error) {
             // The new execution card remains usable if its old receipt expired.
-            console.error('[RouterServer] Failed to update queue receipt:', error);
+            deliveryEvent('queue_receipt_failed', safeCardError(error));
           }
         }
       }
@@ -2291,123 +2310,131 @@ export class RouterServer {
   private async finalizeStreamingMessage(messageId: string, success: boolean, output?: string, error?: string, sessionAbbr?: string, cwd?: string, queueConfirmation?: QueueConfirmationInfo, executionMetadata?: ExecutionMetadata, settingsMenu?: unknown): Promise<void> {
     const streamData = this.streamingMessages.get(messageId);
     if (!streamData) return;
+    const task = taskCorrelation(messageId);
+    deliveryEvent('task_finalization_started', { task, card: taskCorrelation(streamData.feishuMessageId) });
+    try {
 
-    const route = this.imageReplies.get(messageId);
-    if (route) this.images.close(route.reply);
-    this.closeImageIntake(streamData, route?.reply.deadline);
-    // Snapshot accepted work before awaiting; intake is already closed.
-    const accepted = route?.reply.tail;
-    if (accepted) await accepted;
-    if (this.streamingMessages.get(messageId) !== streamData
-      || (route && (this.imageReplies.get(messageId) !== route || !route.current()))) return;
-    if (route?.reply.failed) this.noteImageFailure(messageId, streamData);
-    this.cancelImageReply(messageId);
-    streamData.finalizing = true;
-    streamData.updatePending = false;
-    this.clearDelegationProgressTimers(streamData);
-    await streamData.updateInFlight;
-    if (!await this.canDispatchStreamOutput(messageId, streamData)) return;
+      const route = this.imageReplies.get(messageId);
+      if (route) this.images.close(route.reply);
+      this.closeImageIntake(streamData, route?.reply.deadline);
+      // Snapshot accepted work before awaiting; intake is already closed.
+      const accepted = route?.reply.tail;
+      if (accepted) await accepted;
+      if (this.streamingMessages.get(messageId) !== streamData
+        || (route && (this.imageReplies.get(messageId) !== route || !route.current()))) return;
+      if (route?.reply.failed) this.noteImageFailure(messageId, streamData);
+      this.cancelImageReply(messageId);
+      streamData.finalizing = true;
+      streamData.updatePending = false;
+      this.clearDelegationProgressTimers(streamData);
+      await streamData.updateInFlight;
+      if (!await this.canDispatchStreamOutput(messageId, streamData)) return;
 
-    const { feishuMessageId, openId } = streamData;
+      const { feishuMessageId, openId } = streamData;
 
-    if (feishuMessageId) {
-      // Flush any remaining text content
-      if (streamData.currentTextContent.trim()) {
-        streamData.elements.push(...this.renderCurrentText(streamData));
-        streamData.currentTextContent = '';
-        streamData.recoveryPlainText = false;
-      }
-
-      // If there are no elements at all, use the output parameter as fallback
-      if (streamData.elements.length === 0 && output) {
-        streamData.elements.push(createMarkdownElement(output));
-      }
-
-      // A capable CLI's settings menu replaces the placeholder with a dedicated
-      // interactive card bound to the original user/device/thread/request. The
-      // text output is for incapable peers or delivery failure only: including
-      // its complete catalog here would defeat pagination and its node/byte budget.
-      const prepared = settingsMenu && success
-        ? this.settingsCards.present({ openId: streamData.openId, deviceId: streamData.deviceId, menu: settingsMenu, requestMessageId: messageId, expectedThreadId: streamData.threadId })
-        : undefined;
-      if (prepared) {
-        const finalized = await this.feishuLongConnHandler.finalizeStreamingMessage(
-          feishuMessageId,
-          prepared.elements,
-          undefined,
-          openId,
-          cwd,
-          streamData.threadName,
-          undefined,
-          streamData.threadId,
-          undefined,
-          undefined,
-          true,
-          { bare: true, onDelivered: cardIds => prepared.deliver(cardIds) }
-        );
-        if (!finalized) {
-          prepared.discard();
-          if (!await this.canDispatchStreamOutput(messageId, streamData)) return;
-          const delivered = await this.feishuLongConnHandler.sendMessage(openId, output || '⚙️ Settings are unavailable as a card. Use the text command.');
-          if (delivered === false) throw new Error('Failed to deliver settings result');
+      if (feishuMessageId) {
+        // Flush any remaining text content
+        if (streamData.currentTextContent.trim()) {
+          streamData.elements.push(...this.renderCurrentText(streamData));
+          streamData.currentTextContent = '';
+          streamData.recoveryPlainText = false;
         }
-      } else if (success) {
-        const finalized = await this.feishuLongConnHandler.finalizeStreamingMessage(
-          feishuMessageId,
-          streamData.elements,
-          sessionAbbr,
-          openId,
-          cwd,
-          streamData.threadName,
-          streamData.threads,
-          streamData.threadId,
-          queueConfirmation,
-          executionMetadata,
-          true,
-          { onDelivered: cardIds => this.registerDeliveredThreadCards(messageId, streamData, cardIds) }
-        );
-        if (finalized === false) throw new Error('Failed to finalize task card');
-      } else {
-        // Add error message to elements
-        const finalElements = [...streamData.elements];
-        if (!queueConfirmation) {
-          const errorMsg = error || 'Command failed';
-          finalElements.push(createMarkdownElement(`\n\n❌ **Error:** ${errorMsg}`));
-        }
-        const finalized = await this.feishuLongConnHandler.finalizeStreamingMessage(
-          feishuMessageId,
-          finalElements,
-          undefined,
-          openId,
-          cwd,
-          streamData.threadName,
-          streamData.threads,
-          streamData.threadId,
-          queueConfirmation,
-          executionMetadata,
-          false,
-          { onDelivered: cardIds => this.registerDeliveredThreadCards(messageId, streamData, cardIds) }
-        );
-        if (finalized === false) throw new Error('Failed to finalize task card');
-      }
-    } else if (streamData.queueStarted) {
-      // If card creation failed after session recovery, retain a text result
-      // rather than silently losing the completed queued task's output.
-      const text = streamData.elements
-        .filter((element) => element.tag === 'markdown')
-        .map((element) => element.content)
-        .concat(streamData.currentTextContent, output || '')
-        .filter(Boolean)
-        .join('\n\n');
-      const delivered = await this.feishuLongConnHandler.sendMessage(openId,
-        `${text}\n\n${success ? '✅ Completed' : `❌ Error: ${error || 'Command failed'}`}`);
-      if (delivered === false) throw new Error('Failed to deliver task result');
-    }
 
-    // Keep durable card associations after removing the completed streaming session.
-    if (this.streamingMessages.get(messageId) === streamData) {
-      this.streamingMessages.delete(messageId);
-      this.lastStreamUpdateTime.delete(messageId);
+        // If there are no elements at all, use the output parameter as fallback
+        if (streamData.elements.length === 0 && output) {
+          streamData.elements.push(createMarkdownElement(output));
+        }
+
+        // A capable CLI's settings menu replaces the placeholder with a dedicated
+        // interactive card bound to the original user/device/thread/request. The
+        // text output is for incapable peers or delivery failure only: including
+        // its complete catalog here would defeat pagination and its node/byte budget.
+        const prepared = settingsMenu && success
+          ? this.settingsCards.present({ openId: streamData.openId, deviceId: streamData.deviceId, menu: settingsMenu, requestMessageId: messageId, expectedThreadId: streamData.threadId })
+          : undefined;
+        if (prepared) {
+          const finalized = await this.feishuLongConnHandler.finalizeStreamingMessage(
+            feishuMessageId,
+            prepared.elements,
+            undefined,
+            openId,
+            cwd,
+            streamData.threadName,
+            undefined,
+            streamData.threadId,
+            undefined,
+            undefined,
+            true,
+            { bare: true, onDelivered: cardIds => prepared.deliver(cardIds) }
+          );
+          if (!finalized) {
+            prepared.discard();
+            if (!await this.canDispatchStreamOutput(messageId, streamData)) return;
+            const delivered = await this.feishuLongConnHandler.sendMessage(openId, output || '⚙️ Settings are unavailable as a card. Use the text command.');
+            if (delivered === false) throw new Error('Failed to deliver settings result');
+          }
+        } else if (success) {
+          const finalized = await this.feishuLongConnHandler.finalizeStreamingMessage(
+            feishuMessageId,
+            streamData.elements,
+            sessionAbbr,
+            openId,
+            cwd,
+            streamData.threadName,
+            streamData.threads,
+            streamData.threadId,
+            queueConfirmation,
+            executionMetadata,
+            true,
+            { onDelivered: cardIds => this.registerDeliveredThreadCards(messageId, streamData, cardIds) }
+          );
+          if (finalized === false) throw new Error('Failed to finalize task card');
+        } else {
+          // Add error message to elements
+          const finalElements = [...streamData.elements];
+          if (!queueConfirmation) {
+            const errorMsg = error || 'Command failed';
+            finalElements.push(createMarkdownElement(`\n\n❌ **Error:** ${errorMsg}`));
+          }
+          const finalized = await this.feishuLongConnHandler.finalizeStreamingMessage(
+            feishuMessageId,
+            finalElements,
+            undefined,
+            openId,
+            cwd,
+            streamData.threadName,
+            streamData.threads,
+            streamData.threadId,
+            queueConfirmation,
+            executionMetadata,
+            false,
+            { onDelivered: cardIds => this.registerDeliveredThreadCards(messageId, streamData, cardIds) }
+          );
+          if (finalized === false) throw new Error('Failed to finalize task card');
+        }
+      } else if (streamData.queueStarted) {
+        // If card creation failed after session recovery, retain a text result
+        // rather than silently losing the completed queued task's output.
+        const text = streamData.elements
+          .filter((element) => element.tag === 'markdown')
+          .map((element) => element.content)
+          .concat(streamData.currentTextContent, output || '')
+          .filter(Boolean)
+          .join('\n\n');
+        const delivered = await this.feishuLongConnHandler.sendMessage(openId,
+          `${text}\n\n${success ? '✅ Completed' : `❌ Error: ${error || 'Command failed'}`}`);
+        if (delivered === false) throw new Error('Failed to deliver task result');
+      }
+
+      deliveryEvent('task_finalization_complete', { task });
+      // Keep durable card associations after removing the completed streaming session.
+      if (this.streamingMessages.get(messageId) === streamData) {
+        this.streamingMessages.delete(messageId);
+        this.lastStreamUpdateTime.delete(messageId);
+      }
+    } catch (failure) {
+      deliveryEvent('task_finalization_failed', { task, ...safeCardError(failure) });
+      throw failure;
     }
   }
 
@@ -2485,7 +2512,7 @@ export class RouterServer {
     const failed = results.find(result => result.status === 'rejected');
     if (failed?.status === 'rejected') throw failed.reason;
     if (cleanedCount > 0) {
-      console.log(`[RouterServer] Cleaned up ${cleanedCount} streaming sessions for device ${deviceId}, remaining: ${this.streamingMessages.size}`);
+      deliveryEvent('disconnected_streams_cleaned', { count: cleanedCount, remaining: this.streamingMessages.size });
     }
   }
 
@@ -2539,7 +2566,7 @@ export class RouterServer {
       } catch (error) {
         failed = true;
         firstError ??= error;
-        console.error(`[RouterServer] Failed to finalize streaming card ${messageId} during shutdown:`, error);
+        deliveryEvent('shutdown_card_finalize_failed', { task: taskCorrelation(messageId), ...safeCardError(error) });
       }
     }
     this.streamingMessages.clear();

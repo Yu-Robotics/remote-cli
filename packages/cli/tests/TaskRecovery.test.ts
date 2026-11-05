@@ -1,3 +1,4 @@
+import { taskCorrelation } from '../src/client/TaskDiagnostics';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TaskRecovery } from '../src/client/TaskRecovery';
 
@@ -15,13 +16,51 @@ describe('TaskRecovery', () => {
   });
 
   beforeEach(() => {
+    vi.spyOn(console, 'info').mockImplementation(() => {});
     vi.useFakeTimers();
     send = vi.fn();
     recovery = new TaskRecovery(send);
     recovery.registered(true);
     recovery.track(task);
   });
-  afterEach(() => { recovery.destroy(); vi.useRealTimers(); });
+  afterEach(() => { recovery.destroy(); vi.useRealTimers(); vi.restoreAllMocks(); });
+
+  it('diagnoses the shared receipt deadline while still connected without replaying output', () => {
+    const events = (event: string) => vi.mocked(console.info).mock.calls.map(call => call[1] as any).filter(e => e.event === event);
+    recovery.send({ ...result(), output: 'private-output-sentinel' });
+    vi.advanceTimersByTime(10_000);
+    recovery.track({ ...task, messageId: 'm2', preview: 'private-prompt-sentinel' });
+    recovery.send(result('m2'));
+    const armed = events('result_receipt_timer_armed')[0];
+    expect(events('result_receipt_timer_armed')).toHaveLength(1);
+    expect(events('result_receipt_timer_reused')[0]).toMatchObject({ timer: armed.timer, armedAt: armed.armedAt, connected: true });
+    vi.advanceTimersByTime(4999);
+    expect(resumes()).toHaveLength(0);
+    vi.advanceTimersByTime(1);
+    expect(events('result_receipt_timer_fired')[0].firedAt - armed.armedAt).toBe(15_000);
+    expect(events('task_resume_send')[0]).toMatchObject({ reason: 'result_ack_timeout', connected: true, task: taskCorrelation('m1') });
+    expect(events('result_send')[0]).toMatchObject({ acceptedLocally: true, connected: true, task: taskCorrelation('m1') });
+    expect(events('recovery_disconnected')).toHaveLength(0);
+    acknowledge();
+    expect(events('resume_ack_received')[0].success).toBe(true);
+    recovery.acknowledge({ type: 'task_result_ack', messageId: 'm2' });
+    expect(events('result_ack_received')[0]).toMatchObject({ task: taskCorrelation('m2'), trackedResult: true });
+    expect(JSON.stringify(vi.mocked(console.info).mock.calls)).not.toMatch(/private-output-sentinel|private-prompt-sentinel|entire transcript|Review this change/);
+    expect(resumes().every(message => message.output === undefined)).toBe(true);
+  });
+
+  it('distinguishes reconnect recovery and rejected local sends and tolerates logging failure', () => {
+    const events = () => vi.mocked(console.info).mock.calls.map(call => call[1] as any);
+    send.mockImplementationOnce(() => { throw new Error('credential-sentinel'); });
+    expect(recovery.send(result())).toBe(false);
+    expect(events()).toContainEqual(expect.objectContaining({ event: 'result_send', acceptedLocally: false }));
+    recovery.registered(true, 8);
+    expect(events()).toContainEqual(expect.objectContaining({ event: 'task_resume_send', reason: 'connection_loss', connectionEpoch: 8 }));
+    expect(JSON.stringify(events())).not.toContain('credential-sentinel');
+    vi.mocked(console.info).mockImplementation(() => { throw new Error('unavailable logger'); });
+    expect(() => acknowledge()).not.toThrow();
+    expect(recovery.hasPendingResults()).toBe(false);
+  });
 
   it('drops disconnected output and waits for a recovery card before resuming new output', () => {
     recovery.send(stream('before'));

@@ -1,3 +1,4 @@
+import { taskCorrelation, taskEvent } from './TaskDiagnostics';
 import { v4 as uuidv4 } from 'uuid';
 import type { OutgoingMessage, TaskResumeInfo, ExecutionMetadata } from '../types';
 import { boundExecutionMetadata } from '../executor/ExecutionMetadata';
@@ -16,6 +17,7 @@ interface TaskState {
   task: RecoverableTask;
   recoveryId: string;
   needsRecovery: boolean;
+  recoveryReason?: 'connection_loss' | 'result_ack_timeout';
   recovered: boolean;
   recoveryFailures: number;
   recoveryPaused: boolean;
@@ -38,6 +40,9 @@ export class TaskRecovery {
   private acknowledgementTimer?: NodeJS.Timeout;
   private retry?: { messageId: string; timer: NodeJS.Timeout };
   private resultTimer?: NodeJS.Timeout;
+  private receiptSequence = 0;
+  private receiptArmedAt = 0;
+  private connectionEpoch = 0;
 
   constructor(private readonly sendRaw: (message: any) => void) {}
 
@@ -51,11 +56,13 @@ export class TaskRecovery {
   }
 
   disconnected(): void {
+    taskEvent('recovery_disconnected', { connectionEpoch: this.connectionEpoch, tasks: this.tasks.size });
     this.connected = false;
     this.clearTimers();
     this.inFlight = undefined;
     for (const entry of this.tasks.values()) {
       entry.needsRecovery = true;
+      entry.recoveryReason = 'connection_loss';
       entry.recovered = true;
       entry.recoveryId = uuidv4();
       entry.recoveryFailures = 0;
@@ -63,7 +70,9 @@ export class TaskRecovery {
     }
   }
 
-  registered(supported: boolean): void {
+  registered(supported: boolean, connectionEpoch?: number): void {
+    this.connectionEpoch = connectionEpoch ?? this.connectionEpoch + 1;
+    taskEvent('recovery_registered', { connectionEpoch: this.connectionEpoch, supported });
     this.connected = true;
     this.supported = supported;
     if (!supported) {
@@ -97,6 +106,7 @@ export class TaskRecovery {
       this.prune();
     }
     if (!this.connected || entry.needsRecovery) {
+      if (message.type === 'response') this.resultEvent(message.messageId, false);
       this.pump();
       return false;
     }
@@ -106,9 +116,11 @@ export class TaskRecovery {
       this.sendRaw(entry.recovered && message.type === 'response'
         ? { ...message, output: undefined, error: entry.result?.error } : message);
     } catch (error) {
+      if (message.type === 'response') this.resultEvent(message.messageId, false);
       this.disconnected();
       return false;
     }
+    if (message.type === 'response') this.resultEvent(message.messageId, true);
     if (entry.result) {
       if (!this.supported) this.tasks.delete(message.messageId);
       else this.waitForResultReceipt();
@@ -118,6 +130,8 @@ export class TaskRecovery {
 
   acknowledge(message: any): void {
     if (message.type === 'task_result_ack') {
+      taskEvent('result_ack_received', { task: taskCorrelation(message.messageId),
+        trackedResult: !!this.tasks.get(message.messageId)?.result, connected: this.connected, connectionEpoch: this.connectionEpoch });
       if (this.tasks.get(message.messageId)?.result) this.tasks.delete(message.messageId);
       if (this.inFlight?.messageId === message.messageId) {
         this.inFlight = undefined;
@@ -133,6 +147,8 @@ export class TaskRecovery {
     const pending = this.inFlight;
     if (!pending || pending.messageId !== message.messageId || pending.recoveryId !== message.recoveryId
       || pending.state !== message.state) return;
+    taskEvent('resume_ack_received', { task: taskCorrelation(message.messageId), success: message.success === true,
+      connected: this.connected, connectionEpoch: this.connectionEpoch });
     if (message.success !== true) {
       this.failRecovery();
       return;
@@ -184,6 +200,8 @@ export class TaskRecovery {
     this.inFlight = { messageId: task.messageId, recoveryId: entry.recoveryId, state: taskResume.state };
     this.acknowledgementTimer = setTimeout(() => this.failRecovery(), RETRY_DELAY);
     this.acknowledgementTimer.unref?.();
+    taskEvent('task_resume_send', { task: taskCorrelation(task.messageId), state: taskResume.state,
+      reason: entry.recoveryReason ?? 'connection_loss', connected: this.connected, connectionEpoch: this.connectionEpoch });
     try {
       this.sendRaw({ type: 'task_resume', messageId: task.messageId, openId: task.openId,
         threadId: task.threadId, taskResume, timestamp: Date.now() } satisfies OutgoingMessage);
@@ -207,7 +225,7 @@ export class TaskRecovery {
       // Keep the record so late output cannot bypass recovery or replay history.
       // A new connection starts another round; terminal records remain bounded.
       entry.recoveryPaused = true;
-      console.error(`[TaskRecovery] Pausing task ${entry.task.messageId} after ${entry.recoveryFailures} failed recovery attempts; recovery will wait for another connection.`);
+      taskEvent('recovery_paused', { task: taskCorrelation(entry.task.messageId), failures: entry.recoveryFailures });
       this.pump();
       return;
     }
@@ -221,15 +239,33 @@ export class TaskRecovery {
   }
 
   private waitForResultReceipt(): void {
-    if (this.resultTimer || !this.connected || !this.supported) return;
+    if (this.resultTimer) {
+      taskEvent('result_receipt_timer_reused', { timer: this.receiptSequence, armedAt: this.receiptArmedAt,
+        connected: this.connected, connectionEpoch: this.connectionEpoch });
+      return;
+    }
+    if (!this.connected || !this.supported) return;
+    const timer = ++this.receiptSequence;
+    this.receiptArmedAt = Date.now();
+    taskEvent('result_receipt_timer_armed', { timer, armedAt: this.receiptArmedAt, delayMs: RETRY_DELAY,
+      connected: this.connected, connectionEpoch: this.connectionEpoch });
     this.resultTimer = setTimeout(() => {
       this.resultTimer = undefined;
+      taskEvent('result_receipt_timer_fired', { timer, armedAt: this.receiptArmedAt, firedAt: Date.now(),
+        connected: this.connected, connectionEpoch: this.connectionEpoch });
       for (const entry of this.tasks.values()) {
-        if (entry.result && !entry.recoveryPaused) { entry.needsRecovery = true; entry.recovered = true; }
+        if (entry.result && !entry.recoveryPaused) {
+          entry.needsRecovery = true; entry.recovered = true; entry.recoveryReason = 'result_ack_timeout';
+        }
       }
       this.pump();
     }, RETRY_DELAY);
     this.resultTimer.unref?.();
+  }
+
+  private resultEvent(messageId: string, acceptedLocally: boolean): void {
+    taskEvent('result_send', { task: taskCorrelation(messageId), acceptedLocally,
+      connected: this.connected, connectionEpoch: this.connectionEpoch, receiptTimer: this.resultTimer ? this.receiptSequence : undefined });
   }
 
   private clearAcknowledgementTimer(): void {
@@ -241,7 +277,10 @@ export class TaskRecovery {
     this.clearAcknowledgementTimer();
     if (this.retry) clearTimeout(this.retry.timer);
     this.retry = undefined;
-    if (this.resultTimer) clearTimeout(this.resultTimer);
+    if (this.resultTimer) {
+      taskEvent('result_receipt_timer_cleared', { timer: this.receiptSequence, connectionEpoch: this.connectionEpoch });
+      clearTimeout(this.resultTimer);
+    }
     this.resultTimer = undefined;
   }
 

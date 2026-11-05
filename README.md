@@ -1595,6 +1595,10 @@ remote-cli stop
 remote-cli start
 ```
 
+### Card delivery diagnostics
+
+Version 1.6.220 adds bounded diagnostic events for Feishu card delivery and task recovery. Router logs record serialized card sizes, delivery outcomes, and component changes without including card content in these diagnostic events. Updated CLI logs correlate result acknowledgement waits and recovery attempts; update both peers to trace the complete path. WebSocket closure events are recorded separately, so a recovery card alone should not be treated as evidence of a disconnected socket. Use service logs (or `docker logs` for a containerized Router) when reporting delivery failures, and review/redact logs before sharing them.
+
 ### Connection issues
 
 ```bash

@@ -63,6 +63,7 @@ describe('RouterServer', () => {
 
   beforeEach(() => {
     vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'info').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.useFakeTimers();
@@ -597,6 +598,27 @@ describe('RouterServer', () => {
       const replies = () => ws.send.mock.calls.map(([message]) => JSON.parse(message));
       return { send, close, replies };
     }
+
+    it('records failed finalization withholding ACK, connected recovery replacement, and local ACK acceptance', async () => {
+      const { send, close, replies } = await connect();
+      await mockFeishuHandler.setOnStartStreaming.mock.calls[0][0](resume.messageId, 'user-1', 'old-card', 'device-1', 'thread-1');
+      mockFeishuHandler.finalizeStreamingMessage.mockResolvedValueOnce(false);
+      await send({ type: 'response', messageId: resume.messageId, openId: 'user-1', success: true });
+      const events = () => vi.mocked(console.info).mock.calls.map(call => call[1] as any);
+      expect(replies().some(message => message.type === 'task_result_ack')).toBe(false);
+      expect(events()).toContainEqual(expect.objectContaining({ event: 'task_finalization_failed' }));
+      expect(events().some(e => e.event === 'result_ack_send')).toBe(false);
+      await send({ ...resume, taskResume: { ...resume.taskResume, state: 'completed' } });
+      expect(events()).toContainEqual(expect.objectContaining({ event: 'resume_card_created', reason: 'previous_card_finalizing' }));
+      expect(mockFeishuHandler.sendStreamingStart.mock.calls.at(-1)[4]).toBe(resume.messageId);
+      expect(events()).toContainEqual(expect.objectContaining({ event: 'resume_ack_send', success: true, acceptedLocally: true }));
+      expect(events().some(e => e.event === 'socket_close')).toBe(false);
+      await send({ type: 'response', messageId: resume.messageId, openId: 'user-1', success: true });
+      expect(events()).toContainEqual(expect.objectContaining({ event: 'result_ack_send', acceptedLocally: true, duplicate: true }));
+      close(1001, Buffer.from('private-close-sentinel'));
+      expect(events()).toContainEqual(expect.objectContaining({ event: 'socket_close', connectionEpoch: 1, code: 1001, reasonBytes: 22 }));
+      expect(JSON.stringify(events())).not.toMatch(/private-close-sentinel|recovered-1|old-card|user-1|device-1/);
+    });
 
     it('creates one recovery card, preserves reply routing, and renders only later output', async () => {
       const { send, replies } = await connect();
