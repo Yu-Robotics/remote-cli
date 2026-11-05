@@ -3,6 +3,14 @@ import { PassThrough } from 'stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const fixture = vi.hoisted(() => ({ spawn: vi.fn(), track: vi.fn(), wait: vi.fn(async () => {}) }));
+// These tests supply EventEmitter processes, not OS workers. Native admission and
+// containment are exercised by ManagedSpawn.native.test.ts on each native runner.
+vi.mock('../../src/executor/ManagedSpawn', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../src/executor/ManagedSpawn')>();
+  const { ownedSpawn } = await import('../../src/delegation/OwnershipRuntime');
+  return { ...actual, spawnManaged: (_enabled: boolean, ...args: Parameters<typeof ownedSpawn>) => ownedSpawn(...args) };
+});
+
 vi.mock('../../src/delegation/OwnershipRuntime', () => ({ ownedSpawn: fixture.spawn }));
 vi.mock('../../src/executor/ManagedProcessGroups', () => ({ ManagedProcessGroups: class {
   track = fixture.track;
