@@ -132,18 +132,56 @@ describe('authorized durable snapshots', () => {
     const big = await fs.open(path.join(cwd, 'big'), 'w'); await big.truncate(OUTPUT_LIMITS.file + 1); await big.close();
     await expect(store.snapshot('big', context())).rejects.toThrow();
   });
-  it('rejects mutation and scope replacement during anchored reads', async () => {
+  it('rejects file mutation during anchored reads', async () => {
     await fs.writeFile(path.join(cwd, 'file'), Buffer.alloc(131072, 1));
     const file = openOutputFile(path.join(cwd, 'file')); const chunks = file.chunks();
     try { await chunks.next(); await fs.writeFile(path.join(cwd, 'file'), 'changed'); await expect(chunks.next()).rejects.toThrow(); }
-    finally { await chunks.return(undefined); file.close(); }
-    await fs.writeFile(path.join(cwd, 'file'), 'before');
-    const opened = openOutputFile(path.join(cwd, 'file')); const stream = opened.chunks();
+    finally { try { await chunks.return(undefined); } finally { file.close(); } }
+  });
+  it('protects anchored reads when scope replacement is denied or succeeds', async () => {
+    const original = Buffer.alloc(131072, 1), foreign = Buffer.from('foreign sentinel');
+    const filename = path.join(cwd, 'file'), moved = `${cwd}-old`, replacement = path.join(root, 'replacement');
+    await fs.writeFile(filename, original);
+    await fs.mkdir(replacement); await fs.writeFile(path.join(replacement, 'file'), foreign);
+    const directoryIdentity = await fs.stat(cwd, { bigint: true });
+    const fileIdentity = await fs.stat(filename, { bigint: true });
+    const opened = openOutputFile(filename), stream = opened.chunks(), received: Buffer[] = [];
+    let denied = false;
     try {
-      await stream.next(); await fs.rename(cwd, `${cwd}-old`); await fs.mkdir(cwd); await fs.writeFile(path.join(cwd, 'file'), 'foreign');
-      await expect(stream.next()).rejects.toThrow('scope changed');
-      expect(await fs.readFile(path.join(cwd, 'file'), 'utf8')).toBe('foreign');
-    } finally { await stream.return(undefined); opened.close(); }
+      const first = await stream.next(); expect(first.done).toBe(false); received.push(first.value!);
+      try { await fs.rename(cwd, moved); }
+      catch (error) {
+        // Windows may deny an ancestor rename while descendants are open, even with FILE_SHARE_DELETE.
+        // Accept only the observed native denial; unrelated errors must fail this fixture.
+        expect(process.platform).toBe('win32');
+        expect(error).toMatchObject({ code: 'EPERM', syscall: 'rename', path: cwd, dest: moved });
+        denied = true;
+      }
+      const drain = async () => { for await (const chunk of stream) received.push(chunk); };
+      if (denied) {
+        await expect(fs.stat(moved)).rejects.toMatchObject({ code: 'ENOENT' });
+        expect(await fs.stat(cwd, { bigint: true })).toMatchObject({ dev: directoryIdentity.dev, ino: directoryIdentity.ino });
+        expect(await fs.stat(filename, { bigint: true })).toMatchObject({ dev: fileIdentity.dev, ino: fileIdentity.ino,
+          size: fileIdentity.size, mtimeNs: fileIdentity.mtimeNs });
+        await expect(drain()).resolves.toBeUndefined();
+        expect(await fs.readFile(filename)).toEqual(original);
+        expect(await fs.readFile(path.join(replacement, 'file'))).toEqual(foreign);
+      } else {
+        await fs.rename(replacement, cwd);
+        await expect(drain()).rejects.toThrow('scope changed');
+        expect(await fs.readFile(filename)).toEqual(foreign);
+      }
+      expect(Buffer.concat(received)).toEqual(original);
+    } finally { try { await stream.return(undefined); } finally { opened.close(); } }
+    if (denied) {
+      // All iterator/native handles are closed: the identical rename must now work.
+      // This distinguishes handle protection from unrelated filesystem permission failures.
+      await fs.rename(cwd, moved); await fs.rename(replacement, cwd);
+    }
+    expect(await fs.stat(moved, { bigint: true })).toMatchObject({ dev: directoryIdentity.dev, ino: directoryIdentity.ino });
+    expect(await fs.stat(path.join(moved, 'file'), { bigint: true })).toMatchObject({ dev: fileIdentity.dev, ino: fileIdentity.ino });
+    expect(await fs.readFile(path.join(moved, 'file'))).toEqual(original);
+    expect(await fs.readFile(filename)).toEqual(foreign);
   });
   it('rejects changed snapshot bytes before exposing any stream to the network', async () => {
     await fs.writeFile(path.join(cwd, 'file'), 'original'); const ref = await store.snapshot('file', context());
