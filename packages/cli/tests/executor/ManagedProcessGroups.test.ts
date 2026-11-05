@@ -44,7 +44,7 @@ describe('managed process-group evidence', () => {
     expect(entry.runtime.readStat).not.toHaveBeenCalled();
   });
 
-  it.each(['darwin', 'win32', 'freebsd'])('holds unsupported %s confirmation without signalling', async platform => {
+  it.each(['freebsd', 'sunos'])('holds unsupported %s confirmation without signalling', async platform => {
     const entry = fixture({ platform }); entry.spawn(); entry.close();
     await expect(entry.groups.waitForExit()).rejects.toThrow('unavailable on this platform');
     expect(entry.runtime.signal).not.toHaveBeenCalled();

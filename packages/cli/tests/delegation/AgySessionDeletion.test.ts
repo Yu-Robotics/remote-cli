@@ -41,7 +41,7 @@ const INSERT_INDEX = `INSERT INTO conversation_summaries
   (conversation_id, parent_conversation_id, app_data_dir, last_modified_time, workspace_uris, last_user_input_time)
   VALUES (?, ?, ?, '2026-01-01T00:00:00Z', '[]', '2026-01-01T00:00:00Z')`;
 
-describe.skipIf(process.platform !== 'linux')('AGY exact owned history cleanup', () => {
+describe('AGY exact owned history cleanup', () => {
   let home: string;
   let scope: string;
   let target: AgyDeletionTarget;
@@ -311,7 +311,7 @@ describe.skipIf(process.platform !== 'linux')('AGY exact owned history cleanup',
     vi.mocked(os.homedir).mockReturnValue(path.join(home, 'different-home'));
     expect((await remove()).state).toBe('held');
     vi.mocked(os.homedir).mockReturnValue(home);
-    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('freebsd');
     expect((await remove()).state).toBe('unsupported');
   });
 });

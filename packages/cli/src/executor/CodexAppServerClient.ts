@@ -1,3 +1,4 @@
+import { spawnManaged } from './ManagedSpawn';
 import { ownedSpawn as spawn } from '../delegation/OwnershipRuntime';
 import { ChildProcess } from 'child_process';
 import { StringDecoder } from 'string_decoder';
@@ -166,7 +167,7 @@ export class CodexAppServerClient {
 
     let proc: ChildProcess;
     try {
-      proc = spawn(this.command, ['app-server', '--stdio', ...this.launchArgs], {
+      proc = spawnManaged(this.delegationWorker, this.command, ['app-server', '--stdio', ...this.launchArgs], {
         ...(this.delegationWorker && process.platform !== 'win32' ? { detached: true } : {}),
         cwd: this.cwd,
         env: this.env ?? { ...process.env },

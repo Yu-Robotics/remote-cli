@@ -13,6 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.219] - 2026-11-05
+
+### Added
+- Add Windows Job containment and macOS native process identity checks for managed worker and cleanup-process shutdown.
+- Add handle-relative native history deletion and bounded artifact reads on Windows and macOS, preserving recorded ownership, generation, retry, and deliverable checks.
+- Build and test bundled Node-API helpers on native x64 and arm64 runners; package validation requires matching platform binaries without install-time compilation.
+
+### Fixed
+- Enable compatible managed history capture on Windows and macOS and honor the private AGY user profile on Windows.
+- Record confirmed managed-tree exit in the ownership journal while retaining interrupted launches whose native evidence was lost.
+
 ## [1.6.218] - 2026-11-05
 
 ### Fixed

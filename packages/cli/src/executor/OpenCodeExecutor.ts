@@ -1,3 +1,4 @@
+import { supportsNativeCleanup } from '../native/NativeBindings';
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import { AcpExecutor } from './AcpExecutor';
 import type { AcpEventCallbacks, AcpTransport } from './acp/AcpClient';
@@ -71,7 +72,7 @@ export class OpenCodeExecutor extends AcpExecutor {
       delegationWorker: options.delegationWorker,
       sessionBaseDir: options.sessionBaseDir,
       clientFactory: options.clientFactory,
-      nativeSessionCapture: options.delegationWorker && process.platform === 'linux'
+      nativeSessionCapture: options.delegationWorker && supportsNativeCleanup()
         ? session => captureOpenCodeDeletionTarget({ ...session, home: os.homedir() }) : undefined,
       acpCommand: options.openCodeCommand ?? 'opencode',
       acpArgs: ['acp'],

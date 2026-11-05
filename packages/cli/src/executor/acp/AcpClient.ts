@@ -1,3 +1,4 @@
+import { spawnManaged } from '../ManagedSpawn';
 import { ownedSpawn as spawn } from '../../delegation/OwnershipRuntime';
 import { ChildProcess } from 'child_process';
 import * as readline from 'readline';
@@ -84,7 +85,7 @@ export class AcpClient implements AcpTransport {
     this.workerGroupEnabled = launch.delegationWorker === true;
     this.callbacks = callbacks;
     assertWorkingDirectoryExists(cwd);
-    this.child = spawn(command, args, {
+    this.child = spawnManaged(this.workerGroupEnabled, command, args, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: launch.env ?? process.env,

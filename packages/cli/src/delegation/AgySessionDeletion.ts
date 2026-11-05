@@ -1,10 +1,11 @@
+import { supportsNativeCleanup } from '../native/NativeBindings';
 import fs from 'fs/promises';
 import { constants } from 'fs';
 import os from 'os';
 import path from 'path';
 import { createHash } from 'crypto';
 import { createRequire } from 'module';
-import { LinuxHistoryAnchor } from './LinuxHistoryAnchor';
+import { openHistoryAnchor } from './HistoryAnchor';
 import { historyDirectory, historyIdentity, stableHistoryHash, validHistoryDirectory,
   validHistoryEntry, verifyHistoryDirectory, type HistoryEntry } from './NativeHistoryFiles';
 import type { NativeDirectoryIdentity, NativeDeletionResult } from './NativeSessionDeletion';
@@ -259,7 +260,7 @@ async function verifyExclusiveIndex(target: AgyDeletionTarget, files: HistoryEnt
 
 /** No native DeleteConversation call: it can dispose worktrees and brain deliverables. */
 export async function deleteOwnedAgySession(target: AgyDeletionTarget, recovery: AgyDeletionRecovery): Promise<NativeDeletionResult> {
-  if (process.platform !== 'linux') return { state: 'unsupported', reason: 'AGY history deletion requires Linux anchored files and exit proof' };
+  if (!supportsNativeCleanup()) return { state: 'unsupported', reason: 'AGY history deletion requires Linux anchored files and exit proof' };
   if (!recovery.confirmedProcessGroupExit) return { state: 'waiting-exit', reason: 'AGY writer process-group exit is unconfirmed' };
   let deleting = false;
   try {
@@ -299,7 +300,7 @@ export async function deleteOwnedAgySession(target: AgyDeletionTarget, recovery:
     // Directory mtime changes after removing a leaf are expected on a retry.
     if (current.some(entry => !prepared!.files.some(saved => saved.path === entry.path && saved.dev === entry.dev && saved.ino === entry.ino
       && (entry.kind === 'directory' || stableHistoryHash(saved) === stableHistoryHash(entry))))) throw new Error('AGY history changed after preparation');
-    const anchor = await LinuxHistoryAnchor.open(target.scope, prepared.files);
+    const anchor = await openHistoryAnchor(target.scope, prepared.files);
     try {
       deleting = true;
       // Keep directories, brain deliverables, caches, worktrees and remote-cli artifacts.

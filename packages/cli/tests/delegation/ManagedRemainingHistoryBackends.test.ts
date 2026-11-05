@@ -79,7 +79,7 @@ describe('managed AGY and DSH reset cleanup delivery', () => {
     await manager.requestNativeSessionDeletion('parent', 0);
     await manager.reconcileNativeSessionDeletions();
     const saved = (await manager.laneStore.lanesForThread('parent')).find(value => value.id === old.id)!;
-    expect(saved.nativeDeletion?.state).toBe(process.platform === 'linux' ? 'deleted' : 'unsupported');
+    expect(saved.nativeDeletion?.state).toBe('deleted');
     for (const item of [first, second]) {
       expect(await fs.readFile(item.output, 'utf8')).toBe('required result');
       if (process.platform === 'linux') await expect(fs.stat(item.history)).rejects.toMatchObject({ code: 'ENOENT' });
@@ -90,7 +90,7 @@ describe('managed AGY and DSH reset cleanup delivery', () => {
     expect((await manager.laneStore.lanesForThread('parent')).find(value => value.id === old.id)?.nativeDeletion?.state).toBe(saved.nativeDeletion?.state);
   });
 
-  it.skipIf(process.platform !== 'linux').each(['agy', 'dsh'] as const)('holds %s duplicate references and completes after the conflict is removed', async backend => {
+  it.each(['agy', 'dsh'] as const)('holds %s duplicate references and completes after the conflict is removed', async backend => {
     const old = await lane(backend); const item = await create(old); await ready(old);
     const alias = path.join(path.dirname(item.pointer), 'foreground.json');
     await fs.writeFile(alias, JSON.stringify({ id: item.target.sessionId, adopted: true }));

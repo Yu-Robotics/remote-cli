@@ -1,3 +1,4 @@
+import { supportsNativeCleanup } from '../native/NativeBindings';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -51,7 +52,7 @@ export class DshExecutor extends AcpExecutor {
     if (options.initialWorkingDirectory) guard.resolveWorkingDirectory(options.initialWorkingDirectory, process.cwd());
     const state: DshState = { images: false, usage: null, recoveryNotice: false, compacting: false, generation: 0 };
     const directory = options.sessionBaseDir ?? path.join(os.homedir(), '.remote-cli', 'dsh-sessions');
-    const history = options.delegationWorker && process.platform === 'linux' && options.threadId
+    const history = options.delegationWorker && supportsNativeCleanup() && options.threadId
       && /^delegate-lane-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(options.threadId) && !options.managedHistoryPatch
       ? new DshManagedHistory(os.homedir(), options.threadId, path.join(directory, `${options.threadId}.json`)) : undefined;
     const handoffFile = path.join(directory, `${options.threadId ?? 'default'}.handoff.json`);

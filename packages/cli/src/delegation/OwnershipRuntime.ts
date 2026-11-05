@@ -276,6 +276,13 @@ export function withProcessJournal<T>(journal: ProcessJournal, callback: () => T
   return context.run([...new Set([...(context.getStore() ?? []), journal])], callback);
 }
 
+const managedExitReceipts = new WeakMap<ChildProcess, () => void>();
+/** Called only after kernel group/job absence was positively established. */
+export function confirmOwnedProcessTreeExit(child: ChildProcess): void {
+  managedExitReceipts.get(child)?.();
+  managedExitReceipts.delete(child);
+}
+
 /** Outside managed ownership this is exactly Node spawn, including its options. */
 export const ownedSpawn: typeof nativeSpawn = ((command: string, args: readonly string[], options?: SpawnOptions): ChildProcess => {
   const journals = context.getStore() ?? [];
@@ -295,6 +302,7 @@ export const ownedSpawn: typeof nativeSpawn = ((command: string, args: readonly 
     // EventEmitter callback failure into an uncaught exception or grant cleanup.
     try { for (const journal of journals) journal.append(record); } catch { /* Recovery remains fenced. */ }
   };
+  managedExitReceipts.set(child, () => append({ id, event: 'absent' }));
   if (Number.isSafeInteger(child.pid) && child.pid! > 1) {
     let birth: string | undefined;
     try { birth = processBirth(child.pid!); } catch { /* PID absence is checked by the kernel on recovery. */ }
