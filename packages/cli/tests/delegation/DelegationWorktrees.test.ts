@@ -97,6 +97,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
   const result = (scope: ReturnType<DelegationManager['begin']>, taskId: string, id: string) =>
     trackCall(scope.invoke('remote_cli_result', { taskId, waitSeconds: 25 }, id) as Promise<DelegatedTaskResult>);
   const gitPhase = async <T>(name: string, action: () => Promise<T>): Promise<T> => {
+    if (draining) throw new Error('Fixture is draining; no new Git phases may start');
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([trackCall(Promise.resolve().then(action)), new Promise<never>((_resolve, reject) => {
@@ -104,6 +105,86 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
       })]);
     } finally { clearTimeout(timer); }
   };
+
+  const retainAndCheckCloseout = async (
+    scope: Pick<ReturnType<DelegationManager['begin']>, 'invoke' | 'checkArtifactCloseout'>, taskId: string,
+  ) => {
+    const inspection: any = await gitPhase('inspect the changed artifact', () =>
+      scope.invoke('remote_cli_integrate', { taskId }, 'inspect'));
+    await gitPhase('retain and reclaim the changed artifact', () => scope.invoke('remote_cli_integrate', {
+      taskId, action: 'retain', expectedRevision: inspection.revision,
+    }, 'retain'));
+    expect(await gitPhase('verify artifact closeout', () => scope.checkArtifactCloseout())).toEqual([]);
+  };
+
+  it('gives artifact inspection, retention and closeout independent bounded phases', async () => {
+    const releases: (() => void)[] = [];
+    const invoke = vi.fn(async () => {
+      await new Promise<void>(resolve => { releases.push(resolve); });
+      return { revision: 'synthetic-revision' };
+    });
+    const checkArtifactCloseout = vi.fn(async () => {
+      await new Promise<void>(resolve => { releases.push(resolve); });
+      return [];
+    });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const running = retainAndCheckCloseout({ invoke, checkArtifactCloseout }, 'synthetic-task');
+    const outcome = running.then(() => undefined, error => error);
+    try {
+      // Each operation is below 30 seconds, but their sum is above it.
+      for (let phase = 0; phase < 3; phase++) {
+        await vi.advanceTimersByTimeAsync(0);
+        expect(releases).toHaveLength(phase + 1);
+        await vi.advanceTimersByTimeAsync(11_000);
+        releases[phase]();
+      }
+      expect(await outcome).toBeUndefined();
+      expect(invoke).toHaveBeenNthCalledWith(2, 'remote_cli_integrate', {
+        taskId: 'synthetic-task', action: 'retain', expectedRevision: 'synthetic-revision',
+      }, 'retain');
+      expect(checkArtifactCloseout).toHaveBeenCalledOnce();
+      expect(pendingCalls.size).toBe(0);
+    } finally {
+      vi.useRealTimers(); releases.forEach(release => release());
+      await Promise.allSettled([running, ...pendingCalls]);
+    }
+  });
+
+  it.each(['resolve', 'reject'] as const)('drains a timed-out artifact operation that later %ss without admitting closeout', async completion => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const invoke = vi.fn(async () => {
+      await gate;
+      if (completion === 'reject') throw new Error('Synthetic late inspection failure');
+      return { revision: 'synthetic-revision' };
+    });
+    const checkArtifactCloseout = vi.fn(async () => []);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const running = retainAndCheckCloseout({ invoke, checkArtifactCloseout }, 'synthetic-task');
+    const outcome = running.then(() => undefined, error => error);
+    let settling: Promise<void> | undefined;
+    try {
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(await outcome).toBeInstanceOf(Error);
+      expect(pendingCalls.size).toBe(1);
+      vi.useRealTimers();
+      let settled = false;
+      settling = settleFixture().then(() => { settled = true; });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      const latePhase = vi.fn(async () => undefined);
+      await expect(gitPhase('late admission', latePhase)).rejects.toThrow('Fixture is draining');
+      expect(latePhase).not.toHaveBeenCalled();
+      expect(await fs.stat(fixture.directory)).toBeDefined();
+      release(); await settling;
+      expect(invoke).toHaveBeenCalledOnce();
+      expect(checkArtifactCloseout).not.toHaveBeenCalled();
+      expect(pendingCalls.size).toBe(0);
+    } finally {
+      vi.useRealTimers(); release();
+      await Promise.allSettled([running, ...(settling ? [settling] : []), ...pendingCalls]);
+    }
+  });
 
   // Acceptance is intentionally bounded and may return queued before the factory.
   // Only tests that need an executing worker use this helper; queue/admission tests keep start().
@@ -275,7 +356,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     }
   }, 120_000);
 
-  // Four real-Git phases have independent deadlines. Do not make their combined
+  // Six real-Git phases have independent deadlines. Do not make their combined
   // filesystem/process cost compete for a single 30-second unit-test budget.
   it.each(['mixed', 'same-backend'] as const)('runs five isolated %s tasks concurrently and keeps a sixth queued', async mode => {
     const scope = manager.begin(parent);
@@ -326,37 +407,46 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     expect(terminal.every(task => task.state === 'succeeded')).toBe(true);
     expect(await gitText(fixture.root, ['rev-parse', 'HEAD'])).toBe(fixture.head);
     expect(await gitText(fixture.root, ['for-each-ref', '--format=%(refname)', 'refs/heads'])).toBe('refs/heads/main');
-    await phase('retain the changed artifact and verify closeout', async () => {
-      const inspection: any = await scope.invoke('remote_cli_integrate', { taskId: first.taskId }, 'inspect');
-      await scope.invoke('remote_cli_integrate', { taskId: first.taskId, action: 'retain', expectedRevision: inspection.revision }, 'retain');
-      expect(await scope.checkArtifactCloseout()).toEqual([]);
-    });
-  }, 185_000);
+    await retainAndCheckCloseout(scope, first.taskId);
+  }, 5 * 30_000 + 90_000 + 5_000);
 
+  // Two worker lifecycles and explicit integration each retain bounded operations;
+  // only the outer watchdog accounts for the sum of the seven phase budgets.
   it('reuses native conversation and worktree after explicit integration, including sibling changes in the next baseline', async () => {
     const scope = manager.begin(parent);
-    const first = await startExecuting(scope, 'first');
-    const pointer = path.join(fixture.directory, '.remote-cli', 'codex-sessions', `${factory.mock.calls[0][3]}.json`);
-    await fs.mkdir(path.dirname(pointer), { recursive: true });
-    await fs.writeFile(pointer, JSON.stringify({ threadId: 'fixture-conversation', cwd: workers[0].cwd }));
-    await fs.writeFile(path.join(workers[0].cwd, 'source.txt'), 'integrated result\n');
-    workers[0].finish({ success: true, output: 'Ready' });
-    await result(scope, first.taskId, 'first-result');
-    const inspection: any = await scope.invoke('remote_cli_integrate', { taskId: first.taskId }, 'inspect');
-    expect(await scope.invoke('remote_cli_integrate', { taskId: first.taskId, action: 'apply',
-      expectedRevision: inspection.revision }, 'apply')).toMatchObject({ disposition: 'applied' });
-    await expect(fs.lstat(workers[0].cwd)).rejects.toMatchObject({ code: 'ENOENT' });
-    expect(JSON.parse(await fs.readFile(pointer, 'utf8')).threadId).toBe('fixture-conversation');
-    await fs.writeFile(path.join(fixture.root, 'sibling.txt'), 'new mainline input\n');
-    const second = await startExecuting(scope, 'second');
-    expect(workers[1].cwd).toBe(workers[0].cwd);
-    expect(factory.mock.calls[1][3]).toBe(factory.mock.calls[0][3]);
-    expect(JSON.parse(await fs.readFile(pointer, 'utf8')).cwd).toBe(workers[1].cwd);
-    expect(await fs.readFile(path.join(workers[1].cwd, 'sibling.txt'), 'utf8')).toContain('mainline input');
-    expect(vi.mocked(workers[1].executor.execute).mock.calls[0][0]).toContain('earlier conversation context may be stale');
-    workers[1].finish({ success: true, output: 'Rechecked current files' });
-    await result(scope, second.taskId, 'second-result');
-  }, 30_000);
+    const { first, pointer } = await gitPhase('prepare and edit the first conversation', async () => {
+      const first = await startExecuting(scope, 'first');
+      const pointer = path.join(fixture.directory, '.remote-cli', 'codex-sessions', `${factory.mock.calls[0][3]}.json`);
+      await fs.mkdir(path.dirname(pointer), { recursive: true });
+      await fs.writeFile(pointer, JSON.stringify({ threadId: 'fixture-conversation', cwd: workers[0].cwd }));
+      await fs.writeFile(path.join(workers[0].cwd, 'source.txt'), 'integrated result\n');
+      workers[0].finish({ success: true, output: 'Ready' });
+      return { first, pointer };
+    });
+    await gitPhase('collect the first conversation result', () => result(scope, first.taskId, 'first-result'));
+    const inspection: any = await gitPhase('inspect the first conversation artifact', () =>
+      scope.invoke('remote_cli_integrate', { taskId: first.taskId }, 'inspect'));
+    await gitPhase('apply and reclaim the first conversation artifact', async () => {
+      expect(await scope.invoke('remote_cli_integrate', { taskId: first.taskId, action: 'apply',
+        expectedRevision: inspection.revision }, 'apply')).toMatchObject({ disposition: 'applied' });
+    });
+    await gitPhase('verify reclamation and add sibling changes', async () => {
+      await expect(fs.lstat(workers[0].cwd)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(JSON.parse(await fs.readFile(pointer, 'utf8')).threadId).toBe('fixture-conversation');
+      await fs.writeFile(path.join(fixture.root, 'sibling.txt'), 'new mainline input\n');
+    });
+    const second = await gitPhase('reuse the conversation with the current baseline', async () => {
+      const second = await startExecuting(scope, 'second');
+      expect(workers[1].cwd).toBe(workers[0].cwd);
+      expect(factory.mock.calls[1][3]).toBe(factory.mock.calls[0][3]);
+      expect(JSON.parse(await fs.readFile(pointer, 'utf8')).cwd).toBe(workers[1].cwd);
+      expect(await fs.readFile(path.join(workers[1].cwd, 'sibling.txt'), 'utf8')).toContain('mainline input');
+      expect(vi.mocked(workers[1].executor.execute).mock.calls[0][0]).toContain('earlier conversation context may be stale');
+      workers[1].finish({ success: true, output: 'Rechecked current files' });
+      return second;
+    });
+    await gitPhase('collect the reused conversation result', () => result(scope, second.taskId, 'second-result'));
+  }, 7 * 30_000 + 5_000);
 
   it('reuses a historically delivered lane before the next worker without deleting its checkout at admission', async () => {
     const scope = manager.begin(parent);

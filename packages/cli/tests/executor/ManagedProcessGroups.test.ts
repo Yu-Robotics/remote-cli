@@ -44,6 +44,72 @@ describe('managed process-group evidence', () => {
     expect(entry.runtime.signal).not.toHaveBeenCalled();
   });
 
+  it.each(['empty', 'zombie'] as const)('waits for ESRCH after a transient Darwin EPERM with a %s snapshot', async snapshot => {
+    const denied = () => { throw Object.assign(new Error('Synthetic probe denial'), { code: 'EPERM' }); };
+    const entry = fixture({ platform: 'darwin',
+      pids: vi.fn(async () => snapshot === 'empty' ? [] : [String(pid)]),
+      probe: vi.fn().mockImplementationOnce(denied).mockImplementation(absent),
+    });
+    entry.spawn();
+    vi.mocked(entry.runtime.readStat).mockReturnValue(stat(pid, 'Z'));
+    entry.child.emit('exit', 0);
+    const proof = entry.groups.waitForExit();
+    // The later close must share the in-flight proof rather than reset its deadline.
+    entry.close(); await proof; await entry.groups.waitForExit();
+    expect(entry.runtime.probe).toHaveBeenCalledTimes(2);
+    expect(entry.runtime.pids).toHaveBeenCalledTimes(2);
+    expect(entry.runtime.signal).not.toHaveBeenCalled();
+    expect(entry.runtime.now()).toBe(25);
+  });
+
+  it.each(['empty', 'zombie', 'live'] as const)('holds persistent Darwin EPERM with a %s snapshot until the original deadline', async snapshot => {
+    const entry = fixture({ platform: 'darwin',
+      pids: vi.fn(async () => snapshot === 'empty' ? [] : [String(pid)]),
+      probe: vi.fn(() => { throw Object.assign(new Error('Synthetic private error detail'), { code: 'EPERM' }); }),
+    });
+    entry.spawn();
+    vi.mocked(entry.runtime.readStat).mockReturnValue(stat(pid, snapshot === 'zombie' ? 'Z' : 'S'));
+    entry.close();
+    await expect(entry.groups.waitForExit()).rejects.toThrow('could not be confirmed (last probe error: EPERM)');
+    expect(entry.runtime.now()).toBe(entry.runtime.timeoutMs);
+    expect(entry.runtime.probe).toHaveBeenCalledTimes(4);
+    expect(entry.runtime.signal).not.toHaveBeenCalled();
+    // A failed proof did not mark this group confirmed or discard its identity.
+    vi.mocked(entry.runtime.probe).mockImplementation(absent);
+    await entry.groups.waitForExit();
+    expect(entry.runtime.probe).toHaveBeenCalledTimes(5);
+  });
+
+  it.each(['leader', 'session'] as const)('rechecks Darwin %s identity after EPERM before probing again', async changed => {
+    const entry = fixture({ platform: 'darwin', pids: vi.fn(async () => [String(pid)]),
+      probe: vi.fn(() => {
+        vi.mocked(entry.runtime.readStat).mockReturnValue(changed === 'leader'
+          ? stat(pid, 'S', pid, 200) : stat(pid, 'S', pid, 100, pid + 1));
+        throw Object.assign(new Error('Synthetic probe denial'), { code: 'EPERM' });
+      }),
+    });
+    entry.spawn(); entry.close();
+    await expect(entry.groups.waitForExit()).rejects.toThrow('identity changed');
+    expect(entry.runtime.probe).toHaveBeenCalledOnce();
+    expect(entry.runtime.signal).not.toHaveBeenCalled();
+  });
+
+  it.each(['EIO', 'EINVAL', 'EACCES', 'SYNTHETIC_PRIVATE_CODE', undefined, null] as const)(
+    'reports only sanitized Darwin probe errno and does not retry %s', async code => {
+      const entry = fixture({ platform: 'darwin', probe: vi.fn(() => {
+        throw code === null ? null : Object.assign(new Error('Synthetic private error detail'), { code });
+      }) });
+      entry.spawn(); entry.close();
+      const outcome = await entry.groups.waitForExit().catch(error => error);
+      expect(outcome).toBeInstanceOf(Error);
+      const safeCode = ['EIO', 'EINVAL', 'EACCES'].includes(code as string) ? code : 'UNKNOWN';
+      expect(outcome.message).toBe(`Managed process-group absence is unavailable (probe error: ${safeCode}); preserve the checkout`);
+      expect(outcome.message).not.toContain('Synthetic private');
+      expect(entry.runtime.probe).toHaveBeenCalledOnce();
+      expect(entry.runtime.now()).toBe(0);
+      expect(entry.runtime.signal).not.toHaveBeenCalled();
+    });
+
   it.each([undefined, 0, 1, -1, 1.5, Number.NaN, process.pid])('never signals an invalid or missing owned PID %s', async invalid => {
     const entry = fixture(); Object.assign(entry.child, { pid: invalid }); entry.spawn(); entry.close();
     await expect(entry.groups.waitForExit()).rejects.toThrow('identity');
