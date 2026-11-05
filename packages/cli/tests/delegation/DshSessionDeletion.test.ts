@@ -8,7 +8,7 @@ import { captureDshDeletionTarget, createDshHistoryScope, deleteOwnedDshSession,
   validDshDeletionPreparation, type DshDeletionTarget, type DshHistoryScope, type DshDeletionPreparation } from '../../src/delegation/DshSessionDeletion';
 import { LinuxHistoryAnchor } from '../../src/delegation/LinuxHistoryAnchor';
 
-describe.skipIf(process.platform !== 'linux')('owned DSH history deletion', () => {
+describe('owned DSH history deletion', () => {
   let home: string, scope: DshHistoryScope, target: DshDeletionTarget, transcript: string, pointer: string;
   let preparation: DshDeletionPreparation | undefined;
   const persistPrepared = async (value: DshDeletionPreparation) => { preparation = JSON.parse(JSON.stringify(value)); };

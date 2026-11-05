@@ -1,3 +1,4 @@
+import { spawnManaged } from '../ManagedSpawn';
 import { ownedSpawn as spawn } from '../../delegation/OwnershipRuntime';
 import { ChildProcess } from 'child_process';
 import * as os from 'os';
@@ -88,7 +89,7 @@ export class ZCodeClient implements AcpTransport {
     this.compactPollIntervalMs = options.compactPollIntervalMs ?? 2_000;
     const launch = options.launch ?? resolveZCodeLaunch(options.command);
     assertWorkingDirectoryExists(options.cwd);
-    this.child = spawn(launch.command, launch.args, {
+    this.child = spawnManaged(this.workerGroupEnabled, launch.command, launch.args, {
       cwd: options.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: launch.env,

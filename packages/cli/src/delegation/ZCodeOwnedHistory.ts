@@ -1,3 +1,4 @@
+import { readNativeHistoryTree } from './NativeHistoryRead';
 import fs from 'fs';
 import path from 'path';
 import { createHash, randomUUID } from 'crypto';
@@ -462,7 +463,7 @@ function databaseOutputs(target: ZCodeOwnedTarget, ids: readonly string[]): Buff
 
 /** Read only single components through live directory descriptors on Linux. */
 function readFiles(root: string, anchors: readonly Identity[] = []): Map<string, Buffer> {
-  if (process.platform !== 'linux') throw new Error('ZCode export anchoring requires Linux');
+  if (process.platform !== 'linux') return readNativeHistoryTree(root, anchors, MAX_BYTES, LIMIT);
   const result = new Map<string, Buffer>();
   const handles: number[] = [];
   let total = 0, directories = 0;

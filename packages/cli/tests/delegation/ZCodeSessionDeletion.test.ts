@@ -7,7 +7,7 @@ import { historyDirectory } from '../../src/delegation/NativeHistoryFiles';
 import { deleteOwnedZCodeSession, validZCodeDeletionPreparation, type ZCodeDeletionTarget,
   type ZCodeDeletionPreparation, type ZCodeDeletionRecovery } from '../../src/delegation/ZCodeSessionDeletion';
 
-describe.skipIf(process.platform !== 'linux')('native ZCode permanent deletion', () => {
+describe('native ZCode permanent deletion', () => {
   let home: string, artifact: string, exported: string, target: ZCodeDeletionTarget, preparation: ZCodeDeletionPreparation | undefined;
   let recovery: ZCodeDeletionRecovery;
   let client: { requestSessionData: ReturnType<typeof vi.fn>; destroy: ReturnType<typeof vi.fn>;

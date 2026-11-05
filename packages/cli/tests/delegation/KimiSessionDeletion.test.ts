@@ -19,7 +19,6 @@ describe('Kimi deletion-only maintenance', () => {
   beforeEach(async () => {
     home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'kimi-delete-')));
     vi.spyOn(os, 'homedir').mockReturnValue(home); vi.stubEnv('HOME', home); vi.stubEnv('USERPROFILE', home);
-    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
     const root = path.join(home, 'native'); const pointerRoot = path.join(home, 'pointers');
     await fs.mkdir(root); await fs.mkdir(pointerRoot);
     const id = randomUUID(); const lane = `delegate-lane-${randomUUID()}`; const pointer = path.join(pointerRoot, `${lane}.json`);
@@ -107,7 +106,7 @@ describe('Kimi deletion-only maintenance', () => {
   });
   it('does not launch maintenance without durable fencing or on unsupported platforms', async () => {
     expect((await deleteOwnedKimiSession(target, {}, factory)).state).toBe('held');
-    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin');
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('freebsd');
     expect((await remove()).state).toBe('unsupported'); expect(factory).not.toHaveBeenCalled();
   });
 });

@@ -1,6 +1,6 @@
 {
   "name": "@yu_robotics/remote-cli",
-  "version": "1.6.218",
+  "version": "1.6.219",
   "description": "Remote control Claude Code CLI via mobile",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -11,14 +11,17 @@
     "dist",
     "bin",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "native/prebuilds",
+    "native/managed-worker.cjs"
   ],
   "scripts": {
-    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc && node scripts/build-release-notes.cjs",
+    "build": "npm run build:native && node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc && node scripts/build-release-notes.cjs",
     "dev": "tsx watch src/index.ts",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "prepublishOnly": "npm run build && npm test"
+    "prepublishOnly": "npm run build && npm test",
+    "build:native": "node scripts/build-native.cjs"
   },
   "publishConfig": {
     "access": "public"

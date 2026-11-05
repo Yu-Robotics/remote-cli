@@ -1,3 +1,4 @@
+import { spawnManaged } from '../ManagedSpawn';
 import { ownedSpawn as spawn } from '../../delegation/OwnershipRuntime';
 import { ChildProcess } from 'child_process';
 import { StringDecoder } from 'string_decoder';
@@ -188,7 +189,7 @@ export class PiClient implements PiTransport {
     const { command, args } = buildPiRpcArgs(this.options);
     let proc: ChildProcess;
     try {
-      proc = spawn(command, args, {
+      proc = spawnManaged(this.options.delegationWorker === true, command, args, {
         ...(this.options.delegationWorker && process.platform !== 'win32' ? { detached: true } : {}),
         cwd: this.options.cwd,
         env: { ...process.env,

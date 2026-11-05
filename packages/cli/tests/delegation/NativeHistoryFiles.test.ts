@@ -16,7 +16,6 @@ describe('exact owned native history deletion', () => {
     home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'native-history-')));
     vi.spyOn(os, 'homedir').mockReturnValue(home);
     vi.stubEnv('HOME', home); vi.stubEnv('USERPROFILE', home);
-    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
   });
   afterEach(async () => { vi.restoreAllMocks(); vi.unstubAllEnvs(); await fs.rm(home, { recursive: true, force: true }); });
 
@@ -43,7 +42,7 @@ describe('exact owned native history deletion', () => {
     return { result, prepared: prepared! };
   }
 
-  linuxIt.each(['2.1.309', '9.0.0', undefined])('deletes the supported Claude layout with diagnostic version %s', async version => {
+  it.each(['2.1.309', '9.0.0', undefined])('deletes the supported Claude layout with diagnostic version %s', async version => {
     const target = await fixture('claude');
     await fs.writeFile(target.transcript!, JSON.stringify({ type: 'user', sessionId: target.sessionId,
       cwd: home, version, message: { content: 'synthetic' } }) + '\n');
@@ -70,7 +69,7 @@ describe('exact owned native history deletion', () => {
     expect((await remove(target)).result.state).toBe('held');
     expect((await fs.stat(target.transcript!)).isFile()).toBe(true);
   });
-  linuxIt.each(['pi', 'claude'] as const)('keeps legacy %s target hashes and manifests unchanged during missing-file retries', async backend => {
+  it.each(['pi', 'claude'] as const)('keeps legacy %s target hashes and manifests unchanged during missing-file retries', async backend => {
     const target = await fixture(backend);
     if (target.backend === 'pi') target.nativeVersion = '1.5.0';
     if (target.backend === 'claude') target.nativeVersion = '2.1.308';
@@ -87,7 +86,7 @@ describe('exact owned native history deletion', () => {
     expect(JSON.stringify(prepared)).toBe(originalPreparation);
   });
 
-  linuxIt.each(['pi', 'claude'] as const)('deletes only %s history and idempotently reconciles a lost acknowledgement', async backend => {
+  it.each(['pi', 'claude'] as const)('deletes only %s history and idempotently reconciles a lost acknowledgement', async backend => {
     const target = await fixture(backend);
     const other = await fixture(backend);
     const retained = path.join(home, 'results.txt'); await fs.writeFile(retained, 'retained artifact');
@@ -99,7 +98,7 @@ describe('exact owned native history deletion', () => {
     expect((await fs.stat(other.transcript!)).isFile()).toBe(true);
     expect((await fs.stat(target.pointer)).isFile()).toBe(true);
   });
-  linuxIt('removes owned Claude subagent history but preserves external code and exports', async () => {
+  it('removes owned Claude subagent history but preserves external code and exports', async () => {
     const target = await fixture('claude', 'managed_project');
     const subtree = path.join(target.scope.path, target.sessionId, 'subagents');
     await fs.mkdir(subtree, { recursive: true }); await fs.writeFile(path.join(subtree, 'agent-1.jsonl'), '{}\n');
@@ -107,7 +106,7 @@ describe('exact owned native history deletion', () => {
     expect((await remove(target)).result.state).toBe('deleted');
     expect(await fs.readFile(exportFile, 'utf8')).toBe('export');
   });
-  linuxIt('reconciles an orphan sibling after a prepared transcript unlink', async () => {
+  it('reconciles an orphan sibling after a prepared transcript unlink', async () => {
     const target = await fixture('claude');
     const sibling = path.join(target.scope.path, target.sessionId);
     await fs.mkdir(sibling); await fs.writeFile(path.join(sibling, 'history.jsonl'), '{}\n');
@@ -120,7 +119,7 @@ describe('exact owned native history deletion', () => {
     expect((await remove(target, first.prepared)).result.state).toBe('deleted');
     await expect(fs.stat(sibling)).rejects.toMatchObject({ code: 'ENOENT' });
   });
-  linuxIt('retries an immutable manifest after a nested directory was already removed', async () => {
+  it('retries an immutable manifest after a nested directory was already removed', async () => {
     const target = await fixture('claude');
     const sibling = path.join(target.scope.path, target.sessionId);
     const nested = path.join(sibling, 'subagents', 'deep'); await fs.mkdir(nested, { recursive: true });
@@ -136,7 +135,7 @@ describe('exact owned native history deletion', () => {
     expect((await remove(target, first.prepared)).result.state).toBe('deleted');
     await expect(fs.lstat(sibling)).rejects.toMatchObject({ code: 'ENOENT' });
   });
-  linuxIt('handles a confirmed empty Claude transcript with a durable manifest', async () => {
+  it('handles a confirmed empty Claude transcript with a durable manifest', async () => {
     const target = await fixture('claude'); await fs.writeFile(target.transcript!, '');
     expect((await remove(target)).result.state).toBe('deleted');
   });
@@ -157,7 +156,7 @@ describe('exact owned native history deletion', () => {
     await fs.writeFile(pointer, JSON.stringify({ id: target.sessionId, adopted: true }));
     expect((await remove(target)).result.state).toBe('held');
   });
-  linuxIt('allows a detached historical identity but does not erase its replacement', async () => {
+  it('allows a detached historical identity but does not erase its replacement', async () => {
     const target = await fixture('pi');
     await fs.writeFile(target.pointer, JSON.stringify({ id: randomUUID() }));
     expect((await remove(target)).result.state).toBe('held');
@@ -190,7 +189,7 @@ describe('exact owned native history deletion', () => {
     await fs.unlink(target.transcript!);
     await expect(verifyHistoryTarget(target, true)).rejects.toThrow('references');
   });
-  linuxIt('resolves a symlink followed by dot-dot using filesystem semantics', async () => {
+  it('resolves a symlink followed by dot-dot using filesystem semantics', async () => {
     const target = await fixture('pi'); const intermediate = path.join(target.scope.path, 'intermediate'); await fs.mkdir(intermediate);
     const alias = path.join(home, 'alias'); await fs.symlink(intermediate, alias, 'dir');
     const reference = alias + path.sep + '..' + path.sep + path.basename(target.transcript!);
@@ -235,7 +234,7 @@ describe('exact owned native history deletion', () => {
     }
     expect((await remove(target)).result.state).toBe('held'); expect((await fs.stat(target.transcript!)).isFile()).toBe(true);
   });
-  linuxIt('does not reconcile a dangling replacement symlink as an absent prepared file', async context => {
+  it('does not reconcile a dangling replacement symlink as an absent prepared file', async context => {
     const target = await fixture('pi'); const { prepared } = await remove(target);
     try { await fs.symlink(path.join(home, 'missing-target'), target.transcript!); }
     catch (error) {
@@ -259,12 +258,12 @@ describe('exact owned native history deletion', () => {
     const forged = { ...deletionPreparation(target), files: [], targetHash: '0'.repeat(64) };
     expect((await remove(target, forged)).result.state).toBe('held');
   });
-  linuxIt('rejects a file changed by a late callback after preparation', async () => {
+  it('rejects a file changed by a late callback after preparation', async () => {
     const target = await fixture('pi');
     const result = await deleteOwnedHistoryFiles(target, { persistPrepared: async () => { await fs.appendFile(target.transcript!, '{}\n'); } });
     expect(result.state).toBe('held'); expect((await fs.stat(target.transcript!)).isFile()).toBe(true);
   });
-  it.each(['darwin', 'win32'] as const)('does not delete without %s writer proof', async platform => {
+  it.each(['freebsd', 'sunos'] as const)('does not delete without %s writer proof', async platform => {
     const target = await fixture('pi'); vi.spyOn(process, 'platform', 'get').mockReturnValue(platform);
     expect((await remove(target)).result.state).toBe('unsupported');
   });

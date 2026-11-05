@@ -1,3 +1,6 @@
+import { confirmOwnedProcessTreeExit } from '../delegation/OwnershipRuntime';
+import { managedJob, type ManagedJob } from './ManagedSpawn';
+import { nativeBindings } from '../native/NativeBindings';
 import type { ChildProcess } from 'child_process';
 import { readFileSync, promises as fs } from 'fs';
 import { performance } from 'perf_hooks';
@@ -7,7 +10,8 @@ interface ProcessIdentity { pid: number; state: string; group: number; session: 
 export interface GroupExitDependencies {
   platform: string;
   readStat(pid: number): string;
-  pids(): Promise<string[]>;
+  processIdentity?(pid: number): ProcessIdentity;
+  pids(group?: number): Promise<string[]>;
   /** Signal zero: only ESRCH is kernel evidence that the group no longer exists. */
   probe(group: number): void;
   signal(group: number): void;
@@ -18,8 +22,13 @@ export interface GroupExitDependencies {
 
 const defaults: GroupExitDependencies = {
   platform: process.platform,
+  ...(process.platform === 'darwin' ? { processIdentity: (pid: number) => {
+    const record = nativeBindings().processInfo(pid);
+    return { ...record, birth: BigInt(record.birth) };
+  } } : {}),
   readStat: pid => readFileSync(`/proc/${pid}/stat`, 'utf8'),
-  pids: async () => {
+  pids: async group => {
+    if (process.platform === 'darwin') return nativeBindings().processIds(group!);
     const names = await fs.readdir('/proc');
     if (!names.includes(String(process.pid)) || !readFileSync('/proc/self/stat', 'utf8').startsWith(`${process.pid} (`)) {
       throw new Error('Managed process-group inventory does not match this PID namespace');
@@ -45,6 +54,8 @@ function identity(raw: string, pid: number): ProcessIdentity {
 }
 
 interface Group {
+  job?: ManagedJob;
+  child: ChildProcess;
   leader?: ProcessIdentity;
   closed: boolean;
   confirmed: boolean;
@@ -64,15 +75,19 @@ export class ManagedProcessGroups {
   constructor(private readonly dependencies: GroupExitDependencies = defaults) {}
 
   track(child: ChildProcess): void {
-    const group: Group = { closed: false, confirmed: false };
+    const group: Group = { closed: false, confirmed: false, child, job: managedJob(child) };
     this.groups.add(group);
     child.once('spawn', () => {
       const pid = child.pid;
-      if (this.dependencies.platform !== 'linux' || !Number.isSafeInteger(pid) || pid! <= 1 || pid === process.pid) return;
+      if (!['linux', 'darwin'].includes(this.dependencies.platform) || !Number.isSafeInteger(pid) || pid! <= 1 || pid === process.pid) return;
       try {
-        const leader = identity(this.dependencies.readStat(pid!), pid!);
+        const leader = this.dependencies.processIdentity?.(pid!) ?? identity(this.dependencies.readStat(pid!), pid!);
         if (leader.group === pid && leader.session === pid) group.leader = leader;
       } catch { /* Missing identity is retained as uncertainty, never permission to signal. */ }
+    });
+    if (this.dependencies.platform === 'darwin') child.once('exit', () => {
+      group.closed = true;
+      void this.prove(group).catch(() => undefined);
     });
     child.once('close', () => {
       group.closed = true;
@@ -88,7 +103,7 @@ export class ManagedProcessGroups {
   private prove(group: Group): Promise<void> {
     if (group.confirmed) return Promise.resolve();
     if (group.proof) return group.proof;
-    const proof = this.confirm(group).then(() => { group.confirmed = true; this.groups.delete(group); });
+    const proof = this.confirm(group).then(() => { group.confirmed = true; confirmOwnedProcessTreeExit(group.child); this.groups.delete(group); });
     group.proof = proof;
     void proof.then(() => { group.proof = undefined; }, () => { group.proof = undefined; });
     return proof;
@@ -96,21 +111,32 @@ export class ManagedProcessGroups {
 
   private async confirm(group: Group): Promise<void> {
     const runtime = this.dependencies;
-    if (runtime.platform !== 'linux') throw new Error('Managed process-group exit confirmation is unavailable on this platform; preserve the checkout');
+    if (runtime.platform === 'win32') {
+      if (!group.closed || !group.job || group.job.closed) throw new Error('Managed Windows job exit is unconfirmed');
+      const native = nativeBindings();
+      native.terminateJob(group.job.handle);
+      const deadline = runtime.now() + runtime.timeoutMs;
+      while (native.jobCount(group.job.handle) !== 0) {
+        if (runtime.now() >= deadline) throw new Error('Managed Windows job still has active processes');
+        await runtime.pause();
+      }
+      native.close(group.job.handle); group.job.closed = true; return;
+    }
+    if (!['linux', 'darwin'].includes(runtime.platform)) throw new Error('Managed process-group exit confirmation is unavailable on this platform; preserve the checkout');
     if (!group.closed || !group.leader) throw new Error('Managed process-group identity or transport exit is unconfirmed; preserve the checkout');
     const leader = group.leader;
     const deadline = runtime.now() + runtime.timeoutMs;
     let signalled = false;
     while (true) {
       if (runtime.now() >= deadline) throw new Error('Managed process-group exit could not be confirmed; preserve the checkout');
-      const names = await runtime.pids();
+      const names = await runtime.pids(leader.group);
       if (names.length > 100_000) throw new Error('Managed process-group inventory is incomplete; preserve the checkout');
       let live = false;
       for (const name of names) {
         if (!/^[1-9]\d*$/.test(name)) continue;
         if (runtime.now() >= deadline) throw new Error('Managed process-group exit could not be confirmed; preserve the checkout');
         let member: ProcessIdentity;
-        try { member = identity(runtime.readStat(Number(name)), Number(name)); }
+        try { member = runtime.processIdentity?.(Number(name)) ?? identity(runtime.readStat(Number(name)), Number(name)); }
         catch (error) {
           if (['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code ?? '')) continue;
           throw new Error('Managed process-group inventory is unavailable; preserve the checkout');

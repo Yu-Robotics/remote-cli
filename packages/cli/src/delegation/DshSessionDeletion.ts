@@ -1,10 +1,11 @@
+import { supportsNativeCleanup } from '../native/NativeBindings';
 import fs from 'fs/promises';
 import path from 'path';
 import { constants } from 'fs';
 import { randomUUID, createHash } from 'crypto';
 import { historyDirectory, historyIdentity, stableHistoryHash, validHistoryDirectory, validHistoryEntry,
   verifyHistoryDirectory, type HistoryEntry } from './NativeHistoryFiles';
-import { LinuxHistoryAnchor } from './LinuxHistoryAnchor';
+import { openHistoryAnchor } from './HistoryAnchor';
 import type { NativeDirectoryIdentity, NativeDeletionResult } from './NativeSessionDeletion';
 
 /** Audited DSH 0.2.1-rc.2/rc.5 and deepseek-ai/deepseek-harness@fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159.
@@ -255,7 +256,7 @@ async function prepare(target: DshDeletionTarget, ownedTargets: DshDeletionTarge
 export async function deleteOwnedDshSession(target: DshDeletionTarget, recovery: DshDeletionRecovery): Promise<NativeDeletionResult> {
   let deleting = false;
   try {
-    if (process.platform !== 'linux') return { state: 'unsupported', reason: 'DSH anchored deletion requires Linux writer proof' };
+    if (!supportsNativeCleanup()) return { state: 'unsupported', reason: 'DSH anchored deletion requires Linux writer proof' };
     const ownedTargets = recovery.ownedTargets ?? [target];
     if (!ownedTargets.length || ownedTargets.length > 64 || !ownedTargets.some(value => stableHistoryHash(value) === stableHistoryHash(target))
       || ownedTargets.some(value => !validDshDeletionTarget(value) || stableHistoryHash(scopeRecord(value)) !== stableHistoryHash(scopeRecord(target)))) {
@@ -272,7 +273,7 @@ export async function deleteOwnedDshSession(target: DshDeletionTarget, recovery:
     }
     if (!validDshDeletionPreparation(target, prepared)) throw new Error('DSH preparation changed');
     await verifyTarget(target, recovery.detachedPointer === true, prepared.sessionIds, ownedTargets);
-    const anchor = await LinuxHistoryAnchor.open(target.history, prepared.files);
+    const anchor = await openHistoryAnchor(target.history, prepared.files);
     try {
       deleting = true;
       for (const entry of [...prepared.files].sort((a, b) => b.path.length - a.path.length)) await anchor.remove(entry);

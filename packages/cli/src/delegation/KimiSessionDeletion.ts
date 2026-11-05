@@ -1,3 +1,4 @@
+import { supportsNativeCleanup } from '../native/NativeBindings';
 import { AcpClient } from '../executor/acp/AcpClient';
 import { verifyHistoryTarget, type OwnedHistoryTarget } from './NativeHistoryFiles';
 import { deletionPreparation, validDeletionPreparation, type NativeDeletionRecovery, type NativeDeletionResult } from './NativeSessionDeletion';
@@ -42,7 +43,7 @@ export async function deleteOwnedKimiSession(target: OwnedHistoryTarget, recover
   let deleting = false;
   let result: NativeDeletionResult = { state: 'held', reason: 'Kimi ownership could not be verified' };
   try {
-    if (process.platform !== 'linux' || target.backend !== 'kimi') return { state: 'unsupported', reason: 'Kimi native writer proof is unsupported' };
+    if (!supportsNativeCleanup() || target.backend !== 'kimi') return { state: 'unsupported', reason: 'Kimi native writer proof is unsupported' };
     await verifyHistoryTarget(target, recovery.detachedPointer);
     if (recovery.prepared && !validDeletionPreparation(target, recovery.prepared)) throw new Error('Kimi preparation changed');
     if (!recovery.persistMaintenanceState) throw new Error('Durable maintenance fencing is required');

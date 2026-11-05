@@ -13,3 +13,7 @@ coverage/
 **/.claude-session
 packages/*/dist/
 packages/*/node_modules/
+
+# Native binaries are built and verified by CI, never committed.
+packages/cli/native/build/
+packages/cli/native/prebuilds/

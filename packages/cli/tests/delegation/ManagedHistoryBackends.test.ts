@@ -11,7 +11,7 @@ import { DelegatedWorkerSessionStore, type DelegatedWorkerLane } from '../../src
 import { deletionPreparation } from '../../src/delegation/NativeSessionDeletion';
 
 // Manager ownership needs the real host's locking and boot identity. Only the
-// native deletion adapters require Linux; do not spoof the manager's platform.
+// Native deletion adapters run on the actual host; never spoof the manager's platform.
 const nativeLinux = process.platform === 'linux';
 const linuxIt = nativeLinux ? it : it.skip;
 
@@ -78,17 +78,15 @@ describe('durable managed Kimi/Pi/Claude deletion integration', () => {
     const artifact = path.join(home, 'result.txt'); await fs.writeFile(artifact, 'keep result and recovery');
     await manager.reconcileNativeSessionDeletions(); expect((await current(old.id)).nativeDeletion).toBeUndefined();
     await manager.requestNativeSessionDeletion('parent', 0); await manager.reconcileNativeSessionDeletions();
-    expect((await current(old.id)).nativeDeletion?.state).toBe(nativeLinux ? 'deleted' : 'unsupported');
+    expect((await current(old.id)).nativeDeletion?.state).toBe('deleted');
     expect((await current(future.id)).nativeDeleteRequested).not.toBe(true);
-    if (!nativeLinux) expect(kimiDelete).not.toHaveBeenCalled();
     if (first.transcript) {
-      if (nativeLinux) await expect(fs.stat(first.transcript)).rejects.toMatchObject({ code: 'ENOENT' });
-      else expect((await fs.stat(first.transcript)).isFile()).toBe(true);
+      await expect(fs.stat(first.transcript)).rejects.toMatchObject({ code: 'ENOENT' });
     }
     if (next.transcript) expect((await fs.stat(next.transcript)).isFile()).toBe(true);
     expect(await fs.readFile(artifact, 'utf8')).toBe('keep result and recovery');
   });
-  linuxIt.each(['pi', 'claude'] as const)('retains every %s fallback identity and handles independent children', async backend => {
+  it.each(['pi', 'claude'] as const)('retains every %s fallback identity and handles independent children', async backend => {
     const firstLane = await lane(backend); const first = await target(firstLane); const fallback = await target(firstLane); await ready(firstLane);
     const secondLane = await lane(backend, 0, new Set([firstLane.id])); const other = await target(secondLane); await ready(secondLane);
     expect((await current(firstLane.id)).nativeSessionHistory).toHaveLength(1);
@@ -96,7 +94,7 @@ describe('durable managed Kimi/Pi/Claude deletion integration', () => {
     for (const value of [first, fallback, other]) await expect(fs.stat(value.transcript!)).rejects.toMatchObject({ code: 'ENOENT' });
     expect((await current(firstLane.id)).nativeDeletion?.state).toBe('deleted'); expect((await current(secondLane.id)).nativeDeletion?.state).toBe('deleted');
   });
-  linuxIt.each([false, true])('reconciles persisted Claude preparations after shutdown and restart (legacy=%s)', async legacy => {
+  it.each([false, true])('reconciles persisted Claude preparations after shutdown and restart (legacy=%s)', async legacy => {
     const worker = await lane('claude'); const captured = await target(worker, legacy); await ready(worker);
     const sibling = path.join(captured.scope.path, captured.sessionId); await fs.mkdir(sibling);
     await manager.requestNativeSessionDeletion('parent', 0);
@@ -146,7 +144,7 @@ describe('durable managed Kimi/Pi/Claude deletion integration', () => {
     expect((await current(worker.id)).nativeDeletion?.state).toBe('deleted');
     expect(JSON.stringify((await current(worker.id)).nativeDeletionPreparations)).toBe(saved);
   });
-  linuxIt.each([false, true])('recovers Kimi lost ACK after manager restart (legacy=%s)', async legacy => {
+  it.each([false, true])('recovers Kimi lost ACK after manager restart (legacy=%s)', async legacy => {
     const worker = await lane('kimi'); const captured = await target(worker, legacy); await ready(worker);
     await manager.requestNativeSessionDeletion('parent', 0);
     kimiDelete.mockRejectedValueOnce(new Error('Synthetic lost acknowledgement'));
@@ -159,7 +157,7 @@ describe('durable managed Kimi/Pi/Claude deletion integration', () => {
     expect((await current(worker.id)).nativeDeletion?.state).toBe('deleted');
     expect(JSON.stringify((await current(worker.id)).nativeDeletionPreparations)).toBe(saved);
   });
-  linuxIt('keeps an interrupted Kimi maintenance writer fenced across restart', async () => {
+  it('keeps an interrupted Kimi maintenance writer fenced across restart', async () => {
     const worker = await lane('kimi'); await target(worker); await ready(worker);
     kimiExit.mockRejectedValue(new Error('synthetic surviving writer'));
     await manager.requestNativeSessionDeletion('parent', 0); await manager.reconcileNativeSessionDeletions();
@@ -200,7 +198,7 @@ describe('durable managed Kimi/Pi/Claude deletion integration', () => {
     const persisted = (await reloaded.lanesForThread('parent'))[0];
     expect(persisted.nativeDeletionPreparations?.[captured.sessionId]).toEqual(deletionPreparation(captured));
   });
-  linuxIt('never replaces an already durable file manifest with another valid manifest', async () => {
+  it('never replaces an already durable file manifest with another valid manifest', async () => {
     const worker = await lane('pi'); const captured = await target(worker); await ready(worker);
     await manager.requestNativeSessionDeletion('parent', 0); await manager.reconcileNativeSessionDeletions();
     const prepared = (await current(worker.id)).nativeDeletionPreparations![captured.sessionId];

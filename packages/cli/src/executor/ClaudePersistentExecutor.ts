@@ -1,3 +1,4 @@
+import { spawnManaged } from './ManagedSpawn';
 import { ownedSpawn as spawn } from '../delegation/OwnershipRuntime';
 import { captureHistoryTarget, claudeProjectName, validClaudeProjectOverride, type OwnedHistoryTarget } from '../delegation/NativeHistoryFiles';
 import type { NativeSessionDeletionTarget } from '../delegation/NativeSessionDeletion';
@@ -654,7 +655,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       console.log(`[ClaudePersistent] Working directory: ${this.currentWorkingDirectory}`);
 
       // Spawn the process
-      const child = spawn(this.claudeCommand, args, {
+      const child = spawnManaged(this.delegationWorker, this.claudeCommand, args, {
         ...(this.delegationWorker && process.platform !== 'win32' ? { detached: true } : {}),
         cwd: this.currentWorkingDirectory,
         stdio: ['pipe', 'pipe', 'pipe'],

@@ -219,7 +219,7 @@ describe('AGY managed native creation receipts', () => {
     const result = await deleteOwnedAgySession(targets[0], {
       confirmedProcessGroupExit: true, persistPrepared: async () => {},
     });
-    expect(result.state).toBe(process.platform === 'linux' ? 'held' : 'unsupported');
+    expect(result.state).toBe('held');
     expect(fs.existsSync(targets[0].createdFile.path)).toBe(true);
   });
 

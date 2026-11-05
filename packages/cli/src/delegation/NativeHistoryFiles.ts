@@ -1,8 +1,9 @@
+import { supportsNativeCleanup } from '../native/NativeBindings';
 import fs from 'fs/promises';
 import { constants } from 'fs';
 import path from 'path';
 import { createHash } from 'crypto';
-import { LinuxHistoryAnchor } from './LinuxHistoryAnchor';
+import { openHistoryAnchor } from './HistoryAnchor';
 import type { NativeDirectoryIdentity, NativeDeletionPreparation, NativeDeletionRecovery, NativeDeletionResult } from './NativeSessionDeletion';
 
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
@@ -272,7 +273,7 @@ async function collect(file: string, entries: HistoryEntry[]): Promise<void> {
 export async function deleteOwnedHistoryFiles(target: OwnedHistoryTarget, recovery: NativeDeletionRecovery): Promise<NativeDeletionResult> {
   let deleting = false;
   try {
-    if (process.platform !== 'linux' || target.backend === 'kimi') return { state: 'unsupported', reason: 'Native writer exit or file layout is unsupported' };
+    if (!supportsNativeCleanup() || target.backend === 'kimi') return { state: 'unsupported', reason: 'Native writer exit or file layout is unsupported' };
     await verifyHistoryTarget(target, recovery.detachedPointer);
     if (target.backend === 'claude' && !target.confirmed) throw new Error('Claude native initialization was not confirmed');
     let prepared = recovery.prepared;
@@ -291,7 +292,7 @@ export async function deleteOwnedHistoryFiles(target: OwnedHistoryTarget, recove
       await recovery.persistPrepared(prepared);
     }
     await verifyHistoryTarget(target, recovery.detachedPointer);
-    const anchor = await LinuxHistoryAnchor.open(target.scope, prepared.files!);
+    const anchor = await openHistoryAnchor(target.scope, prepared.files!);
     try {
       deleting = true;
       for (const entry of [...prepared.files!].sort((a, b) => b.path.length - a.path.length)) await anchor.remove(entry);

@@ -1,3 +1,4 @@
+import { supportsNativeCleanup } from '../../native/NativeBindings';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -12,7 +13,7 @@ export interface ZCodeStorageSelection { storage: string; database: string }
  * DB confirmation is required separately before a prompted session is deletable.
  */
 export function selectZCodeStorage(launch: ZCodeLaunchSpec, cwd: string, fallbackHome: string): ZCodeStorageSelection {
-  if (process.platform !== 'linux') throw new Error('ZCode shared history verification requires Linux');
+  if (!supportsNativeCleanup()) throw new Error('ZCode shared history verification requires native cleanup support');
   if (launch.args.some(arg => /^--(?:cwd|config|user-config|prepare-storage)(?:=|$)/.test(arg))) {
     throw new Error('Unsupported ZCode storage selection arguments');
   }
@@ -23,7 +24,7 @@ export function selectZCodeStorage(launch: ZCodeLaunchSpec, cwd: string, fallbac
   const file = path.join(home, '.zcode', 'cli', 'config.json');
   let fd: number | undefined;
   try {
-    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
     const before = fs.fstatSync(fd, { bigint: true });
     if (!before.isFile() || before.size > 2n * 1024n * 1024n) throw new Error('Unsupported ZCode configuration metadata');
     const value = JSON.parse(fs.readFileSync(fd, 'utf8'));

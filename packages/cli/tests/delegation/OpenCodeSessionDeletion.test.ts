@@ -23,7 +23,6 @@ describe('OpenCode managed native deletion', () => {
   const empty = () => ({ roots: 0, children: 0, events: 0, sequences: 0, messages: 0, parts: 0,
     todos: 0, projections: 0, inputs: 0, epochs: 0, projectId: null, cwd: null, parentId: null, createdAt: null });
   beforeEach(async () => {
-    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
     home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'opencode-delete-')));
     cwd = path.join(home, 'workspace');
     database = path.join(home, 'native.sqlite');
@@ -162,7 +161,7 @@ describe('OpenCode managed native deletion', () => {
   it('fails closed on unsupported platforms before launching maintenance', async () => {
     const target = await capture();
     const create = vi.fn(factory);
-    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('freebsd');
     expect((await deleteOwnedOpenCodeSession(target, recovery(), create)).state).toBe('unsupported');
     expect(create).not.toHaveBeenCalled();
   });

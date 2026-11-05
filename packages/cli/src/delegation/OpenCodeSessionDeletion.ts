@@ -1,3 +1,5 @@
+import { supportsNativeCleanup } from '../native/NativeBindings';
+import { spawnManaged } from '../executor/ManagedSpawn';
 import { createHash } from 'crypto';
 import fs from 'fs/promises';
 import { constants } from 'fs';
@@ -52,7 +54,7 @@ export class OpenCodeDeletionClient implements OpenCodeDeletionTransport {
   }
   run(args: string[]): Promise<string> {
     const result = new Promise<string>((resolve, reject) => {
-      const child = ownedSpawn(this.command, ['--pure', ...args], {
+      const child = spawnManaged(true, this.command, ['--pure', ...args], {
         cwd: this.cwd, env: { ...this.environment }, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
       });
       this.groups.track(child);
@@ -222,7 +224,7 @@ export async function captureOpenCodeDeletionTarget(input: {
 /** Caller must supply durable parent-reset authorization and current worker-group exit proof. */
 export async function deleteOwnedOpenCodeSession(target: OpenCodeDeletionTarget, recovery: OpenCodeDeletionRecovery,
   factory: OpenCodeDeletionFactory = defaultFactory): Promise<NativeDeletionResult> {
-  if (process.platform !== 'linux') return { state: 'unsupported', reason: 'OpenCode managed writer proof is unavailable' };
+  if (!supportsNativeCleanup()) return { state: 'unsupported', reason: 'OpenCode managed writer proof is unavailable' };
   let client: OpenCodeDeletionTransport | undefined;
   let deleting = false;
   let fenced = false;

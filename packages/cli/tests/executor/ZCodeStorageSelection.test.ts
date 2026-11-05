@@ -4,7 +4,7 @@ import path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { selectZCodeStorage } from '../../src/executor/zcode/ZCodeStorageSelection';
 
-describe.skipIf(process.platform !== 'linux')('ZCode read-only storage selection', () => {
+describe('ZCode read-only storage selection', () => {
   let home: string, cwd: string, config: string;
   beforeEach(async () => {
     home = await fs.promises.realpath(await fs.promises.mkdtemp(path.join(os.tmpdir(), 'zcode-selection-')));
