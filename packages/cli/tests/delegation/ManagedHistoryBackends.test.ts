@@ -129,10 +129,14 @@ describe('durable managed Kimi/Pi/Claude deletion integration', () => {
     const worker = await lane('claude'); const captured = await target(worker, legacy); await ready(worker);
     const sibling = path.join(captured.scope.path, captured.sessionId); await fs.mkdir(sibling);
     await manager.requestNativeSessionDeletion('parent', 0);
-    const original = fs.rmdir; vi.spyOn(fs, 'rmdir').mockRejectedValueOnce(new Error('synthetic interrupted unlink'));
+    const original = PlatformHistoryAnchor.prototype.remove;
+    const fault = vi.spyOn(PlatformHistoryAnchor.prototype, 'remove').mockImplementation(async function(entry) {
+      if (entry.kind === 'directory') throw new Error('synthetic interrupted unlink');
+      return original.call(this, entry);
+    });
     await manager.reconcileNativeSessionDeletions(); expect((await current(worker.id)).nativeDeletion?.state).toBe('uncertain');
     const saved = JSON.stringify((await current(worker.id)).nativeDeletionPreparations);
-    vi.mocked(fs.rmdir).mockImplementation(original);
+    fault.mockRestore();
     await manager.destroy(); manager = createManager(); await manager.reconcileNativeSessionDeletions();
     expect((await current(worker.id)).nativeDeletion?.state).toBe('deleted');
     expect(JSON.stringify((await current(worker.id)).nativeDeletionPreparations)).toBe(saved);

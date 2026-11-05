@@ -120,10 +120,9 @@ describe('owned DSH history deletion', () => {
     expect(await deleteOwnedDshSession(target, { persistPrepared })).toMatchObject({ state: 'deleted' });
     expect(preparation?.sessionIds.sort()).toEqual([child, target.sessionId].sort());
   });
-  it.each(['unrelated-root', 'fork', 'cycle', 'unknown-file', 'newline-file', 'bad-json', 'seeded-root', 'missing-root'])(
+  it.each(['unrelated-root', 'fork', 'cycle', 'unknown-file', 'bad-json', 'seeded-root', 'missing-root'])(
     'holds ambiguous native history: %s', async kind => {
       if (kind === 'unknown-file') await fs.writeFile(path.join(scope.history.path, 'results.zip'), 'Retain');
-      else if (kind === 'newline-file') await fs.copyFile(transcript, transcript + '\n');
       else if (kind === 'bad-json') await fs.writeFile(transcript, '{');
       else if (kind === 'seeded-root') await fs.writeFile(transcript, JSON.stringify(header(target.sessionId, { isSeeded: true })));
       else if (kind === 'missing-root') await fs.unlink(transcript);
@@ -135,6 +134,17 @@ describe('owned DSH history deletion', () => {
       expect(await deleteOwnedDshSession(target, { persistPrepared })).toMatchObject({ state: 'held' });
       expect(preparation).toBeUndefined();
     });
+  it('rejects newline history names through native filename rules or layout validation', async () => {
+    if (process.platform === 'win32') {
+      // Win32 rejects control characters before such a file can enter the inventory.
+      await expect(fs.copyFile(transcript, transcript + '\n')).rejects.toMatchObject({ code: expect.stringMatching(/^(ENOENT|EINVAL)$/) });
+      expect(await fs.readFile(transcript, 'utf8')).toContain(target.sessionId);
+    } else {
+      await fs.copyFile(transcript, transcript + '\n');
+      expect(await deleteOwnedDshSession(target, { persistPrepared })).toMatchObject({ state: 'held' });
+      expect(preparation).toBeUndefined();
+    }
+  });
   it.each(['same-id', 'missing-id', 'invalid-json', 'symlink', 'hardlink', 'oversized'])(
     'holds unsafe foreign pointers before preparation: %s', async kind => {
       const foreign = path.join(path.dirname(pointer), 'foreign.json');
