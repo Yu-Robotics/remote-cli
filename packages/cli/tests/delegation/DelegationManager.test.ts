@@ -2,6 +2,7 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { randomUUID } from 'crypto';
 import { DELEGATION_LIMITS, DELEGATION_TEXT_PROGRESS, DelegationManager, type DelegationParent } from '../../src/delegation/DelegationManager';
 import { BackendRegistry, type BackendAvailability } from '../../src/delegation/BackendRegistry';
 import { DelegationStore } from '../../src/delegation/DelegationStore';
@@ -15,9 +16,23 @@ import { OpenCodeExecutor } from '../../src/executor/OpenCodeExecutor';
 import { ZCodeExecutor } from '../../src/executor/ZCodeExecutor';
 import { ThreadContextReset } from '../../src/thread/ThreadContextReset';
 import { DelegationOwnership } from '../../src/delegation/DelegationOwnership';
-import { ActiveDelegationWriterError } from '../../src/delegation/OwnershipRuntime';
+import { ActiveDelegationWriterError, ownerRecord } from '../../src/delegation/OwnershipRuntime';
 import type { AcpEventCallbacks, AcpTransport } from '../../src/executor/acp/AcpClient';
 import { withKimiModes } from '../executor/kimiAcpFixture';
+
+vi.mock('../../src/delegation/OwnershipRuntime', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../src/delegation/OwnershipRuntime')>();
+  // Manager fixtures use fake workers. Keep real gates, journals, and recovery
+  // validation, but leave host boot discovery to the native ownership suites.
+  const identity = { host: 'synthetic-manager-host', boot: 'synthetic-manager-boot', namespace: 'host' };
+  return {
+    ...actual,
+    ownerRecord: vi.fn(() => ({ version: 2 as const, token: randomUUID(), pid: process.pid,
+      birth: actual.processBirth(process.pid), ...identity })),
+    assertRecoverable: (raw: Buffer, journalPath: string, current = identity) =>
+      actual.assertRecoverable(raw, journalPath, current),
+  };
+});
 
 const wait = (milliseconds: number) => new Promise<void>(resolve => setTimeout(resolve, milliseconds));
 
@@ -172,6 +187,19 @@ describe('managed agent delegation', () => {
     const scope = manager.begin(parent);
     await expect(scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Must not run' }, 'launch'))
       .rejects.toThrow('Cause: Delegation child process group still exists');
+    expect(factory).not.toHaveBeenCalled();
+    await scope.close();
+  });
+
+  it.each(['win32', 'darwin'] as const)('fails closed when the %s boot identity provider is unavailable', async platform => {
+    // Inject the provider failure without spoofing filesystem/platform semantics
+    // or invoking PowerShell, WMI, or sysctl on the test host.
+    vi.mocked(ownerRecord).mockImplementationOnce(() => {
+      throw Object.assign(new Error(`Synthetic ${platform} boot identity timeout`), { code: 'ETIMEDOUT' });
+    });
+    const scope = manager.begin(parent);
+    await expect(scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Must not run' }, 'launch'))
+      .rejects.toThrow(`Synthetic ${platform} boot identity timeout`);
     expect(factory).not.toHaveBeenCalled();
     await scope.close();
   });
