@@ -37,6 +37,13 @@ describe('managed process-group evidence', () => {
     expect(entry.runtime.signal).toHaveBeenCalledWith(pid);
   });
 
+  it('never signals a possibly recycled macOS group after its leader exits', async () => {
+    const entry = fixture({ platform: 'darwin', pids: async () => [String(pid)] });
+    entry.spawn(); entry.close();
+    await expect(entry.groups.waitForExit()).rejects.toThrow('could not be confirmed');
+    expect(entry.runtime.signal).not.toHaveBeenCalled();
+  });
+
   it.each([undefined, 0, 1, -1, 1.5, Number.NaN, process.pid])('never signals an invalid or missing owned PID %s', async invalid => {
     const entry = fixture(); Object.assign(entry.child, { pid: invalid }); entry.spawn(); entry.close();
     await expect(entry.groups.waitForExit()).rejects.toThrow('identity');
