@@ -1,3 +1,6 @@
+import { OutputFiles } from '../output/OutputFiles';
+import { OutputSnapshots, type VerifiedOutputExport } from '../output/OutputSnapshots';
+import { OutputLinks } from '../output/OutputLinks';
 import { DelegatedWorkspaceManager } from '../delegation/DelegatedWorkspaceManager';
 import type { ApprovalRequestInfo, ApprovalRequestMessage, ApprovalResponseMessage, ApprovalResolvedMessage, ApprovalStatus } from '../types';
 import { WebSocketClient } from './WebSocketClient';
@@ -245,6 +248,7 @@ export class MessageHandler {
   private readonly delegation: DelegationManager;
   private readonly delegationBridges = new Map<string, DelegationBridge>();
   private fileInbox?: FileInbox;
+  private outputFiles?: OutputFiles;
   private readonly imageDeliveries = new Map<string, ImageDelivery>();
   private imageConnectionEpoch = 0;
 
@@ -264,6 +268,7 @@ export class MessageHandler {
       this.imageConnectionEpoch++;
       this.routerVersion = undefined;
       this.fileInbox?.disconnect();
+      this.outputFiles?.disconnect();
       for (const delivery of this.imageDeliveries.values()) delivery.invalidatePending();
     });
     this.delegation = new DelegationManager(directoryGuard, undefined, undefined, undefined, undefined, undefined,
@@ -372,6 +377,11 @@ export class MessageHandler {
         }
         return;
 
+      case 'output_registered':
+      case 'output_grant':
+        this.outputFiles?.handle(message);
+        return;
+
       case 'file_pending':
         if (this.fileInbox) await this.fileInbox.accept(message);
         else this.wsClient.send({ type: 'file_status', fileId: (message as any).fileId, status: 'failed',
@@ -391,6 +401,22 @@ export class MessageHandler {
         const data = (message as any).data;
         if (data?.success !== true) return;
         this.routerVersion = typeof data.routerVersion === 'string' ? data.routerVersion : undefined;
+        if (data.capabilities?.outputFilesV1 === true) {
+          try {
+            if (!this.outputFiles) {
+              const server = this.config.get('serverUrl') as string;
+              const namespace = createHash('sha256').update(fileOrigin(server)).digest('hex');
+              this.outputFiles = new OutputFiles(new OutputSnapshots(path.join(this.config.getConfigDir(), 'output-files', namespace),
+                this.config.get('outputFiles') as any), server, value => this.wsClient.send(value));
+              await this.outputFiles.initialize();
+            }
+            this.outputFiles.connect();
+          } catch {
+            await this.outputFiles?.destroy(); this.outputFiles = undefined;
+            console.error('[OutputFiles] Snapshot storage is unavailable.');
+          }
+        } else this.outputFiles?.disconnect();
+
         if (data.capabilities?.fileTransferV1 === true && !this.fileInbox) {
           try {
             const fileServer = this.config.get('serverUrl') as string;
@@ -2444,6 +2470,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     let executionMetadata: ExecutionMetadata | undefined;
     let requestFinished = false;
     let imageDelivery: ImageDelivery | undefined;
+    const outputExports = new Map<string, VerifiedOutputExport>();
     let executionActive = false;
     let lastProgramState: string | undefined;
     const activity = new ActivityProgress(snapshot => {
@@ -2535,6 +2562,13 @@ You can also use natural language commands to control Claude Code CLI.`,
             : undefined,
           onApproval: (request, child) => isCurrent() && this.forwardApproval(request, child, messageId, threadId, true),
           onApprovalResolved: (id, status) => { if (isCurrent()) this.resolveApprovalCard(id, status); },
+          onVerifiedExports: exports => {
+            for (const entry of exports) if (outputExports.size < 100) outputExports.set(entry.file, entry);
+          },
+          onOutputFiles: this.outputFiles ? async (links, cwd, taskId, final) => {
+            await this.outputFiles!.capture(links, { messageId, threadId, taskId,
+              generation: thread?.delegationWorkspaceGeneration ?? 0, cwd, source: 'worker' }, final);
+          } : undefined,
           isWorkspaceBusy: cwd => this.threadManager.listThreads().some(other => {
             if (other.id === threadId && isCurrent() || !this.threadPool.isThreadBusy(other.id)) return false;
             try { return workspacesOverlap(realpathSync(this.threadPool.getExecutor(other.id).getCurrentWorkingDirectory()), cwd); }
@@ -2560,6 +2594,7 @@ You can also use natural language commands to control Claude Code CLI.`,
           || (this.threadManager.getThread(threadId)?.delegationWorkspaceGeneration ?? 0) !== (thread?.delegationWorkspaceGeneration ?? 0)) return;
         this.notificationAdapter.sendTaskNotification({ ...notification, threadId }, openId);
       };
+      const outputLinks = new OutputLinks();
       const imageCwd = thread?.workingDirectory ?? executor.getCurrentWorkingDirectory();
       const imageGeneration = thread?.delegationWorkspaceGeneration ?? 0;
       const imageBackend = this.threadPool.getBackendKey(threadId);
@@ -2604,6 +2639,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         },
         onApprovalResolved: (requestId: string, status: ApprovalStatus) => { if (isCurrent()) this.resolveApprovalCard(requestId, status); },
         onTaskNotification,
+        onDisplayText: (chunk: string) => outputLinks.append(chunk),
         onStream: (chunk: string) => {
           streamedAny = true;
           if (this.sendStreamChunk(messageId, threadId, chunk)) imageDelivery?.offerStream(chunk, imageEligible());
@@ -2677,6 +2713,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         const canPublish = () => isCurrent() && active && (!scope || (!scope.isClosed() && !scope.hasPendingResults()));
         const guardedOptions: ExecuteOptions = {
           ...options,
+          onDisplayText: text => { if (canPublish()) options.onDisplayText?.(text); },
           onActivity: options.onActivity ? snapshot => {
             if (!isCurrent() || !active || requestFinished || this.isDestroyed || this.abortOperations.has(threadId)) return;
             if (executor.isWaitingInput?.()) {
@@ -2737,6 +2774,11 @@ You can also use natural language commands to control Claude Code CLI.`,
             const visibleResult = imageTextDropped || this.imageConnectionEpoch !== imageEpoch
               || (scope && (suppressed || scope.hasPendingResults())) ? '' : result.output ?? '';
             queueLocalImages(visibleResult);
+            if (this.outputFiles) {
+              await this.outputFiles.capture(outputLinks, { messageId, threadId, taskId: messageId,
+                generation: imageGeneration, cwd: imageCwd, source: 'workspace', exports: [...outputExports.values()] }, visibleResult);
+            }
+
             await imageDelivery?.drain();
           }
           assertCoordinatorActive();
@@ -3495,6 +3537,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     for (const delivery of this.imageDeliveries.values()) delivery.cancel();
     this.imageDeliveries.clear();
     await this.fileInbox?.destroy();
+    await this.outputFiles?.destroy();
     this.notificationAdapter.unregister();
     try {
       const results = await Promise.allSettled([

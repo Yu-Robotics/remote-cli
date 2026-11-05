@@ -63,6 +63,29 @@ describe('managed agent delegation', () => {
 
   afterEach(async () => { if (expectedShutdownFailure) await expect(manager.destroy()).rejects.toThrow('storage ownership was retained'); else await manager.destroy(); vi.restoreAllMocks(); vi.unstubAllEnvs(); fs.rmSync(home, { recursive: true, force: true }); });
 
+  it('awaits owned worker file capture before truncation and worker cleanup', async () => {
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    parent.onOutputFiles = vi.fn(async (links, cwd, _taskId, final) => {
+      expect(cwd).toBe(home);
+      expect(links.finish(final).paths).toEqual(['report.csv']);
+      entered(); await gate;
+    });
+    worker.execute.mockImplementation(async (_prompt: string, options: any) => {
+      options.onDisplayText?.('[report]('); options.onDisplayText?.('report.csv)');
+      return { success: true, output: '[report](report.csv)' };
+    });
+    const scope = manager.begin(parent);
+    try {
+      const response = await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Produce report' }, 'output-start');
+      await started; expect(worker.destroy).not.toHaveBeenCalled();
+      release();
+      await scope.close();
+      expect(parent.onOutputFiles).toHaveBeenCalledOnce();
+    } finally { release(); await scope.close(); }
+  });
+
   it.each(['ready', 'dirty', 'corrupt', 'unreadable', 'legacy-owner'])(
     'allows ordinary scopes and a fresh conversation with %s historical metadata while retaining recovery state', async state => {
       const resets = new ThreadContextReset();

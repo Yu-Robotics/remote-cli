@@ -15,6 +15,8 @@ export interface NativeBindings {
   remove(parent: NativeHandle, name: string, directory: boolean, expected: { dev: string; ino: string; size: string; mtime: string }): void;
   entries(handle: NativeHandle): string[];
   read(handle: NativeHandle, limit: number): Buffer;
+  readChunk(handle: NativeHandle, offset: number, limit: number): Buffer;
+  openOutputChild(parent: NativeHandle, name: string, directory: boolean): NativeHandle;
   close(handle: NativeHandle): void;
   createJob(name: string): NativeHandle;
   joinJob(name: string): void;

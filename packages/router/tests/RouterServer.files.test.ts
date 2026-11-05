@@ -48,7 +48,7 @@ describe('authenticated file registration on real WebSockets', () => {
     const ws = new WebSocket(origin.replace('http:', 'ws:') + '/ws'); sockets.push(ws);
     await once(ws, 'open');
     const messages: any[] = []; ws.on('message', data => messages.push(JSON.parse(data.toString())));
-    const send = (signature?: string, id = 'device') => ws.send(JSON.stringify({ type: 'binding_request', data: { deviceId: id, capabilities: { fileTransferV1: true }, ...(signature ? { deviceSignature: signature } : {}) } }));
+    const send = (signature?: string, id = 'device') => ws.send(JSON.stringify({ type: 'binding_request', data: { deviceId: id, capabilities: { fileTransferV1: true, outputFilesV1: true }, ...(signature ? { deviceSignature: signature } : {}) } }));
     const next = async (type: string) => { await vi.waitFor(() => expect(messages.some(m => m.type === type)).toBe(true)); return messages.find(m => m.type === type); };
     return { ws, messages, send, next };
   }
@@ -87,6 +87,7 @@ describe('authenticated file registration on real WebSockets', () => {
     const client = await connect(); client.send();
     const response = await client.next('binding_confirm');
     expect(response.data.capabilities?.fileTransferV1).not.toBe(true);
+    expect(response.data.capabilities?.outputFilesV1).not.toBe(true);
     expect((server as any).connectionHub.getFileSession('device')).toBeUndefined();
   });
   it('requires proof before replacing a bound connection and rejects cross-connection replay', async () => {
@@ -96,6 +97,8 @@ describe('authenticated file registration on real WebSockets', () => {
     expect((server as any).connectionHub.isDeviceOnline('device')).toBe(false);
     const signature = proof(pair.privateKey, nonce); client.send(signature);
     expect((await client.next('binding_confirm')).data.capabilities.fileTransferV1).toBe(true);
+    expect((await client.next('binding_confirm')).data.capabilities.outputFilesV1).toBe(true);
+    expect((server as any).outputSessions.get('device')?.openId).toBe('owner');
     const original = (server as any).connectionHub.getFileSession('device');
     const attacker = await connect(); attacker.send(); await attacker.next('device_challenge');
     expect((server as any).connectionHub.getFileSession('device')).toEqual(original);

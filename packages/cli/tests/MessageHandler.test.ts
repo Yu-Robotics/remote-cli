@@ -165,6 +165,37 @@ describe('MessageHandler', () => {
     expect(() => workspaces.sharedSymlinks()).toThrow('invalid managed policy');
   });
 
+  it('discovers a final-only reply without assistant streaming callbacks', async () => {
+    ctx.mockThreadManager.getDefaultThread().delegation = false;
+    const capture = vi.fn(async (links, context, final) => {
+      expect(links.finish(final).paths).toEqual(['report.csv']);
+      expect(context.cwd).toBe(ctx.mockThreadManager.getDefaultThread().workingDirectory);
+      return { unavailable: 0, omitted: false };
+    });
+    (ctx.handler as any).outputFiles = { capture, destroy: vi.fn(), disconnect: vi.fn() };
+    ctx.mockExecutor.execute.mockResolvedValue({ success: true, output: '[report](report.csv)' });
+    await ctx.handler.handleMessage({ type: 'command', messageId: 'final-file-reply', content: 'Produce report' });
+    expect(capture).toHaveBeenCalledOnce();
+  });
+
+  it('captures direct file links against the producing cwd without modifying assistant output', async () => {
+    ctx.mockThreadManager.getDefaultThread().delegation = false;
+    const capture = vi.fn(async (links, context, final) => {
+      expect(links.finish(final).paths).toEqual(['report.csv']);
+      expect(context.cwd).toBe(ctx.mockThreadManager.getDefaultThread().workingDirectory);
+      return { unavailable: 0, omitted: false };
+    });
+    (ctx.handler as any).outputFiles = { capture, destroy: vi.fn(), disconnect: vi.fn() };
+    ctx.mockExecutor.execute.mockImplementation(async (_prompt: string, options: any) => {
+      options.onStream('[private stream](credentials.json)');
+      options.onDisplayText('[report]('); options.onDisplayText('report.csv)');
+      return { success: true, output: '[report](report.csv)' };
+    });
+    await ctx.handler.handleMessage({ type: 'command', messageId: 'file-reply', content: 'Produce report' });
+    expect(capture).toHaveBeenCalledOnce();
+    expect(ctx.mockExecutor.execute).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps ordinary execution independent of delegation storage when delegation is disabled', async () => {
     ctx.mockThreadManager.getDefaultThread().delegation = false;
     ctx.mockExecutor.configureDelegation = vi.fn();
@@ -513,8 +544,12 @@ describe('MessageHandler', () => {
 
   describe('multimodal prompts', () => {
     it('reports staging setup errors without crashing registration or invoking a backend', async () => {
+      const output = { connect: vi.fn(), disconnect: vi.fn(), destroy: vi.fn() };
+      (ctx.handler as any).outputFiles = output;
       ctx.mockConfig.get.mockImplementation((key: string) => key === 'serverUrl' ? 'wss://router.test/ws' : key === 'files.retentionDays' ? 0 : undefined);
-      await ctx.handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: { fileTransferV1: true } } } as any);
+      await ctx.handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: { fileTransferV1: true, outputFilesV1: true } } } as any);
+      expect(output.connect).toHaveBeenCalledOnce();
+      expect(output.destroy).not.toHaveBeenCalled();
       await ctx.handler.handleMessage({ type: 'file_pending', fileId: 'a'.repeat(64), openId: 'owner' } as any);
       expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
       expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'file_status', status: 'failed', detail: expect.stringContaining('staging is unavailable') }));

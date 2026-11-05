@@ -1,3 +1,4 @@
+import { nativeBindings } from '../native/NativeBindings';
 import { taskEvent } from './TaskDiagnostics';
 import WebSocket from 'ws';
 import { v4 as uuidv4 } from 'uuid';
@@ -304,6 +305,8 @@ export class WebSocketClient {
 
   private sendRegistration(signature?: string): void {
     if (this.ws && this.connected) {
+      let outputFiles = false;
+      if (this.identity) { try { outputFiles = typeof nativeBindings().readChunk === 'function' && typeof nativeBindings().openOutputChild === 'function'; } catch { /* Unsupported helpers cannot authorize output reads. */ } }
       this.ws.send(JSON.stringify({
         type: 'binding_request',
         messageId: uuidv4(),
@@ -328,6 +331,7 @@ export class WebSocketClient {
             ...(this.maintenanceCapabilities.updateNotice ? { updateNotice: true } : {}),
             ...(this.maintenanceCapabilities.subscriptionInspection ? { subscriptionInspection: true, bankedResetReminder: true } : {}),
             ...(this.identity ? { fileTransferV1: true } : {}),
+            ...(outputFiles ? { outputFilesV1: true } : {}),
           },
         }
       }));

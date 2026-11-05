@@ -188,6 +188,7 @@ export interface Config {
   /** Independent maintenance features; absent values enable notices and status-only inspection. */
   maintenance?: { updateNotice?: boolean; subscriptionInspection?: boolean };
   files?: { retentionDays?: number };
+  outputFiles?: { allowedRoots?: string[]; maxBytes?: number };
   deviceId?: string;
   openId?: string;
   serverUrl?: string;

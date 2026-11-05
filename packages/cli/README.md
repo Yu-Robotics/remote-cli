@@ -839,3 +839,7 @@ MIT
 ## Changelog
 
 See the project [CHANGELOG.md](../../CHANGELOG.md) for release notes and user-visible changes.
+
+## Retrieve Output Files
+
+CLI and Router 1.6.221 add explicit local Markdown link retrieval using immutable 20 MiB snapshots with a fixed 24-hour expiry. A stable file entry opens a separate transfer task card, followed by a native Feishu file message. Progress, safe retries, offline waiting, original-device ownership, restart receipts, and unknown-send handling are independent of the assistant reply and model task. Approved device enrollment and HTTPS are required; Router `files.enabled` also gates retrieval. CLI `outputFiles.allowedRoots` adds specific export roots, and `outputFiles.maxBytes` can lower the limit. Existing 16 MiB delegated exports and incoming attachments retain their contracts. See [Retrieve Output Files](../../README.md#retrieve-output-files) for permissions, limits, proxy configuration, and failure behavior.
