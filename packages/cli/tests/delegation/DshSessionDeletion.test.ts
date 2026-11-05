@@ -1,3 +1,4 @@
+import { NativeHistoryAnchor } from '../../src/delegation/HistoryAnchor';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
@@ -7,6 +8,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { captureDshDeletionTarget, createDshHistoryScope, deleteOwnedDshSession, dshHistoryPatch,
   validDshDeletionPreparation, type DshDeletionTarget, type DshHistoryScope, type DshDeletionPreparation } from '../../src/delegation/DshSessionDeletion';
 import { LinuxHistoryAnchor } from '../../src/delegation/LinuxHistoryAnchor';
+
+const PlatformHistoryAnchor = process.platform === 'linux' ? LinuxHistoryAnchor : NativeHistoryAnchor;
+
 
 describe('owned DSH history deletion', () => {
   let home: string, scope: DshHistoryScope, target: DshDeletionTarget, transcript: string, pointer: string;
@@ -153,9 +157,9 @@ describe('owned DSH history deletion', () => {
     expect(preparation).toBeUndefined();
   });
   it('keeps an immutable manifest for partial-failure retry', async () => {
-    const remove = LinuxHistoryAnchor.prototype.remove;
+    const remove = PlatformHistoryAnchor.prototype.remove;
     let count = 0;
-    vi.spyOn(LinuxHistoryAnchor.prototype, 'remove').mockImplementation(async function (entry) {
+    vi.spyOn(PlatformHistoryAnchor.prototype, 'remove').mockImplementation(async function (entry) {
       if (++count === 2) throw new Error('Synthetic failure after one removal');
       return remove.call(this, entry);
     });
@@ -185,9 +189,9 @@ describe('owned DSH history deletion', () => {
     const foreign = path.join(home, 'foreign-history');
     await fs.mkdir(foreign);
     await fs.writeFile(path.join(foreign, 'keep.txt'), 'Unrelated history');
-    const remove = LinuxHistoryAnchor.prototype.remove;
+    const remove = PlatformHistoryAnchor.prototype.remove;
     let moved = false;
-    vi.spyOn(LinuxHistoryAnchor.prototype, 'remove').mockImplementation(async function (entry) {
+    vi.spyOn(PlatformHistoryAnchor.prototype, 'remove').mockImplementation(async function (entry) {
       if (!moved) {
         moved = true;
         await fs.rename(scope.history.path, path.join(scope.scope.path, 'moved-history'));

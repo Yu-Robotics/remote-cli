@@ -101,6 +101,18 @@ describe('ZCodeClient', () => {
     } finally { vi.restoreAllMocks(); vi.unstubAllEnvs(); }
   });
 
+  it('stops a managed native transport and confirms its complete process group exit', async () => {
+    client.destroy();
+    await client.waitForExit();
+    client = new ZCodeClient({ cwd: temporaryDirectory, delegationWorker: true,
+      launch: { command: process.execPath, args: [fixturePath], env: process.env },
+    }, callbacks);
+    await expect(client.newSession(temporaryDirectory)).resolves.toMatchObject({ sessionId: 'sess-1' });
+    client.destroy();
+    await client.waitForExit();
+    await expect(client.waitForManagedProcessGroupExit()).resolves.toBeUndefined();
+  });
+
   it('drives the official app-server protocol directly', async () => {
     const session = await client.newSession(temporaryDirectory);
     expect(session.sessionId).toBe('sess-1');

@@ -899,7 +899,7 @@ export class AgyExecutor implements IExecutor {
   // ─── Wire protocol parsing ────────────────────────────────────────────────
 
   private signalProcess(proc: ChildProcess, signal: NodeJS.Signals): void {
-    if (this.managedProcesses.has(proc) && process.platform !== 'win32' && proc.pid) {
+    if (this.managedProcesses.has(proc) && process.platform === 'linux' && proc.pid) {
       try { process.kill(-proc.pid, signal); return; } catch { /* Fall back to the direct child. */ }
     }
     if (signal === 'SIGTERM') proc.kill();

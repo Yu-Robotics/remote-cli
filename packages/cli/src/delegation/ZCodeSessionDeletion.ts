@@ -144,7 +144,7 @@ export async function deleteOwnedZCodeSession(target: ZCodeDeletionTarget, recov
   let deleting = false;
   let result: NativeDeletionResult = { state: 'held', reason: 'ZCode ownership or artifact preservation is unconfirmed' };
   try {
-    if (!supportsNativeCleanup()) return { state: 'unsupported', reason: 'ZCode native writer proof requires Linux' };
+    if (!supportsNativeCleanup()) return { state: 'unsupported', reason: 'ZCode native writer proof is unavailable' };
     if (!validZCodeDeletionTarget(target) || !recovery.persistMaintenanceState || !recovery.inspectOwnedTree
       || !recovery.preserveArtifacts || !recovery.verifyArtifacts) throw new Error('Missing ZCode safety contract');
     await verifyHistoryDirectory(target.home); await verifyHistoryDirectory(target.nativeHome);

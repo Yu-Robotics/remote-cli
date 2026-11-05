@@ -27,7 +27,15 @@ describe('managed launcher protocol', () => {
     const rawKill = child.kill;
     spawnManaged(true, 'synthetic-backend', [], {});
     vi.advanceTimersByTime(30000);
-    expect(rawKill).toHaveBeenCalledWith('SIGKILL'); expect(child.send).not.toHaveBeenCalled();
+    expect(rawKill).toHaveBeenCalledWith('SIGKILL');
+    child.emit('message', { type: 'managed-job-ready' });
+    expect(child.send).not.toHaveBeenCalled();
+  });
+  it('rejects queued readiness after cancellation before admission', () => {
+    spawnManaged(true, 'synthetic-backend', [], {});
+    child.kill();
+    child.emit('message', { type: 'managed-job-ready' });
+    expect(child.send).not.toHaveBeenCalled();
   });
   it('asks the live macOS launcher to stop its own group and preserves backend status', () => {
     const rawKill = child.kill, exit = vi.fn();

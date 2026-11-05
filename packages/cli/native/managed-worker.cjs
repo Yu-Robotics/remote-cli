@@ -16,6 +16,7 @@ const stop = () => {
 };
 const timer = setTimeout(stop, 30000);
 process.on('disconnect', stop);
+process.on('error', stop);
 process.on('message', message => {
   if (!message || typeof message !== 'object') return;
   if (message.type === 'stop') { clearTimeout(timer); stop(); return; }
