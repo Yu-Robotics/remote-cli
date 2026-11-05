@@ -1,3 +1,5 @@
+import { NativeHistoryAnchor } from '../../src/delegation/HistoryAnchor';
+import { LinuxHistoryAnchor } from '../../src/delegation/LinuxHistoryAnchor';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
@@ -8,6 +10,7 @@ import { captureHistoryTarget, claudeProjectName, deleteOwnedHistoryFiles, stabl
 import { deletionPreparation, type NativeDeletionPreparation } from '../../src/delegation/NativeSessionDeletion';
 
 // Capture the host before platform-branch mocks. Descriptor tests need real Linux procfs.
+const PlatformHistoryAnchor = process.platform === 'linux' ? LinuxHistoryAnchor : NativeHistoryAnchor;
 const linuxIt = process.platform === 'linux' ? it : it.skip;
 
 describe('exact owned native history deletion', () => {
@@ -110,12 +113,15 @@ describe('exact owned native history deletion', () => {
     const target = await fixture('claude');
     const sibling = path.join(target.scope.path, target.sessionId);
     await fs.mkdir(sibling); await fs.writeFile(path.join(sibling, 'history.jsonl'), '{}\n');
-    const original = fs.rmdir;
-    vi.spyOn(fs, 'rmdir').mockRejectedValueOnce(Object.assign(new Error('synthetic failure'), { code: 'EACCES' }));
+    const original = PlatformHistoryAnchor.prototype.remove;
+    const fault = vi.spyOn(PlatformHistoryAnchor.prototype, 'remove').mockImplementation(async function(entry) {
+      if (entry.kind === 'directory') throw Object.assign(new Error('synthetic failure'), { code: 'EACCES' });
+      return original.call(this, entry);
+    });
     const first = await remove(target);
     expect(first.result.state).toBe('uncertain');
     await expect(fs.stat(target.transcript!)).rejects.toMatchObject({ code: 'ENOENT' });
-    vi.mocked(fs.rmdir).mockImplementation(original);
+    fault.mockRestore();
     expect((await remove(target, first.prepared)).result.state).toBe('deleted');
     await expect(fs.stat(sibling)).rejects.toMatchObject({ code: 'ENOENT' });
   });
@@ -124,14 +130,14 @@ describe('exact owned native history deletion', () => {
     const sibling = path.join(target.scope.path, target.sessionId);
     const nested = path.join(sibling, 'subagents', 'deep'); await fs.mkdir(nested, { recursive: true });
     await fs.writeFile(path.join(nested, 'agent.jsonl'), '{}\n');
-    const original = fs.rmdir; let removed = 0;
-    vi.spyOn(fs, 'rmdir').mockImplementation(async directory => {
-      if (++removed === 2) throw new Error('synthetic interruption after one directory removal');
-      return original(directory);
+    const original = PlatformHistoryAnchor.prototype.remove; let removed = 0;
+    const fault = vi.spyOn(PlatformHistoryAnchor.prototype, 'remove').mockImplementation(async function(entry) {
+      if (entry.kind === 'directory' && ++removed === 2) throw new Error('synthetic interruption after one directory removal');
+      return original.call(this, entry);
     });
     const first = await remove(target); expect(first.result.state).toBe('uncertain');
     await expect(fs.lstat(nested)).rejects.toMatchObject({ code: 'ENOENT' });
-    vi.mocked(fs.rmdir).mockImplementation(original);
+    fault.mockRestore();
     expect((await remove(target, first.prepared)).result.state).toBe('deleted');
     await expect(fs.lstat(sibling)).rejects.toMatchObject({ code: 'ENOENT' });
   });

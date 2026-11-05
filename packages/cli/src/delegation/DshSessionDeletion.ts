@@ -256,7 +256,7 @@ async function prepare(target: DshDeletionTarget, ownedTargets: DshDeletionTarge
 export async function deleteOwnedDshSession(target: DshDeletionTarget, recovery: DshDeletionRecovery): Promise<NativeDeletionResult> {
   let deleting = false;
   try {
-    if (!supportsNativeCleanup()) return { state: 'unsupported', reason: 'DSH anchored deletion requires Linux writer proof' };
+    if (!supportsNativeCleanup()) return { state: 'unsupported', reason: 'DSH anchored deletion requires native writer proof' };
     const ownedTargets = recovery.ownedTargets ?? [target];
     if (!ownedTargets.length || ownedTargets.length > 64 || !ownedTargets.some(value => stableHistoryHash(value) === stableHistoryHash(target))
       || ownedTargets.some(value => !validDshDeletionTarget(value) || stableHistoryHash(scopeRecord(value)) !== stableHistoryHash(scopeRecord(target)))) {

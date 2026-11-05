@@ -259,14 +259,14 @@ export class ZCodeClient implements AcpTransport {
     this.reader.close();
     try { this.child.stdin?.end(); } catch {}
     if (!this.child.killed) {
-      if (process.platform !== 'win32' && this.child.pid) {
+      if (process.platform !== 'win32' && !(this.workerGroupEnabled && process.platform === 'darwin') && this.child.pid) {
         try { process.kill(-this.child.pid, 'SIGTERM'); } catch { this.child.kill('SIGTERM'); }
       } else {
         this.child.kill('SIGTERM');
       }
       this.killTimer = setTimeout(() => {
         if (this.closed) return;
-        if (process.platform !== 'win32' && this.child.pid) {
+        if (process.platform !== 'win32' && !(this.workerGroupEnabled && process.platform === 'darwin') && this.child.pid) {
           try { process.kill(-this.child.pid, 'SIGKILL'); } catch { this.child.kill('SIGKILL'); }
         } else {
           this.child.kill('SIGKILL');

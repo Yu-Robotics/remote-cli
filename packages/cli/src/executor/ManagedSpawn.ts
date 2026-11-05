@@ -30,7 +30,8 @@ export function spawnManaged(enabled: boolean, command: string, args: readonly s
   } catch (error) { if (job) { native.close(job.handle); job.closed = true; } throw error; }
   if (job) jobs.set(child, job);
   const rawKill = child.kill.bind(child);
-  const timer = setTimeout(() => { rawKill('SIGKILL'); }, 30000);
+  let cancelled = false;
+  const timer = setTimeout(() => { cancelled = true; rawKill('SIGKILL'); }, 30000);
   let backendExit: { code: number | null; signal: NodeJS.Signals | null } | undefined;
   const emit = child.emit.bind(child);
   // Close/exit are emitted only after the OS closes the shim. Preserve the backend's
@@ -40,6 +41,7 @@ export function spawnManaged(enabled: boolean, command: string, args: readonly s
     return emit(event, ...values);
   }) as ChildProcess['emit'];
   child.kill = (signal?: NodeJS.Signals | number): boolean => {
+    cancelled = true;
     if (!admitted || !child.connected) return rawKill(signal);
     if (job) {
       try { native.terminateJob(job.handle); return true; } catch { return false; }
@@ -62,7 +64,7 @@ export function spawnManaged(enabled: boolean, command: string, args: readonly s
       backendExit = { code: notification.code, signal: notification.signal ?? null };
       return;
     }
-    if (admitted || job?.closed || notification.type !== 'managed-job-ready') return;
+    if (cancelled || admitted || job?.closed || notification.type !== 'managed-job-ready') return;
     try {
       if (!child.pid) throw new Error('Managed launch identity is missing');
       if (job) {

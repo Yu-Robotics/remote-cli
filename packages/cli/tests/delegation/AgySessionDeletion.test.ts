@@ -1,3 +1,4 @@
+import { NativeHistoryAnchor } from '../../src/delegation/HistoryAnchor';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs/promises';
 import os from 'os';
@@ -40,6 +41,9 @@ CREATE INDEX idx_conversation_summaries_last_modified_time ON conversation_summa
 const INSERT_INDEX = `INSERT INTO conversation_summaries
   (conversation_id, parent_conversation_id, app_data_dir, last_modified_time, workspace_uris, last_user_input_time)
   VALUES (?, ?, ?, '2026-01-01T00:00:00Z', '[]', '2026-01-01T00:00:00Z')`;
+
+const PlatformHistoryAnchor = process.platform === 'linux' ? LinuxHistoryAnchor : NativeHistoryAnchor;
+
 
 describe('AGY exact owned history cleanup', () => {
   let home: string;
@@ -245,9 +249,9 @@ describe('AGY exact owned history cleanup', () => {
   });
 
   it('retries an interrupted manifest without replacing its receipts', async () => {
-    const original = LinuxHistoryAnchor.prototype.remove;
+    const original = PlatformHistoryAnchor.prototype.remove;
     let count = 0;
-    const fault = vi.spyOn(LinuxHistoryAnchor.prototype, 'remove').mockImplementation(async function (entry) {
+    const fault = vi.spyOn(PlatformHistoryAnchor.prototype, 'remove').mockImplementation(async function (entry) {
       if (++count === 2) throw new Error('synthetic unlink failure');
       return original.call(this, entry);
     });
@@ -297,7 +301,7 @@ describe('AGY exact owned history cleanup', () => {
     expect((await remove()).state).toBe('held');
   });
 
-  it('cannot reinterpret missing procfs descriptors as successful deletion', async () => {
+  it.skipIf(process.platform !== 'linux')('cannot reinterpret missing procfs descriptors as successful deletion', async () => {
     const original = fs.stat.bind(fs);
     vi.spyOn(fs, 'stat').mockImplementation((async (file: any, options: any) => {
       if (String(file).startsWith('/proc/self/fd/')) throw Object.assign(new Error('synthetic unavailable procfs'), { code: 'ENOENT' });

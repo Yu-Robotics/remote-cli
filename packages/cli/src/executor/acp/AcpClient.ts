@@ -173,7 +173,7 @@ export class AcpClient implements AcpTransport {
   }
 
   private signalProcess(signal: NodeJS.Signals): void {
-    if (this.managedProcess && process.platform !== 'win32' && this.child.pid) {
+    if (this.managedProcess && process.platform === 'linux' && this.child.pid) {
       try { process.kill(-this.child.pid, signal); return; } catch { /* Fall back to the direct child. */ }
     }
     this.child.kill(signal);

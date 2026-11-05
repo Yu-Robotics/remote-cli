@@ -1,3 +1,5 @@
+import { NativeHistoryAnchor } from '../../src/delegation/HistoryAnchor';
+import { LinuxHistoryAnchor } from '../../src/delegation/LinuxHistoryAnchor';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
@@ -13,7 +15,7 @@ import { deletionPreparation } from '../../src/delegation/NativeSessionDeletion'
 // Manager ownership needs the real host's locking and boot identity. Only the
 // Native deletion adapters run on the actual host; never spoof the manager's platform.
 const nativeLinux = process.platform === 'linux';
-const linuxIt = nativeLinux ? it : it.skip;
+const PlatformHistoryAnchor = nativeLinux ? LinuxHistoryAnchor : NativeHistoryAnchor;
 
 describe('durable managed Kimi/Pi/Claude deletion integration', () => {
   it('runs native ownership lifecycle in an isolated process', () => {
@@ -127,13 +129,13 @@ describe('durable managed Kimi/Pi/Claude deletion integration', () => {
       expect((await reloaded.lanesForThread('parent')).find(value => value.id === worker.id)?.nativeDeletionPreparations?.[captured.sessionId]).toEqual(prepared);
     }
   });
-  linuxIt.each([false, true])('recovers Pi unlink acknowledgement loss after restart (legacy=%s)', async legacy => {
+  it.each([false, true])('recovers Pi unlink acknowledgement loss after restart (legacy=%s)', async legacy => {
     const worker = await lane('pi'); const captured = await target(worker, legacy); await ready(worker);
     await manager.requestNativeSessionDeletion('parent', 0);
-    const original = fs.unlink;
-    const unlink = vi.spyOn(fs, 'unlink').mockImplementationOnce(async file => {
-      expect(path.basename(String(file))).toBe(path.basename(captured.transcript!));
-      await original(file);
+    const original = PlatformHistoryAnchor.prototype.remove;
+    const unlink = vi.spyOn(PlatformHistoryAnchor.prototype, 'remove').mockImplementationOnce(async function(entry) {
+      expect(path.basename(entry.path)).toBe(path.basename(captured.transcript!));
+      await original.call(this, entry);
       throw new Error('Synthetic lost unlink acknowledgement');
     });
     await manager.reconcileNativeSessionDeletions(); unlink.mockRestore();

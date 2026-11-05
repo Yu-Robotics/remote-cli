@@ -74,6 +74,13 @@ jobs:
         run: npm run build
       - name: Exercise native cleanup success and isolation
         run: npm test -w @yu_robotics/remote-cli -- NativeHistoryAnchor.test.ts ManagedSpawn.native.test.ts NativeHistoryFiles.test.ts AgySessionDeletion.test.ts DshSessionDeletion.test.ts OpenCodeSessionDeletion.test.ts KimiSessionDeletion.test.ts ZCodeSessionDeletion.test.ts --pool=forks --maxWorkers=1 --minWorkers=1
+      - name: Check the published helper on minimum supported Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: ${{ matrix.os == 'windows-11-arm' && '22' || '18' }}
+          package-manager-cache: false
+      - name: Verify Node-API compatibility
+        run: node -e "require('./packages/cli/dist/native/NativeBindings').nativeBindings()"
       - name: Upload the tested native helper
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

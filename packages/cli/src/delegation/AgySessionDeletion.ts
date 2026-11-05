@@ -260,7 +260,7 @@ async function verifyExclusiveIndex(target: AgyDeletionTarget, files: HistoryEnt
 
 /** No native DeleteConversation call: it can dispose worktrees and brain deliverables. */
 export async function deleteOwnedAgySession(target: AgyDeletionTarget, recovery: AgyDeletionRecovery): Promise<NativeDeletionResult> {
-  if (!supportsNativeCleanup()) return { state: 'unsupported', reason: 'AGY history deletion requires Linux anchored files and exit proof' };
+  if (!supportsNativeCleanup()) return { state: 'unsupported', reason: 'AGY history deletion requires native anchored files and exit proof' };
   if (!recovery.confirmedProcessGroupExit) return { state: 'waiting-exit', reason: 'AGY writer process-group exit is unconfirmed' };
   let deleting = false;
   try {

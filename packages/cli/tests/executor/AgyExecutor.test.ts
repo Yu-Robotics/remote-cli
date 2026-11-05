@@ -172,14 +172,15 @@ describe('AgyExecutor', () => {
     vi.clearAllMocks();
   });
 
-  it.skipIf(process.platform === 'win32')('cancels the backend process group and confirms exit before releasing cleanup', async () => {
+  it('cancels the backend process group and confirms exit before releasing cleanup', async () => {
     await executor.destroy();
     executor = new AgyExecutor(directoryGuard, { initialWorkingDirectory: '~/test-project', threadId: 'worker', delegationWorker: true });
     vi.mocked(process.kill).mockReturnValue(true);
     const running = executor.execute('Run a task');
     await waitForSpawn();
     await executor.abort();
-    expect(process.kill).toHaveBeenCalledWith(-proc.pid, 'SIGTERM');
+    if (process.platform === 'linux') expect(process.kill).toHaveBeenCalledWith(-proc.pid, 'SIGTERM');
+    else expect(proc.kill).toHaveBeenCalled();
     let exited = false;
     const waiting = executor.waitForExit().then(() => { exited = true; });
     await Promise.resolve();

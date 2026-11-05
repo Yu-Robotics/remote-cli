@@ -92,8 +92,9 @@ describe('AcpClient', () => {
     const signal = vi.spyOn(process, 'kill').mockReturnValue(true);
     try {
       client = new AcpClient('opencode', ['acp'], process.cwd(), callbacks, managed);
-      const grouped = managed && process.platform !== 'win32';
-      expect(vi.mocked(spawn).mock.calls.at(-1)?.[2]?.detached).toBe(grouped ? true : undefined);
+      const detached = managed && process.platform !== 'win32';
+      const grouped = managed && process.platform === 'linux';
+      expect(vi.mocked(spawn).mock.calls.at(-1)?.[2]?.detached).toBe(detached ? true : undefined);
       client.destroy();
       if (grouped) {
         expect(signal).toHaveBeenCalledWith(-424242, 'SIGTERM');
