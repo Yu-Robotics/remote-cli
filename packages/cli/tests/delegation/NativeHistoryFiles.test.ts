@@ -197,8 +197,11 @@ describe('exact owned native history deletion', () => {
   });
   it('resolves a symlink followed by dot-dot using filesystem semantics', async () => {
     const target = await fixture('pi'); const intermediate = path.join(target.scope.path, 'intermediate'); await fs.mkdir(intermediate);
-    const alias = path.join(home, 'alias'); await fs.symlink(intermediate, alias, 'dir');
+    // Win32 collapses dot-dot before following the directory link; POSIX follows it first.
+    const alias = path.join(process.platform === 'win32' ? target.scope.path : home, 'alias');
+    await fs.symlink(intermediate, alias, 'dir');
     const reference = alias + path.sep + '..' + path.sep + path.basename(target.transcript!);
+    expect(await fs.realpath(reference)).toBe(target.transcript);
     await fs.writeFile(target.pointer, JSON.stringify({ id: randomUUID(), sessionFile: reference, adopted: true }));
     await expect(verifyHistoryTarget(target, true)).rejects.toThrow('references');
   });
