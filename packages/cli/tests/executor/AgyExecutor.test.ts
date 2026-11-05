@@ -229,6 +229,7 @@ describe('AgyExecutor', () => {
       const env = vi.mocked(spawn).mock.calls.at(-1)?.[2]?.env;
       expect(env?.REMOTE_CLI_DELEGATION_URL).toBe(delegationWorker ? undefined : 'http://127.0.0.1:12345/');
       expect(env?.REMOTE_CLI_DELEGATION_TOKEN).toBe(delegationWorker ? undefined : 'parent-test-token');
+      expect(env?.USERPROFILE).toBe(delegationWorker && process.platform === 'win32' ? env?.HOME : process.env.USERPROFILE);
       await executor.abort();
       await running;
     } finally { vi.unstubAllEnvs(); }
