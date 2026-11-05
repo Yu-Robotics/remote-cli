@@ -1,3 +1,5 @@
+import { OutputLinks } from '../output/OutputLinks';
+import type { VerifiedOutputExport } from '../output/OutputSnapshots';
 import { NativeSessionDeletionQueue, deleteOwnedCodexSession, type NativeDeletionClientFactory, type NativeDeletionResult, type NativeDeletionRequest } from './NativeSessionDeletion';
 import { deleteOwnedHistoryFiles } from './NativeHistoryFiles';
 import { deleteOwnedKimiSession, type KimiDeletionFactory } from './KimiSessionDeletion';
@@ -100,6 +102,8 @@ export interface DelegationParent {
   onToolUse: (tool: ToolUseInfo) => void;
   onToolResult: (result: ToolResultInfo) => void;
   onNotice: (text: string) => void;
+  onVerifiedExports?: (exports: VerifiedOutputExport[]) => void;
+  onOutputFiles?: (links: OutputLinks, cwd: string, taskId: string, final?: string) => Promise<void>;
   /** Returns true when the client accepted a nested worker-progress update for delivery. */
   onProgress?: (progress: DelegationProgressInfo) => boolean;
   /** Read current binding metadata at delivery, including after a Router reconnect. */
@@ -810,6 +814,7 @@ export class DelegationManager {
             + `\n\n${objective}${task.exports?.length ? `\nRequired durable output paths (relative to checkout root): ${JSON.stringify(task.exports)}` : ''}`;
           const fullPrompt = `${fixedInstructions}\n${taskInstructions}`;
           let includedFixedInstructions = true;
+          const outputLinks = new OutputLinks();
           const execution = worker.execute(fullPrompt,
             {
               resolvePrompt: sessionId => {
@@ -846,6 +851,7 @@ ${prompt}`));
                 });
               },
               onDisplayText: text => {
+                if (parent.onOutputFiles) outputLinks.append(text);
                 if (!closed && task.record.state === 'running' && !task.executor?.isWaitingInput?.()) {
                   recordDisplayText(task, text);
                 }
@@ -902,6 +908,11 @@ ${prompt}`));
             && sessionId === task.lane?.initializedPrompt?.sessionId);
           if (confirmedContext && sessionId && task.lane && !isTerminalTaskState(task.record.state)) {
             await this.laneStore.markPromptInitialized(task.lane.id, sessionId, workspaceKind);
+          }
+          if (parent.onOutputFiles && result) {
+            // Capture before truncation, collection, or releasing this worker's exclusive lane.
+            try { await parent.onOutputFiles(outputLinks, task.workspace?.cwd ?? cwd, task.record.id, result.output); }
+            catch { notify(() => parent.onNotice('Worker output files could not be captured.')); }
           }
           captureWorkerMetadata(task);
           metadataCaptured = true;
@@ -1176,6 +1187,8 @@ ${prompt}`));
             const task = tasks.get(String(args.taskId));
             if (task) task.artifact = await this.workspaceManager.describe(task.record.id);
             const exportedFiles = await this.workspaceManager.getArtifactExports(String(args.taskId));
+            try { parent.onVerifiedExports?.(exportedFiles.map(entry => ({ ...entry, taskId: String(args.taskId) }))); }
+            catch { /* File discovery cannot undo an already completed artifact action. */ }
             return exportedFiles.length && result && typeof result === 'object' ? { ...result, exportedFiles } : result;
           } finally { integrationPending = undefined; integrating = false; releaseWorkspaceIfIdle(); }
         }

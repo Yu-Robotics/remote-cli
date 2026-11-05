@@ -1,3 +1,4 @@
+import { OutputTransfers } from './output/OutputTransfers';
 import { deliveryEvent, safeCardError, taskCorrelation } from './utils/DeliveryDiagnostics';
 import { IngressAdmission, IngressLimitError, INGRESS_LIMITS, PendingFrameBudget } from './security/IngressAdmission';
 import { ApprovalCards } from './feishu/ApprovalCards';
@@ -146,6 +147,9 @@ export class RouterServer {
   }>();
   private readonly deviceAuth: DeviceAuth;
   private readonly fileTransfers: FileTransfers;
+  private readonly outputTransfers: OutputTransfers;
+  private outputsAvailable = false;
+  private outputSessions = new Map<string, { id: string; openId: string }>();
 
   constructor(config: ConfigManager, store: JsonStore) {
     this.config = config;
@@ -213,6 +217,18 @@ export class RouterServer {
           return await this.feishuLongConnHandler.sendTaskNotificationCard(record.openId, elements, header) ?? undefined;
         },
       });
+    this.outputTransfers = new OutputTransfers(path.join(path.dirname(config.getConfigPath()
+      || path.join(os.homedir(), '.remote-cli-router', 'config.json')), 'output-files'), {
+      session: deviceId => this.outputSessions.get(deviceId),
+      owns: async (openId, deviceId, epoch) => this.selections.isOwnershipCurrent(openId, deviceId, epoch)
+        && (await this.bindingManager.getDeviceBinding(deviceId))?.openId === openId,
+      send: (deviceId, message) => this.connectionHub.sendToDevice(deviceId, message),
+      create: (openId, content, uuid) => this.feishuLongConnHandler.createOutputCard(openId, content, uuid),
+      patch: (cardId, content) => this.feishuLongConnHandler.patchOutputCard(cardId, content),
+      upload: (filename, name) => this.feishuLongConnHandler.uploadOutputFile(filename, name),
+      sendFile: (openId, content, uuid) => this.feishuLongConnHandler.sendOutputFile(openId, content, uuid),
+    });
+    this.feishuLongConnHandler.onOutputFileAction = (openId, cardId, payload) => this.outputTransfers.click(openId, cardId, payload);
     this.feishuLongConnHandler.onFileMessage = input => this.fileTransfers.receive(input);
     this.feishuLongConnHandler.onResolveFile = (openId, sourceId) => this.fileTransfers.resolve(openId, sourceId);
     this.feishuLongConnHandler.onApproveDeviceKey = async (openId, deviceId, publicKey) => {
@@ -222,6 +238,7 @@ export class RouterServer {
       this.cancelThreadInventories(deviceId);
       this.connectionHub.disconnectDevice(deviceId);
       this.fileTransfers.disconnect(deviceId);
+      this.outputTransfers.disconnect(deviceId); this.outputSessions.delete(deviceId);
     };
     this.feishuLongConnHandler.onRevokeDevice = async deviceId => {
       const owner = await this.bindingManager.getDeviceBinding(deviceId);
@@ -230,6 +247,7 @@ export class RouterServer {
       this.cancelThreadInventories(deviceId);
       this.connectionHub.disconnectDevice(deviceId);
       this.fileTransfers.disconnect(deviceId);
+      this.outputTransfers.disconnect(deviceId); this.outputSessions.delete(deviceId);
     };
     this.approvalCards = new ApprovalCards({
       ownsDevice: async (openId, deviceId) => (await this.bindingManager.getDeviceBinding(deviceId))?.openId === openId,
@@ -304,6 +322,10 @@ export class RouterServer {
         delegationProgress: new Map(),
         toolCalls: new Map(),
       });
+      if (this.outputSessions.has(deviceId)) {
+        await this.outputTransfers.admitSource({ messageId, openId, deviceId, threadId,
+          epoch: selectionIntent?.epoch ?? this.selections.capture(openId, deviceId).epoch }).catch(() => {});
+      }
       // Populate card associations for parent_id-based routing
       if (feishuMessageId && threadId) {
         await this.registerCardThread(feishuMessageId, { threadId, deviceId, openId, epoch: selectionIntent?.epoch ?? this.selections.capture(openId, deviceId).epoch, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS },
@@ -484,6 +506,7 @@ export class RouterServer {
       };
     });
 
+    router.post('/api/output-files/:id', async ctx => { if (!this.outputsAvailable) { ctx.status = 503; return; } await this.outputTransfers.receive(ctx, ctx.params.id); });
     router.get('/api/files/:id', async ctx => { await this.fileTransfers.serve(ctx, ctx.params.id); });
 
     // Binding code request endpoint
@@ -652,6 +675,21 @@ export class RouterServer {
             return;
           }
 
+          if (message.type === 'output_offer' || message.type === 'output_transfer_failed' || message.type === 'output_discovery') {
+            if (!deviceId || !this.outputSessions.has(deviceId)) return;
+            if (message.type === 'output_transfer_failed') this.outputTransfers.failed(deviceId, message.transferId);
+            else if (message.type === 'output_discovery') await this.outputTransfers.discovery(deviceId, message);
+            else {
+              const stream = this.streamingMessages.get(message.reference?.messageId);
+              if (stream && stream.deviceId === deviceId) {
+                await this.outputTransfers.admitSource({ messageId: message.reference.messageId, deviceId,
+                  openId: stream.openId, threadId: stream.threadId,
+                  epoch: stream.selectionFence?.epoch ?? this.selections.capture(stream.openId, deviceId).epoch });
+              }
+              await this.outputTransfers.offer(deviceId, message.reference);
+            }
+            return;
+          }
           if (message.type === 'file_status') {
             if (deviceId) await this.fileTransfers.handleStatus(deviceId, message);
             return;
@@ -835,6 +873,9 @@ export class RouterServer {
                   this.connectionHub.registerConnection(deviceId, ws);
                 }
                 console.log(`Device registered: ${deviceId} (protocol v${clientVersion})`);
+                this.outputTransfers.disconnect(deviceId); this.outputSessions.delete(deviceId);
+                const outputsEnabled = Boolean(this.outputsAvailable && authenticatedOwner && message.data.capabilities?.outputFilesV1 === true);
+                if (outputsEnabled) this.outputSessions.set(deviceId, { id: randomUUID(), openId: authenticatedOwner! });
                 const filesEnabled = Boolean(this.fileTransfers.enabled && authenticatedOwner && message.data.capabilities?.fileTransferV1 === true);
                 if (filesEnabled) this.connectionHub.setFileSession(deviceId, { id: randomUUID(), openId: authenticatedOwner! });
                 this.fileTransfers.disconnect(deviceId);
@@ -875,12 +916,13 @@ export class RouterServer {
                     success: true,
                     routerVersion: ROUTER_VERSION,
                     minCliVersion: MIN_SUPPORTED_CLI_VERSION,
-                    ...((taskRecoveryEnabled || approvalCardsEnabled || delegationProgressEnabled || streamingContextEnabled || activityProgressEnabled || filesEnabled || updateNoticeEnabled || subscriptionInspectionEnabled || settingsCardsEnabled) ? { capabilities: {
+                    ...((taskRecoveryEnabled || approvalCardsEnabled || delegationProgressEnabled || streamingContextEnabled || activityProgressEnabled || filesEnabled || outputsEnabled || updateNoticeEnabled || subscriptionInspectionEnabled || settingsCardsEnabled) ? { capabilities: {
                       ...(activityProgressEnabled ? { activityProgress: true } : {}),
                       ...(updateNoticeEnabled ? { updateNotice: true } : {}),
                       ...(subscriptionInspectionEnabled ? { subscriptionInspection: true } : {}),
                       ...(bankedResetReminderEnabled ? { bankedResetReminder: true } : {}),
                       ...(filesEnabled ? { fileTransferV1: true } : {}),
+                      ...(outputsEnabled ? { outputFilesV1: true } : {}),
                       ...(taskRecoveryEnabled ? { taskRecovery: true } : {}),
                       ...(approvalCardsEnabled ? { approvalCards: true } : {}),
                       ...(delegationProgressEnabled ? { delegationProgress: true } : {}),
@@ -1145,6 +1187,7 @@ export class RouterServer {
         if (heartbeatTimeout) clearTimeout(heartbeatTimeout);
         if (deviceId && this.connectionHub.unregisterConnection(deviceId, ws)) {
           this.fileTransfers.disconnect(deviceId);
+          this.outputTransfers.disconnect(deviceId); this.outputSessions.delete(deviceId);
           // Clean up any streaming sessions for this device
           this.approvalCards.disconnect(deviceId);
           this.maintenanceCards.disconnect(deviceId);
@@ -1180,6 +1223,10 @@ export class RouterServer {
    */
   async start(): Promise<void> {
     await this.fileTransfers.initialize();
+    if (this.fileTransfers.enabled) {
+      try { await this.outputTransfers.initialize(); this.outputsAvailable = true; }
+      catch { console.error('[OutputFiles] Receipt storage unavailable; output transfers are disabled.'); }
+    }
     const port = this.config.get('server', 'port');
     const host = this.config.get('server', 'host');
 
@@ -2549,6 +2596,7 @@ export class RouterServer {
     this.settingsConnections.clear();
     this.maintenanceCards.destroy();
     this.maintenanceConnections.clear();
+    await attempt('Error destroying output transfers', () => this.outputTransfers.destroy());
     await attempt('Error destroying file transfers', () => this.fileTransfers.destroy());
 
     if (this.cleanupInterval) {

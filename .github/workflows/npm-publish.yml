@@ -73,7 +73,7 @@ jobs:
       - name: Build native helper and packages
         run: npm run build
       - name: Exercise native cleanup success and isolation
-        run: npm test -w @yu_robotics/remote-cli -- NativeHistoryAnchor.test.ts ManagedSpawn.native.test.ts OpenCodeDeletionTransport.test.ts AgyExecutor.test.ts ManagedHistoryBackends.test.ts ManagedRemainingHistoryBackends.test.ts ZCodeClient.test.ts NativeHistoryFiles.test.ts AgySessionDeletion.test.ts DshSessionDeletion.test.ts OpenCodeSessionDeletion.test.ts KimiSessionDeletion.test.ts ZCodeSessionDeletion.test.ts --pool=forks --maxWorkers=1 --minWorkers=1
+        run: npm test -w @yu_robotics/remote-cli -- tests/output/OutputFiles.test.ts tests/output/Durable.test.ts NativeHistoryAnchor.test.ts ManagedSpawn.native.test.ts OpenCodeDeletionTransport.test.ts AgyExecutor.test.ts ManagedHistoryBackends.test.ts ManagedRemainingHistoryBackends.test.ts ZCodeClient.test.ts NativeHistoryFiles.test.ts AgySessionDeletion.test.ts DshSessionDeletion.test.ts OpenCodeSessionDeletion.test.ts KimiSessionDeletion.test.ts ZCodeSessionDeletion.test.ts --pool=forks --maxWorkers=1 --minWorkers=1
       - name: Check the published helper on minimum supported Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:

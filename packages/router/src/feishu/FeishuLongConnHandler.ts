@@ -1,3 +1,4 @@
+import { OutputApiRejection } from '../output/OutputTransfers';
 import { CardDeliveryDiagnostics, type CardDiagnosticContext, deliveryEvent, safeCardError, safeSdkLogger } from '../utils/DeliveryDiagnostics';
 import * as lark from '@larksuiteoapi/node-sdk';
 import { v4 as uuidv4 } from 'uuid';
@@ -160,6 +161,7 @@ export class FeishuLongConnHandler {
   onApprovalAction?: (openId: string, requestId: string, cardId: string, decision: string) => Promise<string>;
   onMaintenanceAction?: (openId: string, id: string, cardId: string, action: string, offset?: number) => Promise<string>;
   onTipsCommand?: (openId: string, content: string) => Promise<void>;
+  onOutputFileAction?: (openId: string, cardId: string, payload: unknown) => Promise<string>;
   onTipsAction?: (openId: string, cardId: string, payload: unknown) => Promise<string>;
   onUserActivity?: (openId: string) => Promise<void>;
   onQueueAction?: (openId: string, action: 'confirm' | 'cancel', queueId: string, threadId: string, cardMessageId?: string) => Promise<'sent' | 'already_processed'>;
@@ -1509,6 +1511,75 @@ Examples:
     });
   }
 
+  private readonly outputLogger = safeSdkLogger();
+
+  /** A per-operation deadline also aborts SDK token requests and the actual HTTP transport. */
+  private async outputRequest<T>(timeout: number, run: (client: lark.Client) => Promise<T>): Promise<T> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeout); timer.unref();
+    const httpInstance = Object.create(lark.defaultHttpInstance);
+    httpInstance.request = (options: any) => lark.defaultHttpInstance.request({ ...options, timeout,
+      signal: controller.signal, maxRedirects: 0, maxContentLength: 64 * 1024, maxBodyLength: 20 * 1024 * 1024 + 64 * 1024 });
+    for (const method of ['get', 'delete', 'head', 'options']) {
+      httpInstance[method] = (url: string, options: any = {}) => httpInstance.request({ ...options, method, url });
+    }
+    for (const method of ['post', 'put', 'patch']) {
+      httpInstance[method] = (url: string, data: any, options: any = {}) => httpInstance.request({ ...options, method, url, data });
+    }
+    try {
+      const client = new lark.Client({ appId: this.appId, appSecret: this.appSecret, appType: lark.AppType.SelfBuild,
+        domain: lark.Domain.Feishu, httpInstance, logger: this.outputLogger });
+      return await run(client);
+    } catch (cause) {
+      const safe = safeCardError(cause);
+      throw Object.assign(new Error('Output service request outcome unknown.'), { code: safe.category,
+        response: { status: safe.httpStatus, data: { code: safe.apiCode,
+          msg: safe.subCode === undefined ? undefined : `ErrCode: ${safe.subCode}`, error: { log_id: safe.traceId } } } });
+    } finally { clearTimeout(timer); controller.abort(); }
+  }
+
+  /** Strict receipts: missing codes/IDs are unknown, never invented success. */
+  async createOutputCard(openId: string, content: string, uuid: string): Promise<string> {
+    const result = await this.cardDiagnostics.deliver({ operation: 'create' }, content, () => this.outputRequest(6000, client => client.im.message.create({
+      params: { receive_id_type: 'open_id' }, data: { receive_id: openId, msg_type: 'interactive', uuid, content },
+    })));
+    return this.outputMessageReceipt(result);
+  }
+
+  async patchOutputCard(cardId: string, content: string): Promise<void> {
+    await this.withMessageLock(cardId, async () => {
+      const result = await this.cardDiagnostics.deliver({ operation: 'update', rootId: cardId }, content,
+        () => this.outputRequest(6000, client => client.im.message.patch({ path: { message_id: cardId }, data: { content } })));
+      if (result?.code !== 0) {
+        if (typeof result?.code === 'number' && result.code !== 0) throw new OutputApiRejection();
+        throw new Error('Output card update outcome unknown.');
+      }
+    });
+  }
+
+  async uploadOutputFile(filename: string, name: string): Promise<string> {
+    const stream = fs.createReadStream(filename);
+    stream.on('error', () => {});
+    try {
+      const result = await this.outputRequest(110_000, client => client.im.file.create({ data: { file_type: 'stream', file_name: name, file: stream } }));
+      // This SDK returns the upload data directly, unlike message.create.
+      if (typeof result?.file_key === 'string' && result.file_key) return result.file_key;
+      throw new Error('File upload outcome unknown.');
+    } finally { stream.destroy(); if (!stream.closed) await new Promise<void>(resolve => stream.once('close', resolve)); }
+  }
+
+  async sendOutputFile(openId: string, content: string, uuid: string): Promise<string> {
+    const result = await this.outputRequest(10_000, client => client.im.message.create({ params: { receive_id_type: 'open_id' },
+      data: { receive_id: openId, msg_type: 'file', uuid, content } }));
+    return this.outputMessageReceipt(result);
+  }
+
+  private outputMessageReceipt(result: any): string {
+    if (result?.code === 0 && typeof result.data?.message_id === 'string' && result.data.message_id && result.data.message_id.length <= 512) return result.data.message_id;
+    if (typeof result?.code === 'number' && result.code !== 0) throw new OutputApiRejection();
+    throw new Error('Output message outcome unknown.');
+  }
+
   private recordUserActivity(openId: string): void {
     // Activity persistence must never delay task admission or expose private identifiers in logs.
     try {
@@ -2032,6 +2103,12 @@ Examples:
 
     if (!parsed || typeof parsed !== 'object') return;
     this.recordUserActivity(openId);
+    if (parsed.action === 'output_file') {
+      const cardId = data?.context?.open_message_id;
+      if (typeof cardId !== 'string' || !this.onOutputFileAction) return { toast: { type: 'error', content: 'Output files unavailable.' } };
+      try { return { toast: { type: 'info', content: await this.onOutputFileAction(openId, cardId, parsed) } }; }
+      catch { return { toast: { type: 'error', content: 'File retrieval could not be admitted.' } }; }
+    }
     if (parsed.action === 'tips') {
       const cardId = data?.context?.open_message_id;
       if (typeof cardId !== 'string' || !this.onTipsAction) {

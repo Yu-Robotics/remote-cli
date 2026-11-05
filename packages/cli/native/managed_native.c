@@ -172,8 +172,15 @@ static napi_value open_root(napi_env env, napi_callback_info info) {
   metadata s; if (!stat_resource(r,&s) || !s.directory) { close_resource(r); free(r); return fail(env,"Unsafe native directory","EINVAL"); }
   return wrap(env,r);
 }
-static resource *open_child_resource(napi_env env, resource *parent, const char *name, int directory, int writable) {
-  if (!component(name)) { fail(env,"Invalid native path component","EINVAL"); return NULL; }
+static resource *open_child_resource(napi_env env, resource *parent, const char *name, int directory, int writable, int output_read) {
+  int valid_name=component(name);
+#ifndef _WIN32
+  /* Read-only output snapshots accept literal POSIX colons; deletion keeps its original namespace contract. */
+  if(output_read) valid_name=*name && strcmp(name,".") && strcmp(name,"..") && !strchr(name,'/') && !strchr(name,'\\');
+#else
+  (void)output_read;
+#endif
+  if (!valid_name) { fail(env,"Invalid native path component","EINVAL"); return NULL; }
   resource *r = calloc(1,sizeof(*r)); if (!r) { fail(env,"Native allocation failed","ENOMEM"); return NULL; } r->kind=1;
 #ifdef _WIN32
   r->value=relative_open(parent->value,name,directory,writable); int valid=r->value!=INVALID_HANDLE_VALUE;
@@ -189,11 +196,17 @@ static napi_value open_child(napi_env env,napi_callback_info info) {
   napi_value a[3]; if(!args(env,info,3,a))return NULL; resource *p=get_resource(env,a[0],1); if(!p)return NULL;
   char *name=string_arg(env,a[1]); if(!name)return NULL; bool directory;
   if(napi_get_value_bool(env,a[2],&directory)!=napi_ok){free(name);return fail(env,"Invalid entry kind","EINVAL");}
-  resource *r=open_child_resource(env,p,name,directory,0);free(name);return r?wrap(env,r):NULL;
+  resource *r=open_child_resource(env,p,name,directory,0,0);free(name);return r?wrap(env,r):NULL;
+}
+static napi_value open_output_child(napi_env env,napi_callback_info info) {
+  napi_value a[3];if(!args(env,info,3,a))return NULL;resource *p=get_resource(env,a[0],1);if(!p)return NULL;
+  char *name=string_arg(env,a[1]);if(!name)return NULL;bool directory;
+  if(napi_get_value_bool(env,a[2],&directory)!=napi_ok){free(name);return fail(env,"Invalid entry kind","EINVAL");}
+  resource *r=open_child_resource(env,p,name,directory,0,1);free(name);return r?wrap(env,r):NULL;
 }
 static napi_value open_entry(napi_env env,napi_callback_info info) {
   napi_value a[2];if(!args(env,info,2,a))return NULL;resource *p=get_resource(env,a[0],1);if(!p)return NULL;
-  char *name=string_arg(env,a[1]);if(!name)return NULL;resource *r=open_child_resource(env,p,name,-1,0);free(name);return r?wrap(env,r):NULL;
+  char *name=string_arg(env,a[1]);if(!name)return NULL;resource *r=open_child_resource(env,p,name,-1,0,0);free(name);return r?wrap(env,r):NULL;
 }
 static napi_value stat_handle(napi_env env,napi_callback_info info) {
   napi_value a[1];if(!args(env,info,1,a))return NULL;resource *r=get_resource(env,a[0],1);if(!r)return NULL;
@@ -208,7 +221,7 @@ static napi_value remove_child(napi_env env,napi_callback_info info) {
   napi_value a[4];if(!args(env,info,4,a))return NULL;resource *p=get_resource(env,a[0],1);if(!p)return NULL;
   char *name=string_arg(env,a[1]);if(!name)return NULL;bool directory;
   if(napi_get_value_bool(env,a[2],&directory)!=napi_ok){free(name);return fail(env,"Invalid entry kind","EINVAL");}
-  resource *r=open_child_resource(env,p,name,directory,1);if(!r){free(name);return NULL;}
+  resource *r=open_child_resource(env,p,name,directory,1,0);if(!r){free(name);return NULL;}
   metadata s;int valid=stat_resource(r,&s)&&equal_field(env,a[3],"dev",s.dev)&&equal_field(env,a[3],"ino",s.ino)
     &&(directory||(s.links==1&&equal_field(env,a[3],"size",s.size)&&equal_field(env,a[3],"mtime",s.mtime)));
 #ifndef _WIN32
@@ -260,6 +273,30 @@ static napi_value list_entries(napi_env env,napi_callback_info info) {
 #endif
   return result;
 }
+/* Bounded positional reads let output snapshots yield between chunks. */
+static napi_value read_chunk(napi_env env,napi_callback_info info) {
+  napi_value a[3],result;if(!args(env,info,3,a))return NULL;
+  resource *r=get_resource(env,a[0],1);if(!r)return NULL;
+  uint32_t offset,limit;
+  if(napi_get_value_uint32(env,a[1],&offset)!=napi_ok||napi_get_value_uint32(env,a[2],&limit)!=napi_ok||limit>65536)
+    return fail(env,"Invalid native chunk limit","EINVAL");
+  metadata before,after;
+  if(!stat_resource(r,&before)||!before.regular||before.links!=1||offset>before.size)
+    return fail(env,"Unsafe native chunk read","EINVAL");
+  size_t length=(size_t)(before.size-offset);if(length>limit)length=limit;
+  void *buffer;if(napi_create_buffer(env,length,&buffer,&result)!=napi_ok)return fail(env,"Native allocation failed","ENOMEM");
+#ifdef _WIN32
+  LARGE_INTEGER start;start.QuadPart=offset;
+  if(!SetFilePointerEx(r->value,start,NULL,FILE_BEGIN))return osfail(env,"Cannot seek native file");
+  DWORD got=0;if(!ReadFile(r->value,buffer,(DWORD)length,&got,NULL))return osfail(env,"Native read failed");
+#else
+  ssize_t got=pread(r->value,buffer,length,(off_t)offset);if(got<0)return osfail(env,"Native read failed");
+#endif
+  if((size_t)got!=length||!stat_resource(r,&after)||before.dev!=after.dev||before.ino!=after.ino||before.size!=after.size||before.mtime!=after.mtime||after.links!=1)
+    return fail(env,"Native file changed during read","ESTALE");
+  return result;
+}
+
 static napi_value read_file(napi_env env,napi_callback_info info) {
   napi_value a[2],result;if(!args(env,info,2,a))return NULL;resource *r=get_resource(env,a[0],1);if(!r)return NULL;
   uint32_t limit;if(napi_get_value_uint32(env,a[1],&limit)!=napi_ok||limit>MAX_BYTES)return fail(env,"Invalid native read limit","EINVAL");
@@ -346,7 +383,7 @@ static napi_value process_ids(napi_env env,napi_callback_info info) {
 static napi_value init(napi_env env,napi_value exports) {
 #define EXPORT(name,fn) {napi_value value;napi_create_function(env,name,NAPI_AUTO_LENGTH,fn,NULL,&value);napi_set_named_property(env,exports,name,value);}
   EXPORT("openRoot",open_root);EXPORT("openChild",open_child);EXPORT("stat",stat_handle);EXPORT("openEntry",open_entry);EXPORT("remove",remove_child);
-  EXPORT("close",close_handle);EXPORT("entries",list_entries);EXPORT("read",read_file);
+  EXPORT("close",close_handle);EXPORT("entries",list_entries);EXPORT("read",read_file);EXPORT("readChunk",read_chunk);EXPORT("openOutputChild",open_output_child);
 #ifdef _WIN32
   EXPORT("jobMember",job_member);EXPORT("createJob",create_job);EXPORT("joinJob",join_job);EXPORT("jobCount",job_count);EXPORT("terminateJob",terminate_job);
 #endif

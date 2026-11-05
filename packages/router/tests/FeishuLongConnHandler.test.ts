@@ -7,6 +7,7 @@ import * as fs from 'fs/promises';
 import { createDelegationProgressElements } from '../src/utils/ToolFormatter';
 import { CARD_TABLE_LIMIT, countCardTables } from '../src/utils/CardTables';
 import { WorkerContextCards, workerContextControl } from '../src/feishu/WorkerContextCards';
+import { OutputTransfers } from '../src/output/OutputTransfers';
 
 // Mock dependencies
 vi.mock('../src/binding/BindingManager');
@@ -86,6 +87,107 @@ describe('FeishuLongConnHandler', () => {
   afterEach(() => {
     handler.workerContexts?.destroy();
     vi.clearAllMocks();
+  });
+
+  it('requires explicit file delivery receipts and uses separate stable message UUIDs', async () => {
+    mockClient.im.message.create.mockResolvedValue({ code: 0, data: { message_id: 'task-card' } });
+    expect(await handler.createOutputCard('owner', '{}', 'card-intent')).toBe('task-card');
+    expect(mockClient.im.message.create).toHaveBeenLastCalledWith(expect.objectContaining({
+      data: { receive_id: 'owner', msg_type: 'interactive', uuid: 'card-intent', content: '{}' },
+    }));
+    const transport = vi.mocked(lark.Client).mock.calls.at(-1)![0].httpInstance!;
+    await transport.get('https://example.com/fixture');
+    expect(lark.defaultHttpInstance.request).toHaveBeenLastCalledWith(expect.objectContaining({
+      timeout: 6000, maxRedirects: 0, maxContentLength: 65536,
+      signal: expect.objectContaining({ aborted: true }),
+    }));
+    mockClient.im.message.create.mockResolvedValue({ data: { message_id: 'unconfirmed' } });
+    await expect(handler.sendOutputFile('owner', '{"file_key":"key"}', 'send-intent')).rejects.toThrow('unknown');
+    mockClient.im.message.create.mockResolvedValue({ code: 123 });
+    await expect(handler.sendOutputFile('owner', '{}', 'send-intent')).rejects.toThrow('rejected');
+    mockClient.im.message.patch.mockResolvedValue({ code: 123 });
+    await expect(handler.patchOutputCard('task-card', '{}')).rejects.toThrow('rejected');
+    mockClient.im.message.patch.mockResolvedValue({});
+    await expect(handler.patchOutputCard('task-card', '{}')).rejects.toThrow('unknown');
+    mockClient.im.message.patch.mockResolvedValue({ code: 0 });
+    await expect(handler.patchOutputCard('task-card', '{}')).resolves.toBeUndefined();
+  });
+
+  it('uploads output bytes as a stream and closes it on success and unknown failure', async () => {
+    const os = await import('os'), path = await import('path');
+    const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'output-sdk-')));
+    const filename = path.join(directory, 'report.bin'); await fs.writeFile(filename, 'synthetic-file-body');
+    const streams: any[] = [];
+    mockClient.im.file = { create: vi.fn(async ({ data }: any) => {
+      streams.push(data.file); const chunks: Buffer[] = [];
+      for await (const chunk of data.file) chunks.push(chunk);
+      expect(Buffer.concat(chunks).toString()).toBe('synthetic-file-body'); return { file_key: 'uploaded-key' };
+    }) };
+    try {
+      expect(await handler.uploadOutputFile(filename, 'report.bin')).toBe('uploaded-key');
+      expect(streams[0].closed).toBe(true);
+      mockClient.im.file.create.mockImplementation(async ({ data }: any) => {
+        streams.push(data.file); throw Object.assign(new Error('private-credential-sentinel'), { config: { secret: 'private-credential-sentinel' } });
+      });
+      await expect(handler.uploadOutputFile(filename, 'report.bin')).rejects.toThrow('outcome unknown');
+      expect(streams[1].closed).toBe(true);
+      expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain('private-credential-sentinel');
+    } finally { await fs.rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('routes output callbacks by exact original card and reports only safe failures', async () => {
+    handler.onOutputFileAction = vi.fn(async (owner, card, value: any) => {
+      expect(owner).toBe('owner'); expect(card).toBe('entry'); expect(value.op).toBe('get'); return 'File retrieval accepted.';
+    });
+    expect(await handler.handleCardAction({ operator: { open_id: 'owner' }, context: { open_message_id: 'entry' },
+      action: { value: { action: 'output_file', id: 'reference', op: 'get' } } })).toEqual({ toast: { type: 'info', content: 'File retrieval accepted.' } });
+    handler.onOutputFileAction = vi.fn().mockRejectedValue(new Error('private-sentinel'));
+    expect(JSON.stringify(await handler.handleCardAction({ operator: { open_id: 'owner' }, context: { open_message_id: 'entry' },
+      action: { value: { action: 'output_file', id: 'reference', op: 'get' } } }))).not.toContain('private-sentinel');
+  });
+
+  it('round-trips Card 2 entry and Retry behaviors through the Feishu callback handler', async () => {
+    const os = await import('os'), path = await import('path');
+    const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'output-card-schema-')));
+    let count = 0, connected = true;
+    mockClient.im.message.create.mockImplementation(async () => ({ code: 0, data: { message_id: `output-card-${++count}` } }));
+    mockClient.im.message.patch.mockResolvedValue({ code: 0 });
+    const transfers = new OutputTransfers(directory, {
+      session: () => connected ? { id: 'connection', openId: 'owner' } : undefined, owns: async () => true, send: vi.fn(),
+      create: (owner, content, uuid) => handler.createOutputCard(owner, content, uuid),
+      patch: (card, content) => handler.patchOutputCard(card, content), upload: vi.fn(), sendFile: vi.fn(),
+    });
+    handler.onOutputFileAction = (owner, card, action) => transfers.click(owner, card, action);
+    const callback = (card: string, value: any, owner = 'owner') => handler.handleCardAction({
+      operator: { open_id: owner }, context: { open_message_id: card }, action: { value },
+    });
+    const behavior = (content: string, label: string) => {
+      const json = JSON.parse(content); expect(json.schema).toBe('2.0');
+      expect(json.body.elements[0]).toMatchObject({ tag: 'div', text: { tag: 'plain_text' } });
+      const button = json.body.elements.find((element: any) => element.tag === 'button');
+      expect(button).toMatchObject({ type: 'default', text: { tag: 'plain_text', content: label }, behaviors: [{ type: 'callback' }] });
+      expect(button).not.toHaveProperty('value');
+      return button.behaviors[0].value;
+    };
+    try {
+      await transfers.admitSource({ messageId: 'reply', deviceId: 'device', openId: 'owner', threadId: 'thread', epoch: 'epoch' });
+      await transfers.offer('device', { id: 'a'.repeat(64), sha256: 'b'.repeat(64), messageId: 'reply', threadId: 'thread', taskId: 'task',
+        generation: 0, name: 'report.csv', source: 'workspace', size: 8, expiresAt: Date.now() + 60_000 });
+      await Promise.all([...(transfers as any).entryWork.values()]);
+      const get = behavior(mockClient.im.message.create.mock.calls[0][0].data.content, 'Get file');
+      connected = false;
+      expect(await callback('wrong-card', get)).toMatchObject({ toast: { content: 'This file is unavailable.' } });
+      expect(await callback('output-card-1', get, 'other-owner')).toMatchObject({ toast: { content: 'This file is unavailable.' } });
+      expect(await callback('output-card-1', get)).toMatchObject({ toast: { content: 'File retrieval accepted.' } });
+      await transfers.tick();
+      await Promise.all([...(transfers as any).presentations.values()]);
+      const internal = transfers as any, job = internal.state.jobs[0], ref = internal.state.references[0];
+      await internal.change(job, 'failed'); await internal.present(job, ref);
+      const retry = behavior(mockClient.im.message.patch.mock.calls.at(-1)[0].data.content, 'Retry');
+      expect(await callback('output-card-1', retry)).toMatchObject({ toast: { content: 'This file is unavailable.' } });
+      expect(await callback(job.card.id, retry)).toMatchObject({ toast: { content: 'Retry accepted.' } });
+      expect(await callback(job.card.id, retry)).toMatchObject({ toast: { content: 'This file is unavailable.' } });
+    } finally { await transfers.destroy(); await fs.rm(directory, { recursive: true, force: true }); }
   });
 
   it('measures the decorated wire content and installs a privacy-safe SDK logger', async () => {

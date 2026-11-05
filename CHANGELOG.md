@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.221] - 2026-11-05
+
+### Added
+- Capture bounded immutable output-file snapshots from explicit assistant Markdown links, with native handle-relative reads and managed worker disposal fencing.
+- Add authenticated CLI-to-Router HTTP streaming, durable original-device references and transfer receipts, separate file-entry and progress cards, and native Feishu file delivery.
+- Preserve retryable failures and uncertain external send outcomes across restarts without replaying delivered files; enforce fixed expiry, storage quotas, and transfer concurrency limits.
+
 ## [1.6.220] - 2026-11-05
 
 ### Changed

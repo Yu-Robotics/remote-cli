@@ -1,3 +1,4 @@
+import { OutputSnapshots } from '../../src/output/OutputSnapshots';
 import { DelegatedWorkspaceManager } from '../../src/delegation/DelegatedWorkspaceManager';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs/promises';
@@ -335,12 +336,21 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
   });
 
   it('exports required ignored reports before deleting the checkout', async () => {
+    const snapshots = new OutputSnapshots(path.join(fixture.directory, 'output-snapshots'));
+    await snapshots.initialize();
+    parent.onOutputFiles = async (links, cwd, taskId, final) => {
+      for (const candidate of links.finish(final).paths) await snapshots.snapshot(candidate, {
+        cwd, taskId, messageId: 'message', threadId: parent.thread.id, generation: 0, source: 'worker',
+      });
+    };
+    parent.onVerifiedExports = vi.fn();
+    try {
     const scope = manager.begin(parent);
     await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Produce a report',
       exports: ['node_modules/report.txt'] }, 'launch');
     await fs.mkdir(path.join(workers[0].cwd, 'node_modules'));
     await fs.writeFile(path.join(workers[0].cwd, 'node_modules', 'report.txt'), 'delivered report');
-    workers[0].finish({ success: true });
+    workers[0].finish({ success: true, output: '[report](node_modules/report.txt)' });
     const [result] = await scope.collectPendingResults();
     expect(result.state).toBe('succeeded');
     await expect(fs.stat(workers[0].cwd)).rejects.toMatchObject({ code: 'ENOENT' });
@@ -350,6 +360,12 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
     expect(inspected.exportedFiles).toHaveLength(1);
     expect(inspected.exportedFiles[0].path).toBe('node_modules/report.txt');
     expect(await fs.readFile(inspected.exportedFiles[0].file, 'utf8')).toBe('delivered report');
+    expect(parent.onVerifiedExports).toHaveBeenCalledWith([expect.objectContaining({ taskId: result.taskId, file: inspected.exportedFiles[0].file })]);
+    expect(snapshots.references()).toHaveLength(1);
+    const parts: Buffer[] = [];
+    await snapshots.read(snapshots.references()[0].id, async bytes => { for await (const part of bytes) parts.push(part); });
+    expect(Buffer.concat(parts).toString()).toBe('delivered report');
+    } finally { await snapshots.destroy(); }
   });
 
   it('holds the checkout when a required report was not delivered', async () => {
