@@ -1,0 +1,2 @@
+# Preserve the exact audited source bytes across native artifact builders.
+packages/cli/native/managed_native.c text eol=lf
