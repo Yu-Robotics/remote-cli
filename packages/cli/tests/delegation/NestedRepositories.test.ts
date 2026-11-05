@@ -16,18 +16,58 @@ vi.mock('child_process', async importOriginal => {
   return { ...actual, spawn: vi.fn(actual.spawn) };
 });
 
+// A deadline stops phase admission, not the Git/filesystem operation already
+// admitted. Teardown must await that operation before restoring mocks or files.
+function fixturePhases() {
+  const pending = new Set<Promise<unknown>>();
+  let closing = false;
+  return {
+    async run<T>(name: string, action: () => Promise<T>): Promise<T> {
+      if (closing) throw new Error('Fixture is draining; no new Git phases may start');
+      const call = Promise.resolve().then(() => {
+        if (closing) throw new Error('Fixture is draining; no new Git phases may start');
+        return action();
+      });
+      pending.add(call);
+      void call.then(() => pending.delete(call), () => pending.delete(call));
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([call, new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            closing = true;
+            reject(new Error(`Git lifecycle phase exceeded 30 seconds: ${name}`));
+          }, 30_000);
+        })]);
+      } finally { clearTimeout(timer); }
+    },
+    async drain(): Promise<void> {
+      closing = true;
+      await Promise.allSettled([...pending]);
+    },
+  };
+}
+
 // These integration cases run real Git captures, nested imports, merges and byte audits.
 describe('local nested repository checkpoints and delivery', { timeout: 30_000 }, () => {
   let fixture: Awaited<ReturnType<typeof gitFixture>>;
   let manager: DelegatedWorkspaceManager;
   let lanes: DelegatedWorkerSessionStore;
+  let phases: ReturnType<typeof fixturePhases>;
   const owner = { threadId: 'fixture-owner', workspaceGeneration: 0 };
   beforeEach(async () => {
+    phases = fixturePhases();
     fixture = await gitFixture();
     manager = new DelegatedWorkspaceManager(path.join(fixture.directory, 'workspaces'));
     lanes = new DelegatedWorkerSessionStore(path.join(fixture.directory, 'lanes'));
   });
-  afterEach(async () => { vi.restoreAllMocks(); await fs.rm(fixture.directory, { recursive: true, force: true }); });
+  const cleanupFixture = async () => {
+    await phases.drain();
+    vi.restoreAllMocks();
+    await fs.rm(fixture.directory, { recursive: true, force: true });
+  };
+  // A phase timeout leaves its admitted operation running. Keep the fixture and
+  // mocks intact while it settles, with a separate bounded teardown watchdog.
+  afterEach(cleanupFixture, 60_000);
   const prepare = async () => {
     const source = (await manager.discover(fixture.root))!;
     const { lane } = await lanes.acquire({ ...owner, backend: 'agy', workingDirectory: fixture.root });
@@ -39,6 +79,82 @@ describe('local nested repository checkpoints and delivery', { timeout: 30_000 }
   };
   const inspect = (workspace: DelegatedWorkspace) => manager.integrate({ ...owner, cwd: fixture.root }, workspace.taskId, 'inspect', undefined) as Promise<any>;
   const apply = async (workspace: DelegatedWorkspace) => manager.integrate({ ...owner, cwd: fixture.root }, workspace.taskId, 'apply', (await inspect(workspace)).revision) as Promise<any>;
+
+  it.each(['resolve', 'reject'] as const)('drains timed-out nested work that later %ss before restoring mocks or removing files', async completion => {
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const discover = vi.spyOn(manager, 'discover');
+    const latePhase = vi.fn(async () => undefined);
+    let mockSurvived = false, writeFinished = false;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const running = (async () => {
+      await phases.run('held nested operation', async () => {
+        entered(); await gate;
+        mockSurvived = manager.discover === discover;
+        await fs.writeFile(path.join(fixture.directory, 'late-result'), 'synthetic completed work');
+        writeFinished = true;
+        if (completion === 'reject') throw new Error('Synthetic late Git failure');
+      });
+      await phases.run('must not integrate after timeout', latePhase);
+    })();
+    const outcome = running.then(() => undefined, error => error);
+    let cleanup: Promise<void> | undefined;
+    try {
+      await started;
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect((await outcome).message).toBe('Git lifecycle phase exceeded 30 seconds: held nested operation');
+      vi.useRealTimers();
+      const drain = vi.spyOn(phases, 'drain');
+      let removed = false;
+      cleanup = cleanupFixture().then(() => { removed = true; });
+      void cleanup.catch(() => undefined);
+      expect(drain).toHaveBeenCalledOnce();
+      expect(removed).toBe(false);
+      expect(manager.discover).toBe(discover);
+      expect(await fs.stat(fixture.directory)).toBeDefined();
+      await expect(phases.run('late admission', latePhase)).rejects.toThrow('Fixture is draining');
+      release(); await cleanup;
+      expect(writeFinished).toBe(true);
+      expect(mockSurvived).toBe(true);
+      expect(manager.discover).not.toBe(discover);
+      expect(latePhase).not.toHaveBeenCalled();
+      await expect(fs.stat(fixture.directory)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      vi.useRealTimers(); release();
+      await Promise.allSettled([running, ...(cleanup ? [cleanup] : [])]);
+      await phases.drain();
+    }
+  });
+
+  it('gives successive nested operations separate deadlines without allowing new work during drain', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const releases: (() => void)[] = [];
+    const running = (async () => {
+      for (let phase = 0; phase < 3; phase++) {
+        await phases.run(`nested operation ${phase}`, () => new Promise<void>(resolve => { releases.push(resolve); }));
+      }
+    })();
+    const outcome = running.then(() => undefined, error => error);
+    try {
+      for (let phase = 0; phase < 3; phase++) {
+        await vi.advanceTimersByTimeAsync(0);
+        expect(releases).toHaveLength(phase + 1);
+        await vi.advanceTimersByTimeAsync(20_000);
+        releases[phase]();
+      }
+      expect(await outcome).toBeUndefined();
+      const neverStarted = vi.fn(async () => undefined);
+      const queued = phases.run('not yet entered', neverStarted);
+      const draining = phases.drain();
+      await expect(queued).rejects.toThrow('Fixture is draining');
+      await draining;
+      expect(neverStarted).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers(); releases.forEach(release => release());
+      await Promise.allSettled([running]); await phases.drain();
+    }
+  });
 
   it('captures an ordinary tracked file replaced by a directory', async () => {
     await fs.unlink(path.join(fixture.root, 'source.txt'));
@@ -88,26 +204,48 @@ describe('local nested repository checkpoints and delivery', { timeout: 30_000 }
     expect(await manager.reclaim(workspace.taskId)).toBe(true);
   });
 
+  // These two worker lifecycles have nine independent 30-second phases. The
+  // outer watchdog accounts for their sum; no individual Git phase gets longer.
   it.each([false, true])('integrates edits and new binary files without changing any HEAD/index (submodule=%s)', async submodule => {
-    const child = await nestedGitFixture(fixture, 'module', submodule);
-    await fs.writeFile(path.join(child, 'local.txt'), 'first\nstaged\nthird\n');
-    await runGit(child, ['add', 'local.txt']);
-    const before = await repositoryState(fixture.root), nestedBefore = await repositoryState(child);
-    const { workspace, lane } = await prepare();
-    await fs.writeFile(path.join(workspace.cwd, 'module/local.txt'), 'worker\nstaged\nthird\n');
-    await fs.writeFile(path.join(workspace.cwd, 'module/new.bin'), Buffer.from([1, 0, 254]));
-    expect((await manager.collect(workspace, true)).changedFiles).toEqual(['module/local.txt', 'module/new.bin']);
-    expect(await apply(workspace)).toMatchObject({ applied: true, disposition: 'applied' });
-    expect(await fs.readFile(path.join(child, 'local.txt'), 'utf8')).toBe('worker\nstaged\nthird\n');
-    expect(await fs.readFile(path.join(child, 'new.bin'))).toEqual(Buffer.from([1, 0, 254]));
-    expect(await repositoryState(fixture.root)).toEqual(before);
-    expect(await repositoryState(child)).toEqual(nestedBefore);
-    const next = await manager.prepare(lane, workspace.source, await manager.baseline(workspace.source), randomUUID());
-    expect(next.cwd).toBe(workspace.cwd);
-    expect(await fs.readFile(path.join(next.cwd, 'module/local.txt'), 'utf8')).toContain('worker');
-    expect((await manager.collect(next, true, { exitConfirmed: true })).disposition).toBe('applied');
-    expect(await manager.reclaim(next.taskId)).toBe(true);
-  }, 30_000);
+    const { child, before, nestedBefore } = await phases.run('create and stage nested input', async () => {
+      const child = await nestedGitFixture(fixture, 'module', submodule);
+      await fs.writeFile(path.join(child, 'local.txt'), 'first\nstaged\nthird\n');
+      await runGit(child, ['add', 'local.txt']);
+      return { child, before: await repositoryState(fixture.root), nestedBefore: await repositoryState(child) };
+    });
+    const { workspace, lane } = await phases.run('prepare and edit the first nested worker', async () => {
+      const prepared = await prepare();
+      await fs.writeFile(path.join(prepared.workspace.cwd, 'module/local.txt'), 'worker\nstaged\nthird\n');
+      await fs.writeFile(path.join(prepared.workspace.cwd, 'module/new.bin'), Buffer.from([1, 0, 254]));
+      return prepared;
+    });
+    await phases.run('collect the nested edit and binary artifact', async () => {
+      expect((await manager.collect(workspace, true)).changedFiles).toEqual(['module/local.txt', 'module/new.bin']);
+    });
+    const inspection = await phases.run('inspect the nested artifact', () => inspect(workspace));
+    await phases.run('apply and reclaim the nested artifact', async () => {
+      expect(await manager.integrate({ ...owner, cwd: fixture.root }, workspace.taskId, 'apply', inspection.revision))
+        .toMatchObject({ applied: true, disposition: 'applied' });
+    });
+    await phases.run('verify delivered bytes and unchanged repository identities', async () => {
+      expect(await fs.readFile(path.join(child, 'local.txt'), 'utf8')).toBe('worker\nstaged\nthird\n');
+      expect(await fs.readFile(path.join(child, 'new.bin'))).toEqual(Buffer.from([1, 0, 254]));
+      expect(await repositoryState(fixture.root)).toEqual(before);
+      expect(await repositoryState(child)).toEqual(nestedBefore);
+    });
+    const next = await phases.run('prepare the reused nested worker from the new baseline', async () => {
+      const next = await manager.prepare(lane, workspace.source, await manager.baseline(workspace.source), randomUUID());
+      expect(next.cwd).toBe(workspace.cwd);
+      expect(await fs.readFile(path.join(next.cwd, 'module/local.txt'), 'utf8')).toContain('worker');
+      return next;
+    });
+    await phases.run('collect the unchanged reused worker', async () => {
+      expect((await manager.collect(next, true, { exitConfirmed: true })).disposition).toBe('applied');
+    });
+    await phases.run('reclaim the reused worker', async () => {
+      expect(await manager.reclaim(next.taskId)).toBe(true);
+    });
+  }, 9 * 30_000 + 5_000);
 
   it('recursively includes nested repositories and supports their uncommitted input', async () => {
     const child = await nestedGitFixture(fixture);
