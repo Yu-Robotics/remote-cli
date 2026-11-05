@@ -14,6 +14,12 @@ import { gitText, runGit } from '../../src/delegation/GitCheckpoint';
 import * as gitCommands from '../../src/delegation/GitCheckpoint';
 import { gitFixture } from './gitFixture';
 
+vi.mock('../../src/delegation/OwnershipRuntime', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../src/delegation/OwnershipRuntime')>();
+  const { syntheticOwnershipRuntime } = await import('./syntheticOwnershipRuntime');
+  return syntheticOwnershipRuntime(actual);
+});
+
 function controlledWorker(cwd: string) {
   let finish!: (result: ExecuteResult) => void;
   const completed = new Promise<ExecuteResult>(resolve => { finish = resolve; });

@@ -14,6 +14,12 @@ import { ThreadContextReset } from '../../src/thread/ThreadContextReset';
 import type { ExecuteResult, IExecutor } from '../../src/executor/IExecutor';
 import { gitFixture } from './gitFixture';
 
+vi.mock('../../src/delegation/OwnershipRuntime', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../src/delegation/OwnershipRuntime')>();
+  const { syntheticOwnershipRuntime } = await import('./syntheticOwnershipRuntime');
+  return syntheticOwnershipRuntime(actual);
+});
+
 describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
   let fixture: Awaited<ReturnType<typeof gitFixture>>;
   let manager: DelegationManager;

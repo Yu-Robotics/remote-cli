@@ -14,6 +14,12 @@ import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 import type { IExecutor } from '../../src/executor/IExecutor';
 import { gitFixture } from './gitFixture';
 
+vi.mock('../../src/delegation/OwnershipRuntime', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../src/delegation/OwnershipRuntime')>();
+  const { syntheticOwnershipRuntime } = await import('./syntheticOwnershipRuntime');
+  return syntheticOwnershipRuntime(actual);
+});
+
 let nativeLfs = false;
 try { execFileSync('git', ['lfs', 'version'], { stdio: 'ignore' }); nativeLfs = true; } catch { /* Native LFS tests require git-lfs. */ }
 

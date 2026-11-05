@@ -8,6 +8,12 @@ import { DelegationStore, type DelegatedTaskRecord } from '../../src/delegation/
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 import type { ExecuteResult, IExecutor } from '../../src/executor/IExecutor';
 
+vi.mock('../../src/delegation/OwnershipRuntime', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../src/delegation/OwnershipRuntime')>();
+  const { syntheticOwnershipRuntime } = await import('./syntheticOwnershipRuntime');
+  return syntheticOwnershipRuntime(actual);
+});
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>(next => { resolve = next; });

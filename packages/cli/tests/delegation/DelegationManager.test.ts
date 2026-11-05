@@ -2,7 +2,6 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { randomUUID } from 'crypto';
 import { DELEGATION_LIMITS, DELEGATION_TEXT_PROGRESS, DelegationManager, type DelegationParent } from '../../src/delegation/DelegationManager';
 import { BackendRegistry, type BackendAvailability } from '../../src/delegation/BackendRegistry';
 import { DelegationStore } from '../../src/delegation/DelegationStore';
@@ -22,16 +21,8 @@ import { withKimiModes } from '../executor/kimiAcpFixture';
 
 vi.mock('../../src/delegation/OwnershipRuntime', async importOriginal => {
   const actual = await importOriginal<typeof import('../../src/delegation/OwnershipRuntime')>();
-  // Manager fixtures use fake workers. Keep real gates, journals, and recovery
-  // validation, but leave host boot discovery to the native ownership suites.
-  const identity = { host: 'synthetic-manager-host', boot: 'synthetic-manager-boot', namespace: 'host' };
-  return {
-    ...actual,
-    ownerRecord: vi.fn(() => ({ version: 2 as const, token: randomUUID(), pid: process.pid,
-      birth: actual.processBirth(process.pid), ...identity })),
-    assertRecoverable: (raw: Buffer, journalPath: string, current = identity) =>
-      actual.assertRecoverable(raw, journalPath, current),
-  };
+  const { syntheticOwnershipRuntime } = await import('./syntheticOwnershipRuntime');
+  return syntheticOwnershipRuntime(actual);
 });
 
 const wait = (milliseconds: number) => new Promise<void>(resolve => setTimeout(resolve, milliseconds));
