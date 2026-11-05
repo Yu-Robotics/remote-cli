@@ -13,6 +13,7 @@ import type { ExecuteResult, IExecutor } from '../../src/executor/IExecutor';
 import { gitText, runGit } from '../../src/delegation/GitCheckpoint';
 import * as gitCommands from '../../src/delegation/GitCheckpoint';
 import { gitFixture } from './gitFixture';
+import { isTerminalTaskState, type DelegatedTaskRecord } from '../../src/delegation/DelegationStore';
 
 vi.mock('../../src/delegation/OwnershipRuntime', async importOriginal => {
   const actual = await importOriginal<typeof import('../../src/delegation/OwnershipRuntime')>();
@@ -20,10 +21,10 @@ vi.mock('../../src/delegation/OwnershipRuntime', async importOriginal => {
   return syntheticOwnershipRuntime(actual);
 });
 
-function controlledWorker(cwd: string) {
+function controlledWorker(cwd: string, onExecute = () => {}) {
   let finish!: (result: ExecuteResult) => void;
   const completed = new Promise<ExecuteResult>(resolve => { finish = resolve; });
-  const executor: IExecutor = { execute: vi.fn(() => completed), abort: vi.fn(async () => true),
+  const executor: IExecutor = { execute: vi.fn(() => { onExecute(); return completed; }), abort: vi.fn(async () => true),
     destroy: vi.fn(async () => undefined), waitForExit: vi.fn(async () => undefined), waitForManagedProcessGroupExit: vi.fn(async () => undefined),
     resetContext: vi.fn(), getCurrentWorkingDirectory: () => cwd, setWorkingDirectory: vi.fn() };
   return { executor, cwd, finish };
@@ -36,6 +37,11 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
   let workers: ReturnType<typeof controlledWorker>[];
   let factory: ReturnType<typeof vi.fn>;
   let pendingCalls: Set<Promise<unknown>>;
+  let phaseListeners: Set<() => void>;
+  let terminalRecords: Map<string, DelegatedTaskRecord>;
+  let observedStores: WeakSet<DelegationManager['store']>;
+  let draining: boolean;
+  const notifyPhase = () => { for (const listener of phaseListeners) listener(); };
   beforeEach(async () => {
     fixture = await gitFixture();
     vi.spyOn(os, 'homedir').mockReturnValue(fixture.directory);
@@ -43,9 +49,12 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     vi.stubEnv('USERPROFILE', fixture.directory);
     workers = [];
     pendingCalls = new Set();
+    phaseListeners = new Set(); terminalRecords = new Map(); observedStores = new WeakSet(); draining = false;
     factory = vi.fn((guard: DirectoryGuard, _config, cwd: string) => {
       expect(guard.resolveWorkingDirectory(cwd)).toBe(cwd);
-      const worker = controlledWorker(cwd); workers.push(worker); return worker.executor;
+      const worker = controlledWorker(cwd, notifyPhase); workers.push(worker);
+      if (draining) worker.finish({ success: false, error: 'Synthetic fixture teardown' });
+      return worker.executor;
     });
     manager = new DelegationManager(new DirectoryGuard([fixture.directory]), factory as any,
       new BackendRegistry(async () => 'fixture 1.0'), undefined, undefined, undefined, undefined,
@@ -58,6 +67,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
   const settleFixture = async (): Promise<void> => {
     // Settle controlled execution even when an assertion or phase deadline fired.
     // Keep mocks, home and ownership intact until all admitted work has exited.
+    draining = true; notifyPhase();
     workers.forEach(worker => worker.finish({ success: false, error: 'Synthetic fixture teardown' }));
     const shutdown = manager.destroy();
     await Promise.allSettled([...pendingCalls, shutdown]);
@@ -95,6 +105,96 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     } finally { clearTimeout(timer); }
   };
 
+  // Acceptance is intentionally bounded and may return queued before the factory.
+  // Only tests that need an executing worker use this helper; queue/admission tests keep start().
+  const startExecuting = (scope: ReturnType<DelegationManager['begin']>, id: string, backend = 'codex') =>
+    gitPhase(`dispatch ${id}`, async () => {
+      if (!observedStores.has(manager.store)) {
+        observedStores.add(manager.store);
+        const write = manager.store.write.bind(manager.store);
+        vi.spyOn(manager.store, 'write').mockImplementation(record => write(record).finally(() => {
+          if (isTerminalTaskState(record.state)) terminalRecords.set(record.id, { ...record });
+          notifyPhase();
+        }));
+      }
+      const accepted = await start(scope, id, backend);
+      const fail = (state: string, error?: string) => new Error(`Fixture worker ${id} ended before execution: ${state}${error ? `: ${error}` : ''}`);
+      if (isTerminalTaskState(accepted.state)) throw fail(accepted.state, accepted.error);
+      let listener!: () => void;
+      try {
+        await new Promise<void>((resolve, reject) => {
+          listener = () => {
+            if (draining) { reject(new Error('Fixture is draining before worker execution.')); return; }
+            const terminal = terminalRecords.get(accepted.taskId);
+            if (terminal) { reject(fail(terminal.state, terminal.error)); return; }
+            // The exact synthetic objective identifies dispatch, including concurrent lanes.
+            if (workers.some(worker => vi.mocked(worker.executor.execute).mock.calls.some(([prompt]) =>
+              prompt.endsWith(`\n\nIndependent task ${id}`)))) resolve();
+          };
+          phaseListeners.add(listener); listener();
+        });
+      } finally { phaseListeners.delete(listener); }
+      const current = await trackCall(scope.invoke('remote_cli_result', { taskId: accepted.taskId, waitSeconds: 0 },
+        `${id}-execution-phase`) as Promise<DelegatedTaskResult>);
+      if (current.state !== 'running') throw fail(current.state, current.error);
+      return current;
+    });
+
+  it.each(['execute', 'setup failure', 'teardown'] as const)(
+    'handles accepted-but-unprepared workers through explicit %s phases', async outcome => {
+      const scope = manager.begin(parent);
+      let entered!: () => void, release!: () => void, accepted!: (task: DelegatedTaskResult) => void;
+      const preparing = new Promise<void>(resolve => { entered = resolve; });
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const acceptance = new Promise<DelegatedTaskResult>(resolve => { accepted = resolve; });
+      const prepare = manager.workspaceManager.prepare.bind(manager.workspaceManager);
+      vi.spyOn(manager.workspaceManager, 'prepare').mockImplementation(async (...args) => {
+        entered(); await gate;
+        if (outcome === 'setup failure') throw new Error('Synthetic gated preparation failure');
+        return prepare(...args);
+      });
+      const invoke = scope.invoke.bind(scope);
+      vi.spyOn(scope, 'invoke').mockImplementation(async (...args) => {
+        const value = await invoke(...args);
+        if (args[0] === 'remote_cli_delegate') accepted(value as DelegatedTaskResult);
+        return value;
+      });
+      // Only advance the tool-response timer once real setup has entered its held phase.
+      // Native startup has not begun; no filesystem operation is simulated by the clock.
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      let settled = false;
+      const starting = startExecuting(scope, 'held-start');
+      const observed = starting.then(value => { settled = true; return { value, error: undefined }; },
+        error => { settled = true; return { value: undefined, error }; });
+      let shuttingDown: Promise<void> | undefined;
+      try {
+        await preparing;
+        await vi.advanceTimersByTimeAsync(DELEGATION_LIMITS.toolResponseWaitMs + 1);
+        const admitted = await acceptance;
+        expect(admitted).toMatchObject({ state: 'queued', statusDetail: expect.stringContaining('preparation') });
+        expect(workers).toHaveLength(0); expect(factory).not.toHaveBeenCalled(); expect(settled).toBe(false);
+        vi.useRealTimers();
+        if (outcome === 'teardown') shuttingDown = settleFixture();
+        release();
+        const completion = await observed;
+        if (outcome === 'execute') {
+          expect(completion.value).toMatchObject({ taskId: admitted.taskId, state: 'running' });
+          expect(workers[0].executor.execute).toHaveBeenCalledOnce();
+          workers[0].finish({ success: true });
+          expect(await result(scope, admitted.taskId, 'held-result')).toMatchObject({ state: 'succeeded' });
+        } else {
+          expect(completion.error).toBeInstanceOf(Error);
+          expect(completion.error.message).toContain(outcome === 'teardown' ? 'Fixture is draining' : 'Synthetic gated preparation failure');
+          expect(factory).not.toHaveBeenCalled();
+        }
+      } finally {
+        vi.useRealTimers(); release();
+        await Promise.allSettled([starting, ...(shuttingDown ? [shuttingDown] : [])]);
+        workers.forEach(worker => worker.finish({ success: false, error: 'Synthetic fixture completion' }));
+      }
+      expect(phaseListeners.size).toBe(0);
+    });
+
   it.skipIf(!supportsFileSymlinks)('warns a managed worker and its result about direct shared-data edits', async () => {
     await manager.destroy();
     const target = path.join(fixture.directory, 'shared.txt'); await fs.writeFile(target, 'synthetic shared bytes\n');
@@ -104,7 +204,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
       new BackendRegistry(async () => 'fixture 1.0'), undefined, undefined, undefined, undefined,
       new DelegatedWorkspaceManager(undefined, true));
     const scope = manager.begin(parent);
-    const task = await start(scope, 'shared-warning');
+    const task = await startExecuting(scope, 'shared-warning');
     expect(task.state).toBe('running');
     const prompt = vi.mocked(workers[0].executor.execute).mock.calls[0][0];
     expect(prompt).toContain('Shared external links: "shared-link"');
@@ -118,7 +218,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
 
   it('settles an unfinished worker and result call after an assertion failure before releasing fixture ownership', async () => {
     const scope = manager.begin(parent);
-    const first = await start(scope, 'unfinished');
+    const first = await startExecuting(scope, 'unfinished');
     expect(first.state).toBe('running');
     const collecting = result(scope, first.taskId, 'pending-result');
     expect(pendingCalls.has(collecting)).toBe(true);
@@ -235,7 +335,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
 
   it('reuses native conversation and worktree after explicit integration, including sibling changes in the next baseline', async () => {
     const scope = manager.begin(parent);
-    const first = await start(scope, 'first');
+    const first = await startExecuting(scope, 'first');
     const pointer = path.join(fixture.directory, '.remote-cli', 'codex-sessions', `${factory.mock.calls[0][3]}.json`);
     await fs.mkdir(path.dirname(pointer), { recursive: true });
     await fs.writeFile(pointer, JSON.stringify({ threadId: 'fixture-conversation', cwd: workers[0].cwd }));
@@ -248,7 +348,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     await expect(fs.lstat(workers[0].cwd)).rejects.toMatchObject({ code: 'ENOENT' });
     expect(JSON.parse(await fs.readFile(pointer, 'utf8')).threadId).toBe('fixture-conversation');
     await fs.writeFile(path.join(fixture.root, 'sibling.txt'), 'new mainline input\n');
-    const second = await start(scope, 'second');
+    const second = await startExecuting(scope, 'second');
     expect(workers[1].cwd).toBe(workers[0].cwd);
     expect(factory.mock.calls[1][3]).toBe(factory.mock.calls[0][3]);
     expect(JSON.parse(await fs.readFile(pointer, 'utf8')).cwd).toBe(workers[1].cwd);
@@ -260,7 +360,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
 
   it('reuses a historically delivered lane before the next worker without deleting its checkout at admission', async () => {
     const scope = manager.begin(parent);
-    const first = await start(scope, 'first');
+    const first = await startExecuting(scope, 'first');
     const originalCwd = workers[0].cwd;
     const executorId = factory.mock.calls[0][3];
     await fs.writeFile(path.join(originalCwd, 'source.txt'), 'manual handoff\n');
@@ -269,7 +369,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     await runGit(fixture.root, ['merge', '--ff-only', completed.artifact!.outputCommit]);
     await fs.writeFile(path.join(fixture.root, 'sibling.txt'), 'fresh coordinator input\n');
     const removal = vi.spyOn(manager.workspaceManager, 'reclaim');
-    const second = await start(scope, 'second');
+    const second = await startExecuting(scope, 'second');
     expect(removal).not.toHaveBeenCalled();
     expect(workers[1].cwd).toBe(originalCwd);
     expect(factory.mock.calls[1][3]).toBe(executorId);
@@ -282,7 +382,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
 
   it('does not charge optional history reconciliation to the native worker startup deadline', async () => {
     const scope = manager.begin(parent);
-    const first = await start(scope, 'first');
+    const first = await startExecuting(scope, 'first');
     // This tests startup timing, not Git's same-size racy-stat detection.
     await fs.writeFile(path.join(workers[0].cwd, 'source.txt'), 'slow-query handoff captured before startup delay\n');
     workers[0].finish({ success: true });
@@ -314,7 +414,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
 
   it('automatically recognizes manual handoff at idle turn closure and awaits reclamation', async () => {
     const scope = manager.begin(parent);
-    const first = await start(scope, 'first');
+    const first = await startExecuting(scope, 'first');
     await fs.writeFile(path.join(workers[0].cwd, 'source.txt'), 'closure handoff\n');
     workers[0].finish({ success: true });
     const completed = await result(scope, first.taskId, 'first-result');
@@ -338,7 +438,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     expect(JSON.parse(await fs.readFile(pointer, 'utf8')).threadId).toBe('fixture-conversation');
     expect(await manager.workspaceManager.describe(first.taskId)).toMatchObject({ disposition: 'applied' });
     const nextScope = manager.begin({ ...parent, messageId: 'next-parent' });
-    const next = await start(nextScope, 'recreated');
+    const next = await startExecuting(nextScope, 'recreated');
     expect(workers[1].cwd).toBe(workers[0].cwd);
     expect(factory.mock.calls[1][3]).toBe(factory.mock.calls[0][3]);
     workers[1].finish({ success: true });
@@ -347,13 +447,13 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
 
   it('defers close-time recognition when another owner holds the delivery workspace', async () => {
     const scope = manager.begin(parent);
-    const first = await start(scope, 'first');
+    const first = await startExecuting(scope, 'first');
     await fs.writeFile(path.join(workers[0].cwd, 'source.txt'), 'deferred handoff\n');
     workers[0].finish({ success: true });
     const completed = await result(scope, first.taskId, 'first-result');
     await runGit(fixture.root, ['merge', '--ff-only', completed.artifact!.outputCommit]);
     const otherScope = manager.begin({ ...parent, thread: { ...parent.thread, id: 'other-owner' } });
-    const other = await start(otherScope, 'independent');
+    const other = await startExecuting(otherScope, 'independent');
     await scope.close();
     expect(await manager.workspaceManager.describe(first.taskId)).toMatchObject({ disposition: 'pending' });
     expect((await fs.stat(workers[0].cwd)).isDirectory()).toBe(true);
@@ -363,7 +463,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
 
   it('defers close-time recognition instead of waiting for an unfinished discovery admission', async () => {
     const scope = manager.begin(parent);
-    const first = await start(scope, 'first');
+    const first = await startExecuting(scope, 'first');
     await fs.writeFile(path.join(workers[0].cwd, 'source.txt'), 'discovery handoff\n');
     workers[0].finish({ success: true });
     const completed = await result(scope, first.taskId, 'first-result');
@@ -387,7 +487,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
 
   it('waits for native exit before reclaiming a successful no-change checkout', async () => {
     const scope = manager.begin(parent);
-    const first = await start(scope, 'first');
+    const first = await startExecuting(scope, 'first');
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     vi.mocked(workers[0].executor.waitForExit!).mockImplementation(() => gate);
@@ -402,7 +502,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
 
   it.each(['failed', 'cancelled'])('reclaims a %s no-change checkout', async outcome => {
     const scope = manager.begin(parent);
-    const first = await start(scope, 'first');
+    const first = await startExecuting(scope, 'first');
     if (outcome === 'failed') workers[0].finish({ success: false, error: 'Fixture failure' });
     else await scope.invoke('remote_cli_cancel', { taskId: first.taskId }, 'cancel');
     expect(await result(scope, first.taskId, 'r1')).toMatchObject({ state: outcome, artifact: { disposition: 'applied' } });
@@ -412,7 +512,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
 
   it.each([false, true])('settles gated reclamation even after an early assertion failure (earlyFailure=%s)', async earlyFailure => {
     const scope = manager.begin(parent);
-    const first = await start(scope, 'first');
+    const first = await startExecuting(scope, 'first');
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     const reclaim = vi.spyOn(manager.workspaceManager, 'reclaim').mockImplementation(async () => { await gate; return false; });
@@ -431,7 +531,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
         await vi.waitFor(() => expect(reclaim).toHaveBeenCalledWith(first.taskId), { timeout: 10_000 });
         expect((await manager.laneStore.lanesForThread(parent.thread.id))[0].state).toBe('running');
         if (earlyFailure) throw assertionFailure;
-        const second = await start(scope, 'follower');
+        const second = await startExecuting(scope, 'follower');
         expect(workers[1].cwd).not.toBe(workers[0].cwd);
         expect(factory.mock.calls[1][3]).not.toBe(factory.mock.calls[0][3]);
         release();
@@ -530,7 +630,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
   it.each(['occupied', 'partial-registration', 'corrupt-receipt'])(
     'preserves existing context and isolates a %s checkout instead of discarding the lane', async condition => {
       const scope = manager.begin(parent);
-      const first = await start(scope, 'first');
+      const first = await startExecuting(scope, 'first');
       const oldCwd = workers[0].cwd;
       const executorId = factory.mock.calls[0][3];
       const pointer = path.join(fixture.directory, '.remote-cli', 'codex-sessions', `${executorId}.json`);
@@ -562,7 +662,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
       expect((await manager.workspaceManager.unavailableLanes()).has(oldLane.id)).toBe(true);
       await manager.reconcilePendingWorkerLanes();
       expect(await fs.readFile(pointer, 'utf8')).toBe(saved);
-      const recovered = await start(scope, 'independent-lane');
+      const recovered = await startExecuting(scope, 'independent-lane');
       expect(factory.mock.calls[1][3]).not.toBe(executorId);
       expect(workers[1].cwd).not.toBe(oldCwd);
       if (condition === 'occupied') expect(await fs.readFile(path.join(oldCwd, 'retained.txt'), 'utf8')).toBe('do not overwrite\n');
@@ -572,7 +672,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
 
   it('lazily resolves a ready interrupted removal without abandoning its native conversation', async () => {
     const scope = manager.begin(parent);
-    const first = await start(scope, 'first');
+    const first = await startExecuting(scope, 'first');
     const executorId = factory.mock.calls[0][3];
     let refused = false;
     const original = gitCommands.runGit;
@@ -586,7 +686,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     workers[0].finish({ success: true });
     expect(await result(scope, first.taskId, 'r1')).toMatchObject({ state: 'succeeded' });
     expect(refused).toBe(true);
-    const second = await start(scope, 'reuse');
+    const second = await startExecuting(scope, 'reuse');
     expect(factory.mock.calls[1][3]).toBe(executorId);
     expect(workers[1].cwd).toBe(workers[0].cwd);
     workers[1].finish({ success: true });
@@ -597,7 +697,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
   // Preserve the 30-second phase limit; the outer budgets cover their sum.
   it('pools same-target conversations without reusing pending artifacts or routing ambiguous input', async () => {
     const scope = manager.begin(parent);
-    const [first, second] = await gitPhase('prepare two pooled workers', () => Promise.all([start(scope, 'first'), start(scope, 'second')]));
+    const [first, second] = await gitPhase('prepare two pooled workers', () => Promise.all([startExecuting(scope, 'first'), startExecuting(scope, 'second')]));
     expect([first.state, second.state]).toEqual(['running', 'running']);
     workers.forEach(worker => { worker.executor.isWaitingInput = () => true; });
     expect(manager.hasAmbiguousInput(parent.thread.id)).toBe(true);
@@ -607,7 +707,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     await fs.writeFile(path.join(workers[0].cwd, 'pending.txt'), 'pending result\n');
     workers.forEach(worker => worker.finish({ success: true }));
     await gitPhase('collect both pooled workers', () => scope.collectPendingResults());
-    const third = await gitPhase('prepare the reusable pooled lane', () => start(scope, 'third'));
+    const third = await gitPhase('prepare the reusable pooled lane', () => startExecuting(scope, 'third'));
     expect(third.state).toBe('running');
     expect(workers[2].cwd).toBe(workers[1].cwd);
     expect(workers[2].cwd).not.toBe(workers[0].cwd);
@@ -618,7 +718,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
 
   it('returns an untouched reused lane to ready when baseline capture fails', async () => {
     const scope = manager.begin(parent);
-    const first = await gitPhase('prepare the baseline worker', () => start(scope, 'first'));
+    const first = await gitPhase('prepare the baseline worker', () => startExecuting(scope, 'first'));
     expect(first.state).toBe('running');
     const executorId = factory.mock.calls[0][3];
     const pointer = path.join(fixture.directory, '.remote-cli', 'codex-sessions', `${executorId}.json`);
@@ -638,7 +738,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     expect((await manager.laneStore.lanesForThread(parent.thread.id))[0]).toMatchObject({ id: lane.id, state: 'ready' });
     expect((await manager.workspaceManager.unavailableLanes()).has(lane.id)).toBe(false);
     expect(await fs.readFile(pointer, 'utf8')).toBe('retained context');
-    const next = await gitPhase('prepare the baseline retry', () => start(scope, 'retry-baseline'));
+    const next = await gitPhase('prepare the baseline retry', () => startExecuting(scope, 'retry-baseline'));
     expect(next.state).toBe('running');
     expect(factory.mock.calls[1][3]).toBe(executorId);
     workers[1].finish({ success: true });
@@ -648,7 +748,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
 
   it('retains a prepared lane on executor setup failure without blaming checkout preparation', async () => {
     const scope = manager.begin(parent);
-    const first = await start(scope, 'first');
+    const first = await startExecuting(scope, 'first');
     workers[0].finish({ success: true });
     await result(scope, first.taskId, 'first-result');
     const lane = (await manager.laneStore.lanesForThread(parent.thread.id))[0];
@@ -670,8 +770,8 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
       scope = manager.begin(parent);
       // Warm both lanes before completing either worker so this is not one reused lane.
       await gitPhase('prepare two idle replacement lanes', async () => {
-        const first = await start(scope, 'warm-first');
-        const second = await start(scope, 'warm-second');
+        const first = await startExecuting(scope, 'warm-first');
+        const second = await startExecuting(scope, 'warm-second');
         expect(first.state).toBe('running');
         expect(second.state).toBe('running');
         workers[0].finish({ success: true });
@@ -686,7 +786,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     }, 30_000);
 
     it('resets preparation tracking before reusing a replacement for a missing native session', async () => {
-      const retrying = await start(scope, 'missing-session');
+      const retrying = await startExecuting(scope, 'missing-session');
       workers[2].executor.consumeSessionResumeFailure = () => true;
       const staleId = factory.mock.calls[2][3];
       const healthyId = factory.mock.calls.slice(0, 2).map(call => call[3]).find(id => id !== staleId);
@@ -705,7 +805,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
       expect(healthy).toMatchObject({ state: 'ready', cleanupPending: false });
       expect((await manager.workspaceManager.unavailableLanes()).has(healthy!.id)).toBe(false);
       parent.isWorkspaceBusy = () => false;
-      const recovered = await start(scope, 'retry-after-busy');
+      const recovered = await startExecuting(scope, 'retry-after-busy');
       expect(factory.mock.calls[3][3]).toBe(healthyId);
       workers[3].finish({ success: true });
       expect(await result(scope, recovered.taskId, 'recovered-result')).toMatchObject({ state: 'succeeded' });
@@ -714,11 +814,11 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
 
   it('captures fresh input for a later idle cohort even when the earlier review changed no files', async () => {
     const scope = manager.begin(parent);
-    const first = await start(scope, 'first');
+    const first = await startExecuting(scope, 'first');
     workers[0].finish({ success: true });
     await result(scope, first.taskId, 'r1');
     await fs.writeFile(path.join(fixture.root, 'source.txt'), 'coordinator updated input\n');
-    const second = await start(scope, 'second');
+    const second = await startExecuting(scope, 'second');
     expect(await fs.readFile(path.join(workers[1].cwd, 'source.txt'), 'utf8')).toBe('coordinator updated input\n');
     workers[1].finish({ success: true });
     await result(scope, second.taskId, 'r2');
@@ -726,7 +826,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
 
   it('collects cancelled same-backend edits for recovery without modifying the coordinator and rejects foreign integration', async () => {
     const scope = manager.begin(parent);
-    const first = await start(scope, 'first', parent.backend);
+    const first = await startExecuting(scope, 'first', parent.backend);
     await fs.writeFile(path.join(workers[0].cwd, 'partial.txt'), 'partial output\n');
     expect(await scope.invoke('remote_cli_cancel', { taskId: first.taskId }, 'cancel')).toMatchObject({
       state: 'cancelled', artifact: { disposition: 'retained' } });
@@ -750,7 +850,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
 
   it('waits for native cleanup and collection before checking artifact closeout', async () => {
     const scope = manager.begin(parent);
-    await start(scope, 'cleanup');
+    await startExecuting(scope, 'cleanup');
     let release!: () => void;
     vi.mocked(workers[0].executor.destroy).mockImplementation(() => new Promise<void>(resolve => { release = resolve; }));
     workers[0].finish({ success: true });
@@ -773,7 +873,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     const busy = vi.fn(() => false);
     parent.isWorkspaceBusy = busy;
     const scope = manager.begin(parent);
-    const task = await start(scope, 'busy-delivery');
+    const task = await startExecuting(scope, 'busy-delivery');
     await fs.writeFile(path.join(workers[0].cwd, 'source.txt'), 'worker output\n');
     workers[0].finish({ success: true });
     const done = await result(scope, task.taskId, 'done');
@@ -790,7 +890,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
   it.each(['no-change', 'apply', 'retain'])(
     'accepts validated %s receipts while another thread is busy without reconciling history', async disposition => {
       const scope = manager.begin(parent);
-      const task = await start(scope, 'delivered');
+      const task = await startExecuting(scope, 'delivered');
       if (disposition !== 'no-change') await fs.writeFile(path.join(workers[0].cwd, 'source.txt'), 'delivered output\n');
       workers[0].finish({ success: true });
       await result(scope, task.taskId, 'done');
@@ -809,12 +909,12 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
 
   it('does not take another active scope lease to validate an already settled receipt', async () => {
     const scope = manager.begin(parent);
-    const task = await start(scope, 'delivered');
+    const task = await startExecuting(scope, 'delivered');
     workers[0].finish({ success: true });
     await result(scope, task.taskId, 'done');
     scope.finishExecution(true);
     const sibling = manager.begin({ ...parent, thread: { ...parent.thread, id: 'another-thread' } });
-    const active = await start(sibling, 'active');
+    const active = await startExecuting(sibling, 'active');
     expect(await scope.checkArtifactCloseout()).toEqual([]);
     expect(manager.blocksWorkspace(fixture.root, parent.thread.id)).toBe(true);
     workers[1].finish({ success: true });
@@ -824,7 +924,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
   it.each(['missing', 'foreign-owner', 'changed-ref'])(
     'does not accept a %s settled receipt merely because the source is busy', async corruption => {
       const scope = manager.begin(parent);
-      const task = await start(scope, 'delivered');
+      const task = await startExecuting(scope, 'delivered');
       workers[0].finish({ success: true });
       await result(scope, task.taskId, 'done');
       scope.finishExecution(true);
@@ -840,8 +940,8 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
 
   it('reports only unresolved artifacts when the source is busy', async () => {
     const scope = manager.begin(parent);
-    const done = await start(scope, 'settled');
-    const pending = await start(scope, 'pending');
+    const done = await startExecuting(scope, 'settled');
+    const pending = await startExecuting(scope, 'pending');
     await fs.writeFile(path.join(workers[1].cwd, 'source.txt'), 'pending output\n');
     workers[0].finish({ success: true });
     workers[1].finish({ success: true });
@@ -854,7 +954,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
 
   it('allows deliberate retention of recovery-bearing output without deleting recovery refs', async () => {
     const scope = manager.begin(parent);
-    const task = await start(scope, 'recovery');
+    const task = await startExecuting(scope, 'recovery');
     await fs.writeFile(path.join(workers[0].cwd, 'source.txt'), 'recovery output\n');
     workers[0].finish({ success: true });
     await result(scope, task.taskId, 'done');
@@ -877,7 +977,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
 
   it('serializes cancellation with an active closeout inspection without continuing after it', async () => {
     const scope = manager.begin(parent);
-    const task = await start(scope, 'cancel-closeout');
+    const task = await startExecuting(scope, 'cancel-closeout');
     workers[0].finish({ success: true });
     await result(scope, task.taskId, 'done');
     scope.finishExecution(true);
