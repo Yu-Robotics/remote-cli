@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import childProcess from 'child_process';
 import { MessageHandler } from '../../src/client/MessageHandler';
 import { ThreadManager } from '../../src/thread/ThreadManager';
 import { isDelegationEnabled } from '../../src/thread/DelegationSettings';
@@ -11,6 +12,12 @@ import { DelegationManager } from '../../src/delegation/DelegationManager';
 import { BackendRegistry } from '../../src/delegation/BackendRegistry';
 import type { DelegationConnection } from '../../src/delegation/contract';
 import type { ExecuteOptions, ExecuteResult } from '../../src/executor/IExecutor';
+
+vi.mock('../../src/delegation/OwnershipRuntime', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../src/delegation/OwnershipRuntime')>();
+  const { syntheticOwnershipRuntime } = await import('../delegation/syntheticOwnershipRuntime');
+  return syntheticOwnershipRuntime(actual);
+});
 
 describe('delegation in the existing thread workflow', () => {
   let home: string;
@@ -70,6 +77,21 @@ describe('delegation in the existing thread workflow', () => {
 
   const message = (id: string, content: string) => ({ type: 'command' as const, messageId: id, content, openId: 'owner', timestamp: Date.now() });
   const responseFor = (id: string) => socket.send.mock.calls.map(([value]: any[]) => value).reverse().find((value: any) => value.type === 'response' && value.messageId === id);
+
+  it('launches and collects a fake worker when native boot discovery is unavailable', async () => {
+    const nativeProbe = vi.spyOn(childProcess, 'execFileSync').mockImplementation(() => {
+      throw Object.assign(new Error('Synthetic native boot provider timeout'), { code: 'ETIMEDOUT' });
+    });
+    main.execute.mockImplementationOnce(async () => {
+      const task = await call('remote_cli_delegate', { backend: 'claude', objective: 'Synthetic review' });
+      expect(await call('remote_cli_result', { taskId: task.taskId })).toMatchObject({ state: 'succeeded' });
+      return { success: true };
+    });
+    await handler.handleMessage(message('no-native-boot', 'Review the fixture'));
+    expect(responseFor('no-native-boot')).toMatchObject({ success: true });
+    expect(worker.execute).toHaveBeenCalledOnce();
+    expect(nativeProbe).not.toHaveBeenCalled();
+  });
 
   it('makes default-on tools available on new and restored threads without automatically launching workers', async () => {
     const newThread = await threads.createThread('new-thread', home);
@@ -244,7 +266,9 @@ describe('delegation in the existing thread workflow', () => {
     const ordinary = { ...main, execute: vi.fn(async () => ({ success: true })), configureDelegation: vi.fn() };
     otherExecutors.set(ordinaryThread.id, ordinary);
     let finish!: (result: ExecuteResult) => void;
-    worker.execute.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    let entered!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    worker.execute.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; entered(); }));
     worker.abort.mockImplementation(async () => { finish?.({ success: false }); return true; });
     main.execute.mockImplementationOnce(async () => {
       const task = await call('remote_cli_delegate', { backend: 'claude', objective: 'Review' });
@@ -252,14 +276,19 @@ describe('delegation in the existing thread workflow', () => {
       return { success: true };
     });
     const active = handler.handleMessage(message('managed', 'Review'));
-    await vi.waitFor(() => expect(worker.execute).toHaveBeenCalledOnce());
-    await handler.handleMessage({ ...message('ordinary', 'Ordinary work'), threadId: ordinaryThread.id });
-    expect(responseFor('ordinary')).toMatchObject({ success: false, error: expect.stringContaining('may still write files') });
-    expect(ordinary.execute).not.toHaveBeenCalled();
-    expect(ordinary.configureDelegation).not.toHaveBeenCalled();
-    expect(worker.abort).not.toHaveBeenCalled();
-    finish({ success: true, output: 'Review complete' });
-    await active;
+    try {
+      // Observe the execution phase, not the wall-clock duration of admission.
+      await Promise.race([started, active.then(() => { throw new Error('Managed request ended before worker execution'); })]);
+      expect(worker.execute).toHaveBeenCalledOnce();
+      await handler.handleMessage({ ...message('ordinary', 'Ordinary work'), threadId: ordinaryThread.id });
+      expect(responseFor('ordinary')).toMatchObject({ success: false, error: expect.stringContaining('may still write files') });
+      expect(ordinary.execute).not.toHaveBeenCalled();
+      expect(ordinary.configureDelegation).not.toHaveBeenCalled();
+      expect(worker.abort).not.toHaveBeenCalled();
+    } finally {
+      finish?.({ success: true, output: 'Review complete' });
+      await active;
+    }
     expect(responseFor('managed')?.success).toBe(true);
     await handler.handleMessage({ ...message('ordinary-retry', 'Ordinary work'), threadId: ordinaryThread.id });
     expect(responseFor('ordinary-retry')?.success).toBe(true);

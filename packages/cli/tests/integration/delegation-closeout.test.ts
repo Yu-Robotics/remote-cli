@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
+import childProcess from 'child_process';
 import { MessageHandler } from '../../src/client/MessageHandler';
 import { ThreadManager } from '../../src/thread/ThreadManager';
 import { ThreadExecutorPool } from '../../src/thread/ThreadExecutorPool';
@@ -13,6 +14,12 @@ import type { DelegationConnection } from '../../src/delegation/contract';
 import type { ExecuteOptions, ExecuteResult } from '../../src/executor/IExecutor';
 import { gitText, runGit } from '../../src/delegation/GitCheckpoint';
 import { gitFixture } from '../delegation/gitFixture';
+
+vi.mock('../../src/delegation/OwnershipRuntime', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../src/delegation/OwnershipRuntime')>();
+  const { syntheticOwnershipRuntime } = await import('../delegation/syntheticOwnershipRuntime');
+  return syntheticOwnershipRuntime(actual);
+});
 
 describe('code-enforced delegated artifact closeout', { timeout: 30_000 }, () => {
   let fixture: Awaited<ReturnType<typeof gitFixture>>;
@@ -120,8 +127,13 @@ describe('code-enforced delegated artifact closeout', { timeout: 30_000 }, () =>
   });
 
   it('does not require a model decision for a verified no-change artifact', async () => {
+    const nativeProbe = vi.spyOn(childProcess, 'execFileSync').mockImplementation(() => {
+      throw Object.assign(new Error('Synthetic native boot provider timeout'), { code: 'ETIMEDOUT' });
+    });
     workerWork = async () => ({ success: true, output: 'Review only' });
     await run();
+    expect(workerExecutions).toBe(1);
+    expect(nativeProbe).not.toHaveBeenCalled();
     expect(main.execute).toHaveBeenCalledOnce();
     expect(response()).toMatchObject({ success: true });
     expect(await artifact()).toMatchObject({ disposition: 'applied' });

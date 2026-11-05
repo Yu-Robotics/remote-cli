@@ -18,6 +18,12 @@ import type { ExecutorConfig } from '../../src/types/config';
 import { DshExecutor } from '../../src/executor/DshExecutor';
 import { runGit } from '../../src/delegation/GitCheckpoint';
 
+vi.mock('../../src/delegation/OwnershipRuntime', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../src/delegation/OwnershipRuntime')>();
+  const { syntheticOwnershipRuntime } = await import('../delegation/syntheticOwnershipRuntime');
+  return syntheticOwnershipRuntime(actual);
+});
+
 describe('thread-wide conversation reset', () => {
   let home: string;
   let project: string;

@@ -13,9 +13,15 @@ import { DelegationStore } from '../../src/delegation/DelegationStore';
 import type { DelegationOwnership } from '../../src/delegation/DelegationOwnership';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 
+vi.mock('../../src/delegation/OwnershipRuntime', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../src/delegation/OwnershipRuntime')>();
+  const { syntheticOwnershipRuntime } = await import('../delegation/syntheticOwnershipRuntime');
+  return syntheticOwnershipRuntime(actual);
+});
+
 vi.mock('child_process', async importOriginal => {
   const actual = await importOriginal<typeof import('child_process')>();
-  // Ownership probes use execFileSync on macOS and Windows.
+  // Only the Pi transport is synthetic; preserve other child-process APIs.
   return { ...actual, spawn: vi.fn() };
 });
 
