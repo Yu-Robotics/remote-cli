@@ -213,8 +213,8 @@ static napi_value remove_child(napi_env env,napi_callback_info info) {
 #endif
   if(!valid){close_resource(r);free(r);free(name);return fail(env,"Prepared native entry changed","ESTALE");}
 #ifdef _WIN32
-  struct { DWORD Flags; } disposition = { 1 | 2 }; /* DELETE | POSIX_SEMANTICS; no path re-resolution */
-  int ok=SetFileInformationByHandle(r->value,(FILE_INFO_BY_HANDLE_CLASS)21,&disposition,sizeof(disposition));
+  FILE_DISPOSITION_INFO_EX disposition = { FILE_DISPOSITION_DELETE | FILE_DISPOSITION_POSIX_SEMANTICS };
+  int ok=SetFileInformationByHandle(r->value,FileDispositionInfoEx,&disposition,sizeof(disposition));
 #else
   /* As on the existing Linux path, leaf comparison/unlink is not atomic against same-UID mutation. */
   int ok=unlinkat(p->value,name,directory?AT_REMOVEDIR:0)==0;

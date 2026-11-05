@@ -112,6 +112,7 @@ export class ManagedProcessGroups {
   private async confirm(group: Group): Promise<void> {
     const runtime = this.dependencies;
     if (runtime.platform === 'win32') {
+      if (group.closed && group.job?.confirmed) return;
       if (!group.closed || !group.job || group.job.closed) throw new Error('Managed Windows job exit is unconfirmed');
       const native = nativeBindings();
       native.terminateJob(group.job.handle);
@@ -153,7 +154,7 @@ export class ManagedProcessGroups {
         if ((error as NodeJS.ErrnoException).code === 'ESRCH') return;
         throw new Error('Managed process-group absence is unavailable; preserve the checkout');
       }
-      if (live && !signalled) {
+      if (live && !signalled && runtime.platform === 'linux') {
         try { runtime.signal(leader.group); }
         catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw new Error('Managed process group could not be stopped; preserve the checkout'); }
         signalled = true;
