@@ -8,6 +8,15 @@ import { AgyExecutor } from '../../src/executor/AgyExecutor';
 import type { DirectoryGuard } from '../../src/security/DirectoryGuard';
 import type { AgyDeletionTarget } from '../../src/delegation/AgySessionDeletion';
 
+
+// These tests supply EventEmitter processes, not OS workers. Native admission and
+// containment are exercised by ManagedSpawn.native.test.ts on each native runner.
+vi.mock('../../src/executor/ManagedSpawn', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../src/executor/ManagedSpawn')>();
+  const { ownedSpawn } = await import('../../src/delegation/OwnershipRuntime');
+  return { ...actual, spawnManaged: (_enabled: boolean, ...args: Parameters<typeof ownedSpawn>) => ownedSpawn(...args) };
+});
+
 vi.mock('child_process', () => ({ spawn: vi.fn(), execFile: vi.fn() }));
 vi.mock('os', async importOriginal => {
   const actual = await importOriginal<typeof import('os')>();

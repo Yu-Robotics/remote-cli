@@ -1,3 +1,6 @@
+import { once } from 'events';
+import { spawnManaged } from '../../src/executor/ManagedSpawn';
+import { ManagedProcessGroups } from '../../src/executor/ManagedProcessGroups';
 import { NativeHistoryAnchor } from '../../src/delegation/HistoryAnchor';
 import { LinuxHistoryAnchor } from '../../src/delegation/LinuxHistoryAnchor';
 import fs from 'fs/promises';
@@ -71,6 +74,32 @@ describe('durable managed Kimi/Pi/Claude deletion integration', () => {
     await manager.laneStore.markReady(lane.id);
   }
   async function current(id: string) { return (await manager.laneStore.lanesForThread('parent')).find(lane => lane.id === id)!; }
+
+  it('waits for a real managed writer before permanently deleting its queued history', async () => {
+    const worker = await lane('pi'); const captured = await target(worker);
+    const child = spawnManaged(true, process.execPath, ['-e',
+      'require("fs").appendFileSync(process.argv[1],"{}\\n"); process.stdout.write("ready"); setInterval(()=>{},1000);', captured.transcript!],
+      { cwd: home, detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'] });
+    const groups = new ManagedProcessGroups(); groups.track(child);
+    try {
+      await Promise.race([once(child.stdout!, 'data'), once(child, 'close').then(() => { throw new Error('Writer exited before readiness'); })]);
+      await manager.requestNativeSessionDeletion('parent', 0);
+      await manager.reconcileNativeSessionDeletions();
+      expect((await current(worker.id)).nativeDeletion?.state).not.toBe('deleted');
+      expect((await fs.stat(captured.transcript!)).isFile()).toBe(true);
+      const closed = once(child, 'close'); child.kill('SIGKILL'); await closed;
+      await groups.waitForExit();
+      await ready(worker);
+      await manager.reconcileNativeSessionDeletions();
+      expect((await current(worker.id)).nativeDeletion?.state).toBe('deleted');
+      await expect(fs.stat(captured.transcript!)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        const closed = once(child, 'close'); child.kill('SIGKILL'); await closed;
+      }
+      child.stdin?.destroy(); child.stdout?.destroy(); child.stderr?.destroy();
+    }
+  });
 
   it.each(['kimi', 'pi', 'claude'] as const)('keeps %s reusable until reset and limits deletion to supported cutoff generations', async backend => {
     const old = await lane(backend); const first = await target(old); await ready(old);

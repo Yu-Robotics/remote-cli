@@ -5,6 +5,15 @@ import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 import { EventEmitter } from 'events';
 
 // Mock child_process
+
+// These tests supply EventEmitter processes, not OS workers. Native admission and
+// containment are exercised by ManagedSpawn.native.test.ts on each native runner.
+vi.mock('../../src/executor/ManagedSpawn', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../src/executor/ManagedSpawn')>();
+  const { ownedSpawn } = await import('../../src/delegation/OwnershipRuntime');
+  return { ...actual, spawnManaged: (_enabled: boolean, ...args: Parameters<typeof ownedSpawn>) => ownedSpawn(...args) };
+});
+
 vi.mock('child_process', () => ({
   execFile: vi.fn(),
   spawn: vi.fn(),

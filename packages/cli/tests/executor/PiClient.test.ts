@@ -13,6 +13,15 @@ import { DelegationStore } from '../../src/delegation/DelegationStore';
 import type { DelegationOwnership } from '../../src/delegation/DelegationOwnership';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 
+
+// These tests supply EventEmitter processes, not OS workers. Native admission and
+// containment are exercised by ManagedSpawn.native.test.ts on each native runner.
+vi.mock('../../src/executor/ManagedSpawn', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../src/executor/ManagedSpawn')>();
+  const { ownedSpawn } = await import('../../src/delegation/OwnershipRuntime');
+  return { ...actual, spawnManaged: (_enabled: boolean, ...args: Parameters<typeof ownedSpawn>) => ownedSpawn(...args) };
+});
+
 vi.mock('../../src/delegation/OwnershipRuntime', async importOriginal => {
   const actual = await importOriginal<typeof import('../../src/delegation/OwnershipRuntime')>();
   const { syntheticOwnershipRuntime } = await import('../delegation/syntheticOwnershipRuntime');
