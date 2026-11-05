@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add authenticated CLI-to-Router HTTP streaming, durable original-device references and transfer receipts, separate file-entry and progress cards, and native Feishu file delivery.
 - Preserve retryable failures and uncertain external send outcomes across restarts without replaying delivered files; enforce fixed expiry, storage quotas, and transfer concurrency limits.
 
+### Fixed
+- Keep inconclusive macOS process-group permission probes pending within the existing exit-confirmation deadline; require kernel absence before cleanup and report only recognized error codes.
+- Give multi-operation delegation fixtures independent phase deadlines and drain timed-out work before teardown.
+
 ## [1.6.220] - 2026-11-05
 
 ### Changed

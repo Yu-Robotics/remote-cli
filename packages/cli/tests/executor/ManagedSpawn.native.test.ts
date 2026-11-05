@@ -31,6 +31,11 @@ describe('native managed worker containment', () => {
       await Promise.race([started, once(child, 'close').then(() => { throw new Error('Worker exited before creating its child'); })]);
       const closed = once(child, 'close'); child.kill('SIGKILL'); await closed;
       await groups.waitForExit();
+      if (process.platform !== 'win32') {
+        // A completed proof must still be backed by kernel absence, including
+        // after any earlier inconclusive Darwin probes.
+        expect(() => process.kill(-child.pid!, 0)).toThrowError(expect.objectContaining({ code: 'ESRCH' }));
+      }
       expect(() => process.kill(sentinel.pid!, 0)).not.toThrow();
     } finally {
       child.kill('SIGKILL'); child.stdin?.destroy(); child.stdout?.destroy(); child.stderr?.destroy();

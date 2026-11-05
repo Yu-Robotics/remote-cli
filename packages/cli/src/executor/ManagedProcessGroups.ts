@@ -4,6 +4,7 @@ import { nativeBindings } from '../native/NativeBindings';
 import type { ChildProcess } from 'child_process';
 import { readFileSync, promises as fs } from 'fs';
 import { performance } from 'perf_hooks';
+import { constants as osConstants } from 'os';
 import { setTimeout as delay } from 'timers/promises';
 
 interface ProcessIdentity { pid: number; state: string; group: number; session: number; birth: bigint }
@@ -53,6 +54,13 @@ function identity(raw: string, pid: number): ProcessIdentity {
   return { pid, state: fields[0], group: Number(fields[2]), session: Number(fields[3]), birth: BigInt(fields[19]) };
 }
 
+// Native errors may carry paths or other context. Expose only a known errno,
+// never the raw message, stack, or arbitrary properties from a failed probe.
+function probeErrorCode(error: unknown): string {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return typeof code === 'string' && Object.prototype.hasOwnProperty.call(osConstants.errno, code) ? code : 'UNKNOWN';
+}
+
 interface Group {
   job?: ManagedJob;
   child: ChildProcess;
@@ -63,10 +71,10 @@ interface Group {
 }
 
 /**
- * Linux-only confirmation that an owned, isolated process group no longer exists.
+ * Kernel confirmation that an owned process group (or Windows Job) is empty.
  * A transport close is insufficient: escalation continues after the leader exits.
- * PID snapshots authorize escalation, never completion: a member can fork and
- * exit between enumeration and stat. Only the kernel's ESRCH completes proof.
+ * POSIX PID snapshots authorize escalation, never completion: a member can fork
+ * and exit between enumeration and stat. Only the kernel's ESRCH completes proof.
  * Unreaped zombies can therefore retain the checkout until their reaper runs.
  * Descendants that escape with setsid/setpgid are NOT covered by this evidence.
  */
@@ -128,14 +136,17 @@ export class ManagedProcessGroups {
     const leader = group.leader;
     const deadline = runtime.now() + runtime.timeoutMs;
     let signalled = false;
+    let lastProbeError: string | undefined;
+    const unconfirmed = () => new Error(`Managed process-group exit could not be confirmed${
+      lastProbeError ? ` (last probe error: ${lastProbeError})` : ''}; preserve the checkout`);
     while (true) {
-      if (runtime.now() >= deadline) throw new Error('Managed process-group exit could not be confirmed; preserve the checkout');
+      if (runtime.now() >= deadline) throw unconfirmed();
       const names = await runtime.pids(leader.group);
       if (names.length > 100_000) throw new Error('Managed process-group inventory is incomplete; preserve the checkout');
       let live = false;
       for (const name of names) {
         if (!/^[1-9]\d*$/.test(name)) continue;
-        if (runtime.now() >= deadline) throw new Error('Managed process-group exit could not be confirmed; preserve the checkout');
+        if (runtime.now() >= deadline) throw unconfirmed();
         let member: ProcessIdentity;
         try { member = runtime.processIdentity?.(Number(name)) ?? identity(runtime.readStat(Number(name)), Number(name)); }
         catch (error) {
@@ -151,8 +162,16 @@ export class ManagedProcessGroups {
       // same-group writer. Repeated snapshots do not close that race either.
       try { runtime.probe(leader.group); }
       catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ESRCH') return;
-        throw new Error('Managed process-group absence is unavailable; preserve the checkout');
+        const code = probeErrorCode(error);
+        if (code === 'ESRCH') return;
+        if (runtime.platform !== 'darwin' || code !== 'EPERM') {
+          throw new Error(`Managed process-group absence is unavailable (probe error: ${code}); preserve the checkout`);
+        }
+        // XNU killpg1 filters zombies from group iteration and can return EPERM
+        // while that group still exists (xnu-11417.140.69, kern_sig.c:1703-1712).
+        // EPERM is uncertainty, not absence or permission to signal. Re-enumerate
+        // and revalidate identity until ESRCH or the unchanged original deadline.
+        lastProbeError = code;
       }
       if (live && !signalled && runtime.platform === 'linux') {
         try { runtime.signal(leader.group); }
