@@ -912,7 +912,7 @@ ${prompt}`));
           if (parent.onOutputFiles && result) {
             // Capture before truncation, collection, or releasing this worker's exclusive lane.
             try { await parent.onOutputFiles(outputLinks, task.workspace?.cwd ?? cwd, task.record.id, result.output); }
-            catch { notify(() => parent.onNotice('Worker output files could not be captured.')); }
+            catch { /* Worker capture failures are private; only coordinator-selected files are published. */ }
           }
           captureWorkerMetadata(task);
           metadataCaptured = true;

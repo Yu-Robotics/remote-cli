@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.224] - 2026-11-06
+
+### Added
+- Automatically request file-key approval for eligible initialized devices and let the existing bound owner approve from a Feishu card. Skip approved devices, retain manual enrollment, and persist an explicit CLI automatic-enrollment opt-out.
+
+### Changed
+- Keep worker file snapshots internal until explicit coordinator selection, suppress worker-only export notices, and preserve hidden publication state across reconnects and restarts.
+- Restyle output-file entries and standalone transfer cards with status-colored headers, primary actions, readable file sizes and absolute UTC expiry times, and clear delivery confirmations. Preserve callback payloads, transfer state, retry boundaries, and uncertain-send protection.
+
 ## [1.6.223] - 2026-11-06
 
 ### Added

@@ -55,16 +55,20 @@ describe('initial binding with device key enrollment', () => {
     expect(Object.keys(body).sort()).toEqual(['deviceId', 'deviceName', 'devicePublicKey', 'nonce', 'signature']);
     expect(axios.post).toHaveBeenCalledOnce();
     expect(values.get('serverUrl')).toBe(serverUrl);
+    expect(values.get('files.autoEnroll')).toBe(true);
     expect(vi.mocked(ora).mock.results[0].value.succeed).toHaveBeenCalledWith(expect.stringContaining('approval is still required'));
     expect(JSON.stringify(result)).not.toContain('PRIVATE KEY');
   });
 
   it('keeps legacy initialization free of key creation and secure request fields', async () => {
+    values.set('files.retentionDays', 7);
     vi.mocked(axios.post).mockResolvedValue({ data: { success: true, bindingCode: accepted.bindingCode } });
     expect(await initCommand({ serverUrl: 'http://router.example.com', withFiles: false })).toMatchObject({ success: true });
     expect(request()).toEqual({ deviceId: expect.any(String), deviceName: 'synthetic-device', platform: os.platform() });
     expect(await fs.readdir(root)).toEqual([]);
     expect(axios.post).toHaveBeenCalledOnce();
+    expect(values.get('files.autoEnroll')).toBe(false);
+    expect(values.get('files.retentionDays')).toBe(7);
   });
 
   it('continues accepting explicit secure API enrollment', async () => {

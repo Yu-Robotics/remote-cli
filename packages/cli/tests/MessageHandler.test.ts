@@ -208,6 +208,28 @@ describe('MessageHandler', () => {
     expect(ctx.mockExecutor.configureDelegation).not.toHaveBeenCalled();
   });
 
+  it('binds private worker capture to the original parent owner and generation', async () => {
+    const thread = ctx.mockThreadManager.getDefaultThread();
+    thread.delegation = true; thread.delegationWorkspaceGeneration = 2;
+    const scope = {
+      isClosed: () => false, hasPendingResults: () => false, getLaunchRevision: () => 0,
+      beginExecution: vi.fn(), finishExecution: vi.fn(), getRetainedResults: () => [],
+      close: vi.fn(async () => undefined), collectPendingResults: async () => [],
+      checkArtifactCloseout: async () => [], invoke: vi.fn(),
+    };
+    const begin = vi.spyOn((ctx.handler as any).delegation, 'begin').mockReturnValue(scope);
+    ctx.mockExecutor.configureDelegation = vi.fn();
+    const capture = vi.fn(async () => ({ unavailable: 0, omitted: false }));
+    (ctx.handler as any).outputFiles = { capture, destroy: vi.fn(), disconnect: vi.fn() };
+    ctx.mockExecutor.execute.mockResolvedValue({ success: true, output: 'Coordinator result' });
+    await ctx.handler.handleMessage({ type: 'command', messageId: 'private-worker-parent', openId: 'synthetic-owner', content: 'Produce report' } as any);
+    thread.delegationWorkspaceGeneration = 3;
+    const parent = begin.mock.calls[0][0] as any;
+    await parent.onOutputFiles({ finish: () => ({ paths: [], omitted: false }) }, ctx.workingDirectory, 'worker-task', '[report](report.csv)');
+    expect(capture).toHaveBeenLastCalledWith(expect.any(Object), expect.objectContaining({ source: 'worker',
+      owner: 'synthetic-owner', messageId: 'private-worker-parent', taskId: 'worker-task', generation: 2 }), '[report](report.csv)');
+  });
+
   it.each(['closed scope', 'handler shutdown'])('does not start a coordinator after %s during backend preparation', async change => {
     let closed = false;
     const scope = {

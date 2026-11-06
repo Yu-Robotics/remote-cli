@@ -8,6 +8,7 @@ import { readOwnedFile } from '../files/FileIO';
 import { PrivateOutputRoot } from './PrivateOutputRoot';
 import { durableJson, syncDirectory } from './Durable';
 import { OPAQUE_ID, OUTPUT_LIMITS, OutputReference, validReference } from './Protocol';
+import { outputFileDiscoveryCard, outputFileEntryCard, outputFileTransferCard } from './OutputFileCards';
 
 export class OutputApiRejection extends Error { constructor() { super('File delivery was rejected.'); } }
 interface Source { messageId: string; deviceId: string; openId: string; threadId?: string; epoch: string; expiresAt: number; notices?: Record<string, CardIntent> }
@@ -65,13 +66,6 @@ function validState(data: State): boolean {
     });
 }
 
-function card(title: string, text: string, action?: object): string {
-  return JSON.stringify({ schema: '2.0', header: { title: { tag: 'plain_text', content: title } }, body: { elements: [
-    { tag: 'div', text: { tag: 'plain_text', content: text } },
-    ...(action ? [{ tag: 'button', type: 'default', text: { tag: 'plain_text', content: (action as any).op === 'retry' ? 'Retry' : 'Get file' },
-      behaviors: [{ type: 'callback', value: action }] }] : []),
-  ] } });
-}
 async function bounded<T>(operation: Promise<T>, ms = 15_000): Promise<T> {
   let timer: NodeJS.Timeout;
   try { return await Promise.race([operation, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('External outcome unknown.')), ms); timer.unref(); })]); }
@@ -195,8 +189,7 @@ export class OutputTransfers {
       const key = createHash('sha256').update(value.taskId).digest('hex');
       source.notices ??= {};
       if (source.notices[key] || Object.keys(source.notices).length >= 16) return;
-      intent = { uuid: randomUUID(), firstAt: Date.now(), state: 'intent', content: card('Output files unavailable',
-        `${value.unavailable} linked files could not be exported.${value.omitted ? ' Discovery limits were reached; the list is not exhaustive.' : ''}`) };
+      intent = { uuid: randomUUID(), firstAt: Date.now(), state: 'intent', content: outputFileDiscoveryCard(value.unavailable, value.omitted) };
       source.notices[key] = intent; await this.save();
     });
     if (this.stopped || !source || !intent || !await this.deps.owns(source.openId, deviceId, source.epoch)) return;
@@ -209,9 +202,7 @@ export class OutputTransfers {
     const work = (async () => {
       await this.lock(async () => {
         if (ref.card || !await this.deps.owns(ref.openId, ref.deviceId, ref.epoch)) return;
-        ref.card = { state: 'intent', uuid: randomUUID(), firstAt: Date.now(), content: card('Output file',
-          `${ref.reference.name}\n${ref.reference.size} bytes · ${ref.reference.source}\nExpires ${new Date(ref.reference.expiresAt).toISOString()}${ref.reference.discoveryIncomplete ? '\nDiscovery was capped; this list is not exhaustive.' : ''}`,
-          { action: 'output_file', id: ref.reference.id, op: 'get' }) }; await this.save();
+        ref.card = { state: 'intent', uuid: randomUUID(), firstAt: Date.now(), content: outputFileEntryCard(ref.reference) }; await this.save();
       });
       if (!ref.card || ref.card.state !== 'intent' || this.stopped || !await this.deps.owns(ref.openId, ref.deviceId, ref.epoch)) return;
       let id: string | undefined, rejected = false;
@@ -258,9 +249,7 @@ export class OutputTransfers {
     return labels[job.state];
   }
   private content(job: OutputJob, ref: Reference): string {
-    const progress = job.state === 'receiving' ? `\nReceived ${job.received}/${ref.reference.size} bytes (${Math.floor(job.received * 100 / ref.reference.size)}%)` : '';
-    return card('File transfer', `${ref.reference.name}\n${this.status(job)}${progress}`,
-      job.state === 'failed' && ref.reference.expiresAt > Date.now() ? { action: 'output_file', id: job.refId, op: 'retry', rev: job.revision } : undefined);
+    return outputFileTransferCard(job, ref.reference, Date.now());
   }
   private async present(job: OutputJob, ref: Reference): Promise<void> {
     if (this.presentations.has(job.id)) return this.presentations.get(job.id);

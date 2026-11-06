@@ -439,10 +439,11 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
   it('exports required ignored reports before deleting the checkout', async () => {
     const snapshots = new OutputSnapshots(path.join(fixture.directory, 'output-snapshots'));
     await snapshots.initialize();
+    let hiddenId = '';
     parent.onOutputFiles = async (links, cwd, taskId, final) => {
-      for (const candidate of links.finish(final).paths) await snapshots.snapshot(candidate, {
-        cwd, taskId, messageId: 'message', threadId: parent.thread.id, generation: 0, source: 'worker',
-      });
+      for (const candidate of links.finish(final).paths) hiddenId = (await snapshots.snapshot(candidate, {
+        owner: 'synthetic-owner', cwd, taskId, messageId: 'message', threadId: parent.thread.id, generation: 0, source: 'worker',
+      })).id;
     };
     parent.onVerifiedExports = vi.fn();
     try {
@@ -455,14 +456,20 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
     const [result] = await scope.collectPendingResults();
     expect(result.state).toBe('succeeded');
     await expect(fs.stat(workers[0].cwd)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(hiddenId).not.toBe(''); expect(snapshots.references()).toEqual([]);
     const inspected = await scope.invoke('remote_cli_integrate', { taskId: result.taskId, action: 'inspect' }, 'inspect') as {
-      exportedFiles: { path: string; file: string; sha256: string }[];
+      exportedFiles: { path: string; file: string; sha256: string; bytes: number }[];
     };
     expect(inspected.exportedFiles).toHaveLength(1);
     expect(inspected.exportedFiles[0].path).toBe('node_modules/report.txt');
     expect(await fs.readFile(inspected.exportedFiles[0].file, 'utf8')).toBe('delivered report');
     expect(parent.onVerifiedExports).toHaveBeenCalledWith([expect.objectContaining({ taskId: result.taskId, file: inspected.exportedFiles[0].file })]);
-    expect(snapshots.references()).toHaveLength(1);
+    const selected = await snapshots.snapshot(inspected.exportedFiles[0].file, {
+      owner: 'synthetic-owner', cwd: parent.cwd, messageId: 'selected-reply', threadId: parent.thread.id,
+      taskId: 'coordinator', generation: 0, source: 'workspace',
+      exports: inspected.exportedFiles.map(entry => ({ ...entry, taskId: result.taskId })),
+    });
+    expect(selected.id).toBe(hiddenId); expect(snapshots.references()).toHaveLength(1);
     const parts: Buffer[] = [];
     await snapshots.read(snapshots.references()[0].id, async bytes => { for await (const part of bytes) parts.push(part); });
     expect(Buffer.concat(parts).toString()).toBe('delivered report');

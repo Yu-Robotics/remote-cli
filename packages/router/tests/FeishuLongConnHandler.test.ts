@@ -161,18 +161,24 @@ describe('FeishuLongConnHandler', () => {
     const callback = (card: string, value: any, owner = 'owner') => handler.handleCardAction({
       operator: { open_id: owner }, context: { open_message_id: card }, action: { value },
     });
+    const filename = 'report **draft** <at id=all>.md';
     const behavior = (content: string, label: string) => {
       const json = JSON.parse(content); expect(json.schema).toBe('2.0');
-      expect(json.body.elements[0]).toMatchObject({ tag: 'div', text: { tag: 'plain_text' } });
+      expect(json.header.template).toBe(label === 'Get file' ? 'blue' : 'red');
+      expect(json.body.elements[0]).toEqual({ tag: 'div', text: { tag: 'plain_text', content: filename } });
+      for (const element of json.body.elements.filter((value: any) => value.tag === 'markdown')) {
+        expect(element.content).not.toContain(filename);
+        expect(element.content).not.toContain('<at');
+      }
       const button = json.body.elements.find((element: any) => element.tag === 'button');
-      expect(button).toMatchObject({ type: 'default', text: { tag: 'plain_text', content: label }, behaviors: [{ type: 'callback' }] });
+      expect(button).toMatchObject({ type: 'primary', text: { tag: 'plain_text', content: label }, behaviors: [{ type: 'callback' }] });
       expect(button).not.toHaveProperty('value');
       return button.behaviors[0].value;
     };
     try {
       await transfers.admitSource({ messageId: 'reply', deviceId: 'device', openId: 'owner', threadId: 'thread', epoch: 'epoch' });
       await transfers.offer('device', { id: 'a'.repeat(64), sha256: 'b'.repeat(64), messageId: 'reply', threadId: 'thread', taskId: 'task',
-        generation: 0, name: 'report.csv', source: 'workspace', size: 8, expiresAt: Date.now() + 60_000 });
+        generation: 0, name: filename, source: 'workspace', size: 8, expiresAt: Date.now() + 60_000 });
       await Promise.all([...(transfers as any).entryWork.values()]);
       const get = behavior(mockClient.im.message.create.mock.calls[0][0].data.content, 'Get file');
       connected = false;

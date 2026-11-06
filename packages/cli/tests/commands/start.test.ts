@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { startCommand, checkBackendAvailability, getServerVersion, isNewerVersion } from '../../src/commands/start';
 import { ConfigManager } from '../../src/config/ConfigManager';
 import { WebSocketClient } from '../../src/client/WebSocketClient';
+import { AutomaticFileEnrollment } from '../../src/files/AutomaticFileEnrollment';
 import { MessageHandler } from '../../src/client/MessageHandler';
 import { MaintenanceClient } from '../../src/maintenance/MaintenanceClient';
 import { CLI_VERSION } from '../../src/types';
@@ -179,7 +180,8 @@ describe('start command', () => {
       expect(WebSocketClient).toHaveBeenCalledWith(
         'wss://test-server.com/ws',
         'dev_test_12345',
-        { identityLoader: expect.any(Function), maintenanceCapabilities: { updateNotice: true, subscriptionInspection: true } }
+        { identityLoader: expect.any(Function), automaticFileEnrollment: expect.any(AutomaticFileEnrollment),
+          maintenanceCapabilities: { updateNotice: true, subscriptionInspection: true } }
       );
       expect(mockWsClient.connect).toHaveBeenCalled();
     });
@@ -190,10 +192,21 @@ describe('start command', () => {
       mockConfig.getAll.mockReturnValue(configuration);
       expect((await startCommand({ daemon: false })).success).toBe(true);
       expect(WebSocketClient).toHaveBeenCalledWith('wss://test-server.com/ws', 'dev_test_12345', {
-        identityLoader: expect.any(Function), maintenanceCapabilities: configuration.maintenance,
+        identityLoader: expect.any(Function), automaticFileEnrollment: expect.any(AutomaticFileEnrollment), maintenanceCapabilities: configuration.maintenance,
       });
       expect(MaintenanceClient).toHaveBeenCalledWith(mockWsClient, '/tmp/.remote-cli', 'https://test-server.com',
         'dev_test_12345', expect.any(Function), configuration.maintenance);
+    });
+
+    it('passes the file enrollment opt-out without disabling identity loading', async () => {
+      const configuration = mockConfig.getAll();
+      configuration.files = { autoEnroll: false, retentionDays: 7 };
+      mockConfig.getAll.mockReturnValue(configuration);
+      expect((await startCommand({ daemon: false })).success).toBe(true);
+      expect(WebSocketClient).toHaveBeenCalledWith('wss://test-server.com/ws', 'dev_test_12345', expect.objectContaining({
+        identityLoader: expect.any(Function), automaticFileEnrollment: expect.objectContaining({ enabled: false }),
+      }));
+      expect(configuration.files.retentionDays).toBe(7);
     });
 
     it('should fail if not initialized', async () => {

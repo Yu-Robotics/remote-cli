@@ -1,6 +1,7 @@
 import { ConfigManager } from '../config/ConfigManager';
 import { WebSocketClient } from '../client/WebSocketClient';
 import { loadIdentity } from '../files/DeviceIdentity';
+import { AutomaticFileEnrollment } from '../files/AutomaticFileEnrollment';
 import { MessageHandler } from '../client/MessageHandler';
 import { DirectoryGuard } from '../security/DirectoryGuard';
 import { HooksConfigurator } from '../security/HooksConfigurator';
@@ -238,6 +239,8 @@ export async function startCommand(
       maintenanceCapabilities: { updateNotice: allConfig.maintenance?.updateNotice !== false,
         subscriptionInspection: allConfig.maintenance?.subscriptionInspection !== false },
       identityLoader: () => loadIdentity(config.getConfigDir(), wsUrl, deviceId),
+      automaticFileEnrollment: new AutomaticFileEnrollment(config.getConfigDir(), wsUrl, deviceId,
+        allConfig.files?.autoEnroll !== false),
     });
 
     const messageHandler = new MessageHandler(wsClient, threadPool, threadManager, directoryGuard, config);

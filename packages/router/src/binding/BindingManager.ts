@@ -89,6 +89,18 @@ export class BindingManager {
     return this.mutate(() => this.bindUserLocked(openId, deviceId, deviceName));
   }
 
+  /** Approve only an unchanged existing binding, serialized with unbind and manual enrollment. */
+  async approveExistingDeviceKey(openId: string, deviceId: string, epoch: string,
+    approve: () => Promise<void>): Promise<void> {
+    return this.mutate(async () => {
+      this.assertOwnership(deviceId, openId);
+      const binding = this.store.getUserBinding(openId);
+      if (!binding?.devices.some(device => device.deviceId === deviceId)
+        || !epoch || this.getCardThreadEpoch(openId, deviceId) !== epoch) throw new Error('Device ownership changed.');
+      await approve();
+    });
+  }
+
   private async bindUserLocked(openId: string, deviceId: string, deviceName: string, requireDeviceAuth = false): Promise<void> {
     this.assertOwnership(deviceId, openId);
     const now = Date.now();

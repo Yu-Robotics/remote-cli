@@ -794,6 +794,14 @@ Restricted Claude Code threads use the same approval card flow, titled Permissio
 
 ## Retrieve Output Files
 
+Worker file links are captured as private snapshots before temporary workspaces are reclaimed. Worker output does not directly create file cards or export-failure notices. A file becomes visible only when the coordinator explicitly selects it in its reply; selection uses the existing snapshot or a verified export instead of rereading a removed worker path. Unselected worker snapshots stay hidden across timers, reconnects and restarts, and retain the same quotas and expiry. Direct coordinator-file failures still produce a notice. Previously published receipts remain usable so existing file cards are not withdrawn. New worker receipts use a private filename format that older clients do not load; a hidden snapshot does not become public merely by downgrading the CLI.
+
+From CLI and Router 1.6.224, existing initialized devices automatically request file-key approval over a supported HTTPS connection when Router files are enabled. Feishu sends the existing bound owner one approval card; no terminal enrollment command or copied binding code is needed. Devices that already authenticate with an approved key do not show another card. Preparing a local key alone does not approve it. Text operation remains available while approval is pending; successful approval reconnects the CLI with its saved key.
+
+CLI `files.autoEnroll` defaults to `true`; set it to `false` to suppress automatic enrollment requests. This is separate from Router `files.enabled` and does not revoke an already approved identity. New `init --without-files` setups persist this opt-out; older releases did not record that choice. Explicit `remote-cli files enable` remains available for manual approval or recovery. Automatic requests expire after 24 hours. Expired requests, uncertain card delivery, or admission limits remain held instead of creating replacement cards; use the manual enrollment command for recovery.
+
+Router 1.6.224 presents file entries and transfer tasks with colored status headers, prominent filenames, compact file metadata, and primary Get file or Retry actions. Expiry times use a readable absolute UTC format. Completed transfers show a delivery confirmation; uncertain sends remain clearly marked and are never retried automatically. This changes presentation only; retrieval still requires the existing button click and device authorization.
+
 With CLI and Router 1.6.223, plain `remote-cli init` requests device binding and file-key approval together by default:
 
 ```bash

@@ -162,6 +162,7 @@ export class FeishuLongConnHandler {
   onMaintenanceAction?: (openId: string, id: string, cardId: string, action: string, offset?: number) => Promise<string>;
   onTipsCommand?: (openId: string, content: string) => Promise<void>;
   onOutputFileAction?: (openId: string, cardId: string, payload: unknown) => Promise<string>;
+  onAutomaticFileEnrollment?: (openId: string, cardId: string, payload: unknown) => Promise<string>;
   onTipsAction?: (openId: string, cardId: string, payload: unknown) => Promise<string>;
   onUserActivity?: (openId: string) => Promise<void>;
   onQueueAction?: (openId: string, action: 'confirm' | 'cancel', queueId: string, threadId: string, cardMessageId?: string) => Promise<'sent' | 'already_processed'>;
@@ -2114,6 +2115,12 @@ Examples:
 
     if (!parsed || typeof parsed !== 'object') return;
     this.recordUserActivity(openId);
+    if (parsed.action === 'automatic_file_enrollment') {
+      const cardId = data?.context?.open_message_id;
+      if (typeof cardId !== 'string' || !this.onAutomaticFileEnrollment) return { toast: { type: 'error', content: 'File approval unavailable.' } };
+      try { return { toast: { type: 'info', content: await this.onAutomaticFileEnrollment(openId, cardId, parsed) } }; }
+      catch { return { toast: { type: 'error', content: 'File approval could not be completed. Existing text access is unchanged.' } }; }
+    }
     if (parsed.action === 'output_file') {
       const cardId = data?.context?.open_message_id;
       if (typeof cardId !== 'string' || !this.onOutputFileAction) return { toast: { type: 'error', content: 'Output files unavailable.' } };
