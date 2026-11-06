@@ -15,7 +15,7 @@ export interface InitCommandOptions {
   force?: boolean;
   /** Allowed directories */
   allowedDirs?: string[];
-  /** Request device-key approval with the initial binding code. */
+  /** Request device-key approval by default; false explicitly selects legacy binding. */
   withFiles?: boolean;
 }
 
@@ -36,6 +36,7 @@ export interface InitCommandResult {
 export async function initCommand(
   options: InitCommandOptions
 ): Promise<InitCommandResult> {
+  const withFiles = options.withFiles !== false;
   const spinner = ora('Initializing remote CLI...').start();
 
   try {
@@ -77,7 +78,7 @@ export async function initCommand(
     spinner.text = 'Requesting binding code from server...';
 
     let bindingCode: string;
-    if (options.withFiles) {
+    if (withFiles) {
       ({ bindingCode } = await requestDeviceEnrollment({
         configDir: config.getConfigDir(), serverUrl: options.serverUrl, deviceId, deviceName: os.hostname(),
       }));
@@ -125,20 +126,22 @@ export async function initCommand(
     ];
     await config.set('security.allowedDirectories', allowedDirs);
 
-    spinner.succeed(options.withFiles ? 'Key enrollment requested; Feishu approval is still required.' : 'Initialization successful!');
+    spinner.succeed(withFiles ? 'Key enrollment requested; Feishu approval is still required.' : 'Initialization successful!');
 
     return {
       success: true,
       bindingCode,
       deviceId,
-      ...(options.withFiles ? { keyEnrollmentRequested: true } : {}),
+      ...(withFiles ? { keyEnrollmentRequested: true } : {}),
     };
   } catch (error) {
     spinner.fail('Initialization failed');
     return {
       success: false,
-      error: options.withFiles && !(error instanceof DeviceEnrollmentError)
-        ? 'Initialization failed. Check local configuration storage and retry with --force; any saved device key will be reused.'
+      error: withFiles
+        ? error instanceof DeviceEnrollmentError
+          ? `${error.message} To initialize without requesting file-key approval, explicitly retry with --without-files.`
+          : 'Initialization failed. Check local configuration storage and retry with --force; any saved device key will be reused.'
         : error instanceof Error ? error.message : 'Unknown error',
     };
   }

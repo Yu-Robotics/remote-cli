@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { Command } from 'commander';
+import { Command, Option } from 'commander';
 import { initCommand } from './commands/init';
 import { startCommand } from './commands/start';
 import { stopCommand } from './commands/stop';
@@ -47,11 +47,12 @@ program
  */
 program
   .command('init')
-  .description('Initialize remote CLI and generate binding code')
+  .description('Initialize remote CLI and request device binding and file-key approval')
   .requiredOption('-s, --server <url>', 'Router server URL')
   .option('-d, --dirs <dirs...>', 'Allowed directories (can specify multiple)')
   .option('-f, --force', 'Force re-initialization')
-  .option('--with-files', 'Request device-key approval during binding (requires Router file support and TLS)')
+  .addOption(new Option('--with-files', 'Request file-key approval (default; requires Router file support and TLS)').conflicts('withoutFiles'))
+  .option('--without-files', 'Explicitly use legacy binding without file-key enrollment')
   .action(async (options) => {
     try {
       console.log(chalk.blue('🚀 Initializing remote CLI...\n'));
@@ -60,7 +61,7 @@ program
         serverUrl: options.server,
         allowedDirs: options.dirs,
         force: options.force,
-        withFiles: options.withFiles,
+        withFiles: options.withoutFiles !== true,
       });
 
       if (result.success) {

@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.6.223] - 2026-11-06
 
 ### Added
-- Add opt-in `remote-cli init --with-files` to request device binding and file-key approval with one Feishu binding code, while preserving ordinary initialization and existing-device enrollment.
+- Make `remote-cli init` request device binding and file-key approval by default with one Feishu binding code. Keep `--with-files` as a compatibility alias and require explicit `--without-files` for legacy text-only initialization; conflicting flags are rejected before initialization.
 - Reuse locally persisted device identities for retries and forced initialization; require an explicit secure-enrollment response without redirect or credentialless fallback.
 
 ### Fixed

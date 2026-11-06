@@ -129,24 +129,27 @@ Bot： 📂 已切换到 ~/projects/.openclaw
 ## 快速开始
 
 ```bash
-# 安装 CLI
+# Install the CLI
 npm install -g @yu_robotics/remote-cli
 
-# 初始化并获取绑定码
-remote-cli init --server https://your-router-server.com
+# Request device binding and file-key approval
+remote-cli init --server https://router.example.com
 
-# 添加允许的目录
+# Approve the printed /bind CODE in Feishu before starting the CLI
+
+# Add allowed directories
 remote-cli config add-dir ~/projects
 
-# 启动服务
+# Start the authenticated service after approval
 remote-cli start
 
-# 在 macOS 或 Linux 上安装自动启动
+# Install automatic startup for macOS or Linux
 remote-cli service install
 
-# 现在将绑定码发送给飞书机器人
-# 然后就可以用手机开始编程了！
+# Send your requests to the Feishu bot
 ```
+
+Initialization requests file-key approval by default and requires an upgraded Router with `files.enabled=true` and HTTPS (loopback HTTP is allowed). Approve the printed `/bind CODE` in Feishu before starting the CLI. For legacy text-only setup, explicitly add `--without-files`; failures never silently switch to that mode.
 
 ## 环境要求
 
@@ -367,7 +370,7 @@ server {
 | 部署方式 | 服务器地址示例 | 说明 |
 |---------|--------------|------|
 | **本地/内网部署** | `http://127.0.0.1:3000` | 路由服务器和客户端在同一台机器 |
-| **局域网部署** | `http://192.168.1.100:3000` | 使用内网 IP + 端口 |
+| **LAN** | `http://router.example.com:3000` | Legacy text-only binding requires `--without-files`; use HTTPS for file enrollment |
 | **公网部署** | `https://your-domain.com` | 使用域名，需配置 HTTPS |
 
 **初始化示例：**
@@ -376,8 +379,8 @@ server {
 # 本地部署
 remote-cli init --server http://127.0.0.1:3000
 
-# 局域网部署
-remote-cli init --server http://192.168.1.100:3000
+# Legacy HTTP LAN deployment (text-only; use HTTPS for file enrollment)
+remote-cli init --server http://router.example.com:3000 --without-files
 
 # 公网部署
 remote-cli init --server https://your-domain.com
@@ -422,8 +425,10 @@ npm link
 生成唯一的设备 ID 和绑定码：
 
 ```bash
-remote-cli init --server https://your-router-server.com
+remote-cli init --server https://router.example.com
 ```
+
+Initialization requests file-key approval by default and requires an upgraded Router with `files.enabled=true` and HTTPS (loopback HTTP is allowed). Approve the printed `/bind CODE` in Feishu before starting the CLI. For legacy text-only setup, explicitly add `--without-files`; failures never silently switch to that mode.
 
 示例输出：
 ```
@@ -1278,15 +1283,15 @@ All seven backends receive local original/preview paths through the shared comma
 
 ### Retrieve Output Files
 
-With CLI and Router 1.6.223, a new device can request its file-transfer identity during initial setup:
+With CLI and Router 1.6.223, plain `remote-cli init` requests device binding and file-key approval together by default:
 
 ```bash
-remote-cli init --server https://router.example.com --with-files
+remote-cli init --server https://router.example.com
 ```
 
 Send the printed `/bind CODE` to the Feishu bot once, then run `remote-cli start`. That approval binds the device and approves its public key together; no separate `remote-cli files enable` step is needed. The private key stays on the CLI machine. Files become available after the authenticated connection negotiates the supported capabilities; output retrieval also requires a compatible native helper.
 
-The option requires HTTPS (loopback HTTP is permitted for development), an upgraded Router, and enabled Router file transfers. Unsupported enrollment, redirects, and failed requests do not silently fall back to legacy binding. Retry with the same key; `init --force --with-files` does not rotate it. Ordinary `init` without the option keeps its existing behavior. Existing devices can still use `remote-cli files enable`; explicit key replacement uses `remote-cli files enable --rotate` and a new owner approval.
+Default enrollment requires HTTPS (loopback HTTP is permitted for development), an upgraded Router, and enabled Router file transfers. Unsupported enrollment, insecure URLs, redirects, and failed requests stop initialization without a silent legacy fallback. Retry with the same key; `init --force` does not rotate it. `--with-files` remains a compatible alias for the default. For text-only setup on an older Router or non-loopback HTTP, explicitly use `remote-cli init --server http://router.example.com:3000 --without-files`. This skips key enrollment; it does not delete or revoke an existing identity. `--with-files` and `--without-files` cannot be combined. Existing devices can still use `remote-cli files enable`; explicit key replacement uses `remote-cli files enable --rotate` and a new owner approval.
 
 CLI and Router 1.6.221 can return files referenced by explicit local Markdown links in assistant replies. Both peers must negotiate `outputFilesV1`; the CLI must have an approved per-Router device identity (see File Attachments). Router `files.enabled: false` also disables output retrieval. Existing text, images, and incoming attachments keep their separate behavior.
 
@@ -1592,14 +1597,14 @@ ping your-router-server.com
 remote-cli config show
 
 # 重新初始化
-remote-cli init --server https://your-router-server.com --force
+remote-cli init --server https://router.example.com --force
 ```
 
 ### 绑定码过期
 
 ```bash
 # 生成新的绑定码
-remote-cli init --force
+remote-cli init --server https://router.example.com --force
 ```
 
 ## 贡献指南

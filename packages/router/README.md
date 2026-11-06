@@ -794,14 +794,14 @@ Restricted Claude Code threads use the same approval card flow, titled Permissio
 
 ## Retrieve Output Files
 
-With CLI and Router 1.6.223, a new device can request its file-transfer identity during initial setup:
+With CLI and Router 1.6.223, plain `remote-cli init` requests device binding and file-key approval together by default:
 
 ```bash
-remote-cli init --server https://router.example.com --with-files
+remote-cli init --server https://router.example.com
 ```
 
 Send the printed `/bind CODE` to the Feishu bot once, then run `remote-cli start`. That approval binds the device and approves its public key together; no separate `remote-cli files enable` step is needed. The private key stays on the CLI machine. Files become available after the authenticated connection negotiates the supported capabilities; output retrieval also requires a compatible native helper.
 
-The option requires HTTPS (loopback HTTP is permitted for development), an upgraded Router, and enabled Router file transfers. Unsupported enrollment, redirects, and failed requests do not silently fall back to legacy binding. Retry with the same key; `init --force --with-files` does not rotate it. Ordinary `init` without the option keeps its existing behavior. Existing devices can still use `remote-cli files enable`; explicit key replacement uses `remote-cli files enable --rotate` and a new owner approval.
+Default enrollment requires HTTPS (loopback HTTP is permitted for development), an upgraded Router, and enabled Router file transfers. Unsupported enrollment, insecure URLs, redirects, and failed requests stop initialization without a silent legacy fallback. Retry with the same key; `init --force` does not rotate it. `--with-files` remains a compatible alias for the default. For text-only setup on an older Router or non-loopback HTTP, explicitly use `remote-cli init --server http://router.example.com:3000 --without-files`. This skips key enrollment; it does not delete or revoke an existing identity. `--with-files` and `--without-files` cannot be combined. Existing devices can still use `remote-cli files enable`; explicit key replacement uses `remote-cli files enable --rotate` and a new owner approval.
 
 CLI and Router 1.6.221 add explicit local Markdown link retrieval using immutable 20 MiB snapshots with a fixed 24-hour expiry. A stable file entry opens a separate transfer task card, followed by a native Feishu file message. Progress, safe retries, offline waiting, original-device ownership, restart receipts, and unknown-send handling are independent of the assistant reply and model task. Approved device enrollment and HTTPS are required; Router `files.enabled` also gates retrieval. CLI `outputFiles.allowedRoots` adds specific export roots, and `outputFiles.maxBytes` can lower the limit. Existing 16 MiB delegated exports and incoming attachments retain their contracts. See [Retrieve Output Files](../../README.md#retrieve-output-files) for permissions, limits, proxy configuration, and failure behavior.
