@@ -41,6 +41,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
   let terminalRecords: Map<string, DelegatedTaskRecord>;
   let observedStores: WeakSet<DelegationManager['store']>;
   let draining: boolean;
+  let phaseAdmissionClosed: boolean;
   const notifyPhase = () => { for (const listener of phaseListeners) listener(); };
   beforeEach(async () => {
     fixture = await gitFixture();
@@ -49,7 +50,7 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     vi.stubEnv('USERPROFILE', fixture.directory);
     workers = [];
     pendingCalls = new Set();
-    phaseListeners = new Set(); terminalRecords = new Map(); observedStores = new WeakSet(); draining = false;
+    phaseListeners = new Set(); terminalRecords = new Map(); observedStores = new WeakSet(); draining = false; phaseAdmissionClosed = false;
     factory = vi.fn((guard: DirectoryGuard, _config, cwd: string) => {
       expect(guard.resolveWorkingDirectory(cwd)).toBe(cwd);
       const worker = controlledWorker(cwd, notifyPhase); workers.push(worker);
@@ -97,11 +98,17 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
   const result = (scope: ReturnType<DelegationManager['begin']>, taskId: string, id: string) =>
     trackCall(scope.invoke('remote_cli_result', { taskId, waitSeconds: 25 }, id) as Promise<DelegatedTaskResult>);
   const gitPhase = async <T>(name: string, action: () => Promise<T>): Promise<T> => {
-    if (draining) throw new Error('Fixture is draining; no new Git phases may start');
+    if (draining || phaseAdmissionClosed) throw new Error('Fixture is draining; no new Git phases may start');
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      return await Promise.race([trackCall(Promise.resolve().then(action)), new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error(`Git lifecycle phase exceeded 30 seconds: ${name}`)), 30_000);
+      return await Promise.race([trackCall(Promise.resolve().then(() => {
+        if (draining || phaseAdmissionClosed) throw new Error('Fixture is draining; no new Git phases may start');
+        return action();
+      })), new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          phaseAdmissionClosed = true;
+          reject(new Error(`Git lifecycle phase exceeded 30 seconds: ${name}`));
+        }, 30_000);
       })]);
     } finally { clearTimeout(timer); }
   };
@@ -167,6 +174,9 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
       await vi.advanceTimersByTimeAsync(30_001);
       expect(await outcome).toBeInstanceOf(Error);
       expect(pendingCalls.size).toBe(1);
+      const afterTimeout = vi.fn(async () => undefined);
+      await expect(gitPhase('after timeout', afterTimeout)).rejects.toThrow('Fixture is draining');
+      expect(afterTimeout).not.toHaveBeenCalled();
       vi.useRealTimers();
       let settled = false;
       settling = settleFixture().then(() => { settled = true; });
@@ -184,6 +194,17 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
       vi.useRealTimers(); release();
       await Promise.allSettled([running, ...(settling ? [settling] : []), ...pendingCalls]);
     }
+  });
+
+  it('does not enter a scheduled Git phase once teardown has begun', async () => {
+    const action = vi.fn(async () => undefined);
+    const scheduled = gitPhase('scheduled before teardown', action);
+    const outcome = scheduled.catch(error => error);
+    const shutdown = settleFixture();
+    try {
+      expect(await outcome).toMatchObject({ message: expect.stringContaining('Fixture is draining') });
+      expect(action).not.toHaveBeenCalled();
+    } finally { await Promise.allSettled([scheduled, shutdown]); }
   });
 
   // Acceptance is intentionally bounded and may return queued before the factory.
@@ -450,25 +471,33 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
 
   it('reuses a historically delivered lane before the next worker without deleting its checkout at admission', async () => {
     const scope = manager.begin(parent);
-    const first = await startExecuting(scope, 'first');
-    const originalCwd = workers[0].cwd;
-    const executorId = factory.mock.calls[0][3];
-    await fs.writeFile(path.join(originalCwd, 'source.txt'), 'manual handoff\n');
-    workers[0].finish({ success: true });
-    const completed = await result(scope, first.taskId, 'first-result');
-    await runGit(fixture.root, ['merge', '--ff-only', completed.artifact!.outputCommit]);
-    await fs.writeFile(path.join(fixture.root, 'sibling.txt'), 'fresh coordinator input\n');
+    const { first, originalCwd, executorId } = await gitPhase('prepare and edit the historical handoff', async () => {
+      const first = await startExecuting(scope, 'first');
+      const originalCwd = workers[0].cwd;
+      const executorId = factory.mock.calls[0][3];
+      await fs.writeFile(path.join(originalCwd, 'source.txt'), 'manual handoff\n');
+      workers[0].finish({ success: true });
+      return { first, originalCwd, executorId };
+    });
+    const completed = await gitPhase('collect the historical handoff', () => result(scope, first.taskId, 'first-result'));
+    await gitPhase('merge the handoff and update coordinator input', async () => {
+      await runGit(fixture.root, ['merge', '--ff-only', completed.artifact!.outputCommit]);
+      await fs.writeFile(path.join(fixture.root, 'sibling.txt'), 'fresh coordinator input\n');
+    });
     const removal = vi.spyOn(manager.workspaceManager, 'reclaim');
-    const second = await startExecuting(scope, 'second');
-    expect(removal).not.toHaveBeenCalled();
-    expect(workers[1].cwd).toBe(originalCwd);
-    expect(factory.mock.calls[1][3]).toBe(executorId);
-    expect(await manager.workspaceManager.describe(first.taskId)).toMatchObject({ disposition: 'applied',
-      deliveredAtHead: completed.artifact!.outputCommit });
-    expect(await fs.readFile(path.join(workers[1].cwd, 'sibling.txt'), 'utf8')).toBe('fresh coordinator input\n');
-    workers[1].finish({ success: true });
-    await result(scope, second.taskId, 'second-result');
-  });
+    const second = await gitPhase('reuse the historical lane without admission-time reclamation', async () => {
+      const second = await startExecuting(scope, 'second');
+      expect(removal).not.toHaveBeenCalled();
+      expect(workers[1].cwd).toBe(originalCwd);
+      expect(factory.mock.calls[1][3]).toBe(executorId);
+      expect(await manager.workspaceManager.describe(first.taskId)).toMatchObject({ disposition: 'applied',
+        deliveredAtHead: completed.artifact!.outputCommit });
+      expect(await fs.readFile(path.join(workers[1].cwd, 'sibling.txt'), 'utf8')).toBe('fresh coordinator input\n');
+      workers[1].finish({ success: true });
+      return second;
+    });
+    await gitPhase('collect the reused historical lane', () => result(scope, second.taskId, 'second-result'));
+  }, 5 * 30_000 + 5_000);
 
   it('does not charge optional history reconciliation to the native worker startup deadline', async () => {
     const scope = manager.begin(parent);
@@ -504,36 +533,47 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
 
   it('automatically recognizes manual handoff at idle turn closure and awaits reclamation', async () => {
     const scope = manager.begin(parent);
-    const first = await startExecuting(scope, 'first');
-    await fs.writeFile(path.join(workers[0].cwd, 'source.txt'), 'closure handoff\n');
-    workers[0].finish({ success: true });
-    const completed = await result(scope, first.taskId, 'first-result');
-    await runGit(fixture.root, ['merge', '--ff-only', completed.artifact!.outputCommit]);
-    const pointer = path.join(fixture.directory, '.remote-cli', 'codex-sessions', `${factory.mock.calls[0][3]}.json`);
-    await fs.mkdir(path.dirname(pointer), { recursive: true });
-    await fs.writeFile(pointer, JSON.stringify({ threadId: 'fixture-conversation', cwd: workers[0].cwd }));
-    let release!: () => void;
-    let entered = false;
-    const gate = new Promise<void>(resolve => { release = resolve; });
-    const original = manager.workspaceManager.reclaim.bind(manager.workspaceManager);
-    vi.spyOn(manager.workspaceManager, 'reclaim').mockImplementation(async taskId => { entered = true; await gate; return original(taskId); });
-    let closed = false;
-    const closing = scope.close().then(() => { closed = true; });
-    try {
-      await vi.waitFor(() => expect(entered).toBe(true), { timeout: 10_000 });
-      expect(closed).toBe(false);
-      expect((await fs.stat(workers[0].cwd)).isDirectory()).toBe(true);
-    } finally { release(); await closing; }
-    await expect(fs.lstat(workers[0].cwd)).rejects.toMatchObject({ code: 'ENOENT' });
-    expect(JSON.parse(await fs.readFile(pointer, 'utf8')).threadId).toBe('fixture-conversation');
-    expect(await manager.workspaceManager.describe(first.taskId)).toMatchObject({ disposition: 'applied' });
+    const first = await gitPhase('prepare and edit the idle-close handoff', async () => {
+      const first = await startExecuting(scope, 'first');
+      await fs.writeFile(path.join(workers[0].cwd, 'source.txt'), 'closure handoff\n');
+      workers[0].finish({ success: true });
+      return first;
+    });
+    const completed = await gitPhase('collect the idle-close handoff', () => result(scope, first.taskId, 'first-result'));
+    const pointer = await gitPhase('merge the idle handoff and retain its native pointer', async () => {
+      await runGit(fixture.root, ['merge', '--ff-only', completed.artifact!.outputCommit]);
+      const pointer = path.join(fixture.directory, '.remote-cli', 'codex-sessions', `${factory.mock.calls[0][3]}.json`);
+      await fs.mkdir(path.dirname(pointer), { recursive: true });
+      await fs.writeFile(pointer, JSON.stringify({ threadId: 'fixture-conversation', cwd: workers[0].cwd }));
+      return pointer;
+    });
+    await gitPhase('await gated idle-close reclamation and verify its receipt', async () => {
+      let release!: () => void;
+      let entered = false;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const original = manager.workspaceManager.reclaim.bind(manager.workspaceManager);
+      vi.spyOn(manager.workspaceManager, 'reclaim').mockImplementation(async taskId => { entered = true; await gate; return original(taskId); });
+      let closed = false;
+      const closing = scope.close().then(() => { closed = true; });
+      try {
+        await vi.waitFor(() => expect(entered).toBe(true), { timeout: 10_000 });
+        expect(closed).toBe(false);
+        expect((await fs.stat(workers[0].cwd)).isDirectory()).toBe(true);
+      } finally { release(); await closing; }
+      await expect(fs.lstat(workers[0].cwd)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(JSON.parse(await fs.readFile(pointer, 'utf8')).threadId).toBe('fixture-conversation');
+      expect(await manager.workspaceManager.describe(first.taskId)).toMatchObject({ disposition: 'applied' });
+    });
     const nextScope = manager.begin({ ...parent, messageId: 'next-parent' });
-    const next = await startExecuting(nextScope, 'recreated');
-    expect(workers[1].cwd).toBe(workers[0].cwd);
-    expect(factory.mock.calls[1][3]).toBe(factory.mock.calls[0][3]);
-    workers[1].finish({ success: true });
-    await result(nextScope, next.taskId, 'next-result');
-  }, 30_000);
+    const next = await gitPhase('recreate the idle-closed lane with its existing conversation', async () => {
+      const next = await startExecuting(nextScope, 'recreated');
+      expect(workers[1].cwd).toBe(workers[0].cwd);
+      expect(factory.mock.calls[1][3]).toBe(factory.mock.calls[0][3]);
+      workers[1].finish({ success: true });
+      return next;
+    });
+    await gitPhase('collect the recreated idle-closed lane', () => result(nextScope, next.taskId, 'next-result'));
+  }, 6 * 30_000 + 5_000);
 
   it('defers close-time recognition when another owner holds the delivery workspace', async () => {
     const scope = manager.begin(parent);
@@ -906,30 +946,45 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     const scope = manager.begin(parent);
     const first = await startExecuting(scope, 'first');
     workers[0].finish({ success: true });
-    await result(scope, first.taskId, 'r1');
-    await fs.writeFile(path.join(fixture.root, 'source.txt'), 'coordinator updated input\n');
-    const second = await startExecuting(scope, 'second');
-    expect(await fs.readFile(path.join(workers[1].cwd, 'source.txt'), 'utf8')).toBe('coordinator updated input\n');
-    workers[1].finish({ success: true });
-    await result(scope, second.taskId, 'r2');
-  });
+    await gitPhase('collect the earlier read-only cohort', () => result(scope, first.taskId, 'r1'));
+    const second = await gitPhase('prepare a later cohort with changed coordinator input', async () => {
+      await fs.writeFile(path.join(fixture.root, 'source.txt'), 'coordinator updated input\n');
+      const second = await startExecuting(scope, 'second');
+      expect(await fs.readFile(path.join(workers[1].cwd, 'source.txt'), 'utf8')).toBe('coordinator updated input\n');
+      workers[1].finish({ success: true });
+      return second;
+    });
+    await gitPhase('collect the later read-only cohort', () => result(scope, second.taskId, 'r2'));
+  }, 4 * 30_000 + 5_000);
 
   it('collects cancelled same-backend edits for recovery without modifying the coordinator and rejects foreign integration', async () => {
     const scope = manager.begin(parent);
-    const first = await startExecuting(scope, 'first', parent.backend);
-    await fs.writeFile(path.join(workers[0].cwd, 'partial.txt'), 'partial output\n');
-    expect(await scope.invoke('remote_cli_cancel', { taskId: first.taskId }, 'cancel')).toMatchObject({
-      state: 'cancelled', artifact: { disposition: 'retained' } });
-    const inspection: any = await scope.invoke('remote_cli_integrate', { taskId: first.taskId }, 'inspect');
-    await expect(scope.invoke('remote_cli_integrate', { taskId: first.taskId, action: 'apply',
-      expectedRevision: inspection.revision }, 'apply')).resolves.toMatchObject({ disposition: 'retained' });
+    const first = await gitPhase('prepare and edit the cancellation worker', async () => {
+      const first = await startExecuting(scope, 'first', parent.backend);
+      await fs.writeFile(path.join(workers[0].cwd, 'partial.txt'), 'partial output\n');
+      return first;
+    });
+    await gitPhase('cancel and capture the worker recovery artifact', async () => {
+      expect(await scope.invoke('remote_cli_cancel', { taskId: first.taskId }, 'cancel')).toMatchObject({
+        state: 'cancelled', artifact: { disposition: 'retained' } });
+    });
+    const inspection: any = await gitPhase('inspect the retained cancellation artifact', () =>
+      scope.invoke('remote_cli_integrate', { taskId: first.taskId }, 'inspect'));
+    await gitPhase('preserve retained disposition on explicit apply', async () => {
+      await expect(scope.invoke('remote_cli_integrate', { taskId: first.taskId, action: 'apply',
+        expectedRevision: inspection.revision }, 'apply')).resolves.toMatchObject({ disposition: 'retained' });
+    });
     const other = manager.begin({ ...parent, thread: { ...parent.thread, id: 'other' } });
-    await expect(other.invoke('remote_cli_integrate', { taskId: first.taskId }, 'foreign')).rejects.toThrow('foreign');
-    expect(await gitText(fixture.root, ['show', `${inspection.outputCommit}:partial.txt`])).toContain('partial output');
-    await expect(fs.stat(workers[0].cwd)).rejects.toMatchObject({ code: 'ENOENT' });
-    await expect(fs.stat(path.join(fixture.root, 'partial.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
-    await other.close();
-  });
+    await gitPhase('reject foreign artifact integration', async () => {
+      await expect(other.invoke('remote_cli_integrate', { taskId: first.taskId }, 'foreign')).rejects.toThrow('foreign');
+    });
+    await gitPhase('verify recovery bytes and coordinator isolation', async () => {
+      expect(await gitText(fixture.root, ['show', `${inspection.outputCommit}:partial.txt`])).toContain('partial output');
+      await expect(fs.stat(workers[0].cwd)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(fs.stat(path.join(fixture.root, 'partial.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+    await gitPhase('close the foreign scope', () => other.close());
+  }, 7 * 30_000 + 5_000);
 
   it('fails closed on damaged Git metadata instead of starting shared-directory workers', async () => {
     await runGit(fixture.root, ['symbolic-ref', 'HEAD', 'refs/heads/unborn']);
