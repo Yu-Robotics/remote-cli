@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.222] - 2026-11-06
+
+### Fixed
+- Include Linux arm64 native helpers in the CLI package so output-file retrieval can create snapshots on that architecture.
+- Build and test Linux arm64 helpers on a native CI runner, retain the minimum Node.js compatibility check, and require all six platform/architecture artifacts with matching source and binary hashes before publication.
+
 ## [1.6.221] - 2026-11-05
 
 ### Added
