@@ -38,11 +38,9 @@ describe('Integration: Full Workflow', () => {
   let mockAxios: any;
   let mockWsClient: any;
   let tempConfigDir: string;
-  let originalConfigDir: string;
   let originalPath: string | undefined;
-  let testCounter = 0;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     originalPath = process.env.PATH;
     vi.clearAllMocks();
 
@@ -61,15 +59,13 @@ describe('Integration: Full Workflow', () => {
     (WebSocketClient as any).mockImplementation(() => mockWsClient);
 
     // Use temporary config directory for isolation
-    testCounter++;
-    tempConfigDir = path.join(os.tmpdir(), `remote-cli-test-${Date.now()}-${testCounter}-${Math.random().toString(36).substring(7)}`);
-    fs.mkdirSync(tempConfigDir, { recursive: true });
+    tempConfigDir = await fs.promises.realpath(await fs.promises.mkdtemp(path.join(os.tmpdir(), 'remote-cli-workflow-')));
 
     // Set config path for ConfigManager
-    originalConfigDir = process.env.HOME || '';
     const testHome = path.join(tempConfigDir, 'home');
     fs.mkdirSync(testHome, { recursive: true });
-    process.env.HOME = testHome;
+    vi.stubEnv('HOME', testHome);
+    vi.stubEnv('USERPROFILE', testHome);
   });
 
   afterEach(() => {
@@ -77,7 +73,7 @@ describe('Integration: Full Workflow', () => {
     if (fs.existsSync(tempConfigDir)) {
       fs.rmSync(tempConfigDir, { recursive: true, force: true });
     }
-    process.env.HOME = originalConfigDir;
+    vi.unstubAllEnvs();
     if (originalPath === undefined) delete process.env.PATH;
     else process.env.PATH = originalPath;
     vi.clearAllMocks();
@@ -89,6 +85,7 @@ describe('Integration: Full Workflow', () => {
       mockAxios.post.mockResolvedValueOnce({
         data: {
           success: true,
+          deviceAuth: true,
           bindingCode: 'ABC-123-XYZ',
           expiresAt: Date.now() + 300000,
         },
@@ -100,6 +97,7 @@ describe('Integration: Full Workflow', () => {
       });
 
       expect(initResult.success).toBe(true);
+      expect(initResult.keyEnrollmentRequested).toBe(true);
       expect(initResult.bindingCode).toBe('ABC-123-XYZ');
       expect(initResult.deviceId).toMatch(/^dev_[a-z0-9]+_[a-z0-9\-]+$/);
 
@@ -155,6 +153,7 @@ describe('Integration: Full Workflow', () => {
       mockAxios.post.mockResolvedValueOnce({
         data: {
           success: true,
+          deviceAuth: true,
           bindingCode: 'XYZ-789-ABC',
           expiresAt: Date.now() + 300000,
         },
@@ -190,6 +189,7 @@ describe('Integration: Full Workflow', () => {
       mockAxios.post.mockResolvedValueOnce({
         data: {
           success: true,
+          deviceAuth: true,
           bindingCode: 'ABC-111-AAA',
           expiresAt: Date.now() + 300000,
         },
@@ -214,6 +214,7 @@ describe('Integration: Full Workflow', () => {
       mockAxios.post.mockResolvedValueOnce({
         data: {
           success: true,
+          deviceAuth: true,
           bindingCode: 'ABC-222-BBB',
           expiresAt: Date.now() + 300000,
         },
@@ -237,6 +238,7 @@ describe('Integration: Full Workflow', () => {
       mockAxios.post.mockResolvedValueOnce({
         data: {
           success: true,
+          deviceAuth: true,
           bindingCode: 'TEST-CODE-123',
           expiresAt: Date.now() + 300000,
         },
@@ -274,7 +276,9 @@ describe('Integration: Full Workflow', () => {
       });
 
       expect(result.success).toBe(false);
-      expect(result.error).toContain('Network timeout');
+      expect(result.error).toContain('Secure file enrollment request failed');
+      expect(result.error).toContain('--without-files');
+      expect(mockAxios.post).toHaveBeenCalledOnce();
     });
 
     it('should handle server errors during initialization', async () => {
@@ -290,7 +294,9 @@ describe('Integration: Full Workflow', () => {
       });
 
       expect(result.success).toBe(false);
-      expect(result.error).toContain('Server');
+      expect(result.error).toContain('Router did not confirm secure file enrollment');
+      expect(result.error).toContain('--without-files');
+      expect(mockAxios.post).toHaveBeenCalledOnce();
     });
 
     it('should handle WebSocket connection failure', async () => {
@@ -298,6 +304,7 @@ describe('Integration: Full Workflow', () => {
       mockAxios.post.mockResolvedValueOnce({
         data: {
           success: true,
+          deviceAuth: true,
           bindingCode: 'ABC-123-XYZ',
           expiresAt: Date.now() + 300000,
         },
@@ -321,6 +328,7 @@ describe('Integration: Full Workflow', () => {
       mockAxios.post.mockResolvedValueOnce({
         data: {
           success: true,
+          deviceAuth: true,
           bindingCode: 'ABC-123-XYZ',
           expiresAt: Date.now() + 300000,
         },
@@ -343,6 +351,7 @@ describe('Integration: Full Workflow', () => {
       mockAxios.post.mockResolvedValueOnce({
         data: {
           success: true,
+          deviceAuth: true,
           bindingCode: 'PERSIST-TEST',
           expiresAt: Date.now() + 300000,
         },

@@ -19,15 +19,18 @@ beforeEach(async () => {
   vi.spyOn(console, 'log').mockImplementation(() => {});
   vi.spyOn(Command.prototype, 'parse').mockImplementation(function (this: Command) { program = this; return this; });
   await import('../../src/index');
+  program.commands.find(command => command.name() === 'init')!
+    .exitOverride().configureOutput({ writeErr: vi.fn() });
 });
 afterEach(() => { vi.restoreAllMocks(); vi.clearAllMocks(); });
 
-it('passes --with-files and --force through and prints approval before startup', async () => {
+it.each([{ flags: [], force: undefined }, { flags: ['--with-files', '--force'], force: true }])(
+  'defaults to file-key approval and keeps --with-files compatible: $flags', async ({ flags, force }) => {
   vi.mocked(initCommand).mockResolvedValue({ success: true, bindingCode: 'ABC-123-XYZ',
     deviceId: 'synthetic-device', keyEnrollmentRequested: true });
-  await program.parseAsync(['init', '--server', 'https://router.example.com', '--with-files', '--force'], { from: 'user' });
+  await program.parseAsync(['init', '--server', 'https://router.example.com', ...flags], { from: 'user' });
   expect(initCommand).toHaveBeenCalledWith(expect.objectContaining({
-    serverUrl: 'https://router.example.com', withFiles: true, force: true,
+    serverUrl: 'https://router.example.com', withFiles: true, force,
   }));
   const output = vi.mocked(console.log).mock.calls.map(args => args.join(' ')).join('\n');
   expect(output).toContain('Key enrollment requested');
@@ -38,11 +41,19 @@ it('passes --with-files and --force through and prints approval before startup',
   expect(output).not.toContain('files enable');
 });
 
-it('keeps legacy init opt-in and does not claim key enrollment', async () => {
+it('requires --without-files for legacy HTTP initialization without key enrollment', async () => {
   vi.mocked(initCommand).mockResolvedValue({ success: true, bindingCode: 'ABC-123-XYZ', deviceId: 'synthetic-device' });
-  await program.parseAsync(['init', '--server', 'http://router.example.com'], { from: 'user' });
-  expect(initCommand).toHaveBeenCalledWith(expect.objectContaining({ withFiles: undefined }));
+  await program.parseAsync(['init', '--server', 'http://router.example.com', '--without-files'], { from: 'user' });
+  expect(initCommand).toHaveBeenCalledWith(expect.objectContaining({ withFiles: false }));
   const output = vi.mocked(console.log).mock.calls.map(args => args.join(' ')).join('\n');
   expect(output).toContain('Initialization successful');
   expect(output).not.toContain('Key enrollment');
 });
+
+it.each([{ flags: ['--with-files', '--without-files'] }, { flags: ['--without-files', '--with-files'] }])(
+  'rejects conflicting enrollment flags before invoking initialization: $flags', async ({ flags }) => {
+    await expect(program.parseAsync(['init', '--server', 'https://router.example.com', ...flags], { from: 'user' }))
+      .rejects.toMatchObject({ code: 'commander.conflictingOption' });
+    // All network requests, identity preparation and configuration writes live behind this boundary.
+    expect(initCommand).not.toHaveBeenCalled();
+  });

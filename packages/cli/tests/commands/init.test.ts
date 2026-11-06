@@ -3,6 +3,8 @@ import { initCommand } from '../../src/commands/init';
 import { ConfigManager } from '../../src/config/ConfigManager';
 import { machineId } from 'node-machine-id';
 import axios from 'axios';
+import os from 'os';
+import path from 'path';
 
 // Mock dependencies
 vi.mock('../../src/config/ConfigManager');
@@ -17,13 +19,15 @@ vi.mock('ora', () => ({
   })),
 }));
 
-describe('init command', () => {
+describe('explicit text-only init command', () => {
   let mockConfig: any;
   const mockMachineId = machineId as any;
   const mockAxios = axios as any;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.spyOn(os, 'homedir').mockReturnValue(path.join(os.tmpdir(), 'remote-cli-init-fixture'));
+    vi.spyOn(os, 'hostname').mockReturnValue('synthetic-device');
 
     mockConfig = {
       set: vi.fn(),
@@ -37,6 +41,7 @@ describe('init command', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.clearAllMocks();
   });
 
@@ -52,6 +57,7 @@ describe('init command', () => {
       });
 
       const result = await initCommand({
+        withFiles: false,
         serverUrl: 'https://test-server.com',
       });
 
@@ -73,6 +79,7 @@ describe('init command', () => {
       });
 
       await initCommand({
+        withFiles: false,
         serverUrl: 'https://test-server.com',
       });
 
@@ -83,6 +90,7 @@ describe('init command', () => {
       mockAxios.post.mockRejectedValue(new Error('Network error'));
 
       const result = await initCommand({
+        withFiles: false,
         serverUrl: 'https://test-server.com',
       });
 
@@ -97,6 +105,7 @@ describe('init command', () => {
       mockConfig.get.mockReturnValue('dev_existing_12345');
 
       const result = await initCommand({
+        withFiles: false,
         serverUrl: 'https://test-server.com',
       });
 
@@ -119,6 +128,7 @@ describe('init command', () => {
       });
 
       const result = await initCommand({
+        withFiles: false,
         serverUrl: 'https://test-server.com',
         force: true,
       });
@@ -141,6 +151,7 @@ describe('init command', () => {
       });
 
       await initCommand({
+        withFiles: false,
         serverUrl: 'https://test-server.com',
         allowedDirs: ['~/projects', '~/work'],
       });
@@ -162,6 +173,7 @@ describe('init command', () => {
       });
 
       await initCommand({
+        withFiles: false,
         serverUrl: 'https://test-server.com',
       });
 
@@ -175,6 +187,7 @@ describe('init command', () => {
   describe('error handling', () => {
     it('should handle invalid server URL', async () => {
       const result = await initCommand({
+        withFiles: false,
         serverUrl: 'invalid-url',
       });
 
@@ -191,6 +204,7 @@ describe('init command', () => {
       });
 
       const result = await initCommand({
+        withFiles: false,
         serverUrl: 'https://test-server.com',
       });
 
@@ -202,6 +216,7 @@ describe('init command', () => {
       mockMachineId.mockRejectedValue(new Error('Cannot read machine ID'));
 
       const result = await initCommand({
+        withFiles: false,
         serverUrl: 'https://test-server.com',
       });
 

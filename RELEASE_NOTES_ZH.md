@@ -5,8 +5,8 @@
 ## [1.6.223] - 2026-11-06
 
 ### 首次绑定时一并启用文件能力
-- [output-files|文件取回] 新设备可用 `remote-cli init --with-files` 在首次绑定时申请文件授权，飞书确认一次即可，无需再单独执行启用命令。
-- [output-files|文件取回] 保留普通初始化方式；文件授权仍需 HTTPS 和支持该能力的 Router。
+- [output-files|文件取回] 新设备直接运行 `remote-cli init` 即会申请文件授权，仍需在飞书确认后启动；`--with-files` 保持兼容，无需再单独执行启用命令。
+- [output-files|文件取回] 旧 Router 或非本机 HTTP 的纯文本初始化需明确添加 `--without-files`；文件授权仍需 HTTPS 和支持该能力的 Router，失败时不会自动降级。
 
 ## [1.6.222] - 2026-11-06
 

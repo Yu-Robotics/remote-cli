@@ -19,7 +19,7 @@ describe('initial binding with device key enrollment', () => {
   let values: Map<string, unknown>;
   let set: ReturnType<typeof vi.fn>;
   const serverUrl = 'https://router.example.com';
-  const options = { serverUrl, withFiles: true };
+  const options = { serverUrl };
   const accepted = { success: true, deviceAuth: true, bindingCode: 'ABC-123-XYZ' };
   const request = () => vi.mocked(axios.post).mock.calls.at(-1)![1] as any;
 
@@ -27,6 +27,8 @@ describe('initial binding with device key enrollment', () => {
     vi.clearAllMocks();
     root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'init-files-')));
     vi.spyOn(os, 'homedir').mockReturnValue(root);
+    vi.stubEnv('HOME', root);
+    vi.stubEnv('USERPROFILE', root);
     vi.spyOn(os, 'hostname').mockReturnValue('synthetic-device');
     values = new Map();
     set = vi.fn(async (key, value) => { values.set(key, value); });
@@ -34,9 +36,9 @@ describe('initial binding with device key enrollment', () => {
       has: (key: string) => values.has(key), get: (key: string) => values.get(key), set } as any);
     vi.mocked(axios.post).mockResolvedValue({ data: accepted });
   });
-  afterEach(async () => { vi.restoreAllMocks(); await fs.rm(root, { recursive: true, force: true }); });
+  afterEach(async () => { vi.restoreAllMocks(); vi.unstubAllEnvs(); await fs.rm(root, { recursive: true, force: true }); });
 
-  it('persists the key before requesting one signed binding code and reports pending approval', async () => {
+  it('defaults the API to persisting a key before requesting signed binding and reports pending approval', async () => {
     vi.mocked(axios.post).mockImplementationOnce(async (_url, body: any) => {
       const saved = await loadIdentity(root, serverUrl, body.deviceId);
       expect(saved?.publicKey).toBe(body.devicePublicKey);
@@ -59,9 +61,16 @@ describe('initial binding with device key enrollment', () => {
 
   it('keeps legacy initialization free of key creation and secure request fields', async () => {
     vi.mocked(axios.post).mockResolvedValue({ data: { success: true, bindingCode: accepted.bindingCode } });
-    expect(await initCommand({ serverUrl: 'http://router.example.com' })).toMatchObject({ success: true });
+    expect(await initCommand({ serverUrl: 'http://router.example.com', withFiles: false })).toMatchObject({ success: true });
     expect(request()).toEqual({ deviceId: expect.any(String), deviceName: 'synthetic-device', platform: os.platform() });
     expect(await fs.readdir(root)).toEqual([]);
+    expect(axios.post).toHaveBeenCalledOnce();
+  });
+
+  it('continues accepting explicit secure API enrollment', async () => {
+    expect(await initCommand({ ...options, withFiles: true })).toMatchObject({ success: true, keyEnrollmentRequested: true });
+    expect(request().devicePublicKey).toEqual(expect.any(String));
+    expect(axios.post).toHaveBeenCalledOnce();
   });
 
   it('reuses the saved key across --force and never requests again without --force', async () => {
@@ -81,6 +90,7 @@ describe('initial binding with device key enrollment', () => {
     const result = await initCommand(options);
     expect(result.success).toBe(false);
     expect(result.error).not.toContain('synthetic-private-error');
+    expect(result.error).toContain('--without-files');
     expect(set).not.toHaveBeenCalled();
     expect(axios.post).toHaveBeenCalledOnce();
     const first = request();
@@ -93,14 +103,18 @@ describe('initial binding with device key enrollment', () => {
     ...['', 'a'.repeat(65), 'A'.repeat(65), 'ABC\n', 'ABC DEF', '/bind ABC', 'ABC--DEF', 'ABC-', 'abc', 123].map(bindingCode => ({ ...accepted, bindingCode })),
   ])('rejects malformed or unsupported enrollment response %j', async data => {
     vi.mocked(axios.post).mockResolvedValueOnce({ data });
-    expect((await initCommand(options)).success).toBe(false);
+    const result = await initCommand(options);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('--without-files');
     expect(set).not.toHaveBeenCalled();
     expect(axios.post).toHaveBeenCalledOnce();
   });
 
   it.each(['http://router.example.com', 'https://user:password@router.example.com',
     'https://router.example.com/?key=synthetic', 'https://router.example.com/#fragment'])('rejects unsafe enrollment URL %s before creating a key', async serverUrl => {
-    expect((await initCommand({ ...options, serverUrl })).success).toBe(false);
+    const result = await initCommand({ ...options, serverUrl });
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('--without-files');
     expect(axios.post).not.toHaveBeenCalled();
     expect(set).not.toHaveBeenCalled();
     expect(await fs.readdir(root)).toEqual([]);
