@@ -266,6 +266,137 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     return trackCall(scope.invoke('remote_cli_result', { taskId, waitSeconds: 0 }, id) as Promise<DelegatedTaskResult>);
   });
 
+  const finishAndReclaim = async (
+    scope: ReturnType<DelegationManager['begin']>, taskId: string, finish: () => void,
+  ) => {
+    if (draining || phaseAdmissionClosed) throw new Error('Fixture is draining; no new finalization phases may start');
+    type Entry = { operation: Promise<unknown> };
+    let captured!: (entry: Entry) => void, reclaimed!: (entry: Entry) => void;
+    const captureEntry = new Promise<Entry>(resolve => { captured = resolve; });
+    const reclaimEntry = new Promise<Entry>(resolve => { reclaimed = resolve; });
+    const collect = manager.workspaceManager.collect.bind(manager.workspaceManager);
+    const reclaim = manager.workspaceManager.reclaim.bind(manager.workspaceManager);
+    const captureSpy = vi.spyOn(manager.workspaceManager, 'collect').mockImplementation((workspace, ...args) => {
+      const operation = collect(workspace, ...args);
+      if (workspace.taskId === taskId) captured({ operation: trackCall(operation) });
+      // Return the original promise: a fixture deadline must not let runtime
+      // finalization release ownership while its Git operation is still running.
+      return operation;
+    });
+    const reclaimSpy = vi.spyOn(manager.workspaceManager, 'reclaim').mockImplementation((id, ...args) => {
+      const operation = reclaim(id, ...args);
+      if (id === taskId) reclaimed({ operation: trackCall(operation) });
+      return operation;
+    });
+    const completed = trackCall(scope.collectPendingResults());
+    void completed.catch(() => undefined);
+    const awaitOperation = (name: string, entry: Promise<Entry>) => gitPhase(name, async () => {
+      const entered = await Promise.race([entry, completed.then(results => {
+        const task = results.find(result => result.taskId === taskId);
+        throw new Error(`Fixture task ended before ${name}: ${JSON.stringify(task)}`);
+      })]);
+      await entered.operation;
+    });
+    try {
+      finish();
+      await awaitOperation('capture the reused pooled worker artifact', captureEntry);
+      await awaitOperation('reclaim the reused pooled checkout', reclaimEntry);
+      return await gitPhase('finish the reused pooled task metadata', () => completed);
+    } finally {
+      captureSpy.mockRestore(); reclaimSpy.mockRestore();
+    }
+  };
+
+  it('bounds artifact capture and reclamation separately without replacing their runtime promises', async () => {
+    const scope = manager.begin(parent);
+    const task = await startInPhases(scope, 'separate-finalization');
+    let enteredCapture!: () => void, releaseCapture!: () => void, enteredReclaim!: () => void, releaseReclaim!: () => void;
+    const captureEntered = new Promise<void>(resolve => { enteredCapture = resolve; });
+    const captureGate = new Promise<void>(resolve => { releaseCapture = resolve; });
+    const reclaimEntered = new Promise<void>(resolve => { enteredReclaim = resolve; });
+    const reclaimGate = new Promise<void>(resolve => { releaseReclaim = resolve; });
+    // Collection verifies once; reclamation verifies again before recording/removing
+    // the checkout. Hold only these entries, never advance timers during real Git I/O.
+    const workspaceManager = manager.workspaceManager as any;
+    const verify = workspaceManager.verifyCheckout.bind(workspaceManager);
+    let checks = 0;
+    vi.spyOn(workspaceManager, 'verifyCheckout').mockImplementation(async (...args) => {
+      if (++checks === 1) { enteredCapture(); await captureGate; }
+      else if (checks === 2) { enteredReclaim(); await reclaimGate; }
+      return verify(...args);
+    });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let settled = false;
+    const finishing = finishAndReclaim(scope, task.taskId, () => workers[0].finish({ success: true }));
+    const outcome = finishing.then(value => { settled = true; return { value }; }, error => { settled = true; return { error }; });
+    const endedBeforeEntry = () => { throw new Error('Task finalization ended before the verification entry signal'); };
+    try {
+      await Promise.race([captureEntered, finishing.then(endedBeforeEntry)]);
+      await vi.advanceTimersByTimeAsync(16_000); releaseCapture();
+      await Promise.race([reclaimEntered, finishing.then(endedBeforeEntry)]);
+      await vi.advanceTimersByTimeAsync(16_000);
+      expect(settled).toBe(false);
+      expect((await fs.lstat(`${manager.laneStore.storageDirectory}.ownership`)).isFile()).toBe(true);
+      vi.useRealTimers(); releaseReclaim();
+      const results = await gitPhase('complete real reclamation after the controlled holds', () => finishing);
+      expect(results.find(result => result.taskId === task.taskId)).toMatchObject({ state: 'succeeded', artifact: { disposition: 'applied' } });
+      await expect(fs.lstat(workers[0].cwd)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      vi.useRealTimers(); releaseCapture(); releaseReclaim();
+      await Promise.allSettled([outcome, settleFixture()]);
+    }
+    expect(pendingCalls.size).toBe(0);
+  }, 6 * 30_000 + 5_000);
+
+  it.each(['resolve', 'reject'] as const)('drains a timed-out native collection that later %ss before fixture removal', async completion => {
+    const scope = manager.begin(parent);
+    const task = await startInPhases(scope, 'timed-finalization');
+    const ownership = `${manager.laneStore.storageDirectory}.ownership`;
+    const marker = path.join(fixture.directory, 'late-capture.txt');
+    let entered!: () => void, release!: () => void;
+    const verifying = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const workspaceManager = manager.workspaceManager as any;
+    const verify = workspaceManager.verifyCheckout.bind(workspaceManager);
+    vi.spyOn(workspaceManager, 'verifyCheckout').mockImplementationOnce(async (...args) => {
+      entered(); await gate;
+      expect((await fs.lstat(ownership)).isFile()).toBe(true);
+      await fs.writeFile(marker, 'capture settled under fixture ownership');
+      if (completion === 'reject') throw new Error('Synthetic late capture rejection');
+      return verify(...args);
+    });
+    const releaseOwnership = vi.spyOn(DelegationOwnership.prototype, 'release');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const finishing = finishAndReclaim(scope, task.taskId, () => workers[0].finish({ success: true }));
+    const outcome = finishing.catch(error => error);
+    let shutdown: Promise<void> | undefined;
+    try {
+      await Promise.race([verifying, finishing.then(() => { throw new Error('Task ended before capture verification'); })]);
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(await outcome).toMatchObject({ message: 'Git lifecycle phase exceeded 30 seconds: capture the reused pooled worker artifact' });
+      expect(pendingCalls.size).toBeGreaterThan(0);
+      await expect(startInPhases(scope, 'must-not-start')).rejects.toThrow('Fixture is draining');
+      const lateFinish = vi.fn();
+      await expect(finishAndReclaim(scope, task.taskId, lateFinish)).rejects.toThrow('Fixture is draining');
+      expect(lateFinish).not.toHaveBeenCalled();
+      expect(workers).toHaveLength(1);
+      vi.useRealTimers();
+      let drained = false;
+      shutdown = settleFixture().then(() => { drained = true; });
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(drained).toBe(false);
+      expect(releaseOwnership).not.toHaveBeenCalled();
+      expect((await fs.stat(fixture.directory)).isDirectory()).toBe(true);
+      release(); await shutdown;
+      expect(await fs.readFile(marker, 'utf8')).toBe('capture settled under fixture ownership');
+      expect(releaseOwnership).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers(); release();
+      await Promise.allSettled([finishing, shutdown ?? settleFixture()]);
+    }
+    expect(pendingCalls.size).toBe(0);
+  }, 6 * 30_000 + 5_000);
+
   it('bounds acceptance and execution separately across successive input and checkout preparation', async () => {
     const scope = manager.begin(parent);
     let enteredInput!: () => void, releaseInput!: () => void, enteredCheckout!: () => void, releaseCheckout!: () => void;
@@ -978,10 +1109,13 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     expect(third.state).toBe('running');
     expect(workers[2].cwd).toBe(workers[1].cwd);
     expect(workers[2].cwd).not.toBe(workers[0].cwd);
+    expect(factory.mock.calls[2][3]).toBe(factory.mock.calls[1][3]);
+    expect(factory.mock.calls[2][3]).not.toBe(factory.mock.calls[0][3]);
     expect((await manager.laneStore.lanesForThread(parent.thread.id)).some(lane => lane.state === 'dirty')).toBe(false);
-    workers[2].finish({ success: true });
-    await gitPhase('collect the reused pooled worker', () => scope.collectPendingResults());
-  }, 125_000);
+    const completed = await finishAndReclaim(scope, third.taskId, () => workers[2].finish({ success: true }));
+    expect(completed.find(task => task.taskId === third.taskId)).toMatchObject({ state: 'succeeded', artifact: { disposition: 'applied' } });
+    expect(await fs.readFile(path.join(workers[0].cwd, 'pending.txt'), 'utf8')).toBe('pending result\n');
+  }, 6 * 30_000 + 5_000);
 
   it('returns an untouched reused lane to ready when baseline capture fails', async () => {
     const scope = manager.begin(parent);

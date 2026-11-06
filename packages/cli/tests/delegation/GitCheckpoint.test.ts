@@ -14,10 +14,108 @@ vi.mock('child_process', async importOriginal => {
   return { ...actual, spawn: vi.fn(actual.spawn) };
 });
 
+const CHECKPOINT_PHASE_MS = 30_000;
+
+// A phase deadline does not cancel admitted filesystem/Git work. Keep ownership
+// until every admitted promise settles, including siblings of a rejected write.
+function checkpointPhases() {
+  const pending = new Set<Promise<unknown>>();
+  let closing = false;
+  const admit = <T>(action: () => Promise<T>): Promise<T> => {
+    const call = Promise.resolve().then(() => {
+      if (closing) throw new Error('Checkpoint fixture is draining; no new work may start');
+      return action();
+    });
+    pending.add(call);
+    void call.then(() => pending.delete(call), () => pending.delete(call));
+    return call;
+  };
+  return {
+    async run<T>(name: string, action: () => Promise<T>): Promise<T> {
+      const call = admit(action);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([call, new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            closing = true;
+            reject(new Error(`Checkpoint phase exceeded 30 seconds: ${name}`));
+          }, CHECKPOINT_PHASE_MS);
+        })]);
+      } finally { clearTimeout(timer); }
+    },
+    async batch(actions: Array<() => Promise<void>>): Promise<void> {
+      const results = await Promise.allSettled(actions.map(admit));
+      for (const result of results) if (result.status === 'rejected') throw result.reason;
+    },
+    async drain(): Promise<void> {
+      closing = true;
+      await Promise.allSettled([...pending]);
+    },
+  };
+}
+
 describe('private Git checkpoints', () => {
   let fixture: Awaited<ReturnType<typeof gitFixture>>;
-  beforeEach(async () => { fixture = await gitFixture(); });
-  afterEach(async () => { vi.restoreAllMocks(); await fs.rm(fixture.directory, { recursive: true, force: true }); });
+  let phases: ReturnType<typeof checkpointPhases>;
+  beforeEach(async () => { phases = checkpointPhases(); fixture = await gitFixture(); });
+  const cleanupFixture = async () => {
+    await phases.drain();
+    vi.restoreAllMocks();
+    await fs.rm(fixture.directory, { recursive: true, force: true });
+  };
+  // Drain retains the fixture and mocks after a phase deadline; removal has a
+  // separate teardown watchdog and never races an admitted writer.
+  afterEach(cleanupFixture, 2 * CHECKPOINT_PHASE_MS);
+
+  it.each(['resolve', 'reject'] as const)('owns timed-out write batches that later %s until fixture removal', async completion => {
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const write = vi.spyOn(fs, 'writeFile');
+    const lateAction = vi.fn(async () => undefined);
+    let settled = false, writeFinished = false, mockSurvived = false;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const running = (async () => {
+      await phases.run('held write batch', () => phases.batch([
+        async () => { throw new Error('Synthetic early write failure'); },
+        async () => {
+          entered(); await gate;
+          mockSurvived = fs.writeFile === write;
+          await fs.writeFile(path.join(fixture.root, 'late-result'), 'synthetic completed write');
+          writeFinished = true;
+          if (completion === 'reject') throw new Error('Synthetic late write failure');
+        },
+      ]));
+      await phases.run('must not capture after timeout', lateAction);
+    })();
+    const outcome = running.then(() => { settled = true; return undefined; }, error => { settled = true; return error; });
+    let cleanup: Promise<void> | undefined;
+    try {
+      await started;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(CHECKPOINT_PHASE_MS + 1);
+      expect((await outcome).message).toBe('Checkpoint phase exceeded 30 seconds: held write batch');
+      vi.useRealTimers();
+      let removed = false;
+      cleanup = cleanupFixture().then(() => { removed = true; });
+      void cleanup.catch(() => undefined);
+      expect(fs.writeFile).toBe(write);
+      expect(removed).toBe(false);
+      expect(await fs.stat(fixture.directory)).toBeDefined();
+      await expect(phases.run('late admission', lateAction)).rejects.toThrow('Checkpoint fixture is draining');
+      release(); await cleanup;
+      expect(writeFinished).toBe(true);
+      expect(mockSurvived).toBe(true);
+      expect(fs.writeFile).not.toBe(write);
+      expect(lateAction).not.toHaveBeenCalled();
+      await expect(fs.stat(fixture.directory)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      vi.useRealTimers(); release();
+      await Promise.allSettled([running, ...(cleanup ? [cleanup] : [])]);
+      await phases.drain();
+    }
+  });
 
   it.each(['win32', 'linux', 'darwin'] as const)('preserves alias components using the %s Git link representation', platform => {
     const native = ['alias', '..', 'nested', 'file.txt'].join(path.win32.sep);
@@ -591,28 +689,54 @@ describe('private Git checkpoints', () => {
     if (kind === 'committed') expect(snapshot.tree).toBe(await gitText(fixture.root, ['rev-parse', 'HEAD^{tree}']));
   }, 30_000);
 
+  // Six independent operations retain 30-second deadlines. The outer watchdog
+  // covers their sum; a single slow capture still fails after 30 seconds.
   it('captures more than 10,000 tracked and untracked files without dropping input', async () => {
     const count = 10_001;
-    for (const directory of ['committed', 'untracked']) await fs.mkdir(path.join(fixture.root, directory));
-    for (let offset = 0; offset < count; offset += 128) {
-      await Promise.all(Array.from({ length: Math.min(128, count - offset) }, (_, index) => {
-        const number = offset + index;
-        return fs.writeFile(path.join(fixture.root, number < 5000 ? 'committed' : 'untracked', `${number}.txt`), 'fixture\n');
-      }));
-    }
-    await runGit(fixture.root, ['add', 'committed']);
-    await runGit(fixture.root, ['commit', '-m', 'Add synthetic tracked files']);
-    const index = await fs.readFile(path.join(fixture.root, '.git', 'index'));
-    const head = await gitText(fixture.root, ['rev-parse', 'HEAD']);
-    const snapshot = await captureCheckpoint(fixture.root);
-    const files = (await runGit(fixture.root, ['ls-tree', '-r', '--name-only', '-z', snapshot.tree]))
-      .toString('utf8').split('\0').filter(Boolean);
-    expect(files).toHaveLength(count + 3);
-    expect(files).toContain('committed/4999.txt');
-    expect(files).toContain('untracked/10000.txt');
-    expect(await fs.readFile(path.join(fixture.root, '.git', 'index'))).toEqual(index);
-    expect(await gitText(fixture.root, ['rev-parse', 'HEAD'])).toBe(head);
-  }, 30_000);
+    const contents = Buffer.from('fixture\n');
+    const relativeFile = (number: number) => `${number < 5000 ? 'committed' : 'untracked'}/${number}.txt`;
+    const writeFiles = async (start: number, end: number) => {
+      for (let offset = start; offset < end; offset += 128) {
+        await phases.batch(Array.from({ length: Math.min(128, end - offset) }, (_, index) => {
+          const relative = relativeFile(offset + index);
+          return () => fs.writeFile(path.join(fixture.root, ...relative.split('/')), contents);
+        }));
+      }
+    };
+    await phases.run('create 5,000 tracked input files', async () => {
+      await fs.mkdir(path.join(fixture.root, 'committed'));
+      await writeFiles(0, 5000);
+    });
+    const { index, head } = await phases.run('commit tracked input and record source identity', async () => {
+      await runGit(fixture.root, ['add', 'committed']);
+      await runGit(fixture.root, ['commit', '-m', 'Add synthetic tracked files']);
+      return { index: await fs.readFile(path.join(fixture.root, '.git', 'index')),
+        head: await gitText(fixture.root, ['rev-parse', 'HEAD']) };
+    });
+    await phases.run('create 5,001 untracked input files', async () => {
+      await fs.mkdir(path.join(fixture.root, 'untracked'));
+      await writeFiles(5000, count);
+    });
+    const snapshot = await phases.run('capture all 10,001 tracked and untracked files', () => captureCheckpoint(fixture.root));
+    await phases.run('verify every captured path and all tracked and untracked bytes', async () => {
+      const entries = (await runGit(fixture.root, ['ls-tree', '-r', '-z', snapshot.tree]))
+        .toString('utf8').split('\0').filter(Boolean);
+      const files = entries.map(entry => entry.slice(entry.indexOf('\t') + 1));
+      expect(files).toHaveLength(count + 3);
+      expect(files).toContain('committed/4999.txt');
+      expect(files).toContain('untracked/10000.txt');
+      // One blob backs identical fixture bytes. Compare every path and object ID,
+      // then read that blob, rather than starting 10,001 cat-file subprocesses.
+      const blob = await gitText(fixture.root, ['hash-object', '--stdin'], contents);
+      const expected = Array.from({ length: count }, (_, number) => `100644 blob ${blob}\t${relativeFile(number)}`).sort();
+      expect(entries.filter(entry => /\t(?:committed|untracked)\//.test(entry)).sort()).toEqual(expected);
+      expect(await runGit(fixture.root, ['cat-file', 'blob', blob])).toEqual(contents);
+    });
+    await phases.run('verify unchanged source HEAD and index', async () => {
+      expect(await fs.readFile(path.join(fixture.root, '.git', 'index'))).toEqual(index);
+      expect(await gitText(fixture.root, ['rev-parse', 'HEAD'])).toBe(head);
+    });
+  }, 6 * CHECKPOINT_PHASE_MS + 5_000);
 
   it('preserves an uninitialized gitlink without requiring its objects or fetching a remote', async () => {
     await runGit(fixture.root, ['update-index', '--add', '--cacheinfo', `160000,${fixture.head},module`]);
