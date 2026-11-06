@@ -31,6 +31,7 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
   let settlingFixture = false;
   let pendingPhases: Set<Promise<unknown>>;
   let phaseTimings: { name: string; elapsedMs: number }[];
+  let phaseAdmissionClosed: boolean;
   const makeManager = (disposalSupported = true) => new DelegationManager(new DirectoryGuard([fixture.directory]), (_guard, _config, cwd) => {
     if (!cwd) throw new Error('Fixture worker requires a working directory');
     let finish!: (result: ExecuteResult) => void;
@@ -50,6 +51,7 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
     settlingFixture = false;
     pendingPhases = new Set();
     phaseTimings = [];
+    phaseAdmissionClosed = false;
     fixture = await gitFixture();
     vi.spyOn(os, 'homedir').mockReturnValue(fixture.directory);
     vi.stubEnv('HOME', fixture.directory);
@@ -85,14 +87,21 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
   }, 60_000);
 
   const lifecyclePhase = async <T>(name: string, action: () => Promise<T>, timeoutMs = 30_000): Promise<T> => {
+    if (settlingFixture || phaseAdmissionClosed) throw new Error('Fixture is draining; no new Git phases may start');
     const began = Date.now();
-    const operation = Promise.resolve().then(action);
+    const operation = Promise.resolve().then(() => {
+      if (settlingFixture || phaseAdmissionClosed) throw new Error('Fixture is draining; no new Git phases may start');
+      return action();
+    });
     pendingPhases.add(operation);
     void operation.then(() => pendingPhases.delete(operation), () => pendingPhases.delete(operation));
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([operation, new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error(`Phase exceeded ${timeoutMs}ms`)), timeoutMs);
+        timer = setTimeout(() => {
+          phaseAdmissionClosed = true;
+          reject(new Error(`Phase exceeded ${timeoutMs}ms`));
+        }, timeoutMs);
       })]);
     } catch (error) {
       throw new Error(`Git lifecycle phase failed: ${name}; elapsedMs=${Date.now() - began}; workers=${workers.length}; `
@@ -110,8 +119,10 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
     const gate = new Promise<void>(resolve => { resume = resolve; });
     const marker = path.join(fixture.directory, 'settled-phase.txt');
     const ownership = `${manager.laneStore.storageDirectory}.ownership`;
+    let operationEntered!: () => void;
+    const operationStarted = new Promise<void>(resolve => { operationEntered = resolve; });
     const collecting = lifecyclePhase('gated result collection', async () => {
-      await gate;
+      operationEntered(); await gate;
       // Exercise a launch which finishes preparation only after teardown starts.
       await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Read the fixture' }, 'launch');
       const results = await scope.collectPendingResults();
@@ -125,6 +136,8 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
     const release = vi.spyOn(DelegationOwnership.prototype, 'release');
     let entered!: () => void;
     const started = new Promise<void>(resolve => { entered = resolve; });
+    // This exercises draining admitted work; a phase not yet entered is rejected separately.
+    await operationStarted;
     const exercise = (async () => {
       try {
         if (failure === 'deadline') await collecting;
@@ -162,6 +175,56 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
     expect(release).toHaveBeenCalledOnce();
     await expect(fs.lstat(ownership)).rejects.toMatchObject({ code: 'ENOENT' });
     expect((await fs.stat(fixture.directory)).isDirectory()).toBe(true);
+  });
+
+  it.each(['resolve', 'reject'] as const)('blocks lifecycle admission after a deadline while late work %ss under ownership', async completion => {
+    await manager.reconcilePendingWorkerLanes();
+    const ownership = `${manager.laneStore.storageDirectory}.ownership`;
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const marker = path.join(fixture.directory, 'late-operation');
+    const destroy = vi.spyOn(manager, 'destroy');
+    const releaseOwnership = vi.spyOn(DelegationOwnership.prototype, 'release');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const running = lifecyclePhase('held lifecycle operation', async () => {
+      entered(); await gate;
+      expect((await fs.lstat(ownership)).isFile()).toBe(true);
+      await fs.writeFile(marker, 'completed under fixture ownership');
+      if (completion === 'reject') throw new Error('Synthetic late lifecycle rejection');
+    });
+    const outcome = running.catch(error => error);
+    let shutdown: Promise<void> | undefined;
+    try {
+      await started; await vi.advanceTimersByTimeAsync(30_001);
+      expect(await outcome).toMatchObject({ cause: { message: 'Phase exceeded 30000ms' } });
+      const later = vi.fn(async () => undefined);
+      await expect(lifecyclePhase('must not integrate after deadline', later)).rejects.toThrow('Fixture is draining');
+      expect(later).not.toHaveBeenCalled();
+      vi.useRealTimers();
+      shutdown = settleFixture();
+      expect(pendingPhases.size).toBe(1);
+      expect(destroy).not.toHaveBeenCalled(); expect(releaseOwnership).not.toHaveBeenCalled();
+      expect((await fs.lstat(ownership)).isFile()).toBe(true);
+      release(); await shutdown;
+      expect(await fs.readFile(marker, 'utf8')).toBe('completed under fixture ownership');
+      expect(releaseOwnership).toHaveBeenCalledOnce();
+      expect(pendingPhases.size).toBe(0);
+    } finally {
+      vi.useRealTimers(); release();
+      await Promise.allSettled([running, ...(shutdown ? [shutdown] : [])]);
+    }
+  });
+
+  it('does not enter a scheduled lifecycle phase once teardown has begun', async () => {
+    const action = vi.fn(async () => undefined);
+    const scheduled = lifecyclePhase('scheduled before teardown', action);
+    const outcome = scheduled.catch(error => error);
+    const shutdown = settleFixture();
+    try {
+      expect(await outcome).toBeInstanceOf(Error);
+      expect(action).not.toHaveBeenCalled();
+    } finally { await Promise.allSettled([scheduled, shutdown]); }
   });
 
   it('waits for managed group confirmation after direct transport exit before collecting or deleting', async () => {
@@ -427,57 +490,84 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
 
   it('excludes old artifacts and lanes after durable conversation detachment and restart', async () => {
     const scope = manager.begin(parent);
-    await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Old changes' }, 'old');
-    await fs.writeFile(path.join(workers[0].cwd, 'source.txt'), 'historical changes\n');
-    workers[0].finish({ success: true });
-    const [old] = await scope.collectPendingResults();
-    const [oldLane] = await manager.laneStore.lanesForThread(parent.thread.id);
-    await scope.close();
-    const resets = new ThreadContextReset(path.join(fixture.directory, 'reset-state'));
-    await resets.begin(parent.thread.id);
-    await resets.advanceGeneration(parent.thread.id);
-    await resets.complete(parent.thread.id);
-    await manager.destroy();
-    manager = makeManager();
-    parent.thread = { ...parent.thread, delegationWorkspaceGeneration: new ThreadContextReset(path.join(fixture.directory, 'reset-state')).generation(parent.thread.id) };
-    expect(await manager.pendingArtifactContext(parent.thread, fixture.root)).toBe('');
-    const historical = await manager.workspaceManager.enumerateArtifacts({ threadId: parent.thread.id });
-    expect(historical.items).toEqual(expect.arrayContaining([expect.objectContaining({ taskId: old.taskId })]));
+    await lifecyclePhase('prepare and edit the old generation worker', async () => {
+      await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Old changes' }, 'old');
+      await fs.writeFile(path.join(workers[0].cwd, 'source.txt'), 'historical changes\n');
+      workers[0].finish({ success: true });
+    });
+    const { old, oldLane } = await lifecyclePhase('collect the old generation artifact and lane', async () => {
+      const [old] = await scope.collectPendingResults();
+      const [oldLane] = await manager.laneStore.lanesForThread(parent.thread.id);
+      return { old, oldLane };
+    });
+    await lifecyclePhase('close the old generation scope', () => scope.close());
+    await lifecyclePhase('persist conversation detachment and stop the old manager', async () => {
+      const resets = new ThreadContextReset(path.join(fixture.directory, 'reset-state'));
+      await resets.begin(parent.thread.id);
+      await resets.advanceGeneration(parent.thread.id);
+      await resets.complete(parent.thread.id);
+      await manager.destroy();
+    });
+    await lifecyclePhase('restart and distinguish historical artifacts from current obligations', async () => {
+      manager = makeManager();
+      parent.thread = { ...parent.thread, delegationWorkspaceGeneration: new ThreadContextReset(path.join(fixture.directory, 'reset-state')).generation(parent.thread.id) };
+      expect(await manager.pendingArtifactContext(parent.thread, fixture.root)).toBe('');
+      const historical = await manager.workspaceManager.enumerateArtifacts({ threadId: parent.thread.id });
+      expect(historical.items).toEqual(expect.arrayContaining([expect.objectContaining({ taskId: old.taskId })]));
+    });
     const next = manager.begin(parent);
-    await next.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Fresh work' }, 'new');
-    const lanes = await manager.laneStore.lanesForThread(parent.thread.id);
-    expect(lanes).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: oldLane.id, workspaceGeneration: 0 }),
-      expect.objectContaining({ workspaceGeneration: 1, state: 'running' }),
-    ]));
-    expect(workers[1].cwd).not.toBe(workers[0].cwd);
-    workers[1].finish({ success: true });
-    await next.collectPendingResults();
-    expect(await next.checkArtifactCloseout()).toEqual([]);
-    expect(await fs.readFile(path.join(workers[0].cwd, 'source.txt'), 'utf8')).toBe('historical changes\n');
-  });
+    await lifecyclePhase('prepare a fresh generation without reusing the detached lane', async () => {
+      await next.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Fresh work' }, 'new');
+      const lanes = await manager.laneStore.lanesForThread(parent.thread.id);
+      expect(lanes).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: oldLane.id, workspaceGeneration: 0 }),
+        expect.objectContaining({ workspaceGeneration: 1, state: 'running' }),
+      ]));
+      expect(workers[1].cwd).not.toBe(workers[0].cwd);
+      workers[1].finish({ success: true });
+    });
+    await lifecyclePhase('collect the fresh generation worker', () => next.collectPendingResults());
+    await lifecyclePhase('verify fresh closeout while retaining historical bytes', async () => {
+      expect(await next.checkArtifactCloseout()).toEqual([]);
+      expect(await fs.readFile(path.join(workers[0].cwd, 'source.txt'), 'utf8')).toBe('historical changes\n');
+    });
+  }, 8 * 30_000 + 5_000);
 
   it('rediscovers pending output after restart without diagnostic task records', async () => {
     const scope = manager.begin(parent);
-    await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Change fixture' }, 'launch');
-    await fs.writeFile(path.join(workers[0].cwd, 'source.txt'), 'pending change\n');
-    workers[0].finish({ success: true });
-    const [result] = await scope.collectPendingResults();
-    expect(result.artifact?.disposition).toBe('pending');
-    await scope.close();
-    await manager.destroy();
-    const diagnosticRoot = path.join(fixture.directory, '.remote-cli', 'delegation');
-    await fs.rm(diagnosticRoot, { recursive: true, force: true });
-    manager = makeManager();
-    expect(await manager.pendingArtifactContext(parent.thread, fixture.root)).toContain(result.taskId);
-    const next = manager.begin(parent);
-    // Ordinary turns do not inherit mandatory managed-work closeout. Explicit inspection remains available.
-    expect(await next.checkArtifactCloseout()).toEqual([]);
-    const inspected = await next.invoke('remote_cli_integrate', { taskId: result.taskId, action: 'inspect' }, 'inspect') as { revision: string };
-    await next.invoke('remote_cli_integrate', { taskId: result.taskId, action: 'retain', expectedRevision: inspected.revision }, 'retain');
-    expect(await next.checkArtifactCloseout()).toEqual([]);
-    await expect(fs.stat(workers[0].cwd)).rejects.toMatchObject({ code: 'ENOENT' });
-  });
+    await lifecyclePhase('prepare and edit the pending restart artifact', async () => {
+      await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Change fixture' }, 'launch');
+      await fs.writeFile(path.join(workers[0].cwd, 'source.txt'), 'pending change\n');
+      workers[0].finish({ success: true });
+    });
+    const result = await lifecyclePhase('collect the pending restart artifact', async () => {
+      const [result] = await scope.collectPendingResults();
+      expect(result.artifact?.disposition).toBe('pending');
+      return result;
+    });
+    await lifecyclePhase('close and stop before removing only diagnostic records', async () => {
+      await scope.close();
+      await manager.destroy();
+      const diagnosticRoot = path.join(fixture.directory, '.remote-cli', 'delegation');
+      await fs.rm(diagnosticRoot, { recursive: true, force: true });
+    });
+    const next = await lifecyclePhase('restart and rediscover pending output without inventing obligations', async () => {
+      manager = makeManager();
+      expect(await manager.pendingArtifactContext(parent.thread, fixture.root)).toContain(result.taskId);
+      const next = manager.begin(parent);
+      // Ordinary turns do not inherit mandatory managed-work closeout. Explicit inspection remains available.
+      expect(await next.checkArtifactCloseout()).toEqual([]);
+      return next;
+    });
+    const inspected = await lifecyclePhase('inspect the rediscovered artifact', () =>
+      next.invoke('remote_cli_integrate', { taskId: result.taskId, action: 'inspect' }, 'inspect') as Promise<{ revision: string }>);
+    await lifecyclePhase('retain and reclaim the rediscovered artifact', () =>
+      next.invoke('remote_cli_integrate', { taskId: result.taskId, action: 'retain', expectedRevision: inspected.revision }, 'retain'));
+    await lifecyclePhase('verify rediscovered artifact closeout and directory removal', async () => {
+      expect(await next.checkArtifactCloseout()).toEqual([]);
+      await expect(fs.stat(workers[0].cwd)).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+  }, 7 * 30_000 + 5_000);
 
   it('retires only a completed exact offline discard after failed capture, preserving native history and refs', async () => {
     const scope = manager.begin(parent);
