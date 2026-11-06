@@ -51,7 +51,8 @@ function isLegacyBinding(value: unknown): value is LegacyUserBinding {
 
 function isDeviceBinding(value: unknown): value is DeviceBinding {
   return isRecord(value) && isIdentifier(value.deviceId) && typeof value.deviceName === 'string'
-    && isTimestamp(value.boundAt) && isTimestamp(value.lastActiveAt) && typeof value.isActive === 'boolean';
+    && isTimestamp(value.boundAt) && isTimestamp(value.lastActiveAt) && typeof value.isActive === 'boolean'
+    && (!Object.hasOwn(value, 'requiresDeviceAuth') || typeof value.requiresDeviceAuth === 'boolean');
 }
 
 function isUserBinding(value: unknown): value is UserBinding {

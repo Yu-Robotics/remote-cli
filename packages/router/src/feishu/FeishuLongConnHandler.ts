@@ -2,7 +2,7 @@ import { OutputApiRejection } from '../output/OutputTransfers';
 import { CardDeliveryDiagnostics, type CardDiagnosticContext, deliveryEvent, safeCardError, safeSdkLogger } from '../utils/DeliveryDiagnostics';
 import * as lark from '@larksuiteoapi/node-sdk';
 import { v4 as uuidv4 } from 'uuid';
-import { BindingManager } from '../binding/BindingManager';
+import { BindingManager, type DeviceEnrollmentBoundary } from '../binding/BindingManager';
 import { ConnectionHub } from '../websocket/ConnectionHub';
 import { MAX_THREADS, MessageType, ThreadSummary, Attachment, QueueConfirmationInfo } from '../types';
 import type { ExecutionMetadata, ActivityProgressInfo } from '../types';
@@ -173,6 +173,7 @@ export class FeishuLongConnHandler {
   onDeviceSwitchIntent?: (openId: string, newDeviceId: string) => void;
   onDeviceSwitch?: (openId: string, oldDeviceId: string | undefined, newDeviceId: string) => void | Promise<void>;
   onApproveDeviceKey?: (openId: string, deviceId: string, publicKey: string) => Promise<void>;
+  onDeviceEnrollmentBoundary?: DeviceEnrollmentBoundary;
   onRevokeDevice?: (deviceId: string) => Promise<void>;
   onFileMessage?: (input: FileInput) => Promise<void>;
   onResolveFile?: (openId: string, sourceOrCardId: string) => { id: string; deviceId: string; threadId: string } | undefined;
@@ -544,7 +545,8 @@ export class FeishuLongConnHandler {
    */
   private async handleBindCommand(openId: string, messageId: string, code: string): Promise<void> {
     try {
-      const redemption = await this.bindingManager.redeemBindingCode(openId, code, 'Device', this.onApproveDeviceKey);
+      const redemption = await this.bindingManager.redeemBindingCode(openId, code, 'Device', this.onApproveDeviceKey,
+        this.onDeviceEnrollmentBoundary);
       if (!redemption) {
         await this.replyToMessage(messageId, '❌ Binding code is invalid or expired, please generate a new one');
         return;
@@ -554,7 +556,16 @@ export class FeishuLongConnHandler {
         return;
       }
       if (redemption.bindingCode.devicePublicKey) {
-        await this.replyToMessage(messageId, '🔐 Device key approved. Reconnect the upgraded CLI to receive files (up to 20 MiB). Older credentialless CLIs cannot connect as this device.');
+        if (redemption.newDeviceEnrollment) {
+          const statusNote = redemption.isFirstDevice
+            ? '\n\n📱 This is your first device and will be set as active.'
+            : '\n\n📱 Use /device switch to activate this device.';
+          await this.replyToMessage(messageId,
+            `🔐 Device key approved. Start the upgraded CLI.${statusNote}\n\nOlder credentialless CLIs cannot connect as this device.`);
+        } else {
+          await this.replyToMessage(messageId,
+            '🔐 Device key approved. Reconnect the upgraded CLI. Older credentialless CLIs cannot connect as this device.');
+        }
         return;
       }
 

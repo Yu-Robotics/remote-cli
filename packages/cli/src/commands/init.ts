@@ -3,6 +3,7 @@ import { machineId } from 'node-machine-id';
 import axios from 'axios';
 import ora from 'ora';
 import os from 'os';
+import { DeviceEnrollmentError, requestDeviceEnrollment } from '../files/DeviceEnrollment';
 
 /**
  * Init command options
@@ -14,6 +15,8 @@ export interface InitCommandOptions {
   force?: boolean;
   /** Allowed directories */
   allowedDirs?: string[];
+  /** Request device-key approval with the initial binding code. */
+  withFiles?: boolean;
 }
 
 /**
@@ -24,6 +27,7 @@ export interface InitCommandResult {
   bindingCode?: string;
   deviceId?: string;
   error?: string;
+  keyEnrollmentRequested?: boolean;
 }
 
 /**
@@ -72,37 +76,44 @@ export async function initCommand(
     // Request binding code from server
     spinner.text = 'Requesting binding code from server...';
 
-    let response;
-    try {
-      response = await axios.post(
-        `${options.serverUrl}/api/bind/request`,
-        {
-          deviceId,
-          deviceName: os.hostname(),
-          platform: os.platform(),
-        },
-        {
-          timeout: 10000,
-        }
-      );
-    } catch (error) {
-      spinner.fail('Failed to connect to server');
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Network error',
-      };
-    }
+    let bindingCode: string;
+    if (options.withFiles) {
+      ({ bindingCode } = await requestDeviceEnrollment({
+        configDir: config.getConfigDir(), serverUrl: options.serverUrl, deviceId, deviceName: os.hostname(),
+      }));
+    } else {
+      let response;
+      try {
+        response = await axios.post(
+          `${options.serverUrl}/api/bind/request`,
+          {
+            deviceId,
+            deviceName: os.hostname(),
+            platform: os.platform(),
+          },
+          {
+            timeout: 10000,
+          }
+        );
+      } catch (error) {
+        spinner.fail('Failed to connect to server');
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Network error',
+        };
+      }
 
-    // Check server response
-    if (!response.data.success) {
-      spinner.fail('Server error');
-      return {
-        success: false,
-        error: response.data.error || 'Server returned error',
-      };
-    }
+      // Check server response
+      if (!response.data.success) {
+        spinner.fail('Server error');
+        return {
+          success: false,
+          error: response.data.error || 'Server returned error',
+        };
+      }
 
-    const { bindingCode } = response.data;
+      bindingCode = response.data.bindingCode;
+    }
 
     // Save configuration
     await config.set('deviceId', deviceId);
@@ -114,18 +125,21 @@ export async function initCommand(
     ];
     await config.set('security.allowedDirectories', allowedDirs);
 
-    spinner.succeed('Initialization successful!');
+    spinner.succeed(options.withFiles ? 'Key enrollment requested; Feishu approval is still required.' : 'Initialization successful!');
 
     return {
       success: true,
       bindingCode,
       deviceId,
+      ...(options.withFiles ? { keyEnrollmentRequested: true } : {}),
     };
   } catch (error) {
     spinner.fail('Initialization failed');
     return {
       success: false,
-      error: error instanceof Error ? error.message : 'Unknown error',
+      error: options.withFiles && !(error instanceof DeviceEnrollmentError)
+        ? 'Initialization failed. Check local configuration storage and retry with --force; any saved device key will be reused.'
+        : error instanceof Error ? error.message : 'Unknown error',
     };
   }
 }

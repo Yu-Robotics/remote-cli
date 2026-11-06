@@ -1278,6 +1278,16 @@ All seven backends receive local original/preview paths through the shared comma
 
 ### Retrieve Output Files
 
+With CLI and Router 1.6.223, a new device can request its file-transfer identity during initial setup:
+
+```bash
+remote-cli init --server https://router.example.com --with-files
+```
+
+Send the printed `/bind CODE` to the Feishu bot once, then run `remote-cli start`. That approval binds the device and approves its public key together; no separate `remote-cli files enable` step is needed. The private key stays on the CLI machine. Files become available after the authenticated connection negotiates the supported capabilities; output retrieval also requires a compatible native helper.
+
+The option requires HTTPS (loopback HTTP is permitted for development), an upgraded Router, and enabled Router file transfers. Unsupported enrollment, redirects, and failed requests do not silently fall back to legacy binding. Retry with the same key; `init --force --with-files` does not rotate it. Ordinary `init` without the option keeps its existing behavior. Existing devices can still use `remote-cli files enable`; explicit key replacement uses `remote-cli files enable --rotate` and a new owner approval.
+
 CLI and Router 1.6.221 can return files referenced by explicit local Markdown links in assistant replies. Both peers must negotiate `outputFilesV1`; the CLI must have an approved per-Router device identity (see File Attachments). Router `files.enabled: false` also disables output retrieval. Existing text, images, and incoming attachments keep their separate behavior.
 
 An eligible file gets a separate **Output file** entry card with its actual filename, size, source, expiry, and **Get file** button. Clicking creates an independent **File transfer** card; progress and retry controls stay there, leaving the original reply unchanged. Successful delivery produces a native Feishu file message. Repeated clicks reuse the same operation. Retrieval does not start a model turn and uses the original device even after selecting another device.

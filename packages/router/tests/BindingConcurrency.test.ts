@@ -216,4 +216,38 @@ describe('BindingManager serialized ownership mutations', () => {
     expect(reloaded.getUserBinding('user-b')?.activeDeviceId).toBe('device-c');
     await reloaded.flush();
   });
+
+  it('keeps a fresh secure device auth-required after key failure and permits same-owner retry after reload', async () => {
+    const issued = await manager.generateBindingCode('device-a', 'Device', 'public-key');
+    const boundary = vi.fn();
+    await expect(manager.redeemBindingCode('user-a', issued.code, 'Device',
+      async () => { throw new Error('synthetic key write failure'); }, boundary)).rejects.toThrow('key write failure');
+
+    expect(store.getUserBinding('user-a')?.devices[0].requiresDeviceAuth).toBe(true);
+    expect(store.getBindingCode(issued.code)?.devicePublicKey).toBe('public-key');
+    expect(boundary.mock.calls).toEqual([['device-a', 'begin'], ['device-a', 'end']]);
+
+    const reloaded = new JsonStore(path.join(directory, 'bindings.json'), 0);
+    await reloaded.initialize();
+    const restoredManager = new BindingManager(reloaded);
+    await expect(restoredManager.redeemBindingCode('user-b', issued.code, 'Other', async () => undefined))
+      .rejects.toThrow('another user');
+    const retry = await restoredManager.redeemBindingCode('user-a', issued.code, 'Device', async () => undefined);
+    expect(retry).toMatchObject({ alreadyBound: true, newDeviceEnrollment: true });
+    expect(reloaded.getUserBinding('user-a')?.devices[0].requiresDeviceAuth).toBeUndefined();
+    expect(reloaded.getBindingCode(issued.code)).toBeNull();
+    await reloaded.flush();
+  });
+
+  it('does not approve a key or consume its code after binding-store uncertainty', async () => {
+    const issued = await manager.generateBindingCode('device-a', 'Device', 'public-key');
+    const approve = vi.fn();
+    (store as any).uncertainty = new Error('synthetic persistence uncertainty');
+    await expect(manager.redeemBindingCode('user-a', issued.code, 'Device', approve)).rejects.toThrow('uncertainty');
+    expect(approve).not.toHaveBeenCalled();
+    const raw = JSON.parse(await fs.readFile(path.join(directory, 'bindings.json'), 'utf8'));
+    expect(raw.bindingCodes[issued.code].devicePublicKey).toBe('public-key');
+    expect(raw.userBindings['user-a']).toBeUndefined();
+    (store as any).uncertainty = undefined;
+  });
 });

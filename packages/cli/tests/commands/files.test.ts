@@ -12,6 +12,7 @@ describe('explicit file enrollment command', () => {
   let root: string; let serverUrl: string; let deviceId: string;
   beforeEach(async () => {
     root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'files-command-')));
+    vi.spyOn(os, 'homedir').mockReturnValue(root);
     serverUrl = 'wss://router.example.test/ws'; deviceId = 'device';
     vi.spyOn(ConfigManager, 'initialize').mockResolvedValue({ getConfigDir: () => root,
       get: (key: string) => key === 'deviceId' ? deviceId : serverUrl } as any);
@@ -33,5 +34,14 @@ describe('explicit file enrollment command', () => {
     deviceId = 'device'; serverUrl = 'ws://router.example.test'; await expect(enableFiles()).rejects.toThrow('HTTPS');
     serverUrl = 'wss://router.example.test'; vi.mocked(axios.post).mockResolvedValue({ data: { success: true, bindingCode: '123456' } });
     await expect(enableFiles()).rejects.toThrow('Upgrade');
+  });
+
+  it.each([{ success: 'true', deviceAuth: true, bindingCode: 'ABC-123-XYZ' },
+    { success: true, deviceAuth: true, bindingCode: 'ABC\n' },
+    { success: true, deviceAuth: true, bindingCode: 'A'.repeat(65) },
+  ])('uses the same strict enrollment response validation as init: %j', async data => {
+    vi.mocked(axios.post).mockResolvedValueOnce({ data });
+    await expect(enableFiles()).rejects.toThrow();
+    expect(axios.post).toHaveBeenCalledOnce();
   });
 });

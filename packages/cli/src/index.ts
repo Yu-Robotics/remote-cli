@@ -51,6 +51,7 @@ program
   .requiredOption('-s, --server <url>', 'Router server URL')
   .option('-d, --dirs <dirs...>', 'Allowed directories (can specify multiple)')
   .option('-f, --force', 'Force re-initialization')
+  .option('--with-files', 'Request device-key approval during binding (requires Router file support and TLS)')
   .action(async (options) => {
     try {
       console.log(chalk.blue('🚀 Initializing remote CLI...\n'));
@@ -59,19 +60,24 @@ program
         serverUrl: options.server,
         allowedDirs: options.dirs,
         force: options.force,
+        withFiles: options.withFiles,
       });
 
       if (result.success) {
-        console.log(chalk.green('✅ Initialization successful!\n'));
+        console.log(chalk.green(result.keyEnrollmentRequested
+          ? 'Key enrollment requested; files are not authorized until Feishu approval.\n'
+          : '✅ Initialization successful!\n'));
         console.log(chalk.yellow('📋 Binding Code:'), chalk.bold(result.bindingCode));
         console.log(chalk.gray('Device ID:'), result.deviceId);
         console.log();
         console.log(
           chalk.cyan('📱 Next steps:'),
-          '\n  1. Open Feishu and send the binding code to the bot',
+          result.keyEnrollmentRequested
+            ? `\n  1. Approve in Feishu: /bind ${result.bindingCode}`
+            : '\n  1. Open Feishu and send the binding code to the bot',
           '\n  2. Run',
           chalk.bold('remote-cli start'),
-          'to start the service'
+          result.keyEnrollmentRequested ? 'after approval to start the service' : 'to start the service'
         );
       } else {
         console.error(chalk.red('❌ Initialization failed:'), result.error);
