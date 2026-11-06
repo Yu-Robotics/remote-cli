@@ -209,7 +209,7 @@ describe('authorized durable snapshots', () => {
 
   it('expires owned bytes and rejects invalid records and IDs', async () => {
     await fs.writeFile(path.join(cwd, 'file'), 'data'); const ref = await store.snapshot('file', context());
-    ref.expiresAt = Date.now() - 1; await store.cleanup(); expect(store.references()).toEqual([]);
+    vi.spyOn(Date, 'now').mockReturnValue(ref.expiresAt + 1); await store.cleanup(); expect(store.references()).toEqual([]);
     await expect(store.read(ref.id, async () => {})).rejects.toThrow(); expect(() => store.filename('../file')).toThrow();
     await durableJson(path.join(store.root, `${'a'.repeat(64)}.json`), { invalid: true });
     await fs.writeFile(path.join(store.root, `${'b'.repeat(64)}.tmp`), 'partial');

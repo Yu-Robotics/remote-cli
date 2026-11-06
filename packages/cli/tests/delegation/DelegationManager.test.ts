@@ -86,6 +86,18 @@ describe('managed agent delegation', () => {
     } finally { release(); await scope.close(); }
   });
 
+  it('keeps worker file capture exceptions out of parent notices without losing the task result', async () => {
+    parent.onOutputFiles = vi.fn(async () => { throw new Error('private-output-path-sentinel'); });
+    worker.execute = vi.fn().mockResolvedValue({ success: true, output: '[report](report.csv)' });
+    const scope = manager.begin(parent);
+    try {
+      await scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Produce report' }, 'private-output');
+      const results = await scope.collectPendingResults();
+      expect(results[0].state).toBe('succeeded'); expect(parent.onOutputFiles).toHaveBeenCalledOnce();
+      expect(JSON.stringify(vi.mocked(parent.onNotice).mock.calls)).not.toMatch(/Worker output files|private-output-path-sentinel/);
+    } finally { await scope.close(); }
+  });
+
   it.each(['ready', 'dirty', 'corrupt', 'unreadable', 'legacy-owner'])(
     'allows ordinary scopes and a fresh conversation with %s historical metadata while retaining recovery state', async state => {
       const resets = new ThreadContextReset();

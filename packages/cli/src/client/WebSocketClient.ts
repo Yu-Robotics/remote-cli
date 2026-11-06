@@ -5,12 +5,14 @@ import { v4 as uuidv4 } from 'uuid';
 import { PROTOCOL_VERSION, CLI_VERSION } from '../types';
 import { TaskRecovery, type RecoverableTask } from './TaskRecovery';
 import { DeviceIdentity, signDeviceProof } from '../files/DeviceIdentity';
+import { AutomaticFileEnrollment } from '../files/AutomaticFileEnrollment';
 
 /**
  * WebSocket client configuration
  */
 export interface WebSocketClientOptions {
   identityLoader?: () => Promise<DeviceIdentity | undefined>;
+  automaticFileEnrollment?: AutomaticFileEnrollment;
   /** Reconnect interval (milliseconds), default 5000 */
   reconnectInterval?: number;
   /** Heartbeat interval (milliseconds), default 15000 */
@@ -47,6 +49,7 @@ export class WebSocketClient {
   private lastReceivedAt = 0;
   private identity?: DeviceIdentity;
   private readonly identityLoader?: () => Promise<DeviceIdentity | undefined>;
+  private readonly automaticFileEnrollment?: AutomaticFileEnrollment;
   private readonly maintenanceCapabilities: { updateNotice: boolean; subscriptionInspection: boolean };
   private readonly taskRecovery = new TaskRecovery(message => this.sendRaw(message));
   private messageHandlers: Array<(message: any) => void> = [];
@@ -58,6 +61,7 @@ export class WebSocketClient {
     this.serverUrl = serverUrl;
     this.deviceId = deviceId;
     this.identityLoader = options.identityLoader;
+    this.automaticFileEnrollment = options.automaticFileEnrollment;
     this.maintenanceCapabilities = options.maintenanceCapabilities ?? { updateNotice: true, subscriptionInspection: true };
     this.reconnectInterval = options.reconnectInterval ?? 5000;
     this.heartbeatInterval = options.heartbeatInterval ?? 15000;
@@ -74,6 +78,7 @@ export class WebSocketClient {
         const socket = new WebSocket(this.serverUrl, { handshakeTimeout: 15000 });
         this.ws = socket;
         const connectionEpoch = ++this.connectionEpoch;
+        let automaticEnrollmentRequested = false;
 
         const onOpen = () => {
           if (this.ws !== socket) return;
@@ -125,6 +130,16 @@ export class WebSocketClient {
             }
             if (message.type === 'binding_confirm' && message.data?.success === true) {
               this.taskRecovery.registered(message.data?.capabilities?.taskRecovery === true, connectionEpoch);
+              if (message.data?.capabilities?.automaticFileEnrollmentV1 === true && this.automaticFileEnrollment && !automaticEnrollmentRequested) {
+                automaticEnrollmentRequested = true;
+                // Enrollment preparation never blocks task dispatch or replaces a live socket.
+                void this.automaticFileEnrollment.prepare(true).then(identity => {
+                  if (!identity || this.ws !== socket || !this.connected || this.manualDisconnect) return;
+                  this.identity = identity;
+                  this.sendRaw({ type: 'automatic_file_enrollment', messageId: uuidv4(), timestamp: Date.now(),
+                    data: AutomaticFileEnrollment.proof(identity, this.deviceId) });
+                }).catch(() => {});
+              }
             }
             if (message.type === 'task_resume_ack' || message.type === 'task_result_ack') {
               this.taskRecovery.acknowledge(message);
@@ -316,6 +331,7 @@ export class WebSocketClient {
           protocolVersion: PROTOCOL_VERSION,
           ...(signature ? { deviceSignature: signature } : {}),
           capabilities: {
+            ...(this.automaticFileEnrollment ? { automaticFileEnrollmentV1: true } : {}),
             queueStarted: true,
             taskRecovery: true,
             approvalCards: true,

@@ -187,7 +187,7 @@ export interface Config {
   delegation?: { sharedSymlinks?: SharedSymlinkGrant[] };
   /** Independent maintenance features; absent values enable notices and status-only inspection. */
   maintenance?: { updateNotice?: boolean; subscriptionInspection?: boolean };
-  files?: { retentionDays?: number };
+  files?: { retentionDays?: number; autoEnroll?: boolean };
   outputFiles?: { allowedRoots?: string[]; maxBytes?: number };
   deviceId?: string;
   openId?: string;

@@ -41,8 +41,8 @@ export class OutputFiles {
     for (const candidate of parsed.paths) {
       try { await this.snapshots.snapshot(candidate, { ...context, omitted: parsed.omitted }); } catch { unavailable++; }
     }
-    this.advertise();
-    if (this.connected && (unavailable || parsed.omitted)) {
+    if (context.source !== 'worker') this.advertise();
+    if (context.source !== 'worker' && this.connected && (unavailable || parsed.omitted)) {
       try { this.send({ type: 'output_discovery', messageId: context.messageId, taskId: context.taskId,
         unavailable, omitted: parsed.omitted }); } catch { /* Discovery notices never alter the assistant response. */ }
     }
@@ -54,6 +54,7 @@ export class OutputFiles {
       return;
     }
     if (message.type !== 'output_grant' || !this.connected || !OPAQUE_ID.test(message.id) || !OPAQUE_ID.test(message.transferId)
+      || !this.snapshots.references().some(ref => ref.id === message.id)
       || !/^[a-f0-9]{64}$/.test(message.token) || !Number.isSafeInteger(message.expiresAt)
       || message.expiresAt <= Date.now() || message.expiresAt > Date.now() + OUTPUT_LIMITS.transfer + 5000
       || this.active.size || this.active.has(message.transferId)) return;

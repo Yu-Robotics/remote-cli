@@ -2497,6 +2497,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       }
       const openId = this.getMessageOpenId(messageId);
       const thread = this.threadManager.getThread(threadId);
+      const outputGeneration = thread?.delegationWorkspaceGeneration ?? 0;
       if (goalRequest && thread && isDelegationEnabled(thread)) {
         throw new Error('Turn managed delegation off before starting a native goal.');
       }
@@ -2531,8 +2532,8 @@ You can also use natural language commands to control Claude Code CLI.`,
             for (const entry of exports) if (outputExports.size < 100) outputExports.set(entry.file, entry);
           },
           onOutputFiles: this.outputFiles ? async (links, cwd, taskId, final) => {
-            await this.outputFiles!.capture(links, { messageId, threadId, taskId,
-              generation: thread?.delegationWorkspaceGeneration ?? 0, cwd, source: 'worker' }, final);
+            await this.outputFiles!.capture(links, { messageId, threadId, taskId, owner: openId,
+              generation: outputGeneration, cwd, source: 'worker' }, final);
           } : undefined,
           isWorkspaceBusy: cwd => this.threadManager.listThreads().some(other => {
             if (other.id === threadId && isCurrent() || !this.threadPool.isThreadBusy(other.id)) return false;
@@ -2740,8 +2741,8 @@ You can also use natural language commands to control Claude Code CLI.`,
               || (scope && (suppressed || scope.hasPendingResults())) ? '' : result.output ?? '';
             queueLocalImages(visibleResult);
             if (this.outputFiles) {
-              await this.outputFiles.capture(outputLinks, { messageId, threadId, taskId: messageId,
-                generation: imageGeneration, cwd: imageCwd, source: 'workspace', exports: [...outputExports.values()] }, visibleResult);
+              await this.outputFiles.capture(outputLinks, { messageId, threadId, taskId: messageId, owner: openId,
+                generation: outputGeneration, cwd: imageCwd, source: 'workspace', exports: [...outputExports.values()] }, visibleResult);
             }
 
             await imageDelivery?.drain();

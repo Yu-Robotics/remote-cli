@@ -119,6 +119,7 @@ export async function initCommand(
     // Save configuration
     await config.set('deviceId', deviceId);
     await config.set('serverUrl', options.serverUrl);
+    await config.set('files.autoEnroll', withFiles);
 
     // Set allowed directories
     const allowedDirs = options.allowedDirs || [

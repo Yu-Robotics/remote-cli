@@ -8,11 +8,11 @@ import { displayName, fileLimit, readPrivateJson } from '../files/FileIO';
 import { PrivateOutputRoot } from './PrivateOutputRoot';
 import { durableJson, syncDirectory } from './Durable';
 import { OPAQUE_ID, OUTPUT_LIMITS, OutputReference, validReference } from './Protocol';
+import { SnapshotRecord, publicReference, validSnapshotRecord, visibleRecord, publicationFor, duplicateWorker, selectedWorker } from './OutputPublication';
 
 export interface VerifiedOutputExport { file: string; path: string; sha256: string; bytes: number; taskId: string }
-export interface SnapshotContext { omitted?: boolean; exports?: VerifiedOutputExport[]; messageId: string; threadId: string; taskId: string; generation: number; cwd: string; source: OutputReference['source'] }
+export interface SnapshotContext { owner?: string; omitted?: boolean; exports?: VerifiedOutputExport[]; messageId: string; threadId: string; taskId: string; generation: number; cwd: string; source: OutputReference['source'] }
 export interface OutputPolicy { allowedRoots?: string[]; maxBytes?: number }
-interface Record { reference: OutputReference; identity: string; snapshotIdentity: string }
 function inside(root: string, file: string): boolean {
   const relative = path.relative(root, file);
   return relative !== '' && !path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`);
@@ -20,7 +20,7 @@ function inside(root: string, file: string): boolean {
 function same(a: NativeStat, b: NativeStat): boolean { return a.dev === b.dev && a.ino === b.ino && a.kind === b.kind; }
 
 /** No-follow, handle-relative traversal on POSIX and Windows; no absolute-path read fallback. */
-export function openOutputFile(filename: string): { identity: string; size: number; chunks(): AsyncGenerator<Buffer>; close(): void } {
+export function openOutputFile(filename: string): { identity: string; version: string; size: number; chunks(): AsyncGenerator<Buffer>; close(): void } {
   const native = nativeBindings();
   if (!native.readChunk) throw new Error('Output file handle support unavailable.');
   const handles: NativeHandle[] = [], stats: NativeStat[] = [];
@@ -36,7 +36,7 @@ export function openOutputFile(filename: string): { identity: string; size: numb
     const before = stats[stats.length - 1];
     const size = Number(before.size);
     if (before.kind !== 'file' || before.nlink !== '1' || !Number.isSafeInteger(size) || size <= 0 || size > OUTPUT_LIMITS.file) throw new Error('Output file is unavailable or exceeds the limit.');
-    return { identity: `${before.dev}:${before.ino}`, size, close,
+    return { identity: `${before.dev}:${before.ino}`, version: `${before.dev}:${before.ino}:${before.size}:${before.mtime}`, size, close,
       async *chunks() {
         for (let offset = 0; offset < size;) {
           const bytes = native.readChunk(current, offset, Math.min(65536, size - offset));
@@ -61,7 +61,7 @@ export function openOutputFile(filename: string): { identity: string; size: numb
 
 /** Snapshots have independent 20 MiB receipts; legacy WorkspaceExport limits are unchanged. */
 export class OutputSnapshots {
-  private records = new Map<string, Record>();
+  private records = new Map<string, SnapshotRecord>();
   private tail: Promise<unknown> = Promise.resolve();
   private pins = new Set<string>();
   private stopped = false;
@@ -76,21 +76,28 @@ export class OutputSnapshots {
   }
   async initialize(): Promise<void> {
     await this.storage.initialize();
+    let total = 0;
+    let overQuota = false;
     for (const name of await fs.readdir(this.root)) {
-      if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
+      if (!/^[a-f0-9]{64}(?:\.worker)?\.json$/.test(name)) continue;
       try {
-        const record = await readPrivateJson(path.join(this.root, name)) as Record;
-        if (!validReference(record.reference) || `${record.reference.id}.json` !== name || typeof record.identity !== 'string' || typeof record.snapshotIdentity !== 'string') continue;
-        this.records.set(record.reference.id, record);
+        const record = await readPrivateJson(path.join(this.root, name));
+        if (!validSnapshotRecord(record) || path.basename(this.recordFilename(record.reference.id, !!record.publication?.worker)) !== name) continue;
+        if (this.records.size >= OUTPUT_LIMITS.references || total + record.reference.size > OUTPUT_LIMITS.cliBytes) {
+          overQuota = true; break;
+        }
+        this.records.set(record.reference.id, { ...record, reference: publicReference(record.reference) });
+        total += record.reference.size;
       } catch { /* Invalid records never authorize reads. */ }
     }
+    if (overQuota) { this.records.clear(); throw new Error('Output receipt inventory exceeds its quota.'); }
     await this.cleanup();
     clearInterval(this.cleanupTimer);
     this.cleanupTimer = setInterval(() => {
       const work = this.tail.then(() => this.cleanup()); this.tail = work.catch(() => {});
     }, 60_000); this.cleanupTimer.unref();
   }
-  references(): OutputReference[] { return [...this.records.values()].map(r => r.reference).filter(r => r.expiresAt > Date.now()); }
+  references(): OutputReference[] { return [...this.records.values()].filter(visibleRecord).map(r => publicReference(r.reference)).filter(r => r.expiresAt > Date.now()); }
   snapshot(candidate: string, context: SnapshotContext): Promise<OutputReference> {
     const operation = this.tail.then(() => this.capture(candidate, context));
     this.tail = operation.catch(() => {}); return operation;
@@ -101,6 +108,28 @@ export class OutputSnapshots {
     const cwd = await fs.realpath(context.cwd);
     const filename = path.resolve(cwd, candidate);
     const exported = context.exports?.find(entry => entry.file === filename);
+    if (context.source !== 'worker') {
+      const selected = selectedWorker(this.records.values(), filename, context, exported);
+      if (selected) {
+        if (visibleRecord(selected)) return publicReference(selected.reference);
+        if (selected.reference.size > fileLimit(this.policy.maxBytes)) throw new Error('Output exceeds the configured limit.');
+        // Verify only the private immutable bytes. The original worktree may be gone
+        // or reused; neither circumstance permits rereading its current contents.
+        let published!: OutputReference;
+        await this.use(selected, async () => {
+          if (selected.reference.expiresAt <= Date.now()) throw new Error('Output expired.');
+          const { discoveryIncomplete: _oldNotice, ...original } = selected.reference;
+          published = { ...original, messageId: context.messageId,
+            ...(context.omitted ? { discoveryIncomplete: true } : {}) };
+          const record: SnapshotRecord = { ...selected, reference: published,
+            publication: { ...selected.publication!, visible: true } };
+          if (!validSnapshotRecord(record)) throw new Error('Invalid output publication.');
+          await durableJson(this.recordFilename(published.id, true), record, this.storage.check);
+          this.records.set(published.id, record);
+        });
+        return publicReference(published);
+      }
+    }
     const home = await fs.realpath(os.homedir());
     const grantedRoots: string[] = [];
     for (const root of this.policy.allowedRoots ?? []) {
@@ -140,11 +169,26 @@ export class OutputSnapshots {
     try {
       if (exported && exported.bytes !== opened.size) throw new Error('Verified export changed.');
       if (opened.size > fileLimit(this.policy.maxBytes)) throw new Error('Output exceeds the configured limit.');
-      const duplicate = [...this.records.values()].find(r => r.reference.messageId === context.messageId && r.identity === opened.identity);
-      if (duplicate) return duplicate.reference;
+      const publication = publicationFor(context, cwd, filename, opened.version);
+      let duplicate: SnapshotRecord | undefined;
+      if (context.source === 'worker') {
+        const candidates = [...this.records.values()].filter(r => duplicateWorker(r, publication));
+        if (candidates.length) {
+          const digest = createHash('sha256');
+          for await (const chunk of opened.chunks()) digest.update(chunk);
+          const hash = digest.digest('hex');
+          duplicate = candidates.find(r => r.reference.sha256 === hash && r.reference.size === opened.size);
+        }
+      } else duplicate = [...this.records.values()].find(r => visibleRecord(r) && r.reference.messageId === context.messageId
+        && r.reference.threadId === context.threadId && r.reference.generation === context.generation && r.identity === opened.identity);
+      if (duplicate) return publicReference(duplicate.reference);
       const total = [...this.records.values()].reduce((n, r) => n + r.reference.size, 0);
       if (this.records.size >= OUTPUT_LIMITS.references || total + opened.size > OUTPUT_LIMITS.cliBytes) throw new Error('Output snapshot quota reached.');
-      const id = randomBytes(32).toString('hex'); temporary = path.join(this.root, `${id}.tmp`);
+      const id = randomBytes(32).toString('hex');
+      const privateWorker = !!publication.worker;
+      // Legacy readers recognize only <id>.json/.bin. Separate worker receipts
+      // also keep hidden data out of older readers during a CLI downgrade.
+      temporary = path.join(this.root, `${id}${privateWorker ? '.worker' : ''}.tmp`);
       const handle = await fs.open(temporary, 'wx', 0o600), hash = createHash('sha256');
       let size = 0;
       try {
@@ -154,21 +198,35 @@ export class OutputSnapshots {
       } finally { await handle.close(); }
       const digest = hash.digest('hex');
       if (exported && digest !== exported.sha256) throw new Error('Verified export changed.');
-      const reference: OutputReference = { ...(context.omitted ? { discoveryIncomplete: true } : {}), id, messageId: context.messageId, threadId: context.threadId, taskId: exported?.taskId ?? context.taskId,
+      const reference: OutputReference = { ...(context.omitted && context.source !== 'worker' ? { discoveryIncomplete: true } : {}), id, messageId: context.messageId, threadId: context.threadId, taskId: exported?.taskId ?? context.taskId,
         generation: context.generation, name: displayName(path.basename(exported?.path ?? filename)), source: exported ? 'export' : context.source,
         size, sha256: digest, expiresAt: Date.now() + OUTPUT_LIMITS.ttl };
       if (!validReference(reference)) throw new Error('Invalid output reference.');
-      await fs.rename(temporary, this.filename(id)); temporary = undefined; await syncDirectory(this.root);
-      const stored = openOutputFile(this.filename(id));
+      await fs.rename(temporary, this.blobFilename(id, privateWorker)); temporary = undefined; await syncDirectory(this.root);
+      const stored = openOutputFile(this.blobFilename(id, privateWorker));
       const snapshotIdentity = stored.identity; stored.close();
-      const record = { reference, identity: opened.identity, snapshotIdentity };
-      await durableJson(path.join(this.root, `${id}.json`), record, this.storage.check); this.records.set(id, record);
-      return reference;
+      const record = { reference, identity: opened.identity, snapshotIdentity, publication };
+      if (!validSnapshotRecord(record)) throw new Error('Invalid output receipt.');
+      await durableJson(this.recordFilename(id, privateWorker), record, this.storage.check); this.records.set(id, record);
+      return publicReference(reference);
     } finally { opened.close(); if (temporary) { this.storage.check(); await fs.rm(temporary, { force: true }); } }
   }
-  filename(id: string): string { if (!OPAQUE_ID.test(id)) throw new Error('Invalid output ID.'); return path.join(this.root, `${id}.bin`); }
+  private blobFilename(id: string, worker: boolean): string {
+    if (!OPAQUE_ID.test(id)) throw new Error('Invalid output ID.');
+    return path.join(this.root, `${id}${worker ? '.worker' : ''}.bin`);
+  }
+  private recordFilename(id: string, worker: boolean): string {
+    if (!OPAQUE_ID.test(id)) throw new Error('Invalid output ID.');
+    return path.join(this.root, `${id}${worker ? '.worker' : ''}.json`);
+  }
+  filename(id: string): string { return this.blobFilename(id, !!this.records.get(id)?.publication?.worker); }
   async read(id: string, use: (source: AsyncIterable<Buffer>, reference: OutputReference) => Promise<void>): Promise<void> {
     const record = this.records.get(id);
+    if (!record || !visibleRecord(record)) throw new Error('Output is not published.');
+    await this.use(record, use);
+  }
+  private async use(record: SnapshotRecord, use: (source: AsyncIterable<Buffer>, reference: OutputReference) => Promise<void>): Promise<void> {
+    const id = record.reference.id;
     if (!record || record.reference.expiresAt <= Date.now() || this.stopped || this.pins.has(id)) throw new Error('Output expired or busy.');
     this.pins.add(id);
     let opened: ReturnType<typeof openOutputFile> | undefined;
@@ -179,15 +237,15 @@ export class OutputSnapshots {
       for await (const chunk of opened.chunks()) hash.update(chunk);
       if (hash.digest('hex') !== record.reference.sha256) throw new Error('Snapshot bytes changed.');
       this.storage.check();
-      await use(opened.chunks(), record.reference);
+      await use(opened.chunks(), publicReference(record.reference));
     } finally { opened?.close(); this.pins.delete(id); }
   }
   async cleanup(): Promise<void> {
     for (const [id, record] of this.records) if (record.reference.expiresAt <= Date.now() && !this.pins.has(id)) {
-      await fs.rm(this.filename(id), { force: true }); await fs.rm(path.join(this.root, `${id}.json`), { force: true }); this.records.delete(id);
+      await fs.rm(this.filename(id), { force: true }); await fs.rm(this.recordFilename(id, !!record.publication?.worker), { force: true }); this.records.delete(id);
     }
     // Only this store's opaque, unreferenced artifacts can be reclaimed after a crash.
-    for (const name of await fs.readdir(this.root)) if (/^[a-f0-9]{64}\.(tmp|bin)$/.test(name) && !this.records.has(name.slice(0, 64))) {
+    for (const name of await fs.readdir(this.root)) if (/^[a-f0-9]{64}(?:\.worker)?\.(tmp|bin)$/.test(name) && !this.records.has(name.slice(0, 64))) {
       await fs.rm(path.join(this.root, name), { force: true });
     }
   }

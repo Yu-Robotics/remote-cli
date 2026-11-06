@@ -87,13 +87,42 @@ describe('durable registration and independent cards', () => {
   });
   it('coalesces concurrent clicks and sends one separate task card plus native file message', async () => {
     await entry(); const entryId = state().references[0].card.id;
-    await Promise.all([click(), click(), click()]); await drain();
+    const entryCard = JSON.parse((deps.create as any).mock.calls[0][1]);
+    expect(entryCard.header.template).toBe('blue');
+    expect(entryCard.body.elements[0]).toEqual({ tag: 'div', text: { tag: 'plain_text', content: 'report.csv' } });
+    const get = entryCard.body.elements.find((element: any) => element.tag === 'button');
+    expect(get.type).toBe('primary');
+    const action = get.behaviors[0].value;
+    expect(action).toEqual({ action: 'output_file', id, op: 'get' });
+    await Promise.all([1, 2, 3].map(() => transfers.click('user', entryId, action))); await drain();
     expect(state().jobs).toHaveLength(1); expect(state().jobs[0].state).toBe('delivered');
     expect(deps.create).toHaveBeenCalledTimes(2); expect(deps.upload).toHaveBeenCalledTimes(1); expect(deps.sendFile).toHaveBeenCalledTimes(1);
     expect((deps.patch as any).mock.calls.every((call: any[]) => call[0] !== entryId)).toBe(true);
     expect(await click()).toBe('File already delivered.'); await drain(); expect(deps.sendFile).toHaveBeenCalledTimes(1);
     expect(JSON.stringify((deps.create as any).mock.calls)).not.toContain(payload.toString());
     const job = state().jobs[0]; expect(job.card.uuid).not.toBe(job.send.uuid);
+    // Admit the pending terminal presentation without changing delivery timers.
+    if (job.display) job.display.after = 0;
+    await (transfers as any).present(job, state().references[0]);
+    const delivered = JSON.parse((deps.patch as any).mock.calls.at(-1)[1]);
+    expect(delivered.header).toMatchObject({ template: 'green', title: { content: 'File delivered' } });
+    expect(JSON.stringify(delivered)).toContain('Find the file message in this chat.');
+    expect(delivered.body.elements.some((element: any) => element.tag === 'button')).toBe(false);
+  });
+  it.each(['known', 'intent'])('keeps historical %s entry content and its UUID immutable after restart', async phase => {
+    await entry(); const ref = state().references[0];
+    const legacy = JSON.stringify({ schema: '2.0', header: { title: { tag: 'plain_text', content: 'Output file' } },
+      body: { elements: [{ tag: 'div', text: { tag: 'plain_text', content: 'Historical entry content' } }] } });
+    ref.card.content = legacy; ref.card.state = phase;
+    if (phase === 'intent') delete ref.card.id;
+    const uuid = ref.card.uuid;
+    await durableJson(path.join(root, 'router', 'state.json'), state());
+    await transfers.destroy(); transfers = new OutputTransfers(path.join(root, 'router'), deps); await transfers.initialize();
+    const restored = state().references[0];
+    expect(restored.card.content).toBe(legacy); expect(restored.card.uuid).toBe(uuid);
+    expect(restored.card.state).toBe(phase === 'intent' ? 'uncertain' : 'known');
+    await transfers.offer('device', restored.reference); await drain();
+    expect(deps.create).toHaveBeenCalledOnce(); expect(deps.patch).not.toHaveBeenCalled();
   });
   it('persists card uncertainty and does not blindly create another entry', async () => {
     deps.create = vi.fn(async () => { throw new Error('unknown-secret-sentinel'); }); await entry();
@@ -167,9 +196,11 @@ describe('receipts, retry and ownership epochs', () => {
   it('recovers prepared crash states without replaying external message creation', async () => {
     await entry(); session = undefined; await click(); await drain();
     const job = state().jobs[0]; job.state = 'send-intent'; job.card.state = 'intent';
+    const content = job.card.content, uuid = job.card.uuid;
     await durableJson(path.join(root, 'router', 'state.json'), state());
     await transfers.destroy(); transfers = new OutputTransfers(path.join(root, 'router'), deps); await transfers.initialize(); await drain();
     expect(state().jobs[0].state).toBe('send-uncertain'); expect(state().jobs[0].card.state).toBe('uncertain'); expect(deps.sendFile).not.toHaveBeenCalled();
+    expect(state().jobs[0].card.content).toBe(content); expect(state().jobs[0].card.uuid).toBe(uuid);
   });
   it('fails closed when intent persistence fails before any external effect', async () => {
     await entry(); await fs.rename(path.join(root, 'router'), path.join(root, 'original'));
@@ -183,7 +214,9 @@ it('shows unavailable discovery separately, once, without accepting unowned noti
   await transfers.discovery('device', { messageId: 'reply', taskId: 'worker', unavailable: 2, omitted: true });
   await transfers.discovery('device', { messageId: 'reply', taskId: 'worker', unavailable: 2, omitted: true });
   expect(deps.create).toHaveBeenCalledTimes(2);
-  expect(JSON.parse((deps.create as any).mock.calls[1][1]).body.elements[0].text.content).toContain('not exhaustive');
+  const notice = JSON.parse((deps.create as any).mock.calls[1][1]);
+  expect(notice.header.template).toBe('orange');
+  expect(JSON.stringify(notice)).toContain('not exhaustive');
   await transfers.discovery('foreign', { messageId: 'reply', taskId: 'other', unavailable: 1, omitted: false });
   await transfers.discovery('device', { messageId: 'reply', taskId: 'other', unavailable: 1000, omitted: false });
   expect(deps.create).toHaveBeenCalledTimes(2);
@@ -324,7 +357,7 @@ it('preserves a terminal display update while an older progress patch is pending
     deps.patch = vi.fn(async () => {}); job.display.after = 0;
     await (transfers as any).present(job, ref);
     expect(deps.patch).toHaveBeenCalledOnce();
-    expect((deps.patch as any).mock.calls[0][1]).toContain('File already delivered.');
+    expect((deps.patch as any).mock.calls[0][1]).toContain('File delivered');
     expect(job.displayPending).toBe(false);
   } finally { release(); await progress; }
 });

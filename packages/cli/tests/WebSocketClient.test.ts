@@ -40,6 +40,48 @@ describe('WebSocketClient', () => {
   });
 
   describe('connection management', () => {
+    it('ignores old Router confirmations and does not send a prepared request after disconnect', async () => {
+      let release!: (value: any) => void;
+      const prepared = new Promise<any>(resolve => { release = resolve; });
+      const prepare = vi.fn(() => prepared);
+      client = new WebSocketClient(serverUrl, deviceId, { automaticFileEnrollment: { prepare } as any });
+      const connected = client.connect();
+      mockWs.on.mock.calls.find((c: any) => c[0] === 'open')[1](); await connected;
+      const message = mockWs.on.mock.calls.find((c: any) => c[0] === 'message')[1];
+      message(Buffer.from(JSON.stringify({ type: 'binding_confirm', data: { success: true } })));
+      expect(prepare).not.toHaveBeenCalled();
+      message(Buffer.from(JSON.stringify({ type: 'binding_confirm', data: { success: true,
+        capabilities: { automaticFileEnrollmentV1: true } } })));
+      expect(prepare).toHaveBeenCalledOnce();
+      client.disconnect();
+      const identity = generateKeyPairSync('ed25519', { publicKeyEncoding: { type: 'spki', format: 'pem' }, privateKeyEncoding: { type: 'pkcs8', format: 'pem' } });
+      release(identity); await prepared; await Promise.resolve();
+      expect(mockWs.send.mock.calls.some((call: any[]) => JSON.parse(call[0]).type === 'automatic_file_enrollment')).toBe(false);
+      mockWs.on.mockClear();
+      const reconnected = client.connect();
+      mockWs.on.mock.calls.find((c: any) => c[0] === 'open')[1](); await reconnected;
+      const nextMessage = mockWs.on.mock.calls.find((c: any) => c[0] === 'message')[1];
+      const confirmation = Buffer.from(JSON.stringify({ type: 'binding_confirm', data: { success: true,
+        capabilities: { automaticFileEnrollmentV1: true } } }));
+      nextMessage(confirmation); nextMessage(confirmation);
+      await prepared; await Promise.resolve();
+      expect(prepare).toHaveBeenCalledTimes(2);
+      expect(mockWs.send.mock.calls.filter((call: any[]) => JSON.parse(call[0]).type === 'automatic_file_enrollment')).toHaveLength(1);
+    });
+
+    it('keeps ordinary message handling independent of automatic preparation failure', async () => {
+      const prepare = vi.fn().mockRejectedValue(new Error('private-sentinel'));
+      client = new WebSocketClient(serverUrl, deviceId, { automaticFileEnrollment: { prepare } as any });
+      const received = vi.fn(); client.onMessage(received);
+      const connected = client.connect(); mockWs.on.mock.calls.find((c: any) => c[0] === 'open')[1](); await connected;
+      const message = mockWs.on.mock.calls.find((c: any) => c[0] === 'message')[1];
+      message(Buffer.from(JSON.stringify({ type: 'binding_confirm', data: { success: true, capabilities: { automaticFileEnrollmentV1: true } } })));
+      message(Buffer.from(JSON.stringify({ type: 'command', content: 'Synthetic task' })));
+      await Promise.resolve();
+      expect(received).toHaveBeenCalledWith({ type: 'command', content: 'Synthetic task' });
+      expect(mockWs.close).not.toHaveBeenCalled();
+    });
+
     it('logs actual close codes and per-socket epochs without close text or identities', async () => {
       const info = vi.spyOn(console, 'info').mockImplementation(() => {});
       vi.useFakeTimers();

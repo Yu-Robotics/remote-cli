@@ -10,6 +10,7 @@ import { TipService } from './tips/TipService';
 import { TIPS } from './tips/TipCatalog';
 import { TipImages } from './tips/TipImages';
 import { DeviceAuth } from './files/DeviceAuth';
+import { AutomaticFileEnrollment, type EnrollmentAuthority } from './files/AutomaticFileEnrollment';
 import { FileTransfers } from './files/FileTransfers';
 import path from 'path';
 import os from 'os';
@@ -146,6 +147,7 @@ export class RouterServer {
     };
   }>();
   private readonly deviceAuth: DeviceAuth;
+  private readonly automaticFileEnrollment: AutomaticFileEnrollment;
   private readonly fileTransfers: FileTransfers;
   private readonly outputTransfers: OutputTransfers;
   private outputsAvailable = false;
@@ -247,6 +249,14 @@ export class RouterServer {
       this.fileTransfers.disconnect(deviceId);
       this.outputTransfers.disconnect(deviceId); this.outputSessions.delete(deviceId);
     };
+    this.automaticFileEnrollment = new AutomaticFileEnrollment(path.join(path.dirname(config.getConfigPath()
+      || path.join(os.homedir(), '.remote-cli-router', 'config.json')), 'automatic-file-enrollment', 'requests.json'), {
+      bindings: this.bindingManager, auth: this.deviceAuth,
+      create: (openId, content, uuid) => this.feishuLongConnHandler.createOutputCard(openId, content, uuid),
+      approve: (openId, deviceId, key) => this.feishuLongConnHandler.onApproveDeviceKey!(openId, deviceId, key),
+    });
+    this.feishuLongConnHandler.onAutomaticFileEnrollment = (openId, cardId, payload) => this.fileTransfers.enabled
+      ? this.automaticFileEnrollment.click(openId, cardId, payload) : Promise.resolve('File access is disabled by the Router administrator.');
     this.feishuLongConnHandler.onRevokeDevice = async deviceId => {
       const owner = await this.bindingManager.getDeviceBinding(deviceId);
       if (owner?.openId) await this.selections.invalidateDevice(owner.openId, deviceId);
@@ -641,6 +651,9 @@ export class RouterServer {
       let subscriptionInspectionEnabled = false;
       let bankedResetReminderEnabled = false;
       let authenticationPending = false;
+      let automaticEnrollmentEnabled = false;
+      let automaticEnrollmentAuthority: EnrollmentAuthority | undefined;
+      let automaticEnrollmentRequestPending = false;
       let challengeTimer: NodeJS.Timeout | undefined;
       let heartbeatTimeout: NodeJS.Timeout | null = null;
 
@@ -676,6 +689,18 @@ export class RouterServer {
 
           // Update heartbeat on any message
           resetHeartbeat();
+
+          if (message.type === 'automatic_file_enrollment') {
+            const current = () => registered && !this.stopping && this.connectionHub.isCurrentConnection(deviceId!, ws) && ws.readyState === WebSocket.OPEN;
+            if (!deviceId || !automaticEnrollmentEnabled || !automaticEnrollmentAuthority || !this.fileTransfers.enabled
+              || automaticEnrollmentRequestPending || !current()) return;
+            automaticEnrollmentRequestPending = true;
+            let status = 'unavailable';
+            try { status = await this.automaticFileEnrollment.request(deviceId, message.data, automaticEnrollmentAuthority, current); } catch { /* Enrollment must not interrupt text tasks. */ }
+            finally { automaticEnrollmentRequestPending = false; }
+            if (current()) ws.send(JSON.stringify({ type: 'automatic_file_enrollment_status', data: { status } }));
+            return;
+          }
 
           if (message.type === 'status' && this.threadInventoryRequests.has(message.messageId)) {
             await this.handleThreadInventoryResponse(message, deviceId, ws);
@@ -908,6 +933,13 @@ export class RouterServer {
                 const outputsEnabled = Boolean(this.outputsAvailable && authenticatedOwner && message.data.capabilities?.outputFilesV1 === true);
                 if (outputsEnabled) this.outputSessions.set(deviceId, { id: randomUUID(), openId: authenticatedOwner! });
                 const filesEnabled = Boolean(this.fileTransfers.enabled && authenticatedOwner && message.data.capabilities?.fileTransferV1 === true);
+                const enrollmentBinding = this.fileTransfers.enabled && !authenticatedOwner
+                  && message.data.capabilities?.automaticFileEnrollmentV1 === true
+                  ? await this.bindingManager.getDeviceBinding(requestedId) : null;
+                const enrollmentEpoch = enrollmentBinding && this.bindingManager.getCardThreadEpoch(enrollmentBinding.openId, requestedId);
+                automaticEnrollmentAuthority = enrollmentBinding && enrollmentEpoch
+                  ? Object.freeze({ openId: enrollmentBinding.openId, epoch: enrollmentEpoch }) : undefined;
+                automaticEnrollmentEnabled = Boolean(automaticEnrollmentAuthority);
                 if (filesEnabled) this.connectionHub.setFileSession(deviceId, { id: randomUUID(), openId: authenticatedOwner! });
                 this.fileTransfers.disconnect(deviceId);
 
@@ -947,7 +979,8 @@ export class RouterServer {
                     success: true,
                     routerVersion: ROUTER_VERSION,
                     minCliVersion: MIN_SUPPORTED_CLI_VERSION,
-                    ...((taskRecoveryEnabled || approvalCardsEnabled || delegationProgressEnabled || streamingContextEnabled || activityProgressEnabled || filesEnabled || outputsEnabled || updateNoticeEnabled || subscriptionInspectionEnabled || settingsCardsEnabled) ? { capabilities: {
+                    ...((taskRecoveryEnabled || approvalCardsEnabled || delegationProgressEnabled || streamingContextEnabled || activityProgressEnabled || filesEnabled || outputsEnabled || updateNoticeEnabled || subscriptionInspectionEnabled || settingsCardsEnabled || automaticEnrollmentEnabled) ? { capabilities: {
+                      ...(automaticEnrollmentEnabled ? { automaticFileEnrollmentV1: true } : {}),
                       ...(activityProgressEnabled ? { activityProgress: true } : {}),
                       ...(updateNoticeEnabled ? { updateNotice: true } : {}),
                       ...(subscriptionInspectionEnabled ? { subscriptionInspection: true } : {}),
@@ -2628,6 +2661,7 @@ export class RouterServer {
     this.maintenanceCards.destroy();
     this.maintenanceConnections.clear();
     await attempt('Error destroying output transfers', () => this.outputTransfers.destroy());
+    await attempt('Error draining automatic enrollment', () => this.automaticFileEnrollment.destroy());
     await attempt('Error destroying file transfers', () => this.fileTransfers.destroy());
 
     if (this.cleanupInterval) {
