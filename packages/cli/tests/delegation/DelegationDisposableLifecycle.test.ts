@@ -86,15 +86,9 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
     }
   }, 60_000);
 
-  const lifecyclePhase = async <T>(name: string, action: () => Promise<T>, timeoutMs = 30_000): Promise<T> => {
-    if (settlingFixture || phaseAdmissionClosed) throw new Error('Fixture is draining; no new Git phases may start');
+  // A drain waits for admitted work; tracking the drain itself would make it wait on itself.
+  const lifecycleWait = async <T>(name: string, operation: Promise<T>, timeoutMs = 30_000): Promise<T> => {
     const began = Date.now();
-    const operation = Promise.resolve().then(() => {
-      if (settlingFixture || phaseAdmissionClosed) throw new Error('Fixture is draining; no new Git phases may start');
-      return action();
-    });
-    pendingPhases.add(operation);
-    void operation.then(() => pendingPhases.delete(operation), () => pendingPhases.delete(operation));
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([operation, new Promise<never>((_resolve, reject) => {
@@ -112,8 +106,26 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
     }
   };
 
+  const lifecyclePhase = <T>(name: string, action: () => Promise<T>, timeoutMs = 30_000): Promise<T> => {
+    if (settlingFixture || phaseAdmissionClosed) return Promise.reject(new Error('Fixture is draining; no new Git phases may start'));
+    const operation = Promise.resolve().then(() => {
+      if (settlingFixture || phaseAdmissionClosed) throw new Error('Fixture is draining; no new Git phases may start');
+      return action();
+    });
+    pendingPhases.add(operation);
+    void operation.then(() => pendingPhases.delete(operation), () => pendingPhases.delete(operation));
+    return lifecycleWait(name, operation, timeoutMs);
+  };
+
+  const awaitPhaseEntry = (name: string, entered: Promise<void>, phase: Promise<unknown>): Promise<void> => Promise.race([
+    entered,
+    phase.then(() => { throw new Error(`Git lifecycle phase finished before entry: ${name}`); }),
+  ]);
+
+  // Ownership preparation, admitted collection and in-test teardown each keep a
+  // 30-second boundary. The outer watchdog covers their sum plus assertion overhead.
   it.each(['assertion', 'deadline'] as const)('drains unfinished phase work before fixture ownership release after a %s failure', async failure => {
-    await manager.reconcilePendingWorkerLanes();
+    await lifecyclePhase('reconcile fixture ownership before gated collection', () => manager.reconcilePendingWorkerLanes());
     const scope = manager.begin(parent);
     let resume!: () => void;
     const gate = new Promise<void>(resolve => { resume = resolve; });
@@ -137,18 +149,18 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
     let entered!: () => void;
     const started = new Promise<void>(resolve => { entered = resolve; });
     // This exercises draining admitted work; a phase not yet entered is rejected separately.
-    await operationStarted;
+    await awaitPhaseEntry('gated result collection', operationStarted, collecting);
     const exercise = (async () => {
       try {
         if (failure === 'deadline') await collecting;
         else expect(workers).toHaveLength(1);
       } finally {
-        const shutdown = settleFixture();
+        const shutdown = lifecycleWait('drain gated collection and release fixture ownership', settleFixture());
         entered();
         await shutdown;
       }
     })().catch(error => error as Error);
-    await started;
+    await awaitPhaseEntry('fixture drain', started, exercise);
     try {
       expect(pendingPhases.size).toBe(1);
       expect(destroy).not.toHaveBeenCalled();
@@ -175,10 +187,10 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
     expect(release).toHaveBeenCalledOnce();
     await expect(fs.lstat(ownership)).rejects.toMatchObject({ code: 'ENOENT' });
     expect((await fs.stat(fixture.directory)).isDirectory()).toBe(true);
-  });
+  }, 3 * 30_000 + 5_000);
 
   it.each(['resolve', 'reject'] as const)('blocks lifecycle admission after a deadline while late work %ss under ownership', async completion => {
-    await manager.reconcilePendingWorkerLanes();
+    await lifecyclePhase('reconcile fixture ownership before the admission deadline', () => manager.reconcilePendingWorkerLanes());
     const ownership = `${manager.laneStore.storageDirectory}.ownership`;
     let entered!: () => void, release!: () => void;
     const started = new Promise<void>(resolve => { entered = resolve; });
@@ -196,13 +208,14 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
     const outcome = running.catch(error => error);
     let shutdown: Promise<void> | undefined;
     try {
-      await started; await vi.advanceTimersByTimeAsync(30_001);
+      await awaitPhaseEntry('held lifecycle operation', started, running);
+      await vi.advanceTimersByTimeAsync(30_001);
       expect(await outcome).toMatchObject({ cause: { message: 'Phase exceeded 30000ms' } });
       const later = vi.fn(async () => undefined);
       await expect(lifecyclePhase('must not integrate after deadline', later)).rejects.toThrow('Fixture is draining');
       expect(later).not.toHaveBeenCalled();
       vi.useRealTimers();
-      shutdown = settleFixture();
+      shutdown = lifecycleWait('drain the expired operation and release fixture ownership', settleFixture());
       expect(pendingPhases.size).toBe(1);
       expect(destroy).not.toHaveBeenCalled(); expect(releaseOwnership).not.toHaveBeenCalled();
       expect((await fs.lstat(ownership)).isFile()).toBe(true);
@@ -214,15 +227,40 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
       vi.useRealTimers(); release();
       await Promise.allSettled([running, ...(shutdown ? [shutdown] : [])]);
     }
+  }, 3 * 30_000 + 5_000);
+
+  it.each(['resolve', 'reject'] as const)('rejects an entry waiter when a lifecycle phase %ss without signalling entry', async completion => {
+    const entered = new Promise<void>(() => undefined);
+    const phase = lifecyclePhase('missing entry signal', async () => {
+      if (completion === 'reject') throw new Error('Synthetic failure before entry');
+    });
+    let settled = false;
+    let error: unknown;
+    const entering = awaitPhaseEntry('missing entry signal', entered, phase)
+      .catch(cause => { error = cause; }).finally(() => { settled = true; });
+    await Promise.allSettled([phase]);
+    // All promise reactions must finish before the next event-loop turn. A missing
+    // signal must fail promptly instead of stranding the test until its watchdog.
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(settled).toBe(true);
+    await entering;
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain(completion === 'reject'
+      ? 'Git lifecycle phase failed: missing entry signal' : 'finished before entry: missing entry signal');
+    expect(pendingPhases.size).toBe(0);
   });
 
   it('does not enter a scheduled lifecycle phase once teardown has begun', async () => {
-    const action = vi.fn(async () => undefined);
+    let entered!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const action = vi.fn(async () => { entered(); });
     const scheduled = lifecyclePhase('scheduled before teardown', action);
     const outcome = scheduled.catch(error => error);
+    const entering = awaitPhaseEntry('scheduled before teardown', started, scheduled).catch(error => error);
     const shutdown = settleFixture();
     try {
       expect(await outcome).toBeInstanceOf(Error);
+      expect(await entering).toBeInstanceOf(Error);
       expect(action).not.toHaveBeenCalled();
     } finally { await Promise.allSettled([scheduled, shutdown]); }
   });

@@ -19,6 +19,64 @@ vi.mock('../../src/delegation/OwnershipRuntime', async importOriginal => {
   return syntheticOwnershipRuntime(actual);
 });
 
+function signal<T = void>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+// Deadlines bound observation, not the underlying filesystem or request work.
+// Keep admitted work alive until teardown releases fake executors and drains it.
+function fixturePhases() {
+  const pending = new Set<Promise<unknown>>();
+  const releases = new Set<() => void>();
+  let closing = false;
+  const track = <T>(action: () => Promise<T>): Promise<T> => {
+    if (closing) return Promise.reject(new Error('Fixture is draining; no new phase may start'));
+    const work = Promise.resolve().then(() => {
+      if (closing) throw new Error('Fixture is draining; no new phase may start');
+      return action();
+    });
+    pending.add(work);
+    void work.then(() => pending.delete(work), () => pending.delete(work));
+    return work;
+  };
+  const beginDrain = () => {
+    closing = true;
+    for (const release of releases) release();
+    releases.clear();
+  };
+  const run = async <T>(name: string, action: () => Promise<T>, timeoutMs = 30_000): Promise<T> => {
+    const work = track(action);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([work, new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`Integration phase exceeded ${timeoutMs / 1000} seconds: ${name}`));
+          beginDrain();
+        }, timeoutMs);
+      })]);
+    } finally { clearTimeout(timer); }
+  };
+  return {
+    track, run, beginDrain,
+    releaseOnDrain(release: () => void) {
+      if (closing) release();
+      else releases.add(release);
+    },
+    wait<T>(name: string, ready: Promise<T>, active: Promise<unknown>, failure?: () => string | undefined): Promise<T> {
+      return run(name, () => Promise.race([ready, active.then(() => {
+        const error = failure?.();
+        throw new Error(`Request completed before integration phase: ${name}${error ? `: ${error}` : ''}`);
+      })]));
+    },
+    async drain() {
+      beginDrain();
+      while (pending.size) await Promise.allSettled([...pending]);
+    },
+  };
+}
+
 describe('delegation in the existing thread workflow', () => {
   let home: string;
   let threads: ThreadManager;
@@ -30,17 +88,30 @@ describe('delegation in the existing thread workflow', () => {
   let otherExecutors: Map<string, any>;
   let connection: DelegationConnection | undefined;
   let callCounter = 0;
+  let phases: ReturnType<typeof fixturePhases>;
+  let sentListeners: Set<(value: any) => void>;
 
-  const call = async (name: string, args: Record<string, unknown> = {}) => {
+  const call = (name: string, args: Record<string, unknown> = {}) => phases.track(async () => {
     const response = await fetch(connection!.url, { method: 'POST',
       headers: { authorization: `Bearer ${connection!.token}` },
       body: JSON.stringify({ name, args, callId: `call-${++callCounter}` }) });
     const result = await response.json() as any;
     if (!response.ok) throw new Error(result.error);
     return result;
+  });
+  const trackRequests = (value: MessageHandler): MessageHandler => {
+    const handle = value.handleMessage.bind(value);
+    vi.spyOn(value, 'handleMessage').mockImplementation(request => phases.track(() => handle(request)));
+    return value;
   };
+  const heldResult = (enter: (finish: (result: ExecuteResult) => void) => void) => phases.track(() =>
+    new Promise<ExecuteResult>(resolve => {
+      phases.releaseOnDrain(() => resolve({ success: false, error: 'Fixture drained' }));
+      enter(resolve);
+    }));
 
   beforeEach(async () => {
+    phases = fixturePhases();
     // Use the same native canonicalization as durable queue ownership checks.
     home = await fs.promises.realpath(await fs.promises.mkdtemp(path.join(os.tmpdir(), 'delegation-workflow-')));
     vi.spyOn(os, 'homedir').mockReturnValue(home);
@@ -62,21 +133,37 @@ describe('delegation in the existing thread workflow', () => {
       getAll: () => ({}), has: () => true, getConfigDir: () => home };
     otherExecutors = new Map();
     pool = new ThreadExecutorPool(threads, guard, { type: 'codex' }, (_guard, _config, _cwd, id) => otherExecutors.get(id!) ?? main);
-    socket = { send: vi.fn(), trackTask: vi.fn(), hasPendingTaskResults: () => false, isConnected: () => true };
-    handler = new MessageHandler(socket, pool, threads, guard, config);
+    sentListeners = new Set();
+    socket = { send: vi.fn(value => { for (const listener of sentListeners) listener(value); }),
+      trackTask: vi.fn(), hasPendingTaskResults: () => false, isConnected: () => true };
+    handler = trackRequests(new MessageHandler(socket, pool, threads, guard, config));
     (handler as any).delegation = new DelegationManager(guard, () => worker, new BackendRegistry(async () => 'test 1.0'));
   });
 
   afterEach(async () => {
+    phases.beginDrain();
     try { await handler?.destroy(); }
     finally {
-      vi.restoreAllMocks(); vi.unstubAllEnvs();
+      try { await phases.drain(); }
+      finally { vi.restoreAllMocks(); vi.unstubAllEnvs(); }
     }
     await fs.promises.rm(home, { recursive: true, force: true });
   });
 
   const message = (id: string, content: string) => ({ type: 'command' as const, messageId: id, content, openId: 'owner', timestamp: Date.now() });
   const responseFor = (id: string) => socket.send.mock.calls.map(([value]: any[]) => value).reverse().find((value: any) => value.type === 'response' && value.messageId === id);
+  const observe = <T>(name: string, ready: Promise<T>, active: Promise<unknown>) =>
+    phases.wait(name, ready, active, () => responseFor('parent')?.error);
+  const sent = (matches: (value: any) => boolean): Promise<void> => {
+    const ready = signal();
+    const listener = (value: any) => {
+      if (matches(value)) { sentListeners.delete(listener); ready.resolve(); }
+    };
+    sentListeners.add(listener);
+    for (const [value] of socket.send.mock.calls) listener(value);
+    phases.releaseOnDrain(() => { sentListeners.delete(listener); ready.resolve(); });
+    return ready.promise;
+  };
 
   it('launches and collects a fake worker when native boot discovery is unavailable', async () => {
     const nativeProbe = vi.spyOn(childProcess, 'execFileSync').mockImplementation(() => {
@@ -103,7 +190,7 @@ describe('delegation in the existing thread workflow', () => {
     const guard = new DirectoryGuard([home]);
     const config: any = { get: () => ({ type: 'codex' }), getAll: () => ({}), has: () => true, getConfigDir: () => home };
     pool = new ThreadExecutorPool(threads, guard, { type: 'codex' }, (_guard, _config, _cwd, id) => otherExecutors.get(id!) ?? main);
-    handler = new MessageHandler(socket, pool, threads, guard, config);
+    handler = trackRequests(new MessageHandler(socket, pool, threads, guard, config));
     (handler as any).delegation = new DelegationManager(guard, () => worker, new BackendRegistry(async () => 'test 1.0'));
     main.execute.mockImplementationOnce(async () => {
       const discovery = await call('remote_cli_list_backends');
@@ -241,7 +328,7 @@ describe('delegation in the existing thread workflow', () => {
     const guard = new DirectoryGuard([home]);
     const config: any = { get: () => ({ type: 'codex' }), getAll: () => ({}), has: () => true, getConfigDir: () => home };
     pool = new ThreadExecutorPool(threads, guard, { type: 'codex' }, () => main);
-    handler = new MessageHandler(socket, pool, threads, guard, config);
+    handler = trackRequests(new MessageHandler(socket, pool, threads, guard, config));
     main.configureDelegation.mockClear();
     main.listModels = vi.fn(async () => []);
     await handler.handleMessage(message('models', '/model'));
@@ -268,14 +355,14 @@ describe('delegation in the existing thread workflow', () => {
     let finish!: (result: ExecuteResult) => void;
     let entered!: () => void;
     const started = new Promise<void>(resolve => { entered = resolve; });
-    worker.execute.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; entered(); }));
+    worker.execute.mockImplementationOnce(() => heldResult(resolve => { finish = resolve; entered(); }));
     worker.abort.mockImplementation(async () => { finish?.({ success: false }); return true; });
     main.execute.mockImplementationOnce(async () => {
       const task = await call('remote_cli_delegate', { backend: 'claude', objective: 'Review' });
       await call('remote_cli_result', { taskId: task.taskId });
       return { success: true };
     });
-    const active = handler.handleMessage(message('managed', 'Review'));
+    const active = phases.track(() => handler.handleMessage(message('managed', 'Review')));
     try {
       // Observe the execution phase, not the wall-clock duration of admission.
       await Promise.race([started, active.then(() => { throw new Error('Managed request ended before worker execution'); })]);
@@ -333,7 +420,7 @@ describe('delegation in the existing thread workflow', () => {
     }
     const config: any = { get: () => executorConfig, getAll: () => ({}), has: () => true, getConfigDir: () => home };
     pool = new ThreadExecutorPool(threads, guard, executorConfig, () => main);
-    handler = new MessageHandler(socket, pool, threads, guard, config);
+    handler = trackRequests(new MessageHandler(socket, pool, threads, guard, config));
     (handler as any).delegation = new DelegationManager(guard, () => worker, new BackendRegistry(async () => 'test 1.0'));
     await handler.handleMessage(message('restricted-menu', '/delegation'));
     const menu = responseFor('restricted-menu').output;
@@ -355,7 +442,10 @@ describe('delegation in the existing thread workflow', () => {
     await handler.handleMessage(message('enable', '/delegation on'));
     expect((await ThreadManager.initialize(home)).getDefaultThread().delegation).toBe(true);
     let finish!: (result: ExecuteResult) => void;
-    worker.execute.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const started = signal();
+    worker.execute.mockImplementationOnce(() => heldResult(resolve => {
+      finish = resolve; started.resolve();
+    }));
     worker.abort.mockImplementation(async () => { finish?.({ success: false, error: 'Aborted' }); return true; });
     main.execute.mockImplementationOnce(async () => {
       const task = await call('remote_cli_delegate', { backend: 'claude', objective: 'Review' });
@@ -363,15 +453,17 @@ describe('delegation in the existing thread workflow', () => {
       expect(result.output).toBe('review complete');
       return { success: true };
     });
-    const active = handler.handleMessage(message('parent', 'Review this'));
-    await vi.waitFor(() => expect(worker.execute).toHaveBeenCalledOnce());
+    const active = phases.track(() => handler.handleMessage(message('parent', 'Review this')));
+    await observe('worker executing', started.promise, active);
+    expect(worker.execute).toHaveBeenCalledOnce();
     await handler.handleMessage(message('next', 'Continue'));
     const confirmation = responseFor('next').queueConfirmation;
     await handler.handleMessage(message('confirm', `/queue confirm ${confirmation.id}`));
     expect(main.execute).toHaveBeenCalledTimes(1);
     finish({ success: true, output: 'review complete' });
     await active;
-    await vi.waitFor(() => expect(responseFor('next')?.success).toBe(true));
+    await phases.run('next queued response delivered', () => sent(value => value.type === 'response' && value.messageId === 'next' && value.success));
+    expect(responseFor('next')?.success).toBe(true);
     expect(main.execute).toHaveBeenCalledTimes(2);
     expect(worker.execute).toHaveBeenCalledTimes(1);
     expect(socket.send.mock.calls.map(([value]: any[]) => value).some((value: any) => value.messageId === 'parent' && value.streamType === 'tool_use')).toBe(true);
@@ -468,7 +560,8 @@ describe('delegation in the existing thread workflow', () => {
     await handler.handleMessage(message('enable', '/delegation on'));
     await handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: { approvalCards: true } } } as any);
     let finish!: (result: ExecuteResult) => void;
-    worker.execute.mockImplementationOnce((_prompt: string, options: ExecuteOptions) => new Promise(resolve => {
+    worker.execute.mockImplementationOnce((_prompt: string, options: ExecuteOptions) => heldResult(resolve => {
+
       finish = resolve;
       worker.respondToApproval = vi.fn((id: string) => { options.onApprovalResolved?.(id, 'approved'); finish({ success: true }); return true; });
       options.onApprovalRequest?.({ requestId: 'child-approval', kind: 'command', description: 'Write a file', canRemember: false });
@@ -480,8 +573,9 @@ describe('delegation in the existing thread workflow', () => {
       await call('remote_cli_result', { taskId: task.taskId });
       return { success: true };
     });
-    const active = handler.handleMessage(message('parent', 'Work'));
-    await vi.waitFor(() => expect(socket.send.mock.calls.some(([value]: any[]) => value.type === 'approval_request')).toBe(true));
+    const active = phases.track(() => handler.handleMessage(message('parent', 'Work')));
+    await observe('child approval delivered', sent(value => value.type === 'approval_request'), active);
+    expect(socket.send.mock.calls.some(([value]: any[]) => value.type === 'approval_request')).toBe(true);
     await handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: { approvalCards: true } } } as any);
     expect(socket.send.mock.calls.filter(([value]: any[]) => value.type === 'approval_request')).toHaveLength(2);
     await handler.handleMessage({ type: 'approval_response', messageId: 'child-approval', taskMessageId: 'parent',
@@ -503,7 +597,7 @@ describe('delegation in the existing thread workflow', () => {
     let waiting = false;
     let cardSupported: boolean | undefined;
     worker.isWaitingInput = () => waiting;
-    worker.execute.mockImplementationOnce((_prompt: string, options: ExecuteOptions) => new Promise(resolve => {
+    worker.execute.mockImplementationOnce((_prompt: string, options: ExecuteOptions) => heldResult(resolve => {
       waiting = true;
       worker.sendInput = vi.fn((input: string) => {
         if (input !== 'yes') return false;
@@ -523,9 +617,10 @@ describe('delegation in the existing thread workflow', () => {
       options.onStream?.(result.output);
       return { success: true, output: result.output };
     });
-    const active = handler.handleMessage(message('parent', 'Work'));
-    await vi.waitFor(() => expect(socket.send.mock.calls.some(([value]: any[]) =>
-      value.type === 'stream' && value.messageId === 'parent' && value.chunk?.includes('Approval required:'))).toBe(true));
+    const active = phases.track(() => handler.handleMessage(message('parent', 'Work')));
+    await observe('legacy child approval delivered', sent(value =>
+      value.type === 'stream' && value.messageId === 'parent' && value.chunk?.includes('Approval required:')), active);
+    expect(socket.send.mock.calls.some(([value]: any[]) => value.chunk?.includes('Approval required:'))).toBe(true);
     expect(cardSupported).toBe(false);
     await handler.handleMessage(message('answer', 'yes'));
     await active;
@@ -541,15 +636,22 @@ describe('delegation in the existing thread workflow', () => {
     expect(threads.getDefaultThread().delegation).toBeUndefined();
     let finishWorker!: (result: ExecuteResult) => void;
     let finishMain!: (result: ExecuteResult) => void;
-    worker.execute.mockImplementationOnce(() => new Promise(resolve => { finishWorker = resolve; }));
+    const entered = signal();
+    worker.execute.mockImplementationOnce(() => heldResult(resolve => {
+      finishWorker = resolve;
+    }));
     worker.abort.mockImplementation(async () => { finishWorker({ success: false, error: 'Aborted' }); return true; });
     main.execute.mockImplementationOnce(async () => {
       await call('remote_cli_delegate', { backend: 'pi', objective: 'Wait' });
-      return new Promise(resolve => { finishMain = resolve; });
+      return heldResult(resolve => {
+        finishMain = resolve; entered.resolve();
+
+      });
     });
     main.abort.mockImplementation(async () => { finishMain({ success: false, error: 'Aborted' }); return true; });
-    const active = handler.handleMessage(message('parent', 'Work'));
-    await vi.waitFor(() => expect(finishMain).toBeTypeOf('function'));
+    const active = phases.track(() => handler.handleMessage(message('parent', 'Work')));
+    await observe('coordinator holding after child admission', entered.promise, active);
+    expect(finishMain).toBeTypeOf('function');
     await handler.handleMessage(message('abort', '/abort'));
     await active;
     expect(worker.destroy).toHaveBeenCalledOnce();
@@ -601,7 +703,7 @@ describe('delegation in the existing thread workflow', () => {
     await handler.handleMessage(message('enable', '/delegation on'));
     let waiting = false;
     worker.isWaitingInput = () => waiting;
-    worker.execute.mockImplementationOnce((_prompt: string, options: ExecuteOptions) => new Promise(resolve => {
+    worker.execute.mockImplementationOnce((_prompt: string, options: ExecuteOptions) => heldResult(resolve => {
       worker.sendInput = vi.fn(() => { waiting = false; resolve({ success: true, output: 'Selected A' }); return true; });
       options.onStream?.('Choose A or B');
       waiting = true;
@@ -612,8 +714,9 @@ describe('delegation in the existing thread workflow', () => {
       await call('remote_cli_result', { taskId: task.taskId });
       return { success: true };
     });
-    const active = handler.handleMessage(message('parent', 'Choose'));
-    await vi.waitFor(() => expect(socket.send.mock.calls.some(([value]: any[]) => value.messageId === 'parent' && JSON.stringify(value).includes('Choose A or B'))).toBe(true));
+    const active = phases.track(() => handler.handleMessage(message('parent', 'Choose')));
+    await observe('worker question delivered', sent(value => value.messageId === 'parent' && value.chunk?.includes('Choose A or B')), active);
+    expect(socket.send.mock.calls.some(([value]: any[]) => value.chunk?.includes('Choose A or B'))).toBe(true);
     await handler.handleMessage(message('input', 'A'));
     await active;
     expect(worker.sendInput).toHaveBeenCalledWith('A');
@@ -624,8 +727,15 @@ describe('delegation in the existing thread workflow', () => {
     let finishFirst!: (result: ExecuteResult) => void;
     let finishSecond!: (result: ExecuteResult) => void;
     let queuedId!: string;
-    worker.execute.mockImplementationOnce(() => new Promise(resolve => { finishFirst = resolve; }));
-    const secondWorker = { ...worker, execute: vi.fn(() => new Promise(resolve => { finishSecond = resolve; })),
+    const accepted = signal();
+    const firstStarted = signal();
+    worker.execute.mockImplementationOnce(() => heldResult(resolve => {
+      finishFirst = resolve; firstStarted.resolve();
+    }));
+    const secondStarted = signal();
+    const secondWorker = { ...worker, execute: vi.fn(() => heldResult(resolve => {
+      finishSecond = resolve; secondStarted.resolve();
+    })),
       abort: vi.fn(async () => true), destroy: vi.fn(async () => undefined), waitForExit: vi.fn(async () => undefined) };
     const factory = vi.fn().mockReturnValueOnce(worker).mockReturnValueOnce(secondWorker);
     (handler as any).delegation = new DelegationManager(new DirectoryGuard([home]), factory,
@@ -635,6 +745,7 @@ describe('delegation in the existing thread workflow', () => {
       const second = await call('remote_cli_delegate', { backend: 'agy', objective: 'Second independent review' });
       expect(second.state).toBe('queued');
       queuedId = second.taskId;
+      accepted.resolve();
       options.onStream?.('Premature summary of all reviews');
       return { success: true };
     }).mockImplementationOnce(async (prompt: string, options: ExecuteOptions) => {
@@ -646,22 +757,26 @@ describe('delegation in the existing thread workflow', () => {
       options.onStream?.('Combined review conclusion');
       return { success: true, output: 'Combined review conclusion' };
     });
-    const active = handler.handleMessage({ ...message('parent', 'Original request with attachment'),
-      attachments: [{ type: 'image' as const, data: 'aW1hZ2U=', mimeType: 'image/png' }] });
-    await vi.waitFor(() => expect(queuedId).toBeTypeOf('string'));
+    const active = phases.track(() => handler.handleMessage({ ...message('parent', 'Original request with attachment'),
+      attachments: [{ type: 'image' as const, data: 'aW1hZ2U=', mimeType: 'image/png' }] }));
+    await observe('both tasks accepted and first worker executing', Promise.all([accepted.promise, firstStarted.promise]), active);
+    expect(queuedId).toBeTypeOf('string');
     expect(factory).toHaveBeenCalledOnce();
     expect(responseFor('parent')).toBeUndefined();
-    await handler.handleMessage(message('next', 'Next independent user request'));
+    const nextSent = sent(value => value.type === 'response' && value.messageId === 'next' && value.success);
+    await phases.run('queue the next user message', () => handler.handleMessage(message('next', 'Next independent user request')));
     const confirmation = responseFor('next').queueConfirmation;
-    await handler.handleMessage(message('confirm', `/queue confirm ${confirmation.id}`));
+    await phases.run('confirm the next queued message', () => handler.handleMessage(message('confirm', `/queue confirm ${confirmation.id}`)));
     finishFirst({ success: false, error: 'First authentication failure' });
-    await vi.waitFor(() => expect(secondWorker.execute).toHaveBeenCalledOnce());
+    await observe('second worker executing', secondStarted.promise, active);
+    expect(secondWorker.execute).toHaveBeenCalledOnce();
     expect(worker.waitForExit).toHaveBeenCalledOnce();
     expect(main.execute).toHaveBeenCalledOnce();
     expect(pool.isThreadBusy(threads.getDefaultThread().id)).toBe(true);
     finishSecond({ success: true, output: 'Second verified result' });
-    await active;
-    await vi.waitFor(() => expect(responseFor('next')?.success).toBe(true));
+    await phases.run('collect both results and continue the parent', () => active);
+    await phases.run('deliver the next queued response', () => nextSent);
+    expect(responseFor('next')?.success).toBe(true);
     expect(main.execute).toHaveBeenCalledTimes(3);
     expect(factory).toHaveBeenCalledTimes(2);
     expect(responseFor('parent')).toMatchObject({ success: true });
@@ -669,24 +784,33 @@ describe('delegation in the existing thread workflow', () => {
       .filter((value: any) => value.messageId === 'parent' && value.streamType === 'text');
     expect(JSON.stringify(text)).toContain('Combined review conclusion');
     expect(JSON.stringify(text)).not.toContain('Premature summary of all reviews');
-  });
+  }, 6 * 30_000 + 5_000);
 
   it.each(['abort', 'shutdown', 'failure'] as const)('never starts a queued sibling after coordinator %s', async action => {
     let queuedId!: string;
-    worker.execute.mockImplementationOnce(() => new Promise(() => undefined));
+    const accepted = signal();
+    const started = signal();
+    worker.execute.mockImplementationOnce(() => heldResult(resolve => {
+      started.resolve();
+    }));
     const factory = vi.fn(() => worker);
     (handler as any).delegation = new DelegationManager(new DirectoryGuard([home]), factory,
       new BackendRegistry(async () => 'test 1.0'));
     main.execute.mockImplementationOnce(async () => {
       await call('remote_cli_delegate', { backend: 'claude', objective: 'Active review' });
+      await started.promise;
       queuedId = (await call('remote_cli_delegate', { backend: 'agy', objective: 'Queued review' })).taskId;
+      accepted.resolve();
       return action === 'failure' ? { success: false, error: 'Coordinator failure' } : { success: true };
     });
-    const active = handler.handleMessage(message('parent', 'Review independently'));
-    await vi.waitFor(() => expect(queuedId).toBeTypeOf('string'));
-    if (action === 'abort') await handler.handleMessage(message('abort', '/abort'));
-    else if (action === 'shutdown') await handler.destroy();
-    await active;
+    const active = phases.track(() => handler.handleMessage(message('parent', 'Review independently')));
+    await observe('queued sibling accepted after first execution starts', accepted.promise, active);
+    expect(queuedId).toBeTypeOf('string');
+    await phases.run('cancel or fail the coordinator', async () => {
+      if (action === 'abort') await handler.handleMessage(message('abort', '/abort'));
+      else if (action === 'shutdown') await handler.destroy();
+    });
+    await phases.run('settle the cancelled request', () => active);
     expect(factory).toHaveBeenCalledOnce();
     expect(worker.abort).toHaveBeenCalledOnce();
     expect(worker.destroy).toHaveBeenCalledOnce();
@@ -695,18 +819,20 @@ describe('delegation in the existing thread workflow', () => {
     const record = JSON.parse(fs.readFileSync(path.join(home, '.remote-cli', 'delegation', `${queuedId}.json`), 'utf8'));
     expect(record).toMatchObject({ state: 'cancelled' });
     expect(record.startedAt).toBeUndefined();
-  });
+  }, 3 * 30_000 + 5_000);
 
   it('waits for a verbose worker and resumes the coordinator with its conclusion before draining the queue', async () => {
     await handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: { activityProgress: true } } } as any);
     await handler.handleMessage(message('enable', '/delegation on'));
     fs.writeFileSync(path.join(home, 'stale.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+cZYsAAAAASUVORK5CYII=', 'base64'));
     let finish!: (result: ExecuteResult) => void;
+    const started = signal();
+    const returned = signal();
     let staleOptions!: ExecuteOptions;
-    worker.execute.mockImplementationOnce((_prompt: string, options: ExecuteOptions) => new Promise(resolve => {
+    worker.execute.mockImplementationOnce((_prompt: string, options: ExecuteOptions) => heldResult(resolve => {
       options.onToolResult?.({ tool_use_id: 'research', content: 'Large evidence'.repeat(30000) });
       options.onStream?.('Research progress'.repeat(30000));
-      finish = resolve;
+      finish = resolve; started.resolve();
     }));
     worker.abort.mockImplementation(async () => { finish({ success: false }); return true; });
     main.execute.mockImplementationOnce(async (_prompt: string, options: ExecuteOptions) => {
@@ -717,6 +843,7 @@ describe('delegation in the existing thread workflow', () => {
       options.onPlanMode?.('A stale waiting plan');
       options.onActivity?.({ source: 'reasoning_summary', text: 'A premature coordinator conclusion' });
       options.onImage?.({ type: 'image', data: 'c3RhbGU=', mimeType: 'image/png' });
+      returned.resolve();
       return { success: true, output: 'Still waiting for the worker.\n![stale image](./stale.png)' };
     }).mockImplementationOnce(async (prompt: string, options: ExecuteOptions) => {
       expect(prompt).toContain('Verified child result');
@@ -730,9 +857,9 @@ describe('delegation in the existing thread workflow', () => {
       return { success: true, output: 'The review is complete.' };
     });
     const attachments = [{ type: 'image' as const, data: 'aW1hZ2U=', mimeType: 'image/png' }];
-    const active = handler.handleMessage({ ...message('parent', 'Unique original request'), attachments });
-    await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
-    await vi.waitFor(async () => expect(await main.execute.mock.results[0].value).toMatchObject({ success: true }));
+    const active = phases.track(() => handler.handleMessage({ ...message('parent', 'Unique original request'), attachments }));
+    await observe('verbose worker executing and coordinator returning', Promise.all([started.promise, returned.promise]), active);
+    expect(await main.execute.mock.results[0].value).toMatchObject({ success: true });
     expect(responseFor('parent')).toBeUndefined();
     expect(pool.isThreadBusy(threads.getDefaultThread().id)).toBe(true);
     expect(worker.abort).not.toHaveBeenCalled();
@@ -742,7 +869,8 @@ describe('delegation in the existing thread workflow', () => {
     expect(main.execute).toHaveBeenCalledTimes(1);
     finish({ success: true, output: `Review context\n${'x'.repeat(40 * 1024)}\nVerified child result` });
     await active;
-    await vi.waitFor(() => expect(responseFor('next')?.success).toBe(true));
+    await phases.run('next response after verbose worker', () => sent(value => value.type === 'response' && value.messageId === 'next' && value.success));
+    expect(responseFor('next')?.success).toBe(true);
     expect(main.execute).toHaveBeenCalledTimes(3);
     expect(main.execute.mock.calls[0][1].attachments).toEqual(attachments);
     expect(worker.execute).toHaveBeenCalledOnce();
@@ -883,14 +1011,18 @@ describe('delegation in the existing thread workflow', () => {
   it('does not resume or display failure results when aborted during continuation compaction', async () => {
     await handler.handleMessage(message('enable', '/delegation on'));
     let finishCompact!: (result: ExecuteResult) => void;
-    main.compactWhenFull = vi.fn(() => new Promise(resolve => { finishCompact = resolve; }));
+    const entered = signal();
+    main.compactWhenFull = vi.fn(() => heldResult(resolve => {
+      finishCompact = resolve; entered.resolve();
+    }));
     main.abort.mockImplementation(async () => { finishCompact({ success: true }); return true; });
     main.execute.mockImplementationOnce(async () => {
       await call('remote_cli_delegate', { backend: 'claude', objective: 'Inspect' });
       return { success: true };
     }).mockResolvedValueOnce({ success: false, error: 'Prompt too long' });
-    const active = handler.handleMessage(message('parent', 'Work'));
-    await vi.waitFor(() => expect(finishCompact).toBeTypeOf('function'));
+    const active = phases.track(() => handler.handleMessage(message('parent', 'Work')));
+    await observe('continuation compaction entered', entered.promise, active);
+    expect(finishCompact).toBeTypeOf('function');
     await handler.handleMessage(message('abort', '/abort'));
     await active;
     expect(main.execute).toHaveBeenCalledTimes(2);
@@ -904,7 +1036,8 @@ describe('delegation in the existing thread workflow', () => {
     await handler.handleMessage(message('enable', '/delegation on'));
     main.execute.mockImplementationOnce(async (_prompt: string, options: ExecuteOptions) => {
       const task = await call('remote_cli_delegate', { backend: 'claude', objective: 'Inspect' });
-      await vi.waitFor(() => expect(socket.send.mock.calls.some(([value]: any[]) => value.chunk?.includes('Completed</text_tag>'))).toBe(true));
+      await phases.run('completed child progress delivered', () => sent(value => value.chunk?.includes('Completed</text_tag>')));
+      expect(socket.send.mock.calls.some(([value]: any[]) => value.chunk?.includes('Completed</text_tag>'))).toBe(true);
       options.onStream?.('The worker is still running.');
       const result = await call('remote_cli_result', { taskId: task.taskId });
       options.onStream?.(`Final answer: ${result.output}`);
@@ -918,30 +1051,37 @@ describe('delegation in the existing thread workflow', () => {
   });
 
   it.each(['abort', 'shutdown'])('does not resume an early-returned coordinator after %s during host waiting', async action => {
-    await handler.handleMessage(message('enable', '/delegation on'));
+    await phases.run('enable delegation', () => handler.handleMessage(message('enable', '/delegation on')));
     let finish!: (result: ExecuteResult) => void;
-    worker.execute.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const started = signal();
+    const returned = signal();
+    worker.execute.mockImplementationOnce(() => heldResult(resolve => {
+      finish = resolve; started.resolve();
+    }));
     worker.abort.mockImplementation(async () => { finish({ success: false, error: 'Aborted' }); return true; });
     main.execute.mockImplementationOnce(async () => {
       await call('remote_cli_delegate', { backend: 'claude', objective: 'Wait' });
+      returned.resolve();
       return { success: true };
     });
-    const active = handler.handleMessage(message('parent', 'Work'));
-    await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
-    await vi.waitFor(async () => expect(await main.execute.mock.results[0].value).toMatchObject({ success: true }));
-    if (action === 'abort') await handler.handleMessage(message('abort', '/abort'));
-    else await handler.destroy();
-    await active;
+    const active = phases.track(() => handler.handleMessage(message('parent', 'Work')));
+    await observe('worker executing and coordinator returning', Promise.all([started.promise, returned.promise]), active);
+    expect(await main.execute.mock.results[0].value).toMatchObject({ success: true });
+    await phases.run('cancel the host waiting request', async () => {
+      if (action === 'abort') await handler.handleMessage(message('abort', '/abort'));
+      else await handler.destroy();
+    });
+    await phases.run('settle host waiting cancellation', () => active);
     expect(main.execute).toHaveBeenCalledOnce();
     expect(responseFor('parent')).toMatchObject({ success: false, error: expect.stringMatching(/cancel/i) });
     if (action === 'abort') expect(responseFor('abort').success).toBe(true);
     expect(worker.destroy).toHaveBeenCalledOnce();
-  });
+  }, 4 * 30_000 + 5_000);
 
   it('cancels unfinished children on coordinator failure without replaying the user request', async () => {
     await handler.handleMessage(message('enable', '/delegation on'));
     let finish!: (result: ExecuteResult) => void;
-    worker.execute.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    worker.execute.mockImplementationOnce(() => heldResult(resolve => { finish = resolve; }));
     worker.abort.mockImplementation(async () => { finish({ success: false }); return true; });
     main.compactWhenFull = vi.fn(async () => ({ success: true }));
     main.execute.mockImplementationOnce(async () => {
@@ -962,7 +1102,7 @@ describe('delegation in the existing thread workflow', () => {
     else {
       const guard = new DirectoryGuard([home]);
       (handler as any).delegation = new DelegationManager(guard, () => worker, new BackendRegistry(async () => 'test 1.0'), undefined, 20);
-      worker.execute.mockImplementationOnce(() => new Promise(() => undefined));
+      worker.execute.mockImplementationOnce(() => heldResult(() => undefined));
     }
     main.execute.mockImplementationOnce(async () => {
       await call('remote_cli_delegate', { backend: 'claude', objective: 'Inspect' });
@@ -986,15 +1126,21 @@ describe('delegation in the existing thread workflow', () => {
   });
 
   it('relays genuine coordinator questions emitted before the waiting flag is set while a child is active', async () => {
-    await handler.handleMessage(message('enable', '/delegation on'));
+    await phases.run('enable delegation', () => handler.handleMessage(message('enable', '/delegation on')));
     let waiting = false;
+    const started = signal();
+    const questionSent = sent(value => value.messageId === 'parent' && value.chunk?.includes('Choose output language'));
     let finishChild!: (result: ExecuteResult) => void;
-    worker.execute.mockImplementationOnce(() => new Promise(resolve => { finishChild = resolve; }));
+    worker.execute.mockImplementationOnce(() => heldResult(resolve => {
+      finishChild = resolve; started.resolve();
+    }));
     worker.abort.mockImplementation(async () => { finishChild({ success: false }); return true; });
     main.isWaitingInput = () => waiting;
     main.execute.mockImplementationOnce(async (_prompt: string, options: ExecuteOptions) => {
       const task = await call('remote_cli_delegate', { backend: 'claude', objective: 'Inspect' });
+      await started.promise;
       await new Promise<void>(resolve => {
+        phases.releaseOnDrain(resolve);
         main.sendInput = vi.fn(() => { waiting = false; resolve(); return true; });
         options.onStream?.('Choose output language: A or B');
         waiting = true;
@@ -1004,14 +1150,15 @@ describe('delegation in the existing thread workflow', () => {
       options.onStream?.('Final answer');
       return { success: true };
     });
-    const active = handler.handleMessage(message('parent', 'Work'));
-    await vi.waitFor(() => expect(JSON.stringify(socket.send.mock.calls)).toContain('Choose output language'));
-    await handler.handleMessage(message('input', 'A'));
-    await active;
+    const active = phases.track(() => handler.handleMessage(message('parent', 'Work')));
+    await observe('question delivered before the waiting flag', questionSent, active);
+    expect(JSON.stringify(socket.send.mock.calls)).toContain('Choose output language');
+    await phases.run('answer the coordinator question', () => handler.handleMessage(message('input', 'A')));
+    await phases.run('collect the child and deliver the final answer', () => active);
     expect(main.sendInput).toHaveBeenCalledWith('A');
     expect(main.execute).toHaveBeenCalledOnce();
     expect(responseFor('parent')).toMatchObject({ success: true });
-  });
+  }, 4 * 30_000 + 5_000);
 
   it('rejects unsupported coordinators without changing the selected backend or ordinary execution', async () => {
     delete main.configureDelegation;
@@ -1024,5 +1171,122 @@ describe('delegation in the existing thread workflow', () => {
     await handler.handleMessage(message('disable', '/delegation off'));
     expect(responseFor('disable')?.success).toBe(true);
     expect(threads.getDefaultThread().delegation).toBe(false);
+  });
+});
+
+describe('delegation workflow fixture phase boundaries', () => {
+  it('observes slow admission beyond the old polling window without assuming worker entry', async () => {
+    vi.useFakeTimers();
+    const phases = fixturePhases();
+    const admission = signal();
+    const started = signal();
+    const finish = signal();
+    let entered = false;
+    const active = phases.track(async () => {
+      await admission.promise;
+      entered = true;
+      started.resolve();
+      await finish.promise;
+    });
+    phases.releaseOnDrain(() => { admission.resolve(); finish.resolve(); });
+    const observed = phases.wait('worker entry', started.promise, active);
+    // Reproduce the old default observer's false failure, without sleeping.
+    const oldObserver = vi.waitFor(() => expect(entered).toBe(true));
+    const oldFailure = expect(oldObserver).rejects.toThrow();
+    try {
+      await vi.advanceTimersByTimeAsync(1_500);
+      await oldFailure;
+      expect(entered).toBe(false);
+      admission.resolve();
+      await observed;
+      expect(entered).toBe(true);
+    } finally {
+      await phases.drain();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['completion', 'rejection'] as const)('reports premature request %s before a worker starts', async outcome => {
+    const phases = fixturePhases();
+    const started = signal();
+    const active = phases.track(async () => {
+      if (outcome === 'rejection') throw new Error('Synthetic setup rejected');
+    });
+    try {
+      await expect(phases.wait('worker entry', started.promise, active, () => 'Synthetic setup failed'))
+        .rejects.toThrow(outcome === 'rejection' ? 'Synthetic setup rejected' : 'worker entry: Synthetic setup failed');
+    } finally { await phases.drain(); }
+  });
+
+  it('refuses a scheduled action when draining starts before its entry', async () => {
+    const phases = fixturePhases();
+    const action = vi.fn(async () => undefined);
+    const scheduled = phases.track(action);
+    const rejected = expect(scheduled).rejects.toThrow('Fixture is draining');
+    await phases.drain();
+    await rejected;
+    expect(action).not.toHaveBeenCalled();
+  });
+
+  it.each(['completion', 'rejection'] as const)('drains late %s before releasing the fixture after assertion failure', async outcome => {
+    const phases = fixturePhases();
+    const finish = signal();
+    const entered = signal();
+    let fixtureReleased = false;
+    const work = phases.track(async () => {
+      entered.resolve();
+      await finish.promise;
+      expect(fixtureReleased).toBe(false);
+      if (outcome === 'rejection') throw new Error('Synthetic late rejection');
+    });
+    const settled = Promise.allSettled([work]);
+    await entered.promise;
+    try {
+      let drain!: Promise<void>;
+      try {
+        expect('Synthetic actual').toBe('Synthetic expected');
+      } catch {
+        drain = phases.drain().then(() => { fixtureReleased = true; });
+      }
+      await Promise.resolve();
+      expect(fixtureReleased).toBe(false);
+      await expect(phases.run('late command', async () => undefined)).rejects.toThrow('Fixture is draining');
+      finish.resolve();
+      await drain;
+      expect(fixtureReleased).toBe(true);
+      expect((await settled)[0].status).toBe(outcome === 'rejection' ? 'rejected' : 'fulfilled');
+    } finally {
+      finish.resolve();
+      await phases.drain();
+    }
+  });
+
+  it('retains timed-out work, bounds the phase and refuses subsequent admission while draining', async () => {
+    vi.useFakeTimers();
+    const phases = fixturePhases();
+    const finish = signal();
+    let lateFinished = false;
+    let drained = false;
+    const action = vi.fn(async () => { await finish.promise; lateFinished = true; });
+    const phase = phases.run('slow durable setup', action);
+    const timeout = expect(phase).rejects.toThrow('Integration phase exceeded 30 seconds: slow durable setup');
+    try {
+      await vi.advanceTimersByTimeAsync(30_000);
+      await timeout;
+      const drain = phases.drain().then(() => { drained = true; });
+      await Promise.resolve();
+      expect(drained).toBe(false);
+      const next = vi.fn(async () => undefined);
+      await expect(phases.run('late setup', next)).rejects.toThrow('Fixture is draining');
+      expect(next).not.toHaveBeenCalled();
+      phases.releaseOnDrain(finish.resolve);
+      await drain;
+      expect(lateFinished).toBe(true);
+      expect(action).toHaveBeenCalledOnce();
+    } finally {
+      finish.resolve();
+      await phases.drain();
+      vi.useRealTimers();
+    }
   });
 });
