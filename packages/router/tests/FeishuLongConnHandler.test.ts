@@ -325,11 +325,35 @@ describe('FeishuLongConnHandler', () => {
       handler.onApproveDeviceKey = vi.fn();
       const reply = vi.spyOn(handler as any, 'replyToMessage').mockResolvedValue(undefined);
       await (handler as any).handleBindCommand('owner', 'source', '123456');
-      expect(mockBindingManager.redeemBindingCode).toHaveBeenCalledWith('owner', '123456', 'Device', handler.onApproveDeviceKey);
+      expect(mockBindingManager.redeemBindingCode).toHaveBeenCalledWith('owner', '123456', 'Device', handler.onApproveDeviceKey, undefined);
       expect(reply).toHaveBeenCalledWith('source', expect.stringContaining('Device key approved'));
       mockBindingManager.redeemBindingCode.mockRejectedValue(new Error('other owner'));
       await (handler as any).handleBindCommand('stranger', 'source', '123456');
       expect(reply).toHaveBeenCalledWith('source', expect.stringContaining('Binding failed'));
+    });
+    it.each([
+      { first: true, guidance: 'first device and will be set as active' },
+      { first: false, guidance: '/device switch to activate this device' },
+    ])('guides a new secure device through CLI startup with first=$first', async ({ first, guidance }) => {
+      mockBindingManager.redeemBindingCode.mockResolvedValue({
+        bindingCode: { deviceId: 'device', devicePublicKey: 'test-key' },
+        alreadyBound: false, isFirstDevice: first, newDeviceEnrollment: true,
+      });
+      const reply = vi.spyOn(handler as any, 'replyToMessage').mockResolvedValue(undefined);
+      await (handler as any).handleBindCommand('owner', 'source', '123456');
+      expect(reply).toHaveBeenCalledWith('source', expect.stringContaining('Device key approved. Start the upgraded CLI.'));
+      expect(reply).toHaveBeenCalledWith('source', expect.stringContaining(guidance));
+      expect(reply).not.toHaveBeenCalledWith('source', expect.stringContaining('receive files'));
+    });
+    it('retains reconnect guidance for an existing secure device without promising file readiness', async () => {
+      mockBindingManager.redeemBindingCode.mockResolvedValue({
+        bindingCode: { deviceId: 'device', devicePublicKey: 'test-key' },
+        alreadyBound: true, isFirstDevice: false, newDeviceEnrollment: false,
+      });
+      const reply = vi.spyOn(handler as any, 'replyToMessage').mockResolvedValue(undefined);
+      await (handler as any).handleBindCommand('owner', 'source', '123456');
+      expect(reply).toHaveBeenCalledWith('source',
+        '🔐 Device key approved. Reconnect the upgraded CLI. Older credentialless CLIs cannot connect as this device.');
     });
     it('should send text message successfully', async () => {
       mockClient.im.message.create.mockResolvedValue({ data: { message_id: 'msg_123' } });
@@ -2607,7 +2631,7 @@ describe('FeishuLongConnHandler', () => {
 
       await (handler as any).handleBindCommand('ou_123', 'msg_1', 'VALID-CODE');
 
-      expect(mockBindingManager.redeemBindingCode).toHaveBeenCalledWith('ou_123', 'VALID-CODE', 'Device', undefined);
+      expect(mockBindingManager.redeemBindingCode).toHaveBeenCalledWith('ou_123', 'VALID-CODE', 'Device', undefined, undefined);
       expect(replySpy).toHaveBeenCalledWith('msg_1', expect.stringContaining('Binding successful'));
     });
 

@@ -174,6 +174,7 @@ From CLI 1.6.219, managed child-session cleanup uses bundled Node-API helpers on
 | Command | Description |
 |---------|-------------|
 | `remote-cli init -s <url>` | Initialize and generate binding code |
+| `remote-cli init -s <https-url> --with-files` | Request device binding and file-key approval together |
 | `remote-cli start` | Start the background service |
 | `remote-cli stop` | Stop the service |
 | `remote-cli status` | Check service status |
@@ -841,5 +842,15 @@ MIT
 See the project [CHANGELOG.md](../../CHANGELOG.md) for release notes and user-visible changes.
 
 ## Retrieve Output Files
+
+With CLI and Router 1.6.223, a new device can request its file-transfer identity during initial setup:
+
+```bash
+remote-cli init --server https://router.example.com --with-files
+```
+
+Send the printed `/bind CODE` to the Feishu bot once, then run `remote-cli start`. That approval binds the device and approves its public key together; no separate `remote-cli files enable` step is needed. The private key stays on the CLI machine. Files become available after the authenticated connection negotiates the supported capabilities; output retrieval also requires a compatible native helper.
+
+The option requires HTTPS (loopback HTTP is permitted for development), an upgraded Router, and enabled Router file transfers. Unsupported enrollment, redirects, and failed requests do not silently fall back to legacy binding. Retry with the same key; `init --force --with-files` does not rotate it. Ordinary `init` without the option keeps its existing behavior. Existing devices can still use `remote-cli files enable`; explicit key replacement uses `remote-cli files enable --rotate` and a new owner approval.
 
 CLI and Router 1.6.221 add explicit local Markdown link retrieval using immutable 20 MiB snapshots with a fixed 24-hour expiry. A stable file entry opens a separate transfer task card, followed by a native Feishu file message. Progress, safe retries, offline waiting, original-device ownership, restart receipts, and unknown-send handling are independent of the assistant reply and model task. Approved device enrollment and HTTPS are required; Router `files.enabled` also gates retrieval. CLI `outputFiles.allowedRoots` adds specific export roots, and `outputFiles.maxBytes` can lower the limit. Existing 16 MiB delegated exports and incoming attachments retain their contracts. See [Retrieve Output Files](../../README.md#retrieve-output-files) for permissions, limits, proxy configuration, and failure behavior.

@@ -2,6 +2,7 @@ import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, sig
 import fs from 'fs/promises';
 import { privateDirectory, readPrivateJson } from './FileIO';
 import path from 'path';
+import { syncDirectory } from '../output/Durable';
 
 export interface DeviceIdentity {
   privateKey: string;
@@ -48,21 +49,44 @@ export async function loadIdentity(configDir: string, serverUrl: string, deviceI
 }
 
 export async function ensureIdentity(configDir: string, serverUrl: string, deviceId: string, rotate = false): Promise<DeviceIdentity> {
-  if (!rotate) {
-    const current = await loadIdentity(configDir, serverUrl, deviceId);
-    if (current) return current;
-  }
   const filename = identityPath(configDir, serverUrl, deviceId);
   const directory = path.dirname(filename);
+  const syncDirectories = async () => {
+    await syncDirectory(directory);
+    await syncDirectory(path.dirname(directory));
+  };
+  if (!rotate) {
+    const current = await loadIdentity(configDir, serverUrl, deviceId);
+    // A previous creator may have published the synced file but failed directory sync.
+    if (current) { await syncDirectories(); return current; }
+  }
   await privateDirectory(directory);
   const keys = generateKeyPairSync('ed25519', {
     privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
     publicKeyEncoding: { type: 'spki', format: 'pem' },
   });
   const temporary = `${filename}.${createHash('sha256').update(keys.publicKey).digest('hex')}.tmp`;
-  await fs.writeFile(temporary, JSON.stringify(keys), { flag: 'wx', mode: 0o600 });
-  await fs.rename(temporary, filename);
-  return keys;
+  const handle = await fs.open(temporary, 'wx', 0o600);
+  let identity = keys;
+  try {
+    try { await handle.writeFile(JSON.stringify(keys)); await handle.sync(); }
+    finally { await handle.close(); }
+    if (rotate) await fs.rename(temporary, filename);
+    else {
+      // Publishing a complete file with link is atomic and never replaces another
+      // creator's key, including across processes. Unsupported filesystems fail closed.
+      try { await fs.link(temporary, filename); }
+      catch (error: any) {
+        if (error.code !== 'EEXIST') throw error;
+        const current = await loadIdentity(configDir, serverUrl, deviceId);
+        if (!current) throw new Error('Device identity changed during creation. Retry enrollment.');
+        identity = current;
+      }
+    }
+  } finally { await fs.rm(temporary, { force: true }); }
+  // syncDirectory omits directory fsync on Windows; file sync above remains required.
+  await syncDirectories();
+  return identity;
 }
 
 export function signDeviceProof(identity: DeviceIdentity, deviceId: string, nonce: string): string {

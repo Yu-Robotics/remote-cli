@@ -9,8 +9,8 @@ describe('approved device authentication', () => {
   let root: string; let auth: DeviceAuth;
   const keys = () => generateKeyPairSync('ed25519', { privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
   const proof = (key: string, device: string, nonce: string) => sign(null, Buffer.from(`remote-cli-device-v1\n${device}\n${nonce}`), key).toString('base64');
-  beforeEach(async () => { root = await fs.mkdtemp(path.join(os.tmpdir(), 'remote-device-auth-')); auth = new DeviceAuth(path.join(root, 'auth.json')); });
-  afterEach(async () => { vi.useRealTimers(); await fs.rm(root, { recursive: true, force: true }); });
+  beforeEach(async () => { root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'remote-device-auth-'))); auth = new DeviceAuth(path.join(root, 'auth.json')); });
+  afterEach(async () => { vi.useRealTimers(); vi.restoreAllMocks(); await fs.rm(root, { recursive: true, force: true }); });
 
   it('requires owner enrollment and a fresh connection-bound challenge', async () => {
     const key = keys(); const connection = {};
@@ -57,5 +57,55 @@ describe('approved device authentication', () => {
     const restored = new DeviceAuth(path.join(root, 'auth.json'));
     for (const id of ['a', 'b', 'c']) expect(await restored.get(id)).toBeDefined();
     expect((await fs.stat(path.join(root, 'auth.json'))).mode & 0o777).toBe(process.platform === 'win32' ? 0o666 : 0o600);
+  });
+  // Directory fsync is unavailable on Windows; file durability is covered separately.
+  it.skipIf(process.platform === 'win32')('blocks authentication after post-replacement durability uncertainty until reload', async () => {
+    const previous = keys(); const replacement = keys();
+    await auth.enroll('device', 'owner', previous.publicKey);
+    const open = fs.open.bind(fs);
+    vi.spyOn(fs, 'open').mockImplementation(async (target: any, flags: any, mode?: any) => {
+      if (target === root && flags === 'r') throw new Error('synthetic directory sync failure');
+      return open(target, flags, mode);
+    });
+    await expect(auth.enroll('device', 'owner', replacement.publicKey)).rejects.toThrow('uncertain');
+    await expect(auth.get('device')).rejects.toThrow('uncertain');
+    expect(auth.isCurrent('device', { openId: 'owner', publicKey: previous.publicKey })).toBe(false);
+    const restored = new DeviceAuth(path.join(root, 'auth.json'));
+    expect((await restored.get('device'))?.publicKey).toBe(replacement.publicKey);
+  });
+
+  it('preserves the previous key after a failed file sync and permits retry', async () => {
+    const previous = keys(); const replacement = keys();
+    await auth.enroll('device', 'owner', previous.publicKey);
+    const open = fs.open.bind(fs);
+    const opening = vi.spyOn(fs, 'open').mockImplementation(async (target: any, flags: any, mode?: any) => {
+      const handle = await open(target, flags, mode);
+      if (flags === 'wx') vi.spyOn(handle, 'sync').mockRejectedValueOnce(new Error('synthetic file sync failure'));
+      return handle;
+    });
+    await expect(auth.enroll('device', 'owner', replacement.publicKey)).rejects.toThrow('synthetic file sync failure');
+    expect(auth.isCurrent('device', { openId: 'owner', publicKey: previous.publicKey })).toBe(true);
+    expect((await new DeviceAuth(path.join(root, 'auth.json')).get('device'))?.publicKey).toBe(previous.publicKey);
+    expect(await fs.readdir(root)).toEqual(['auth.json']);
+    opening.mockRestore();
+    await auth.enroll('device', 'owner', replacement.publicKey);
+    expect((await auth.get('device'))?.publicKey).toBe(replacement.publicKey);
+  });
+
+  it('syncs key files without opening a directory handle on Windows', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    const open = fs.open.bind(fs);
+    const syncs: ReturnType<typeof vi.spyOn>[] = [];
+    const opening = vi.spyOn(fs, 'open').mockImplementation(async (target: any, flags: any, mode?: any) => {
+      const handle = await open(target, flags, mode);
+      if (flags === 'wx') syncs.push(vi.spyOn(handle, 'sync'));
+      return handle;
+    });
+    const key = keys();
+    await auth.enroll('device', 'owner', key.publicKey);
+    expect(syncs).toHaveLength(1);
+    expect(syncs[0]).toHaveBeenCalledOnce();
+    expect(opening.mock.calls.some(([target, flags]) => target === root && flags === 'r')).toBe(false);
+    expect((await new DeviceAuth(path.join(root, 'auth.json')).get('device'))?.publicKey).toBe(key.publicKey);
   });
 });

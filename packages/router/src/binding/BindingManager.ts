@@ -6,7 +6,11 @@ export interface BindingRedemption {
   bindingCode: BindingCode;
   alreadyBound: boolean;
   isFirstDevice: boolean;
+  /** Fresh first-key enrollment, including a retry after a failed key write. */
+  newDeviceEnrollment?: boolean;
 }
+
+export type DeviceEnrollmentBoundary = (deviceId: string, phase: 'begin' | 'end') => void;
 
 /** Serializes ownership mutations sharing one JsonStore, including key callbacks. */
 export class BindingManager {
@@ -49,24 +53,35 @@ export class BindingManager {
 
   /** Validate, assign, enroll, and consume without admitting competing mutations. */
   async redeemBindingCode(openId: string, code: string, deviceName: string,
-    approveDeviceKey?: (openId: string, deviceId: string, publicKey: string) => Promise<void>): Promise<BindingRedemption | null> {
+    approveDeviceKey?: (openId: string, deviceId: string, publicKey: string) => Promise<void>,
+    enrollmentBoundary?: DeviceEnrollmentBoundary): Promise<BindingRedemption | null> {
     return this.mutate(async () => {
       const bindingCode = this.store.getBindingCode(code);
       if (!bindingCode) return null;
       if (bindingCode.devicePublicKey && !approveDeviceKey) throw new Error('Secure device enrollment is unavailable.');
       this.assertOwnership(bindingCode.deviceId, openId);
       const existingDevices = this.store.getUserBinding(openId)?.devices ?? [];
-      const alreadyBound = existingDevices.some(device => device.deviceId === bindingCode.deviceId);
+      const existingDevice = existingDevices.find(device => device.deviceId === bindingCode.deviceId);
+      const alreadyBound = Boolean(existingDevice);
       if (alreadyBound && !bindingCode.devicePublicKey) {
         return { bindingCode, alreadyBound, isFirstDevice: existingDevices.length === 0 };
       }
 
-      await this.bindUserLocked(openId, bindingCode.deviceId, deviceName);
-      if (bindingCode.devicePublicKey) {
-        await approveDeviceKey!(openId, bindingCode.deviceId, bindingCode.devicePublicKey);
+      const newDeviceEnrollment = Boolean(bindingCode.devicePublicKey
+        && (!alreadyBound || existingDevice?.requiresDeviceAuth));
+      const excludeLegacy = Boolean(bindingCode.devicePublicKey && !alreadyBound);
+      if (excludeLegacy) enrollmentBoundary?.(bindingCode.deviceId, 'begin');
+      try {
+        await this.bindUserLocked(openId, bindingCode.deviceId, deviceName, newDeviceEnrollment);
+        if (bindingCode.devicePublicKey) {
+          await approveDeviceKey!(openId, bindingCode.deviceId, bindingCode.devicePublicKey);
+        }
+        if (newDeviceEnrollment) await this.clearDeviceAuthRequirementLocked(openId, bindingCode.deviceId);
+        await this.store.deleteBindingCode(code);
+        return { bindingCode, alreadyBound, isFirstDevice: existingDevices.length === 0, newDeviceEnrollment };
+      } finally {
+        if (excludeLegacy) enrollmentBoundary?.(bindingCode.deviceId, 'end');
       }
-      await this.store.deleteBindingCode(code);
-      return { bindingCode, alreadyBound, isFirstDevice: existingDevices.length === 0 };
     });
   }
 
@@ -74,7 +89,7 @@ export class BindingManager {
     return this.mutate(() => this.bindUserLocked(openId, deviceId, deviceName));
   }
 
-  private async bindUserLocked(openId: string, deviceId: string, deviceName: string): Promise<void> {
+  private async bindUserLocked(openId: string, deviceId: string, deviceName: string, requireDeviceAuth = false): Promise<void> {
     this.assertOwnership(deviceId, openId);
     const now = Date.now();
     const existingBinding = this.store.getUserBinding(openId);
@@ -85,14 +100,16 @@ export class BindingManager {
           ...existingBinding.devices[deviceIndex], deviceName, lastActiveAt: now,
         };
       } else {
-        existingBinding.devices.push({ deviceId, deviceName, boundAt: now, lastActiveAt: now, isActive: false });
+        existingBinding.devices.push({ deviceId, deviceName, boundAt: now, lastActiveAt: now, isActive: false,
+          ...(requireDeviceAuth ? { requiresDeviceAuth: true } : {}) });
       }
       existingBinding.updatedAt = now;
       await this.store.setUserBinding(openId, existingBinding);
     } else {
       const binding: UserBinding = {
         openId,
-        devices: [{ deviceId, deviceName, boundAt: now, lastActiveAt: now, isActive: true }],
+        devices: [{ deviceId, deviceName, boundAt: now, lastActiveAt: now, isActive: true,
+          ...(requireDeviceAuth ? { requiresDeviceAuth: true } : {}) }],
         activeDeviceId: deviceId,
         createdAt: now,
         updatedAt: now,
@@ -100,6 +117,21 @@ export class BindingManager {
       await this.store.setUserBinding(openId, binding);
     }
     await this.store.setDeviceToUserMap(deviceId, openId);
+  }
+
+  private async clearDeviceAuthRequirementLocked(openId: string, deviceId: string): Promise<void> {
+    this.assertOwnership(deviceId, openId);
+    const binding = this.store.getUserBinding(openId);
+    const device = binding?.devices.find(item => item.deviceId === deviceId);
+    if (!binding || !device) throw new Error('Device ownership changed during key enrollment.');
+    if (!device.requiresDeviceAuth) return;
+    binding.devices = binding.devices.map(item => {
+      if (item.deviceId !== deviceId) return item;
+      const { requiresDeviceAuth: _cleared, ...enrolled } = item;
+      return enrolled;
+    });
+    binding.updatedAt = Date.now();
+    await this.store.setUserBinding(openId, binding);
   }
 
   /** Detect conflicting records rather than silently choosing or repairing an owner. */

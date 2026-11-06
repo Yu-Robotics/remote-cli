@@ -11,6 +11,7 @@ export class DeviceAuth {
   private readonly challenges = new WeakMap<object, Challenge>();
   private loading?: Promise<void>;
   private writes = Promise.resolve();
+  private uncertainty?: Error;
 
   constructor(private readonly filename: string) {}
 
@@ -46,11 +47,13 @@ export class DeviceAuth {
 
   async get(deviceId: string): Promise<Enrollment | undefined> {
     await this.ready();
+    if (this.uncertainty) throw this.uncertainty;
     const record = this.records[deviceId];
     return record ? { ...record } : undefined;
   }
 
   isCurrent(deviceId: string, record: { openId: string; publicKey: string }): boolean {
+    if (this.uncertainty) return false;
     const current = this.records[deviceId];
     return Boolean(current && !current.revoked && current.openId === record.openId && current.publicKey === record.publicKey);
   }
@@ -84,14 +87,39 @@ export class DeviceAuth {
   private async change(deviceId: string, record: Enrollment): Promise<void> {
     await this.ready();
     const write = this.writes.then(async () => {
+      if (this.uncertainty) throw this.uncertainty;
       const next = Object.assign(Object.create(null), this.records, { [deviceId]: record });
       await fs.mkdir(path.dirname(this.filename), { recursive: true, mode: 0o700 });
       const temporary = `${this.filename}.${randomUUID()}.tmp`;
+      let handle: fs.FileHandle | undefined;
+      let replaced = false;
       try {
-        await fs.writeFile(temporary, JSON.stringify(next), { flag: 'wx', mode: 0o600 });
+        handle = await fs.open(temporary, 'wx', 0o600);
+        await handle.writeFile(JSON.stringify(next));
+        await handle.sync();
+        await handle.close();
+        handle = undefined;
         await fs.rename(temporary, this.filename);
-        this.records = next;
-      } finally { await fs.rm(temporary, { force: true }); }
+        replaced = true;
+        // Windows does not support directory handles/fsync through this portable path.
+        if (process.platform !== 'win32') {
+          const directory = await fs.open(path.dirname(this.filename), 'r');
+          try { await directory.sync(); } finally { await directory.close(); }
+        }
+      } catch (error) {
+        if (replaced) {
+          this.uncertainty = new Error(
+            'Device authentication disk state is uncertain; authentication and writes are blocked until restart.',
+            { cause: error },
+          );
+          throw this.uncertainty;
+        }
+        throw error;
+      } finally {
+        if (handle) await handle.close().catch(() => undefined);
+        await fs.rm(temporary, { force: true }).catch(() => undefined);
+      }
+      this.records = next;
     });
     this.writes = write.catch(() => {});
     return write;

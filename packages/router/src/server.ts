@@ -150,6 +150,7 @@ export class RouterServer {
   private readonly outputTransfers: OutputTransfers;
   private outputsAvailable = false;
   private outputSessions = new Map<string, { id: string; openId: string }>();
+  private readonly deviceEnrollments = new Set<string>();
 
   constructor(config: ConfigManager, store: JsonStore) {
     this.config = config;
@@ -231,6 +232,12 @@ export class RouterServer {
     this.feishuLongConnHandler.onOutputFileAction = (openId, cardId, payload) => this.outputTransfers.click(openId, cardId, payload);
     this.feishuLongConnHandler.onFileMessage = input => this.fileTransfers.receive(input);
     this.feishuLongConnHandler.onResolveFile = (openId, sourceId) => this.fileTransfers.resolve(openId, sourceId);
+    this.feishuLongConnHandler.onDeviceEnrollmentBoundary = (deviceId, phase) => {
+      if (phase === 'end') { this.deviceEnrollments.delete(deviceId); return; }
+      // Exclude credentialless registrations before the pending marker reaches disk.
+      this.deviceEnrollments.add(deviceId);
+      this.connectionHub.disconnectDevice(deviceId);
+    };
     this.feishuLongConnHandler.onApproveDeviceKey = async (openId, deviceId, publicKey) => {
       if ((await this.bindingManager.getDeviceBinding(deviceId))?.openId !== openId) throw new Error('Device ownership changed.');
       await this.selections.invalidateDevice(openId, deviceId);
@@ -814,7 +821,19 @@ export class RouterServer {
                 const requestedId: string = message.data.deviceId;
                 let authenticatedOwner: string | undefined;
                 try {
+                  if (this.deviceEnrollments.has(requestedId)) {
+                    ws.send(JSON.stringify({ type: 'error', data: { code: 'DEVICE_AUTH_REQUIRED', message: 'Device key enrollment is in progress. Retry after approval.' } }));
+                    ws.close();
+                    break;
+                  }
                   const enrolled = await this.deviceAuth.get(requestedId);
+                  const binding = await this.bindingManager.getDeviceBinding(requestedId);
+                  const requiresAuthentication = binding?.devices?.some(device => device.deviceId === requestedId && device.requiresDeviceAuth);
+                  if (requiresAuthentication && !enrolled) {
+                    ws.send(JSON.stringify({ type: 'error', data: { code: 'DEVICE_AUTH_REQUIRED', message: 'Device key enrollment is incomplete. Approve the device key and retry.' } }));
+                    ws.close();
+                    break;
+                  }
                   if (enrolled) {
                     if (!message.data.deviceSignature && !enrolled.revoked) {
                       if (this.stopping || socketClosed || !admission.active() || ws.readyState !== WebSocket.OPEN) break;
@@ -834,11 +853,23 @@ export class RouterServer {
                     authenticatedOwner = proof.openId;
                   }
                   if (this.stopping || socketClosed || !admission.active() || ws.readyState !== WebSocket.OPEN) break;
+                  if (!authenticatedOwner) {
+                    const current = await this.bindingManager.getDeviceBinding(requestedId);
+                    const pending = current?.devices?.some(device => device.deviceId === requestedId && device.requiresDeviceAuth);
+                    const enrolledAfterLookup = await this.deviceAuth.get(requestedId);
+                    if (this.deviceEnrollments.has(requestedId) || pending || enrolledAfterLookup) {
+                      ws.send(JSON.stringify({ type: 'error', data: { code: 'DEVICE_AUTH_REQUIRED', message: 'Device authentication is required. Reconnect and retry.' } }));
+                      ws.close();
+                      break;
+                    }
+                  }
                 } catch {
                   ws.send(JSON.stringify({ type: 'error', data: { code: 'DEVICE_AUTH_REQUIRED', message: 'Device authentication is unavailable. Ask the Router administrator to check the authentication store.' } }));
                   ws.close();
                   break;
                 } finally { authenticationPending = false; }
+                // Authentication lookups may outlive the socket or its admission lease.
+                if (this.stopping || socketClosed || !admission.active() || ws.readyState !== WebSocket.OPEN) break;
                 if (challengeTimer) clearTimeout(challengeTimer);
                 // Version check: missing protocolVersion defaults to 1 (current baseline)
                 const clientVersion: number = message.data?.protocolVersion ?? 1;

@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.223] - 2026-11-06
+
+### Added
+- Add opt-in `remote-cli init --with-files` to request device binding and file-key approval with one Feishu binding code, while preserving ordinary initialization and existing-device enrollment.
+- Reuse locally persisted device identities for retries and forced initialization; require an explicit secure-enrollment response without redirect or credentialless fallback.
+
+### Fixed
+- Persist an authentication requirement before first-device key enrollment, retain failed approvals for owner retry, and reject credentialless connections during enrollment and after restart. Sync approved keys before clearing the requirement and exclude sockets whose authentication outlives their connection.
+
 ## [1.6.222] - 2026-11-06
 
 ### Fixed
