@@ -8,6 +8,7 @@ import { setTimeout as realDelay } from 'node:timers/promises';
 import { DELEGATION_LIMITS, DelegationManager, type DelegationParent, type DelegatedTaskResult } from '../../src/delegation/DelegationManager';
 import { configuredExecutionMetadata } from '../../src/executor/ExecutionMetadata';
 import { BackendRegistry } from '../../src/delegation/BackendRegistry';
+import { DelegationOwnership } from '../../src/delegation/DelegationOwnership';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 import type { ExecuteResult, IExecutor } from '../../src/executor/IExecutor';
 import { gitText, runGit } from '../../src/delegation/GitCheckpoint';
@@ -207,40 +208,176 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     } finally { await Promise.allSettled([scheduled, shutdown]); }
   });
 
+  const observeTaskStates = () => {
+    if (!observedStores.has(manager.store)) {
+      observedStores.add(manager.store);
+      const write = manager.store.write.bind(manager.store);
+      vi.spyOn(manager.store, 'write').mockImplementation(record => write(record).finally(() => {
+        if (isTerminalTaskState(record.state)) terminalRecords.set(record.id, { ...record });
+        notifyPhase();
+      }));
+    }
+  };
+  const waitForExecution = async (scope: ReturnType<DelegationManager['begin']>, id: string, accepted: DelegatedTaskResult) => {
+    const fail = (state: string, error?: string) => new Error(`Fixture worker ${id} ended before execution: ${state}${error ? `: ${error}` : ''}`);
+    if (isTerminalTaskState(accepted.state)) throw fail(accepted.state, accepted.error);
+    let listener!: () => void;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        listener = () => {
+          if (draining) { reject(new Error('Fixture is draining before worker execution.')); return; }
+          const terminal = terminalRecords.get(accepted.taskId);
+          if (terminal) { reject(fail(terminal.state, terminal.error)); return; }
+          // The exact synthetic objective identifies dispatch, including concurrent lanes.
+          if (workers.some(worker => vi.mocked(worker.executor.execute).mock.calls.some(([prompt]) =>
+            prompt.endsWith(`\n\nIndependent task ${id}`)))) resolve();
+        };
+        phaseListeners.add(listener); listener();
+      });
+    } finally { phaseListeners.delete(listener); }
+    const current = await trackCall(scope.invoke('remote_cli_result', { taskId: accepted.taskId, waitSeconds: 0 },
+      `${id}-execution-phase`) as Promise<DelegatedTaskResult>);
+    if (current.state !== 'running') throw fail(current.state, current.error);
+    return current;
+  };
   // Acceptance is intentionally bounded and may return queued before the factory.
-  // Only tests that need an executing worker use this helper; queue/admission tests keep start().
+  // Queue/admission tests keep start(); existing single-window dispatch tests keep this helper.
   const startExecuting = (scope: ReturnType<DelegationManager['begin']>, id: string, backend = 'codex') =>
     gitPhase(`dispatch ${id}`, async () => {
-      if (!observedStores.has(manager.store)) {
-        observedStores.add(manager.store);
-        const write = manager.store.write.bind(manager.store);
-        vi.spyOn(manager.store, 'write').mockImplementation(record => write(record).finally(() => {
-          if (isTerminalTaskState(record.state)) terminalRecords.set(record.id, { ...record });
-          notifyPhase();
-        }));
-      }
-      const accepted = await start(scope, id, backend);
-      const fail = (state: string, error?: string) => new Error(`Fixture worker ${id} ended before execution: ${state}${error ? `: ${error}` : ''}`);
-      if (isTerminalTaskState(accepted.state)) throw fail(accepted.state, accepted.error);
-      let listener!: () => void;
-      try {
-        await new Promise<void>((resolve, reject) => {
-          listener = () => {
-            if (draining) { reject(new Error('Fixture is draining before worker execution.')); return; }
-            const terminal = terminalRecords.get(accepted.taskId);
-            if (terminal) { reject(fail(terminal.state, terminal.error)); return; }
-            // The exact synthetic objective identifies dispatch, including concurrent lanes.
-            if (workers.some(worker => vi.mocked(worker.executor.execute).mock.calls.some(([prompt]) =>
-              prompt.endsWith(`\n\nIndependent task ${id}`)))) resolve();
-          };
-          phaseListeners.add(listener); listener();
-        });
-      } finally { phaseListeners.delete(listener); }
-      const current = await trackCall(scope.invoke('remote_cli_result', { taskId: accepted.taskId, waitSeconds: 0 },
-        `${id}-execution-phase`) as Promise<DelegatedTaskResult>);
-      if (current.state !== 'running') throw fail(current.state, current.error);
-      return current;
+      observeTaskStates();
+      return waitForExecution(scope, id, await start(scope, id, backend));
     });
+
+  // Slow multi-cohort fixtures give admission and eventual execution separate
+  // 30-second boundaries, including when the tool response returns queued.
+  const startInPhases = async (scope: ReturnType<DelegationManager['begin']>, id: string, backend = 'codex') => {
+    observeTaskStates();
+    const accepted = await gitPhase(`accept ${id}`, () => start(scope, id, backend));
+    return gitPhase(`execute ${id}`, () => waitForExecution(scope, id, accepted));
+  };
+  const collectFinished = (
+    scope: Pick<ReturnType<DelegationManager['begin']>, 'collectPendingResults' | 'invoke'>, taskId: string, id: string,
+  ) => gitPhase(`finish collection ${id}`, async () => {
+    // A 25-second result poll can return running. Only task completion establishes
+    // an idle cohort and permits the fixture to change coordinator input.
+    const completed = (await scope.collectPendingResults()).find(task => task.taskId === taskId);
+    if (!completed || !isTerminalTaskState(completed.state)) throw new Error(`Fixture task ${id} did not finish collection`);
+    if (draining || phaseAdmissionClosed) throw new Error('Fixture is draining; no new result reads may start');
+    return trackCall(scope.invoke('remote_cli_result', { taskId, waitSeconds: 0 }, id) as Promise<DelegatedTaskResult>);
+  });
+
+  it('bounds acceptance and execution separately across successive input and checkout preparation', async () => {
+    const scope = manager.begin(parent);
+    let enteredInput!: () => void, releaseInput!: () => void, enteredCheckout!: () => void, releaseCheckout!: () => void;
+    const inputEntered = new Promise<void>(resolve => { enteredInput = resolve; });
+    const inputGate = new Promise<void>(resolve => { releaseInput = resolve; });
+    const checkoutEntered = new Promise<void>(resolve => { enteredCheckout = resolve; });
+    const checkoutGate = new Promise<void>(resolve => { releaseCheckout = resolve; });
+    const baseline = manager.workspaceManager.baseline.bind(manager.workspaceManager);
+    const prepare = manager.workspaceManager.prepare.bind(manager.workspaceManager);
+    vi.spyOn(manager.workspaceManager, 'baseline').mockImplementationOnce(async (...args) => {
+      enteredInput(); await inputGate; return baseline(...args);
+    });
+    vi.spyOn(manager.workspaceManager, 'prepare').mockImplementationOnce(async (...args) => {
+      enteredCheckout(); await checkoutGate; return prepare(...args);
+    });
+    const invoke = scope.invoke.bind(scope);
+    let accepted: DelegatedTaskResult | undefined;
+    vi.spyOn(scope, 'invoke').mockImplementation(async (...args) => {
+      const value = await invoke(...args);
+      if (args[0] === 'remote_cli_delegate') accepted = value as DelegatedTaskResult;
+      return value;
+    });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let settled = false;
+    const starting = startInPhases(scope, 'successive-preparation');
+    const outcome = starting.then(value => { settled = true; return { value }; }, error => { settled = true; return { error }; });
+    const endedBeforeEntry = () => { throw new Error('Fixture dispatch ended before its preparation phase entered'); };
+    try {
+      await Promise.race([inputEntered, starting.then(endedBeforeEntry)]);
+      await vi.advanceTimersByTimeAsync(16_000);
+      releaseInput();
+      await Promise.race([checkoutEntered, starting.then(endedBeforeEntry)]);
+      await vi.advanceTimersByTimeAsync(16_000);
+      // Each held operation is below 30 seconds, while their sum exceeds it.
+      expect(accepted).toMatchObject({ state: 'queued' });
+      expect(settled).toBe(false);
+      expect(factory).not.toHaveBeenCalled();
+      vi.useRealTimers(); releaseCheckout();
+      // Restore wall-clock bounds before allowing any remaining real Git work.
+      const started = await gitPhase('complete the controlled checkout and dispatch', () => starting);
+      expect(started.state).toBe('running');
+      workers[0].finish({ success: true });
+      expect(await collectFinished(scope, started.taskId, 'successive-result')).toMatchObject({ state: 'succeeded' });
+    } finally {
+      vi.useRealTimers(); releaseInput(); releaseCheckout();
+      await Promise.allSettled([outcome, settleFixture()]);
+    }
+    expect(pendingCalls.size).toBe(0);
+    expect(phaseListeners.size).toBe(0);
+  }, 4 * 30_000 + 5_000);
+
+  it.each(['completed', 'late resolution', 'late rejection'] as const)(
+    'waits past a bounded result poll and drains collection before fixture removal (%s)', async completion => {
+      const scope = manager.begin(parent);
+      const task = await startInPhases(scope, 'held-collection');
+      const invoke = vi.spyOn(scope, 'invoke');
+      const ownership = `${manager.laneStore.storageDirectory}.ownership`;
+      const marker = path.join(fixture.directory, 'collection-drained.txt');
+      const releaseOwnership = vi.spyOn(DelegationOwnership.prototype, 'release');
+      let entered!: () => void, release!: () => void;
+      const enteredCollection = new Promise<void>(resolve => { entered = resolve; });
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const collect = manager.workspaceManager.collect.bind(manager.workspaceManager);
+      vi.spyOn(manager.workspaceManager, 'collect').mockImplementationOnce(async (...args) => {
+        entered(); await gate;
+        expect((await fs.lstat(ownership)).isFile()).toBe(true);
+        await fs.writeFile(marker, 'collection settled under fixture ownership');
+        if (completion === 'late rejection') throw new Error('Synthetic late collection failure');
+        return collect(...args);
+      });
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      workers[0].finish({ success: true });
+      const polling = result(scope, task.taskId, 'bounded-poll');
+      let settled = false;
+      const collecting = collectFinished(scope, task.taskId, 'terminal-result');
+      const outcome = collecting.then(value => { settled = true; return { value, error: undefined }; },
+        error => { settled = true; return { value: undefined, error }; });
+      let shutdown: Promise<void> | undefined;
+      try {
+        await Promise.race([enteredCollection, collecting.then(() => { throw new Error('Collection ended before its entry signal'); })]);
+        await vi.advanceTimersByTimeAsync(25_001);
+        expect(await polling).toMatchObject({ state: 'running' });
+        expect(settled).toBe(false);
+        expect(await fs.readFile(path.join(fixture.root, 'source.txt'), 'utf8')).toContain('first');
+        if (completion === 'completed') {
+          vi.useRealTimers(); release();
+          expect(await gitPhase('complete the held terminal collection', () => collecting)).toMatchObject({ state: 'succeeded' });
+        } else {
+          await vi.advanceTimersByTimeAsync(5_000);
+          expect((await outcome).error).toMatchObject({ message: 'Git lifecycle phase exceeded 30 seconds: finish collection terminal-result' });
+          await expect(startInPhases(scope, 'must-not-start')).rejects.toThrow('Fixture is draining');
+          expect(workers).toHaveLength(1);
+          expect(pendingCalls.size).toBeGreaterThan(0);
+          vi.useRealTimers();
+          let drained = false;
+          shutdown = settleFixture().then(() => { drained = true; });
+          await new Promise<void>(resolve => setImmediate(resolve));
+          expect(drained).toBe(false);
+          expect(releaseOwnership).not.toHaveBeenCalled();
+          expect((await fs.lstat(ownership)).isFile()).toBe(true);
+          expect((await fs.stat(fixture.directory)).isDirectory()).toBe(true);
+          release(); await shutdown;
+          expect(await fs.readFile(marker, 'utf8')).toBe('collection settled under fixture ownership');
+          expect(releaseOwnership).toHaveBeenCalledOnce();
+          expect(invoke.mock.calls.some(([, , id]) => id === 'terminal-result')).toBe(false);
+        }
+      } finally {
+        vi.useRealTimers(); release();
+        await Promise.allSettled([polling, collecting, shutdown ?? settleFixture()]);
+      }
+      expect(pendingCalls.size).toBe(0);
+    }, 4 * 30_000 + 5_000);
 
   it.each(['execute', 'setup failure', 'teardown'] as const)(
     'handles accepted-but-unprepared workers through explicit %s phases', async outcome => {
@@ -899,63 +1036,72 @@ describe('Git-aware delegated scheduling and lane reuse', { timeout: 30_000 }, (
     beforeEach(async () => {
       scope = manager.begin(parent);
       // Warm both lanes before completing either worker so this is not one reused lane.
-      await gitPhase('prepare two idle replacement lanes', async () => {
-        const first = await startExecuting(scope, 'warm-first');
-        const second = await startExecuting(scope, 'warm-second');
-        expect(first.state).toBe('running');
-        expect(second.state).toBe('running');
-        workers[0].finish({ success: true });
-        workers[1].finish({ success: true });
-        expect(await result(scope, first.taskId, 'first-result')).toMatchObject({ state: 'succeeded' });
-        expect(await result(scope, second.taskId, 'second-result')).toMatchObject({ state: 'succeeded' });
-        const lanes = await manager.laneStore.lanesForThread(parent.thread.id);
-        expect(lanes).toHaveLength(2);
-        expect(new Set(lanes.map(lane => lane.executorThreadId)).size).toBe(2);
-        expect(lanes.every(lane => lane.state === 'ready')).toBe(true);
-      });
-    }, 30_000);
+      // Two admissions, two execution waits and two collections each retain 30 seconds.
+      const first = await startInPhases(scope, 'warm-first');
+      const second = await startInPhases(scope, 'warm-second');
+      expect(first.state).toBe('running');
+      expect(second.state).toBe('running');
+      workers[0].finish({ success: true });
+      workers[1].finish({ success: true });
+      expect(await collectFinished(scope, first.taskId, 'first-result')).toMatchObject({ state: 'succeeded' });
+      expect(await collectFinished(scope, second.taskId, 'second-result')).toMatchObject({ state: 'succeeded' });
+      const lanes = await manager.laneStore.lanesForThread(parent.thread.id);
+      expect(lanes).toHaveLength(2);
+      expect(new Set(lanes.map(lane => lane.executorThreadId)).size).toBe(2);
+      expect(lanes.every(lane => lane.state === 'ready')).toBe(true);
+    }, 6 * 30_000 + 5_000);
 
+    // Two dispatch/collection cycles plus the replacement acquisition use seven bounded steps.
     it('resets preparation tracking before reusing a replacement for a missing native session', async () => {
-      const retrying = await startExecuting(scope, 'missing-session');
+      const retrying = await startInPhases(scope, 'missing-session');
       workers[2].executor.consumeSessionResumeFailure = () => true;
       const staleId = factory.mock.calls[2][3];
       const healthyId = factory.mock.calls.slice(0, 2).map(call => call[3]).find(id => id !== staleId);
       const acquire = manager.laneStore.acquire.bind(manager.laneStore);
+      let acquiredReplacement!: () => void;
+      const replacement = new Promise<void>(resolve => { acquiredReplacement = resolve; });
       const acquisition = vi.spyOn(manager.laneStore, 'acquire').mockImplementationOnce(async (...args) => {
         const acquired = await acquire(...args);
         expect(acquired.reused).toBe(true);
         expect(acquired.lane.executorThreadId).toBe(healthyId);
         parent.isWorkspaceBusy = () => true;
+        acquiredReplacement();
         return acquired;
       });
       workers[2].finish({ success: false, error: 'Stored native session is missing' });
-      expect(await result(scope, retrying.taskId, 'retry-result')).toMatchObject({ state: 'failed' });
+      const collecting = collectFinished(scope, retrying.taskId, 'retry-result');
+      void collecting.catch(() => undefined);
+      await gitPhase('observe the healthy replacement acquisition', () => Promise.race([
+        replacement, collecting.then(task => { throw new Error(`Task ended before replacement acquisition: ${JSON.stringify(task)}`); }),
+      ]));
+      expect(await collecting).toMatchObject({ state: 'failed' });
       expect(acquisition).toHaveBeenCalledOnce();
       const healthy = (await manager.laneStore.lanesForThread(parent.thread.id)).find(lane => lane.executorThreadId === healthyId);
       expect(healthy).toMatchObject({ state: 'ready', cleanupPending: false });
       expect((await manager.workspaceManager.unavailableLanes()).has(healthy!.id)).toBe(false);
       parent.isWorkspaceBusy = () => false;
-      const recovered = await startExecuting(scope, 'retry-after-busy');
+      const recovered = await startInPhases(scope, 'retry-after-busy');
       expect(factory.mock.calls[3][3]).toBe(healthyId);
       workers[3].finish({ success: true });
-      expect(await result(scope, recovered.taskId, 'recovered-result')).toMatchObject({ state: 'succeeded' });
-    });
+      expect(await collectFinished(scope, recovered.taskId, 'recovered-result')).toMatchObject({ state: 'succeeded' });
+    }, 7 * 30_000 + 5_000);
   });
 
+  // Four dispatch steps, two terminal collections, one edit and one input check.
   it('captures fresh input for a later idle cohort even when the earlier review changed no files', async () => {
     const scope = manager.begin(parent);
-    const first = await startExecuting(scope, 'first');
+    const first = await startInPhases(scope, 'first');
     workers[0].finish({ success: true });
-    await gitPhase('collect the earlier read-only cohort', () => result(scope, first.taskId, 'r1'));
-    const second = await gitPhase('prepare a later cohort with changed coordinator input', async () => {
-      await fs.writeFile(path.join(fixture.root, 'source.txt'), 'coordinator updated input\n');
-      const second = await startExecuting(scope, 'second');
+    expect(await collectFinished(scope, first.taskId, 'r1')).toMatchObject({ state: 'succeeded' });
+    await gitPhase('update coordinator input after the earlier cohort is idle', () =>
+      fs.writeFile(path.join(fixture.root, 'source.txt'), 'coordinator updated input\n'));
+    const second = await startInPhases(scope, 'second');
+    await gitPhase('verify the later cohort received fresh coordinator input', async () => {
       expect(await fs.readFile(path.join(workers[1].cwd, 'source.txt'), 'utf8')).toBe('coordinator updated input\n');
       workers[1].finish({ success: true });
-      return second;
     });
-    await gitPhase('collect the later read-only cohort', () => result(scope, second.taskId, 'r2'));
-  }, 4 * 30_000 + 5_000);
+    expect(await collectFinished(scope, second.taskId, 'r2')).toMatchObject({ state: 'succeeded' });
+  }, 8 * 30_000 + 5_000);
 
   it('collects cancelled same-backend edits for recovery without modifying the coordinator and rejects foreign integration', async () => {
     const scope = manager.begin(parent);
