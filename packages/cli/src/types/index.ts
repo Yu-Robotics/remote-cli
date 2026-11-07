@@ -1,3 +1,4 @@
+import type { AttachmentHints } from '../output/Protocol';
 import { version } from '../../package.json';
 import type { ThreadSummary } from '../thread/types';
 
@@ -233,6 +234,7 @@ export interface TaskNotificationInfo {
 export interface TaskResumeInfo {
   /** Available only for a terminal execution; never reconstructed from current preferences. */
   executionMetadata?: ExecutionMetadata;
+  attachmentHints?: AttachmentHints;
   recoveryId: string;
   threadName: string;
   backend: string;
@@ -312,6 +314,7 @@ export interface OutgoingMessage {
   sessionAbbr?: string;
   /** Request-scoped execution settings; absent for legacy peers and local controls. */
   executionMetadata?: ExecutionMetadata;
+  attachmentHints?: AttachmentHints;
 }
 
 /** Optional approval-card protocol; negotiated through approvalCards capability. */

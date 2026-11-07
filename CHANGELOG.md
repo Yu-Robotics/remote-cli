@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.227] - 2026-11-07
+
+### Changed
+- Show new output files, manual retrieval, transfer state, and valid retries inside the original assistant execution card. Bind controls to its actual final continuation, preserve the full card body through serialized updates, and retain bounded private parent-body receipts for late offers and restart recovery. Paginate file rows without dropping selections.
+- Display negotiated, basename-only unavailable controls when file retrieval is disabled, unapproved, or unsupported, without reading or snapshotting candidate files. Existing approved offline references retain queueing and cached-copy delivery; hints never authorize bytes or prove file existence.
+- Suppress count-only preparation alerts, including legacy discovery frames. Keep bounded internal reason codes and hashed request/path correlations, and guide assistants to prepare visible deliverables in the approved workspace or an explicitly authorized export root. Preserve path guards, original device ownership, quotas, expiry, legacy published cards, and unknown-send protections.
+
 ## [1.6.226] - 2026-11-07
 
 ### Changed

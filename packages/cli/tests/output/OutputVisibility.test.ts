@@ -87,6 +87,23 @@ describe('private worker capture and explicit publication', () => {
     client.connect(); expect(client.isEnabled()).toBe(true);
   });
 
+  it('keeps the actual hidden/outside-workspace regression guarded and quiet', async () => {
+    const hidden = path.join(root, '.synthetic-export'); await fs.mkdir(hidden);
+    const output = path.join(hidden, 'report.csv'); await fs.writeFile(output, 'test,value\n1,2\n');
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await client.capture(links(output), parentContext());
+    expect(frames).toEqual([]); expect(store.references()).toEqual([]);
+    expect(diagnostic).toHaveBeenCalledWith('[OutputFiles]', expect.stringContaining('"reason":"policy"'));
+    expect(JSON.stringify(diagnostic.mock.calls)).not.toContain(output);
+    expect(await fs.readFile(output, 'utf8')).toBe('test,value\n1,2\n');
+  });
+  it('does not read, hash or snapshot candidates when file capability is disabled', async () => {
+    client.disable();
+    const snapshot = vi.spyOn(store, 'snapshot');
+    await client.capture(links(filename()), parentContext()); await client.capture(links(filename()), workerContext());
+    expect(snapshot).not.toHaveBeenCalled(); expect(frames).toEqual([]);
+  });
+
   it('requires deliberate selection even for captured worker citations after reclamation', async () => {
     const input = new OutputLinks(); input.append(`[source](<${filename()}>)`);
     await client.capture(input, workerContext());
@@ -183,7 +200,7 @@ describe('private worker capture and explicit publication', () => {
     const context = { ...parentContext(), [field]: field === 'generation' ? 3 : 'foreign-scope' };
     expect(await client.capture(links(filename()), context)).toMatchObject({ unavailable: 1 });
     expect(store.references()).toEqual([]);
-    expect(frames.map(frame => frame.type)).toEqual(['output_discovery']);
+    expect(frames).toEqual([]);
   });
 
   it('does not promote unknown owner provenance', async () => {
@@ -345,11 +362,11 @@ describe('private worker capture and explicit publication', () => {
     expect(store.references()[0].id).toBe(hidden.id); expect(await read(hidden.id)).toBe('original worker bytes');
   });
 
-  it('keeps coordinator unavailable and capped discovery visible', async () => {
+  it('keeps coordinator preparation failures quiet with safe internal diagnostics', async () => {
     const input = links(path.join(parent, 'missing'));
     input.append(' '.repeat(OUTPUT_LIMITS.text));
     expect(await client.capture(input, parentContext())).toMatchObject({ unavailable: 1, omitted: true });
-    expect(frames).toEqual([expect.objectContaining({ type: 'output_discovery', unavailable: 1, omitted: true })]);
+    expect(frames).toEqual([]);
   });
 
   it('uploads selected old bytes through the existing bounded transport after cleanup', async () => {

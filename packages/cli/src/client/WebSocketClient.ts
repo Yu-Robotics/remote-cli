@@ -129,7 +129,7 @@ export class WebSocketClient {
               return;
             }
             if (message.type === 'binding_confirm' && message.data?.success === true) {
-              this.taskRecovery.registered(message.data?.capabilities?.taskRecovery === true, connectionEpoch);
+              this.taskRecovery.registered(message.data?.capabilities?.taskRecovery === true, connectionEpoch, message.data?.capabilities?.outputAttachmentHintsV1 === true);
               if (message.data?.capabilities?.automaticFileEnrollmentV1 === true && this.automaticFileEnrollment && !automaticEnrollmentRequested) {
                 automaticEnrollmentRequested = true;
                 // Enrollment preparation never blocks task dispatch or replaces a live socket.
@@ -333,6 +333,7 @@ export class WebSocketClient {
           capabilities: {
             ...(this.automaticFileEnrollment ? { automaticFileEnrollmentV1: true } : {}),
             queueStarted: true,
+            outputAttachmentHintsV1: true,
             taskRecovery: true,
             approvalCards: true,
             delegationProgress: true,

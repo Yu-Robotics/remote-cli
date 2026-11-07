@@ -8,10 +8,11 @@ import { readOwnedFile } from '../files/FileIO';
 import { PrivateOutputRoot } from './PrivateOutputRoot';
 import { durableJson, syncDirectory } from './Durable';
 import { OPAQUE_ID, OUTPUT_LIMITS, OutputReference, validReference } from './Protocol';
-import { outputFileDiscoveryCard, outputFileEntryCard, outputFileTransferCard } from './OutputFileCards';
+import type { InlineFileRow, InlineIdentity } from './InlineFileCards';
+import { outputFileTransferCard } from './OutputFileCards';
 
 export class OutputApiRejection extends Error { constructor() { super('File delivery was rejected.'); } }
-interface Source { messageId: string; deviceId: string; openId: string; threadId?: string; epoch: string; expiresAt: number; notices?: Record<string, CardIntent> }
+interface Source { generation?: number; messageId: string; deviceId: string; openId: string; threadId?: string; epoch: string; expiresAt: number; notices?: Record<string, CardIntent> }
 interface CardIntent { uuid: string; content: string; firstAt: number; id?: string; state: 'intent' | 'known' | 'uncertain' | 'unavailable' }
 interface Reference extends Source { reference: OutputReference; card?: CardIntent }
 export type JobState = 'queued' | 'waiting-device' | 'receiving' | 'staged-verified' | 'upload-intent' | 'file-key-saved' | 'send-intent' | 'delivered' | 'send-uncertain' | 'failed' | 'expired' | 'revoked';
@@ -30,6 +31,8 @@ export interface OutputDependencies {
   create(openId: string, content: string, uuid: string): Promise<string>;
   patch(cardId: string, content: string): Promise<void>;
   upload(filename: string, name: string): Promise<string>;
+  inline?(messageId: string): Promise<void>;
+  parentAllowed?(identity: InlineIdentity, cardId: string): Promise<boolean>;
   sendFile(openId: string, content: string, uuid: string): Promise<string>;
 }
 const terminal = new Set<JobState>(['delivered', 'send-uncertain', 'expired', 'revoked']);
@@ -45,6 +48,7 @@ function validCard(value: any): boolean {
 }
 function validSource(value: any): boolean {
   return !!value && ['messageId', 'deviceId', 'openId', 'epoch'].every(key => label(value[key]))
+    && (value.generation === undefined || Number.isSafeInteger(value.generation) && value.generation >= 0)
     && (value.threadId === undefined || label(value.threadId)) && Number.isSafeInteger(value.expiresAt)
     && (value.notices === undefined || (typeof value.notices === 'object' && value.notices !== null
       && Object.keys(value.notices).length <= 16 && Object.entries(value.notices).every(([key, intent]) => OPAQUE_ID.test(key) && validCard(intent))));
@@ -52,6 +56,7 @@ function validSource(value: any): boolean {
 function validState(data: State): boolean {
   return data.sources.every(validSource) && new Set(data.sources.map(s => s.messageId)).size === data.sources.length
     && data.references.every(r => validSource(r) && validReference(r.reference) && validCard(r.card)
+      && (r.generation === undefined || r.generation === r.reference.generation)
       && r.messageId === r.reference.messageId && (!r.threadId || r.threadId === r.reference.threadId))
     && new Set(data.references.map(r => r.reference.id)).size === data.references.length
     && new Set(data.jobs.map(j => j.id)).size === data.jobs.length
@@ -80,11 +85,13 @@ export class OutputTransfers {
   private presentations = new Map<string, Promise<void>>();
   private grants = new Map<string, Grant>();
   private entryWork = new Map<string, Promise<void>>();
+  private entryDirty = new Set<string>();
   private timer?: NodeJS.Timeout;
   private stopped = false;
   private ticking = false;
   private currentTick?: Promise<void>;
   private healthy = true;
+  private ready = false;
   private loading?: Promise<void>;
   private noticeWork = new Set<Promise<void>>();
   private cleanedAt = 0;
@@ -128,18 +135,42 @@ export class OutputTransfers {
         }
         if (job.card?.id) job.displayPending = true;
       }
-      await this.cleanup(); await this.save();
+      await this.cleanup(); await this.save(); this.ready = true;
       this.timer = setInterval(() => { void this.tick().catch(() => {}); }, 2000); this.timer.unref();
     })();
+  }
+  /** In-memory only: disabled file capability must not initialize byte storage. */
+  identityStatus(identity: InlineIdentity): 'match' | 'conflict' | 'unknown' {
+    if (!this.ready || !this.healthy || this.stopped) return 'unknown';
+    const records = [...this.state.sources.filter(source => source.messageId === identity.messageId),
+      ...this.state.references.filter(ref => ref.messageId === identity.messageId).map(ref => this.identity(ref))];
+    if (!records.length) return 'unknown';
+    if (new Set(records.flatMap(record => record.generation === undefined ? [] : [record.generation])).size > 1) return 'conflict';
+    return records.every(record => record.openId === identity.openId && record.deviceId === identity.deviceId
+      && record.epoch === identity.epoch && (record.threadId === undefined || record.threadId === identity.threadId)
+      && (record.generation === undefined || identity.generation === undefined || record.generation === identity.generation)) ? 'match' : 'conflict';
+  }
+  private identity(ref: Reference): InlineIdentity {
+    return { messageId: ref.messageId, openId: ref.openId, deviceId: ref.deviceId, epoch: ref.epoch,
+      threadId: ref.reference.threadId, generation: ref.reference.generation };
   }
   async admitSource(source: Omit<Source, 'expiresAt'>): Promise<void> {
     await this.initialize();
     await this.lock(async () => {
       if (this.stopped) return;
+      const refs = this.state.references.filter(ref => ref.messageId === source.messageId);
+      if (refs.some(ref => ref.openId !== source.openId || ref.deviceId !== source.deviceId || ref.epoch !== source.epoch
+        || source.threadId !== undefined && ref.reference.threadId !== source.threadId
+        || source.generation !== undefined && ref.reference.generation !== source.generation)) throw new Error('Output source conflict.');
       const prior = this.state.sources.find(s => s.messageId === source.messageId);
       if (prior) {
         if (prior.openId !== source.openId || prior.deviceId !== source.deviceId || prior.epoch !== source.epoch
-          || (prior.threadId && source.threadId && prior.threadId !== source.threadId)) throw new Error('Output source conflict.');
+          || (prior.threadId && source.threadId && prior.threadId !== source.threadId)
+          || (prior.generation !== undefined && source.generation !== undefined && prior.generation !== source.generation)) throw new Error('Output source conflict.');
+        let changed = false;
+        if (!prior.threadId && source.threadId) { prior.threadId = source.threadId; changed = true; }
+        if (prior.generation === undefined && source.generation !== undefined) { prior.generation = source.generation; changed = true; }
+        if (changed) await this.save();
         if (prior.expiresAt <= Date.now()) { prior.expiresAt = Date.now() + OUTPUT_LIMITS.ttl; await this.save(); }
         return;
       }
@@ -161,11 +192,14 @@ export class OutputTransfers {
       const source = prior ?? this.state.sources.find(s => s.messageId === reference.messageId && s.deviceId === deviceId && s.expiresAt > Date.now());
       if (this.stopped || !expectedSession || session?.id !== expectedSession || !source || session?.openId !== source.openId || (source.threadId && source.threadId !== reference.threadId)
         || !await this.deps.owns(source.openId, deviceId, source.epoch)) return;
+      const generation = source.generation ?? this.state.references.find(r => r.deviceId === deviceId && r.messageId === reference.messageId)?.reference.generation;
+      if (generation !== undefined && generation !== reference.generation) return;
       if (prior) {
         if (prior.deviceId !== deviceId || JSON.stringify(prior.reference) !== JSON.stringify(reference)) return;
         accepted = prior;
       } else {
         if (this.state.references.length >= OUTPUT_LIMITS.references) return;
+        source.generation ??= reference.generation; source.threadId ??= reference.threadId;
         const { notices: _notices, ...binding } = source;
         accepted = { ...binding, reference }; this.state.references.push(accepted); await this.save();
       }
@@ -173,44 +207,24 @@ export class OutputTransfers {
     });
     if (accepted) this.entry(accepted);
   }
-  discovery(deviceId: string, value: any): Promise<void> {
-    if (this.stopped || this.noticeWork.size >= 4) return Promise.resolve();
-    const work = this.discoveryNow(deviceId, value).finally(() => this.noticeWork.delete(work));
-    this.noticeWork.add(work); return work;
-  }
-  private async discoveryNow(deviceId: string, value: any): Promise<void> {
-    if (!Number.isInteger(value.unavailable) || value.unavailable < 0 || value.unavailable > OUTPUT_LIMITS.candidates
-      || typeof value.omitted !== 'boolean' || typeof value.taskId !== 'string' || value.taskId.length > 200) return;
-    let source: Source | undefined, intent: CardIntent | undefined;
-    await this.lock(async () => {
-      source = this.state.sources.find(s => s.deviceId === deviceId && s.messageId === value.messageId && s.expiresAt > Date.now());
-      if (!source || this.deps.session(deviceId)?.openId !== source.openId || !await this.deps.owns(source.openId, deviceId, source.epoch)) return;
-      if (this.state.sources.reduce((n, s) => n + Object.keys(s.notices ?? {}).length, 0) >= 100) return;
-      const key = createHash('sha256').update(value.taskId).digest('hex');
-      source.notices ??= {};
-      if (source.notices[key] || Object.keys(source.notices).length >= 16) return;
-      intent = { uuid: randomUUID(), firstAt: Date.now(), state: 'intent', content: outputFileDiscoveryCard(value.unavailable, value.omitted) };
-      source.notices[key] = intent; await this.save();
-    });
-    if (this.stopped || !source || !intent || !await this.deps.owns(source.openId, deviceId, source.epoch)) return;
-    try { intent.id = await bounded(this.deps.create(source.openId, intent.content, intent.uuid), 8000); intent.state = 'known'; }
-    catch { intent.state = 'uncertain'; }
-    await this.lock(() => this.save());
+  async discovery(_deviceId: string, _value: unknown): Promise<void> {
+    // Legacy count-only notices are intentionally quiet. Never create a card.
   }
   private entry(ref: Reference): void {
-    if (ref.card || this.entryWork.has(ref.reference.id) || this.stopped || this.entryWork.size >= 4) return;
+    // New references require the original assistant body. Never create a fallback entry.
+    if (ref.card || !this.deps.inline || this.stopped) return;
+    this.entryDirty.add(ref.messageId);
+    if (this.entryWork.has(ref.messageId)) return;
     const work = (async () => {
-      await this.lock(async () => {
-        if (ref.card || !await this.deps.owns(ref.openId, ref.deviceId, ref.epoch)) return;
-        ref.card = { state: 'intent', uuid: randomUUID(), firstAt: Date.now(), content: outputFileEntryCard(ref.reference) }; await this.save();
-      });
-      if (!ref.card || ref.card.state !== 'intent' || this.stopped || !await this.deps.owns(ref.openId, ref.deviceId, ref.epoch)) return;
-      let id: string | undefined, rejected = false;
-      try { id = await bounded(this.deps.create(ref.openId, ref.card.content, ref.card.uuid), 8000); }
-      catch (error) { rejected = error instanceof OutputApiRejection; }
-      await this.lock(async () => { ref.card!.id = id; ref.card!.state = id ? 'known' : rejected ? 'unavailable' : 'uncertain'; await this.save(); });
-    })().catch(() => {}).finally(() => this.entryWork.delete(ref.reference.id));
-    this.entryWork.set(ref.reference.id, work);
+      do {
+        this.entryDirty.delete(ref.messageId);
+        try { await this.deps.inline!(ref.messageId); } catch { /* Hold unavailable bodies without fallback cards. */ }
+      } while (!this.stopped && this.entryDirty.has(ref.messageId));
+    })().finally(() => {
+      this.entryWork.delete(ref.messageId);
+      if (this.entryDirty.delete(ref.messageId) && !this.stopped) this.entry(ref);
+    });
+    this.entryWork.set(ref.messageId, work);
   }
   async click(openId: string, cardId: string, action: any): Promise<string> {
     await this.initialize();
@@ -219,22 +233,37 @@ export class OutputTransfers {
       if (this.stopped || !OPAQUE_ID.test(action?.id)) return;
       const ref = this.state.references.find(r => r.reference.id === action.id);
       if (!ref || ref.openId !== openId || !await this.deps.owns(openId, ref.deviceId, ref.epoch)) return;
+      if (!ref.card && this.identityStatus(this.identity(ref)) !== 'match') return;
       let job = this.state.jobs.find(j => j.refId === ref.reference.id && j.openId === openId && j.epoch === ref.epoch);
+      const parent = !ref.card && !!this.deps.parentAllowed && await this.deps.parentAllowed(this.identity(ref), cardId);
       if (action.op === 'get') {
-        if (ref.card?.state !== 'known' || ref.card.id !== cardId) return;
+        if (!parent && (ref.card?.state !== 'known' || ref.card.id !== cardId)) return;
         if (job) { result = this.status(job); return; }
         if (ref.reference.expiresAt <= Date.now()) { result = 'This file has expired.'; return; }
         if (this.state.jobs.length >= 1000 || this.state.jobs.filter(j => j.openId === openId && !terminal.has(j.state) && j.state !== 'failed').length >= 20) { result = 'File queue is full.'; return; }
         job = { id: randomBytes(32).toString('hex'), refId: ref.reference.id, openId, deviceId: ref.deviceId, epoch: ref.epoch,
           state: 'queued', revision: 0, received: 0, createdAt: Date.now(), updatedAt: Date.now() };
         this.state.jobs.push(job); await this.save(); result = 'File retrieval accepted.';
-      } else if (action.op === 'retry' && job?.card?.state === 'known' && job.card.id === cardId && action.rev === job.revision
+      } else if (action.op === 'retry' && job && (parent || job.card?.state === 'known' && job.card.id === cardId) && action.rev === job.revision
         && job.state === 'failed' && !this.running.has(job.id) && ref.reference.expiresAt > Date.now()) {
         job.state = job.fileKey ? 'file-key-saved' : await this.hasSpool(job, ref) ? 'staged-verified' : 'queued';
         job.revision++; job.updatedAt = Date.now(); job.displayPending = true; await this.save(); result = 'Retry accepted.';
       }
     });
     void this.tick().catch(() => {}); return result;
+  }
+  inlineRows(identity: InlineIdentity): InlineFileRow[] {
+    if (!this.ready || !this.healthy || this.stopped || this.identityStatus(identity) === 'conflict') return [];
+    return this.state.references.filter(ref => !ref.card && ref.messageId === identity.messageId && ref.openId === identity.openId
+      && ref.deviceId === identity.deviceId && ref.epoch === identity.epoch && ref.reference.threadId === identity.threadId
+      && (identity.generation === undefined || ref.reference.generation === identity.generation)).map(ref => {
+      const job = this.state.jobs.find(j => j.refId === ref.reference.id && j.epoch === ref.epoch);
+      const expired = ref.reference.expiresAt <= Date.now();
+      const op = expired ? undefined : !job ? 'get' as const : job.state === 'failed' ? 'retry' as const
+        : ['delivered', 'send-uncertain', 'revoked', 'expired'].includes(job.state) ? undefined : 'get' as const;
+      return { ...this.identity(ref), id: ref.reference.id, name: ref.reference.name, size: ref.reference.size, expiresAt: ref.reference.expiresAt, generation: ref.reference.generation,
+        status: expired ? 'Expired' : job ? this.status(job) : 'Ready', op, revision: job?.revision };
+    });
   }
   private status(job: OutputJob): string {
     if (job.state === 'delivered') return 'File already delivered.';
@@ -243,7 +272,7 @@ export class OutputTransfers {
       queued: 'File retrieval queued.', 'waiting-device': 'Waiting for the original device to reconnect.',
       receiving: 'Receiving the snapshot.', 'staged-verified': 'Snapshot received and verified.',
       'upload-intent': 'Uploading to Feishu.', 'file-key-saved': 'Upload complete; preparing the file message.',
-      'send-intent': 'Sending the file message.', failed: 'Retrieval failed. You can retry on the transfer card.',
+      'send-intent': 'Sending the file message.', failed: 'Retrieval failed. Retry is available here.',
       expired: 'This file has expired.', revoked: 'Device ownership changed; retrieval is unavailable.',
     };
     return labels[job.state];
@@ -252,6 +281,11 @@ export class OutputTransfers {
     return outputFileTransferCard(job, ref.reference, Date.now());
   }
   private async present(job: OutputJob, ref: Reference): Promise<void> {
+    if (!ref.card && !job.card) {
+      try { await this.deps.inline?.(ref.messageId); job.displayPending = false; }
+      catch { /* Presentation loss cannot change delivery receipts or create fallback cards. */ }
+      return;
+    }
     if (this.presentations.has(job.id)) return this.presentations.get(job.id);
     if (this.presentations.size >= 4) return;
     if (job.card?.id && job.display) {

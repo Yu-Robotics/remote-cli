@@ -17,3 +17,13 @@ export function validReference(value: any): value is OutputReference {
     && Number.isSafeInteger(value.size) && value.size > 0 && value.size <= OUTPUT_LIMITS.file
     && Number.isSafeInteger(value.generation) && value.generation >= 0 && Number.isSafeInteger(value.expiresAt);
 }
+
+/** Display-only assistant intent. Never authorizes existence, reads, or transfers. */
+export interface AttachmentHints { generation: number; names: string[] }
+export function parseAttachmentHints(value: unknown): AttachmentHints | undefined {
+  const v = value as AttachmentHints | undefined;
+  if (!v || !Number.isSafeInteger(v.generation) || v.generation < 0 || !Array.isArray(v.names)
+    || !v.names.length || v.names.length > 16 || v.names.some(name => typeof name !== 'string' || !name || name.length > 120
+      || /[\\/\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/.test(name))) return;
+  return { generation: v.generation, names: [...new Set(v.names)] };
+}

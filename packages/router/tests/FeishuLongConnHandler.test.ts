@@ -7,6 +7,10 @@ import * as fs from 'fs/promises';
 import { createDelegationProgressElements } from '../src/utils/ToolFormatter';
 import { CARD_TABLE_LIMIT, countCardTables } from '../src/utils/CardTables';
 import { WorkerContextCards, workerContextControl } from '../src/feishu/WorkerContextCards';
+import { InlineFileCards } from '../src/output/InlineFileCards';
+import os from 'os';
+import path from 'path';
+import { outputFileEntryCard } from '../src/output/OutputFileCards';
 import { OutputTransfers } from '../src/output/OutputTransfers';
 
 // Mock dependencies
@@ -146,7 +150,7 @@ describe('FeishuLongConnHandler', () => {
       action: { value: { action: 'output_file', id: 'reference', op: 'get' } } }))).not.toContain('private-sentinel');
   });
 
-  it('round-trips Card 2 entry and Retry behaviors through the Feishu callback handler', async () => {
+  it('round-trips legacy published Card 2 entry and Retry behaviors through the Feishu callback handler', async () => {
     const os = await import('os'), path = await import('path');
     const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'output-card-schema-')));
     let count = 0, connected = true;
@@ -180,6 +184,10 @@ describe('FeishuLongConnHandler', () => {
       await transfers.offer('device', { id: 'a'.repeat(64), sha256: 'b'.repeat(64), messageId: 'reply', threadId: 'thread', taskId: 'task',
         generation: 0, name: filename, source: 'workspace', size: 8, expiresAt: Date.now() + 60_000 });
       await Promise.all([...(transfers as any).entryWork.values()]);
+      const legacy = (transfers as any).state.references[0];
+      const content = outputFileEntryCard(legacy.reference), uuid = 'synthetic-legacy-entry';
+      legacy.card = { id: await handler.createOutputCard('owner', content, uuid), content, uuid, firstAt: Date.now(), state: 'known' };
+      await (transfers as any).save();
       const get = behavior(mockClient.im.message.create.mock.calls[0][0].data.content, 'Get file');
       connected = false;
       expect(await callback('wrong-card', get)).toMatchObject({ toast: { content: 'This file is unavailable.' } });
@@ -724,6 +732,77 @@ describe('FeishuLongConnHandler', () => {
       const result = await handler.updateStreamingMessage('msg_123', [{ tag: 'markdown', content: 'Content' }]);
 
       expect(result).toBe(false);
+    });
+  });
+
+  describe('inline files share the serialized assistant composer', () => {
+    it('binds the actual final continuation and preserves body, images, tools, footer and controls', async () => {
+      const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'inline-handler-')));
+      const home = vi.spyOn(os, 'homedir').mockReturnValue(root);
+      let sequence = 0; mockClient.im.message.create.mockImplementation(async () => ({ code: 0, data: { message_id: `actual-${++sequence}` } }));
+      mockClient.im.message.patch.mockResolvedValue({ code: 0 });
+      const inline = new InlineFileCards(path.join(root, 'journal'), {
+        owns: async () => true, rows: () => [{ messageId: 'request', openId: 'owner', deviceId: 'device', threadId: 'thread', epoch: 'epoch', id: 'a'.repeat(64), name: 'report.csv', generation: 1, status: 'Ready', op: 'get' }],
+        patch: (id, content) => handler.patchInlineOutputCard(id, content),
+      }); handler.inlineFiles = inline;
+      try {
+        const actual = await handler.sendStreamingStart('owner'); expect(actual).toBe('actual-1');
+        await inline.admit({ messageId: 'request', rootId: actual!, openId: 'owner', deviceId: 'device', epoch: 'epoch', threadId: 'thread' });
+        const body = Array.from({ length: 230 }, (_, i) => ({ tag: 'markdown', content: `Body ${i}` }));
+        body.push({ tag: 'img', img_key: 'synthetic-image' } as any);
+        const threads: any[] = [{ id: 'thread', name: 'default', status: 'idle' }];
+        expect(await handler.finalizeStreamingMessage(actual!, body, 'session', 'owner', undefined, 'thread', threads, 'thread')).toBe(true);
+        const creates = mockClient.im.message.create.mock.calls;
+        const finalId = `actual-${creates.length}`;
+        const patches = mockClient.im.message.patch.mock.calls.map(([value]: any) => value);
+        const final = patches.filter((p: any) => p.path.message_id === finalId).at(-1);
+        expect(final).toBeDefined(); expect(final.data.content).toContain('output_files_inline');
+        expect(final.data.content).toContain('Body 229'); expect(final.data.content).toContain('synthetic-image');
+        expect(final.data.content).toContain('Completed'); expect(final.data.content).toContain('switch_thread');
+        await (handler as any).refreshThreadSwitchButtons(finalId, 'other-thread');
+        const refreshed = mockClient.im.message.patch.mock.calls.filter(([p]: any) => p.path.message_id === finalId).at(-1)![0];
+        expect(refreshed.data.content).toContain('output_files_inline');
+        expect(refreshed.data.content).toContain('Body 229'); expect(refreshed.data.content).toContain('synthetic-image');
+
+        expect(await inline.allows({ messageId: 'request', openId: 'owner', deviceId: 'device', threadId: 'thread', epoch: 'epoch', generation: 1 }, finalId)).toBe(true);
+        expect(await inline.allows({ messageId: 'request', openId: 'owner', deviceId: 'device', threadId: 'thread', epoch: 'epoch', generation: 1 }, 'request')).toBe(false);
+        handler.onOutputFileAction = vi.fn(async (_owner, card) => card === finalId ? 'File retrieval accepted.' : 'Unavailable');
+        const panel = JSON.parse(final.data.content).body.elements.find((e: any) => e.element_id === 'output_files_inline');
+        const get = panel.elements.find((e: any) => e.behaviors?.[0]?.value.action === 'output_file').behaviors[0].value;
+        expect(await handler.handleCardAction({ operator: { open_id: 'owner' }, context: { open_message_id: finalId }, action: { value: get } })).toMatchObject({ toast: { content: 'File retrieval accepted.' } });
+
+        const all = creates.concat(mockClient.im.message.patch.mock.calls).map(([v]: any) => v.data.content).join('');
+        for (let i = 0; i < 230; i++) expect(all).toContain(`Body ${i}`);
+        expect(creates.every(([v]: any) => !v.data.content.includes('File ready'))).toBe(true);
+        const before = creates.length; await inline.refresh('request'); expect(mockClient.im.message.create).toHaveBeenCalledTimes(before);
+      } finally { await inline.destroy(); home.mockRestore(); await fs.rm(root, { recursive: true, force: true }); }
+    });
+    it('binds the actual final body page when a previously longer stream leaves surplus cards', async () => {
+      const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'inline-short-final-')));
+      let count = 0; mockClient.im.message.create.mockImplementation(async () => ({ code: 0, data: { message_id: `chain-${++count}` } }));
+      mockClient.im.message.patch.mockResolvedValue({ code: 0 });
+      const inline = new InlineFileCards(path.join(root, 'journal'), { owns: async () => true,
+        rows: () => [{ messageId: 'request', openId: 'owner', deviceId: 'device', threadId: 'thread', epoch: 'epoch', id: 'a'.repeat(64), name: 'report.csv', generation: 1, status: 'Ready', op: 'get' }],
+        patch: (id, content) => handler.patchInlineOutputCard(id, content) }); handler.inlineFiles = inline;
+      try {
+        const actual = (await handler.sendStreamingStart('owner'))!;
+        await inline.admit({ messageId: 'request', rootId: actual, openId: 'owner', deviceId: 'device', epoch: 'epoch', threadId: 'thread' });
+        await handler.updateStreamingMessage(actual, Array.from({ length: 230 }, (_, i) => ({ tag: 'markdown', content: `Streaming ${i}` })), 'owner');
+        expect(count).toBeGreaterThan(1);
+        expect(await handler.finalizeStreamingMessage(actual, [{ tag: 'markdown', content: 'Short final body' }], undefined, 'owner')).toBe(true);
+        expect(await inline.allows({ messageId: 'request', openId: 'owner', deviceId: 'device', threadId: 'thread', epoch: 'epoch', generation: 1 }, actual)).toBe(true);
+        expect(await inline.allows({ messageId: 'request', openId: 'owner', deviceId: 'device', threadId: 'thread', epoch: 'epoch', generation: 1 }, `chain-${count}`)).toBe(false);
+        const patch = mockClient.im.message.patch.mock.calls.filter(([p]: any) => p.path.message_id === actual).at(-1)![0];
+        expect(patch.data.content).toContain('Short final body'); expect(patch.data.content).toContain('output_files_inline');
+      } finally { await inline.destroy(); await fs.rm(root, { recursive: true, force: true }); }
+    });
+    it('requires the actual callback context card ID for file pagination', async () => {
+      handler.onInlineFilePage = vi.fn(async () => 'File list updated.');
+      const value = { action: 'output_page', id: 'a'.repeat(64), page: 1 };
+      const bad = await handler.handleCardAction({ operator: { open_id: 'owner' }, action: { value }, open_message_id: 'forged-top-level' });
+      expect(bad?.toast.content).toContain('unavailable'); expect(handler.onInlineFilePage).not.toHaveBeenCalled();
+      const good = await handler.handleCardAction({ operator: { open_id: 'owner' }, action: { value }, context: { open_message_id: 'actual-card' } });
+      expect(good?.toast.content).toContain('updated'); expect(handler.onInlineFilePage).toHaveBeenCalledWith('owner', 'actual-card', value);
     });
   });
 

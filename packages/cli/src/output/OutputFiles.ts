@@ -5,6 +5,7 @@ import { pipeline } from 'stream/promises';
 import { fileOrigin } from '../files/DeviceIdentity';
 import { OutputLinks } from './OutputLinks';
 import { OutputSnapshots, SnapshotContext } from './OutputSnapshots';
+import { OutputDiagnostics } from './OutputDiagnostics';
 import { OPAQUE_ID, OUTPUT_LIMITS } from './Protocol';
 
 /** Discovery and HTTP upload never invoke an executor or consume a model turn. */
@@ -40,17 +41,15 @@ export class OutputFiles {
     }
   }
   async capture(links: OutputLinks, context: SnapshotContext, final?: string): Promise<{ unavailable: number; omitted: boolean }> {
+    if (!this.enabled) return { unavailable: 0, omitted: false };
     // Aggregate backend results are diagnostics, not public delivery intent.
     const parsed = links.finish(context.source === 'worker' ? final : undefined,
       context.source === 'worker' ? 'all' : 'attachments'); let unavailable = 0;
+    const diagnostics = new OutputDiagnostics();
     for (const candidate of parsed.paths) {
-      try { await this.snapshots.snapshot(candidate, { ...context, omitted: parsed.omitted }); } catch { unavailable++; }
+      try { await this.snapshots.snapshot(candidate, { ...context, omitted: parsed.omitted }); } catch (error) { unavailable++; diagnostics.failure(context.messageId, candidate, error); }
     }
     if (context.source !== 'worker') this.advertise();
-    if (context.source !== 'worker' && this.connected && (unavailable || parsed.omitted)) {
-      try { this.send({ type: 'output_discovery', messageId: context.messageId, taskId: context.taskId,
-        unavailable, omitted: parsed.omitted }); } catch { /* Discovery notices never alter the assistant response. */ }
-    }
     return { unavailable, omitted: parsed.omitted };
   }
   handle(message: any): void {

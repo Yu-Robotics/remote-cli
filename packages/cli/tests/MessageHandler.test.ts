@@ -233,6 +233,24 @@ describe('MessageHandler', () => {
     expect(ctx.mockExecutor.execute.mock.calls[1][0]).toContain('Continue the original request');
   });
 
+  it.each([false, true])('sends consent-safe basename hints only when capability is negotiated: %s', async enabled => {
+    ctx.mockThreadManager.getDefaultThread().delegation = false;
+    const capture = vi.fn(); (ctx.handler as any).outputFiles = { isEnabled: () => false, capture, destroy: vi.fn(), disconnect: vi.fn(), disable: vi.fn() };
+    await ctx.handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: { outputAttachmentHintsV1: enabled } } } as any);
+    const filename = path.join(ctx.workingDirectory, 'output', 'report.csv');
+    ctx.mockExecutor.execute.mockImplementation(async (prompt: string, options: any) => {
+      expect(prompt.includes('current approved workspace')).toBe(enabled);
+      options.onStream(`[tool-like stream](secret.csv "attachment")`);
+      options.onDisplayText(`[Source](ordinary.go) [Report](<${filename}> "attachment")`);
+      return { success: true, output: '[diagnostic](private.csv "attachment")' };
+    });
+    await ctx.handler.handleMessage({ type: 'command', messageId: 'display-hints', content: 'Produce report' });
+    const hints = ctx.mockWsClient.send.mock.calls.map(([m]: any) => m).filter((m: any) => m.type === 'response' && m.attachmentHints).map((m: any) => m.attachmentHints);
+    expect(hints).toHaveLength(enabled ? 1 : 0);
+    if (enabled) { expect(hints[0].names).toEqual(['report.csv']); expect(JSON.stringify(hints)).not.toContain(ctx.workingDirectory); }
+    expect(capture).not.toHaveBeenCalled();
+  });
+
   it('keeps ordinary execution independent of delegation storage when delegation is disabled', async () => {
     ctx.mockThreadManager.getDefaultThread().delegation = false;
     ctx.mockExecutor.configureDelegation = vi.fn();

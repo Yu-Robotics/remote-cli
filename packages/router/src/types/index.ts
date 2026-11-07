@@ -1,3 +1,4 @@
+import type { AttachmentHints } from '../output/Protocol';
 import { version } from '../../package.json';
 
 /**
@@ -79,6 +80,7 @@ export enum MessageType {
 export interface TaskResumeInfo {
   /** Available only for a terminal execution; old CLIs omit it. */
   executionMetadata?: ExecutionMetadata;
+  attachmentHints?: AttachmentHints;
   recoveryId: string;
   threadName: string;
   backend: string;
@@ -155,6 +157,7 @@ export interface ResponseMessage extends WSMessage {
   threads?: ThreadSummary[];
   /** Optional on the actual top-level response envelope; old CLIs omit it. */
   executionMetadata?: ExecutionMetadata;
+  attachmentHints?: AttachmentHints;
   /** Optional top-level field; delegation menus require settingsCards and delegationCards. */
   settingsMenu?: import('./Settings').SettingsMenu;
   data: {
