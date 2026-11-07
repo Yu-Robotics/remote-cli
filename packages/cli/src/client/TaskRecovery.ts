@@ -1,3 +1,4 @@
+import { parseAttachmentHints, type AttachmentHints } from '../output/Protocol';
 import { taskCorrelation, taskEvent } from './TaskDiagnostics';
 import { v4 as uuidv4 } from 'uuid';
 import type { OutgoingMessage, TaskResumeInfo, ExecutionMetadata } from '../types';
@@ -21,7 +22,7 @@ interface TaskState {
   recovered: boolean;
   recoveryFailures: number;
   recoveryPaused: boolean;
-  result?: { success: boolean; error?: string; finishedAt: number; executionMetadata?: ExecutionMetadata };
+  result?: { success: boolean; error?: string; finishedAt: number; attachmentHints?: AttachmentHints; executionMetadata?: ExecutionMetadata };
 }
 
 const RESULT_TTL = 24 * 60 * 60 * 1000;
@@ -43,6 +44,7 @@ export class TaskRecovery {
   private receiptSequence = 0;
   private receiptArmedAt = 0;
   private connectionEpoch = 0;
+  private hintsSupported = false;
 
   constructor(private readonly sendRaw: (message: any) => void) {}
 
@@ -70,10 +72,11 @@ export class TaskRecovery {
     }
   }
 
-  registered(supported: boolean, connectionEpoch?: number): void {
+  registered(supported: boolean, connectionEpoch?: number, hintsSupported = false): void {
     this.connectionEpoch = connectionEpoch ?? this.connectionEpoch + 1;
     taskEvent('recovery_registered', { connectionEpoch: this.connectionEpoch, supported });
     this.connected = true;
+    this.hintsSupported = hintsSupported;
     this.supported = supported;
     if (!supported) {
       this.clearTimers();
@@ -92,13 +95,19 @@ export class TaskRecovery {
 
   /** Return local transport acceptance, not a remote delivery acknowledgement. */
   send(message: any): boolean {
+    if (message.type === 'response') {
+      const { attachmentHints, ...response } = message;
+      const hints = this.hintsSupported ? parseAttachmentHints(attachmentHints) : undefined;
+      message = { ...response, ...(hints ? { attachmentHints: hints } : {}) };
+    }
     const entry = this.tasks.get(message.messageId);
     if (!entry) {
       this.sendRaw(message);
       return true;
     }
     if (message.type === 'response' && typeof message.success === 'boolean') {
-      entry.result = { success: message.success, error: message.error?.slice(0, 500), finishedAt: Date.now() };
+      entry.result = { success: message.success, error: message.error?.slice(0, 500), finishedAt: Date.now(),
+        ...(message.attachmentHints ? { attachmentHints: message.attachmentHints } : {}) };
       if (message.executionMetadata?.backend === entry.task.backend) {
         entry.result.executionMetadata = boundExecutionMetadata(message.executionMetadata, entry.task.backend);
       }
@@ -164,7 +173,7 @@ export class TaskRecovery {
         if (entry.result) {
           this.send({ type: 'response', messageId: message.messageId, openId: entry.task.openId,
             threadId: entry.task.threadId, cwd: entry.task.cwd, success: entry.result.success,
-            error: entry.result.error, timestamp: Date.now() });
+            error: entry.result.error, ...(this.hintsSupported && entry.result.attachmentHints ? { attachmentHints: entry.result.attachmentHints } : {}), timestamp: Date.now() });
         }
       }
     }
@@ -196,6 +205,7 @@ export class TaskRecovery {
       cwd: task.cwd, preview: task.preview,
       state: result ? (result.success ? 'completed' : 'failed') : 'running', error: result?.error,
       ...(result?.executionMetadata ? { executionMetadata: result.executionMetadata } : {}),
+      ...(this.hintsSupported && result?.attachmentHints ? { attachmentHints: result.attachmentHints } : {}),
     };
     this.inFlight = { messageId: task.messageId, recoveryId: entry.recoveryId, state: taskResume.state };
     this.acknowledgementTimer = setTimeout(() => this.failRecovery(), RETRY_DELAY);

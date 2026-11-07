@@ -1,3 +1,4 @@
+import type { InlineFileCards } from '../output/InlineFileCards';
 import { OutputApiRejection } from '../output/OutputTransfers';
 import { CardDeliveryDiagnostics, type CardDiagnosticContext, deliveryEvent, safeCardError, safeSdkLogger } from '../utils/DeliveryDiagnostics';
 import * as lark from '@larksuiteoapi/node-sdk';
@@ -161,6 +162,8 @@ export class FeishuLongConnHandler {
   onApprovalAction?: (openId: string, requestId: string, cardId: string, decision: string) => Promise<string>;
   onMaintenanceAction?: (openId: string, id: string, cardId: string, action: string, offset?: number) => Promise<string>;
   onTipsCommand?: (openId: string, content: string) => Promise<void>;
+  inlineFiles?: InlineFileCards;
+  onInlineFilePage?: (openId: string, cardId: string, payload: unknown) => Promise<string>;
   onOutputFileAction?: (openId: string, cardId: string, payload: unknown) => Promise<string>;
   onAutomaticFileEnrollment?: (openId: string, cardId: string, payload: unknown) => Promise<string>;
   onTipsAction?: (openId: string, cardId: string, payload: unknown) => Promise<string>;
@@ -1223,7 +1226,7 @@ Examples:
    * @param trailingElements Final controls and footer elements that must remain together
    * @returns Array of element chunks, each satisfying Feishu's limits
    */
-  private splitElementsIntoChunks(elements: any[], continuationHeaderElements: any[] = [], trailingElements: any[] = [], activityTail?: any, keepCompletionWithBody = false): any[][] {
+  private splitElementsIntoChunks(elements: any[], continuationHeaderElements: any[] = [], trailingElements: any[] = [], activityTail?: any, keepCompletionWithBody = false, reserveFiles = false): any[][] {
     // If empty or very small, return as-is
     if (elements.length === 0) {
       return [activityTail ? [activityTail] : elements];
@@ -1266,8 +1269,8 @@ Examples:
     const finalGroup = finalBodyStart >= continuationHeaderElements.length
       ? elements.slice(finalBodyStart) : [];
     const keepFinalBody = finalGroup.length > trailingElements.length
-      && finalGroup.reduce((sum, item) => sum + this.countTaggedNodes(item, true), 0) + continuationIndicatorCount <= this.CARD_ELEMENT_LIMIT
-      && finalGroup.reduce((sum, item) => sum + JSON.stringify(item).length, 0) + continuationIndicatorSize <= this.CARD_DATA_SIZE_LIMIT - this.CARD_SIZE_BUFFER
+      && finalGroup.reduce((sum, item) => sum + this.countTaggedNodes(item, true), 0) + continuationIndicatorCount <= (this.CARD_ELEMENT_LIMIT - (reserveFiles ? 40 : 0))
+      && finalGroup.reduce((sum, item) => sum + JSON.stringify(item).length, 0) + continuationIndicatorSize <= this.CARD_DATA_SIZE_LIMIT - this.CARD_SIZE_BUFFER - (reserveFiles ? 32_768 : 0)
       && countCardTables(finalGroup) + headerTables <= CARD_TABLE_LIMIT;
 
     for (let i = 0; i < elements.length; i++) {
@@ -1292,10 +1295,10 @@ Examples:
       // Check if adding this element would exceed limits
       // Reserve space for continuation indicators
       const wouldExceedElementLimit =
-        currentChunkTaggedNodes + groupTaggedNodes > (this.CARD_ELEMENT_LIMIT - continuationIndicatorCount);
+        currentChunkTaggedNodes + groupTaggedNodes > ((this.CARD_ELEMENT_LIMIT - (reserveFiles ? 40 : 0)) - continuationIndicatorCount);
       const wouldExceedSizeLimit =
         currentChunkSize + groupSize + continuationIndicatorSize >
-        (this.CARD_DATA_SIZE_LIMIT - this.CARD_SIZE_BUFFER);
+        (this.CARD_DATA_SIZE_LIMIT - this.CARD_SIZE_BUFFER - (reserveFiles ? 32_768 : 0));
       const wouldExceedTableLimit = currentChunkTables + groupTables + headerTables > CARD_TABLE_LIMIT;
 
       if (currentChunk.length > 0 && (wouldExceedElementLimit || wouldExceedSizeLimit || wouldExceedTableLimit)) {
@@ -1461,6 +1464,7 @@ Examples:
             content: body,
           },
         });
+        if (response.code === 0 && response.data?.message_id) this.inlineFiles?.remember(response.data.message_id, rootId ?? response.data.message_id, body);
         if (!response.code && response.data?.message_id) this.workerContexts?.remember(response.data.message_id,
           rootId ?? response.data.message_id, body);
         return response;
@@ -1521,6 +1525,16 @@ Examples:
         data: { content: JSON.stringify({ schema: '2.0', header, body: { elements } }) } });
       if (result?.code !== 0) throw new Error('Could not update tip card.');
     });
+  }
+
+  private async patchAssistantCard(cardId: string, rootId: string, content: string): Promise<any> {
+    const send = (body: string) => this.client.im.message.patch({ path: { message_id: cardId }, data: { content: body } });
+    return this.inlineFiles ? this.inlineFiles.write(cardId, rootId, content, send) : send(content);
+  }
+  async patchInlineOutputCard(cardId: string, content: string): Promise<void> {
+    const body = this.workerContexts?.decorate(content) ?? content;
+    const result = await this.outputRequest(6000, client => client.im.message.patch({ path: { message_id: cardId }, data: { content: body } }));
+    if (result?.code !== 0) throw new Error('Inline card update unconfirmed.');
   }
 
   private readonly outputLogger = safeSdkLogger();
@@ -1674,7 +1688,7 @@ Examples:
       // Split elements into chunks based on Feishu Card 2.0 limits
       const shell = this.activityShells.get(messageId);
       const activityTail = shell && shell.finishedAt === undefined ? createActivityElement(shell.activity) : undefined;
-      const chunks = this.splitElementsIntoChunks(elements, continuationHeaderElements, trailingElements, activityTail, keepCompletionWithBody);
+      const chunks = this.splitElementsIntoChunks(elements, continuationHeaderElements, trailingElements, activityTail, keepCompletionWithBody, this.inlineFiles?.hasRoot(messageId));
       const tailIndex = activityTail ? chunks.length - 1 : -1;
       console.log(`[FeishuHandler] Need ${chunks.length} card(s), currently have ${chain.length} card(s)`);
       let hashes = this.cardContentHashes.get(messageId);
@@ -1696,7 +1710,7 @@ Examples:
         const fallback = fallbackCards.has(index);
         const content = JSON.stringify({ schema: '2.0', body: { elements: fallback ? plainTextCard(elements) : elements } });
         await this.sendCardRequest(content, async body => {
-          const result = await this.client.im.message.patch({ path: { message_id: cardId }, data: { content: body } });
+          const result = await this.patchAssistantCard(cardId, messageId, body);
           if (!result?.code) this.workerContexts?.remember(cardId, messageId, body);
           return result;
         }, () => fallbackCards.add(index), !fallback, { operation: 'tail-clear', cardId, rootId: messageId, index });
@@ -1747,7 +1761,7 @@ Examples:
           return;
         }
         await this.sendCardRequest(payloads[index], async content => {
-          const result = await this.client.im.message.patch({ path: { message_id: chain[index] }, data: { content } });
+          const result = await this.patchAssistantCard(chain[index], messageId, content);
           if (!result?.code) this.workerContexts?.remember(chain[index], messageId, content);
           return result;
         }, () => usePlainText(index), !fallbackCards.has(index), { operation: diagnosticOperation, cardId: chain[index], rootId: messageId, index });
@@ -1877,10 +1891,16 @@ Examples:
         if (delivered && delivered.length > 0) await options.onDelivered([...delivered]);
       }
 
+      if (!bare && this.inlineFiles) {
+        const chunks = this.splitElementsIntoChunks(finalElements, headerElements, trailingElements, undefined, keepCompletionWithBody, this.inlineFiles?.hasRoot(messageId));
+        const cardId = this.messageChains.get(messageId)?.[chunks.length - 1];
+        if (cardId) { try { await this.inlineFiles.bind(messageId, cardId); } catch { /* Hold file controls if the complete durable parent binding is unavailable. */ } }
+      }
+
       // Store thread switch card state for later refresh (before cleanup)
       if (!bare && threads && threads.length >= 1) {
         const chain = this.messageChains.get(messageId);
-        const chunks = this.splitElementsIntoChunks(finalElements, headerElements, trailingElements, undefined, keepCompletionWithBody);
+        const chunks = this.splitElementsIntoChunks(finalElements, headerElements, trailingElements, undefined, keepCompletionWithBody, this.inlineFiles?.hasRoot(messageId));
         const lastChunkIndex = chunks.length - 1;
         const lastCardId = chain?.[lastChunkIndex];
 
@@ -2063,7 +2083,7 @@ Examples:
    * Re-patches the card with updated button states (new active thread highlighted).
    */
   private async refreshThreadSwitchButtons(cardMessageId: string, newActiveThreadId: string): Promise<void> {
-    const rootId = this.workerContexts?.rootFor(cardMessageId) ?? cardMessageId;
+    const rootId = this.workerContexts?.rootFor(cardMessageId) ?? this.inlineFiles?.rootFor(cardMessageId) ?? cardMessageId;
     await this.withMessageLock(rootId, async () => {
       const state = this.threadSwitchCardState.get(cardMessageId);
       if (!state) {
@@ -2075,7 +2095,7 @@ Examples:
         ...this.createThreadSwitchElements(state.threads, newActiveThreadId, state.replyLabel),
       ];
       await this.sendCardRequest(JSON.stringify({ schema: '2.0', body: { elements: updatedElements } }), async content => {
-        const result = await this.client.im.message.patch({ path: { message_id: cardMessageId }, data: { content } });
+        const result = await this.patchAssistantCard(cardMessageId, rootId, content);
         if (!result?.code) this.workerContexts?.remember(cardMessageId, rootId, content);
         return result;
       }, undefined, true, { operation: 'controls', cardId: cardMessageId, rootId });
@@ -2088,7 +2108,7 @@ Examples:
       const content = this.workerContexts?.contentFor(cardId);
       if (!content) return;
       await this.sendCardRequest(content, async body => {
-        const result = await this.client.im.message.patch({ path: { message_id: cardId }, data: { content: body } });
+        const result = await this.patchAssistantCard(cardId, rootId, body);
         if (!result?.code) this.workerContexts?.remember(cardId, rootId, body);
         return result;
       }, undefined, true, { operation: 'controls', cardId, rootId });
@@ -2120,6 +2140,12 @@ Examples:
       if (typeof cardId !== 'string' || !this.onAutomaticFileEnrollment) return { toast: { type: 'error', content: 'File approval unavailable.' } };
       try { return { toast: { type: 'info', content: await this.onAutomaticFileEnrollment(openId, cardId, parsed) } }; }
       catch { return { toast: { type: 'error', content: 'File approval could not be completed. Existing text access is unchanged.' } }; }
+    }
+    if (parsed.action === 'output_page') {
+      const cardId = data?.context?.open_message_id;
+      if (typeof cardId !== 'string' || !this.onInlineFilePage) return { toast: { type: 'error', content: 'File controls unavailable.' } };
+      try { return { toast: { type: 'info', content: await this.onInlineFilePage(openId, cardId, parsed) } }; }
+      catch { return { toast: { type: 'error', content: 'File controls unavailable.' } }; }
     }
     if (parsed.action === 'output_file') {
       const cardId = data?.context?.open_message_id;

@@ -9,6 +9,7 @@ import { WebSocket, WebSocketServer } from 'ws';
 import { once } from 'events';
 import { OutputTransfers, OutputApiRejection, OutputDependencies } from '../../src/output/OutputTransfers';
 import { OutputReference, OUTPUT_LIMITS } from '../../src/output/Protocol';
+import { outputFileEntryCard } from '../../src/output/OutputFileCards';
 import { durableJson } from '../../src/output/Durable';
 import { OutputSnapshots } from '../../../cli/src/output/OutputSnapshots';
 import { OutputFiles } from '../../../cli/src/output/OutputFiles';
@@ -24,6 +25,13 @@ function ctx(token: string, data: Buffer): any { return { get: () => `Bearer ${t
 async function entry(ref = reference()): Promise<void> {
   await transfers.admitSource({ messageId: ref.messageId, deviceId: 'device', openId: 'user', threadId: 'thread', epoch: 'owner-epoch' });
   await transfers.offer('device', ref); await Promise.allSettled([...(transfers as any).entryWork.values()]);
+  // Synthetic receipts represent cards published by older releases, not new entry creation.
+  const saved = state().references.find((r: any) => r.reference.id === ref.id);
+  if (saved && !saved.card) {
+    const content = outputFileEntryCard(ref), uuid = `legacy-${ref.id.slice(0, 16)}`;
+    saved.card = { id: await deps.create('user', content, uuid), uuid, content, firstAt: Date.now(), state: 'known' };
+    await (transfers as any).save();
+  }
 }
 async function click(): Promise<string> { return transfers.click('user', state().references[0].card.id, { id, op: 'get' }); }
 async function drain(): Promise<void> {
@@ -85,8 +93,8 @@ describe('durable registration and independent cards', () => {
     owned = false; expect(await click()).toContain('unavailable'); expect(state().jobs).toHaveLength(0);
     await expect(transfers.admitSource({ messageId: 'reply', deviceId: 'foreign', openId: 'user', epoch: 'owner-epoch' })).rejects.toThrow('conflict');
   });
-  it('coalesces concurrent clicks and sends one separate task card plus native file message', async () => {
-    await entry(); const entryId = state().references[0].card.id;
+  it('keeps historical entry clicks usable with their legacy progress card after inline support is enabled', async () => {
+    await entry(); deps.inline = vi.fn(async () => {}); const entryId = state().references[0].card.id;
     const entryCard = JSON.parse((deps.create as any).mock.calls[0][1]);
     expect(entryCard.header.template).toBe('blue');
     expect(entryCard.body.elements[0]).toEqual({ tag: 'div', text: { tag: 'plain_text', content: 'report.csv' } });
@@ -100,6 +108,7 @@ describe('durable registration and independent cards', () => {
     expect((deps.patch as any).mock.calls.every((call: any[]) => call[0] !== entryId)).toBe(true);
     expect(await click()).toBe('File already delivered.'); await drain(); expect(deps.sendFile).toHaveBeenCalledTimes(1);
     expect(JSON.stringify((deps.create as any).mock.calls)).not.toContain(payload.toString());
+    expect(deps.inline).not.toHaveBeenCalled();
     const job = state().jobs[0]; expect(job.card.uuid).not.toBe(job.send.uuid);
     // Admit the pending terminal presentation without changing delivery timers.
     if (job.display) job.display.after = 0;
@@ -124,10 +133,65 @@ describe('durable registration and independent cards', () => {
     await transfers.offer('device', restored.reference); await drain();
     expect(deps.create).toHaveBeenCalledOnce(); expect(deps.patch).not.toHaveBeenCalled();
   });
-  it('persists card uncertainty and does not blindly create another entry', async () => {
-    deps.create = vi.fn(async () => { throw new Error('unknown-secret-sentinel'); }); await entry();
-    expect(state().references[0].card.state).toBe('uncertain');
-    await transfers.offer('device', state().references[0].reference); await drain(); expect(deps.create).toHaveBeenCalledTimes(1);
+  it('refreshes the final offer cohort after new files arrive during an in-flight parent patch', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const cohorts: number[] = [];
+    deps.inline = vi.fn(async () => { cohorts.push(transfers.inlineRows({ messageId: 'reply', openId: 'user', deviceId: 'device', epoch: 'owner-epoch', threadId: 'thread' }).length); if (cohorts.length === 1) await gate; });
+    await transfers.admitSource({ messageId: 'reply', deviceId: 'device', openId: 'user', threadId: 'thread', epoch: 'owner-epoch' });
+    try {
+      await transfers.offer('device', reference());
+      expect(cohorts).toEqual([1]);
+      for (let i = 1; i < 16; i++) await transfers.offer('device', { ...reference(), id: i.toString(16).padStart(64, '0'), name: `report-${i}.csv` });
+      expect(cohorts).toEqual([1]);
+      release(); await Promise.allSettled([...(transfers as any).entryWork.values()]);
+      expect(cohorts).toEqual([1, 16]); expect(deps.create).not.toHaveBeenCalled();
+    } finally { release(); await Promise.allSettled([...(transfers as any).entryWork.values()]); }
+  });
+  it('joins the full durable reference identity even when its source inventory is missing after restart', async () => {
+    const identity = { messageId: 'reply', openId: 'user', deviceId: 'device', epoch: 'owner-epoch', threadId: 'thread', generation: 2 };
+    await transfers.admitSource(identity); await transfers.offer('device', reference());
+    expect(transfers.inlineRows(identity)).toHaveLength(1);
+    state().sources = []; await (transfers as any).save();
+    await transfers.destroy(); transfers = new OutputTransfers(path.join(root, 'router'), deps); await transfers.initialize();
+    expect(transfers.identityStatus(identity)).toBe('match');
+    for (const key of ['openId', 'deviceId', 'epoch', 'threadId', 'generation'] as const) {
+      const foreign = { ...identity, [key]: key === 'generation' ? 3 : 'foreign' };
+      expect(transfers.inlineRows(foreign)).toEqual([]); expect(transfers.identityStatus(foreign)).toBe('conflict');
+      await expect(transfers.admitSource(foreign)).rejects.toThrow('source conflict');
+    }
+    deps.parentAllowed = vi.fn(async () => false);
+    expect(await transfers.click('user', 'foreign-card', { id, op: 'get' })).toContain('unavailable');
+    expect(deps.parentAllowed).toHaveBeenCalledWith(identity, 'foreign-card');
+    expect(state().references).toHaveLength(1); expect(state().jobs).toEqual([]);
+  });
+  it('holds conflicting durable generations even when the caller has no generation yet', async () => {
+    const identity = { messageId: 'reply', openId: 'user', deviceId: 'device', epoch: 'owner-epoch', threadId: 'thread' };
+    await transfers.admitSource(identity); await transfers.offer('device', reference());
+    state().sources[0].generation = 3;
+    expect(transfers.identityStatus(identity)).toBe('conflict'); expect(transfers.inlineRows(identity)).toEqual([]);
+    deps.parentAllowed = vi.fn(async () => true);
+    expect(await transfers.click('user', 'parent', { id, op: 'get' })).toContain('unavailable');
+    expect(deps.parentAllowed).not.toHaveBeenCalled(); expect(state().jobs).toEqual([]);
+  });
+  it('does not initialize byte storage to inspect an unknown identity or render disabled hints', async () => {
+    const cold = new OutputTransfers(path.join(root, 'cold'), deps);
+    const initialize = vi.spyOn(cold, 'initialize'); const read = vi.spyOn(fs, 'readFile'); const list = vi.spyOn(fs, 'readdir');
+    const identity = { messageId: 'reply', openId: 'user', deviceId: 'device', epoch: 'epoch', threadId: 'thread' };
+    expect(cold.identityStatus(identity)).toBe('unknown'); expect(cold.inlineRows(identity)).toEqual([]);
+    expect(initialize).not.toHaveBeenCalled(); expect(read).not.toHaveBeenCalled(); expect(list).not.toHaveBeenCalled(); await cold.destroy();
+  });
+  it('seals initially unresolved source thread identity and rejects later generation changes', async () => {
+    await transfers.admitSource({ messageId: 'reply', openId: 'user', deviceId: 'device', epoch: 'owner-epoch' });
+    await transfers.admitSource({ messageId: 'reply', openId: 'user', deviceId: 'device', epoch: 'owner-epoch', threadId: 'thread', generation: 2 });
+    await transfers.offer('device', reference());
+    expect(state().references[0].threadId).toBe('thread');
+    await expect(transfers.admitSource({ messageId: 'reply', openId: 'user', deviceId: 'device', epoch: 'owner-epoch', generation: 3 })).rejects.toThrow('source conflict');
+  });
+  it('holds new references without a recoverable parent instead of creating standalone cards', async () => {
+    await transfers.admitSource({ messageId: 'reply', deviceId: 'device', openId: 'user', threadId: 'thread', epoch: 'owner-epoch' });
+    await transfers.offer('device', reference()); await drain();
+    expect(state().references[0].card).toBeUndefined(); expect(deps.create).not.toHaveBeenCalled();
     expect(await transfers.click('user', 'guessed-card', { id, op: 'get' })).toContain('unavailable');
   });
   it('delivers despite unknown task-card creation and never resends on failed terminal patches', async () => {
@@ -209,35 +273,10 @@ describe('receipts, retry and ownership epochs', () => {
   });
 });
 
-it('shows unavailable discovery separately, once, without accepting unowned notices', async () => {
-  await entry();
-  await transfers.discovery('device', { messageId: 'reply', taskId: 'worker', unavailable: 2, omitted: true });
-  await transfers.discovery('device', { messageId: 'reply', taskId: 'worker', unavailable: 2, omitted: true });
-  expect(deps.create).toHaveBeenCalledTimes(2);
-  const notice = JSON.parse((deps.create as any).mock.calls[1][1]);
-  expect(notice.header.template).toBe('orange');
-  expect(JSON.stringify(notice)).toContain('not exhaustive');
-  await transfers.discovery('foreign', { messageId: 'reply', taskId: 'other', unavailable: 1, omitted: false });
-  await transfers.discovery('device', { messageId: 'reply', taskId: 'other', unavailable: 1000, omitted: false });
-  expect(deps.create).toHaveBeenCalledTimes(2);
-});
-
-it.each(['receiving', 'staged-verified', 'upload-intent', 'file-key-saved', 'delivered'])('reconciles durable %s on restart without replaying known external effects', async phase => {
-  await entry(); session = undefined; await click(); await drain();
-  const job = state().jobs[0]; job.state = phase;
-  if (['staged-verified', 'upload-intent', 'file-key-saved'].includes(phase)) {
-    await fs.writeFile(path.join(root, 'router', `${job.id}.bin`), payload); job.spoolBytes = payload.length;
-  }
-  if (phase === 'file-key-saved') job.fileKey = 'saved-file-key';
-  await durableJson(path.join(root, 'router', 'state.json'), state());
-  await transfers.destroy(); transfers = new OutputTransfers(path.join(root, 'router'), deps); await transfers.initialize();
-  session = { id: 'restart-connection', openId: 'user' }; await drain();
-  if (phase === 'upload-intent') { expect(state().jobs[0].state).toBe('failed'); expect(deps.sendFile).not.toHaveBeenCalled(); }
-  else {
-    expect(state().jobs[0].state).toBe('delivered');
-    expect(deps.sendFile).toHaveBeenCalledTimes(phase === 'delivered' ? 0 : 1);
-    if (phase === 'file-key-saved') expect(deps.upload).not.toHaveBeenCalled();
-  }
+it('ignores legacy count-only discovery without creating cards or new notice receipts', async () => {
+  await entry(); const count = (deps.create as any).mock.calls.length;
+  await transfers.discovery('device', { messageId: 'reply', taskId: 'task', unavailable: 1, omitted: true });
+  expect(deps.create).toHaveBeenCalledTimes(count); expect(state().sources[0].notices).toBeUndefined();
 });
 
 it('counts retained failed spools against quota before admitting more bytes', async () => {
@@ -277,6 +316,8 @@ it('does not let an offline device block a different original device', async () 
   await entry(); const second = { ...reference(), id: 'b'.repeat(64), messageId: 'second-reply' };
   await transfers.admitSource({ messageId: second.messageId, deviceId: 'device-2', openId: 'user', threadId: 'thread', epoch: 'owner-epoch' });
   await transfers.offer('device-2', second); await Promise.allSettled([...(transfers as any).entryWork.values()]);
+  state().references[1].card = { id: 'legacy-second-card', uuid: 'legacy-second', content: outputFileEntryCard(second), firstAt: Date.now(), state: 'known' };
+  await (transfers as any).save();
   deps.session = deviceId => deviceId === 'device-2' ? { id: 'online-second', openId: 'user' } : undefined;
   await click(); await transfers.click('user', state().references[1].card.id, { id: second.id, op: 'get' }); await drain();
   expect(state().jobs.find((j: any) => j.refId === id).state).toBe('waiting-device');

@@ -23,7 +23,7 @@ export function localDestination(href: string, flavor: typeof path = path, whole
   }
   return value;
 }
-export const ATTACHMENT_GUIDANCE = 'Output attachments: only when deliberately delivering a file, use a local Markdown link with the exact title "attachment", for example `[Report](./report.md "attachment")`. Use ordinary untitled links for source citations and review references. Do not mark examples or incidental files as attachments. Attachments select whole files, without line positions or fragments.';
+export const ATTACHMENT_GUIDANCE = 'Output attachments: only when deliberately delivering a file, use a local Markdown link with the exact title "attachment", for example `[Report](./report.md "attachment")`. Use ordinary untitled links for source citations and review references. Do not mark examples or incidental files as attachments. Create intended deliverables in the current approved workspace using a visible path such as output/report.csv, or an already explicitly authorized export root. Do not put deliverables in hidden directories, application state, or unapproved temporary locations. Never copy protected files to bypass these guards. Attachments select whole files, without line positions or fragments.';
 
 export class OutputLinks {
   private text = '';
@@ -32,6 +32,11 @@ export class OutputLinks {
     const left = OUTPUT_LIMITS.text - this.text.length;
     if (text.length > left) this.capped = true;
     this.text += text.slice(0, Math.max(left, 0));
+  }
+  attachmentNames(): string[] {
+    const copy = new OutputLinks(); copy.text = this.text;
+    return [...new Set(copy.finish(undefined, 'attachments').paths.map(file =>
+      path.posix.basename(file.replace(/\\/g, '/')).replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, '').slice(0, 120) || 'attachment'))];
   }
   finish(finalText?: string, selection: 'all' | 'attachments' = 'all'): { paths: string[]; omitted: boolean } {
     // Final output often repeats the stream; parse separately and deduplicate.

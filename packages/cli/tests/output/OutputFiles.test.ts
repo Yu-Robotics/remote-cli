@@ -250,7 +250,7 @@ describe('metadata and outbound HTTP', () => {
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
     const client = new OutputFiles(store, `ws://127.0.0.1:${(server.address() as any).port}`, send);
     try {
-      const links = new OutputLinks(); links.append('[result](report "attachment")'); await client.capture(links, context()); client.connect();
+      client.connect(); const links = new OutputLinks(); links.append('[result](report "attachment")'); await client.capture(links, context());
       const offer = send.mock.calls.find(call => call[0].type === 'output_offer')![0];
       client.handle({ type: 'output_registered', id: offer.reference.id });
       client.disconnect(); client.connect(); expect(send.mock.calls.filter(call => call[0].type === 'output_offer')).toHaveLength(2);

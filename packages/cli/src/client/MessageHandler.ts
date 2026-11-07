@@ -1,3 +1,4 @@
+import type { AttachmentHints } from '../output/Protocol';
 import { OutputFiles } from '../output/OutputFiles';
 import { OutputSnapshots, type VerifiedOutputExport } from '../output/OutputSnapshots';
 import { ATTACHMENT_GUIDANCE, OutputLinks } from '../output/OutputLinks';
@@ -250,6 +251,7 @@ export class MessageHandler {
   private fileInbox?: FileInbox;
   private outputFiles?: OutputFiles;
   private readonly imageDeliveries = new Map<string, ImageDelivery>();
+  private attachmentHintsSupported = false;
   private imageConnectionEpoch = 0;
 
   constructor(
@@ -400,6 +402,7 @@ export class MessageHandler {
       case 'binding_confirm': {
         const data = (message as any).data;
         if (data?.success !== true) return;
+        this.attachmentHintsSupported = data.capabilities?.outputAttachmentHintsV1 === true;
         this.routerVersion = typeof data.routerVersion === 'string' ? data.routerVersion : undefined;
         if (data.capabilities?.outputFilesV1 === true) {
           try {
@@ -2470,6 +2473,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     let executionMetadata: ExecutionMetadata | undefined;
     let requestFinished = false;
     let imageDelivery: ImageDelivery | undefined;
+    let outputAttachmentHints: AttachmentHints | undefined;
     const outputExports = new Map<string, VerifiedOutputExport>();
     let executionActive = false;
     let lastProgramState: string | undefined;
@@ -2519,7 +2523,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       }
       const responseError = fromQueue && !success
         ? this.pauseQueueAfterFailure(threadId, error || 'Queued command failed') : error;
-      this.sendResponse(messageId, threadId, { success, error: responseError, threads: this.threadPool.getSummaries(), executionMetadata });
+      this.sendResponse(messageId, threadId, { success, error: responseError, threads: this.threadPool.getSummaries(), executionMetadata, attachmentHints: outputAttachmentHints });
       if (fromQueue) console.log(`[MessageHandler] Finished queued message ${messageId} in thread ${threadId}: success=${success}, remaining=${this.threadQueues.get(threadId)?.length ?? 0}, paused=${this.pausedQueues.has(threadId)}`);
       return success;
     };
@@ -2758,7 +2762,7 @@ You can also use natural language commands to control Claude Code CLI.`,
             this.pendingGoalActivations.delete(threadId);
           }
           // Reapply guidance to every request, including native continuations. Never persist it in user config.
-          const attachments = this.outputFiles?.isEnabled();
+          const attachments = this.outputFiles?.isEnabled() || this.attachmentHintsSupported;
           const guidedPrompt = attachments ? `${prompt}\n\n${ATTACHMENT_GUIDANCE}` : prompt;
           const guidedGoal = goalRequest && attachments && goalRequest.objective
             ? { ...goalRequest, objective: `${goalRequest.objective}\n\n${ATTACHMENT_GUIDANCE}` } : goalRequest;
@@ -2780,6 +2784,10 @@ You can also use natural language commands to control Claude Code CLI.`,
             const visibleResult = imageTextDropped || this.imageConnectionEpoch !== imageEpoch
               || (scope && (suppressed || scope.hasPendingResults())) ? '' : result.output ?? '';
             queueLocalImages(visibleResult);
+            if (this.attachmentHintsSupported) {
+              const names = outputLinks.attachmentNames();
+              if (names.length) outputAttachmentHints = { generation: outputGeneration, names: [...new Set([...(outputAttachmentHints?.names ?? []), ...names])].slice(0, 16) };
+            }
             if (this.outputFiles?.isEnabled()) {
               await this.outputFiles.capture(outputLinks, { messageId, threadId, taskId: messageId, owner: openId,
                 generation: outputGeneration, cwd: imageCwd, source: 'workspace', exports: [...outputExports.values()] });
@@ -3180,6 +3188,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       queueConfirmation?: QueueConfirmationInfo;
       executionMetadata?: ExecutionMetadata;
       settingsMenu?: SettingsMenu;
+      attachmentHints?: AttachmentHints;
     },
     metadataOnly = false,
   ): void {
@@ -3213,6 +3222,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         threads: result.threads,
         queueConfirmation: result.queueConfirmation,
         ...(result.executionMetadata ? { executionMetadata: result.executionMetadata } : {}),
+        ...(this.attachmentHintsSupported && result.attachmentHints ? { attachmentHints: result.attachmentHints } : {}),
         ...(this.settingsCardsSupported && result.settingsMenu
           && (result.settingsMenu.kind !== 'delegation' || this.delegationCardsSupported)
           && (result.settingsMenu.kind !== 'directory' || this.directoryCardsSupported) ? { settingsMenu: result.settingsMenu } : {}),

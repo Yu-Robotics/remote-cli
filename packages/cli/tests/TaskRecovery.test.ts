@@ -113,6 +113,42 @@ describe('TaskRecovery', () => {
     expect(JSON.stringify(resumes())).not.toContain('entire transcript');
   });
 
+  it('recovers negotiated basename hints without output replay and takes an immutable copy', () => {
+    recovery.registered(true, 1, true);
+    recovery.disconnected();
+    const attachmentHints = { generation: 3, names: ['report.csv', 'source.go', 'report.csv'] };
+    recovery.send({ ...result(), attachmentHints });
+    attachmentHints.names[0] = 'changed.csv';
+    recovery.registered(true, 2, true);
+    expect(resumes().at(-1).taskResume.attachmentHints).toEqual({ generation: 3, names: ['report.csv', 'source.go'] });
+    expect(JSON.stringify(resumes())).not.toContain('entire transcript');
+    acknowledge();
+    expect(recovery.hasPendingResults()).toBe(false);
+  });
+
+  it('drops hints for old peers and invalid path metadata without retaining it for replay', () => {
+    recovery.send({ ...result(), attachmentHints: { generation: 0, names: ['report.csv'] } });
+    expect(send.mock.calls.at(-1)?.[0]).not.toHaveProperty('attachmentHints');
+    recovery.registered(true, 2, true);
+    recovery.send({ ...result(), attachmentHints: { generation: 0, names: ['hidden/report.csv'] } });
+    expect(send.mock.calls.at(-1)?.[0]).not.toHaveProperty('attachmentHints');
+    recovery.disconnected();
+    recovery.send({ ...result(), attachmentHints: { generation: 1, names: ['report.csv'] } });
+    recovery.registered(true, 3, false);
+    expect(resumes().at(-1).taskResume).not.toHaveProperty('attachmentHints');
+  });
+
+  it('carries completion hints when a result arrives during recovery card creation', () => {
+    recovery.registered(true, 1, true);
+    recovery.disconnected();
+    recovery.registered(true, 2, true);
+    expect(resumes().at(-1).taskResume.state).toBe('running');
+    recovery.send({ ...result(), attachmentHints: { generation: 2, names: ['report.csv'] } });
+    acknowledge();
+    expect(send.mock.calls.at(-1)?.[0]).toMatchObject({ type: 'response', output: undefined,
+      attachmentHints: { generation: 2, names: ['report.csv'] } });
+  });
+
   it('does not retain model metadata attributed to another backend', () => {
     recovery.disconnected();
     recovery.send({ ...result(), executionMetadata: { backend: 'codex', model: 'wrong', modelSource: 'reported', effortSource: 'default' } });

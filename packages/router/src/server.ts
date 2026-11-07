@@ -1,3 +1,5 @@
+import { parseAttachmentHints } from './output/Protocol';
+import { InlineFileCards, type HintStatus, type InlineIdentity } from './output/InlineFileCards';
 import { OutputTransfers } from './output/OutputTransfers';
 import { deliveryEvent, safeCardError, taskCorrelation } from './utils/DeliveryDiagnostics';
 import { IngressAdmission, IngressLimitError, INGRESS_LIMITS, PendingFrameBudget } from './security/IngressAdmission';
@@ -59,6 +61,7 @@ const DELEGATION_PROGRESS_TERMINAL_PHASES = new Set<DelegationProgressInfo['phas
 const DELEGATION_PROGRESS_EVENT_LIMIT = 5;
 
 interface StreamingMessageState {
+  inlineRecoveryHeld?: boolean;
   openId: string;
   feishuMessageId: string | null;
   /** Includes continuation routes until this execution completes. */
@@ -150,6 +153,8 @@ export class RouterServer {
   private readonly automaticFileEnrollment: AutomaticFileEnrollment;
   private readonly fileTransfers: FileTransfers;
   private readonly outputTransfers: OutputTransfers;
+  private readonly inlineFileCards: InlineFileCards;
+  private readonly attachmentHintStatus = new Map<string, HintStatus>();
   private outputsAvailable = false;
   private outputSessions = new Map<string, { id: string; openId: string }>();
   private readonly deviceEnrollments = new Set<string>();
@@ -228,10 +233,23 @@ export class RouterServer {
       send: (deviceId, message) => this.connectionHub.sendToDevice(deviceId, message),
       create: (openId, content, uuid) => this.feishuLongConnHandler.createOutputCard(openId, content, uuid),
       patch: (cardId, content) => this.feishuLongConnHandler.patchOutputCard(cardId, content),
+      inline: messageId => this.inlineFileCards.refresh(messageId),
+      parentAllowed: (identity, cardId) => this.inlineFileCards.allows(identity, cardId),
       upload: (filename, name) => this.feishuLongConnHandler.uploadOutputFile(filename, name),
       sendFile: (openId, content, uuid) => this.feishuLongConnHandler.sendOutputFile(openId, content, uuid),
     });
-    this.feishuLongConnHandler.onOutputFileAction = (openId, cardId, payload) => this.outputTransfers.click(openId, cardId, payload);
+    this.inlineFileCards = new InlineFileCards(path.join(path.dirname(config.getConfigPath()
+      || path.join(os.homedir(), '.remote-cli-router', 'config.json')), 'inline-file-cards'), {
+      owns: async owner => this.selections.isOwnershipCurrent(owner.openId, owner.deviceId, owner.epoch)
+        && (await this.bindingManager.getDeviceBinding(owner.deviceId))?.openId === owner.openId,
+      rows: identity => this.outputTransfers.inlineRows(identity),
+      status: owner => !this.fileTransfers.enabled ? 'disabled' : this.outputSessions.has(owner.deviceId) ? 'ready' : this.attachmentHintStatus.get(owner.deviceId),
+      patch: (cardId, content) => this.feishuLongConnHandler.patchInlineOutputCard(cardId, content),
+    });
+    this.feishuLongConnHandler.inlineFiles = this.inlineFileCards;
+    this.feishuLongConnHandler.onInlineFilePage = (openId, cardId, action) => this.inlineFileCards.page(openId, cardId, action);
+    this.feishuLongConnHandler.onOutputFileAction = (openId, cardId, payload) => this.outputsAvailable
+      ? this.outputTransfers.click(openId, cardId, payload) : Promise.resolve('File retrieval is disabled.');
     this.feishuLongConnHandler.onFileMessage = input => this.fileTransfers.receive(input);
     this.feishuLongConnHandler.onResolveFile = (openId, sourceId) => this.fileTransfers.resolve(openId, sourceId);
     this.feishuLongConnHandler.onDeviceEnrollmentBoundary = (deviceId, phase) => {
@@ -343,6 +361,7 @@ export class RouterServer {
         await this.outputTransfers.admitSource({ messageId, openId, deviceId, threadId,
           epoch: selectionIntent?.epoch ?? this.selections.capture(openId, deviceId).epoch }).catch(() => {});
       }
+      if (this.outputSessions.has(deviceId) || this.attachmentHintStatus.has(deviceId)) await this.admitInlineParent(messageId).catch(() => {});
       // Populate card associations for parent_id-based routing
       if (feishuMessageId && threadId) {
         await this.registerCardThread(feishuMessageId, { threadId, deviceId, openId, epoch: selectionIntent?.epoch ?? this.selections.capture(openId, deviceId).epoch, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS },
@@ -718,6 +737,7 @@ export class RouterServer {
                   openId: stream.openId, threadId: stream.threadId,
                   epoch: stream.selectionFence?.epoch ?? this.selections.capture(stream.openId, deviceId).epoch });
               }
+              await this.admitInlineParent(message.reference?.messageId).catch(() => {});
               await this.outputTransfers.offer(deviceId, message.reference);
             }
             return;
@@ -932,6 +952,10 @@ export class RouterServer {
                 this.outputTransfers.disconnect(deviceId); this.outputSessions.delete(deviceId);
                 const outputsEnabled = Boolean(this.outputsAvailable && authenticatedOwner && message.data.capabilities?.outputFilesV1 === true);
                 if (outputsEnabled) this.outputSessions.set(deviceId, { id: randomUUID(), openId: authenticatedOwner! });
+                this.attachmentHintStatus.delete(deviceId);
+                if (message.data.capabilities?.outputAttachmentHintsV1 === true) this.attachmentHintStatus.set(deviceId,
+                  !this.fileTransfers.enabled ? 'disabled' : !authenticatedOwner ? 'approval'
+                    : message.data.capabilities?.outputFilesV1 !== true ? 'upgrade' : !this.outputsAvailable ? 'unavailable' : 'ready');
                 const filesEnabled = Boolean(this.fileTransfers.enabled && authenticatedOwner && message.data.capabilities?.fileTransferV1 === true);
                 const enrollmentBinding = this.fileTransfers.enabled && !authenticatedOwner
                   && message.data.capabilities?.automaticFileEnrollmentV1 === true
@@ -979,13 +1003,14 @@ export class RouterServer {
                     success: true,
                     routerVersion: ROUTER_VERSION,
                     minCliVersion: MIN_SUPPORTED_CLI_VERSION,
-                    ...((taskRecoveryEnabled || approvalCardsEnabled || delegationProgressEnabled || streamingContextEnabled || activityProgressEnabled || filesEnabled || outputsEnabled || updateNoticeEnabled || subscriptionInspectionEnabled || settingsCardsEnabled || automaticEnrollmentEnabled) ? { capabilities: {
+                    ...((taskRecoveryEnabled || approvalCardsEnabled || delegationProgressEnabled || streamingContextEnabled || activityProgressEnabled || filesEnabled || outputsEnabled || updateNoticeEnabled || subscriptionInspectionEnabled || settingsCardsEnabled || automaticEnrollmentEnabled || message.data.capabilities?.outputAttachmentHintsV1 === true) ? { capabilities: {
                       ...(automaticEnrollmentEnabled ? { automaticFileEnrollmentV1: true } : {}),
                       ...(activityProgressEnabled ? { activityProgress: true } : {}),
                       ...(updateNoticeEnabled ? { updateNotice: true } : {}),
                       ...(subscriptionInspectionEnabled ? { subscriptionInspection: true } : {}),
                       ...(bankedResetReminderEnabled ? { bankedResetReminder: true } : {}),
                       ...(filesEnabled ? { fileTransferV1: true } : {}),
+                      ...(message.data.capabilities?.outputAttachmentHintsV1 === true ? { outputAttachmentHintsV1: true } : {}),
                       ...(outputsEnabled ? { outputFilesV1: true } : {}),
                       ...(taskRecoveryEnabled ? { taskRecovery: true } : {}),
                       ...(approvalCardsEnabled ? { approvalCards: true } : {}),
@@ -1085,6 +1110,11 @@ export class RouterServer {
                   await this.selections.handleMissingThread(responseSession.openId, responseSession.deviceId,
                     responseSession.selectionFence, responseSession.threadId, imageCurrent);
                 }
+              }
+              const hints = this.attachmentHintStatus.has(deviceId!) && parseAttachmentHints(message.attachmentHints);
+              if (hints && responseSession?.deviceId === deviceId && responseThreadId === responseSession.threadId) {
+                await this.admitInlineParent(responseMessageId).catch(() => {});
+                await this.inlineFileCards.hints(deviceId!, { ...hints, messageId: responseMessageId, threadId: responseThreadId }, this.attachmentHintStatus.get(deviceId!)!).catch(() => {});
               }
               if (responseMessageId && responseOpenId) {
                 // Check if this was a streaming message (stream chunks were sent)
@@ -1251,7 +1281,7 @@ export class RouterServer {
         if (heartbeatTimeout) clearTimeout(heartbeatTimeout);
         if (deviceId && this.connectionHub.unregisterConnection(deviceId, ws)) {
           this.fileTransfers.disconnect(deviceId);
-          this.outputTransfers.disconnect(deviceId); this.outputSessions.delete(deviceId);
+          this.outputTransfers.disconnect(deviceId); this.outputSessions.delete(deviceId); this.attachmentHintStatus.delete(deviceId);
           // Clean up any streaming sessions for this device
           this.approvalCards.disconnect(deviceId);
           this.maintenanceCards.disconnect(deviceId);
@@ -2202,6 +2232,21 @@ export class RouterServer {
     if (previous && (previous.deviceId !== deviceId || previous.openId !== openId
       || (previous.threadId && previous.threadId !== threadId))) return false;
 
+    const hints = this.attachmentHintStatus.has(deviceId) && parseAttachmentHints(info.attachmentHints);
+    const identity: InlineIdentity = { messageId, openId, deviceId, threadId, epoch: selectionFence.epoch,
+      ...(hints ? { generation: hints.generation } : {}) };
+    const sourceStatus = this.outputTransfers.identityStatus(identity);
+    const inlineCapable = this.outputSessions.has(deviceId) || this.attachmentHintStatus.has(deviceId);
+    const parentStatus = inlineCapable ? await this.inlineFileCards.identityStatus(identity).catch(() => 'unavailable' as const) : 'unknown';
+    if (!isCurrent() || sourceStatus === 'conflict' || parentStatus === 'conflict') return false;
+    // A known empty initialized ledger can establish a new source. Disabled or
+    // unavailable byte storage is never initialized just to authorize a hint.
+    if (this.outputsAvailable && inlineCapable) await this.outputTransfers.admitSource(identity);
+    // A missing journal cannot prove that an existing source was unpublished.
+    const holdInline = !inlineCapable || parentStatus === 'unavailable'
+      || (sourceStatus === 'match' && parentStatus === 'unknown')
+      || (!this.outputsAvailable && parentStatus !== 'match');
+
     // A failed terminal patch can retry on its own recovery card, but an old
     // finalizing card cannot accept a newly resumed stream.
     const reusable = previous?.feishuMessageId && (!previous.finalizing
@@ -2266,7 +2311,11 @@ export class RouterServer {
       });
       await this.registerCardThread(cardId, { threadId, deviceId, openId, epoch: selectionFence.epoch, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS }, isCurrent);
     }
+    const recoveredStream = this.streamingMessages.get(messageId);
+    if (recoveredStream) recoveredStream.inlineRecoveryHeld = holdInline;
     this.bindImageStream(messageId);
+    await this.admitInlineParent(messageId, true).catch(() => {});
+    if (hints) await this.inlineFileCards.hints(deviceId, { ...hints, messageId, threadId }, this.attachmentHintStatus.get(deviceId)!).catch(() => {});
     if (info.state !== 'running') {
       await this.finalizeStreamingMessage(messageId, info.state === 'completed', undefined, info.error, undefined, info.cwd,
         undefined, parseExecutionMetadata(info.executionMetadata));
@@ -2401,12 +2450,24 @@ export class RouterServer {
   /**
    * Finalize streaming message
    */
+  private async admitInlineParent(messageId: string, replacePending = false): Promise<void> {
+    const stream = this.streamingMessages.get(messageId);
+    if (!stream?.feishuMessageId || !stream.threadId || stream.inlineRecoveryHeld
+      || (!this.outputSessions.has(stream.deviceId) && !this.attachmentHintStatus.has(stream.deviceId))) return;
+    const owner = { messageId, rootId: stream.feishuMessageId, openId: stream.openId,
+      deviceId: stream.deviceId, threadId: stream.threadId,
+      epoch: stream.selectionFence?.epoch ?? this.selections.capture(stream.openId, stream.deviceId).epoch };
+    if (this.outputTransfers.identityStatus(owner) === 'conflict') return;
+    await this.inlineFileCards.admit(owner, replacePending);
+  }
+
   private async registerDeliveredThreadCards(messageId: string, streamData: StreamingMessageState, cardIds: string[]): Promise<void> {
     if (!streamData.threadId || this.streamingMessages.get(messageId) !== streamData) return;
     const fence = streamData.selectionFence;
     if (streamData.currentConnection && !streamData.currentConnection()) return;
     const epoch = fence?.epoch ?? this.selections.capture(streamData.openId, streamData.deviceId).epoch;
     if (!this.selections.isOwnershipCurrent(streamData.openId, streamData.deviceId, epoch)) return;
+    await this.admitInlineParent(messageId).catch(() => {});
     const delivered = cardIds.filter(id => typeof id === 'string' && id.length > 0);
     streamData.deliveredCardIds ??= new Set();
     // Track the whole batch before disk I/O so interruption revokes pending writes too.
@@ -2441,6 +2502,7 @@ export class RouterServer {
       await streamData.updateInFlight;
       if (!await this.canDispatchStreamOutput(messageId, streamData)) return;
 
+      await this.admitInlineParent(messageId).catch(() => {});
       const { feishuMessageId, openId } = streamData;
 
       if (feishuMessageId) {
@@ -2685,6 +2747,7 @@ export class RouterServer {
     this.streamingMessages.clear();
     this.lastStreamUpdateTime.clear();
 
+    await attempt('Error destroying inline file cards', () => this.inlineFileCards.destroy());
     await attempt('Error stopping Feishu long connection', () => this.feishuLongConnHandler.stop());
     await attempt('Error closing WebSocket connections', () => this.connectionHub.closeAllConnections());
     if (this.wss) {
