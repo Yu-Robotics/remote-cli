@@ -59,6 +59,7 @@ interface ActiveTurn {
   sideEffectsStarted: boolean;
   emittedTools: Map<string, { title?: string; description?: string; fallback?: boolean; completed?: boolean }>;
   itemPhases: Map<string, string>;
+  assistantText: Map<string, string>;
   temporaryFiles: string[];
   images: CodexImages;
   timeoutTimer?: ReturnType<typeof setTimeout>;
@@ -318,7 +319,7 @@ export class CodexAppServerExecutor implements IExecutor {
           output: [],
           sideEffectsStarted: false,
           emittedTools: new Map(),
-          itemPhases: new Map(),
+          itemPhases: new Map(), assistantText: new Map(),
           temporaryFiles,
           images: new CodexImages(),
           inactivityTimeoutMs: options.inactivityTimeout,
@@ -404,7 +405,7 @@ export class CodexAppServerExecutor implements IExecutor {
     let resolve!: (result: ExecuteResult) => void;
     const done = new Promise<ExecuteResult>(settle => { resolve = settle; });
     const active: ActiveTurn = { options, resolve, turnId: null, output: [], sideEffectsStarted: false,
-      emittedTools: new Map(), itemPhases: new Map(), temporaryFiles: [], images: new CodexImages(), inactivityTimeoutMs: options.inactivityTimeout };
+      emittedTools: new Map(), itemPhases: new Map(), assistantText: new Map(), temporaryFiles: [], images: new CodexImages(), inactivityTimeoutMs: options.inactivityTimeout };
     const run: GoalRun = { active, done, objective: request.objective, ready: false, inFlight: new Set(), retired: new Set(),
       revision: 0, checking: false, controlling: false, stopping: false };
     // Install ownership before any native loading or mutation can start a turn.
@@ -1454,6 +1455,7 @@ export class CodexAppServerExecutor implements IExecutor {
             }
             goalRun.active.emittedTools.clear();
             goalRun.active.itemPhases.clear();
+            goalRun.active.assistantText.clear();
             goalRun.active.error = undefined;
             goalRun.active.errorCode = undefined;
           }
@@ -1469,6 +1471,8 @@ export class CodexAppServerExecutor implements IExecutor {
       case 'item/agentMessage/delta':
         if (this.activeTurn && typeof params.delta === 'string') {
           this.activeTurn.output.push(params.delta);
+          const itemId = typeof params.itemId === 'string' ? params.itemId : '';
+          this.activeTurn.assistantText.set(itemId, (this.activeTurn.assistantText.get(itemId) ?? '') + params.delta);
           if (goalRun && this.activeTurn.output.reduce((size, part) => size + part.length, 0) > 65_536) {
             this.activeTurn.output = ['[Earlier native goal output omitted from this diagnostic buffer]\n',
               this.activeTurn.output.join('').slice(-65_536)];
@@ -1669,6 +1673,16 @@ export class CodexAppServerExecutor implements IExecutor {
     active.itemPhases.delete(id);
 
     switch (item.type) {
+      case 'agentMessage': {
+        // Completed native assistant items can arrive without any delta events.
+        const displayed = active.assistantText.get(id) ?? active.assistantText.get('') ?? '';
+        if (typeof item.text === 'string' && item.text.startsWith(displayed)) {
+          const suffix = item.text.slice(displayed.length);
+          if (suffix) active.options.onDisplayText?.(suffix);
+          active.assistantText.set(id, item.text);
+        }
+        break;
+      }
       case 'commandExecution':
         this.emitCommandUse(active, item);
         active.options.onToolResult?.({

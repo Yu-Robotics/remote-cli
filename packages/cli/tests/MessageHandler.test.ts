@@ -165,15 +165,15 @@ describe('MessageHandler', () => {
     expect(() => workspaces.sharedSymlinks()).toThrow('invalid managed policy');
   });
 
-  it('discovers a final-only reply without assistant streaming callbacks', async () => {
+  it('never discovers attachment intent in aggregate backend diagnostics', async () => {
     ctx.mockThreadManager.getDefaultThread().delegation = false;
     const capture = vi.fn(async (links, context, final) => {
-      expect(links.finish(final).paths).toEqual(['report.csv']);
+      expect(links.finish(final, 'attachments').paths).toEqual([]);
       expect(context.cwd).toBe(ctx.mockThreadManager.getDefaultThread().workingDirectory);
       return { unavailable: 0, omitted: false };
     });
-    (ctx.handler as any).outputFiles = { capture, destroy: vi.fn(), disconnect: vi.fn() };
-    ctx.mockExecutor.execute.mockResolvedValue({ success: true, output: '[report](report.csv)' });
+    (ctx.handler as any).outputFiles = { capture, isEnabled: () => true, destroy: vi.fn(), disconnect: vi.fn(), disable: vi.fn() };
+    ctx.mockExecutor.execute.mockResolvedValue({ success: true, output: '[report](report.csv "attachment")' });
     await ctx.handler.handleMessage({ type: 'command', messageId: 'final-file-reply', content: 'Produce report' });
     expect(capture).toHaveBeenCalledOnce();
   });
@@ -181,19 +181,56 @@ describe('MessageHandler', () => {
   it('captures direct file links against the producing cwd without modifying assistant output', async () => {
     ctx.mockThreadManager.getDefaultThread().delegation = false;
     const capture = vi.fn(async (links, context, final) => {
-      expect(links.finish(final).paths).toEqual(['report.csv']);
+      expect(links.finish(final, 'attachments').paths).toEqual(['report.csv']);
       expect(context.cwd).toBe(ctx.mockThreadManager.getDefaultThread().workingDirectory);
       return { unavailable: 0, omitted: false };
     });
-    (ctx.handler as any).outputFiles = { capture, destroy: vi.fn(), disconnect: vi.fn() };
+    (ctx.handler as any).outputFiles = { capture, isEnabled: () => true, destroy: vi.fn(), disconnect: vi.fn(), disable: vi.fn() };
     ctx.mockExecutor.execute.mockImplementation(async (_prompt: string, options: any) => {
-      options.onStream('[private stream](credentials.json)');
-      options.onDisplayText('[report]('); options.onDisplayText('report.csv)');
+      options.onStream('[private stream](credentials.json "attachment")');
+      options.onToolResult?.({ tool_use_id: 'synthetic-tool', content: '[tool](secret.txt "attachment")' });
+      options.onDisplayText('[report]('); options.onDisplayText('report.csv "attachment")');
       return { success: true, output: '[report](report.csv)' };
     });
     await ctx.handler.handleMessage({ type: 'command', messageId: 'file-reply', content: 'Produce report' });
     expect(capture).toHaveBeenCalledOnce();
     expect(ctx.mockExecutor.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([false, true])('gates per-request attachment guidance on negotiated capability: %s', async enabled => {
+    ctx.mockThreadManager.getDefaultThread().delegation = false;
+    const capture = vi.fn(async () => ({ unavailable: 0, omitted: false }));
+    (ctx.handler as any).outputFiles = { capture, isEnabled: () => enabled, destroy: vi.fn(), disconnect: vi.fn(), disable: vi.fn() };
+    ctx.mockExecutor.execute.mockImplementation(async (prompt: string, options: any) => {
+      expect(prompt.includes('[Report](./report.md "attachment")')).toBe(enabled);
+      options.onDisplayText('[report](report.csv "attachment")');
+      return { success: true, output: 'Report complete' };
+    });
+    for (const messageId of ['first-request', 'continued-request']) {
+      await ctx.handler.handleMessage({ type: 'command', messageId, content: 'Produce report' });
+    }
+    expect(capture).toHaveBeenCalledTimes(enabled ? 2 : 0);
+  });
+
+  it('teaches attachment selection on delegated coordinator continuations as well as the first native request', async () => {
+    ctx.mockThreadManager.getDefaultThread().delegation = true;
+    const scope = {
+      isClosed: () => false, hasPendingResults: () => false, getLaunchRevision: () => 0,
+      beginExecution: vi.fn(), finishExecution: vi.fn(), getRetainedResults: () => [],
+      close: vi.fn(async () => undefined), checkArtifactCloseout: async () => [], invoke: vi.fn(),
+      collectPendingResults: vi.fn().mockResolvedValueOnce([{ taskId: 'synthetic-worker', status: 'completed', output: 'Worker result' }]).mockResolvedValue([]),
+    };
+    vi.spyOn((ctx.handler as any).delegation, 'begin').mockReturnValue(scope);
+    ctx.mockExecutor.configureDelegation = vi.fn();
+    (ctx.handler as any).outputFiles = { capture: vi.fn(), isEnabled: () => true, destroy: vi.fn(), disconnect: vi.fn(), disable: vi.fn() };
+    ctx.mockExecutor.execute.mockImplementation(async (prompt: string) => {
+      expect(prompt.match(/Output attachments: only/g)).toHaveLength(1);
+      expect(prompt).toContain('[Report](./report.md "attachment")');
+      return { success: true, output: 'Result' };
+    });
+    await ctx.handler.handleMessage({ type: 'command', messageId: 'guided-delegation', content: 'Produce report' });
+    expect(ctx.mockExecutor.execute).toHaveBeenCalledTimes(2);
+    expect(ctx.mockExecutor.execute.mock.calls[1][0]).toContain('Continue the original request');
   });
 
   it('keeps ordinary execution independent of delegation storage when delegation is disabled', async () => {
@@ -220,7 +257,7 @@ describe('MessageHandler', () => {
     const begin = vi.spyOn((ctx.handler as any).delegation, 'begin').mockReturnValue(scope);
     ctx.mockExecutor.configureDelegation = vi.fn();
     const capture = vi.fn(async () => ({ unavailable: 0, omitted: false }));
-    (ctx.handler as any).outputFiles = { capture, destroy: vi.fn(), disconnect: vi.fn() };
+    (ctx.handler as any).outputFiles = { capture, isEnabled: () => true, destroy: vi.fn(), disconnect: vi.fn(), disable: vi.fn() };
     ctx.mockExecutor.execute.mockResolvedValue({ success: true, output: 'Coordinator result' });
     await ctx.handler.handleMessage({ type: 'command', messageId: 'private-worker-parent', openId: 'synthetic-owner', content: 'Produce report' } as any);
     thread.delegationWorkspaceGeneration = 3;

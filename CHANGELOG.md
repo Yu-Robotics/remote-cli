@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.226] - 2026-11-07
+
+### Changed
+- Require the exact Markdown link title `attachment` for newly selected output files. Ordinary source citations no longer produce Get file cards or unavailable notices, while deliberate source-file attachments remain supported.
+- Discover public attachment intent only from trusted assistant text, including native final-only replies, rather than aggregate backend diagnostics. Teach the selection syntax on each capability-enabled coordinator request without changing saved configuration.
+- Keep ordinary worker links as private snapshots for explicit coordinator selection after workspace reclamation. Existing published receipts, transfer permissions, quotas, and expiry remain compatible.
+
 ## [1.6.225] - 2026-11-07
 
 ### Fixed

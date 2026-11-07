@@ -390,6 +390,34 @@ describe('ClaudePersistentExecutor', () => {
       expect(completed).toHaveBeenCalledWith(expect.objectContaining({ success: true, output: 'Hello world' }));
     });
 
+    it('forwards only a native successful final-only response, never diagnostic buffer text', async () => {
+      const onDisplayText = vi.fn();
+      const pending = executor.execute('Produce a deliverable', { onDisplayText });
+      await vi.advanceTimersByTimeAsync(1000);
+      emit({ type: 'thinking', content: '[private](secret.txt "attachment")' });
+      const response = '[Report](./report.md "attachment")';
+      emit({ type: 'result', subtype: 'success', result: response });
+      const result = await pending;
+      expect(result.output).toContain('[private]');
+      expect(onDisplayText.mock.calls.map(([text]) => text)).toEqual([response]);
+    });
+
+    it('preserves native subagent presentation without treating it as coordinator attachment intent', async () => {
+      const onDisplayText = vi.fn(), onStream = vi.fn();
+      const pending = executor.execute('Review', { onDisplayText, onStream });
+      await vi.advanceTimersByTimeAsync(1000);
+      const child = '[child](./child.go "attachment")';
+      beginText('child-message', 0, 'task-tool', child.slice(0, 8));
+      delta(child.slice(8), 0, 'task-tool');
+      assistant('child-message', [{ type: 'text', text: child }], 'task-tool');
+      emit({ type: 'assistant', parent_tool_use_id: 'task-tool', content: '[child](./other.go "attachment")' });
+      assistant('main-message', [{ type: 'text', text: '[Report](./report.md "attachment")' }]);
+      emit({ type: 'result', subtype: 'success', result: 'Repeated final report' });
+      await pending;
+      expect(onStream.mock.calls.map(([text]) => text).join('')).toContain(child);
+      expect(onDisplayText.mock.calls.map(([text]) => text)).toEqual(['[Report](./report.md "attachment")']);
+    });
+
     it('sends only assistant response text to the display-only callback', async () => {
       const onStream = vi.fn();
       const onDisplayText = vi.fn();

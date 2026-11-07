@@ -383,6 +383,18 @@ describe('AgyExecutor', () => {
 
   // ── Streaming and completion ──────────────────────────────────────────────
 
+  it('forwards a native final-only assistant response without forwarding stderr or tools', async () => {
+    const onDisplayText = vi.fn();
+    const pending = executor.execute('Produce a deliverable', { onDisplayText });
+    await waitForSpawn(); emitInit();
+    proc.stderr.emit('data', Buffer.from('[diagnostic](secret.txt "attachment")'));
+    emitJson({ event: 'step_update', step_update: { step_type: 'tool', state: 'DONE', text_delta: '[tool](secret.txt "attachment")' } });
+    const response = '[Report](./report.md "attachment")';
+    emitResult({ response });
+    await expect(pending).resolves.toMatchObject({ success: true, output: response });
+    expect(onDisplayText.mock.calls.map(([text]) => text)).toEqual([response]);
+  });
+
   it('streams agent_response text_delta chunks and resolves accumulated output on result SUCCESS', async () => {
     const chunks: string[] = [];
     const visible: string[] = [];

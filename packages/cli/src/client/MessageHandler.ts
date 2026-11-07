@@ -1,6 +1,6 @@
 import { OutputFiles } from '../output/OutputFiles';
 import { OutputSnapshots, type VerifiedOutputExport } from '../output/OutputSnapshots';
-import { OutputLinks } from '../output/OutputLinks';
+import { ATTACHMENT_GUIDANCE, OutputLinks } from '../output/OutputLinks';
 import { DelegatedWorkspaceManager } from '../delegation/DelegatedWorkspaceManager';
 import type { ApprovalRequestInfo, ApprovalRequestMessage, ApprovalResponseMessage, ApprovalResolvedMessage, ApprovalStatus } from '../types';
 import { WebSocketClient } from './WebSocketClient';
@@ -415,7 +415,7 @@ export class MessageHandler {
             await this.outputFiles?.destroy(); this.outputFiles = undefined;
             console.error('[OutputFiles] Snapshot storage is unavailable.');
           }
-        } else this.outputFiles?.disconnect();
+        } else this.outputFiles?.disable();
 
         if (data.capabilities?.fileTransferV1 === true && !this.fileInbox) {
           try {
@@ -2757,9 +2757,14 @@ You can also use natural language commands to control Claude Code CLI.`,
           if (goalActivation && this.pendingGoalActivations.get(threadId) === goalActivation) {
             this.pendingGoalActivations.delete(threadId);
           }
-          const result = goalRequest
-            ? await executor.executeGoal!(goalRequest, guardedOptions)
-            : await executor.execute(prompt, guardedOptions);
+          // Reapply guidance to every request, including native continuations. Never persist it in user config.
+          const attachments = this.outputFiles?.isEnabled();
+          const guidedPrompt = attachments ? `${prompt}\n\n${ATTACHMENT_GUIDANCE}` : prompt;
+          const guidedGoal = goalRequest && attachments && goalRequest.objective
+            ? { ...goalRequest, objective: `${goalRequest.objective}\n\n${ATTACHMENT_GUIDANCE}` } : goalRequest;
+          const result = guidedGoal
+            ? await executor.executeGoal!(guidedGoal, guardedOptions)
+            : await executor.execute(guidedPrompt, guardedOptions);
           if (goalRequest && !streamedAny && result.output) guardedOptions.onStream?.(result.output);
           executionMetadata = mergeReportedExecutionMetadata(launchMetadata, captureExecutionMetadata(executor, backend));
           capturedMetadata = true;
@@ -2775,9 +2780,9 @@ You can also use natural language commands to control Claude Code CLI.`,
             const visibleResult = imageTextDropped || this.imageConnectionEpoch !== imageEpoch
               || (scope && (suppressed || scope.hasPendingResults())) ? '' : result.output ?? '';
             queueLocalImages(visibleResult);
-            if (this.outputFiles) {
+            if (this.outputFiles?.isEnabled()) {
               await this.outputFiles.capture(outputLinks, { messageId, threadId, taskId: messageId, owner: openId,
-                generation: outputGeneration, cwd: imageCwd, source: 'workspace', exports: [...outputExports.values()] }, visibleResult);
+                generation: outputGeneration, cwd: imageCwd, source: 'workspace', exports: [...outputExports.values()] });
             }
 
             await imageDelivery?.drain();

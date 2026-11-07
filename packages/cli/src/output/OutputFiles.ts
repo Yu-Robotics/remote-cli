@@ -11,6 +11,7 @@ import { OPAQUE_ID, OUTPUT_LIMITS } from './Protocol';
 export class OutputFiles {
   private origin: string;
   private connected = false;
+  private enabled = false;
   private acknowledged = new Set<string>();
   private active = new Map<string, AbortController>();
   private tasks = new Set<Promise<void>>();
@@ -20,13 +21,15 @@ export class OutputFiles {
   }
   async initialize(): Promise<void> { await this.snapshots.initialize(); }
   connect(): void {
-    this.connected = true; this.acknowledged.clear(); this.advertise();
+    this.enabled = true; this.connected = true; this.acknowledged.clear(); this.advertise();
     clearInterval(this.timer); this.timer = setInterval(() => this.advertise(), 15_000); this.timer.unref();
   }
   disconnect(): void {
     this.connected = false; clearInterval(this.timer);
     for (const controller of this.active.values()) controller.abort();
   }
+  disable(): void { this.enabled = false; this.disconnect(); }
+  isEnabled(): boolean { return this.enabled; }
   private advertise(): void {
     if (!this.connected) return;
     const references = this.snapshots.references();
@@ -37,7 +40,9 @@ export class OutputFiles {
     }
   }
   async capture(links: OutputLinks, context: SnapshotContext, final?: string): Promise<{ unavailable: number; omitted: boolean }> {
-    const parsed = links.finish(final); let unavailable = 0;
+    // Aggregate backend results are diagnostics, not public delivery intent.
+    const parsed = links.finish(context.source === 'worker' ? final : undefined,
+      context.source === 'worker' ? 'all' : 'attachments'); let unavailable = 0;
     for (const candidate of parsed.paths) {
       try { await this.snapshots.snapshot(candidate, { ...context, omitted: parsed.omitted }); } catch { unavailable++; }
     }
@@ -84,5 +89,5 @@ export class OutputFiles {
       });
     } finally { clearTimeout(timer); }
   }
-  async destroy(): Promise<void> { this.disconnect(); await Promise.allSettled([...this.tasks]); await this.snapshots.destroy(); }
+  async destroy(): Promise<void> { this.disable(); await Promise.allSettled([...this.tasks]); await this.snapshots.destroy(); }
 }

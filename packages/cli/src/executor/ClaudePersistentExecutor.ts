@@ -261,6 +261,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
   // Main-agent and subagent streams have independent message IDs and block indices.
   private textStreams = new Map<string, { messageId: string; blocks: Map<number, string> }>();
   private currentStreamCallback?: (chunk: string) => void;
+  private currentAssistantTextSeen = false;
   private currentDisplayTextCallback?: (chunk: string) => void;
   private currentToolUseCallback?: (toolUse: ToolUseInfo) => void;
   private currentToolResultCallback?: (toolResult: ToolResultInfo) => void;
@@ -1192,12 +1193,12 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     }, this.defaultTimeout);
   }
 
-  private emitText(text: string): void {
+  private emitText(text: string, mainAssistant = true): void {
     if (!text) return;
     this.currentOutputBuffer.push(text);
     if (this.isInPlanMode) this.planModeBuffer.push(text);
     this.currentStreamCallback?.(text);
-    this.currentDisplayTextCallback?.(text);
+    if (mainAssistant) this.currentDisplayTextCallback?.(text);
     this.activityTracker.emitPublicText(text);
   }
 
@@ -1218,12 +1219,12 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     if (event.type === 'content_block_start' && event.content_block?.type === 'text') {
       const text = event.content_block.text ?? '';
       stream.blocks.set(event.index, text);
-      this.emitText(text);
+      this.emitText(text, !source);
     } else if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta'
       && stream.blocks.has(event.index)) {
       const text = event.delta.text ?? '';
       stream.blocks.set(event.index, stream.blocks.get(event.index)! + text);
-      this.emitText(text);
+      this.emitText(text, !source);
     }
   }
 
@@ -1437,6 +1438,9 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
                 this.completeCurrentCommand(false, message.result || 'Command failed');
               }
             } else {
+              if (!message.parent_tool_use_id && !this.currentAssistantTextSeen && typeof message.result === 'string') {
+                this.currentDisplayTextCallback?.(message.result);
+              }
               this.completeCurrentCommand(true);
             }
           } else {
@@ -1501,7 +1505,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
                 // The tool will be executed by Claude CLI, and we'll receive the result in a 'user' message
                 // with tool_result content. We should emit the hook when we receive tool_result.
               } else if (block.type === 'text' && block.text) {
-                this.emitText(this.unstreamedText(message, block.text));
+                this.emitText(this.unstreamedText(message, block.text), !message.parent_tool_use_id);
               } else if (block.type === 'redacted_thinking') {
                 // Handle redacted thinking blocks (Claude 3.7 Sonnet, Gemini models)
                 console.log('[ClaudePersistent] Redacted thinking block detected in assistant message');
@@ -1529,7 +1533,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
             if (this.currentStreamCallback) {
               this.currentStreamCallback(message.content);
             }
-            this.currentDisplayTextCallback?.(message.content);
+            if (!message.parent_tool_use_id) this.currentDisplayTextCallback?.(message.content);
             this.startInputDetectionTimer(message.content);
           }
 
@@ -1910,7 +1914,11 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
 
     this.isProcessing = true;
     this.currentStreamCallback = command.options.onStream;
-    this.currentDisplayTextCallback = command.options.onDisplayText;
+    this.currentAssistantTextSeen = false;
+    this.currentDisplayTextCallback = text => {
+      this.currentAssistantTextSeen ||= !!text;
+      command.options.onDisplayText?.(text);
+    };
     this.currentStructuredCallback = command.options.onStructuredContent;
     this.currentToolUseCallback = command.options.onToolUse;
     this.currentToolResultCallback = command.options.onToolResult;

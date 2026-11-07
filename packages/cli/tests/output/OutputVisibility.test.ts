@@ -16,7 +16,7 @@ const owner = 'synthetic-owner';
 const workerContext = (): SnapshotContext => ({ owner, cwd: worker, messageId: 'parent-command', threadId: 'thread',
   taskId: 'worker-task', generation: 2, source: 'worker' });
 const parentContext = (): SnapshotContext => ({ ...workerContext(), cwd: parent, taskId: 'parent-command', source: 'workspace' });
-const links = (filename: string) => { const value = new OutputLinks(); value.append(`[report](<${filename}>)`); return value; };
+const links = (filename: string) => { const value = new OutputLinks(); value.append(`[report](<${filename}> "attachment")`); return value; };
 const filename = () => path.join(worker, 'report.txt');
 const read = async (id: string) => {
   const parts: Buffer[] = [];
@@ -40,8 +40,88 @@ afterEach(async () => {
 });
 
 describe('private worker capture and explicit publication', () => {
+  it.each(['source.go', 'source.ts', 'report.md', 'missing.go', '.secret'])('ignores ordinary %s citations without offers or unavailable notices', async name => {
+    if (name !== 'missing.go') await fs.writeFile(path.join(parent, name), 'ordinary source');
+    const input = new OutputLinks();
+    input.append(`[review](./${name}) [line](./${name}#L12) [position](./${name}:12:2)`);
+    input.append(' '.repeat(OUTPUT_LIMITS.text));
+    expect(await client.capture(input, parentContext())).toEqual({ unavailable: 0, omitted: false });
+    expect(store.references()).toEqual([]); expect(frames).toEqual([]);
+  });
+
+  it('does not accept aggregate backend diagnostics as public attachment intent', async () => {
+    await fs.writeFile(path.join(parent, 'report.go'), 'diagnostic marker target');
+    await client.capture(new OutputLinks(), parentContext(), '[diagnostic](report.go "attachment")');
+    expect(frames).toEqual([]); expect(store.references()).toEqual([]);
+  });
+
+  it.each(['report#draft.md', 'source.go#L12'])('delivers the literal encoded filename %s without treating it as a fragment', async name => {
+    await fs.writeFile(path.join(parent, name), 'literal filename attachment');
+    const input = new OutputLinks();
+    input.append(`[Report](./${encodeURIComponent(name)} "attachment")`);
+    input.append(' [Citation](source.go#L12 "attachment")');
+    expect(await client.capture(input, parentContext())).toEqual({ unavailable: 0, omitted: false });
+    expect(frames.map(frame => frame.type)).toEqual(['output_offer']);
+    expect(await read(store.references()[0].id)).toBe('literal filename attachment');
+  });
+
+  it('counts only attachment selections against the public candidate budget', async () => {
+    await fs.writeFile(path.join(parent, 'report.go'), 'explicit bytes');
+    const input = new OutputLinks();
+    input.append(Array.from({ length: 30 }, (_, i) => `[citation](missing-${i}.go)`).join(' '));
+    input.append(' [Report](report.go "attachment")');
+    expect(await client.capture(input, parentContext())).toEqual({ unavailable: 0, omitted: false });
+    expect(frames.map(frame => frame.type)).toEqual(['output_offer']);
+    expect(await read(store.references()[0].id)).toBe('explicit bytes');
+  });
+
+  it('retains negotiated selection across a temporary disconnect without publishing until reconnect', async () => {
+    client.disconnect(); expect(client.isEnabled()).toBe(true);
+    const source = path.join(parent, 'report.md'); await fs.writeFile(source, 'offline captured bytes');
+    await client.capture(links(source), parentContext());
+    await fs.unlink(source); expect(frames).toEqual([]);
+    client.connect(); expect(frames.map(frame => frame.type)).toEqual(['output_offer']);
+    expect(await read(store.references()[0].id)).toBe('offline captured bytes');
+    client.disable(); expect(client.isEnabled()).toBe(false);
+    expect(await read(store.references()[0].id)).toBe('offline captured bytes');
+    client.connect(); expect(client.isEnabled()).toBe(true);
+  });
+
+  it('requires deliberate selection even for captured worker citations after reclamation', async () => {
+    const input = new OutputLinks(); input.append(`[source](<${filename()}>)`);
+    await client.capture(input, workerContext());
+    await fs.rm(worker, { recursive: true });
+    const citation = new OutputLinks(); citation.append(`[review](<${filename()}>)`);
+    await client.capture(citation, parentContext());
+    expect(frames).toEqual([]); expect(store.references()).toEqual([]);
+    await client.capture(links(filename()), parentContext());
+    expect(await read(store.references()[0].id)).toBe('original worker bytes');
+    expect(frames.map(frame => frame.type)).toEqual(['output_offer']);
+  });
+
+  it('delivers explicitly selected source code with exact bytes while marked worker output stays private', async () => {
+    const source = path.join(parent, 'deliverable.go');
+    await fs.writeFile(source, 'package deliverable\n');
+    await client.capture(links(filename()), workerContext());
+    expect(frames).toEqual([]);
+    await client.capture(links(source), parentContext());
+    expect(frames.map(frame => frame.type)).toEqual(['output_offer']);
+    expect(await read(store.references()[0].id)).toBe('package deliverable\n');
+  });
+
+  it('ignores remote, unsafe, malformed, example and source-position markers', async () => {
+    const input = new OutputLinks();
+    input.append('[web](https://example.com/report "attachment") [unsafe](javascript:alert "attachment") '
+      + '[line](report.txt#L12 "attachment") [position](report.go:12 "attachment") '
+      + '[fragment](report.go#summary "attachment") [encoded position](report.go%3A12 "attachment") '
+      + '[malformed](report.txt "attachment) ` [sample](report.txt "attachment") `\n'
+      + '```md\n[example](report.txt "attachment")\n```');
+    expect(await client.capture(input, parentContext())).toEqual({ unavailable: 0, omitted: false });
+    expect(frames).toEqual([]);
+  });
+
   it('keeps eligible, missing, denied and capped worker discoveries off the wire', async () => {
-    const input = links(filename()); input.append(' [missing](missing.txt) [denied](.secret)');
+    const input = new OutputLinks(); input.append(`[report](<${filename()}>)`); input.append(' [missing](missing.txt) [denied](.secret)');
     input.append(Array.from({ length: 20 }, (_, i) => ` [extra](${i}.txt)`).join(' '));
     expect(await client.capture(input, workerContext())).toMatchObject({ unavailable: 15, omitted: true });
     expect(store.references()).toEqual([]); expect(frames).toEqual([]);

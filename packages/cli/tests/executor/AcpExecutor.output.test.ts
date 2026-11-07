@@ -93,11 +93,11 @@ describe.each([
 
   it('excludes interleaved thoughts without filtering ordinary response wording', async () => {
     transport.prompt.mockImplementationOnce(async () => {
-      callbacks.onThoughtChunk?.({ type: 'text', text: 'PRIVATE_BEFORE' });
+      callbacks.onThoughtChunk?.({ type: 'text', text: '[private](secret.txt "attachment")' });
       callbacks.onTextChunk?.({ type: 'text', text: 'Thinking about ' });
-      callbacks.onThoughtChunk?.({ type: 'text', text: 'PRIVATE_BETWEEN' });
+      callbacks.onThoughtChunk?.({ type: 'text', text: '[private](secret.txt "attachment")' });
       callbacks.onTextChunk?.({ type: 'text', text: '**documentation**.' });
-      callbacks.onThoughtChunk?.({ type: 'text', text: 'PRIVATE_AFTER' });
+      callbacks.onThoughtChunk?.({ type: 'text', text: '[private](secret.txt "attachment")' });
       return { stopReason: 'end_turn' };
     });
     const stream = vi.fn(), display = vi.fn();

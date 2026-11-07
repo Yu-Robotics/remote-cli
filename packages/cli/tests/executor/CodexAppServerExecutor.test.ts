@@ -8,6 +8,9 @@ import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 import { ThreadManager } from '../../src/thread/ThreadManager';
 import { ThreadExecutorPool } from '../../src/thread/ThreadExecutorPool';
 import { MessageHandler } from '../../src/client/MessageHandler';
+import { OutputFiles } from '../../src/output/OutputFiles';
+import { OutputSnapshots } from '../../src/output/OutputSnapshots';
+import { OutputLinks } from '../../src/output/OutputLinks';
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -100,6 +103,37 @@ describe('CodexAppServerExecutor', () => {
       vi.restoreAllMocks();
       vi.unstubAllEnvs();
     }
+  });
+
+  it.each(['final only', 'streamed prefix', 'fully streamed'])('forwards trusted completed assistant text once: %s', async mode => {
+    const links = new OutputLinks();
+    const onDisplayText = vi.fn((text: string) => links.append(text));
+    const frames: any[] = [];
+    const snapshots = new OutputSnapshots(path.join(tempHome, 'output-snapshots'));
+    const files = new OutputFiles(snapshots, 'http://127.0.0.1:3000', frame => frames.push(frame));
+    await files.initialize(); files.connect();
+    await fs.writeFile(path.join(projectDir, 'deliverable.go'), 'package deliverable\n');
+    try {
+      const text = '[Source deliverable](./deliverable.go "attachment")';
+      const pending = executor.execute('Produce a deliverable', { onDisplayText });
+      await vi.waitFor(() => expect(transport.requests.some(request => request.method === 'turn/start')).toBe(true));
+      const params = { threadId: 'codex-thread-1', turnId: 'turn-1' };
+      transport.emit({ method: 'item/reasoning/summaryTextDelta', params: { ...params, delta: '[private](secret.txt "attachment")' } });
+      transport.emit({ method: 'item/completed', params: { ...params, item: { id: 'tool', type: 'commandExecution', aggregatedOutput: '[tool](secret.txt "attachment")' } } });
+      if (mode !== 'final only') transport.emit({ method: 'item/agentMessage/delta', params: {
+        ...params, itemId: 'answer', delta: mode === 'fully streamed' ? text : text.slice(0, 12),
+      } });
+      transport.emit({ method: 'item/completed', params: { ...params, item: { id: 'answer', type: 'agentMessage', text } } });
+      transport.emit({ method: 'item/completed', params: { ...params, item: { id: 'answer', type: 'agentMessage', text } } });
+      transport.emit({ method: 'turn/completed', params: { ...params, turn: { id: 'turn-1', status: 'completed' } } });
+      await expect(pending).resolves.toMatchObject({ success: true });
+      expect(onDisplayText.mock.calls.map(([chunk]) => chunk).join('')).toBe(text);
+      await files.capture(links, { messageId: 'parent', taskId: 'parent', threadId: 'thread', generation: 0, cwd: projectDir, source: 'workspace' });
+      expect(frames.map(frame => frame.type)).toEqual(['output_offer']);
+      const bytes: Buffer[] = [];
+      await snapshots.read(snapshots.references()[0].id, async stream => { for await (const chunk of stream) bytes.push(chunk); });
+      expect(Buffer.concat(bytes).toString()).toBe('package deliverable\n');
+    } finally { await files.destroy(); }
   });
 
   it('persists a managed creation receipt before its first turn and never observes a foreground session', async () => {
