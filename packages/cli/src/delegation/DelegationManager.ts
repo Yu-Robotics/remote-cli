@@ -263,6 +263,7 @@ export class DelegationManager {
   private reportedUnavailableWriterEvidence = false;
   private readonly publicOperations = new Set<Promise<unknown>>();
   private maintenance?: Promise<unknown>;
+  private readonly recentUnavailableArtifactRetries = new Set<string>();
   readonly nativeSessionDeletions: NativeSessionDeletionQueue;
   private nativeMaintenance?: Promise<void>;
   private readonly nativeResetFences = new Map<string, number>();
@@ -1696,9 +1697,36 @@ ${prompt}`));
   }
 
   private async discardUnavailableArtifacts(items: WorkspaceArtifactSummary[]): Promise<boolean> {
+    const candidates = new Map(items.filter(value => !value.discarded && !value.recovery && (value.disposition === undefined
+      && value.cleanup?.reason === 'capture-failed' || value.failedCollection && !value.recoverable))
+      .map(item => [item.taskId, item]));
+    const limit = Math.min(25, candidates.size);
+    if (!limit) return false;
+    const selected: WorkspaceArtifactSummary[] = [];
+    for (const item of candidates.values()) {
+      if (!this.recentUnavailableArtifactRetries.has(item.taskId)) selected.push(item);
+      if (selected.length === limit) break;
+    }
+    if (selected.length < limit) {
+      for (const taskId of this.recentUnavailableArtifactRetries) {
+        const item = candidates.get(taskId);
+        if (item) selected.push(item);
+        if (selected.length === limit) break;
+      }
+    }
+    // Share oldest-first retry order across global and scoped scans, without
+    // accumulating per-scope cursors. Reserve the batch before awaiting disposal
+    // so overlapping scans also advance; holds consume their attempt as before.
+    for (const item of selected) {
+      this.recentUnavailableArtifactRetries.delete(item.taskId);
+      this.recentUnavailableArtifactRetries.add(item.taskId);
+    }
+    // Retain at most one bounded inventory of task IDs, including removed tasks.
+    while (this.recentUnavailableArtifactRetries.size > WORKSPACE_INVENTORY_PAGE_LIMIT) {
+      this.recentUnavailableArtifactRetries.delete(this.recentUnavailableArtifactRetries.values().next().value!);
+    }
     let changed = false;
-    for (const item of items.filter(value => !value.discarded && !value.recovery && (value.disposition === undefined
-      && value.cleanup?.reason === 'capture-failed' || value.failedCollection && !value.recoverable)).slice(0, 25)) {
+    for (const item of selected) {
       try { await this.workspaceManager.discardFailedWorker(item.laneId, item.taskId); changed = true; }
       catch { /* Live, unknown, rebound and recovery-bearing targets remain explicit obligations. */ }
     }

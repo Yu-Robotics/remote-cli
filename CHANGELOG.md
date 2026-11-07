@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.229] - 2026-11-07
+
+### Changed
+- Open inline Files panels expanded by default, with a clear heading and total attachment count above completion details and thread controls. Preserve ordering through continuation cards, streaming and selection refreshes, pagination, late offers, and saved-body recovery without changing retrieval authorization or expiry.
+
+### Fixed
+- Serialize automatic file approval, manual key enrollment, and unbinding across binding managers sharing one store, preventing stale approvals from restoring revoked access or overwriting a newer manually approved key.
+- Rotate bounded failed-worker cleanup retries across candidates so persistent safety holds do not indefinitely block later eligible checkouts, while retaining all existing disposal guards.
+
 ## [1.6.228] - 2026-11-07
 
 ### Changed

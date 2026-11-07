@@ -22,6 +22,35 @@ interface Dependencies {
   patch(cardId: string, content: string): Promise<void>;
 }
 const TTL = 86_400_000, MAX_BYTES = 8 * 1024 * 1024, PANEL = 'output_files_inline';
+export const ASSISTANT_FOOTER_ID = 'assistant_footer';
+export const THREAD_CONTROLS_ID = 'assistant_threads';
+
+/** Locate presentation boundaries only; ownership always comes from the parent journal. */
+function footerIndex(elements: any[]): number {
+  const marked = elements.findIndex(e => e.element_id === ASSISTANT_FOOTER_ID || e.element_id === THREAD_CONTROLS_ID);
+  if (marked >= 0) return marked;
+  // Journals written before the anchors existed retain the complete old card.
+  // Recognize only its trailing generated control rows and completion block.
+  let index = elements.length;
+  const threadRow = (e: any) => e?.tag === 'column_set' && Array.isArray(e.columns) && e.columns.length > 0
+    && e.columns.every((c: any) => c.tag === 'column' && Array.isArray(c.elements) && c.elements.length === 1
+      && c.elements[0].tag === 'button' && c.elements[0].behaviors?.length === 1
+      && c.elements[0].behaviors[0].type === 'callback'
+      && ['switch_thread', 'new_thread'].includes(c.elements[0].behaviors[0].value?.action));
+  while (index > 0 && threadRow(elements[index - 1])) index--;
+  if (index < elements.length) {
+    if (elements[index - 1]?.tag === 'markdown' && elements[index - 1].content?.startsWith('📍 **Reply from:** ')) index--;
+    if (elements[index - 1]?.tag === 'hr') index--;
+  }
+  const completion = (e: any) => e?.tag === 'markdown' && typeof e.content === 'string'
+    && /^(?:✅ Completed|❌ Failed|⏳ Awaiting queue confirmation)(?: · Session: [^\r\n]+)?$/.test(e.content);
+  const metadata = elements[index - 1];
+  if (metadata?.tag === 'markdown' && metadata.text_size === 'notation'
+    && typeof metadata.content === 'string' && metadata.content.startsWith("<font color='grey'>Model: ")
+    && metadata.content.endsWith('</font>') && completion(elements[index - 2])) index--;
+  if (completion(elements[index - 1])) index--;
+  return index;
+}
 const label = (v: unknown, max = 200): v is string => typeof v === 'string' && !!v && v.length <= max;
 const clean = (v: string) => v.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, '').slice(0, 120);
 export const sameInlineIdentity = (a: InlineIdentity, b: InlineIdentity): boolean =>
@@ -244,7 +273,7 @@ export class InlineFileCards {
       elements.push({ tag: 'button', type: 'default', text: { tag: 'plain_text', content: name },
         behaviors: [{ type: 'callback', value: { action: 'output_page', id: p.token, page } }] });
     }
-    card.body.elements.push({ tag: 'collapsible_panel', element_id: PANEL, expanded: false,
+    card.body.elements.splice(footerIndex(card.body.elements), 0, { tag: 'collapsible_panel', element_id: PANEL, expanded: true,
       header: { title: { tag: 'plain_text', content: `Files (${rows.length})` } }, elements });
     const result = JSON.stringify(card);
     if (nodes(card) > 180 || Buffer.byteLength(result) > 2_900_000) throw new Error('Inline file panel exceeds card capacity.');

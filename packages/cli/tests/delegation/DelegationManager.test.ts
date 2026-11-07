@@ -6,6 +6,7 @@ import { DELEGATION_LIMITS, DELEGATION_TEXT_PROGRESS, DelegationManager, type De
 import { BackendRegistry, type BackendAvailability } from '../../src/delegation/BackendRegistry';
 import { DelegationStore } from '../../src/delegation/DelegationStore';
 import { DelegatedWorkerSessionStore } from '../../src/delegation/DelegatedWorkerSessionStore';
+import type { WorkspaceArtifactSummary } from '../../src/delegation/DelegatedWorkspaceManager';
 import { DELEGATION_BACKENDS } from '../../src/delegation/contract';
 import { workerConfiguration } from '../../src/delegation/WorkerPolicy';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
@@ -1717,6 +1718,155 @@ describe('managed agent delegation', () => {
     await expect(manager.laneStore.cleanupCandidates()).resolves.toEqual([
       expect.objectContaining({ id: acquired.lane.id, cleanupPending: true, cleanupAttempts: 1 }),
     ]);
+  });
+
+  describe('fair unavailable artifact retries', () => {
+    const artifact = (index: number, scope: Partial<WorkspaceArtifactSummary> = {}): WorkspaceArtifactSummary => ({
+      taskId: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+      laneId: `10000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+      threadId: parent.thread.id, workspaceGeneration: 0, cwd: home,
+      exitConfirmed: true, recoverable: false,
+      cleanup: { reason: 'capture-failed', attempts: 1, updatedAt: 0, retryable: false }, ...scope,
+    });
+    const mockInventory = (items: WorkspaceArtifactSummary[], disposable = new Set<string>()) => {
+      vi.spyOn(manager.workspaceManager, 'enumerateArtifacts').mockImplementation(async (options = {}) => {
+        const matches = items.filter(item => (options.threadId === undefined || item.threadId === options.threadId)
+          && (options.cwd === undefined || item.cwd === options.cwd)
+          && (options.workspaceGeneration === undefined || item.workspaceGeneration === options.workspaceGeneration))
+          .sort((a, b) => a.taskId.localeCompare(b.taskId));
+        return { items: matches.slice(0, options.limit).map(item => ({ ...item })), total: matches.length, incomplete: false };
+      });
+      // Scheduling uses synthetic inventory; real disposal guards have separate regressions.
+      vi.spyOn(manager.workspaceManager, 'retryReclamation').mockResolvedValue({ attempted: 0, reclaimed: 0, held: 0, incomplete: false });
+      return vi.spyOn(manager.workspaceManager, 'discardFailedWorker').mockImplementation(async (laneId, taskId) => {
+        const item = items.find(value => value.taskId === taskId && value.laneId === laneId);
+        if (!item || !disposable.has(taskId)) throw new Error('Synthetic permanent disposal hold');
+        item.discarded = { fingerprint: 'synthetic-fingerprint', planHash: 'synthetic-plan' };
+      });
+    };
+
+    it.each(['maintenance', 'scoped closeout'] as const)(
+      'reaches a disposable target after 25 permanent holds during %s', async mode => {
+        const items = Array.from({ length: 26 }, (_, index) => artifact(index + 1));
+        const target = items[25];
+        const discard = mockInventory(items, new Set([target.taskId]));
+        const scan = () => mode === 'maintenance' ? manager.reconcilePendingWorkerLanes()
+          : manager.pendingArtifactContext({ ...parent.thread }, home);
+
+        const first = await scan();
+        expect(discard).toHaveBeenCalledTimes(25);
+        expect(discard).not.toHaveBeenCalledWith(target.laneId, target.taskId);
+        if (mode === 'scoped closeout') expect(first).toContain(target.taskId);
+
+        const second = await scan();
+        expect(discard).toHaveBeenCalledTimes(50);
+        expect(target.discarded).toBeDefined();
+        if (mode === 'scoped closeout') expect(second).not.toContain(target.taskId);
+        await scan();
+        expect(discard).toHaveBeenCalledTimes(75);
+        expect(discard.mock.calls.filter(([, taskId]) => taskId === target.taskId)).toHaveLength(1);
+        expect(items.slice(0, 25).every(item => item.discarded === undefined)).toBe(true);
+        expect(factory).not.toHaveBeenCalled();
+      });
+
+    it('wraps retries after candidate additions and removals, including the last attempted task', async () => {
+      const items = Array.from({ length: 52 }, (_, index) => artifact(index + 1));
+      const disposable = new Set<string>();
+      const discard = mockInventory(items, disposable);
+      const scan = async () => {
+        const start = discard.mock.calls.length;
+        const expectedAttempts = Math.min(25, items.filter(item => !item.discarded).length);
+        await manager.reconcilePendingWorkerLanes();
+        const attempted = discard.mock.calls.slice(start).map(([, taskId]) => taskId);
+        expect(attempted).toHaveLength(expectedAttempts);
+        expect(new Set(attempted).size).toBe(attempted.length);
+        return attempted;
+      };
+      const first = await scan();
+      const removed = [items[0], items[24]];
+      items.splice(24, 1); items.splice(0, 1);
+      items.push(artifact(0), artifact(53));
+      const second = await scan();
+      const target = items[0];
+      disposable.add(target.taskId);
+      const third = await scan();
+      expect(target.discarded).toBeDefined();
+      expect(new Set([...first, ...second, ...third])).toEqual(new Set([...items, ...removed].map(item => item.taskId)));
+      for (const item of removed) expect([...second, ...third]).not.toContain(item.taskId);
+
+      items.splice(0);
+      expect(await scan()).toEqual([]);
+      const added = artifact(54);
+      items.push(added); disposable.add(added.taskId);
+      expect(await scan()).toEqual([added.taskId]);
+      expect(added.discarded).toBeDefined();
+    });
+
+    it('preserves progress when global scans alternate with different thread, cwd and generation scopes', async () => {
+      const prefix = Array.from({ length: 25 }, (_, index) => artifact(index + 1));
+      const groups = [
+        { threadId: 'other-thread', cwd: home, workspaceGeneration: 0 },
+        { threadId: parent.thread.id, cwd: path.join(home, 'other-workspace'), workspaceGeneration: 0 },
+        { threadId: parent.thread.id, cwd: home, workspaceGeneration: 1 },
+      ].map((scope, group) => Array.from({ length: 26 }, (_, index) => artifact((group + 1) * 100 + index, scope)));
+      const targets = groups.map(group => group[25]);
+      const items = [...prefix, ...groups.flat()];
+      const discard = mockInventory(items, new Set(targets.map(item => item.taskId)));
+
+      for (let pass = 0; pass < 3; pass++) {
+        let start = discard.mock.calls.length;
+        await manager.reconcilePendingWorkerLanes();
+        expect(discard.mock.calls.length - start).toBe(25);
+        for (const group of [prefix, ...groups]) {
+          start = discard.mock.calls.length;
+          const item = group[0];
+          const thread = { ...parent.thread, id: item.threadId, delegationWorkspaceGeneration: item.workspaceGeneration };
+          await manager.pendingArtifactContext(thread, item.cwd);
+          const attempted = discard.mock.calls.slice(start).map(([, taskId]) => taskId);
+          expect(attempted).toHaveLength(25);
+          expect(attempted.every(taskId => group.some(value => value.taskId === taskId))).toBe(true);
+        }
+      }
+      expect(targets.every(item => item.discarded !== undefined)).toBe(true);
+      expect(items.filter(item => !targets.includes(item)).every(item => item.discarded === undefined)).toBe(true);
+    });
+
+    it('reserves retry batches before overlapping scoped and global disposal awaits', async () => {
+      const items = Array.from({ length: 50 }, (_, index) => artifact(index + 1));
+      const discard = mockInventory(items);
+      const dispose = discard.getMockImplementation()!;
+      let enter!: () => void, release!: () => void;
+      const started = new Promise<void>(resolve => { enter = resolve; });
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      discard.mockImplementation(async (laneId, taskId) => {
+        if (taskId === items[0].taskId) { enter(); await gate; }
+        return dispose(laneId, taskId);
+      });
+      const scoped = manager.pendingArtifactContext({ ...parent.thread }, home);
+      try {
+        await started;
+        await manager.reconcilePendingWorkerLanes();
+        expect(discard.mock.calls.slice(1).map(([, taskId]) => taskId)).toEqual(items.slice(25).map(item => item.taskId));
+      } finally { release(); await scoped; }
+      expect(discard).toHaveBeenCalledTimes(50);
+      expect(new Set(discard.mock.calls.map(([, taskId]) => taskId))).toEqual(new Set(items.map(item => item.taskId)));
+    });
+
+    it('keeps the existing candidate filter while rotating retries', async () => {
+      const eligible = [artifact(1), artifact(2, { disposition: 'retained', failedCollection: true })];
+      const preserved = [
+        artifact(3, { discarded: { fingerprint: 'synthetic-fingerprint', planHash: 'synthetic-plan' } }),
+        artifact(4, { recovery: { beforeRef: 'synthetic-before', targetRef: 'synthetic-target' } }),
+        artifact(5, { disposition: 'retained', failedCollection: true, recoverable: true }),
+        artifact(6, { disposition: 'pending', recoverable: true }),
+        artifact(7, { cleanup: undefined }),
+      ];
+      const items = [...eligible, ...preserved];
+      const discard = mockInventory(items, new Set(items.map(item => item.taskId)));
+      await manager.reconcilePendingWorkerLanes();
+      await manager.pendingArtifactContext({ ...parent.thread }, home);
+      expect(discard.mock.calls).toEqual(eligible.map(item => [item.laneId, item.taskId]));
+    });
   });
 
   it('retries pending lane cleanup on reconciliation without reusing the native pointer', async () => {

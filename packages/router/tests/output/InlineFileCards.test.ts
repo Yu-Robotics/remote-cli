@@ -24,6 +24,60 @@ beforeEach(async () => {
 afterEach(async () => { vi.useRealTimers(); await cards.destroy(); vi.restoreAllMocks(); await fs.rm(root, { recursive: true, force: true }); });
 
 describe('owned assistant body composition', () => {
+  const controls = [
+    { tag: 'hr' }, { tag: 'markdown', content: '📍 **Reply from:** Default · workspace' },
+    { tag: 'column_set', columns: [{ tag: 'column', elements: [{ tag: 'button',
+      behaviors: [{ type: 'callback', value: { action: 'switch_thread', threadId: 'thread' } }] }] }] },
+    { tag: 'column_set', columns: [{ tag: 'column', elements: [{ tag: 'button',
+      behaviors: [{ type: 'callback', value: { action: 'new_thread' } }] }] }] },
+  ];
+  const metadata = { tag: 'markdown', text_size: 'notation', content: "<font color='grey'>Model: synthetic · Effort: unknown</font>" };
+  it.each([
+    [{ tag: 'markdown', element_id: 'assistant_footer', content: '✅ Completed' }, metadata, ...controls],
+    [{ ...controls[0], element_id: 'assistant_threads' }, ...controls.slice(1)],
+    [{ tag: 'markdown', content: '✅ Completed · Session: synthetic' }, metadata, ...controls],
+    [{ tag: 'markdown', content: '❌ Failed' }, ...controls],
+    [{ tag: 'markdown', content: '⏳ Awaiting queue confirmation' }, controls[0], ...controls.slice(2)],
+    [{ tag: 'markdown', content: '✅ Completed' }],
+    controls,
+  ].map(trailing => [trailing]))('expands Files above the complete marked or legacy trailing block (%#)', async trailing => {
+    rows = [row()]; await cards.admit(owner);
+    const answer = JSON.parse(body()).body.elements.slice(0, 3);
+    const original = [...answer, ...trailing];
+    cards.remember('final-card', owner.rootId, JSON.stringify({ schema: '2.0', body: { elements: original } }));
+    await cards.bind(owner.rootId, 'final-card');
+    const elements = last().body.elements;
+    expect(elements[answer.length].element_id).toBe('output_files_inline');
+    expect(panel().expanded).toBe(true); expect(panel().header.title.content).toBe('Files (1)');
+    expect(elements.filter((e: any) => e.element_id !== 'output_files_inline')).toEqual(original);
+  });
+  it('keeps unrelated trailing actions and answer text ahead of Files', async () => {
+    rows = [row()]; await cards.admit(owner);
+    const original = [{ tag: 'markdown', content: '✅ Completed inside an answer, not a footer' },
+      { tag: 'column_set', columns: [{ tag: 'column', elements: [{ tag: 'button',
+        behaviors: [{ type: 'callback', value: { action: 'output_file' } }] }] }] }];
+    cards.remember('final-card', owner.rootId, JSON.stringify({ schema: '2.0', body: { elements: original } }));
+    await cards.bind(owner.rootId, 'final-card');
+    expect(last().body.elements.slice(0, -1)).toEqual(original); expect(panel().expanded).toBe(true);
+  });
+  it('keeps all sixteen rows above legacy controls on every page, progress update and restart', async () => {
+    rows = Array.from({ length: 16 }, (_, i) => row(i + 1)); await cards.admit(owner);
+    const answer = { tag: 'markdown', content: 'Full answer' };
+    cards.remember('final-card', owner.rootId, JSON.stringify({ schema: '2.0', body: { elements: [answer, ...controls] } }));
+    await cards.bind(owner.rootId, 'final-card'); const seen = new Set<string>();
+    for (let page = 0; page < 4; page++) {
+      expect(last().body.elements[1].element_id).toBe('output_files_inline');
+      expect(panel().expanded).toBe(true); expect(panel().header.title.content).toBe('Files (16)');
+      for (const e of panel().elements) if (e.behaviors?.[0]?.value.action === 'output_file') seen.add(e.behaviors[0].value.id);
+      const next = panel().elements.find((e: any) => e.text?.content === 'Next');
+      if (next) await cards.page(owner.openId, 'final-card', next.behaviors[0].value);
+    }
+    expect(seen.size).toBe(16);
+    await cards.destroy(); cards = make(); rows = rows.map(r => ({ ...r, status: 'Receiving' })); await cards.refresh(owner.messageId);
+    expect(panel().expanded).toBe(true); expect(JSON.stringify(panel())).toContain('Receiving');
+    expect(last().body.elements.filter((e: any) => e.element_id !== 'output_files_inline')).toEqual([answer, ...controls]);
+    expect(last().body.elements[1].element_id).toBe('output_files_inline');
+  });
   it('holds early offers until the complete actual final card body is known', async () => {
     rows = [row()]; await cards.admit(owner); await cards.refresh(owner.messageId); expect(patch).not.toHaveBeenCalled();
     await cards.bind(owner.rootId, owner.messageId); expect(patch).not.toHaveBeenCalled();
