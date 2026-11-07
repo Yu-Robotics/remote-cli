@@ -17,6 +17,7 @@ import type { IExecutor } from '../../src/executor/IExecutor';
 import type { ExecutorConfig } from '../../src/types/config';
 import { DshExecutor } from '../../src/executor/DshExecutor';
 import { runGit } from '../../src/delegation/GitCheckpoint';
+import { completedLegacyDiscard } from '../../src/delegation/LegacyWorkspaceCleanup';
 
 vi.mock('../../src/delegation/OwnershipRuntime', async importOriginal => {
   const actual = await importOriginal<typeof import('../../src/delegation/OwnershipRuntime')>();
@@ -274,8 +275,11 @@ describe('thread-wide conversation reset', () => {
     await seedDirect();
     current = pool.getExecutor(threadId);
     vi.mocked(current.abort).mockResolvedValue(true);
+    const siblingMetadata = { ...threads.getThread(siblingId)! };
+    let enterExecution!: () => void;
+    const executing = new Promise<void>(resolve => { enterExecution = resolve; });
     const worker: IExecutor = {
-      execute: vi.fn(() => new Promise(() => {})), abort: vi.fn(async () => true),
+      execute: vi.fn(() => { enterExecution(); return new Promise(() => {}); }), abort: vi.fn(async () => true),
       destroy: vi.fn(async () => {}), waitForExit: vi.fn(async () => {}),
       waitForManagedProcessGroupExit: vi.fn(async () => {}), resetContext: vi.fn(),
       getCurrentWorkingDirectory: () => project, setWorkingDirectory: vi.fn(),
@@ -294,28 +298,61 @@ describe('thread-wide conversation reset', () => {
     const task: any = await scope.invoke('remote_cli_delegate', {
       backend: 'codex', objective: 'Prepare a synthetic export', exports: ['unfinished.txt'],
     }, 'start');
-    expect(task.state).toBe('running');
-    const workerLane = (await delegation.laneStore.lanesForThread(threadId))[0];
-    await write(pointer('codex', workerLane.executorThreadId), 'old worker conversation');
-    const retainedFile = await write(path.join(workerDirectory, 'partial.txt'), 'partial worker output\n');
-    const archive = await write(path.join(home, '.remote-cli', 'codex-archive', 'history.jsonl'));
-    pool.setThreadBusy(threadId, true);
-    expect(await send('/abort')).toMatchObject({ success: true });
-    expect(worker.waitForExit).toHaveBeenCalled();
-    expect(worker.waitForManagedProcessGroupExit).toHaveBeenCalled();
-    await scope.close();
-    expect((await delegation.laneStore.lanesForThread(threadId))[0]).toMatchObject({ state: 'dirty' });
-    const artifact = await delegation.workspaceManager.describe(task.taskId);
+    const setup = scope.collectPendingResults();
+    try {
+      // Acceptance can precede execution. Surface setup failure without polling a queued result.
+      await Promise.race([executing, setup.then(() => { throw new Error('Worker ended before execution entry'); })]);
+      expect(worker.execute).toHaveBeenCalledOnce();
+      const workerLane = (await delegation.laneStore.lanesForThread(threadId))[0];
+      await write(pointer('codex', workerLane.executorThreadId), 'old worker conversation');
+      const partialFile = await write(path.join(workerDirectory, 'partial.txt'), 'partial worker output\n');
+      const archive = await write(path.join(home, '.remote-cli', 'codex-archive', 'history.jsonl'));
+      pool.setThreadBusy(threadId, true);
+      expect(await send('/abort')).toMatchObject({ success: true });
+      // Abort has a bounded response; the original scope still owns finalization.
+      await scope.close();
+      await Promise.allSettled([setup]);
+      expect(worker.waitForExit).toHaveBeenCalled();
+      expect(worker.waitForManagedProcessGroupExit).toHaveBeenCalled();
+      expect(scope.getRetainedResults()).toMatchObject([{ taskId: task.taskId, state: 'cancelled' }]);
+      expect((await delegation.laneStore.lanesForThread(threadId))[0]).toMatchObject({ state: 'dirty' });
+      const artifact = await delegation.workspaceManager.describe(task.taskId);
+      const workspaceRoot = path.join(home, '.remote-cli', 'delegation-workspaces');
+      const discarded = await completedLegacyDiscard(workspaceRoot, workerLane.id, task.taskId);
+      if (process.platform === 'linux') {
+        // A verified completed receipt proves both checkout and Git registration removal.
+        expect(discarded).toBeDefined();
+        expect(scope.getRetainedResults()[0].error).toContain('Failed worker contents were discarded');
+        await expect(fs.lstat(workerDirectory)).rejects.toMatchObject({ code: 'ENOENT' });
+        expect(artifact).toBeUndefined();
+        expect(await delegation.pendingArtifactContext(threads.getThread(threadId)!, project)).toBe('');
+      } else {
+        expect(discarded).toBeUndefined();
+        expect(scope.getRetainedResults()[0].error).toContain('Cleanup remains held');
+        expect(await fs.readFile(partialFile, 'utf8')).toBe('partial worker output\n');
+        expect(artifact).toMatchObject({ taskId: task.taskId, disposition: 'pending', successful: false });
+        expect(await delegation.pendingArtifactContext(threads.getThread(threadId)!, project)).toContain(task.taskId);
+      }
 
-    expect(await send(command)).toMatchObject({ success: true });
-    expect(existsSync(pointer('codex', threadId))).toBe(false);
-    expect(existsSync(pointer('codex', workerLane.executorThreadId))).toBe(true);
-    expect(await fs.readFile(retainedFile, 'utf8')).toBe('partial worker output\n');
-    expect(await fs.readFile(archive, 'utf8')).toBe('preserved fixture');
-    expect(await delegation.workspaceManager.describe(task.taskId)).toEqual(artifact);
-    expect((await delegation.laneStore.lanesForThread(threadId))[0])
-      .toMatchObject({ state: 'dirty', workspaceGeneration: 3, shutdownConfirmedGeneration: 0 });
-    expect(await send('/clear')).toMatchObject({ success: true });
+      expect(await send(command)).toMatchObject({ success: true });
+      expect(existsSync(pointer('codex', threadId))).toBe(false);
+      expect(await fs.readFile(pointer('codex', workerLane.executorThreadId), 'utf8')).toBe('old worker conversation');
+      if (process.platform !== 'linux') expect(await fs.readFile(partialFile, 'utf8')).toBe('partial worker output\n');
+      expect(await completedLegacyDiscard(workspaceRoot, workerLane.id, task.taskId)).toEqual(discarded);
+      expect(await fs.readFile(archive, 'utf8')).toBe('preserved fixture');
+      expect(await fs.readFile(path.join(project, 'source.txt'), 'utf8')).toBe('original source\n');
+      expect(threads.getThread(siblingId)).toEqual(siblingMetadata);
+      for (const backend of DELEGATION_BACKENDS) expect(await fs.readFile(pointer(backend, siblingId), 'utf8')).toBe('sibling conversation');
+      expect(await delegation.workspaceManager.describe(task.taskId)).toEqual(artifact);
+      expect((await delegation.laneStore.lanesForThread(threadId))[0])
+        .toMatchObject({ state: 'dirty', workspaceGeneration: 3, shutdownConfirmedGeneration: 0 });
+      expect(await send('/clear')).toMatchObject({ success: true });
+      expect(await send('Fresh direct chat')).toMatchObject({ success: true });
+      expect((pool.getExecutor(threadId) as any).saved).toBeNull();
+    } finally {
+      await scope.close(true);
+      await Promise.allSettled([setup]);
+    }
   });
 
   it('blocks every old context after later direct-pointer cleanup fails, including reload, and allows an explicit retry', async () => {
