@@ -394,8 +394,9 @@ describe('managed Git phases and native worker deadlines', { timeout: 30_000 }, 
     const terminal = await finishing;
     expect(terminal.state).toBe(outcome === 'success' ? 'succeeded' : 'failed');
     if (outcome === 'success') expect(terminal.artifact?.disposition).toBe('pending');
-    else expect(terminal.error).toContain('Files were retained for manual recovery');
-    expect(await fs.readFile(path.join(workers[0].cwd, 'result.txt'), 'utf8')).toBe('retained output\n');
+    else expect(terminal.error).toContain(process.platform === 'linux' ? 'Failed worker contents were discarded' : 'Cleanup remains held');
+    if (outcome === 'failure' && process.platform === 'linux') await expect(fs.stat(workers[0].cwd)).rejects.toMatchObject({ code: 'ENOENT' });
+    else expect(await fs.readFile(path.join(workers[0].cwd, 'result.txt'), 'utf8')).toBe('retained output\n');
     expect((manager as any).running).toBe(0);
     expect(manager.blocksWorkspace(fixture.root, 'other')).toBe(false);
     const lane = (await manager.laneStore.lanesForThread(parent.thread.id))[0];
@@ -458,7 +459,7 @@ describe('managed Git phases and native worker deadlines', { timeout: 30_000 }, 
     expect(workers).toHaveLength(0);
   });
 
-  it('preserves hidden worker edits instead of publishing a stale no-change artifact', async () => {
+  it('rejects hidden worker edits and disposes only their unavailable failed checkout', async () => {
     const scope = manager.begin(parent);
     const task = await start(scope);
     const cwd = workers[0].cwd;
@@ -468,7 +469,9 @@ describe('managed Git phases and native worker deadlines', { timeout: 30_000 }, 
     expect(await result(scope, task.taskId)).toMatchObject({ state: 'failed',
       error: expect.stringContaining('assume-unchanged or skip-worktree') });
     expect(await manager.workspaceManager.describe(task.taskId)).toBeUndefined();
-    expect(await fs.readFile(path.join(cwd, 'source.txt'), 'utf8')).toBe('hidden worker output\n');
+    if (process.platform === 'linux') await expect(fs.stat(cwd)).rejects.toMatchObject({ code: 'ENOENT' });
+    else expect(await fs.readFile(path.join(cwd, 'source.txt'), 'utf8')).toBe('hidden worker output\n');
+    expect(await fs.readFile(path.join(fixture.root, 'source.txt'), 'utf8')).toBe('first\nsecond\nthird\n');
     expect((await manager.laneStore.lanesForThread(parent.thread.id))[0]).toMatchObject({ state: 'dirty', cleanupPending: false });
     expect((manager as any).running).toBe(0);
     expect(manager.blocksWorkspace(fixture.root, 'other')).toBe(false);

@@ -943,6 +943,31 @@ session. Removing tools may recycle that backend process once per executor
 instance; it preserves the saved conversation and does not repeatedly restart
 an already cleaned process. Backends never used for delegation skip this cleanup.
 
+On Linux hosts with the existing disposal proofs, CLI 1.6.225 automatically
+discards verified temporary checkouts of terminated workers whose artifact capture
+failed. Completion is
+recorded durably so a missing artifact does not repeatedly block later replies.
+This can discard unsubmitted worker files; rerun the worker if its output is
+needed. Valid pending artifacts retain the ordinary review and integration flow.
+Cleanup is limited to the exact owned checkout and its Git registration; external
+symlink targets, the coordinator checkout, and native conversation history are
+preserved. Active workers, conflicting ownership, and unsafe filesystem boundaries
+remain excluded from automatic removal. Potential credential files are held;
+unchanged tracked environment templates are allowed only after comparison with the
+worker input. macOS and Windows retain their existing conservative workspace
+policy. This behavior requires a CLI upgrade.
+
+A local operator can retry one eligible failed worker without stopping unrelated
+workers or the daemon:
+
+```bash
+remote-cli delegation storage discard-failed --task <task-id> --lane <lane-id>
+```
+
+The command verifies the same target, exit and filesystem evidence as automatic
+cleanup. It does not discard normal pending artifacts. The separate historical
+`scan`, `plan` and `discard` maintenance flow retains its offline requirements.
+
 From CLI 1.6.138, already settled artifact receipts are validated without requiring
 an idle source workspace; another busy thread does not reopen completed delivery.
 Pending or unverifiable outcomes still require closeout, and history reconciliation

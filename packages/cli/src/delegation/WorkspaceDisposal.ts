@@ -127,7 +127,7 @@ export async function mountedPaths(): Promise<string[]> {
 }
 
 /** Inspect boundaries without following links or treating ignored names as trusted. */
-export async function assertDisposableTree(root: string, mounts?: readonly string[]): Promise<void> {
+export async function assertDisposableTree(root: string, mounts?: readonly string[], protectCredentials = false, credentialTemplates?: ReadonlySet<string>): Promise<void> {
   const rootStat = await fs.lstat(root);
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || await fs.realpath(root) !== root) {
     throw new WorkspaceCleanupError('unsafe-checkout-path');
@@ -156,6 +156,10 @@ export async function assertDisposableTree(root: string, mounts?: readonly strin
         throw new WorkspaceCleanupError('nested-repository');
       }
       if (child.dev !== rootStat.dev) throw new WorkspaceCleanupError('unsafe-checkout-boundary');
+      if (protectCredentials && !child.isSymbolicLink() && !credentialTemplates?.has(file)
+        && /^(?:\.env(?:\..*)?|\.ssh|\.aws|\.azure|\.kube|\.gnupg|\.netrc|\.npmrc|\.pypirc|\.git-credentials|auth\.json|credentials(?:\.json)?)$/i.test(entry.name)) {
+        throw new WorkspaceCleanupError('credential-entry', false, 'Potential credentials in a failed checkout are preserved');
+      }
       if (child.isSymbolicLink()) {
         // Git removes the link itself, never its target. Dependency environments
         // routinely contain ignored executable links; their targets are not owned.
