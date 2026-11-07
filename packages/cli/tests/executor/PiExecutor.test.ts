@@ -248,6 +248,23 @@ describe('PiExecutor', () => {
     expect((await executor.listEfforts()).current).toBe('low');
   });
 
+  it.each(['message_end', 'turn_end', 'agent_end'])('keeps %s final-only assistant attachment intent separate from thinking and tools', async type => {
+    const original = transport.request.getMockImplementation()!;
+    const text = '[Report](./report.md "attachment")';
+    transport.request.mockImplementation(async command => {
+      if (command.type !== 'prompt') return original(command);
+      transport.emit({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: '[private](secret.txt "attachment")' } });
+      transport.emit({ type: 'tool_execution_end', toolCallId: 'tool-attachment', result: { content: [{ type: 'text', text: '[tool](secret.txt "attachment")' }] }, isError: false });
+      const message = { role: 'assistant', content: [{ type: 'text', text }] };
+      transport.emit(type === 'agent_end' ? { type, messages: [message] } : { type, message });
+      transport.emit({ type: 'agent_settled' });
+      return { type: 'response', command: 'prompt', success: true };
+    });
+    const onDisplayText = vi.fn();
+    await expect(executor.execute('Produce report', { onDisplayText })).resolves.toMatchObject({ success: true, output: text });
+    expect(onDisplayText.mock.calls.map(([chunk]) => chunk)).toEqual([text]);
+  });
+
   it('streams text, tools, and image input while persisting the Pi session', async () => {
     const chunks: string[] = [];
     const visible: string[] = [];

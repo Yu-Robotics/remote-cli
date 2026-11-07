@@ -35,6 +35,29 @@ describe('deterministic output links', () => {
     expect(localDestination('C:/work/file:stream', path.win32 as typeof path)).toBeUndefined();
     for (const value of ['//server/file', '\\\\server\\file', 'file:///report', '%00secret', '%zz', 'https://example.com']) expect(localDestination(value)).toBeUndefined();
   });
+  it('uses exact attachment titles on streamed and reference links without guessing from file types or labels', () => {
+    const links = new OutputLinks();
+    links.append('[Download](source.go) [Attachment](source.ts "Attachment") [Report](<report ');
+    links.append('one.md> "attachment")\n[source][selected]\n\n[selected]: deliverable.go "attachment"');
+    expect(links.finish(undefined, 'attachments')).toEqual({ paths: ['report one.md', 'deliverable.go'], omitted: false });
+  });
+  it.each([{ platform: 'POSIX', flavor: path.posix }, { platform: 'Windows', flavor: path.win32 }])(
+    'distinguishes encoded filename hashes from citation fragments on $platform', ({ flavor }) => {
+      expect(localDestination('./report%23notes.go', flavor as typeof path, true)).toBe('./report#notes.go');
+      expect(localDestination('./report.go%23L12', flavor as typeof path, true)).toBe('./report.go#L12');
+      expect(localDestination('./report.go#L12', flavor as typeof path, true)).toBeUndefined();
+      expect(localDestination('./report.go:12', flavor as typeof path, true)).toBeUndefined();
+      expect(localDestination('//server/file', flavor as typeof path, true)).toBeUndefined();
+    });
+  it('retains the Windows alternate-stream guard for explicit attachments', () => {
+    expect(localDestination('C:/work/report.go:stream', path.win32 as typeof path, true)).toBeUndefined();
+  });
+  it('does not carry an ordinary capped citation scan into a later attachment selection', () => {
+    const links = new OutputLinks(); links.append('[source](source.go)' + ' '.repeat(OUTPUT_LIMITS.text));
+    expect(links.finish(undefined, 'attachments')).toEqual({ paths: [], omitted: false });
+    links.append('[Report](report.md "attachment")');
+    expect(links.finish(undefined, 'attachments')).toEqual({ paths: ['report.md'], omitted: false });
+  });
   it('caps input and candidates with an explicit omission marker', () => {
     const links = new OutputLinks(); links.append(Array.from({ length: 25 }, (_, i) => `[a](./${i}.txt)`).join(' '));
     expect(links.finish().paths).toHaveLength(16);
@@ -227,7 +250,7 @@ describe('metadata and outbound HTTP', () => {
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
     const client = new OutputFiles(store, `ws://127.0.0.1:${(server.address() as any).port}`, send);
     try {
-      const links = new OutputLinks(); links.append('[result](report)'); await client.capture(links, context()); client.connect();
+      const links = new OutputLinks(); links.append('[result](report "attachment")'); await client.capture(links, context()); client.connect();
       const offer = send.mock.calls.find(call => call[0].type === 'output_offer')![0];
       client.handle({ type: 'output_registered', id: offer.reference.id });
       client.disconnect(); client.connect(); expect(send.mock.calls.filter(call => call[0].type === 'output_offer')).toHaveLength(2);

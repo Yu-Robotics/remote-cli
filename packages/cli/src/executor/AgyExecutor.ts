@@ -1012,6 +1012,7 @@ export class AgyExecutor implements IExecutor {
 
     if (result.status === 'SUCCESS') {
       const accumulated = this.currentOutputBuffer.join('');
+      if (!accumulated && typeof result.response === 'string') this.activeCommand.options.onDisplayText?.(result.response);
       this.completeActiveCommand({
         success: true,
         output: accumulated || result.response || '',

@@ -73,6 +73,14 @@ describe('MessageHandler native goal commands', () => {
   });
   afterEach(async () => { await f.handler.destroy(); await rm(f.cwd, { recursive: true, force: true }); vi.restoreAllMocks(); });
 
+  it('adds capability-gated attachment guidance to a fresh goal without changing resume semantics', async () => {
+    (f.handler as any).outputFiles = { isEnabled: () => true, capture: vi.fn(), disconnect: vi.fn(), destroy: vi.fn() };
+    await f.send('/goal Produce report');
+    expect(f.executor.executeGoal).toHaveBeenLastCalledWith({ objective: expect.stringContaining('[Report](./report.md "attachment")') }, expect.anything());
+    await f.send('/goal resume');
+    expect(f.executor.executeGoal).toHaveBeenLastCalledWith({}, expect.anything());
+  });
+
   it('reads only the addressed thread goal without starting model work', async () => {
     await f.send('/goal');
     expect(f.responses().at(-1)).toMatchObject({ success: true, threadId: 'thread-a', output: expect.stringContaining('Tokens used: 123 / 40000') });
