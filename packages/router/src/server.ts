@@ -34,8 +34,8 @@ import { FeishuLongConnHandler } from './feishu/FeishuLongConnHandler';
 import { ConnectionHub } from './websocket/ConnectionHub';
 import { BindingManager } from './binding/BindingManager';
 import { ThreadSelectionManager, isCompleteThreadCatalog, type SelectionFence } from './binding/ThreadSelectionManager';
-import { MessageType, ToolUseInfo, ToolResultInfo, DelegationProgressInfo, TaskNotificationInfo, PROTOCOL_VERSION, MIN_SUPPORTED_CLI_VERSION, ROUTER_VERSION, ThreadSummary, QueueConfirmationInfo, QueueStartedInfo, TaskResumeInfo, ImageBlock } from './types';
-import { DELEGATION_PROGRESS_ELEMENT_COUNT, DELEGATION_RESULT_SUMMARY_LIMIT, DelegationProgressCardState, FeishuCardElement, type ToolCallCardState, createToolCallSummary, createToolCallElement, createDelegationProgressElements, createDividerElement, createToolUseElement, createToolResultElement, createMarkdownElement, createRedactedThinkingElement, createPlanModeElement, createTaskNotificationElement, createImageElement } from './utils/ToolFormatter';
+import { MessageType, ToolUseInfo, ToolResultInfo, DelegationProgressInfo, PROTOCOL_VERSION, MIN_SUPPORTED_CLI_VERSION, ROUTER_VERSION, ThreadSummary, QueueConfirmationInfo, QueueStartedInfo, TaskResumeInfo, ImageBlock } from './types';
+import { DELEGATION_PROGRESS_ELEMENT_COUNT, DELEGATION_RESULT_SUMMARY_LIMIT, DelegationProgressCardState, FeishuCardElement, type ToolCallCardState, createToolCallSummary, createToolCallElement, createDelegationProgressElements, createDividerElement, createToolUseElement, createToolResultElement, createMarkdownElement, createRedactedThinkingElement, createPlanModeElement, createImageElement } from './utils/ToolFormatter';
 
 interface ToolCallProgressState extends ToolCallCardState {
   /** A single fixed slot keeps later text and worker section indices stable. */
@@ -708,6 +708,9 @@ export class RouterServer {
 
           // Update heartbeat on any message
           resetHeartbeat();
+          // Retired presentation: ignore legacy background terminal frames before
+          // recipient lookup, card creation, logging or reply-route mutation.
+          if (message.type === MessageType.TASK_NOTIFICATION) return;
 
           if (message.type === 'automatic_file_enrollment') {
             const current = () => registered && !this.stopping && this.connectionHub.isCurrentConnection(deviceId!, ws) && ws.readyState === WebSocket.OPEN;
@@ -779,7 +782,7 @@ export class RouterServer {
           const imageDevice = deviceId;
           const imageCurrent = () => !socketClosed && ws.readyState === WebSocket.OPEN
             && !!imageDevice && this.connectionHub.isCurrentConnection(imageDevice, ws);
-          if ([MessageType.RESPONSE, MessageType.NOTIFICATION, MessageType.TASK_NOTIFICATION,
+          if ([MessageType.RESPONSE, MessageType.NOTIFICATION,
             'task_resume', 'stream', 'stream_context', 'queue_started'].includes(message.type)
             && !await this.authorizeRecipientOutput(message, imageDevice, imageCurrent)) return;
           // Establish routing before card creation awaits. Payload admission and
@@ -1240,16 +1243,6 @@ export class RouterServer {
                   // Log non-actionable notifications but don't forward to user
                   console.log(`[RouterServer] Ignoring notification (non-actionable): ${message.title}`);
                 }
-              }
-              break;
-
-            case MessageType.TASK_NOTIFICATION:
-              // Background task terminal-state event (Claude Code 2.x).
-              // Not tied to any streaming session — rendered as a standalone card.
-              if (message.openId && message.taskNotification) {
-                await this.handleTaskNotification(message.openId, message.taskNotification, message.threadId, deviceId, message.threadName, imageCurrent);
-              } else {
-                console.log('[RouterServer] Ignoring task_notification with missing openId or payload');
               }
               break;
 
@@ -2411,39 +2404,6 @@ export class RouterServer {
       if (this.queueMessageOperations.get(messageId) === operation) {
         this.queueMessageOperations.delete(messageId);
       }
-    }
-  }
-
-  /**
-   * Handle background task notification (Claude Code 2.x)
-   *
-   * Sent as a standalone one-shot card — the event may arrive while no
-   * streaming session exists (the originating command's card is often
-   * already finalized), so it deliberately never touches streamingMessages.
-   * The new card has a durable association so the user can reply to it
-   * to continue working in the originating thread.
-   */
-  private async handleTaskNotification(openId: string, info: TaskNotificationInfo, threadId?: string, deviceId?: string | null, threadName?: string, current = () => true): Promise<void> {
-    // Boundary validation — the WS message is external data, never trust it.
-    // Required for rendering: a non-empty taskId and a string summary.
-    // Unknown status values are allowed through (forward compatibility);
-    // createTaskNotificationElement renders them with a neutral label.
-    if (!info || typeof info.taskId !== 'string' || info.taskId.length === 0 || typeof info.summary !== 'string') {
-      console.log('[RouterServer] Ignoring task_notification with invalid payload:', JSON.stringify(info).slice(0, 200));
-      return;
-    }
-
-    console.log(`[RouterServer] Task notification for ${openId}: task=${info.taskId} status=${info.status} thread=${threadId || 'default'}`);
-
-    const threadLabel = typeof threadName === 'string' && threadName.trim()
-      ? threadName : typeof threadId === 'string' && threadId.trim() ? threadId : undefined;
-    const selectionFence = deviceId ? this.selections.capture(openId, deviceId) : undefined;
-    const elements = createTaskNotificationElement(info, threadLabel);
-    const feishuMessageId = await this.feishuLongConnHandler.sendTaskNotificationCard(openId, elements);
-
-    if (feishuMessageId && threadId && deviceId && selectionFence) {
-      await this.registerCardThread(feishuMessageId, { threadId, deviceId, openId, epoch: selectionFence.epoch, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS }, current);
-      console.log(`[RouterServer] Registered task notification card ${feishuMessageId} for thread ${threadId}`);
     }
   }
 

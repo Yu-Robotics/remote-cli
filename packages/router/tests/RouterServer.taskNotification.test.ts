@@ -1,3 +1,6 @@
+import fs from 'fs/promises';
+import os from 'os';
+import path from 'path';
 import { cardThreadStorage } from './helpers/cardThreadStorage';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import Koa from 'koa';
@@ -26,15 +29,9 @@ vi.mock('../src/websocket/ConnectionHub');
 vi.mock('../src/binding/BindingManager');
 // ToolFormatter is intentionally NOT mocked — we want the real card elements
 
-/**
- * Tests for the router's handling of `task_notification` WS messages
- * (Claude Code 2.x background task completion events).
- *
- * Expected behavior: the router sends a standalone Feishu card (there may be
- * no active streaming card) and registers the new card in cardThreadMap so
- * the user can reply to it to continue the originating thread.
- */
+/** Legacy background terminal frames are accepted without any presentation or reply route. */
 describe('RouterServer - task_notification', () => {
+  let directory: string;
   let config: any;
   let store: any;
   let server: RouterServer;
@@ -69,20 +66,22 @@ describe('RouterServer - task_notification', () => {
         taskId: 'b4a2f1c9',
         status: 'completed',
         summary: 'Build finished successfully',
-        outputFile: '/tmp/claude-outputs/b4a2f1c9.log',
+        outputFile: path.join(directory, 'background.log'),
       },
       timestamp: Date.now(),
       ...overrides,
     })));
   };
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'retired-background-card-')));
+    vi.spyOn(os, 'homedir').mockReturnValue(directory);
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     config = {
-      getConfigPath: () => '/virtual-router-notifications/config.json',
+      getConfigPath: () => path.join(directory, 'config.json'),
       get: vi.fn((section: string, key: string) => {
         if (section === 'files') return { enabled: false };
         if (section === 'server' && key === 'port') return 3000;
@@ -147,7 +146,7 @@ describe('RouterServer - task_notification', () => {
       generateBindingCode: vi.fn().mockResolvedValue({ code: '123456', expiresAt: Date.now() + 60000 }),
     }));
 
-    mockWss = { on: vi.fn(), close: vi.fn() };
+    mockWss = { on: vi.fn(), close: vi.fn((cb: any) => cb?.()) };
     (WebSocketServer as unknown as any).mockImplementation(() => mockWss);
 
     vi.spyOn(global, 'setInterval');
@@ -155,122 +154,41 @@ describe('RouterServer - task_notification', () => {
     server = new RouterServer(config, store);
   });
 
-  afterEach(() => {
-    vi.restoreAllMocks();
+  afterEach(async () => {
+    await server.stop(); vi.restoreAllMocks(); await fs.rm(directory, { recursive: true, force: true });
   });
 
-  it('should send a standalone card and register it in cardThreadMap', async () => {
+  it.each(['completed', 'failed', 'stopped', 'unknown-future-status'])('quietly drops legacy terminal frames with status %s', async status => {
     const onMessage = await connectAndBind('device-1');
-
-    await sendTaskNotification(onMessage);
-
-    // Card sent with real elements from ToolFormatter
-    expect(mockFeishuHandler.sendTaskNotificationCard).toHaveBeenCalledTimes(1);
-    const [openId, elements] = mockFeishuHandler.sendTaskNotificationCard.mock.calls[0];
-    expect(openId).toBe('user-1');
-    const cardJson = JSON.stringify(elements);
-    const visible = elements.filter((element: any) => element.tag === 'markdown')
-      .map((element: any) => element.content).join('\n');
-    expect(visible).toMatch(/background task.*completed/i);
-    expect(visible).toContain('b4a2f1c9');
-    expect(visible).toContain('thread-1');
-    expect(elements.find((element: any) => element.tag === 'collapsible_panel')).toMatchObject({ expanded: false });
-    expect(visible).not.toContain('Build finished successfully');
-    expect(cardJson).toContain('Build finished successfully');
-
-    // The new card is registered for reply-to-continue-thread routing
-    expect(resolveThreadCallback).toBeDefined();
-    const resolved = await resolveThreadCallback!('feishu-task-card-1', 'user-1');
-    expect(resolved).toMatchObject({ threadId: 'thread-1', deviceId: 'device-1' });
-  });
-
-  it('should not touch streamingMessages (no interaction with active command cards)', async () => {
-    const onMessage = await connectAndBind('device-1');
-
-    await sendTaskNotification(onMessage);
-
-    // Streaming APIs must not be involved at all
+    vi.mocked(console.log).mockClear();
+    await sendTaskNotification(onMessage, { taskNotification: { taskId: 'private-task-sentinel', status, summary: 'Background result', outputFile: path.join(directory, 'result.log') } });
+    expect(mockFeishuHandler.sendTaskNotificationCard).not.toHaveBeenCalled();
+    expect(mockFeishuHandler.sendMessage).not.toHaveBeenCalled();
     expect(mockFeishuHandler.updateStreamingMessage).not.toHaveBeenCalled();
     expect(mockFeishuHandler.finalizeStreamingMessage).not.toHaveBeenCalled();
-  });
-
-  it('should send card but skip cardThreadMap when threadId is absent (legacy default thread)', async () => {
-    const onMessage = await connectAndBind('device-1');
-
-    await sendTaskNotification(onMessage, { threadId: undefined });
-
-    expect(mockFeishuHandler.sendTaskNotificationCard).toHaveBeenCalledTimes(1);
+    expect(store.cards.size).toBe(0); expect(store.setCardThread).not.toHaveBeenCalled();
     expect(await resolveThreadCallback!('feishu-task-card-1', 'user-1')).toBeUndefined();
+    expect(JSON.stringify([vi.mocked(console.log).mock.calls, vi.mocked(console.error).mock.calls])).not.toMatch(/user-1|private-task-sentinel/);
   });
-
-  it('should skip cardThreadMap registration when card sending fails', async () => {
-    mockFeishuHandler.sendTaskNotificationCard.mockResolvedValue(null);
+  it.each([undefined, null, {}, [], 'malformed', { status: 'completed' }, { taskId: 'task', summary: 42 }])('silently drops malformed background payload %j', async taskNotification => {
     const onMessage = await connectAndBind('device-1');
-
+    await sendTaskNotification(onMessage, { taskNotification });
+    expect(mockFeishuHandler.sendTaskNotificationCard).not.toHaveBeenCalled(); expect(mockFeishuHandler.sendMessage).not.toHaveBeenCalled();
+    expect(store.cards.size).toBe(0);
+  });
+  it.each([{ openId: undefined }, { threadId: undefined }, { threadName: 'Readable thread' }, { data: { taskNotification: { taskId: 'legacy-task', status: 'completed', summary: 'Legacy payload' } }, taskNotification: undefined }])('drops old optional routing variants without fallback %j', async overrides => {
+    const onMessage = await connectAndBind('device-1'); await sendTaskNotification(onMessage, overrides);
+    expect(mockFeishuHandler.sendTaskNotificationCard).not.toHaveBeenCalled(); expect(mockFeishuHandler.sendMessage).not.toHaveBeenCalled(); expect(store.cards.size).toBe(0);
+  });
+  it('drops valid owner background events after a main response while keeping authorization and input messages actionable', async () => {
+    const onMessage = await connectAndBind('device-1');
+    await onMessage(Buffer.from(JSON.stringify({ type: 'response', messageId: 'main', openId: 'user-1', success: true, output: 'Main response' })));
+    expect(mockFeishuHandler.sendMessage).toHaveBeenCalledWith('user-1', 'Main response'); mockFeishuHandler.sendMessage.mockClear();
     await sendTaskNotification(onMessage);
-
-    expect(mockFeishuHandler.sendTaskNotificationCard).toHaveBeenCalledTimes(1);
-    expect(await resolveThreadCallback!('feishu-task-card-1', 'user-1')).toBeUndefined();
-  });
-
-  it('should ignore messages with missing taskNotification payload', async () => {
-    const onMessage = await connectAndBind('device-1');
-
-    await sendTaskNotification(onMessage, { taskNotification: undefined });
-
-    expect(mockFeishuHandler.sendTaskNotificationCard).not.toHaveBeenCalled();
-  });
-
-  it('should ignore messages with missing openId', async () => {
-    const onMessage = await connectAndBind('device-1');
-
-    await sendTaskNotification(onMessage, { openId: undefined });
-
-    expect(mockFeishuHandler.sendTaskNotificationCard).not.toHaveBeenCalled();
-  });
-
-  it.each([
-    ['refactor-login', 'refactor-login'], ['   ', 'thread-1'],
-  ])('shows readable thread context for name %j', async (threadName, expectedLabel) => {
-    const onMessage = await connectAndBind('device-1');
-
-    await sendTaskNotification(onMessage, { threadName });
-
-    expect(mockFeishuHandler.sendTaskNotificationCard).toHaveBeenCalledTimes(1);
-    const [, elements] = mockFeishuHandler.sendTaskNotificationCard.mock.calls[0];
-    expect(elements.filter((element: any) => element.tag === 'markdown')
-      .map((element: any) => element.content).join('\n')).toContain(expectedLabel);
-  });
-
-  it('should silently drop payloads missing taskId without throwing', async () => {
-    const onMessage = await connectAndBind('device-1');
-
-    await sendTaskNotification(onMessage, {
-      taskNotification: { status: 'completed', summary: 'no id here', outputFile: '/tmp/x' },
-    });
-
-    expect(mockFeishuHandler.sendTaskNotificationCard).not.toHaveBeenCalled();
-  });
-
-  it('should silently drop payloads with a non-string summary without throwing', async () => {
-    const onMessage = await connectAndBind('device-1');
-
-    await sendTaskNotification(onMessage, {
-      taskNotification: { taskId: 'b4a2f1c9', status: 'completed', summary: 42 },
-    });
-
-    expect(mockFeishuHandler.sendTaskNotificationCard).not.toHaveBeenCalled();
-  });
-
-  it('should still send the card for unknown future statuses (forward compatibility)', async () => {
-    const onMessage = await connectAndBind('device-1');
-
-    await sendTaskNotification(onMessage, {
-      taskNotification: { taskId: 'b4a2f1c9', status: 'exploded', summary: 'weird new status', outputFile: '/tmp/x' },
-    });
-
-    expect(mockFeishuHandler.sendTaskNotificationCard).toHaveBeenCalledTimes(1);
-    const [, elements] = mockFeishuHandler.sendTaskNotificationCard.mock.calls[0];
-    expect(JSON.stringify(elements)).toContain('Ended');
+    expect(mockFeishuHandler.sendMessage).not.toHaveBeenCalled(); expect(mockFeishuHandler.sendTaskNotificationCard).not.toHaveBeenCalled(); expect(store.cards.size).toBe(0);
+    for (const title of ['🔒 Authorization Required', '⌨️ Waiting for Input']) {
+      await onMessage(Buffer.from(JSON.stringify({ type: 'notification', openId: 'user-1', title, message: 'Action required' })));
+      expect(mockFeishuHandler.sendMessage).toHaveBeenCalledWith('user-1', `**${title}**\n\nAction required`);
+    }
   });
 });

@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.228] - 2026-11-07
+
+### Changed
+- Retire standalone native background-task terminal notifications. The CLI stops forwarding Claude Code hooks and Codex completion callbacks, and the Router quietly drops legacy `task_notification` frames without cards, text fallback, reply associations, or task/recipient logging. Legacy notification options cannot restore this presentation.
+- Preserve native background execution, completion consumption and deduplication, main response/tool flow, actionable approvals and input prompts, managed worker progress and closeout, and inline file retrieval. Keep the generic card sender and legacy wire types for their remaining callers and compatibility.
+
 ## [1.6.227] - 2026-11-07
 
 ### Changed

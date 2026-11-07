@@ -53,6 +53,12 @@ result barriers. Worker activity also requires `delegationProgress`. Older peers
 keep their existing behavior; no percentage, model call, or prompt is added. See
 [Public Activity](../../README.md#public-activity) for provider coverage limits.
 
+### Background Task Notifications
+
+From CLI and Router 1.6.228, standalone native background-task terminal cards are retired. The CLI no longer publishes Claude Code hook or Codex callback completions as `task_notification` frames, including with legacy notification settings or explicit enable calls. The Router quietly discards these frames from older clients without creating cards, text fallbacks, or new reply associations. Existing main replies and their thread routing continue normally; no new setting or migration is required.
+
+Native background work and internal completion processing continue. Codex still consumes and deduplicates terminal items so late background output does not enter another turn. Authorization and waiting-for-input prompts, device/file approval, maintenance cards, managed worker progress and closeout, and inline attachment retrieval retain their existing behavior. This change does not delete native history, task results, or previously published messages.
+
 ## Maintenance Notices
 
 From CLI and Router 1.6.127, upgrade notices use concise Chinese summaries from `RELEASE_NOTES_ZH.md`, with one short title and bounded user-visible changes per release. `CHANGELOG.md` remains the English technical record. The CLI build requires matching current-version entries in both documents and bundles both, without online translation or model calls. New Routers show summaries directly and collapse technical details. Earlier maintenance-capable Routers show the summary in their existing collapsed panels; new Routers keep older CLI notes collapsed when no technical-details field is present. Cumulative ranges, silent first adoption, delivery acknowledgements, and protocol version 1 are unchanged.

@@ -325,7 +325,7 @@ Use the current [CLI types](packages/cli/src/types/index.ts), [Router types](pac
 
 - Registration exchanges the protocol version and optional capabilities such as `queueStarted`, `taskRecovery`, and `approvalCards`.
 - `threadId` associates commands and output with a remote-cli thread; a backend's session ID is a separate identifier.
-- Streaming supports text, tools, images, filtered-thinking notices, and plan messages. Background tasks use separate `task_notification` cards.
+- Streaming supports text, tools, images, filtered-thinking notices, and plan messages. Native background terminal events remain internal; Router 1.6.228 and newer quietly discard legacy `task_notification` frames.
 - Queue-start and task-recovery messages establish fresh execution cards before subsequent output is routed to them. Recovery sends metadata and later output, not a replay of disconnected output.
 - Follow the Protocol Versioning section below and both compatibility test files when changing the wire format.
 
@@ -457,7 +457,7 @@ CodexAppServerExecutor keeps one app-server process per active thread. It uses a
 
 Known gaps vs Claude backend: no native Claude hook events. The app-server path supports Codex image inputs.
 
-Codex background command and sub-agent completion events also produce standalone task cards through `onTaskNotification`. This tracking is process-local and depends on the events exposed by the installed Codex version; see [Background Task Notifications](README.md#background-task-notifications) for the supported behavior.
+Codex background command and sub-agent terminal tracking remains process-local and depends on native event availability. Keep the `onTaskNotification` completion callback installed for native item consumption and deduplication, but do not publish these events to Feishu. Standalone background terminal cards are retired from 1.6.228; see [Background Task Notifications](README.md#background-task-notifications).
 
 **Slash passthrough (Codex)**: none — app-server has no interactive TUI slash-command protocol, so backend-specific slash commands are rejected. remote-cli's built-in commands (`/clear`, `/compact`, `/model`, `/effort`, ...) are handled locally.
 
