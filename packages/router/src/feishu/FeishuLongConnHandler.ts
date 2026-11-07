@@ -1,4 +1,5 @@
 import type { InlineFileCards } from '../output/InlineFileCards';
+import { ASSISTANT_FOOTER_ID, THREAD_CONTROLS_ID } from '../output/InlineFileCards';
 import { OutputApiRejection } from '../output/OutputTransfers';
 import { CardDeliveryDiagnostics, type CardDiagnosticContext, deliveryEvent, safeCardError, safeSdkLogger } from '../utils/DeliveryDiagnostics';
 import * as lark from '@larksuiteoapi/node-sdk';
@@ -1845,7 +1846,7 @@ Examples:
       // the settings controller replace the whole body without a visual jump.
       const headerElements = bare ? [] : this.createResponseHeaderElements(threadName || 'Resolving thread...', cwd);
       const finalElements: any[] = [...headerElements];
-      const footerElements: any[] = bare ? [] : [{ tag: 'markdown', content: noteContent }];
+      const footerElements: any[] = bare ? [] : [{ tag: 'markdown', ...(this.inlineFiles?.hasRoot(messageId) ? { element_id: ASSISTANT_FOOTER_ID } : {}), content: noteContent }];
       const metadataElement = !bare && !queueConfirmation ? createExecutionMetadataElement(executionMetadata) : null;
       if (metadataElement) footerElements.push(metadataElement);
       finalElements.push(...elements, ...footerElements);
@@ -1976,7 +1977,7 @@ Examples:
     }
 
     return [
-      { tag: 'hr' },
+      { tag: 'hr', ...(this.inlineFiles ? { element_id: THREAD_CONTROLS_ID } : {}) },
       ...(replyLabel ? [{ tag: 'markdown', content: `📍 **Reply from:** ${replyLabel}` }] : []),
       ...rows,
     ];

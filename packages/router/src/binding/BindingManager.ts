@@ -12,18 +12,28 @@ export interface BindingRedemption {
 
 export type DeviceEnrollmentBoundary = (deviceId: string, phase: 'begin' | 'end') => void;
 
+// Router and Feishu handlers construct separate managers over the same store.
+// Keep callbacks inside their shared queue so ownership cannot change mid-enrollment.
+const mutationQueues = new WeakMap<JsonStore, { tail: Promise<void> }>();
+
 /** Serializes ownership mutations sharing one JsonStore, including key callbacks. */
 export class BindingManager {
   private store: JsonStore;
-  private mutationTail: Promise<void> = Promise.resolve();
+  private readonly mutations: { tail: Promise<void> };
 
   constructor(store: JsonStore) {
     this.store = store;
+    let mutations = mutationQueues.get(store);
+    if (!mutations) {
+      mutations = { tail: Promise.resolve() };
+      mutationQueues.set(store, mutations);
+    }
+    this.mutations = mutations;
   }
 
   private mutate<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.mutationTail.then(operation);
-    this.mutationTail = result.then(() => undefined, () => undefined);
+    const result = this.mutations.tail.then(operation);
+    this.mutations.tail = result.then(() => undefined, () => undefined);
     return result;
   }
 
@@ -267,7 +277,7 @@ export class BindingManager {
   }
 
   async close(): Promise<void> {
-    await this.mutationTail;
+    await this.mutations.tail;
     await this.store.flush();
   }
 }
