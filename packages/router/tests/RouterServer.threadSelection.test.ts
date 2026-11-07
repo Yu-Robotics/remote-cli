@@ -659,21 +659,24 @@ describe('Router durable selected-thread integration', () => {
     }
   });
 
-  it('does not register a notification that completes after unbind and rebind', async () => {
+  it('keeps the generic approval card sender while fencing a late association after unbind and rebind', async () => {
     const first = await createRouter();
     await first.bindings.bindUser('user-a', 'device-a', 'A');
     let release!: (id: string) => void;
     const create = vi.spyOn(first.feishu, 'sendTaskNotificationCard').mockImplementationOnce(() =>
       new Promise<string>(resolve => { release = resolve; }));
-    const pending = (first.server as any).handleTaskNotification('user-a',
-      { taskId: 'synthetic-task', status: 'completed', summary: 'Done' }, 'target', 'device-a');
-    await vi.waitFor(() => expect(create).toHaveBeenCalledOnce());
-    await first.bindings.unbindDevice('user-a', 'device-a');
-    await first.bindings.bindUser('user-a', 'device-a', 'A');
-    release('late-notification');
-    await pending;
-    const restored = await createRouter();
-    expect(await (restored.server as any).resolveCardThread('late-notification', 'user-a')).toBeUndefined();
+    const pending = (first.server as any).approvalCards.receive({ type: 'approval_request', messageId: 'synthetic-approval',
+      taskMessageId: 'foreground-task', openId: 'user-a', threadId: 'target', threadName: 'Target', cwd: home,
+      approval: { requestId: 'synthetic-approval', kind: 'file', description: 'Write a synthetic report', canRemember: false }, timestamp: Date.now(),
+    }, 'device-a', () => true);
+    try {
+      await vi.waitFor(() => expect(create).toHaveBeenCalledWith('user-a', expect.any(Array), expect.objectContaining({ title: { content: '🔐 Permission request', tag: 'plain_text' } })));
+      await first.bindings.unbindDevice('user-a', 'device-a');
+      await first.bindings.bindUser('user-a', 'device-a', 'A');
+      release('late-approval'); await pending;
+      const restored = await createRouter();
+      expect(await (restored.server as any).resolveCardThread('late-approval', 'user-a')).toBeUndefined();
+    } finally { release?.('late-approval'); await Promise.allSettled([pending]); }
   });
 
   it('rejects a pending switch when ownership changes before its catalog arrives', async () => {

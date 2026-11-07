@@ -1,3 +1,7 @@
+import fs from 'fs/promises';
+import os from 'os';
+import path from 'path';
+import { FeishuNotificationAdapter } from '../src/hooks/FeishuNotificationAdapter';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { ClaudePersistentExecutor } from '../src/executor/ClaudePersistentExecutor';
 import { DirectoryGuard } from '../src/security/DirectoryGuard';
@@ -40,6 +44,8 @@ import { spawn } from 'child_process';
  * bus WITHOUT interfering with the current command lifecycle.
  */
 describe('ClaudePersistentExecutor - task_notification', () => {
+  let fixtureRoot: string;
+  let workspace: string;
   let executor: ClaudePersistentExecutor;
   let directoryGuard: DirectoryGuard;
   const mockSpawn = spawn as any;
@@ -51,7 +57,10 @@ describe('ClaudePersistentExecutor - task_notification', () => {
     mockChildProcess.stdout.emit('data', Buffer.from(JSON.stringify(obj) + '\n'));
   };
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    fixtureRoot = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'native-background-hooks-')));
+    workspace = path.join(fixtureRoot, 'workspace'); await fs.mkdir(workspace);
+    vi.spyOn(os, 'homedir').mockReturnValue(fixtureRoot);
     vi.useFakeTimers();
     vi.clearAllMocks();
 
@@ -59,7 +68,7 @@ describe('ClaudePersistentExecutor - task_notification', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(console, 'log').mockImplementation(() => {});
 
-    directoryGuard = new DirectoryGuard(['~/test-project', './work']);
+    directoryGuard = new DirectoryGuard([workspace]);
 
     mockChildProcess = new EventEmitter() as any;
     mockChildProcess.stdout = new EventEmitter();
@@ -76,7 +85,7 @@ describe('ClaudePersistentExecutor - task_notification', () => {
     };
     claudeCodeHooks.onTaskNotification(notificationListener);
 
-    executor = new ClaudePersistentExecutor(directoryGuard, '~/test-project', 'thread-1');
+    executor = new ClaudePersistentExecutor(directoryGuard, workspace, 'thread-1');
   });
 
   afterEach(async () => {
@@ -90,8 +99,8 @@ describe('ClaudePersistentExecutor - task_notification', () => {
       await vi.advanceTimersByTimeAsync(9_000);
       await cleanup;
     } finally {
-      vi.useRealTimers();
-      vi.clearAllMocks();
+      vi.useRealTimers(); vi.restoreAllMocks();
+      await fs.rm(fixtureRoot, { recursive: true, force: true });
     }
   });
 
@@ -118,7 +127,7 @@ describe('ClaudePersistentExecutor - task_notification', () => {
       type: 'system',
       subtype: 'init',
       session_id: 'session-xyz',
-      cwd: '/home/user/test-project',
+      cwd: workspace,
     });
     expect(executor.getSessionId()).toBe('session-xyz');
   };
@@ -142,7 +151,7 @@ describe('ClaudePersistentExecutor - task_notification', () => {
       task_id: 'b4a2f1',
       status: 'completed',
       summary: 'Build finished successfully',
-      output_file: '/tmp/claude-outputs/b4a2f1.log',
+      output_file: path.join(fixtureRoot, 'background.log'),
       session_id: 'session-xyz',
     });
 
@@ -161,7 +170,7 @@ describe('ClaudePersistentExecutor - task_notification', () => {
       taskId: 'b4a2f1',
       status: 'completed',
       summary: 'Build finished successfully',
-      outputFile: '/tmp/claude-outputs/b4a2f1.log',
+      outputFile: path.join(fixtureRoot, 'background.log'),
       threadId: 'thread-1',
       sessionId: 'session-xyz',
     });
@@ -180,7 +189,7 @@ describe('ClaudePersistentExecutor - task_notification', () => {
       task_id: 'c7d8e9',
       status: 'failed',
       summary: 'Tests failed: 2 failures',
-      output_file: '/tmp/claude-outputs/c7d8e9.log',
+      output_file: path.join(fixtureRoot, 'failed.log'),
       session_id: 'session-xyz',
     });
 
@@ -189,6 +198,20 @@ describe('ClaudePersistentExecutor - task_notification', () => {
     expect(receivedNotifications).toHaveLength(1);
     expect(receivedNotifications[0].taskId).toBe('c7d8e9');
     expect(receivedNotifications[0].status).toBe('failed');
+  }, 10000);
+
+  it.each(['owner', undefined])('keeps real native completion hooks internal during and after a command (recipient=%j)', async recipient => {
+    const sender = { send: vi.fn() };
+    const adapter = new FeishuNotificationAdapter(sender as any, { enabledNotifications: ['task_notification'] });
+    adapter.enableNotification('task_notification'); adapter.setCurrentOpenId(recipient); adapter.register();
+    try {
+      const command = executor.execute('Synthetic foreground task'); await startProcessAndInit(command);
+      emitJson({ type: 'system', subtype: 'task_notification', task_id: 'native-background', status: 'completed', summary: 'Native result', output_file: path.join(fixtureRoot, 'background.log'), session_id: 'session-xyz' });
+      expect(receivedNotifications).toHaveLength(1); expect(sender.send).not.toHaveBeenCalled();
+      completeCommand(); await expect(command).resolves.toMatchObject({ success: true });
+      emitJson({ type: 'system', subtype: 'task_notification', task_id: 'native-late', status: 'failed', summary: 'Late native result', output_file: path.join(fixtureRoot, 'late.log'), session_id: 'session-xyz' });
+      expect(receivedNotifications).toHaveLength(2); expect(sender.send).not.toHaveBeenCalled();
+    } finally { adapter.unregister(); }
   }, 10000);
 
   it('should support all three task statuses', async () => {
@@ -205,7 +228,7 @@ describe('ClaudePersistentExecutor - task_notification', () => {
         task_id: `task-${status}`,
         status,
         summary: `Task ${status}`,
-        output_file: `/tmp/${status}.log`,
+        output_file: path.join(fixtureRoot, `${status}.log`),
         session_id: 'session-xyz',
       });
     }

@@ -12,7 +12,6 @@ import {
   TaskNotificationContext,
 } from './ClaudeCodeHooks';
 import { WebSocketClient } from '../client/WebSocketClient';
-import { v4 as uuidv4 } from 'uuid';
 
 /**
  * Feishu Notification Adapter
@@ -28,8 +27,6 @@ export class FeishuNotificationAdapter {
   private wsClient: WebSocketClient;
   private currentOpenId?: string;
   private enabledNotifications: Set<string>;
-  /** Resolves a thread ID to its display name (wired by MessageHandler) */
-  private threadNameResolver?: (threadId: string) => string | undefined;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private registeredHandlers: Array<{ event: string; handler: (...args: any[]) => any }> = [];
 
@@ -45,14 +42,13 @@ export class FeishuNotificationAdapter {
     } = {}
   ) {
     this.wsClient = wsClient;
-    this.enabledNotifications = new Set(options.enabledNotifications || [
+    this.enabledNotifications = new Set((options.enabledNotifications || [
       'task_started',
       'task_completed',
       'task_failed',
       'task_aborted',
       'authorization_required',
-      'task_notification',
-    ]);
+    ]).filter(type => type !== 'task_notification'));
   }
 
   /**
@@ -62,13 +58,8 @@ export class FeishuNotificationAdapter {
     this.currentOpenId = openId;
   }
 
-  /**
-   * Set a resolver that maps thread IDs to display names.
-   * Used to enrich background task notifications with the thread name.
-   */
-  setThreadNameResolver(resolver: (threadId: string) => string | undefined): void {
-    this.threadNameResolver = resolver;
-  }
+  /** @deprecated Background terminal cards are retired; kept for internal compatibility. */
+  setThreadNameResolver(_resolver: (threadId: string) => string | undefined): void {}
 
   /**
    * Register all hook handlers
@@ -79,7 +70,6 @@ export class FeishuNotificationAdapter {
     this.registerToolExecutionHandlers();
     this.registerProgressHandler();
     this.registerUserInputHandler();
-    this.registerTaskNotificationHandler();
   }
 
   /**
@@ -251,51 +241,8 @@ Please respond with /authorize grant or /authorize deny`;
     this.registeredHandlers.push({ event: HookEventType.PROGRESS_UPDATE, handler: progressHandler as (...args: unknown[]) => unknown });
   }
 
-  /**
-   * Register background task notification handler (Claude Code 2.x)
-   *
-   * Unlike the task lifecycle handlers above, these events fire when a
-   * background task finishes — often while no command is running — so they
-   * are sent as a structured `task_notification` message. The router renders
-   * them as a standalone Feishu card (no active streaming card may exist).
-   */
-  private registerTaskNotificationHandler(): void {
-    const handler = (context: TaskNotificationContext) => {
-      this.sendTaskNotification(context, this.currentOpenId);
-    };
-    claudeCodeHooks.onTaskNotification(handler);
-    this.registeredHandlers.push({ event: HookEventType.TASK_NOTIFICATION, handler });
-  }
-
-  /** Send the same task card for hooks and executor callbacks with an explicit recipient. */
-  sendTaskNotification(context: TaskNotificationContext, openId: string | undefined): void {
-    if (!this.enabledNotifications.has('task_notification')) return;
-
-    if (!openId) {
-      console.log(`[FeishuAdapter] No OpenID set, skipping task notification: ${context.taskId}`);
-      return;
-    }
-
-    try {
-      this.wsClient.send({
-        type: 'task_notification',
-        messageId: uuidv4(),
-        openId,
-        threadId: context.threadId,
-        threadName: context.threadId ? this.threadNameResolver?.(context.threadId) : undefined,
-        taskNotification: {
-          taskId: context.taskId,
-          status: context.status,
-          summary: context.summary,
-          outputFile: context.outputFile,
-        },
-        timestamp: Date.now(),
-      });
-      console.log(`[FeishuAdapter] Sent task notification: ${context.taskId} (${context.status})`);
-    } catch (error) {
-      console.error('[FeishuAdapter] Failed to send task notification:', error);
-    }
-  }
+  /** @deprecated Native completion remains internal; this compatibility method never sends. */
+  sendTaskNotification(_context: TaskNotificationContext, _openId: string | undefined): void {}
 
   /**
    * Register user input handler
@@ -371,6 +318,7 @@ Please reply with your response to continue.`;
    * Enable specific notification types
    */
   enableNotification(type: string): void {
+    if (type === 'task_notification') return;
     this.enabledNotifications.add(type);
   }
 

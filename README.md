@@ -1289,11 +1289,9 @@ From CLI 1.6.153, Codex shell calls no longer lose their label when native comma
 
 ### Background Task Notifications
 
-Claude Code and Codex can send a standalone task card when a background task finishes, even after the original reply has completed. Both use the same completed, failed, and stopped card styles, show the originating thread, and let you reply to the card to continue that thread. Foreground commands stay in their original response; duplicate completion events do not create duplicate Codex task cards.
+From CLI and Router 1.6.228, standalone native background-task terminal cards are retired. The CLI no longer publishes Claude Code hook or Codex callback completions as `task_notification` frames, including with legacy notification settings or explicit enable calls. The Router quietly discards these frames from older clients without creating cards, text fallbacks, or new reply associations. Existing main replies and their thread routing continue normally; no new setting or migration is required.
 
-Router 1.6.117 and newer explicitly label standalone background-task notifications **Background task**. The status, originating thread name (or thread ID when no name is provided), and abbreviated task ID remain visible, while **View details** is collapsed by default and contains the rich Markdown result and optional output path. Failed tasks also show a short, literal failure summary outside the panel. This changes only the Router presentation: the CLI protocol, foreground replies, delegated-worker cards, and reply-to-thread routing remain unchanged.
-
-Codex watches native command completion events and sub-agent terminal states. Command cards include the command, exit code when available, and an output excerpt; sub-agent cards use the reported result. It does not run another model turn to generate these cards. Native command notifications were verified with Codex 0.154.0; sub-agent event availability depends on the installed Codex version. Tracking lasts for the current executor process: clearing a conversation, switching its backend, or restarting/disconnecting the Codex process discards its watchers. This does not add durable background-task recovery or change AGY support.
+Native background work and internal completion processing continue. Codex still consumes and deduplicates terminal items so late background output does not enter another turn. Authorization and waiting-for-input prompts, device/file approval, maintenance cards, managed worker progress and closeout, and inline attachment retrieval retain their existing behavior. This change does not delete native history, task results, or previously published messages.
 
 ### Image Input
 

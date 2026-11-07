@@ -136,7 +136,7 @@ describe('Router recipient ownership', () => {
     expect((server as any).completedTasks.get('completed-task')).toMatchObject({ deviceId: 'device-1' });
   });
 
-  it('delivers independent bound legacy notifications and task cards', async () => {
+  it('delivers bound authorization notifications while dropping retired background cards', async () => {
     owners.set('device-1', 'owner');
     const socket = connect();
     await register(socket);
@@ -149,8 +149,8 @@ describe('Router recipient ownership', () => {
     });
 
     expect(feishu.sendMessage).toHaveBeenCalledWith('owner', '**🔒 Authorization Required**\n\nApprove?');
-    expect(feishu.sendTaskNotificationCard).toHaveBeenCalledWith('owner', expect.any(Array));
-    expect((server as any).store.getCardThread('background-card')).toMatchObject({ deviceId: 'device-1', threadId: 'thread-1' });
+    expect(feishu.sendTaskNotificationCard).not.toHaveBeenCalled();
+    expect((server as any).store.getCardThread('background-card')).toBeUndefined();
   });
 
   it.each([

@@ -406,126 +406,32 @@ describe('FeishuNotificationAdapter', () => {
   });
 
 
-  describe('background task notifications (task_notification)', () => {
-    it('uses an explicit executor recipient and honors disabled notifications', () => {
-      adapter.setCurrentOpenId('another-user');
-      const task = { taskId: 'exec-42', status: 'completed' as const, summary: 'Done', outputFile: '', threadId: 'thread-2' };
-      adapter.sendTaskNotification(task, 'task-owner');
-      expect(mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
-        type: 'task_notification', openId: 'task-owner', threadId: 'thread-2',
-      }));
-      mockWsClient.send.mockClear();
-      const disabled = new FeishuNotificationAdapter(mockWsClient, { enabledNotifications: [] });
-      disabled.sendTaskNotification(task, 'task-owner');
+  describe('retired background terminal presentation', () => {
+    const task = { taskId: 'native-task-sentinel', status: 'completed' as const, summary: 'Background summary sentinel', outputFile: '', threadId: 'thread' };
+    it.each([undefined, [], ['task_notification']])('cannot emit through native hooks with legacy settings %j', enabledNotifications => {
+      const configured = new FeishuNotificationAdapter(mockWsClient, { enabledNotifications });
+      configured.setCurrentOpenId('owner'); configured.register(); configured.enableNotification('task_notification');
+      const internal = vi.fn(); claudeCodeHooks.onTaskNotification(internal);
+      try {
+        for (const status of ['completed', 'failed', 'stopped']) claudeCodeHooks.emit(HookEventType.TASK_NOTIFICATION, { ...task, status });
+        expect(mockWsClient.send).not.toHaveBeenCalled(); expect(internal).toHaveBeenCalledTimes(3);
+        expect(configured.getEnabledNotifications()).not.toContain('task_notification');
+        expect(JSON.stringify(vi.mocked(console.log).mock.calls.filter(([line]) => String(line).startsWith('[FeishuAdapter]')))).not.toContain(task.taskId);
+      } finally { configured.unregister(); claudeCodeHooks.removeListener(HookEventType.TASK_NOTIFICATION, internal); }
+    });
+    it.each(['owner', undefined])('keeps the deprecated direct method silent for recipient %j even after explicit enable', recipient => {
+      adapter.setCurrentOpenId('another-owner'); adapter.enableNotification('task_notification');
+      adapter.setThreadNameResolver(() => 'Another thread'); adapter.sendTaskNotification(task, recipient);
       expect(mockWsClient.send).not.toHaveBeenCalled();
+      expect(JSON.stringify(vi.mocked(console.log).mock.calls.filter(([line]) => String(line).startsWith('[FeishuAdapter]')))).not.toContain(task.taskId);
     });
-
-    const emitTaskNotification = (overrides: Record<string, unknown> = {}) => {
-      claudeCodeHooks.emit(HookEventType.TASK_NOTIFICATION, {
-        taskId: 'b4a2f1',
-        status: 'completed',
-        summary: 'Build finished successfully',
-        outputFile: '/tmp/claude-outputs/b4a2f1.log',
-        threadId: 'thread-1',
-        sessionId: 'session-789',
-        ...overrides,
-      });
-    };
-
-    it('should be enabled by default', () => {
-      const defaultAdapter = new FeishuNotificationAdapter(mockWsClient);
-      expect(defaultAdapter.getEnabledNotifications()).toContain('task_notification');
-    });
-
-    it('should send a structured task_notification message when the hook fires', () => {
-      adapter.register();
-      adapter.setCurrentOpenId('user-123');
-
-      emitTaskNotification();
-
-      expect(mockWsClient.send).toHaveBeenCalledTimes(1);
-      const msg = mockWsClient.send.mock.calls[0][0];
-      expect(msg).toMatchObject({
-        type: 'task_notification',
-        openId: 'user-123',
-        threadId: 'thread-1',
-        taskNotification: {
-          taskId: 'b4a2f1',
-          status: 'completed',
-          summary: 'Build finished successfully',
-          outputFile: '/tmp/claude-outputs/b4a2f1.log',
-        },
-      });
-      // A fresh messageId is generated for tracing (no incoming command to reuse)
-      expect(typeof msg.messageId).toBe('string');
-      expect(msg.messageId.length).toBeGreaterThan(0);
-      expect(typeof msg.timestamp).toBe('number');
-    });
-
-    it('should skip sending when no openId is set', () => {
-      adapter.register();
-      // No setCurrentOpenId call
-
-      emitTaskNotification();
-
+    it('keeps background hooks internal after unregister and allows actionable input notifications', async () => {
+      adapter.register(); adapter.setCurrentOpenId('owner'); adapter.unregister();
+      claudeCodeHooks.emit(HookEventType.TASK_NOTIFICATION, task);
       expect(mockWsClient.send).not.toHaveBeenCalled();
-    });
-
-    it('should respect disabled notification type', () => {
-      const customAdapter = new FeishuNotificationAdapter(mockWsClient, {
-        enabledNotifications: ['task_started'],
-      });
-      customAdapter.register();
-      customAdapter.setCurrentOpenId('user-123');
-
-      emitTaskNotification();
-
-      expect(mockWsClient.send).not.toHaveBeenCalled();
-      customAdapter.unregister();
-    });
-
-    it('should not send after unregister', () => {
       adapter.register();
-      adapter.setCurrentOpenId('user-123');
-      adapter.unregister();
-
-      emitTaskNotification();
-
-      expect(mockWsClient.send).not.toHaveBeenCalled();
-    });
-
-    it('should include threadName when a thread name resolver is set', () => {
-      adapter.setThreadNameResolver((threadId: string) =>
-        threadId === 'thread-1' ? 'refactor-login' : undefined
-      );
-      adapter.register();
-      adapter.setCurrentOpenId('user-123');
-
-      emitTaskNotification();
-
-      const msg = mockWsClient.send.mock.calls[0][0];
-      expect(msg.threadName).toBe('refactor-login');
-    });
-
-    it('should omit threadName when the resolver returns undefined', () => {
-      adapter.setThreadNameResolver(() => undefined);
-      adapter.register();
-      adapter.setCurrentOpenId('user-123');
-
-      emitTaskNotification();
-
-      const msg = mockWsClient.send.mock.calls[0][0];
-      expect(msg.threadName).toBeUndefined();
-    });
-
-    it('should omit threadName when no resolver is set', () => {
-      adapter.register();
-      adapter.setCurrentOpenId('user-123');
-
-      emitTaskNotification();
-
-      const msg = mockWsClient.send.mock.calls[0][0];
-      expect(msg.threadName).toBeUndefined();
+      await claudeCodeHooks.requestUserInput({ prompt: 'Choose an option', type: 'text' });
+      expect(mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'notification', title: '⌨️ Waiting for Input', openId: 'owner' }));
     });
   });
 });

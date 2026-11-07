@@ -1,3 +1,4 @@
+import { CodexTaskNotifications } from '../src/executor/CodexTaskNotifications';
 import { ThreadContextReset } from '../src/thread/ThreadContextReset';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'events';
@@ -467,28 +468,29 @@ describe('MessageHandler', () => {
     });
   });
 
-  it('sends late task cards to the originating user and thread after another request completes', async () => {
+  it.each(['original-user', undefined])('retires late native task cards without losing completion consumption (recipient=%j)', async recipient => {
     ctx.mockExecutor.execute.mockResolvedValue({ success: true, output: 'Started in background' });
-    await ctx.handler.handleMessage({ type: 'command', messageId: 'launch-task', content: 'run tests', openId: 'original-user', timestamp: Date.now() });
+    const adapter = (ctx.handler as any).notificationAdapter;
+    adapter.enableNotification('task_notification');
+    await ctx.handler.handleMessage({ type: 'command', messageId: 'launch-task', content: 'run tests', openId: recipient, timestamp: Date.now() });
     const notify = ctx.mockExecutor.execute.mock.calls[0][1].onTaskNotification;
+    expect(notify).toBeTypeOf('function');
+    expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'response', messageId: 'launch-task', success: true }));
     const original = ctx.mockThreadManager.getThread('default-thread-id')!;
-    vi.mocked(ctx.mockThreadManager.getThread).mockImplementation((id) => id === original.id
-      ? original : { ...original, id: 'second-thread-id', name: 'thread-2' });
+    vi.mocked(ctx.mockThreadManager.getThread).mockImplementation(id => id === original.id ? original : { ...original, id: 'second-thread-id', name: 'thread-2' });
     await ctx.handler.handleMessage({ type: 'command', messageId: 'other-request', content: 'hello', openId: 'other-user', threadId: 'second-thread-id', timestamp: Date.now() });
     ctx.mockWsClient.send.mockClear();
-    const task = { taskId: 'exec-42', status: 'completed', summary: 'Tests passed', outputFile: '' };
-    notify(task);
-    expect(ctx.mockWsClient.send).toHaveBeenCalledTimes(1);
-    expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
-      type: 'task_notification', openId: 'original-user', threadId: 'default-thread-id', threadName: 'default', taskNotification: task,
-    }));
-    const card = ctx.mockWsClient.send.mock.calls[0][0];
-    expect(card.messageId).not.toBe('launch-task');
-    expect(card.messageId).not.toBe('other-request');
-
-    ctx.mockWsClient.send.mockClear();
+    const tracker = new CodexTaskNotifications(vi.fn());
+    const item = { type: 'commandExecution', id: 'native-command', command: 'npm test', status: 'inProgress' };
+    tracker.handle('item/started', { turnId: 'original-turn', item }, notify);
+    tracker.handle('turn/completed', { turn: { id: 'original-turn' } });
+    const completion = { turnId: 'original-turn', item: { ...item, status: 'completed', exitCode: 0, aggregatedOutput: 'Native background result' } };
+    expect(tracker.handle('item/completed', completion)).toBe(true);
+    expect(tracker.handle('item/completed', completion)).toBe(true);
+    notify({ taskId: 'native-agent', status: 'failed', summary: 'Native agent result', outputFile: '' });
+    expect(ctx.mockWsClient.send).not.toHaveBeenCalled();
     vi.mocked(ctx.mockThreadManager.getThread).mockReturnValue(undefined);
-    notify(task);
+    notify({ taskId: 'retired-agent', status: 'stopped', summary: 'Stopped', outputFile: '' });
     expect(ctx.mockWsClient.send).not.toHaveBeenCalled();
   });
 

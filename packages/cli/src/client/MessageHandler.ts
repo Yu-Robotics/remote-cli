@@ -2593,12 +2593,9 @@ You can also use natural language commands to control Claude Code CLI.`,
       } else if (thread?.delegationBackends?.includes(this.threadPool.getBackendKey(threadId)) && executor.configureDelegation) {
         await executor.configureDelegation(undefined);
       }
-      const onTaskNotification = (notification: TaskNotificationInfo): void => {
-        if (this.isDestroyed || !this.threadManager.getThread(threadId)
-          || (this.conversationRevisions.get(threadId) ?? 0) !== conversationRevision
-          || (this.threadManager.getThread(threadId)?.delegationWorkspaceGeneration ?? 0) !== (thread?.delegationWorkspaceGeneration ?? 0)) return;
-        this.notificationAdapter.sendTaskNotification({ ...notification, threadId }, openId);
-      };
+      // Retain the callback so native completion tracking consumes late items
+      // and deduplicates them without adding background output to another turn.
+      const onTaskNotification = (_notification: TaskNotificationInfo): void => {};
       const outputLinks = new OutputLinks();
       const imageCwd = thread?.workingDirectory ?? executor.getCurrentWorkingDirectory();
       const imageGeneration = thread?.delegationWorkspaceGeneration ?? 0;
