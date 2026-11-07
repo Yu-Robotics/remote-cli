@@ -34,6 +34,13 @@ describe('local delegation storage commands', () => {
     await delegationStorageCommand('discard', { plan: file, discardContents: true, confirmWorkersStopped: true }, cleanup);
     expect(discard).toHaveBeenCalledWith(file, { discardContents: true, confirmWorkersStopped: true });
   });
+  it('dispatches exact failed-worker recovery without offline flags or a second loss confirmation', async () => {
+    const cleanup = new LegacyWorkspaceCleanup(path.join(home, '.remote-cli'));
+    const discard = vi.spyOn(cleanup, 'discardFailedWorker').mockResolvedValue({ removed: true });
+    await expect(delegationStorageCommand('discard-failed', {}, cleanup)).rejects.toThrow('--task and --lane');
+    await delegationStorageCommand('discard-failed', { task: 'synthetic-task', lane: 'synthetic-lane' }, cleanup);
+    expect(discard).toHaveBeenCalledWith('synthetic-lane', 'synthetic-task');
+  });
   it('registers the exact hierarchy and reports command failure', async () => {
     const program = new Command(); registerDelegationStorage(program);
     const output = vi.spyOn(console, 'log').mockImplementation(() => undefined);

@@ -186,12 +186,24 @@ describe('code-enforced delegated artifact closeout', { timeout: 30_000 }, () =>
     expect(response()).toMatchObject({ success: false, error: expect.stringContaining('unavailable') });
   });
 
-  it('does not mistake failed collection for an empty worker result', async () => {
+  it('settles an unavailable failed-worker obligation after actual disposal without perpetual model rounds', async () => {
     vi.spyOn(DelegatedWorkspaceManager.prototype, 'collect').mockRejectedValue(new Error('Fixture storage failure'));
     await run();
-    expect(main.execute).toHaveBeenCalledTimes(3);
-    expect(response()).toMatchObject({ success: false, error: expect.stringContaining('unavailable') });
     expect(workerExecutions).toBe(1);
+    if (process.platform === 'linux') {
+      expect(main.execute).toHaveBeenCalledOnce();
+      expect(response()).toMatchObject({ success: true });
+      const record = JSON.parse(await fs.readFile(path.join(fixture.directory, '.remote-cli', 'delegation', `${taskId}.json`), 'utf8'));
+      expect(record.state).toBe('failed'); expect(record.error).toContain('Failed worker contents were discarded');
+      expect(await fs.readFile(path.join(fixture.root, 'source.txt'), 'utf8')).toBe('first\nsecond\nthird\n');
+      await handler.handleMessage(message('after-failure', 'Another ordinary request'));
+      expect(main.execute).toHaveBeenCalledTimes(2); expect(workerExecutions).toBe(1);
+      expect(socket.send.mock.calls.map(([value]: any[]) => value).find((value: any) => value.type === 'response' && value.messageId === 'after-failure'))
+        .toMatchObject({ success: true });
+    } else {
+      expect(main.execute).toHaveBeenCalledTimes(3);
+      expect(response()).toMatchObject({ success: false, error: expect.stringContaining('unavailable') });
+    }
   });
 
   it('retains verified failed worker edits without an extra model round or automatic application', async () => {

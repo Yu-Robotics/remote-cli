@@ -5,6 +5,9 @@ import fs from 'fs/promises';
 import path from 'path';
 import { gitText, runGit } from './GitCheckpoint';
 import { replaceAtomicFile } from './AtomicFile';
+import type { DelegatedWorkspace } from './DelegatedWorkspaceManager';
+import { assertDisposableTree } from './WorkspaceDisposal';
+import { syncDirectory } from './OwnershipRuntime';
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const HASH = /^[a-f0-9]{64}$/;
@@ -194,7 +197,8 @@ export async function completedLegacyDiscard(workspaceRoot: string, laneId: stri
 }
 
 /**
- * Offline-only, explicit loss of checkout contents. Artifacts, refs, and native records are retained.
+ * Guarded loss of checkout contents. Frozen plans require offline ownership;
+ * exact terminal failures support online disposal. Refs and native records are retained.
  * A ready label is not strict reclamation proof. Lane discard never manufactures
  * the reclaiming/reclaimed receipts required for safe native rehydration.
  * Shared ownership fences cooperating CLI writers, not arbitrary OS-user filesystem mutations.
@@ -414,6 +418,233 @@ export class LegacyWorkspaceCleanup {
       }
       return result;
     } finally { await ownership.release(); }
+  }
+
+  /**
+   * Exact terminal failed-worker loss, independent of native-history deletion.
+   * Online callers lend their real storage owner. A standalone caller acquires
+   * its own maintenance lease and the SAME native repository lease as the daemon.
+   * The pending compatible tombstone fences old-binary lane admission before loss.
+   */
+  async discardFailedWorker(laneId: string, taskId: string, owner?: CleanupOwnership): Promise<{ removed: true }> {
+    if (!UUID.test(laneId) || !UUID.test(taskId)) throw new Error('Invalid failed-worker target');
+    await canonicalDirectory(this.root); await canonicalDirectory(this.workerRoot);
+    await canonicalDirectory(this.workspaceRoot); await canonicalDirectory(path.join(this.workspaceRoot, 'lanes'));
+    await canonicalDirectory(path.join(this.workspaceRoot, 'artifacts'));
+    const file = path.join(this.workspaceRoot, 'lanes', `${laneId}.json`);
+    const workspaceBytes = await boundedRead(file);
+    const workspace = metadata(workspaceBytes) as DelegatedWorkspace;
+    if (workspace.taskId !== taskId || workspace.laneId !== laneId) throw new Error('Failed-worker task was rebound');
+    let standalone: CleanupOwnership | undefined;
+    if (!owner) {
+      const modulePath = './DelegationOwnership';
+      const { DelegationOwnership } = await import(modulePath);
+      // This is real, journaled ownership, not a replacement for the daemon's
+      // live storage lease. Repository exclusion and the terminal lane fence
+      // allow unrelated daemon workers to continue using their existing owner.
+      const lease: CleanupOwnership = new DelegationOwnership(path.join(this.root, 'failed-worker-disposal'));
+      await lease.acquire(); standalone = lease; owner = lease;
+    }
+    try {
+      return await owner!.withRepository(workspace.source.commonDirectory, async () => {
+        await canonicalDirectory(this.root); await canonicalDirectory(this.workerRoot);
+        if (!(await boundedRead(file)).equals(workspaceBytes)) throw new Error('Failed-worker workspace changed');
+        if (await completedLegacyDiscard(this.workspaceRoot, laneId, taskId)) return { removed: true as const };
+        const worker = metadata(await boundedRead(path.join(this.workerRoot, `${laneId}.json`)));
+        const generation = worker.contextGeneration ?? 0;
+        const workerKey = () => JSON.stringify([worker.id, worker.executorThreadId, worker.threadId, worker.workingDirectory,
+          worker.workspaceGeneration, generation, worker.nativeGroupExitGeneration, worker.shutdownConfirmedGeneration]);
+        const proof = workerKey();
+        const artifactFile = path.join(this.workspaceRoot, 'artifacts', `${taskId}.json`);
+        const backupFile = path.join(this.workerRoot, 'failed-disposal-intents', `${laneId}.artifact.json`);
+        let artifactHash: string | undefined;
+        try {
+          const artifactBytes = await boundedRead(artifactFile);
+          const artifact = metadata(artifactBytes);
+          if (artifact.taskId !== taskId || artifact.laneId !== laneId || artifact.threadId !== workspace.threadId
+            || artifact.disposalPolicy !== 1 || artifact.recovery || artifact.closeout?.taskId !== taskId
+            || artifact.closeout?.recoverable !== false || !['applied', 'pending', 'retained'].includes(artifact.disposition)
+            || artifact.workspaceGeneration !== workspace.workspaceGeneration
+            || artifact.source?.root !== workspace.source.root || artifact.source?.cwd !== workspace.source.cwd
+            || artifact.source?.commonDirectory !== workspace.source.commonDirectory || artifact.source?.relativeCwd !== workspace.source.relativeCwd
+            || artifact.input?.commit !== workspace.input.commit || !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(artifact.output ?? '')
+            || !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(artifact.tree ?? '')
+            || artifact.closeout.output !== artifact.output || artifact.closeout.tree !== artifact.tree) {
+            throw new Error('A valid pending artifact or parent recovery record must be preserved');
+          }
+          artifactHash = digest(artifactBytes);
+        } catch (error) { if (!missing(error)) throw error; }
+        let terminalRecord: { id: string; threadId: string; state: string; startedAt: number; finishedAt: number } | undefined;
+        const assertEligible = async () => {
+          for (const directory of [this.workerRoot, this.workspaceRoot, path.join(this.workspaceRoot, 'lanes'),
+            path.join(this.workspaceRoot, 'artifacts')]) await canonicalDirectory(directory);
+          const current = metadata(await boundedRead(path.join(this.workerRoot, `${laneId}.json`)));
+          if (current.id !== laneId || current.executorThreadId !== `delegate-lane-${laneId}`
+            || current.threadId !== workspace.threadId || current.workingDirectory !== workspace.source.cwd
+            || current.workspaceGeneration !== workspace.workspaceGeneration || !Number.isSafeInteger(generation) || generation < 0
+            || JSON.stringify([current.id, current.executorThreadId, current.threadId, current.workingDirectory,
+            current.workspaceGeneration, current.contextGeneration ?? 0, current.nativeGroupExitGeneration,
+            current.shutdownConfirmedGeneration]) !== proof || current.state !== 'dirty' || current.cleanupPending === true
+            || current.nativeHistoryExitUnconfirmed === true || current.nativeMaintenanceExitUnconfirmed === true
+            || current.nativeGroupExitGeneration !== generation || current.shutdownConfirmedGeneration !== generation
+            || workspace.directory !== path.join(this.workspaceRoot, 'trees', digest(workspace.source.root), laneId)
+            || workspace.cwd !== path.join(workspace.directory, workspace.source.relativeCwd)
+            || workspace.disposalPolicy !== 1 || workspace.checkoutState !== 'present'
+            || workspace.pendingTaskId !== undefined && workspace.pendingTaskId !== taskId
+            || workspace.cleanup?.reason !== 'capture-failed' && workspace.failedCollection?.taskId !== taskId) throw new Error('Failed worker exit, failure or acquisition identity is unconfirmed');
+          if (!(await boundedRead(file)).equals(workspaceBytes)) throw new Error('Failed-worker workspace changed');
+          try {
+            const artifact = await boundedRead(artifactFile);
+            if (!artifactHash || digest(artifact) !== artifactHash) throw new Error('Artifact changed; preserve parent output');
+          } catch (error) { if (!missing(error)) throw error; }
+          if (workspace.failedCollection?.taskId === taskId
+            && ['failed', 'cancelled', 'timed_out', 'interrupted'].includes(workspace.failedCollection.state)
+            && workspace.exitConfirmation?.taskId === taskId
+            && workspace.exitConfirmation.contextGeneration === generation && Number.isFinite(workspace.exitConfirmation.confirmedAt)
+            && workspace.exitConfirmation.confirmedAt > 0) return;
+          let task: any;
+          try {
+            await canonicalDirectory(path.join(this.root, 'delegation'));
+            task = metadata(await boundedRead(path.join(this.root, 'delegation', `${taskId}.json`)));
+          }
+          catch (error) {
+            if (!missing(error)) throw error;
+            const directory = path.join(this.workerRoot, 'failed-disposal-intents');
+            await canonicalDirectory(directory);
+            const prepared = metadata(await boundedRead(path.join(directory, `${laneId}.json`)));
+            if (prepared.version !== 1 || prepared.proof !== proof || prepared.item?.taskId !== taskId
+              || prepared.item?.workspaceFingerprint !== digest(workspaceBytes)) throw new Error('Prepared terminal evidence changed');
+            task = prepared.terminal;
+          }
+          if (!task || task.id !== taskId || task.threadId !== workspace.threadId || !['failed', 'cancelled', 'timed_out', 'interrupted'].includes(task.state)
+            || !Number.isFinite(task.finishedAt) || !Number.isFinite(task.startedAt) || task.finishedAt < task.startedAt) {
+            throw new Error('Legacy target has no matching terminal failed task');
+          }
+          terminalRecord = { id: task.id, threadId: task.threadId, state: task.state, startedAt: task.startedAt, finishedAt: task.finishedAt };
+        };
+        await assertEligible();
+        const directory = path.join(this.workerRoot, 'failed-disposal-intents');
+        await fs.mkdir(directory, { recursive: true, mode: 0o700 }); await canonicalDirectory(directory);
+        syncDirectory(this.workerRoot);
+        const intentFile = path.join(directory, `${laneId}.json`);
+        let intent: { version: number; proof: string; item: LegacyCleanupItem; artifactHash?: string; terminal?: typeof terminalRecord; identities: Array<[string, string, string]> };
+        let bytes: Buffer;
+        try { bytes = await boundedRead(intentFile); intent = metadata(bytes); }
+        catch (error) {
+          if (!missing(error)) throw error;
+          const mounts = await (this.dependencies.mountPoints ?? localMountPoints)();
+          await assertDisposableTree(workspace.directory, mounts, true, await this.credentialTemplates(workspace));
+          const item = await this.inspect(workspace.directory, mounts, new Budget({ entries: 500_000, bytes: 1024 ** 3, seconds: 120 }));
+          if (item.taskId !== taskId || item.workspaceFingerprint !== digest(workspaceBytes)
+            || !workspace.checkoutIdentity) throw new Error('Failed worker identity is unavailable');
+          await assertDisposableTree(item.directory, mounts, true, await this.credentialTemplates(workspace));
+          const identities: Array<[string, string, string]> = [];
+          for (const target of [item.directory, item.registration, item.sourceRoot, item.commonDirectory]) {
+            const stat = await fs.lstat(target, { bigint: true });
+            if (process.getuid && stat.uid !== BigInt(process.getuid())) throw new Error('Failed worker is not owned by this OS user');
+            identities.push([target, String(stat.dev), String(stat.ino)]);
+            if (target === item.directory && (Number(stat.dev) !== workspace.checkoutIdentity.dev || Number(stat.ino) !== workspace.checkoutIdentity.ino)) throw new Error('Failed checkout was replaced');
+          }
+          intent = { version: 1, proof, item, identities, ...(terminalRecord ? { terminal: terminalRecord } : {}), ...(artifactHash ? { artifactHash } : {}) };
+          await durableWrite(intentFile, intent, true); bytes = await boundedRead(intentFile);
+        }
+        if (intent.terminal && terminalRecord && JSON.stringify(intent.terminal) !== JSON.stringify(terminalRecord)) throw new Error('Terminal task evidence changed');
+        if (intent.artifactHash !== undefined) {
+          if (!HASH.test(intent.artifactHash) || artifactHash && artifactHash !== intent.artifactHash) throw new Error('Prepared failed artifact changed');
+          artifactHash = intent.artifactHash;
+          if (!await this.exists(artifactFile) && (!await this.exists(backupFile)
+            || digest(await boundedRead(backupFile)) !== artifactHash)) throw new Error('Failed artifact recovery evidence is missing');
+        } else if (artifactHash) throw new Error('An artifact appeared after failed disposal preparation');
+        const item = intent.item;
+        this.validateItem(item);
+        if (intent.version !== 1 || intent.proof !== proof || item.laneId !== laneId || item.taskId !== taskId
+          || item.workspaceFingerprint !== digest(workspaceBytes) || item.directory !== workspace.directory
+          || item.sourceRoot !== workspace.source.root || item.commonDirectory !== workspace.source.commonDirectory
+          || !Array.isArray(intent.identities) || intent.identities.length !== 4) throw new Error('Failed-worker disposal intent changed');
+        const expectedPaths = [item.directory, item.registration, item.sourceRoot, item.commonDirectory];
+        if (intent.identities.some((entry, index) => !Array.isArray(entry) || entry.length !== 3
+          || entry[0] !== expectedPaths[index] || !/^[0-9]+$/.test(entry[1]) || !/^[1-9][0-9]*$/.test(entry[2]))
+          || !workspace.checkoutIdentity || intent.identities[0][1] !== String(workspace.checkoutIdentity.dev)
+          || intent.identities[0][2] !== String(workspace.checkoutIdentity.ino)) throw new Error('Failed-worker identity manifest changed');
+        const planHash = digest(bytes!);
+        const verify = async () => {
+          await assertEligible();
+          await canonicalDirectory(directory);
+          if (!(await boundedRead(intentFile)).equals(bytes!)) throw new Error('Failed-worker disposal intent changed');
+          const mounts = await (this.dependencies.mountPoints ?? localMountPoints)();
+          await this.safeBoundary(this.workspaceRoot, mounts);
+          for (const [target, dev, ino] of intent.identities) {
+            try {
+              await canonicalDirectory(target); const stat = await fs.lstat(target, { bigint: true });
+              if (String(stat.dev) !== dev || String(stat.ino) !== ino) throw new Error('Failed-worker target was replaced');
+              await this.safeBoundary(target, mounts);
+            } catch (error) { if (!missing(error) || target !== item.directory && target !== item.registration) throw error; }
+          }
+          if (await this.exists(item.registration)) {
+            const back = (await boundedRead(path.join(item.registration, 'gitdir'))).toString('utf8').trim();
+            const common = (await boundedRead(path.join(item.registration, 'commondir'))).toString('utf8').trim();
+            if (path.resolve(back) !== path.join(item.directory, '.git')
+              || await fs.realpath(path.resolve(item.registration, common)) !== item.commonDirectory) throw new Error('Failed registration was rebound');
+            for (const name of ['locked', 'config.worktree']) if (await this.exists(path.join(item.registration, name))) throw new Error('Failed registration is locked or separately configured');
+            if (await this.exists(path.join(item.directory, '.git'))
+              && (await boundedRead(path.join(item.directory, '.git'))).toString('utf8').trim() !== `gitdir: ${item.registration}`) throw new Error('Failed checkout registration changed');
+          }
+          if (await this.exists(item.directory)) await assertDisposableTree(item.directory, mounts, true, await this.credentialTemplates(workspace));
+        };
+        await verify();
+        await fs.mkdir(path.dirname(this.markerPath(item)), { recursive: true, mode: 0o700 });
+        syncDirectory(this.workerRoot);
+        try { await this.verifyIntent(item, planHash); }
+        catch (error) { if (!missing(error)) throw error; await this.tombstone(item, planHash, 'pending', 'Authorized terminal failed-worker disposal; native history is preserved'); }
+        await verify();
+        if (await this.exists(item.directory) || await this.exists(item.registration)) {
+          await (this.dependencies.remove ?? (async (source, target) => runGit(source, ['worktree', 'remove', '--force', target]).then(() => undefined)))(item.sourceRoot, item.directory);
+        }
+        await this.confirmRemoved(item);
+        await verify();
+        if (artifactHash && await this.exists(artifactFile)) {
+          if (await this.exists(backupFile)) throw new Error('Failed artifact backup already exists');
+          if (digest(await boundedRead(artifactFile)) !== artifactHash) throw new Error('Failed artifact changed before preservation');
+          await fs.rename(artifactFile, backupFile);
+          const handle = await fs.open(backupFile, 'r');
+          try { await handle.sync(); } finally { await handle.close(); }
+          if (digest(await boundedRead(backupFile)) !== artifactHash) throw new Error('Failed artifact backup changed');
+          if (process.platform !== 'win32') {
+            for (const directory of [path.dirname(artifactFile), path.dirname(backupFile)]) {
+              const handle = await fs.open(directory, 'r'); try { await handle.sync(); } finally { await handle.close(); }
+            }
+          }
+        }
+        await this.tombstone(item, planHash, 'removed', 'Authorized terminal failed-worker disposal; native history is preserved');
+        return { removed: true };
+      });
+    } finally { await standalone?.release(); }
+  }
+
+  /** Only unchanged, tracked public-template copies may be removed; originals and input blobs remain. */
+  private async credentialTemplates(workspace: DelegatedWorkspace): Promise<Set<string>> {
+    if (!/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(workspace.input.tree)) throw new Error('Failed input tree is unverified');
+    const identity = await fs.lstat(workspace.directory);
+    if (!identity.isDirectory() || identity.isSymbolicLink() || identity.dev !== workspace.checkoutIdentity?.dev
+      || identity.ino !== workspace.checkoutIdentity?.ino) throw new Error('Failed checkout was replaced');
+    const entries = (await runGit(workspace.source.root, ['ls-tree', '-r', '-z', workspace.input.tree])).toString('utf8').split('\0');
+    const allowed = new Set<string>();
+    for (const entry of entries) {
+      const match = /^100(?:644|755) blob ([a-f0-9]+)\t(.+)$/.exec(entry);
+      if (!match || !/^\.env\.(example|sample|template)$/i.test(path.basename(match[2]))) continue;
+      const file = path.join(workspace.directory, match[2]);
+      try {
+        if (!inside(workspace.directory, file) || await fs.realpath(path.dirname(file)) !== path.dirname(file)) throw new Error('Failed template path changed');
+        const stat = await fs.lstat(file);
+        if (!stat.isFile() || stat.isSymbolicLink()) continue;
+        if (await gitText(workspace.source.root, ['hash-object', '--no-filters', '--', file]) === match[1]) allowed.add(file);
+      } catch (error) { if (!missing(error)) throw error; }
+    }
+    return allowed;
+  }
+
+  private async exists(file: string): Promise<boolean> {
+    try { await fs.lstat(file); return true; } catch (error) { if (missing(error)) return false; throw error; }
   }
 
   private async owner(): Promise<CleanupOwnership> {
@@ -640,15 +871,15 @@ export class LegacyWorkspaceCleanup {
     if (await this.registered(item.sourceRoot, item.directory)) throw new Error('Removal registration remains; manual recovery is required');
   }
 
-  private async tombstone(item: LegacyCleanupItem, planHash: string, state: 'pending' | 'removed'): Promise<void> {
+  private async tombstone(item: LegacyCleanupItem, planHash: string, state: 'pending' | 'removed', reason?: string): Promise<void> {
     await durableWrite(this.markerPath(item), {
       ...(item.kind === 'scratch' ? { kind: 'scratch', scratchId: item.scratchId } : {}),
       version: 1, laneId: item.laneId, directory: item.directory, fingerprint: item.fingerprint, planHash, state,
       taskId: item.taskId, workspaceFingerprint: item.workspaceFingerprint,
       sourceRoot: item.sourceRoot, commonDirectory: item.commonDirectory, registration: item.registration,
       // Never an invented successful task, native-session reset, or process-exit receipt.
-      reason: item.kind === 'scratch' ? 'Explicit offline integration scratch discard; originating lane and native context are unchanged'
-        : 'Explicit offline checkout discard; native context must not be resumed automatically',
+      reason: reason ?? (item.kind === 'scratch' ? 'Explicit offline integration scratch discard; originating lane and native context are unchanged'
+        : 'Explicit offline checkout discard; native context must not be resumed automatically'),
     });
   }
 

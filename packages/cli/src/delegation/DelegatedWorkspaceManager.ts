@@ -13,7 +13,8 @@ import { checkFilesInBatches } from './BoundedFileChecks';
 import { LfsCheckoutVerifier } from './LfsCheckout';
 import { nativeGitPath } from './GitPaths';
 import { replaceAtomicFile } from './AtomicFile';
-import { completedLegacyDiscard } from './LegacyWorkspaceCleanup';
+import { completedLegacyDiscard, LegacyWorkspaceCleanup } from './LegacyWorkspaceCleanup';
+import { syncDirectory } from './OwnershipRuntime';
 import { assertDisposableTree, exportWorkspaceFiles, verifyWorkspaceExports, type WorkspaceExport,
   WorkspaceCleanupError } from './WorkspaceDisposal';
 
@@ -61,6 +62,7 @@ export interface WorkspaceArtifactSummary {
   recoverable: boolean;
   recovery?: { beforeRef: string; targetRef: string };
   holdReason?: string;
+  failedCollection?: boolean;
   cleanup?: WorkspaceCleanupHold;
   /** Explicit loss of the original checkout; not successful collection or delivery. */
   discarded?: { fingerprint: string; planHash: string };
@@ -103,6 +105,10 @@ export interface DelegatedWorkspace {
   disposalPolicy?: 1;
   checkoutIdentity?: { dev: number; ino: number };
   cleanup?: WorkspaceCleanupHold;
+  /** Exact acquisition proof, persisted before any fallible artifact capture. */
+  exitConfirmation?: { taskId: string; contextGeneration: number; confirmedAt: number };
+  /** Collection failure is distinct from a valid pending or recovery artifact. */
+  failedCollection?: { taskId: string; state: 'failed' | 'cancelled' | 'timed_out' | 'interrupted' };
 }
 
 interface Artifact {
@@ -289,6 +295,37 @@ export class DelegatedWorkspaceManager {
     await this.write('lanes', lane.id, workspace);
     await this.validateWorkspace(workspace);
     return workspace;
+  }
+
+  async confirmWorkerExit(workspace: DelegatedWorkspace, contextGeneration: number): Promise<void> {
+    await this.withLane(workspace.laneId, async () => {
+      const current = await this.read<DelegatedWorkspace>('lanes', workspace.laneId);
+      if (!current || current.taskId !== workspace.taskId || current.disposalPolicy !== 1
+        || !Number.isSafeInteger(contextGeneration) || contextGeneration < 0) throw new Error('Worker exit acquisition changed');
+      await this.validateWorkspaceRecord(current);
+      const stat = await fs.lstat(current.directory);
+      if (stat.isSymbolicLink() || !stat.isDirectory() || stat.dev !== current.checkoutIdentity?.dev || stat.ino !== current.checkoutIdentity?.ino) throw new Error('Worker exit checkout identity changed');
+      await this.write('lanes', current.laneId, { ...current,
+        exitConfirmation: { taskId: current.taskId, contextGeneration, confirmedAt: Date.now() } }, true);
+    });
+  }
+
+  async discardFailedWorker(laneId: string, taskId: string,
+    state?: 'failed' | 'cancelled' | 'timed_out' | 'interrupted'): Promise<void> {
+    await this.withLane(laneId, async () => {
+      await this.initialize();
+      const current = await this.read<DelegatedWorkspace>('lanes', laneId);
+      if (!current || current.taskId !== taskId) throw new Error('Failed worker acquisition changed');
+      if (state && !current.failedCollection) {
+        if (current.exitConfirmation?.taskId !== taskId) throw new Error('Worker group exit is not recorded');
+        await this.write('lanes', laneId, { ...current, failedCollection: { taskId, state } }, true);
+      }
+      await new LegacyWorkspaceCleanup(path.dirname(this.directory)).discardFailedWorker(laneId, taskId, this.ownership);
+    });
+  }
+
+  async isDiscarded(workspace: DelegatedWorkspace): Promise<boolean> {
+    return !!await completedLegacyDiscard(this.directory, workspace.laneId, workspace.taskId);
   }
 
   async collect(workspace: DelegatedWorkspace, successful: boolean,
@@ -684,6 +721,7 @@ export class DelegatedWorkspaceManager {
       outputCommit: artifact?.output, baseCommit: artifact?.input?.commit, exports: artifact?.exports,
       disposalPolicy: workspace?.disposalPolicy, checkoutState: workspace?.checkoutState,
       blocked: workspace?.blocked, pendingTaskId: workspace?.pendingTaskId,
+      ...(workspace?.failedCollection?.taskId === workspace?.taskId && workspace?.failedCollection ? { failedCollection: true } : {}),
       exitConfirmed: artifact?.closeout?.taskId === artifact?.taskId && Number.isFinite(artifact?.closeout?.exitConfirmedAt),
       recoverable: artifact?.closeout?.recoverable === true, recovery: artifact?.recovery,
       cleanup: workspace?.cleanup,
@@ -1400,14 +1438,15 @@ export class DelegatedWorkspaceManager {
     } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
   }
 
-  private async write(kind: 'lanes' | 'artifacts' | 'scratch', id: string, record: unknown): Promise<void> {
+  private async write(kind: 'lanes' | 'artifacts' | 'scratch', id: string, record: unknown, durable = false): Promise<void> {
     this.assertId(id);
     await this.initialize();
     const data = JSON.stringify(record);
     if (Buffer.byteLength(data) > RECORD_BYTES) throw new Error('Worker workspace record is too large');
     const target = path.join(this.directory, kind, `${id}.json`);
     const temporary = `${target}.${randomUUID()}.tmp`;
-    await fs.writeFile(temporary, data, { mode: 0o600, flag: 'wx' });
-    try { await replaceAtomicFile(temporary, target); } finally { await fs.rm(temporary, { force: true }); }
+    const handle = await fs.open(temporary, 'wx', 0o600);
+    try { await handle.writeFile(data); if (durable) await handle.sync(); } finally { await handle.close(); }
+    try { await replaceAtomicFile(temporary, target); if (durable) syncDirectory(path.dirname(target)); } finally { await fs.rm(temporary, { force: true }); }
   }
 }

@@ -31,7 +31,7 @@ import { DELEGATION_BACKENDS, type DelegationBackend, type DelegationHandler } f
 import { workerAvailability, workerConfiguration } from './WorkerPolicy';
 import { formatDelegationNotice } from './DelegationNotice';
 import { assertWorkingDirectoryExists } from '../utils/WorkingDirectory';
-import { DelegatedWorkspaceManager, WORKSPACE_INVENTORY_PAGE_LIMIT, type DelegatedWorkspaceSource, type DelegatedWorkspace,
+import { DelegatedWorkspaceManager, WORKSPACE_INVENTORY_PAGE_LIMIT, type WorkspaceArtifactSummary, type DelegatedWorkspaceSource, type DelegatedWorkspace,
   type DelegatedArtifactView } from './DelegatedWorkspaceManager';
 import type { GitCheckpoint } from './GitCheckpoint';
 import { DelegationOwnership } from './DelegationOwnership';
@@ -998,6 +998,9 @@ ${prompt}`));
           if (released && task.lane && !task.preserveUnstartedLane) {
             try {
               if (task.workspace) {
+                if (task.workspace.disposalPolicy === 1 && groupConfirmed) {
+                  await this.workspaceManager.confirmWorkerExit(task.workspace, task.lane.contextGeneration ?? 0);
+                }
                 task.artifact = await this.workspaceManager.collect(task.workspace, task.record.state === 'succeeded', { exitConfirmed: true, exports: task.exports,
                   preserveForRecovery: () => this.isNativeDeletionRequested(task.lane!) });
                 readyWorkspaceLane = task.lane;
@@ -1007,11 +1010,22 @@ ${prompt}`));
             } catch (error) {
               const detail = error instanceof Error ? error.message : 'Worker lane persistence failed';
               if (task.workspace) {
-                // Exit was confirmed. Preserve files and context for recovery without blocking unrelated lanes.
+                // Dispose only proven stopped invalid output; valid artifacts and safety holds remain explicit.
                 await this.workspaceManager.preserveLane(task.lane.id).catch(() => undefined);
                 await this.laneStore.markDirty(task.lane.id, detail).catch(() => undefined);
                 if (task.record.state === 'succeeded') task.record.state = 'failed';
-                task.record.error = bounded(`Worker artifact could not be finalized: ${detail}. Files were retained for manual recovery.`, 4000).text;
+                let discarded = false;
+                let cleanupReason = 'Exact failed-worker disposal proof is unavailable';
+                if (task.workspace.disposalPolicy === 1 && groupConfirmed) {
+                  try {
+                    await this.workspaceManager.discardFailedWorker(task.lane.id, task.record.id,
+                      task.record.state as 'failed' | 'cancelled' | 'timed_out' | 'interrupted');
+                    discarded = true;
+                  } catch (error) { cleanupReason = error instanceof Error ? error.message : cleanupReason; }
+                }
+                task.record.error = bounded(discarded
+                  ? `Worker artifact could not be finalized: ${detail}. Failed worker contents were discarded; retry the task if needed.`
+                  : `Worker artifact could not be finalized: ${detail}. Cleanup remains held for a safe retry: ${cleanupReason}.`, 4000).text;
               } else {
                 await this.laneStore.markDirty(task.lane.id, detail, true).catch(() => undefined);
                 await discardLane(task.lane);
@@ -1366,6 +1380,8 @@ ${prompt}`));
           const issues: DelegationCloseoutIssue[] = [];
           for (const task of candidates.values()) {
             checkActive();
+            const currentTask = tasks.get(task.taskId);
+            if (currentTask?.workspace && await this.workspaceManager.isDiscarded(currentTask.workspace)) continue;
             try {
               const artifact = await this.workspaceManager.inspectCloseout({
                 threadId: parent.thread.id, cwd, workspaceGeneration, checkActive,
@@ -1572,6 +1588,8 @@ ${prompt}`));
     if (this.maintenance) return this.maintenance as Promise<{ removed: number; failed: number }>;
     const operation = this.withAdmission(async () => {
       await this.ensureOwnership();
+      const inventory = await this.workspaceManager.enumerateArtifacts({ limit: WORKSPACE_INVENTORY_PAGE_LIMIT });
+      await this.discardUnavailableArtifacts(inventory.items);
       if (this.scopes.size || this.detachedScopes.size || this.running || this.workspaces.size) return { removed: 0, failed: 0 };
       await this.retireRequestedNativeSessions();
       await this.workspaceManager.retryReclamation({ limit: 25,
@@ -1677,10 +1695,22 @@ ${prompt}`));
     return { removed, failed };
   }
 
+  private async discardUnavailableArtifacts(items: WorkspaceArtifactSummary[]): Promise<boolean> {
+    let changed = false;
+    for (const item of items.filter(value => !value.discarded && !value.recovery && (value.disposition === undefined
+      && value.cleanup?.reason === 'capture-failed' || value.failedCollection && !value.recoverable)).slice(0, 25)) {
+      try { await this.workspaceManager.discardFailedWorker(item.laneId, item.taskId); changed = true; }
+      catch { /* Live, unknown, rebound and recovery-bearing targets remain explicit obligations. */ }
+    }
+    return changed;
+  }
+
   /** Durable review obligations survive expiry of diagnostic task records. */
   private async pendingArtifactIssues(thread: Thread, cwd: string): Promise<{ issues: DelegationCloseoutIssue[]; incomplete: boolean }> {
-    const inventory = await this.workspaceManager.enumerateArtifacts({ threadId: thread.id,
-      cwd, workspaceGeneration: thread.delegationWorkspaceGeneration ?? 0, limit: WORKSPACE_INVENTORY_PAGE_LIMIT, unresolvedOnly: true });
+    const options = { threadId: thread.id, cwd, workspaceGeneration: thread.delegationWorkspaceGeneration ?? 0,
+      limit: WORKSPACE_INVENTORY_PAGE_LIMIT };
+    let inventory = await this.workspaceManager.enumerateArtifacts(options);
+    if (await this.discardUnavailableArtifacts(inventory.items)) inventory = await this.workspaceManager.enumerateArtifacts(options);
     const issues: DelegationCloseoutIssue[] = inventory.items
       .filter(item => item.disposition === 'pending' || item.recovery || item.disposition === undefined && !item.discarded)
       .map(item => ({ taskId: item.taskId, backend: 'stored-worker',

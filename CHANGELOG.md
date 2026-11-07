@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.225] - 2026-11-07
+
+### Fixed
+- Automatically dispose of verified, terminated worker checkouts when artifact capture fails, persist completion receipts, and stop repeating unavailable-artifact closeout errors. Pending deliverables and external symlink targets retain their existing protections.
+
 ## [1.6.224] - 2026-11-06
 
 ### Added

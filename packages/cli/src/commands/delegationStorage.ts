@@ -4,6 +4,8 @@ import type { Command } from 'commander';
 import { LegacyWorkspaceCleanup, type CleanupLimits } from '../delegation/LegacyWorkspaceCleanup';
 
 export interface DelegationStorageOptions {
+  task?: string;
+  lane?: string;
   plan?: string;
   out?: string;
   discardContents?: boolean;
@@ -14,8 +16,12 @@ export interface DelegationStorageOptions {
 }
 
 /** Local-only output may contain repository paths and thread identities. Never forward it to chat. */
-export async function delegationStorageCommand(action: 'scan' | 'plan' | 'discard', options: DelegationStorageOptions = {},
+export async function delegationStorageCommand(action: 'scan' | 'plan' | 'discard' | 'discard-failed', options: DelegationStorageOptions = {},
   cleanup = new LegacyWorkspaceCleanup(path.join(os.homedir(), '.remote-cli'))): Promise<unknown> {
+  if (action === 'discard-failed') {
+    if (!options.task || !options.lane) throw new Error('Require an exact --task and --lane');
+    return cleanup.discardFailedWorker(options.lane, options.task);
+  }
   const limits: CleanupLimits = { entries: Number(options.maxEntries ?? 100_000), bytes: Number(options.maxBytes ?? 1024 ** 3),
     seconds: Number(options.maxSeconds ?? 120) };
   if (action === 'scan') return cleanup.scan(limits);
@@ -30,7 +36,13 @@ export async function delegationStorageCommand(action: 'scan' | 'plan' | 'discar
 
 export function registerDelegationStorage(program: Command): void {
   const storage = program.command('delegation').description('Inspect local managed delegation storage')
-    .command('storage').description('Offline historical worktree maintenance; never stops services');
+    .command('storage').description('Guarded historical and failed-worker maintenance; never stops services');
+  storage.command('discard-failed').description('Discard one proven stopped failed worker with no artifact; preserve native history and other workers')
+    .requiredOption('--task <id>', 'Exact failed task UUID').requiredOption('--lane <id>', 'Exact owned lane UUID')
+    .action(async options => {
+      try { console.log(JSON.stringify(await delegationStorageCommand('discard-failed', options))); }
+      catch (error) { console.error(error instanceof Error ? error.message : 'Failed-worker disposal held'); process.exitCode = 1; }
+    });
   for (const action of ['scan', 'plan', 'discard'] as const) {
     const command = storage.command(action).description(action === 'scan' ? 'Read-only bounded disk inventory (no store initialization)'
       : action === 'plan' ? 'Freeze eligible checkout identities and contents in a new manifest'

@@ -725,27 +725,22 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
     } finally { await snapshots.destroy(); }
   }, lifecycleBudget(6));
 
-  it('holds the checkout when a required report was not delivered', async () => {
+  it('settles a failed missing-report obligation after authorized disposal', async () => {
     const scope = manager.begin(parent);
     await launchExecuting(scope, { backend: 'codex', objective: 'Produce a required report',
       exports: ['missing-report.txt'] }, 'launch');
     workers[0].finish({ success: true });
     const [result] = await collectResults(scope);
     expect(result.state).toBe('failed');
-    expect((await fs.stat(workers[0].cwd)).isDirectory()).toBe(true);
-    expect(await lifecyclePhase('check the missing report obligation', () => scope.checkArtifactCloseout()))
-      .toMatchObject([{ taskId: result.taskId, status: 'unavailable' }]);
-    const [lane] = await manager.laneStore.lanesForThread(parent.thread.id);
-    const pointer = path.join(fixture.directory, '.remote-cli', 'codex-sessions', `${lane.executorThreadId}.json`);
-    await fs.mkdir(path.dirname(pointer), { recursive: true });
-    await fs.writeFile(pointer, 'synthetic continuation');
-    await lifecyclePhase('close the missing report scope', () => scope.close());
-    await expect(lifecyclePhase('reject reset while the required report is missing', () => manager.resetWorkerLanes(parent.thread.id)))
-      .rejects.toMatchObject({ cause: { message: expect.stringContaining('cleanup failed') } });
-    expect(await fs.readFile(pointer, 'utf8')).toBe('synthetic continuation');
-    expect(await manager.laneStore.lanesForThread(parent.thread.id)).toMatchObject([
-      { id: lane.id, cleanupError: expect.stringContaining('[artifact-recovery-required]') },
-    ]);
+    if (process.platform === 'linux') {
+      expect(result.error).toContain('Failed worker contents were discarded');
+      await expect(fs.stat(workers[0].cwd)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(await lifecyclePhase('check discarded report obligation', () => scope.checkArtifactCloseout())).toEqual([]);
+      expect(await lifecyclePhase('check future report obligation', () => manager.pendingArtifactContext(parent.thread, fixture.root))).toBe('');
+    } else {
+      expect((await fs.stat(workers[0].cwd)).isDirectory()).toBe(true);
+      expect(await lifecyclePhase('check held report obligation', () => scope.checkArtifactCloseout())).toMatchObject([{ taskId: result.taskId, status: 'unavailable' }]);
+    }
   }, lifecycleBudget(8));
 
   // Each admission, execution, native finalization and explicit Git operation has
@@ -851,6 +846,7 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
   it('retires only a completed exact offline discard after failed capture, preserving native history and refs', async () => {
     const scope = manager.begin(parent);
     const capture = vi.spyOn(manager.workspaceManager, 'collect').mockRejectedValue(new Error('Synthetic capture failure before artifact persistence'));
+    vi.spyOn(manager.workspaceManager, 'discardFailedWorker').mockRejectedValue(new Error('Synthetic automatic disposal hold'));
     await launchExecuting(scope, { backend: 'codex', objective: 'Produce required fixture output', exports: ['missing.txt'] }, 'launch');
     workers[0].finish({ success: true });
     const [result] = await collectResults(scope);
@@ -943,8 +939,10 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
     workers[0].finish({ success: true });
     const [result] = await collectResults(scope);
     capture.mockRestore();
-    expect(await lifecyclePhase('checkArtifactCloseout fixture state', () => scope.checkArtifactCloseout())).toMatchObject([{ taskId: result.taskId, status: 'unavailable' }]);
-    expect(await lifecyclePhase('pendingArtifactContext fixture state', () => manager.pendingArtifactContext(parent.thread, fixture.root))).toContain(result.taskId);
+    const issues = await lifecyclePhase('checkArtifactCloseout fixture state', () => scope.checkArtifactCloseout());
+    const pending = await lifecyclePhase('pendingArtifactContext fixture state', () => manager.pendingArtifactContext(parent.thread, fixture.root));
+    if (process.platform === 'linux') { expect(issues).toEqual([]); expect(pending).not.toContain(result.taskId); }
+    else { expect(issues).toMatchObject([{ taskId: result.taskId, status: 'unavailable' }]); expect(pending).toContain(result.taskId); }
     expect(await fs.readFile(corrupt, 'utf8')).toBe('{synthetic-invalid-json');
   }, lifecycleBudget(8));
 
@@ -1149,16 +1147,19 @@ describe('disposable delegation lifecycle', { timeout: 30_000 }, () => {
     workers[0].finish({ success: true });
     const acquire = vi.spyOn(DelegationOwnership.prototype, 'acquire');
     let shutdown: Promise<void> | undefined;
+    let acquisitionsBeforeShutdown = 0;
     try {
       await lifecyclePhase('enter held finalization', () => awaitPhaseEntry('finalization', started, watchTerminal(scope).operation));
+      acquisitionsBeforeShutdown = acquire.mock.calls.length;
       shutdown = settleFinalization(scope, watchOperation(manager.destroy()), 'shutdown');
+      expect(acquire).toHaveBeenCalledTimes(acquisitionsBeforeShutdown);
       await expect(lifecyclePhase('pendingArtifactContext fixture state', () => manager.pendingArtifactContext(parent.thread, fixture.root))).rejects.toThrow('shutting down');
       resume(); await shutdown;
     } finally { resume(); await Promise.allSettled(shutdown ? [shutdown] : []); }
     await expect(scope.invoke('remote_cli_delegate', { backend: 'codex', objective: 'Too late' }, 'late')).rejects.toThrow();
     await expect(lifecyclePhase('checkArtifactCloseout fixture state', () => scope.checkArtifactCloseout())).rejects.toThrow('cancelled');
     await lifecyclePhase('close fixture state', () => scope.close());
-    expect(acquire).not.toHaveBeenCalled();
+    expect(acquire).toHaveBeenCalledTimes(acquisitionsBeforeShutdown);
     await expect(fs.stat(workers[0].cwd)).rejects.toMatchObject({ code: 'ENOENT' });
     await expect(fs.stat(`${manager.laneStore.storageDirectory}.ownership`)).rejects.toMatchObject({ code: 'ENOENT' });
   }, lifecycleBudget(9));
