@@ -252,6 +252,30 @@ describe('MessageHandler', () => {
     expect(capture).not.toHaveBeenCalled();
   });
 
+  it('retains original display intent until authenticated output capability and prepares it without another model turn', async () => {
+    ctx.mockThreadManager.getDefaultThread().delegation = false;
+    let enabled = false;
+    const capturePaths = vi.fn(async () => ({ unavailable: 0, omitted: false }));
+    const capture = vi.fn();
+    (ctx.handler as any).outputFiles = { isEnabled: () => enabled, canPrepare: () => enabled, preparationLease: () => () => enabled,
+      connect: () => { enabled = true; }, capture, capturePaths, initialize: vi.fn(), destroy: vi.fn(), disconnect: vi.fn(), disable: () => { enabled = false; } };
+    const capabilities = { outputAttachmentHintsV1: true, pendingOutputFilesV1: true };
+    await ctx.handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities } } as any);
+    ctx.mockExecutor.execute.mockImplementation(async (_prompt: string, options: any) => {
+      options.onDisplayText('[Report](output/report.csv "attachment")'); return { success: true, output: 'Done' };
+    });
+    await ctx.handler.handleMessage({ type: 'command', messageId: 'delayed', openId: 'owner', content: 'Produce report' } as any);
+    const request = { type: 'prepare_pending_output', messageId: 'delayed', openId: 'owner',
+      threadId: ctx.mockThreadManager.getDefaultThread().id, generation: 0 };
+    await ctx.handler.handleMessage(request as any); expect(capturePaths).not.toHaveBeenCalled(); expect(capture).not.toHaveBeenCalled();
+    await ctx.handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: { ...capabilities, outputFilesV1: true } } } as any);
+    expect(ctx.mockWsClient.send).toHaveBeenCalledWith({ type: 'pending_outputs_ready' });
+    await ctx.handler.handleMessage(request as any);
+    expect(capturePaths).toHaveBeenCalledWith(['output/report.csv'], expect.objectContaining({ messageId: 'delayed', owner: 'owner', cwd: ctx.mockThreadManager.getDefaultThread().workingDirectory, generation: 0 }));
+    expect(ctx.mockExecutor.execute).toHaveBeenCalledOnce();
+    await ctx.handler.handleMessage(request as any); expect(capturePaths).toHaveBeenCalledOnce();
+  });
+
   it('keeps ordinary execution independent of delegation storage when delegation is disabled', async () => {
     ctx.mockThreadManager.getDefaultThread().delegation = false;
     ctx.mockExecutor.configureDelegation = vi.fn();

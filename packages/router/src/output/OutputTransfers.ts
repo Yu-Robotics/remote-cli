@@ -179,6 +179,24 @@ export class OutputTransfers {
       this.state.sources.push({ ...source, expiresAt: Date.now() + OUTPUT_LIMITS.ttl }); await this.save();
     });
   }
+  /** Carry an unverified source only across the first-key approval of its exact parent. */
+  async migrateApprovalSource(owner: InlineIdentity, epoch: string): Promise<boolean> {
+    await this.initialize();
+    return this.lock(async () => {
+      if (this.stopped || this.state.references.some(r => r.messageId === owner.messageId)
+        || !await this.deps.owns(owner.openId, owner.deviceId, epoch)) return false;
+      const prior = this.state.sources.find(s => s.messageId === owner.messageId);
+      if (prior && (prior.openId !== owner.openId || prior.deviceId !== owner.deviceId || prior.epoch !== owner.epoch
+        || prior.threadId !== undefined && prior.threadId !== owner.threadId
+        || prior.generation !== undefined && prior.generation !== owner.generation || prior.expiresAt <= Date.now())) return false;
+      if (prior) { prior.epoch = epoch; prior.threadId = owner.threadId; prior.generation = owner.generation; }
+      else {
+        if (this.state.sources.length >= 1024) return false;
+        this.state.sources.push({ ...owner, epoch, expiresAt: Date.now() + OUTPUT_LIMITS.ttl });
+      }
+      await this.save(); return true;
+    });
+  }
   async offer(deviceId: string, value: unknown): Promise<void> {
     const expectedSession = this.deps.session(deviceId)?.id;
     await this.initialize();

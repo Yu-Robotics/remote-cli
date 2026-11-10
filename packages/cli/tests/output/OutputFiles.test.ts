@@ -66,6 +66,16 @@ describe('deterministic output links', () => {
 });
 
 describe('authorized durable snapshots', () => {
+  it('honors delayed permission loss before content reads and fixes delayed snapshot expiry', async () => {
+    await fs.writeFile(path.join(cwd, 'report'), 'current bytes after approval');
+    const denied = vi.fn(() => false);
+    await expect(store.snapshot('report', { ...context(), current: denied })).rejects.toThrow('stopped');
+    expect(store.references()).toHaveLength(0);
+    const expiresAt = Date.now() + 30_000;
+    const ref = await store.snapshot('report', { ...context(), expiresAt, current: () => true });
+    expect(ref.expiresAt).toBe(expiresAt);
+    await expect(store.snapshot('report', { ...context(), expiresAt: Date.now() })).rejects.toThrow('stopped');
+  });
   it('uses a canonical private store beneath an existing ancestor alias', async () => {
     const alias = path.join(root, 'alias');
     await fs.symlink(cwd, alias, process.platform === 'win32' ? 'junction' : 'dir');

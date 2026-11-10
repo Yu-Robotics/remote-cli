@@ -11,7 +11,7 @@ import { OPAQUE_ID, OUTPUT_LIMITS, OutputReference, validReference } from './Pro
 import { SnapshotRecord, publicReference, validSnapshotRecord, visibleRecord, publicationFor, duplicateWorker, selectedWorker } from './OutputPublication';
 
 export interface VerifiedOutputExport { file: string; path: string; sha256: string; bytes: number; taskId: string }
-export interface SnapshotContext { owner?: string; omitted?: boolean; exports?: VerifiedOutputExport[]; messageId: string; threadId: string; taskId: string; generation: number; cwd: string; source: OutputReference['source'] }
+export interface SnapshotContext { expiresAt?: number; current?(): boolean; owner?: string; omitted?: boolean; exports?: VerifiedOutputExport[]; messageId: string; threadId: string; taskId: string; generation: number; cwd: string; source: OutputReference['source'] }
 export interface OutputPolicy { allowedRoots?: string[]; maxBytes?: number }
 function inside(root: string, file: string): boolean {
   const relative = path.relative(root, file);
@@ -20,7 +20,7 @@ function inside(root: string, file: string): boolean {
 function same(a: NativeStat, b: NativeStat): boolean { return a.dev === b.dev && a.ino === b.ino && a.kind === b.kind; }
 
 /** No-follow, handle-relative traversal on POSIX and Windows; no absolute-path read fallback. */
-export function openOutputFile(filename: string): { identity: string; version: string; size: number; chunks(): AsyncGenerator<Buffer>; close(): void } {
+export function openOutputFile(filename: string, allowed: () => boolean = () => true): { identity: string; version: string; size: number; chunks(): AsyncGenerator<Buffer>; close(): void } {
   const native = nativeBindings();
   if (!native.readChunk) throw new Error('Output file handle support unavailable.');
   const handles: NativeHandle[] = [], stats: NativeStat[] = [];
@@ -28,6 +28,7 @@ export function openOutputFile(filename: string): { identity: string; version: s
   const components = filename.slice(volume.length).split(path.sep).filter(Boolean);
   const close = () => { for (const handle of handles.splice(0).reverse()) native.close(handle); };
   try {
+    if (!allowed()) throw new Error('Output permission changed.');
     let current = native.openRoot(volume); handles.push(current); stats.push(native.stat(current));
     for (let i = 0; i < components.length; i++) {
       current = native.openOutputChild(current, components[i], i < components.length - 1);
@@ -39,6 +40,7 @@ export function openOutputFile(filename: string): { identity: string; version: s
     return { identity: `${before.dev}:${before.ino}`, version: `${before.dev}:${before.ino}:${before.size}:${before.mtime}`, size, close,
       async *chunks() {
         for (let offset = 0; offset < size;) {
+          if (!allowed()) throw new Error('Output permission changed.');
           const bytes = native.readChunk(current, offset, Math.min(65536, size - offset));
           if (!bytes.length) throw new Error('Output changed during snapshot.');
           offset += bytes.length; yield bytes; await yieldIO();
@@ -103,7 +105,7 @@ export class OutputSnapshots {
     this.tail = operation.catch(() => {}); return operation;
   }
   private async capture(candidate: string, context: SnapshotContext): Promise<OutputReference> {
-    if (this.stopped) throw new Error('Output capture stopped.');
+    if (this.stopped || context.current?.() === false || context.expiresAt !== undefined && context.expiresAt <= Date.now()) throw new Error('Output capture stopped.');
     await this.cleanup();
     const cwd = await fs.realpath(context.cwd);
     const filename = path.resolve(cwd, candidate);
@@ -156,8 +158,9 @@ export class OutputSnapshots {
       if (inside(canonical, filename)) authorized = true;
     }
     if (!authorized) throw new Error('Output is outside the authorized workspace.');
+    if (context.current?.() === false) throw new Error('Output permission changed.');
     let opened: ReturnType<typeof openOutputFile>;
-    try { opened = openOutputFile(filename); }
+    try { opened = openOutputFile(filename, context.current); }
     catch (error: any) {
       // A real POSIX colon filename wins. Only a missing exact file permits a numeric code-location suffix.
       if (!exported && process.platform !== 'win32' && error.code === 'ENOENT' && /:\d+(?::\d+)?$/.test(candidate)) {
@@ -192,15 +195,16 @@ export class OutputSnapshots {
       const handle = await fs.open(temporary, 'wx', 0o600), hash = createHash('sha256');
       let size = 0;
       try {
-        for await (const chunk of opened.chunks()) { size += chunk.length; hash.update(chunk); await handle.writeFile(chunk); }
+        for await (const chunk of opened.chunks()) { if (context.current?.() === false) throw new Error('Output permission changed.'); size += chunk.length; hash.update(chunk); await handle.writeFile(chunk); }
         if (size !== opened.size) throw new Error('Output changed during snapshot.');
         await handle.sync();
       } finally { await handle.close(); }
+      if (context.current?.() === false || context.expiresAt !== undefined && context.expiresAt <= Date.now()) throw new Error('Output permission changed.');
       const digest = hash.digest('hex');
       if (exported && digest !== exported.sha256) throw new Error('Verified export changed.');
       const reference: OutputReference = { ...(context.omitted && context.source !== 'worker' ? { discoveryIncomplete: true } : {}), id, messageId: context.messageId, threadId: context.threadId, taskId: exported?.taskId ?? context.taskId,
         generation: context.generation, name: displayName(path.basename(exported?.path ?? filename)), source: exported ? 'export' : context.source,
-        size, sha256: digest, expiresAt: Date.now() + OUTPUT_LIMITS.ttl };
+        size, sha256: digest, expiresAt: Math.min(Date.now() + OUTPUT_LIMITS.ttl, context.expiresAt ?? Infinity) };
       if (!validReference(reference)) throw new Error('Invalid output reference.');
       await fs.rename(temporary, this.blobFilename(id, privateWorker)); temporary = undefined; await syncDirectory(this.root);
       const stored = openOutputFile(this.blobFilename(id, privateWorker));

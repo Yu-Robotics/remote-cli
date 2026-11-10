@@ -69,6 +69,18 @@ describe('WebSocketClient', () => {
       expect(mockWs.send.mock.calls.filter((call: any[]) => JSON.parse(call[0]).type === 'automatic_file_enrollment')).toHaveLength(1);
     });
 
+    it.each([false, true])('advertises delayed recovery only with native support and enrollment integration (%s)', async integrated => {
+      client = new WebSocketClient(serverUrl, deviceId, integrated ? { automaticFileEnrollment: { prepare: vi.fn() } as any } : {});
+      const connect = client.connect(); mockWs.on.mock.calls.find((c: any) => c[0] === 'open')[1](); await connect;
+      await vi.waitFor(() => expect(mockWs.send).toHaveBeenCalled());
+      const registration = mockWs.send.mock.calls.map((call: any[]) => JSON.parse(call[0])).find((m: any) => m.type === 'binding_request');
+      // The helper is optional: registration truthfully reflects the native module on this runner.
+      const native = await import('../src/native/NativeBindings');
+      let supported = false;
+      try { supported = typeof native.nativeBindings().readChunk === 'function' && typeof native.nativeBindings().openOutputChild === 'function'; } catch { /* Unsupported runner. */ }
+      expect(registration.data.capabilities.pendingOutputFilesV1).toBe(supported && integrated ? true : undefined);
+    });
+
     it('keeps ordinary message handling independent of automatic preparation failure', async () => {
       const prepare = vi.fn().mockRejectedValue(new Error('private-sentinel'));
       client = new WebSocketClient(serverUrl, deviceId, { automaticFileEnrollment: { prepare } as any });

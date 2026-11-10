@@ -1,4 +1,5 @@
 import type { AttachmentHints } from '../output/Protocol';
+import { PendingOutputFiles } from '../output/PendingOutputFiles';
 import { OutputFiles } from '../output/OutputFiles';
 import { OutputSnapshots, type VerifiedOutputExport } from '../output/OutputSnapshots';
 import { ATTACHMENT_GUIDANCE, OutputLinks } from '../output/OutputLinks';
@@ -252,6 +253,8 @@ export class MessageHandler {
   private outputFiles?: OutputFiles;
   private readonly imageDeliveries = new Map<string, ImageDelivery>();
   private attachmentHintsSupported = false;
+  private pendingOutputSupported = false;
+  private readonly pendingOutputFiles = new PendingOutputFiles();
   private imageConnectionEpoch = 0;
 
   constructor(
@@ -379,6 +382,12 @@ export class MessageHandler {
         }
         return;
 
+      case 'prepare_pending_output': {
+        if (this.pendingOutputSupported && this.outputFiles?.isEnabled()) {
+          await this.pendingOutputFiles.prepare(message, this.outputFiles);
+        }
+        return;
+      }
       case 'output_registered':
       case 'output_grant':
         this.outputFiles?.handle(message);
@@ -403,6 +412,7 @@ export class MessageHandler {
         const data = (message as any).data;
         if (data?.success !== true) return;
         this.attachmentHintsSupported = data.capabilities?.outputAttachmentHintsV1 === true;
+        this.pendingOutputSupported = data.capabilities?.pendingOutputFilesV1 === true;
         this.routerVersion = typeof data.routerVersion === 'string' ? data.routerVersion : undefined;
         if (data.capabilities?.outputFilesV1 === true) {
           try {
@@ -414,6 +424,7 @@ export class MessageHandler {
               await this.outputFiles.initialize();
             }
             this.outputFiles.connect();
+            if (this.pendingOutputSupported) this.wsClient.send({ type: 'pending_outputs_ready' });
           } catch {
             await this.outputFiles?.destroy(); this.outputFiles = undefined;
             console.error('[OutputFiles] Snapshot storage is unavailable.');
@@ -2455,6 +2466,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       throw new Error('Previous backend preparation is still pending. Wait for it to settle, then retry /clear before sending more work.');
     }
     if (executor.hasUncertainShutdown?.()) throw new Error('Direct backend shutdown is unconfirmed. Retry /abort or /clear before sending more work.');
+    this.pendingOutputFiles.invalidateThread(threadId);
     const conversationRevision = this.conversationRevisions.get(threadId) ?? 0;
     const operationToken = this.activeThreadOperations.get(threadId)?.token;
     const isCurrent = () => !this.isDestroyed && (!operationToken ||
@@ -2785,9 +2797,17 @@ You can also use natural language commands to control Claude Code CLI.`,
               const names = outputLinks.attachmentNames();
               if (names.length) outputAttachmentHints = { generation: outputGeneration, names: [...new Set([...(outputAttachmentHints?.names ?? []), ...names])].slice(0, 16) };
             }
+            const outputContext = { messageId, threadId, taskId: messageId, owner: openId,
+              generation: outputGeneration, cwd: imageCwd, source: 'workspace' as const, exports: [...outputExports.values()] };
             if (this.outputFiles?.isEnabled()) {
-              await this.outputFiles.capture(outputLinks, { messageId, threadId, taskId: messageId, owner: openId,
-                generation: outputGeneration, cwd: imageCwd, source: 'workspace', exports: [...outputExports.values()] });
+              await this.outputFiles.capture(outputLinks, outputContext);
+            } else if (this.pendingOutputSupported) {
+              this.pendingOutputFiles.remember(outputLinks, outputContext, () => {
+                const current = this.threadManager.getThread(threadId);
+                return !this.isDestroyed && !!current && current.workingDirectory === imageCwd
+                  && (current.delegationWorkspaceGeneration ?? 0) === outputGeneration
+                  && (this.conversationRevisions.get(threadId) ?? 0) === conversationRevision;
+              });
             }
 
             await imageDelivery?.drain();
@@ -3543,6 +3563,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     this.directoryBrowser.destroy();
     this.settingsService.destroy();
     this.isDestroyed = true;
+    this.pendingOutputFiles.clear();
     for (const threadId of this.activeThreadOperations.keys()) {
       this.settingsAdmission.cancelRecoverable(threadId);
       this.cancelThreadOperation(threadId, 'Request cancelled because the CLI is shutting down.');

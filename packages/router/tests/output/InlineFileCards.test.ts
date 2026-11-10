@@ -33,6 +33,67 @@ beforeEach(async () => {
 });
 afterEach(async () => { vi.useRealTimers(); await cards.destroy(); vi.restoreAllMocks(); await fs.rm(root, { recursive: true, force: true }); });
 
+describe('Get file approval recovery', () => {
+  it('uses exactly one secondary Get file and dispatches only the original owner/card/generation', async () => {
+    await cards.destroy(); const requestApproval = vi.fn(async () => 'Approval card sent');
+    let status = 'approval' as any;
+    cards = new InlineFileCards(path.join(root, 'journal'), { owns: async () => owned, rows: () => rows, patch,
+      status: () => status, approvalAvailable: () => true, requestApproval });
+    await bind(); await cards.hints(owner.deviceId, { messageId: owner.messageId, threadId: owner.threadId, generation: 3, names: ['report.csv'] }, 'approval');
+    const buttons = panel().elements.filter((e: any) => e.tag === 'button');
+    expect(buttons).toHaveLength(1); expect(buttons[0]).toMatchObject({ type: 'default', disabled: false, text: { content: 'Get file' } });
+    const action = buttons[0].behaviors[0].value; expect(action.action).toBe('output_file_approval');
+    await cards.requestApproval('intruder', 'final-card', action); await cards.requestApproval(owner.openId, 'foreign-card', action);
+    await cards.requestApproval(owner.openId, 'final-card', { ...action, generation: 4 });
+    expect(requestApproval).not.toHaveBeenCalled();
+    expect(await cards.requestApproval(owner.openId, 'final-card', action)).toContain('sent');
+    expect(requestApproval).toHaveBeenCalledWith(expect.objectContaining({ ...owner, generation: 3 }));
+    owned = false; await cards.requestApproval(owner.openId, 'final-card', action); expect(requestApproval).toHaveBeenCalledOnce();
+    owned = true; status = 'disabled'; await cards.refresh(owner.messageId);
+    expect(panel().elements.find((e: any) => e.tag === 'button').disabled).toBe(true);
+    await cards.requestApproval(owner.openId, 'final-card', action); expect(requestApproval).toHaveBeenCalledOnce();
+  });
+  it.each(['disabled', 'upgrade', 'unavailable', 'ready'] as const)('never turns %s hints into enrollment', async status => {
+    await cards.destroy(); const requestApproval = vi.fn();
+    cards = new InlineFileCards(path.join(root, 'journal'), { owns: async () => true, rows: () => [], patch,
+      status: () => status, approvalAvailable: () => true, requestApproval });
+    await bind(); await cards.hints(owner.deviceId, { messageId: owner.messageId, threadId: owner.threadId, generation: 3, names: ['report.csv'] }, status);
+    const button = panel().elements.find((e: any) => e.tag === 'button');
+    expect(button.disabled).toBe(true); expect(button.behaviors).toBeUndefined();
+    await cards.requestApproval(owner.openId, 'final-card', { id: (cards as any).parents.get(owner.messageId).token, generation: 3 });
+    expect(requestApproval).not.toHaveBeenCalled();
+  });
+  it('budgets a clickable approval row and both navigation buttons on a 168-node base', async () => {
+    await cards.destroy(); const requestApproval = vi.fn(async () => 'Sent');
+    cards = new InlineFileCards(path.join(root, 'journal'), { owns: async () => true, rows: () => [], patch,
+      approvalAvailable: () => true, requestApproval });
+    await cards.admit(owner);
+    cards.remember('final-card', owner.rootId, JSON.stringify({ schema: '2.0', body: { elements: Array.from({ length: 168 }, () => ({ tag: 'markdown', content: 'Answer' })) } }));
+    await cards.bind(owner.rootId, 'final-card');
+    await cards.hints(owner.deviceId, { messageId: owner.messageId, threadId: owner.threadId, generation: 3, names: ['first.csv', 'second.csv', 'third.csv'] }, 'approval');
+    const next = panel().elements.find((e: any) => e.text?.content === 'Next'); await cards.page(owner.openId, 'final-card', next.behaviors[0].value);
+    expect(taggedNodeCount(last())).toBe(180);
+    expect(panel().elements.filter((e: any) => e.behaviors?.[0]?.value.action === 'output_file_approval')).toHaveLength(1);
+    expect(panel().elements.find((e: any) => e.text?.content === 'Get file').disabled).toBe(false);
+  });
+  it('migrates only an exact unverified parent and returns to normal Get file after verified offers', async () => {
+    await cards.destroy(); let epoch = owner.epoch;
+    cards = new InlineFileCards(path.join(root, 'journal'), { owns: async p => p.epoch === epoch, rows: () => rows, patch });
+    await bind(); await cards.hints(owner.deviceId, { messageId: owner.messageId, threadId: owner.threadId, generation: 3, names: ['report.csv'] }, 'approval');
+    epoch = 'approved-epoch';
+    expect(await cards.migrateApproval({ ...owner, openId: 'other', generation: 3 }, epoch)).toBe(false);
+    expect(await cards.migrateApproval({ ...owner, generation: 4 }, epoch)).toBe(false);
+    expect(await cards.migrateApproval({ ...owner, generation: 3 }, epoch)).toBe(true);
+    rows = [{ ...row(), epoch, name: 'report.csv' }]; await cards.refresh(owner.messageId);
+    const button = panel().elements.find((e: any) => e.tag === 'button');
+    expect(button).toMatchObject({ type: 'primary', disabled: false, text: { content: 'Get file' } });
+    expect(button.behaviors[0].value).toEqual({ action: 'output_file', id: row().id, op: 'get' });
+    expect(await cards.allows({ ...owner, epoch, generation: 3 }, 'final-card')).toBe(true);
+    expect(await cards.allows({ ...owner, generation: 3 }, 'final-card')).toBe(false);
+    expect(await cards.migrateApproval({ ...owner, epoch, generation: 3 }, epoch)).toBe(false);
+  });
+});
+
 describe('inline file presentation', () => {
   it('shows one heading and separates the literal filename from subdued size, status and absolute UTC expiry', async () => {
     rows = [{ ...row(), size: 1536, expiresAt: Date.UTC(2026, 0, 2, 3, 4) }]; await bind();

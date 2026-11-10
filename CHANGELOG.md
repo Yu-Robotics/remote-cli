@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.231] - 2026-11-10
+
+### Added
+- Let the existing inline Get file button request device file approval when approval is missing, without adding a second button. Keep automatic enrollment reminders separate from explicit user requests.
+- Carry only the explicitly selected unverified reply across first-key approval, and prepare bounded process-local attachment intent after authenticated reconnection. Keep stale contexts, unavailable proof, revoked keys, and unknown delivery outcomes held without widening file access.
+
 ## [1.6.230] - 2026-11-10
 
 ### Changed
