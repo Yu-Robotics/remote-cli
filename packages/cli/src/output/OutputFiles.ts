@@ -12,6 +12,7 @@ import { OPAQUE_ID, OUTPUT_LIMITS } from './Protocol';
 export class OutputFiles {
   private origin: string;
   private connected = false;
+  private connectionRevision = 0;
   private enabled = false;
   private acknowledged = new Set<string>();
   private active = new Map<string, AbortController>();
@@ -22,15 +23,22 @@ export class OutputFiles {
   }
   async initialize(): Promise<void> { await this.snapshots.initialize(); }
   connect(): void {
+    this.connectionRevision++;
     this.enabled = true; this.connected = true; this.acknowledged.clear(); this.advertise();
     clearInterval(this.timer); this.timer = setInterval(() => this.advertise(), 15_000); this.timer.unref();
   }
   disconnect(): void {
+    this.connectionRevision++;
     this.connected = false; clearInterval(this.timer);
     for (const controller of this.active.values()) controller.abort();
   }
   disable(): void { this.enabled = false; this.disconnect(); }
   isEnabled(): boolean { return this.enabled; }
+  canPrepare(): boolean { return this.enabled && this.connected; }
+  preparationLease(): () => boolean {
+    const revision = this.connectionRevision;
+    return () => this.canPrepare() && this.connectionRevision === revision;
+  }
   private advertise(): void {
     if (!this.connected) return;
     const references = this.snapshots.references();
@@ -44,13 +52,18 @@ export class OutputFiles {
     if (!this.enabled) return { unavailable: 0, omitted: false };
     // Aggregate backend results are diagnostics, not public delivery intent.
     const parsed = links.finish(context.source === 'worker' ? final : undefined,
-      context.source === 'worker' ? 'all' : 'attachments'); let unavailable = 0;
+      context.source === 'worker' ? 'all' : 'attachments');
+    return this.capturePaths(parsed.paths, { ...context, omitted: parsed.omitted });
+  }
+  async capturePaths(paths: string[], context: SnapshotContext): Promise<{ unavailable: number; omitted: boolean }> {
+    if (!this.enabled) return { unavailable: paths.length, omitted: !!context.omitted };
+    let unavailable = 0;
     const diagnostics = new OutputDiagnostics();
-    for (const candidate of parsed.paths) {
-      try { await this.snapshots.snapshot(candidate, { ...context, omitted: parsed.omitted }); } catch (error) { unavailable++; diagnostics.failure(context.messageId, candidate, error); }
+    for (const candidate of paths) {
+      try { await this.snapshots.snapshot(candidate, { ...context, current: () => this.enabled && (context.current?.() ?? true) }); } catch (error) { unavailable++; diagnostics.failure(context.messageId, candidate, error); }
     }
     if (context.source !== 'worker') this.advertise();
-    return { unavailable, omitted: parsed.omitted };
+    return { unavailable, omitted: !!context.omitted };
   }
   handle(message: any): void {
     if (message.type === 'output_registered' && OPAQUE_ID.test(message.id)) {

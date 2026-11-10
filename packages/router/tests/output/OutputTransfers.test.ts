@@ -60,6 +60,18 @@ beforeEach(async () => {
 afterEach(async () => { await transfers.destroy(); await Promise.allSettled(receiving); vi.restoreAllMocks(); await fs.rm(root, { recursive: true, force: true }); });
 
 describe('durable registration and independent cards', () => {
+  it('carries only an exact unverified source across first-key approval and rejects existing references', async () => {
+    const owner = { messageId: 'reply', deviceId: 'device', openId: 'user', threadId: 'thread', generation: 2, epoch: 'owner-epoch' };
+    await transfers.admitSource(owner);
+    expect(await transfers.migrateApprovalSource({ ...owner, threadId: 'foreign' }, 'approved')).toBe(false);
+    expect(await transfers.migrateApprovalSource(owner, 'approved')).toBe(true);
+    expect(state().sources[0]).toMatchObject({ ...owner, epoch: 'approved' });
+    await transfers.offer('device', reference());
+    expect(state().references).toHaveLength(1);
+    expect(await transfers.migrateApprovalSource({ ...owner, epoch: 'approved' }, 'another')).toBe(false);
+    owned = false;
+    expect(await transfers.migrateApprovalSource({ ...owner, messageId: 'another-reply' }, 'approved')).toBe(false);
+  });
   it('persists and restarts output receipts beneath an existing ancestor alias', async () => {
     const alias = path.join(root, 'alias');
     await fs.symlink(root, alias, process.platform === 'win32' ? 'junction' : 'dir');

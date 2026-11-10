@@ -2142,6 +2142,12 @@ Examples:
       try { return { toast: { type: 'info', content: await this.onAutomaticFileEnrollment(openId, cardId, parsed) } }; }
       catch { return { toast: { type: 'error', content: 'File approval could not be completed. Existing text access is unchanged.' } }; }
     }
+    if (parsed.action === 'output_file_approval') {
+      const cardId = data?.context?.open_message_id;
+      if (typeof cardId !== 'string' || !this.inlineFiles) return { toast: { type: 'error', content: 'File approval unavailable.' } };
+      try { return { toast: { type: 'info', content: await this.inlineFiles.requestApproval(openId, cardId, parsed) } }; }
+      catch { return { toast: { type: 'error', content: 'File approval could not be requested. Use remote-cli files enable.' } }; }
+    }
     if (parsed.action === 'output_page') {
       const cardId = data?.context?.open_message_id;
       if (typeof cardId !== 'string' || !this.onInlineFilePage) return { toast: { type: 'error', content: 'File controls unavailable.' } };

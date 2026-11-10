@@ -68,6 +68,61 @@ describe('durable automatic file approval', () => {
     expect((await auth.get('device'))?.publicKey).toBe(key.publicKey);
   });
 
+  it('reissues an explicit card once, invalidates its predecessor, and preserves automatic dedupe after expiry', async () => {
+    const proofValue = proof(); await service.request('device', proofValue);
+    const original = action(); create.mockResolvedValue('explicit-card');
+    const epoch = bindings.getCardThreadEpoch('owner', 'device');
+    expect(service.canRecover('device', 'owner', epoch)).toBe(true);
+    await Promise.all([service.requestExplicit('device', 'owner', epoch), service.requestExplicit('device', 'owner', epoch)]);
+    expect(create).toHaveBeenCalledTimes(2);
+    const renewed = JSON.parse(create.mock.calls[1][1]).body.elements.at(-1).behaviors[0].value;
+    expect(renewed.id).not.toBe(original.id);
+    expect(await service.click('owner', 'approval-card', original)).toContain('unavailable');
+    await service.destroy(); restart();
+    expect(await service.request('device', proofValue)).toBe('known');
+    expect(create).toHaveBeenCalledTimes(2);
+    vi.spyOn(Date, 'now').mockReturnValue((await record()).expires);
+    expect(await service.request('device', proofValue)).toBe('expired');
+    expect(create).toHaveBeenCalledTimes(2);
+    await service.requestExplicit('device', 'owner', epoch);
+    expect(create).toHaveBeenCalledTimes(3);
+    expect(await service.click('owner', 'explicit-card', renewed)).toContain('unavailable');
+  });
+  it.each(['owner', 'epoch', 'revoked', 'conflict', 'uncertain', 'absent'])('holds unsafe explicit recovery: %s', async mode => {
+    const request = proof(); if (mode !== 'absent') await service.request('device', request);
+    const epoch = bindings.getCardThreadEpoch('owner', 'device');
+    if (mode === 'revoked' || mode === 'conflict') {
+      await auth.enroll('device', 'owner', mode === 'conflict' ? keys().publicKey : request.publicKey);
+      if (mode === 'revoked') await auth.revoke('device');
+    }
+    if (mode === 'uncertain') {
+      const saved = await record(); saved.state = 'uncertain'; await durable.durableJson(filename, [saved]);
+      await service.destroy(); restart();
+    }
+    const count = create.mock.calls.length;
+    await service.requestExplicit('device', mode === 'owner' ? 'intruder' : 'owner', mode === 'epoch' ? 'stale' : epoch);
+    expect(create).toHaveBeenCalledTimes(count); expect(approve).not.toHaveBeenCalled();
+  });
+  it('persists a conflicting CLI proof and never enrolls the stale key through an old card or explicit click', async () => {
+    await service.request('device', proof()); const old = action();
+    expect(await service.request('device', proof())).toBe('conflict');
+    const epoch = bindings.getCardThreadEpoch('owner', 'device');
+    await service.destroy(); restart();
+    await service.requestExplicit('device', 'owner', epoch);
+    expect(service.canRecover('device', 'owner', epoch)).toBe(false);
+    expect(await service.click('owner', 'approval-card', old)).toContain('unavailable');
+    expect(create).toHaveBeenCalledOnce(); expect(approve).not.toHaveBeenCalled();
+  });
+  it('never blindly retries an uncertain explicit send, including after restart', async () => {
+    const request = proof(); await service.request('device', request);
+    const epoch = bindings.getCardThreadEpoch('owner', 'device');
+    create.mockRejectedValue(new Error('Synthetic lost receipt'));
+    expect(await service.requestExplicit('device', 'owner', epoch)).toContain('unconfirmed');
+    await service.destroy(); restart();
+    expect(await service.requestExplicit('device', 'owner', epoch)).toContain('unconfirmed');
+    expect(await service.request('device', request)).toBe('uncertain'); expect(create).toHaveBeenCalledTimes(2);
+  });
+
   it('rejects malformed proof, unbound devices, conflicting keys and unknown actions', async () => {
     expect(await service.request('device', {})).toBe('invalid');
     expect(await service.request('device', { ...proof(), signature: 'bad' })).toBe('invalid');

@@ -19,6 +19,8 @@ interface Dependencies {
   owns(owner: InlineOwner): Promise<boolean>;
   rows(identity: InlineIdentity): InlineFileRow[];
   status?(owner: InlineOwner): HintStatus | undefined;
+  approvalAvailable?(owner: InlineOwner): boolean;
+  requestApproval?(owner: InlineOwner): Promise<string>;
   patch(cardId: string, content: string): Promise<void>;
 }
 const TTL = 86_400_000, MAX_BYTES = 8 * 1024 * 1024, PANEL = 'output_files_inline';
@@ -178,6 +180,11 @@ export class InlineFileCards {
       try { await this.save(); } catch (error) { this.parents.delete(owner.messageId); throw error; }
     });
   }
+  ownerFor(messageId: string): InlineOwner | undefined {
+    const p = this.parents.get(messageId);
+    return p && p.expiresAt > Date.now() && p.cardId && p.base ? { messageId: p.messageId, openId: p.openId,
+      deviceId: p.deviceId, epoch: p.epoch, threadId: p.threadId, generation: p.generation, rootId: p.rootId } : undefined;
+  }
   rootFor(cardId: string): string | undefined { return [...this.parents.values()].find(p => p.cardId === cardId && p.expiresAt > Date.now())?.rootId; }
   hasRoot(rootId: string): boolean { return [...this.parents.values()].some(p => p.rootId === rootId && p.expiresAt > Date.now()); }
   remember(cardId: string, rootId: string, content: string): void {
@@ -242,6 +249,33 @@ export class InlineFileCards {
       || !p || !sameInlineIdentity(p, identity) || p.generation !== identity.generation) return false;
     return this.healthy && p.cardId === cardId && !!p.base && p.expiresAt > Date.now() && await this.deps.owns(p);
   }
+  async requestApproval(openId: string, cardId: string, action: any): Promise<string> {
+    await this.initialize();
+    const p = [...this.parents.values()].find(p => p.token === action?.id);
+    if (!p || p.openId !== openId || p.cardId !== cardId || p.generation !== action.generation
+      || !Number.isSafeInteger(action.generation)) return 'File approval is unavailable.';
+    return this.serial(p.rootId, async () => {
+      if (!this.healthy || p.expiresAt <= Date.now() || !p.base || !await this.deps.owns(p)
+        || (this.deps.status?.(p) ?? p.status) !== 'approval' || !this.deps.approvalAvailable?.(p)
+        || !this.deps.requestApproval) return 'File approval is unavailable. Use remote-cli files enable.';
+      return this.deps.requestApproval(this.ownerFor(p.messageId)!);
+    });
+  }
+
+  /** The first-key approval may carry only the exact clicked, still-unverified parent across its epoch change. */
+  async migrateApproval(owner: InlineOwner, epoch: string): Promise<boolean> {
+    await this.initialize();
+    return this.serial(owner.rootId, async () => {
+      const p = this.parents.get(owner.messageId);
+      if (!p || !same(p, owner) || p.generation !== owner.generation || p.verified || p.expiresAt <= Date.now()
+        || !p.base || !p.cardId || this.rows(p).length || !await this.deps.owns({ ...p, epoch })) return false;
+      const old = p.epoch; p.epoch = epoch; p.status = 'ready';
+      try { await this.save(); } catch (error) { p.epoch = old; throw error; }
+      // Presentation updates must not determine whether durable migration succeeded.
+      return true;
+    });
+  }
+
   async page(openId: string, cardId: string, action: any): Promise<string> {
     await this.initialize(); const p = [...this.parents.values()].find(p => p.token === action?.id);
     if (!p || p.openId !== openId || p.cardId !== cardId || p.expiresAt <= Date.now() || !Number.isInteger(action.page) || action.page < 0 || action.page >= 30 || !await this.deps.owns(p)) return 'File controls are unavailable.';
@@ -267,13 +301,16 @@ export class InlineFileCards {
     const elements: any[] = pages > 1 ? [{ tag: 'markdown', text_size: 'notation', content: `Page ${p.page + 1} of ${pages}` }] : [];
     for (const row of rows.slice(p.page * pageSize, p.page * pageSize + pageSize)) {
       const size = 'size' in row && typeof row.size === 'number' ? `${formatOutputFileSize(row.size)} · ` : '';
+      const displayStatus = status === 'approval' && this.deps.approvalAvailable && !this.deps.approvalAvailable(p)
+        ? 'File approval required. Run remote-cli files enable, then request this attachment again.' : row.status;
       const expiry = 'expiresAt' in row && typeof row.expiresAt === 'number' ? `\nExpires ${formatOutputExpiry(row.expiresAt)}` : '';
       elements.push({ tag: 'div', text: { tag: 'plain_text', content: clean(row.name) } },
-        { tag: 'markdown', text_size: 'notation', content: `<font color='grey'>${size}${metadataLiteral(row.status)}${expiry}</font>` });
+        { tag: 'markdown', text_size: 'notation', content: `<font color='grey'>${size}${metadataLiteral(displayStatus)}${expiry}</font>` });
       const op = 'op' in row ? row.op : undefined;
-      elements.push({ tag: 'button', type: op ? 'primary' : 'default', disabled: !op,
+      const approval = status === 'approval' && !!this.deps.approvalAvailable?.(p);
+      elements.push({ tag: 'button', type: op ? 'primary' : 'default', disabled: !op && !approval,
         text: { tag: 'plain_text', content: op === 'retry' ? 'Retry' : 'Get file' },
-        ...(op && 'id' in row ? { behaviors: [{ type: 'callback', value: { action: 'output_file', id: row.id, op, ...(op === 'retry' ? { rev: row.revision } : {}) } }] } : {}) });
+        ...(approval ? { behaviors: [{ type: 'callback', value: { action: 'output_file_approval', id: p.token, generation: p.generation } }] } : op && 'id' in row ? { behaviors: [{ type: 'callback', value: { action: 'output_file', id: row.id, op, ...(op === 'retry' ? { rev: row.revision } : {}) } }] } : {}) });
     }
     for (const [name, page] of [['Previous', p.page - 1], ['Next', p.page + 1]] as const) if (page >= 0 && page < pages) {
       elements.push({ tag: 'button', type: 'default', text: { tag: 'plain_text', content: name },

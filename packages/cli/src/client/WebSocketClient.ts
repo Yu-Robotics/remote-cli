@@ -321,6 +321,8 @@ export class WebSocketClient {
   private sendRegistration(signature?: string): void {
     if (this.ws && this.connected) {
       let outputFiles = false;
+      let pendingOutputs = false;
+      try { pendingOutputs = typeof nativeBindings().readChunk === 'function' && typeof nativeBindings().openOutputChild === 'function'; } catch { /* No native helper means no delayed reads. */ }
       if (this.identity) { try { outputFiles = typeof nativeBindings().readChunk === 'function' && typeof nativeBindings().openOutputChild === 'function'; } catch { /* Unsupported helpers cannot authorize output reads. */ } }
       this.ws.send(JSON.stringify({
         type: 'binding_request',
@@ -334,6 +336,7 @@ export class WebSocketClient {
             ...(this.automaticFileEnrollment ? { automaticFileEnrollmentV1: true } : {}),
             queueStarted: true,
             outputAttachmentHintsV1: true,
+            ...(pendingOutputs && this.automaticFileEnrollment ? { pendingOutputFilesV1: true } : {}),
             taskRecovery: true,
             approvalCards: true,
             delegationProgress: true,

@@ -7,7 +7,7 @@ import { durableJson } from '../output/Durable';
 
 interface Request {
   id: string; deviceId: string; openId: string; epoch: string; publicKey: string;
-  expires: number; uuid: string; state: 'intent' | 'known' | 'uncertain' | 'approved'; cardId?: string;
+  explicit?: boolean; expires: number; uuid: string; state: 'intent' | 'known' | 'uncertain' | 'approved' | 'conflict'; cardId?: string;
 }
 interface Dependencies {
   bindings: BindingManager; auth: DeviceAuth;
@@ -41,7 +41,8 @@ export class AutomaticFileEnrollment {
             || typeof item.epoch !== 'string' || !item.epoch || item.epoch.length > 100
             || !DeviceAuth.validKey(item.publicKey) || !Number.isSafeInteger(item.expires)
             || typeof item.uuid !== 'string' || !/^[a-f0-9-]{36}$/.test(item.uuid)
-            || !['intent', 'known', 'uncertain', 'approved'].includes(item.state)
+            || (item.explicit !== undefined && item.explicit !== true)
+            || !['intent', 'known', 'uncertain', 'approved', 'conflict'].includes(item.state)
             || (item.cardId !== undefined && (typeof item.cardId !== 'string' || !item.cardId || item.cardId.length > 200))
             || (item.state === 'known' && !item.cardId)) throw new Error('Invalid enrollment request.');
           ids.add(item.id);
@@ -89,8 +90,12 @@ export class AutomaticFileEnrollment {
       if (!owns()) return 'unbound';
       const { openId, epoch } = original;
       const existing = this.records.find(item => item.deviceId === deviceId && item.epoch === epoch);
-      if (existing) return existing.publicKey === offered.publicKey
-        ? (existing.expires <= Date.now() ? 'expired' : existing.state) : 'conflict';
+      if (existing) {
+        if (existing.publicKey !== offered.publicKey) {
+          existing.state = 'conflict'; await this.save(); return 'conflict';
+        }
+        return existing.expires <= Date.now() ? 'expired' : existing.state;
+      }
       if (this.records.length >= 64 || this.records.filter(item => item.openId === openId).length >= 8) return 'limited';
       const request: Request = { id: createHash('sha256').update(`${deviceId}\n${epoch}\n${offered.publicKey}`).digest('hex'),
         deviceId, openId, epoch, publicKey: offered.publicKey,
@@ -98,40 +103,69 @@ export class AutomaticFileEnrollment {
       if (Buffer.byteLength(JSON.stringify([...this.records, request])) > 60 * 1024) return 'limited';
       this.records.push(request);
       await this.save();
-      const fingerprint = createHash('sha256').update(request.publicKey).digest('hex').slice(0, 16);
-      const content = JSON.stringify({ schema: '2.0', header: { template: 'blue', title: { tag: 'plain_text', content: 'Enable file access' } },
-        body: { elements: [{ tag: 'div', text: { tag: 'plain_text', content:
-          'An upgraded CLI requests file access. Approve only if you expect this request from your device. Text tasks continue without approval.' } },
-        { tag: 'div', text: { tag: 'plain_text', content: `New device key: ${fingerprint}. Approval requires a fresh authenticated connection.` } },
-        { tag: 'button', type: 'primary', text: { tag: 'plain_text', content: 'Enable file access' },
-          behaviors: [{ type: 'callback', value: { action: 'automatic_file_enrollment', id: request.id } }] }] } });
-      let delivery: Promise<string> | undefined;
-      let checked = false;
-      let status = 'unbound';
-      try {
-        await this.deps.bindings.approveExistingDeviceKey(openId, deviceId, epoch, async () => {
-          checked = true;
-          if (await this.deps.auth.get(deviceId)) { status = 'already-enrolled'; return; }
-          // This call is the external admission boundary. No binding mutation can
-          // commit between this final auth read and starting the exact owner's RPC.
-          // Release the binding queue before awaiting network completion.
-          try { delivery = Promise.resolve(this.deps.create(openId, content, request.uuid)); }
-          catch { delivery = Promise.reject(new Error('Card creation outcome unknown.')); }
-          void delivery.catch(() => {});
-        });
-      } catch (error) {
-        if (checked) throw error;
-        return 'unbound';
-      }
-      if (!delivery) return status;
-      try {
-        const cardId = await delivery;
-        if (typeof cardId !== 'string' || !cardId || cardId.length > 200) throw new Error('Missing card receipt.');
-        request.cardId = cardId; request.state = 'known';
-      } catch { request.state = 'uncertain'; }
-      await this.save();
-      return request.state;
+      return this.deliver(request);
     });
+  }
+
+  /** Only a previously proven key can recover from an explicit, owner-bound click. */
+  canRecover(deviceId: string, openId: string, epoch: string): boolean {
+    return this.healthy && !this.stopped && this.records.some(r => r.deviceId === deviceId && r.openId === openId
+      && r.epoch === epoch && r.state === 'known');
+  }
+
+  async requestExplicit(deviceId: string, openId: string, epoch: string): Promise<string> {
+    return this.run(async () => {
+      if (this.deps.bindings.getCardThreadEpoch(openId, deviceId) !== epoch) return 'File approval is unavailable.';
+      if (await this.deps.auth.get(deviceId)) return 'File approval cannot replace an existing or revoked key. Use remote-cli files enable.';
+      const previous = this.records.find(r => r.deviceId === deviceId && r.openId === openId && r.epoch === epoch);
+      if (!previous || previous.state !== 'known') return 'File approval is unavailable or its delivery is unconfirmed. Use remote-cli files enable.';
+      if (previous.explicit && previous.expires > Date.now()) return 'Use the existing file approval card in this chat.';
+      const request: Request = { ...previous, explicit: true, id: createHash('sha256').update(randomUUID()).digest('hex'),
+        expires: Date.now() + 24 * 60 * 60 * 1000, uuid: randomUUID(), state: 'intent', cardId: undefined };
+      const replacement = this.records.map(r => r === previous ? request : r);
+      if (Buffer.byteLength(JSON.stringify(replacement)) > 60 * 1024) return 'File approval capacity is unavailable.';
+      this.records = replacement;
+      await this.save();
+      const state = await this.deliver(request);
+      return state === 'known' ? 'A new file approval card was sent. Approve it, then return to Get file.'
+        : 'File approval delivery is unconfirmed. Use remote-cli files enable; no automatic resend will occur.';
+    });
+  }
+
+  private async deliver(request: Request): Promise<string> {
+    const fingerprint = createHash('sha256').update(request.publicKey).digest('hex').slice(0, 16);
+    const content = JSON.stringify({ schema: '2.0', header: { template: 'blue', title: { tag: 'plain_text', content: 'Enable file access' } },
+      body: { elements: [{ tag: 'div', text: { tag: 'plain_text', content:
+        'An upgraded CLI requests file access. Approve only if you expect this request from your device. Text tasks continue without approval.' } },
+      { tag: 'div', text: { tag: 'plain_text', content: `New device key: ${fingerprint}. Approval requires a fresh authenticated connection.` } },
+      { tag: 'button', type: 'primary', text: { tag: 'plain_text', content: 'Enable file access' },
+        behaviors: [{ type: 'callback', value: { action: 'automatic_file_enrollment', id: request.id } }] }] } });
+    let delivery: Promise<string> | undefined;
+    let checked = false;
+    let status = 'unbound';
+    try {
+      await this.deps.bindings.approveExistingDeviceKey(request.openId, request.deviceId, request.epoch, async () => {
+        checked = true;
+        if (await this.deps.auth.get(request.deviceId)) { status = 'already-enrolled'; return; }
+        // This call is the external admission boundary. No binding mutation can
+        // commit between this final auth read and starting the exact owner's RPC.
+        // Release the binding queue before awaiting network completion.
+        try { delivery = Promise.resolve(this.deps.create(request.openId, content, request.uuid)); }
+        catch { delivery = Promise.reject(new Error('Card creation outcome unknown.')); }
+        void delivery.catch(() => {});
+      });
+    } catch (error) {
+      if (checked) throw error;
+      return 'unbound';
+    }
+    if (!delivery) return status;
+    try {
+      const cardId = await delivery;
+      if (typeof cardId !== 'string' || !cardId || cardId.length > 200) throw new Error('Missing card receipt.');
+      request.cardId = cardId; request.state = 'known';
+    } catch { request.state = 'uncertain'; }
+    await this.save();
+    return request.state;
   }
 
   async click(openId: string, cardId: string, payload: unknown): Promise<string> {
