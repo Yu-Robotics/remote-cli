@@ -1306,6 +1306,8 @@ All seven backends receive local original/preview paths through the shared comma
 
 ### Retrieve Output Files
 
+From Router 1.6.230, the inline Files panel uses one heading and shows page numbers only when multiple pages are needed. Each filename appears on its own line, with smaller subdued size, status, and absolute UTC expiry details below it. Get file and Retry controls remain with the relevant file details.
+
 From Router 1.6.229, the Files panel opens expanded by default with a clear heading and total file count. It appears below the answer and above completion details and thread controls, including long replies, late offers, pagination, restart recovery, and thread-selection refreshes. Get file, progress, retry, and disabled approval hints stay compact in the same card; all selected attachments remain reachable. Retrieval remains manual and retains the existing ownership, authorization, capacity, and expiry checks.
 
 Router 1.6.229 serializes automatic file approval, manual key enrollment, and device unbinding across managers sharing one store. Completed revocation and newer manual key replacement cannot be overwritten by a stale approval callback. Existing ownership and authentication checks remain enforced.

@@ -53,6 +53,9 @@ function footerIndex(elements: any[]): number {
 }
 const label = (v: unknown, max = 200): v is string => typeof v === 'string' && !!v && v.length <= max;
 const clean = (v: string) => v.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, '').slice(0, 120);
+const metadataLiteral = (v: string) => v.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, ' ')
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  .replace(/[\\`*_{}\[\]()#+\-.!|~]/g, '\\$&');
 export const sameInlineIdentity = (a: InlineIdentity, b: InlineIdentity): boolean =>
   ['messageId', 'openId', 'deviceId', 'epoch', 'threadId'].every(k => a[k as keyof InlineIdentity] === b[k as keyof InlineIdentity])
   && (a.generation === undefined || b.generation === undefined || a.generation === b.generation);
@@ -257,13 +260,16 @@ export class InlineFileCards {
     const available = status !== 'disabled' && status !== 'approval';
     const rows: Array<InlineFileRow | { name: string; status: string }> = [...ready.map(r => available ? r : { ...r, op: undefined, status: statuses[status] }), ...p.names.filter(n => !names.has(n)).map(name => ({ name, status: statuses[status] }))];
     if (!rows.length) return p.base!;
-    const pageSize = Math.max(1, Math.min(4, Math.floor((180 - nodes(card) - 8) / 4)));
+    // Reserve panel/title (2), page notation (1), and two navigation buttons/texts (4).
+    // Each row adds filename div/text (2), metadata (1), and action button/text (2).
+    const pageSize = Math.max(1, Math.min(4, Math.floor((180 - nodes(card) - 7) / 5)));
     const pages = Math.ceil(rows.length / pageSize); p.page = Math.min(p.page, pages - 1);
-    const elements: any[] = [{ tag: 'markdown', text_size: 'notation', content: `Files · ${p.page + 1}/${pages}` }];
+    const elements: any[] = pages > 1 ? [{ tag: 'markdown', text_size: 'notation', content: `Page ${p.page + 1} of ${pages}` }] : [];
     for (const row of rows.slice(p.page * pageSize, p.page * pageSize + pageSize)) {
-      const size = 'size' in row && typeof row.size === 'number' ? ` · ${formatOutputFileSize(row.size)}` : '';
+      const size = 'size' in row && typeof row.size === 'number' ? `${formatOutputFileSize(row.size)} · ` : '';
       const expiry = 'expiresAt' in row && typeof row.expiresAt === 'number' ? `\nExpires ${formatOutputExpiry(row.expiresAt)}` : '';
-      elements.push({ tag: 'div', text: { tag: 'plain_text', content: `${clean(row.name)}${size} · ${row.status}${expiry}` } });
+      elements.push({ tag: 'div', text: { tag: 'plain_text', content: clean(row.name) } },
+        { tag: 'markdown', text_size: 'notation', content: `<font color='grey'>${size}${metadataLiteral(row.status)}${expiry}</font>` });
       const op = 'op' in row ? row.op : undefined;
       elements.push({ tag: 'button', type: op ? 'primary' : 'default', disabled: !op,
         text: { tag: 'plain_text', content: op === 'retry' ? 'Retry' : 'Get file' },

@@ -17,11 +17,136 @@ const make = () => new InlineFileCards(path.join(root, 'journal'), { owns: async
 async function bind() { await cards.admit(owner); cards.remember('final-card', owner.rootId, body()); await cards.bind(owner.rootId, 'final-card'); }
 const last = () => JSON.parse(patch.mock.calls.at(-1)![1]);
 const panel = () => last().body.elements.find((e: any) => e.element_id === 'output_files_inline');
+function taggedNodeCount(value: unknown): number {
+  const pending = [value]; let count = 0;
+  while (pending.length) {
+    const next = pending.pop();
+    if (!next || typeof next !== 'object') continue;
+    if ('tag' in next && typeof next.tag === 'string') count++;
+    pending.push(...Object.values(next));
+  }
+  return count;
+}
 beforeEach(async () => {
   root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'inline-output-test-')));
   vi.spyOn(os, 'homedir').mockReturnValue(root); owned = true; rows = []; patch = vi.fn(async () => {}); cards = make();
 });
 afterEach(async () => { vi.useRealTimers(); await cards.destroy(); vi.restoreAllMocks(); await fs.rm(root, { recursive: true, force: true }); });
+
+describe('inline file presentation', () => {
+  it('shows one heading and separates the literal filename from subdued size, status and absolute UTC expiry', async () => {
+    rows = [{ ...row(), size: 1536, expiresAt: Date.UTC(2026, 0, 2, 3, 4) }]; await bind();
+    expect(panel()).toMatchObject({ expanded: true, header: { title: { tag: 'plain_text', content: 'Files (1)' } } });
+    expect(panel().elements).toEqual([
+      { tag: 'div', text: { tag: 'plain_text', content: 'report-1.csv' } },
+      { tag: 'markdown', text_size: 'notation', content: "<font color='grey'>1.5 KiB · Ready\nExpires 02 Jan 2026, 03:04 UTC</font>" },
+      { tag: 'button', type: 'primary', disabled: false, text: { tag: 'plain_text', content: 'Get file' },
+        behaviors: [{ type: 'callback', value: { action: 'output_file', id: row().id, op: 'get' } }] },
+    ]);
+  });
+  it('omits the page indicator for a full single page and does not invent missing metadata', async () => {
+    rows = Array.from({ length: 4 }, (_, i) => row(i + 1)); await bind();
+    expect(panel().header.title.content).toBe('Files (4)');
+    expect(panel().elements.filter((e: any) => e.tag === 'markdown')).toEqual(
+      Array(4).fill({ tag: 'markdown', text_size: 'notation', content: "<font color='grey'>Ready</font>" }));
+    expect(panel().elements.filter((e: any) => e.tag === 'button')).toHaveLength(4);
+  });
+  it.each([
+    ['</font><at id=all>Alert</at><font color="red">', '&lt;/font&gt;&lt;at id=all&gt;Alert&lt;/at&gt;&lt;font color="red"&gt;'],
+    ['[open](https://example.com) ![image](x) **urgent** _text_ `code` \\ | ~ {x} # + -',
+      '\\[open\\]\\(https://example\\.com\\) \\!\\[image\\]\\(x\\) \\*\\*urgent\\*\\* \\_text\\_ \\`code\\` \\\\ \\| \\~ \\{x\\} \\# \\+ \\-'],
+    ['&lt;at id=all&gt; & text', '&amp;lt;at id=all&amp;gt; &amp; text'],
+    ['Ready\n# injected\r\n> quote', 'Ready \\# injected  &gt; quote'],
+  ])('keeps malicious names literal and escapes untrusted status (%#)', async (status, escaped) => {
+    const name = '\u202e<at id=all>**report**[x]`code`.csv\u0000';
+    rows = [{ ...row(), name, status }]; await bind();
+    expect(panel().elements[0]).toEqual({ tag: 'div', text: { tag: 'plain_text', content: name.slice(1, -1) } });
+    expect(panel().elements[1]).toEqual({ tag: 'markdown', text_size: 'notation', content: `<font color='grey'>${escaped}</font>` });
+    expect(panel().elements.filter((e: any) => e.tag === 'markdown').every((e: any) => !e.content.includes('report'))).toBe(true);
+  });
+  it('retains filename truncation and control-character sanitization on the standalone line', async () => {
+    rows = [{ ...row(), name: `\u0000${'a'.repeat(121)}\u202e.csv` }]; await bind();
+    expect(panel().elements[0].text).toEqual({ tag: 'plain_text', content: 'a'.repeat(120) });
+  });
+  it.each([
+    ['Ready', 'get'], ['File retrieval queued', 'get'], ['Waiting for the original device to reconnect', 'get'],
+    ['Receiving the snapshot', 'get'], ['Snapshot received and verified', 'get'], ['Uploading to Feishu', 'get'],
+    ['Upload complete; preparing the file message', 'get'], ['Sending the file message', 'get'],
+    ['Retrieval failed', 'retry'], ['Expired', undefined], ['File already delivered', undefined],
+    ['File send outcome is unknown', undefined], ['Device ownership changed; retrieval is unavailable', undefined],
+  ] as const)('keeps %s visible with the original action semantics', async (status, op) => {
+    rows = [{ ...row(), status, op, revision: 7 }]; await bind();
+    expect(panel().elements[1]).toEqual({ tag: 'markdown', text_size: 'notation', content: `<font color='grey'>${status}</font>` });
+    const button = panel().elements[2];
+    expect(button).toMatchObject({ tag: 'button', disabled: !op, type: op ? 'primary' : 'default',
+      text: { tag: 'plain_text', content: op === 'retry' ? 'Retry' : 'Get file' } });
+    if (op) expect(button.behaviors).toEqual([{ type: 'callback', value: {
+      action: 'output_file', id: row().id, op, ...(op === 'retry' ? { rev: 7 } : {}),
+    } }]);
+    else expect(button.behaviors).toBeUndefined();
+  });
+  it.each([
+    ['disabled', 'File retrieval disabled'], ['approval', 'File approval required'],
+    ['upgrade', 'CLI file support required'], ['unavailable', 'Attachment unavailable'], ['ready', 'Attachment not prepared'],
+  ] as const)('shows %s hint status in notation metadata with a disabled action', async (status, text) => {
+    await bind(); await cards.hints(owner.deviceId, { messageId: owner.messageId, threadId: owner.threadId, generation: 3, names: ['report.csv'] }, status);
+    expect(panel().elements[0].text).toEqual({ tag: 'plain_text', content: 'report.csv' });
+    expect(panel().elements[1]).toEqual({ tag: 'markdown', text_size: 'notation', content: `<font color='grey'>${text}</font>` });
+    expect(panel().elements[2]).toMatchObject({ disabled: true, type: 'default' });
+    expect(panel().elements[2].behaviors).toBeUndefined();
+  });
+  it.each(['disabled', 'approval'] as const)('keeps %s verified rows visibly blocked without a retrieval callback', async status => {
+    rows = [row()]; await bind();
+    await cards.hints(owner.deviceId, { messageId: owner.messageId, threadId: owner.threadId, generation: 3, names: [row().name] }, status);
+    expect(panel().elements[1].content).toBe(`<font color='grey'>${status === 'disabled' ? 'File retrieval disabled' : 'File approval required'}</font>`);
+    expect(panel().elements[2].disabled).toBe(true); expect(panel().elements[2].behaviors).toBeUndefined();
+  });
+  it.each([153, 154, 163, 164, 168])('keeps every row reachable within 180 recursive nodes on a %i-node base card', async budget => {
+    rows = Array.from({ length: 16 }, (_, i) => row(i + 1)); await cards.admit(owner);
+    const original = { schema: '2.0', header: { title: { tag: 'plain_text', content: 'Assistant' } }, body: { elements: [
+      ...Array.from({ length: Math.floor((budget - 1) / 2) }, () => ({ tag: 'div', text: { tag: 'plain_text', content: 'Answer' } })),
+      ...(budget % 2 === 0 ? [{ tag: 'markdown', content: 'Tail' }] : []),
+    ] } };
+    expect(taggedNodeCount(original)).toBe(budget);
+    cards.remember('final-card', owner.rootId, JSON.stringify(original)); await cards.bind(owner.rootId, 'final-card');
+    const pageSize = budget === 153 ? 4 : budget === 154 ? 3 : budget === 163 ? 2 : 1;
+    const pages = Math.ceil(16 / pageSize), seen = new Set<string>();
+    for (let page = 0; page < pages; page++) {
+      expect(taggedNodeCount(last())).toBeLessThanOrEqual(180);
+      expect(last().body.elements.slice(0, -1)).toEqual(original.body.elements);
+      expect(panel().elements[0].content).toBe(`Page ${page + 1} of ${pages}`);
+      expect(JSON.stringify(panel())).not.toContain('Files ·');
+      const actions = panel().elements.filter((e: any) => e.behaviors?.[0]?.value.action === 'output_file');
+      expect(actions).toHaveLength(Math.min(pageSize, 16 - page * pageSize));
+      for (const action of actions) seen.add(action.behaviors[0].value.id);
+      const previous = panel().elements.find((e: any) => e.text?.content === 'Previous');
+      const next = panel().elements.find((e: any) => e.text?.content === 'Next');
+      if (page === 0) expect(previous).toBeUndefined();
+      else {
+        expect(previous.behaviors[0].value).toMatchObject({ action: 'output_page', page: page - 1 });
+        expect(previous.behaviors[0].value.id).toMatch(/^[a-f0-9]{64}$/);
+        if (budget === 168 && next) expect(taggedNodeCount(last())).toBe(180);
+      }
+      if (page === pages - 1) expect(next).toBeUndefined();
+      else {
+        expect(next.behaviors[0].value).toMatchObject({ action: 'output_page', page: page + 1 });
+        if (previous) expect(next.behaviors[0].value.id).toBe(previous.behaviors[0].value.id);
+        expect(await cards.page(owner.openId, 'final-card', next.behaviors[0].value)).toContain('updated');
+      }
+    }
+    expect(seen).toEqual(new Set(rows.map(r => r.id)));
+    const previous = panel().elements.find((e: any) => e.text?.content === 'Previous');
+    await cards.page(owner.openId, 'final-card', previous.behaviors[0].value);
+    expect(panel().elements[0].content).toBe(`Page ${pages - 1} of ${pages}`);
+  });
+  it('rejects base cards exceeding 168 recursive nodes', async () => {
+    rows = [row()]; await bind();
+    const send = vi.fn(async () => ({ code: 0 }));
+    const oversized = JSON.stringify({ schema: '2.0', body: { elements: Array.from({ length: 169 }, () => ({ tag: 'markdown', content: 'Answer' })) } });
+    await expect(cards.write('final-card', owner.rootId, oversized, send)).rejects.toThrow('reserved capacity');
+    expect(send).not.toHaveBeenCalled();
+  });
+});
 
 describe('owned assistant body composition', () => {
   const controls = [
