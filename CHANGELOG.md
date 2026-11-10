@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.230] - 2026-11-10
+
+### Changed
+- Simplify the inline Files panel to a single heading, show page numbers only for multiple pages, and separate filenames from subdued size, status, and absolute UTC expiry details.
+
 ## [1.6.229] - 2026-11-07
 
 ### Changed
