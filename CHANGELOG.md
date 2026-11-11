@@ -13,6 +13,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.232] - 2026-11-11
+
+### Added
+- Add capability-based `/schedule` commands for native one-shot and recurring Claude and DSH tasks, with an isolated native process per schedule, explicit timezone handling, native create/list/cancel receipts, and lifecycle-correlated completion.
+- Persist task ownership, interrupted state, and bounded pending results; deliver acknowledged result cards to the original thread and retry after reconnect without adding a Router scheduler or model polling.
+- Add DSH native scheduler composition and an ACP event adapter with private job storage, correlated native terminal outcomes, and explicit cleanup. Preserve backend identity through catalog recovery and result delivery.
+- Report explicit scheduling eligibility for all eight backends and return version-specific reasons when native timing or existing-transport result delivery is unavailable. Keep list/cancel available after backend switches, and reject unavailable native capabilities, restricted sandbox configurations, and incompatible Routers explicitly.
+
+### Fixed
+- Keep scheduling initialization and delivery subscriptions dormant when no catalog exists. Recover persisted results after reconnect without creating schedule state for ordinary chat users; serialize first-use and recovery initialization and guard shutdown races.
+- Preserve already completed pending results when native processes report shutdown; distinguish service shutdown from ownership invalidation so offline recurring results can be delivered after restart.
+
 ## [1.6.231] - 2026-11-10
 
 ### Added
