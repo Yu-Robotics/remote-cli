@@ -59,6 +59,14 @@ import { isSessionControl } from '../session/SessionResumeService';
 import { readSessionCatalog } from '../session/adapters';
 import { piSessionHolder, resolvePiSessionLocator } from '../session/adapters/PiSessionCatalog';
 import { SessionControl, type PiBindingState } from '../session/SessionControl';
+import { ScheduleService, SCHEDULE_CATALOG_FILE } from '../scheduling/ScheduleService';
+import { ClaudeNativeScheduleProvider } from '../scheduling/ClaudeNativeScheduleProvider';
+import { DshNativeScheduleProvider } from '../scheduling/DshNativeScheduleProvider';
+import { ScheduleDeliveryClient } from '../scheduling/ScheduleDeliveryClient';
+import { parseScheduleCommand, SCHEDULE_USAGE } from '../scheduling/ScheduleCommand';
+import { assertNativeScheduleBackend, NATIVE_SCHEDULE_CAPABILITIES, SCHEDULE_CAPABILITIES } from '../scheduling/ScheduleCapabilities';
+import type { ScheduleOwner, ScheduleRecord } from '../scheduling/types';
+import { ClaudeSandbox } from '../executor/claude/ClaudeSandbox';
 
 /**
  * Detected backend information
@@ -256,6 +264,12 @@ export class MessageHandler {
   private pendingOutputSupported = false;
   private readonly pendingOutputFiles = new PendingOutputFiles();
   private imageConnectionEpoch = 0;
+  private scheduleResultsSupported = false;
+  private schedules?: ScheduleService;
+  private scheduleInitialization?: Promise<ScheduleService>;
+  private scheduleDelivery?: ScheduleDeliveryClient;
+  private readonly scheduleOwners = new Map<string, ScheduleOwner>();
+  private readonly scheduleManagement = new Set<string>();
 
   constructor(
     wsClient: WebSocketClient,
@@ -271,6 +285,7 @@ export class MessageHandler {
     this.config = config;
     this.wsClient.onClose?.(() => {
       this.imageConnectionEpoch++;
+      this.scheduleResultsSupported = false;
       this.routerVersion = undefined;
       this.fileInbox?.disconnect();
       this.outputFiles?.disconnect();
@@ -414,6 +429,13 @@ export class MessageHandler {
         this.attachmentHintsSupported = data.capabilities?.outputAttachmentHintsV1 === true;
         this.pendingOutputSupported = data.capabilities?.pendingOutputFilesV1 === true;
         this.routerVersion = typeof data.routerVersion === 'string' ? data.routerVersion : undefined;
+        this.scheduleResultsSupported = data.capabilities?.scheduleResultsV1 === true;
+        if (this.scheduleResultsSupported) {
+          void this.recoverSchedules().catch(() => {
+            if (this.isDestroyed || !this.scheduleResultsSupported) return;
+            console.warn('[Schedules] Local schedule recovery is unavailable. Use /schedule list for details.');
+          });
+        }
         if (data.capabilities?.outputFilesV1 === true) {
           try {
             if (!this.outputFiles) {
@@ -493,6 +515,7 @@ export class MessageHandler {
       || this.pendingReplaces.size > 0
       || this.activeThreadOperations.size > 0
       || this.abortOperations.size > 0
+      || this.scheduleManagement.size > 0 || this.schedules?.hasActiveSchedules()
       || this.threadManager.listThreads().some(thread => this.settingsAdmission.isBlocked(thread.id))
     ) {
       return false;
@@ -620,6 +643,10 @@ export class MessageHandler {
     }
 
     const settingsCommand = content?.trim() ?? '';
+    if (/^\/schedule(?:\s|$)/.test(settingsCommand)) {
+      await this.handleScheduleCommand(message, resolvedThreadId);
+      return;
+    }
     if (settingsCommand === '/clear' || settingsCommand === '/new') {
       await this.clearThreadConversation(messageId, resolvedThreadId);
       return;
@@ -1093,6 +1120,7 @@ export class MessageHandler {
   }
 
   private async clearThreadConversation(messageId: string, threadId: string): Promise<void> {
+    await this.assertSchedulesIdle(threadId);
     this.conversationRevisions.set(threadId, (this.conversationRevisions.get(threadId) ?? 0) + 1);
     this.settingsService.invalidate(threadId);
     this.directoryBrowser.invalidate(threadId);
@@ -1233,6 +1261,7 @@ export class MessageHandler {
     }
 
     if (trimmed === '/sandbox' || trimmed.startsWith('/sandbox ')) {
+      if (trimmed !== '/sandbox') await this.assertSchedulesIdle(threadId);
       if (!('getSandboxStatus' in executor) || !('configureSandbox' in executor)) {
         this.sendResponse(messageId, threadId, { success: false, error: '/sandbox is currently supported by the Codex and Claude Code backends.' });
         return true;
@@ -1354,6 +1383,7 @@ Use /compact to reduce conversation context or /clear to start a fresh context.`
 - /effort [auto|level] - Open effort settings, or set a native supported level with a text argument
 - /goal [objective|pause|resume|clear] - Manage a native Codex goal; optional --budget <tokens> on start or resume
 - /sandbox [on|off|read-only|default|allow <directory>|remove <directory>|network on|off] - Configure this thread's sandbox (Codex, Claude Code)
+- /schedule [capabilities|list|cancel <id>|after|at|cron] - Manage native scheduled tasks; /schedule shows examples
 - /delegation [on|off|reset [backend]] - Delegate tasks between installed agent backends; reset saved worker context when needed
 - /backend - Open backend settings (Current thread by default; Confirm applies)
 - /backend <index> - Switch all threads and clear per-thread backend overrides
@@ -1922,6 +1952,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       }
 
       try {
+        await this.assertSchedulesIdle(target.id);
         await this.delegation.cancelThread(target.id);
         await this.delegationBridges.get(target.id)?.close();
         this.delegationBridges.delete(target.id);
@@ -3258,8 +3289,177 @@ You can also use natural language commands to control Claude Code CLI.`,
     return (this.config.get('executor') as ExecutorConfig | undefined) ?? { type: 'auto' };
   }
 
+  private scheduleGeneration(threadId: string): string {
+    const thread = this.threadManager.getThread(threadId);
+    if (!thread) throw new Error('This thread no longer exists.');
+    this.threadManager.contextResets.assertReady(threadId);
+    return createHash('sha256').update(JSON.stringify({
+      server: this.config.get('serverUrl'), device: this.config.get('deviceId'),
+      thread: threadId, cwd: thread.workingDirectory,
+      generation: this.threadManager.contextResets.generation(threadId, thread.delegationWorkspaceGeneration ?? 0),
+    })).digest('hex');
+  }
+
+  private scheduleDirectory(): string | undefined {
+    const directory = this.config.getConfigDir?.();
+    if (typeof directory !== 'string' || !directory) return undefined;
+    const namespace = createHash('sha256').update(JSON.stringify({
+      server: this.config.get('serverUrl'), device: this.config.get('deviceId'),
+    })).digest('hex');
+    return path.join(directory, 'schedules', namespace);
+  }
+
+  /** Binding recovery only reads existing storage; first use belongs to /schedule. */
+  private async recoverSchedules(): Promise<void> {
+    if (this.isDestroyed || !this.scheduleResultsSupported) return;
+    if (!this.scheduleInitialization) {
+      const directory = this.scheduleDirectory();
+      if (!directory) return;
+      try {
+        await fs.promises.lstat(path.join(directory, SCHEDULE_CATALOG_FILE));
+      } catch (error) {
+        if (['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) return;
+        throw error;
+      }
+    }
+    // A disconnect or shutdown can happen while storage is being checked. Never
+    // create a late service/subscription after shutdown has collected its work.
+    if (this.isDestroyed || !this.scheduleResultsSupported) return;
+    const service = await this.initializeSchedules();
+    if (!this.isDestroyed && this.scheduleResultsSupported) await service.retryDeliveries();
+  }
+
+  private initializeSchedules(): Promise<ScheduleService> {
+    if (this.scheduleInitialization) return this.scheduleInitialization;
+    this.scheduleInitialization = (async () => {
+      if (this.isDestroyed) throw new Error('The client is shutting down.');
+      const directory = this.scheduleDirectory();
+      if (!directory) throw new Error('Local schedule storage is unavailable.');
+      const providers = { claude: new ClaudeNativeScheduleProvider(), dsh: new DshNativeScheduleProvider() };
+      const service = new ScheduleService({
+        directory,
+        provider: { create: (input, onEvent) => {
+          const backend = input.backend === undefined ? 'claude' : input.backend;
+          assertNativeScheduleBackend(backend);
+          return providers[backend].create(input, onEvent);
+        } },
+        isOwnerCurrent: owner => {
+          // Shutdown blocks delivery separately; it does not invalidate persisted ownership.
+          try { return this.scheduleGeneration(owner.threadId) === owner.generation; }
+          catch { return false; }
+        },
+        deliver: async delivery => {
+          if (!this.scheduleResultsSupported || this.isDestroyed) throw new Error('Scheduled result delivery is unavailable.');
+          const thread = this.threadManager.getThread(delivery.schedule.threadId);
+          if (!thread) throw new Error('The original thread no longer exists.');
+          await this.scheduleDelivery!.deliver(delivery, thread.name);
+        },
+      });
+      await service.initialize();
+      if (!this.isDestroyed) this.scheduleDelivery = new ScheduleDeliveryClient(this.wsClient);
+      this.schedules = service;
+      return service;
+    })();
+    return this.scheduleInitialization;
+  }
+
+  private async activeSchedules(threadId: string): Promise<ScheduleRecord[]> {
+    const owner = this.scheduleOwners.get(threadId);
+    if (!owner || !this.schedules) return [];
+    const records = await this.schedules.list(owner);
+    const active = records.filter(record => ['creating', 'active', 'running'].includes(record.state));
+    if (!active.length && !this.scheduleManagement.has(threadId)) this.scheduleOwners.delete(threadId);
+    return active;
+  }
+
+  private async assertSchedulesIdle(threadId: string): Promise<void> {
+    if (this.scheduleManagement.has(threadId) || this.schedules?.hasActiveSchedules(threadId)) {
+      throw new Error('Cancel this thread\'s schedules with /schedule cancel <id> before resetting context, changing directory, or deleting the thread.');
+    }
+  }
+
+  private async handleScheduleCommand(message: IncomingMessage, threadId: string): Promise<void> {
+    const respond = (result: ExecuteResult) => this.sendResponse(message.messageId, threadId, result, true);
+    let reserved = false;
+    try {
+      const command = parseScheduleCommand(message.content ?? '');
+      if (!command || command.kind === 'help') { respond({ success: true, output: SCHEDULE_USAGE }); return; }
+      if (command.kind === 'invalid') { respond({ success: false, error: command.message }); return; }
+      if (command.kind === 'capabilities') { respond({ success: true, output: SCHEDULE_CAPABILITIES }); return; }
+      if (!message.openId) throw new Error('Scheduled tasks require an authenticated thread owner.');
+      if (message.attachments?.length || message.fileIds?.length || message.workingDirectory) {
+        throw new Error('Use /cd first and include a self-contained text prompt. Schedule commands do not accept attachments or directory overrides.');
+      }
+      const owner: ScheduleOwner = { threadId, openId: message.openId, generation: this.scheduleGeneration(threadId) };
+      if (command.kind === 'create' || command.kind === 'cancel') {
+        if (this.scheduleManagement.has(threadId)) throw new Error('A schedule operation is already in progress for this thread.');
+        this.scheduleManagement.add(threadId);
+        reserved = true;
+      }
+      const service = await this.initializeSchedules();
+      if (command.kind === 'list') {
+        await service.refresh(owner);
+        const records = await service.list(owner);
+        void service.retryDeliveries().catch(() => {});
+        await this.activeSchedules(threadId);
+        respond({ success: true, output: records.length ? records.map(record =>
+          `${record.id} — ${record.state}\n${record.rule.kind === 'once' ? record.rule.at : `${record.rule.expression} (${record.rule.timezone})`}\n${record.prompt.slice(0, 240)}${record.error ? `\n${record.error}` : ''}`
+        ).join('\n\n') : 'No schedules in this thread. Use /schedule for examples.' });
+        return;
+      }
+      try {
+        if (command.kind === 'cancel') {
+          const record = await service.cancel(owner, command.id);
+          respond({ success: true, output: `Schedule ${record.id}: ${record.state}.` });
+          return;
+        }
+        if (command.kind !== 'create') throw new Error('Unknown schedule operation.');
+        if (this.isDestroyed || this.automaticUpdateInProgress) throw new Error('The client is updating or shutting down. No schedule was created.');
+        if (!this.scheduleResultsSupported || !this.wsClient.isConnected()) {
+          throw new Error('Schedule creation requires a connected Router with scheduleResultsV1 support. Update both CLI and Router.');
+        }
+        const backend = this.threadPool.getBackendKey(threadId);
+        assertNativeScheduleBackend(backend);
+        const config = this.executorConfiguration();
+        if (backend === 'claude' && new ClaudeSandbox(this.directoryGuard, config.claude?.sandbox, threadId).isRestricted()) {
+          throw new Error('This native scheduling adapter does not support restricted Claude sandboxes. No schedule was created and sandbox settings were not changed.');
+        }
+        const thread = this.threadManager.getThread(threadId)!;
+        const cwd = this.directoryGuard.resolveWorkingDirectory(thread.workingDirectory);
+        assertWorkingDirectoryExists(cwd);
+        const existingOwner = this.scheduleOwners.get(threadId);
+        if (existingOwner && existingOwner.openId !== owner.openId && (await this.activeSchedules(threadId)).length) {
+          throw new Error('This thread has schedules belonging to a different owner.');
+        }
+        this.scheduleOwners.set(threadId, owner);
+        const record = await service.create(owner, {
+          id: uuidv4(), backend, cwd, rule: command.rule, prompt: command.prompt,
+          command: config[backend]?.command,
+          model: thread.models?.[backend] ?? (backend === 'claude' ? thread.model || undefined : config.dsh?.model),
+          effort: thread.efforts?.[backend],
+        });
+        const lifecycle = backend === 'claude'
+          ? 'Schedules are lost when the native process exits; recurring tasks expire after seven days.'
+          : 'Native job storage is isolated and is never automatically reopened after process exit.';
+        respond({ success: true, output: `Schedule ${record.id}: ${record.state}.\n${record.rule.kind === 'once' ? record.rule.at : `${record.rule.expression} (${record.rule.timezone})`}\n\nRuns in its own ${NATIVE_SCHEDULE_CAPABILITIES[backend].label} session and returns results to this thread. Keep the CLI running; native timing is approximate. ${lifecycle}\nUse /schedule list or /schedule cancel ${record.id}.` });
+      } finally {
+        this.scheduleManagement.delete(threadId);
+        reserved = false;
+        await this.activeSchedules(threadId).catch(() => undefined);
+      }
+    } catch (error) {
+      respond({ success: false, error: error instanceof Error ? error.message : 'Schedule operation failed.' });
+    } finally {
+      if (reserved) {
+        this.scheduleManagement.delete(threadId);
+        await this.activeSchedules(threadId).catch(() => undefined);
+      }
+    }
+  }
+
   /** Shared card/text Apply path. Callers hold exclusive settings admission. */
   private async changeWorkingDirectory(threadId: string, targetDir: string): Promise<ExecuteResult> {
+    await this.assertSchedulesIdle(threadId);
     if (this.isDestroyed || this.automaticUpdateInProgress || this.abortOperations.has(threadId)
       || this.threadPool.isThreadBusy(threadId) || this.coordinatorPreparations.has(threadId) || this.hasThreadQueueState(threadId)) {
       throw new Error('Cannot change working directory while the thread has active or queued work. Retry when it is idle.');
@@ -3563,6 +3763,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     this.directoryBrowser.destroy();
     this.settingsService.destroy();
     this.isDestroyed = true;
+    this.scheduleDelivery?.destroy();
     this.pendingOutputFiles.clear();
     for (const threadId of this.activeThreadOperations.keys()) {
       this.settingsAdmission.cancelRecoverable(threadId);
@@ -3575,6 +3776,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     this.notificationAdapter.unregister();
     try {
       const results = await Promise.allSettled([
+        this.scheduleInitialization?.then(service => service.destroy(), () => undefined),
         this.delegation.destroy(),
         ...[...this.delegationBridges.values()].map(bridge => bridge.close()),
         this.threadPool.destroyAll({ deleteData: false, shutdown: true }),

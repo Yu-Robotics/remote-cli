@@ -858,6 +858,7 @@ Backend and session commands (sent to active device):
 /skills - List available skills for the active backend
 /abort - Abort the currently executing command
 /queue - Inspect or manage confirmed messages for busy threads
+/schedule - Manage native scheduled tasks; /schedule help shows available actions
 /files [clear] - List staged attachments or remove unused local copies
 /model [name] - Show models or set this thread's model
 /effort [auto|low|medium|high] - Show or set Codex/AGY reasoning effort

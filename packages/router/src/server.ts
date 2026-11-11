@@ -693,6 +693,7 @@ export class RouterServer {
       let deviceId: string | null = null;
       let socketClosed = false;
       let taskRecoveryEnabled = false;
+      let scheduleResultsEnabled = false;
       let approvalCardsEnabled = false;
       let delegationProgressEnabled = false;
       let delegationProgressTextEnabled = false;
@@ -830,6 +831,8 @@ export class RouterServer {
           if ([MessageType.RESPONSE, MessageType.NOTIFICATION,
             'task_resume', 'stream', 'stream_context', 'queue_started'].includes(message.type)
             && !await this.authorizeRecipientOutput(message, imageDevice, imageCurrent)) return;
+          if (message.queueStarted?.source !== undefined
+            && (!scheduleResultsEnabled || !this.validScheduledResult(message))) return;
           // Establish routing before card creation awaits. Payload admission and
           // response closure must occur before waiting for earlier operations.
           if (imageDevice && taskRecoveryEnabled && message.type === 'task_resume') {
@@ -1019,6 +1022,8 @@ export class RouterServer {
                 this.fileTransfers.disconnect(deviceId);
 
                 taskRecoveryEnabled = message.data.capabilities?.taskRecovery === true;
+                scheduleResultsEnabled = taskRecoveryEnabled && message.data.capabilities?.queueStarted === true
+                  && message.data.capabilities?.scheduleResultsV1 === true;
                 approvalCardsEnabled = message.data.capabilities?.approvalCards === true;
                 updateNoticeEnabled = message.data.capabilities?.updateNotice === true;
                 subscriptionInspectionEnabled = message.data.capabilities?.subscriptionInspection === true;
@@ -1065,6 +1070,7 @@ export class RouterServer {
                       ...(message.data.capabilities?.pendingOutputFilesV1 === true ? { pendingOutputFilesV1: true } : {}),
                       ...(outputsEnabled ? { outputFilesV1: true } : {}),
                       ...(taskRecoveryEnabled ? { taskRecovery: true } : {}),
+                      ...(scheduleResultsEnabled ? { scheduleResultsV1: true } : {}),
                       ...(approvalCardsEnabled ? { approvalCards: true } : {}),
                       ...(delegationProgressEnabled ? { delegationProgress: true } : {}),
                       ...(delegationProgressTextEnabled ? { delegationProgressText: true } : {}),
@@ -1096,6 +1102,17 @@ export class RouterServer {
 
             case MessageType.RESPONSE:
               deliveryEvent('task_result_received', { task: taskCorrelation(message.messageId), connectionEpoch });
+              const scheduledSession = this.streamingMessages.get(message.messageId);
+              if (scheduledSession?.queueStarted?.source === 'schedule') {
+                if (!scheduleResultsEnabled || message.threadId !== scheduledSession.threadId
+                  || message.cwd !== scheduledSession.cwd || message.queueConfirmation || message.data?.queueConfirmation
+                  || (message.queueStarted && (message.queueStarted.scheduleId !== scheduledSession.queueStarted.scheduleId
+                    || message.queueStarted.backend !== scheduledSession.queueStarted.backend))) break;
+              } else if (message.queueStarted?.source === 'schedule'
+                && !(deviceId && this.isCompletedTask(message.messageId, deviceId))) {
+                // A rejected/missing start must not fall through to an unthreaded plain response.
+                break;
+              }
               if (taskRecoveryEnabled && deviceId && this.isCompletedTask(message.messageId, deviceId)) {
                 ws.send(JSON.stringify({ type: 'task_result_ack', messageId: message.messageId, timestamp: Date.now() }));
                 deliveryEvent('result_ack_send', { task: taskCorrelation(message.messageId), connectionEpoch, acceptedLocally: true, duplicate: true });
@@ -1171,7 +1188,7 @@ export class RouterServer {
               if (responseMessageId && responseOpenId) {
                 // Check if this was a streaming message (stream chunks were sent)
                 if (this.streamingMessages.has(responseMessageId)) {
-                  await this.finalizeStreamingMessage(
+                  const delivered = await this.finalizeStreamingMessage(
                     responseMessageId,
                     message.success ?? message.data?.success,
                     message.output || message.data?.output,
@@ -1182,6 +1199,7 @@ export class RouterServer {
                     executionMetadata,
                     settingsMenu,
                   );
+                  if (scheduledSession?.queueStarted?.source === 'schedule' && !delivered) break;
                 } else {
                   // No streaming session found - session should have been created when command was sent
                   // This might happen if there was an error. Just send the result as plain text.
@@ -2367,6 +2385,19 @@ export class RouterServer {
     return true;
   }
 
+  /** Validate the additive scheduled-result envelope without changing ordinary queue metadata. */
+  private validScheduledResult(message: any): boolean {
+    const info = message.queueStarted;
+    const bounded = (value: unknown, maximum: number, empty = false) => typeof value === 'string'
+      && (empty || value.length > 0) && value.length <= maximum;
+    return (message.type === 'queue_started' || message.type === MessageType.RESPONSE)
+      && info?.source === 'schedule' && bounded(info.scheduleId, 256)
+      && bounded(message.messageId, 256) && bounded(message.openId, 256) && bounded(message.threadId, 256)
+      && (info.backend === 'claude' || info.backend === 'dsh') && bounded(info.threadName, 100, true) && bounded(info.cwd, 4096)
+      && bounded(info.preview, 240, true) && info.remainingCount === 0
+      && message.cwd === info.cwd;
+  }
+
   /** Create a fresh card before accepting any output for a dequeued task. */
   private async handleQueueStarted(message: any, deviceId: string | null, isCurrent = () => true): Promise<void> {
     const info = message.queueStarted as QueueStartedInfo | undefined;
@@ -2376,19 +2407,25 @@ export class RouterServer {
       || !info || typeof info.threadName !== 'string' || typeof info.backend !== 'string'
       || typeof info.cwd !== 'string' || typeof info.preview !== 'string'
       || !Number.isInteger(info.remainingCount) || info.remainingCount < 0) return;
+    if (info.source === 'schedule' && this.isCompletedTask(messageId, deviceId)) return;
     const selectionFence = this.selections.capture(openId, deviceId);
     const previous = this.streamingMessages.get(messageId);
     if (previous && (previous.deviceId !== deviceId || previous.openId !== openId
       || (previous.threadId && previous.threadId !== threadId))) return;
     const pending = this.queueMessageOperations.get(messageId);
     if (pending) return pending;
-    if (this.startedQueueMessages.has(messageId)) return;
+    // Disconnect cleanup removes unfinished sessions. A persisted schedule outbox
+    // may recreate those cards; completed results are fenced by the receipt cache above.
+    if (this.startedQueueMessages.has(messageId) && (info.source !== 'schedule' || previous?.feishuMessageId)) return;
 
     this.startedQueueMessages.set(messageId, Date.now());
     this.cancelImageReply(messageId);
     const imageRoute = this.prepareImageReply(messageId, openId, deviceId, isCurrent, threadId, true);
     const operation = Promise.resolve().then(async () => {
-      const intro = `▶️ **Queued task started**
+      const escape = (value: string) => value.replace(/[\\`*_{}\[\]()<>!#|]/g, '\\$&');
+      const intro = info.source === 'schedule'
+        ? `🕒 **Scheduled task result**\n\n**Thread:** ${escape(info.threadName)} · **Backend:** ${info.backend}\n**Working directory:** ${escape(info.cwd)}\n**Task:** ${escape(info.preview)}`
+        : `▶️ **Queued task started**
 
 **Thread:** ${info.threadName} · **Backend:** ${info.backend}
 **Working directory:** \`${info.cwd}\`
@@ -2505,9 +2542,9 @@ export class RouterServer {
     }
   }
 
-  private async finalizeStreamingMessage(messageId: string, success: boolean, output?: string, error?: string, sessionAbbr?: string, cwd?: string, queueConfirmation?: QueueConfirmationInfo, executionMetadata?: ExecutionMetadata, settingsMenu?: unknown): Promise<void> {
+  private async finalizeStreamingMessage(messageId: string, success: boolean, output?: string, error?: string, sessionAbbr?: string, cwd?: string, queueConfirmation?: QueueConfirmationInfo, executionMetadata?: ExecutionMetadata, settingsMenu?: unknown): Promise<boolean> {
     const streamData = this.streamingMessages.get(messageId);
-    if (!streamData) return;
+    if (!streamData) return false;
     const task = taskCorrelation(messageId);
     deliveryEvent('task_finalization_started', { task, card: taskCorrelation(streamData.feishuMessageId) });
     try {
@@ -2519,19 +2556,24 @@ export class RouterServer {
       const accepted = route?.reply.tail;
       if (accepted) await accepted;
       if (this.streamingMessages.get(messageId) !== streamData
-        || (route && (this.imageReplies.get(messageId) !== route || !route.current()))) return;
+        || (route && (this.imageReplies.get(messageId) !== route || !route.current()))) return false;
       if (route?.reply.failed) this.noteImageFailure(messageId, streamData);
       this.cancelImageReply(messageId);
       streamData.finalizing = true;
       streamData.updatePending = false;
       this.clearDelegationProgressTimers(streamData);
       await streamData.updateInFlight;
-      if (!await this.canDispatchStreamOutput(messageId, streamData)) return;
+      if (!await this.canDispatchStreamOutput(messageId, streamData)) return false;
 
       await this.admitInlineParent(messageId).catch(() => {});
       const { feishuMessageId, openId } = streamData;
 
       if (feishuMessageId) {
+        if (streamData.queueStarted?.source === 'schedule') {
+          // Scheduled results have no live stream. Replace the body on retry after a failed PATCH.
+          streamData.elements = streamData.elements.slice(0, 1);
+          streamData.currentTextContent = output || '';
+        }
         // Flush any remaining text content
         if (streamData.currentTextContent.trim()) {
           streamData.elements.push(...this.renderCurrentText(streamData));
@@ -2568,7 +2610,7 @@ export class RouterServer {
           );
           if (!finalized) {
             prepared.discard();
-            if (!await this.canDispatchStreamOutput(messageId, streamData)) return;
+            if (!await this.canDispatchStreamOutput(messageId, streamData)) return false;
             const delivered = await this.feishuLongConnHandler.sendMessage(openId, output || '⚙️ Settings are unavailable as a card. Use the text command.');
             if (delivered === false) throw new Error('Failed to deliver settings result');
           }
@@ -2612,6 +2654,11 @@ export class RouterServer {
           if (finalized === false) throw new Error('Failed to finalize task card');
         }
       } else if (streamData.queueStarted) {
+        if (streamData.queueStarted.source === 'schedule') {
+          // An unthreaded plain message would lose the original reply route.
+          // Leave this occurrence in the CLI outbox for a fresh card attempt.
+          throw new Error('Scheduled result card is unavailable');
+        }
         // If card creation failed after session recovery, retain a text result
         // rather than silently losing the completed queued task's output.
         const text = streamData.elements
@@ -2631,6 +2678,7 @@ export class RouterServer {
         this.streamingMessages.delete(messageId);
         this.lastStreamUpdateTime.delete(messageId);
       }
+      return true;
     } catch (failure) {
       deliveryEvent('task_finalization_failed', { task, ...safeCardError(failure) });
       throw failure;

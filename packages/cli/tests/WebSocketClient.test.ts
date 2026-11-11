@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { WebSocketClient } from '../src/client/WebSocketClient';
 import WebSocket from 'ws';
 import { generateKeyPairSync, verify } from 'crypto';
+import os from 'os';
 
 // Mock WebSocket
 vi.mock('ws');
@@ -40,6 +41,77 @@ describe('WebSocketClient', () => {
   });
 
   describe('connection management', () => {
+    it.each([false, true])('recovers ordinary tasks and consumes receipts without schedule subscribers (capability %s)', async scheduleCapability => {
+      const connected = client.connect();
+      mockWs.on.mock.calls.find((call: any) => call[0] === 'open')[1](); await connected;
+      const receive = mockWs.on.mock.calls.find((call: any) => call[0] === 'message')[1];
+      const confirmation = { type: 'binding_confirm', data: { success: true,
+        capabilities: { taskRecovery: true, ...(scheduleCapability ? { scheduleResultsV1: true } : {}) } } };
+      receive(JSON.stringify(confirmation));
+      client.trackTask({ messageId: 'ordinary-task', openId: 'owner', threadId: 'thread', threadName: 'Thread',
+        backend: 'codex', cwd: os.tmpdir(), preview: 'Ordinary request' });
+      expect(client.send({ type: 'stream', streamType: 'text', messageId: 'ordinary-task', chunk: 'Before disconnect' })).toBe(true);
+      const close = mockWs.on.mock.calls.find((call: any) => call[0] === 'close')[1];
+      close(1006, Buffer.from('Connection lost'));
+      const previous = mockWs;
+      mockWs = { ...previous, on: vi.fn(), send: vi.fn(), close: vi.fn() };
+      const reconnected = client.connect();
+      mockWs.on.mock.calls.find((call: any) => call[0] === 'open')[1](); await reconnected;
+      const nextReceive = mockWs.on.mock.calls.find((call: any) => call[0] === 'message')[1];
+      nextReceive(JSON.stringify(confirmation));
+      const frames = () => mockWs.send.mock.calls.map((call: any[]) => JSON.parse(call[0]));
+      const resumed = frames().find((frame: any) => frame.type === 'task_resume');
+      expect(resumed).toMatchObject({ messageId: 'ordinary-task', taskResume: { backend: 'codex', state: 'running' } });
+      nextReceive(JSON.stringify({ type: 'task_resume_ack', messageId: resumed.messageId,
+        recoveryId: resumed.taskResume.recoveryId, state: 'running', success: true }));
+      expect(client.canSendTaskOutput('ordinary-task')).toBe(true);
+      expect(client.send({ type: 'response', messageId: 'ordinary-task', success: true, output: 'Ordinary result' })).toBe(true);
+      expect(client.hasPendingTaskResults()).toBe(true);
+      // Stale socket receipts cannot consume a current task's pending result.
+      receive(JSON.stringify({ type: 'task_result_ack', messageId: 'ordinary-task' }));
+      expect(client.hasPendingTaskResults()).toBe(true);
+      nextReceive(JSON.stringify({ type: 'task_result_ack', messageId: 'ordinary-task' }));
+      expect(client.hasPendingTaskResults()).toBe(false);
+      expect(frames().filter((frame: any) => frame.type === 'response')).toHaveLength(1);
+      expect(frames().some((frame: any) => frame.queueStarted?.source === 'schedule')).toBe(false);
+    });
+
+    it('exposes result receipts after recovery consumes them without redispatching raw frames', async () => {
+      const connected = client.connect();
+      mockWs.on.mock.calls.find((call: any) => call[0] === 'open')[1](); await connected;
+      const message = mockWs.on.mock.calls.find((call: any) => call[0] === 'message')[1];
+      const order: string[] = [];
+      vi.spyOn((client as any).taskRecovery, 'acknowledge').mockImplementation(() => { order.push('recovery'); });
+      const raw = vi.fn(); client.onMessage(raw);
+      const remove = client.onTaskResultAck(id => { order.push(id); });
+      message(Buffer.from(JSON.stringify({ type: 'task_resume_ack', messageId: 'resume' })));
+      message(Buffer.from(JSON.stringify({ type: 'task_result_ack', messageId: 'result' })));
+      expect(order).toEqual(['recovery', 'recovery', 'result']);
+      remove(); remove();
+      message(Buffer.from(JSON.stringify({ type: 'task_result_ack', messageId: 'removed' })));
+      expect(order.at(-1)).toBe('recovery'); expect(raw).not.toHaveBeenCalled();
+    });
+
+    it('isolates receipt subscribers, ignores malformed IDs and supports independent removal', async () => {
+      const connected = client.connect(); mockWs.on.mock.calls.find((call: any) => call[0] === 'open')[1](); await connected;
+      const message = mockWs.on.mock.calls.find((call: any) => call[0] === 'message')[1];
+      client.onTaskResultAck(() => { throw new Error('Synthetic subscriber failure'); });
+      const handler = vi.fn(); const remove = client.onTaskResultAck(handler); client.onTaskResultAck(handler); remove();
+      for (const messageId of [undefined, null, '', 42]) message(Buffer.from(JSON.stringify({ type: 'task_result_ack', messageId })));
+      expect(handler).not.toHaveBeenCalled();
+      message(Buffer.from(JSON.stringify({ type: 'task_result_ack', messageId: 'result' })));
+      expect(handler).toHaveBeenCalledOnce(); expect(handler).toHaveBeenCalledWith('result');
+    });
+
+    it('notifies shutdown once and allows close subscriptions to be removed independently', async () => {
+      const connected = client.connect(); mockWs.on.mock.calls.find((call: any) => call[0] === 'open')[1](); await connected;
+      const closed = mockWs.on.mock.calls.find((call: any) => call[0] === 'close')[1];
+      const handler = vi.fn(); const removed = client.onClose(handler); removed(); removed();
+      client.onClose(handler);
+      client.disconnect(); closed(1000, Buffer.from('')); client.disconnect();
+      expect(handler).toHaveBeenCalledOnce(); expect(handler).toHaveBeenCalledWith(1000, 'Client disconnected');
+    });
+
     it('ignores old Router confirmations and does not send a prepared request after disconnect', async () => {
       let release!: (value: any) => void;
       const prepared = new Promise<any>(resolve => { release = resolve; });
@@ -569,7 +641,11 @@ describe('WebSocketClient', () => {
 
       client.disconnect();
 
-      // Handlers should not be called after disconnect
+      // Shutdown notifies close subscribers once, then removes every subscription.
+      expect(closeHandler).toHaveBeenCalledOnce(); closeHandler.mockClear();
+      mockWs.on.mock.calls.find((call: any) => call[0] === 'close')[1](1000, Buffer.from(''));
+      mockWs.on.mock.calls.find((call: any) => call[0] === 'message')[1](Buffer.from('{"type":"command"}'));
+      mockWs.on.mock.calls.find((call: any) => call[0] === 'error')[1](new Error('Late socket error'));
       expect(messageHandler).not.toHaveBeenCalled();
       expect(errorHandler).not.toHaveBeenCalled();
       expect(closeHandler).not.toHaveBeenCalled();

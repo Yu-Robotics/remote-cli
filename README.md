@@ -513,6 +513,76 @@ Once connected, use these commands in Feishu:
 | `/unbind` | Unbind all devices |
 | `/device` | List bound devices with connection status, or switch devices |
 
+### Native scheduled tasks
+
+`/schedule` manages native scheduled work through Claude Code (2.1.311) and
+DeepSeek Harness (0.2.1-rc.5). All eight backends have an explicit eligibility entry:
+`/schedule capabilities` shows the supported adapter and the specific reason
+for each temporarily unsupported backend. Creation on an unsupported backend
+returns that reason without switching backends or starting a fallback job.
+An adapter requires both native timing and autonomous results over the existing
+backend transport. Product UI features, third-party schedulers, and unverified
+headless behavior do not qualify. Listing and cancelling existing tasks remain
+available after a backend switch.
+
+Scheduling stays dormant for users without a task catalog: ordinary connection,
+reconnection, chat, and control commands do not create scheduling files, start
+native schedule processes, or subscribe to schedule delivery receipts. Startup
+only checks whether a catalog already exists. Existing catalogs are recovered
+for interrupted-job status and pending-result delivery; explicit `/schedule`
+management initializes the service on demand.
+
+Both CLI and Router must support scheduled result receipts. Restricted Claude
+sandbox configurations are rejected. The DSH adapter loads first-party scheduler
+services and a remote-cli event adapter through a process-owned native plugin
+overlay; native events and management receipts use ACP extensions. This adds no
+remote-cli timer and does not modify the installed backend or global settings.
+
+```text
+/schedule after 5m -- Check the test results and summarize failures
+/schedule at 2099-01-01T09:15:00+08:00 -- Review the release checklist
+/schedule cron "15 9 * * 1-5" --tz Asia/Shanghai -- Summarize the open tasks
+/schedule list
+/schedule cancel <id>
+```
+
+Replace the example date with a future instant within the next year. One-shot
+requests round up to the next whole minute. Recurring cron requires an explicit
+IANA timezone. Native timing is approximate, including Claude's jitter and
+seven-day recurring expiry; this is not an exact-time alarm service.
+
+Each task has a dedicated native process/session bound to the original user,
+thread, working directory, and conversation generation. Supply a self-contained
+prompt: the current conversation history is not copied. Tasks retain their
+creation-time model and effort. Native tools execute with ordinary unrestricted
+OS permissions; managed delegation and interactive approval cards are not part
+of these adapters. Claude management uses bounded native tool turns. DSH
+management calls the native schedule service through the adapter. DSH permission
+requests are declined when they require an interactive client decision; choose
+work allowed by the native policy for unattended execution. Idle timing does not
+issue polling prompts.
+
+Keep the CLI and computer running. Claude jobs are explicitly session-only.
+DSH uses isolated native job storage for each process; the adapter retires its
+jobs on shutdown and never automatically reopens the store. On restart the
+catalog marks unfinished jobs interrupted and never silently recreates or
+resumes them. Completed results are retained locally until the Router
+acknowledges delivery and retried after reconnect or a schedule list
+request. Router deduplication is bounded and process-local; a Router restart or
+crash between delivery and acknowledgement can cause a duplicate. An
+acknowledgement confirms Router delivery, not that a person has read the message.
+
+`/schedule list` reconciles native expiry on demand and reports interrupted jobs
+without recreating them. Completed results are text-only in this first adapter.
+
+Use `/schedule cancel <id>` to stop a schedule, including its dedicated process;
+`/abort` controls the ordinary foreground task. Cancel active schedules before
+clearing the conversation, changing its directory or sandbox, or deleting the thread.
+Results appear in the original thread even if another thread is selected.
+The catalog and pending results contain task text and are local private state.
+See the [eight-backend inventory](docs/native-scheduling-inventory.md) for the
+native capability and transport evidence behind the adapter choice.
+
 ### Illustrated Tips
 
 Use `/tips` to browse 27 short Chinese scenario cards, each with its own bundled

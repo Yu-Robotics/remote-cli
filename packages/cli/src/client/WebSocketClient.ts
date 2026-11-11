@@ -56,6 +56,7 @@ export class WebSocketClient {
   private errorHandlers: Array<(error: Error) => void> = [];
   private closeHandlers: Array<(code: number, reason: string) => void> = [];
   private connectHandlers: Array<() => void> = [];
+  private taskResultAckHandlers = new Set<(messageId: string) => void>();
 
   constructor(serverUrl: string, deviceId: string, options: WebSocketClientOptions = {}) {
     this.serverUrl = serverUrl;
@@ -106,7 +107,9 @@ export class WebSocketClient {
           this.taskRecovery.disconnected();
           this.stopHeartbeat();
           const reasonStr = reason.toString();
-          this.closeHandlers.forEach(handler => handler(code, reasonStr));
+          for (const handler of [...this.closeHandlers]) {
+            try { handler(code, reasonStr); } catch { /* Notify every disconnect subscriber. */ }
+          }
 
           if (!this.manualDisconnect) {
             this.scheduleReconnect();
@@ -143,6 +146,11 @@ export class WebSocketClient {
             }
             if (message.type === 'task_resume_ack' || message.type === 'task_result_ack') {
               this.taskRecovery.acknowledge(message);
+              if (message.type === 'task_result_ack' && typeof message.messageId === 'string' && message.messageId) {
+                for (const handler of this.taskResultAckHandlers) {
+                  try { handler(message.messageId); } catch { /* Isolate receipt subscribers. */ }
+                }
+              }
               return;
             }
 
@@ -177,14 +185,22 @@ export class WebSocketClient {
    */
   disconnect(): void {
     this.manualDisconnect = true;
+    const wasConnected = this.connected;
     this.connected = false;
     this.stopHeartbeat();
     this.clearReconnectTimer();
     this.taskRecovery.destroy();
 
     if (this.ws) {
-      this.ws.close();
+      const socket = this.ws;
       this.ws = null;
+      socket.close();
+    }
+
+    if (wasConnected) {
+      for (const handler of [...this.closeHandlers]) {
+        try { handler(1000, 'Client disconnected'); } catch { /* Complete shutdown for all subscribers. */ }
+      }
     }
 
     // Clear all handlers
@@ -192,6 +208,7 @@ export class WebSocketClient {
     this.errorHandlers = [];
     this.closeHandlers = [];
     this.connectHandlers = [];
+    this.taskResultAckHandlers.clear();
   }
 
   /**
@@ -263,8 +280,17 @@ export class WebSocketClient {
    * Register close handler
    * @param handler Close handler function
    */
-  onClose(handler: (code: number, reason: string) => void): void {
-    this.closeHandlers.push(handler);
+  onClose(handler: (code: number, reason: string) => void): () => void {
+    const subscription = (code: number, reason: string) => handler(code, reason);
+    this.closeHandlers.push(subscription);
+    return () => { this.closeHandlers = this.closeHandlers.filter(value => value !== subscription); };
+  }
+
+  /** Observe Router result receipts after task recovery consumes them. */
+  onTaskResultAck(handler: (messageId: string) => void): () => void {
+    const subscription = (messageId: string) => handler(messageId);
+    this.taskResultAckHandlers.add(subscription);
+    return () => { this.taskResultAckHandlers.delete(subscription); };
   }
 
   /**
@@ -338,6 +364,7 @@ export class WebSocketClient {
             outputAttachmentHintsV1: true,
             ...(pendingOutputs && this.automaticFileEnrollment ? { pendingOutputFilesV1: true } : {}),
             taskRecovery: true,
+            scheduleResultsV1: true,
             approvalCards: true,
             delegationProgress: true,
             delegationProgressText: true,

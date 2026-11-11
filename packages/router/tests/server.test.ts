@@ -579,7 +579,7 @@ describe('RouterServer', () => {
     });
   });
 
-  describe('task recovery', () => {
+  describe.each([false, true])('ordinary task recovery with schedule capability %s', scheduleCapability => {
     const resume = {
       type: 'task_resume', messageId: 'recovered-1', openId: 'user-1', threadId: 'thread-1',
       taskResume: { recoveryId: 'recovery-1', threadName: 'thread-2', backend: 'claude',
@@ -592,8 +592,10 @@ describe('RouterServer', () => {
       onConnection(ws, { socket: { remoteAddress: '1' } });
       const onMessage = ws.on.mock.calls.find(call => call[0] === 'message')[1];
       const send = (message: any) => onMessage(Buffer.from(JSON.stringify(message)));
-      await send({ type: 'binding_request', data: { deviceId: 'device-1', capabilities: { taskRecovery: true } } });
-      expect(JSON.parse(ws.send.mock.calls[0][0]).data.capabilities).toEqual({ taskRecovery: true });
+      const capabilities = { taskRecovery: true, ...(scheduleCapability ? { queueStarted: true, scheduleResultsV1: true } : {}) };
+      await send({ type: 'binding_request', data: { deviceId: 'device-1', capabilities } });
+      expect(JSON.parse(ws.send.mock.calls[0][0]).data.capabilities).toEqual({ taskRecovery: true,
+        ...(scheduleCapability ? { scheduleResultsV1: true } : {}) });
       const close = ws.on.mock.calls.find(call => call[0] === 'close')[1];
       const replies = () => ws.send.mock.calls.map(([message]) => JSON.parse(message));
       return { send, close, replies };
@@ -995,7 +997,7 @@ describe('RouterServer', () => {
     });
   });
 
-  describe('queued execution cards', () => {
+  describe.each([false, true])('ordinary queued execution cards with schedule capability %s', scheduleCapability => {
     const started = {
       type: 'queue_started', messageId: 'queued-1', openId: 'user-1', threadId: 'thread-1',
       queueStarted: {
@@ -1012,8 +1014,10 @@ describe('RouterServer', () => {
       onConnection(ws, { socket: { remoteAddress: '1' } });
       const onMessage = ws.on.mock.calls.find(call => call[0] === 'message')[1];
       const send = (message: any) => onMessage(Buffer.from(JSON.stringify(message)));
-      await send({ type: 'binding_request', data: { deviceId: 'device-1', capabilities: { queueStarted: true } } });
+      const capabilities = { queueStarted: true, ...(scheduleCapability ? { taskRecovery: true, scheduleResultsV1: true } : {}) };
+      await send({ type: 'binding_request', data: { deviceId: 'device-1', capabilities } });
       expect(mockConnectionHub.registerConnection).toHaveBeenCalledWith('device-1', ws, { queueStarted: true });
+      expect(JSON.parse(ws.send.mock.calls[0][0]).data.capabilities?.scheduleResultsV1).toBe(scheduleCapability ? true : undefined);
       return send;
     }
 

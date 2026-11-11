@@ -130,6 +130,10 @@ export interface QueueConfirmationInfo {
 
 /** Emitted immediately before a confirmed queued task starts executing. */
 export interface QueueStartedInfo {
+  /** Native schedule results reuse queue routing only after capability negotiation. */
+  source?: 'schedule';
+  /** Required with source=schedule; at most 256 characters. */
+  scheduleId?: string;
   threadName: string;
   backend: string;
   cwd: string;
