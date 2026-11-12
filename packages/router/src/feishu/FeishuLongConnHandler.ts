@@ -45,6 +45,19 @@ interface ToolPageRemainder {
   elements: any[];
 }
 
+function escapeCardText(value: unknown): string {
+  return String(value ?? '')
+    .replace(/[\x00-\x1f\x7f]/g, ' ')
+    .replace(/[\\`*_{}\[\]()<>!#|~]/g, '\\$&');
+}
+
+function formatUtcDateTime(timestamp: number): string {
+  const date = new Date(timestamp);
+  if (!Number.isFinite(date.getTime())) return 'Unknown time (UTC)';
+  const pad = (part: number) => String(part).padStart(2, '0');
+  return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())} UTC`;
+}
+
 /**
  * Feishu Long Connection Handler
  * Uses Feishu SDK's WSClient for WebSocket long connection
@@ -2041,10 +2054,14 @@ Examples:
   }
 
   private createQueueConfirmationElements(info: QueueConfirmationInfo): any[] {
-    const expiresAt = new Date(info.expiresAt).toLocaleTimeString();
+    const preview = escapeCardText(info.preview).trim() || 'Message preview unavailable';
+    const context = `<text_tag color='orange'>Awaiting confirmation</text_tag> · ${escapeCardText(info.threadName)} · ${escapeCardText(info.backend)}\n`
+      + `Queued: ${Number.isSafeInteger(info.pendingCount) && info.pendingCount >= 0 ? info.pendingCount : 'Unknown'} · Directory: \`${escapeCardText(info.cwd)}\`\n`
+      + `Expires ${formatUtcDateTime(info.expiresAt)}`;
     return [
       { tag: 'hr' },
-      { tag: 'markdown', content: `⏳ **Queue confirmation**\n\n**Thread:** ${info.threadName}  ·  **Backend:** ${info.backend}\n**Working directory:** \`${info.cwd}\`\n**Already queued:** ${info.pendingCount}\n**Message:** ${info.preview}\n\nConfirmation expires at ${expiresAt}.` },
+      { tag: 'markdown', content: `**${preview}**` },
+      { tag: 'markdown', text_size: 'notation', content: context },
       {
         tag: 'column_set',
         flex_mode: 'stretch',
@@ -2055,7 +2072,7 @@ Examples:
             elements: [
               {
                 tag: 'button',
-                text: { tag: 'plain_text', content: '✅ Add to queue' },
+                text: { tag: 'plain_text', content: 'Add to queue' },
                 type: 'primary',
                 behaviors: [{ type: 'callback', value: { action: 'queue_confirm', queueId: info.id, threadId: info.threadId } }],
               },
@@ -2067,7 +2084,7 @@ Examples:
             elements: [
               {
                 tag: 'button',
-                text: { tag: 'plain_text', content: '❌ Cancel' },
+                text: { tag: 'plain_text', content: 'Cancel' },
                 type: 'default',
                 behaviors: [{ type: 'callback', value: { action: 'queue_cancel', queueId: info.id, threadId: info.threadId } }],
               },
@@ -2374,7 +2391,7 @@ Examples:
       data: {
         content: JSON.stringify({
           schema: '2.0',
-          body: { elements: [{ tag: 'markdown', content: '▶️ **Queued task started**\n\nFollow progress in the new execution card at the bottom of the chat.' }] },
+          body: { elements: [{ tag: 'markdown', content: "<text_tag color='blue'>Running</text_tag>\n\nThe queued message is now running. Follow progress in the new execution card." }] },
         }),
       },
     }));
@@ -2391,8 +2408,8 @@ Examples:
 
   private async updateQueueConfirmationCard(cardMessageId: string, action: 'confirm' | 'cancel'): Promise<void> {
     const content = action === 'confirm'
-      ? '✅ **Added to queue**\n\nThis message has been accepted into the thread queue. Use /queue to check its status. If the queue is paused, use /queue continue to resume.'
-      : '❌ **Queue request cancelled**\n\nThis message was not added to the thread queue.';
+      ? "<text_tag color='green'>Queued</text_tag>\n\nThis message was accepted into the thread queue. Use /queue to check its status. If the queue is paused, use /queue continue to resume."
+      : "<text_tag color='grey'>Cancelled</text_tag>\n\nThis message was not added to the thread queue.";
 
     try {
       await this.withMessageLock(cardMessageId, async () => {

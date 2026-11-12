@@ -2462,15 +2462,16 @@ export class RouterServer {
     this.cancelImageReply(messageId);
     const imageRoute = this.prepareImageReply(messageId, openId, deviceId, isCurrent, threadId, true);
     const operation = Promise.resolve().then(async () => {
-      const escape = (value: string) => value.replace(/[\\`*_{}\[\]()<>!#|]/g, '\\$&');
+      const escape = (value: string) => value.replace(/[\x00-\x1f\x7f]/g, ' ').replace(/[\\`*_{}\[\]()<>!#|]/g, '\\$&');
+      const preview = escape(info.preview).trim() || 'Message preview unavailable';
       const intro = info.source === 'schedule'
-        ? `🕒 **Scheduled task result**\n\n**Thread:** ${escape(info.threadName)} · **Backend:** ${info.backend}\n**Working directory:** ${escape(info.cwd)}\n**Task:** ${escape(info.preview)}`
-        : `▶️ **Queued task started**
+        ? `🕒 **Scheduled task result**\n\n**Thread:** ${escape(info.threadName)} · **Backend:** ${info.backend}\n**Working directory:** ${escape(info.cwd)}\n**Task:** ${preview}`
+        : `<text_tag color='blue'>Running</text_tag>
 
-**Thread:** ${info.threadName} · **Backend:** ${info.backend}
-**Working directory:** \`${info.cwd}\`
-**Task:** ${info.preview}
-**Remaining in queue:** ${info.remainingCount}`;
+**${preview}**
+
+<font color='grey'>${escape(info.threadName)} · ${escape(info.backend)}
+Directory: \`${escape(info.cwd)}\` · Remaining: ${info.remainingCount}</font>`;
       let cardId: string | null = null;
       try {
         cardId = await this.feishuLongConnHandler.sendStreamingStart(openId, intro, info.threadName, info.cwd, messageId);

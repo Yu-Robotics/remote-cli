@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto';
-import type { ScheduleActionMessage, ScheduleActionResult, ScheduleMenu } from '../types/ScheduleCards';
+import type { ScheduleActionMessage, ScheduleActionResult, ScheduleCardEntry, ScheduleMenu } from '../types/ScheduleCards';
 
 interface Transport {
   ownsDevice(openId: string, deviceId: string): Promise<boolean>;
@@ -27,6 +27,31 @@ const text = (value: unknown, max: number): value is string => typeof value === 
   && !/[\x00-\x1f\x7f]/.test(value);
 const id = (value: unknown): value is string => text(value, 256) && value.length > 0;
 const escape = (value: string) => value.replace(/[\\`*_{}\[\]()<>!#|~]/g, '\\$&');
+
+function formatUtcDateTime(value: string): string | undefined {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return;
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return;
+  const pad = (part: number) => String(part).padStart(2, '0');
+  return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())} UTC`;
+}
+
+function displayRule(rule: string): string {
+  return formatUtcDateTime(rule) ?? rule;
+}
+
+function statusPresentation(state: ScheduleCardEntry['state'], cleanupPending: boolean): { label: string; color: string } {
+  if (cleanupPending) return { label: 'Stopping · exit unconfirmed', color: 'orange' };
+  switch (state) {
+    case 'creating': return { label: 'Creating', color: 'blue' };
+    case 'active': return { label: 'Scheduled', color: 'green' };
+    case 'running': return { label: 'Running', color: 'blue' };
+    case 'completed': return { label: 'Completed', color: 'grey' };
+    case 'cancelled': return { label: 'Cancelled', color: 'grey' };
+    case 'interrupted': return { label: 'Interrupted', color: 'orange' };
+    case 'failed': return { label: 'Failed', color: 'red' };
+  }
+}
 
 /** Reject malformed peer views before they enter card state or callback authority. */
 export function parseScheduleMenu(value: unknown): ScheduleMenu | undefined {
@@ -188,6 +213,7 @@ export class ScheduleCards {
   private render(state: State): any[] {
     const blocked = Boolean(state.pending) || !this.active(state);
     const markdown = (content: string) => ({ tag: 'markdown', content });
+    const notation = (content: string) => ({ tag: 'markdown', text_size: 'notation', content });
     const button = (op: string, label: string, value?: string, disabled = blocked) => ({ tag: 'button',
       text: { tag: 'plain_text', content: label }, type: op === 'confirm' ? 'danger' : 'default', disabled,
       behaviors: [{ type: 'callback', value: { action: 'schedule', id: state.id, rev: state.revision, op, ...(value === undefined ? {} : { value }) } }] });
@@ -195,27 +221,34 @@ export class ScheduleCards {
       tag: 'column', width: 'weighted', weight: 1, elements: [item],
     })) });
     const entry = state.menu.entries[state.page];
-    const elements: any[] = [markdown(`**Scheduled tasks** · ${escape(state.menu.threadName)}`)];
+    const elements: any[] = [];
     if (entry) {
-      const status = entry.canCancel && !['creating', 'active', 'running'].includes(entry.state)
-        ? 'Native process cleanup pending; exit is unconfirmed' : entry.state;
-      elements.push(markdown(`**${escape(entry.id)}** · ${entry.backend}\n**Status:** ${status}\n**Schedule:** ${escape(entry.rule)}\n**Task:** ${escape(entry.prompt)}${entry.error ? `\n**Details:** ${escape(entry.error)}` : ''}`));
+      const cleanupPending = entry.canCancel && !['creating', 'active', 'running'].includes(entry.state);
+      const status = statusPresentation(entry.state, cleanupPending);
+      // Keep the user request as the visual headline. The complete task ID stays
+      // available as a subdued reference for copy/paste and callback support.
+      elements.push(markdown(`**${escape(entry.prompt)}**`));
+      elements.push(markdown(`<text_tag color='${status.color}'>${status.label}</text_tag> · ${escape(entry.backend)} · ${escape(state.menu.threadName)}`));
+      elements.push(notation(`When: ${escape(displayRule(entry.rule))}\nReference: \`${escape(entry.id)}\``));
+      if (entry.error) elements.push(notation(`<text_tag color='red'>Details</text_tag> · ${escape(entry.error)}`));
       if (state.confirm) {
         elements.push(markdown('Cancel future runs of this task? Work already queued or running may still finish. The conversation remains available. Results already delivered cannot be recalled.'));
         elements.push(row([button('confirm', 'Confirm cancellation'), button('back', 'Back')]));
-      } else elements.push(row([button('refresh', 'Refresh status'), button('cancel', entry.canCancel && !['creating', 'active', 'running'].includes(entry.state) ? 'Retry stopping task' : 'Cancel task', entry.value, blocked || !entry.canCancel)]));
+      } else elements.push(row([button('refresh', 'Refresh status'), button('cancel', cleanupPending ? 'Retry stopping task' : 'Cancel task', entry.value, blocked || !entry.canCancel)]));
       if (state.menu.entries.length > 1) {
         elements.push(markdown(`Task ${state.page + 1} of ${state.menu.entries.length}`));
         elements.push(row([button('page', 'Previous', String(state.page - 1), blocked || state.page === 0),
           button('page', 'Next', String(state.page + 1), blocked || state.page + 1 >= state.menu.entries.length)]));
       }
-    } else elements.push(markdown('No schedules in this thread.'), row([button('refresh', 'Refresh status')]));
-    if (state.notice) elements.push(markdown(state.notice));
+    } else elements.push(markdown(`**Scheduled tasks** · ${escape(state.menu.threadName)}`), notation('No schedules in this thread.'), row([button('refresh', 'Refresh status')]));
+    if (state.notice) elements.push(notation(escape(state.notice)));
     if (state.pending) {
-      elements.push(markdown(state.pending.timedOut ? 'The outcome is unknown. Retry confirmation; no success has been confirmed.' : 'Waiting for CLI confirmation…'));
+      elements.push(notation(state.pending.timedOut
+        ? "<text_tag color='orange'>Outcome unknown</text_tag> · Retry confirmation; no success has been confirmed."
+        : "<text_tag color='blue'>Waiting for confirmation</text_tag> · The CLI has not acknowledged this action yet."));
       if (state.pending.timedOut) elements.push(row([button('retry', 'Retry confirmation', undefined, !this.active(state))]));
     }
-    elements.push(markdown(state.expired ? 'This connection ended. Use /schedule list after reconnecting.'
+    elements.push(notation(state.expired ? 'Connection ended. Use /schedule list after reconnecting.'
       : `Keep the CLI running. Native timing is approximate; tasks are not recreated after restart.${entry?.backend === 'claude' ? ' Claude recurring tasks expire after seven days.' : ''} Use /schedule list for a fresh card.`));
     return elements;
   }

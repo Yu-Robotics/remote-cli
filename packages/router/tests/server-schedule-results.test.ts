@@ -152,7 +152,7 @@ describe.each(['claude', 'dsh'])('Scheduled %s result delivery', backend => {
     const socket = connect(); await register(socket, { queueStarted: true });
     const frame = start(); const { source, scheduleId, ...legacy } = frame.queueStarted;
     await receive(socket, { ...frame, queueStarted: legacy });
-    expect(feishu.sendStreamingStart.mock.calls[0][1]).toContain('Queued task started');
+    expect(feishu.sendStreamingStart.mock.calls[0][1]).toContain('Running');
     await receive(socket, { type: 'response', messageId: frame.messageId, openId: 'owner', success: true });
     expect(feishu.finalizeStreamingMessage).toHaveBeenCalledOnce(); expect(acks(socket)).toHaveLength(0);
   });
