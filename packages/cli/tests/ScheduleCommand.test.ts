@@ -14,6 +14,7 @@ describe('ScheduleCommand', () => {
     expect(parse('/schedule list')).toEqual({ kind: 'list' });
     expect(parse('/schedule cancel schedule-1')).toEqual({ kind: 'cancel', id: 'schedule-1' });
     expect(SCHEDULE_USAGE).toContain('Claude and DSH');
+    expect(SCHEDULE_USAGE).toContain('Claude shares the foreground conversation');
     expect(SCHEDULE_USAGE).toContain('never automatically recreated');
   });
 

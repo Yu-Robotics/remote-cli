@@ -180,6 +180,8 @@ export abstract class AcpExecutor implements IExecutor {
   private model?: string;
   private effort?: string;
   private client: AcpTransport | null = null;
+  private initializingSession?: Promise<{ client: AcpTransport; sessionId: string }>;
+  private requireOriginalSession = false;
   private readonly transports = new Map<AcpTransport, boolean>();
   private readonly delegationWorker: boolean;
   private readonly pendingExits = new Set<Promise<void>>();
@@ -665,9 +667,21 @@ export abstract class AcpExecutor implements IExecutor {
     };
   }
 
-  private async ensureSession(selection?: { model: string; assertCurrent: () => void }): Promise<{ client: AcpTransport; sessionId: string }> {
+  protected async schedulingSession(): Promise<{ client: AcpTransport; sessionId: string }> {
+    this.requireOriginalSession = true;
+    try { return await this.ensureSession(); }
+    finally { this.requireOriginalSession = false; }
+  }
+
+  protected async ensureSession(selection?: { model: string; assertCurrent: () => void }): Promise<{ client: AcpTransport; sessionId: string }> {
     this.nativeReceiptOperations++;
-    try { return await this.ensureSessionInternal(selection); }
+    try {
+      if (selection) return await this.ensureSessionInternal(selection);
+      if (!this.initializingSession) {
+        this.initializingSession = this.ensureSessionInternal().finally(() => { this.initializingSession = undefined; });
+      }
+      return await this.initializingSession;
+    }
     finally { this.nativeReceiptOperations--; }
   }
 
@@ -713,7 +727,7 @@ export abstract class AcpExecutor implements IExecutor {
           assertCurrent();
           const missingSession = /\bsession (?:not found|does not exist|no longer exists|is missing)\b/i
             .test(error instanceof Error ? error.message : String(error));
-          if (selection || ((this.delegationConnection || this.options.preserveSessionOnResumeError) && !missingSession)) throw error;
+          if (this.requireOriginalSession || selection || ((this.delegationConnection || this.options.preserveSessionOnResumeError) && !missingSession)) throw error;
           console.warn(`[${this.backendLabel}Executor] Stored session could not be loaded; starting fresh`, error);
           this.clearSessionPointer();
         } finally { this.replayingSession = false; }

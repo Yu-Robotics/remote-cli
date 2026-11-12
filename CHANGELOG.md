@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.235] - 2026-11-12
+
+### Changed
+- Execute Claude and DSH managed schedules in their original foreground native conversation, preserving earlier discussion, subsequent messages, and recurring-turn history without copying transcripts.
+- Authorize Claude Cron actions in the active model turn, serialize card/slash management on that session, and use native DSH host CRUD with occurrence-aware output routing.
+- Cancel future firings without terminating the shared conversation; retain already-started results and label native combined answers. Process-restart job restoration remains unsupported.
+- Require recurring Claude timing to match the native session timezone and reject ambiguous one-shot clock-rollback times without changing session settings.
+
 ## [1.6.234] - 2026-11-12
 
 ### Added

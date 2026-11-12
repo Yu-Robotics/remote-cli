@@ -135,6 +135,12 @@ export interface IExecutor {
   // Optional — MessageHandler uses 'method' in executor checks for these
   /** Enable tools for future turns without changing the native conversation. */
   configureDelegation?(connection?: DelegationConnection): Promise<void>;
+  /** Native timing in the existing foreground conversation; never fork its history. */
+  createNativeSchedule?(input: import('../scheduling/types').NativeScheduleInput,
+    onEvent: (event: import('../scheduling/types').NativeScheduleEvent) => void, isOwnerCurrent?: () => boolean): Promise<import('../scheduling/types').NativeScheduleHandle>;
+  /** Bind a management operation to its authenticated owner; in-turn tools receive a native action. */
+  withNativeScheduleOperation?<T>(id: string, current: () => boolean, run: () => Promise<T>, inTurn: boolean): Promise<T>;
+  nativeScheduleAction?(id: string): import('../scheduling/types').NativeScheduleToolAction | undefined;
   /** Register scoped control-tool groups without enabling delegation or changing native timing support. */
   configureManagedTools?(connection?: import('../managed/contract').ManagedToolConnection): Promise<void>;
   getGoal?(): Promise<ExecutorGoal | null>;

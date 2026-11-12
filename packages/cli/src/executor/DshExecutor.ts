@@ -80,6 +80,7 @@ export class DshExecutor extends AcpExecutor {
         const transport = options.clientFactory?.(wrapped, cwd)
           ?? new DshAcpClient(options.dshCommand ?? 'dsh', cwd, wrapped, undefined, options.delegationWorker, history?.patch || options.managedHistoryPatch);
         return {
+          ...(transport.createNativeSchedule ? { createNativeSchedule: transport.createNativeSchedule.bind(transport) } : {}),
           initialize: async () => {
             const result = await transport.initialize() as { agentCapabilities?: { promptCapabilities?: { image?: boolean } } };
             state.images = result?.agentCapabilities?.promptCapabilities?.image === true;
@@ -152,6 +153,17 @@ export class DshExecutor extends AcpExecutor {
     if (/^\s*\/[a-z][\w-]*(?:\s|$)/i.test(prompt)) return Promise.resolve({ success: false,
       error: 'DSH ACP does not expose interactive slash commands. Use remote-cli built-ins or describe the task in plain text.' });
     return super.execute(prompt, options);
+  }
+
+  async createNativeSchedule(input: import('../scheduling/types').NativeScheduleInput,
+    onEvent: (event: import('../scheduling/types').NativeScheduleEvent) => void, isOwnerCurrent: () => boolean = () => true) {
+    if (!isOwnerCurrent() || input.cwd !== this.getCurrentWorkingDirectory()) throw new Error('Native scheduling context changed.');
+    const previous = this.getSessionId();
+    const { client, sessionId } = await this.schedulingSession();
+    if (!isOwnerCurrent() || input.cwd !== this.getCurrentWorkingDirectory()) throw new Error('Native scheduling context changed.');
+    if (previous && sessionId !== previous) throw new Error('The original DSH conversation could not be resumed. No schedule was created.');
+    if (!client.createNativeSchedule) throw new Error('This DSH transport does not support foreground-session scheduling.');
+    return client.createNativeSchedule(sessionId, input, onEvent);
   }
 
   isBusy(): boolean { return this.state?.compacting === true || super.isBusy(); }

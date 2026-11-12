@@ -28,13 +28,18 @@ async function fixture() {
   let backend = 'claude';
   let sandbox: { mode: string } | undefined;
   let connected = true;
-  const executor = { configureManagedTools: vi.fn(async (_connection?: any) => {}), configureDelegation: vi.fn(async (_connection?: any) => {}), execute: vi.fn(async () => ({ success: true })), getCurrentWorkingDirectory: () => cwd,
-    abort: vi.fn(async () => true), destroy: vi.fn(), isBusy: () => false, resetContext: vi.fn(),
+  let executorBusy = false;
+  const executor = { createNativeSchedule: vi.fn((input: any, emit: any) => (input.backend === 'dsh' ? native.createDsh : native.create)(input, emit)),
+    withNativeScheduleOperation: vi.fn(async (_id: string, current: () => boolean, run: () => Promise<unknown>) => {
+      if (!current()) throw new Error('Stale scheduling operation');
+      return run();
+    }), configureManagedTools: vi.fn(async (_connection?: any) => {}), configureDelegation: vi.fn(async (_connection?: any) => {}), execute: vi.fn(async () => ({ success: true })), getCurrentWorkingDirectory: () => cwd,
+    abort: vi.fn(async () => true), destroy: vi.fn(), isBusy: () => executorBusy, resetContext: vi.fn(),
     getSandboxStatus: () => 'Unrestricted', configureSandbox: vi.fn(async () => ({ success: true })) };
   const pool = {
     getExistingExecutor: () => executor, getExecutor: () => executor, getBackendKey: () => backend,
     getSummaries: () => threads.map(thread => ({ id: thread.id, name: thread.name, status: 'idle' })),
-    isThreadBusy: () => false, setThreadBusy: vi.fn(), setThreadError: vi.fn(), destroyAll: vi.fn(async () => {}),
+    isThreadBusy: () => executorBusy, setThreadBusy: vi.fn(), setThreadError: vi.fn(), destroyAll: vi.fn(async () => {}),
     setWorkingDirectory: vi.fn(async () => ({ cwd, changed: false })),
     assertContextResettable: vi.fn(), clearThreadContext: vi.fn(async () => {}), destroyThread: vi.fn(async () => {}),
   };
@@ -89,6 +94,7 @@ async function fixture() {
     acknowledgements, closeHandlers,
     restart: async () => { await handler.destroy(); handler = makeHandler(); scheduledMessages.clear(); ws.send.mockClear(); },
     setBackend: (value: string) => { backend = value; }, setSandbox: (value: { mode: string }) => { sandbox = value; },
+    setExecutorBusy: (value: boolean) => { executorBusy = value; },
     disconnect: () => { connected = false; closeHandlers.forEach(handler => handler(1006, '')); },
     reconnect: async (cards = false) => { connected = true; await bind(cards); },
     scheduledResults: () => responses().filter(message => scheduledMessages.has(message.messageId)),
@@ -109,6 +115,40 @@ describe('MessageHandler native schedule closed loop', () => {
 
   const invoke = (name: string, args: Record<string, unknown>) => (f.handler as any).delegationBridges.get('thread-a').handler(name, args, 'native-call');
   const createArgs = { requestId: 'create-one', when: { kind: 'after', amount: 5, unit: 'm' }, prompt: 'Synthetic scheduled task' };
+
+  it('prepares slash creation on the foreground bridge reused by subsequent chat without a dedicated Claude provider', async () => {
+    await f.bind(true, true);
+    await f.send('/schedule after 5m -- Use future conversation updates');
+    expect(f.jobs[0].input.threadId).toBe('thread-a');
+    expect(f.executor.withNativeScheduleOperation).toHaveBeenCalledWith(expect.any(String), expect.any(Function), expect.any(Function), false);
+    const connection = f.executor.configureManagedTools.mock.calls[0][0];
+    expect(connection.groups).toEqual(['scheduling']);
+    expect(f.executor.configureManagedTools.mock.invocationCallOrder[0]).toBeLessThan(native.create.mock.invocationCallOrder[0]);
+    await f.send('Additional context for the future task', 'thread-a', { isSlashCommand: false });
+    expect(f.executor.configureManagedTools.mock.calls.at(-1)![0]).toEqual(connection);
+    expect(native.create).toHaveBeenCalledOnce(); expect(f.jobs[0].handle.stop).not.toHaveBeenCalled();
+  });
+
+  it('does not start shared native management for an empty list or unknown cancellation', async () => {
+    await f.bind(); await f.send('/schedule list');
+    await f.send('/schedule cancel unknown-synthetic-job');
+    expect(f.executor.withNativeScheduleOperation).not.toHaveBeenCalled();
+    expect(f.executor.configureManagedTools).not.toHaveBeenCalled(); expect(native.create).not.toHaveBeenCalled();
+  });
+
+  it('drains a confirmed foreground queue when an autonomous native occurrence completes', async () => {
+    await f.bind(); await f.send('/schedule after 2m -- Synthetic queued occurrence');
+    f.setExecutorBusy(true);
+    f.jobs[0].emit({ type: 'started', occurrenceId: 'occurrence-1' });
+    await f.send('Foreground message waiting behind the native occurrence', 'thread-a', { isSlashCommand: false });
+    const confirmation = f.responses().at(-1).queueConfirmation;
+    expect(confirmation).toBeDefined();
+    await f.send(`/queue confirm ${confirmation.id}`, 'thread-a');
+    expect(f.executor.execute).not.toHaveBeenCalled();
+    f.setExecutorBusy(false);
+    f.jobs[0].emit({ type: 'completed', occurrenceId: 'occurrence-1', success: true, output: 'Synthetic result' });
+    await vi.waitFor(() => expect(f.executor.execute).toHaveBeenCalledWith(expect.stringContaining('Foreground message waiting behind the native occurrence'), expect.anything()));
+  });
 
   it.each(['claude', 'dsh'])('creates %s managed schedules from model tools with delegation off and a separate card', async backend => {
     f.setBackend(backend); await f.bind(true, true);

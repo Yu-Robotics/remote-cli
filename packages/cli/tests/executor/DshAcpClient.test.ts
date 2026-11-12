@@ -46,6 +46,34 @@ function processFixture() {
 }
 
 describe('DshAcpClient', () => {
+  it('routes delayed projections by native message identity rather than whichever foreground request is waiting', async () => {
+    const onTextChunk = vi.fn(); const client = create({ onTextChunk });
+    const scope = (client as any).scheduleScope;
+    (client as any).scheduleEnabled = true;
+    (client as any).foregroundSession = 'dsh-session';
+    const send = (method: string, params: unknown) => fixture.child.push({ jsonrpc: '2.0', method, params });
+    const classify = (messageId: string, foreground: boolean) => send('_remote_cli/session_schedule_event',
+      { version: 2, scope, kind: 'projection', sessionId: 'dsh-session', messageId, foreground });
+    classify('scheduled', false); classify('foreground', true);
+    for (const messageId of ['scheduled', 'foreground', 'unknown']) send('session/update', { sessionId: 'dsh-session',
+      update: { sessionUpdate: 'agent_message_chunk', messageId, content: { type: 'text', text: messageId } } });
+    await vi.waitFor(() => expect(onTextChunk).toHaveBeenCalledOnce());
+    expect(onTextChunk).toHaveBeenCalledWith({ type: 'text', text: 'foreground' });
+    (client as any).foregroundSession = undefined;
+    send('session/update', { sessionId: 'dsh-session', update: { sessionUpdate: 'agent_message_chunk', messageId: 'foreground', content: { type: 'text', text: 'late' } } });
+    await new Promise(resolve => setImmediate(resolve)); expect(onTextChunk).toHaveBeenCalledOnce();
+  });
+  it('keeps the foreground outcome when native ACP settles after an unrelated autonomous turn', async () => {
+    const client = create(); await client.initialize();
+    delete fixture.replies['session/prompt'];
+    (client as any).scheduleEnabled = true;
+    const running = client.prompt('dsh-session', [{ type: 'text', text: 'foreground' }]);
+    const frame = fixture.frames.at(-1)!;
+    fixture.child.push({ jsonrpc: '2.0', method: '_remote_cli/session_schedule_event', params: {
+      version: 2, scope: (client as any).scheduleScope, kind: 'foregroundEnd', sessionId: 'dsh-session', stopReason: 'end_turn' } });
+    fixture.child.push({ jsonrpc: '2.0', id: frame.id, result: { stopReason: 'error' } });
+    expect(await running).toEqual({ stopReason: 'end_turn' });
+  });
   let home: string;
   let fixture: ReturnType<typeof processFixture>;
   let clients: DshAcpClient[];

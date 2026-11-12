@@ -32,6 +32,7 @@ interface PendingDelivery {
   id: string;
   scheduleId: string;
   occurrenceId: string;
+  afterCancellation?: boolean;
   success: boolean;
   output?: string;
   error?: string;
@@ -143,7 +144,7 @@ export class ScheduleService {
       }
       for (const [id, delivery] of this.pending) {
         const record = this.records.get(delivery.scheduleId)!;
-        if (record.state === 'cancelled' || !this.current(record)) { this.pending.delete(id); changed = true; }
+        if (record.state === 'cancelled' && !delivery.afterCancellation || !this.current(record)) { this.pending.delete(id); changed = true; }
       }
       if (changed || data === undefined) await this.persist();
       this.initialized = true;
@@ -235,6 +236,7 @@ export class ScheduleService {
     this.checkReady();
     const record = this.owned(owner, id);
     const runtime = this.runtimes.get(id);
+    if (record.state === 'cancelled' && runtime?.handle?.cancellationKeepsRunning && !record.error) return false;
     return LIVE.has(record.state) || Boolean(runtime && !runtime.stopped);
   }
 
@@ -247,13 +249,13 @@ export class ScheduleService {
     this.checkReady(); validateOwner(owner);
     const candidates = await this.serial(async () => [...this.records.values()]
       .filter(record => sameOwner(record, owner)).map(record => record.id));
-    await Promise.all(candidates.map(async id => {
+    for (const id of candidates) {
       const runtime = this.runtimes.get(id);
-      if (!runtime?.handle || runtime.stopped || runtime.cancelling || runtime.running.size || !this.current(owner)) return;
-      if (!LIVE.has(this.records.get(id)!.state)) { await this.stop(id, runtime); return; }
+      if (!runtime?.handle || runtime.stopped || runtime.cancelling || runtime.running.size || !this.current(owner)) continue;
+      if (!LIVE.has(this.records.get(id)!.state)) { await this.stop(id, runtime); continue; }
       try {
         const present = await runtime.handle.list();
-        if (present) return;
+        if (present) continue;
         await this.serial(async () => {
           const record = this.records.get(id)!;
           if (LIVE.has(record.state)) {
@@ -272,7 +274,7 @@ export class ScheduleService {
         });
         await this.stop(id, runtime);
       }
-    }));
+    }
   }
 
   cancel(owner: ScheduleOwner, id: string): Promise<ScheduleRecord> {
@@ -289,7 +291,9 @@ export class ScheduleService {
       runtime = this.runtimes.get(id);
       if (runtime?.cancelPromise) { existing = runtime.cancelPromise; return; }
       if (!LIVE.has(record.state) && !runtime?.cancelling && (!runtime || runtime.stopped)) {
-        this.dropPending(id);
+        for (const [key, pending] of this.pending) {
+          if (pending.scheduleId === id && !pending.afterCancellation) this.pending.delete(key);
+        }
         await this.persist();
         operation = Promise.resolve(structuredClone(record));
         return;
@@ -340,18 +344,21 @@ export class ScheduleService {
     try {
       const handle = await runtime.ready;
       if (handle && !runtime.stopped) {
-        if (LIVE.has(this.records.get(id)!.state)) await handle.cancel();
+        if (LIVE.has(this.records.get(id)!.state) || handle.cancellationKeepsRunning) await handle.cancel();
         else await this.stop(id, runtime);
       }
       await this.serial(async () => {
         const record = this.records.get(id)!;
         record.state = 'cancelled'; delete record.error;
-        this.dropPending(id);
+        if (handle?.cancellationKeepsRunning) {
+          for (const pending of this.pending.values()) if (pending.scheduleId === id) pending.afterCancellation = true;
+        } else this.dropPending(id);
         await this.persist();
       });
       runtime.cancelling = false;
       runtime.heldDeliveries.clear();
       await this.stop(id, runtime);
+      if (handle?.cancellationKeepsRunning) await this.attemptDeliveries([...this.pending.keys()]);
       return structuredClone(this.records.get(id)!);
     } catch (error) {
       runtime.cancelling = false;
@@ -392,7 +399,9 @@ export class ScheduleService {
         cleanup = true;
         await this.persist(); return;
       }
-      if (record.state === 'cancelled' || record.state === 'failed' || record.state === 'completed') return;
+      const finishingCancelled = record.state === 'cancelled' && runtime.handle?.cancellationKeepsRunning
+        && event.type === 'completed' && runtime.running.has(event.occurrenceId);
+      if ((!finishingCancelled && record.state === 'cancelled') || record.state === 'failed' || record.state === 'completed') return;
       if (event.type === 'stopped') {
         if (LIVE.has(record.state)) { record.state = 'interrupted'; record.error = bounded(event.reason, ERROR_BYTES); }
       } else {
@@ -413,9 +422,10 @@ export class ScheduleService {
           } else {
             delivery = deliveryId(id, event.occurrenceId);
             this.pending.set(delivery, { id: delivery, scheduleId: id, occurrenceId: event.occurrenceId,
-              success: event.success, ...(event.output !== undefined && { output: bounded(event.output, OUTPUT_BYTES) }),
+              success: event.success, ...(finishingCancelled ? { afterCancellation: true } : {}), ...(event.output !== undefined && { output: bounded(event.output, OUTPUT_BYTES) }),
               ...(event.error !== undefined && { error: bounded(event.error, ERROR_BYTES) }) });
-            if (record.rule.kind === 'once') { record.state = 'completed'; cleanup = true; }
+            if (finishingCancelled) { cleanup = true; }
+            else if (record.rule.kind === 'once') { record.state = 'completed'; cleanup = true; }
             else if (record.state !== 'interrupted') record.state = runtime.running.size ? 'running' : 'active';
           }
         } else throw new Error('Invalid native schedule event.');
@@ -439,7 +449,7 @@ export class ScheduleService {
           const pending = this.pending.get(id);
           if (!pending) return;
           const record = this.records.get(pending.scheduleId)!;
-          if (!this.current(record) || record.state === 'cancelled') {
+          if (!this.current(record) || record.state === 'cancelled' && !pending.afterCancellation) {
             this.pending.delete(id); await this.persist(); return;
           }
           const runtime = this.runtimes.get(record.id);
@@ -473,7 +483,9 @@ export class ScheduleService {
       try {
         const handle = await runtime.ready;
         if (handle && !runtime.stopped) await handle.stop();
-        runtime.stopped = true;
+        // A shared session can delete future firings while an occurrence still
+        // finishes. Keep ownership until its terminal stopped notification.
+        if (!handle?.cancellationKeepsRunning || !runtime.running.size) runtime.stopped = true;
       } catch (error) {
         await this.serial(async () => {
           this.records.get(id)!.error = `Native process exit unconfirmed: ${errorText(error)}`.slice(0, ERROR_BYTES / 4);
@@ -483,7 +495,7 @@ export class ScheduleService {
       }
     })();
     runtime.stopPromise = operation;
-    void operation.catch(() => { runtime.stopPromise = undefined; });
+    void operation.finally(() => { if (!runtime.stopped) runtime.stopPromise = undefined; }).catch(() => {});
     return operation;
   }
 
@@ -585,13 +597,14 @@ export class ScheduleService {
       records.set(record.id, structuredClone(record) as unknown as ScheduleRecord);
     }
     for (const value of catalog.pending) {
-      const item = object(value, ['id', 'scheduleId', 'occurrenceId', 'success', 'output', 'error']);
+      const item = object(value, ['id', 'scheduleId', 'occurrenceId', 'success', 'output', 'error', 'afterCancellation']);
       validateScheduleId(item.scheduleId); text(item.occurrenceId);
       if (item.id !== deliveryId(item.scheduleId, item.occurrenceId) || !records.has(item.scheduleId)
         || pending.has(item.id as string) || typeof item.success !== 'boolean') throw new Error('Invalid pending schedule delivery.');
       for (const [field, limit] of [['output', OUTPUT_BYTES], ['error', ERROR_BYTES]] as const) {
         if (item[field] !== undefined && (typeof item[field] !== 'string' || Buffer.byteLength(item[field] as string) > limit)) throw new Error('Invalid delivery text.');
       }
+      if (item.afterCancellation !== undefined && item.afterCancellation !== true) throw new Error('Invalid cancellation delivery flag.');
       pending.set(item.id as string, structuredClone(item) as unknown as PendingDelivery);
     }
     this.records = records; this.pending = pending;

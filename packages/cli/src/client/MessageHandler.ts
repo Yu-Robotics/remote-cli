@@ -64,8 +64,6 @@ import { readSessionCatalog } from '../session/adapters';
 import { piSessionHolder, resolvePiSessionLocator } from '../session/adapters/PiSessionCatalog';
 import { SessionControl, type PiBindingState } from '../session/SessionControl';
 import { ScheduleService, SCHEDULE_CATALOG_FILE } from '../scheduling/ScheduleService';
-import { ClaudeNativeScheduleProvider } from '../scheduling/ClaudeNativeScheduleProvider';
-import { DshNativeScheduleProvider } from '../scheduling/DshNativeScheduleProvider';
 import { ScheduleDeliveryClient } from '../scheduling/ScheduleDeliveryClient';
 import { parseScheduleCommand, SCHEDULE_USAGE } from '../scheduling/ScheduleCommand';
 import { assertNativeScheduleBackend, NATIVE_SCHEDULE_CAPABILITIES, SCHEDULE_CAPABILITIES } from '../scheduling/ScheduleCapabilities';
@@ -306,8 +304,16 @@ export class MessageHandler {
         if (!this.schedules || this.isDestroyed || this.automaticUpdateInProgress
           || this.scheduleManagement.has(owner.threadId)) throw new Error('Schedule controls are busy.');
         this.scheduleManagement.add(owner.threadId);
-        try { return await body(); }
-        finally { this.scheduleManagement.delete(owner.threadId); }
+        try {
+          const executor = this.threadPool.getExecutor(owner.threadId);
+          if (this.threadPool.getBackendKey(owner.threadId) !== 'claude' || !executor.withNativeScheduleOperation
+            || !this.schedules.hasActiveSchedules(owner.threadId)) return await body();
+          const epoch = this.imageConnectionEpoch;
+          return await executor.withNativeScheduleOperation(uuidv4(), () => {
+            try { return !this.isDestroyed && this.wsClient.isConnected() && epoch === this.imageConnectionEpoch
+              && this.scheduleGeneration(owner.threadId) === owner.generation; } catch { return false; }
+          }, body, false);
+        } finally { this.scheduleManagement.delete(owner.threadId); }
       },
     });
     this.wsClient.onClose?.(() => {
@@ -2734,6 +2740,7 @@ You can also use natural language commands to control Claude Code CLI.`,
           assertCurrent(); await executor.configureManagedTools(connection); assertCurrent();
         }
         scheduleScope = this.scheduleToolOperations.scope({ owner, messageId, backend, current: context.current,
+          nativeAction: id => executor.nativeScheduleAction?.(id),
           run: (command, id) => this.runScheduleOperation(owner, command, id, context),
           present: async (records, operationId) => {
             if (!context.current() || !this.scheduleToolCardsSupported) return 'Management card unavailable. Use /schedule list; do not recreate the task.';
@@ -3450,13 +3457,29 @@ You can also use natural language commands to control Claude Code CLI.`,
       if (this.isDestroyed) throw new Error('The client is shutting down.');
       const directory = this.scheduleDirectory();
       if (!directory) throw new Error('Local schedule storage is unavailable.');
-      const providers = { claude: new ClaudeNativeScheduleProvider(), dsh: new DshNativeScheduleProvider() };
       const service = new ScheduleService({
         directory,
         provider: { create: (input, onEvent) => {
           const backend = input.backend === undefined ? 'claude' : input.backend;
           assertNativeScheduleBackend(backend);
-          return providers[backend].create(input, onEvent);
+          if (!input.threadId) throw new Error('Native scheduling requires the original thread.');
+          if (this.threadPool.getBackendKey(input.threadId) !== backend) throw new Error('Foreground scheduling backend changed before native admission.');
+          const executor = this.threadPool.getExecutor(input.threadId);
+          if (!executor.createNativeSchedule) throw new Error('The original executor does not support native session scheduling.');
+          const generation = this.scheduleGeneration(input.threadId);
+          return executor.createNativeSchedule(input, event => {
+            onEvent(event);
+            // A foreground message confirmed into the thread queue while an
+            // autonomous native occurrence was running must be retried when
+            // that occurrence reaches a terminal state. The executor's own
+            // queue wake does not know about MessageHandler's queue.
+            if (event.type === 'completed' || (event.type === 'stopped' && event.exitConfirmed !== false)) {
+              queueMicrotask(() => { void this.startNextQueuedCommand(input.threadId!); });
+            }
+          }, () => {
+            try { return !this.isDestroyed && this.scheduleGeneration(input.threadId!) === generation
+              && this.threadPool.getBackendKey(input.threadId!) === backend; } catch { return false; }
+          });
         } },
         isOwnerCurrent: owner => {
           // Shutdown blocks delivery separately; it does not invalidate persisted ownership.
@@ -3517,14 +3540,14 @@ You can also use natural language commands to control Claude Code CLI.`,
   /** Shared admission for slash commands and scoped model tools. Native providers alone own timing. */
   private async runScheduleOperation(owner: ScheduleOwner, command: ScheduleOperation, id = uuidv4(),
     context?: { current: () => boolean; backend: ReturnType<ThreadExecutorPool['getBackendKey']>; config: ExecutorConfig;
-      cwd: string; model?: string; effort?: string }): Promise<ScheduleRecord[]> {
+      cwd: string; model?: string; effort?: string }, nativeBound = false): Promise<ScheduleRecord[]> {
     const current = () => {
       try { return !this.isDestroyed && this.scheduleGeneration(owner.threadId) === owner.generation && (!context || context.current()); }
       catch { return false; }
     };
     const check = () => { if (!current() || this.automaticUpdateInProgress) throw new Error('Scheduling context changed or client is shutting down/updating.'); };
     check();
-    if (this.scheduleManagement.has(owner.threadId)) throw new Error('A schedule operation is already in progress for this thread.');
+    if (!nativeBound && this.scheduleManagement.has(owner.threadId)) throw new Error('A schedule operation is already in progress for this thread.');
     this.scheduleManagement.add(owner.threadId);
     try {
       const backend = context?.backend ?? this.threadPool.getBackendKey(owner.threadId);
@@ -3535,6 +3558,21 @@ You can also use natural language commands to control Claude Code CLI.`,
         if (backend === 'claude' && new ClaudeSandbox(this.directoryGuard, config.claude?.sandbox, owner.threadId).isRestricted()) {
           throw new Error('This native scheduling adapter does not support restricted Claude sandboxes. No schedule was created and sandbox settings were not changed.');
         }
+      }
+      if (!nativeBound && backend === 'claude' && (command.kind === 'create' || this.schedules?.hasActiveSchedules(owner.threadId))) {
+        const executor = this.threadPool.getExecutor(owner.threadId);
+        if (!executor.withNativeScheduleOperation) throw new Error('Shared native session scheduling is unavailable.');
+        if (!context && command.kind === 'create' && executor.configureManagedTools) {
+          // Install the same bridge the next ordinary turn will use before a
+          // slash-created native job exists. That turn must not recycle its host.
+          const bridge = this.delegationBridges.get(owner.threadId) ?? new DelegationBridge();
+          this.delegationBridges.set(owner.threadId, bridge);
+          const thread = this.threadManager.getThread(owner.threadId);
+          const connection = await bridge.start(thread && isDelegationEnabled(thread) ? ['delegation', 'scheduling'] : ['scheduling']);
+          check(); await executor.configureManagedTools(connection); check();
+        }
+        return await executor.withNativeScheduleOperation(id, current,
+          () => this.runScheduleOperation(owner, command, id, context, true), !!context);
       }
       const service = await this.initializeSchedules(); check();
       if (command.kind === 'list') {
@@ -3553,7 +3591,16 @@ You can also use natural language commands to control Claude Code CLI.`,
       const existingOwner = this.scheduleOwners.get(owner.threadId);
       if (existingOwner && existingOwner.openId !== owner.openId && (await this.activeSchedules(owner.threadId)).length) throw new Error('This thread has schedules belonging to a different owner.');
       check(); this.scheduleOwners.set(owner.threadId, owner);
-      const record = await service.create(owner, { id, backend, cwd, rule: command.rule, prompt: command.prompt,
+      if (!context && backend !== 'claude') {
+        const executor = this.threadPool.getExecutor(owner.threadId);
+        if (executor.configureManagedTools) {
+          const bridge = this.delegationBridges.get(owner.threadId) ?? new DelegationBridge();
+          this.delegationBridges.set(owner.threadId, bridge);
+          const connection = await bridge.start(isDelegationEnabled(thread) ? ['delegation', 'scheduling'] : ['scheduling']);
+          check(); await executor.configureManagedTools(connection); check();
+        }
+      }
+      const record = await service.create(owner, { id, threadId: owner.threadId, backend, cwd, rule: command.rule, prompt: command.prompt,
         command: config[backend]?.command,
         model: context ? context.model : thread.models?.[backend] ?? (backend === 'claude' ? thread.model || undefined : config.dsh?.model),
         effort: context ? context.effort : thread.efforts?.[backend] });
@@ -3563,8 +3610,10 @@ You can also use natural language commands to control Claude Code CLI.`,
       }
       return [record];
     } finally {
-      this.scheduleManagement.delete(owner.threadId);
-      await this.activeSchedules(owner.threadId).catch(() => undefined);
+      if (!nativeBound) {
+        this.scheduleManagement.delete(owner.threadId);
+        await this.activeSchedules(owner.threadId).catch(() => undefined);
+      }
     }
   }
 
@@ -3596,7 +3645,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         const lifecycle = record.backend === 'claude'
           ? 'Schedules are lost when the native process exits; recurring tasks expire after seven days.'
           : 'Native job storage is isolated and is never automatically reopened after process exit.';
-        output = `Schedule ${record.id}: ${record.state}.\n${record.rule.kind === 'once' ? record.rule.at : `${record.rule.expression} (${record.rule.timezone})`}\n\nRuns in its own ${NATIVE_SCHEDULE_CAPABILITIES[record.backend].label} session and returns results to this thread. Keep the CLI running; native timing is approximate. ${lifecycle}\nUse /schedule list or /schedule cancel ${record.id}.`;
+        output = `Schedule ${record.id}: ${record.state}.\n${record.rule.kind === 'once' ? record.rule.at : `${record.rule.expression} (${record.rule.timezone})`}\n\nRuns in this thread's foreground ${NATIVE_SCHEDULE_CAPABILITIES[record.backend].label} conversation and returns results here. Keep the CLI running; native timing is approximate. ${lifecycle}\nUse /schedule list or /schedule cancel ${record.id}.`;
       }
       respond({ success: true, scheduleMenu: menuFor(owner, records), output });
     } catch (error) {

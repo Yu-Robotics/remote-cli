@@ -7,6 +7,8 @@ export type ScheduleRule =
 
 export interface NativeScheduleInput {
   id: string;
+  /** Captured by the framework, never supplied by the model. */
+  threadId?: string;
   /** Omitted by legacy callers to select the original Claude provider. */
   backend?: NativeScheduleBackend;
   rule: ScheduleRule;
@@ -22,14 +24,16 @@ export type NativeScheduleEvent =
   | { type: 'completed'; occurrenceId: string; success: boolean; output?: string; error?: string }
   | { type: 'stopped'; reason: string; exitConfirmed?: boolean };
 
-/** A dedicated native process owns one schedule; its store must never be automatically reopened. */
+/** Native job ownership; process exit or job retirement is never automatically reversed. */
 export interface NativeScheduleHandle {
   readonly nativeId: string;
+  /** Shared-session deletion leaves an already started occurrence running. */
+  readonly cancellationKeepsRunning?: boolean;
   /** Native list verification, not a local catalog lookup. */
   list(): Promise<boolean>;
   /** Confirm native deletion; an already executing occurrence may finish. */
   cancel(): Promise<void>;
-  /** Confirm process exit and retire owned native jobs/storage without resuming them. */
+  /** Retire this job; a shared provider must never stop other jobs or their conversation. */
   stop(): Promise<void>;
 }
 
@@ -69,3 +73,6 @@ export interface ScheduleDelivery {
   output?: string;
   error?: string;
 }
+
+/** A backend tool action authorized by a managed operation, never arbitrary model dispatch. */
+export interface NativeScheduleToolAction { tool: string; input: Record<string, unknown> }

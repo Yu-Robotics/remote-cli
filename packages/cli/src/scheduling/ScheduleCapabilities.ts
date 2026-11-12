@@ -10,7 +10,7 @@ interface ScheduleCapability {
 export const NATIVE_SCHEDULE_CAPABILITIES = {
   claude: {
     label: 'Claude', supported: true,
-    detail: 'One-shot and recurring cron; requires advertised native tools/lifecycle capabilities, unrestricted execution, and a compatible Router.',
+    detail: 'One-shot and recurring cron in the foreground native conversation, including later messages. Requires native tools, lifecycle/hooks, unrestricted execution, and a compatible Router. Recurring timezone must match the native session.',
   },
   codex: {
     label: 'Codex', supported: false,
@@ -22,7 +22,7 @@ export const NATIVE_SCHEDULE_CAPABILITIES = {
   },
   dsh: {
     label: 'DSH', supported: true,
-    detail: 'Native one-shot and recurring scheduling through a process-owned plugin overlay and ACP event adapter; isolated job storage is never automatically reopened.',
+    detail: 'Native scheduling in the foreground conversation through supported host CRUD and ACP extensions. Jobs stop on process recycle; native conversation history resumes through ordinary DSH session loading.',
   },
   kimi: {
     label: 'Kimi', supported: false,
@@ -42,22 +42,20 @@ export const NATIVE_SCHEDULE_CAPABILITIES = {
   },
 } as const satisfies Record<BackendKey, ScheduleCapability>;
 
-export type NativeScheduleBackend = {
-  [Key in BackendKey]: typeof NATIVE_SCHEDULE_CAPABILITIES[Key]['supported'] extends true ? Key : never;
-}[BackendKey];
+/** Historical catalog/result identities remain readable when new creation is disabled. */
+export type NativeScheduleBackend = 'claude' | 'dsh';
 
 export function isNativeScheduleBackend(value: unknown): value is NativeScheduleBackend {
-  return typeof value === 'string' && Object.hasOwn(NATIVE_SCHEDULE_CAPABILITIES, value)
-    && NATIVE_SCHEDULE_CAPABILITIES[value as BackendKey].supported;
+  return value === 'claude' || value === 'dsh';
 }
 
-/** Reject unsupported/unknown backends without falling back to another executor. */
+/** Validate catalog identities, including retained Claude jobs. Creation checks supported separately. */
 export function assertNativeScheduleBackend(backend: string): asserts backend is NativeScheduleBackend {
   if (!Object.hasOwn(NATIVE_SCHEDULE_CAPABILITIES, backend)) {
     throw new Error('Native scheduling is temporarily unsupported for this unknown backend. Use /schedule capabilities to inspect supported backends.');
   }
   const capability = NATIVE_SCHEDULE_CAPABILITIES[backend as BackendKey];
-  if (!capability.supported) {
+  if (!isNativeScheduleBackend(backend)) {
     throw new Error(`${capability.label} scheduling is temporarily unsupported. ${capability.detail} Use /schedule capabilities to inspect supported backends.`);
   }
 }
@@ -68,7 +66,7 @@ export const SCHEDULE_CAPABILITIES = [
   ...Object.values(NATIVE_SCHEDULE_CAPABILITIES).map(capability =>
     `- ${capability.label}: ${capability.supported ? 'supported (runtime checks required)' : 'temporarily unsupported'}. ${capability.detail}`),
   '',
-  'Each task uses a separate native session with its own prompt and captured working directory/model. Conversation history is not copied.',
+  'Claude and DSH tasks share their original native conversation and later chat messages. Separate schedules in that thread share context; no transcript copy is made.',
   'The native backend owns timing. No Router timer or periodic model polling is used.',
   'Keep the CLI running. Restart reports interruption instead of recreating tasks. Claude jobs are session-only; DSH uses isolated native storage that is never automatically reopened.',
   'Timing is approximate and recurring Claude jobs expire after seven days. Use an explicit IANA timezone for recurring cron.',

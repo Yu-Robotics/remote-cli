@@ -1,3 +1,5 @@
+import { ClaudeSessionSchedules, SCHEDULE_HOOKS } from '../scheduling/claude/ClaudeSessionSchedules';
+import type { NativeScheduleInput, NativeScheduleEvent, NativeScheduleHandle } from '../scheduling/types';
 import { managedTools } from '../managed/tools';
 import { spawnManaged } from './ManagedSpawn';
 import { ownedSpawn as spawn } from '../delegation/OwnershipRuntime';
@@ -36,6 +38,7 @@ import { ClaudeStderrFilter } from './claude/ClaudeStderrFilter';
  * Format: { "type": "user", "message": { "role": "user", "content": "..." } }
  */
 interface ClaudeInputMessage {
+  uuid?: string;
   /** Message type */
   type: 'user';
   /** Message object with role and content */
@@ -161,6 +164,9 @@ interface ClaudeOutputMessage {
  * Persistent Claude Executor options
  */
 export interface PersistentClaudeOptions {
+  /** Executor-internal queued management turn; never accepted from model tool input. */
+  nativeScheduleManagement?: boolean;
+  nativeScheduleCurrent?: () => boolean;
   /** Resolve delegated task text against the conversation selected for dispatch. */
   resolvePrompt?: (sessionId: string | null) => string;
   /** Stream output callback (for backward compatibility) */
@@ -487,6 +493,72 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     return data;
   }
 
+  private sessionSchedules?: ClaudeSessionSchedules;
+  private scheduleHooksReady = false;
+  private currentScheduleManagement = false;
+  private nativeScheduleTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  private schedules(): ClaudeSessionSchedules {
+    return this.sessionSchedules ??= new ClaudeSessionSchedules({
+      send: frame => {
+        if (!this.claudeProcess?.stdin?.writable) throw new Error('Native conversation is unavailable.');
+        this.claudeProcess.stdin.write(JSON.stringify(frame) + '\n');
+      },
+      manage: async (prompt, current) => {
+        await this.listModels();
+        return this.execute(prompt, { nativeScheduleManagement: true, nativeScheduleCurrent: current });
+      },
+      wake: () => { void this.processQueue(); },
+    });
+  }
+
+  async withNativeScheduleOperation<T>(id: string, current: () => boolean, run: () => Promise<T>, inTurn: boolean): Promise<T> {
+    if (this.delegationWorker || this.isDestroyed || this.isStopping || this.sandbox.isRestricted()) throw new Error('Native schedule owner or sandbox is unavailable.');
+    if (!inTurn) await this.listModels();
+    if (!this.scheduleHooksReady) throw new Error('Native scheduling hooks are not initialized.');
+    return this.schedules().inToolOperation(id, current, run, inTurn);
+  }
+  nativeScheduleAction(id: string) { return this.sessionSchedules?.action(id); }
+  async createNativeSchedule(input: NativeScheduleInput, onEvent: (event: NativeScheduleEvent) => void, isOwnerCurrent?: () => boolean): Promise<NativeScheduleHandle> {
+    if (this.delegationWorker || this.isDestroyed || this.isStopping || this.sandbox.isRestricted()
+      || input.cwd !== this.currentWorkingDirectory) throw new Error('Native schedule context or sandbox is unavailable.');
+    if (!this.scheduleHooksReady) throw new Error('Native scheduling hooks are not initialized.');
+    const timezone = await this.readNativeScheduleTimezone();
+    return this.schedules().create(input, onEvent, isOwnerCurrent, timezone);
+  }
+
+  /** Inspect only the effective TZ; never log, retain, or expose settings to a model. */
+  private readNativeScheduleTimezone(): Promise<string> {
+    const child = this.claudeProcess;
+    if (!child?.stdin?.writable) return Promise.reject(new Error('Native conversation is unavailable.'));
+    const stdin = child.stdin;
+    const requestId = `schedule-timezone-${randomUUID()}`;
+    return new Promise((resolve, reject) => {
+      const failure = () => { this.pendingControlRequests.delete(requestId); clearTimeout(timer);
+        reject(new Error('Native session timezone could not be verified. No schedule was created.')); };
+      const timer = setTimeout(failure, 10_000);
+      this.pendingControlRequests.set(requestId, {
+        timer, reject: failure,
+        resolve: value => {
+          clearTimeout(timer); this.pendingControlRequests.delete(requestId);
+          if (this.claudeProcess !== child || this.isDestroyed || this.isStopping) { failure(); return; }
+          try {
+            const response = value as { effective?: { env?: { TZ?: unknown }; disableAllHooks?: boolean; allowManagedHooksOnly?: boolean } };
+            if (!response?.effective || typeof response.effective !== 'object') { failure(); return; }
+            if (response.effective.disableAllHooks || response.effective.allowManagedHooksOnly) {
+              reject(new Error('Native scheduling requires active SDK callback hooks. Native hook policy was not changed.')); return;
+            }
+            const timezone = response.effective.env?.TZ ?? this.nativeScheduleTimezone;
+            if (typeof timezone !== 'string' || !timezone || timezone.length > 128) { failure(); return; }
+            resolve(new Intl.DateTimeFormat('en', { timeZone: timezone }).resolvedOptions().timeZone);
+          } catch { failure(); }
+        },
+      });
+      try { stdin.write(JSON.stringify({ type: 'control_request', request_id: requestId,
+        request: { subtype: 'get_settings' } }) + '\n', error => { if (error) failure(); }); }
+      catch { failure(); }
+    });
+  }
+
   private delegation?: DelegationConnection;
 
   async configureManagedTools(connection?: DelegationConnection): Promise<void> {
@@ -509,6 +581,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
    * directories that may have their own .claude-session files.
    */
   isBusy(): boolean {
+    if (this.sessionSchedules?.busy) return true;
     return this.isProcessing || this.isStarting || this.commandQueue.length > 0;
   }
 
@@ -564,6 +637,14 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       // Build arguments
       // Note: --output-format=stream-json requires --verbose
       const restricted = this.sandbox.isRestricted();
+      // Claude restores session-only cron jobs from the resumed transcript, even
+      // when the original CronCreate used durable:false.  A resumed process that
+      // cannot install our ownership hooks must therefore disable native task
+      // execution at launch; otherwise a remote-cli job can run unowned after a
+      // restart or in a restricted/worker process.
+      const managedScheduling = !this.delegationWorker && !restricted
+        && this.delegation?.groups?.includes('scheduling') === true;
+      const disableResumedSchedules = !!this.sessionId && !managedScheduling;
       const mcpServers: Record<string, unknown> = {};
       const args: string[] = [
         '--input-format=stream-json',
@@ -589,12 +670,13 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
           fileHookCommand = [process.execPath, ClaudePersistentExecutor.FILE_POLICY_SCRIPT, socketPath, this.filePolicyToken]
             .map(quote).join(' ') + ' || exit 2';
         }
-        const settings = this.sandbox.spawnSettings(this.currentWorkingDirectory, fileHookCommand);
+        let settings = this.sandbox.spawnSettings(this.currentWorkingDirectory, fileHookCommand);
         if (settings && this.delegation) {
           const permissions = settings.permissions as { allow?: string[] };
           permissions.allow = [...(permissions.allow ?? []),
             ...managedTools(this.delegation).map(tool => `mcp__remote-cli-delegation__${tool.name}`)];
         }
+        if (disableResumedSchedules) settings = { ...(settings ?? {}), scheduledTasksEnabled: false };
         if (settings) args.push('--settings', JSON.stringify(settings));
         mcpServers['remote-cli-approval'] = {
           command: process.execPath,
@@ -604,6 +686,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
         args.push('--permission-prompt-tool', ClaudePersistentExecutor.APPROVAL_TOOL_NAME);
       } else {
         args.push('--dangerously-skip-permissions');
+        if (disableResumedSchedules) args.push('--settings', JSON.stringify({ scheduledTasksEnabled: false }));
       }
       if (this.delegation) {
         mcpServers['remote-cli-delegation'] = delegationMcpConfig(this.delegation);
@@ -676,6 +759,8 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       });
 
       this.claudeProcess = child;
+      this.nativeScheduleTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      if (this.delegation?.groups?.includes('scheduling') && !this.delegationWorker && !restricted) this.schedules();
       if (this.delegationWorker) this.workerGroups.track(child);
 
       // Buffer for collecting stderr on startup (for error reporting)
@@ -701,6 +786,9 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
 
       const forwardStderr = (text: string) => {
         if (!text) return;
+        // Stderr has no native turn ID; it cannot be attributed to a foreground
+        // request queued behind an autonomous scheduled turn.
+        if (this.sessionSchedules?.busy) return;
         // Collect stderr during startup for error reporting
         if (isStartupPhase) {
           stderrBuffer.push(text);
@@ -748,6 +836,11 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       // Use 'close' event (fires after all I/O streams are closed, i.e. after all stdout
       // data events have been processed) instead of 'exit' for command completion logic.
       child.on('close', (code, signal) => {
+        if (this.claudeProcess === child) {
+          this.sessionSchedules?.processClosed();
+          this.sessionSchedules = undefined;
+          this.scheduleHooksReady = false;
+        }
         if (this.claudeProcess !== child) return;
         flushStderr();
         this.clearApprovals('Claude process exited');
@@ -843,7 +936,10 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       child.on('error', (error) => {
         console.error('[ClaudePersistent] Process error:', error);
         this.clearApprovals('Claude process failed');
-        this.claudeProcess = null;
+        // An error is not exit evidence for a session that owns native jobs.
+        // Retain the process until close (or an explicit bounded stop) confirms it.
+        if (this.sessionSchedules?.hasJobs) this.isStopping = true;
+        else this.claudeProcess = null;
         this.isStarting = false;
 
         if (this.currentCommandReject) {
@@ -1294,6 +1390,8 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
 
       // Handle native Claude Control response packets (models catalog, etc.).
       // These bypass raw stdout logging to prevent any potential account/credential leakage.
+      if (this.sessionSchedules?.accept(parsedMessage)) return;
+      if (parsedMessage.type === 'result' && !parsedMessage.parent_tool_use_id) this.sessionSchedules?.foregroundEnded();
       if (parsedMessage.type === 'control_response' || parsedMessage.type === 'control_request') {
         this.handleControlMessage(parsedMessage);
         return;
@@ -1589,7 +1687,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
 
                 // Emit hook for tool execution completion (this is the ACTUAL execution result)
                 // Note: We don't have the original tool name here, but we have the tool_use_id
-                if (this.lifecycleHooks) claudeCodeHooks.notifyToolExecuted(
+                if (this.lifecycleHooks && !this.currentScheduleManagement) claudeCodeHooks.notifyToolExecuted(
                   {
                     toolName: toolUseId || 'unknown', // Use tool_use_id as identifier
                     params: {}, // Original params not available in tool_result
@@ -1700,7 +1798,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     this.isWaitingForInput = true;
 
     // Emit hook to notify user (fire and forget)
-    if (this.lifecycleHooks) claudeCodeHooks.requestUserInput({
+    if (this.lifecycleHooks && !this.currentScheduleManagement) claudeCodeHooks.requestUserInput({
       prompt,
       type: 'text',
       timeout: 300000, // 5 minutes timeout for input
@@ -1753,6 +1851,8 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       },
     };
 
+    inputMessage.uuid = randomUUID();
+    this.sessionSchedules?.foregroundDispatched(inputMessage.uuid);
     const inputLine = JSON.stringify(inputMessage);
     console.log(`[ClaudePersistent] Sending user input: ${input}`);
 
@@ -1794,7 +1894,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     console.log(`[ClaudePersistent] Completing command, success=${success}, output length=${output.length}, output preview: ${output.substring(0, 100)}...`);
 
     // Emit task completion hooks
-    if (this.lifecycleHooks && this.currentTaskId) {
+    if (this.lifecycleHooks && !this.currentScheduleManagement && this.currentTaskId) {
       const endTime = Date.now();
       const duration = endTime - this.currentTaskStartTime;
 
@@ -1851,6 +1951,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
    * Reset current command state
    */
   private resetCurrentCommand(): void {
+    this.currentScheduleManagement = false;
     this.clearApprovals('Task is no longer active');
     this.currentOutputBuffer = [];
     this.currentObjectiveDispatched = false;
@@ -1883,7 +1984,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
    * Process the command queue
    */
   private async processQueue(): Promise<void> {
-    if (this.isProcessing || this.isStarting || this.commandQueue.length === 0) {
+    if (this.isProcessing || this.isStarting || this.sessionSchedules?.busy || this.commandQueue.length === 0) {
       return;
     }
 
@@ -1913,12 +2014,33 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       return;
     }
 
+    if (this.delegation?.groups?.includes('scheduling') && !this.scheduleHooksReady && !this.delegationWorker && !this.sandbox.isRestricted()) {
+      // Initialize callback hooks once per native process before its first model turn.
+      this.isStarting = true;
+      try { await this.listModels(); }
+      catch {
+        const failed = this.commandQueue.shift();
+        // A resumed native scheduler can fire before a later command. If hook
+        // registration or policy validation failed, retire that process before
+        // returning an error so no restored job can run without ownership.
+        await this.stopProcess().catch(() => {});
+        failed?.resolve({ success: false, error: 'Native managed-tool initialization failed.' });
+        return;
+      } finally { this.isStarting = false; }
+    }
+    if (this.sessionSchedules?.busy) return;
     const command = this.commandQueue.shift();
     if (!command) {
       return;
     }
+    if (command.options.nativeScheduleCurrent && !command.options.nativeScheduleCurrent()) {
+      command.resolve({ success: false, error: 'Native schedule management authorization expired before dispatch.' });
+      void this.processQueue();
+      return;
+    }
 
     this.isProcessing = true;
+    this.currentScheduleManagement = command.options.nativeScheduleManagement === true;
     this.currentStreamCallback = command.options.onStream;
     this.currentAssistantTextSeen = false;
     this.currentDisplayTextCallback = text => {
@@ -1958,7 +2080,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     this.currentTaskStartTime = Date.now();
 
     // Emit task started hook
-    if (this.lifecycleHooks) claudeCodeHooks.notifyTaskStarted({
+    if (this.lifecycleHooks && !this.currentScheduleManagement) claudeCodeHooks.notifyTaskStarted({
       taskId: this.currentTaskId,
       description: command.prompt,
       workingDirectory: this.currentWorkingDirectory,
@@ -2013,6 +2135,8 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       ...(command.isSlashCommand ? { isSlashCommand: true } : {}),
     };
 
+    inputMessage.uuid = randomUUID();
+    this.sessionSchedules?.foregroundDispatched(inputMessage.uuid, command.options.nativeScheduleManagement);
     const inputLine = JSON.stringify(inputMessage);
     console.log(`[ClaudePersistent] Sending command${command.isSlashCommand ? ' (slash)' : ''}: ${command.prompt.substring(0, 100)}...`);
 
@@ -2079,7 +2203,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     this.denyAllPendingApprovals('Task aborted by user');
 
     // Emit task aborted hook before stopping
-    if (this.lifecycleHooks && this.currentTaskId) {
+    if (this.lifecycleHooks && !this.currentScheduleManagement && this.currentTaskId) {
       claudeCodeHooks.notifyTaskAborted(
         {
           taskId: this.currentTaskId,
@@ -2231,6 +2355,11 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       throw new Error('Claude process is not available for control initialization');
     }
 
+    // Install the lifecycle guard even in restricted mode so a native schedule
+    // restored from an earlier unrestricted session cannot run unowned after the
+    // execution policy changes. Creation and management remain rejected below.
+    const scheduleHooks = !this.delegationWorker;
+    if (scheduleHooks) this.schedules();
     const stdin = child.stdin;
     const requestId = `catalog-${randomUUID()}`;
     const requestPacket = {
@@ -2238,6 +2367,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       request_id: requestId,
       request: {
         subtype: 'initialize',
+        ...(scheduleHooks ? { hooks: SCHEDULE_HOOKS } : {}),
       },
     };
 
@@ -2255,7 +2385,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       }, 10_000);
 
       this.pendingControlRequests.set(requestId, {
-        resolve: (response: unknown) => {
+        resolve: async (response: unknown) => {
           cleanup();
           if (this.claudeProcess !== child || this.isDestroyed || this.isStopping) { reject(new Error('Claude catalog process is no longer active')); return; }
           try {
@@ -2264,6 +2394,10 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
               rawResponse.models,
               this.reportedModel || this.model,
             );
+            if (scheduleHooks && this.sessionId && this.delegation?.groups?.includes('scheduling')) {
+              await this.readNativeScheduleTimezone();
+            }
+            if (scheduleHooks) { this.schedules(); this.scheduleHooksReady = true; }
             this.cachedRawEntries = rawEntries;
             this.cachedModelCatalog = models;
             resolve(models);
@@ -2455,7 +2589,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     const compactResult = await new Promise<PersistentClaudeResult>((resolve) => {
       const child = spawn(
         this.claudeCommand,
-        ['--resume', sessionIdBeforeCompact, '--print', '/compact'],
+        ['--resume', sessionIdBeforeCompact, '--settings', JSON.stringify({ scheduledTasksEnabled: false }), '--print', '/compact'],
         {
           cwd: this.currentWorkingDirectory,
           stdio: ['ignore', 'pipe', 'pipe'],

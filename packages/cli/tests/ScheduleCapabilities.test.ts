@@ -8,12 +8,15 @@ describe('native scheduling eligibility', () => {
     ]);
     expect(Object.entries(NATIVE_SCHEDULE_CAPABILITIES).filter(([, value]) => value.supported)
       .map(([backend]) => backend)).toEqual(['claude', 'dsh']);
+    expect(NATIVE_SCHEDULE_CAPABILITIES.claude.supported).toBe(true);
     expect(() => assertNativeScheduleBackend('claude')).not.toThrow();
     expect(() => assertNativeScheduleBackend('dsh')).not.toThrow();
     expect(isNativeScheduleBackend('dsh')).toBe(true);
     expect(isNativeScheduleBackend('claude')).toBe(true);
     expect(isNativeScheduleBackend(null)).toBe(false);
     expect(SCHEDULE_CAPABILITIES).toContain('runtime checks required');
+    expect(SCHEDULE_CAPABILITIES).toContain('Claude and DSH tasks share their original native conversation and later chat messages');
+    expect(NATIVE_SCHEDULE_CAPABILITIES.claude.detail).toContain('timezone must match the native session');
   });
 
   it.each(['codex', 'agy', 'kimi', 'opencode', 'pi', 'zcode'] as const)(

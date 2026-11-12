@@ -48,6 +48,8 @@ interface PendingRequest {
 }
 
 export interface AcpTransport {
+  createNativeSchedule?(sessionId: string, input: import('../../scheduling/types').NativeScheduleInput,
+    onEvent: (event: import('../../scheduling/types').NativeScheduleEvent) => void): Promise<import('../../scheduling/types').NativeScheduleHandle>;
   initialize(): Promise<unknown>;
   newSession(cwd: string, mcpServers?: AcpMcpServer[]): Promise<AcpSessionResult>;
   loadSession(sessionId: string, cwd: string, mcpServers?: AcpMcpServer[]): Promise<AcpSessionResult>;
@@ -198,7 +200,7 @@ export class AcpClient implements AcpTransport {
     });
   }
 
-  private sendNotification(method: string, params: unknown): void {
+  protected sendNotification(method: string, params: unknown): void {
     this.writeLine({ jsonrpc: '2.0', method, params } satisfies AcpJsonRpcNotification);
   }
 
@@ -252,7 +254,7 @@ export class AcpClient implements AcpTransport {
     }
   }
 
-  private handleNotification(message: AcpJsonRpcNotification): void {
+  protected handleNotification(message: AcpJsonRpcNotification): void {
     if (message.method !== 'session/update') return;
     const params = message.params as { update?: Record<string, unknown> };
     const update = params.update;

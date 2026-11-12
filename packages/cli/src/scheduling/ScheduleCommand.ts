@@ -10,7 +10,7 @@ export const SCHEDULE_USAGE = [
   '/schedule after <positive integer><m|h|d> -- <prompt>',
   '/schedule at <ISO timestamp with Z or offset> -- <prompt>',
   '/schedule cron "<five numeric fields>" --tz <IANA timezone> -- <prompt>',
-  'Claude and DSH schedules require their dedicated native process to remain running.',
+  'Claude and DSH schedules require their native host process to remain running; Claude shares the foreground conversation.',
   'Restarted schedules are marked interrupted and are never automatically recreated.',
   'One-shot times round up to the next minute; native firing times may include jitter.',
 ].join('\n');
