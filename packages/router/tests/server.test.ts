@@ -1034,7 +1034,8 @@ describe('RouterServer', () => {
       const intro = mockFeishuHandler.sendStreamingStart.mock.calls[0][1];
       expect(intro).toContain('Review the implementation');
       expect(intro).toContain('/workspace/project');
-      expect(intro).toContain('Remaining in queue:** 2');
+      expect(intro).toContain('Remaining: 2');
+      expect(intro).toContain("<text_tag color='blue'>Running</text_tag>");
       expect(mockFeishuHandler.markQueueCardStarted).toHaveBeenCalledWith('receipt-card');
       const resolveThread = mockFeishuHandler.setOnResolveThread.mock.calls[0][0];
       expect(await resolveThread('execution-card', 'user-1')).toMatchObject({ threadId: 'thread-1', deviceId: 'device-1' });
@@ -1067,7 +1068,7 @@ describe('RouterServer', () => {
       await Promise.all([starting, text, finished]);
       const elements = mockFeishuHandler.finalizeStreamingMessage.mock.calls[0][1];
       expect(JSON.stringify(elements)).toContain('First output');
-      expect(JSON.stringify(elements)).toContain('Queued task started');
+      expect(JSON.stringify(elements)).toContain('Running');
     });
 
     it('finishes an image upload before rendering the queued task result', async () => {

@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.236] - 2026-11-12
+
+### Changed
+- Refine scheduled-task and queue cards with task-first content, compact status and context, readable timestamps with explicit timezones, and consistent action and receipt layouts.
+- Keep full schedule identifiers in secondary details while preserving existing ownership, confirmation, pagination, and retry controls.
+
 ## [1.6.235] - 2026-11-12
 
 ### Changed

@@ -611,6 +611,10 @@ acknowledgement confirms Router delivery, not that a person has read the message
 `/schedule list` reconciles native expiry on demand and reports interrupted jobs
 without recreating them. Completed results are text-only in this first adapter.
 
+Schedule and queue cards emphasize task content, with compact status and context
+information. Schedule identifiers remain available as secondary references, and
+displayed timestamps include an explicit timezone.
+
 When both CLI and Router support schedule cards, creation and list replies offer
 **Refresh status** and **Cancel** controls. Cancellation requires confirmation
 on the card and is shown as successful only after the original CLI acknowledges

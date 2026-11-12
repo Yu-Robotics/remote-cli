@@ -6,10 +6,10 @@ import type { ScheduleMenu } from '../src/types/ScheduleCards';
 function buttons(elements: any[]): any[] {
   return elements.flatMap(element => element.columns?.flatMap((column: any) => column.elements.filter((child: any) => child.tag === 'button')) ?? []);
 }
-function fixture(count = 1) {
+function fixture(count = 1, rule = '* * * * * (UTC)') {
   const menu: ScheduleMenu = { snapshotId: 'snapshot', threadId: 'original-thread', threadName: 'Original thread', expiresAt: Date.now() + 60_000,
     entries: Array.from({ length: count }, (_, index) => ({ value: `choice-${index}`, id: `schedule-${index}`, backend: 'claude',
-      state: 'active', rule: '* * * * * (UTC)', prompt: '<at id="all">**synthetic**</at>', canCancel: true })) };
+      state: 'active', rule, prompt: '<at id="all">**synthetic**</at>', canCancel: true })) };
   const transport = { ownsDevice: vi.fn(async () => true), available: vi.fn(() => true), send: vi.fn(async () => true), update: vi.fn(async () => {}) };
   const cards = new ScheduleCards(transport);
   const present = cards.present({ openId: 'owner', deviceId: 'device', expectedThreadId: 'original-thread', menu })!;
@@ -28,6 +28,30 @@ function fixture(count = 1) {
 afterEach(() => { vi.useRealTimers(); });
 
 describe('ScheduleCards', () => {
+  it('puts the prompt first, uses a readable status chip, and keeps the full ID in subdued metadata', () => {
+    const f = fixture();
+    const first = f.latest()[0];
+    expect(first).toMatchObject({ tag: 'markdown' });
+    expect(first.content).toContain('synthetic');
+    expect(first.content).not.toContain('schedule-0');
+    expect(JSON.stringify(f.latest())).toMatch(/<text_tag color='green'>Scheduled<\/text_tag>/);
+    expect(JSON.stringify(f.latest())).toContain('Reference:');
+    expect(JSON.stringify(f.latest())).toContain('schedule-0');
+    expect(f.latest().find(element => element.content?.startsWith('When:'))?.content).toBe('When: \\* \\* \\* \\* \\* \\(UTC\\)\nReference: `schedule-0`');
+    expect(f.latest().at(-1)).toMatchObject({ tag: 'markdown', text_size: 'notation' });
+    expect(f.latest().at(-1).content).toContain('not recreated after restart');
+    f.cards.destroy();
+  });
+
+  it('formats one-shot rules in explicit UTC without changing recurring timezone text', () => {
+    const f = fixture(1, '2026-02-03T04:05:00.000Z');
+    expect(JSON.stringify(f.latest())).toContain('2026-02-03 04:05:00 UTC');
+    f.cards.destroy();
+    const recurring = fixture(1, '0 9 * * * (Asia/Shanghai)');
+    expect(recurring.latest().find(element => element.content?.startsWith('When:'))?.content).toContain('Asia/Shanghai');
+    recurring.cards.destroy();
+  });
+
   it('requires confirmation, supports Back, and changes state only after the matching CLI receipt', async () => {
     const f = fixture();
     await f.click('cancel'); await f.settle();
@@ -39,7 +63,7 @@ describe('ScheduleCards', () => {
     await f.click('cancel'); await f.settle();
     await f.click('confirm'); await f.settle();
     expect(f.transport.send).toHaveBeenCalledWith('device', expect.objectContaining({ type: 'schedule_action', operation: 'cancel', threadId: 'original-thread', value: 'choice-0' }));
-    expect(JSON.stringify(f.latest())).toContain('Waiting for CLI');
+    expect(JSON.stringify(f.latest())).toContain('Waiting for confirmation');
     expect(JSON.stringify(f.latest())).not.toContain('Cancellation confirmed');
     await f.result();
     expect(JSON.stringify(f.latest())).toContain('Cancellation confirmed');
@@ -70,7 +94,7 @@ describe('ScheduleCards', () => {
     await f.cards.resolve('wrong', { ...request, type: 'schedule_action_result', success: true });
     for (const change of [{ openId: 'other' }, { threadId: 'other' }, { snapshotId: 'other' }, { messageId: 'other' }]) await f.result(true, change);
     await f.settle();
-    expect(JSON.stringify(f.latest())).toContain('Waiting for CLI');
+    expect(JSON.stringify(f.latest())).toContain('Waiting for confirmation');
     await f.result();
     await expect(f.cards.click('owner', 'card', old)).rejects.toThrow('changed');
     f.cards.destroy();
@@ -81,7 +105,7 @@ describe('ScheduleCards', () => {
     const f = fixture();
     await f.click('refresh');
     await vi.advanceTimersByTimeAsync(15_000); await f.settle();
-    expect(JSON.stringify(f.latest())).toContain('outcome is unknown');
+    expect(JSON.stringify(f.latest())).toContain('Outcome unknown');
     await f.click('retry');
     expect(f.transport.send.mock.calls[1][1]).toEqual(f.transport.send.mock.calls[0][1]);
     await f.result();
@@ -105,7 +129,7 @@ describe('ScheduleCards', () => {
     await f.click('cancel'); await f.settle(); await f.click('confirm');
     await f.result(true, { menu: { ...f.menu, entries: [{ ...f.menu.entries[0], state: 'completed', canCancel: false }] } });
     expect(JSON.stringify(f.latest())).not.toContain('Cancellation confirmed');
-    expect(JSON.stringify(f.latest())).toContain('completed');
+    expect(JSON.stringify(f.latest())).toContain('Completed');
     f.cards.destroy();
   });
 
@@ -114,7 +138,7 @@ describe('ScheduleCards', () => {
     await f.click('cancel'); await f.settle(); await f.click('confirm');
     await f.result(success, { menu: { ...f.menu, entries: [{ ...f.menu.entries[0], state: 'cancelled', canCancel: true }] } });
     const rendered = JSON.stringify(f.latest());
-    expect(rendered).toContain('Native process cleanup pending; exit is unconfirmed');
+    expect(rendered).toContain('Stopping · exit unconfirmed');
     expect(rendered).not.toContain('**Status:** cancelled');
     expect(rendered).not.toContain('Cancellation confirmed by the CLI');
     expect(buttons(f.latest()).find(button => button.text.content === 'Retry stopping task').disabled).toBe(false);

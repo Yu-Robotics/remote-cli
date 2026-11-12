@@ -1197,17 +1197,22 @@ describe('FeishuLongConnHandler', () => {
         threadId: 'thread-1',
         threadName: 'thread-1',
         backend: 'codex',
-        cwd: '/tmp/project',
+        cwd: path.join(os.tmpdir(), 'project_[draft]'),
         pendingCount: 0,
-        preview: 'queued command',
-        expiresAt: Date.now() + 60_000,
+        preview: 'queued *command* <at id="all">',
+        expiresAt: Date.UTC(2026, 1, 3, 4, 5),
       });
 
       const buttonLayout = elements.find((element: any) => element.tag === 'column_set');
-      const details = elements.find((element: any) => element.tag === 'markdown').content;
-      expect(details).toContain('Queue confirmation');
-      expect(details).not.toContain('Thread is busy');
-      expect(details).toContain('Already queued:** 0');
+      const preview = elements.find((element: any) => element.tag === 'markdown' && !element.text_size);
+      const details = elements.find((element: any) => element.tag === 'markdown' && element.text_size === 'notation');
+      expect(preview.content).toBe('**queued \\*command\\* \\<at id="all"\\>**');
+      expect(preview.content).not.toContain('<at id="all">');
+      expect(details.content).toContain("<text_tag color='orange'>Awaiting confirmation</text_tag>");
+      expect(details.content).toContain('Queued: 0');
+      expect(details.content).toContain('Directory: `');
+      expect(details.content).toContain('project\\_\\[draft\\]');
+      expect(details.content).toContain('Expires 2026-02-03 04:05:00 UTC');
       expect(buttonLayout).toMatchObject({
         tag: 'column_set',
         columns: [
@@ -1215,6 +1220,8 @@ describe('FeishuLongConnHandler', () => {
             tag: 'column',
             elements: [{
               tag: 'button',
+              text: { content: 'Add to queue' },
+              type: 'primary',
               behaviors: [{ type: 'callback', value: { action: 'queue_confirm', queueId: 'queue-1', threadId: 'thread-1' } }],
             }],
           },
@@ -1222,12 +1229,25 @@ describe('FeishuLongConnHandler', () => {
             tag: 'column',
             elements: [{
               tag: 'button',
+              text: { content: 'Cancel' },
+              type: 'default',
               behaviors: [{ type: 'callback', value: { action: 'queue_cancel', queueId: 'queue-1', threadId: 'thread-1' } }],
             }],
           },
         ],
       });
       expect(elements.some((element: any) => element.tag === 'action')).toBe(false);
+    });
+
+    it('does not present malformed queue metadata as an empty queue or valid expiry', () => {
+      const elements = (handler as any).createQueueConfirmationElements({
+        id: 'queue-unknown', threadId: 'thread-1', threadName: 'Thread', backend: 'codex',
+        cwd: path.join(os.tmpdir(), 'project'), pendingCount: undefined, preview: 'Review changes', expiresAt: NaN,
+      });
+      const details = elements.find((element: any) => element.text_size === 'notation').content;
+      expect(details).toContain('Queued: Unknown');
+      expect(details).toContain('Unknown time (UTC)');
+      expect(details).not.toContain('Queued: 0');
     });
   });
 
@@ -3346,7 +3366,7 @@ describe('FeishuLongConnHandler', () => {
         },
       });
       const receipt = JSON.parse(mockClient.im.message.patch.mock.calls[0][0].data.content);
-      expect(receipt.body.elements[0].content).toContain('Added to queue');
+      expect(receipt.body.elements[0].content).toContain('Queued');
       expect(receipt.body.elements[0].content).toContain('/queue continue');
     });
 
@@ -3370,8 +3390,8 @@ describe('FeishuLongConnHandler', () => {
       }));
       await handler.markQueueCardStarted('card-1');
       const card = JSON.parse(mockClient.im.message.patch.mock.calls.at(-1)[0].data.content);
-      expect(card.body.elements[0].content).toContain('Queued task started');
-      expect(card.body.elements[0].content).toContain('bottom of the chat');
+      expect(card.body.elements[0].content).toContain('Running');
+      expect(card.body.elements[0].content).toContain('new execution card');
     });
 
     it('fences a queue card created across an ownership change before dispatch', async () => {
@@ -3418,8 +3438,8 @@ describe('FeishuLongConnHandler', () => {
       expect(mockClient.im.message.patch).not.toHaveBeenCalled();
       sent(true);
       await Promise.all([confirmation, started]);
-      expect(mockClient.im.message.patch.mock.calls[0][0].data.content).toContain('Added to queue');
-      expect(mockClient.im.message.patch.mock.calls[1][0].data.content).toContain('Queued task started');
+      expect(mockClient.im.message.patch.mock.calls[0][0].data.content).toContain('Queued');
+      expect(mockClient.im.message.patch.mock.calls[1][0].data.content).toContain('Running');
     });
 
     it('allows queue confirmation retry after durable card registration fails', async () => {
