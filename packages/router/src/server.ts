@@ -1,3 +1,4 @@
+import { ScheduleCards } from './feishu/ScheduleCards';
 import { parseAttachmentHints } from './output/Protocol';
 import { InlineFileCards, type HintStatus, type InlineIdentity, type InlineOwner } from './output/InlineFileCards';
 import { OutputTransfers } from './output/OutputTransfers';
@@ -16,7 +17,7 @@ import { AutomaticFileEnrollment, type EnrollmentAuthority } from './files/Autom
 import { FileTransfers } from './files/FileTransfers';
 import path from 'path';
 import os from 'os';
-import { randomUUID } from 'crypto';
+import { randomUUID, createHash } from 'crypto';
 import { ImageLifecycle, IMAGE_LIMITS, type ImageReply } from './utils/ImageLifecycle';
 import type { ApprovalAction } from './types';
 import type { ExecutionMetadata, ActivityProgressInfo } from './types';
@@ -123,6 +124,9 @@ export class RouterServer {
   private readonly workerContextCards: WorkerContextCards;
   private readonly workerContextConnections = new Map<string, () => boolean>();
   private readonly settingsCards: SettingsCards;
+  private readonly scheduleCards: ScheduleCards;
+  private readonly scheduleToolDeliveries = new Map<string, { digest: string; done: Promise<boolean>; settled: boolean }>();
+  private readonly scheduleCardConnections = new Map<string, () => boolean>();
   private readonly settingsConnections = new Map<string, (kind?: import('./types/Settings').SettingsKind | 'speed') => boolean>();
   private readonly maintenanceCards: MaintenanceCards;
   private readonly tips: TipService;
@@ -351,6 +355,13 @@ export class RouterServer {
       update: (cardId, elements, header) => this.feishuLongConnHandler.updateApprovalCard(cardId, elements, header),
     });
     this.feishuLongConnHandler.settingsCards = this.settingsCards;
+    this.scheduleCards = new ScheduleCards({
+      ownsDevice: async (openId, deviceId) => (await this.bindingManager.getDeviceBinding(deviceId))?.openId === openId,
+      available: deviceId => this.scheduleCardConnections.get(deviceId)?.() === true,
+      send: (deviceId, message) => this.connectionHub.sendToDevice(deviceId, message),
+      update: (cardId, elements) => this.feishuLongConnHandler.updateScheduleCard(cardId, elements),
+    });
+    this.feishuLongConnHandler.scheduleCards = this.scheduleCards;
     this.maintenanceCards = new MaintenanceCards(new NoticeReceipts(path.join(
       path.dirname(config.getConfigPath() || path.join(os.homedir(), '.remote-cli-router', 'config.json')), 'notice-receipts.json')), {
       owner: async deviceId => (await this.bindingManager.getDeviceBinding(deviceId))?.openId,
@@ -694,6 +705,8 @@ export class RouterServer {
       let socketClosed = false;
       let taskRecoveryEnabled = false;
       let scheduleResultsEnabled = false;
+      let scheduleCardsEnabled = false;
+      let scheduleToolCardsEnabled = false;
       let approvalCardsEnabled = false;
       let delegationProgressEnabled = false;
       let delegationProgressTextEnabled = false;
@@ -810,6 +823,18 @@ export class RouterServer {
 
           if (message.type === 'worker_context_reset_result') {
             if (workerContextResetEnabled && deviceId) await this.workerContextCards.resolve(deviceId, message);
+            return;
+          }
+
+          if (message.type === 'schedule_tool_card') {
+            if (!scheduleToolCardsEnabled || !deviceId) return;
+            const current = () => !socketClosed && ws.readyState === WebSocket.OPEN && this.connectionHub.isCurrentConnection(deviceId!, ws);
+            const success = await this.deliverScheduleToolCard(deviceId, message, current);
+            if (current()) ws.send(JSON.stringify({ type: 'schedule_tool_card_ack', messageId: message.messageId, success, timestamp: Date.now() }));
+            return;
+          }
+          if (message.type === 'schedule_action_result') {
+            if (scheduleCardsEnabled && deviceId) await this.scheduleCards.resolve(deviceId, message);
             return;
           }
 
@@ -993,6 +1018,8 @@ export class RouterServer {
                 this.approvalCards.disconnect(deviceId);
                 this.maintenanceCards.disconnect(deviceId);
                 this.settingsCards.disconnect(deviceId);
+                this.scheduleCards.disconnect(deviceId);
+                this.scheduleCardConnections.delete(deviceId);
                 if (!this.connectionHub.isCurrentConnection(deviceId, ws)) this.cancelThreadInventories(deviceId);
                 if (message.data.capabilities?.queueStarted === true) {
                   this.connectionHub.registerConnection(deviceId, ws, { queueStarted: true });
@@ -1024,6 +1051,11 @@ export class RouterServer {
                 taskRecoveryEnabled = message.data.capabilities?.taskRecovery === true;
                 scheduleResultsEnabled = taskRecoveryEnabled && message.data.capabilities?.queueStarted === true
                   && message.data.capabilities?.scheduleResultsV1 === true;
+                scheduleCardsEnabled = scheduleResultsEnabled && message.data.capabilities?.scheduleCardsV1 === true;
+                scheduleToolCardsEnabled = scheduleCardsEnabled && message.data.capabilities?.scheduleToolCardsV1 === true;
+                if (scheduleCardsEnabled) this.scheduleCardConnections.set(deviceId,
+                  () => this.connectionHub.isCurrentConnection(deviceId!, ws) && ws.readyState === WebSocket.OPEN);
+                else this.scheduleCardConnections.delete(deviceId);
                 approvalCardsEnabled = message.data.capabilities?.approvalCards === true;
                 updateNoticeEnabled = message.data.capabilities?.updateNotice === true;
                 subscriptionInspectionEnabled = message.data.capabilities?.subscriptionInspection === true;
@@ -1071,6 +1103,8 @@ export class RouterServer {
                       ...(outputsEnabled ? { outputFilesV1: true } : {}),
                       ...(taskRecoveryEnabled ? { taskRecovery: true } : {}),
                       ...(scheduleResultsEnabled ? { scheduleResultsV1: true } : {}),
+                      ...(scheduleCardsEnabled ? { scheduleCardsV1: true } : {}),
+                      ...(scheduleToolCardsEnabled ? { scheduleToolCardsV1: true } : {}),
                       ...(approvalCardsEnabled ? { approvalCards: true } : {}),
                       ...(delegationProgressEnabled ? { delegationProgress: true } : {}),
                       ...(delegationProgressTextEnabled ? { delegationProgressText: true } : {}),
@@ -1139,6 +1173,9 @@ export class RouterServer {
                 || (candidateSettingsMenu?.kind === 'directory' && !directoryCardsEnabled) ? undefined : candidateSettingsMenu;
 
               const responseSession = responseMessageId ? this.streamingMessages.get(responseMessageId) : undefined;
+              const scheduleMenu = scheduleCardsEnabled && !queueConfirmation && !responseSession?.queueStarted
+                && responseSession?.threadId === (message.scheduleMenu ?? message.data?.scheduleMenu)?.threadId
+                ? (message.scheduleMenu ?? message.data?.scheduleMenu) : undefined;
               const responseSuccess = message.success ?? message.data?.success;
               let selectionWarning: string | undefined;
               if (responseSession) {
@@ -1198,6 +1235,7 @@ export class RouterServer {
                     queueConfirmation,
                     executionMetadata,
                     settingsMenu,
+                    scheduleMenu,
                   );
                   if (scheduledSession?.queueStarted?.source === 'schedule' && !delivered) break;
                 } else {
@@ -1346,6 +1384,8 @@ export class RouterServer {
           this.approvalCards.disconnect(deviceId);
           this.maintenanceCards.disconnect(deviceId);
           this.settingsCards.disconnect(deviceId);
+          this.scheduleCards.disconnect(deviceId);
+          this.scheduleCardConnections.delete(deviceId);
           this.settingsConnections.delete(deviceId);
           this.maintenanceConnections.delete(deviceId);
           this.workerContextConnections.delete(deviceId);
@@ -2524,6 +2564,47 @@ export class RouterServer {
     await this.inlineFileCards.admit(owner, replacePending);
   }
 
+  private async deliverScheduleToolCard(deviceId: string, message: import('./types/ScheduleCards').ScheduleToolCardMessage,
+    current: () => boolean): Promise<boolean> {
+    const valid = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 256;
+    if (![message.messageId, message.parentMessageId, message.openId, message.threadId].every(valid)) return false;
+    const key = `${deviceId}:${message.messageId}`;
+    const digest = createHash('sha256').update(JSON.stringify(message)).digest('hex');
+    const previous = this.scheduleToolDeliveries.get(key);
+    if (previous) return previous.digest === digest ? previous.done : false;
+    if (this.scheduleToolDeliveries.size >= 500) {
+      const stale = [...this.scheduleToolDeliveries].find(([, receipt]) => receipt.settled);
+      if (!stale) return false;
+      this.scheduleToolDeliveries.delete(stale[0]);
+    }
+    // Capture the admitted foreground source before yielding. Finalizing its answer
+    // may remove that stream while this separate management card is being sent.
+    const parent = this.streamingMessages.get(message.parentMessageId);
+    if (!parent || parent.deviceId !== deviceId || parent.openId !== message.openId || parent.threadId !== message.threadId) return false;
+    const epoch = parent.selectionFence?.epoch ?? this.selections.capture(message.openId, deviceId).epoch;
+    const owned = () => current() && this.selections.isOwnershipCurrent(message.openId, deviceId, epoch);
+    const done = Promise.resolve().then(async () => {
+      if (!owned() || (await this.bindingManager.getDeviceBinding(deviceId))?.openId !== message.openId || !owned()) return false;
+      const prepared = this.scheduleCards.present({ openId: message.openId, deviceId, menu: message.menu, expectedThreadId: message.threadId });
+      if (!prepared) return false;
+      try {
+        const content = JSON.stringify({ schema: '2.0', body: { elements: prepared.elements } });
+        if (Buffer.byteLength(content) > 16 * 1024) throw new Error('Schedule card exceeds its budget.');
+        const cardId = await this.feishuLongConnHandler.createOutputCard(message.openId, content,
+          createHash('sha256').update(key).digest('hex').slice(0, 32));
+        if (!owned() || (await this.bindingManager.getDeviceBinding(deviceId))?.openId !== message.openId || !owned()) { prepared.discard(); return false; }
+        await this.registerCardThread(cardId, { openId: message.openId, deviceId, threadId: message.threadId,
+          epoch, expiresAt: Date.now() + this.CARD_THREAD_MAP_TTL_MS }, owned);
+        if (!owned()) { prepared.discard(); return false; }
+        prepared.deliver([cardId]); return true;
+      } catch { prepared.discard(); return false; }
+    });
+    const receipt = { digest, done, settled: false };
+    this.scheduleToolDeliveries.set(key, receipt);
+    void done.then(() => { receipt.settled = true; }, () => { receipt.settled = true; });
+    return done;
+  }
+
   private async registerDeliveredThreadCards(messageId: string, streamData: StreamingMessageState, cardIds: string[]): Promise<void> {
     if (!streamData.threadId || this.streamingMessages.get(messageId) !== streamData) return;
     const fence = streamData.selectionFence;
@@ -2542,7 +2623,7 @@ export class RouterServer {
     }
   }
 
-  private async finalizeStreamingMessage(messageId: string, success: boolean, output?: string, error?: string, sessionAbbr?: string, cwd?: string, queueConfirmation?: QueueConfirmationInfo, executionMetadata?: ExecutionMetadata, settingsMenu?: unknown): Promise<boolean> {
+  private async finalizeStreamingMessage(messageId: string, success: boolean, output?: string, error?: string, sessionAbbr?: string, cwd?: string, queueConfirmation?: QueueConfirmationInfo, executionMetadata?: ExecutionMetadata, settingsMenu?: unknown, scheduleMenu?: unknown): Promise<boolean> {
     const streamData = this.streamingMessages.get(messageId);
     if (!streamData) return false;
     const task = taskCorrelation(messageId);
@@ -2590,7 +2671,9 @@ export class RouterServer {
         // interactive card bound to the original user/device/thread/request. The
         // text output is for incapable peers or delivery failure only: including
         // its complete catalog here would defeat pagination and its node/byte budget.
-        const prepared = settingsMenu && success
+        const prepared = scheduleMenu && success
+          ? this.scheduleCards.present({ openId: streamData.openId, deviceId: streamData.deviceId, menu: scheduleMenu, expectedThreadId: streamData.threadId })
+          : settingsMenu && success
           ? this.settingsCards.present({ openId: streamData.openId, deviceId: streamData.deviceId, menu: settingsMenu, requestMessageId: messageId, expectedThreadId: streamData.threadId })
           : undefined;
         if (prepared) {
@@ -2606,7 +2689,10 @@ export class RouterServer {
             undefined,
             undefined,
             true,
-            { bare: true, onDelivered: cardIds => prepared.deliver(cardIds) }
+            { bare: true, onDelivered: async cardIds => {
+              prepared.deliver(cardIds);
+              if (scheduleMenu) await this.registerDeliveredThreadCards(messageId, streamData, cardIds);
+            } }
           );
           if (!finalized) {
             prepared.discard();
@@ -2793,6 +2879,9 @@ export class RouterServer {
     this.workerContextCards.destroy();
     this.workerContextConnections.clear();
     this.settingsCards.destroy();
+    this.scheduleCards.destroy();
+    this.scheduleToolDeliveries.clear();
+    this.scheduleCardConnections.clear();
     this.settingsConnections.clear();
     this.maintenanceCards.destroy();
     this.maintenanceConnections.clear();

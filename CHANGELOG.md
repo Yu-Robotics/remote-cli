@@ -13,6 +13,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.234] - 2026-11-12
+
+### Added
+- Add backend-neutral managed scheduling tools for natural-language creation, listing, cancellation, and bounded operation receipts, independently of delegation settings. Retain Claude and DSH native-provider admission and reject unsupported execution backends explicitly.
+- Deliver model-requested management cards separately from foreground answers with negotiated compatibility, captured ownership, replay fencing, and cleanup of newly created jobs when their turn context retires.
+
+### Fixed
+- Surface terminal failures after pending scheduling receipts, preserve scoped tools across authorized Codex model recovery, and reclaim completed receipt capacity without dropping pending operations.
+
+## [1.6.233] - 2026-11-12
+
+### Added
+- Add interactive native schedule management cards with on-demand status refresh and confirmed cancellation through the CLI, retaining the original task owner and thread.
+- Negotiate schedule card controls separately, preserve text commands for older peers, and keep scheduling dormant until used.
+
+### Fixed
+- Treat timed-out card operations as unknown outcomes and retain cancellation retry when native process cleanup is unconfirmed.
+
 ## [1.6.232] - 2026-11-11
 
 ### Added

@@ -529,7 +529,7 @@ reconnection, chat, and control commands do not create scheduling files, start
 native schedule processes, or subscribe to schedule delivery receipts. Startup
 only checks whether a catalog already exists. Existing catalogs are recovered
 for interrupted-job status and pending-result delivery; explicit `/schedule`
-management initializes the service on demand.
+management or an explicit scheduling tool call initializes the service on demand.
 
 Both CLI and Router must support scheduled result receipts. Restricted Claude
 sandbox configurations are rejected. The DSH adapter loads first-party scheduler
@@ -544,6 +544,30 @@ remote-cli timer and does not modify the installed backend or global settings.
 /schedule list
 /schedule cancel <id>
 ```
+
+Foreground conversations can also request managed schedules in natural language,
+for example: "In ten minutes, check the build and summarize failures" or
+"Every weekday at 09:00 Asia/Shanghai, review the outstanding tasks." The current
+backend interprets the request through the shared `remote_cli_schedule_*` tools;
+ambiguous dates, task content, or timezones should be clarified first. Tool
+registration is independent of `/delegation`. Native creation currently supports
+Claude and DSH; other backends report their unsupported reason without switching
+execution backends. Native goal executions do not expose these tools.
+
+The framework captures the authenticated user, thread, working directory, model,
+effort, backend, and execution policy. Models cannot override that identity through
+tool arguments. Creation, listing, and cancellation reuse the slash-command
+admission path. Tools return pending or terminal operation receipts; pending does
+not mean success. Reuse the same operation request ID when checking a slow result.
+If the conversation disconnects or is cancelled during creation, the CLI attempts
+to stop that newly created task; unconfirmed cleanup remains visible in the catalog.
+
+With `scheduleToolCardsV1` negotiated, completed management operations send a
+separate interactive task card without replacing the assistant's answer. Failed
+card delivery does not recreate a task: use `/schedule list` to recover controls.
+Operation receipts and card-delivery deduplication are bounded and process-local;
+after restart, inspect durable task IDs with `/schedule list`. Do not repeat a
+natural-language creation request merely because its confirmation was lost.
 
 Replace the example date with a future instant within the next year. One-shot
 requests round up to the next whole minute. Recurring cron requires an explicit
@@ -573,6 +597,20 @@ acknowledgement confirms Router delivery, not that a person has read the message
 
 `/schedule list` reconciles native expiry on demand and reports interrupted jobs
 without recreating them. Completed results are text-only in this first adapter.
+
+When both CLI and Router support schedule cards, creation and list replies offer
+**Refresh status** and **Cancel** controls. Cancellation requires confirmation
+on the card and is shown as successful only after the original CLI acknowledges
+it. Refresh queries native state on demand; it does not start periodic polling
+or an ordinary conversation turn. These controls apply to the card's original
+user, device, and thread even after switching the selected thread or backend.
+
+If an operation times out, its outcome is unknown. Retry confirmation before
+assuming the task stopped; failed native cleanup remains retryable. Card controls
+are temporary: after a disconnect, restart, or expiry, run `/schedule list` to
+open a fresh card. Older peers keep the existing text commands. Completed-result
+notifications retain their existing delivery flow; these management cards do not
+add task-start notifications or interactive tool approvals.
 
 Use `/schedule cancel <id>` to stop a schedule, including its dedicated process;
 `/abort` controls the ordinary foreground task. Cancel active schedules before

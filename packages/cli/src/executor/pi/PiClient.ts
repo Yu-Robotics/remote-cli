@@ -196,6 +196,7 @@ export class PiClient implements PiTransport {
           ...(this.options.delegation || this.options.delegationWorker ? {
             REMOTE_CLI_DELEGATION_URL: this.options.delegation?.url,
             REMOTE_CLI_DELEGATION_TOKEN: this.options.delegation?.token,
+            REMOTE_CLI_TOOL_GROUPS: this.options.delegation?.groups ? JSON.stringify(this.options.delegation.groups) : undefined,
           } : {}),
         },
         stdio: ['pipe', 'pipe', 'pipe'],

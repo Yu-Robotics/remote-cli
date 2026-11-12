@@ -1,0 +1,19 @@
+const object = (properties: Record<string, unknown>, required: string[] = []) => ({
+  type: 'object', properties, required, additionalProperties: false,
+});
+const requestId = { type: 'string', pattern: '^[A-Za-z0-9_-]{1,80}$', description: 'Stable ID for this user-requested operation. Reuse exactly this ID and payload after a timeout; never invent a new ID to retry.' };
+export const SCHEDULE_TOOLS = [
+  { name: 'remote_cli_schedule_capabilities', description: 'Inspect native scheduling support for this conversation backend and the current clock. Tool availability does not imply native scheduling support.', inputSchema: object({}) },
+  { name: 'remote_cli_schedule_create', description: 'Create one managed native scheduled task for the current user and conversation. Only act on an explicit user request. Clarify ambiguous dates, task content or timezones first. Use a self-contained prompt; conversation history is not copied. Native timing is approximate and requires the CLI to stay running. Pending is not success; inspect using remote_cli_schedule_operation with the same requestId. Do not create a second task while awaiting confirmation.',
+    inputSchema: object({ requestId, prompt: { type: 'string', minLength: 1, maxLength: 16384 },
+      when: { oneOf: [object({ kind: { const: 'after' }, amount: { type: 'integer', minimum: 1 }, unit: { enum: ['m', 'h', 'd'] } }, ['kind', 'amount', 'unit']),
+        object({ kind: { const: 'at' }, at: { type: 'string', description: 'ISO timestamp with explicit offset or Z.' } }, ['kind', 'at']),
+        object({ kind: { const: 'cron' }, expression: { type: 'string' }, timezone: { type: 'string', description: 'Explicit IANA timezone confirmed by the user.' } }, ['kind', 'expression', 'timezone'])] } }, ['requestId', 'when', 'prompt']) },
+  { name: 'remote_cli_schedule_list', description: 'Inspect managed schedules in this conversation and request an interactive management card. Does not create native jobs.', inputSchema: object({ requestId }, ['requestId']) },
+  { name: 'remote_cli_schedule_cancel', description: 'Cancel an owned schedule only when the user requests cancellation. Cancellation is confirmed only after native cleanup succeeds. Reuse the same requestId for lost replies. After a confirmed failure, a new requestId may explicitly retry cleanup.',
+    inputSchema: object({ requestId, scheduleId: { type: 'string' } }, ['requestId', 'scheduleId']) },
+  { name: 'remote_cli_schedule_operation', description: 'Inspect an accepted operation without repeating its native side effects. Waits at most 10 seconds; pending is not success. If still pending, explain that the management card will arrive after completion; do not busy-poll or invent another requestId.', inputSchema: object({ requestId }, ['requestId']) },
+] as const;
+export function scheduleGuidance(now = new Date()): string {
+  return `Remote CLI managed scheduling tools are available independently of delegation. For user requests to run a task later or repeatedly, use remote_cli_schedule_* rather than native CronCreate, /loop, shell timers, or background polling. Interpret the user's language but clarify ambiguous dates, timezones and task content before creating anything. Current UTC time: ${now.toISOString()}. Host timezone: ${Intl.DateTimeFormat().resolvedOptions().timeZone}; this is not proof of the user's timezone. Use an explicit IANA timezone for recurring tasks. Retain the operation requestId across retries; pending is not success. Management cards are separate from your answer. If cards are unavailable, report the schedule ID and /schedule list fallback. Never silently switch execution backend.`;
+}

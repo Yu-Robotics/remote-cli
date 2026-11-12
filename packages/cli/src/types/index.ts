@@ -272,6 +272,8 @@ export interface OutgoingMessage {
   success?: boolean;
   /** Negotiated, dedicated settings card; legacy peers receive output only. */
   settingsMenu?: import('./Settings').SettingsMenu;
+  /** Optional scheduleCardsV1 view; legacy peers receive text only. */
+  scheduleMenu?: import('./ScheduleCards').ScheduleMenu;
   /** Plain text output (for backward compatibility) */
   output?: string;
   /** Structured content for rich formatting (new format) */

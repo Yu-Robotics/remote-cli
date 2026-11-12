@@ -1,3 +1,5 @@
+import { managedTools } from '../managed/tools';
+import { hasDelegationTools } from '../managed/contract';
 import { captureCodexDeletionTarget, type NativeSessionDeletionTarget } from '../delegation/NativeSessionDeletion';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -13,7 +15,7 @@ import { AppServerMessage, CodexAppServerClient } from './CodexAppServerClient';
 import { CodexTaskNotifications } from './CodexTaskNotifications';
 import { CodexSandbox } from './CodexSandbox';
 import type { CodexSandboxConfig } from '../types/config';
-import { DELEGATION_TOOLS, delegationMcpConfig, sameConnection, type DelegationConnection } from '../delegation/contract';
+import { delegationMcpConfig, sameConnection, type DelegationConnection } from '../delegation/contract';
 import { assertWorkingDirectoryExists } from '../utils/WorkingDirectory';
 import { ActivityTracker, extractTodoPlan, sanitizeActivityText } from './Activity';
 import { describeCodexCommandActions } from './CodexCommandActions';
@@ -226,6 +228,11 @@ export class CodexAppServerExecutor implements IExecutor {
   private goalTransportStops = 0;
   private threadLoads = 0;
 
+  async configureManagedTools(connection?: DelegationConnection): Promise<void> {
+    if (this.delegationWorker && connection) throw new Error('Managed child workers cannot register control tools.');
+    await this.configureDelegation(connection);
+  }
+
   async configureDelegation(connection?: DelegationConnection): Promise<void> {
     if (this.delegationConfigured && sameConnection(this.delegation, connection)) return;
     if (this.isBusy()) throw new Error('Cannot change delegation while Codex is busy');
@@ -398,7 +405,7 @@ export class CodexAppServerExecutor implements IExecutor {
       validateGoalRequest(request);
       if (this.destroyed) throw new Error('Executor has been destroyed');
       if (this.isBusy()) throw new Error('Codex thread is already running a command');
-      if (this.delegationWorker || this.delegation) throw new Error('Native goals require managed delegation to be off and cannot run in a delegated worker.');
+      if (this.delegationWorker || hasDelegationTools(this.delegation)) throw new Error('Native goals require managed delegation to be off and cannot run in a delegated worker.');
       if (request.objective === undefined && !this.codexThreadId) throw new Error('There is no saved native goal to resume.');
     } catch (error) { return { success: false, error: nativeGoalError(error) }; }
 
@@ -1317,7 +1324,7 @@ export class CodexAppServerExecutor implements IExecutor {
         approvalPolicy: 'never',
         sandbox: 'danger-full-access',
       } : {}),
-      ...this.sandbox.threadOptions(this.currentWorkingDirectory, this.delegationWorker || !!this.delegation),
+      ...this.sandbox.threadOptions(this.currentWorkingDirectory, this.delegationWorker || hasDelegationTools(this.delegation)),
     };
     // A saved active goal can dispatch during resume, before settings/update.
     if (goalOwner && this.effort) common.config = { ...common.config, model_reasoning_effort: this.effort };
@@ -1325,9 +1332,9 @@ export class CodexAppServerExecutor implements IExecutor {
       common.config = { ...common.config,
         'mcp_servers.remote_cli_delegation': this.delegation
           ? { ...delegationMcpConfig(this.delegation), enabled: true, required: true, tool_timeout_sec: 35,
-            // /delegation on authorizes these local control tools. Each worker
-            // still enforces its inherited sandbox and requests native approvals.
-            enabled_tools: DELEGATION_TOOLS.map(tool => tool.name), default_tools_approval_mode: 'approve' }
+            // Tool groups are registered independently. The authenticated turn
+            // handler applies scheduling ownership and delegation sandbox policy.
+            enabled_tools: managedTools(this.delegation).map(tool => tool.name), default_tools_approval_mode: 'approve' }
           : { command: process.execPath, enabled: false },
       };
     }

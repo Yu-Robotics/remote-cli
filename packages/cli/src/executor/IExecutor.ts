@@ -135,6 +135,8 @@ export interface IExecutor {
   // Optional — MessageHandler uses 'method' in executor checks for these
   /** Enable tools for future turns without changing the native conversation. */
   configureDelegation?(connection?: DelegationConnection): Promise<void>;
+  /** Register scoped control-tool groups without enabling delegation or changing native timing support. */
+  configureManagedTools?(connection?: import('../managed/contract').ManagedToolConnection): Promise<void>;
   getGoal?(): Promise<ExecutorGoal | null>;
   executeGoal?(request: ExecutorGoalRunRequest, options: ExecuteOptions): Promise<ExecuteResult>;
   pauseGoal?(): Promise<ExecuteResult>;

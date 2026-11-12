@@ -24,6 +24,17 @@ describe('FeishuLongConnHandler', () => {
   let mockConnectionHub: any;
   let mockClient: any;
 
+  it('patches dedicated schedule cards under a bounded payload and rejects negative API receipts', async () => {
+    mockClient.im.message.patch.mockResolvedValue({ code: 0 });
+    await handler.updateScheduleCard('schedule-card', [{ tag: 'markdown', content: 'Synthetic status' }]);
+    expect(mockClient.im.message.patch).toHaveBeenCalledWith(expect.objectContaining({ path: { message_id: 'schedule-card' } }));
+    mockClient.im.message.patch.mockResolvedValue({ code: 1 });
+    await expect(handler.updateScheduleCard('schedule-card', [])).rejects.toThrow('update failed');
+    mockClient.im.message.patch.mockClear();
+    await expect(handler.updateScheduleCard('schedule-card', [{ content: 'x'.repeat(17 * 1024) }])).rejects.toThrow('size budget');
+    expect(mockClient.im.message.patch).not.toHaveBeenCalled();
+  });
+
   beforeEach(() => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.spyOn(console, 'warn').mockImplementation(() => {});

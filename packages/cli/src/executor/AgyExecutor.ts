@@ -316,6 +316,11 @@ export class AgyExecutor implements IExecutor {
     return this.currentWorkingDirectory;
   }
 
+  async configureManagedTools(connection?: DelegationConnection): Promise<void> {
+    if (this.delegationWorker && connection) throw new Error('Managed child workers cannot register control tools.');
+    await this.configureDelegation(connection);
+  }
+
   async configureDelegation(connection?: DelegationConnection): Promise<void> {
     if (this.delegationConfigured && sameConnection(this.delegationConnection, connection)) return;
     if (this.isProcessing) throw new Error('Cannot change delegation during an active turn');

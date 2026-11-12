@@ -230,6 +230,14 @@ export class ScheduleService {
       && (LIVE.has(record.state) || (this.runtimes.has(record.id) && !this.runtimes.get(record.id)!.stopped)));
   }
 
+  /** Card eligibility includes retryable cleanup even for a terminal catalog record. */
+  canCancel(owner: ScheduleOwner, id: string): boolean {
+    this.checkReady();
+    const record = this.owned(owner, id);
+    const runtime = this.runtimes.get(id);
+    return LIVE.has(record.state) || Boolean(runtime && !runtime.stopped);
+  }
+
   /** User-requested native reconciliation only; no background polling is installed. */
   refresh(owner: ScheduleOwner): Promise<void> {
     return this.operation(this.refreshNative(owner));

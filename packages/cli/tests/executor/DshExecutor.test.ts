@@ -299,6 +299,17 @@ describe('DshExecutor', () => {
     expect(await decision).toBe(1);
   });
 
+  it('composes scoped scheduling tools through ACP and preserves the session across registration changes', async () => {
+    const connection = { url: 'http://127.0.0.1:1234', token: 'fixture-token', groups: ['scheduling'] as const };
+    await executor.configureManagedTools(connection); await executor.execute('first');
+    const first = current();
+    expect(first.newSession.mock.calls[0][1][0].env).toContainEqual({ name: 'REMOTE_CLI_TOOL_GROUPS', value: '["scheduling"]' });
+    await executor.configureManagedTools({ ...connection }); await executor.execute('second');
+    expect(current()).toBe(first);
+    await executor.configureManagedTools({ ...connection, groups: ['delegation', 'scheduling'] }); await executor.execute('third');
+    expect(current().loadSession.mock.calls[0][0]).toBe('session-0');
+  });
+
   it('mounts delegation MCP on new and resumed sessions without changing the native command', async () => {
     const connection = { url: 'http://127.0.0.1:1234', token: 'test-only' };
     await executor.configureDelegation(connection); await executor.execute('hi');

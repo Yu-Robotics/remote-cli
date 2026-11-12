@@ -160,6 +160,8 @@ export interface ResponseMessage extends WSMessage {
   attachmentHints?: AttachmentHints;
   /** Optional top-level field; delegation menus require settingsCards and delegationCards. */
   settingsMenu?: import('./Settings').SettingsMenu;
+  /** Optional scheduleCardsV1 view; legacy peers receive text only. */
+  scheduleMenu?: import('./ScheduleCards').ScheduleMenu;
   data: {
     success: boolean;
     output?: string;
