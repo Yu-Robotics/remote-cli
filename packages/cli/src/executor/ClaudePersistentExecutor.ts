@@ -1,3 +1,4 @@
+import { managedTools } from '../managed/tools';
 import { spawnManaged } from './ManagedSpawn';
 import { ownedSpawn as spawn } from '../delegation/OwnershipRuntime';
 import { captureHistoryTarget, claudeProjectName, validClaudeProjectOverride, type OwnedHistoryTarget } from '../delegation/NativeHistoryFiles';
@@ -25,7 +26,7 @@ import os from 'os';
 import net from 'net';
 import { randomUUID } from 'crypto';
 import { EventEmitter } from 'events';
-import { DELEGATION_TOOLS, delegationMcpConfig, sameConnection, type DelegationConnection } from '../delegation/contract';
+import { delegationMcpConfig, sameConnection, type DelegationConnection } from '../delegation/contract';
 import { assertWorkingDirectoryExists } from '../utils/WorkingDirectory';
 import { ClaudeStderrFilter } from './claude/ClaudeStderrFilter';
 
@@ -488,6 +489,11 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
 
   private delegation?: DelegationConnection;
 
+  async configureManagedTools(connection?: DelegationConnection): Promise<void> {
+    if (this.delegationWorker && connection) throw new Error('Managed child workers cannot register control tools.');
+    await this.configureDelegation(connection);
+  }
+
   async configureDelegation(connection?: DelegationConnection): Promise<void> {
     if (sameConnection(this.delegation, connection)) return;
     if (this.isProcessing || this.isStarting || this.commandQueue.length) throw new Error('Cannot change delegation while Claude is busy');
@@ -587,7 +593,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
         if (settings && this.delegation) {
           const permissions = settings.permissions as { allow?: string[] };
           permissions.allow = [...(permissions.allow ?? []),
-            ...DELEGATION_TOOLS.map(tool => `mcp__remote-cli-delegation__${tool.name}`)];
+            ...managedTools(this.delegation).map(tool => `mcp__remote-cli-delegation__${tool.name}`)];
         }
         if (settings) args.push('--settings', JSON.stringify(settings));
         mcpServers['remote-cli-approval'] = {

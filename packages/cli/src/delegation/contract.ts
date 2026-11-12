@@ -1,12 +1,10 @@
+import type { ManagedToolConnection, ManagedToolHandler } from '../managed/contract';
 import path from 'path';
 
 /** Tool transport is independent of the coordinator's native protocol. */
-export interface DelegationConnection {
-  url: string;
-  token: string;
-}
+export interface DelegationConnection extends ManagedToolConnection {}
 
-export type DelegationHandler = (name: string, args: Record<string, unknown>, callId: string) => Promise<unknown>;
+export type DelegationHandler = ManagedToolHandler;
 export const DELEGATION_BACKENDS = ['claude', 'codex', 'pi', 'agy', 'opencode', 'kimi', 'zcode', 'dsh'] as const;
 export type DelegationBackend = typeof DELEGATION_BACKENDS[number];
 
@@ -61,11 +59,12 @@ export const DELEGATION_TOOLS = [
 export const DELEGATION_INSTRUCTIONS = 'Remote CLI delegation is enabled for this turn. Use remote_cli_list_backends to discover workers and scheduling. Delegate managed tasks to any eligible installed backend, including the coordinator backend, and provide self-contained context. Same-backend workers use independent sessions, never this coordinator conversation. Prefer a different backend when independent cross-review is needed. Git workers run in isolated reusable worktrees, potentially concurrently; non-Git workers run serially in the shared directory. A queued task is not running. Git task completion does not integrate edits: after all accepted workers finish, use remote_cli_integrate to inspect and explicitly apply or retain each artifact, then verify the combined result. No automatic merge, commit, push, or Git initialization occurs. Worktrees are not an OS sandbox. Reused lanes retain their own conversation but each Git task starts on a fresh baseline; do not assume sibling or previous edits are present. Use remote_cli_result for status; returning after submission waits for terminal results and resumes this coordinator. Use inherit, including research; put no-write requirements in the objective. Sandboxed coordinators cannot launch managed workers, including on the same backend; unrestricted coordinators must not request read_only. The current thread and backend own the answer and delivery. In shared-workspace mode do not write concurrently with a worker. Workers cannot delegate recursively or inherit this coordinator conversation.';
 
 export function sameConnection(a?: DelegationConnection, b?: DelegationConnection): boolean {
-  return a?.url === b?.url && a?.token === b?.token;
+  return a?.url === b?.url && a?.token === b?.token && JSON.stringify(a?.groups) === JSON.stringify(b?.groups);
 }
 
 export function delegationEnvironment(connection: DelegationConnection): Record<string, string> {
-  return { REMOTE_CLI_DELEGATION_URL: connection.url, REMOTE_CLI_DELEGATION_TOKEN: connection.token };
+  return { REMOTE_CLI_DELEGATION_URL: connection.url, REMOTE_CLI_DELEGATION_TOKEN: connection.token,
+    ...(connection.groups ? { REMOTE_CLI_TOOL_GROUPS: JSON.stringify(connection.groups) } : {}) };
 }
 
 export function delegationMcpConfig(connection: DelegationConnection) {

@@ -1,3 +1,4 @@
+import { ScheduleCards } from '../../router/src/feishu/ScheduleCards';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'fs/promises';
 import fs from 'fs';
@@ -27,7 +28,7 @@ async function fixture() {
   let backend = 'claude';
   let sandbox: { mode: string } | undefined;
   let connected = true;
-  const executor = { execute: vi.fn(async () => ({ success: true })), getCurrentWorkingDirectory: () => cwd,
+  const executor = { configureManagedTools: vi.fn(async (_connection?: any) => {}), configureDelegation: vi.fn(async (_connection?: any) => {}), execute: vi.fn(async () => ({ success: true })), getCurrentWorkingDirectory: () => cwd,
     abort: vi.fn(async () => true), destroy: vi.fn(), isBusy: () => false, resetContext: vi.fn(),
     getSandboxStatus: () => 'Unrestricted', configureSandbox: vi.fn(async () => ({ success: true })) };
   const pool = {
@@ -49,6 +50,7 @@ async function fixture() {
   const ws = {
     send: vi.fn((message: any) => {
       if (!connected) throw new Error('Disconnected');
+      if (message.type === 'schedule_tool_card') queueMicrotask(() => { void handler.handleMessage({ type: 'schedule_tool_card_ack', messageId: message.messageId, success: true } as any); });
       if (message.type === 'queue_started' && message.queueStarted?.source === 'schedule') scheduledMessages.add(message.messageId);
       if (message.type === 'response' && scheduledMessages.has(message.messageId)) {
         for (const acknowledge of acknowledgements) acknowledge(message.messageId);
@@ -80,15 +82,15 @@ async function fixture() {
     type: 'command', messageId: `command-${++sequence}`, openId: 'owner', threadId, content,
     isSlashCommand: true, timestamp: Date.now(), ...extra,
   } as any);
-  const bind = () => handler.handleMessage({ type: 'binding_confirm', data: { success: true,
-    capabilities: { scheduleResultsV1: true, taskRecovery: true } } } as any);
+  const bind = (cards = false, tools = false) => handler.handleMessage({ type: 'binding_confirm', data: { success: true,
+    capabilities: { scheduleResultsV1: true, taskRecovery: true, ...(cards ? { scheduleCardsV1: true } : {}), ...(tools ? { scheduleToolCardsV1: true } : {}) } } } as any);
   const responses = () => ws.send.mock.calls.map(([message]) => message).filter(message => message.type === 'response');
   return { cwd, threads, get handler() { return handler; }, pool, manager, ws, jobs, send, bind, responses, executor, config,
     acknowledgements, closeHandlers,
     restart: async () => { await handler.destroy(); handler = makeHandler(); scheduledMessages.clear(); ws.send.mockClear(); },
     setBackend: (value: string) => { backend = value; }, setSandbox: (value: { mode: string }) => { sandbox = value; },
     disconnect: () => { connected = false; closeHandlers.forEach(handler => handler(1006, '')); },
-    reconnect: async () => { connected = true; await bind(); },
+    reconnect: async (cards = false) => { connected = true; await bind(cards); },
     scheduledResults: () => responses().filter(message => scheduledMessages.has(message.messageId)),
   };
 }
@@ -105,13 +107,386 @@ describe('MessageHandler native schedule closed loop', () => {
   });
   afterEach(async () => { await f.handler.destroy(); await rm(f.cwd, { recursive: true, force: true }); vi.restoreAllMocks(); });
 
+  const invoke = (name: string, args: Record<string, unknown>) => (f.handler as any).delegationBridges.get('thread-a').handler(name, args, 'native-call');
+  const createArgs = { requestId: 'create-one', when: { kind: 'after', amount: 5, unit: 'm' }, prompt: 'Synthetic scheduled task' };
+
+  it.each(['claude', 'dsh'])('creates %s managed schedules from model tools with delegation off and a separate card', async backend => {
+    f.setBackend(backend); await f.bind(true, true);
+    f.executor.execute.mockImplementation(async () => {
+      const result = await invoke('remote_cli_schedule_create', createArgs);
+      expect(result).toMatchObject({ status: 'succeeded', card: 'Management card delivered.' });
+      expect(await invoke('remote_cli_schedule_create', createArgs)).toEqual(result);
+      return { success: true, output: 'Original assistant answer remains independent.' };
+    });
+    await f.send('Please check the build in five minutes.', 'thread-a', { isSlashCommand: false });
+    expect(f.jobs).toHaveLength(1); expect(f.jobs[0].input.backend).toBe(backend);
+    const card = f.ws.send.mock.calls.map(([message]) => message).find(message => message.type === 'schedule_tool_card');
+    expect(card).toMatchObject({ openId: 'owner', threadId: 'thread-a', menu: { entries: [{ state: 'active' }] } });
+    expect(f.responses().at(-1).scheduleMenu).toBeUndefined();
+    expect(f.executor.execute).toHaveBeenCalledOnce();
+    expect(f.executor.configureManagedTools.mock.calls[0][0].groups).toEqual(['scheduling']);
+    expect(f.threads[0].delegation).toBe(false);
+    await action(card.menu, 'cancel');
+    expect(f.jobs[0].handle.cancel).toHaveBeenCalledOnce(); expect(f.jobs[0].handle.stop).toHaveBeenCalledOnce();
+    expect((f.handler as any).delegationBridges.get('thread-a').handler).toBeUndefined();
+  });
+
+  it('keeps tools available for unsupported backends without falling back or activating the catalog', async () => {
+    f.setBackend('codex'); await f.bind(true, true);
+    f.executor.execute.mockImplementation(async () => {
+      expect(await invoke('remote_cli_schedule_capabilities', {})).toMatchObject({ backend: 'codex', capability: { supported: false } });
+      expect(await invoke('remote_cli_schedule_create', createArgs)).toMatchObject({ status: 'failed', error: expect.stringContaining('Codex') });
+      return { success: true };
+    });
+    await f.send('Run this later', 'thread-a', { isSlashCommand: false });
+    expect(f.jobs).toHaveLength(0); expect((f.handler as any).schedules).toBeUndefined();
+  });
+
+  it.each([false, true])('preserves scheduling after authorized Codex model recovery without accepting other settings changes (%s)', async changeEffort => {
+    await f.bind(true, true);
+    await f.send('/schedule after 5m -- Synthetic existing task');
+    f.setBackend('codex');
+    f.threads[0].models = { codex: 'unavailable-model' };
+    f.manager.updateThread.mockImplementation(async (id: string, patch: any) => {
+      Object.assign(f.threads.find(thread => thread.id === id)!, patch);
+      if (changeEffort && patch.models) f.threads[0].efforts = { codex: 'high' };
+    });
+    f.executor.execute.mockResolvedValueOnce({ success: false, error: 'Unknown Codex model' } as any);
+    f.executor.execute.mockImplementationOnce(async () => {
+      if (changeEffort) {
+        await expect(invoke('remote_cli_schedule_list', { requestId: 'list-recovered' })).rejects.toThrow('no longer active');
+      } else {
+        expect(await invoke('remote_cli_schedule_list', { requestId: 'list-recovered' })).toMatchObject({ status: 'succeeded' });
+        expect(await invoke('remote_cli_schedule_cancel', { requestId: 'cancel-recovered', scheduleId: f.jobs[0].input.id })).toMatchObject({ status: 'succeeded' });
+      }
+      return { success: true };
+    });
+    await f.send('Inspect and cancel the existing synthetic task', 'thread-a', { isSlashCommand: false });
+    expect(f.executor.execute).toHaveBeenCalledTimes(2);
+    expect(f.jobs[0].handle.cancel).toHaveBeenCalledTimes(changeEffort ? 0 : 1);
+    expect(f.responses().at(-1).success, f.responses().at(-1).error).toBe(true);
+  });
+
+  it('removes prior scheduling registration before entering a native goal and restores it for ordinary chat', async () => {
+    f.setBackend('codex'); await f.bind(true, true);
+    await f.send('Synthetic ordinary chat', 'thread-a', { isSlashCommand: false });
+    const previous = (f.handler as any).delegationBridges.get('thread-a');
+    const executeGoal = vi.fn(async () => {
+      expect(f.executor.configureManagedTools).toHaveBeenLastCalledWith(undefined);
+      expect((f.handler as any).delegationBridges.has('thread-a')).toBe(false);
+      expect(previous.handler).toBeUndefined();
+      return { success: true };
+    });
+    (f.executor as any).executeGoal = executeGoal;
+    expect(await (f.handler as any).executeCommand('goal-message', 'thread-a', '', f.executor, undefined, false,
+      { objective: 'Synthetic native goal' })).toBe(true);
+    expect(executeGoal).toHaveBeenCalledOnce();
+    await f.send('Synthetic ordinary chat again', 'thread-a', { isSlashCommand: false });
+    expect(f.executor.configureManagedTools).toHaveBeenLastCalledWith(expect.objectContaining({ groups: ['scheduling'] }));
+  });
+
+  it('shares a stable registration with delegation enabled without launching a worker', async () => {
+    await f.bind(true, true); f.threads[0].delegation = true;
+    const scope = { isClosed: () => false, hasPendingResults: () => false, getLaunchRevision: () => 0,
+      beginExecution: vi.fn(), finishExecution: vi.fn(), getRetainedResults: () => [],
+      close: vi.fn(async () => {}), checkArtifactCloseout: async () => [], collectPendingResults: async () => [],
+      invoke: vi.fn(async () => ({ backends: [] })) };
+    vi.spyOn((f.handler as any).delegation, 'begin').mockReturnValue(scope);
+    f.executor.execute.mockImplementation(async () => {
+      await invoke('remote_cli_list_backends', {});
+      expect(await invoke('remote_cli_schedule_create', createArgs)).toMatchObject({ status: 'succeeded' });
+      return { success: true };
+    });
+    await f.send('Synthetic scheduled request', 'thread-a', { isSlashCommand: false });
+    expect(f.jobs).toHaveLength(1);
+    expect(f.executor.configureManagedTools.mock.calls[0][0].groups).toEqual(['delegation', 'scheduling']);
+    expect(scope.invoke).toHaveBeenCalledOnce();
+    expect(scope.invoke).toHaveBeenCalledWith('remote_cli_list_backends', {}, 'native-call');
+  });
+
+  it('fences durable job IDs after lost operation receipts without creating a second job', async () => {
+    await f.bind(true, true);
+    f.executor.execute.mockImplementation(async () => {
+      expect(await invoke('remote_cli_schedule_create', createArgs)).toMatchObject({ status: 'succeeded' });
+      // Model call IDs may differ after a transport retry, but the user request and requestId remain fixed.
+      (f.handler as any).scheduleToolOperations.receipts.clear();
+      expect(await invoke('remote_cli_schedule_create', createArgs)).toMatchObject({ status: 'failed', error: expect.stringContaining('durable record') });
+      return { success: true };
+    });
+    await f.send('Synthetic retry request', 'thread-a', { isSlashCommand: false });
+    expect(f.jobs).toHaveLength(1);
+  });
+
+  it.each(['generation', 'backend', 'settings', 'abort'])('rejects retired %s scope before accepting native work', async boundary => {
+    await f.bind(true, true);
+    f.executor.execute.mockImplementation(async () => {
+      if (boundary === 'generation') f.threads[0].delegationWorkspaceGeneration = 42;
+      if (boundary === 'backend') f.setBackend('dsh');
+      if (boundary === 'settings') f.setSandbox({ mode: 'read-only' });
+      if (boundary === 'abort') (f.handler as any).abortOperations.set('thread-a', Promise.resolve());
+      await expect(invoke('remote_cli_schedule_create', createArgs)).rejects.toThrow('no longer active');
+      (f.handler as any).abortOperations.delete('thread-a');
+      return { success: true };
+    });
+    await f.send('Synthetic stale request', 'thread-a', { isSlashCommand: false });
+    expect(f.jobs).toHaveLength(0); expect((f.handler as any).schedules).toBeUndefined();
+  });
+
+  it('keeps successful native creation after a missing card receipt and does not duplicate on tool retry', async () => {
+    await f.bind(true, true);
+    const send = f.ws.send.getMockImplementation()!;
+    f.ws.send.mockImplementation(message => message.type === 'schedule_tool_card' ? true : send(message));
+    f.executor.execute.mockImplementation(async () => {
+      const pending = invoke('remote_cli_schedule_create', createArgs);
+      await vi.waitFor(() => expect((f.handler as any).scheduleCardReceipts.size).toBe(1));
+      // Simulate receipt loss expiry without waiting for the eight-second network budget.
+      (f.handler as any).clearScheduleCardReceipts();
+      const result = await pending;
+      expect(result).toMatchObject({ status: 'succeeded', card: expect.stringContaining('unknown') });
+      expect(await invoke('remote_cli_schedule_create', createArgs)).toEqual(result);
+      return { success: true };
+    });
+    await f.send('Synthetic receipt loss request', 'thread-a', { isSlashCommand: false });
+    expect(f.jobs).toHaveLength(1);
+  });
+
+  it('keeps unconfirmed native cleanup owned and requires an explicit new cancel attempt after failure', async () => {
+    await f.bind(true, true);
+    f.executor.execute.mockImplementation(async () => {
+      const created = await invoke('remote_cli_schedule_create', createArgs);
+      f.jobs[0].handle.stop.mockRejectedValueOnce(new Error('Exit unconfirmed'));
+      const args = { requestId: 'cancel', scheduleId: created.scheduleId };
+      expect(await invoke('remote_cli_schedule_cancel', args)).toMatchObject({ status: 'failed', error: 'Exit unconfirmed' });
+      expect((f.handler as any).schedules.hasActiveSchedules()).toBe(true);
+      expect(await invoke('remote_cli_schedule_cancel', args)).toMatchObject({ status: 'failed' });
+      expect(f.jobs[0].handle.stop).toHaveBeenCalledOnce();
+      expect(await invoke('remote_cli_schedule_cancel', { ...args, requestId: 'retry-cleanup' })).toMatchObject({ status: 'succeeded', records: [{ state: 'cancelled' }] });
+      expect((f.handler as any).schedules.hasActiveSchedules()).toBe(false);
+      return { success: true };
+    });
+    await f.send('Synthetic cleanup request', 'thread-a', { isSlashCommand: false });
+    expect(f.jobs[0].handle.stop).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['abort', 'generation', 'shutdown'])('owns pending native creation through %s and does not publish its card', async boundary => {
+    await f.bind(true, true); const actual = native.create.getMockImplementation()!;
+    let release!: () => void;
+    native.create.mockImplementation(async (...args: any[]) => {
+      const handle = await actual(...args); await new Promise<void>(resolve => { release = resolve; }); return handle;
+    });
+    let destruction: Promise<void> | undefined;
+    f.executor.execute.mockImplementation(async () => {
+      const request = invoke('remote_cli_schedule_create', createArgs);
+      await vi.waitFor(() => expect(f.jobs).toHaveLength(1));
+      if (boundary === 'abort') (f.handler as any).cancelThreadOperation('thread-a', 'Synthetic abort');
+      if (boundary === 'generation') f.threads[0].delegationWorkspaceGeneration = 42;
+      if (boundary === 'shutdown') destruction = f.handler.destroy();
+      release(); await expect(request).rejects.toThrow('context changed');
+      return { success: true };
+    });
+    await f.send('Synthetic pending request', 'thread-a', { isSlashCommand: false });
+    await destruction;
+    expect(f.jobs[0].handle.stop).toHaveBeenCalled();
+    expect((f.handler as any).schedules.hasActiveSchedules()).toBe(false);
+    expect(f.ws.send.mock.calls.some(([message]) => message.type === 'schedule_tool_card')).toBe(false);
+  });
+
+  it('rejects a restricted sandbox, and keeps successful old-peer creation distinct from missing cards', async () => {
+    await f.bind(); f.setSandbox({ mode: 'read-only' });
+    f.executor.execute.mockImplementation(async () => {
+      expect(await invoke('remote_cli_schedule_create', createArgs)).toMatchObject({ status: 'failed', error: expect.stringContaining('sandbox') });
+      return { success: true };
+    });
+    await f.send('Synthetic restricted request', 'thread-a', { isSlashCommand: false }); expect(f.jobs).toHaveLength(0);
+    f.setSandbox(undefined as any);
+    f.executor.execute.mockImplementation(async () => {
+      expect(await invoke('remote_cli_schedule_create', createArgs)).toMatchObject({ status: 'succeeded', card: expect.stringContaining('/schedule list') });
+      return { success: true };
+    });
+    await f.send('Synthetic older Router request', 'thread-a', { isSlashCommand: false });
+    expect(f.jobs).toHaveLength(1);
+    expect(f.ws.send.mock.calls.some(([message]) => message.type === 'schedule_tool_card')).toBe(false);
+  });
+
+  it('reports a late creation failure even when the model finishes after receiving pending', async () => {
+    await f.bind(true, true);
+    let fail!: (error: Error) => void;
+    native.create.mockImplementation(() => new Promise((_, reject) => { fail = reject; }));
+    f.executor.execute.mockImplementation(async () => {
+      expect(await invoke('remote_cli_schedule_create', createArgs)).toMatchObject({ status: 'pending' });
+      fail(new Error('Synthetic delayed creation failure'));
+      return { success: true };
+    });
+    await f.send('Create a synthetic delayed task', 'thread-a', { isSlashCommand: false });
+    const frames = JSON.stringify(f.ws.send.mock.calls.map(([message]) => message));
+    expect(frames).toContain('Scheduled operation failed after its pending receipt');
+    expect(frames).toContain('Synthetic delayed creation failure');
+    expect(f.executor.execute).toHaveBeenCalledOnce();
+    expect(native.create).toHaveBeenCalledOnce();
+  });
+
+  it('does not replay a model turn after scheduling side effects or expose ended-turn calls', async () => {
+    await f.bind(true, true);
+    f.executor.execute.mockImplementation(async () => {
+      await invoke('remote_cli_schedule_create', createArgs);
+      return { success: false, error: 'Prompt too long' } as any;
+    });
+    (f.executor as any).compactWhenFull = vi.fn(async () => ({ success: true }));
+    await f.send('Synthetic request', 'thread-a', { isSlashCommand: false });
+    expect(f.executor.execute).toHaveBeenCalledOnce(); expect((f.executor as any).compactWhenFull).not.toHaveBeenCalled();
+    expect(f.jobs).toHaveLength(1);
+    expect((f.handler as any).delegationBridges.get('thread-a').handler).toBeUndefined();
+  });
+
+  it('cancels a native create that finishes after its connection is retired', async () => {
+    await f.bind(true, true); const actual = native.create.getMockImplementation()!;
+    let release!: () => void;
+    native.create.mockImplementation(async (...args: any[]) => { const handle = await actual(...args); await new Promise<void>(resolve => { release = resolve; }); return handle; });
+    f.executor.execute.mockImplementation(async () => {
+      const request = invoke('remote_cli_schedule_create', createArgs);
+      await vi.waitFor(() => expect(f.jobs).toHaveLength(1));
+      f.disconnect(); release();
+      await expect(request).rejects.toThrow('context changed');
+      return { success: true };
+    });
+    await f.send('Synthetic request', 'thread-a', { isSlashCommand: false });
+    expect(f.jobs[0].handle.cancel).toHaveBeenCalledOnce(); expect(f.jobs[0].handle.stop).toHaveBeenCalledOnce();
+    expect(f.ws.send.mock.calls.some(([message]) => message.type === 'schedule_tool_card')).toBe(false);
+  });
+
+  const action = (menu: any, operation = 'refresh', extra: Record<string, unknown> = {}) => f.handler.handleMessage({
+    type: 'schedule_action', messageId: 'card-request', openId: 'owner', threadId: 'thread-a',
+    snapshotId: menu.snapshotId, operation, ...(operation === 'cancel' ? { value: menu.entries[0].value } : {}),
+    timestamp: Date.now(), ...extra,
+  } as any);
+  const receipts = () => f.ws.send.mock.calls.map(([message]) => message).filter(message => message.type === 'schedule_action_result');
+
+  it.each(['claude', 'dsh'])('refreshes and cancels %s through direct controls without a foreground turn', async backend => {
+    f.setBackend(backend); await f.bind(true);
+    await f.send('/schedule after 2m -- Synthetic task');
+    const menu = f.responses().at(-1).scheduleMenu;
+    expect(menu.entries[0]).toMatchObject({ backend, state: 'active', canCancel: true });
+    await action(menu);
+    expect(receipts().at(-1).success).toBe(true);
+    expect(f.jobs[0].handle.list).toHaveBeenCalledOnce();
+    await action(menu, 'cancel', { messageId: 'cancel-request' });
+    expect(receipts().at(-1)).toMatchObject({ success: true, menu: { entries: [{ state: 'cancelled', canCancel: false }] } });
+    await action(menu, 'cancel', { messageId: 'cancel-request' });
+    expect(f.jobs[0].handle.cancel).toHaveBeenCalledOnce();
+    expect(f.jobs[0].handle.stop).toHaveBeenCalledOnce();
+    expect(f.executor.execute).not.toHaveBeenCalled();
+    expect(f.ws.trackTask).not.toHaveBeenCalled();
+    expect(f.scheduledResults()).toHaveLength(0);
+  });
+
+  it.each(['claude', 'dsh'].flatMap(backend => ['slash', 'tool'].map(entry => ({ backend, entry }))))('round trips $backend $entry card confirmation through the real CLI service and native handle', async ({ backend, entry }) => {
+    f.setBackend(backend); await f.bind(true, true);
+    f.executor.execute.mockImplementation(async () => {
+      expect(await invoke('remote_cli_schedule_create', createArgs)).toMatchObject({ status: 'succeeded' });
+      return { success: true };
+    });
+    if (entry === 'slash') await f.send('/schedule after 2m -- Synthetic end-to-end task');
+    else await f.send('Please do the synthetic task in five minutes.', 'thread-a', { isSlashCommand: false });
+    const menu = entry === 'slash' ? f.responses().at(-1).scheduleMenu
+      : f.ws.send.mock.calls.map(([message]) => message).find(message => message.type === 'schedule_tool_card').menu;
+    let elements: any[] = [];
+    const pendingReplies: Promise<void>[] = [];
+    const controller = new ScheduleCards({
+      ownsDevice: async openId => openId === 'owner', available: () => true,
+      send: async (_device, request) => { await f.handler.handleMessage(request as any); return true; },
+      update: async (_card, next) => { elements = next; },
+    });
+    const originalSend = f.ws.send.getMockImplementation()!;
+    f.ws.send.mockImplementation(message => {
+      const sent = originalSend(message);
+      if (message.type === 'schedule_action_result') pendingReplies.push(controller.resolve('device', message));
+      return sent;
+    });
+    try {
+      const prepared = controller.present({ openId: 'owner', deviceId: 'device', menu, expectedThreadId: 'thread-a' })!;
+      elements = prepared.elements; prepared.deliver(['delivered-card']);
+      const click = async (op: string) => {
+        const payload = elements.flatMap(element => element.columns?.flatMap((column: any) => column.elements) ?? [])
+          .find((button: any) => button.behaviors?.[0]?.value.op === op).behaviors[0].value;
+        await controller.click('owner', 'delivered-card', payload);
+        await Promise.all(pendingReplies);
+        await (controller as any).states.values().next().value.chain;
+      };
+      await click('refresh');
+      expect(JSON.stringify(elements)).toContain('Status refreshed');
+      await click('cancel');
+      expect(f.jobs[0].handle.cancel).not.toHaveBeenCalled();
+      await click('confirm');
+      expect(JSON.stringify(elements)).toContain('Cancellation confirmed');
+      expect(f.jobs[0].handle.cancel).toHaveBeenCalledOnce();
+      expect(f.jobs[0].handle.stop).toHaveBeenCalledOnce();
+      expect(f.executor.execute).toHaveBeenCalledTimes(entry === 'slash' ? 0 : 1);
+      expect(f.scheduledResults()).toHaveLength(0);
+    } finally { controller.destroy(); }
+  });
+
+  it('does not initialize scheduling from forged controls and keeps old peers text-only', async () => {
+    await f.bind(true);
+    await action({ snapshotId: 'forged' });
+    expect((f.handler as any).schedules).toBeUndefined();
+    expect(receipts()).toHaveLength(0);
+    await f.bind();
+    await f.send('/schedule after 2m -- Synthetic task');
+    expect(f.responses().at(-1).scheduleMenu).toBeUndefined();
+    expect(f.responses().at(-1).output).toContain('/schedule cancel');
+    await action({ snapshotId: 'forged' });
+    expect(receipts()).toHaveLength(0);
+  });
+
+  it('rejects foreign owners and old context generations without native cancellation', async () => {
+    await f.bind(true); await f.send('/schedule after 2m -- Synthetic task');
+    const menu = f.responses().at(-1).scheduleMenu;
+    await action(menu, 'cancel', { openId: 'other' });
+    expect(receipts().at(-1).success).toBe(false);
+    f.threads[0].delegationWorkspaceGeneration = 42;
+    await action(menu, 'cancel', { messageId: 'stale' });
+    expect(receipts().at(-1).success).toBe(false);
+    expect(f.jobs[0].handle.cancel).not.toHaveBeenCalled();
+  });
+
+  it('preserves cleanup retry after native shutdown failure without claiming cancellation success', async () => {
+    await f.bind(true); await f.send('/schedule after 2m -- Synthetic task');
+    const menu = f.responses().at(-1).scheduleMenu;
+    f.jobs[0].handle.stop.mockRejectedValue(new Error('synthetic shutdown failure'));
+    await action(menu, 'cancel');
+    const failed = receipts().at(-1);
+    expect(failed).toMatchObject({ success: false, menu: { entries: [{ state: 'cancelled', canCancel: true }] } });
+    expect(f.handler.tryBeginAutomaticUpdate()).toBe(false);
+    f.jobs[0].handle.stop.mockResolvedValue();
+    await action(failed.menu, 'cancel', { messageId: 'retry-cleanup' });
+    expect(receipts().at(-1)).toMatchObject({ success: true, menu: { entries: [{ canCancel: false }] } });
+    expect(f.handler.tryBeginAutomaticUpdate()).toBe(true); f.handler.endAutomaticUpdate();
+  });
+
+  it('invalidates disconnected card snapshots and reserves cancellation against automatic update', async () => {
+    await f.bind(true); await f.send('/schedule after 2m -- Synthetic task');
+    const menu = f.responses().at(-1).scheduleMenu;
+    let release!: () => void;
+    f.jobs[0].handle.cancel.mockImplementation(async () => { await new Promise<void>(resolve => { release = resolve; }); });
+    const pending = action(menu, 'cancel');
+    await vi.waitFor(() => expect(f.jobs[0].handle.cancel).toHaveBeenCalledOnce());
+    expect(f.handler.tryBeginAutomaticUpdate()).toBe(false);
+    f.disconnect(); release(); await pending;
+    expect(receipts()).toHaveLength(0);
+    await f.reconnect(); await f.bind(true);
+    await action(menu, 'cancel', { messageId: 'old-card' });
+    expect(receipts().at(-1).success).toBe(false);
+    await f.send('/schedule list');
+    expect(f.responses().at(-1).scheduleMenu.entries[0].state).toBe('cancelled');
+  });
+
   it('keeps never-used scheduling dormant across binding, reconnect, chat and ordinary controls', async () => {
     const recover = vi.spyOn(f.handler as any, 'recoverSchedules');
     const initialize = vi.spyOn(ScheduleService.prototype, 'initialize');
     const closeListeners = f.closeHandlers.size;
-    await f.bind();
+    await f.bind(true);
     f.disconnect();
-    await f.reconnect();
+    await f.reconnect(true);
     await Promise.all(recover.mock.results.map(result => result.value));
     await f.send('Return a synthetic greeting', 'thread-a', { isSlashCommand: false });
     expect(f.executor.execute).toHaveBeenCalledOnce();

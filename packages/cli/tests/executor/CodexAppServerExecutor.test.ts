@@ -136,6 +136,25 @@ describe('CodexAppServerExecutor', () => {
     } finally { await files.destroy(); }
   });
 
+  it('registers scheduling MCP separately from delegation and preserves the native thread on reconfiguration', async () => {
+    const registration = { url: 'http://127.0.0.1:1234/', token: 'fixture-token', groups: ['scheduling'] as const };
+    await executor.configureManagedTools(registration);
+    const stop = vi.spyOn(transport, 'stop');
+    await executor.configureManagedTools({ ...registration }); expect(stop).not.toHaveBeenCalled();
+    const first = executor.execute('Synthetic first turn');
+    await vi.waitFor(() => expect(transport.requests.some(request => request.method === 'turn/start')).toBe(true));
+    const config = transport.requests.find(request => request.method === 'thread/start')!.params.config.mcp_servers?.remote_cli_delegation
+      ?? transport.requests.find(request => request.method === 'thread/start')!.params.config['mcp_servers.remote_cli_delegation'];
+    expect(config.enabled_tools).toContain('remote_cli_schedule_create'); expect(config.enabled_tools).not.toContain('remote_cli_delegate');
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } }); await first;
+    await executor.configureManagedTools({ ...registration, groups: ['delegation', 'scheduling'] });
+    const second = executor.execute('Synthetic second turn');
+    await vi.waitFor(() => expect(transport.requests.some(request => request.method === 'thread/resume')).toBe(true));
+    await vi.waitFor(() => expect(transport.requests.filter(request => request.method === 'turn/start')).toHaveLength(2));
+    expect(transport.requests.find(request => request.method === 'thread/resume')!.params.threadId).toBe('codex-thread-1');
+    transport.emit({ method: 'turn/completed', params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } } }); await second;
+  });
+
   it('persists a managed creation receipt before its first turn and never observes a foreground session', async () => {
     expect(() => executor.observeNativeSessionCreation(async () => {})).toThrow('managed worker');
     await executor.destroy();

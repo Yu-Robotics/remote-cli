@@ -1,3 +1,4 @@
+import { hasDelegationTools } from '../managed/contract';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -248,6 +249,11 @@ export abstract class AcpExecutor implements IExecutor {
 
   getCurrentWorkingDirectory(): string {
     return this.currentWorkingDirectory;
+  }
+
+  async configureManagedTools(connection?: DelegationConnection): Promise<void> {
+    if (this.delegationWorker && connection) throw new Error('Managed child workers cannot register control tools.');
+    await this.configureDelegation(connection);
   }
 
   async configureDelegation(connection?: DelegationConnection): Promise<void> {
@@ -930,7 +936,7 @@ export abstract class AcpExecutor implements IExecutor {
   }
 
   private isDelegationManaged(): boolean {
-    return this.options.managedLifecycle === true || this.delegationWorker || this.delegationConnection !== undefined;
+    return this.options.managedLifecycle === true || this.delegationWorker || hasDelegationTools(this.delegationConnection);
   }
 
   private clearAbortTimer(): void {

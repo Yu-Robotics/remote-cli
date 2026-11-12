@@ -1,10 +1,10 @@
-import { DELEGATION_TOOLS } from './contract';
+import { environmentTools } from '../managed/tools';
 
 interface PiToolRegistration {
   name: string;
   label: string;
   description: string;
-  parameters: (typeof DELEGATION_TOOLS)[number]['inputSchema'];
+  parameters: ReturnType<typeof environmentTools>[number]['inputSchema'];
   execute: (callId: string, args: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>;
 }
 
@@ -20,8 +20,8 @@ function errorMessage(value: unknown): string {
 }
 
 /** Loaded explicitly by Pi; no project skill or global extension is installed. */
-export default function registerDelegation(pi: PiExtensionApi): void {
-  for (const tool of DELEGATION_TOOLS) {
+export default function registerManagedTools(pi: PiExtensionApi): void {
+  for (const tool of environmentTools()) {
     pi.registerTool({ name: tool.name, label: tool.name, description: tool.description,
       parameters: tool.inputSchema,
       async execute(callId: string, args: Record<string, unknown>, signal?: AbortSignal) {

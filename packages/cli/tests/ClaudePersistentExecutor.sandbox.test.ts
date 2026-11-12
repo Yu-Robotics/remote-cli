@@ -50,6 +50,29 @@ describe('Claude sandbox launch policy', () => {
     return executor;
   }
 
+  it('registers scheduling tools without worker powers or sandbox escalation and reuses identical configuration', async () => {
+    for (const tool of ['bwrap', 'socat']) fs.writeFileSync(path.join(home, tool), '', { mode: 0o700 });
+    const active = create({ mode: 'read-only' });
+    const registration = { url: 'http://127.0.0.1:12345/', token: 'fixture-token', groups: ['scheduling'] as const };
+    await active.configureManagedTools(registration);
+    const stop = vi.spyOn(active as any, 'stopProcess');
+    await active.configureManagedTools({ ...registration }); expect(stop).not.toHaveBeenCalled();
+    const pending = active.execute('Synthetic ordinary request'); await vi.advanceTimersByTimeAsync(1000);
+    const args = vi.mocked(spawn).mock.calls[0][1] as string[];
+    const settings = JSON.parse(args[args.indexOf('--settings') + 1]);
+    expect(settings.permissions.allow).toContain('mcp__remote-cli-delegation__remote_cli_schedule_create');
+    expect(settings.permissions.allow.some((name: string) => name.endsWith('__remote_cli_delegate'))).toBe(false);
+    expect(settings.permissions.ask).toContain('Write'); expect(args).not.toContain('--dangerously-skip-permissions');
+    child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'system', subtype: 'init', session_id: 'synthetic-session' }) + '\n'));
+    child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'result', subtype: 'success' }) + '\n')); await pending;
+    const change = active.configureManagedTools({ ...registration, groups: ['scheduling', 'delegation'] });
+    child.emit('close', 0, null); await change;
+    const resumed = active.execute('Synthetic second request'); await vi.advanceTimersByTimeAsync(1000);
+    const next = vi.mocked(spawn).mock.calls[1][1] as string[];
+    expect(next[next.indexOf('--resume') + 1]).toBe('synthetic-session');
+    child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'result', subtype: 'success' }) + '\n')); await resumed;
+  });
+
   it('composes delegation with sandbox approvals and redacts credentials in launch logs', async () => {
     for (const tool of ['bwrap', 'socat']) fs.writeFileSync(path.join(home, tool), '', { mode: 0o700 });
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);

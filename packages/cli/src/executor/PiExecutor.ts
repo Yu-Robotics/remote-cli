@@ -256,6 +256,11 @@ export class PiExecutor implements IExecutor {
   private delegation?: DelegationConnection;
   private readonly delegationWorker: boolean;
 
+  async configureManagedTools(connection?: DelegationConnection): Promise<void> {
+    if (this.delegationWorker && connection) throw new Error('Managed child workers cannot register control tools.');
+    await this.configureDelegation(connection);
+  }
+
   async configureDelegation(connection?: DelegationConnection): Promise<void> {
     if (sameConnection(this.delegation, connection)) return;
     if (this.isBusy()) throw new Error('Cannot change delegation while Pi is busy');

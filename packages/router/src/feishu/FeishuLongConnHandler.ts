@@ -1,3 +1,4 @@
+import type { ScheduleCards } from './ScheduleCards';
 import type { InlineFileCards } from '../output/InlineFileCards';
 import { ASSISTANT_FOOTER_ID, THREAD_CONTROLS_ID } from '../output/InlineFileCards';
 import { OutputApiRejection } from '../output/OutputTransfers';
@@ -53,6 +54,7 @@ export class FeishuLongConnHandler {
   bindDiagnosticTask(cardId: string, taskId: string): void { this.cardDiagnostics.bind(cardId, taskId); }
   workerContexts?: WorkerContextCards;
   settingsCards?: SettingsCards;
+  scheduleCards?: ScheduleCards;
   private client: lark.Client;
   private wsClient: lark.WSClient | null = null;
   private bindingManager: BindingManager;
@@ -1617,6 +1619,15 @@ Examples:
     }
   }
 
+  async updateScheduleCard(cardId: string, elements: any[]): Promise<void> {
+    await this.withMessageLock(cardId, async () => {
+      const content = JSON.stringify({ schema: '2.0', body: { elements } });
+      if (Buffer.byteLength(content) > 16 * 1024) throw new Error('Schedule card exceeds its size budget.');
+      const result = await this.client.im.message.patch({ path: { message_id: cardId }, data: { content } });
+      if (result.code) throw new Error('Schedule card update failed.');
+    });
+  }
+
   async updateApprovalCard(cardId: string, elements: any[], header?: Record<string, unknown>): Promise<void> {
     await this.withMessageLock(cardId, async () => {
       await this.client.im.message.patch({ path: { message_id: cardId },
@@ -2171,6 +2182,13 @@ Examples:
       } catch {
         return { toast: { type: 'error', content: 'Could not update tips. Please try /tips again.' } };
       }
+    }
+
+    if (parsed.action === 'schedule') {
+      const cardId = data?.context?.open_message_id;
+      if (typeof cardId !== 'string' || !this.scheduleCards) return { toast: { type: 'error', content: 'Schedule controls are unavailable. Use /schedule list.' } };
+      try { return { toast: { type: 'info', content: await this.scheduleCards.click(openId, cardId, parsed) } }; }
+      catch (error) { return { toast: { type: 'error', content: error instanceof Error ? error.message : 'Schedule action failed.' } }; }
     }
 
     if (parsed.action === 'settings') {

@@ -1,7 +1,8 @@
 /** Standalone stdio MCP adapter. Credentials are supplied by the parent process. */
 import { randomUUID } from 'crypto';
 import { StringDecoder } from 'string_decoder';
-import { DELEGATION_TOOLS } from './contract';
+import { environmentTools } from '../managed/tools';
+const DELEGATION_TOOLS = environmentTools();
 
 const prefix = randomUUID();
 const url = process.env.REMOTE_CLI_DELEGATION_URL;
