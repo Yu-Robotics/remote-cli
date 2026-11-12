@@ -16,6 +16,7 @@ describe('Claude sandbox launch policy', () => {
   let home: string;
   let executor: ClaudePersistentExecutor | undefined;
   let child: any;
+  let nativeSettings: unknown;
 
   beforeEach(() => {
     home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'claude-launch-test-')));
@@ -28,6 +29,14 @@ describe('Claude sandbox launch policy', () => {
     child.stderr = new EventEmitter();
     child.stdin = { write: vi.fn(), end: vi.fn() };
     child.kill = vi.fn();
+    nativeSettings = { effective: { env: {} }, sources: [] };
+    child.stdin.write.mockImplementation((line: string) => {
+      const message = JSON.parse(line);
+      if (message.type !== 'control_request') return;
+      queueMicrotask(() => child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'control_response', response: {
+        subtype: 'success', request_id: message.request_id, response: message.request.subtype === 'get_settings' ? nativeSettings : { models: [] },
+      } }) + '\n')));
+    });
     vi.mocked(spawn).mockReturnValue(child);
   });
 
@@ -71,6 +80,30 @@ describe('Claude sandbox launch policy', () => {
     const next = vi.mocked(spawn).mock.calls[1][1] as string[];
     expect(next[next.indexOf('--resume') + 1]).toBe('synthetic-session');
     child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'result', subtype: 'success' }) + '\n')); await resumed;
+  });
+
+  it('disables restored native schedules when a resumed ordinary session has no managed scheduling hooks', async () => {
+    const active = create();
+    (active as any).sessionId = 'restored-session';
+    const result = active.execute('Continue ordinary chat');
+    await vi.advanceTimersByTimeAsync(1000);
+    const args = vi.mocked(spawn).mock.calls[0][1] as string[];
+    expect(JSON.parse(args[args.indexOf('--settings') + 1])).toEqual({ scheduledTasksEnabled: false });
+    child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'result', subtype: 'success' }) + '\n'));
+    await expect(result).resolves.toMatchObject({ success: true });
+  });
+
+  it('keeps restored native schedules disabled in a restricted resumed process', async () => {
+    for (const tool of ['bwrap', 'socat']) fs.writeFileSync(path.join(home, tool), '', { mode: 0o700 });
+    const active = create({ mode: 'read-only' });
+    (active as any).sessionId = 'restored-restricted-session';
+    const result = active.execute('Continue ordinary chat');
+    await vi.advanceTimersByTimeAsync(1000);
+    const args = vi.mocked(spawn).mock.calls[0][1] as string[];
+    const settings = JSON.parse(args[args.indexOf('--settings') + 1]);
+    expect(settings.scheduledTasksEnabled).toBe(false);
+    child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'result', subtype: 'success' }) + '\n'));
+    await expect(result).resolves.toMatchObject({ success: true });
   });
 
   it('composes delegation with sandbox approvals and redacts credentials in launch logs', async () => {

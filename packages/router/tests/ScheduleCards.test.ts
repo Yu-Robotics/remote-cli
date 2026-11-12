@@ -32,6 +32,8 @@ describe('ScheduleCards', () => {
     const f = fixture();
     await f.click('cancel'); await f.settle();
     expect(f.transport.send).not.toHaveBeenCalled();
+    expect(JSON.stringify(f.latest())).toContain('Work already queued or running may still finish');
+    expect(JSON.stringify(f.latest())).toContain('The conversation remains available');
     await f.click('back'); await f.settle();
     expect(f.transport.send).not.toHaveBeenCalled();
     await f.click('cancel'); await f.settle();

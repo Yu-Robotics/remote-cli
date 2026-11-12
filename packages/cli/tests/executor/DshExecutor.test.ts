@@ -49,6 +49,58 @@ describe('DshExecutor', () => {
   const pointer = () => path.join(directory, 'sessions', 'thread.json');
   const handoff = () => path.join(directory, 'sessions', 'thread.handoff.json');
   const current = () => transports[transports.length - 1];
+  it('uses the active foreground transport for management without awaiting its model turn or opening another session', async () => {
+    await executor.execute('original context');
+    const transport = current();
+    const handle = { nativeId: 'native-job', list: vi.fn(async () => true), cancel: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
+    // The wrapper captures optional methods at construction; use a fresh executor
+    // whose transport advertises the supported host management interface.
+    customize = item => { (item as any).createNativeSchedule = vi.fn(async () => handle); };
+    const shared = create({ threadId: 'shared' });
+    await shared.execute('original');
+    const sharedTransport = current();
+    let finish!: () => void;
+    sharedTransport.prompt.mockImplementation(async () => { await new Promise<void>(resolve => { finish = resolve; }); return { stopReason: 'end_turn' }; });
+    const foreground = shared.execute('future user context');
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+    const jobs = await shared.createNativeSchedule({ id: 'job', backend: 'dsh', cwd: directory, prompt: 'Use context',
+      rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } }, () => {});
+    expect((sharedTransport as any).createNativeSchedule).toHaveBeenCalledWith(shared.getSessionId(), expect.anything(), expect.any(Function));
+    expect(sharedTransport.newSession).toHaveBeenCalledOnce();
+    await jobs.cancel(); expect(sharedTransport.sendCancel).not.toHaveBeenCalled(); expect(sharedTransport.destroy).not.toHaveBeenCalled();
+    finish(); await foreground;
+    expect(transport.prompt).toHaveBeenCalledOnce();
+  });
+  it('refuses schedule creation when the original native conversation cannot resume, without minting a replacement', async () => {
+    await executor.execute('original context');
+    await executor.destroy();
+    customize = item => { item.loadSession.mockRejectedValue(new Error('session is not resumable: fixture')); };
+    const restored = create();
+    await expect(restored.createNativeSchedule({ id: 'job', backend: 'dsh', cwd: directory, prompt: 'Use context',
+      rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } }, () => {})).rejects.toThrow('cannot be resumed');
+    expect(current().newSession).not.toHaveBeenCalled();
+    expect(restored.getSessionId()).toBe('session-0');
+  });
+  it('revalidates schedule ownership after a slow native session initialization', async () => {
+    let release!: () => void;
+    let owned = true;
+    const createJob = vi.fn();
+    customize = item => {
+      (item as any).createNativeSchedule = createJob;
+      item.initialize.mockImplementation(async () => {
+        await new Promise<void>(resolve => { release = resolve; });
+        return { protocolVersion: 1, agentCapabilities: { sessionCapabilities: { resume: {} } } };
+      });
+    };
+    const pending = executor.createNativeSchedule({ id: 'job', backend: 'dsh', cwd: directory, prompt: 'Use context',
+      rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } }, () => {}, () => owned);
+    const rejected = expect(pending).rejects.toThrow('context changed');
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+    owned = false; release();
+    await rejected;
+    expect(createJob).not.toHaveBeenCalled();
+    expect(current().prompt).not.toHaveBeenCalled();
+  });
   const create = (options: Partial<DshExecutorOptions> = {}) => {
     const instance = new DshExecutor(new DirectoryGuard([directory]), {
       initialWorkingDirectory: directory, sessionBaseDir: path.join(directory, 'sessions'),

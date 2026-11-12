@@ -201,7 +201,7 @@ export class ScheduleCards {
         ? 'Native process cleanup pending; exit is unconfirmed' : entry.state;
       elements.push(markdown(`**${escape(entry.id)}** · ${entry.backend}\n**Status:** ${status}\n**Schedule:** ${escape(entry.rule)}\n**Task:** ${escape(entry.prompt)}${entry.error ? `\n**Details:** ${escape(entry.error)}` : ''}`));
       if (state.confirm) {
-        elements.push(markdown('Cancel this scheduled task? Its current run may be interrupted. Results already delivered cannot be recalled.'));
+        elements.push(markdown('Cancel future runs of this task? Work already queued or running may still finish. The conversation remains available. Results already delivered cannot be recalled.'));
         elements.push(row([button('confirm', 'Confirm cancellation'), button('back', 'Back')]));
       } else elements.push(row([button('refresh', 'Refresh status'), button('cancel', entry.canCancel && !['creating', 'active', 'running'].includes(entry.state) ? 'Retry stopping task' : 'Cancel task', entry.value, blocked || !entry.canCancel)]));
       if (state.menu.entries.length > 1) {

@@ -1,6 +1,11 @@
 import { AcpClient, type AcpEventCallbacks } from '../acp/AcpClient';
 import type { AcpContentBlock, AcpMcpServer, AcpPermissionOption, AcpSessionResult } from '../acp/AcpTypes';
 import { createDshPrivacyLaunch } from './DshPrivacy';
+import { randomUUID } from 'crypto';
+import { sessionSchedulePatch } from '../../scheduling/dsh/sessionLaunch';
+import { SessionScheduleClient } from '../../scheduling/dsh/SessionScheduleClient';
+import { SESSION_EVENT, SESSION_VERSION } from '../../scheduling/dsh/sessionProtocol';
+import type { AcpJsonRpcNotification } from '../acp/AcpTypes';
 
 /** Provider errors can contain request headers; never relay them verbatim. */
 export function dshErrorMessage(value: unknown): string {
@@ -16,10 +21,17 @@ export class DshAcpClient extends AcpClient {
   supportsImages = false;
   private stopped = false;
   private readonly permission: AcpEventCallbacks['onPermissionRequest'];
+  private readonly scheduleClient?: SessionScheduleClient;
+  private readonly scheduleScope: string;
+  private foregroundSession?: string;
+  private foregroundStopReason?: string;
+  private scheduleEnabled = false;
+  private projections = new Map<string, boolean>();
 
   constructor(command: string, cwd: string, callbacks: AcpEventCallbacks, private readonly controlTimeout = 30_000, delegationWorker = false, managedHistoryPatch = '') {
     if (managedHistoryPatch && !delegationWorker) throw new Error('DSH owned history requires a managed worker');
-    const launch = createDshPrivacyLaunch(managedHistoryPatch);
+    const scope = randomUUID();
+    const launch = createDshPrivacyLaunch(managedHistoryPatch, delegationWorker ? undefined : directory => sessionSchedulePatch(directory, scope));
     try {
       super(command, launch.args, cwd, {
         ...callbacks,
@@ -31,7 +43,10 @@ export class DshAcpClient extends AcpClient {
       throw error;
     }
     this.permission = callbacks.onPermissionRequest;
+    this.scheduleScope = scope;
+    if (!delegationWorker) this.scheduleClient = new SessionScheduleClient(scope, (method, params) => this.sendNotification(method, params));
     void super.waitForExit().then(() => {
+      this.scheduleClient?.close();
       this.stopped = true;
       try { launch.dispose(); } catch { console.warn('[DSH] Temporary privacy overlay cleanup failed.'); }
     });
@@ -58,7 +73,47 @@ export class DshAcpClient extends AcpClient {
     if (!this.supportsImages && blocks.some(block => block.type === 'image')) {
       throw new Error('This DSH ACP profile/model does not support image input. No part of this prompt was submitted. Send text or a supported document instead.');
     }
-    return super.prompt(sessionId, blocks);
+    this.foregroundSession = sessionId;
+    this.foregroundStopReason = undefined;
+    try {
+      const result = await super.prompt(sessionId, blocks);
+      return this.scheduleEnabled && this.foregroundStopReason ? { stopReason: this.foregroundStopReason } : result;
+    } finally { this.foregroundSession = undefined; this.foregroundStopReason = undefined; }
+  }
+
+  createNativeSchedule(sessionId: string, input: import('../../scheduling/types').NativeScheduleInput,
+    onEvent: (event: import('../../scheduling/types').NativeScheduleEvent) => void) {
+    if (!this.scheduleClient) throw new Error('Worker sessions cannot create schedules.');
+    this.scheduleEnabled = true;
+    return this.scheduleClient.create(sessionId, input, onEvent);
+  }
+
+  protected handleNotification(message: AcpJsonRpcNotification): void {
+    if (!this.scheduleClient) { super.handleNotification(message); return; }
+    if (message.method === SESSION_EVENT) {
+      const p = message.params as any;
+      if (p?.scope !== this.scheduleScope || p.version !== SESSION_VERSION) return;
+      if (p.kind === 'projection' && typeof p.sessionId === 'string' && typeof p.foreground === 'boolean') {
+        const id = p.messageId ?? p.toolCallId;
+        if (typeof id !== 'string') return;
+        this.projections.set(`${p.sessionId}:${id}`, p.foreground);
+        if (this.projections.size > 4096) this.projections.delete(this.projections.keys().next().value!);
+      } else if (p.kind === 'foregroundEnd' && p.sessionId === this.foregroundSession
+        && ['end_turn', 'cancelled', 'error'].includes(p.stopReason)) {
+        this.foregroundStopReason = p.stopReason;
+      } else this.scheduleClient.receive(p);
+      return;
+    }
+    if (!this.scheduleEnabled) { super.handleNotification(message); return; }
+    // Native ACP projections are async and can lag turn/end. Classify their
+    // actual message/tool identity using the synchronous durable-event observation.
+    const params = message.params as any;
+    const update = params?.update;
+    if (['agent_message_chunk', 'agent_thought_chunk', 'tool_call', 'tool_call_update'].includes(update?.sessionUpdate)) {
+      if (params.sessionId !== this.foregroundSession
+        || this.projections.get(`${params.sessionId}:${update.messageId ?? update.toolCallId}`) !== true) return;
+    }
+    super.handleNotification(message);
   }
 
   /** DSH closes live sessions but intentionally retains its native history on disk. */

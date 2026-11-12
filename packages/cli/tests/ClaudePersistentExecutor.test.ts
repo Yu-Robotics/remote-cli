@@ -1495,6 +1495,7 @@ describe('ClaudePersistentExecutor', () => {
       const compactCall = mockSpawn.mock.calls[0];
       expect(compactCall[1]).toContain('--resume');
       expect(compactCall[1]).toContain('test-session');
+      expect(JSON.parse((compactCall[1] as string[])[(compactCall[1] as string[]).indexOf('--settings') + 1])).toEqual({ scheduledTasksEnabled: false });
       expect(compactCall[1]).toContain('--print');
       expect(compactCall[1]).toContain('/compact');
 

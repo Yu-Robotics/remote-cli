@@ -14,6 +14,7 @@ interface Options {
   current(): boolean;
   run(command: ScheduleOperation, scheduleId: string): Promise<ScheduleRecord[]>;
   present(records: ScheduleRecord[], operationId: string): Promise<string>;
+  nativeAction?(id: string): unknown;
   waitMs?: number;
 }
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
@@ -120,7 +121,9 @@ export class ScheduleToolScope {
     if (!this.options.current()) throw new Error('Scheduling context changed. Inspect /schedule list after reconnecting.');
     if (receipt.result.status === 'pending') receipt.pendingObserved = true;
     else receipt.terminalObserved = true;
-    return structuredClone(receipt.result);
+    const nativeAction = receipt.result.status === 'pending' ? this.options.nativeAction?.(`managed-${key.slice(0, 48)}`) : undefined;
+    return { ...structuredClone(receipt.result), ...(nativeAction ? { nativeAction,
+      instruction: 'Call this exact authorized native tool now in this conversation, once. Do not report success until remote_cli_schedule_operation confirms its native receipt. Do not change any arguments.' } : {}) };
   }
   unreportedFailures(): Result[] {
     if (!this.options.current()) return [];

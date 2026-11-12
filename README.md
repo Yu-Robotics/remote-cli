@@ -575,18 +575,30 @@ requests round up to the next whole minute. Recurring cron requires an explicit
 IANA timezone. Native timing is approximate, including Claude's jitter and
 seven-day recurring expiry; this is not an exact-time alarm service.
 
-Each task has a dedicated native process/session bound to the original user,
-thread, working directory, and conversation generation. Supply a self-contained
-prompt: the current conversation history is not copied. Tasks retain their
-creation-time model and effort. Native tools execute with ordinary unrestricted
-OS permissions; managed delegation and interactive approval cards are not part
-of these adapters. Claude management uses bounded native tool turns. DSH
-management calls the native schedule service through the adapter. DSH permission
-requests are declined when they require an interactive client decision; choose
-work allowed by the native policy for unattended execution. Idle timing does not
-issue polling prompts.
+Claude and DSH schedules execute in the original foreground native conversation.
+They use its earlier discussion, subsequent user messages, and previous scheduled
+occurrences, subject to native compaction and context limits. Multiple tasks in
+one thread share that context. The adapter does not copy a transcript, create a
+summary, or fork an empty task session. The native session controls its model,
+effort, and tool policy; this is not a frozen snapshot of creation-time settings.
 
-Keep the CLI and computer running. Claude jobs are explicitly session-only.
+Claude model-requested operations return an exact authorized native Cron action.
+The model executes that action in its current turn, and the adapter validates the
+native receipt. Slash commands and card controls use serialized management turns
+in the same conversation. DSH uses native host CRUD without an extra model turn.
+Native timing runs without polling prompts. Simultaneously due tasks can share a
+native turn and a labeled combined result; they are not separate model answers.
+
+Claude recurring schedules must use the native session's timezone; a mismatch is
+rejected without changing the conversation timezone. One-shot timestamps are
+converted to that timezone, and ambiguous clock-rollback times are rejected.
+Unattended work follows the existing native tool policy. Cancellation stops future
+firings without killing the shared conversation; queued or running work may finish.
+
+Keep the CLI and computer running. Claude jobs are explicitly session-only. If
+Claude restores an old native wakeup after a process restart, the scheduling
+hook blocks it because the managed owner is no longer present; it is not silently
+adopted or delivered as a new task. Recreate the task explicitly after restart.
 DSH uses isolated native job storage for each process; the adapter retires its
 jobs on shutdown and never automatically reopens the store. On restart the
 catalog marks unfinished jobs interrupted and never silently recreates or
@@ -603,7 +615,8 @@ When both CLI and Router support schedule cards, creation and list replies offer
 **Refresh status** and **Cancel** controls. Cancellation requires confirmation
 on the card and is shown as successful only after the original CLI acknowledges
 it. Refresh queries native state on demand; it does not start periodic polling
-or an ordinary conversation turn. These controls apply to the card's original
+or replay a scheduled occurrence. Claude controls may use a native management
+turn. These controls apply to the card's original
 user, device, and thread even after switching the selected thread or backend.
 
 If an operation times out, its outcome is unknown. Retry confirmation before
@@ -613,10 +626,14 @@ open a fresh card. Older peers keep the existing text commands. Completed-result
 notifications retain their existing delivery flow; these management cards do not
 add task-start notifications or interactive tool approvals.
 
-Use `/schedule cancel <id>` to stop a schedule, including its dedicated process;
-`/abort` controls the ordinary foreground task. Cancel active schedules before
-clearing the conversation, changing its directory or sandbox, or deleting the thread.
-Results appear in the original thread even if another thread is selected.
+Use `/schedule cancel <id>` to cancel future firings. Results from occurrences
+already tracked as running remain deliverable after cancellation. `/abort` controls
+an active foreground request; it does not independently stop an autonomous scheduled
+turn. Aborting a foreground request may also interrupt shared-session work. Cancel
+active schedules before clearing the conversation, changing its directory or
+sandbox, or deleting the thread. Merely selecting another thread leaves its
+executor and schedules running; switching backends or recycling the native
+process interrupts jobs. Results appear in the original thread.
 The catalog and pending results contain task text and are local private state.
 See the [eight-backend inventory](docs/native-scheduling-inventory.md) for the
 native capability and transport evidence behind the adapter choice.

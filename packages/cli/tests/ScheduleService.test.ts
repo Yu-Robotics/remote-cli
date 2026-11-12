@@ -97,6 +97,70 @@ describe('ScheduleService', () => {
     expect(provider.create).toHaveBeenCalledTimes(1);
   });
 
+  it.each([true, false])('retains a shared cancelled occurrence outbox across restart only for its current owner (%s)', async ownerCurrent => {
+    deliver.mockRejectedValue(new Error('Disconnected'));
+    const service = make(); await service.initialize(); await service.create(owner, input('shared', true));
+    Object.assign(provider.handles.get('shared')!, { cancellationKeepsRunning: true });
+    provider.emit('shared', { type: 'started', occurrenceId: 'running-at-cancel' });
+    await service.list(owner);
+    await expect(service.cancel(owner, 'shared')).resolves.toMatchObject({ state: 'cancelled' });
+    expect(service.hasActiveSchedules()).toBe(true);
+    expect(service.canCancel(owner, 'shared')).toBe(false);
+    complete('shared', 'running-at-cancel');
+    provider.emit('shared', { type: 'stopped', exitConfirmed: true, reason: 'Owned job retired' });
+    await settled(service);
+    expect(service.hasActiveSchedules()).toBe(false);
+    expect((await read()).pending).toMatchObject([{ afterCancellation: true, occurrenceId: 'running-at-cancel' }]);
+    // Repeated cancellation must not erase an honest result from a started turn.
+    await service.cancel(owner, 'shared');
+    expect((await read()).pending).toHaveLength(1);
+    await service.destroy(); current.mockReturnValue(ownerCurrent); deliver.mockClear(); deliver.mockResolvedValue(undefined);
+    const restored = make(); await restored.initialize(); await restored.retryDeliveries(); await restored.retryDeliveries();
+    expect(deliver).toHaveBeenCalledTimes(ownerCurrent ? 1 : 0);
+    expect(provider.create).toHaveBeenCalledOnce(); expect((await read()).pending).toHaveLength(0);
+  });
+
+  it('retains a shared completion racing the native delete receipt', async () => {
+    const service = make(); await service.initialize(); await service.create(owner, input('shared', true));
+    const handle = provider.handles.get('shared')!; Object.assign(handle, { cancellationKeepsRunning: true });
+    const gate = deferred<void>(); vi.mocked(handle.cancel).mockImplementation(() => gate.promise);
+    provider.emit('shared', { type: 'started', occurrenceId: 'race' }); await service.list(owner);
+    const cancellation = service.cancel(owner, 'shared');
+    await vi.waitFor(() => expect(handle.cancel).toHaveBeenCalledOnce());
+    complete('shared', 'race'); await service.list(owner);
+    expect(deliver).not.toHaveBeenCalled(); gate.resolve(); await cancellation;
+    await settled(service);
+    expect(deliver).toHaveBeenCalledOnce();
+    expect(deliver.mock.calls[0][0]).toMatchObject({ occurrenceId: 'race', schedule: { state: 'cancelled' } });
+  });
+
+  it('serializes native refresh operations for jobs sharing a conversation', async () => {
+    const service = make(); await service.initialize();
+    await service.create(owner, input('first', true)); await service.create(owner, input('second', true));
+    const gate = deferred<boolean>();
+    vi.mocked(provider.handles.get('first')!.list).mockImplementation(() => gate.promise);
+    const refresh = service.refresh(owner);
+    await vi.waitFor(() => expect(provider.handles.get('first')!.list).toHaveBeenCalledOnce());
+    expect(provider.handles.get('second')!.list).not.toHaveBeenCalled();
+    gate.resolve(true); await refresh;
+    expect(provider.handles.get('second')!.list).toHaveBeenCalledOnce();
+  });
+
+  it('uses explicit shared-job cancellation to reconcile failed creation instead of repeating automatic stop', async () => {
+    let cancelled = false;
+    const handle: NativeScheduleHandle = { nativeId: 'unconfirmed-synthetic', cancellationKeepsRunning: true,
+      list: vi.fn(async () => true), cancel: vi.fn(async () => { cancelled = true; }),
+      stop: vi.fn(async () => { if (!cancelled) throw new Error('Explicit reconciliation required'); }),
+    };
+    provider.create.mockRejectedValueOnce(new NativeScheduleCleanupError('Uncertain creation', handle));
+    const service = make(); await service.initialize();
+    await expect(service.create(owner, input())).rejects.toThrow('Uncertain creation');
+    expect(service.hasActiveSchedules()).toBe(true);
+    await expect(service.cancel(owner, 'schedule-a')).resolves.toMatchObject({ state: 'cancelled' });
+    expect(handle.cancel).toHaveBeenCalledOnce(); expect(service.hasActiveSchedules()).toBe(false);
+    expect(provider.create).toHaveBeenCalledOnce();
+  });
+
   it('preserves DSH identity across native creation, outbox persistence, and restart without recreating jobs', async () => {
     deliver.mockRejectedValue(new Error('Disconnected'));
     const service = make(); await service.initialize();
