@@ -667,6 +667,14 @@ export abstract class AcpExecutor implements IExecutor {
     };
   }
 
+  /** Only call after a provider has drained its native scheduler and session. */
+  protected async stopSchedulingSession(): Promise<void> {
+    if (this.isProcessing || this.commandQueue.length || this.initializingSession) throw new Error('Native session is busy.');
+    if (this.client && !this.client.waitForExit) throw new Error('Native host cannot confirm exit.');
+    this.destroyClient();
+    await this.waitForExit();
+  }
+
   protected async schedulingSession(): Promise<{ client: AcpTransport; sessionId: string }> {
     this.requireOriginalSession = true;
     try { return await this.ensureSession(); }

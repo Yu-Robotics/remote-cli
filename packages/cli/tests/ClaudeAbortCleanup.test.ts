@@ -542,8 +542,8 @@ describe('Claude abort cleanup ownership', () => {
     // Prove a fresh owner-bound scope can recover the same handle without recreating the job.
     raw.isProcessing = false;
     const recovered = main.reconcileNativeSchedule('cleanup-probe', () => true, () => service.cancel(owner, 'managed-probe'));
-    // service.cancel performs serialized admission before asking for its native action.
-    for (let n = 0; n < 100 && !(adapter as any).pending; n++) await Promise.resolve();
+    // Cancellation intent must reach durable storage before native deletion.
+    await vi.waitFor(() => expect((adapter as any).pending).toBeDefined());
     const deletion = (adapter as any).pending.action;
     expect(deletion).toEqual({ tool: 'CronDelete', input: { id: 'native-probe' } });
     adapter.accept({ type: 'control_request', request_id: 'synthetic-delete-hook', request: {

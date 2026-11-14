@@ -53,6 +53,20 @@ describe('ThreadExecutorPool', () => {
     else process.env.HOME = previousHome;
   });
 
+  it('admits only explicit settled-setting retry while retaining work and shutdown fences', () => {
+    const id = manager.getDefaultThread().id;
+    const executor = pool.getExecutor(id);
+    executor.isBusy = () => true;
+    executor.canRetrySettingsChange = setting => setting === 'model';
+    expect(pool.isThreadBusy(id)).toBe(true);
+    expect(pool.isThreadBusy(id, 'model')).toBe(false);
+    pool.setThreadBusy(id, true);
+    expect(pool.isThreadBusy(id, 'model')).toBe(true);
+    pool.setThreadBusy(id, false);
+    executor.hasUncertainShutdown = () => true;
+    expect(pool.isThreadBusy(id, 'model')).toBe(true);
+  });
+
   describe('directory recovery safety', () => {
     it('reports unavailable recovery as error without hiding an active thread or creating an executor', async () => {
       const thread = manager.getDefaultThread();

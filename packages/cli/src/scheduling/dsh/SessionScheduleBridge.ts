@@ -90,6 +90,23 @@ export class SessionScheduleBridge {
         for (const work of this.early.splice(0)) work();
       }
     }
+    if (p.operation === 'release') {
+      // Native delete shares the dispatch serializer: when it returns, every
+      // previously admitted reminder is already in this agent's durable inbox.
+      const owned = this.jobs.get(p.id);
+      if (!identifier(p.id) || owned && (owned.sessionId !== p.sessionId || !owned.row)
+        || typeof agent.whenIdle !== 'function' || typeof this.ctx.sessions?.flush !== 'function') throw new Error();
+      if (owned) await this.ctx.schedule.delete({ sessionId: p.sessionId, id: owned.row.id });
+      // A completed/cancelled job may already have retired its in-memory entry.
+      // Absence alone is insufficient: verify native inventory, then drain its inbox.
+      if ((await this.ctx.schedule.catalog()).some((row: any) =>
+        owned ? row.id === owned.row.id : row.sessionId === p.sessionId && row.title === p.id)) throw new Error();
+      // Do not mark cancelled first: queued reminders must retain their result join.
+      await agent.whenIdle();
+      if ([...this.turns.keys()].some(key => key.startsWith(`${p.sessionId}:`))) throw new Error('Native turn remains unjoined.');
+      if (!await this.ctx.sessions.flush(agent.session)) throw new Error('Native session flush unconfirmed.');
+      return { released: true, sessionId: p.sessionId };
+    }
     const job = this.jobs.get(p.id);
     if (!job && p.operation === 'cancel') return { deleted: true };
     if (!job || job.sessionId !== p.sessionId) throw new Error();

@@ -1,6 +1,7 @@
 import { ClaudeSessionSchedules, SCHEDULE_HOOKS } from '../scheduling/claude/ClaudeSessionSchedules';
 import { TurnLedger } from './claude/TurnLedger';
-import type { NativeScheduleInput, NativeScheduleEvent, NativeScheduleHandle } from '../scheduling/types';
+import { NativeScheduleCleanupError } from '../scheduling/types';
+import type { NativeScheduleInput, NativeScheduleEvent, NativeScheduleHandle, NativeScheduleRecovery, NativeScheduleRelease } from '../scheduling/types';
 import { managedTools } from '../managed/tools';
 import { spawnManaged } from './ManagedSpawn';
 import { ownedSpawn as spawn } from '../delegation/OwnershipRuntime';
@@ -92,6 +93,8 @@ interface ClaudeControlResponsePayload {
   request_id?: string;
   response?: Record<string, unknown>;
   error?: string;
+  error_code?: string;
+  model?: string;
 }
 
 interface ClaudeOutputMessage {
@@ -235,6 +238,14 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
   private model?: string;
   private effort?: string;
   private reportedModel?: string;
+  /** Native session selection, not a claim about the model serving an in-flight response. */
+  private acknowledgedModel?: string;
+  private modelSelectionForeground?: string;
+  private modelChange?: { child: ChildProcess; epoch: number; session: string | null; retryable: boolean };
+  hasPendingSettingsChange(): boolean { return !!this.modelChange; }
+  canRetrySettingsChange(setting: 'model'): boolean {
+    return setting === 'model' && this.modelChange?.retryable === true && !this.isWorkBusy() && !this.sessionSchedules?.hasPendingMutation;
+  }
 
   // Native control catalog cache & control request state
   private cachedModelCatalog: ExecutorModelInfo[] | null = null;
@@ -504,7 +515,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
   getExecutionMetadata() {
     let effectiveEffort = this.effort;
     if (this.effort && this.cachedRawEntries) {
-      const activeModel = this.reportedModel || this.model;
+      const activeModel = this.reportedModel || this.acknowledgedModel || this.model;
       const entry = activeModel
         ? this.cachedRawEntries.find(
             e => e.value === activeModel || (e.resolvedModel !== undefined && e.resolvedModel === activeModel),
@@ -520,11 +531,160 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     if (!effectiveEffort) {
       data.effortSource = 'unknown';
     }
-    if (this.isProcessRunning() && this.reportedModel) {
-      data.model = this.reportedModel;
+    if (this.isProcessRunning() && (this.acknowledgedModel || this.reportedModel)) {
+      data.model = this.reportedModel || this.acknowledgedModel;
       data.modelSource = 'reported';
     }
+    if (this.modelChange) { data.model = undefined; data.modelSource = 'unknown'; }
     return data;
+  }
+
+  private scheduleRestart?: {
+    child: ChildProcess; epoch: number; adapter: ClaudeSessionSchedules;
+    release?: Promise<NativeScheduleRelease>; endRequested?: boolean;
+    exit?: { code: number | null; signal: NodeJS.Signals | null };
+  };
+  private scheduleRestoring?: object;
+
+  get nativeScheduleRecovery(): NativeScheduleRecovery | undefined {
+    if (this.delegationWorker || process.platform !== 'linux' || process.arch !== 'x64'
+      || this.sandbox.isRestricted() || this.turnLedger.version && this.turnLedger.version !== '2.1.311') return undefined;
+    return {
+      provider: 'claude-session-skip-unadmitted-v1', strategy: 'reconstruct', orderlyOnly: true,
+      handoffPolicy: 'skip-unadmitted',
+      describe: input => JSON.stringify({ marker: randomUUID(), sessionId: this.sessionId,
+        cwd: input.cwd, threadId: this.threadId, model: this.model, effort: this.effort,
+        effectiveModel: this.acknowledgedModel || this.reportedModel || this.model }),
+      finishRestart: () => this.finishScheduleRestart(),
+      releaseRestartAdmission: () => {
+        const state = this.scheduleRestart;
+        if (state?.exit?.code === 0 && !state.exit.signal && state.endRequested
+          && state.epoch === this.stopEpoch && !this.claudeProcess) this.scheduleRestart = undefined;
+      },
+      reconcile: async (record, context, emit) => {
+        const identity = JSON.parse(record.recovery!.identity);
+        if (record.recovery?.handoff !== 'clean' || !record.recovery.nativeDefinitionAbsent
+          || record.recovery.handoffPolicy !== 'skip-unadmitted' || !context.isCurrent()
+          || context.signal.aborted || !identity.sessionId || identity.sessionId !== this.sessionId
+          || identity.cwd !== this.currentWorkingDirectory || identity.threadId !== this.threadId
+          || identity.model !== this.model || identity.effort !== this.effort) {
+          throw new Error('Original Claude context or clean handoff evidence changed.');
+        }
+        if (this.scheduleRestart && !this.scheduleRestart.exit) throw new Error('Claude predecessor exit is unconfirmed.');
+        this.scheduleRestart = undefined;
+        const restoration = {};
+        this.scheduleRestoring = restoration;
+        const epoch = this.stopEpoch;
+        const current = () => this.scheduleRestoring === restoration && this.stopEpoch === epoch
+          && !this.isDestroyed && context.isCurrent() && !context.signal.aborted && this.sessionId === identity.sessionId;
+        const input: NativeScheduleInput = { id: record.id, threadId: record.threadId, backend: 'claude',
+          cwd: record.cwd, prompt: record.prompt, rule: record.rule, ...record.execution, recovery: record.recovery };
+        let handle: NativeScheduleHandle | undefined;
+        try {
+          await this.listModels();
+          if (!current()) throw new Error('Claude recovery owner changed.');
+          if (this.turnLedger.version !== '2.1.311' || this.turnLedger.pid !== this.claudeProcess?.pid
+            || typeof identity.effectiveModel !== 'string' || !identity.effectiveModel) throw new Error('Original Claude model or supported host is unavailable.');
+          const child = this.claudeProcess;
+          if (this.model !== identity.effectiveModel) {
+            const response = await this.nativeControl('set_model', { model: identity.effectiveModel });
+            if (!current() || this.claudeProcess !== child) throw new Error('Claude recovery model owner changed.');
+            if (!response || typeof response !== 'object' || (response as Record<string, unknown>).model !== identity.effectiveModel) {
+              throw new Error('Claude recovery model selection is unconfirmed.');
+            }
+            this.recordModelSelection(identity.effectiveModel);
+          }
+          const adapter = this.schedules();
+          const timezone = await this.readNativeScheduleTimezone();
+          if (!current() || this.claudeProcess !== child) throw new Error('Claude recovery host changed.');
+          handle = await adapter.inToolOperation(`restore-${record.id}`, current,
+            () => adapter.create(input, emit, context.isOwnerCurrent ?? context.isCurrent, timezone, true), false);
+          if (!current() || this.claudeProcess !== child || !this.turnLedger.supported(child?.pid)) throw new NativeScheduleCleanupError('Claude recovery host or protocol changed.', handle);
+          const recovered = this.recoverableScheduleHandle(handle, input, restoration);
+          this.scheduleRestoring = undefined;
+          return recovered;
+        } catch (error) {
+          const cleanup = error instanceof NativeScheduleCleanupError ? error.handle : handle;
+          if (cleanup) throw new NativeScheduleCleanupError(error instanceof Error ? error.message : 'Claude recovery failed after native creation.',
+            this.recoverableScheduleHandle(cleanup, input, restoration));
+          throw error; // Keep direct input fenced until cleanup or explicit context reset.
+        }
+      },
+    };
+  }
+
+  private recoverableScheduleHandle(handle: NativeScheduleHandle, input: NativeScheduleInput, restoration?: object): NativeScheduleHandle {
+    if (!input.recovery) return handle;
+    const identity = JSON.parse(input.recovery.identity);
+    const executor = this;
+    return { ...handle,
+      get nativeId() { return handle.nativeId; },
+      get recoveryIdentity() { return JSON.stringify({ ...identity, sessionId: executor.sessionId,
+        model: executor.model, effort: executor.effort,
+        effectiveModel: executor.acknowledgedModel || executor.reportedModel || executor.model }); },
+      releaseForRestart: async () => ({ ...await this.releaseScheduleDefinitions(),
+        ...(handle.onceDefinitionAlreadyAbsent && { onceDefinitionAlreadyAbsent: true as const }) }),
+      stop: async () => {
+        await handle.stop();
+        if (restoration && this.scheduleRestoring === restoration && !this.sessionSchedules?.hasPendingMutation) this.scheduleRestoring = undefined;
+      },
+    };
+  }
+
+  private releaseScheduleDefinitions(): Promise<NativeScheduleRelease> {
+    if (this.scheduleRestart?.release) return this.scheduleRestart.release;
+    const child = this.claudeProcess;
+    if (!child || !this.turnLedger.supported(child.pid) || !this.scheduleHooksReady || this.modelChange
+      || this.retainedAbort || this.abortOperation || this.hasUncertainShutdown() || this.commandQueue.length
+      || this.isProcessing || this.isStarting || this.scheduleRestoring) return Promise.reject(new Error('Claude handoff admission is unavailable.'));
+    const adapter = this.schedules();
+    const state = this.scheduleRestart ??= { child, epoch: this.stopEpoch, adapter };
+    const current = () => !this.isDestroyed && this.claudeProcess === child && this.stopEpoch === state.epoch && !this.abortOperation;
+    // Synchronous: after this point, a wake must pass the hook fence or be skipped.
+    adapter.beginRestart();
+    state.release = (async () => {
+      await adapter.removeFutureDefinitionsForRestart({ isCurrent: current });
+      await this.turnLedger.wait(() => current() && !adapter.admittedWork && !this.isProcessing
+        && !this.turnLedger.active && !this.pendingApprovals.size && !this.pendingControlRequests.size,
+      25_000, 'Admitted schedule execution drain');
+      if (!current()) throw new Error('Claude handoff host changed.');
+      return { nativeDefinitionAbsent: true, policy: 'skip-unadmitted' };
+    })();
+    return state.release;
+  }
+
+  private async finishScheduleRestart(): Promise<void> {
+    const state = this.scheduleRestart;
+    if (!state?.release) throw new Error('Claude handoff was not prepared.');
+    await state.release;
+    if (state.exit) {
+      if (state.exit.code === 0 && !state.exit.signal && this.stopEpoch === state.epoch) return;
+      throw new Error('Claude handoff exited unsuccessfully.');
+    }
+    const child = state.child;
+    const current = () => this.claudeProcess === child && this.stopEpoch === state.epoch && !this.isDestroyed;
+    if (!current()) throw new Error('Claude handoff host changed.');
+    // A new initialize response includes a fresh authoritative native task snapshot.
+    this.turnLedger.inventory = undefined;
+    await this.nativeControl('initialize', { hooks: SCHEDULE_HOOKS });
+    await this.turnLedger.wait(() => current() && this.turnLedger.inventory?.size === 0
+      && [...this.turnLedger.tasks.values()].every(task => task.terminal)
+      && !state.adapter.admittedWork && !this.turnLedger.active && !this.isProcessing
+      && !this.pendingApprovals.size && !this.pendingControlRequests.size, 25_000, 'Native background drain');
+    if (!current()) throw new Error('Claude handoff host changed.');
+    // No signals, process-tree stop or timeout escalation: timeout retains the fence.
+    const exit = new Promise<void>((resolve, reject) => {
+      const closed = (code: number | null, signal: NodeJS.Signals | null) => {
+        clearTimeout(timer);
+        if (code === 0 && !signal && this.stopEpoch === state.epoch) resolve();
+        else reject(new Error('Claude orderly exit was not confirmed.'));
+      };
+      const timer = setTimeout(() => { child.removeListener('close', closed); reject(new Error('Claude orderly exit remains unconfirmed; ownership retained.')); }, 20_000);
+      child.once('close', closed);
+    });
+    state.endRequested = true;
+    child.stdin!.end();
+    await exit;
   }
 
   private sessionSchedules?: ClaudeSessionSchedules;
@@ -545,13 +705,14 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
         } else await this.listModels();
         return this.execute(prompt, { nativeScheduleManagement: true, nativeScheduleCurrent: current });
       },
-      wake: () => { void this.processQueue(); },
+      wake: () => { this.turnLedger.changed(); void this.processQueue(); },
     });
   }
 
   async withNativeScheduleOperation<T>(id: string, current: () => boolean, run: () => Promise<T>, inTurn: boolean): Promise<T> {
-    if (this.retainedAbort || this.delegationWorker || this.isDestroyed || this.isStopping || this.sandbox.isRestricted()) throw new Error('Native schedule owner or sandbox is unavailable.');
+    if (this.modelChange || this.retainedAbort || this.delegationWorker || this.isDestroyed || this.isStopping || this.sandbox.isRestricted()) throw new Error('Native schedule owner or sandbox is unavailable.');
     if (!inTurn) await this.listModels();
+    if (this.modelChange) throw new Error('Native model change is pending or unconfirmed.');
     if (!this.scheduleHooksReady) throw new Error('Native scheduling hooks are not initialized.');
     return this.schedules().inToolOperation(id, current, run, inTurn);
   }
@@ -573,11 +734,13 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
 
   nativeScheduleAction(id: string) { return this.sessionSchedules?.action(id); }
   async createNativeSchedule(input: NativeScheduleInput, onEvent: (event: NativeScheduleEvent) => void, isOwnerCurrent?: () => boolean): Promise<NativeScheduleHandle> {
-    if (this.delegationWorker || this.isDestroyed || this.isStopping || this.sandbox.isRestricted()
+    if (this.scheduleRestart || this.modelChange || this.delegationWorker || this.isDestroyed || this.isStopping || this.sandbox.isRestricted()
       || input.cwd !== this.currentWorkingDirectory) throw new Error('Native schedule context or sandbox is unavailable.');
     if (!this.scheduleHooksReady) throw new Error('Native scheduling hooks are not initialized.');
     const timezone = await this.readNativeScheduleTimezone();
-    return this.schedules().create(input, onEvent, isOwnerCurrent, timezone);
+    if (this.modelChange) throw new Error('Native model change is pending or unconfirmed.');
+    if (input.recovery && !this.turnLedger.supported(this.claudeProcess?.pid)) throw new Error('Claude recovery protocol is unsupported.');
+    return this.recoverableScheduleHandle(await this.schedules().create(input, onEvent, isOwnerCurrent, timezone), input);
   }
 
   /** Inspect only the effective TZ; never log, retain, or expose settings to a model. */
@@ -636,8 +799,11 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
    */
   hasUncertainShutdown(): boolean { return this.shutdownUncertain || this.isStopping || !!this.stopOperation; }
 
-  isBusy(): boolean {
-    if (this.retainedAbort || this.abortOperation || this.hasUncertainShutdown() || this.scheduleCleanupHost) return true;
+  isBusy(): boolean { return !!this.modelChange || this.isWorkBusy(); }
+
+  private isWorkBusy(): boolean {
+    if (this.scheduleRestoring || this.retainedAbort || this.abortOperation || this.hasUncertainShutdown() || this.scheduleCleanupHost
+      || this.scheduleRestart && this.claudeProcess === this.scheduleRestart.child) return true;
     if (this.sessionSchedules?.busy) return true;
     return this.isProcessing || this.isStarting || this.commandQueue.length > 0;
   }
@@ -914,8 +1080,11 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       // Use 'close' event (fires after all I/O streams are closed, i.e. after all stdout
       // data events have been processed) instead of 'exit' for command completion logic.
       child.on('close', (code, signal) => {
+        const restart = this.scheduleRestart;
+        const released = restart?.child === child && restart.endRequested && restart.epoch === this.stopEpoch && code === 0 && !signal;
         if (this.claudeProcess === child) {
-          this.sessionSchedules?.processClosed();
+          if (restart?.child === child) restart.exit = { code, signal };
+          this.sessionSchedules?.processClosed(!!released);
           this.sessionSchedules = undefined;
           this.scheduleHooksReady = false;
         }
@@ -923,12 +1092,14 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
         flushStderr();
         this.clearApprovals('Claude process exited');
         this.rejectPendingControlRequests('Claude process exited before control response');
+        this.modelChange = undefined;
+        this.acknowledgedModel = undefined;
         this.clearCatalogCache();
         this.claudeProcess = null;
         this.turnLedger.retire();
 
         // Check if this was an intentional stop (abort/reset)
-        const wasIntentionalStop = this.isStopping;
+        const wasIntentionalStop = this.isStopping || !!released;
         this.isStopping = false; // Reset the flag
 
         // Reject current command if any (only for unexpected exits)
@@ -1109,7 +1280,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       try { child.stdin?.end(); } catch { child.kill('SIGTERM'); }
     });
 
-    if (this.claudeProcess === child) { this.claudeProcess = null; this.turnLedger.retire(); }
+    if (this.claudeProcess === child) { this.claudeProcess = null; this.turnLedger.retire(); this.modelChange = undefined; this.acknowledgedModel = undefined; }
     this.isStopping = false;
     console.log('[ClaudePersistent] Process stopped');
   }
@@ -1469,7 +1640,9 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       if (Buffer.byteLength(JSON.stringify(response ?? {}), 'utf8') > 1024 * 1024) { pending.reject(new Error('Claude control response exceeds the supported size')); return; }
       pending.resolve(response ?? {});
     } else {
-      pending.reject(new Error(error || `Claude control request failed with status: ${subtype}`));
+      pending.reject(Object.assign(new Error(error || `Claude control request failed with status: ${subtype}`), {
+        nativeCode: message.response.error_code, nativeModel: message.response.model,
+      }));
     }
   }
 
@@ -1590,7 +1763,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
 
         case 'system':
           // System messages (e.g., init)
-          if (message.subtype === 'init' && typeof message.model === 'string' && message.model.trim()) {
+          if (message.subtype === 'init' && !this.acknowledgedModel && typeof message.model === 'string' && message.model.trim()) {
             this.reportedModel = message.model;
           }
           if (message.subtype === 'init' && message.session_id) {
@@ -1684,7 +1857,8 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
           break;
 
         case 'assistant':
-          if (!message.parent_tool_use_id && typeof message.message?.model === 'string' && message.message.model.trim()) {
+          if (!message.parent_tool_use_id && typeof message.message?.model === 'string' && message.message.model.trim()
+            && (!this.acknowledgedModel || (this.isProcessing && this.turnLedger.foreground !== this.modelSelectionForeground))) {
             this.reportedModel = message.message.model;
           }
           // Assistant messages contain the actual response content
@@ -2117,7 +2291,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
    */
   private async processQueue(): Promise<void> {
     const cleanup = this.cleanupAdmission() && this.commandQueue[0]?.options.nativeScheduleManagement;
-    if (this.isDestroyed || ((this.abortOperation || this.retainedAbort) && !cleanup) || this.hasUncertainShutdown() || this.isProcessing || this.isStarting || this.sessionSchedules?.busy || this.commandQueue.length === 0) {
+    if (this.isDestroyed || this.modelChange || ((this.abortOperation || this.retainedAbort) && !cleanup) || this.hasUncertainShutdown() || this.isProcessing || this.isStarting || this.sessionSchedules?.busy || this.commandQueue.length === 0) {
       return;
     }
     if (this.turnLedger.supported(this.claudeProcess?.pid) && this.turnLedger.foreground
@@ -2171,7 +2345,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
         return;
       } finally { this.isStarting = false; }
     }
-    if (epoch !== this.commandEpoch || ((this.abortOperation || this.retainedAbort) && !cleanup) || this.hasUncertainShutdown() || this.sessionSchedules?.busy) return;
+    if (epoch !== this.commandEpoch || this.modelChange || ((this.abortOperation || this.retainedAbort) && !cleanup) || this.hasUncertainShutdown() || this.sessionSchedules?.busy) return;
     const command = this.commandQueue.shift();
     if (!command) {
       return;
@@ -2296,6 +2470,8 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     options: PersistentClaudeOptions = {}
   ): Promise<PersistentClaudeResult> {
     if (this.isDestroyed) return { success: false, error: 'Executor has been destroyed' };
+    if ((this.scheduleRestart || this.scheduleRestoring) && !(options.nativeScheduleManagement && options.nativeScheduleCurrent?.())) return { success: false, error: 'Native schedule handoff or restoration is pending.' };
+    if (this.modelChange) return { success: false, error: 'Native model change is pending or unconfirmed. Retry /model after its reply, or use /clear (session-only schedules will be lost).' };
     if (((this.abortOperation || this.retainedAbort) && !(this.cleanupAdmission() && options.nativeScheduleManagement && options.nativeScheduleCurrent?.()))
       || this.hasUncertainShutdown() || (this.scheduleCleanupHost && !options.nativeScheduleManagement)) {
       return { success: false, error: 'Native cleanup is still pending. Retry after cleanup.' };
@@ -2334,6 +2510,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
   }
 
   private async abortCurrent(): Promise<boolean> {
+    if (this.modelChange) throw new Error('Native model change is pending or unconfirmed. /abort cannot cancel a settings request; wait for its reply or explicitly /clear (session-only schedules will be lost).');
     if (this.retainedAbort || (this.preservesProcessOnAbort() && (this.isProcessing || this.isWaitingInput() || this.sessionSchedules?.hasPendingMutation))) {
       return this.interruptForeground();
     }
@@ -2513,6 +2690,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     this.resetCurrentCommand(); this.isProcessing = false;
     this.currentTaskId = null; this.currentTaskStartTime = 0;
     await this.stopProcess(); this.retainedAbort = undefined; this.shutdownUncertain = false;
+    this.scheduleRestart = undefined; this.scheduleRestoring = undefined;
   }
 
   /**
@@ -2524,6 +2702,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
    * prompts interrupted during startup are not replayed into the fresh context.
    */
   resetContext(): void {
+    this.scheduleRestart = undefined; this.scheduleRestoring = undefined;
     this.cancelInputWaiters();
     this.nativeCreationEpoch++;
     console.log('[ClaudePersistent] Resetting session context');
@@ -2546,53 +2725,120 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     );
   }
 
-  /**
-   * Switch the model for future commands.
-   * Restarts the process if running, preserving the session via --resume.
-   * Rejects known incompatible effort rather than silently changing a second preference.
-   * Retains a deliberate text-argument full-model path if not found in catalog.
-   */
+  /** Switch only the session selection. Never recycle a live host to change a model. */
   async setModel(model: string, _onStream?: (chunk: string) => void): Promise<PersistentClaudeResult> {
-    if (this.isDestroyed) {
-      return { success: false, error: 'Executor has been destroyed' };
-    }
-    if (this.isBusy()) {
-      return { success: false, error: 'Cannot change model while Claude is busy' };
-    }
-
-    if (this.effort && !this.cachedRawEntries) {
-      try { await this.listModels(); } catch { return { success: false, error: 'Cannot validate the saved reasoning effort. Reset /effort auto before changing models.' }; }
-    }
-    let matchedEntry: ClaudeControlModelEntry | undefined;
-    if (this.cachedRawEntries) {
-      matchedEntry = this.cachedRawEntries.find(
-        e => e.value === model || (e.resolvedModel !== undefined && e.resolvedModel === model),
-      );
-    }
-
-    if (this.effort && matchedEntry) {
-      if (!matchedEntry.supportsEffort || !matchedEntry.supportedEffortLevels?.includes(this.effort)) {
-        return { success: false, error: 'The saved reasoning effort is incompatible with this model. Reset /effort auto before changing models.' };
-      }
-    }
-
-    await this.stopProcess();
-    this.model = model;
-    this.reportedModel = undefined;
-    return {
-      success: true,
-      output: `Model set to ${this.model}.`,
-    };
+    return this.changeModel(model);
   }
 
   async clearModel(): Promise<void> {
-    if (this.isDestroyed) return;
-    if (this.isBusy()) {
-      throw new Error('Cannot clear model while Claude is busy');
+    const result = await this.changeModel(undefined);
+    if (!result.success) throw new Error(result.error);
+  }
+
+  private async changeModel(model: string | undefined): Promise<PersistentClaudeResult> {
+    const failure = (error: string): PersistentClaudeResult => ({ success: false, error });
+    if (this.isDestroyed) return failure('Executor has been destroyed');
+    if (model !== undefined && (!model.trim() || model.length > 512 || /[\x00-\x1f\x7f]/.test(model))) return failure('Invalid model identifier.');
+    if (this.isWorkBusy() || (this.modelChange && !this.modelChange.retryable) || this.sessionSchedules?.hasPendingMutation) {
+      return failure('Cannot change model while Claude work or a model change is pending.');
     }
-    this.model = undefined;
+    const validateEffort = (): string | undefined => {
+      if (!this.effort) return;
+      const entry = this.cachedRawEntries?.find(e => e.value === (model ?? 'default') || (model !== undefined && e.resolvedModel === model));
+      if (!entry) return 'Cannot validate the saved reasoning effort. Reset /effort auto before changing models.';
+      if (!entry.supportsEffort || !entry.supportedEffortLevels?.includes(this.effort)) {
+        return 'The saved reasoning effort is incompatible with this model. Reset /effort auto before changing models.';
+      }
+    };
+    const child = this.claudeProcess;
+    if (!child) {
+      // Cold preferences never start a model process just to validate or change a setting.
+      const error = validateEffort();
+      if (error) return failure(error);
+      this.model = model; this.reportedModel = undefined; this.acknowledgedModel = undefined;
+      return { success: true, output: model === undefined ? 'Model restored to default.' : `Model set to ${model}.` };
+    }
+    const previous = this.modelChange;
+    const operation = { child, epoch: this.stopEpoch, session: this.sessionId, retryable: false };
+    this.modelChange = operation;
+    const current = (initialized = true) => this.modelChange === operation && this.claudeProcess === child
+      && this.stopEpoch === operation.epoch && this.sessionId === operation.session && !this.turnLedger.invalid
+      && (!initialized || (this.turnLedger.pid === child.pid && this.turnLedger.version === '2.1.311'))
+      && (!this.turnLedger.session || this.turnLedger.session === operation.session) && !this.isDestroyed && !this.hasUncertainShutdown();
+    try {
+      await this.listModels();
+      if (!current(false)) throw new Error('Native model host changed before the request.');
+      // The public SDK supports set_model, but receipt/error semantics below have
+      // only been inspected for this build. No process-stop fallback on other hosts.
+      if (process.platform !== 'linux' || process.arch !== 'x64' || this.turnLedger.version !== '2.1.311'
+        || !child.pid || this.turnLedger.pid !== child.pid || !child.stdin?.writable || child.killed) {
+        throw new Error('In-process model changes require the inspected Linux x64 Claude 2.1.311 host. The current host and schedules were retained.');
+      }
+      const error = validateEffort();
+      if (error) throw new Error(error);
+    } catch (error) {
+      if (this.modelChange === operation) this.modelChange = previous;
+      return failure(error instanceof Error ? error.message : 'Cannot prepare native model change.');
+    }
+
+    return new Promise(resolve => {
+      const requestId = `model-${randomUUID()}`;
+      let returned = false;
+      const finish = (result: PersistentClaudeResult) => { if (!returned) { returned = true; resolve(result); } };
+      const uncertain = (reason: string, retryable = false) => {
+        if (this.modelChange === operation) operation.retryable = retryable;
+        finish(failure(`${reason} Model selection is unconfirmed; no preference was saved. Native jobs were not stopped. Wait for the pending reply or retry /model after a terminal error; /clear is destructive recovery and loses session-only schedules.`));
+      };
+      const validModel = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0
+        && value.length <= 512 && !/[\x00-\x1f\x7f]/.test(value);
+      // Keep the correlated receiver after the user-facing deadline. A late ACK
+      // can settle admission, but must never save a preference or emit success.
+      const timer = setTimeout(() => uncertain('Native model change timed out after 10000ms.'), 10_000);
+      this.pendingControlRequests.set(requestId, {
+        timer,
+        resolve: response => {
+          if (!current()) { uncertain('Native model host changed before acknowledgement.'); return; }
+          const selected = (response as Record<string, unknown>)?.model;
+          if (!validModel(selected)) { uncertain('Native model acknowledgement omitted a valid selection.', true); return; }
+          this.recordModelSelection(selected);
+          if (!returned) this.model = model;
+          this.modelChange = undefined;
+          finish({ success: true, output: model === undefined ? 'Model restored to default.' : `Model set to ${model}.` });
+          void this.processQueue();
+        },
+        reject: error => {
+          if (!current()) { uncertain('Native model host changed before acknowledgement.'); return; }
+          const { nativeCode, nativeModel } = error as Error & { nativeCode?: string; nativeModel?: unknown };
+          // A terminal response may report a changed selection even on failure.
+          // verdict_pending is explicitly not a refusal and may still apply later.
+          if (nativeCode !== 'verdict_pending' && validModel(nativeModel)) {
+            this.recordModelSelection(nativeModel);
+          }
+          const refused = ['invalid_request', 'catalog_unknown', 'not_found', 'restricted_by_org', 'unavailable_for_account',
+            'not_offered', 'alias_1m_disabled', 'alias_1m_unsupported', 'blocked_by_hook', 'check_failed',
+            'check_rejected', 'credits_required', 'rate_limit', 'auth_failed', 'model_not_current'].includes(nativeCode ?? '');
+          if (refused && validModel(nativeModel)) {
+            this.modelChange = undefined;
+            finish(failure(`Native model change refused (${nativeCode}); no preference was saved.`));
+            void this.processQueue();
+          } else uncertain('Native model change did not return a confirmed outcome.', nativeCode === 'internal_error');
+        },
+      });
+      try {
+        child.stdin!.write(JSON.stringify({ type: 'control_request', request_id: requestId,
+          request: { subtype: 'set_model', ...(model === undefined ? {} : { model }) } }) + '\n', error => {
+          if (error && this.pendingControlRequests.has(requestId)) uncertain('Native model request write failed.');
+        });
+      } catch { uncertain('Native model request write failed.'); }
+    });
+  }
+
+  private recordModelSelection(model: string): void {
+    this.acknowledgedModel = model;
+    this.modelSelectionForeground = this.turnLedger.foreground;
+    // Old in-flight responses cannot shadow a newly acknowledged session selection.
+    // A later foreground can report the actual served model (including fallback).
     this.reportedModel = undefined;
-    await this.stopProcess();
   }
 
   /**
@@ -2605,7 +2851,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     }
 
     if (this.cachedModelCatalog) {
-      return parseClaudeModelsCatalog(this.cachedRawEntries, this.reportedModel || this.model).models;
+      return parseClaudeModelsCatalog(this.cachedRawEntries, this.reportedModel || this.acknowledgedModel || this.model).models;
     }
 
     if (this.catalogInitPromise) {
@@ -2666,7 +2912,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
             this.turnLedger.pid = typeof rawResponse.pid === 'number' ? rawResponse.pid : undefined;
             const { models, rawEntries } = parseClaudeModelsCatalog(
               rawResponse.models,
-              this.reportedModel || this.model,
+              this.reportedModel || this.acknowledgedModel || this.model,
             );
             if (scheduleHooks && this.sessionId && this.delegation?.groups?.includes('scheduling')) {
               await this.readNativeScheduleTimezone();
@@ -2736,7 +2982,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       };
     }
 
-    const activeModel = this.reportedModel || this.model;
+    const activeModel = this.reportedModel || this.acknowledgedModel || this.model;
     return resolveClaudeEfforts(this.cachedRawEntries, activeModel, this.effort);
   }
 
@@ -2753,6 +2999,9 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       return { success: false, error: 'Cannot change reasoning effort while Claude is busy' };
     }
 
+    if (this.sessionSchedules?.hasJobs || this.sessionSchedules?.hasPendingMutation) {
+      return { success: false, error: 'Reasoning effort changes require a process restart and are unavailable while native schedules exist. Cancel schedules explicitly first; they will not be stopped to change a preference.' };
+    }
     const normalized = effort.trim().toLowerCase();
     if (normalized === 'auto' || normalized === '') {
       await this.stopProcess();
@@ -2788,6 +3037,10 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       };
     }
 
+    // Catalog lookup yields: a schedule or settings request may have arrived.
+    if (this.isBusy() || this.sessionSchedules?.hasJobs || this.sessionSchedules?.hasPendingMutation) {
+      return { success: false, error: 'Claude work or native schedules arrived while checking effort. Retry after explicitly retiring schedules.' };
+    }
     await this.stopProcess();
     this.effort = match.value;
     return {
@@ -2802,6 +3055,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
    * Returns a promise that resolves when compaction is complete.
    */
   compact(onStream?: (chunk: string) => void): Promise<PersistentClaudeResult> {
+    if (this.modelChange) return Promise.resolve({ success: false, error: 'Native model change is pending or unconfirmed.' });
     if (this.retainedAbort || this.abortOperation) return Promise.resolve({ success: false, error: 'Native cancellation cleanup is pending.' });
     console.log('[ClaudePersistent] Sending /compact slash command');
     return new Promise((resolve, reject) => {

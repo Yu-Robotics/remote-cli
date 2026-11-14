@@ -28,7 +28,7 @@ export interface SettingsDependencies {
   state(threadId: string): SettingsState | undefined;
   backends(threadId?: string, kind?: SettingsKind): Promise<SettingsBackendInfo[]>;
   catalog(threadId: string, backend: SettingsBackend, kind: 'model' | 'effort'): Promise<SettingsCatalog>;
-  busy(threadId: string, exceptRequest?: string, includeQueue?: boolean): boolean;
+  busy(threadId: string, exceptRequest?: string, includeQueue?: boolean, setting?: SettingsMenu['kind']): boolean;
   threads(): string[];
   exclusive<T>(target: string, body: () => Promise<T>): Promise<T>;
   backend(threadId: string, backend: SettingsBackend, scope: SettingsScope, followGlobal: boolean): Promise<ExecuteResult>;
@@ -90,7 +90,7 @@ export class SettingsService {
     try {
       const backends = await this.dependencies.backends(threadId, kind);
       const installed = backends.find(entry => entry.value === backend)?.installed === true;
-      const busy = this.dependencies.busy(threadId, requestId, kind !== 'backend');
+      const busy = this.dependencies.busy(threadId, requestId, kind !== 'backend', kind);
       let catalog: SettingsCatalog = { choices: [], effectiveSource: 'unknown', supportsReset: false };
       if (kind === 'backend') {
         catalog = { choices: backends.map(entry => ({ value: entry.value, label: entry.label, disabled: !entry.installed, reason: entry.reason })),
@@ -194,10 +194,10 @@ export class SettingsService {
         const result = await this.dependencies.exclusive(scope === 'all' ? '*' : menu.threadId, async () => {
           this.validate(request);
           const affected = scope === 'all' ? this.dependencies.threads() : [menu.threadId];
-          if (affected.some(id => this.dependencies.busy(id, undefined, menu.kind !== 'backend'))) throw new SettingsValidationError('An affected thread is busy. Retry when its work is finished.');
+          if (affected.some(id => this.dependencies.busy(id, undefined, menu.kind !== 'backend', menu.kind))) throw new SettingsValidationError('An affected thread is busy. Retry when its work is finished.');
           const installed = await this.dependencies.backends(menu.threadId, menu.kind);
           this.validate(request);
-          if (affected.some(id => this.dependencies.busy(id, undefined, menu.kind !== 'backend'))) throw new SettingsValidationError('An affected thread became busy. No setting was applied.');
+          if (affected.some(id => this.dependencies.busy(id, undefined, menu.kind !== 'backend', menu.kind))) throw new SettingsValidationError('An affected thread became busy. No setting was applied.');
           const backend = menu.kind === 'backend' && request.operation === 'apply' ? request.value as SettingsBackend : menu.targetBackend;
           if (menu.kind !== 'delegation' && request.operation !== 'follow_global' && !installed.some(entry => entry.value === backend && entry.installed)) throw new SettingsValidationError('This backend is no longer available.');
           try {

@@ -70,6 +70,12 @@ export class SessionScheduleClient {
       });
     };
     const handle: NativeScheduleHandle = { nativeId: input.id, cancellationKeepsRunning: true, cancel, stop: cancel,
+      releaseForRestart: async () => {
+        if (this.closed) throw new Error('Native host exited before schedule handoff.');
+        const receipt = await this.request(sessionId, 'release', { id: input.id });
+        if (receipt?.released !== true || receipt.sessionId !== sessionId || job.running.size) throw new Error('Native drain is unconfirmed.');
+        return { nativeDefinitionAbsent: true as const };
+      },
       list: async () => !job.cancelled && !this.closed && (await this.request(sessionId, 'list', { id: input.id })).present === true };
     try {
       const receipt = await this.request(sessionId, 'create', { id: input.id, rule: input.rule, prompt: input.prompt });

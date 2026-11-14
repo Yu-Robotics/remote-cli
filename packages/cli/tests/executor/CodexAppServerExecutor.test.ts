@@ -1452,6 +1452,7 @@ describe('CodexAppServerExecutor', () => {
       const queue = [command];
       const admission = {
         settingsAdmission: { isBlocked: () => false },
+        scheduleRecoveryThreads: new Set<string>(),
         threadPool: pool,
         pausedQueues: new Set<string>(),
         abortOperations: new Map(),

@@ -22,7 +22,7 @@ export const NATIVE_SCHEDULE_CAPABILITIES = {
   },
   dsh: {
     label: 'DSH', supported: true,
-    detail: 'Native scheduling in the foreground conversation through supported host CRUD and ACP extensions. Jobs stop on process recycle; native conversation history resumes through ordinary DSH session loading.',
+    detail: 'Native scheduling in the foreground conversation through supported host CRUD and ACP extensions. Eligible new jobs recover in the original session after confirmed orderly shutdown or upgrade. Dirty crashes and uncertain native work remain blocked.',
   },
   kimi: {
     label: 'Kimi', supported: false,
@@ -68,6 +68,7 @@ export const SCHEDULE_CAPABILITIES = [
   '',
   'Claude and DSH tasks share their original native conversation and later chat messages. Separate schedules in that thread share context; no transcript copy is made.',
   'The native backend owns timing. No Router timer or periodic model polling is used.',
-  'Keep the CLI running. Restart reports interruption instead of recreating tasks. Claude jobs are session-only; DSH uses isolated native storage that is never automatically reopened.',
+  'Keep the CLI running for native timing. Supported Claude 2.1.311 Linux x64 and DSH jobs recover after verified orderly handoff in the original session. Dirty crashes remain unsupported.',
+  'Restart recovery is a separate provider capability. Eligible waiting jobs permit verified handoff before automatic upgrades. Claude may skip fired but not-yet-admitted occurrences; admitted execution and background work must drain. DSH drains queued work. Running or unconfirmed work still blocks upgrades. Expired one-shots are not run late and missed cron firings are not replayed.',
   'Timing is approximate and recurring Claude jobs expire after seven days. Use an explicit IANA timezone for recurring cron.',
 ].join('\n');

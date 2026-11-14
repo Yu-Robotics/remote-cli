@@ -216,7 +216,7 @@ export class MessageHandler {
     threadName: threadId => this.threadManager.getThread(threadId)?.name,
     // Queued or pending work counts as busy: a confirmation must never redirect it into another session.
     isBusy: threadId => this.threadPool.isThreadBusy(threadId) || this.hasThreadQueueState(threadId)
-      || this.abortOperations.has(threadId) || this.isDestroyed || this.automaticUpdateInProgress
+      || this.abortOperations.has(threadId) || this.scheduleRecoveryThreads.has(threadId) || this.isDestroyed || this.automaticUpdateInProgress
       || this.delegation.hasActiveTasks(threadId) || this.settingsAdmission.hasCommand(threadId),
     setBusy: (threadId, busy) => {
       if (busy) {
@@ -241,6 +241,8 @@ export class MessageHandler {
   private readonly abortOperations = new Map<string, Promise<void>>();
   private readonly pendingGoalActivations = new Map<string, { cancelled: boolean }>();
   private automaticUpdateInProgress = false;
+  private automaticUpdateRecovering = false;
+  private automaticUpdateRecoveryPending = false;
   private approvalCardsSupported = false;
   private streamingContextSupported = false;
   private delegationProgressSupported = false;
@@ -274,6 +276,8 @@ export class MessageHandler {
   private readonly scheduleCards: ScheduleCardService;
   private schedules?: ScheduleService;
   private scheduleInitialization?: Promise<ScheduleService>;
+  private scheduleRecoveryPending = false;
+  private scheduleRecoveryThreads = new Set<string>();
   private scheduleDelivery?: ScheduleDeliveryClient;
   private readonly scheduleOwners = new Map<string, ScheduleOwner>();
   private readonly scheduleManagement = new Set<string>();
@@ -302,7 +306,7 @@ export class MessageHandler {
       cancel: (owner, id) => this.schedules!.cancel(owner, id),
       exclusive: async (owner, body) => {
         if (!this.schedules || this.isDestroyed || this.automaticUpdateInProgress
-          || this.scheduleManagement.has(owner.threadId)) throw new Error('Schedule controls are busy.');
+          || this.scheduleRecoveryThreads.has(owner.threadId) || this.scheduleManagement.has(owner.threadId)) throw new Error('Schedule controls are busy.');
         this.scheduleManagement.add(owner.threadId);
         try {
           const executor = this.threadPool.getExecutor(owner.threadId);
@@ -350,7 +354,7 @@ export class MessageHandler {
         const config = this.executorConfiguration();
         return this.settingsCatalogReader.read(config, thread, this.threadPool.getBackendKey(id), target, kind, this.modelSpeedSettingsSupported);
       },
-      busy: (id, except, queue = true) => this.settingsBusy(id, except, queue),
+      busy: (id, except, queue = true, setting) => this.settingsBusy(id, except, queue, setting),
       threads: () => this.threadManager.listThreads().map(thread => thread.id),
       exclusive: async (target, body) => {
         try { return await this.settingsAdmission.mutation(target, body); }
@@ -563,6 +567,8 @@ export class MessageHandler {
     const hasRunningThread = this.threadPool.getSummaries().some((thread) => thread.status === 'running');
     if (
       this.automaticUpdateInProgress
+      || this.isDestroyed
+      || this.scheduleRecoveryPending
       || this.wsClient.hasPendingTaskResults()
       || hasRunningThread
       || hasQueuedCommands
@@ -570,7 +576,7 @@ export class MessageHandler {
       || this.pendingReplaces.size > 0
       || this.activeThreadOperations.size > 0
       || this.abortOperations.size > 0
-      || this.scheduleManagement.size > 0 || this.schedules?.hasActiveSchedules()
+      || this.scheduleManagement.size > 0 || this.schedules?.hasActiveSchedules() && !this.schedules.canSuspendForRestart()
       || this.threadManager.listThreads().some(thread => this.settingsAdmission.isBlocked(thread.id))
     ) {
       return false;
@@ -579,8 +585,39 @@ export class MessageHandler {
     return true;
   }
 
-  endAutomaticUpdate(): void {
-    this.automaticUpdateInProgress = false;
+  async prepareAutomaticUpdate(): Promise<void> {
+    if (!this.automaticUpdateInProgress || this.isDestroyed) throw new Error('Automatic update admission expired.');
+    if (this.schedules?.hasActiveSchedules()) await this.schedules.suspendForRestart();
+    if (this.wsClient.hasPendingTaskResults()) throw new Error('Result delivery remains pending.');
+  }
+
+  async endAutomaticUpdate(): Promise<void> {
+    if (this.schedules?.hasUnresolvedHandoff()) throw new Error(
+      'Native restart handoff remains unresolved; update admission is retained.');
+    if (!this.schedules?.hasPendingRecovery()) {
+      if (this.schedules?.hasUnresolvedRecovery()) throw new Error('Native recovery remains blocked; update admission is retained.');
+      // Terminal-only handoffs still own the predecessor's local admission fence.
+      // No job needs recreation, but the shared recovery finalizer must release it.
+      if (this.schedules) {
+        this.automaticUpdateRecovering = true;
+        try { await this.schedules.recover(); }
+        finally { this.automaticUpdateRecovering = false; }
+      }
+      this.automaticUpdateInProgress = false; this.automaticUpdateRecoveryPending = false; return;
+    }
+    if (this.isDestroyed) throw new Error('Shutdown already began; native schedules require startup recovery.');
+    // Only finalization authorizes restoration. Reconnect during installation must
+    // never restart native timing under the still-active installer.
+    this.automaticUpdateRecoveryPending = true;
+    this.automaticUpdateRecovering = true;
+    try {
+      await this.schedules.recover();
+      if (this.schedules.hasUnresolvedRecovery()) {
+        throw new Error('Native schedule restoration remains unresolved; update admission is retained.');
+      }
+      this.automaticUpdateInProgress = false;
+      this.automaticUpdateRecoveryPending = false;
+    } finally { this.automaticUpdateRecovering = false; }
   }
 
   /**
@@ -589,6 +626,21 @@ export class MessageHandler {
   private async handleCommandMessage(message: IncomingMessage, fileOrder?: number): Promise<void> {
     const threadId = message.threadId ?? this.threadManager.getDefaultThread().id;
     const content = message.content?.trim() ?? '';
+    if (this.automaticUpdateInProgress && content === '/schedule list') {
+      this.messageOpenIds.set(message.messageId, message.openId);
+      await this.handleScheduleCommand(message, threadId);
+      return;
+    }
+    if (this.scheduleRecoveryThreads.has(threadId)
+      || this.scheduleRecoveryThreads.size > 0 && /^\/backend\s/.test(content) && !/\s@$/.test(content)) {
+      this.sendResponse(message.messageId!, threadId, { success: false,
+        error: 'Native schedule recovery is in progress. Retry after reconciliation finishes.' });
+      return;
+    }
+    if (this.scheduleRecoveryPending && /^\/(?:clear|new|backend|cd|thread\s+delete)(?:\s|$)/.test(content)) {
+      this.sendResponse(message.messageId!, threadId, { success: false, error: 'Schedule catalog readiness is unresolved. Retry context changes after recovery or inspect /schedule list.' });
+      return;
+    }
     const clearing = content === '/clear' || content === '/new';
     const management = content === '/abort' || /^\/thread(?:\s+list)?$/.test(content) || /^\/thread\s+new(?:\s|$)/.test(content);
     let admissionCurrent = () => true;
@@ -607,6 +659,10 @@ export class MessageHandler {
       return this.handleAdmittedCommandMessage(message, fileOrder, () => admissionCurrent());
     };
     this.messageOpenIds.set(message.messageId, message.openId);
+    if (isSessionControl(content) && this.automaticUpdateInProgress) {
+      this.sendResponse(message.messageId, threadId, { success: false, error: 'Automatic update handoff is in progress. Retry after it finishes.' });
+      return;
+    }
     if (isSessionControl(content)) {
       if (!this.threadManager.getThread(threadId)) {
         this.sendResponse(message.messageId, undefined, { success: false, error: 'The selected thread no longer exists.' });
@@ -689,6 +745,11 @@ export class MessageHandler {
 
     const resolvedThreadId = thread.id;
 
+    if (this.scheduleRecoveryThreads.has(resolvedThreadId)) {
+      this.sendResponse(messageId, resolvedThreadId, { success: false,
+        error: 'Native schedule recovery is in progress for this thread. Retry after reconciliation finishes.' });
+      return;
+    }
     if (this.automaticUpdateInProgress) {
       this.sendResponse(messageId, resolvedThreadId, {
         success: false,
@@ -892,7 +953,8 @@ export class MessageHandler {
       }
     }
     if (!admissionCurrent()) return;
-    const threadBusy = this.threadPool.isThreadBusy(resolvedThreadId);
+    const threadBusy = /^\/model\s+\S/.test(settingsCommand)
+      ? this.threadPool.isThreadBusy(resolvedThreadId, 'model') : this.threadPool.isThreadBusy(resolvedThreadId);
     const queuedCount = this.threadQueues.get(resolvedThreadId)?.length ?? 0;
     if (!threadBusy && !this.hasThreadQueueState(resolvedThreadId)) this.pausedQueues.delete(resolvedThreadId);
     const queuePaused = this.pausedQueues.has(resolvedThreadId);
@@ -1034,6 +1096,11 @@ export class MessageHandler {
     threadId: string,
     executor: IExecutor | undefined
   ): Promise<void> {
+    if (executor?.hasPendingSettingsChange?.()) {
+      this.sendResponse(messageId, threadId, { success: false,
+        error: 'Native settings change is pending or unconfirmed. Wait for its reply or retry the setting after a terminal error. /clear is destructive recovery and loses session-only schedules.' });
+      return;
+    }
     this.conversationRevisions.set(threadId, (this.conversationRevisions.get(threadId) ?? 0) + 1);
     this.settingsAdmission.cancelRecoverable(threadId);
     this.fileInbox?.cancelThread(threadId);
@@ -1181,7 +1248,8 @@ export class MessageHandler {
 
   private async clearThreadConversation(messageId: string, threadId: string): Promise<void> {
     if (this.abortOperations.has(threadId)) throw new Error('Direct backend abort is still pending; retry /clear after it settles.');
-    const destructiveRecovery = this.threadPool.getExistingExecutor(threadId)?.hasPendingCancellation?.() === true;
+    const existing = this.threadPool.getExistingExecutor(threadId);
+    const destructiveRecovery = existing?.hasPendingCancellation?.() === true || existing?.hasPendingSettingsChange?.() === true;
     if (!destructiveRecovery) await this.assertSchedulesIdle(threadId);
     this.conversationRevisions.set(threadId, (this.conversationRevisions.get(threadId) ?? 0) + 1);
     this.settingsService.invalidate(threadId);
@@ -1783,7 +1851,7 @@ You can also use natural language commands to control Claude Code CLI.`,
 
   private async startNextQueuedCommand(threadId: string): Promise<void> {
     if (this.settingsAdmission.isBlocked(threadId)) return;
-    if (this.threadPool.isThreadBusy(threadId) || this.pausedQueues.has(threadId) || this.abortOperations.has(threadId)) return;
+    if (this.scheduleRecoveryThreads.has(threadId) || this.threadPool.isThreadBusy(threadId) || this.pausedQueues.has(threadId) || this.abortOperations.has(threadId)) return;
     const queue = this.threadQueues.get(threadId);
     const command = queue?.shift();
     if (!command) {
@@ -3442,7 +3510,21 @@ You can also use natural language commands to control Claude Code CLI.`,
     return path.join(directory, 'schedules', namespace);
   }
 
-  /** Binding recovery only reads existing storage; explicit command/tool use initializes it. */
+  /** Fence the updater before connection/version callbacks can race catalog recovery. */
+  async prepareScheduleStartup(): Promise<void> {
+    const directory = this.scheduleDirectory();
+    if (!directory) return;
+    this.scheduleRecoveryPending = true;
+    try { await fs.promises.lstat(path.join(directory, SCHEDULE_CATALOG_FILE)); }
+    catch (error) {
+      if (['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) {
+        this.scheduleRecoveryPending = false; return;
+      }
+      throw error;
+    }
+  }
+
+  /** Binding recovery waits for transport readiness and never creates an absent catalog. */
   private async recoverSchedules(): Promise<void> {
     if (this.isDestroyed || !this.scheduleResultsSupported) return;
     if (!this.scheduleInitialization) {
@@ -3458,8 +3540,15 @@ You can also use natural language commands to control Claude Code CLI.`,
     // A disconnect or shutdown can happen while storage is being checked. Never
     // create a late service/subscription after shutdown has collected its work.
     if (this.isDestroyed || !this.scheduleResultsSupported) return;
+    this.scheduleRecoveryPending = true;
     const service = await this.initializeSchedules();
-    if (!this.isDestroyed && this.scheduleResultsSupported) await service.retryDeliveries();
+    if (!this.isDestroyed && this.scheduleResultsSupported) {
+      if (this.automaticUpdateRecoveryPending && !this.automaticUpdateRecovering) {
+        await this.endAutomaticUpdate();
+      } else await service.recover();
+      await service.retryDeliveries();
+      this.scheduleRecoveryPending = false;
+    }
   }
 
   private initializeSchedules(): Promise<ScheduleService> {
@@ -3470,7 +3559,54 @@ You can also use natural language commands to control Claude Code CLI.`,
       if (!directory) throw new Error('Local schedule storage is unavailable.');
       const service = new ScheduleService({
         directory,
-        provider: { create: (input, onEvent) => {
+        acquireRecovery: record => {
+          if (this.scheduleRecoveryThreads.has(record.threadId)) throw new Error('Recovery thread admission unavailable.');
+          this.scheduleRecoveryThreads.add(record.threadId);
+          return () => { this.scheduleRecoveryThreads.delete(record.threadId); };
+        },
+        canRecover: record => {
+          try {
+            if (this.isDestroyed || this.automaticUpdateInProgress && !this.automaticUpdateRecovering || !this.scheduleResultsSupported || !this.wsClient.isConnected()
+              || this.scheduleGeneration(record.threadId) !== record.generation
+              || this.threadPool.getBackendKey(record.threadId) !== record.backend) return false;
+            const thread = this.threadManager.getThread(record.threadId)!;
+            const configuration = this.executorConfiguration();
+            if (record.execution?.command !== configuration[record.backend]?.command) return false;
+            const cwd = this.directoryGuard.resolveWorkingDirectory(thread.workingDirectory);
+            assertWorkingDirectoryExists(cwd);
+            if (cwd !== record.cwd || this.threadPool.isThreadBusy(record.threadId) && !this.scheduleRecoveryThreads.has(record.threadId)
+              || this.activeThreadOperations.has(record.threadId) || this.scheduleManagement.has(record.threadId)
+              || this.abortOperations.has(record.threadId) || this.coordinatorPreparations.has(record.threadId)
+              || this.settingsAdmission.isBlocked(record.threadId) || this.settingsAdmission.hasCommand(record.threadId)
+              || this.hasThreadQueueState(record.threadId) || this.delegation.hasActiveTasks(record.threadId)) return false;
+            this.scheduleOwners.set(record.threadId, { threadId: record.threadId, openId: record.openId, generation: record.generation });
+            return true;
+          } catch { return false; }
+        },
+        provider: { recoveryFor: input => {
+          if (!input.threadId || this.threadPool.getBackendKey(input.threadId) !== input.backend) return undefined;
+          // Capability lookup never starts native work. Native adapters opt in only
+          // when they implement inventory reconciliation and original-session ownership.
+          const executor = this.threadPool.getExecutor(input.threadId);
+          const capability = executor.nativeScheduleRecovery;
+          if (!capability) return undefined;
+          return { ...capability, reconcile: async (record, context, emit) => {
+            if (!context.isCurrent()) throw new Error('Schedule recovery context changed.');
+            if (executor.configureManagedTools) {
+              const bridge = this.delegationBridges.get(record.threadId) ?? new DelegationBridge();
+              this.delegationBridges.set(record.threadId, bridge);
+              const thread = this.threadManager.getThread(record.threadId)!;
+              const connection = await bridge.start(isDelegationEnabled(thread) ? ['delegation', 'scheduling'] : ['scheduling']);
+              if (!context.isCurrent()) throw new Error('Schedule recovery context changed.');
+              await executor.configureManagedTools(connection);
+            }
+            if (!context.isCurrent()) throw new Error('Schedule recovery context changed.');
+            return capability.reconcile(record, context, event => {
+              emit(event);
+              if (event.type === 'completed') queueMicrotask(() => { void this.startNextQueuedCommand(record.threadId); });
+            });
+          } };
+        }, create: (input, onEvent) => {
           const backend = input.backend === undefined ? 'claude' : input.backend;
           assertNativeScheduleBackend(backend);
           if (!input.threadId) throw new Error('Native scheduling requires the original thread.');
@@ -3556,7 +3692,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       try { return !this.isDestroyed && this.scheduleGeneration(owner.threadId) === owner.generation && (!context || context.current()); }
       catch { return false; }
     };
-    const check = () => { if (!current() || this.automaticUpdateInProgress) throw new Error('Scheduling context changed or client is shutting down/updating.'); };
+    const check = () => { if (!current() || this.automaticUpdateInProgress || this.scheduleRecoveryThreads.has(owner.threadId)) throw new Error('Scheduling context changed or client is shutting down/updating/recovering.'); };
     check();
     if (command.kind === 'list' && this.threadPool.getExistingExecutor(owner.threadId)?.hasPendingCancellation?.()) {
       const service = await this.initializeSchedules(); check();
@@ -3668,7 +3804,9 @@ You can also use natural language commands to control Claude Code CLI.`,
       }
       const owner: ScheduleOwner = { threadId, openId: message.openId, generation: this.scheduleGeneration(threadId) };
       const storedOnly = command.kind === 'list' && this.threadPool.getExistingExecutor(threadId)?.hasPendingCancellation?.();
-      const records = await this.runScheduleOperation(owner, command.kind === 'list' ? { kind: 'list' } : command as ScheduleOperation);
+      const updateSnapshot = this.automaticUpdateInProgress && command.kind === 'list';
+      const records = updateSnapshot ? await this.schedules?.list(owner) ?? []
+        : await this.runScheduleOperation(owner, command.kind === 'list' ? { kind: 'list' } : command as ScheduleOperation);
       const record = records[0];
       let output: string;
       if (command.kind === 'list') output = records.length ? records.map(item =>
@@ -3676,13 +3814,16 @@ You can also use natural language commands to control Claude Code CLI.`,
       ).join('\n\n') : 'No schedules in this thread. Use /schedule for examples.';
       else if (command.kind === 'cancel') output = `Schedule ${record.id}: ${record.state}.`;
       else {
-        const lifecycle = record.backend === 'claude'
-          ? 'Schedules are lost when the native process exits; recurring tasks expire after seven days.'
-          : 'Native job storage is isolated and is never automatically reopened after process exit.';
+        const lifecycle = record.recovery
+          ? `Managed jobs recover automatically after a confirmed orderly restart. Dirty shutdowns remain blocked. ${record.recovery.handoffPolicy === 'skip-unadmitted'
+            ? 'Fired occurrences not yet admitted to execution may be skipped without replay; admitted work must finish.'
+            : 'Queued and executing occurrences must finish before handoff.'}`
+          : 'This host does not support automatic schedule recovery after process exit.';
         output = `Schedule ${record.id}: ${record.state}.\n${record.rule.kind === 'once' ? record.rule.at : `${record.rule.expression} (${record.rule.timezone})`}\n\nRuns in this thread's foreground ${NATIVE_SCHEDULE_CAPABILITIES[record.backend].label} conversation and returns results here. Keep the CLI running; native timing is approximate. ${lifecycle}\nUse /schedule list or /schedule cancel ${record.id}.`;
       }
       if (storedOnly) output = `Native cancellation cleanup is pending. This is the stored catalog, not a fresh native inventory. Retry /abort; /clear stops the host and loses session-only schedules.\n\n${output}`;
-      respond({ success: true, scheduleMenu: menuFor(owner, records), output });
+      if (updateSnapshot) output = `Automatic update handoff: stored catalog only, not fresh native inventory. Unconfirmed work remains fenced; inspect the CLI diagnostic before an explicit service stop/restart.\n\n${output}`;
+      respond({ success: true, scheduleMenu: updateSnapshot ? undefined : menuFor(owner, records), output });
     } catch (error) {
       respond({ success: false, error: error instanceof Error ? error.message : 'Schedule operation failed.' });
     }
@@ -3719,8 +3860,8 @@ You can also use natural language commands to control Claude Code CLI.`,
       revision: createHash('sha256').update(JSON.stringify({ thread: projection(thread), all, config: this.executorConfiguration() })).digest('hex') };
   }
 
-  private settingsBusy(threadId: string, exceptRequest?: string, includeQueue = true): boolean {
-    return this.isDestroyed || this.automaticUpdateInProgress || this.threadPool.isThreadBusy(threadId)
+  private settingsBusy(threadId: string, exceptRequest?: string, includeQueue = true, setting?: SettingsMenu['kind']): boolean {
+    return this.isDestroyed || this.automaticUpdateInProgress || this.scheduleRecoveryThreads.has(threadId) || (setting === 'model' ? this.threadPool.isThreadBusy(threadId, 'model') : this.threadPool.isThreadBusy(threadId))
       || this.delegation.hasActiveTasks(threadId) || this.abortOperations.has(threadId)
       || this.coordinatorPreparations.has(threadId) || this.settingsAdmission.hasCommand(threadId, exceptRequest) || (includeQueue && this.hasThreadQueueState(threadId));
   }
@@ -3991,6 +4132,12 @@ You can also use natural language commands to control Claude Code CLI.`,
    * Destroy handler and all executors
    */
   async destroy(): Promise<void> {
+    // Fence new commands first, but keep result acknowledgements alive while a
+    // waiting schedule races the orderly drain. No foreground work is killed here.
+    if (!this.isDestroyed && this.schedules?.hasActiveSchedules() && this.schedules.canSuspendForRestart()) {
+      this.automaticUpdateInProgress = true;
+      await this.schedules.suspendForRestart();
+    }
     this.directoryBrowser.destroy();
     this.settingsService.destroy();
     this.scheduleCards.destroy();
@@ -4008,6 +4155,9 @@ You can also use natural language commands to control Claude Code CLI.`,
     await this.outputFiles?.destroy();
     this.notificationAdapter.unregister();
     try {
+      // Native recovery handoff must finish before executor destruction can stop
+      // its original host. An uncertain handoff keeps that host owned for retry.
+      await this.scheduleInitialization?.then(service => service.requiresShutdownHandoff() ? service.destroy() : undefined, () => undefined);
       const results = await Promise.allSettled([
         this.scheduleInitialization?.then(service => service.destroy(), () => undefined),
         this.delegation.destroy(),

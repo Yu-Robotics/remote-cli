@@ -75,6 +75,7 @@ vi.mock('../../src/thread/ThreadExecutorPool', () => ({
 vi.mock('../../src/client/MessageHandler', () => ({
   MessageHandler: vi.fn().mockImplementation(() => ({
     handleMessage: vi.fn().mockResolvedValue(undefined),
+    prepareScheduleStartup: vi.fn().mockResolvedValue(undefined),
     reconcilePendingDelegatedWorkers: vi.fn().mockResolvedValue(undefined),
     destroy: vi.fn().mockResolvedValue(undefined),
   })),
@@ -339,7 +340,8 @@ describe('start command', () => {
       expect((await startCommand({ onShutdownReady: register })).success).toBe(true);
       const handler = vi.mocked(MessageHandler).mock.results.at(-1)!.value;
       const maintenance = vi.mocked(MaintenanceClient).mock.results.at(-1)!.value;
-      expect(register.mock.invocationCallOrder[0]).toBeLessThan(handler.reconcilePendingDelegatedWorkers.mock.invocationCallOrder[0]);
+      expect(register.mock.invocationCallOrder[0]).toBeLessThan(handler.prepareScheduleStartup.mock.invocationCallOrder[0]);
+      expect(handler.prepareScheduleStartup.mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(AutomaticUpdater).mock.invocationCallOrder.at(-1)!);
       expect(vi.mocked(AutomaticUpdater).mock.calls.at(-1)![2].beforeRestart).toBe(close);
       await Promise.all([close(), close()]);
       expect(handler.destroy).toHaveBeenCalledTimes(1);

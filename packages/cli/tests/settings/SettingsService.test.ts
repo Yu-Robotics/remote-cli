@@ -250,7 +250,7 @@ describe('immutable settings menus and acknowledged mutations', () => {
     vi.mocked(f.dependencies.busy).mockReturnValue(true);
     const busy = await f.service.open('effort', 'thread-a', 'owner-a', 'codex', 'opening-request');
     expect(busy).toMatchObject({ busy: true, supportsReset: false, choices: [] });
-    expect(f.dependencies.busy).toHaveBeenLastCalledWith('thread-a', 'opening-request', true);
+    expect(f.dependencies.busy).toHaveBeenLastCalledWith('thread-a', 'opening-request', true, 'effort');
     vi.mocked(f.dependencies.busy).mockReturnValue(false);
     expect((await f.service.action(f.action(busy))).error).toContain('busy');
     expect(f.dependencies.catalog).not.toHaveBeenCalled();
@@ -304,12 +304,12 @@ describe('immutable settings menus and acknowledged mutations', () => {
   it('distinguishes queued preference changes from backend queue-clearing semantics', async () => {
     const f = fixture();
     const model = await f.service.open('model', 'thread-a', 'owner-a');
-    expect(f.dependencies.busy).toHaveBeenLastCalledWith('thread-a', undefined, true);
+    expect(f.dependencies.busy).toHaveBeenLastCalledWith('thread-a', undefined, true, 'model');
     await f.service.action(f.action(model));
     const backend = await f.service.open('backend', 'thread-a', 'owner-a');
-    expect(f.dependencies.busy).toHaveBeenLastCalledWith('thread-a', undefined, false);
+    expect(f.dependencies.busy).toHaveBeenLastCalledWith('thread-a', undefined, false, 'backend');
     await f.service.action(f.action(backend, { value: 'agy' }));
-    expect(f.dependencies.busy).toHaveBeenLastCalledWith('thread-a', undefined, false);
+    expect(f.dependencies.busy).toHaveBeenLastCalledWith('thread-a', undefined, false, 'backend');
   });
 
   it('does not claim applied state after a partial failure or disclose backend exception details', async () => {

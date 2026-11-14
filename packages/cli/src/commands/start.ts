@@ -262,6 +262,7 @@ export async function startCommand(
       return { success: false, error: 'Service startup was interrupted by shutdown' };
     };
     if (options.onShutdownReady?.(closeStartedClient) === false) return interrupted();
+    await messageHandler.prepareScheduleStartup();
     await messageHandler.reconcilePendingDelegatedWorkers();
     if (stopping) return interrupted();
     maintenance = new MaintenanceClient(wsClient, config.getConfigDir(), serverUrl, deviceId,

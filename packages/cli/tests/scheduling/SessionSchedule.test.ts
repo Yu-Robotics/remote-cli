@@ -8,10 +8,10 @@ async function fixture() {
   const listeners = new Map<string, Function[]>();
   const input = new PassThrough(), output = new PassThrough();
   const rows: any[] = [], frames: any[] = [];
-  const agents = new Map(['one', 'two'].map(id => [id, { session: { id, header: {} }, cancel: vi.fn(), history: [] as string[] }]));
+  const agents = new Map(['one', 'two'].map(id => [id, { session: { id, header: {} }, whenIdle: vi.fn(async () => {}), cancel: vi.fn(), history: [] as string[] }]));
   const emit = (name: string, ...args: any[]) => { for (const callback of listeners.get(name) ?? []) callback(...args); };
   let count = 0;
-  const ctx = { agents: { get: (id: string) => agents.get(id) }, tools: { guard: vi.fn(() => () => {}) },
+  const ctx = { sessions: { flush: vi.fn(async () => true) }, agents: { get: (id: string) => agents.get(id) }, tools: { guard: vi.fn(() => () => {}) },
     on: (name: string, callback: Function) => { listeners.set(name, [...listeners.get(name) ?? [], callback]); return () => {}; },
     schedule: { catalog: vi.fn(async () => rows),
       create: vi.fn(async (sessionId: string, request: any) => {
@@ -62,6 +62,68 @@ describe('foreground native schedule bridge', () => {
         expect.objectContaining({ kind: 'foregroundEnd', stopReason: 'end_turn' })]);
     } finally { await f.close(); }
   });
+  it('releases future firings, drains a queued reminder and flushes before acknowledging handoff', async () => {
+    const f = await fixture(), events: any[] = [];
+    try {
+      const handle = await f.create('job', 'one', events);
+      let finish!: () => void;
+      f.agents.get('one')!.whenIdle.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve; }));
+      const releasing = handle.releaseForRestart!();
+      await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+      expect(f.ctx.schedule.delete).toHaveBeenCalledWith({ sessionId: 'one', id: handle.nativeId });
+      f.claim('one', 7, [handle.nativeId]); f.finish('one', 7, 'queued result');
+      expect(events.map(event => event.type)).toEqual(['started', 'completed']);
+      expect(f.ctx.sessions.flush).not.toHaveBeenCalled();
+      finish(); await releasing;
+      expect(f.ctx.sessions.flush).toHaveBeenCalledWith(f.agents.get('one')!.session);
+      expect(f.agents.get('one')!.cancel).not.toHaveBeenCalled();
+    } finally { await f.close(); }
+  });
+
+  it.each(['missing-idle', 'missing-flush', 'flush-failed', 'definition-remains', 'unjoined-turn'])(
+    'refuses a clean handoff when native evidence is %s', async fault => {
+      const f = await fixture();
+      try {
+        const handle = await f.create('job');
+        if (fault === 'missing-idle') (f.agents.get('one') as any).whenIdle = undefined;
+        if (fault === 'missing-flush') (f.ctx.sessions as any).flush = undefined;
+        if (fault === 'flush-failed') f.ctx.sessions.flush.mockResolvedValueOnce(false);
+        if (fault === 'definition-remains') f.ctx.schedule.delete.mockImplementationOnce(async ({ id }: any) => ({ id, deleted: true }));
+        if (fault === 'unjoined-turn') f.claim('one', 1, [handle.nativeId]);
+        await expect(handle.releaseForRestart!()).rejects.toThrow('operation failed');
+        expect(f.agents.get('one')!.cancel).not.toHaveBeenCalled();
+      } finally { await f.close(); }
+    });
+
+  it('joins repeated or already-retired release without deleting another session and rejects foreign ownership', async () => {
+    const f = await fixture();
+    try {
+      const job = await f.create('job'), sibling = await f.create('sibling', 'two');
+      await expect((f.client as any).request('two', 'release', { id: 'job' })).rejects.toThrow('operation failed');
+      await job.releaseForRestart!(); await job.releaseForRestart!();
+      expect(await sibling.list()).toBe(true);
+      await job.cancel(); await job.releaseForRestart!();
+      expect(f.agents.get('one')!.whenIdle).toHaveBeenCalledTimes(3);
+      f.ctx.schedule.catalog.mockResolvedValueOnce([{ id: job.nativeId, sessionId: 'one', title: 'job' }]);
+      await expect(job.releaseForRestart!()).rejects.toThrow('operation failed');
+      f.client.close(); await expect(sibling.releaseForRestart!()).rejects.toThrow('exited');
+    } finally { await f.close(); }
+  });
+
+  it('refuses missing agents and subagent origins before native scheduling or host reconfiguration', async () => {
+    const f = await fixture();
+    try {
+      await expect(f.create('missing', 'absent')).rejects.toThrow('operation failed');
+      Object.assign(f.agents.get('one')!.session.header, { origin: 'subagent' });
+      await expect(f.create('child')).rejects.toThrow('operation failed');
+      f.agents.get('one')!.session.header = { parentSession: 'parent' };
+      await expect(f.create('child')).rejects.toThrow('operation failed');
+      const guard = f.ctx.tools.guard.mock.calls[0][0] as any;
+      expect(guard({ name: 'plugin_manager' })).toContain('reconfiguration');
+      expect(f.ctx.schedule.create).not.toHaveBeenCalled();
+    } finally { await f.close(); }
+  });
+
   it('creates during an active foreground turn without another model turn and retains the exact agent across occurrences', async () => {
     const f = await fixture(); const events: any[] = [];
     try {

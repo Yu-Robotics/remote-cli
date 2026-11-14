@@ -427,7 +427,7 @@ describe('ScheduleService', () => {
   });
 
   it.each([
-    '{broken', '{}', '{"version":2,"records":[],"pending":[]}',
+    '{broken', '{}', '{"version":999,"records":[],"pending":[]}',
     '{"version":1,"records":{},"pending":[]}', '{"version":1,"records":[],"pending":[],"__proto__":{}}',
     '{"version":1,"records":[],"pending":[{"id":"bad"}]}',
   ])('preserves malformed persisted bytes without overwriting: %s', async bytes => {

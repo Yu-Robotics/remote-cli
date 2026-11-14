@@ -1001,7 +1001,7 @@ describe('ClaudePersistentExecutor', () => {
   });
 
   describe('setModel()', () => {
-    it('sets model and stops running idle process without injecting slash command', async () => {
+    it('refuses an unsupported live model control without stopping the process', async () => {
       const testExecutor = new ClaudePersistentExecutor(directoryGuard, '~/test-project');
 
       const freshProcess = new EventEmitter() as any;
@@ -1035,14 +1035,16 @@ describe('ClaudePersistentExecutor', () => {
 
       freshProcess.stdin.write.mockClear();
 
+      freshProcess.stdin.write.mockImplementation((line: string) => {
+        const request = JSON.parse(line);
+        queueMicrotask(() => freshProcess.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'control_response',
+          response: { subtype: 'success', request_id: request.request_id, response: { models: [] } } }) + '\n')));
+      });
       const result = await testExecutor.setModel('opus');
-      expect(result.success).toBe(true);
-      expect(result.output).toBe('Model set to opus.');
-
-      // Does NOT write /model to stdin
-      expect(freshProcess.stdin.write).not.toHaveBeenCalled();
-      // Stops the process via stdin.end()
-      expect(freshProcess.stdin.end).toHaveBeenCalled();
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('retained');
+      expect(JSON.parse(freshProcess.stdin.write.mock.calls[0][0]).request.subtype).toBe('initialize');
+      expect(freshProcess.stdin.end).not.toHaveBeenCalled();
 
       await testExecutor.destroy();
     }, 10000);
@@ -1090,7 +1092,7 @@ describe('ClaudePersistentExecutor', () => {
       await testExecutor.destroy();
     }, 10000);
 
-    it('clearModel resets model and stops process', async () => {
+    it('clearModel refuses an unsupported live host without clearing its configured model', async () => {
       const testExecutor = new ClaudePersistentExecutor(directoryGuard, '~/test-project', undefined, 'opus');
 
       const freshProcess = new EventEmitter() as any;
@@ -1121,8 +1123,14 @@ describe('ClaudePersistentExecutor', () => {
       }) + '\n'));
       await execPromise;
 
-      await testExecutor.clearModel();
-      expect(freshProcess.stdin.end).toHaveBeenCalled();
+      freshProcess.stdin.write.mockImplementation((line: string) => {
+        const request = JSON.parse(line);
+        queueMicrotask(() => freshProcess.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'control_response',
+          response: { subtype: 'success', request_id: request.request_id, response: { models: [] } } }) + '\n')));
+      });
+      await expect(testExecutor.clearModel()).rejects.toThrow('retained');
+      expect(freshProcess.stdin.end).not.toHaveBeenCalled();
+      expect(testExecutor.getExecutionMetadata().model).toBe('opus');
       await testExecutor.destroy();
     }, 10000);
 
@@ -1333,23 +1341,11 @@ describe('ClaudePersistentExecutor', () => {
       const effortSet = await testExecutor.setEffort('high');
       expect(effortSet.success).toBe(true);
 
-      // A recycled process must refresh native capabilities rather than reuse
-      // the prior process's catalog.
-      freshProcess.stdin.write.mockImplementation((line: string) => {
-        const control = JSON.parse(line);
-        queueMicrotask(() => freshProcess.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'control_response',
-          response: { subtype: 'success', request_id: control.request_id, response: { models: [
-            { value: 'claude-3-7-sonnet', supportsEffort: true, supportedEffortLevels: ['low', 'high'] },
-            { value: 'claude-3-5-haiku', supportsEffort: false },
-          ] } } }) + '\n')));
-      });
-
       // Switch to haiku which does not support effort
       freshProcess.stdin.write.mockClear();
-      const changingModel = testExecutor.setModel('claude-3-5-haiku');
-      await advanceStartup(freshProcess);
-      const setModelResult = await changingModel;
-      expect(freshProcess.stdin.write).toHaveBeenCalledTimes(1);
+      // Cold selection must not start a host merely to validate saved effort.
+      const setModelResult = await testExecutor.setModel('claude-3-5-haiku');
+      expect(freshProcess.stdin.write).not.toHaveBeenCalled();
       expect(setModelResult.success).toBe(false);
       expect(setModelResult.error).toContain('Reset /effort auto');
       expect(testExecutor.getExecutionMetadata()).toMatchObject({ model: 'claude-3-7-sonnet', reasoningEffort: 'high' });
