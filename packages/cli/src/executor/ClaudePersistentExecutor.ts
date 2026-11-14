@@ -2518,8 +2518,10 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
   /**
    * Reset execution context
    * Clears the session ID to start a fresh conversation on next command.
-   * Does NOT stop the process - the process continues running and will
-   * create a new session automatically when the next command is executed.
+   * Initiates a process stop; this void API is not a shutdown acknowledgement.
+   * Production callers cancel work and await destroy/waitForExit before resetting.
+   * Concurrent execute calls remain fenced until the captured stop settles;
+   * prompts interrupted during startup are not replayed into the fresh context.
    */
   resetContext(): void {
     this.cancelInputWaiters();

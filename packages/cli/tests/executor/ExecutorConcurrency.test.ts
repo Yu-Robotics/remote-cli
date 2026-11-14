@@ -1,25 +1,16 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import * as os from 'os';
+import osDefault, * as os from 'os';
 import * as path from 'path';
 import { AgyExecutor } from '../../src/executor/AgyExecutor';
 import { ClaudePersistentExecutor } from '../../src/executor/ClaudePersistentExecutor';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
-import { ConfigManager } from '../../src/config/ConfigManager';
-import { ThreadManager } from '../../src/thread/ThreadManager';
-import { ThreadExecutorPool } from '../../src/thread/ThreadExecutorPool';
-import { MessageHandler } from '../../src/client/MessageHandler';
+import * as fs from 'node:fs/promises';
 
-// Mock os module
+const fixture = vi.hoisted(() => ({ root: '' }));
 vi.mock('os', async (importOriginal) => {
   const original = await importOriginal<typeof os>();
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const fsSync = require('fs') as typeof import('fs');
-  const realTmpDir = fsSync.realpathSync(original.tmpdir());
-  return {
-    ...original,
-    homedir: () => realTmpDir,
-    tmpdir: () => realTmpDir,
-  };
+  const homedir = () => fixture.root;
+  return { ...original, homedir, default: { ...original, homedir } };
 });
 
 // Prompts received by agy-format user events (recorded by the stdin mock below)
@@ -73,16 +64,26 @@ vi.mock('child_process', () => {
 describe('Executor Concurrency & Rapid Commands', () => {
   let directoryGuard: DirectoryGuard;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
     agyPrompts.length = 0;
     claudeInputs.length = 0;
-    directoryGuard = new DirectoryGuard([os.tmpdir()]);
+    fixture.root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'executor-concurrency-')));
+    vi.stubEnv('HOME', fixture.root);
+    vi.stubEnv('USERPROFILE', fixture.root);
+    expect(os.homedir()).toBe(fixture.root);
+    expect(osDefault.homedir()).toBe(fixture.root);
+    directoryGuard = new DirectoryGuard([fixture.root]);
+  });
+
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    await fs.rm(fixture.root, { recursive: true, force: true });
   });
 
   describe('AgyExecutor', () => {
     it('should queue multiple execute calls sequentially', async () => {
-      const executor = new AgyExecutor(directoryGuard);
+      const executor = new AgyExecutor(directoryGuard, { initialWorkingDirectory: fixture.root });
 
       const p1 = executor.execute('First', {});
       const p2 = executor.execute('Second', {});
@@ -100,7 +101,7 @@ describe('Executor Concurrency & Rapid Commands', () => {
     });
 
     it('should handle resetContext concurrently with execute', async () => {
-      const executor = new AgyExecutor(directoryGuard);
+      const executor = new AgyExecutor(directoryGuard, { initialWorkingDirectory: fixture.root });
 
       // Fire execute while immediately resetting context
       const p1 = executor.execute('Long command', {});
@@ -114,21 +115,30 @@ describe('Executor Concurrency & Rapid Commands', () => {
   });
 
   describe('ClaudePersistentExecutor', () => {
-    it('should handle rapid execute and resetContext', async () => {
-      const executor = new ClaudePersistentExecutor(directoryGuard);
+    it('fences reset-interrupted startup and admits only a fresh explicit retry', async () => {
+      const executor = new ClaudePersistentExecutor(directoryGuard, fixture.root, 'synthetic-thread', undefined, undefined, 'synthetic-claude', false);
       
       const p1 = executor.execute('First command', {});
       executor.resetContext();
       const p2 = executor.execute('Second command', {});
       
-      const results = await Promise.all([p1, p2]);
-      expect(results.every(result => result.success)).toBe(true);
-      expect(claudeInputs.map(input => input.message.content)).toEqual(['First command', 'Second command']);
-      await executor.destroy();
+      try {
+        const [interrupted, blocked] = await Promise.all([p1, p2]);
+        expect(interrupted).toEqual({ success: false, error: 'Claude startup was cancelled after process creation' });
+        expect(blocked).toEqual({ success: false, error: 'Native cleanup is still pending. Retry after cleanup.' });
+        expect(claudeInputs).toEqual([]);
+        expect(executor.hasUncertainShutdown()).toBe(false);
+        expect(executor.isBusy()).toBe(false);
+        // Reset is destructive, not a request to replay pre-reset prompts in a new conversation.
+        expect((await executor.execute('Fresh explicit retry')).success).toBe(true);
+        expect(claudeInputs.map(input => input.message.content)).toEqual(['Fresh explicit retry']);
+      } finally {
+        await executor.destroy();
+      }
     });
     
     it('should queue multiple slash commands and regular commands', async () => {
-      const executor = new ClaudePersistentExecutor(directoryGuard);
+      const executor = new ClaudePersistentExecutor(directoryGuard, fixture.root, 'synthetic-thread', undefined, undefined, 'synthetic-claude', false);
       (executor as any).sessionId = 'test-session';
       
       // Sending multiple commands rapidly
