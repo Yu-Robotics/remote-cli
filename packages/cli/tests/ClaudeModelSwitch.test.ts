@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'events';
 import fs from 'fs/promises';
+import fsSync from 'fs';
 import os from 'os';
 import path from 'path';
 import { spawn } from 'child_process';
@@ -27,6 +28,7 @@ let version: string;
 let handlers: MessageHandler[];
 let bridges: ManagedToolBridge[];
 let sessionModel: string;
+const hostPlatform = process.platform;
 const models = [
   { value: 'sonnet', resolvedModel: 'synthetic-sonnet', supportsEffort: true, supportedEffortLevels: ['high'] },
   { value: 'opus', resolvedModel: 'synthetic-opus', supportsEffort: true, supportedEffortLevels: ['high'] },
@@ -364,14 +366,33 @@ describe('production handler model/card persistence', () => {
     expect(child.stdin.end).not.toHaveBeenCalled();
   });
 
-  it('offers explicit destructive clear after timeout and ignores the retired control reply', async () => {
+  it.each(['host', 'windows-directory-handles'] as const)('offers explicit destructive clear after timeout and ignores the retired control reply (%s)', async filesystem => {
     await warm(); const job = await reserve(); const f = handlerFixture();
     vi.spyOn(f.inner.delegation, 'requestNativeSessionDeletion').mockResolvedValue(undefined);
     vi.spyOn(f.inner.delegation, 'cancelThread').mockResolvedValue(undefined);
     const pending = f.send('/model opus'); await tick(); const packet = control();
     await vi.advanceTimersByTimeAsync(10000); await pending;
+    if (filesystem === 'windows-directory-handles') {
+      const openSync = fsSync.openSync;
+      // Windows cannot open directory handles through Node's file API. Reproduce
+      // that boundary on every runner while retaining real file persistence.
+      vi.spyOn(fsSync, 'openSync').mockImplementation((...args: Parameters<typeof fsSync.openSync>) => {
+        if (fsSync.statSync(args[0], { throwIfNoEntry: false })?.isDirectory()) {
+          throw Object.assign(new Error('Synthetic Windows directory handle refusal'), { code: 'EPERM' });
+        }
+        return openSync(...args);
+      });
+    }
+    // The Linux override above selects the inspected model-control protocol.
+    // Destructive clear uses real filesystem durability APIs, whose platform
+    // must match the host (or the directory-handle boundary simulated here).
+    vi.spyOn(process, 'platform', 'get').mockReturnValue(filesystem === 'host' ? hostPlatform : 'win32');
     await f.send('/clear');
+    expect(f.messages().at(-1)?.error, f.messages().at(-1)?.error).toBeUndefined();
     expect(f.messages().at(-1)).toMatchObject({ success: true, output: expect.stringContaining('schedules were lost') });
+    expect(f.manager.contextResets.isPending(f.thread.id)).toBe(false);
+    expect(f.manager.contextResets.generation(f.thread.id)).toBe(1);
+    expect(f.manager.clearBackendSessionPointers).toHaveBeenCalledWith(f.thread.id);
     expect(child.stdin.end).toHaveBeenCalledOnce(); expect(executor.isProcessRunning()).toBe(false);
     expect(await job.handle.list!()).toBe(false); ack('synthetic-opus', packet); expect(raw.model).toBe('sonnet');
   });
