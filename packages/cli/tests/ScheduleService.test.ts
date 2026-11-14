@@ -8,6 +8,11 @@ import { NativeScheduleCleanupError } from '../src/scheduling/types';
 import type { NativeScheduleEvent, NativeScheduleHandle, NativeScheduleInput, NativeScheduleProvider,
   ScheduleDelivery, ScheduleOwner } from '../src/scheduling/types';
 
+// Keep real filesystem operations, with configurable exports for the write barrier test.
+vi.mock('node:fs/promises', async importOriginal => ({
+  ...await importOriginal<typeof import('node:fs/promises')>(),
+}));
+
 const now = Date.parse('2030-01-01T00:00:00Z');
 const owner: ScheduleOwner = { threadId: 'thread-a', openId: 'user-a', generation: 'epoch-a' };
 const other: ScheduleOwner = { threadId: 'thread-b', openId: 'user-b', generation: 'epoch-b' };
@@ -330,15 +335,53 @@ describe('ScheduleService', () => {
     const service = make(); await service.initialize(); await service.create(owner, input('schedule-a', true));
     complete(); await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(1));
     const gate = deferred<void>();
+    const entered = deferred<void>();
     vi.mocked(provider.handles.get('schedule-a')!.cancel).mockImplementation(async () => {
-      complete('schedule-a', 'occurrence-2'); await gate.promise; throw new Error('Native cancellation refused');
+      complete('schedule-a', 'occurrence-2'); entered.resolve();
+      await gate.promise; throw new Error('Native cancellation refused');
     });
     const cancellation = service.cancel(owner, 'schedule-a');
     const rejected = expect(cancellation).rejects.toThrow('refused');
-    await vi.waitFor(async () => expect((await read()).pending).toHaveLength(2));
-    gate.resolve(); await rejected;
+    try {
+      // Native entry follows durable cancellation intent. Join the completion's
+      // serialized write before opening the catalog, rather than polling it
+      // during atomic replacement (which can deny rename on Windows).
+      await entered.promise;
+      await service.list(owner);
+      expect((await read()).pending).toHaveLength(2);
+    } finally { gate.resolve(); await rejected; }
     await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(2));
     expect(deliver.mock.calls.map(([delivery]) => delivery.occurrenceId)).toEqual(['occurrence-1', 'occurrence-2']);
+  });
+
+  it('keeps native cancellation behind the durable intent replacement', async () => {
+    const service = make(); await service.initialize(); await service.create(owner, input());
+    const replacing = deferred<void>(), release = deferred<void>();
+    const rename = fs.rename.bind(fs);
+    const replacement = vi.spyOn(fs, 'rename').mockImplementationOnce(async (...args) => {
+      replacing.resolve(); await release.promise;
+      return rename(...args);
+    });
+    const handle = provider.handles.get('schedule-a')!;
+    vi.mocked(handle.cancel).mockImplementation(async () => {
+      expect((await read()).records[0].cancelRequested).toBe(true);
+    });
+    const cancellation = service.cancel(owner, 'schedule-a');
+    // Observe rejection immediately, including assertion failures inside the
+    // native callback, while the test controls the persistence boundary.
+    const cancelled = expect(cancellation).resolves.toMatchObject({ state: 'cancelled' });
+    try {
+      await replacing.promise;
+      expect(handle.cancel).not.toHaveBeenCalled();
+      expect(handle.stop).not.toHaveBeenCalled();
+      expect((await read()).records[0].cancelRequested).toBeUndefined();
+    } finally {
+      release.resolve();
+      try { await cancelled; } finally { replacement.mockRestore(); }
+    }
+    expect(handle.cancel).toHaveBeenCalledOnce();
+    expect(handle.stop).toHaveBeenCalledOnce();
+    expect((await read()).records[0]).toMatchObject({ state: 'cancelled', cancelRequested: true });
   });
 
   it('suppresses queued deliveries after owner reset and stops a stale live schedule', async () => {
