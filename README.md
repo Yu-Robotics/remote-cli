@@ -175,6 +175,26 @@ remote-cli service uninstall
 
 The installer captures the current Node.js executable, CLI entry point, `HOME`, `PATH`, and log paths. macOS uses a `LaunchAgent`; Linux uses a `systemd --user` service. `remote-cli stop` also stops an active managed service, while `remote-cli service stop` and `remote-cli service start` pause and resume it without removing automatic startup. The service runs as the current user, not root, so backend credentials and project access remain consistent with manual startup. On Linux, it starts after user login by default. To start it before login after reboot, enable user lingering explicitly with `loginctl enable-linger "$USER"`.
 
+From CLI 1.6.239, generated Linux user units use `KillMode=mixed` and
+`TimeoutStopSec=90s`. systemd first signals only the CLI main process so native
+schedule handoff can drain; the Router connection remains open for result
+acknowledgements until handler cleanup settles. On main-process exit or timeout,
+systemd can still kill remaining children. Timeout or failed cleanup is not a clean
+recovery checkpoint. The limited same-machine reboot reconciliation described below
+does not make same-boot crashes safe.
+
+Use the updated CLI's `remote-cli service start`, `stop`, or `install` to apply the
+shutdown policy to an existing generated unit before stopping it. Start/stop migrate
+only the exact legacy generated layout, preserving captured paths and environment;
+installation can refresh a recognized generated unit. Custom or indirect unit files
+are refused without replacement. Review them manually instead of expecting an
+automatic rewrite. Effective overrides that change the signal/cleanup policy, add
+stop commands or remove the finite stop timeout block the operation. Status is
+read-only. Direct `systemctl stop` on an unmigrated unit still uses its old policy;
+an npm update alone does not reload it. Uninstall also requires confirmed successful
+stop before removing the unit. These unit changes apply only to Linux systemd;
+macOS/Windows supervisor behavior is unchanged.
+
 Both manual and non-interactive clients automatically install a newer Router's exact version from npm on startup or reconnection. The client waits until all threads and confirmed queues are idle. New commands received during the short installation window are rejected with a retry message. Manual starts keep the current process running after installation: the terminal reports the installed and running versions, and the update takes effect the next time you start remote-cli. Reconnecting alone does not activate the installed update. Non-interactive clients exit after installation so their process supervisor can restart them immediately; `--non-interactive` is intended for systemd or a macOS LaunchAgent, and manually using that flag also enables exit-after-update behavior. If npm installation or version verification fails, the existing process keeps running and retries later, with an exact-version command for manual recovery. If the Router rejects the running CLI protocol, a manual client must be restarted after installation before it can connect again.
 
 When the Router restarts or its WebSocket connection drops, running backend processes continue. With CLI and Router 1.6.55 or newer, the CLI reconnects and resumes each task on a usable surviving card, or creates a new recovery card if the old card is missing or already finalizing. The Router acknowledges recovery only after a card is available; terminal recovery is acknowledged only after its result is delivered. Retained content, the output-gap notice, and resumed text are separate components. Output during disconnection or recovery is discarded, not buffered or replayed. The first resumed text segment uses plain text until a tool or image boundary so a partial code fence or table cannot consume the notice or later content.
@@ -228,7 +248,7 @@ remote-cli config set maintenance.subscriptionInspection false
 
 CLI 1.6.119 enriches its own `PATH` at startup on Linux and macOS before backend checks or child processes. Inherited entries keep their precedence, followed by the running Node directory, a verified npm global installation bin, conventional user bins (`~/.local/bin`, `~/.kimi-code/bin`, `~/.npm-global/bin`, `~/.bun/bin`, `~/.opencode/bin`), and platform system/Homebrew bins. Directories need not exist yet: installing a backend there later can be detected by a fresh `/backend`; delegation discovery retains its existing 30-second cache.
 
-Upgrade and restart the CLI process once to activate this behavior; reconnecting alone does not activate an installed update in an old running process. Valid existing systemd units and LaunchAgents do not need reinstallation and are never rewritten automatically. New service installations use the same PATH builder. A removed Node executable or broken CLI `ExecStart` path still requires repairing the service. Upgrading only the Router does not fix an old client's PATH; the wire protocol and existing compatibility requirements are unchanged.
+Upgrade and restart the CLI process once to activate this behavior; reconnecting alone does not activate an installed update in an old running process. Existing service PATH settings do not need reinstallation. LaunchAgents are not rewritten automatically; generated Linux units have the narrowly scoped shutdown-policy migration described above on explicit service operations. New service installations use the same PATH builder. A removed Node executable or broken CLI `ExecStart` path still requires repairing the service. Upgrading only the Router does not fix an old client's PATH; the wire protocol and existing compatibility requirements are unchanged.
 
 Startup does not source shell profiles, invoke npm to discover prefixes, scan runtime versions, install tools, or newly add version-manager shims. Already inherited shim directories stay unchanged. For custom installation locations, set `executor.<backend>.command` to an absolute executable path, preferably the real binary. Startup checks, `/backend`, delegation, and auxiliary Claude queries honor that setting without silently substituting another executable. ZCode retains its native unset/empty-command lookup behavior; a nonempty invalid override does not fall back. A successful version probe does not prove authentication or remaining quota.
 
@@ -515,7 +535,7 @@ Once connected, use these commands in Feishu:
 
 ### Native scheduled tasks
 
-`/schedule` manages native scheduled work through Claude Code (2.1.311) and
+`/schedule` manages native scheduled work through Claude Code (runtime capability checks) and
 DeepSeek Harness (0.2.1-rc.5). All eight backends have an explicit eligibility entry:
 `/schedule capabilities` shows the supported adapter and the specific reason
 for each temporarily unsupported backend. Creation on an unsupported backend
@@ -595,12 +615,37 @@ converted to that timezone, and ambiguous clock-rollback times are rejected.
 Unattended work follows the existing native tool policy. Cancellation stops future
 firings without killing the shared conversation; queued or running work may finish.
 
-Keep the CLI and computer running for native execution. From CLI 1.6.238,
-newly managed Claude schedules support orderly restart/upgrade recovery on Linux
-x64 with Claude Code 2.1.311 and its verified native controls. Future definitions
-are preserved as durable intent and recreated in the original conversation only
-after owned deletion and confirmed host exit. Startup does not require visiting
-the thread. Other builds/platforms and dirty crashes remain unsupported.
+Keep the CLI and computer running for native execution. From CLI 1.6.239,
+newly managed Claude schedules use runtime tools, hooks, lifecycle capabilities
+and matching host/session identity for orderly restart/upgrade recovery, without
+an exact native version or architecture allowlist. Future definitions
+are preserved as durable intent. Recovery resumes the original conversation and
+queries structured native inventory: matching definitions are adopted, and missing
+definitions are recreated only after verified orderly deletion. Startup does not
+require visiting the thread. Missing capabilities and uncertain receipts remain
+unsupported; removing the allowlist does not guarantee compatibility with every
+native release or platform. The official changelog introduced `/loop` in 2.1.71,
+but does not establish a minimum for this complete recovery protocol.
+
+New Claude recurring jobs also retain a small per-session ownership receipt under
+an exclusive kernel lock. After a verified later boot of the same machine, future
+firings can reconcile without an exit-time handoff. This uses existing portable
+ownership primitives, not systemd, launchd or a Windows service manager. A second
+catalog writer is rejected before it can overwrite cancellation intent. The new
+host is durably reserved before reconciliation, so another crash cannot authorize
+a concurrent same-boot retry. Exact native IDs, full prompts, cron rules and
+session-only persistence must match; unrelated native definitions are not deleted.
+Wakes observed during reconciliation are blocked before admission.
+
+This is deliberately limited: a CLI-only crash in the same boot remains blocked,
+even if its PID is missing or reused, because escaped native descendants may still
+be executing. A missing native definition after an unclean restart is not recreated:
+expiry or deletion cannot be distinguished. Unknown past effects are not retried,
+missed firings are not replayed, and uncertain one-shots remain interrupted. Legacy
+records without this ownership evidence require the existing clean handoff path.
+The ownership APIs have Linux/macOS/Windows implementations; this change's native
+acceptance ran only on Linux with a simulated boot identity transition. It is not
+proof of a real machine-reboot recovery or of native macOS/Windows behavior.
 
 Claude handoff fences scheduled work at the UserPromptSubmit admission boundary,
 before model inference or tools. An already-fired occurrence that has not crossed
@@ -632,7 +677,7 @@ identity, intent, absolute one-shot deadlines, cancellation intent and bounded
 completed-occurrence IDs. Recovery waits for Router readiness and runs sequentially.
 No catalog means no schedule host starts. Explicit cancellation, context reset,
 thread deletion and retired ownership never authorize recreation. Legacy interrupted
-jobs and dirty crashes are not reconstructed; neither a missing PID nor a conversation
+jobs and same-boot dirty crashes remain blocked; neither a missing PID nor a conversation
 ID proves that old work cannot still execute. Running/unknown-completion work is
 never blindly replayed. Clean proof is consumed before native mutation, so an
 error-after-commit cannot authorize a duplicate CREATE on the next startup. A clean
@@ -659,7 +704,8 @@ updates restore cleanly suspended jobs in the running client. If only Router
 readiness is missing, restoration continues on reconnect after installation has
 finished; reconnect during installation cannot restart native timing. An uncertain handoff
 or restoration retains admission and reports failure; operator inspection and an
-explicit service stop/restart may be needed, and dirty work stays blocked afterward.
+explicit service stop/restart may be needed. Same-boot dirty ownership stays blocked;
+a service restart alone is not proof of predecessor loss.
 Non-interactive clients retain supervisor restart behavior. Foreground start mode
 still activates the installed version only at the next manual start. No shell clock,
 transcript copy, blind CREATE retry or backend switch is used as fallback. Claude
@@ -695,7 +741,7 @@ active schedules before clearing the conversation, changing its directory or
 sandbox, or deleting the thread. Merely selecting another thread leaves its
 executor and schedules running; switching backends or recycling the native
 process interrupts jobs. Results appear in the original thread.
-On Linux x64 with Claude 2.1.311 and verified native interrupt/lifecycle capabilities,
+With verified native interrupt/lifecycle capabilities and matching host/session identity,
 `/abort` interrupts foreground work while retaining its process, conversation,
 managed-tool registration and future Cron jobs. Old input waits, approvals and
 foreground queues are retired; known foreground-owned native background tasks
@@ -1625,8 +1671,8 @@ From CLI 1.6.190, Kimi and OpenCode permission decisions use the standard nested
 
 From CLI 1.6.204, Claude Code model aliases show the alias name followed by the native resolved model ID, preserving provider prefixes. If the resolved ID is unavailable, the native display name is used. Direct model and Default labels, selection values, and other backends remain unchanged.
 
-From CLI 1.6.238, an idle live Claude session on Linux x64 with native build
-2.1.311 and matching initialization/process identity changes model through the
+From CLI 1.6.239, an idle live Claude session with matching
+initialization/process identity changes model through the
 native `set_model` control. A confirmed reply keeps the process, conversation,
 managed-tool endpoint and future native jobs. Subsequent responses, including
 scheduled work, use the new session selection; a wake racing the change is not
@@ -1636,6 +1682,12 @@ has synthetic production-class tests and isolated Linux native acceptance with
 a loopback fake provider: same-host model/default changes, refusal, late replies,
 and a real timed occurrence during an unresolved model change. This verifies
 protocol behavior, not authenticated provider availability or model quality.
+No authoritative public minimum was found for the complete control contract.
+There is no version/architecture allowlist: `set_model` must return a correlated
+explicit selection; missing or ambiguous replies fail closed without stopping
+the host. Interrupt and recovery additionally require their native lifecycle
+capabilities. Linux ARM64 with Claude 2.1.318 has separate isolated native protocol
+evidence; macOS/Windows branches are synthetic coverage, not native acceptance.
 
 `/model default` selects the native default. Reset in the model card clears the
 thread override and follows the configured backend model, or requests the native
@@ -1653,7 +1705,7 @@ explicit `/model` retry on the same host; a still-pending or unclassified outcom
 requires its reply or explicit destructive `/clear`/`/new`, which loses session-only
 jobs. `/abort` does not cancel an unresolved settings request. Orderly schedule
 recovery is a separate capability with the platform and handoff requirements
-described in the scheduling section above; dirty-crash recovery remains disabled.
+described in the scheduling section above; same-boot dirty-crash recovery remains disabled.
 
 From CLI 1.6.203, Codex integration uses the native app-server handshake path that preserves its default User-Agent instead of adding a remote-cli identity to that header. Native Codex still determines the version, platform details, and inherited environment behavior; remote-cli does not replace the header or change global Codex configuration. This is app-server behavior, not a promise to match the interactive TUI. The native exemption was checked against Codex 0.166.0. Missing User-Agent metadata or an unexpected backend identity rewrite stops startup before a task is sent; upgrade native Codex if this check fails. Upgrade the local CLI; a Router-only upgrade does not apply this change.
 

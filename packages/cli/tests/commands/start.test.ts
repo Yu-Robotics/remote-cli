@@ -349,6 +349,21 @@ describe('start command', () => {
       expect(mockWsClient.disconnect).toHaveBeenCalledTimes(1);
     });
 
+    it('keeps result acknowledgement transport connected until native handoff settles', async () => {
+      let close!: () => Promise<void>;
+      expect((await startCommand({ onShutdownReady: cleanup => { close = cleanup; return true; } })).success).toBe(true);
+      const handler = vi.mocked(MessageHandler).mock.results.at(-1)!.value;
+      let acknowledge!: () => void;
+      handler.destroy.mockImplementation(() => new Promise<void>(resolve => { acknowledge = resolve; }));
+      const stopping = close();
+      await vi.waitFor(() => expect(handler.destroy).toHaveBeenCalledTimes(1));
+      try {
+        expect(mockWsClient.disconnect).not.toHaveBeenCalled();
+      } finally { acknowledge(); await stopping; }
+      expect(mockWsClient.disconnect).toHaveBeenCalledTimes(1);
+      expect(handler.destroy.mock.invocationCallOrder[0]).toBeLessThan(mockWsClient.disconnect.mock.invocationCallOrder[0]);
+    });
+
     it('cancels startup before mutable inventory when shutdown was already requested', async () => {
       const result = await startCommand({ onShutdownReady: () => false });
       const handler = vi.mocked(MessageHandler).mock.results.at(-1)!.value;

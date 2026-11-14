@@ -340,6 +340,42 @@ describe('Claude foreground native schedule protocol', () => {
     await failure; expect(h.adapter.hasJobs).toBe(true); h.adapter.processClosed();
   });
 
+  it.each(['valid', 'missing', 'duplicate', 'prompt', 'cron', 'durable', 'recurring-string', 'recurring-number', 'id-collision', 'changed-id'])(
+    'requires exact structured native ownership when adopting (%s)', async variant => {
+      const h = harness(); const marker = '11111111-1111-4111-8111-111111111111';
+      const restored = { ...input(), recovery: { version: 1 as const, provider: 'fixture', strategy: 'reconstruct' as const,
+        identity: JSON.stringify({ marker }) } };
+      const events = vi.fn();
+      const operation = h.adapter.inToolOperation('restore', () => true,
+        () => h.adapter.create(restored, events, () => true, 'UTC', 'adopt', 'original-native'));
+      const failure = variant === 'valid' ? undefined : expect(operation).rejects.toThrow();
+      const row = { id: 'original-native', prompt: `[remote-cli:${marker}]\n${restored.prompt}`, cron: '* * * * *', recurring: true, durable: false };
+      const jobs = [row];
+      if (variant === 'duplicate') jobs.push({ ...row, id: 'duplicate-native' });
+      if (variant === 'id-collision') jobs.push({ ...row, prompt: 'Unrelated task' });
+      if (variant === 'prompt') row.prompt += ' changed';
+      if (variant === 'cron') row.cron = '0 * * * *';
+      if (variant === 'durable') row.durable = true;
+      if (variant === 'recurring-string') Object.assign(row, { recurring: 'false' });
+      if (variant === 'recurring-number') Object.assign(row, { recurring: 1 });
+      if (variant === 'changed-id') row.id = 'changed-native-id';
+      // A restored wake arriving during inspection must not become a later admission.
+      expect(h.hook('CronList', {})).toEqual({});
+      h.adapter.accept({ type: 'user', ...(variant === 'missing' ? {} : { tool_use_result: { jobs } }),
+        message: { content: [{ type: 'tool_result', tool_use_id: 'tool-one', content: 'Native human-readable summary.' }] } });
+      h.adapter.accept({ type: 'command_lifecycle', command_uuid: 'queued-before-adoption', state: 'started', wakeup_source: 'schedule_wakeup' });
+      if (failure) await failure;
+      else {
+        expect((await operation).nativeId).toBe('original-native');
+        expect(h.adapter.action('restore')).toBeUndefined();
+        h.adapter.accept({ type: 'control_request', request_id: 'stale-wake', request: { subtype: 'hook_callback', callback_id: SCHEDULE_HOOK,
+          input: { hook_event_name: 'UserPromptSubmit', source: 'schedule_wakeup', prompt: row.prompt } } });
+        expect(h.send.mock.calls.at(-1)![0].response.response.decision).toBe('block');
+        expect(events).not.toHaveBeenCalled();
+      }
+      h.adapter.processClosed();
+    });
+
   it('does not activate management or consume ordinary frames when never used', () => {
     const h = harness();
     expect(h.adapter.accept({ type: 'result', is_error: false })).toBe(false);
