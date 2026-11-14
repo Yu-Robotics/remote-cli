@@ -4,11 +4,15 @@ import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'fs/prom
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { DshExecutor } from '../src/executor/DshExecutor';
+import { Host } from './scheduling/SyntheticDshScheduleHost';
+import { AutomaticUpdater } from '../src/update/AutomaticUpdater';
 import { MessageHandler } from '../src/client/MessageHandler';
 import { DirectoryGuard } from '../src/security/DirectoryGuard';
 import { ThreadContextReset } from '../src/thread/ThreadContextReset';
 import type { Thread } from '../src/thread/types';
 import type { NativeScheduleEvent, NativeScheduleInput } from '../src/scheduling/types';
+import { NativeScheduleCleanupError } from '../src/scheduling/types';
 import { ScheduleService, SCHEDULE_CATALOG_FILE } from '../src/scheduling/ScheduleService';
 
 const native = vi.hoisted(() => ({ create: vi.fn(), createDsh: vi.fn() }));
@@ -116,6 +120,19 @@ describe('MessageHandler native schedule closed loop', () => {
 
   const invoke = (name: string, args: Record<string, unknown>) => (f.handler as any).delegationBridges.get('thread-a').handler(name, args, 'native-call');
   const createArgs = { requestId: 'create-one', when: { kind: 'after', amount: 5, unit: 'm' }, prompt: 'Synthetic scheduled task' };
+
+  it.each([undefined, 'drain-all', 'skip-unadmitted'])('describes the negotiated recovery policy (%s) after creation', async policy => {
+    if (policy) Object.assign(f.executor, { nativeScheduleRecovery: {
+      provider: 'synthetic-recovery', strategy: 'reconstruct', handoffPolicy: policy,
+      describe: () => 'synthetic-original-owner', reconcile: vi.fn(),
+    } });
+    await f.bind(); await f.send('/schedule after 5m -- Synthetic future work');
+    const response = f.responses().at(-1);
+    expect(response.success).toBe(true);
+    expect(response.output).toContain(policy ? 'recover automatically after a confirmed orderly restart' : 'does not support automatic schedule recovery');
+    if (policy === 'skip-unadmitted') expect(response.output).toContain('may be skipped without replay');
+    if (policy === 'drain-all') expect(response.output).toContain('Queued and executing occurrences must finish');
+  });
 
   it('prepares slash creation on the foreground bridge reused by subsequent chat without a dedicated Claude provider', async () => {
     await f.bind(true, true);
@@ -569,6 +586,159 @@ describe('MessageHandler native schedule closed loop', () => {
     f.handler.endAutomaticUpdate();
   });
 
+  it('reattaches opted-in native inventory at binding without a foreground message and keeps updates fenced', async () => {
+    const reconcile = vi.fn(async (record: any, context: any, emit: any) => {
+      expect(context.isCurrent()).toBe(true);
+      expect(record.execution).toBeDefined();
+      expect(record.recovery.identity).toBe('original-fixture-session');
+      f.jobs[0].emit = emit;
+      return f.jobs[0].handle;
+    });
+    Object.assign(f.executor, { nativeScheduleRecovery: { provider: 'fixture-persistent-v1', strategy: 'reattach',
+      describe: () => 'original-fixture-session', reconcile } });
+    await f.bind();
+    await f.send('/schedule cron "*/5 * * * *" --tz UTC -- Inspect synthetic build');
+    Object.assign(f.jobs[0].handle, { releaseForRestart: vi.fn(async () => {}) });
+    await f.restart();
+    await f.handler.prepareScheduleStartup();
+    expect(f.handler.tryBeginAutomaticUpdate()).toBe(false);
+    const install = vi.fn(async () => {});
+    const updater = new AutomaticUpdater('1.6.237', f.handler, { installVersion: install, restartAfterUpdate: false });
+    vi.useFakeTimers();
+    await updater.handleRouterVersion('1.6.238');
+    expect(install).not.toHaveBeenCalled();
+    vi.clearAllTimers(); vi.useRealTimers();
+    await f.reconnect();
+    await vi.waitFor(() => expect(reconcile).toHaveBeenCalledOnce());
+    await (f.handler as any).recoverSchedules();
+    expect(native.create).toHaveBeenCalledOnce();
+    expect(f.handler.tryBeginAutomaticUpdate()).toBe(true); // Admission still requires an asynchronous native handoff.
+    await f.handler.endAutomaticUpdate();
+    f.jobs[0].emit({ type: 'started', occurrenceId: 'recovered-occurrence' });
+    f.jobs[0].emit({ type: 'completed', occurrenceId: 'recovered-occurrence', success: true, output: 'Recovered result' });
+    await vi.waitFor(() => expect(f.scheduledResults()).toHaveLength(1));
+    expect(f.scheduledResults()[0]).toMatchObject({ threadId: 'thread-a', openId: 'owner', output: 'Recovered result' });
+  });
+
+  it('hands off actual DSH adapters through handler/updater and restores after install-only update', async () => {
+    const hosts: Host[] = [];
+    f.setBackend('dsh');
+    const executor = new DshExecutor(new DirectoryGuard([f.cwd]), { initialWorkingDirectory: f.cwd, threadId: 'thread-a',
+      sessionBaseDir: path.join(f.cwd, 'native-sessions'), clientFactory: () => { const host = new Host([]); hosts.push(host); return host; } });
+    f.pool.getExecutor = () => executor as any; f.pool.getExistingExecutor = () => executor as any;
+    f.pool.isThreadBusy = () => executor.isBusy();
+    const configure = vi.spyOn(executor, 'configureManagedTools');
+    try {
+      await f.bind(); await f.send('/schedule cron "*/5 * * * *" --tz UTC -- Synthetic DSH reminder');
+      expect(f.responses().at(-1).success).toBe(true);
+      const connection = configure.mock.calls[0][0];
+      const install = vi.fn(async () => { expect(hosts[0].destroy).toHaveBeenCalledOnce(); });
+      await new AutomaticUpdater('1.6.237', f.handler, { installVersion: install, restartAfterUpdate: false })
+        .handleRouterVersion('1.6.238');
+      expect(install).toHaveBeenCalledOnce(); expect(hosts).toHaveLength(2);
+      expect(hosts[1].loadSession).toHaveBeenCalled(); expect(hosts[1].prompt).not.toHaveBeenCalled();
+      expect(configure.mock.calls.at(-1)![0]).toEqual(connection);
+      await f.send('Foreground after update', 'thread-a', { isSlashCommand: false });
+      expect(hosts).toHaveLength(2); expect(hosts[1].prompt).toHaveBeenCalledOnce();
+      hosts[1].start(hosts[1].rows[0]); hosts[1].finish('Restored scheduled output');
+      await vi.waitFor(() => expect(f.scheduledResults()).toHaveLength(1));
+      expect(f.scheduledResults()[0].threadId).toBe('thread-a');
+    } finally { await f.handler.destroy(); await executor.destroy(); await executor.waitForExit(); }
+  });
+
+  it('retains handler admission after an unconfirmed native handoff and never installs', async () => {
+    Object.assign(f.executor, { nativeScheduleRecovery: { provider: 'fixture-persistent-v1', strategy: 'reattach',
+      describe: () => 'original-fixture-session', reconcile: vi.fn() } });
+    await f.bind(); await f.send('/schedule cron "*/5 * * * *" --tz UTC -- Synthetic reminder');
+    Object.assign(f.jobs[0].handle, { releaseForRestart: vi.fn(async () => { throw new Error('Native drain unresolved'); }) });
+    const install = vi.fn();
+    await new AutomaticUpdater('1.6.237', f.handler, { installVersion: install }).handleRouterVersion('1.6.238');
+    expect(install).not.toHaveBeenCalled(); expect(f.handler.tryBeginAutomaticUpdate()).toBe(false);
+    await f.send('Must remain fenced', 'thread-a', { isSlashCommand: false });
+    expect(f.executor.execute).not.toHaveBeenCalled(); expect(f.responses().at(-1).success).toBe(false);
+    await f.send('/session'); expect(f.responses().at(-1).success).toBe(false);
+    await f.send('/schedule list');
+    expect(f.responses().at(-1)).toMatchObject({ success: true, output: expect.stringContaining('Restart handoff unconfirmed') });
+    expect(f.responses().at(-1).scheduleMenu).toBeUndefined();
+  });
+
+  it('does not release admission when install-only restoration fails and updater retries finalization', async () => {
+    Object.assign(f.executor, { nativeScheduleRecovery: { provider: 'fixture-persistent-v1', strategy: 'reattach',
+      describe: () => 'original-fixture-session', reconcile: async () => {
+        throw new NativeScheduleCleanupError('Synthetic restoration failure', f.jobs[0].handle);
+      } } });
+    await f.bind(); await f.send('/schedule cron "*/5 * * * *" --tz UTC -- Synthetic reminder');
+    Object.assign(f.jobs[0].handle, { releaseForRestart: vi.fn(async () => {}) });
+    const install = vi.fn();
+    await new AutomaticUpdater('1.6.237', f.handler, { installVersion: install, restartAfterUpdate: false })
+      .handleRouterVersion('1.6.238');
+    expect(install).toHaveBeenCalledOnce();
+    await expect(f.handler.endAutomaticUpdate()).rejects.toThrow('admission is retained');
+    await f.send('Must remain fenced', 'thread-a', { isSlashCommand: false });
+    expect(f.executor.execute).not.toHaveBeenCalled(); expect(f.responses().at(-1).success).toBe(false);
+  });
+
+  it('restores a clean handoff after transport readiness returns, but never during installation', async () => {
+    const hosts: Host[] = [];
+    f.setBackend('dsh');
+    const executor = new DshExecutor(new DirectoryGuard([f.cwd]), { initialWorkingDirectory: f.cwd, threadId: 'thread-a',
+      sessionBaseDir: path.join(f.cwd, 'native-sessions'), clientFactory: () => { const host = new Host([]); hosts.push(host); return host; } });
+    f.pool.getExecutor = () => executor as any; f.pool.getExistingExecutor = () => executor as any;
+    f.pool.isThreadBusy = () => executor.isBusy();
+    try {
+      await f.bind(); await f.send('/schedule cron "*/5 * * * *" --tz UTC -- Synthetic reminder');
+      const updater = new AutomaticUpdater('1.6.237', f.handler, { restartAfterUpdate: false, installVersion: async () => {
+        f.disconnect(); await f.reconnect(); await (f.handler as any).recoverSchedules();
+        expect(hosts).toHaveLength(1); // A reconnect cannot reconstruct jobs under an ongoing installer.
+        f.disconnect();
+      } });
+      await updater.handleRouterVersion('1.6.238');
+      expect(hosts).toHaveLength(1); expect(f.handler.tryBeginAutomaticUpdate()).toBe(false);
+      await f.reconnect(); await (f.handler as any).recoverSchedules();
+      expect(hosts).toHaveLength(2); expect(hosts[1].loadSession).toHaveBeenCalled();
+      await f.send('Foreground after readiness', 'thread-a', { isSlashCommand: false });
+      expect(hosts[1].prompt).toHaveBeenCalledOnce();
+    } finally { await f.handler.destroy(); await executor.destroy(); await executor.waitForExit(); }
+  });
+
+  it('does not re-admit updates after handler destruction when no schedules exist', async () => {
+    await f.bind(); await f.handler.destroy();
+    expect(f.handler.tryBeginAutomaticUpdate()).toBe(false);
+  });
+
+  it('does not unblock upgrades before an older Router can negotiate recovery transport', async () => {
+    await f.bind(); await f.send('/schedule after 5m -- Synthetic reminder'); await f.restart();
+    await f.handler.prepareScheduleStartup();
+    await f.handler.handleMessage({ type: 'binding_confirm', data: { success: true, capabilities: {} } } as any);
+    expect(f.handler.tryBeginAutomaticUpdate()).toBe(false);
+    expect(native.create).toHaveBeenCalledOnce();
+  });
+
+  it('blocks foreground input throughout recovery inventory validation', async () => {
+    let finish!: (present: boolean) => void;
+    const inventory = new Promise<boolean>(resolve => { finish = resolve; });
+    const reconcile = vi.fn(async () => ({ ...f.jobs[0].handle, list: () => inventory }));
+    Object.assign(f.executor, { nativeScheduleRecovery: { provider: 'fixture-v1', strategy: 'reattach',
+      describe: () => 'original-fixture-session', reconcile } });
+    await f.bind(); await f.send('/schedule after 5m -- Synthetic reminder');
+    Object.assign(f.jobs[0].handle, { releaseForRestart: async () => {} });
+    await f.restart(); await f.reconnect();
+    await vi.waitFor(() => expect(reconcile).toHaveBeenCalledOnce());
+    await f.send('Must not start before inventory', 'thread-a', { isSlashCommand: false });
+    expect(f.responses().at(-1)).toMatchObject({ success: false, error: expect.stringContaining('recovery is in progress') });
+    expect(f.executor.execute).not.toHaveBeenCalled();
+    finish(true); await (f.handler as any).recoverSchedules();
+    await f.send('Synthetic new foreground', 'thread-a', { isSlashCommand: false }); expect(f.executor.execute).toHaveBeenCalledOnce();
+  });
+
+  it('startup inventory check leaves users without catalogs dormant and update-eligible', async () => {
+    await f.handler.prepareScheduleStartup();
+    expect(f.handler.tryBeginAutomaticUpdate()).toBe(true);
+    f.handler.endAutomaticUpdate();
+    expect(native.create).not.toHaveBeenCalled();
+    expect(f.acknowledgements.size).toBe(0);
+  });
+
   it('recovers a persisted outbox after handler restart without recreating native jobs', async () => {
     await f.bind();
     await f.send('/schedule after 2m -- Return a synthetic summary');
@@ -627,10 +797,11 @@ describe('MessageHandler native schedule closed loop', () => {
     expect(f.executor.execute).toHaveBeenCalledOnce();
     for (const command of ['/clear', '/cd ' + f.cwd, '/sandbox off', '/thread delete thread-b']) {
       await f.send(command);
-      expect(f.responses().at(-1).success, `${command}: ${f.responses().at(-1).error}`).toBe(true);
+      expect(f.responses().at(-1).success, `${command}: ${f.responses().at(-1).error}`).toBe(!/^\/(clear|cd|backend|thread delete)/.test(command));
     }
     expect(f.acknowledgements.size).toBe(0);
-    expect(f.handler.tryBeginAutomaticUpdate()).toBe(true);
+    // A corrupt catalog cannot prove that no recoverable native work is owned.
+    expect(f.handler.tryBeginAutomaticUpdate()).toBe(false);
     f.handler.endAutomaticUpdate();
     await f.handler.destroy();
     expect(await readFile(catalog, 'utf8')).toBe('invalid catalog');

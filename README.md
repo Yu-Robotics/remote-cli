@@ -595,18 +595,75 @@ converted to that timezone, and ambiguous clock-rollback times are rejected.
 Unattended work follows the existing native tool policy. Cancellation stops future
 firings without killing the shared conversation; queued or running work may finish.
 
-Keep the CLI and computer running. Claude jobs are explicitly session-only. If
-Claude restores an old native wakeup after a process restart, the scheduling
-hook blocks it because the managed owner is no longer present; it is not silently
-adopted or delivered as a new task. Recreate the task explicitly after restart.
-DSH uses isolated native job storage for each process; the adapter retires its
-jobs on shutdown and never automatically reopens the store. On restart the
-catalog marks unfinished jobs interrupted and never silently recreates or
-resumes them. Completed results are retained locally until the Router
-acknowledges delivery and retried after reconnect or a schedule list
-request. Router deduplication is bounded and process-local; a Router restart or
-crash between delivery and acknowledgement can cause a duplicate. An
-acknowledgement confirms Router delivery, not that a person has read the message.
+Keep the CLI and computer running for native execution. From CLI 1.6.238,
+newly managed Claude schedules support orderly restart/upgrade recovery on Linux
+x64 with Claude Code 2.1.311 and its verified native controls. Future definitions
+are preserved as durable intent and recreated in the original conversation only
+after owned deletion and confirmed host exit. Startup does not require visiting
+the thread. Other builds/platforms and dirty crashes remain unsupported.
+
+Claude handoff fences scheduled work at the UserPromptSubmit admission boundary,
+before model inference or tools. An already-fired occurrence that has not crossed
+that boundary may be skipped, including a queued or still-expanding wakeup. Skips
+are not successful results and are never replayed; unseen skips cannot be counted.
+Already admitted work must finish, results must be acknowledged, and native
+background work must complete naturally. Unmanaged inventory, unknown activity,
+or unconfirmed exit blocks handoff without force-killing the host. Expired
+one-shots stay expired; a one-shot already absent from native inventory is not
+recreated, even if its stored deadline is still ahead. Recurring jobs resume only
+future native firings.
+
+A cancelled, discarded or refused native occurrence is reported as unsuccessful
+even if its separate result frame claims successful completion.
+
+From CLI 1.6.238, newly created DSH schedules can recover after a confirmed orderly
+shutdown or automatic update, without opening their thread. Before installation,
+the client fences new commands, deletes future native definitions, drains already
+queued/started reminders, waits for result acknowledgements, flushes the original
+native session and joins the owned host exit. Only then does it persist a clean
+restart checkpoint. Startup resumes that original session and reconstructs eligible
+jobs in fresh native schedule storage, with native timing and inventory validation.
+The adapter checks required drain/flush/exit operations; incompatible or unconfirmed
+outcomes block the handoff. DSH retains its stricter queued-work drain and session-flush requirements.
+
+The provider-neutral framework supports persistent reattachment or reconstruction
+with proven predecessor exclusion. It stores original owner/backend/directory
+identity, intent, absolute one-shot deadlines, cancellation intent and bounded
+completed-occurrence IDs. Recovery waits for Router readiness and runs sequentially.
+No catalog means no schedule host starts. Explicit cancellation, context reset,
+thread deletion and retired ownership never authorize recreation. Legacy interrupted
+jobs and dirty crashes are not reconstructed; neither a missing PID nor a conversation
+ID proves that old work cannot still execute. Running/unknown-completion work is
+never blindly replayed. Clean proof is consumed before native mutation, so an
+error-after-commit cannot authorize a duplicate CREATE on the next startup. A clean
+pause is distinct from verified native deletion: persistent providers must retain
+cleanup ownership until deletion is confirmed, including cancellation and expiry.
+Claude restoration requires acknowledgement of the original model selection;
+malformed or mismatched replies keep recovery blocked. Cleanup of another job
+cannot release an unresolved restoration fence. If every one-shot expires or is
+skipped, update finalization releases confirmed-exit admission without recreating it.
+
+Expired one-shots remain interrupted with an explicit expiry reason and do not run
+late. Recurring rules resume future native firings without a catch-up storm. Missed
+firings during the shutdown/install interval are not replayed. Completed results
+remain in the local outbox until Router acknowledgement. Delivery is not globally
+exactly-once: Router deduplication is bounded and process-local, and a crash between
+send and acknowledgement can duplicate output. Acknowledgement is not a read receipt.
+
+Waiting supported Claude and DSH jobs with clean handoff capability no longer indefinitely block automatic
+upgrades. Active turns, queues, unacknowledged results, uncertain mutations and cleanup
+still block. A Claude firing racing idle admission may be skipped before prompt admission;
+admitted execution must drain. DSH retains its stricter queued-work drain policy.
+A timeout does not force-kill work or claim success. Failed installation and manual install-only
+updates restore cleanly suspended jobs in the running client. If only Router
+readiness is missing, restoration continues on reconnect after installation has
+finished; reconnect during installation cannot restart native timing. An uncertain handoff
+or restoration retains admission and reports failure; operator inspection and an
+explicit service stop/restart may be needed, and dirty work stays blocked afterward.
+Non-interactive clients retain supervisor restart behavior. Foreground start mode
+still activates the installed version only at the next manual start. No shell clock,
+transcript copy, blind CREATE retry or backend switch is used as fallback. Claude
+retained-process `/abort` behavior is unchanged.
 
 `/schedule list` reconciles native expiry on demand and reports interrupted jobs
 without recreating them. Completed results are text-only in this first adapter.
@@ -1567,6 +1624,36 @@ Model listing uses native metadata: Claude Code control initialization, bounded 
 From CLI 1.6.190, Kimi and OpenCode permission decisions use the standard nested ACP v1 response, so automatic or explicit approvals and cancellations can be interpreted correctly by the backend. Upgrade the local CLI; a Router-only upgrade does not apply this fix.
 
 From CLI 1.6.204, Claude Code model aliases show the alias name followed by the native resolved model ID, preserving provider prefixes. If the resolved ID is unavailable, the native display name is used. Direct model and Default labels, selection values, and other backends remain unchanged.
+
+From CLI 1.6.238, an idle live Claude session on Linux x64 with native build
+2.1.311 and matching initialization/process identity changes model through the
+native `set_model` control. A confirmed reply keeps the process, conversation,
+managed-tool endpoint and future native jobs. Subsequent responses, including
+scheduled work, use the new session selection; a wake racing the change is not
+cancelled or promised an atomic turn boundary. The displayed native selection
+is not proof of the model serving an already-running response. This integration
+has synthetic production-class tests and isolated Linux native acceptance with
+a loopback fake provider: same-host model/default changes, refusal, late replies,
+and a real timed occurrence during an unresolved model change. This verifies
+protocol behavior, not authenticated provider availability or model quality.
+
+`/model default` selects the native default. Reset in the model card clears the
+thread override and follows the configured backend model, or requests the native
+default when none is configured. Cold selection only saves a launch preference;
+it never starts a host just to switch. Saved effort must be compatible. Effort
+changes still require a restart and are refused while managed native jobs exist,
+including `/effort auto`; cancel those jobs explicitly before changing effort.
+
+Unsupported live hosts return an error without restarting. Model controls have
+a ten-second response deadline. Timeout or an ambiguous outcome keeps foreground
+admission and automatic upgrades blocked, without stopping native schedules or
+saving the requested preference. A correlated late reply can settle admission but
+does not retroactively save that preference. A settled internal error permits an
+explicit `/model` retry on the same host; a still-pending or unclassified outcome
+requires its reply or explicit destructive `/clear`/`/new`, which loses session-only
+jobs. `/abort` does not cancel an unresolved settings request. Orderly schedule
+recovery is a separate capability with the platform and handoff requirements
+described in the scheduling section above; dirty-crash recovery remains disabled.
 
 From CLI 1.6.203, Codex integration uses the native app-server handshake path that preserves its default User-Agent instead of adding a remote-cli identity to that header. Native Codex still determines the version, platform details, and inherited environment behavior; remote-cli does not replace the header or change global Codex configuration. This is app-server behavior, not a promise to match the interactive TUI. The native exemption was checked against Codex 0.166.0. Missing User-Agent metadata or an unexpected backend identity rewrite stops startup before a task is sent; upgrade native Codex if this check fails. Upgrade the local CLI; a Router-only upgrade does not apply this change.
 

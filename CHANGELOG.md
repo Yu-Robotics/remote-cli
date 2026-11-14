@@ -13,6 +13,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.238] - 2026-11-14
+
+### Tests
+- Verify Claude model switching with the real isolated Linux 2.1.311 host and a loopback fake provider, including autonomous timing and late acknowledgement. Add a regression for a resumed unowned wake whose blocked hook still produces a successful native terminal; this is not schedule recovery proof.
+
+### Added
+- Add a versioned provider-neutral schedule recovery contract for authoritative persistent reattachment or predecessor-fenced reconstruction. Persist execution intent, cancellation intent and bounded occurrence deduplication; reconcile eligible records after Router readiness without a foreground message.
+- Require original owner/backend/directory admission, serialize recovery and retain ambiguous native receipts. Expired one-shots and crash-interrupted executions are not replayed. Legacy terminal records remain terminal.
+- Add an explicit provider-neutral skip-unadmitted handoff policy. Claude 2.1.311 on Linux x64 fences UserPromptSubmit admission, skips pending occurrences without replay or successful delivery, drains admitted work/background tasks, verifies owned native deletion and joins a no-escalation EOF exit. Persist stable ownership before CREATE and verify native inventory in the original session before reconstruction.
+
+### Changed
+- Use acknowledged native `set_model` for live Claude 2.1.311 sessions on Linux x64, retaining process/session/managed-tool registration and future jobs. Support native default and card/global reset semantics; cold selection does not spawn a host. Other live builds/platforms refuse the change without a destructive fallback.
+- Fence model-control uncertainty, bind receipts to the captured host/session, and keep timed-out preferences unsaved even on late acknowledgement. Allow only explicit same-host retries after settled internal errors; retain destructive context reset as an explicit recovery option. Refuse restart-based effort changes while managed native schedules exist.
+- Enable DSH orderly recovery through native serialized deletion, queued-turn drain, session flush and confirmed owned-host exit. Resume the original session automatically after Router readiness and reconstruct only future firings from a consumed durable clean checkpoint.
+- Prepare native handoff before automatic installation; restore suspended jobs after failed installation or manual install-only updates. Waiting eligible Claude and DSH jobs no longer block updates indefinitely; uncertain drain/exit/restoration retains admission and never silently force-stops work.
+
+### Fixed
+- Require a completed Claude scheduled lifecycle as well as a successful result before reporting occurrence success; cancelled, discarded or refused terminals cannot be overwritten by late success receipts.
+- Do not reconstruct a one-shot already absent at handoff, or block the next foreground turn when every cleanly suspended one-shot is skipped or expires.
+- Validate the exact model acknowledgement during Claude recovery, retain cleanup handles for post-create failures, and scope admission release to its restoration owner. Finalize terminal-only update handoffs and describe the negotiated recovery policy in creation responses.
+- Fence automatic updates while startup catalog inspection/reconciliation is unresolved, including malformed catalogs. Persist cancellation intent before native deletion so a failed receipt cannot authorize later recreation.
+- Distinguish clean native quiescence from deletion evidence when cancelling or expiring persistent schedules. Resume clean update restoration on Router reconnect only after installation finalization; reject update admission on destroyed handlers.
+
+### Limitations
+- Dirty-crash reconstruction remains unsupported. Claude orderly recovery is gated to Linux x64 Claude Code 2.1.311; isolated real-native acceptance uses a loopback fake API and native Cron timing, not authenticated provider traffic. No macOS/Windows native Claude recovery claim is made. DSH retains its stricter drain policy. Retained-process `/abort` and model switching remain supported.
+
 ## [1.6.237] - 2026-11-13
 
 ### Changed

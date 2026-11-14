@@ -192,9 +192,11 @@ export class ThreadExecutorPool {
 
   // ── Per-thread locking ──────────────────────────────────────────────────
 
-  isThreadBusy(threadId: string): boolean {
-    return (this.busy.get(threadId) ?? false) || this.executors.get(threadId)?.isBusy?.() === true
-      || this.executors.get(threadId)?.hasUncertainShutdown?.() === true;
+  isThreadBusy(threadId: string, setting?: 'model'): boolean {
+    const executor = this.executors.get(threadId);
+    const retry = setting === 'model' && executor?.canRetrySettingsChange?.(setting) === true;
+    return (this.busy.get(threadId) ?? false) || (!retry && executor?.isBusy?.() === true)
+      || executor?.hasUncertainShutdown?.() === true;
   }
 
   setThreadBusy(threadId: string, busy: boolean): void {

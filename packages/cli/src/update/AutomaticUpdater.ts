@@ -7,7 +7,8 @@ const CLI_PACKAGE = '@yu_robotics/remote-cli';
 
 export interface UpdateReadiness {
   tryBeginAutomaticUpdate(): boolean;
-  endAutomaticUpdate(): void;
+  prepareAutomaticUpdate?(): Promise<void>;
+  endAutomaticUpdate(): void | Promise<void>;
 }
 
 export interface AutomaticUpdaterDependencies {
@@ -111,12 +112,13 @@ export class AutomaticUpdater {
     const targetVersion = this.pendingVersion;
     console.log(`[AutoUpdate] Installing ${CLI_PACKAGE}@${targetVersion}...`);
     try {
+      await this.readiness.prepareAutomaticUpdate?.();
       await this.dependencies.installVersion(targetVersion);
       if (!this.restartAfterUpdate) {
         this.installedVersion = targetVersion;
         if (this.pendingVersion === targetVersion) this.pendingVersion = undefined;
         this.updating = false;
-        this.readiness.endAutomaticUpdate();
+        await this.readiness.endAutomaticUpdate();
         console.log(`[AutoUpdate] CLI ${targetVersion} installed. Running CLI ${this.currentVersion} will continue; the new version takes effect the next time you start remote-cli.`);
         if (this.pendingVersion) this.scheduleAttempt(this.dependencies.retryDelayMs);
         return;
@@ -125,10 +127,15 @@ export class AutomaticUpdater {
       await this.dependencies.beforeRestart();
       this.dependencies.exitProcess(0);
     } catch (error) {
-      console.error('[AutoUpdate] Upgrade failed; continuing with the current process and retrying later:', error instanceof Error ? error.message : error);
+      console.error('[AutoUpdate] Upgrade did not finish:', error instanceof Error ? error.message : error);
       console.error(`[AutoUpdate] To update manually: npm install -g ${CLI_PACKAGE}@${targetVersion}`);
       this.updating = false;
-      this.readiness.endAutomaticUpdate();
+      try { await this.readiness.endAutomaticUpdate(); }
+      catch {
+        console.error('[AutoUpdate] Schedule recovery or shutdown remains unresolved. Work is fenced; inspect schedule status before retrying.');
+        return;
+      }
+      console.error('[AutoUpdate] The current process can continue; retrying the update later.');
       this.scheduleAttempt(this.dependencies.failureRetryDelayMs);
     }
   }

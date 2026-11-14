@@ -44,6 +44,26 @@ function harness() {
 afterEach(() => vi.useRealTimers());
 
 describe('Claude foreground native schedule protocol', () => {
+  it.each(['cancelled', 'discarded', 'refused'])('does not turn a %s occurrence into success from a successful result', async terminal => {
+    for (const resultFirst of [true, false]) {
+      const h = harness(); const job = await h.create();
+      expect(h.occurrence(String(job.action.input.prompt))).toEqual({});
+      const result = { type: 'result', uuid: 'synthetic-result', is_error: false,
+        terminal_reason: 'completed', result: 'A successful-looking native response' };
+      if (resultFirst) h.adapter.accept(result);
+      h.adapter.accept({ type: 'command_lifecycle', command_uuid: 'occurrence-one', state: terminal });
+      if (!resultFirst) {
+        // A conflicting late terminal cannot erase an observed failed terminal.
+        h.adapter.accept({ type: 'command_lifecycle', command_uuid: 'occurrence-one', state: 'completed' });
+        h.adapter.accept(result);
+      }
+      expect(job.onEvent).toHaveBeenCalledWith(expect.objectContaining({ type: 'completed', success: false }));
+      expect(job.onEvent.mock.calls.filter(([event]) => event.type === 'completed')).toHaveLength(1);
+      expect(h.adapter.busy).toBe(false);
+      h.adapter.processClosed();
+    }
+  });
+
   it('returns an exact action without a nested model turn and waits for its matching native receipt', async () => {
     const h = harness(); let done = false;
     const pending = h.adapter.inToolOperation('operation', () => true, () => h.adapter.create(input(), vi.fn())).then(handle => { done = true; return handle; });
@@ -56,7 +76,9 @@ describe('Claude foreground native schedule protocol', () => {
     expect(h.hook(action.tool, action.input)).toEqual({});
     expect(h.hook(action.tool, action.input, 'replayed-tool')).toHaveProperty('hookSpecificOutput.permissionDecision', 'deny');
     h.receipt(h.created());
-    expect((await pending).nativeId).toBe('native-one');
+    const handle = await pending;
+    expect(handle.nativeId).toBe('native-one');
+    expect(handle.releaseForRestart).toBeUndefined();
     expect(h.adapter.action('operation')).toBeUndefined();
     h.adapter.processClosed();
   });
@@ -101,6 +123,31 @@ describe('Claude foreground native schedule protocol', () => {
     const h = harness(); const job = await h.create();
     expect(h.occurrence('A missed task notice')).toHaveProperty('decision', 'block');
     h.complete(); expect(job.onEvent).not.toHaveBeenCalled();
+    h.adapter.processClosed();
+  });
+
+  it('blocks a resumed unowned wake even when native reports a successful terminal', () => {
+    // Observed on 2.1.311: resume reconstructs memory cron definitions, and a
+    // blocked UserPromptSubmit can still end with a successful native result.
+    // Neither receipt authorizes adopting the job or delivering its output.
+    const h = harness();
+    h.adapter.accept({ type: 'command_lifecycle', state: 'started',
+      wakeup_source: 'schedule_wakeup', command_uuid: 'resumed-occurrence' });
+    h.adapter.accept({ type: 'control_request', request_id: 'resumed-hook', request: {
+      subtype: 'hook_callback', callback_id: SCHEDULE_HOOK,
+      input: { hook_event_name: 'UserPromptSubmit', prompt: '[remote-cli:synthetic-old-owner]\nSynthetic reminder' },
+    } });
+    expect(h.send.mock.calls.at(-1)![0].response.response).toHaveProperty('decision', 'block');
+    expect(h.adapter.hasJobs).toBe(false);
+    expect(h.adapter.busy).toBe(true);
+    expect(h.adapter.accept({ type: 'result', uuid: 'resumed-result', is_error: false,
+      terminal_reason: 'completed', result: 'Synthetic hook-block terminal' })).toBe(true);
+    expect(h.adapter.busy).toBe(true);
+    h.adapter.accept({ type: 'command_lifecycle', command_uuid: 'resumed-occurrence', state: 'completed' });
+    expect(h.adapter.busy).toBe(false);
+    expect(h.manage).not.toHaveBeenCalled();
+    expect(h.adapter.hasJobs).toBe(false);
+    expect(h.wake).toHaveBeenCalledOnce();
     h.adapter.processClosed();
   });
 

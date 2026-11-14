@@ -121,6 +121,10 @@ export interface IExecutor {
   /** Retire the turn activation but retain native managed-tool registration during interrupt. */
   preservesProcessOnAbort?(): boolean;
   hasPendingCancellation?(): boolean;
+  /** A native settings mutation still owns admission; abort must not retire its bridge. */
+  hasPendingSettingsChange?(): boolean;
+  /** Permit only an explicit retry of a settled-but-unconfirmed native setting. */
+  canRetrySettingsChange?(setting: 'model'): boolean;
   abortStatusMessage?(): string | undefined;
   /** Explicit context reset may stop a retained host, losing session-only schedules. */
   stopForContextReset?(): Promise<void>;
@@ -141,6 +145,8 @@ export interface IExecutor {
   // Optional — MessageHandler uses 'method' in executor checks for these
   /** Enable tools for future turns without changing the native conversation. */
   configureDelegation?(connection?: DelegationConnection): Promise<void>;
+  /** Opt-in cross-process reconciliation; absent until native ownership/handoff is proven. */
+  nativeScheduleRecovery?: import('../scheduling/types').NativeScheduleRecovery;
   /** Native timing in the existing foreground conversation; never fork its history. */
   createNativeSchedule?(input: import('../scheduling/types').NativeScheduleInput,
     onEvent: (event: import('../scheduling/types').NativeScheduleEvent) => void, isOwnerCurrent?: () => boolean): Promise<import('../scheduling/types').NativeScheduleHandle>;

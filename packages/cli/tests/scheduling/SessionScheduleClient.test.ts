@@ -22,7 +22,8 @@ afterEach(() => { vi.useRealTimers(); });
 describe('session schedule receipts', () => {
   it('validates scope/session, deduplicates occurrences, and rejects malformed output', async () => {
     const f = fixture(), emit = vi.fn();
-    await f.created(emit);
+    const handle = await f.created(emit);
+    expect(handle.releaseForRestart).toBeTypeOf('function');
     expect(f.client.receive({ version: 2, scope: 'foreign' })).toBe(false);
     f.event({ type: 'started', occurrenceId: 'one' }, 'other');
     expect(emit).not.toHaveBeenCalled();
