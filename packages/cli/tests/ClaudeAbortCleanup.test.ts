@@ -3,6 +3,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs/promises';
+import syncFs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
@@ -30,9 +31,18 @@ function deferred<T = void>() {
   return { promise, resolve };
 }
 let root: string;
+const filesystemPlatform = process.platform;
+const nativeFsync = syncFs.fsyncSync;
+let persistencePlatforms: NodeJS.Platform[];
 let executors: ClaudePersistentExecutor[];
 let handlers: MessageHandler[];
 beforeEach(async () => {
+  persistencePlatforms = [];
+  // Observe actual fsync calls without weakening the filesystem durability checks.
+  vi.spyOn(syncFs, 'fsyncSync').mockImplementation(fd => {
+    persistencePlatforms.push(process.platform);
+    return nativeFsync(fd);
+  });
   vi.mocked(spawn).mockReset().mockImplementation(() => { throw new Error('Probe forbids child processes'); });
   root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'abort-framework-probe-')));
   vi.spyOn(os, 'homedir').mockReturnValue(root);
@@ -46,6 +56,7 @@ beforeEach(async () => {
   executors = []; handlers = [];
 });
 afterEach(async () => {
+  const teardownPlatform = process.platform;
   for (const handler of handlers) await handler.destroy();
   for (const executor of executors) {
     const raw = executor as any;
@@ -57,6 +68,8 @@ afterEach(async () => {
   vi.clearAllTimers(); vi.useRealTimers();
   vi.restoreAllMocks(); vi.unstubAllEnvs(); vi.unstubAllGlobals();
   await fs.rm(root, { recursive: true, force: true });
+  expect(teardownPlatform).toBe(filesystemPlatform);
+  expect(persistencePlatforms.filter(platform => platform !== filesystemPlatform)).toEqual([]);
 });
 function executor() {
   const value = new ClaudePersistentExecutor(new DirectoryGuard([root]), root, 'synthetic-thread',
@@ -662,16 +675,19 @@ async function retainedFixture() {
 describe('Claude retained cancellation integration', () => {
   const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
   const architecture = Object.getOwnPropertyDescriptor(process, 'arch')!;
-  beforeEach(() => Object.defineProperty(process, 'arch', { ...architecture, value: 'x64' }));
-  afterEach(() => Object.defineProperty(process, 'arch', architecture));
-  beforeEach(() => Object.defineProperty(process, 'platform', { ...platform, value: 'linux' }));
-  afterEach(() => Object.defineProperty(process, 'platform', platform));
   it.each([['linux', 'arm64'], ['darwin', 'arm64'], ['win32', 'x64']] as const)(
-    'retains a capable newer host on %s/%s', async (hostPlatform, arch) => {
-      Object.defineProperty(process, 'platform', { ...platform, value: hostPlatform });
-      Object.defineProperty(process, 'arch', { ...architecture, value: arch });
+    'accepts %s/%s capabilities and retains the actual filesystem host', async (hostPlatform, arch) => {
       const f = await retainedFixture();
       f.raw.turnLedger.version = '2.1.318';
+      // Restore the host before asynchronous protocol handling or persistence.
+      try {
+        Object.defineProperty(process, 'platform', { ...platform, value: hostPlatform });
+        Object.defineProperty(process, 'arch', { ...architecture, value: arch });
+        expect(f.main.preservesProcessOnAbort()).toBe(true);
+      } finally {
+        Object.defineProperty(process, 'arch', architecture);
+        Object.defineProperty(process, 'platform', platform);
+      }
       const foreground = f.main.execute('Foreground to cancel').catch(error => error);
       await Promise.resolve();
       expect(await f.main.abort()).toBe(true); await foreground;
