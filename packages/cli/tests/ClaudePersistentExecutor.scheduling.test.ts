@@ -151,6 +151,22 @@ describe('Claude shared foreground scheduling integration', () => {
     await expect(foreground).resolves.toMatchObject({ success: true });
   });
 
+  it('reconciles an owned job only on the existing idle host without initialization or recreation', async () => {
+    const job = await reserve();
+    const host = raw.claudeProcess;
+    const start = vi.spyOn(raw, 'startProcess');
+    const catalog = vi.spyOn(executor, 'listModels');
+    await executor.reconcileNativeSchedule('cleanup', () => true, () => job.handle.cancel());
+    expect(nativeTools).toEqual(['CronDelete']);
+    expect(raw.claudeProcess).toBe(host);
+    expect(start).not.toHaveBeenCalled(); expect(catalog).not.toHaveBeenCalled();
+    await executor.reconcileNativeSchedule('cleanup-again', () => true, () => job.handle.cancel());
+    expect(nativeTools).toEqual(['CronDelete']);
+    await job.handle.stop();
+    expect(raw.sessionSchedules.hasJobs).toBe(false);
+    expect(raw.scheduleCleanupHost).toBeUndefined();
+  });
+
   it('rejects a missing native action at foreground completion instead of deadlocking operation drain', async () => {
     const foreground = executor.execute('Request a schedule but omit its native action');
     const pending = executor.withNativeScheduleOperation('missing', () => true, () => executor.createNativeSchedule({

@@ -16,7 +16,21 @@ export class ManagedToolBridge {
   private starting?: Promise<ManagedToolConnection>;
   private sockets = new Set<Socket>();
 
-  activate(handler?: ManagedToolHandler): void { this.handler = handler; }
+  private activation?: symbol;
+
+  /** Revoke current turn authority without replacing native endpoint registration. */
+  retireCurrentActivation(): void { this.activation = undefined; this.handler = undefined; }
+
+  activate(handler: ManagedToolHandler): () => void {
+    const lease = Symbol('managed-tool-turn');
+    this.activation = lease;
+    this.handler = handler;
+    return () => {
+      if (this.activation !== lease) return;
+      this.activation = undefined;
+      this.handler = undefined;
+    };
+  }
 
   async start(groups?: ManagedToolConnection['groups']): Promise<ManagedToolConnection> {
     if (this.connection) { this.connection = { ...this.connection, groups }; return this.connection; }
@@ -43,6 +57,7 @@ export class ManagedToolBridge {
         answer(404, { error: 'Unknown delegation endpoint' }); request.resume(); return;
       }
       const handler = this.handler;
+      const activation = this.activation;
       if (!handler) { answer(409, { error: 'No active delegation turn' }); request.resume(); return; }
       let size = 0;
       const chunks: Buffer[] = [];
@@ -63,7 +78,7 @@ export class ManagedToolBridge {
           || !isRecord(payload.args)) {
           answer(400, { error: 'Invalid delegation call' }); return;
         }
-        if (this.handler !== handler) { answer(409, { error: 'Delegation turn expired' }); return; }
+        if (this.activation !== activation) { answer(409, { error: 'Delegation turn expired' }); return; }
         void handler(payload.name, payload.args, payload.callId)
           .then(value => answer(200, value))
           .catch(error => answer(400, { error: error instanceof Error ? error.message : 'Delegation failed' }));
@@ -85,6 +100,7 @@ export class ManagedToolBridge {
   }
 
   async close(): Promise<void> {
+    this.activation = undefined;
     this.handler = undefined;
     if (this.starting) await this.starting;
     const server = this.server;

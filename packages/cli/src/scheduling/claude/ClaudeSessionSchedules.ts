@@ -4,7 +4,7 @@ import { NativeScheduleCleanupError, type NativeScheduleInput, type NativeSchedu
 
 export interface NativeScheduleAction { tool: 'CronCreate' | 'CronList' | 'CronDelete'; input: Record<string, unknown> }
 type Frame = Record<string, any>;
-type Scope = { id: string; current: () => boolean; inTurn: boolean; ended?: boolean };
+type Scope = { id: string; current: () => boolean; inTurn: boolean; ended?: boolean; mutations: Set<string>; done: Promise<void> };
 interface Job {
   id: string; marker: string; prompt: string; nativeId?: string; recurring: boolean; deadline?: number;
   current(): boolean; uncertain: boolean; retired: boolean; cancelled: boolean; emit(event: NativeScheduleEvent): void;
@@ -54,10 +54,33 @@ export class ClaudeSessionSchedules {
 
   get busy(): boolean { return !!this.batch || !!this.submitted; }
   get hasJobs(): boolean { return [...this.jobs.values()].some(job => !job.retired); }
+  get hasPendingMutation(): boolean { return !!this.scope?.mutations.size || [...this.jobs.values()].some(job => !job.retired && job.uncertain); }
   async inToolOperation<T>(id: string, current: () => boolean, run: () => Promise<T>, inTurn = true): Promise<T> {
     if (this.scope) throw new Error('A native schedule operation is already active.');
-    const scope = { id, current, inTurn }; this.scope = scope;
-    try { return await run(); } finally { if (this.scope === scope) this.scope = undefined; }
+    let finish!: () => void;
+    const scope: Scope = { id, current, inTurn, mutations: new Set(), done: new Promise(resolve => { finish = resolve; }) }; this.scope = scope;
+    try { return await run(); } finally { if (this.scope === scope) this.scope = undefined; finish(); }
+  }
+  /** Capture existing mutation ownership before revoking foreground authority. Never creates jobs. */
+  captureCancellation(): (current: () => boolean) => Promise<void> {
+    const scope = this.scope;
+    const ids = new Set(scope?.mutations);
+    for (const job of this.jobs.values()) if (job.uncertain) ids.add(job.id);
+    return async current => {
+      await scope?.done;
+      for (const id of ids) {
+        if (!current()) throw new Error('Cancellation cleanup lease expired.');
+        const job = this.jobs.get(id);
+        if (!job || job.retired || this.closed) continue;
+        await this.inToolOperation(id, current, async () => {
+          await this.cancel(job);
+          if (this.inventory(job, await this.request(job, { tool: 'CronList', input: {} }))) {
+            throw new Error('Cancelled native mutation still exists in inventory.');
+          }
+          if (!this.batch?.occurrences.some(item => item.job === job)) this.retire(job, 'Cancelled foreground mutation reconciled on the original native host.');
+        }, false);
+      }
+    };
   }
   action(id: string): NativeScheduleAction | undefined {
     return this.pending?.scope?.inTurn && this.pending.scope.id === id && this.pending.scope.current() && !this.pending.toolId
@@ -156,6 +179,7 @@ export class ClaudeSessionSchedules {
     if (this.closed || this.pending || job.retired) return Promise.reject(new Error('Native schedule operation is unavailable.'));
     const scope = this.scope;
     if (scope && (scope.ended || !scope.current())) return Promise.reject(new Error('Scheduling owner or native turn is no longer current.'));
+    if (action.tool !== 'CronList') scope?.mutations.add(job.id);
     const result = new Promise<string>((resolve, reject) => {
       const timer = setTimeout(() => this.failPending('Native scheduling tool receipt timed out; inspect or cancel the existing task.'), this.options.timeoutMs ?? 60_000);
       this.pending = { action, job, scope, resolve, reject, timer };

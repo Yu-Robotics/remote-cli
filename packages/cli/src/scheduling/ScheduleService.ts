@@ -240,6 +240,17 @@ export class ScheduleService {
     return LIVE.has(record.state) || Boolean(runtime && !runtime.stopped);
   }
 
+  /** Keep admitted native work visible when cleanup cannot safely acquire its host. */
+  async retainCleanupError(owner: ScheduleOwner, id: string, error: unknown): Promise<void> {
+    this.checkReady(); validateOwner(owner); validateScheduleId(id);
+    await this.serial(async () => {
+      const record = this.owned(owner, id);
+      if (this.runtimes.get(id)?.stopped) return;
+      record.error = errorText(error);
+      await this.persist();
+    });
+  }
+
   /** User-requested native reconciliation only; no background polling is installed. */
   refresh(owner: ScheduleOwner): Promise<void> {
     return this.operation(this.refreshNative(owner));
