@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'events';
 import fs from 'fs/promises';
+import syncFs from 'node:fs';
 import os from 'os';
 import path from 'path';
 import { spawn } from 'child_process';
@@ -16,6 +17,9 @@ import * as ownershipRuntime from '../src/delegation/OwnershipRuntime';
 import { SCHEDULE_HOOK } from '../src/scheduling/claude/ClaudeSessionSchedules';
 
 const owner = { threadId: 'fixture-thread', openId: 'fixture-owner', generation: 'fixture-generation' };
+const filesystemPlatform = process.platform;
+const nativeFsync = syncFs.fsyncSync;
+let persistencePlatforms: NodeJS.Platform[];
 let root: string, executor: ClaudePersistentExecutor, raw: any, service: ScheduleService;
 let child: any, hosts: any[], inventory: Map<string, string>, deliver: any, serial: number;
 let onCreate: undefined | (() => Promise<void>);
@@ -83,9 +87,14 @@ function spawnFixture() {
   return host;
 }
 beforeEach(async () => {
+  persistencePlatforms = [];
+  // Keep real persistence, and detect protocol platform mocks leaking into it.
+  vi.spyOn(syncFs, 'fsyncSync').mockImplementation(fd => {
+    persistencePlatforms.push(process.platform);
+    return nativeFsync(fd);
+  });
   root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'claude-recovery-')));
   vi.spyOn(os, 'homedir').mockReturnValue(root); vi.stubEnv('HOME', root); vi.stubEnv('USERPROFILE', root);
-  vi.spyOn(process, 'platform', 'get').mockReturnValue('linux'); vi.spyOn(process, 'arch', 'get').mockReturnValue('x64');
   for (const name of ['log', 'warn', 'error'] as const) vi.spyOn(console, name).mockImplementation(() => {});
   boot = 'fixture-boot';
   vi.spyOn(ownershipRuntime, 'bootIdentity').mockImplementation(() => ({ host: 'fixture-host', boot, namespace: 'fixture-pid-namespace' }));
@@ -103,10 +112,13 @@ beforeEach(async () => {
   await service.initialize(); await executor.listModels();
 });
 afterEach(async () => {
+  const teardownPlatform = process.platform;
   withholdClose = false; failCleanup = false;
   await executor.destroy(); await Promise.allSettled([service.destroy()]);
   vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllEnvs();
   await fs.rm(root, { recursive: true, force: true });
+  expect(teardownPlatform).toBe(filesystemPlatform);
+  expect(persistencePlatforms.filter(platform => platform !== filesystemPlatform)).toEqual([]);
 });
 async function create(id = 'first', once = false) {
   return executor.withNativeScheduleOperation(id, () => true, () => service.create(owner, { id, backend: 'claude', threadId: owner.threadId,
@@ -465,11 +477,15 @@ describe('Claude production orderly recovery', () => {
   });
   it.each([
     ['linux', 'arm64'], ['darwin', 'arm64'], ['win32', 'x64'],
-  ] as const)('hands off and restores on %s/%s with a newer capable host', async (platform, arch) => {
-    vi.spyOn(process, 'platform', 'get').mockReturnValue(platform);
-    vi.spyOn(process, 'arch', 'get').mockReturnValue(arch);
+  ] as const)('accepts %s/%s capabilities and restores on the actual filesystem host', async (platform, arch) => {
     nativeVersion = '2.1.318'; raw.turnLedger.version = nativeVersion;
-    expect(executor.nativeScheduleRecovery).toBeDefined();
+    // Only synchronous capability selection is simulated, never filesystem work.
+    const platformMock = vi.spyOn(process, 'platform', 'get').mockReturnValue(platform);
+    const archMock = vi.spyOn(process, 'arch', 'get').mockReturnValue(arch);
+    try {
+      expect(executor.nativeScheduleRecovery).toBeDefined();
+      expect(executor.preservesProcessOnAbort()).toBe(true);
+    } finally { archMock.mockRestore(); platformMock.mockRestore(); }
     await create('first'); await create('second');
     await service.suspendForRestart(); await service.recover();
     expect(hosts).toHaveLength(2); expect(inventory.size).toBe(2);
