@@ -98,6 +98,58 @@ function makeHandler(main: any) {
 }
 
 describe('Claude abort cleanup ownership', () => {
+  it.each(['delayed-close', 'unconfirmed-close'] as const)(
+    'reset retains captured-child admission until %s settles, then permits a fresh context', async mode => {
+      vi.useFakeTimers();
+      const native = executor();
+      const first = nativePipe();
+      const warmup = native.execute('Synthetic pre-reset turn');
+      await vi.advanceTimersByTimeAsync(1000);
+      first.child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'system', subtype: 'init', session_id: 'synthetic-old-session' }) + '\n'));
+      first.child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'result', is_error: false, result: 'Synthetic result' }) + '\n'));
+      expect((await warmup).success).toBe(true);
+      first.child.stdin.end.mockImplementation(() => {});
+      native.resetContext();
+      expect(native.getSessionId()).toBeNull();
+      expect(native.hasUncertainShutdown()).toBe(true);
+      const blocked = await native.execute('Must not dispatch while reset is stopping');
+      expect(blocked).toEqual({ success: false, error: 'Native cleanup is still pending. Retry after cleanup.' });
+      expect(spawn).toHaveBeenCalledOnce();
+      expect(first.frames.filter(frame => frame.type === 'user')).toHaveLength(1);
+
+      if (mode === 'unconfirmed-close') {
+        await vi.advanceTimersByTimeAsync(9001);
+        expect(native.hasUncertainShutdown()).toBe(true);
+        expect((await native.execute('Must not replace an unconfirmed child')).success).toBe(false);
+        expect(spawn).toHaveBeenCalledOnce();
+        expect(first.child.kill.mock.calls).toEqual([['SIGTERM'], ['SIGKILL']]);
+        // Retry joins the same owned host; a signal or elapsed deadline did not release it.
+        first.child.stdin.end.mockImplementation(() => queueMicrotask(() => first.child.emit('close', 0)));
+        const retry = native.abort();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(await retry).toBe(true);
+      } else {
+        await vi.advanceTimersByTimeAsync(4000);
+        expect(spawn).toHaveBeenCalledOnce();
+        expect(first.child.kill).not.toHaveBeenCalled();
+        first.child.emit('close', 0);
+        await vi.advanceTimersByTimeAsync(0);
+      }
+      expect(native.hasUncertainShutdown()).toBe(false);
+      const second = nativePipe();
+      const fresh = native.execute('Synthetic fresh context');
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(spawn).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(spawn).mock.calls[1][1]).not.toContain('--resume');
+      expect(second.frames.filter(frame => frame.type === 'user').map(frame => frame.message.content)).toEqual(['Synthetic fresh context']);
+      // A duplicate old close cannot retire the replacement host or finish its turn.
+      first.child.emit('close', 0);
+      expect(native.isBusy()).toBe(true);
+      second.child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'result', is_error: false, result: 'Synthetic fresh result' }) + '\n'));
+      expect((await fresh).success).toBe(true);
+      expect(native.isBusy()).toBe(false);
+    });
+
   it('review: rejects sandbox mutation during public catalog startup before changing settings or stopping', async () => {
     const native = executor(), raw = native as any;
     const entered = deferred(), release = deferred();
