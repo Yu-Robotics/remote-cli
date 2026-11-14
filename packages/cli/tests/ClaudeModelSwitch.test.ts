@@ -24,7 +24,7 @@ let executor: ClaudePersistentExecutor;
 let raw: any;
 let child: any;
 let wire: any[];
-let version: string;
+let version: string | undefined;
 let handlers: MessageHandler[];
 let bridges: ManagedToolBridge[];
 let sessionModel: string;
@@ -50,7 +50,7 @@ beforeEach(async () => {
   vi.spyOn(os, 'homedir').mockReturnValue(root);
   vi.stubEnv('HOME', root); vi.stubEnv('USERPROFILE', root);
   vi.stubGlobal('fetch', () => { throw new Error('External requests are forbidden'); });
-  // This exercises the inspected gate portably, not native platform execution.
+  // This exercises the native control protocol portably, not native platform execution.
   vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
   vi.spyOn(process, 'arch', 'get').mockReturnValue('x64');
   for (const name of ['log', 'warn', 'error'] as const) vi.spyOn(console, name).mockImplementation(() => {});
@@ -194,11 +194,25 @@ describe('Claude in-process model ownership', () => {
     completed(id); await next;
   });
 
-  it.each(['version', 'platform', 'pid'])('refuses unsupported %s without changing preferences or stopping native jobs', async mismatch => {
-    if (mismatch === 'version') version = '2.1.310';
+  it.each([
+    ['linux', 'arm64', '2.1.318'], ['darwin', 'arm64', 'future-build'],
+    ['win32', 'x64', '2.1.310'], ['linux', 'x64', undefined],
+  ] as const)('uses acknowledged model control on %s/%s build %s', async (platform, arch, build) => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue(platform);
+    vi.spyOn(process, 'arch', 'get').mockReturnValue(arch);
+    version = build;
     await warm(); await reserve();
-    if (mismatch === 'platform') vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    const { promise } = await change(); ack();
+    expect((await promise).success).toBe(true);
+    expect(raw.model).toBe('opus'); expect(child.stdin.end).not.toHaveBeenCalled();
+    expect(spawn).toHaveBeenCalledOnce();
+  });
+
+  it.each(['pid', 'invalid', 'unwritable'])('rejects %s host evidence without stopping jobs', async mismatch => {
+    await warm(); await reserve();
     if (mismatch === 'pid') raw.turnLedger.pid = 4243;
+    if (mismatch === 'invalid') raw.turnLedger.invalid = true;
+    if (mismatch === 'unwritable') child.stdin.writable = false;
     expect((await executor.setModel('opus')).success).toBe(false);
     expect(control()).toBeUndefined(); expect(raw.model).toBe('sonnet'); expect(child.stdin.end).not.toHaveBeenCalled();
   });
@@ -383,7 +397,7 @@ describe('production handler model/card persistence', () => {
         return openSync(...args);
       });
     }
-    // The Linux override above selects the inspected model-control protocol.
+    // The Linux override above simulates the native model-control host.
     // Destructive clear uses real filesystem durability APIs, whose platform
     // must match the host (or the directory-handle boundary simulated here).
     vi.spyOn(process, 'platform', 'get').mockReturnValue(filesystem === 'host' ? hostPlatform : 'win32');

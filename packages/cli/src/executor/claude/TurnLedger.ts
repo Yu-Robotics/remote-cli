@@ -20,7 +20,7 @@ export class TurnLedger {
   }
 
   supported(pid: number | undefined): boolean {
-    return process.platform === 'linux' && process.arch === 'x64' && this.version === '2.1.311' && this.pid === pid && !!pid
+    return this.pid === pid && !!pid
       && !!this.session && !this.invalid
       && ['interrupt_receipt_v1', 'msg_lifecycle_v1', 'lifecycle_wakeup_source_v1'].every(x => this.capabilities.has(x));
   }

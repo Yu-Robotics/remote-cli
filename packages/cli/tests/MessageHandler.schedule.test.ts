@@ -717,17 +717,30 @@ describe('MessageHandler native schedule closed loop', () => {
   it('blocks foreground input throughout recovery inventory validation', async () => {
     let finish!: (present: boolean) => void;
     const inventory = new Promise<boolean>(resolve => { finish = resolve; });
-    const reconcile = vi.fn(async () => ({ ...f.jobs[0].handle, list: () => inventory }));
+    let entered!: () => void;
+    const inventoryEntered = new Promise<void>(resolve => { entered = resolve; });
+    const reconcile = vi.fn(async () => {
+      entered();
+      return { ...f.jobs[0].handle, list: () => inventory };
+    });
     Object.assign(f.executor, { nativeScheduleRecovery: { provider: 'fixture-v1', strategy: 'reattach',
       describe: () => 'original-fixture-session', reconcile } });
     await f.bind(); await f.send('/schedule after 5m -- Synthetic reminder');
     Object.assign(f.jobs[0].handle, { releaseForRestart: async () => {} });
     await f.restart(); await f.reconnect();
-    await vi.waitFor(() => expect(reconcile).toHaveBeenCalledOnce());
-    await f.send('Must not start before inventory', 'thread-a', { isSlashCommand: false });
-    expect(f.responses().at(-1)).toMatchObject({ success: false, error: expect.stringContaining('recovery is in progress') });
-    expect(f.executor.execute).not.toHaveBeenCalled();
-    finish(true); await (f.handler as any).recoverSchedules();
+    const recovery = (f.handler as any).recoverSchedules() as Promise<void>;
+    try {
+      await Promise.race([inventoryEntered, recovery.then(() => {
+        throw new Error('Recovery completed without entering native inventory.');
+      })]);
+      expect(reconcile).toHaveBeenCalledOnce();
+      await f.send('Must not start before inventory', 'thread-a', { isSlashCommand: false });
+      expect(f.responses().at(-1)).toMatchObject({ success: false, error: expect.stringContaining('recovery is in progress') });
+      expect(f.executor.execute).not.toHaveBeenCalled();
+    } finally {
+      finish(true);
+      await recovery;
+    }
     await f.send('Synthetic new foreground', 'thread-a', { isSlashCommand: false }); expect(f.executor.execute).toHaveBeenCalledOnce();
   });
 

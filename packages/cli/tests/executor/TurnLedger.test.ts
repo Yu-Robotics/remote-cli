@@ -13,15 +13,26 @@ function ledger() {
   return value;
 }
 describe('native turn identity and evidence ledger', () => {
-  it('requires tested platform, version, pid, session and all capabilities', () => {
+  it.each([
+    ['linux', 'arm64', '2.1.318'], ['darwin', 'arm64', 'future-build'],
+    ['win32', 'x64', '2.1.310'], ['linux', 'x64', undefined],
+  ])('uses native evidence on %s/%s build %s without an allowlist', (host, arch, version) => {
+    Object.defineProperty(process, 'platform', { ...platform, value: host });
+    Object.defineProperty(process, 'arch', { ...architecture, value: arch });
+    const value = ledger(); value.version = version;
+    expect(value.supported(17)).toBe(true);
+  });
+  it.each(['interrupt_receipt_v1', 'msg_lifecycle_v1', 'lifecycle_wakeup_source_v1'])('requires %s independently of the version', missing => {
+    const value = ledger(); value.version = '2.1.318';
+    value.capabilities.delete(missing); expect(value.supported(17)).toBe(false);
+  });
+  it('requires matching pid, session and valid ownership', () => {
     const value = ledger(); expect(value.supported(17)).toBe(true);
     expect(value.supported(18)).toBe(false); expect(value.supported(undefined)).toBe(false);
-    for (const name of ['darwin', 'win32']) { Object.defineProperty(process, 'platform', { ...platform, value: name }); expect(value.supported(17)).toBe(false); }
-    Object.defineProperty(process, 'platform', { ...platform, value: 'linux' });
-    Object.defineProperty(process, 'arch', { ...architecture, value: 'arm64' }); expect(value.supported(17)).toBe(false);
-    Object.defineProperty(process, 'arch', { ...architecture, value: 'x64' });
-    value.version = '2.1.312'; expect(value.supported(17)).toBe(false); value.version = '2.1.311';
-    value.observe({ type: 'system', subtype: 'init', capabilities: ['msg_lifecycle_v1', 1] }); expect(value.supported(17)).toBe(false);
+    value.session = undefined; expect(value.supported(17)).toBe(false);
+    value.session = 'fixture-session'; value.retire(); expect(value.supported(17)).toBe(false);
+    value.observe({ type: 'system', subtype: 'init', capabilities: ['msg_lifecycle_v1', 1] });
+    expect(value.capabilities.has('1')).toBe(false);
   });
   it('joins result and lifecycle independently, ignores foreign and child results, and invalidates session changes', () => {
     const value = ledger(); value.dispatched('a'); value.dispatched('b', true);

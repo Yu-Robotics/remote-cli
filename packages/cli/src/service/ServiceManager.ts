@@ -1,4 +1,5 @@
 import { execFile } from 'child_process';
+import { randomUUID } from 'crypto';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
@@ -135,10 +136,8 @@ export class LinuxServiceManager extends BaseServiceManager {
     this.unitPath = path.join(context.homeDir, '.config', 'systemd', 'user', `${SERVICE_NAME}.service`);
   }
 
-  async install(): Promise<ServiceStatus> {
-    await this.prepareDirectories();
-    await fs.mkdir(path.dirname(this.unitPath), { recursive: true, mode: 0o700 });
-    const unit = [
+  private createUnit(): string {
+    return [
       '[Unit]',
       'Description=Remote CLI Client',
       'After=network-online.target',
@@ -152,33 +151,110 @@ export class LinuxServiceManager extends BaseServiceManager {
       `StandardError=append:${escapeSystemdPath(path.join(this.context.logDirectory, 'service.error.log'))}`,
       'Restart=always',
       'RestartSec=5',
+      'KillMode=mixed',
+      'TimeoutStopSec=90s',
       '',
       '[Install]',
       'WantedBy=default.target',
       '',
     ].join('\n');
-    await fs.writeFile(this.unitPath, unit, { mode: 0o600 });
-    await this.runner('systemctl', ['--user', 'daemon-reload']);
+  }
+
+  async install(): Promise<ServiceStatus> {
+    await this.prepareDirectories();
+    await fs.mkdir(path.dirname(this.unitPath), { recursive: true, mode: 0o700 });
+    const existing = await fs.lstat(this.unitPath).catch(error => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw error;
+    });
+    if (existing) await this.readManagedUnit();
+    await fs.writeFile(this.unitPath, this.createUnit(), { mode: 0o600 });
+    await this.prepareStopPolicy();
     await this.runner('systemctl', ['--user', 'enable', '--now', SERVICE_NAME]);
     return this.status();
   }
 
+  /** Only the exact generated layout is eligible for automatic migration. */
+  private async readManagedUnit(): Promise<string> {
+    const stat = await fs.lstat(this.unitPath);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > 64 * 1024) {
+      throw new Error('The service unit is not a regular managed file; review it manually. No service operation was performed.');
+    }
+    const unit = await fs.readFile(this.unitPath, 'utf8');
+    // Preserve previously captured executable, PATH, HOME and log locations.
+    // Unknown directives, comments, duplicates or alternate layouts are custom.
+    const normalize = (text: string) => text
+      .replace(/^ExecStart="(?:[^"\\\n]|\\.)+" "(?:[^"\\\n]|\\.)+" start --non-interactive$/m, 'ExecStart=<managed>')
+      .replace(/^WorkingDirectory=[^\n]+$/m, 'WorkingDirectory=<managed>')
+      .replace(/^Environment="HOME=(?:[^"\\\n]|\\.)*"$/m, 'Environment=HOME')
+      .replace(/^Environment="PATH=(?:[^"\\\n]|\\.)*"$/m, 'Environment=PATH')
+      .replace(/^StandardOutput=append:[^\n]+$/m, 'StandardOutput=<managed>')
+      .replace(/^StandardError=append:[^\n]+$/m, 'StandardError=<managed>');
+    const legacy = this.createUnit().replace('KillMode=mixed\nTimeoutStopSec=90s\n', '');
+    if (unit.split('\n').some(line => line.endsWith('\\') || line.includes('\r'))
+      || (normalize(unit) !== normalize(legacy) && normalize(unit) !== normalize(this.createUnit()))) {
+      throw new Error('The service unit has custom settings. Review its parent-first shutdown policy manually; it was not rewritten or stopped.');
+    }
+    return unit;
+  }
+
+  private async prepareStopPolicy(): Promise<void> {
+    const unit = await this.readManagedUnit();
+    if (!unit.includes('KillMode=mixed\n')) {
+      const temporary = `${this.unitPath}.${randomUUID()}.tmp`;
+      try {
+        const stat = await fs.lstat(this.unitPath);
+        await fs.writeFile(temporary, unit.replace('RestartSec=5\n', 'RestartSec=5\nKillMode=mixed\nTimeoutStopSec=90s\n'),
+          { mode: stat.mode & 0o777, flag: 'wx' });
+        if (await this.readManagedUnit() !== unit) throw new Error('Service unit changed during migration; retry after review.');
+        await fs.rename(temporary, this.unitPath);
+      } finally { await fs.rm(temporary, { force: true }); }
+    }
+    // Reload before stop, including a running service installed by an older CLI.
+    // Effective checks catch drop-ins and a stale or failed manager reload.
+    await this.runner('systemctl', ['--user', 'daemon-reload']);
+    const values = await this.properties();
+    const duration = values.TimeoutStopUSec ?? '';
+    const finiteTimeout = /^(?:[0-9]+(?:\.[0-9]+)?(?:us|ms|s|min|h|d|w) ?)+$/.test(duration)
+      && /[1-9]/.test(duration);
+    if (values.KillMode !== 'mixed' || values.KillSignal !== '15' || values.SendSIGKILL !== 'yes'
+      || values.FinalKillSignal !== '9' || values.SendSIGHUP !== 'no' || !finiteTimeout
+      || values.ExecStop !== '' || values.ExecStopPost !== '') {
+      throw new Error('Effective systemd shutdown policy is incompatible with orderly native handoff. Review unit overrides; no start or stop was requested.');
+    }
+  }
+
+  private async properties(): Promise<Record<string, string>> {
+    // Empty stop-command properties are omitted unless --all is requested.
+    const result = await this.runner('systemctl', ['--user', 'show', SERVICE_NAME, '--no-page', '--all']);
+    return parseKeyValueOutput(result.stdout);
+  }
+
   async uninstall(): Promise<ServiceStatus> {
-    await ignoreCommandFailure(this.runner, 'systemctl', ['--user', 'disable', '--now', SERVICE_NAME]);
-    await fs.rm(this.unitPath, { force: true });
-    await ignoreCommandFailure(this.runner, 'systemctl', ['--user', 'daemon-reload']);
+    if (await fileExists(this.unitPath)) {
+      await this.stop();
+      await this.runner('systemctl', ['--user', 'disable', SERVICE_NAME]);
+      await fs.rm(this.unitPath);
+      await this.runner('systemctl', ['--user', 'daemon-reload']);
+    }
     return this.status();
   }
 
   async start(): Promise<ServiceStatus> {
     if (!await fileExists(this.unitPath)) throw new Error('The user service is not installed. Run "remote-cli service install" first.');
+    await this.prepareStopPolicy();
     await this.runner('systemctl', ['--user', 'start', SERVICE_NAME]);
     return this.status();
   }
 
   async stop(): Promise<ServiceStatus> {
     if (!await fileExists(this.unitPath)) throw new Error('The user service is not installed.');
+    await this.prepareStopPolicy();
     await this.runner('systemctl', ['--user', 'stop', SERVICE_NAME]);
+    const result = await this.properties();
+    if (result.ActiveState !== 'inactive' || result.Result !== 'success') {
+      throw new Error('Managed service shutdown was not confirmed successful. Native recovery may remain blocked; inspect the service before restarting.');
+    }
     return this.status();
   }
 

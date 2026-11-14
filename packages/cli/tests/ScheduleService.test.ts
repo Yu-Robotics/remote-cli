@@ -76,6 +76,14 @@ describe('ScheduleService', () => {
     await fs.rm(directory, { recursive: true, force: true });
   });
 
+  it('rejects a second catalog writer before reading or overwriting cancellation intent', async () => {
+    const first = make(); await first.initialize(); await first.create(owner, input());
+    await first.cancel(owner, 'schedule-a');
+    const before = await fs.readFile(path.join(directory, SCHEDULE_CATALOG_FILE), 'utf8');
+    const second = make(); await expect(second.initialize()).rejects.toThrow('Another client');
+    expect(await fs.readFile(path.join(directory, SCHEDULE_CATALOG_FILE), 'utf8')).toBe(before);
+  });
+
   it('persists private catalog entries and never invokes native list for local listing', async () => {
     const service = make(); await service.initialize();
     const record = await service.create(owner, input());
@@ -83,7 +91,7 @@ describe('ScheduleService', () => {
     expect((await read()).records).toEqual([record]);
     expect(await service.list(owner)).toEqual([record]);
     expect(provider.handles.get(record.id)!.list).not.toHaveBeenCalled();
-    expect(await fs.readdir(directory)).toEqual([SCHEDULE_CATALOG_FILE]);
+    expect((await fs.readdir(directory)).sort()).toEqual([SCHEDULE_CATALOG_FILE, `${SCHEDULE_CATALOG_FILE}.lock`]);
     if (process.platform !== 'win32') expect((await fs.stat(path.join(directory, SCHEDULE_CATALOG_FILE))).mode & 0o777).toBe(0o600);
     record.openId = 'mutated'; record.rule = { kind: 'cron', expression: '* * * * *', timezone: 'UTC' };
     expect((await service.list(owner))[0].openId).toBe(owner.openId);

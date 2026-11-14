@@ -15,6 +15,8 @@ describe('native scheduling eligibility', () => {
     expect(isNativeScheduleBackend('claude')).toBe(true);
     expect(isNativeScheduleBackend(null)).toBe(false);
     expect(SCHEDULE_CAPABILITIES).toContain('runtime checks required');
+    expect(SCHEDULE_CAPABILITIES).toContain('Claude jobs with verified native runtime capabilities');
+    expect(SCHEDULE_CAPABILITIES).not.toContain('2.1.311');
     expect(SCHEDULE_CAPABILITIES).toContain('Eligible waiting jobs permit verified handoff');
     expect(SCHEDULE_CAPABILITIES).toContain('Running or unconfirmed work still blocks upgrades');
     expect(SCHEDULE_CAPABILITIES).toContain('Expired one-shots are not run late');

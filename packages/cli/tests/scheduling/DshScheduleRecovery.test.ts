@@ -157,6 +157,8 @@ describe('DSH orderly recovery through production adapters', () => {
     expect(committed.records[0].recovery.handoff).toBeUndefined();
     expect(hosts[1].rows).toHaveLength(0); // Actual adapter reconciles its exact owned title and deletes the committed row.
     await executor.destroy(); await executor.waitForExit();
+    // Simulate the OS releasing the crashed writer's kernel gate.
+    (service as any).catalogGate.close();
     fs.writeFileSync(path.join(root, 'catalog', SCHEDULE_CATALOG_FILE), JSON.stringify(committed));
     executor = makeExecutor(); service = makeService(); await service.initialize(); await service.recover();
     expect(hosts).toHaveLength(2); expect((await service.list(owner))[0].recovery?.status).toBe('blocked');

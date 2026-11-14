@@ -35,6 +35,8 @@ export interface ScheduleRecoveryCheckpoint {
   /** Provider-owned native session and ownership identity; not a transcript. */
   identity: string;
   orderlyOnly?: true;
+  /** Future recurring definitions may reconcile after provider-proven predecessor loss. */
+  futureOnly?: true;
   handoffPolicy?: ScheduleHandoffPolicy;
   handoff?: 'clean';
   /** Separate release evidence: a clean pause alone does not prove deletion. */
@@ -46,6 +48,7 @@ export interface NativeScheduleRecovery {
   readonly provider: string;
   readonly strategy: ScheduleRecoveryCheckpoint['strategy'];
   readonly orderlyOnly?: true;
+  readonly futureOnly?: true;
   readonly handoffPolicy?: ScheduleHandoffPolicy;
   /** After all job releases: stop and join the exact owned native host. */
   finishRestart?(): Promise<void>;
@@ -104,6 +107,9 @@ export interface NativeScheduleProvider {
   recoveryFor?(input: NativeScheduleInput): NativeScheduleRecovery | undefined;
   create(input: NativeScheduleInput, onEvent: (event: NativeScheduleEvent) => void): Promise<NativeScheduleHandle>;
 }
+
+/** Authoritative read-only inventory found no definition; no mutation was attempted. */
+export class NativeScheduleAbsentError extends Error {}
 
 /** Failed creation must retain a cleanup handle when native exit is unconfirmed. */
 export class NativeScheduleCleanupError extends Error {

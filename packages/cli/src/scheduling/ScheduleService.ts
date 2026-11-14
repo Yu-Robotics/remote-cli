@@ -1,3 +1,4 @@
+import { kernelGate, syncDirectory, type KernelGate } from '../delegation/OwnershipRuntime';
 import { constants } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
@@ -5,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { validateScheduleId, validateSchedulePrompt, validateScheduleRule } from './ScheduleCommand';
 import type { NativeScheduleEvent, NativeScheduleHandle, NativeScheduleInput, NativeScheduleProvider,
   ScheduleDelivery, ScheduleOwner, ScheduleRecord, ScheduleRule, ScheduleRecoveryCheckpoint } from './types';
-import { NativeScheduleCleanupError } from './types';
+import { NativeScheduleAbsentError, NativeScheduleCleanupError } from './types';
 import { assertNativeScheduleBackend, isNativeScheduleBackend } from './ScheduleCapabilities';
 
 export const SCHEDULE_CATALOG_FILE = 'schedule-catalog.json';
@@ -131,6 +132,7 @@ export class ScheduleService {
   private fault?: Error;
   private catalogPath = '';
   private recoveryRun?: Promise<void>;
+  private catalogGate?: KernelGate;
   private suspending = false;
   private handoffUnresolved = false;
   private suspension?: Promise<void>;
@@ -157,6 +159,8 @@ export class ScheduleService {
       await fs.mkdir(this.options.directory, { recursive: true, mode: 0o700 });
       const directory = await fs.realpath(this.options.directory);
       this.catalogPath = path.join(directory, SCHEDULE_CATALOG_FILE);
+      this.catalogGate = kernelGate(`${this.catalogPath}.lock`);
+      if (!this.catalogGate) throw new Error('Another client owns the schedule catalog.');
       const data = await this.readCatalog();
       if (data !== undefined) this.load(data);
       let changed = false;
@@ -165,11 +169,13 @@ export class ScheduleService {
           if (record.recovery?.status === 'pending') { record.recovery.status = 'blocked'; changed = true; }
           continue; // Terminal tombstones always win over a stale recovery checkpoint.
         }
-        if (LIVE.has(record.state) || record.recovery?.status === 'pending') {
+        if (LIVE.has(record.state) || record.recovery?.status === 'pending'
+          || record.state === 'interrupted' && record.recovery?.futureOnly && record.rule.kind === 'cron') {
+          const futureOnly = record.recovery?.futureOnly && record.rule.kind === 'cron';
           const recoverable = record.recovery && !record.cancelRequested && this.current(record)
-            && record.state !== 'running' && record.state !== 'failed'
-            && (!record.recovery.orderlyOnly || record.recovery.handoff === 'clean')
-            && (record.state === 'active' || record.recovery.status === 'pending');
+            && (record.state !== 'running' || futureOnly) && record.state !== 'failed'
+            && (!record.recovery.orderlyOnly || record.recovery.handoff === 'clean' || futureOnly)
+            && (record.state === 'active' || record.recovery.status === 'pending' || futureOnly);
           if (record.recovery) record.recovery.status = recoverable ? 'pending' : 'blocked';
           record.error = recoverable ? 'Waiting for native recovery capability and owner readiness.'
             : record.recovery?.orderlyOnly ? 'Dirty shutdown: original native work is unconfirmed; automatic reconstruction is blocked.' : RESTART_REASON;
@@ -182,7 +188,7 @@ export class ScheduleService {
       }
       if (changed || data === undefined) await this.persist();
       this.initialized = true;
-    });
+    }).catch(error => { this.catalogGate?.close(); this.catalogGate = undefined; throw error; });
   }
 
   /** Sequential startup/reconnect reconciliation. Never drives the native schedule clock. */
@@ -284,7 +290,7 @@ export class ScheduleService {
         succeeded = true;
       } catch (error) {
         controller.abort();
-        if (!admitted) { runtime.stopped = true; runtime.resolveReady(undefined); }
+        if (!admitted || error instanceof NativeScheduleAbsentError) { runtime.stopped = true; runtime.resolveReady(undefined); }
         // Do not retry an ambiguous mutation or release its handle on a timeout.
         await this.blockRecovery(record, errorText(error));
         if (runtime.handle) await this.stop(id, runtime).catch(() => {});
@@ -312,11 +318,12 @@ export class ScheduleService {
 
   private checkpoint(value: ScheduleRecoveryCheckpoint): ScheduleRecoveryCheckpoint {
     return { version: 1, provider: value.provider, strategy: value.strategy, identity: value.identity,
-      ...(value.orderlyOnly && { orderlyOnly: true }), ...(value.handoffPolicy && { handoffPolicy: value.handoffPolicy }), ...(value.handoff && { handoff: value.handoff }),
+      ...(value.orderlyOnly && { orderlyOnly: true }), ...(value.futureOnly && { futureOnly: true }), ...(value.handoffPolicy && { handoffPolicy: value.handoffPolicy }), ...(value.handoff && { handoff: value.handoff }),
       ...(value.nativeDefinitionAbsent && { nativeDefinitionAbsent: true }) };
   }
 
   private validateCheckpoint(value: any): void {
+    if (value.futureOnly !== undefined && value.futureOnly !== true) throw new Error('Invalid future recovery policy.');
     if (value.version !== 1 || !['reattach', 'reconstruct'].includes(value.strategy)) throw new Error('Invalid recovery checkpoint.');
     if (value.orderlyOnly !== undefined && value.orderlyOnly !== true || value.handoff !== undefined && value.handoff !== 'clean') throw new Error('Invalid handoff evidence.');
     if (value.nativeDefinitionAbsent !== undefined && (value.nativeDefinitionAbsent !== true || value.handoff !== 'clean')) throw new Error('Invalid native absence evidence.');
@@ -360,7 +367,7 @@ export class ScheduleService {
     const recovery = this.options.provider.recoveryFor?.(nativeInput);
     if (recovery) {
       nativeInput.recovery = { version: 1, provider: recovery.provider, strategy: recovery.strategy,
-        identity: recovery.describe(structuredClone(nativeInput), originalOwner), ...(recovery.orderlyOnly && { orderlyOnly: true }), ...(recovery.handoffPolicy && { handoffPolicy: recovery.handoffPolicy }) };
+        identity: recovery.describe(structuredClone(nativeInput), originalOwner), ...(recovery.orderlyOnly && { orderlyOnly: true }), ...(recovery.futureOnly && { futureOnly: true }), ...(recovery.handoffPolicy && { handoffPolicy: recovery.handoffPolicy }) };
       this.validateCheckpoint(nativeInput.recovery);
     }
     const runtime = this.newRuntime();
@@ -720,6 +727,7 @@ export class ScheduleService {
       await this.tail;
       const rejected = stops.find((result): result is PromiseRejectedResult => result.status === 'rejected');
       if (failure || rejected || this.fault) throw failure ?? rejected?.reason ?? this.fault;
+      this.catalogGate?.close(); this.catalogGate = undefined;
     })().catch(error => {
       // Keep admission closed and retain handles, but allow explicit cleanup retries.
       this.destruction = undefined;
@@ -1018,7 +1026,7 @@ export class ScheduleService {
       }
       if (record.recovery !== undefined) {
         if (catalog.version !== 2) throw new Error('Recovery requires catalog version 2.');
-        const recovery = object(record.recovery, ['version', 'provider', 'strategy', 'identity', 'status', 'orderlyOnly', 'handoff', 'nativeDefinitionAbsent', 'handoffPolicy']);
+        const recovery = object(record.recovery, ['version', 'provider', 'strategy', 'identity', 'status', 'orderlyOnly', 'futureOnly', 'handoff', 'nativeDefinitionAbsent', 'handoffPolicy']);
         this.validateCheckpoint(recovery);
         if (!['eligible', 'pending', 'blocked'].includes(recovery.status as string)) throw new Error('Invalid recovery status.');
       }
@@ -1055,6 +1063,8 @@ export class ScheduleService {
   }
 
   private async persist(): Promise<void> {
+    if (!this.catalogGate) throw new Error('Schedule catalog ownership is unavailable.');
+    this.catalogGate.verify();
     if (this.fault) throw this.fault;
     const temporary = path.join(path.dirname(this.catalogPath), `.schedule-${randomUUID()}.tmp`);
     try {
@@ -1068,6 +1078,7 @@ export class ScheduleService {
         await handle.sync();
       } finally { await handle.close(); }
       await fs.rename(temporary, this.catalogPath);
+      syncDirectory(path.dirname(this.catalogPath));
     } catch (error) {
       this.fault = error instanceof Error ? error : new Error('Schedule catalog write failed.');
       for (const [id, runtime] of this.runtimes) void this.stop(id, runtime).catch(() => {});

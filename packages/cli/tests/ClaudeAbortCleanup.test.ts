@@ -666,6 +666,20 @@ describe('Claude retained cancellation integration', () => {
   afterEach(() => Object.defineProperty(process, 'arch', architecture));
   beforeEach(() => Object.defineProperty(process, 'platform', { ...platform, value: 'linux' }));
   afterEach(() => Object.defineProperty(process, 'platform', platform));
+  it.each([['linux', 'arm64'], ['darwin', 'arm64'], ['win32', 'x64']] as const)(
+    'retains a capable newer host on %s/%s', async (hostPlatform, arch) => {
+      Object.defineProperty(process, 'platform', { ...platform, value: hostPlatform });
+      Object.defineProperty(process, 'arch', { ...architecture, value: arch });
+      const f = await retainedFixture();
+      f.raw.turnLedger.version = '2.1.318';
+      const foreground = f.main.execute('Foreground to cancel').catch(error => error);
+      await Promise.resolve();
+      expect(await f.main.abort()).toBe(true); await foreground;
+      expect(f.frames.some(row => row.request?.subtype === 'interrupt')).toBe(true);
+      expect(f.child.stdin.end).not.toHaveBeenCalled(); expect(f.child.kill).not.toHaveBeenCalled();
+      expect(f.main.isProcessRunning()).toBe(true);
+    },
+  );
   it('retains the host and bridge registration, expires its lease, and ignores stale results in a successor', async () => {
     const f = await retainedFixture(), h = makeHandler(f.main);
     const bridge = new ManagedToolBridge();

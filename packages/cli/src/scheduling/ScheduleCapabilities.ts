@@ -68,7 +68,7 @@ export const SCHEDULE_CAPABILITIES = [
   '',
   'Claude and DSH tasks share their original native conversation and later chat messages. Separate schedules in that thread share context; no transcript copy is made.',
   'The native backend owns timing. No Router timer or periodic model polling is used.',
-  'Keep the CLI running for native timing. Supported Claude 2.1.311 Linux x64 and DSH jobs recover after verified orderly handoff in the original session. Dirty crashes remain unsupported.',
+  'Keep the CLI running for native timing. Claude jobs with verified native runtime capabilities and DSH jobs recover after verified orderly handoff in the original session. New Claude recurring jobs can also adopt exact native definitions after verified same-machine reboot. Same-boot crashes, unexplained missing definitions and uncertain one-shots remain blocked.',
   'Restart recovery is a separate provider capability. Eligible waiting jobs permit verified handoff before automatic upgrades. Claude may skip fired but not-yet-admitted occurrences; admitted execution and background work must drain. DSH drains queued work. Running or unconfirmed work still blocks upgrades. Expired one-shots are not run late and missed cron firings are not replayed.',
   'Timing is approximate and recurring Claude jobs expire after seven days. Use an explicit IANA timezone for recurring cron.',
 ].join('\n');

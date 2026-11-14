@@ -1,6 +1,7 @@
+import { ClaudeScheduleOwnership } from '../scheduling/claude/ClaudeScheduleOwnership';
 import { ClaudeSessionSchedules, SCHEDULE_HOOKS } from '../scheduling/claude/ClaudeSessionSchedules';
 import { TurnLedger } from './claude/TurnLedger';
-import { NativeScheduleCleanupError } from '../scheduling/types';
+import { NativeScheduleAbsentError, NativeScheduleCleanupError } from '../scheduling/types';
 import type { NativeScheduleInput, NativeScheduleEvent, NativeScheduleHandle, NativeScheduleRecovery, NativeScheduleRelease } from '../scheduling/types';
 import { managedTools } from '../managed/tools';
 import { spawnManaged } from './ManagedSpawn';
@@ -545,12 +546,24 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     exit?: { code: number | null; signal: NodeJS.Signals | null };
   };
   private scheduleRestoring?: object;
+  private scheduleOwnership?: ClaudeScheduleOwnership;
+  private scheduleOwnershipSession?: string;
+  private scheduleHostOwnership(): ClaudeScheduleOwnership {
+    if (!this.sessionId) throw new Error('Native schedule session identity is unavailable.');
+    if (this.scheduleOwnershipSession !== this.sessionId) {
+      this.scheduleOwnership?.close();
+      this.scheduleOwnership = new ClaudeScheduleOwnership(this.sessionFilePath, this.sessionId);
+      this.scheduleOwnershipSession = this.sessionId;
+    }
+    return this.scheduleOwnership!;
+  }
 
   get nativeScheduleRecovery(): NativeScheduleRecovery | undefined {
-    if (this.delegationWorker || process.platform !== 'linux' || process.arch !== 'x64'
-      || this.sandbox.isRestricted() || this.turnLedger.version && this.turnLedger.version !== '2.1.311') return undefined;
+    // Advertise the adapter before cold startup; native operations still require
+    // the current host's tools, hooks, lifecycle evidence and confirmed receipts.
+    if (this.delegationWorker || this.sandbox.isRestricted()) return undefined;
     return {
-      provider: 'claude-session-skip-unadmitted-v1', strategy: 'reconstruct', orderlyOnly: true,
+      provider: 'claude-session-skip-unadmitted-v1', strategy: 'reconstruct', orderlyOnly: true, futureOnly: true,
       handoffPolicy: 'skip-unadmitted',
       describe: input => JSON.stringify({ marker: randomUUID(), sessionId: this.sessionId,
         cwd: input.cwd, threadId: this.threadId, model: this.model, effort: this.effort,
@@ -563,15 +576,19 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       },
       reconcile: async (record, context, emit) => {
         const identity = JSON.parse(record.recovery!.identity);
-        if (record.recovery?.handoff !== 'clean' || !record.recovery.nativeDefinitionAbsent
-          || record.recovery.handoffPolicy !== 'skip-unadmitted' || !context.isCurrent()
+        const clean = record.recovery?.handoff === 'clean' && record.recovery.nativeDefinitionAbsent;
+        if ((!clean && (!record.recovery?.futureOnly || record.rule.kind !== 'cron'))
+          || record.recovery?.handoffPolicy !== 'skip-unadmitted' || !context.isCurrent()
           || context.signal.aborted || !identity.sessionId || identity.sessionId !== this.sessionId
           || identity.cwd !== this.currentWorkingDirectory || identity.threadId !== this.threadId
           || identity.model !== this.model || identity.effort !== this.effort) {
-          throw new Error('Original Claude context or clean handoff evidence changed.');
+          throw new Error('Original Claude context or recovery evidence changed.');
         }
         if (this.scheduleRestart && !this.scheduleRestart.exit) throw new Error('Claude predecessor exit is unconfirmed.');
         this.scheduleRestart = undefined;
+        const ownership = this.scheduleHostOwnership();
+        ownership.reserve(!!clean);
+        if (!clean) ownership.assertRebootRecovery();
         const restoration = {};
         this.scheduleRestoring = restoration;
         const epoch = this.stopEpoch;
@@ -583,7 +600,8 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
         try {
           await this.listModels();
           if (!current()) throw new Error('Claude recovery owner changed.');
-          if (this.turnLedger.version !== '2.1.311' || this.turnLedger.pid !== this.claudeProcess?.pid
+          if (!this.claudeProcess?.pid || this.turnLedger.invalid || this.turnLedger.pid !== this.claudeProcess.pid
+            || this.turnLedger.session && !this.turnLedger.supported(this.claudeProcess.pid)
             || typeof identity.effectiveModel !== 'string' || !identity.effectiveModel) throw new Error('Original Claude model or supported host is unavailable.');
           const child = this.claudeProcess;
           if (this.model !== identity.effectiveModel) {
@@ -598,12 +616,13 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
           const timezone = await this.readNativeScheduleTimezone();
           if (!current() || this.claudeProcess !== child) throw new Error('Claude recovery host changed.');
           handle = await adapter.inToolOperation(`restore-${record.id}`, current,
-            () => adapter.create(input, emit, context.isOwnerCurrent ?? context.isCurrent, timezone, true), false);
+            () => adapter.create(input, emit, context.isOwnerCurrent ?? context.isCurrent, timezone, clean ? 'adopt' : 'adopt-existing', record.nativeId), false);
           if (!current() || this.claudeProcess !== child || !this.turnLedger.supported(child?.pid)) throw new NativeScheduleCleanupError('Claude recovery host or protocol changed.', handle);
           const recovered = this.recoverableScheduleHandle(handle, input, restoration);
           this.scheduleRestoring = undefined;
           return recovered;
         } catch (error) {
+          if (error instanceof NativeScheduleAbsentError && this.scheduleRestoring === restoration) this.scheduleRestoring = undefined;
           const cleanup = error instanceof NativeScheduleCleanupError ? error.handle : handle;
           if (cleanup) throw new NativeScheduleCleanupError(error instanceof Error ? error.message : 'Claude recovery failed after native creation.',
             this.recoverableScheduleHandle(cleanup, input, restoration));
@@ -658,7 +677,13 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     if (!state?.release) throw new Error('Claude handoff was not prepared.');
     await state.release;
     if (state.exit) {
-      if (state.exit.code === 0 && !state.exit.signal && this.stopEpoch === state.epoch) return;
+      if (state.exit.code === 0 && !state.exit.signal && state.endRequested
+        && this.stopEpoch === state.epoch && !this.claudeProcess) {
+        // A timeout or failed receipt publication can precede a confirmed close.
+        // Retrying must durably publish that proof before reporting success.
+        this.scheduleOwnership?.confirmClean();
+        return;
+      }
       throw new Error('Claude handoff exited unsuccessfully.');
     }
     const child = state.child;
@@ -685,6 +710,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     state.endRequested = true;
     child.stdin!.end();
     await exit;
+    this.scheduleOwnership?.confirmClean();
   }
 
   private sessionSchedules?: ClaudeSessionSchedules;
@@ -740,6 +766,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     const timezone = await this.readNativeScheduleTimezone();
     if (this.modelChange) throw new Error('Native model change is pending or unconfirmed.');
     if (input.recovery && !this.turnLedger.supported(this.claudeProcess?.pid)) throw new Error('Claude recovery protocol is unsupported.');
+    if (input.recovery) this.scheduleHostOwnership().reserve(true);
     return this.recoverableScheduleHandle(await this.schedules().create(input, onEvent, isOwnerCurrent, timezone), input);
   }
 
@@ -1084,6 +1111,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
         const released = restart?.child === child && restart.endRequested && restart.epoch === this.stopEpoch && code === 0 && !signal;
         if (this.claudeProcess === child) {
           if (restart?.child === child) restart.exit = { code, signal };
+          this.scheduleOwnership?.hostClosed();
           this.sessionSchedules?.processClosed(!!released);
           this.sessionSchedules = undefined;
           this.scheduleHooksReady = false;
@@ -2763,16 +2791,15 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     this.modelChange = operation;
     const current = (initialized = true) => this.modelChange === operation && this.claudeProcess === child
       && this.stopEpoch === operation.epoch && this.sessionId === operation.session && !this.turnLedger.invalid
-      && (!initialized || (this.turnLedger.pid === child.pid && this.turnLedger.version === '2.1.311'))
+      && (!initialized || (!!child.pid && this.turnLedger.pid === child.pid))
       && (!this.turnLedger.session || this.turnLedger.session === operation.session) && !this.isDestroyed && !this.hasUncertainShutdown();
     try {
       await this.listModels();
       if (!current(false)) throw new Error('Native model host changed before the request.');
-      // The public SDK supports set_model, but receipt/error semantics below have
-      // only been inspected for this build. No process-stop fallback on other hosts.
-      if (process.platform !== 'linux' || process.arch !== 'x64' || this.turnLedger.version !== '2.1.311'
-        || !child.pid || this.turnLedger.pid !== child.pid || !child.stdin?.writable || child.killed) {
-        throw new Error('In-process model changes require the inspected Linux x64 Claude 2.1.311 host. The current host and schedules were retained.');
+      // set_model has no advertised capability bit in the public SDK. Probe the
+      // initialized host and require its correlated, explicit model receipt.
+      if (!child.pid || this.turnLedger.pid !== child.pid || !child.stdin?.writable || child.killed) {
+        throw new Error('In-process model changes require a matching initialized, writable native host. The current host and schedules were retained.');
       }
       const error = validateEffort();
       if (error) throw new Error(error);
@@ -3224,6 +3251,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       this.approvalSocketDirectory = undefined;
     }
 
+    this.scheduleOwnership?.close();
     // Remove all listeners
     this.removeAllListeners();
   }

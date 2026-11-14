@@ -13,6 +13,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.239] - 2026-11-14
+
+### Fixed
+- Require exact boolean recurrence evidence when adopting native Claude schedules. On handoff-completion retries, publish the durable clean ownership receipt only after the captured host's drained EOF exit; a successful exit before that boundary is insufficient.
+- Reconcile Claude schedules against structured native CronList receipts, adopting exact owned definitions without duplicate creation. New recurring jobs may resume future firings after verified same-machine reboot using durable session ownership and exclusive catalog/host locks. Same-boot crashes, unknown predecessors, unexplained native absence and uncertain one-shots remain blocked; cancellation tombstones and the existing orderly path are preserved.
+- Give the CLI main process the first systemd stop signal with `KillMode=mixed` and an explicit 90-second supervisor timeout. Migrate only recognized generated legacy units before explicit service operations, verify effective overrides, preserve custom units, and report failed/timed-out stops without removing the unit.
+- Keep the Router connection available until native shutdown handoff and result acknowledgement settle; disconnect afterward, preserving cleanup errors and idempotent shutdown.
+- Remove exact Claude version, OS and architecture allowlists from native model control, retained-process interruption and orderly schedule recovery. Use actual initialized process/session identity, native tools/hooks/lifecycle capabilities and correlated receipts instead; newer capable ARM64 hosts are no longer excluded solely by their build or architecture.
+- Preserve restricted/worker recovery exclusions, uncertain-outcome fences, admitted-work drain, background inventory and confirmed predecessor exit. Missing protocol evidence never authorizes automatic recreation or false success.
+
+### Tests
+- Cover newer ARM64 and simulated macOS/Windows protocol branches, absent version metadata, missing lifecycle capabilities, changed process/session identity and original-session recovery. These synthetic tests do not establish native support on every OS or Claude release.
+
 ## [1.6.238] - 2026-11-14
 
 ### Tests
