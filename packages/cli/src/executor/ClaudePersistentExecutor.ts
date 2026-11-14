@@ -1,4 +1,5 @@
 import { ClaudeSessionSchedules, SCHEDULE_HOOKS } from '../scheduling/claude/ClaudeSessionSchedules';
+import { TurnLedger } from './claude/TurnLedger';
 import type { NativeScheduleInput, NativeScheduleEvent, NativeScheduleHandle } from '../scheduling/types';
 import { managedTools } from '../managed/tools';
 import { spawnManaged } from './ManagedSpawn';
@@ -249,6 +250,30 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
   private claudeProcess: ChildProcess | null = null;
   private readonly workerGroups = new ManagedProcessGroups();
   private isStarting = false;
+  private startup?: Promise<void>;
+  private stopOperation?: Promise<void>;
+  private stopEpoch = 0;
+  private destruction?: Promise<void>;
+  private abortOperation?: Promise<boolean>;
+  private shutdownUncertain = false;
+  private commandEpoch = 0;
+  private scheduleCleanupHost?: ChildProcess;
+  private turnLedger = new TurnLedger();
+  private retainedAbort?: {
+    child: ChildProcess; id: string; inputs: Set<string>; session: string; requestId?: string; ack: boolean;
+    cleanup: (current: () => boolean) => Promise<void>; lease: boolean; work?: Promise<void>;
+  };
+  private lastAbortMessage?: string;
+  private cleanupAdmission(): boolean {
+    return !!this.retainedAbort?.lease && this.scheduleCleanupHost === this.retainedAbort.child
+      && this.claudeProcess === this.retainedAbort.child && !this.isStopping && !this.isDestroyed;
+  }
+  preservesProcessOnAbort(): boolean {
+    return !!this.retainedAbort || (this.turnLedger.invalid && !!this.sessionSchedules?.hasJobs) || (!this.delegationWorker && !this.isStarting && !this.hasUncertainShutdown()
+      && this.turnLedger.supported(this.claudeProcess?.pid));
+  }
+  abortStatusMessage(): string | undefined { return this.lastAbortMessage; }
+  hasPendingCancellation(): boolean { return !!this.retainedAbort; }
   private isStopping = false; // Flag to indicate intentional process stop
   private isSessionError = false; // Flag to suppress auto-restart on session-not-found errors
   private sessionResumeFailure = false;
@@ -293,7 +318,16 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
 
   // Interactive input handling
   private isWaitingForInput = false;
-  private inputRequestCallbacks: Array<(input: string) => void> = [];
+  private inputGeneration = 0;
+  private inputWaiters = new Set<{ finish(input: string | null): void }>();
+
+  private cancelInputWaiters(): void {
+    this.inputGeneration++;
+    clearTimeout(this.inputDetectionTimer);
+    this.inputDetectionTimer = undefined;
+    for (const waiter of [...this.inputWaiters]) waiter.finish(null);
+    this.isWaitingForInput = false;
+  }
   private inputDetectionTimer?: NodeJS.Timeout;
   private lastOutputTime = 0;
 
@@ -504,7 +538,11 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
         this.claudeProcess.stdin.write(JSON.stringify(frame) + '\n');
       },
       manage: async (prompt, current) => {
-        await this.listModels();
+        if (this.scheduleCleanupHost) {
+          if (!current() || this.claudeProcess !== this.scheduleCleanupHost || this.isStopping || (this.abortOperation && !this.cleanupAdmission())) {
+            throw new Error('Native cleanup admission expired; retry explicit schedule cancellation.');
+          }
+        } else await this.listModels();
         return this.execute(prompt, { nativeScheduleManagement: true, nativeScheduleCurrent: current });
       },
       wake: () => { void this.processQueue(); },
@@ -512,11 +550,27 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
   }
 
   async withNativeScheduleOperation<T>(id: string, current: () => boolean, run: () => Promise<T>, inTurn: boolean): Promise<T> {
-    if (this.delegationWorker || this.isDestroyed || this.isStopping || this.sandbox.isRestricted()) throw new Error('Native schedule owner or sandbox is unavailable.');
+    if (this.retainedAbort || this.delegationWorker || this.isDestroyed || this.isStopping || this.sandbox.isRestricted()) throw new Error('Native schedule owner or sandbox is unavailable.');
     if (!inTurn) await this.listModels();
     if (!this.scheduleHooksReady) throw new Error('Native scheduling hooks are not initialized.');
     return this.schedules().inToolOperation(id, current, run, inTurn);
   }
+  async reconcileNativeSchedule<T>(id: string, current: () => boolean, run: () => Promise<T>): Promise<T> {
+    if (!current() || this.isDestroyed || this.hasUncertainShutdown() || this.abortOperation
+      || this.isBusy() || this.scheduleCleanupHost) {
+      throw new Error(`Schedule ${id} cleanup is pending; retry explicit cancellation when the native session is idle.`);
+    }
+    // A confirmed close already retired the old handle. Never initialize a replacement host here.
+    if (!this.claudeProcess) return run();
+    if (!this.sessionSchedules || !this.scheduleHooksReady) throw new Error('Native cleanup ownership is unavailable.');
+    const child = this.claudeProcess;
+    this.scheduleCleanupHost = child;
+    try {
+      return await this.sessionSchedules.inToolOperation(id,
+        () => current() && this.claudeProcess === child && !this.isStopping && !this.abortOperation, run, false);
+    } finally { this.scheduleCleanupHost = undefined; }
+  }
+
   nativeScheduleAction(id: string) { return this.sessionSchedules?.action(id); }
   async createNativeSchedule(input: NativeScheduleInput, onEvent: (event: NativeScheduleEvent) => void, isOwnerCurrent?: () => boolean): Promise<NativeScheduleHandle> {
     if (this.delegationWorker || this.isDestroyed || this.isStopping || this.sandbox.isRestricted()
@@ -568,7 +622,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
 
   async configureDelegation(connection?: DelegationConnection): Promise<void> {
     if (sameConnection(this.delegation, connection)) return;
-    if (this.isProcessing || this.isStarting || this.commandQueue.length) throw new Error('Cannot change delegation while Claude is busy');
+    if (this.isBusy()) throw new Error('Cannot change delegation while Claude is busy');
     await this.stopProcess();
     this.delegation = connection;
   }
@@ -580,7 +634,10 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
    * the previous session. This prevents session conflicts when switching between
    * directories that may have their own .claude-session files.
    */
+  hasUncertainShutdown(): boolean { return this.shutdownUncertain || this.isStopping || !!this.stopOperation; }
+
   isBusy(): boolean {
+    if (this.retainedAbort || this.abortOperation || this.hasUncertainShutdown() || this.scheduleCleanupHost) return true;
     if (this.sessionSchedules?.busy) return true;
     return this.isProcessing || this.isStarting || this.commandQueue.length > 0;
   }
@@ -621,14 +678,23 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     this.nativeCaptureFailure = onFailure;
   }
 
-  private async startProcess(): Promise<void> {
-    if (this.isDestroyed || (this.isStopping && this.claudeProcess)) throw new Error('Claude process is unavailable or its exit is unconfirmed');
+  private startProcess(): Promise<void> {
+    if (this.startup) return this.startup;
+    const startup = this.startProcessImpl();
+    this.startup = startup;
+    void startup.finally(() => { if (this.startup === startup) this.startup = undefined; }).catch(() => {});
+    return startup;
+  }
+
+  private async startProcessImpl(): Promise<void> {
+    if (this.isDestroyed || this.abortOperation || this.retainedAbort || this.hasUncertainShutdown()) throw new Error('Claude process is unavailable or its exit is unconfirmed');
     if (this.claudeProcess || this.isStarting) {
       return;
     }
 
     this.isStarting = true;
     const creationEpoch = this.nativeCreationEpoch;
+    const stopEpoch = this.stopEpoch;
     this.reportedModel = undefined;
 
     try {
@@ -744,6 +810,10 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       console.log(`[ClaudePersistent] Starting: ${this.claudeCommand} ${loggedArgs.join(' ')}`);
       console.log(`[ClaudePersistent] Working directory: ${this.currentWorkingDirectory}`);
 
+      // Startup may have awaited approval-channel setup while abort retired its queue.
+      if (this.isDestroyed || this.abortOperation || this.hasUncertainShutdown() || stopEpoch !== this.stopEpoch) {
+        throw new Error('Claude startup was cancelled before process creation');
+      }
       // Spawn the process
       const child = spawnManaged(this.delegationWorker, this.claudeCommand, args, {
         ...(this.delegationWorker && process.platform !== 'win32' ? { detached: true } : {}),
@@ -759,6 +829,13 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       });
 
       this.claudeProcess = child;
+      this.turnLedger = new TurnLedger();
+      child.stdin?.on?.('error', () => {
+        if (this.claudeProcess !== child) return;
+        this.turnLedger.invalid = true;
+        this.rejectPendingControlRequests('Native input transport failed; cancellation remains unconfirmed.');
+        this.turnLedger.changed();
+      });
       this.nativeScheduleTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
       if (this.delegation?.groups?.includes('scheduling') && !this.delegationWorker && !restricted) this.schedules();
       if (this.delegationWorker) this.workerGroups.track(child);
@@ -771,6 +848,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       // Handle stdout (JSON stream)
       let buffer = '';
       child.stdout?.on('data', (data: Buffer) => {
+        if (this.claudeProcess !== child) return;
         buffer += data.toString();
 
         // Process complete JSON lines
@@ -847,6 +925,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
         this.rejectPendingControlRequests('Claude process exited before control response');
         this.clearCatalogCache();
         this.claudeProcess = null;
+        this.turnLedger.retire();
 
         // Check if this was an intentional stop (abort/reset)
         const wasIntentionalStop = this.isStopping;
@@ -876,7 +955,10 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
 
         if (!this.isDestroyed && !wasIntentionalStop && !hasSessionError && this.commandQueue.length > 0) {
           console.log('[ClaudePersistent] Auto-restarting process...');
-          setTimeout(() => this.startProcess(), 1000);
+          const epoch = this.commandEpoch;
+          setTimeout(() => {
+            if (epoch === this.commandEpoch && !this.abortOperation && !this.hasUncertainShutdown()) void this.startProcess().catch(() => {});
+          }, 1000);
         } else if (hasSessionError && this.commandQueue.length > 0) {
           // Session is invalid - drain the queue with a friendly error rather than restarting
           const sessionErrorMsg = '❌ Session not found. The previous session may have expired or been deleted.\n\n' +
@@ -912,13 +994,20 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       });
 
       if (earlyError) {
-        this.claudeProcess = null;
+        if (this.claudeProcess === child) this.claudeProcess = null;
         this.isStarting = false;
         const err = earlyError as NodeJS.ErrnoException;
         if (err.message.includes('ENOENT') || err.code === 'ENOENT') {
           throw new Error('Claude Code CLI not found. Use /backend to switch to another AI backend.');
         }
         throw err;
+      }
+
+      // A stop may finish while the startup readiness wait is still settling.
+      // Do not attach fresh callbacks or dispatch work on that retired child.
+      if (this.isDestroyed || this.abortOperation || this.hasUncertainShutdown()
+        || stopEpoch !== this.stopEpoch || this.claudeProcess !== child) {
+        throw new Error('Claude startup was cancelled after process creation');
       }
 
       if (this.filePolicyToken) {
@@ -938,7 +1027,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
         this.clearApprovals('Claude process failed');
         // An error is not exit evidence for a session that owns native jobs.
         // Retain the process until close (or an explicit bounded stop) confirms it.
-        if (this.sessionSchedules?.hasJobs) this.isStopping = true;
+        if (this.sessionSchedules?.hasJobs || this.retainedAbort) this.isStopping = true;
         else this.claudeProcess = null;
         this.isStarting = false;
 
@@ -975,21 +1064,39 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
   /**
    * Stop the persistent Claude process
    */
-  private async stopProcess(): Promise<void> {
+  private stopProcess(): Promise<void> {
+    if (this.stopOperation) return this.stopOperation;
+    const child = this.claudeProcess;
+    this.stopEpoch++;
+    this.isStopping = true;
+    // Publish the barrier before stdin.end can synchronously emit close or invoke
+    // a processExit listener. All callers join this captured child's stop.
+    let resolve!: () => void;
+    let reject!: (error: unknown) => void;
+    const operation = new Promise<void>((done, fail) => { resolve = done; reject = fail; });
+    this.stopOperation = operation;
+    void operation.finally(() => {
+      if (this.stopOperation === operation) this.stopOperation = undefined;
+    }).catch(() => {});
+    void this.stopCapturedProcess(child).then(resolve, reject);
+    return operation;
+  }
+
+  private async stopCapturedProcess(child: ChildProcess | null): Promise<void> {
     this.filePolicyToken = undefined;
     this.filePolicyRoots = [];
     this.filePolicyStarted = false;
     this.clearApprovals('Claude process stopped');
     this.rejectPendingControlRequests('Claude process stopped before control response');
     this.clearCatalogCache();
-    if (!this.claudeProcess) {
+    if (!child) {
+      this.isStopping = false;
       return;
     }
 
     console.log('[ClaudePersistent] Stopping process...');
     this.isStopping = true;
 
-    const child = this.claudeProcess;
     // A signal is not evidence of exit. Bound the wait and retain the child on
     // failure so the caller cannot silently launch a replacement over it.
     await new Promise<void>((resolve, reject) => {
@@ -1002,7 +1109,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       try { child.stdin?.end(); } catch { child.kill('SIGTERM'); }
     });
 
-    if (this.claudeProcess === child) this.claudeProcess = null;
+    if (this.claudeProcess === child) { this.claudeProcess = null; this.turnLedger.retire(); }
     this.isStopping = false;
     console.log('[ClaudePersistent] Process stopped');
   }
@@ -1235,7 +1342,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
   }
 
   async configureSandbox(command: string): Promise<PersistentClaudeResult> {
-    if (this.isProcessing || this.commandQueue.length > 0) {
+    if (this.isDestroyed || this.isBusy()) {
       return { success: false, error: 'Wait for the running task before changing sandbox settings.' };
     }
     try {
@@ -1387,15 +1494,39 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     try {
       // Parse message first to check type
       const parsedMessage: ClaudeOutputMessage = JSON.parse(line);
+      this.turnLedger.observe(parsedMessage);
+      const cancellation = this.retainedAbort;
+      if (cancellation?.requestId && parsedMessage.type === 'control_response'
+        && parsedMessage.response?.request_id === cancellation.requestId) {
+        const receipt = parsedMessage.response.response as { turn?: string } | undefined;
+        cancellation.ack = parsedMessage.response.subtype === 'success' && ['stopped', 'idle', 'spared'].includes(receipt?.turn ?? '');
+        this.turnLedger.changed();
+      }
 
       // Handle native Claude Control response packets (models catalog, etc.).
       // These bypass raw stdout logging to prevent any potential account/credential leakage.
       if (this.sessionSchedules?.accept(parsedMessage)) return;
+      if (this.turnLedger.supported(this.claudeProcess?.pid) && parsedMessage.type === 'result'
+        && !parsedMessage.parent_tool_use_id && !this.turnLedger.joined(parsedMessage, this.turnLedger.foreground)) return;
       if (parsedMessage.type === 'result' && !parsedMessage.parent_tool_use_id) this.sessionSchedules?.foregroundEnded();
       if (parsedMessage.type === 'control_response' || parsedMessage.type === 'control_request') {
         this.handleControlMessage(parsedMessage);
         return;
       }
+      if ((parsedMessage as any).type === 'command_lifecycle') { void this.processQueue(); return; }
+      // Keep native controls and schedule receipts alive, but retire old foreground display authority.
+      if (cancellation && !this.cleanupAdmission()) {
+        // A timed-out cleanup lease does not erase its in-flight native management turn.
+        // Consume its matched terminal internally so an explicit retry can acquire the same host.
+        if (parsedMessage.type === 'result' && this.currentScheduleManagement
+          && this.turnLedger.joined(parsedMessage, this.turnLedger.foreground)) {
+          this.completeCurrentCommand(!parsedMessage.is_error, 'Native cancellation management turn failed.');
+        }
+        return;
+      }
+      const lineage = parsedMessage as ClaudeOutputMessage & { user_message_uuid?: string; user_message_uuids?: string[] };
+      if (this.turnLedger.supported(this.claudeProcess?.pid) && (lineage.user_message_uuid || lineage.user_message_uuids?.length)
+        && !this.turnLedger.joined(lineage, this.turnLedger.foreground)) return;
 
       const nativeContent = parsedMessage.message?.content ?? parsedMessage.content;
       const containsToolResult = Array.isArray(nativeContent) && nativeContent.some(block => (
@@ -1757,7 +1888,9 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     this.isWaitingForInput = true;
 
     // Notify through hooks
+    const generation = this.inputGeneration;
     const userInput = await this.requestInteractiveInput(lastLine);
+    if (generation !== this.inputGeneration) return;
 
     if (userInput !== null) {
       this.sendInput(userInput);
@@ -1808,18 +1941,16 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     else this.currentStreamCallback?.(`\n${prompt}\n`);
 
     // Wait for input via sendInput() or timeout
+    const generation = this.inputGeneration;
     return new Promise((resolve) => {
-      const timeoutId = setTimeout(() => {
-        console.log('[ClaudePersistent] Input request timed out');
-        this.isWaitingForInput = false;
-        resolve(null);
-      }, 300000); // 5 minutes timeout
-
-      // Store callback to be called when sendInput is invoked
-      this.inputRequestCallbacks.push((input: string) => {
-        clearTimeout(timeoutId);
+      const waiter = { finish: (input: string | null) => {
+        if (!this.inputWaiters.delete(waiter)) return;
+        clearTimeout(timer);
+        if (generation === this.inputGeneration) this.isWaitingForInput = false;
         resolve(input);
-      });
+      } };
+      const timer = setTimeout(() => waiter.finish(null), 300000);
+      this.inputWaiters.add(waiter);
     });
   }
 
@@ -1828,6 +1959,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
    * This is called by MessageHandler when user sends a message while waiting for input
    */
   sendInput(input: string): boolean {
+    if (this.retainedAbort || this.abortOperation) return false;
     if (this.pendingApprovals.size > 0) {
       const match = /^(yes|y|approve|accept|no|n|deny|decline|cancel)(?:\s+(\S+))?$/i.exec(input.trim());
       const requestId = match?.[2] ?? (this.pendingApprovals.size === 1 ? this.pendingApprovals.keys().next().value : undefined);
@@ -1852,6 +1984,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     };
 
     inputMessage.uuid = randomUUID();
+    this.turnLedger.dispatched(inputMessage.uuid, true);
     this.sessionSchedules?.foregroundDispatched(inputMessage.uuid);
     const inputLine = JSON.stringify(inputMessage);
     console.log(`[ClaudePersistent] Sending user input: ${input}`);
@@ -1860,10 +1993,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     this.isWaitingForInput = false;
 
     // Notify any waiting callbacks (for requestInteractiveInput)
-    for (const callback of this.inputRequestCallbacks) {
-      callback(input);
-    }
-    this.inputRequestCallbacks = [];
+    for (const waiter of [...this.inputWaiters]) waiter.finish(input);
 
     return true;
   }
@@ -1944,6 +2074,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
 
     // Process next command in queue
     this.isProcessing = false;
+    this.turnLedger.changed();
     this.processQueue();
   }
 
@@ -1951,6 +2082,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
    * Reset current command state
    */
   private resetCurrentCommand(): void {
+    this.cancelInputWaiters();
     this.currentScheduleManagement = false;
     this.clearApprovals('Task is no longer active');
     this.currentOutputBuffer = [];
@@ -1984,15 +2116,25 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
    * Process the command queue
    */
   private async processQueue(): Promise<void> {
-    if (this.isProcessing || this.isStarting || this.sessionSchedules?.busy || this.commandQueue.length === 0) {
+    const cleanup = this.cleanupAdmission() && this.commandQueue[0]?.options.nativeScheduleManagement;
+    if (this.isDestroyed || ((this.abortOperation || this.retainedAbort) && !cleanup) || this.hasUncertainShutdown() || this.isProcessing || this.isStarting || this.sessionSchedules?.busy || this.commandQueue.length === 0) {
       return;
     }
+    if (this.turnLedger.supported(this.claudeProcess?.pid) && this.turnLedger.foreground
+      && !this.turnLedger.settled(this.turnLedger.foreground)) return;
 
+    const epoch = this.commandEpoch;
+    // Expired management work must not start a replacement host.
+    while (this.commandQueue[0]?.options.nativeScheduleCurrent && !this.commandQueue[0].options.nativeScheduleCurrent!()) {
+      this.commandQueue.shift()!.resolve({ success: false, error: 'Native schedule management authorization expired before dispatch.' });
+    }
+    if (!this.commandQueue.length) return;
     // Ensure process is running
     if (!this.claudeProcess) {
       try {
         await this.startProcess();
       } catch (error) {
+        if (epoch !== this.commandEpoch) return;
         // Failed to start process (e.g., working directory doesn't exist)
         // Return error result to caller without crashing the process
         const errorMessage = error instanceof Error ? error.message : String(error);
@@ -2019,6 +2161,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       this.isStarting = true;
       try { await this.listModels(); }
       catch {
+        if (epoch !== this.commandEpoch) return;
         const failed = this.commandQueue.shift();
         // A resumed native scheduler can fire before a later command. If hook
         // registration or policy validation failed, retire that process before
@@ -2028,7 +2171,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
         return;
       } finally { this.isStarting = false; }
     }
-    if (this.sessionSchedules?.busy) return;
+    if (epoch !== this.commandEpoch || ((this.abortOperation || this.retainedAbort) && !cleanup) || this.hasUncertainShutdown() || this.sessionSchedules?.busy) return;
     const command = this.commandQueue.shift();
     if (!command) {
       return;
@@ -2136,6 +2279,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     };
 
     inputMessage.uuid = randomUUID();
+    this.turnLedger.dispatched(inputMessage.uuid);
     this.sessionSchedules?.foregroundDispatched(inputMessage.uuid, command.options.nativeScheduleManagement);
     const inputLine = JSON.stringify(inputMessage);
     console.log(`[ClaudePersistent] Sending command${command.isSlashCommand ? ' (slash)' : ''}: ${command.prompt.substring(0, 100)}...`);
@@ -2151,11 +2295,10 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     prompt: string,
     options: PersistentClaudeOptions = {}
   ): Promise<PersistentClaudeResult> {
-    if (this.isDestroyed) {
-      return {
-        success: false,
-        error: 'Executor has been destroyed',
-      };
+    if (this.isDestroyed) return { success: false, error: 'Executor has been destroyed' };
+    if (((this.abortOperation || this.retainedAbort) && !(this.cleanupAdmission() && options.nativeScheduleManagement && options.nativeScheduleCurrent?.()))
+      || this.hasUncertainShutdown() || (this.scheduleCleanupHost && !options.nativeScheduleManagement)) {
+      return { success: false, error: 'Native cleanup is still pending. Retry after cleanup.' };
     }
 
     try {
@@ -2179,14 +2322,36 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
   }
 
   /**
-   * Abort current command execution
-   * Stops the current process and rejects the pending command
+   * Interrupt a verified native foreground, or retain the legacy stop path for unsupported/startup hosts.
+   * A retained cancellation owns its unresolved evidence until retry or explicit destructive reset.
    */
-  async abort(): Promise<boolean> {
-    if (!this.isProcessing && !this.isWaitingInput()) {
+  abort(): Promise<boolean> {
+    if (this.abortOperation) return this.abortOperation;
+    const operation = Promise.resolve().then(() => this.abortCurrent());
+    this.abortOperation = operation;
+    void operation.finally(() => { if (this.abortOperation === operation) this.abortOperation = undefined; }).catch(() => {});
+    return operation;
+  }
+
+  private async abortCurrent(): Promise<boolean> {
+    if (this.retainedAbort || (this.preservesProcessOnAbort() && (this.isProcessing || this.isWaitingInput() || this.sessionSchedules?.hasPendingMutation))) {
+      return this.interruptForeground();
+    }
+    if (this.preservesProcessOnAbort() && this.commandQueue.length) {
+      this.commandEpoch++;
+      for (const command of this.commandQueue.splice(0)) command.reject(new Error('Command aborted by user'));
+      this.lastAbortMessage = 'Queued foreground work cancelled; Claude and future native schedules retained.';
+      return true;
+    }
+    this.lastAbortMessage = undefined;
+    if (!this.isProcessing && !this.isWaitingInput() && !this.isStarting && !this.commandQueue.length && !this.hasUncertainShutdown()) {
       console.log('[ClaudePersistent] No command is currently executing');
       return false;
     }
+
+    this.commandEpoch++;
+    const queued = this.commandQueue.splice(0);
+    for (const command of queued) command.reject(new Error('Command aborted by user'));
 
     // If waiting for input, cancel the input request
     if (this.isWaitingForInput) {
@@ -2202,19 +2367,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
 
     this.denyAllPendingApprovals('Task aborted by user');
 
-    // Emit task aborted hook before stopping
-    if (this.lifecycleHooks && !this.currentScheduleManagement && this.currentTaskId) {
-      claudeCodeHooks.notifyTaskAborted(
-        {
-          taskId: this.currentTaskId,
-          description: '',
-          workingDirectory: this.currentWorkingDirectory,
-          sessionId: this.sessionId || undefined,
-          startTime: this.currentTaskStartTime,
-        },
-        'Command aborted by user via /abort'
-      );
-    }
+    this.notifyForegroundAborted();
 
     // Mark as intentional stop before rejecting and stopping
     this.isStopping = true;
@@ -2230,20 +2383,136 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     this.currentTaskId = null;
     this.currentTaskStartTime = 0;
 
-    // Stop the process to ensure clean state
-    await this.stopProcess();
-    console.log('[ClaudePersistent] Process stopped after abort');
-
-    // Clear any pending commands in queue
-    if (this.commandQueue.length > 0) {
-      console.log(`[ClaudePersistent] Clearing ${this.commandQueue.length} pending commands from queue`);
-      for (const command of this.commandQueue) {
-        command.reject(new Error('Command aborted by user'));
+    // Startup may not have published its child yet. Keep admission fenced until
+    // that continuation settles, then stop its owned process with close evidence.
+    try {
+      if (this.startup) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([this.startup.catch(() => {}), new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error('Claude startup cancellation could not be confirmed')), 10000);
+          })]);
+        } finally { clearTimeout(timer); }
       }
-      this.commandQueue = [];
+      await this.stopProcess();
+      this.lastAbortMessage = 'Current work stopped by closing the Claude host. Session-only native schedules on that host were lost (native retained interruption was unavailable or startup was still pending).';
+      this.shutdownUncertain = false;
+      this.isStopping = false;
+    } catch (error) {
+      this.shutdownUncertain = true;
+      throw error;
     }
 
     return true;
+  }
+
+  private nativeControl(subtype: string, fields: Record<string, unknown>): Promise<unknown> {
+    const child = this.claudeProcess;
+    const requestId = `abort-control-${randomUUID()}`;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { this.pendingControlRequests.delete(requestId); reject(new Error('Native task cleanup acknowledgement timed out.')); }, 10_000);
+      this.pendingControlRequests.set(requestId, { timer, resolve, reject });
+      try {
+        if (!child?.stdin?.writable) throw new Error('Native cancellation host is unavailable.');
+        child.stdin.write(JSON.stringify({ type: 'control_request', request_id: requestId, request: { subtype, ...fields } }) + '\n');
+      } catch (error) { clearTimeout(timer); this.pendingControlRequests.delete(requestId); reject(error); }
+    });
+  }
+
+  private notifyForegroundAborted(): void {
+    if (this.lifecycleHooks && !this.currentScheduleManagement && this.currentTaskId) {
+      claudeCodeHooks.notifyTaskAborted({ taskId: this.currentTaskId, description: '',
+        workingDirectory: this.currentWorkingDirectory, sessionId: this.sessionId || undefined,
+        startTime: this.currentTaskStartTime }, 'Command aborted by user via /abort');
+    }
+  }
+
+  private async interruptForeground(): Promise<boolean> {
+    let state = this.retainedAbort;
+    if (!state) {
+      const id = this.turnLedger.foreground, child = this.claudeProcess;
+      if (!id || !child) throw new Error('Native foreground identity is unconfirmed; retry /abort or use /clear (session-only schedules will be lost).');
+      state = { child, id, inputs: new Set(this.turnLedger.inputs), session: this.turnLedger.session!, ack: false, lease: false,
+        cleanup: this.sessionSchedules?.captureCancellation() ?? (async () => {}) };
+      this.retainedAbort = state;
+      this.commandEpoch++;
+      for (const command of this.commandQueue.splice(0)) command.reject(new Error('Command aborted by user'));
+      this.denyAllPendingApprovals('Task aborted by user');
+      this.notifyForegroundAborted();
+      this.currentCommandReject?.(new Error('Command aborted by user'));
+      this.resetCurrentCommand(); this.isProcessing = false;
+      this.currentTaskId = null; this.currentTaskStartTime = 0;
+    }
+    const captured = state;
+    const current = () => this.retainedAbort === captured && this.claudeProcess === captured.child
+      && this.turnLedger.session === captured.session && !this.turnLedger.invalid && !this.isDestroyed && !this.isStopping;
+    if (!current()) throw new Error('Native cancellation host identity changed. Use /clear for explicit destructive recovery.');
+    await this.turnLedger.wait(() => current() && !!this.turnLedger.turns.get(captured.id)?.started, 15_000, 'Native foreground start identity');
+    if (!state.requestId) {
+      if (this.turnLedger.settled(state.id)) state.ack = true; // Natural completion: do not interrupt a later autonomous turn.
+      else {
+        state.requestId = `interrupt-${randomUUID()}`;
+        // Native targeting accepts at most eight UUIDs; oversized lists silently
+        // become unscoped interrupts. Target recent lineage but join every input.
+        state.child.stdin!.write(JSON.stringify({ type: 'control_request', request_id: state.requestId,
+          request: { subtype: 'interrupt', for_user_message_uuids: [...state.inputs].slice(-8) } }) + '\n');
+      }
+    }
+    await this.turnLedger.wait(() => current() && captured.ack && [...captured.inputs].every(id => this.turnLedger.settled(id)), 15_000, 'Native foreground cancellation');
+    // A previous failed cleanup may still have a native management turn. Do not overlap or replay it.
+    await this.turnLedger.wait(() => current() && !this.isProcessing && !this.sessionSchedules?.busy, 15_000, 'Native cleanup admission');
+    if (!state.work) {
+      state.lease = true; this.scheduleCleanupHost = state.child;
+      state.work = (async () => {
+        const lease = () => current() && captured.lease;
+        await captured.cleanup(lease);
+        await this.turnLedger.wait(() => lease() && !this.isProcessing
+          && (!this.turnLedger.foreground || this.turnLedger.settled(this.turnLedger.foreground)), 15_000, 'Native management terminal');
+        for (const [id, task] of this.turnLedger.tasks) {
+          if (!task.owner || !captured.inputs.has(task.owner) || task.terminal) continue;
+          if (!lease()) throw new Error('Native task cleanup lease expired.');
+          // Only a snapshot observed after this stop request can prove retirement.
+          this.turnLedger.inventory = undefined;
+          await this.nativeControl('stop_task', { task_id: id });
+          await this.turnLedger.wait(() => lease() && (task.terminal || !!this.turnLedger.inventory && !this.turnLedger.inventory.has(id)), 10_000, 'Owned native task retirement');
+        }
+      })();
+      void state.work.catch(() => {});
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let closed: (() => void) | undefined;
+    try {
+      await Promise.race([state.work, new Promise<never>((_, reject) => {
+        closed = () => reject(new Error('Native cancellation host closed; session-only schedules were lost. Use /clear to recover.'));
+        captured.child.once('close', closed);
+        timer = setTimeout(() => reject(new Error('Native mutation cleanup remains pending. Retry /abort or use /clear; /clear loses session-only schedules.')), 75_000);
+      })]);
+      if (!current()) throw new Error('Native cancellation host changed during cleanup.');
+      this.retainedAbort = undefined;
+      this.lastAbortMessage = 'Current foreground work interrupted. Claude conversation and future native schedules were retained. Already-fired shared-session work may also have been interrupted; native task retirement does not prove all external effects stopped.';
+      return true;
+    } catch (error) {
+      // Keep the handle/catalog and host fenced. Retry only after the previous cleanup unwinds.
+      const work = state.work;
+      void work?.finally(() => { if (captured.work === work) captured.work = undefined; }).catch(() => {});
+      throw error;
+    } finally {
+      clearTimeout(timer); state.lease = false; this.scheduleCleanupHost = undefined;
+      if (closed) captured.child.removeListener('close', closed);
+    }
+  }
+
+  /** Explicit /clear recovery is destructive; never used as an interrupt timeout fallback. */
+  async stopForContextReset(): Promise<void> {
+    if (this.abortOperation) throw new Error('Cancellation is still settling; retry /clear after it returns.');
+    if (this.startup || this.isStarting) { await this.abort(); return; }
+    this.commandEpoch++;
+    for (const command of this.commandQueue.splice(0)) command.reject(new Error('Conversation cleared'));
+    this.notifyForegroundAborted();
+    this.currentCommandReject?.(new Error('Conversation cleared'));
+    this.resetCurrentCommand(); this.isProcessing = false;
+    this.currentTaskId = null; this.currentTaskStartTime = 0;
+    await this.stopProcess(); this.retainedAbort = undefined; this.shutdownUncertain = false;
   }
 
   /**
@@ -2253,6 +2522,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
    * create a new session automatically when the next command is executed.
    */
   resetContext(): void {
+    this.cancelInputWaiters();
     this.nativeCreationEpoch++;
     console.log('[ClaudePersistent] Resetting session context');
     this.sessionId = null;
@@ -2390,6 +2660,8 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
           if (this.claudeProcess !== child || this.isDestroyed || this.isStopping) { reject(new Error('Claude catalog process is no longer active')); return; }
           try {
             const rawResponse = (response as Record<string, unknown>) || {};
+            this.turnLedger.version = typeof rawResponse.claude_code_version === 'string' ? rawResponse.claude_code_version : undefined;
+            this.turnLedger.pid = typeof rawResponse.pid === 'number' ? rawResponse.pid : undefined;
             const { models, rawEntries } = parseClaudeModelsCatalog(
               rawResponse.models,
               this.reportedModel || this.model,
@@ -2528,6 +2800,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
    * Returns a promise that resolves when compaction is complete.
    */
   compact(onStream?: (chunk: string) => void): Promise<PersistentClaudeResult> {
+    if (this.retainedAbort || this.abortOperation) return Promise.resolve({ success: false, error: 'Native cancellation cleanup is pending.' });
     console.log('[ClaudePersistent] Sending /compact slash command');
     return new Promise((resolve, reject) => {
       if (this.isDestroyed) {
@@ -2565,6 +2838,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
    * 4. Restart the persistent process with the new session ID
    */
   async compactWhenFull(onStream?: (chunk: string) => void): Promise<PersistentClaudeResult> {
+    if (this.retainedAbort || this.abortOperation) return { success: false, error: 'Native cancellation cleanup is pending.' };
     console.log('[ClaudePersistent] Context full - running external compact');
 
     if (this.isDestroyed) {
@@ -2638,7 +2912,18 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
   /**
    * Destroy executor and cleanup
    */
-  async destroy(): Promise<void> {
+  destroy(): Promise<void> {
+    if (this.destruction) return this.destruction;
+    const operation = this.destroyOwnedResources();
+    this.destruction = operation;
+    void operation.finally(() => {
+      if (this.destruction === operation) this.destruction = undefined;
+    }).catch(() => {});
+    return operation;
+  }
+
+  private async destroyOwnedResources(): Promise<void> {
+    this.cancelInputWaiters();
     this.isDestroyed = true;
 
     // Clear queue and reject pending commands
@@ -2651,8 +2936,27 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     this.rejectPendingControlRequests('Executor has been destroyed');
     this.clearCatalogCache();
 
-    // Startup owns its unpublished listener until it has completed or cleaned up.
-    await this.approvalStartup?.catch(() => undefined);
+    if (this.currentCommandReject) {
+      this.currentCommandReject(new Error('Executor has been destroyed'));
+      this.resetCurrentCommand();
+    }
+
+    // Stop the published child first: startup may itself be waiting for that
+    // child's close. Then join unpublished resource ownership before reporting
+    // destruction complete. A timeout retains a retryable destroyed executor.
+    await this.stopProcess();
+    let startupDeadline: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.allSettled([this.startup, this.approvalStartup]),
+        new Promise<never>((_, reject) => {
+          startupDeadline = setTimeout(() => reject(new Error('Claude startup destruction could not be confirmed')), 10000);
+        }),
+      ]);
+    } catch (error) {
+      this.shutdownUncertain = true;
+      throw error;
+    } finally { clearTimeout(startupDeadline); }
     if (this.approvalServer) {
       const server = this.approvalServer;
       this.approvalServer = null;
@@ -2663,14 +2967,6 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       fs.rmSync(this.approvalSocketDirectory, { recursive: true, force: true });
       this.approvalSocketDirectory = undefined;
     }
-
-    if (this.currentCommandReject) {
-      this.currentCommandReject(new Error('Executor has been destroyed'));
-      this.resetCurrentCommand();
-    }
-
-    // Stop process
-    await this.stopProcess();
 
     // Remove all listeners
     this.removeAllListeners();

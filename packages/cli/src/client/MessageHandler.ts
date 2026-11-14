@@ -1043,6 +1043,11 @@ export class MessageHandler {
     const existingAbort = this.abortOperations.get(threadId);
     if (existingAbort) {
       await existingAbort;
+      if (executor?.hasPendingCancellation?.()) {
+        this.sendResponse(messageId, threadId, { success: false,
+          error: 'Native cancellation cleanup remains pending. Retry /abort, or use /clear to stop the host and lose its session-only schedules.' });
+        return;
+      }
       if (executor?.hasUncertainShutdown?.()) {
         this.sendResponse(messageId, threadId, {
           success: false,
@@ -1067,7 +1072,8 @@ export class MessageHandler {
     const wasExecuting = this.threadPool.isThreadBusy(threadId);
     const clearedCount = this.clearThreadQueue(threadId);
     const activeOperation = this.cancelThreadOperation(threadId);
-    this.detachDelegationBridge(threadId);
+    if (executor?.preservesProcessOnAbort?.()) this.delegationBridges.get(threadId)?.retireCurrentActivation();
+    else this.detachDelegationBridge(threadId);
     for (const [id, approval] of this.pendingApprovalCards) {
       if (approval.request.threadId === threadId) this.resolveApprovalCard(id, 'expired');
     }
@@ -1105,7 +1111,7 @@ export class MessageHandler {
       if (!activeOperation) this.threadPool.setThreadBusy(threadId, false);
       this.sendResponse(messageId, threadId, {
         success: true,
-        output: `${wasExecuting ? '✅ Current command has been aborted' : '⚠️ No command was executing, but executor has been reset'}${clearedCount ? `\n🗑️ Cleared ${clearedCount} queued message${clearedCount === 1 ? '' : 's'}.` : ''}`,
+        output: `${executor?.abortStatusMessage?.() ?? (wasExecuting ? '✅ Current command has been aborted' : '⚠️ No command was executing, but executor has been reset')}${clearedCount ? `\n🗑️ Cleared ${clearedCount} queued message${clearedCount === 1 ? '' : 's'}.` : ''}`,
       });
     } else {
       this.sendResponse(messageId, threadId, {
@@ -1169,13 +1175,14 @@ export class MessageHandler {
   private detachDelegationBridge(threadId: string): void {
     const bridge = this.delegationBridges.get(threadId);
     if (!bridge) return;
-    bridge.activate(undefined);
     this.delegationBridges.delete(threadId);
     void bridge.close().catch(() => undefined);
   }
 
   private async clearThreadConversation(messageId: string, threadId: string): Promise<void> {
-    await this.assertSchedulesIdle(threadId);
+    if (this.abortOperations.has(threadId)) throw new Error('Direct backend abort is still pending; retry /clear after it settles.');
+    const destructiveRecovery = this.threadPool.getExistingExecutor(threadId)?.hasPendingCancellation?.() === true;
+    if (!destructiveRecovery) await this.assertSchedulesIdle(threadId);
     this.conversationRevisions.set(threadId, (this.conversationRevisions.get(threadId) ?? 0) + 1);
     this.settingsService.invalidate(threadId);
     this.directoryBrowser.invalidate(threadId);
@@ -1201,7 +1208,8 @@ export class MessageHandler {
       if (aborting) throw new Error('Direct backend abort is still pending; retry after it settles');
       const executor = this.threadPool.getExistingExecutor(threadId);
       if (executor) {
-        await executor.abort();
+        if (executor.stopForContextReset) await executor.stopForContextReset();
+        else await executor.abort();
         if (executor.hasUncertainShutdown?.()) throw new Error('Direct backend shutdown is unconfirmed');
       }
       if (this.coordinatorPreparations.has(threadId)) throw new Error('Direct backend preparation is still pending; retry after it settles');
@@ -1212,7 +1220,7 @@ export class MessageHandler {
       this.threadPool.setThreadBusy(threadId, false);
       await workers;
       this.sendResponse(messageId, threadId, { success: true,
-        output: 'Started a fresh conversation for direct backends and managed workers. Permanent deletion of old managed child native sessions is queued. Verified Codex, Kimi, Pi, and Claude child sessions are supported on Linux; unsupported versions, layouts, backends, platforms, and unconfirmed targets remain pending. Task artifacts and recovery evidence are retained. Pending native writers still block conflicting execution.' }, true);
+        output: `${destructiveRecovery ? 'Explicit recovery stopped the Claude host; its session-only schedules were lost. ' : ''}Started a fresh conversation for direct backends and managed workers. Permanent deletion of old managed child native sessions is queued. Verified Codex, Kimi, Pi, and Claude child sessions are supported on Linux; unsupported versions, layouts, backends, platforms, and unconfirmed targets remain pending. Task artifacts and recovery evidence are retained. Pending native writers still block conflicting execution.` }, true);
     } catch (error) {
       const detail = error instanceof Error ? error.message : 'Local context storage is unavailable';
       throw new Error(`Could not clear thread conversation: ${detail}. Check local CLI storage and retry /clear or /new.`);
@@ -2370,6 +2378,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       throw new Error('Previous backend preparation is still pending. Wait for it to settle, then retry /clear before sending more work.');
     }
     if (executor.hasUncertainShutdown?.()) throw new Error('Direct backend shutdown is unconfirmed. Retry /abort or /clear before sending more work.');
+    if (executor.hasPendingCancellation?.()) throw new Error('Native cancellation cleanup is pending. Retry /abort or use /clear (session-only schedules will be lost).');
     await this.delegation.assertExecutionSafe(executor.getCurrentWorkingDirectory(), threadId);
     if (this.isDestroyed || this.abortOperations.has(threadId) || (token &&
       (this.cancelledOperations.has(token) || this.activeThreadOperations.get(threadId)?.token !== token))) {
@@ -2552,6 +2561,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       throw new Error('Previous backend preparation is still pending. Wait for it to settle, then retry /clear before sending more work.');
     }
     if (executor.hasUncertainShutdown?.()) throw new Error('Direct backend shutdown is unconfirmed. Retry /abort or /clear before sending more work.');
+    if (executor.hasPendingCancellation?.()) throw new Error('Native cancellation cleanup is pending. Retry /abort or use /clear (session-only schedules will be lost).');
     this.pendingOutputFiles.invalidateThread(threadId);
     const conversationRevision = this.conversationRevisions.get(threadId) ?? 0;
     const operationToken = this.activeThreadOperations.get(threadId)?.token;
@@ -2570,6 +2580,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     let scheduleScope: ScheduleToolScope | undefined;
     let clearScheduleModelOverride: (() => void) | undefined;
     let delegationBridge: DelegationBridge | undefined;
+    let retireActivation: (() => void) | undefined;
     let executionMetadata: ExecutionMetadata | undefined;
     let requestFinished = false;
     let imageDelivery: ImageDelivery | undefined;
@@ -2603,7 +2614,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       if (this.imageDeliveries.get(threadId) === imageDelivery) this.imageDeliveries.delete(threadId);
       requestFinished = true;
       activity.dispose();
-      delegationBridge?.activate(undefined);
+      retireActivation?.();
       const retained = !success && delegationScope && !delegationScope.isClosed()
         && !this.isDestroyed && !this.abortOperations.has(threadId)
         ? delegationScope.getRetainedResults() : [];
@@ -2866,7 +2877,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         showState('Working');
         scope?.beginExecution(continuationResults.map(task => task.taskId));
         const launchRevision = scope?.getLaunchRevision();
-        if (scope || scheduleScope) delegationBridge?.activate((name, args, callId) => {
+        if (scope || scheduleScope) retireActivation = delegationBridge?.activate((name, args, callId) => {
           if (!active || !isCurrent()) return Promise.reject(new Error('The coordinator execution has ended'));
           if (name.startsWith('remote_cli_schedule_') && scheduleScope) return scheduleScope.invoke(name, args);
           return scope ? scope.invoke(name, args, callId) : Promise.reject(new Error('Delegation is disabled for this turn.'));
@@ -2931,7 +2942,7 @@ You can also use natural language commands to control Claude Code CLI.`,
           active = false;
           executionActive = false;
           activity.clear();
-          delegationBridge?.activate(undefined);
+          retireActivation?.();
           assertCoordinatorActive();
           scope?.finishExecution(result.success);
           finished = true;
@@ -2966,7 +2977,7 @@ You can also use natural language commands to control Claude Code CLI.`,
           active = false;
           executionActive = false;
           activity.clear();
-          delegationBridge?.activate(undefined);
+          retireActivation?.();
           if (!finished) scope?.finishExecution(false);
           // Goal activation mutates durable native state; never replay it as a model retry.
           await scheduleScope?.drain();
@@ -3019,7 +3030,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         }
 
         if (!delegationScope || !result.success) return complete(result.success, result.error);
-        delegationBridge?.activate(undefined);
+        retireActivation?.();
         if (delegationScope.hasPendingResults()) showState('Waiting for worker results');
         const results = await delegationScope.collectPendingResults();
         assertCoordinatorActive();
@@ -3061,7 +3072,7 @@ You can also use natural language commands to control Claude Code CLI.`,
     } finally {
       finishPreparation();
       await scheduleScope?.close();
-      delegationBridge?.activate(undefined);
+      retireActivation?.();
       if (delegationBridge && this.delegationBridges.get(threadId) !== delegationBridge) {
         void delegationBridge.close().catch(() => undefined);
       }
@@ -3547,6 +3558,10 @@ You can also use natural language commands to control Claude Code CLI.`,
     };
     const check = () => { if (!current() || this.automaticUpdateInProgress) throw new Error('Scheduling context changed or client is shutting down/updating.'); };
     check();
+    if (command.kind === 'list' && this.threadPool.getExistingExecutor(owner.threadId)?.hasPendingCancellation?.()) {
+      const service = await this.initializeSchedules(); check();
+      return service.list(owner); // Catalog-only recovery visibility; never acquire native management admission.
+    }
     if (!nativeBound && this.scheduleManagement.has(owner.threadId)) throw new Error('A schedule operation is already in progress for this thread.');
     this.scheduleManagement.add(owner.threadId);
     try {
@@ -3571,8 +3586,26 @@ You can also use natural language commands to control Claude Code CLI.`,
           const connection = await bridge.start(thread && isDelegationEnabled(thread) ? ['delegation', 'scheduling'] : ['scheduling']);
           check(); await executor.configureManagedTools(connection); check();
         }
-        return await executor.withNativeScheduleOperation(id, current,
+        const records = await executor.withNativeScheduleOperation(id, current,
           () => this.runScheduleOperation(owner, command, id, context, true), !!context);
+        if (command.kind === 'create' && !current()) {
+          const cleanupCurrent = () => {
+            try { return !this.isDestroyed && this.scheduleGeneration(owner.threadId) === owner.generation
+              && this.threadPool.getExistingExecutor(owner.threadId) === executor; } catch { return false; }
+          };
+          const service = await this.initializeSchedules();
+          try {
+            if (!executor.reconcileNativeSchedule) {
+              throw new Error(`Schedule ${id} requires explicit cancellation; native cleanup admission is unavailable.`);
+            }
+            await executor.reconcileNativeSchedule(id, cleanupCurrent, () => service.cancel(owner, id));
+          } catch (error) {
+            await service.retainCleanupError(owner, id, error);
+            throw error;
+          }
+          throw new Error('Scheduling context retired during creation. Inspect /schedule list for the final task state.');
+        }
+        return records;
       }
       const service = await this.initializeSchedules(); check();
       if (command.kind === 'list') {
@@ -3604,7 +3637,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         command: config[backend]?.command,
         model: context ? context.model : thread.models?.[backend] ?? (backend === 'claude' ? thread.model || undefined : config.dsh?.model),
         effort: context ? context.effort : thread.efforts?.[backend] });
-      if (!current()) {
+      if (!current() && !nativeBound) {
         await service.cancel(owner, record.id);
         throw new Error('Scheduling context retired during creation; the native task was cancelled.');
       }
@@ -3634,6 +3667,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         throw new Error('Use /cd first and include a self-contained text prompt. Schedule commands do not accept attachments or directory overrides.');
       }
       const owner: ScheduleOwner = { threadId, openId: message.openId, generation: this.scheduleGeneration(threadId) };
+      const storedOnly = command.kind === 'list' && this.threadPool.getExistingExecutor(threadId)?.hasPendingCancellation?.();
       const records = await this.runScheduleOperation(owner, command.kind === 'list' ? { kind: 'list' } : command as ScheduleOperation);
       const record = records[0];
       let output: string;
@@ -3647,6 +3681,7 @@ You can also use natural language commands to control Claude Code CLI.`,
           : 'Native job storage is isolated and is never automatically reopened after process exit.';
         output = `Schedule ${record.id}: ${record.state}.\n${record.rule.kind === 'once' ? record.rule.at : `${record.rule.expression} (${record.rule.timezone})`}\n\nRuns in this thread's foreground ${NATIVE_SCHEDULE_CAPABILITIES[record.backend].label} conversation and returns results here. Keep the CLI running; native timing is approximate. ${lifecycle}\nUse /schedule list or /schedule cancel ${record.id}.`;
       }
+      if (storedOnly) output = `Native cancellation cleanup is pending. This is the stored catalog, not a fresh native inventory. Retry /abort; /clear stops the host and loses session-only schedules.\n\n${output}`;
       respond({ success: true, scheduleMenu: menuFor(owner, records), output });
     } catch (error) {
       respond({ success: false, error: error instanceof Error ? error.message : 'Schedule operation failed.' });

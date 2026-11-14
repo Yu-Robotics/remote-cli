@@ -637,6 +637,29 @@ active schedules before clearing the conversation, changing its directory or
 sandbox, or deleting the thread. Merely selecting another thread leaves its
 executor and schedules running; switching backends or recycling the native
 process interrupts jobs. Results appear in the original thread.
+On Linux x64 with Claude 2.1.311 and verified native interrupt/lifecycle capabilities,
+`/abort` interrupts foreground work while retaining its process, conversation,
+managed-tool registration and future Cron jobs. Old input waits, approvals and
+foreground queues are retired; known foreground-owned native background tasks
+receive native stop requests. This is not an atomic all-work stop or proof that
+every OS descendant or external effect ended. Already-fired shared-session work
+may also be interrupted; fired one-shots are not recreated.
+
+Abort joins the native acknowledgement and matching terminal/lifecycle evidence.
+An admitted schedule mutation whose receipt is uncertain keeps its owned handle
+and is reconciled on the same host before cancellation succeeds; no CREATE is
+replayed. Cleanup uses bounded native inventory/deletion turns and can take longer
+than foreground interruption. If settlement remains unconfirmed, the host stays
+owned and conflicting work is blocked. Retry `/abort` on that host. `/schedule list`
+retains the cleanup record. For explicit destructive recovery after an unresolved
+abort, `/clear` (or `/new`) stops the host, loses its session-only schedules and
+starts a fresh conversation. There is no automatic destructive timeout fallback.
+
+Startup cancellation, unsupported versions/platforms or missing capabilities use
+the existing process-stop path and report that session-only jobs are lost. Native
+macOS/Windows retained interruption is not enabled. Reset, destruction and backend
+changes still stop the host. Other backends keep their existing abort behavior.
+
 The catalog and pending results contain task text and are local private state.
 See the [eight-backend inventory](docs/native-scheduling-inventory.md) for the
 native capability and transport evidence behind the adapter choice.

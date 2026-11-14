@@ -14,11 +14,11 @@ describe('delegation transport and discovery', () => {
     const call = (token: string) => fetch(connection.url, { method: 'POST', headers: { authorization: `Bearer ${token}` },
       body: JSON.stringify({ name: 'remote_cli_list_backends', args: {}, callId: 'one' }) });
     expect((await call(connection.token)).status).toBe(409);
-    bridge.activate(handler);
+    const retire = bridge.activate(handler);
     expect((await call('wrong')).status).toBe(401);
     expect(handler).not.toHaveBeenCalled();
     expect(await (await call(connection.token)).json()).toEqual({ marker: 'ok' });
-    bridge.activate(undefined);
+    retire();
     expect((await call(connection.token)).status).toBe(409);
     expect(handler).toHaveBeenCalledTimes(1);
   });

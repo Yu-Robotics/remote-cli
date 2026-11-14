@@ -34,6 +34,7 @@ async function fixture() {
       if (!current()) throw new Error('Stale scheduling operation');
       return run();
     }), configureManagedTools: vi.fn(async (_connection?: any) => {}), configureDelegation: vi.fn(async (_connection?: any) => {}), execute: vi.fn(async () => ({ success: true })), getCurrentWorkingDirectory: () => cwd,
+    reconcileNativeSchedule: vi.fn(async (_id: string, current: () => boolean, run: () => Promise<unknown>) => { if (!current()) throw new Error('Cleanup owner retired'); return run(); }),
     abort: vi.fn(async () => true), destroy: vi.fn(), isBusy: () => executorBusy, resetContext: vi.fn(),
     getSandboxStatus: () => 'Unrestricted', configureSandbox: vi.fn(async () => ({ success: true })) };
   const pool = {

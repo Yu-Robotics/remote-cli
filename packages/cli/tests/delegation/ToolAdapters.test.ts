@@ -13,6 +13,7 @@ import { ScheduleToolOperations } from '../../src/scheduling/ScheduleToolScope';
 
 describe('native delegation tool adapters', () => {
   let bridge: DelegationBridge;
+  let retire: () => void;
   let directory: string;
   let child: ChildProcessWithoutNullStreams | undefined;
   let connection: { url: string; token: string };
@@ -21,7 +22,7 @@ describe('native delegation tool adapters', () => {
   beforeEach(async () => {
     directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'delegation-adapter-')));
     bridge = new DelegationBridge(); connection = await bridge.start();
-    bridge.activate(async (name, args) => ({ name, args, marker: 'ok' }));
+    retire = bridge.activate(async (name, args) => ({ name, args, marker: 'ok' }));
   });
   afterEach(async () => {
     if (child) {
@@ -65,7 +66,7 @@ describe('native delegation tool adapters', () => {
       const run = vi.fn(async () => []);
       const scope = new ScheduleToolOperations().scope({ owner: { threadId: 'thread', openId: 'owner', generation: 'current' },
         messageId: 'foreground', backend: 'dsh', current: () => true, run, present: async () => 'Delivered' });
-      bridge.activate((name, args) => scope.invoke(name, args));
+      retire = bridge.activate((name, args) => scope.invoke(name, args));
       const args = { requestId: 'native-request', when: { kind: 'after', amount: 5, unit: 'm' }, prompt: 'Synthetic task' };
       const first = await request(3, 'tools/call', { name: 'remote_cli_schedule_create', arguments: args });
       expect(JSON.parse(first.content[0].text)).toMatchObject({ status: 'succeeded' });
@@ -94,7 +95,7 @@ describe('native delegation tool adapters', () => {
     expect(JSON.parse(result.content[0].text).args.objective).toBe('Read \u00e9vidence');
     const malformedArgs = await request(5, 'tools/call', { name: 'remote_cli_delegate', arguments: [] });
     expect(JSON.parse(malformedArgs.content[0].text).args).toEqual({});
-    bridge.activate(undefined);
+    retire();
     expect(await request(4, 'tools/call', { name: 'remote_cli_list_backends', arguments: {} })).toMatchObject({ isError: true });
   });
 
@@ -115,7 +116,7 @@ describe('native delegation tool adapters', () => {
     const launch = buildPiRpcArgs({ delegation: connection });
     expect(launch.args).toContain('--extension');
     expect(launch.args).not.toContain('--no-builtin-tools');
-    bridge.activate(undefined);
+    retire();
     await expect(tools[0].execute('expired', {})).rejects.toThrow('No active');
   });
 

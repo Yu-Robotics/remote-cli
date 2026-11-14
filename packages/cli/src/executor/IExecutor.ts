@@ -118,6 +118,12 @@ export interface IExecutor {
   observeNativeSessionCreation?(observer: (target: NativeSessionDeletionTarget) => Promise<void>, onFailure?: () => Promise<void>): void;
   resetContext(): void;
   abort(): Promise<boolean>;
+  /** Retire the turn activation but retain native managed-tool registration during interrupt. */
+  preservesProcessOnAbort?(): boolean;
+  hasPendingCancellation?(): boolean;
+  abortStatusMessage?(): string | undefined;
+  /** Explicit context reset may stop a retained host, losing session-only schedules. */
+  stopForContextReset?(): Promise<void>;
   destroy(): Promise<void> | void;
   /** Transport-exit confirmation; insufficient by itself for disposable worker cleanup. */
   waitForExit?(): Promise<void>;
@@ -140,6 +146,8 @@ export interface IExecutor {
     onEvent: (event: import('../scheduling/types').NativeScheduleEvent) => void, isOwnerCurrent?: () => boolean): Promise<import('../scheduling/types').NativeScheduleHandle>;
   /** Bind a management operation to its authenticated owner; in-turn tools receive a native action. */
   withNativeScheduleOperation?<T>(id: string, current: () => boolean, run: () => Promise<T>, inTurn: boolean): Promise<T>;
+  /** Reconcile an accepted mutation after its foreground scope retires; never start a new host. */
+  reconcileNativeSchedule?<T>(id: string, current: () => boolean, run: () => Promise<T>): Promise<T>;
   nativeScheduleAction?(id: string): import('../scheduling/types').NativeScheduleToolAction | undefined;
   /** Register scoped control-tool groups without enabling delegation or changing native timing support. */
   configureManagedTools?(connection?: import('../managed/contract').ManagedToolConnection): Promise<void>;

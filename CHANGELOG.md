@@ -13,6 +13,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.237] - 2026-11-13
+
+### Changed
+- On Linux x64 with Claude 2.1.311 and verified native capabilities/process identity, interrupt foreground work without restarting Claude or losing future native schedules. Join acknowledgement, input UUID results and lifecycle terminals, retire old interactive authority, and stop only background tasks with observed foreground tool lineage.
+- Reconcile interrupted native CREATE/DELETE mutations under a cancellation-owned lease on the same host. Keep unconfirmed cleanup fenced and retryable with `/abort`; `/clear` provides explicit destructive recovery that loses session-only schedules. Never recreate jobs or claim atomic cancellation of already-fired scheduled work or all external effects.
+
+### Fixed
+- Cancel Claude requests still queued during startup, fence late startup dispatch, and keep uncertain shutdowns blocked until explicit retry confirms process exit. Startup and unsupported native hosts retain the explicit process-stop fallback.
+- Retire interactive input waiters and detection timers on abort, context reset, and destruction so old callbacks cannot change a later turn's input state.
+- Give managed tool activations owner-checked retirement so an older finalizer cannot deactivate a newer turn; keep the Claude endpoint registered across a verified retained abort while preserving deliberate disposal on reset/destroy/backend changes.
+- Reconcile late accepted Claude schedule creation only under fresh owner authority on the existing idle host. Preserve the native handle and a retryable cleanup error when admission is unsafe, without recreating jobs or reviving an expired foreground scope.
+
 ## [1.6.236] - 2026-11-12
 
 ### Changed
