@@ -245,25 +245,66 @@ describe('ScheduleService', () => {
     expect((await read()).records).toEqual([]);
   });
 
-  it('preserves early completion before create returns and stops a one-shot process', async () => {
+  it.each([false, true])('preserves early completion before create returns and stops a one-shot process (delayed ACK: %s)', async delayAck => {
     const gate = deferred<void>();
+    const replacing = deferred<void>(), release = deferred<void>();
     provider.beforeResolve = async (_id, emit) => {
       emit({ type: 'started', occurrenceId: 'early-1' });
       emit({ type: 'completed', occurrenceId: 'early-1', success: true, output: 'Early result' });
       await gate.promise;
     };
     const service = make(); await service.initialize();
+    const rename = fs.rename.bind(fs);
+    let ackReplaced = false;
+    const replacement = vi.spyOn(fs, 'rename').mockImplementation(async (...args) => {
+      // With the create receipt held, the first write after delivery is its ACK.
+      if (delayAck && deliver.mock.calls.length === 1 && !ackReplaced) {
+        replacing.resolve();
+        await release.promise;
+        await rename(...args);
+        ackReplaced = true;
+        return;
+      }
+      return rename(...args);
+    });
     const creation = service.create(owner, input());
-    await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(1));
-    expect((await read()).records[0].state).toBe('completed');
-    expect((await read()).records[0].nativeId).toBeUndefined();
-    gate.resolve();
-    expect(await creation).toMatchObject({ state: 'completed', nativeId: 'native-schedule-a' });
-    expect(provider.handles.get('schedule-a')!.stop).toHaveBeenCalledTimes(1);
-    expect(deliver.mock.calls[0][0]).toMatchObject({ id: 'schedule-a:early-1', occurrenceId: 'early-1', schedule: owner });
+    let deliverySettled: Promise<void> | undefined;
+    let joined = false;
+    try {
+      await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(1));
+      // Delivery invocation precedes the ACK's atomic replacement. Join it
+      // before opening the catalog, without waiting for the held create receipt.
+      deliverySettled = settled(service).then(() => { joined = true; });
+      if (delayAck) {
+        await replacing.promise;
+        expect(joined).toBe(false);
+        expect(ackReplaced).toBe(false);
+        release.resolve();
+      }
+      await deliverySettled;
+      if (delayAck) expect(ackReplaced).toBe(true);
+      const catalog = await read();
+      expect(catalog.records[0].state).toBe('completed');
+      expect(catalog.records[0].nativeId).toBeUndefined();
+      expect(catalog.pending).toEqual([]);
+      gate.resolve();
+      expect(await creation).toMatchObject({ state: 'completed', nativeId: 'native-schedule-a' });
+      expect(provider.handles.get('schedule-a')!.stop).toHaveBeenCalledTimes(1);
+      expect(deliver).toHaveBeenCalledTimes(1);
+      expect(deliver.mock.calls[0][0]).toMatchObject({ id: 'schedule-a:early-1', occurrenceId: 'early-1', schedule: owner });
+    } finally {
+      release.resolve(); gate.resolve();
+      try {
+        await Promise.allSettled([creation, ...(deliverySettled ? [deliverySettled] : [])]);
+        await service.destroy();
+      }
+      finally { replacement.mockRestore(); }
+    }
   });
 
   it('queues failed delivery durably and only retries on explicit reconnect', async () => {
+    // Rejected delivery has no ACK write; joining via retryDeliveries here
+    // would change the explicit retry counts this test verifies.
     deliver.mockRejectedValue(new Error('Disconnected'));
     const service = make(); await service.initialize(); await service.create(owner, input('schedule-a', true));
     complete();
@@ -658,6 +699,7 @@ describe('ScheduleService', () => {
     provider.emit('schedule-a', { type: 'completed', occurrenceId: 'occurrence-1', success: false,
       output: '\u{1f680}'.repeat(9000), error: 'x'.repeat(9000) });
     await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(1));
+    // This delivery rejects, so its persisted outbox has no trailing ACK write.
     const [pending] = (await read()).pending;
     expect(Buffer.byteLength(pending.output)).toBeLessThanOrEqual(16 * 1024);
     expect(Buffer.byteLength(pending.error)).toBeLessThanOrEqual(4096);
