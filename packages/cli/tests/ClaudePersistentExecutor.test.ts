@@ -50,7 +50,7 @@ describe('ClaudePersistentExecutor', () => {
     // Reset mock implementations
     mockFs.existsSync.mockReturnValue(true);  // Default: files and directories exist
     mockFsModule.existsSync.mockImplementation((file: any) => !String(file).includes('claude-sandbox'));
-    mockFs.readFileSync.mockReturnValue(JSON.stringify({ id: 'test-session' }));  // Default: valid session
+    mockFs.readFileSync.mockReturnValue('{}');  // Ordinary tests start a fresh session; resume cases opt in.
 
     directoryGuard = new DirectoryGuard(['~/test-project', './work']);
 
@@ -84,8 +84,25 @@ describe('ClaudePersistentExecutor', () => {
     }
   });
 
-  const advanceStartup = async (child = mockChildProcess) => {
+  const advanceStartup = async (child = mockChildProcess, initializeGuard = true) => {
+    child.stdin.writable = true;
     await vi.advanceTimersByTimeAsync(1_000);
+    if (initializeGuard) {
+      const packet = child.stdin.write.mock.calls.map(([line]: [string]) => JSON.parse(line))
+        .find((frame: any) => frame.request?.subtype === 'initialize');
+      if (packet) {
+        child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'control_response', response: {
+          subtype: 'success', request_id: packet.request_id, response: { models: [] },
+        } }) + '\n'));
+        await vi.advanceTimersByTimeAsync(0);
+        const settings = JSON.parse(child.stdin.write.mock.calls.at(-1)[0]);
+        expect(settings.request.subtype).toBe('get_settings');
+        child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'control_response', response: {
+          subtype: 'success', request_id: settings.request_id, response: { effective: { env: {} } },
+        } }) + '\n'));
+        await vi.advanceTimersByTimeAsync(0);
+      }
+    }
     expect(child.stdin.write).toHaveBeenCalled();
   };
 
@@ -821,6 +838,7 @@ describe('ClaudePersistentExecutor', () => {
   });
 
   describe('compact()', () => {
+    beforeEach(() => mockFs.readFileSync.mockReturnValue(JSON.stringify({ id: 'test-session' })));
     it('should resolve immediately when no active session exists', async () => {
       mockFs.existsSync.mockReturnValue(false);
       const noSessionExecutor = new ClaudePersistentExecutor(directoryGuard, '~/test-project');
@@ -859,7 +877,7 @@ describe('ClaudePersistentExecutor', () => {
 
       // Verify stdin received a message with isSlashCommand: true
       expect(freshProcess.stdin.write).toHaveBeenCalled();
-      const writtenArg = freshProcess.stdin.write.mock.calls[0][0] as string;
+      const writtenArg = freshProcess.stdin.write.mock.calls.find(([line]: [string]) => JSON.parse(line).type === 'user')[0] as string;
       const parsed = JSON.parse(writtenArg.trim());
       expect(parsed.isSlashCommand).toBe(true);
       expect(parsed.message.content).toBe('/compact');
@@ -1149,7 +1167,7 @@ describe('ClaudePersistentExecutor', () => {
       mockSpawn.mockReturnValue(freshProcess);
 
       const listPromise = testExecutor.listModels();
-      await advanceStartup(freshProcess);
+      await advanceStartup(freshProcess, false);
 
       const written = JSON.parse(freshProcess.stdin.write.mock.calls[0][0].trim());
       expect(written).toMatchObject({
@@ -1212,7 +1230,7 @@ describe('ClaudePersistentExecutor', () => {
       mockSpawn.mockReturnValue(freshProcess);
 
       const effortsPromise = testExecutor.listEfforts();
-      await advanceStartup(freshProcess);
+      await advanceStartup(freshProcess, false);
 
       const written = JSON.parse(freshProcess.stdin.write.mock.calls[0][0].trim());
       freshProcess.stdout.emit('data', Buffer.from(JSON.stringify({
@@ -1312,7 +1330,7 @@ describe('ClaudePersistentExecutor', () => {
 
       // Populate catalog
       const listPromise = testExecutor.listModels();
-      await advanceStartup(freshProcess);
+      await advanceStartup(freshProcess, false);
       const written = JSON.parse(freshProcess.stdin.write.mock.calls[0][0].trim());
       freshProcess.stdout.emit('data', Buffer.from(JSON.stringify({
         type: 'control_response',
@@ -1430,6 +1448,7 @@ describe('ClaudePersistentExecutor', () => {
   });
 
   describe('compactWhenFull()', () => {
+    beforeEach(() => mockFs.readFileSync.mockReturnValue(JSON.stringify({ id: 'test-session' })));
     it('should return error when no active session exists', async () => {
       // When session file doesn't exist, sessionId will be null
       mockFs.existsSync.mockReturnValue(false);
@@ -1443,6 +1462,7 @@ describe('ClaudePersistentExecutor', () => {
     });
 
     it('should run external compact, reload session, and restart', async () => {
+      mockFs.readFileSync.mockReturnValue(JSON.stringify({ id: 'test-session' }));
       // Constructor reads session from disk via loadSessionId() — mock returns 'test-session'
       // No persistent process is running (constructor doesn't spawn one)
       // So stopProcess() returns immediately
@@ -1466,7 +1486,8 @@ describe('ClaudePersistentExecutor', () => {
         .mockReturnValueOnce(restartProcess);  // restart after compact (second spawn)
 
       const testExecutor = new ClaudePersistentExecutor(directoryGuard, '~/test-project');
-      // sessionId = 'test-session' from mockFs.readFileSync default
+      (testExecutor as any).sessionId = 'test-session';
+      // Use an explicit synthetic saved session for native compaction.
 
       const compactPromise = testExecutor.compactWhenFull();
 
@@ -1491,9 +1512,11 @@ describe('ClaudePersistentExecutor', () => {
       const compactCall = mockSpawn.mock.calls[0];
       expect(compactCall[1]).toContain('--resume');
       expect(compactCall[1]).toContain('test-session');
-      expect(JSON.parse((compactCall[1] as string[])[(compactCall[1] as string[]).indexOf('--settings') + 1])).toEqual({ scheduledTasksEnabled: false });
+      expect(compactCall[1]).not.toContain('--settings');
       expect(compactCall[1]).toContain('--print');
       expect(compactCall[1]).toContain('/compact');
+      expect(compactCall[2]?.env?.CLAUDE_CODE_DISABLE_CRON).toBe('1');
+      expect(compactCall[1]).not.toContain('--await-initialize');
 
       restartProcess.emit('exit', 0, null);
       restartProcess.emit('close', 0, null);

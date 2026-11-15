@@ -552,6 +552,29 @@ only checks whether a catalog already exists. Existing catalogs are recovered
 for interrupted-job status and pending-result delivery; explicit `/schedule`
 management or an explicit scheduling tool call initializes the service on demand.
 
+Scheduling-enabled Claude hosts use the native `--await-initialize` startup barrier:
+restored timers cannot start during the wait for the initial admission-hook request.
+An unsupported launch flag fails startup without retrying an unguarded launch.
+The hooks reject restored wakes without current managed ownership before model
+execution; output is not merely hidden. Hosts without scheduling registration,
+restricted hosts, delegated workers, and external compaction instead receive the
+per-process `CLAUDE_CODE_DISABLE_CRON=1`, disabling native Cron execution and tools.
+An inherited Cron disable remains in force on scheduling-enabled hosts too.
+`scheduledTasksEnabled:false` is not a scheduler safety barrier.
+
+Claude checks the current managed admission state again at every wake. An
+interrupted task or a task with cancellation intent cannot start another
+occurrence even if native cleanup fails. Already admitted results and unrelated
+jobs keep their delivery callbacks; a blocked wake is not proof of deletion.
+
+Unknown definitions are not deleted or adopted, and no missed occurrence is
+replayed. This also fences unmanaged native schedules within that remote-cli host;
+it does not edit other native sessions. Resumed foreground chat still verifies
+callback-hook policy and fails closed if native policy disables the guard. Legacy
+jobs without verifiable ownership require explicit owner review for deletion.
+These protections cannot revoke work already admitted by a surviving predecessor
+or an escaped external process.
+
 Both CLI and Router must support scheduled result receipts. Restricted Claude
 sandbox configurations are rejected. The DSH adapter loads first-party scheduler
 services and a remote-cli event adapter through a process-owned native plugin
@@ -660,6 +683,43 @@ Missing legacy ownership evidence, changed identities or unresolved receipts
 require manual review of the original session; do not bypass native authorization
 or recreate the task. An interrupted catalog row alone does not prove native
 absence, and restarting Claude can reload definitions from its transcript.
+
+From CLI 1.6.241, the owner can explicitly review legacy native definitions in
+this thread's currently bound Claude session, even when managed recovery metadata
+is missing:
+
+```text
+/schedule cleanup review
+/schedule cleanup review <native-id,...>
+/schedule cleanup confirm <review-token> <request-id> <native-id,...>
+```
+
+Review shows native tasks, their schedules and full prompts, the bound session,
+eligibility and expiry. It includes a ready-to-send command for all eligible tasks;
+keep only the desired **native** IDs to select fewer (not managed catalog IDs).
+Send confirmation yourself within five minutes. If the reply is lost, resend the
+identical command. The full structured inventory remains bound to the review.
+The managed `remote_cli_schedule_cleanup_review` tool can prepare the same review,
+but no model tool can confirm deletion. Ordinary `/schedule cancel` remains strict.
+
+Cleanup holds an exclusive session lease and rechecks the complete inventory
+before and after exact deletion. Changed definitions, owner, connection, native
+host, session, directory, configuration or expiry invalidate the review. The
+native `nextFireAt` forecast may advance without changing the definition. Only
+session-only definitions (`durable: false`) qualify: native inventory also includes
+project-persisted jobs but does not identify their originating session, so those
+are shown with an attribution blocker. Other native sessions are never searched;
+select the original thread if the expected definition is absent. No jobs are
+recreated, and unknown scheduled wakes remain blocked before inference throughout
+inspection and cleanup. Native management itself uses model-mediated tools.
+
+Success means verified definition absence on the reviewed current host, not proof
+that a predecessor or already-started external work has stopped. Existing admitted
+callbacks and sibling jobs are preserved. Exactly attributable managed rows retain
+cancellation intent and the observed local absence; unattributable legacy rows
+remain unchanged, without fabricated recovery receipts. A new review is required
+after reconnect or restart. Native acceptance is Linux-only; macOS and Windows
+still require native validation.
 
 Claude handoff fences scheduled work at the UserPromptSubmit admission boundary,
 before model inference or tools. An already-fired occurrence that has not crossed

@@ -17,7 +17,7 @@ vi.mock('child_process', () => ({
 vi.mock('fs', () => ({
   default: {
     existsSync: vi.fn((file: any) => String(file).includes('claude-sandbox') ? false : true),
-    readFileSync: vi.fn(() => JSON.stringify({ id: 'test-session' })),
+    readFileSync: vi.fn(() => '{}'), // Fresh conversation; resume admission has separate protocol tests.
     writeFileSync: vi.fn(),
     unlinkSync: vi.fn(),
     readdirSync: vi.fn(() => []),
@@ -25,7 +25,7 @@ vi.mock('fs', () => ({
     mkdirSync: vi.fn(),
   },
   existsSync: vi.fn((file: any) => String(file).includes('claude-sandbox') ? false : true),
-  readFileSync: vi.fn(() => JSON.stringify({ id: 'test-session' })),
+  readFileSync: vi.fn(() => '{}'),
   writeFileSync: vi.fn(),
   unlinkSync: vi.fn(),
   readdirSync: vi.fn(() => []),

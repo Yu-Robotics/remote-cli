@@ -1,3 +1,4 @@
+import { cleanupInventory, type NativeCleanupDefinition } from '../ReviewedNativeCleanup';
 import { randomUUID } from 'crypto';
 import { nativeRule } from './rules';
 import { NativeScheduleAbsentError, NativeScheduleCleanupError, type NativeScheduleInput, type NativeScheduleHandle, type NativeScheduleEvent } from '../types';
@@ -15,9 +16,13 @@ interface Job {
   adopt?: boolean;
   cron?: string;
   inventoryReceipt?: boolean;
+  reviewOnly?: true;
+  reviewedInventory?: NativeCleanupDefinition[];
   expectedNativeId?: string;
   onceDefinitionAlreadyAbsent?: true;
   cleanupOnly?: true;
+  admissionBlocked?: true;
+  canAdmitOccurrence?(): boolean;
 }
 interface Pending {
   action: NativeScheduleAction; job: Job; scope?: Scope; toolId?: string;
@@ -149,6 +154,37 @@ export class ClaudeSessionSchedules {
       ? structuredClone(this.pending.action) : undefined;
   }
 
+  /** Explicit review authority is independent of historical managed job ownership. */
+  async reviewedInventory(current: () => boolean): Promise<NativeCleanupDefinition[]> {
+    const job = this.reviewJob(current);
+    await this.request(job, { tool: 'CronList', input: {} });
+    if (!current() || !job.reviewedInventory) throw new Error('Fresh native cleanup inventory is unavailable.');
+    for (const owned of this.jobs.values()) {
+      if (owned.admissionBlocked && owned.nativeId && !job.reviewedInventory.some(entry => entry.id === owned.nativeId)) {
+        owned.cancelled = true;
+      }
+    }
+    return job.reviewedInventory;
+  }
+  async reviewedDelete(target: NativeCleanupDefinition, current: () => boolean): Promise<void> {
+    if (target.durable !== false) throw new Error('Native definition lacks session-only provenance.');
+    const job = this.reviewJob(current);
+    job.nativeId = target.id;
+    // Revoke only future admission for this exact definition. Keep already-started
+    // occurrence callbacks and all sibling jobs; absence is not process quiescence.
+    for (const owned of this.jobs.values()) {
+      if (owned.nativeId === target.id && owned.prompt === target.prompt && owned.cron === target.cron
+        && owned.recurring === (target.recurring ?? false)) owned.admissionBlocked = true;
+    }
+    await this.request(job, { tool: 'CronDelete', input: { id: target.id } }, true);
+  }
+  private reviewJob(current: () => boolean): Job {
+    if (this.closed || this.definitionRemoval || !this.scope || !current()) throw new Error('Reviewed cleanup lease is unavailable.');
+    // Never insert this query placeholder into the admitted job map.
+    return { id: `review-${randomUUID()}`, marker: '', prompt: '', recurring: false,
+      current, uncertain: false, retired: false, cancelled: false, emit: () => {}, adopt: true, reviewOnly: true };
+  }
+
   /** Retained ownership authorizes deletion only, never restored wake admission. */
   async cancelRetained(input: NativeScheduleInput, nativeId: string, current: () => boolean, timezone: string): Promise<void> {
     if (this.closed || this.definitionRemoval || !this.capable || !this.scope || !current() || this.busy) {
@@ -194,7 +230,8 @@ export class ClaudeSessionSchedules {
   }
 
   async create(input: NativeScheduleInput, emit: Job['emit'], current: () => boolean = () => true,
-    timezone = this.options.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone, restore: boolean | 'adopt' | 'adopt-existing' = false, expectedNativeId?: string): Promise<NativeScheduleHandle> {
+    timezone = this.options.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone, restore: boolean | 'adopt' | 'adopt-existing' = false, expectedNativeId?: string,
+    canAdmitOccurrence?: () => boolean): Promise<NativeScheduleHandle> {
     if (this.closed || this.definitionRemoval || this.jobs.has(input.id) || this.jobs.size >= 100 || [...this.jobs.values()].filter(j => !j.retired).length >= 5) {
       throw new Error('Native session schedule identity or capacity is unavailable.');
     }
@@ -221,7 +258,7 @@ export class ClaudeSessionSchedules {
     if (input.recovery && (typeof stable !== 'string' || !/^[a-f0-9-]{36}$/.test(stable))) throw new Error('Invalid durable native schedule marker.');
     const marker = `[remote-cli:${stable ?? randomUUID()}]`;
     const job: Job = { id: input.id, marker, prompt: `${marker}\n${input.prompt}`, recurring: rule.recurring,
-      deadline: rule.at, current, recovering: !!restore, adopt: typeof restore === 'string', cron, expectedNativeId, uncertain: false, retired: false, cancelled: false, emit };
+      deadline: rule.at, current, canAdmitOccurrence, recovering: !!restore, adopt: typeof restore === 'string', cron, expectedNativeId, uncertain: false, retired: false, cancelled: false, emit };
     this.jobs.set(job.id, job);
     const handle = this.handle(job);
     try {
@@ -310,9 +347,11 @@ export class ClaudeSessionSchedules {
     return !!match;
   }
   private structuredInventory(job: Job, value: unknown): void {
+    if (job.reviewOnly) { job.reviewedInventory = cleanupInventory(value); return; }
     const entries = (value as { jobs?: unknown } | undefined)?.jobs;
     if (!Array.isArray(entries) || entries.length > 100 || entries.some(entry => !entry || typeof entry !== 'object'
-      || typeof entry.id !== 'string' || !idPattern.test(entry.id) || typeof entry.prompt !== 'string' || typeof entry.cron !== 'string')
+      || typeof entry.id !== 'string' || !idPattern.test(entry.id) || typeof entry.prompt !== 'string' || typeof entry.cron !== 'string'
+      || ('recurring' in entry && typeof entry.recurring !== 'boolean'))
       || new Set(entries.map(entry => entry.id)).size !== entries.length) throw new Error('Structured native inventory is unavailable or ambiguous.');
     if (this.skipUnadmitted && entries.some(entry => ![...this.jobs.values()].some(candidate => !candidate.retired
       && candidate.prompt === entry.prompt && candidate.nativeId === entry.id && entry.durable === false))) {
@@ -324,7 +363,8 @@ export class ClaudeSessionSchedules {
     if (!entry && entries.some(entry => entry.id === (job.expectedNativeId ?? job.nativeId))) {
       throw new Error('Native schedule ID now belongs to a different definition.');
     }
-    if (entry && (entry.prompt !== job.prompt || entry.cron !== job.cron || entry.recurring !== job.recurring
+    // Native CronList omits the optional recurrence flag for one-shot definitions.
+    if (entry && (entry.prompt !== job.prompt || entry.cron !== job.cron || (entry.recurring ?? false) !== job.recurring
       || entry.durable !== false || job.expectedNativeId && job.expectedNativeId !== entry.id
       || job.nativeId && job.nativeId !== entry.id
       || [...this.jobs.values()].some(other => other !== job && other.nativeId === entry.id))) {
@@ -463,7 +503,7 @@ export class ClaudeSessionSchedules {
     } else if (action.tool === 'CronDelete') {
       if (text !== `Cancelled job ${job.nativeId}.`) throw new Error('Unverified native cancellation receipt.');
       if (!preserveOccurrences) job.cancelled = true;
-    } else this.inventory(job, text);
+    } else if (!job.reviewOnly) this.inventory(job, text);
   }
   private hook(frame: Frame): void {
     const input = frame.request.input;
@@ -525,7 +565,7 @@ export class ClaudeSessionSchedules {
     const jobs: Job[] = [];
     let remaining = prompt;
     while (remaining && jobs.length < 100) {
-      const job = [...this.jobs.values()].find(item => !item.retired && !item.cancelled && !item.recovering && item.current() && !!item.nativeId
+      const job = [...this.jobs.values()].find(item => !item.retired && !item.cancelled && !item.admissionBlocked && !item.recovering && this.canAdmitOccurrence(item) && !!item.nativeId
         && (remaining === item.prompt || remaining.startsWith(item.prompt + '\n')));
       if (!job) return;
       jobs.push(job); remaining = remaining.slice(job.prompt.length);
@@ -533,6 +573,11 @@ export class ClaudeSessionSchedules {
     }
     return !remaining && jobs.length ? jobs : undefined;
   }
+  private canAdmitOccurrence(job: Job): boolean {
+    try { return job.current() && (job.canAdmitOccurrence?.() ?? true); }
+    catch { return false; }
+  }
+
   private bind(jobs: Job[]): void {
     for (const [index, job] of jobs.entries()) {
       const occurrence = this.batch!.occurrences[index]; occurrence.job = job;

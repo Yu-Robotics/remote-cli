@@ -7,6 +7,8 @@ export const SCHEDULE_USAGE = [
   '/schedule capabilities',
   '/schedule list',
   '/schedule cancel <id>',
+  '/schedule cleanup review [native-id,...]',
+  '/schedule cleanup confirm <review-token> <request-id> <native-id,...>',
   '/schedule after <positive integer><m|h|d> -- <prompt>',
   '/schedule at <ISO timestamp with Z or offset> -- <prompt>',
   '/schedule cron "<five numeric fields>" --tz <IANA timezone> -- <prompt>',
@@ -18,6 +20,8 @@ export const SCHEDULE_USAGE = [
 export type ScheduleCommand =
   | { kind: 'help' | 'capabilities' | 'list' }
   | { kind: 'cancel'; id: string }
+  | { kind: 'cleanup-review'; ids?: string[] }
+  | { kind: 'cleanup-confirm'; token: string; requestId: string; ids: string[] }
   | { kind: 'create'; rule: ScheduleRule; prompt: string }
   | { kind: 'invalid'; message: string };
 
@@ -120,6 +124,16 @@ export function parseScheduleCommand(content: string, nowMs = Date.now()): Sched
   if (!args || args === 'help') return { kind: 'help' };
   if (args === 'capabilities' || args === 'list') return { kind: args };
   try {
+    const review = /^cleanup review(?:\s+(\S+))?$/.exec(args);
+    if (review) {
+      const ids = review[1]?.split(','); ids?.forEach(validateScheduleId);
+      return { kind: 'cleanup-review', ids };
+    }
+    const confirm = /^cleanup confirm\s+([a-f0-9-]{36})\s+(\S+)\s+(\S+)$/.exec(args);
+    if (confirm) {
+      validateScheduleId(confirm[2]); const ids = confirm[3].split(','); ids.forEach(validateScheduleId);
+      return { kind: 'cleanup-confirm', token: confirm[1], requestId: confirm[2], ids };
+    }
     const cancel = /^cancel\s+(\S+)$/.exec(args);
     if (cancel) { validateScheduleId(cancel[1]); return { kind: 'cancel', id: cancel[1] }; }
     const split = /\s+--(?:\s+|$)/.exec(args);

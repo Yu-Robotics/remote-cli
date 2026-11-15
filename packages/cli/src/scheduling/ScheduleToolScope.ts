@@ -1,3 +1,4 @@
+import type { NativeCleanupReview } from './ReviewedNativeCleanup';
 import { createHash } from 'crypto';
 import { parseScheduleCommand, type ScheduleCommand, validateScheduleId } from './ScheduleCommand';
 import { NATIVE_SCHEDULE_CAPABILITIES } from './ScheduleCapabilities';
@@ -5,7 +6,7 @@ import type { ScheduleOwner, ScheduleRecord } from './types';
 
 export type ScheduleOperation = Extract<ScheduleCommand, { kind: 'create' | 'cancel' }> | { kind: 'list' };
 type PublicRecord = Pick<ScheduleRecord, 'id' | 'state' | 'backend' | 'rule' | 'prompt' | 'error'>;
-interface Result { status: 'pending' | 'succeeded' | 'failed'; requestId: string; scheduleId?: string; records?: PublicRecord[]; error?: string; card?: string }
+interface Result { status: 'pending' | 'succeeded' | 'failed'; requestId: string; scheduleId?: string; records?: PublicRecord[]; error?: string; card?: string; cleanupReview?: NativeCleanupReview }
 interface Receipt { scope: string; settled: boolean; pendingObserved?: boolean; terminalObserved?: boolean; digest: string; sideEffect: boolean; result: Result; done: Promise<void> }
 interface Options {
   owner: ScheduleOwner;
@@ -13,6 +14,7 @@ interface Options {
   backend: keyof typeof NATIVE_SCHEDULE_CAPABILITIES;
   current(): boolean;
   run(command: ScheduleOperation, scheduleId: string): Promise<ScheduleRecord[]>;
+  reviewCleanup?(id: string): Promise<NativeCleanupReview>;
   present(records: ScheduleRecord[], operationId: string): Promise<string>;
   nativeAction?(id: string): unknown;
   waitMs?: number;
@@ -21,7 +23,8 @@ const object = (value: unknown): value is Record<string, unknown> => !!value && 
 function keys(args: Record<string, unknown>, allowed: string[]): void {
   if (Object.keys(args).some(key => !allowed.includes(key))) throw new Error('Unknown scheduling field. Ownership and execution settings cannot be supplied by tools.');
 }
-function command(name: string, args: Record<string, unknown>): ScheduleOperation {
+function command(name: string, args: Record<string, unknown>): ScheduleOperation | { kind: 'cleanup-review' } {
+  if (name === 'remote_cli_schedule_cleanup_review') { keys(args, ['requestId']); return { kind: 'cleanup-review' }; }
   if (name === 'remote_cli_schedule_list') { keys(args, ['requestId']); return { kind: 'list' }; }
   if (name === 'remote_cli_schedule_cancel') {
     keys(args, ['requestId', 'scheduleId']); validateScheduleId(args.scheduleId);
@@ -99,6 +102,11 @@ export class ScheduleToolScope {
         admitted.done = Promise.resolve().then(async () => {
           try {
             if (!this.options.current()) throw new Error('Scheduling context changed before admission.');
+            if (parsed.kind === 'cleanup-review') {
+              if (!this.options.reviewCleanup) throw new Error('Reviewed native cleanup is unavailable.');
+              admitted.result = { ...admitted.result, status: 'succeeded', cleanupReview: await this.options.reviewCleanup(scheduleId) };
+              return;
+            }
             const records = await this.options.run(parsed, scheduleId);
             admitted.result = { ...admitted.result, status: 'succeeded', records: records.map(record => ({
               id: record.id, state: record.state, backend: record.backend, rule: record.rule,

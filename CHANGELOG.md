@@ -16,10 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.6.241] - 2026-11-15
 
 ### Fixed
+- Add explicit `/schedule cleanup review` and owner text confirmation for exact session-only Claude Cron definitions, including legacy/native-only tasks without managed recovery metadata. Bind short-lived reviews to owner, connection and native host/session, verify full structured inventory before and after deletion, reconcile lost receipts only from fresh absence, and preserve unknown predecessor status. Project-persisted definitions without session attribution remain blocked. Expose review through managed scheduling tools without a model confirmation endpoint.
+- Check live managed admission at every Claude wake, including recovered jobs. Interrupted, cancelled, faulted or retired owners cannot admit new occurrences even when native cleanup fails; preserve already-admitted completion callbacks and independent sibling jobs.
+- Accept omitted native CronList recurrence for one-shot cancellation while rejecting malformed values and preserving exact definition and ownership checks.
+- Hold scheduling-enabled Claude startup with the native `--await-initialize` barrier before restored timers can run. Disable native Cron per process for non-owning foreground hosts, restricted hosts, delegated workers and external compaction; the previous settings flag did not suppress restored execution. Preserve owned adoption, delivery and exact cancellation without changing native timers.
+- Guard resumed foreground Claude schedules before chat independently of managed-tool registration. Verify callback-hook policy, reject unowned restored wakeups before inference, and preserve exact-owned adoption and delivery. Do not infer scheduler suppression from launch settings, delete unverifiable legacy definitions, or claim already-admitted predecessor work is stopped.
 - Continue unresolved delegated artifact closeout in the original coordinator request/session instead of failing after two rounds. Preserve explicit integration decisions, durable receipt and ancestry checks, worker-launch/tool-call admission limits, and existing backend failure handling; do not replay completed workers or original attachments.
 - Pace repeated unresolved closeout with a 1–30 second capped backoff. Cancel waits on abort, conversation retirement, or shutdown, retain request/queue ownership, and recheck durable disposition before another model turn.
 
 ### Tests
+- Cover reviewed cleanup authorization, stale inventories and hosts, partial/error-after-commit retries, missing/foreign ownership receipts, sibling callbacks, catalog attribution and authenticated command/tool routing. Isolated Linux native acceptance verifies exact deletion and absence after a second resume while unknown scheduled wakes make no inference requests.
 - Cover continuation beyond two rounds, capped pacing and timer cleanup, cancellation during waits, model/compaction retries, unchanged admission limits, and pending/unavailable artifact preservation with synthetic executors and real Git fixtures.
 
 ## [1.6.240] - 2026-11-15

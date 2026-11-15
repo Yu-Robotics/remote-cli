@@ -72,7 +72,7 @@ export interface NativeScheduleRecovery {
    * Honor cancellation before admission, bound native operations, and retain a
    * cleanup handle in NativeScheduleCleanupError for any uncertain mutation.
    */
-  reconcile(record: ScheduleRecord, context: { notBefore: number; signal: AbortSignal; isCurrent(): boolean; isOwnerCurrent?(): boolean },
+  reconcile(record: ScheduleRecord, context: { notBefore: number; signal: AbortSignal; isCurrent(): boolean; isOwnerCurrent?(): boolean; canAdmitOccurrence?(): boolean },
     onEvent: (event: NativeScheduleEvent) => void): Promise<NativeScheduleHandle>;
 }
 
@@ -112,7 +112,9 @@ export interface NativeScheduleHandle {
 export interface NativeScheduleProvider {
   /** Pure capability lookup; absent means restart recovery is unsupported. */
   recoveryFor?(input: NativeScheduleInput): NativeScheduleRecovery | undefined;
-  create(input: NativeScheduleInput, onEvent: (event: NativeScheduleEvent) => void): Promise<NativeScheduleHandle>;
+  /** Admission is checked at each future wake, independently of deletion authority and completion delivery. */
+  create(input: NativeScheduleInput, onEvent: (event: NativeScheduleEvent) => void,
+    canAdmitOccurrence?: () => boolean): Promise<NativeScheduleHandle>;
 }
 
 /** Provider proved refusal before starting native admission or mutation. Not absence evidence. */

@@ -86,3 +86,14 @@ describe('ScheduleCommand', () => {
     expect(parse(`/schedule after 1m -- ${'\u{1f680}'.repeat(4097)}`)).toMatchObject({ kind: 'invalid' });
   });
 });
+
+// Reviewed cleanup is deliberately a distinct text confirmation, not cancel by guessed ID.
+it('parses owner cleanup review and exact confirmation without wildcard or path authority', () => {
+  expect(parseScheduleCommand('/schedule cleanup review')).toEqual({ kind: 'cleanup-review', ids: undefined });
+  expect(parseScheduleCommand('/schedule cleanup review native-one,native-two')).toEqual({ kind: 'cleanup-review', ids: ['native-one', 'native-two'] });
+  const token = '11111111-1111-4111-8111-111111111111';
+  expect(parseScheduleCommand(`/schedule cleanup confirm ${token} owner-request native-one`)).toEqual({ kind: 'cleanup-confirm', token, requestId: 'owner-request', ids: ['native-one'] });
+  for (const command of ['/schedule cleanup review ../foreign', `/schedule cleanup confirm ${token} owner-request *`, '/schedule cleanup confirm invented']) {
+    expect(parseScheduleCommand(command)).toHaveProperty('kind', 'invalid');
+  }
+});

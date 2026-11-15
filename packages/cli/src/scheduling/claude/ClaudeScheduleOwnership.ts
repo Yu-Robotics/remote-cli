@@ -67,6 +67,21 @@ export class ClaudeScheduleOwnership {
     }
     return saved.clean || saved.identity.boot !== current.boot || (this.live && saved.token === this.receipt?.token);
   }
+  /** Explicit local definition removal does not invent predecessor proof. */
+  reviewedRemovalLease(): { verify(): void; close(): void } {
+    const existing = this.gate;
+    fs.mkdirSync(path.dirname(this.filename), { recursive: true, mode: 0o700 });
+    const gate = existing ?? this.dependencies.gate(`${this.filename}.lock`);
+    if (!gate) throw new Error('Another client owns this native schedule session.');
+    try {
+      gate.verify();
+      const saved = this.read();
+      if (saved && saved.identity.host !== this.dependencies.identity().host) {
+        throw new Error('Native ownership receipt belongs to another machine.');
+      }
+      return { verify: () => gate.verify(), close: () => { if (!existing) gate.close(); } };
+    } catch (error) { if (!existing) gate.close(); throw error; }
+  }
   hostClosed(): void { this.live = false; }
   confirmClean(): void {
     if (this.live || !this.receipt || !this.gate) throw new Error('Native schedule host exit is unconfirmed.');

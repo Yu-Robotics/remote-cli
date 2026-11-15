@@ -33,7 +33,7 @@ async function fixture() {
   let sandbox: { mode: string } | undefined;
   let connected = true;
   let executorBusy = false;
-  const executor = { createNativeSchedule: vi.fn((input: any, emit: any) => (input.backend === 'dsh' ? native.createDsh : native.create)(input, emit)),
+  const executor = { createNativeSchedule: vi.fn((input: any, emit: any, _owner?: () => boolean, _admit?: () => boolean) => (input.backend === 'dsh' ? native.createDsh : native.create)(input, emit)),
     withNativeScheduleOperation: vi.fn(async (_id: string, current: () => boolean, run: () => Promise<unknown>) => {
       if (!current()) throw new Error('Stale scheduling operation');
       return run();
@@ -120,6 +120,115 @@ describe('MessageHandler native schedule closed loop', () => {
 
   const invoke = (name: string, args: Record<string, unknown>) => (f.handler as any).delegationBridges.get('thread-a').handler(name, args, 'native-call');
   const createArgs = { requestId: 'create-one', when: { kind: 'after', amount: 5, unit: 'm' }, prompt: 'Synthetic scheduled task' };
+
+  it('routes managed cleanup review through the actual authenticated tool scope without allowing model confirmation', async () => {
+    await f.bind(true, true);
+    const rows = [{ id: 'native-only', prompt: 'Synthetic native-only task', cron: '* * * * *', durable: true }];
+    const remove = vi.fn();
+    Object.assign(f.executor, { getSessionId: () => 'bound',
+      withReviewedNativeCleanup: vi.fn(async (_id: string, current: () => boolean, run: any, inTurn: boolean) => {
+        expect(inTurn).toBe(true);
+        return run({ binding: 'host', sessionId: 'bound', current, inventory: async () => rows, remove });
+      }) });
+    f.executor.execute.mockImplementation(async () => {
+      expect(await invoke('remote_cli_schedule_cleanup_review', { requestId: 'review' })).toMatchObject({
+        status: 'succeeded', cleanupReview: { sessionId: 'bound', candidates: rows, token: expect.any(String) },
+      });
+      await expect(invoke('remote_cli_schedule_cleanup_confirm', { requestId: 'model-confirm' })).rejects.toThrow('Unknown');
+      return { success: true };
+    });
+    await f.send('Review synthetic legacy native schedules', 'thread-a', { isSlashCommand: false });
+    expect(f.responses().at(-1).success).toBe(true); expect(remove).not.toHaveBeenCalled();
+  });
+  it('exposes authoritative cleanup review and authenticated confirmation without a legacy catalog mapping', async () => {
+    await f.bind();
+    let rows = [{ id: 'native-legacy', prompt: 'Synthetic legacy definition', cron: '* * * * *', recurring: true, durable: false },
+      { id: 'native-sibling', prompt: 'Synthetic sibling', cron: '* * * * *', recurring: true, durable: false }];
+    const remove = vi.fn(async (target: any) => { rows = rows.filter(row => row.id !== target.id); });
+    Object.assign(f.executor, { getSessionId: () => 'synthetic-bound-session',
+      withReviewedNativeCleanup: vi.fn(async (_id: string, current: () => boolean, run: any) => run({
+        binding: 'host', sessionId: 'synthetic-bound-session', current,
+        inventory: async () => structuredClone(rows), remove,
+      })) });
+    const service = await (f.handler as any).initializeSchedules();
+    const owner = { threadId: 'thread-a', openId: 'owner', generation: (f.handler as any).scheduleGeneration('thread-a') };
+    const legacy = { ...owner, id: 'legacy-row', backend: 'claude', cwd: f.cwd, state: 'interrupted',
+      nativeId: 'native-legacy', prompt: 'Synthetic legacy definition', createdAt: Date.now(),
+      rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } };
+    service.records.set(legacy.id, legacy); await service.persist();
+    await f.send('/schedule cleanup review');
+    const output = f.responses().at(-1).output;
+    expect(output).toContain('Synthetic legacy definition'); expect(output).toContain('Predecessor');
+    const token = /cleanup confirm ([a-f0-9-]{36})/.exec(output)![1];
+    expect(output).toContain(`/schedule cleanup confirm ${token} cleanup-${token} native-legacy,native-sibling`);
+    expect(output).not.toContain('<request-id>');
+    await f.send(`/schedule cleanup confirm ${token} explicit-owner-request native-legacy`);
+    expect(f.responses().at(-1)).toMatchObject({ success: true, output: expect.stringContaining('Verified absent') });
+    expect(rows.map(row => row.id)).toEqual(['native-sibling']);
+    expect((await service.list(owner))[0]).toEqual(legacy);
+    await f.send(`/schedule cleanup confirm ${token} explicit-owner-request native-legacy`);
+    expect(remove).toHaveBeenCalledTimes(1);
+    await f.send('/schedule cleanup review'); const next = /cleanup confirm ([a-f0-9-]{36})/.exec(f.responses().at(-1).output)![1];
+    f.disconnect(); await f.reconnect();
+    await f.send(`/schedule cleanup confirm ${next} second native-sibling`);
+    expect(f.responses().at(-1).success).toBe(false); expect(remove).toHaveBeenCalledTimes(1);
+  });
+  it.each([false, true])('omits a confirmation command when review has no eligible tasks (project task=%s)', async project => {
+    await f.bind();
+    const rows = project ? [{ id: 'project-task', prompt: 'Synthetic project task', cron: '* * * * *' }] : [];
+    Object.assign(f.executor, { getSessionId: () => 'bound', withReviewedNativeCleanup: async (_id: string, current: () => boolean, run: any) =>
+      run({ binding: 'host', sessionId: 'bound', current, inventory: async () => rows, remove: vi.fn() }) });
+    await f.send('/schedule cleanup review');
+    expect(f.responses().at(-1)).toMatchObject({ success: true, output: expect.stringContaining('No eligible tasks to delete') });
+    expect(f.responses().at(-1).output).not.toContain('/schedule cleanup confirm');
+    if (project) expect(f.responses().at(-1).output).toContain('project-persisted; deletion unavailable here');
+  });
+  it('persists only cancellation intent and observed absence for exactly attributable rows', async () => {
+    await f.bind();
+    const service = await (f.handler as any).initializeSchedules();
+    const owner = { threadId: 'thread-a', openId: 'owner', generation: (f.handler as any).scheduleGeneration('thread-a') };
+    const marker = '11111111-1111-4111-8111-111111111111';
+    const identity = JSON.stringify({ sessionId: 'bound', threadId: owner.threadId, cwd: f.cwd, marker });
+    const record = { ...owner, id: 'attributable', backend: 'claude', cwd: f.cwd, state: 'interrupted', nativeId: 'native-a',
+      prompt: 'Synthetic attributed prompt', createdAt: Date.now(), rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' },
+      recovery: { version: 1, provider: 'claude-session-skip-unadmitted-v1', strategy: 'reconstruct', identity, status: 'blocked' } };
+    service.records.set(record.id, record); await service.persist();
+    let rows = [{ id: 'native-a', prompt: `[remote-cli:${marker}]\n${record.prompt}`, cron: '* * * * *', recurring: true, durable: false }];
+    Object.assign(f.executor, { getSessionId: () => 'bound',
+      withReviewedNativeCleanup: async (_id: string, current: () => boolean, run: any) => run({ binding: 'host', sessionId: 'bound', current,
+        inventory: async () => structuredClone(rows), remove: async () => {
+          expect((await service.list(owner))[0].cancelRequested).toBe(true); rows = [];
+        } }) });
+    await f.send('/schedule cleanup review'); const token = /cleanup confirm ([a-f0-9-]{36})/.exec(f.responses().at(-1).output)![1];
+    await f.send(`/schedule cleanup confirm ${token} explicit native-a`);
+    expect(f.responses().at(-1).success).toBe(true);
+    expect((await service.list(owner))[0]).toMatchObject({ state: 'interrupted', cancelRequested: true,
+      error: expect.stringContaining('predecessor work remains unknown'), recovery: { identity, status: 'blocked' } });
+    const stored = JSON.parse(await readFile(path.join(service.options.directory, SCHEDULE_CATALOG_FILE), 'utf8'));
+    expect(stored.records[0].recovery.identity).toBe(identity);
+    expect(stored.records[0].recovery).not.toHaveProperty('nativeDefinitionAbsent');
+    await expect(service.recordReviewedCleanup({ ...owner, generation: 'retired-generation' }, [record.id], true)).rejects.toThrow('owner changed');
+  });
+  it('refuses cleanup without an authenticated bound session or while busy', async () => {
+    await f.bind();
+    await f.send('/schedule cleanup review'); expect(f.responses().at(-1).success).toBe(false);
+    Object.assign(f.executor, { withReviewedNativeCleanup: vi.fn(), getSessionId: () => null });
+    await f.send('/schedule cleanup review'); expect(f.responses().at(-1).error).toContain('No bound Claude session');
+    Object.assign(f.executor, { getSessionId: () => 'bound' }); f.setExecutorBusy(true);
+    await f.send('/schedule cleanup review'); expect(f.responses().at(-1).error).toContain('busy');
+    f.setExecutorBusy(false); f.setBackend('dsh');
+    await f.send('/schedule cleanup review'); expect(f.responses().at(-1).error).toContain('bound to Claude');
+    expect((f.executor as any).withReviewedNativeCleanup).not.toHaveBeenCalled();
+  });
+  it('passes a live admission fence to the foreground executor before cancellation cleanup', async () => {
+    await f.bind(); await f.send('/schedule after 5m -- Synthetic future work');
+    const [, , ownerCurrent, admit] = f.executor.createNativeSchedule.mock.calls[0];
+    expect(ownerCurrent!()).toBe(true); expect(admit!()).toBe(true);
+    f.jobs[0].handle.cancel.mockRejectedValue(new Error('Synthetic deletion failure'));
+    await f.send(`/schedule cancel ${f.jobs[0].input.id}`);
+    expect(ownerCurrent!()).toBe(true);
+    expect(admit!()).toBe(false);
+  });
 
   it.each([undefined, 'drain-all', 'skip-unadmitted'])('describes the negotiated recovery policy (%s) after creation', async policy => {
     if (policy) Object.assign(f.executor, { nativeScheduleRecovery: {

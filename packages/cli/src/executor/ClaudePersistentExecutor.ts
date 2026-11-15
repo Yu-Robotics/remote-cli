@@ -1,3 +1,4 @@
+import type { NativeCleanupSession } from '../scheduling/ReviewedNativeCleanup';
 import { ClaudeScheduleOwnership } from '../scheduling/claude/ClaudeScheduleOwnership';
 import { ClaudeSessionSchedules, SCHEDULE_HOOKS } from '../scheduling/claude/ClaudeSessionSchedules';
 import { TurnLedger } from './claude/TurnLedger';
@@ -29,7 +30,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import net from 'net';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { EventEmitter } from 'events';
 import { delegationMcpConfig, sameConnection, type DelegationConnection } from '../delegation/contract';
 import { assertWorkingDirectoryExists } from '../utils/WorkingDirectory';
@@ -649,7 +650,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
           const timezone = await this.readNativeScheduleTimezone();
           if (!current() || this.claudeProcess !== child) throw new Error('Claude recovery host changed.');
           handle = await adapter.inToolOperation(`restore-${record.id}`, current,
-            () => adapter.create(input, emit, context.isOwnerCurrent ?? context.isCurrent, timezone, clean ? 'adopt' : 'adopt-existing', record.nativeId), false);
+            () => adapter.create(input, emit, context.isOwnerCurrent ?? context.isCurrent, timezone, clean ? 'adopt' : 'adopt-existing', record.nativeId, context.canAdmitOccurrence), false);
           if (!current() || this.claudeProcess !== child || !this.turnLedger.supported(child?.pid)) throw new NativeScheduleCleanupError('Claude recovery host or protocol changed.', handle);
           const recovered = this.recoverableScheduleHandle(handle, input, restoration);
           this.scheduleRestoring = undefined;
@@ -749,6 +750,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
 
   private sessionSchedules?: ClaudeSessionSchedules;
   private scheduleHooksReady = false;
+  private scheduleGuardRequired = false;
   private currentScheduleManagement = false;
   private nativeScheduleTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   private schedules(): ClaudeSessionSchedules {
@@ -767,6 +769,43 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       },
       wake: () => { this.turnLedger.changed(); void this.processQueue(); },
     });
+  }
+
+  private reviewedCleanupActive = false;
+  private readonly cleanupHosts = new WeakMap<ChildProcess, string>();
+  async withReviewedNativeCleanup<T>(id: string, current: () => boolean,
+    run: (session: NativeCleanupSession) => Promise<T>, inTurn = false): Promise<T> {
+    if (!this.sessionId) throw new Error('No bound Claude session. Select the original thread/session; cleanup never searches or creates another session.');
+    if (!current() || this.reviewedCleanupActive || this.modelChange || this.retainedAbort || this.abortOperation
+      || this.hasUncertainShutdown() || this.delegationWorker || this.isDestroyed || this.isStopping
+      || this.sandbox.isRestricted() || this.scheduleRestart || this.scheduleRestoring || (!inTurn && this.isBusy())
+      || !this.delegation?.groups?.includes('scheduling')) throw new Error('Bound native cleanup is unavailable or busy. Retry when this thread is idle.');
+    this.reviewedCleanupActive = true;
+    const sessionId = this.sessionId, cwd = this.currentWorkingDirectory;
+    let lease: ReturnType<ClaudeScheduleOwnership['reviewedRemovalLease']> | undefined;
+    try {
+      lease = this.scheduleHostOwnership().reviewedRemovalLease();
+      if (!inTurn) await this.listModels();
+      const child = this.claudeProcess, epoch = this.stopEpoch;
+      if (!child || !this.scheduleHooksReady || this.sessionId !== sessionId) throw new Error('Bound native session changed during cleanup startup.');
+      if (!this.cleanupHosts.has(child)) this.cleanupHosts.set(child, randomUUID());
+      const settings = JSON.stringify([this.model, this.effort, this.delegation]);
+      const valid = () => {
+        try { lease!.verify(); return current() && !this.isDestroyed && !this.isStopping && !this.abortOperation
+          && !this.modelChange && this.claudeProcess === child && this.stopEpoch === epoch && this.sessionId === sessionId
+          && this.currentWorkingDirectory === cwd && settings === JSON.stringify([this.model, this.effort, this.delegation]); }
+        catch { return false; }
+      };
+      this.scheduleCleanupHost = child;
+      const adapter = this.schedules();
+      return await adapter.inToolOperation(id, valid, () => run({
+        binding: createHash('sha256').update(JSON.stringify([this.cleanupHosts.get(child), sessionId, cwd, epoch, settings])).digest('hex'),
+        sessionId, current: valid,
+        inventory: () => adapter.reviewedInventory(valid), remove: target => adapter.reviewedDelete(target, valid),
+      }), inTurn);
+    } finally {
+      lease?.close(); this.scheduleCleanupHost = undefined; this.reviewedCleanupActive = false;
+    }
   }
 
   async withNativeScheduleOperation<T>(id: string, current: () => boolean, run: () => Promise<T>, inTurn: boolean): Promise<T> {
@@ -793,7 +832,8 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
   }
 
   nativeScheduleAction(id: string) { return this.sessionSchedules?.action(id); }
-  async createNativeSchedule(input: NativeScheduleInput, onEvent: (event: NativeScheduleEvent) => void, isOwnerCurrent?: () => boolean): Promise<NativeScheduleHandle> {
+  async createNativeSchedule(input: NativeScheduleInput, onEvent: (event: NativeScheduleEvent) => void, isOwnerCurrent?: () => boolean,
+    canAdmitOccurrence?: () => boolean): Promise<NativeScheduleHandle> {
     if (this.scheduleRestart || this.modelChange || this.delegationWorker || this.isDestroyed || this.isStopping || this.sandbox.isRestricted()
       || input.cwd !== this.currentWorkingDirectory) throw new Error('Native schedule context or sandbox is unavailable.');
     if (!this.scheduleHooksReady) throw new Error('Native scheduling hooks are not initialized.');
@@ -801,7 +841,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     if (this.modelChange) throw new Error('Native model change is pending or unconfirmed.');
     if (input.recovery && !this.turnLedger.supported(this.claudeProcess?.pid)) throw new Error('Claude recovery protocol is unsupported.');
     if (input.recovery) this.scheduleHostOwnership().reserve(true);
-    return this.recoverableScheduleHandle(await this.schedules().create(input, onEvent, isOwnerCurrent, timezone), input);
+    return this.recoverableScheduleHandle(await this.schedules().create(input, onEvent, isOwnerCurrent, timezone, false, undefined, canAdmitOccurrence), input);
   }
 
   /** Inspect only the effective TZ; never log, retain, or expose settings to a model. */
@@ -863,7 +903,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
   isBusy(): boolean { return !!this.modelChange || this.isWorkBusy(); }
 
   private isWorkBusy(): boolean {
-    if (this.scheduleRestoring || this.retainedAbort || this.abortOperation || this.hasUncertainShutdown() || this.scheduleCleanupHost
+    if (this.reviewedCleanupActive || this.scheduleRestoring || this.retainedAbort || this.abortOperation || this.hasUncertainShutdown() || this.scheduleCleanupHost
       || this.scheduleRestart && this.claudeProcess === this.scheduleRestart.child) return true;
     if (this.sessionSchedules?.busy) return true;
     return this.isProcessing || this.isStarting || this.commandQueue.length > 0;
@@ -931,13 +971,15 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       // Note: --output-format=stream-json requires --verbose
       const restricted = this.sandbox.isRestricted();
       // Claude restores session-only cron jobs from the resumed transcript, even
-      // when the original CronCreate used durable:false.  A resumed process that
-      // cannot install our ownership hooks must therefore disable native task
-      // execution at launch; otherwise a remote-cli job can run unowned after a
-      // restart or in a restricted/worker process.
+      // when the original CronCreate used durable:false. Scheduling hosts need
+      // bootstrap admission hooks; every other launch disables the native Cron
+      // feature itself rather than relying on a scheduler preference setting.
       const managedScheduling = !this.delegationWorker && !restricted
         && this.delegation?.groups?.includes('scheduling') === true;
-      const disableResumedSchedules = !!this.sessionId && !managedScheduling;
+      this.scheduleGuardRequired = !this.delegationWorker && (!!this.sessionId || managedScheduling);
+      // Non-owning hosts must not start the native scheduler or expose Cron tools.
+      // The settings flag does not suppress transcript-restored definitions.
+      const disableNativeSchedules = !managedScheduling;
       const mcpServers: Record<string, unknown> = {};
       const args: string[] = [
         '--input-format=stream-json',
@@ -945,6 +987,11 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
         '--include-partial-messages',
         '--verbose',
       ];
+      // Native startup holds before loading the resumed session until our first
+      // initialize frame (including admission hooks) is available. Unsupported
+      // binaries must fail startup; never retry without this barrier. Restricted
+      // hosts use the Cron kill switch instead, preserving SessionStart ordering.
+      if (managedScheduling) args.push('--await-initialize');
       if (restricted) {
         // Sandboxed mode: OS-enforced Bash isolation; widening requests surface
         // through the permission-prompt MCP tool as approval cards. Skipping
@@ -969,7 +1016,6 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
           permissions.allow = [...(permissions.allow ?? []),
             ...managedTools(this.delegation).map(tool => `mcp__remote-cli-delegation__${tool.name}`)];
         }
-        if (disableResumedSchedules) settings = { ...(settings ?? {}), scheduledTasksEnabled: false };
         if (settings) args.push('--settings', JSON.stringify(settings));
         mcpServers['remote-cli-approval'] = {
           command: process.execPath,
@@ -979,7 +1025,6 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
         args.push('--permission-prompt-tool', ClaudePersistentExecutor.APPROVAL_TOOL_NAME);
       } else {
         args.push('--dangerously-skip-permissions');
-        if (disableResumedSchedules) args.push('--settings', JSON.stringify({ scheduledTasksEnabled: false }));
       }
       if (this.delegation) {
         mcpServers['remote-cli-delegation'] = delegationMcpConfig(this.delegation);
@@ -1049,6 +1094,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
         env: {
           ...process.env,
           FORCE_COLOR: '0',
+          ...(disableNativeSchedules ? { CLAUDE_CODE_DISABLE_CRON: '1' } : {}),
           // Prevent nested session error
           CLAUDECODE: '',
           CLAUDE_CODE: '',
@@ -1064,7 +1110,9 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
         this.turnLedger.changed();
       });
       this.nativeScheduleTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-      if (this.delegation?.groups?.includes('scheduling') && !this.delegationWorker && !restricted) this.schedules();
+      // Observe restored lifecycle frames even before managed tools/catalogs exist.
+      // Installing the adapter does not adopt or authorize any native definition.
+      if (!this.delegationWorker) this.schedules();
       if (this.delegationWorker) this.workerGroups.track(child);
 
       // Buffer for collecting stderr on startup (for error reporting)
@@ -2392,7 +2440,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       return;
     }
 
-    if (this.delegation?.groups?.includes('scheduling') && !this.scheduleHooksReady && !this.delegationWorker && !this.sandbox.isRestricted()) {
+    if (this.scheduleGuardRequired && !this.scheduleHooksReady && !this.delegationWorker) {
       // Initialize callback hooks once per native process before its first model turn.
       this.isStarting = true;
       try { await this.listModels(); }
@@ -2535,7 +2583,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     if ((this.scheduleRestart || this.scheduleRestoring) && !(options.nativeScheduleManagement && options.nativeScheduleCurrent?.())) return { success: false, error: 'Native schedule handoff or restoration is pending.' };
     if (this.modelChange) return { success: false, error: 'Native model change is pending or unconfirmed. Retry /model after its reply, or use /clear (session-only schedules will be lost).' };
     if (((this.abortOperation || this.retainedAbort) && !(this.cleanupAdmission() && options.nativeScheduleManagement && options.nativeScheduleCurrent?.()))
-      || this.hasUncertainShutdown() || (this.scheduleCleanupHost && !options.nativeScheduleManagement)) {
+      || this.hasUncertainShutdown() || ((this.scheduleCleanupHost || this.reviewedCleanupActive) && !options.nativeScheduleManagement)) {
       return { success: false, error: 'Native cleanup is still pending. Retry after cleanup.' };
     }
 
@@ -2975,7 +3023,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
               rawResponse.models,
               this.reportedModel || this.acknowledgedModel || this.model,
             );
-            if (scheduleHooks && this.sessionId && this.delegation?.groups?.includes('scheduling')) {
+            if (scheduleHooks && this.scheduleGuardRequired) {
               await this.readNativeScheduleTimezone();
             }
             if (scheduleHooks) { this.schedules(); this.scheduleHooksReady = true; }
@@ -3180,11 +3228,11 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     const compactResult = await new Promise<PersistentClaudeResult>((resolve) => {
       const child = spawn(
         this.claudeCommand,
-        ['--resume', sessionIdBeforeCompact, '--settings', JSON.stringify({ scheduledTasksEnabled: false }), '--print', '/compact'],
+        ['--resume', sessionIdBeforeCompact, '--print', '/compact'],
         {
           cwd: this.currentWorkingDirectory,
           stdio: ['ignore', 'pipe', 'pipe'],
-          env: { ...process.env, FORCE_COLOR: '0', CLAUDECODE: '', CLAUDE_CODE: '' },
+          env: { ...process.env, FORCE_COLOR: '0', CLAUDECODE: '', CLAUDE_CODE: '', CLAUDE_CODE_DISABLE_CRON: '1' },
         }
       );
 

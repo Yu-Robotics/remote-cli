@@ -1,3 +1,4 @@
+import { ReviewedNativeCleanup, type NativeCleanupReview } from '../scheduling/ReviewedNativeCleanup';
 import { ScheduleToolOperations, type ScheduleToolScope, type ScheduleOperation } from '../scheduling/ScheduleToolScope';
 import { scheduleGuidance } from '../scheduling/toolContract';
 import { ScheduleCardService } from '../scheduling/ScheduleCardService';
@@ -66,7 +67,7 @@ import { piSessionHolder, resolvePiSessionLocator } from '../session/adapters/Pi
 import { SessionControl, type PiBindingState } from '../session/SessionControl';
 import { ScheduleService, SCHEDULE_CATALOG_FILE } from '../scheduling/ScheduleService';
 import { ScheduleDeliveryClient } from '../scheduling/ScheduleDeliveryClient';
-import { parseScheduleCommand, SCHEDULE_USAGE } from '../scheduling/ScheduleCommand';
+import { parseScheduleCommand, SCHEDULE_USAGE, type ScheduleCommand } from '../scheduling/ScheduleCommand';
 import { assertNativeScheduleBackend, NATIVE_SCHEDULE_CAPABILITIES, SCHEDULE_CAPABILITIES } from '../scheduling/ScheduleCapabilities';
 import type { ScheduleOwner, ScheduleRecord } from '../scheduling/types';
 import { ClaudeSandbox } from '../executor/claude/ClaudeSandbox';
@@ -281,6 +282,7 @@ export class MessageHandler {
   private scheduleRecoveryPending = false;
   private scheduleRecoveryThreads = new Set<string>();
   private scheduleDelivery?: ScheduleDeliveryClient;
+  private readonly reviewedNativeCleanup = new ReviewedNativeCleanup();
   private readonly scheduleOwners = new Map<string, ScheduleOwner>();
   private readonly scheduleManagement = new Set<string>();
 
@@ -2790,6 +2792,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         }
         scheduleScope = this.scheduleToolOperations.scope({ owner, messageId, backend, current: context.current,
           nativeAction: id => executor.nativeScheduleAction?.(id),
+          reviewCleanup: id => this.runReviewedNativeCleanup(owner, { kind: 'cleanup-review' }, id, context.current) as Promise<NativeCleanupReview>,
           run: (command, id) => this.runScheduleOperation(owner, command, id, context),
           present: async (records, operationId) => {
             if (!context.current() || !this.scheduleToolCardsSupported) return 'Management card unavailable. Use /schedule list; do not recreate the task.';
@@ -3585,7 +3588,7 @@ You can also use natural language commands to control Claude Code CLI.`,
               if (event.type === 'completed') queueMicrotask(() => { void this.startNextQueuedCommand(record.threadId); });
             });
           } };
-        }, create: (input, onEvent) => {
+        }, create: (input, onEvent, canAdmitOccurrence) => {
           const backend = input.backend === undefined ? 'claude' : input.backend;
           assertNativeScheduleBackend(backend);
           if (!input.threadId) throw new Error('Native scheduling requires the original thread.');
@@ -3605,7 +3608,7 @@ You can also use natural language commands to control Claude Code CLI.`,
           }, () => {
             try { return !this.isDestroyed && this.scheduleGeneration(input.threadId!) === generation
               && this.threadPool.getBackendKey(input.threadId!) === backend; } catch { return false; }
-          });
+          }, canAdmitOccurrence);
         } },
         isOwnerCurrent: owner => {
           // Shutdown blocks delivery separately; it does not invalidate persisted ownership.
@@ -3769,6 +3772,71 @@ You can also use natural language commands to control Claude Code CLI.`,
     }
   }
 
+  /** Confirmation is accepted only from the authenticated text-command ingress,
+   * never from model-supplied tool arguments or a recovered historical receipt. */
+  private async runReviewedNativeCleanup(owner: ScheduleOwner,
+    command: Extract<ScheduleCommand, { kind: 'cleanup-review' | 'cleanup-confirm' }>, requestId: string,
+    inTurnCurrent?: () => boolean): Promise<NativeCleanupReview | { absentIds: string[]; warning: string }> {
+    const threadId = owner.threadId, epoch = this.imageConnectionEpoch;
+    const executor = this.threadPool.getExecutor(threadId);
+    const thread = this.threadManager.getThread(threadId);
+    if (!owner.openId || !thread || this.threadPool.getBackendKey(threadId) !== 'claude' || !executor.withReviewedNativeCleanup) {
+      throw new Error('Reviewed native cleanup requires this authenticated thread to be bound to Claude. Select the original thread; other sessions are never searched.');
+    }
+    const knownOwner = this.scheduleOwners.get(threadId);
+    if (knownOwner && knownOwner.openId !== owner.openId) throw new Error('This thread belongs to another scheduling owner.');
+    const settings = () => JSON.stringify([this.executorConfiguration(), this.threadManager.getThread(threadId)?.models,
+      this.threadManager.getThread(threadId)?.model, this.threadManager.getThread(threadId)?.efforts]);
+    const config = settings();
+    const current = () => {
+      try { return !this.isDestroyed && !this.automaticUpdateInProgress && !this.scheduleRecoveryThreads.has(threadId)
+        && !this.abortOperations.has(threadId) && this.wsClient.isConnected() && epoch === this.imageConnectionEpoch
+        && this.scheduleGeneration(threadId) === owner.generation && this.threadPool.getExistingExecutor(threadId) === executor
+        && this.threadPool.getBackendKey(threadId) === 'claude' && config === settings() && (!inTurnCurrent || inTurnCurrent()); }
+      catch { return false; }
+    };
+    if (!current() || this.scheduleManagement.has(threadId) || (!inTurnCurrent && (this.threadPool.isThreadBusy(threadId)
+      || executor.isBusy?.() || this.hasThreadQueueState(threadId) || this.coordinatorPreparations.has(threadId)))) {
+      throw new Error('Cleanup is unavailable while this thread is busy, disconnected or changing. Retry when idle.');
+    }
+    if (!executor.getSessionId?.()) throw new Error('No bound Claude session. Select the original thread/session before reviewing cleanup.');
+    this.scheduleManagement.add(threadId);
+    try {
+      if (!inTurnCurrent && executor.configureManagedTools) {
+        const bridge = this.delegationBridges.get(threadId) ?? new DelegationBridge();
+        this.delegationBridges.set(threadId, bridge);
+        const connection = await bridge.start(isDelegationEnabled(thread) ? ['delegation', 'scheduling'] : ['scheduling']);
+        if (!current()) throw new Error('Cleanup owner changed.');
+        await executor.configureManagedTools(connection);
+      }
+      const scope = JSON.stringify([owner, epoch, config]);
+      return await executor.withReviewedNativeCleanup(requestId, current, async host => {
+        if (command.kind === 'cleanup-review') return this.reviewedNativeCleanup.prepare(scope, requestId, host, command.ids);
+        return this.reviewedNativeCleanup.confirm(scope, command.requestId, command.token, command.ids, host,
+          async (targets, absent) => {
+            // A native-only review proves current-session deletion authority, not
+            // historical catalog attribution. Do not infer a session from an ID.
+            const service = await this.initializeSchedules();
+            const records = await service.list(owner);
+            const attributable = records.filter(record => {
+              if (record.backend !== 'claude' || !record.recovery) return false;
+              try {
+                const identity = JSON.parse(record.recovery.identity);
+                return /^[a-f0-9-]{36}$/.test(identity.marker ?? '') && identity.sessionId === host.sessionId
+                  && identity.threadId === threadId && identity.cwd === record.cwd
+                  && targets.some(target => target.id === record.nativeId && target.durable === false
+                    && target.prompt === `[remote-cli:${identity.marker}]\n${record.prompt}`
+                    && (target.recurring ?? false) === (record.rule.kind === 'cron')
+                    && (record.rule.kind !== 'cron' || target.cron === record.rule.expression));
+              } catch { return false; }
+            }).map(record => record.id);
+            if (!current()) throw new Error('Cleanup owner changed before catalog persistence.');
+            await service.recordReviewedCleanup(owner, attributable, absent);
+          });
+      }, !!inTurnCurrent);
+    } finally { this.scheduleManagement.delete(threadId); }
+  }
+
   private async handleScheduleCommand(message: IncomingMessage, threadId: string): Promise<void> {
     const respond = (result: ExecuteResult & { scheduleMenu?: ScheduleMenu }) => this.sendResponse(message.messageId, threadId, result, true);
     const menuFor = (owner: ScheduleOwner, records: ScheduleRecord[]): ScheduleMenu | undefined => {
@@ -3786,6 +3854,20 @@ You can also use natural language commands to control Claude Code CLI.`,
         throw new Error('Use /cd first and include a self-contained text prompt. Schedule commands do not accept attachments or directory overrides.');
       }
       const owner: ScheduleOwner = { threadId, openId: message.openId, generation: this.scheduleGeneration(threadId) };
+      if (command.kind === 'cleanup-review' || command.kind === 'cleanup-confirm') {
+        const result = await this.runReviewedNativeCleanup(owner, command,
+          createHash('sha256').update(message.messageId ?? uuidv4()).digest('hex'));
+        let output: string;
+        if ('candidates' in result) {
+          const eligible = result.candidates.filter(entry => !result.blockedIds.includes(entry.id));
+          const entries = result.candidates.map(entry => `${entry.id} — ${entry.cron} (${entry.recurring ? 'recurring' : 'one-shot'}; ${entry.durable === false ? 'session-only' : 'project-persisted; deletion unavailable here'})\n${entry.prompt}`);
+          const confirmation = eligible.length
+            ? `To delete all eligible tasks listed above, send this command yourself. To delete fewer tasks, keep only their IDs:\n/schedule cleanup confirm ${result.token} cleanup-${result.token} ${eligible.map(entry => entry.id).join(',')}\nIf the reply is lost, resend the identical command.`
+            : 'No eligible tasks to delete in this review.';
+          output = `${result.warning}\nBound native session: ${result.sessionId}\nReview expires: ${result.expiresAt}\n\n${entries.join('\n\n') || 'No native tasks in this session.'}\n\n${confirmation}`;
+        } else output = `Verified absent on the reviewed current host: ${result.absentIds.join(', ')}.\n${result.warning}`;
+        respond({ success: true, output }); return;
+      }
       const storedOnly = command.kind === 'list' && this.threadPool.getExistingExecutor(threadId)?.hasPendingCancellation?.();
       const updateSnapshot = this.automaticUpdateInProgress && command.kind === 'list';
       const records = updateSnapshot ? await this.schedules?.list(owner) ?? []

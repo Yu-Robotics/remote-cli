@@ -27,7 +27,7 @@ describe('Claude sandbox launch policy', () => {
     child = new EventEmitter();
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
-    child.stdin = { write: vi.fn(), end: vi.fn() };
+    child.stdin = { writable: true, write: vi.fn(), end: vi.fn(() => child.emit('close', 0, null)) };
     child.kill = vi.fn();
     nativeSettings = { effective: { env: {} }, sources: [] };
     child.stdin.write.mockImplementation((line: string) => {
@@ -82,13 +82,133 @@ describe('Claude sandbox launch policy', () => {
     child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'result', subtype: 'success' }) + '\n')); await resumed;
   });
 
-  it('disables restored native schedules when a resumed ordinary session has no managed scheduling hooks', async () => {
+  it.each([false, true])('disables Cron on a fresh non-scheduling host (bridge: %s)', async withBridge => {
+    vi.stubEnv('CLAUDE_CODE_DISABLE_CRON', '');
+    const active = create();
+    if (withBridge) await active.configureManagedTools({ url: 'http://127.0.0.1:12345/', token: 'fixture-token', groups: ['delegation'] });
+    const result = active.execute('Synthetic ordinary request');
+    await vi.advanceTimersByTimeAsync(1000);
+    const call = vi.mocked(spawn).mock.calls[0];
+    expect(call[2]?.env?.CLAUDE_CODE_DISABLE_CRON).toBe('1');
+    expect(call[1]).not.toContain('--await-initialize');
+    expect(process.env.CLAUDE_CODE_DISABLE_CRON).toBe('');
+    child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'result', subtype: 'success' }) + '\n'));
+    await expect(result).resolves.toMatchObject({ success: true });
+  });
+
+  it.each([false, true])('holds scheduling startup for initialize (resumed: %s)', async resumed => {
+    const active = create();
+    if (resumed) (active as any).sessionId = 'synthetic-restored-session';
+    await active.configureManagedTools({ url: 'http://127.0.0.1:12345/', token: 'fixture-token', groups: ['scheduling'] });
+    vi.stubEnv('CLAUDE_CODE_DISABLE_CRON', '');
+    const pending = active.execute('Synthetic ordinary request');
+    await vi.advanceTimersByTimeAsync(0);
+    const call = vi.mocked(spawn).mock.calls[0];
+    expect(call[1]).toContain('--await-initialize');
+    expect(call[2]?.env?.CLAUDE_CODE_DISABLE_CRON).toBe('');
+    expect(child.stdin.write).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1000);
+    const frames = child.stdin.write.mock.calls.map(([line]: [string]) => JSON.parse(line));
+    expect(frames[0].request.subtype).toBe('initialize');
+    expect(frames[0].request.hooks.UserPromptSubmit).toHaveLength(1);
+    expect(frames.findIndex((frame: any) => frame.type === 'user')).toBeGreaterThan(0);
+    child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'result', subtype: 'success' }) + '\n'));
+    await expect(pending).resolves.toMatchObject({ success: true });
+  });
+
+  it('blocks a restored wake while the initialize acknowledgement is still pending', async () => {
+    const active = create();
+    (active as any).sessionId = 'synthetic-restored-session';
+    await active.configureManagedTools({ url: 'http://127.0.0.1:12345/', token: 'fixture-token', groups: ['scheduling'] });
+    child.stdin.write.mockImplementation(() => true);
+    const result = active.execute('Synthetic ordinary request');
+    await vi.advanceTimersByTimeAsync(1000);
+    const initialize = JSON.parse(child.stdin.write.mock.calls[0][0]);
+    expect(initialize.request.subtype).toBe('initialize');
+    child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'command_lifecycle', state: 'started',
+      wakeup_source: 'schedule_wakeup', command_uuid: 'synthetic-startup-wake' }) + '\n'));
+    child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'control_request', request_id: 'synthetic-startup-hook',
+      request: { subtype: 'hook_callback', callback_id: 'remote-cli-session-schedules',
+        input: { hook_event_name: 'UserPromptSubmit', prompt: 'Synthetic unowned reminder' } } }) + '\n'));
+    const frames = child.stdin.write.mock.calls.map(([line]: [string]) => JSON.parse(line));
+    expect(frames.at(-1).response.response.decision).toBe('block');
+    expect(frames.some((frame: any) => frame.type === 'user')).toBe(false);
+    child.emit('close', 0, null);
+    await expect(result).resolves.toMatchObject({ success: false });
+  });
+
+  it('fails without dropping the bootstrap flag when native startup rejects it', async () => {
+    const active = create();
+    await active.configureManagedTools({ url: 'http://127.0.0.1:12345/', token: 'fixture-token', groups: ['scheduling'] });
+    const result = active.execute('Synthetic ordinary request');
+    await vi.advanceTimersByTimeAsync(0);
+    child.stderr.emit('data', Buffer.from("error: unknown option '--await-initialize'"));
+    child.emit('exit', 1, null);
+    child.emit('close', 1, null);
+    await vi.advanceTimersByTimeAsync(1000);
+    await expect(result).resolves.toMatchObject({ success: false });
+    // Settle the already-scheduled restart's liveness wait before fixture teardown.
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(child.stdin.write).not.toHaveBeenCalled();
+    for (const call of vi.mocked(spawn).mock.calls) expect(call[1]).toContain('--await-initialize');
+  });
+
+  it('preserves an explicit inherited Cron disable on a scheduling host', async () => {
+    vi.stubEnv('CLAUDE_CODE_DISABLE_CRON', '1');
+    const active = create();
+    await active.configureManagedTools({ url: 'http://127.0.0.1:12345/', token: 'fixture-token', groups: ['scheduling'] });
+    const startup = (active as any).startProcess();
+    await vi.advanceTimersByTimeAsync(1000);
+    await startup;
+    expect(vi.mocked(spawn).mock.calls[0][2]?.env?.CLAUDE_CODE_DISABLE_CRON).toBe('1');
+  });
+
+  it.each([false, true])('disables Cron for delegated workers (resumed: %s)', async resumed => {
+    vi.stubEnv('CLAUDE_CODE_DISABLE_CRON', '');
+    executor = createExecutor(new DirectoryGuard([home]), { type: 'claude-persistent' }, home,
+      'delegate-test', undefined, undefined, { lifecycleHooks: false }) as ClaudePersistentExecutor;
+    if (resumed) (executor as any).sessionId = 'synthetic-worker-session';
+    const startup = (executor as any).startProcess();
+    await vi.advanceTimersByTimeAsync(1000);
+    await startup;
+    const call = vi.mocked(spawn).mock.calls[0];
+    expect(call[2]?.env?.CLAUDE_CODE_DISABLE_CRON).toBe('1');
+    expect(call[1]).not.toContain('--await-initialize');
+    expect(process.env.CLAUDE_CODE_DISABLE_CRON).toBe('');
+  });
+
+  it('guards restored native schedules before ordinary chat without a managed bridge', async () => {
     const active = create();
     (active as any).sessionId = 'restored-session';
-    const result = active.execute('Continue ordinary chat');
+    const onStream = vi.fn();
+    let finished = false;
+    const result = active.execute('Continue ordinary chat', { onStream }).then(value => { finished = true; return value; });
     await vi.advanceTimersByTimeAsync(1000);
     const args = vi.mocked(spawn).mock.calls[0][1] as string[];
-    expect(JSON.parse(args[args.indexOf('--settings') + 1])).toEqual({ scheduledTasksEnabled: false });
+    expect(vi.mocked(spawn).mock.calls[0][2]?.env?.CLAUDE_CODE_DISABLE_CRON).toBe('1');
+    expect(args).not.toContain('--await-initialize');
+    const frames = child.stdin.write.mock.calls.map(([line]: [string]) => JSON.parse(line));
+    const initialization = frames.findIndex((frame: any) => frame.request?.subtype === 'initialize');
+    const foreground = frames.findIndex((frame: any) => frame.type === 'user');
+    expect(initialization).toBeGreaterThanOrEqual(0);
+    expect(foreground).toBeGreaterThan(initialization);
+    expect(frames[initialization].request.hooks.UserPromptSubmit).toHaveLength(1);
+    child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'command_lifecycle', state: 'started',
+      wakeup_source: 'schedule_wakeup', command_uuid: 'fixture-orphan' }) + '\n'));
+    child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'control_request', request_id: 'fixture-wake-hook',
+      request: { subtype: 'hook_callback', callback_id: 'remote-cli-session-schedules',
+        input: { hook_event_name: 'UserPromptSubmit', prompt: 'Synthetic restored reminder' } } }) + '\n'));
+    expect(JSON.parse(child.stdin.write.mock.calls.at(-1)[0]).response.response.decision).toBe('block');
+    child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'assistant', message: { content: [
+      { type: 'text', text: 'Synthetic stale schedule output' },
+    ] } }) + '\n'));
+    child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'result', is_error: false,
+      terminal_reason: 'completed', result: 'Synthetic blocked terminal' }) + '\n'));
+    child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'command_lifecycle', state: 'completed',
+      command_uuid: 'fixture-orphan' }) + '\n'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(finished).toBe(false);
+    expect(onStream).not.toHaveBeenCalled();
     child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'result', subtype: 'success' }) + '\n'));
     await expect(result).resolves.toMatchObject({ success: true });
   });
@@ -101,9 +221,22 @@ describe('Claude sandbox launch policy', () => {
     await vi.advanceTimersByTimeAsync(1000);
     const args = vi.mocked(spawn).mock.calls[0][1] as string[];
     const settings = JSON.parse(args[args.indexOf('--settings') + 1]);
-    expect(settings.scheduledTasksEnabled).toBe(false);
+    expect(settings).not.toHaveProperty('scheduledTasksEnabled');
+    expect(vi.mocked(spawn).mock.calls[0][2]?.env?.CLAUDE_CODE_DISABLE_CRON).toBe('1');
+    expect(args).not.toContain('--await-initialize');
     child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'result', subtype: 'success' }) + '\n'));
     await expect(result).resolves.toMatchObject({ success: true });
+  });
+
+  it.each(['disableAllHooks', 'allowManagedHooksOnly'])('refuses resumed chat when %s prevents the ownership guard', async policy => {
+    const active = create();
+    (active as any).sessionId = 'synthetic-restored-session';
+    nativeSettings = { effective: { env: {}, [policy]: true }, sources: [] };
+    const result = active.execute('Synthetic request must not reach the model');
+    await vi.advanceTimersByTimeAsync(1000);
+    await expect(result).resolves.toMatchObject({ success: false, error: 'Native managed-tool initialization failed.' });
+    expect(child.stdin.write.mock.calls.map(([line]: [string]) => JSON.parse(line)).some((frame: any) => frame.type === 'user')).toBe(false);
+    expect(child.stdin.end).toHaveBeenCalledOnce();
   });
 
   it('composes delegation with sandbox approvals and redacts credentials in launch logs', async () => {

@@ -25,6 +25,27 @@ beforeEach(() => {
 afterEach(() => { for (const value of guards) value.close(); vi.restoreAllMocks(); fs.rmSync(root, { recursive: true, force: true }); });
 
 describe('Claude schedule predecessor ownership', () => {
+  it('leases explicit removal without a receipt and never creates execution proof', () => {
+    const a = guard(), b = guard();
+    const lease = a.reviewedRemovalLease(); lease.verify();
+    expect(a.exists()).toBe(false);
+    expect(() => b.reviewedRemovalLease()).toThrow('Another client');
+    expect(() => a.assertRebootRecovery()).toThrow('later boot');
+    lease.close(); const next = b.reviewedRemovalLease(); next.close();
+    expect(a.exists()).toBe(false);
+  });
+  it('preserves an existing live receipt/lock and rejects foreign or malformed proof', () => {
+    const a = guard(); a.reserve(true);
+    const before = fs.readFileSync(a.filename, 'utf8');
+    const lease = a.reviewedRemovalLease(); lease.verify(); lease.close();
+    expect(fs.readFileSync(a.filename, 'utf8')).toBe(before);
+    expect(() => guard().reviewedRemovalLease()).toThrow('Another client');
+    a.close(); host = 'foreign-host';
+    expect(() => guard().reviewedRemovalLease()).toThrow('another machine');
+    host = 'fixture-host'; fs.writeFileSync(a.filename, '{}');
+    expect(() => guard().reviewedRemovalLease()).toThrow('invalid');
+    expect(held.size).toBe(0);
+  });
   it('stays dormant until used and serializes owners across clients', () => {
     const a = guard(), b = guard(); expect(a.exists()).toBe(false);
     a.reserve(true); a.reserve(true);

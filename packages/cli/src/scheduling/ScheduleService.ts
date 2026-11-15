@@ -253,7 +253,8 @@ export class ScheduleService {
         admitted = true;
         const admission = Promise.resolve().then(() => provider.reconcile(restoreRecord,
           { notBefore: this.now(), signal: controller.signal, isCurrent: current,
-            isOwnerCurrent: () => !record.cancelRequested && !this.fault && this.current(record) }, emit));
+            isOwnerCurrent: () => !record.cancelRequested && !this.fault && this.current(record),
+            canAdmitOccurrence: () => this.canAdmitOccurrence(id, runtime) }, emit));
         const adopt = async (handle: NativeScheduleHandle) => {
           runtime.handle = handle; runtime.resolveReady(handle);
           text(handle.nativeId);
@@ -393,7 +394,7 @@ export class ScheduleService {
         if (this.runtimes.get(nativeInput.id) !== runtime) return;
         const task = this.onEvent(nativeInput.id, structuredClone(event));
         this.track(task);
-      });
+      }, () => this.canAdmitOccurrence(nativeInput.id, runtime));
       runtime.handle = handle;
       runtime.resolveReady(handle);
       text(handle.nativeId);
@@ -445,6 +446,24 @@ export class ScheduleService {
     if (record.state === 'cancelled' && runtime?.handle?.cancellationKeepsRunning && !record.error) return false;
     return LIVE.has(record.state) || recoveryOwnsWork(record) || record.state === 'interrupted' && !!record.nativeId && this.supportsRetainedCancellation(record)
       || Boolean(runtime && !runtime.stopped);
+  }
+
+  /** Newly observed local cleanup facts do not supply historical recovery proof. */
+  async recordReviewedCleanup(owner: ScheduleOwner, ids: string[], absent: boolean): Promise<void> {
+    this.checkReady(); validateOwner(owner); ids.forEach(validateScheduleId);
+    if (!ids.length) return;
+    await this.serial(async () => {
+      if (!this.options.isOwnerCurrent(owner)) throw new Error('Cleanup catalog owner changed.');
+      for (const id of ids) {
+        const record = this.owned(owner, id);
+        record.cancelRequested = true;
+        if (record.recovery) record.recovery.status = 'blocked';
+        if (record.state !== 'running') record.state = 'interrupted';
+        record.error = absent ? 'Owner-reviewed native definition absent on current host; predecessor work remains unknown.'
+          : 'Owner-reviewed native deletion requested; absence and predecessor work remain unconfirmed.';
+      }
+      await this.persist();
+    });
   }
 
   /** Keep admitted native work visible when cleanup cannot safely acquire its host. */
@@ -557,7 +576,7 @@ export class ScheduleService {
         ...record.execution, recovery });
       if (!recovery || !provider?.cancelRetained || provider.provider !== recovery.provider || provider.strategy !== recovery.strategy
         || (provider.handoffPolicy ?? 'drain-all') !== (recovery.handoffPolicy ?? 'drain-all')) {
-        throw new Error('Cancellation intent retained; native cleanup is unconfirmed. Original native ownership metadata or cleanup support is unavailable. Preserve the original session for manual inventory review; do not recreate this job.');
+        throw new Error('Cancellation intent retained; native cleanup is unconfirmed. Original native ownership metadata or cleanup support is unavailable. Preserve the original session. For Claude, use /schedule cleanup review in the bound original thread for explicit deletion-only review; do not recreate this job.');
       }
       if (!current()) throw new Error('Native cancellation owner is no longer current.');
       await provider.cancelRetained(structuredClone(record), { isCurrent: current });
@@ -962,6 +981,13 @@ export class ScheduleService {
         timer = setTimeout(() => reject(new Error(message)), this.options.recoveryTimeoutMs ?? 30_000);
       })]);
     } finally { if (timer) clearTimeout(timer); }
+  }
+
+  private canAdmitOccurrence(id: string, runtime: Runtime): boolean {
+    const record = this.records.get(id);
+    return !!record && this.runtimes.get(id) === runtime && !this.closing && !this.fault
+      && !runtime.stopped && !runtime.cancelling && !record.cancelRequested
+      && LIVE.has(record.state) && this.current(record);
   }
 
   private newRuntime(): Runtime {

@@ -1,3 +1,4 @@
+import type { NativeCleanupSession } from '../scheduling/ReviewedNativeCleanup';
 import type { NativeSessionDeletionTarget } from '../delegation/NativeSessionDeletion';
 import { ToolUseInfo, ToolResultInfo, Attachment, ImageBlock, TaskNotificationInfo, ApprovalRequestInfo, ApprovalAction, ApprovalStatus, ExecutionMetadata, ActivityProgressInfo } from '../types';
 import type { DelegationConnection } from '../delegation/contract';
@@ -149,8 +150,11 @@ export interface IExecutor {
   nativeScheduleRecovery?: import('../scheduling/types').NativeScheduleRecovery;
   /** Native timing in the existing foreground conversation; never fork its history. */
   createNativeSchedule?(input: import('../scheduling/types').NativeScheduleInput,
-    onEvent: (event: import('../scheduling/types').NativeScheduleEvent) => void, isOwnerCurrent?: () => boolean): Promise<import('../scheduling/types').NativeScheduleHandle>;
+    onEvent: (event: import('../scheduling/types').NativeScheduleEvent) => void, isOwnerCurrent?: () => boolean,
+    canAdmitOccurrence?: () => boolean): Promise<import('../scheduling/types').NativeScheduleHandle>;
   /** Bind a management operation to its authenticated owner; in-turn tools receive a native action. */
+  withReviewedNativeCleanup?<T>(id: string, current: () => boolean,
+    run: (session: NativeCleanupSession) => Promise<T>, inTurn?: boolean): Promise<T>;
   withNativeScheduleOperation?<T>(id: string, current: () => boolean, run: () => Promise<T>, inTurn: boolean): Promise<T>;
   /** Reconcile an accepted mutation after its foreground scope retires; never start a new host. */
   reconcileNativeSchedule?<T>(id: string, current: () => boolean, run: () => Promise<T>): Promise<T>;

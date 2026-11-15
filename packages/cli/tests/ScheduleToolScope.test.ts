@@ -9,6 +9,22 @@ function fixture() {
   return { operations, options, scope: operations.scope(options) };
 }
 describe('ScheduleToolScope', () => {
+  it('exposes review receipts and correlated native actions but never a model confirmation tool', async () => {
+    const f = fixture(); let finish!: (value: any) => void;
+    const reviewCleanup = vi.fn(() => new Promise<any>(resolve => { finish = resolve; }));
+    const scope = f.operations.scope({ ...f.options, reviewCleanup,
+      nativeAction: () => ({ tool: 'CronList', input: {} }) });
+    const pending: any = await scope.invoke('remote_cli_schedule_cleanup_review', { requestId: 'review' });
+    expect(pending).toMatchObject({ status: 'pending', nativeAction: { tool: 'CronList', input: {} } });
+    const review = { token: 'opaque-owner-token', candidates: [], warning: 'Predecessor unknown' };
+    finish(review); await scope.drain();
+    expect(await scope.invoke('remote_cli_schedule_operation', { requestId: 'review' })).toMatchObject({ status: 'succeeded', cleanupReview: review });
+    expect(await scope.invoke('remote_cli_schedule_cleanup_review', { requestId: 'review' })).toMatchObject({ cleanupReview: review });
+    expect(reviewCleanup).toHaveBeenCalledOnce(); expect(f.options.run).not.toHaveBeenCalled();
+    await expect(scope.invoke('remote_cli_schedule_cleanup_confirm', { requestId: 'model-confirm' })).rejects.toThrow('Unknown');
+    await expect(scope.invoke('remote_cli_schedule_cleanup_review', { requestId: 'other', sessionId: 'foreign' })).rejects.toThrow('cannot be supplied');
+    expect(await f.scope.invoke('remote_cli_schedule_cleanup_review', { requestId: 'unsupported' })).toMatchObject({ status: 'failed' });
+  });
   it('does not initialize scheduling for capabilities and returns current native capability separately', async () => {
     const f = fixture();
     expect(await f.scope.invoke('remote_cli_schedule_capabilities', {})).toMatchObject({ backend: 'claude', capability: { supported: true }, now: expect.any(String) });

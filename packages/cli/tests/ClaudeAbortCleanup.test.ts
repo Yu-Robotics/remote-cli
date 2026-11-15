@@ -612,6 +612,15 @@ describe('Claude abort cleanup ownership', () => {
     if (state === 'successor') {
       second = nativePipe(); successor = main.execute('Successor foreground');
       await vi.advanceTimersByTimeAsync(1000);
+      // A resumed foreground host must install its ownership guard before chat.
+      const initialize = second.frames.find(row => row.request?.subtype === 'initialize');
+      expect(initialize.request.hooks.UserPromptSubmit).toHaveLength(1);
+      expect(second.frames.some(row => row.type === 'user')).toBe(false);
+      frame({ type: 'control_response', response: { subtype: 'success', request_id: initialize.request_id, response: { models: [] } } });
+      await vi.advanceTimersByTimeAsync(0);
+      const settings = second.frames.find(row => row.request?.subtype === 'get_settings');
+      frame({ type: 'control_response', response: { subtype: 'success', request_id: settings.request_id, response: { effective: { env: {} } } } });
+      await vi.advanceTimersByTimeAsync(0);
     }
     release.resolve(); expect(await outcome).toBeInstanceOf(Error);
     const records = await service.list(owner);

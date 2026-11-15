@@ -37,6 +37,8 @@ describe('Claude shared foreground scheduling integration', () => {
     executor = new ClaudePersistentExecutor(new DirectoryGuard([root]), root, 'synthetic-thread');
     raw = executor as any; wire = []; nativeTools = []; nativeSettings = { effective: { env: {} }, sources: [] };
     raw.sessionId = 'original-native-session';
+    // This fixture injects the resumed host instead of executing startProcess.
+    raw.scheduleGuardRequired = true;
     raw.claudeProcess = { killed: false, stdin: { writable: true, write: vi.fn((line: string, callback?: () => void) => {
       const message = JSON.parse(line); wire.push(message);
       if (message.type === 'control_request' && message.request.subtype === 'initialize') {
@@ -66,6 +68,45 @@ describe('Claude shared foreground scheduling integration', () => {
     raw.claudeProcess = null;
     await executor.destroy();
     vi.restoreAllMocks(); await fs.rm(root, { recursive: true, force: true });
+  });
+  it('leases reviewed cleanup on the bound host without creating ownership proof or admitting ordinary work', async () => {
+    raw.delegation = { url: 'http://127.0.0.1:1/', token: 'synthetic', groups: ['scheduling'] };
+    const definition = { id: 'legacy', prompt: 'Synthetic legacy', cron: '* * * * *', durable: false };
+    const inventory = vi.spyOn(raw.sessionSchedules, 'reviewedInventory').mockResolvedValue([definition]);
+    const remove = vi.spyOn(raw.sessionSchedules, 'reviewedDelete').mockResolvedValue(undefined);
+    let binding = '';
+    await executor.withReviewedNativeCleanup('review', () => true, async host => {
+      binding = host.binding; expect(host.current()).toBe(true); expect(host.sessionId).toBe('original-native-session');
+      expect(await host.inventory()).toEqual([definition]); await host.remove(definition);
+      expect((await executor.execute('Unrelated ordinary work')).success).toBe(false);
+      await expect(executor.withReviewedNativeCleanup('concurrent', () => true, async () => {})).rejects.toThrow('busy');
+    });
+    expect(inventory).toHaveBeenCalledOnce(); expect(remove).toHaveBeenCalledOnce();
+    expect(raw.reviewedCleanupActive).toBe(false); expect(raw.scheduleCleanupHost).toBeUndefined();
+    expect(raw.scheduleOwnership.exists()).toBe(false);
+    await executor.withReviewedNativeCleanup('again', () => true, async host => {
+      expect(host.binding).toBe(binding);
+      raw.stopEpoch++; expect(host.current()).toBe(false);
+    }, true);
+    await executor.withReviewedNativeCleanup('epoch', () => true, async host => expect(host.binding).not.toBe(binding), true);
+    const child = raw.claudeProcess;
+    raw.claudeProcess = { ...child };
+    await executor.withReviewedNativeCleanup('replacement', () => true, async host => expect(host.binding).not.toBe(binding), true);
+  });
+  it('rejects missing session, retired owner and failed cleanup exclusion without leaking admission', async () => {
+    raw.delegation = { groups: ['scheduling'] };
+    raw.sessionId = null;
+    await expect(executor.withReviewedNativeCleanup('review', () => true, async () => {})).rejects.toThrow('No bound');
+    raw.sessionId = 'original-native-session';
+    await expect(executor.withReviewedNativeCleanup('review', () => false, async () => {})).rejects.toThrow('unavailable');
+    const ownership = raw.scheduleHostOwnership();
+    const locked = vi.spyOn(ownership, 'reviewedRemovalLease').mockImplementation(() => { throw new Error('Locked'); });
+    await expect(executor.withReviewedNativeCleanup('review', () => true, async () => {})).rejects.toThrow('Locked');
+    expect(raw.reviewedCleanupActive).toBe(false); locked.mockRestore();
+    await expect(executor.withReviewedNativeCleanup('review', () => true, async () => { throw new Error('Operation failed'); }, true)).rejects.toThrow('Operation failed');
+    expect(raw.reviewedCleanupActive).toBe(false);
+    raw.scheduleHooksReady = false;
+    await expect(executor.withReviewedNativeCleanup('review', () => true, async () => {}, true)).rejects.toThrow('changed during');
   });
   async function reserve(id = 'job-a') {
     const input: NativeScheduleInput = { id, cwd: root, prompt: 'Use the latest conversation state',
