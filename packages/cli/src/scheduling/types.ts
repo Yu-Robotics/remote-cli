@@ -148,6 +148,9 @@ export interface ScheduleRecord extends ScheduleOwner {
   execution?: { command?: string; model?: string; effort?: string };
   /** Cancellation intent is written before native deletion; never resurrect it. */
   cancelRequested?: true;
+  /** Provider explicitly refused before any native admission; not inferred from
+   * an error, missing native ID, process exit or terminal catalog state. */
+  creationRefused?: true;
   recovery?: ScheduleRecoveryCheckpoint & { status: 'eligible' | 'pending' | 'blocked' };
   /** Bounded replay suppression; external delivery is not globally exactly-once. */
   completedOccurrences?: string[];

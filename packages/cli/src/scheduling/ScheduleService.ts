@@ -15,6 +15,27 @@ const ERROR_BYTES = 4096;
 const LIVE = new Set<ScheduleRecord['state']>(['creating', 'active', 'running']);
 const STATES = new Set<ScheduleRecord['state']>([...LIVE, 'completed', 'cancelled', 'interrupted', 'failed']);
 const RESTART_REASON = 'Native schedule interrupted by service restart; not recreated or resumed.';
+const MAX_PURGED_IDS = 10_000;
+
+export type SchedulePurgeSelection = { ids: readonly string[] } | { all: true };
+export type SchedulePurgeReason = 'operation_pending' | 'occurrence_running' | 'delivery_pending'
+  | 'native_absence_unknown' | 'predecessor_unknown' | 'unattributed' | 'fence_capacity';
+/** Framework/provider evidence, never deserialized from model or command arguments.
+ * Verification must cover this original definition and all its execution owners,
+ * not just absence of a short ID in some current session. */
+export type SchedulePurgeEvidence =
+  | { status: 'verified'; isCurrent(): boolean }
+  | { status: 'unresolved'; reason: SchedulePurgeReason; detail: string };
+export interface SchedulePurgeResult {
+  /** Freeze these IDs for retries of an all-owner request. */
+  selectedIds: string[];
+  removedIds: string[];
+  alreadyRemovedIds: string[];
+  pending: { id: string; reason: SchedulePurgeReason; detail: string }[];
+  errors: { id: string; error: string }[];
+}
+type PurgeOutcome = { status: 'removed' | 'alreadyRemoved' }
+  | { status: 'pending'; reason: SchedulePurgeReason; detail: string };
 
 export interface ScheduleServiceOptions {
   directory: string;
@@ -28,6 +49,12 @@ export interface ScheduleServiceOptions {
   recoveryTimeoutMs?: number;
   /** Hold foreground admission until reconciliation or confirmed cleanup finishes. */
   acquireRecovery?: (record: ScheduleRecord) => () => void;
+  /** Optional exact native cleanup/absence verification for retired or legacy rows.
+   * Installed by trusted framework wiring. Must not recreate jobs, infer session
+   * attribution from short IDs, or treat local absence as predecessor quiescence.
+   * A verified result remains valid only while its captured lease is current. */
+  withPurgeVerification?<T>(record: Readonly<ScheduleRecord>, context: { isCurrent(): boolean },
+    accept: (evidence: SchedulePurgeEvidence) => Promise<T>): Promise<T>;
   maxLiveSchedules?: number;
   maxRecords?: number;
   maxPendingDeliveries?: number;
@@ -59,6 +86,7 @@ interface Runtime {
   releasing?: boolean;
   releasePromise?: ReturnType<NonNullable<NativeScheduleHandle['releaseForRestart']>>;
   releaseAdmission?: () => void;
+  removalConfirmed?: boolean;
 }
 
 function bounded(value: string, limit: number): string {
@@ -122,6 +150,11 @@ export class ScheduleService {
   private pending = new Map<string, PendingDelivery>();
   private runtimes = new Map<string, Runtime>();
   private retainedCancellations = new Map<string, Promise<ScheduleRecord>>();
+  private purged = new Map<string, ScheduleOwner>();
+  private purges = new Map<string, Promise<PurgeOutcome>>();
+  private recordOperations = new Map<string, number>();
+  private delivering = new Set<string>();
+  private refreshes = 0;
   private tail: Promise<unknown> = Promise.resolve();
   private deliveryTail: Promise<unknown> = Promise.resolve();
   private tasks = new Set<Promise<unknown>>();
@@ -208,7 +241,8 @@ export class ScheduleService {
     // Catalog capacity is bounded, and only one native admission runs at a time.
     for (const id of candidates.slice(0, this.maxLive)) {
       if (this.closing || this.fault) return;
-      const record = this.records.get(id)!;
+      const record = this.records.get(id);
+      if (!record) continue;
       if (record.cancelRequested || !this.current(record)) {
         await this.blockRecovery(record, 'Recovery owner retired or cancellation was requested.'); continue;
       }
@@ -346,7 +380,7 @@ export class ScheduleService {
   }
 
   create(owner: ScheduleOwner, input: NativeScheduleInput): Promise<ScheduleRecord> {
-    return this.operation(this.createSchedule(owner, input));
+    return this.operation(this.recordOperation(input.id, this.createSchedule(owner, input)));
   }
 
   private async createSchedule(owner: ScheduleOwner, input: NativeScheduleInput): Promise<ScheduleRecord> {
@@ -376,7 +410,7 @@ export class ScheduleService {
     await this.serial(async () => {
       this.checkReady();
       if (!this.current(originalOwner)) throw new Error('Schedule owner is no longer current.');
-      if (this.records.has(nativeInput.id)) throw new Error('Schedule ID already exists.');
+      if (this.records.has(nativeInput.id) || this.purged.has(nativeInput.id)) throw new Error('Schedule ID already exists or was purged.');
       if (this.records.size >= this.maxRecords) throw new Error('Schedule catalog is full; history was not pruned.');
       const liveCount = [...this.records.values()].filter(record => LIVE.has(record.state)
         || recoveryOwnsWork(record)
@@ -418,6 +452,9 @@ export class ScheduleService {
       await this.serial(async () => {
         const record = this.records.get(nativeInput.id)!;
         if (LIVE.has(record.state)) { record.state = 'failed'; record.error = errorText(error); }
+        if (error instanceof NativeScheduleNotAdmittedError && !runtime.handle && !runtime.running.size && !runtime.completed.size) {
+          record.creationRefused = true;
+        }
         if (!this.fault) await this.persist();
       });
       if (runtime.handle) await this.stop(nativeInput.id, runtime).catch(() => {});
@@ -430,6 +467,141 @@ export class ScheduleService {
   async list(owner: ScheduleOwner): Promise<ScheduleRecord[]> {
     this.checkReady(); validateOwner(owner);
     return this.serial(async () => [...this.records.values()].filter(record => sameOwner(record, owner)).map(record => structuredClone(record)));
+  }
+
+  /** Cancel first, then erase only verified retired history. No native sweep or
+   * recovery admission is implied. Missing/foreign IDs never count as removed. */
+  purge(owner: ScheduleOwner, selection: SchedulePurgeSelection): Promise<SchedulePurgeResult> {
+    return this.operation(this.purgeSelected(structuredClone(owner), structuredClone(selection)));
+  }
+
+  private async purgeSelected(owner: ScheduleOwner, selection: SchedulePurgeSelection): Promise<SchedulePurgeResult> {
+    this.checkReady(); validateOwner(owner);
+    const selectedIds = await this.serial(async () => {
+      if (!this.current(owner)) throw new Error('Schedule purge owner is no longer current.');
+      const value = object(selection, ['ids', 'all']);
+      if (value.all !== undefined ? value.all !== true || value.ids !== undefined : !Array.isArray(value.ids)) {
+        throw new Error('Select exact schedule IDs or all current-owner schedules.');
+      }
+      const ids = value.all === true ? [...this.records.values()].filter(record => sameOwner(record, owner)).map(record => record.id)
+        : [...value.ids as string[]];
+      if (ids.length > this.maxRecords || new Set(ids).size !== ids.length) throw new Error('Invalid schedule purge selection.');
+      ids.forEach(validateScheduleId);
+      let changed = false;
+      for (const id of ids) {
+        const record = this.records.get(id);
+        if (!record || !sameOwner(record, owner)) continue;
+        record.cancelRequested = true;
+        if (record.recovery) record.recovery.status = 'blocked';
+        this.runtimes.get(id)?.recoveryAbort?.abort();
+        changed = true;
+      }
+      // Persist admission/recovery denial before any external cleanup attempt.
+      if (changed) await this.persist();
+      return ids;
+    });
+    const result: SchedulePurgeResult = { selectedIds, removedIds: [], alreadyRemovedIds: [], pending: [], errors: [] };
+    for (const id of selectedIds) {
+      const previouslyPurged = this.purged.has(id);
+      try {
+        const record = this.records.get(id);
+        const prior = this.purged.get(id);
+        if ((!record || !sameOwner(record, owner)) && (!prior || !sameOwner(prior, owner))) {
+          throw new Error('Schedule not found for this owner.');
+        }
+        let task = this.purges.get(id);
+        if (!task) {
+          task = this.purgeRecord(owner, id);
+          this.purges.set(id, task);
+          void task.finally(() => { if (this.purges.get(id) === task) this.purges.delete(id); }).catch(() => {});
+        }
+        const outcome = await task;
+        if (outcome.status === 'pending') result.pending.push({ id, reason: outcome.reason, detail: outcome.detail });
+        else (outcome.status === 'removed' ? result.removedIds : result.alreadyRemovedIds).push(id);
+      } catch (error) {
+        if (!previouslyPurged && this.purged.has(id) && sameOwner(this.purged.get(id)!, owner)) result.removedIds.push(id);
+        result.errors.push({ id, error: errorText(error) });
+      }
+    }
+    return result;
+  }
+
+  private async purgeRecord(owner: ScheduleOwner, id: string): Promise<PurgeOutcome> {
+    const pending = (reason: SchedulePurgeReason, detail: string): PurgeOutcome => ({ status: 'pending', reason, detail });
+    this.checkReady();
+    if (!this.current(owner)) throw new Error('Schedule purge owner is no longer current.');
+    if (this.purged.has(id)) return { status: 'alreadyRemoved' };
+    const record = this.owned(owner, id);
+    const current = () => !this.closing && !this.fault && !this.suspending && this.current(owner)
+      && this.records.get(id) === record && record.cancelRequested === true;
+    const busy = (): PurgeOutcome | undefined => {
+      if (this.recordOperations.has(id) || this.recoveryRun || this.refreshes || this.retainedCancellations.has(id)) {
+        return pending('operation_pending', 'Creation, recovery, inspection or cleanup is still pending. Retry these same IDs.');
+      }
+      if (this.delivering.has(id)) return pending('delivery_pending', 'An external delivery is already in flight; its outcome cannot be revoked.');
+    };
+    const active = busy(); if (active) return active;
+    if (this.purged.size >= MAX_PURGED_IDS) return pending('fence_capacity', 'Durable purge ID capacity reached; no replay fence was discarded.');
+    const runtime = this.runtimes.get(id);
+    // Do not interpret terminal state, an absent handle or a stopped process as
+    // native definition absence. Existing cancelRetained owns its stronger proof.
+    let retainedVerified = false;
+    const clean = !runtime && record.recovery?.handoff === 'clean' && record.recovery.nativeDefinitionAbsent === true;
+    if (runtime?.handle && !runtime.stopped) {
+      await this.cancel(owner, id);
+    } else if (!runtime && !record.creationRefused && !clean && record.recovery && this.supportsRetainedCancellation(record)) {
+      try {
+        await this.recordOperation(id, this.cancelRetained(record));
+        retainedVerified = true;
+      } catch (error) {
+        // A failed receipt (including error-after-commit) is not absence proof.
+        // Exact framework verification may still resolve it without recreating.
+        if (!this.options.withPurgeVerification) throw error;
+      }
+    }
+    if (!current()) throw new Error('Schedule purge context changed during cleanup.');
+    const unfinished = busy(); if (unfinished) return unfinished;
+    if (runtime?.running.size) return pending('occurrence_running', 'Future cancellation does not revoke an already admitted occurrence.');
+    if (runtime && (!runtime.stopped || runtime.releaseAdmission)) return pending('operation_pending', 'Native runtime retirement is unconfirmed.');
+
+    const handleProof = runtime?.removalConfirmed && runtime.handle?.nativeDefinitionAbsent !== false;
+    const erase = (evidence?: Extract<SchedulePurgeEvidence, { status: 'verified' }>): Promise<PurgeOutcome> => this.serial(async () => {
+      this.checkReady();
+      if (!current() || evidence?.status === 'verified' && !evidence.isCurrent()) throw new Error('Schedule purge evidence expired before persistence.');
+      const changed = busy(); if (changed) return changed;
+      if (this.purged.size >= MAX_PURGED_IDS) return pending('fence_capacity', 'Durable purge ID capacity reached; no replay fence was discarded.');
+      if (this.runtimes.get(id) !== runtime || runtime?.running.size || runtime && !runtime.stopped
+        || handleProof && runtime?.handle?.nativeDefinitionAbsent === false) {
+        return pending('operation_pending', 'Native ownership changed before history removal.');
+      }
+      // The ID-only owner fence prevents delayed CREATE retries from resurrecting
+      // deleted history. Prompts, results and recovery identities are not retained.
+      const outputs = [...this.pending].filter(([, entry]) => entry.scheduleId === id);
+      this.purged.set(id, ownerOf(record));
+      this.records.delete(id); this.dropPending(id);
+      try { await this.persist(); }
+      catch (error) {
+        this.records.set(id, record); this.purged.delete(id);
+        for (const [key, entry] of outputs) this.pending.set(key, entry);
+        throw error;
+      }
+      this.runtimes.delete(id);
+      return { status: 'removed' };
+    });
+    if (record.creationRefused || clean || retainedVerified || handleProof) return erase();
+    if (!this.options.withPurgeVerification) return pending('native_absence_unknown',
+      'Native absence and execution retirement require exact provider verification; terminal state and current-session absence alone are insufficient.');
+    let accepted = false;
+    // The framework keeps its native scope/lease open until accept() finishes
+    // persisting removal. A receipt returned after closing that lease is unsafe.
+    return this.options.withPurgeVerification(structuredClone(record), { isCurrent: current }, async evidence => {
+      if (accepted) throw new Error('Purge verification was already consumed.');
+      accepted = true;
+      if (!current()) throw new Error('Schedule purge context changed during verification.');
+      if (evidence.status === 'unresolved') return pending(evidence.reason, bounded(evidence.detail, ERROR_BYTES));
+      if (evidence.status !== 'verified' || typeof evidence.isCurrent !== 'function') throw new Error('Invalid native purge verification.');
+      return erase(evidence);
+    });
   }
 
   /** Includes terminal jobs whose native process exit is still unconfirmed. */
@@ -479,7 +651,8 @@ export class ScheduleService {
 
   /** User-requested native reconciliation only; no background polling is installed. */
   refresh(owner: ScheduleOwner): Promise<void> {
-    return this.operation(this.refreshNative(owner));
+    this.refreshes++;
+    return this.operation(this.refreshNative(owner).finally(() => { this.refreshes--; }));
   }
 
   private async refreshNative(owner: ScheduleOwner): Promise<void> {
@@ -515,7 +688,7 @@ export class ScheduleService {
   }
 
   cancel(owner: ScheduleOwner, id: string): Promise<ScheduleRecord> {
-    return this.operation(this.cancelSchedule(owner, id));
+    return this.operation(this.recordOperation(id, this.cancelSchedule(owner, id)));
   }
 
   private async cancelSchedule(owner: ScheduleOwner, id: string): Promise<ScheduleRecord> {
@@ -795,7 +968,9 @@ export class ScheduleService {
     try {
       const handle = await runtime.ready;
       if (handle && !runtime.stopped) {
-        if (LIVE.has(this.records.get(id)!.state) || handle.cancellationKeepsRunning) await handle.cancel();
+        if (LIVE.has(this.records.get(id)!.state) || handle.cancellationKeepsRunning) {
+          await handle.cancel(); runtime.removalConfirmed = true;
+        }
         else await this.stop(id, runtime);
       }
       await this.serial(async () => {
@@ -830,6 +1005,7 @@ export class ScheduleService {
     let cleanup = false;
     const runtime = this.runtimes.get(id)!;
     await this.serial(async () => {
+      if (!runtime || this.runtimes.get(id) !== runtime || !this.records.has(id)) return;
       if (this.fault) throw this.fault;
       const record = this.records.get(id)!;
       if (this.suspending && event.type === 'stopped') {
@@ -919,6 +1095,7 @@ export class ScheduleService {
           if (this.closing || this.fault) return;
           const pending = this.pending.get(id);
           if (!pending) return;
+          if (this.purges.has(pending.scheduleId)) return;
           const record = this.records.get(pending.scheduleId)!;
           if (!this.current(record) || record.state === 'cancelled' && !pending.afterCancellation) {
             this.pending.delete(id); await this.persist(); return;
@@ -932,14 +1109,17 @@ export class ScheduleService {
             success: pending.success, ...(pending.output !== undefined && { output: pending.output }),
             ...(pending.error !== undefined && { error: pending.error }) };
         });
-        if (!delivery || this.closing || !this.current(delivery.schedule) || !this.pending.has(id)) continue;
+        if (!delivery || this.closing || !this.current(delivery.schedule) || !this.pending.has(id)
+          || this.purges.has(delivery.schedule.id)) continue;
         const runtime = this.runtimes.get(delivery.schedule.id);
         if (runtime?.cancelling) {
           if (firstAttempt) runtime.heldDeliveries.add(id);
           continue;
         }
+        this.delivering.add(delivery.schedule.id);
         try { await this.options.deliver(delivery); }
         catch { continue; } // Keep the persisted outbox; only explicit reconnect retries it.
+        finally { this.delivering.delete(delivery.schedule.id); }
         await this.serial(async () => { this.pending.delete(id); await this.persist(); });
       }
     });
@@ -948,6 +1128,7 @@ export class ScheduleService {
   }
 
   private stop(id: string, runtime: Runtime): Promise<void> {
+    if (this.runtimes.get(id) !== runtime) return Promise.resolve();
     if (runtime.stopped) return Promise.resolve();
     if (runtime.stopPromise) return runtime.recoveryAbort ? this.boundRecovery(runtime.stopPromise, 'Native cleanup remains unresolved; ownership retained.') : runtime.stopPromise;
     const operation = (async () => {
@@ -956,7 +1137,11 @@ export class ScheduleService {
           throw new Error('Recovery receipt is unresolved; native ownership retained.');
         }
         const handle = await runtime.ready;
-        if (handle && !runtime.stopped) await handle.stop();
+        if (handle && !runtime.stopped) {
+          await handle.stop();
+          // Process/job retirement is not itself proof that persisted timing was deleted.
+          if (handle.nativeDefinitionAbsent === true) runtime.removalConfirmed = true;
+        }
         // A shared session can delete future firings while an occurrence still
         // finishes. Keep ownership until its terminal stopped notification.
         if (!handle?.cancellationKeepsRunning || !runtime.running.size) runtime.stopped = true;
@@ -969,9 +1154,10 @@ export class ScheduleService {
         throw error;
       }
     })();
-    runtime.stopPromise = operation;
+    const tracked = this.recordOperation(id, operation);
+    runtime.stopPromise = tracked;
     void operation.finally(() => { if (!runtime.stopped) runtime.stopPromise = undefined; }).catch(() => {});
-    return runtime.recoveryAbort ? this.boundRecovery(operation, 'Native cleanup remains unresolved; ownership retained.') : operation;
+    return runtime.recoveryAbort ? this.boundRecovery(tracked, 'Native cleanup remains unresolved; ownership retained.') : tracked;
   }
 
   private async boundRecovery<T>(operation: Promise<T>, message: string): Promise<T> {
@@ -1009,6 +1195,14 @@ export class ScheduleService {
     this.operations.add(task);
     void task.finally(() => this.operations.delete(task)).catch(() => {});
     return task;
+  }
+
+  private recordOperation<T>(id: string, task: Promise<T>): Promise<T> {
+    this.recordOperations.set(id, (this.recordOperations.get(id) ?? 0) + 1);
+    return task.finally(() => {
+      const remaining = this.recordOperations.get(id)! - 1;
+      if (remaining) this.recordOperations.set(id, remaining); else this.recordOperations.delete(id);
+    });
   }
 
   private current(owner: ScheduleOwner): boolean {
@@ -1049,7 +1243,7 @@ export class ScheduleService {
     try {
       // JSON can expand one control byte to six bytes (for example, "\\u0001").
       const maxBytes = (this.maxRecords + this.maxPending) * (160 * 1024)
-        + this.maxRecords * this.maxOccurrences * 515 + 4096;
+        + this.maxRecords * this.maxOccurrences * 515 + MAX_PURGED_IDS * 2048 + 4096;
       const size = (await handle.stat()).size;
       if (size > maxBytes) throw new Error('Schedule catalog exceeds its size limit.');
       const buffer = Buffer.alloc(size + 1);
@@ -1068,13 +1262,13 @@ export class ScheduleService {
   }
 
   private load(data: unknown): void {
-    const catalog = object(data, ['version', 'records', 'pending']);
-    if (![1, 2].includes(catalog.version as number) || !Array.isArray(catalog.records) || catalog.records.length > this.maxRecords
+    const catalog = object(data, ['version', 'records', 'pending', 'purged']);
+    if (![1, 2, 3].includes(catalog.version as number) || !Array.isArray(catalog.records) || catalog.records.length > this.maxRecords
       || !Array.isArray(catalog.pending) || catalog.pending.length > this.maxPending) throw new Error('Invalid schedule catalog envelope.');
     const records = new Map<string, ScheduleRecord>();
     const pending = new Map<string, PendingDelivery>();
     for (const value of catalog.records) {
-      const record = object(value, ['id', 'backend', 'cwd', 'prompt', 'rule', 'createdAt', 'nativeId', 'state', 'error', 'threadId', 'openId', 'generation', 'execution', 'cancelRequested', 'recovery', 'completedOccurrences', 'skippedOccurrences']);
+      const record = object(value, ['id', 'backend', 'cwd', 'prompt', 'rule', 'createdAt', 'nativeId', 'state', 'error', 'threadId', 'openId', 'generation', 'execution', 'cancelRequested', 'creationRefused', 'recovery', 'completedOccurrences', 'skippedOccurrences']);
       validateScheduleId(record.id); validateOwner(record as unknown as ScheduleOwner); validateSchedulePrompt(record.prompt);
       text(record.cwd, 4096);
       if (!path.isAbsolute(record.cwd) || !isNativeScheduleBackend(record.backend) || !STATES.has(record.state as ScheduleRecord['state'])
@@ -1083,12 +1277,15 @@ export class ScheduleService {
       if (record.nativeId !== undefined) text(record.nativeId);
       if (record.error !== undefined && (typeof record.error !== 'string' || Buffer.byteLength(record.error) > ERROR_BYTES)) throw new Error('Invalid schedule error.');
       if (record.cancelRequested !== undefined && record.cancelRequested !== true) throw new Error('Invalid cancellation intent.');
+      if (record.creationRefused !== undefined && (catalog.version !== 3 || record.creationRefused !== true || record.nativeId !== undefined
+        || !['failed', 'cancelled', 'interrupted'].includes(record.state as string)
+        || record.completedOccurrences !== undefined)) throw new Error('Invalid native admission refusal.');
       if (record.execution !== undefined) {
         const execution = object(record.execution, ['command', 'model', 'effort']);
         for (const value of Object.values(execution)) if (value !== undefined) text(value, 4096);
       }
       if (record.recovery !== undefined) {
-        if (catalog.version !== 2) throw new Error('Recovery requires catalog version 2.');
+        if (catalog.version === 1) throw new Error('Recovery requires catalog version 2 or newer.');
         const recovery = object(record.recovery, ['version', 'provider', 'strategy', 'identity', 'status', 'orderlyOnly', 'futureOnly', 'handoff', 'nativeDefinitionAbsent', 'handoffPolicy']);
         this.validateCheckpoint(recovery);
         if (!['eligible', 'pending', 'blocked'].includes(recovery.status as string)) throw new Error('Invalid recovery status.');
@@ -1122,7 +1319,17 @@ export class ScheduleService {
       if (item.afterCancellation !== undefined && item.afterCancellation !== true) throw new Error('Invalid cancellation delivery flag.');
       pending.set(item.id as string, structuredClone(item) as unknown as PendingDelivery);
     }
-    this.records = records; this.pending = pending;
+    const purged = new Map<string, ScheduleOwner>();
+    if (catalog.version === 3) {
+      if (!Array.isArray(catalog.purged) || catalog.purged.length > MAX_PURGED_IDS) throw new Error('Invalid purge fences.');
+      for (const value of catalog.purged) {
+        const fence = object(value, ['id', 'threadId', 'openId', 'generation']);
+        validateScheduleId(fence.id); validateOwner(fence as unknown as ScheduleOwner);
+        if (records.has(fence.id) || purged.has(fence.id)) throw new Error('Conflicting purge fence.');
+        purged.set(fence.id, ownerOf(fence as unknown as ScheduleOwner));
+      }
+    } else if (catalog.purged !== undefined) throw new Error('Purge fences require catalog version 3.');
+    this.records = records; this.pending = pending; this.purged = purged;
   }
 
   private async persist(): Promise<void> {
@@ -1137,7 +1344,9 @@ export class ScheduleService {
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
       const handle = await fs.open(temporary, 'wx', 0o600);
       try {
-        await handle.writeFile(JSON.stringify({ version: 2, records: [...this.records.values()], pending: [...this.pending.values()] }), 'utf8');
+        const upgraded = this.purged.size > 0 || [...this.records.values()].some(record => record.creationRefused);
+        await handle.writeFile(JSON.stringify({ version: upgraded ? 3 : 2, records: [...this.records.values()], pending: [...this.pending.values()],
+          ...(upgraded ? { purged: [...this.purged].map(([id, owner]) => ({ id, ...owner })) } : {}) }), 'utf8');
         await handle.sync();
       } finally { await handle.close(); }
       await fs.rename(temporary, this.catalogPath);

@@ -9,7 +9,7 @@ function fixture() {
   return { operations, options, scope: operations.scope(options) };
 }
 describe('ScheduleToolScope', () => {
-  it('exposes review receipts and correlated native actions but never a model confirmation tool', async () => {
+  it('exposes review receipts and correlated native actions and rejects unregistered tool names', async () => {
     const f = fixture(); let finish!: (value: any) => void;
     const reviewCleanup = vi.fn(() => new Promise<any>(resolve => { finish = resolve; }));
     const scope = f.operations.scope({ ...f.options, reviewCleanup,
@@ -25,6 +25,37 @@ describe('ScheduleToolScope', () => {
     await expect(scope.invoke('remote_cli_schedule_cleanup_review', { requestId: 'other', sessionId: 'foreign' })).rejects.toThrow('cannot be supplied');
     expect(await f.scope.invoke('remote_cli_schedule_cleanup_review', { requestId: 'unsupported' })).toMatchObject({ status: 'failed' });
   });
+  it.each(['claude', 'codex', 'agy', 'dsh', 'kimi', 'opencode', 'pi', 'zcode'] as const)('permits scoped deletion and purge tools for %s without a human confirmation gate', async backend => {
+    const f = fixture();
+    const cleanup = { absentIds: ['native-a'], warning: 'Current host only' };
+    const deleteCleanup = vi.fn(async () => cleanup);
+    const purge = vi.fn(async () => ({ selectedIds: ['managed-a'], removedIds: ['managed-a'], alreadyRemovedIds: [], pending: [], errors: [] }));
+    const scope = f.operations.scope({ ...f.options, backend, deleteCleanup, purge });
+    const args = { requestId: 'delete-native', token: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', nativeIds: ['native-a'] };
+    expect(await scope.invoke('remote_cli_schedule_cleanup_delete', args)).toMatchObject({ status: 'succeeded', cleanup });
+    expect(await scope.invoke('remote_cli_schedule_cleanup_delete', args)).toMatchObject({ status: 'succeeded' });
+    expect(deleteCleanup).toHaveBeenCalledOnce();
+    await expect(scope.invoke('remote_cli_schedule_cleanup_delete', { ...args, nativeIds: ['different'] })).rejects.toThrow('different');
+    expect(await scope.invoke('remote_cli_schedule_purge', { requestId: 'purge', all: true })).toMatchObject({ purge: { removedIds: ['managed-a'] } });
+    expect(await scope.invoke('remote_cli_schedule_purge', { requestId: 'purge', all: true })).toMatchObject({ status: 'succeeded' });
+    expect(purge).toHaveBeenCalledOnce();
+    await expect(scope.invoke('remote_cli_schedule_purge', { requestId: 'bad', all: true, scheduleIds: [] })).rejects.toThrow('Select exact');
+    await expect(scope.invoke('remote_cli_schedule_purge', { requestId: 'bad-scope', scheduleIds: ['managed-a'], owner: 'foreign' })).rejects.toThrow('cannot be supplied');
+  });
+
+  it('keeps partial purge outcomes explicit and exposes each pending native deletion action', async () => {
+    const f = fixture(); let finish!: (value: any) => void;
+    const deleteCleanup = vi.fn(() => new Promise<any>(resolve => { finish = resolve; }));
+    const purge = vi.fn(async () => ({ selectedIds: ['blocked'], removedIds: [], alreadyRemovedIds: [],
+      pending: [{ id: 'blocked', reason: 'predecessor_unknown' as const, detail: 'Prior execution remains unknown' }], errors: [] }));
+    const scope = f.operations.scope({ ...f.options, deleteCleanup, purge, nativeAction: () => ({ tool: 'CronDelete', input: { id: 'native-a' } }) });
+    expect(await scope.invoke('remote_cli_schedule_cleanup_delete', { requestId: 'delete', token: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', nativeIds: ['native-a'] })).toMatchObject({ status: 'pending', nativeAction: { tool: 'CronDelete' } });
+    finish({ absentIds: ['native-a'], warning: 'Prior execution unknown' }); await scope.drain();
+    expect(await scope.invoke('remote_cli_schedule_operation', { requestId: 'delete' })).toMatchObject({ status: 'succeeded', cleanup: { absentIds: ['native-a'] } });
+    expect(await scope.invoke('remote_cli_schedule_purge', { requestId: 'purge', scheduleIds: ['blocked'] })).toMatchObject({ status: 'succeeded', purge: { removedIds: [], pending: [{ id: 'blocked' }] } });
+    expect(await f.scope.invoke('remote_cli_schedule_cleanup_delete', { requestId: 'unsupported', token: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', nativeIds: ['native-a'] })).toMatchObject({ status: 'failed' });
+  });
+
   it('does not initialize scheduling for capabilities and returns current native capability separately', async () => {
     const f = fixture();
     expect(await f.scope.invoke('remote_cli_schedule_capabilities', {})).toMatchObject({ backend: 'claude', capability: { supported: true }, now: expect.any(String) });

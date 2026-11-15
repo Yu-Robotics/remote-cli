@@ -65,7 +65,7 @@ import { isSessionControl } from '../session/SessionResumeService';
 import { readSessionCatalog } from '../session/adapters';
 import { piSessionHolder, resolvePiSessionLocator } from '../session/adapters/PiSessionCatalog';
 import { SessionControl, type PiBindingState } from '../session/SessionControl';
-import { ScheduleService, SCHEDULE_CATALOG_FILE } from '../scheduling/ScheduleService';
+import { ScheduleService, SCHEDULE_CATALOG_FILE, type SchedulePurgeSelection, type SchedulePurgeResult } from '../scheduling/ScheduleService';
 import { ScheduleDeliveryClient } from '../scheduling/ScheduleDeliveryClient';
 import { parseScheduleCommand, SCHEDULE_USAGE, type ScheduleCommand } from '../scheduling/ScheduleCommand';
 import { assertNativeScheduleBackend, NATIVE_SCHEDULE_CAPABILITIES, SCHEDULE_CAPABILITIES } from '../scheduling/ScheduleCapabilities';
@@ -2792,6 +2792,8 @@ You can also use natural language commands to control Claude Code CLI.`,
         }
         scheduleScope = this.scheduleToolOperations.scope({ owner, messageId, backend, current: context.current,
           nativeAction: id => executor.nativeScheduleAction?.(id),
+          deleteCleanup: (command, id) => this.runReviewedNativeCleanup(owner, command, id, context.current) as Promise<{ absentIds: string[]; warning: string }>,
+          purge: (selection, id) => this.runSchedulePurge(owner, selection, id, context.current),
           reviewCleanup: id => this.runReviewedNativeCleanup(owner, { kind: 'cleanup-review' }, id, context.current) as Promise<NativeCleanupReview>,
           run: (command, id) => this.runScheduleOperation(owner, command, id, context),
           present: async (records, operationId) => {
@@ -3772,8 +3774,61 @@ You can also use natural language commands to control Claude Code CLI.`,
     }
   }
 
-  /** Confirmation is accepted only from the authenticated text-command ingress,
-   * never from model-supplied tool arguments or a recovered historical receipt. */
+  /** Purge shares native operation admission with cancellation; only the service
+   * decides whether verified retirement permits history removal. */
+  private async runSchedulePurge(owner: ScheduleOwner, selection: SchedulePurgeSelection, id: string,
+    inTurnCurrent?: () => boolean): Promise<SchedulePurgeResult> {
+    const epoch = this.imageConnectionEpoch;
+    const backend = this.threadPool.getBackendKey(owner.threadId);
+    const executor = this.threadPool.getExecutor(owner.threadId);
+    const settings = () => JSON.stringify([this.executorConfiguration(), this.threadManager.getThread(owner.threadId)?.models,
+      this.threadManager.getThread(owner.threadId)?.model, this.threadManager.getThread(owner.threadId)?.efforts]);
+    const capturedSettings = settings();
+    const current = () => {
+      try { return !this.isDestroyed && !this.automaticUpdateInProgress && this.wsClient.isConnected()
+        && epoch === this.imageConnectionEpoch && this.scheduleGeneration(owner.threadId) === owner.generation
+        && !this.scheduleRecoveryThreads.has(owner.threadId) && !this.abortOperations.has(owner.threadId)
+        && this.threadPool.getBackendKey(owner.threadId) === backend
+        && this.threadPool.getExistingExecutor(owner.threadId) === executor
+        && capturedSettings === settings() && (!inTurnCurrent || inTurnCurrent()); }
+      catch { return false; }
+    };
+    if (!owner.openId || !current() || this.scheduleManagement.has(owner.threadId)
+      || !inTurnCurrent && (this.threadPool.isThreadBusy(owner.threadId) || executor.isBusy?.()
+        || this.hasThreadQueueState(owner.threadId) || this.coordinatorPreparations.has(owner.threadId))) {
+      throw new Error('Schedule purge is unavailable while this thread is busy, disconnected or changing.');
+    }
+    this.scheduleManagement.add(owner.threadId);
+    try {
+      const service = await this.initializeSchedules();
+      if (!current()) throw new Error('Schedule purge context changed.');
+      // Freeze all before native calls; retries of this operation must not select new tasks.
+      const ids = 'all' in selection ? (await service.list(owner)).map(record => record.id) : [...selection.ids];
+      const run = async () => {
+        if (!current()) throw new Error('Schedule purge context changed before cleanup.');
+        const result = await service.purge(owner, { ids });
+        if (result.removedIds.length) this.scheduleCards.invalidate();
+        return result;
+      };
+      const records = await service.list(owner);
+      const needsNative = backend === 'claude' && records.some(record => ids.includes(record.id)
+        && record.backend === 'claude' && service.canCancel(owner, record.id));
+      if (!needsNative) return await run();
+      if (!executor.withNativeScheduleOperation) throw new Error('Native cleanup admission is unavailable.');
+      if (!inTurnCurrent && executor.configureManagedTools) {
+        const bridge = this.delegationBridges.get(owner.threadId) ?? new DelegationBridge();
+        this.delegationBridges.set(owner.threadId, bridge);
+        const thread = this.threadManager.getThread(owner.threadId);
+        const connection = await bridge.start(thread && isDelegationEnabled(thread) ? ['delegation', 'scheduling'] : ['scheduling']);
+        if (!current()) throw new Error('Schedule purge owner changed.');
+        await executor.configureManagedTools(connection);
+      }
+      return await executor.withNativeScheduleOperation(id, current, run, !!inTurnCurrent);
+    } finally { this.scheduleManagement.delete(owner.threadId); }
+  }
+
+  /** Authenticated text and scoped model tools share exact reviewed deletion.
+   * Native identity and inventory checks remain independent of the caller. */
   private async runReviewedNativeCleanup(owner: ScheduleOwner,
     command: Extract<ScheduleCommand, { kind: 'cleanup-review' | 'cleanup-confirm' }>, requestId: string,
     inTurnCurrent?: () => boolean): Promise<NativeCleanupReview | { absentIds: string[]; warning: string }> {
@@ -3862,11 +3917,22 @@ You can also use natural language commands to control Claude Code CLI.`,
           const eligible = result.candidates.filter(entry => !result.blockedIds.includes(entry.id));
           const entries = result.candidates.map(entry => `${entry.id} — ${entry.cron} (${entry.recurring ? 'recurring' : 'one-shot'}; ${entry.durable === false ? 'session-only' : 'project-persisted; deletion unavailable here'})\n${entry.prompt}`);
           const confirmation = eligible.length
-            ? `To delete all eligible tasks listed above, send this command yourself. To delete fewer tasks, keep only their IDs:\n/schedule cleanup confirm ${result.token} cleanup-${result.token} ${eligible.map(entry => entry.id).join(',')}\nIf the reply is lost, resend the identical command.`
+            ? `An agent can delete eligible tasks with remote_cli_schedule_cleanup_delete using this review token and exact native IDs. You may also use this command; keep only the desired IDs:\n/schedule cleanup confirm ${result.token} cleanup-${result.token} ${eligible.map(entry => entry.id).join(',')}\nIf the reply is lost, resend the identical command.`
             : 'No eligible tasks to delete in this review.';
           output = `${result.warning}\nBound native session: ${result.sessionId}\nReview expires: ${result.expiresAt}\n\n${entries.join('\n\n') || 'No native tasks in this session.'}\n\n${confirmation}`;
         } else output = `Verified absent on the reviewed current host: ${result.absentIds.join(', ')}.\n${result.warning}`;
         respond({ success: true, output }); return;
+      }
+      if (command.kind === 'purge') {
+        const result = await this.runSchedulePurge(owner, command.selection,
+          createHash('sha256').update(message.messageId ?? uuidv4()).digest('hex'));
+        const lines = [`Removed history: ${result.removedIds.join(', ') || 'none'}.`,
+          `Already removed: ${result.alreadyRemovedIds.join(', ') || 'none'}.`,
+          ...result.pending.map(entry => `Pending ${entry.id}: ${entry.detail}`),
+          ...result.errors.map(entry => `Failed ${entry.id}: ${entry.error}`)];
+        if (result.pending.length || result.errors.length) lines.push('Cleanup is incomplete. Retry only the unresolved managed IDs; do not infer native absence from history state.');
+        lines.push('Native-only definitions require native cleanup review and deletion in their original session.');
+        respond({ success: !result.pending.length && !result.errors.length, output: lines.join('\n') }); return;
       }
       const storedOnly = command.kind === 'list' && this.threadPool.getExistingExecutor(threadId)?.hasPendingCancellation?.();
       const updateSnapshot = this.automaticUpdateInProgress && command.kind === 'list';

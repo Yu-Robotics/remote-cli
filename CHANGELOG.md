@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.242] - 2026-11-15
+
+### Changed
+- Permit scoped agent tools to execute reviewed native schedule deletion without a separate owner-text confirmation. Preserve exact inventory, owner/session, expiry, sibling and native-action receipt checks; keep the existing text command compatible.
+- Add managed schedule purge tools and commands: cancel first, remove only verified retired history and queued output, and report pending cleanup per task. Persist bounded ID/owner replay fences in catalog format 3; older format-2 clients cannot downgrade this catalog.
+
+### Fixed
+- Release expired native CronList read authorizations to prevent capacity exhaustion after repeated missing receipts. Report the stalled timeout stage without implying that an inventory read created a task; retain uncertain mutation receipts for reconciliation.
+
 ## [1.6.241] - 2026-11-15
 
 ### Fixed

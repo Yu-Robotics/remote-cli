@@ -380,7 +380,9 @@ export class ClaudeSessionSchedules {
     if (scope && (scope.ended || !scope.current())) return Promise.reject(new Error('Scheduling owner or native turn is no longer current.'));
     if (action.tool !== 'CronList') scope?.mutations.add(job.id);
     const result = new Promise<string>((resolve, reject) => {
-      const timer = setTimeout(() => this.failPending('Native scheduling tool receipt timed out; inspect or cancel the existing task.'), this.options.timeoutMs ?? 60_000);
+      const timer = setTimeout(() => {
+        if (this.pending) this.failPending(this.receiptTimeout(this.pending));
+      }, this.options.timeoutMs ?? 60_000);
       this.pending = { action, job, scope, resolve, reject, timer, preserveOccurrences };
     });
     // A managed MCP call returns the action to its caller. Never execute a second
@@ -393,9 +395,23 @@ export class ClaudeSessionSchedules {
     }
     return result;
   }
+  private receiptTimeout(pending: Pending): string {
+    const stage = pending.toolId ? 'authorized tool result missing'
+      : pending.scope?.inTurn ? 'awaiting matching tool invocation in the current turn'
+      : pending.managementId ? 'awaiting matching tool invocation in the management turn'
+      : 'management turn not dispatched';
+    if (pending.action.tool === 'CronList') {
+      return `Native CronList inventory timed out (${stage}). No inventory was verified; this read created or deleted no task. Retry inventory in the same session after the native turn finishes.`;
+    }
+    return `Native ${pending.action.tool} receipt timed out (${stage}); mutation outcome is unconfirmed. Inspect or cancel the existing task before retrying.`;
+  }
   private failPending(message: string): void {
     const pending = this.pending;
     if (!pending) return;
+    // An expired read cannot establish fresh inventory for a later operation.
+    // Release its reservation; otherwise missing reads eventually exhaust the
+    // authorization cap. Mutations retain their late-receipt ownership fence.
+    if (pending.action.tool === 'CronList' && pending.toolId) this.authorized.delete(pending.toolId);
     this.pending = undefined; clearTimeout(pending.timer); pending.reject(new Error(message));
   }
   /** Called before an ordinary command resolves so its unexecuted reservations cannot deadlock drain(). */

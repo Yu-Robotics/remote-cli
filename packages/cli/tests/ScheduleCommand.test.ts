@@ -18,6 +18,14 @@ describe('ScheduleCommand', () => {
     expect(SCHEDULE_USAGE).toContain('never automatically recreated');
   });
 
+  it('parses explicit purge selections and rejects ambiguous or duplicate IDs', () => {
+    expect(parse('/schedule purge all')).toEqual({ kind: 'purge', selection: { all: true } });
+    expect(parse('/schedule purge schedule-a,schedule-b')).toEqual({ kind: 'purge', selection: { ids: ['schedule-a', 'schedule-b'] } });
+    for (const text of ['/schedule purge', '/schedule purge a,a', '/schedule purge a,', '/schedule purge *', '/schedule purge a b']) {
+      expect(parse(text)?.kind).toBe('invalid');
+    }
+  });
+
   it.each([
     ['1m', '2030-01-01T00:02:00.000Z'],
     ['2h', '2030-01-01T02:01:00.000Z'],

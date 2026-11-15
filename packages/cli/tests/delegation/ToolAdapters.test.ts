@@ -64,14 +64,22 @@ describe('native delegation tool adapters', () => {
     if (group === 'scheduling') {
       expect(tools.tools).toEqual(SCHEDULE_TOOLS);
       const run = vi.fn(async () => []);
+      const deleteCleanup = vi.fn(async () => ({ absentIds: ['native-a'], warning: 'Current host only' }));
+      const purge = vi.fn(async () => ({ selectedIds: ['managed-a'], removedIds: ['managed-a'], alreadyRemovedIds: [], pending: [], errors: [] }));
       const scope = new ScheduleToolOperations().scope({ owner: { threadId: 'thread', openId: 'owner', generation: 'current' },
-        messageId: 'foreground', backend: 'dsh', current: () => true, run, present: async () => 'Delivered' });
+        messageId: 'foreground', backend: 'dsh', current: () => true, run, deleteCleanup, purge, present: async () => 'Delivered' });
       retire = bridge.activate((name, args) => scope.invoke(name, args));
       const args = { requestId: 'native-request', when: { kind: 'after', amount: 5, unit: 'm' }, prompt: 'Synthetic task' };
       const first = await request(3, 'tools/call', { name: 'remote_cli_schedule_create', arguments: args });
       expect(JSON.parse(first.content[0].text)).toMatchObject({ status: 'succeeded' });
       expect(await request(4, 'tools/call', { name: 'remote_cli_schedule_create', arguments: args })).toEqual(first);
       expect(run).toHaveBeenCalledOnce();
+      const deleted = await request(5, 'tools/call', { name: 'remote_cli_schedule_cleanup_delete', arguments: {
+        requestId: 'delete', token: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', nativeIds: ['native-a'] } });
+      expect(JSON.parse(deleted.content[0].text)).toMatchObject({ status: 'succeeded', cleanup: { absentIds: ['native-a'] } });
+      const purged = await request(6, 'tools/call', { name: 'remote_cli_schedule_purge', arguments: { requestId: 'purge', scheduleIds: ['managed-a'] } });
+      expect(JSON.parse(purged.content[0].text)).toMatchObject({ status: 'succeeded', purge: { removedIds: ['managed-a'] } });
+      expect(deleteCleanup).toHaveBeenCalledOnce(); expect(purge).toHaveBeenCalledOnce();
       await scope.close(); return;
     }
     expect(tools.tools.map((tool: any) => tool.name)).toContain('remote_cli_delegate');

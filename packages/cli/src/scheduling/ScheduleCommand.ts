@@ -7,6 +7,7 @@ export const SCHEDULE_USAGE = [
   '/schedule capabilities',
   '/schedule list',
   '/schedule cancel <id>',
+  '/schedule purge <managed-id,...|all>',
   '/schedule cleanup review [native-id,...]',
   '/schedule cleanup confirm <review-token> <request-id> <native-id,...>',
   '/schedule after <positive integer><m|h|d> -- <prompt>',
@@ -20,6 +21,7 @@ export const SCHEDULE_USAGE = [
 export type ScheduleCommand =
   | { kind: 'help' | 'capabilities' | 'list' }
   | { kind: 'cancel'; id: string }
+  | { kind: 'purge'; selection: { ids: string[] } | { all: true } }
   | { kind: 'cleanup-review'; ids?: string[] }
   | { kind: 'cleanup-confirm'; token: string; requestId: string; ids: string[] }
   | { kind: 'create'; rule: ScheduleRule; prompt: string }
@@ -133,6 +135,13 @@ export function parseScheduleCommand(content: string, nowMs = Date.now()): Sched
     if (confirm) {
       validateScheduleId(confirm[2]); const ids = confirm[3].split(','); ids.forEach(validateScheduleId);
       return { kind: 'cleanup-confirm', token: confirm[1], requestId: confirm[2], ids };
+    }
+    const purge = /^purge\s+(\S+)$/.exec(args);
+    if (purge) {
+      if (purge[1] === 'all') return { kind: 'purge', selection: { all: true } };
+      const ids = purge[1].split(','); ids.forEach(validateScheduleId);
+      if (new Set(ids).size !== ids.length || ids.length > 500) throw new Error('Invalid purge selection.');
+      return { kind: 'purge', selection: { ids } };
     }
     const cancel = /^cancel\s+(\S+)$/.exec(args);
     if (cancel) { validateScheduleId(cancel[1]); return { kind: 'cancel', id: cancel[1] }; }

@@ -1,3 +1,4 @@
+import type { SchedulePurgeResult, SchedulePurgeSelection } from './ScheduleService';
 import type { NativeCleanupReview } from './ReviewedNativeCleanup';
 import { createHash } from 'crypto';
 import { parseScheduleCommand, type ScheduleCommand, validateScheduleId } from './ScheduleCommand';
@@ -6,7 +7,7 @@ import type { ScheduleOwner, ScheduleRecord } from './types';
 
 export type ScheduleOperation = Extract<ScheduleCommand, { kind: 'create' | 'cancel' }> | { kind: 'list' };
 type PublicRecord = Pick<ScheduleRecord, 'id' | 'state' | 'backend' | 'rule' | 'prompt' | 'error'>;
-interface Result { status: 'pending' | 'succeeded' | 'failed'; requestId: string; scheduleId?: string; records?: PublicRecord[]; error?: string; card?: string; cleanupReview?: NativeCleanupReview }
+interface Result { status: 'pending' | 'succeeded' | 'failed'; requestId: string; scheduleId?: string; records?: PublicRecord[]; error?: string; card?: string; cleanupReview?: NativeCleanupReview; purge?: SchedulePurgeResult; cleanup?: { absentIds: string[]; warning: string } }
 interface Receipt { scope: string; settled: boolean; pendingObserved?: boolean; terminalObserved?: boolean; digest: string; sideEffect: boolean; result: Result; done: Promise<void> }
 interface Options {
   owner: ScheduleOwner;
@@ -15,6 +16,8 @@ interface Options {
   current(): boolean;
   run(command: ScheduleOperation, scheduleId: string): Promise<ScheduleRecord[]>;
   reviewCleanup?(id: string): Promise<NativeCleanupReview>;
+  deleteCleanup?(command: Extract<ScheduleCommand, { kind: 'cleanup-confirm' }>, id: string): Promise<{ absentIds: string[]; warning: string }>;
+  purge?(selection: SchedulePurgeSelection, id: string): Promise<SchedulePurgeResult>;
   present(records: ScheduleRecord[], operationId: string): Promise<string>;
   nativeAction?(id: string): unknown;
   waitMs?: number;
@@ -23,7 +26,23 @@ const object = (value: unknown): value is Record<string, unknown> => !!value && 
 function keys(args: Record<string, unknown>, allowed: string[]): void {
   if (Object.keys(args).some(key => !allowed.includes(key))) throw new Error('Unknown scheduling field. Ownership and execution settings cannot be supplied by tools.');
 }
-function command(name: string, args: Record<string, unknown>): ScheduleOperation | { kind: 'cleanup-review' } {
+function command(name: string, args: Record<string, unknown>): ScheduleOperation | { kind: 'cleanup-review' } | Extract<ScheduleCommand, { kind: 'purge' | 'cleanup-confirm' }> {
+  if (name === 'remote_cli_schedule_cleanup_delete') {
+    keys(args, ['requestId', 'token', 'nativeIds']);
+    if (typeof args.token !== 'string' || !/^[a-f0-9-]{36}$/.test(args.token)
+      || !Array.isArray(args.nativeIds) || !args.nativeIds.length || args.nativeIds.length > 100
+      || new Set(args.nativeIds).size !== args.nativeIds.length) throw new Error('A current review token and exact nativeIds are required.');
+    args.nativeIds.forEach(validateScheduleId);
+    return { kind: 'cleanup-confirm', token: args.token, requestId: args.requestId as string, ids: args.nativeIds };
+  }
+  if (name === 'remote_cli_schedule_purge') {
+    keys(args, ['requestId', 'scheduleIds', 'all']);
+    if (args.all === true && args.scheduleIds === undefined) return { kind: 'purge', selection: { all: true } };
+    if (args.all !== undefined || !Array.isArray(args.scheduleIds) || !args.scheduleIds.length || args.scheduleIds.length > 500) throw new Error('Select exact managed scheduleIds or all: true.');
+    args.scheduleIds.forEach(validateScheduleId);
+    if (new Set(args.scheduleIds).size !== args.scheduleIds.length) throw new Error('Duplicate purge IDs.');
+    return { kind: 'purge', selection: { ids: args.scheduleIds } };
+  }
   if (name === 'remote_cli_schedule_cleanup_review') { keys(args, ['requestId']); return { kind: 'cleanup-review' }; }
   if (name === 'remote_cli_schedule_list') { keys(args, ['requestId']); return { kind: 'list' }; }
   if (name === 'remote_cli_schedule_cancel') {
@@ -102,6 +121,17 @@ export class ScheduleToolScope {
         admitted.done = Promise.resolve().then(async () => {
           try {
             if (!this.options.current()) throw new Error('Scheduling context changed before admission.');
+            if (parsed.kind === 'cleanup-confirm') {
+              if (!this.options.deleteCleanup) throw new Error('Native cleanup deletion is unavailable for this backend.');
+              admitted.result = { ...admitted.result, status: 'succeeded', cleanup: await this.options.deleteCleanup(parsed, scheduleId) };
+              return;
+            }
+            if (parsed.kind === 'purge') {
+              if (!this.options.purge) throw new Error('Schedule purge is unavailable.');
+              const purge = await this.options.purge(parsed.selection, scheduleId);
+              admitted.result = { ...admitted.result, status: 'succeeded', purge };
+              return;
+            }
             if (parsed.kind === 'cleanup-review') {
               if (!this.options.reviewCleanup) throw new Error('Reviewed native cleanup is unavailable.');
               admitted.result = { ...admitted.result, status: 'succeeded', cleanupReview: await this.options.reviewCleanup(scheduleId) };

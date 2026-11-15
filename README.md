@@ -697,10 +697,40 @@ is missing:
 Review shows native tasks, their schedules and full prompts, the bound session,
 eligibility and expiry. It includes a ready-to-send command for all eligible tasks;
 keep only the desired **native** IDs to select fewer (not managed catalog IDs).
-Send confirmation yourself within five minutes. If the reply is lost, resend the
-identical command. The full structured inventory remains bound to the review.
-The managed `remote_cli_schedule_cleanup_review` tool can prepare the same review,
-but no model tool can confirm deletion. Ordinary `/schedule cancel` remains strict.
+Use the review within five minutes. On your cleanup request, the agent can call
+`remote_cli_schedule_cleanup_review` followed by `remote_cli_schedule_cleanup_delete`
+with the returned token and selected native IDs; no extra manually typed user
+confirmation is required. The text confirmation command remains available.
+If a reply is lost, retain the same token, request ID and selection. The full
+structured inventory remains bound to the review. Ordinary `/schedule cancel`
+continues to cancel future firings while retaining managed history.
+
+From 1.6.242, `/schedule purge <managed-id,...|all>` and
+`remote_cli_schedule_purge` cancel selected managed schedules and remove verified
+retired history and queued output. `all` selects the current owner's conversation
+records, not other sessions. The tool reports `removedIds`, `alreadyRemovedIds`,
+`pending`, and `errors`; a completed operation with pending entries is not complete
+cleanup. After a partial result, retry only the unresolved IDs. Unknown native
+absence, attribution or predecessor execution stays visible, even for completed,
+failed, cancelled or interrupted history. Native-only definitions still require
+native cleanup review/delete; purge does not silently scan other sessions.
+
+Deletion tools share one authorization policy across backend adapters: an agent
+can act on your cleanup request without a second human confirmation. Actual native
+capabilities remain backend-specific: managed cancellation/purge uses the original
+provider, and native-only reviewed deletion currently requires Claude. No backend
+switch or substitute scheduler is performed automatically.
+
+Successful purge removes full rows and queued results, retaining only bounded
+ID/owner replay fences so old creation requests cannot resurrect the tasks after
+restart. Purging writes catalog format 3; older clients supporting only format 2
+cannot read it. Finish upgrading before purging; do not downgrade that catalog.
+Already sent messages and work already executing externally cannot be recalled.
+
+Native inventory timeouts now identify whether dispatch, invocation or the tool
+receipt stalled. Expired read authorizations are released so repeated timeouts
+do not exhaust capacity. Mutation timeouts remain unconfirmed until reconciled;
+the default deadline is unchanged, and a timeout does not prove task deletion.
 
 Cleanup holds an exclusive session lease and rechecks the complete inventory
 before and after exact deletion. Changed definitions, owner, connection, native

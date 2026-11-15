@@ -121,7 +121,72 @@ describe('MessageHandler native schedule closed loop', () => {
   const invoke = (name: string, args: Record<string, unknown>) => (f.handler as any).delegationBridges.get('thread-a').handler(name, args, 'native-call');
   const createArgs = { requestId: 'create-one', when: { kind: 'after', amount: 5, unit: 'm' }, prompt: 'Synthetic scheduled task' };
 
-  it('routes managed cleanup review through the actual authenticated tool scope without allowing model confirmation', async () => {
+  it.each(['claude', 'dsh'])('purges selected %s history through the text command and preserves siblings', async backend => {
+    f.setBackend(backend); await f.bind(true, true);
+    await f.send('/schedule after 5m -- Synthetic selected task');
+    await f.send('/schedule after 6m -- Synthetic sibling task');
+    const selected = f.jobs[0].input.id, sibling = f.jobs[1].input.id;
+    await f.send(`/schedule purge ${selected}`);
+    expect(f.responses().at(-1)).toMatchObject({ success: true, output: expect.stringContaining(`Removed history: ${selected}`) });
+    expect(f.jobs[0].handle.cancel).toHaveBeenCalledOnce();
+    expect(f.jobs[1].handle.cancel).not.toHaveBeenCalled();
+    const stored = JSON.parse(await readFile(path.join((f.handler as any).scheduleDirectory(), SCHEDULE_CATALOG_FILE), 'utf8'));
+    expect(stored.records.map((record: any) => record.id)).toEqual([sibling]);
+    await f.send(`/schedule purge ${selected}`);
+    expect(f.responses().at(-1).output).toContain(`Already removed: ${selected}`);
+    expect(f.jobs[0].handle.cancel).toHaveBeenCalledOnce();
+  });
+
+  it('allows model-reviewed native deletion without a manually typed confirmation and preserves unselected tasks', async () => {
+    await f.bind(true, true);
+    let rows = ['selected-native', 'sibling-native'].map(id => ({ id, prompt: `Synthetic ${id}`, cron: '* * * * *', durable: false }));
+    const remove = vi.fn(async (target: any) => { rows = rows.filter(row => row.id !== target.id); });
+    Object.assign(f.executor, { getSessionId: () => 'bound',
+      withReviewedNativeCleanup: vi.fn(async (_id: string, current: () => boolean, run: any, inTurn: boolean) => {
+        expect(inTurn).toBe(true);
+        return run({ binding: 'host', sessionId: 'bound', current, inventory: async () => structuredClone(rows), remove });
+      }) });
+    f.executor.execute.mockImplementation(async () => {
+      const review: any = await invoke('remote_cli_schedule_cleanup_review', { requestId: 'review-direct' });
+      const args = { requestId: 'delete-direct', token: review.cleanupReview.token, nativeIds: ['selected-native'] };
+      expect(await invoke('remote_cli_schedule_cleanup_delete', args)).toMatchObject({ status: 'succeeded', cleanup: { absentIds: ['selected-native'] } });
+      expect(await invoke('remote_cli_schedule_cleanup_delete', args)).toMatchObject({ status: 'succeeded' });
+      expect(remove).toHaveBeenCalledOnce();
+      return { success: true };
+    });
+    await f.send('Delete the selected synthetic native task', 'thread-a', { isSlashCommand: false });
+    expect(f.responses().at(-1).success).toBe(true);
+    expect(rows.map(row => row.id)).toEqual(['sibling-native']);
+  });
+
+  it('rejects purge if model settings change before native cleanup admission', async () => {
+    await f.bind(); await f.send('/schedule after 5m -- Synthetic purge task');
+    f.executor.withNativeScheduleOperation.mockImplementationOnce(async (_id, current, run) => {
+      f.threads[0].models = { claude: 'changed-model' };
+      expect(current()).toBe(false);
+      return run();
+    });
+    await f.send(`/schedule purge ${f.jobs[0].input.id}`);
+    expect(f.responses().at(-1).success).toBe(false);
+    expect(f.jobs[0].handle.cancel).not.toHaveBeenCalled();
+  });
+
+  it('routes model purge through native admission and removes history without user confirmation', async () => {
+    await f.bind(true, true);
+    await f.send('/schedule after 5m -- Synthetic purge task');
+    const selected = f.jobs[0].input.id;
+    f.executor.execute.mockImplementation(async () => {
+      const result: any = await invoke('remote_cli_schedule_purge', { requestId: 'purge-direct', scheduleIds: [selected] });
+      expect(result).toMatchObject({ status: 'succeeded', purge: { removedIds: [selected], pending: [], errors: [] } });
+      expect(await invoke('remote_cli_schedule_purge', { requestId: 'purge-direct', scheduleIds: [selected] })).toEqual(result);
+      return { success: true };
+    });
+    await f.send('Purge the selected synthetic schedule', 'thread-a', { isSlashCommand: false });
+    expect(f.responses().at(-1).success).toBe(true);
+    expect(f.jobs[0].handle.cancel).toHaveBeenCalledOnce();
+  });
+
+  it('routes read-only cleanup review through the authenticated tool scope without deleting tasks', async () => {
     await f.bind(true, true);
     const rows = [{ id: 'native-only', prompt: 'Synthetic native-only task', cron: '* * * * *', durable: true }];
     const remove = vi.fn();
