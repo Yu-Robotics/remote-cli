@@ -30,6 +30,7 @@ describe('managed Git phases and native worker deadlines', { timeout: 30_000 }, 
   let fixture: Awaited<ReturnType<typeof gitFixture>>;
   let manager: DelegationManager;
   let expectedShutdownFailure = false;
+  let workerStarted: ReturnType<typeof deferred>;
   let parent: DelegationParent;
   let workers: { executor: IExecutor; cwd: string; finish: (result: ExecuteResult) => void }[];
   beforeEach(async () => {
@@ -40,11 +41,12 @@ describe('managed Git phases and native worker deadlines', { timeout: 30_000 }, 
     vi.stubEnv('USERPROFILE', fixture.directory);
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     workers = [];
+    workerStarted = deferred();
     manager = new DelegationManager(new DirectoryGuard([fixture.directory]), (_guard, _config, cwd) => {
       let finish!: (result: ExecuteResult) => void;
       const completion = new Promise<ExecuteResult>(resolve => { finish = resolve; });
       const executor: IExecutor = {
-        execute: vi.fn(() => completion), abort: vi.fn(async () => true), destroy: vi.fn(async () => undefined),
+        execute: vi.fn(() => { workerStarted.resolve(); return completion; }), abort: vi.fn(async () => true), destroy: vi.fn(async () => undefined),
         waitForExit: vi.fn(async () => undefined), waitForManagedProcessGroupExit: vi.fn(async () => undefined), resetContext: vi.fn(),
         getCurrentWorkingDirectory: () => cwd, setWorkingDirectory: vi.fn(),
       };
@@ -72,6 +74,17 @@ describe('managed Git phases and native worker deadlines', { timeout: 30_000 }, 
     scope.invoke('remote_cli_delegate', { backend: 'codex', objective: `Independent ${id}` }, id) as Promise<DelegatedTaskResult>;
   const result = (scope: ReturnType<DelegationManager['begin']>, taskId: string) =>
     scope.invoke('remote_cli_result', { taskId, waitSeconds: 25 }, `result-${taskId}`) as Promise<DelegatedTaskResult>;
+
+  // Acceptance is not dispatch. Observe execution or actual terminal failure;
+  // the suite's existing 30-second deadline bounds real Git preparation too.
+  const waitForWorker = async (scope: ReturnType<DelegationManager['begin']>): Promise<void> => {
+    await Promise.race([
+      workerStarted.promise,
+      scope.collectPendingResults().then(records => {
+        throw new Error(`Task ended before worker dispatch: ${records.map(record => `${record.state}: ${record.error ?? 'no error'}`).join('; ')}`);
+      }),
+    ]);
+  };
 
   it('bounds cancellation during hanging collection while retaining the detached scope and source lease', async () => {
     const scope = manager.begin(parent);
@@ -175,12 +188,17 @@ describe('managed Git phases and native worker deadlines', { timeout: 30_000 }, 
 
   it.each(['baseline', 'prepare'] as const)('returns an accepted task before transport timeout during slow %s', async phase => {
     const gate = deferred();
+    const phaseCompleted = deferred();
+    const releaseCompletion = deferred();
     let entered = false;
     const original = manager.workspaceManager[phase].bind(manager.workspaceManager);
     vi.spyOn(manager.workspaceManager, phase).mockImplementation(async (...args: any[]) => {
       entered = true;
       await gate.promise;
-      return (original as any)(...args);
+      const prepared = await (original as any)(...args);
+      phaseCompleted.resolve();
+      await releaseCompletion.promise;
+      return prepared;
     });
     const scope = manager.begin(parent);
     vi.useFakeTimers();
@@ -198,12 +216,48 @@ describe('managed Git phases and native worker deadlines', { timeout: 30_000 }, 
       expect(workers).toHaveLength(0);
       expect((manager as any).running).toBe(1);
       expect(manager.blocksWorkspace(fixture.root, 'other')).toBe(true);
-    } finally { vi.useRealTimers(); gate.resolve(); }
-    const task = await starting;
-    await vi.waitFor(() => expect(workers).toHaveLength(1), { timeout: 5000 });
-    workers[0].finish({ success: true });
-    expect(await result(scope, task.taskId)).toMatchObject({ state: 'succeeded' });
-    expect((manager as any).running).toBe(0);
+      vi.useRealTimers();
+      gate.resolve();
+      const task = await starting;
+      const dispatch = waitForWorker(scope);
+      // Fail promptly if real preparation ends the task rather than reaching
+      // this barrier. Neither barrier replaces any Git/filesystem operation.
+      await Promise.race([phaseCompleted.promise, dispatch]);
+      vi.useFakeTimers();
+      try {
+        // Preparation completion may still be pending beyond the old poll's
+        // five-second window. No native worker deadline is running yet.
+        await vi.advanceTimersByTimeAsync(5_001);
+        expect(workers).toHaveLength(0);
+        expect((manager as any).running).toBe(1);
+        expect(manager.blocksWorkspace(fixture.root, 'other')).toBe(true);
+      } finally { vi.useRealTimers(); releaseCompletion.resolve(); }
+      await dispatch;
+      expect(workers).toHaveLength(1);
+      expect(workers[0].executor.execute).toHaveBeenCalledOnce();
+      workers[0].finish({ success: true });
+      expect(await result(scope, task.taskId)).toMatchObject({ state: 'succeeded' });
+      expect((manager as any).running).toBe(0);
+      expect(manager.blocksWorkspace(fixture.root, 'other')).toBe(false);
+    } finally {
+      vi.useRealTimers(); gate.resolve(); releaseCompletion.resolve();
+      workers.forEach(worker => worker.finish({ success: false, error: 'Synthetic fixture teardown' }));
+      await scope.close();
+      await starting;
+    }
+  });
+
+  it('reports preparation failure instead of waiting for a worker that cannot start', async () => {
+    vi.spyOn(manager.workspaceManager, 'prepare').mockRejectedValueOnce(new Error('Synthetic preparation failure'));
+    const scope = manager.begin(parent);
+    try {
+      const task = await start(scope);
+      await expect(waitForWorker(scope)).rejects.toThrow('Task ended before worker dispatch: failed: Synthetic preparation failure');
+      expect(await result(scope, task.taskId)).toMatchObject({ state: 'failed', error: expect.stringContaining('Synthetic preparation failure') });
+      expect(workers).toHaveLength(0);
+      expect((manager as any).running).toBe(0);
+      expect(manager.blocksWorkspace(fixture.root, 'other')).toBe(false);
+    } finally { await scope.close(); }
   });
 
   it.each(['prepare', 'collect'] as const)('acknowledges cancellation without waiting for slow %s or releasing ownership', async phase => {
