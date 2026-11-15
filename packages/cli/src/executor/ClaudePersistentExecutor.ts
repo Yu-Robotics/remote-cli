@@ -1,7 +1,7 @@
 import { ClaudeScheduleOwnership } from '../scheduling/claude/ClaudeScheduleOwnership';
 import { ClaudeSessionSchedules, SCHEDULE_HOOKS } from '../scheduling/claude/ClaudeSessionSchedules';
 import { TurnLedger } from './claude/TurnLedger';
-import { NativeScheduleAbsentError, NativeScheduleCleanupError } from '../scheduling/types';
+import { NativeScheduleAbsentError, NativeScheduleNotAdmittedError, NativeScheduleCleanupError } from '../scheduling/types';
 import type { NativeScheduleInput, NativeScheduleEvent, NativeScheduleHandle, NativeScheduleRecovery, NativeScheduleRelease } from '../scheduling/types';
 import { managedTools } from '../managed/tools';
 import { spawnManaged } from './ManagedSpawn';
@@ -565,6 +565,31 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     return {
       provider: 'claude-session-skip-unadmitted-v1', strategy: 'reconstruct', orderlyOnly: true, futureOnly: true,
       handoffPolicy: 'skip-unadmitted',
+      cancelRetained: async (record, context) => {
+        const identity = JSON.parse(record.recovery!.identity);
+        const child = this.claudeProcess, epoch = this.stopEpoch;
+        const current = () => context.isCurrent() && !this.isDestroyed && !this.isStopping
+          && !!child && this.claudeProcess === child && this.stopEpoch === epoch && this.sessionId === identity.sessionId
+          && record.cwd === this.currentWorkingDirectory && record.threadId === this.threadId
+          && identity.cwd === this.currentWorkingDirectory && identity.threadId === this.threadId
+          && identity.model === this.model && identity.effort === this.effort
+          && !!identity.effectiveModel && identity.effectiveModel === (this.acknowledgedModel || this.reportedModel || this.model)
+          && this.scheduleHooksReady && this.turnLedger.supported(child.pid) && !this.modelChange
+          && !this.retainedAbort && !this.abortOperation && !this.hasUncertainShutdown();
+        if (!record.nativeId || !identity.sessionId || !current()) {
+          throw new Error('Native cancellation requires the matching original session, model and supported current host. Open that thread and retry the full managed schedule ID; no replacement was created.');
+        }
+        const ownership = this.scheduleHostOwnership();
+        const predecessorConfirmed = ownership.cancellationProof();
+        const timezone = await this.readNativeScheduleTimezone();
+        if (!current()) throw new Error('Native cancellation host changed.');
+        await this.schedules().cancelRetained({ id: record.id, threadId: record.threadId, backend: 'claude',
+          cwd: record.cwd, prompt: record.prompt, rule: record.rule, recovery: record.recovery }, record.nativeId, current, timezone);
+        if (!current()) throw new Error('Native cancellation host changed after deletion.');
+        if (!predecessorConfirmed || !ownership.cancellationProof()) {
+          throw new Error('Owned future definition is absent on the current host, but predecessor work remains unconfirmed in this boot. Cancellation intent is retained; do not recreate the job. Review predecessor ownership before claiming complete cleanup.');
+        }
+      },
       describe: input => JSON.stringify({ marker: randomUUID(), sessionId: this.sessionId,
         cwd: input.cwd, threadId: this.threadId, model: this.model, effort: this.effort,
         effectiveModel: this.acknowledgedModel || this.reportedModel || this.model }),
@@ -575,20 +600,28 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
           && state.epoch === this.stopEpoch && !this.claudeProcess) this.scheduleRestart = undefined;
       },
       reconcile: async (record, context, emit) => {
-        const identity = JSON.parse(record.recovery!.identity);
-        const clean = record.recovery?.handoff === 'clean' && record.recovery.nativeDefinitionAbsent;
-        if ((!clean && (!record.recovery?.futureOnly || record.rule.kind !== 'cron'))
-          || record.recovery?.handoffPolicy !== 'skip-unadmitted' || !context.isCurrent()
-          || context.signal.aborted || !identity.sessionId || identity.sessionId !== this.sessionId
-          || identity.cwd !== this.currentWorkingDirectory || identity.threadId !== this.threadId
-          || identity.model !== this.model || identity.effort !== this.effort) {
-          throw new Error('Original Claude context or recovery evidence changed.');
+        let identity: { sessionId: string; cwd: string; threadId: string; model?: string; effort?: string; effectiveModel?: string };
+        let clean: boolean | undefined;
+        // Only this synchronous preflight can certify that no native admission
+        // began. Failures after host startup retain the ordinary uncertainty fence.
+        try {
+          identity = JSON.parse(record.recovery!.identity);
+          clean = record.recovery?.handoff === 'clean' && record.recovery.nativeDefinitionAbsent;
+          if ((!clean && (!record.recovery?.futureOnly || record.rule.kind !== 'cron'))
+            || record.recovery?.handoffPolicy !== 'skip-unadmitted' || !context.isCurrent()
+            || context.signal.aborted || !identity.sessionId || identity.sessionId !== this.sessionId
+            || identity.cwd !== this.currentWorkingDirectory || identity.threadId !== this.threadId
+            || identity.model !== this.model || identity.effort !== this.effort) {
+            throw new Error('Original Claude context or recovery evidence changed.');
+          }
+          if (this.scheduleRestart && !this.scheduleRestart.exit) throw new Error('Claude predecessor exit is unconfirmed.');
+          this.scheduleRestart = undefined;
+          const ownership = this.scheduleHostOwnership();
+          ownership.reserve(!!clean);
+          if (!clean) ownership.assertRebootRecovery();
+        } catch (error) {
+          throw new NativeScheduleNotAdmittedError(error instanceof Error ? error.message : 'Native recovery preflight refused admission.');
         }
-        if (this.scheduleRestart && !this.scheduleRestart.exit) throw new Error('Claude predecessor exit is unconfirmed.');
-        this.scheduleRestart = undefined;
-        const ownership = this.scheduleHostOwnership();
-        ownership.reserve(!!clean);
-        if (!clean) ownership.assertRebootRecovery();
         const restoration = {};
         this.scheduleRestoring = restoration;
         const epoch = this.stopEpoch;
@@ -638,6 +671,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     const executor = this;
     return { ...handle,
       get nativeId() { return handle.nativeId; },
+      get nativeDefinitionAbsent() { return handle.nativeDefinitionAbsent; },
       get recoveryIdentity() { return JSON.stringify({ ...identity, sessionId: executor.sessionId,
         model: executor.model, effort: executor.effort,
         effectiveModel: executor.acknowledgedModel || executor.reportedModel || executor.model }); },

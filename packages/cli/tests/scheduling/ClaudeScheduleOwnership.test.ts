@@ -56,6 +56,25 @@ describe('Claude schedule predecessor ownership', () => {
     const a = guard(); a.reserve(true); a.close(); host = 'another-fixture-host'; boot = 'boot-two';
     expect(() => guard().reserve(false)).toThrow('another machine');
   });
+  it('allows removal-only inspection without granting same-boot execution admission', () => {
+    const first = guard(); first.reserve(true);
+    expect(first.cancellationProof()).toBe(true);
+    expect(() => guard().cancellationProof()).toThrow('Another client');
+    first.hostClosed(); expect(first.cancellationProof()).toBe(false); first.close();
+    const successor = guard(); const before = fs.readFileSync(successor.filename, 'utf8');
+    expect(successor.cancellationProof()).toBe(false);
+    expect(fs.readFileSync(successor.filename, 'utf8')).toBe(before);
+    expect(() => successor.reserve(false)).toThrow('PID absence');
+    expect(() => successor.assertRebootRecovery()).toThrow('later boot');
+    boot = 'boot-two'; expect(successor.cancellationProof()).toBe(true);
+    expect(fs.readFileSync(successor.filename, 'utf8')).toBe(before);
+  });
+  it('requires a valid same-machine receipt for cancellation and accepts clean exit evidence', () => {
+    const first = guard(); expect(() => first.cancellationProof()).toThrow('missing');
+    first.reserve(true); first.hostClosed(); first.confirmClean(); first.close();
+    const successor = guard(); expect(successor.cancellationProof()).toBe(true);
+    host = 'another-fixture-host'; expect(() => successor.cancellationProof()).toThrow('another machine');
+  });
   it('keeps different native sessions independent', () => {
     const a = guard(), b = guard('new-fixture-session'); a.reserve(true); b.reserve(true);
     expect(a.filename).not.toBe(b.filename);

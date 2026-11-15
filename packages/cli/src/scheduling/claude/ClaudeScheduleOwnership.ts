@@ -51,6 +51,22 @@ export class ClaudeScheduleOwnership {
     this.gate?.verify();
     if (!this.live || this.admission !== 'reboot') throw new Error('Unclean native schedule recovery requires verified predecessor loss on a later boot of the same machine.');
   }
+  /** Acquire exclusion for removal only. Never overwrite the predecessor receipt
+   * or grant execution admission from a same-boot dirty predecessor.
+   */
+  cancellationProof(): boolean {
+    if (!this.gate) {
+      this.gate = this.dependencies.gate(`${this.filename}.lock`);
+      if (!this.gate) throw new Error('Another client owns this native schedule session.');
+    }
+    this.gate.verify();
+    const saved = this.read();
+    const current = this.dependencies.identity();
+    if (!saved || saved.identity.host !== current.host) {
+      throw new Error('Native cancellation ownership receipt is missing or belongs to another machine. Preserve the session for manual review.');
+    }
+    return saved.clean || saved.identity.boot !== current.boot || (this.live && saved.token === this.receipt?.token);
+  }
   hostClosed(): void { this.live = false; }
   confirmClean(): void {
     if (this.live || !this.receipt || !this.gate) throw new Error('Native schedule host exit is unconfirmed.');

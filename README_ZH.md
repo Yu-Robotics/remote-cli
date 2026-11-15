@@ -646,6 +646,20 @@ The ownership APIs have Linux/macOS/Windows implementations; this change's nativ
 acceptance ran only on Linux with a simulated boot identity transition. It is not
 proof of a real machine-reboot recovery or of native macOS/Windows behavior.
 
+From CLI 1.6.240, explicit cancellation can inspect an interrupted Claude job in
+its original native session even without a live schedule handle. Use the full
+managed ID from `/schedule list`, not the short native Cron ID. Cleanup verifies
+structured inventory against the saved marker, complete prompt, rule, native ID
+and original session/model, deletes only that definition, and verifies absence.
+It never recreates a job or authorizes a scheduled occurrence. Other jobs and
+already admitted work keep their existing ownership. A same-boot uncertain
+predecessor still prevents claiming complete cleanup: the current host's verified
+absence is reported as partial cleanup and cancellation intent remains saved.
+Missing legacy ownership evidence, changed identities or unresolved receipts
+require manual review of the original session; do not bypass native authorization
+or recreate the task. An interrupted catalog row alone does not prove native
+absence, and restarting Claude can reload definitions from its transcript.
+
 Claude handoff fences scheduled work at the UserPromptSubmit admission boundary,
 before model inference or tools. An already-fired occurrence that has not crossed
 that boundary may be skipped, including a queued or still-expanding wakeup. Skips

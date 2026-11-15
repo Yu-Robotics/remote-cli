@@ -3,7 +3,7 @@ import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { ScheduleService, SCHEDULE_CATALOG_FILE, type ScheduleServiceOptions } from '../src/scheduling/ScheduleService';
-import { NativeScheduleCleanupError, type NativeScheduleEvent, type NativeScheduleHandle, type NativeScheduleInput,
+import { NativeScheduleCleanupError, NativeScheduleNotAdmittedError, type NativeScheduleEvent, type NativeScheduleHandle, type NativeScheduleInput,
   type NativeScheduleProvider, type NativeScheduleRecovery, type ScheduleOwner, type ScheduleRecord } from '../src/scheduling/types';
 
 const owner: ScheduleOwner = { threadId: 'thread-a', openId: 'owner-a', generation: 'generation-a' };
@@ -129,6 +129,49 @@ describe('durable provider-neutral schedule recovery', () => {
     await next.recover(); expect(native.calls).toBe(0);
   });
 
+  it('releases only a proven pre-admission refusal for explicit retained cleanup', async () => {
+    const next = await restart(await start());
+    native.hook = async () => { throw new NativeScheduleNotAdmittedError('Synthetic preflight refusal'); };
+    await next.recover();
+    const cleanup = vi.fn(async (record: ScheduleRecord) => { native.store.delete(record.id); });
+    native.recovery.cancelRetained = cleanup;
+    expect(await next.cancel(owner, 'job-a')).toMatchObject({ state: 'cancelled', cancelRequested: true });
+    expect(cleanup).toHaveBeenCalledOnce(); expect(native.creations).toBe(1);
+  });
+  it('coalesces retained cancellation, preserves its tombstone, and never runs recovery or create', async () => {
+    const next = await restart(await start()); const gate = deferred<void>();
+    const cleanup = vi.fn(async (record: ScheduleRecord, context: { isCurrent(): boolean }) => {
+      expect(context.isCurrent()).toBe(true); expect(record.cancelRequested).toBe(true);
+      await gate.promise; native.store.delete(record.id);
+    });
+    native.recovery.cancelRetained = cleanup;
+    const first = next.cancel(owner, 'job-a'); const second = next.cancel(owner, 'job-a');
+    try {
+      await vi.waitFor(() => expect(cleanup).toHaveBeenCalledOnce());
+      expect((await next.list(owner))[0]).toMatchObject({ state: 'interrupted', cancelRequested: true });
+    } finally { gate.resolve(); await Promise.allSettled([first, second]); }
+    expect(await first).toMatchObject({ state: 'cancelled', cancelRequested: true });
+    expect(await second).toMatchObject({ state: 'cancelled', cancelRequested: true });
+    await next.recover(); await (await restart(next)).recover();
+    expect(native.calls).toBe(0); expect(native.creations).toBe(1); expect(native.store.size).toBe(0);
+  });
+  it('does not report cleanup success if the owner changes before the native receipt', async () => {
+    const next = await restart(await start());
+    native.recovery.cancelRetained = vi.fn(async () => { current = false; });
+    await expect(next.cancel(owner, 'job-a')).rejects.toThrow('owner changed');
+    current = true;
+    expect((await next.list(owner))[0]).toMatchObject({ state: 'interrupted', cancelRequested: true });
+  });
+  it('reports missing legacy identity honestly instead of returning an interrupted record as cancelled', async () => {
+    const first = await start(); await first.destroy();
+    const data = await catalog(); delete data.records[0].recovery; await write(data);
+    native.recovery.cancelRetained = vi.fn();
+    const next = make(); await next.initialize();
+    await expect(next.cancel(owner, 'job-a')).rejects.toThrow('ownership metadata');
+    expect(next.canCancel(owner, 'job-a')).toBe(true);
+    expect((await next.list(owner))[0]).toMatchObject({ state: 'interrupted', cancelRequested: true });
+    expect(native.creations).toBe(1);
+  });
   it('keeps cleanup ownership when a cleanly paused persistent one-shot expires', async () => {
     const first = make(); await first.initialize(); await first.create(owner, input('job-a', true));
     const next = await restart(first); now += 20 * 60_000; await next.recover();

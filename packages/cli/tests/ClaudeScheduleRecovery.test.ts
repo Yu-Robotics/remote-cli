@@ -217,6 +217,49 @@ describe('Claude production orderly recovery', () => {
     expect((await service.list(owner))[0].error).toContain('PID absence');
     expect(inventory.size).toBe(1);
   });
+  it.each([false, true])('cancels a retained native definition without recreation (verified reboot=%s)', async nextBoot => {
+    await create(); await create('second'); const [target, sibling] = [...inventory.keys()];
+    await abruptRestart(false); await service.recover();
+    expect((service as any).runtimes.size).toBe(0);
+    if (nextBoot) boot = 'fixture-next-boot';
+    const cancel = () => executor.withNativeScheduleOperation('cancel-operation', () => true,
+      () => service.cancel(owner, 'first'), false);
+    if (nextBoot) expect(await cancel()).toMatchObject({ state: 'cancelled', cancelRequested: true });
+    else await expect(cancel()).rejects.toThrow('predecessor work remains unconfirmed');
+    expect([...inventory.keys()]).toEqual([sibling]); expect(inventory.has(target)).toBe(false);
+    const record = (await service.list(owner)).find(r => r.id === 'first')!;
+    expect(record.cancelRequested).toBe(true);
+    expect(record.state).toBe(nextBoot ? 'cancelled' : 'interrupted');
+    expect(executor.getSessionId()).toBe('synthetic-original-session');
+    const actions = child.stdin.write.mock.calls.map(([line]: [string]) => JSON.parse(line))
+      .filter((p: any) => p.type === 'user');
+    expect(actions).toHaveLength(3);
+    expect(actions.every((p: any) => !JSON.stringify(p).includes('select:CronCreate'))).toBe(true);
+    await service.recover();
+    expect(inventory.has(target)).toBe(false); expect(inventory.has(sibling)).toBe(true);
+    expect((await service.list(owner)).find(r => r.id === 'first')!.cancelRequested).toBe(true);
+  });
+  it.each(['session', 'model', 'host', 'capabilities'])('refuses retained cancellation after %s identity changes', async variant => {
+    await create(); const target = [...inventory.keys()][0]; await abruptRestart(true); await executor.listModels();
+    if (variant === 'session') raw.sessionId = 'synthetic-other-session';
+    if (variant === 'model') raw.model = 'synthetic-other-model';
+    if (variant === 'host') vi.mocked(ownershipRuntime.bootIdentity).mockReturnValue({ host: 'foreign-host', boot, namespace: 'fixture-namespace' });
+    if (variant === 'capabilities') raw.turnLedger.capabilities.clear();
+    await expect(executor.withNativeScheduleOperation('cancel-operation', () => true,
+      () => service.cancel(owner, 'first'), false)).rejects.toThrow();
+    expect(inventory.has(target)).toBe(true);
+    expect((await service.list(owner))[0]).toMatchObject({ state: 'interrupted', cancelRequested: true });
+  });
+  it('rechecks model ownership after asynchronous timezone inspection before authorizing deletion', async () => {
+    await create(); const target = [...inventory.keys()][0]; await abruptRestart(true); await executor.listModels();
+    vi.spyOn(raw, 'readNativeScheduleTimezone').mockImplementation(async () => {
+      raw.model = 'synthetic-changed-model'; return 'UTC';
+    });
+    await expect(executor.withNativeScheduleOperation('cancel-operation', () => true,
+      () => service.cancel(owner, 'first'), false)).rejects.toThrow('host changed');
+    expect(inventory.has(target)).toBe(true);
+    expect((await service.list(owner))[0]).toMatchObject({ state: 'interrupted', cancelRequested: true });
+  });
   it('recovers future cron intent but never retries an unknown admitted occurrence', async () => {
     await create(); wake('unknown-past', [...inventory.values()][0]); await drain();
     expect((await service.list(owner))[0].state).toBe('running');

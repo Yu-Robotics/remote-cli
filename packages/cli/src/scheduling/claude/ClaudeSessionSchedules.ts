@@ -17,6 +17,7 @@ interface Job {
   inventoryReceipt?: boolean;
   expectedNativeId?: string;
   onceDefinitionAlreadyAbsent?: true;
+  cleanupOnly?: true;
 }
 interface Pending {
   action: NativeScheduleAction; job: Job; scope?: Scope; toolId?: string;
@@ -148,6 +149,50 @@ export class ClaudeSessionSchedules {
       ? structuredClone(this.pending.action) : undefined;
   }
 
+  /** Retained ownership authorizes deletion only, never restored wake admission. */
+  async cancelRetained(input: NativeScheduleInput, nativeId: string, current: () => boolean, timezone: string): Promise<void> {
+    if (this.closed || this.definitionRemoval || !this.capable || !this.scope || !current() || this.busy) {
+      throw new Error('Native cancellation requires the current idle original session.');
+    }
+    const stable = input.recovery && JSON.parse(input.recovery.identity).marker;
+    if (typeof stable !== 'string' || !/^[a-f0-9-]{36}$/.test(stable) || !idPattern.test(nativeId)) {
+      throw new Error('Retained native cancellation identity is unavailable.');
+    }
+    // Cancellation does not reschedule an expired one-shot. Reconstruct only its
+    // original wall-clock expression for exact inventory comparison.
+    const rule = nativeRule(input.rule, input.rule.kind === 'once' ? Math.min(Date.now(), Date.parse(input.rule.at) - 1) : Date.now());
+    let cron = rule.cron;
+    if (rule.at) {
+      const parts = new Intl.DateTimeFormat('en-US', { timeZone: timezone, month: 'numeric', day: 'numeric',
+        hour: 'numeric', minute: 'numeric', hourCycle: 'h23' }).formatToParts(rule.at);
+      const part = (name: string) => Number(parts.find(p => p.type === name)!.value);
+      cron = `${part('minute')} ${part('hour')} ${part('day')} ${part('month')} *`;
+    } else if (new Intl.DateTimeFormat('en', { timeZone: rule.timezone }).resolvedOptions().timeZone
+      !== new Intl.DateTimeFormat('en', { timeZone: timezone }).resolvedOptions().timeZone) {
+      throw new Error('Original native schedule timezone changed.');
+    }
+    const marker = `[remote-cli:${stable}]`, prompt = `${marker}\n${input.prompt}`;
+    let job = this.jobs.get(input.id);
+    if (job && (!job.cleanupOnly || job.prompt !== prompt || job.expectedNativeId !== nativeId || job.cron !== cron
+      || job.recurring !== rule.recurring || [...this.authorized.values()].some(auth => auth.job === job))) {
+      throw new Error('Native cancellation ownership changed or a receipt remains unresolved.');
+    }
+    if (!job) {
+      if (this.jobs.size >= 100) throw new Error('Native cancellation ownership capacity is unavailable.');
+      job = { id: input.id, marker, prompt, cron, recurring: rule.recurring, current, nativeId,
+        expectedNativeId: nativeId, cleanupOnly: true, recovering: true, adopt: true,
+        uncertain: false, retired: false, cancelled: false, emit: () => {} };
+      this.jobs.set(input.id, job);
+    }
+    job.current = current;
+    // Every retry verifies inventory again; a prior local receipt is not fresh absence proof.
+    job.retired = false; job.cancelled = false;
+    if (this.inventory(job, await this.request(job, { tool: 'CronList', input: {} }))) await this.cancel(job);
+    if (!current()) throw new Error('Native cancellation owner changed.');
+    if (this.inventory(job, await this.request(job, { tool: 'CronList', input: {} }))) throw new Error('Native cancellation remains unconfirmed.');
+    job.cancelled = true; job.retired = true;
+  }
+
   async create(input: NativeScheduleInput, emit: Job['emit'], current: () => boolean = () => true,
     timezone = this.options.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone, restore: boolean | 'adopt' | 'adopt-existing' = false, expectedNativeId?: string): Promise<NativeScheduleHandle> {
     if (this.closed || this.definitionRemoval || this.jobs.has(input.id) || this.jobs.size >= 100 || [...this.jobs.values()].filter(j => !j.retired).length >= 5) {
@@ -203,8 +248,10 @@ export class ClaudeSessionSchedules {
   }
 
   private handle(job: Job): NativeScheduleHandle {
+    const adapter = this;
     return {
       cancellationKeepsRunning: true,
+      get nativeDefinitionAbsent() { return !adapter.closed && job.cancelled; },
       get onceDefinitionAlreadyAbsent() { return job.onceDefinitionAlreadyAbsent; },
       get nativeId() { return job.nativeId ?? `unconfirmed-${job.id}`; },
       list: async () => {
@@ -274,6 +321,9 @@ export class ClaudeSessionSchedules {
     const owned = entries.filter(entry => entry.prompt.startsWith(`${job.marker}\n`));
     if (owned.length > 1) throw new Error('Ambiguous native schedule identity.');
     const entry = owned[0];
+    if (!entry && entries.some(entry => entry.id === (job.expectedNativeId ?? job.nativeId))) {
+      throw new Error('Native schedule ID now belongs to a different definition.');
+    }
     if (entry && (entry.prompt !== job.prompt || entry.cron !== job.cron || entry.recurring !== job.recurring
       || entry.durable !== false || job.expectedNativeId && job.expectedNativeId !== entry.id
       || job.nativeId && job.nativeId !== entry.id
@@ -352,7 +402,7 @@ export class ClaudeSessionSchedules {
         // startBatch emits their lifecycle IDs in prompt concatenation order.
         if (batch.occurrences.length >= 100) { this.failPending('Native schedule batch limit reached.'); return true; }
         batch.occurrences.push({ id: frame.command_uuid, admissible: this.jobs.size > 0
-          && ![...this.jobs.values()].some(job => !job.retired && job.recovering) });
+          && ![...this.jobs.values()].some(job => !job.retired && job.recovering && !job.cleanupOnly) });
         if (this.submitted) { this.bind([this.submitted]); this.submitted = undefined; }
         return true;
       }

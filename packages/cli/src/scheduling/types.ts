@@ -50,6 +50,11 @@ export interface NativeScheduleRecovery {
   readonly orderlyOnly?: true;
   readonly futureOnly?: true;
   readonly handoffPolicy?: ScheduleHandoffPolicy;
+  /** Cancellation only: verify exact retained definitions on the original session,
+   * never recreate or admit occurrences. Reject if global cleanup is unconfirmed,
+   * even when removal on the current host succeeded. No execution-recovery gate.
+   */
+  cancelRetained?(record: ScheduleRecord, context: { isCurrent(): boolean }): Promise<void>;
   /** After all job releases: stop and join the exact owned native host. */
   finishRestart?(): Promise<void>;
   /** All jobs for this owner are terminal after recovery (for example expired).
@@ -85,6 +90,8 @@ export interface NativeScheduleHandle {
   readonly onceDefinitionAlreadyAbsent?: true;
   /** Shared-session deletion leaves an already started occurrence running. */
   readonly cancellationKeepsRunning?: boolean;
+  /** Fresh local absence evidence; invalidated when its native host exits. */
+  readonly nativeDefinitionAbsent?: boolean;
   /**
    * Optional orderly shutdown handoff. Exclude new firings and prove
    * no admitted execution remains. A negotiated skip-unadmitted policy may discard
@@ -107,6 +114,9 @@ export interface NativeScheduleProvider {
   recoveryFor?(input: NativeScheduleInput): NativeScheduleRecovery | undefined;
   create(input: NativeScheduleInput, onEvent: (event: NativeScheduleEvent) => void): Promise<NativeScheduleHandle>;
 }
+
+/** Provider proved refusal before starting native admission or mutation. Not absence evidence. */
+export class NativeScheduleNotAdmittedError extends Error {}
 
 /** Authoritative read-only inventory found no definition; no mutation was attempted. */
 export class NativeScheduleAbsentError extends Error {}

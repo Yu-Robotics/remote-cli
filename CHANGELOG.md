@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.240] - 2026-11-15
+
+### Fixed
+- Route interrupted Claude schedule cancellation through a removal-only native inventory operation when the live handle is gone. Require the original session/model, durable ownership evidence, exact native ID, full marked prompt and rule before deleting; verify absence afterward without creating or admitting work.
+- Preserve cancellation intent and report partial cleanup when a same-boot predecessor remains unconfirmed. Legacy records without ownership evidence now fail explicitly instead of returning an unchanged interrupted record as a successful cancellation. Direct unscoped native deletion remains denied.
+
+### Tests
+- Cover scoped inventory/deletion receipts, mismatched ownership, expired one-shots, stale and late replies, repeated cancellation, sibling execution, predecessor fences and cancellation tombstones using isolated synthetic protocol fixtures.
+
 ## [1.6.239] - 2026-11-14
 
 ### Fixed

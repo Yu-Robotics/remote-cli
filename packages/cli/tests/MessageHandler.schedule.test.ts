@@ -154,6 +154,20 @@ describe('MessageHandler native schedule closed loop', () => {
     expect(f.executor.configureManagedTools).not.toHaveBeenCalled(); expect(native.create).not.toHaveBeenCalled();
   });
 
+  it('scopes interrupted legacy cancellation and reports missing native ownership without claiming success', async () => {
+    await f.bind(); await f.send('/schedule after 5m -- Synthetic future work');
+    const id = f.jobs[0].input.id;
+    await f.restart();
+    Object.assign(f.executor, { nativeScheduleRecovery: { provider: 'fixture-recovery', strategy: 'reconstruct',
+      describe: () => 'fixture-identity', reconcile: vi.fn(), cancelRetained: vi.fn() } });
+    await f.bind(); f.executor.withNativeScheduleOperation.mockClear();
+    await f.send(`/schedule cancel ${id}`);
+    expect(f.executor.withNativeScheduleOperation).toHaveBeenCalledWith(expect.any(String), expect.any(Function), expect.any(Function), false);
+    expect(f.responses().at(-1)).toMatchObject({ success: false });
+    expect(f.responses().at(-1).error).toContain('ownership metadata');
+    expect(native.create).toHaveBeenCalledOnce();
+  });
+
   it('drains a confirmed foreground queue when an autonomous native occurrence completes', async () => {
     await f.bind(); await f.send('/schedule after 2m -- Synthetic queued occurrence');
     f.setExecutorBusy(true);

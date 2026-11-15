@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { validateScheduleId, validateSchedulePrompt, validateScheduleRule } from './ScheduleCommand';
 import type { NativeScheduleEvent, NativeScheduleHandle, NativeScheduleInput, NativeScheduleProvider,
   ScheduleDelivery, ScheduleOwner, ScheduleRecord, ScheduleRule, ScheduleRecoveryCheckpoint } from './types';
-import { NativeScheduleAbsentError, NativeScheduleCleanupError } from './types';
+import { NativeScheduleAbsentError, NativeScheduleNotAdmittedError, NativeScheduleCleanupError } from './types';
 import { assertNativeScheduleBackend, isNativeScheduleBackend } from './ScheduleCapabilities';
 
 export const SCHEDULE_CATALOG_FILE = 'schedule-catalog.json';
@@ -121,6 +121,7 @@ export class ScheduleService {
   private records = new Map<string, ScheduleRecord>();
   private pending = new Map<string, PendingDelivery>();
   private runtimes = new Map<string, Runtime>();
+  private retainedCancellations = new Map<string, Promise<ScheduleRecord>>();
   private tail: Promise<unknown> = Promise.resolve();
   private deliveryTail: Promise<unknown> = Promise.resolve();
   private tasks = new Set<Promise<unknown>>();
@@ -290,7 +291,7 @@ export class ScheduleService {
         succeeded = true;
       } catch (error) {
         controller.abort();
-        if (!admitted || error instanceof NativeScheduleAbsentError) { runtime.stopped = true; runtime.resolveReady(undefined); }
+        if (!admitted || error instanceof NativeScheduleAbsentError || error instanceof NativeScheduleNotAdmittedError) { runtime.stopped = true; runtime.resolveReady(undefined); }
         // Do not retry an ambiguous mutation or release its handle on a timeout.
         await this.blockRecovery(record, errorText(error));
         if (runtime.handle) await this.stop(id, runtime).catch(() => {});
@@ -442,7 +443,8 @@ export class ScheduleService {
     const record = this.owned(owner, id);
     const runtime = this.runtimes.get(id);
     if (record.state === 'cancelled' && runtime?.handle?.cancellationKeepsRunning && !record.error) return false;
-    return LIVE.has(record.state) || recoveryOwnsWork(record) || Boolean(runtime && !runtime.stopped);
+    return LIVE.has(record.state) || recoveryOwnsWork(record) || record.state === 'interrupted' && !!record.nativeId && this.supportsRetainedCancellation(record)
+      || Boolean(runtime && !runtime.stopped);
   }
 
   /** Keep admitted native work visible when cleanup cannot safely acquire its host. */
@@ -504,16 +506,21 @@ export class ScheduleService {
     let operation: Promise<ScheduleRecord> | undefined;
     await this.serial(async () => {
       const record = this.owned(owner, id);
+      existing = this.retainedCancellations.get(id);
+      if (existing) return;
       runtime = this.runtimes.get(id);
       record.cancelRequested = true;
       runtime?.recoveryAbort?.abort();
       if (record.recovery) record.recovery.status = 'blocked';
       await this.persist();
       if (!runtime && record.recovery?.handoff === 'clean' && record.recovery.nativeDefinitionAbsent) { record.state = 'cancelled'; delete record.error; await this.persist(); }
-      if (!runtime && recoveryOwnsWork(record)) {
-        record.error = 'Cancellation intent retained; native cleanup is unconfirmed. Recovery will not recreate this job.';
-        await this.persist();
-        throw new Error(record.error);
+      const retainedCleanup = !runtime || runtime.stopped && !runtime.handle?.nativeDefinitionAbsent
+        && this.supportsRetainedCancellation(record);
+      if (retainedCleanup && (recoveryOwnsWork(record)
+        || record.state === 'interrupted' && !!record.nativeId && this.supportsRetainedCancellation(record))) {
+        operation = Promise.resolve().then(() => this.cancelRetained(record));
+        this.retainedCancellations.set(id, operation);
+        return;
       }
       if (runtime?.cancelPromise) { existing = runtime.cancelPromise; return; }
       if (!LIVE.has(record.state) && !runtime?.cancelling && (!runtime || runtime.stopped)) {
@@ -535,6 +542,36 @@ export class ScheduleService {
       runtime.cancelPromise = operation;
     });
     return (existing ?? operation)!;
+  }
+
+  private supportsRetainedCancellation(record: ScheduleRecord): boolean {
+    return !!this.options.provider.recoveryFor?.({ ...record, ...record.execution })?.cancelRetained;
+  }
+
+  private async cancelRetained(record: ScheduleRecord): Promise<ScheduleRecord> {
+    const current = () => !this.closing && !this.fault && this.current(record) && record.cancelRequested === true;
+    try {
+      const recovery = record.recovery;
+      const provider = this.options.provider.recoveryFor?.({ id: record.id, threadId: record.threadId,
+        backend: record.backend, cwd: record.cwd, prompt: record.prompt, rule: record.rule,
+        ...record.execution, recovery });
+      if (!recovery || !provider?.cancelRetained || provider.provider !== recovery.provider || provider.strategy !== recovery.strategy
+        || (provider.handoffPolicy ?? 'drain-all') !== (recovery.handoffPolicy ?? 'drain-all')) {
+        throw new Error('Cancellation intent retained; native cleanup is unconfirmed. Original native ownership metadata or cleanup support is unavailable. Preserve the original session for manual inventory review; do not recreate this job.');
+      }
+      if (!current()) throw new Error('Native cancellation owner is no longer current.');
+      await provider.cancelRetained(structuredClone(record), { isCurrent: current });
+      await this.serial(async () => {
+        if (!current()) throw new Error('Native cancellation owner changed before its receipt was saved.');
+        record.state = 'cancelled'; delete record.error;
+        for (const [key, pending] of this.pending) if (pending.scheduleId === record.id && !pending.afterCancellation) this.pending.delete(key);
+        await this.persist();
+      });
+      return structuredClone(record);
+    } catch (error) {
+      await this.serial(async () => { record.error = errorText(error); if (!this.fault) await this.persist(); });
+      throw error;
+    } finally { this.retainedCancellations.delete(record.id); }
   }
 
   /** Explicit reconnect retry. No timer or periodic retry is installed. */

@@ -3675,7 +3675,11 @@ You can also use natural language commands to control Claude Code CLI.`,
           throw new Error('This native scheduling adapter does not support restricted Claude sandboxes. No schedule was created and sandbox settings were not changed.');
         }
       }
-      if (!nativeBound && backend === 'claude' && (command.kind === 'create' || this.schedules?.hasActiveSchedules(owner.threadId))) {
+      const nativeCancellation = !nativeBound && backend === 'claude' && command.kind === 'cancel'
+        && (await this.initializeSchedules()).canCancel(owner, command.id);
+      check();
+      if (!nativeBound && backend === 'claude' && (command.kind === 'create' || nativeCancellation
+        || command.kind !== 'cancel' && this.schedules?.hasActiveSchedules(owner.threadId))) {
         const executor = this.threadPool.getExecutor(owner.threadId);
         if (!executor.withNativeScheduleOperation) throw new Error('Shared native session scheduling is unavailable.');
         if (!context && command.kind === 'create' && executor.configureManagedTools) {
