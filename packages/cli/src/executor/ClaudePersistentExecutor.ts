@@ -286,6 +286,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       && this.turnLedger.supported(this.claudeProcess?.pid));
   }
   abortStatusMessage(): string | undefined { return this.lastAbortMessage; }
+  hasPendingScheduleMutation(): boolean { return this.sessionSchedules?.cleanupMutationPending ?? false; }
   hasPendingCancellation(): boolean { return !!this.retainedAbort; }
   private isStopping = false; // Flag to indicate intentional process stop
   private isSessionError = false; // Flag to suppress auto-restart on session-not-found errors
@@ -801,6 +802,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       return await adapter.inToolOperation(id, valid, () => run({
         binding: createHash('sha256').update(JSON.stringify([this.cleanupHosts.get(child), sessionId, cwd, epoch, settings])).digest('hex'),
         sessionId, cwd, current: valid,
+        mutationPending: () => adapter.cleanupMutationPending,
         retirementConfirmed: () => valid() && adapter.cleanupRetirementReady && lease!.retirementConfirmed(),
         inventory: () => adapter.reviewedInventory(valid), remove: target => adapter.reviewedDelete(target, valid),
       }), inTurn);

@@ -704,46 +704,52 @@ If a reply is lost, retain the same token, request ID and selection. The full
 structured inventory remains bound to the review. Ordinary `/schedule cancel`
 continues to cancel future firings while retaining managed history.
 
-From 1.6.242, `/schedule purge <managed-id,...|all>` and
-`remote_cli_schedule_purge` cancel selected managed schedules and remove verified
-retired history and queued output. `all` selects the current owner's conversation
-records, not other sessions. The tool reports `removedIds`, `alreadyRemovedIds`,
-`pending`, and `errors`; a completed operation with pending entries is not complete
-cleanup. After a partial result, retry only the unresolved IDs. Unknown native
-absence, attribution or predecessor execution stays visible, even for completed,
-failed, cancelled or interrupted history. Native-only definitions still require
-native cleanup review/delete; purge does not silently scan other sessions.
+From CLI 1.6.244, `/schedule purge <managed-id,...|all>` and
+`remote_cli_schedule_purge` cancel selected owned schedules and delete eligible
+history and queued output even when legacy native session attribution is missing.
+No manually typed confirmation is required. `all` freezes the current owner's
+conversation records and unresolved cleanup IDs; request selections survive restart, so replay never selects newly created siblings; siblings outside the selection
+and other owner generations are preserved. Running occurrences, native mutations,
+recovery operations and external deliveries already in flight remain pending.
 
-From CLI 1.6.243, purge reconciles attributable Claude history with a fresh,
-complete inventory in the original bound session under the cleanup lease. A saved
-session/thread/working-directory/marker identity and framework-confirmed retirement
-are required; execution-recovery model metadata is not needed for this absence
-check. After native cleanup review/delete, retry the selected managed IDs with
-`/schedule purge` or `remote_cli_schedule_purge`. Native presence still requires
-exact reviewed deletion, not a sweep. Missing legacy session attribution remains
-pending: review/delete can remove selected definitions in the original bound
-session, but cannot prove that unrelated historical sessions or predecessor work
-are absent. No session search, recreation or new execution admission is performed.
+History removal is separate from native cleanup. Inspect `status` (`complete` or `partial`), `historyRemovedIds`
+(`removedIds` remains its compatibility alias), `alreadyRemovedIds`,
+`nativeCleanupUnresolved`, `pending` and `errors`. A completed operation is not
+proof that all native tasks are gone. `/schedule list` and the model list tool
+show unresolved cleanup separately from history. Retry those managed IDs with a
+new requestId after a terminal attempt; reuse the same requestId while pending
+or after a lost reply. Existing native cleanup review/delete remains available
+for exact selected definitions in the authenticated bound session.
 
-Confirmed cancellation and execution retirement are saved separately from recovery
-metadata for both Claude and DSH. These cleanup receipts let later history purge
-finish after restart and never authorize recovery. While such receipts exist,
-the catalog uses format 4 and requires CLI 1.6.243 or newer; do not downgrade.
-DSH history without a live cancellation handle, confirmed cleanup receipt or clean
-handoff remains unresolved because a current-session list cannot prove retirement
-of an earlier host. Updating the Router alone does not change CLI cleanup behavior.
+History/output removal, a deletion-only cleanup selector and an ID/owner replay
+fence are persisted atomically. Cleanup tracking keeps no prompts, results or
+execution settings: only owner/ID/backend/location and, where valid, original
+session/marker, schedule rule and an exact prompt digest. It never grants
+execution recovery. The same authenticated user can still list and retry cleanup
+in the same thread after a context reset or directory change; original generation
+and attribution remain unchanged. Live history and execution retain exact generation
+checks. Attributed Claude cleanup preserves its supported original-session route
+until resolved. DSH cleanup without a supported session-bound retry does not block
+context reset. Ordinary chat and backend selection do not gain a new hurdle.
+A retry can delete an exact matching attributed Claude
+recurring session-only definition and verify fresh absence without recreating it.
+Legacy one-shots lack the original native timezone: use explicit native
+review/delete first, then retry the managed ID to verify absence. Changed
+definitions and siblings are never swept. Missing original session attribution
+cannot be invented from a short ID or an empty current session. Unknown native
+work remains an explicit cleanup obligation; unknown predecessor work is never
+reported stopped. DSH uses its live cancellation handle or previously confirmed
+cleanup/clean-handoff receipt; without these, history can be removed but native
+retirement remains unresolved. Other backends retain their actual capability
+limits; the permission to delete is backend-neutral, not a new native API.
 
-Deletion tools share one authorization policy across backend adapters: an agent
-can act on your cleanup request without a second human confirmation. Actual native
-capabilities remain backend-specific: managed cancellation/purge uses the original
-provider, and native-only reviewed deletion currently requires Claude. No backend
-switch or substitute scheduler is performed automatically.
-
-Successful purge removes full rows and queued results, retaining only bounded
-ID/owner replay fences so old creation requests cannot resurrect the tasks after
-restart. Purging writes catalog format 3; older clients supporting only format 2
-cannot read it. Finish upgrading before purging; do not downgrade that catalog.
-Already sent messages and work already executing externally cannot be recalled.
+The cleanup ledger is bounded to 1,000 entries and permanent replay fences to
+10,000 IDs. Capacity exhaustion blocks further removal explicitly rather than
+dropping cleanup routes or replay protection. Durable request receipts are bounded
+to 1,000 requests and 20,000 selected-ID references; exhaustion is explicit and
+never evicts a retry selection. Catalog format 5 is used once cleanup entries or
+production purge receipts are saved and requires CLI 1.6.244 or newer. Formats 1–4 remain
+readable. This is CLI behavior; updating only the Router does not enable it.
 
 Native inventory timeouts now identify whether dispatch, invocation or the tool
 receipt stalled. Expired read authorizations are released so repeated timeouts

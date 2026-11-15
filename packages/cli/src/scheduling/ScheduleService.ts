@@ -1,8 +1,9 @@
+import { cleanupRecord, cleanupSummary, type ScheduleCleanupSummary, type CleanupReason, type ScheduleCleanupRecord } from './ScheduleCleanup';
 import { kernelGate, syncDirectory, type KernelGate } from '../delegation/OwnershipRuntime';
 import { constants } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { validateScheduleId, validateSchedulePrompt, validateScheduleRule } from './ScheduleCommand';
 import type { NativeScheduleEvent, NativeScheduleHandle, NativeScheduleInput, NativeScheduleProvider,
   ScheduleDelivery, ScheduleOwner, ScheduleRecord, ScheduleRule, ScheduleRecoveryCheckpoint } from './types';
@@ -16,6 +17,9 @@ const LIVE = new Set<ScheduleRecord['state']>(['creating', 'active', 'running'])
 const STATES = new Set<ScheduleRecord['state']>([...LIVE, 'completed', 'cancelled', 'interrupted', 'failed']);
 const RESTART_REASON = 'Native schedule interrupted by service restart; not recreated or resumed.';
 const MAX_PURGED_IDS = 10_000;
+const MAX_CLEANUP_RECORDS = 1000;
+const MAX_PURGE_REQUESTS = 1000;
+const MAX_PURGE_SELECTION_IDS = 20_000;
 
 export type SchedulePurgeSelection = { ids: readonly string[] } | { all: true };
 export type SchedulePurgeReason = 'operation_pending' | 'occurrence_running' | 'delivery_pending'
@@ -29,7 +33,11 @@ export type SchedulePurgeEvidence =
 export interface SchedulePurgeResult {
   /** Freeze these IDs for retries of an all-owner request. */
   selectedIds: string[];
+  status: 'complete' | 'partial';
+  /** History deletion only; inspect nativeCleanupUnresolved before claiming complete cleanup. */
   removedIds: string[];
+  historyRemovedIds: string[];
+  nativeCleanupUnresolved: ScheduleCleanupSummary[];
   alreadyRemovedIds: string[];
   pending: { id: string; reason: SchedulePurgeReason; detail: string }[];
   errors: { id: string; error: string }[];
@@ -43,6 +51,8 @@ export interface ScheduleServiceOptions {
   /** Reject when disconnected or not delivered. Success is not an exactly-once receipt. */
   deliver: (delivery: ScheduleDelivery) => Promise<void>;
   isOwnerCurrent: (owner: ScheduleOwner) => boolean;
+  /** Framework observation of late native mutations, never model-supplied proof. */
+  isNativeMutationPending?: (owner: ScheduleOwner) => boolean;
   now?: () => number;
   /** Current configuration/directory/session policy, checked before native recovery. */
   canRecover?: (record: ScheduleRecord) => boolean;
@@ -53,7 +63,7 @@ export interface ScheduleServiceOptions {
    * Installed by trusted framework wiring. Must not recreate jobs, infer session
    * attribution from short IDs, or treat local absence as predecessor quiescence.
    * A verified result remains valid only while its captured lease is current. */
-  withPurgeVerification?<T>(record: Readonly<ScheduleRecord>, context: { isCurrent(): boolean },
+  withPurgeVerification?<T>(record: Readonly<ScheduleRecord | ScheduleCleanupRecord>, context: { isCurrent(): boolean },
     accept: (evidence: SchedulePurgeEvidence) => Promise<T>): Promise<T>;
   maxLiveSchedules?: number;
   maxRecords?: number;
@@ -123,6 +133,13 @@ function sameOwner(left: ScheduleOwner, right: ScheduleOwner): boolean {
   return left.threadId === right.threadId && left.openId === right.openId && left.generation === right.generation;
 }
 
+/** Deletion-only obligations and receipts remain manageable by the same user in
+ * the same thread after reset. Original provenance stays immutable; live records
+ * and all execution admission continue to require exact generation ownership. */
+function sameCleanupOwner(left: ScheduleOwner, right: ScheduleOwner): boolean {
+  return left.threadId === right.threadId && left.openId === right.openId;
+}
+
 /** Terminal intent prevents recreation, but uncertain native cleanup still owns admission. */
 function recoveryOwnsWork(record: ScheduleRecord): boolean {
   return !!record.recovery && (!['completed', 'cancelled'].includes(record.state)
@@ -151,6 +168,8 @@ export class ScheduleService {
   private runtimes = new Map<string, Runtime>();
   private retainedCancellations = new Map<string, Promise<ScheduleRecord>>();
   private purged = new Map<string, ScheduleOwner>();
+  private cleanup = new Map<string, ScheduleCleanupRecord>();
+  private purgeRequests = new Map<string, { digest: string; ids: string[] }>();
   private purges = new Map<string, Promise<PurgeOutcome>>();
   private recordOperations = new Map<string, number>();
   private delivering = new Set<string>();
@@ -469,24 +488,66 @@ export class ScheduleService {
     return this.serial(async () => [...this.records.values()].filter(record => sameOwner(record, owner)).map(record => structuredClone(record)));
   }
 
-  /** Cancel first, then erase only verified retired history. No native sweep or
-   * recovery admission is implied. Missing/foreign IDs never count as removed. */
-  purge(owner: ScheduleOwner, selection: SchedulePurgeSelection): Promise<SchedulePurgeResult> {
-    return this.operation(this.purgeSelected(structuredClone(owner), structuredClone(selection)));
+  /** Operational deletion ledger, separate from user history and never recoverable. */
+  async listCleanup(owner: ScheduleOwner): Promise<ScheduleCleanupRecord[]> {
+    this.checkReady(); validateOwner(owner);
+    return this.serial(async () => [...this.cleanup.values()].filter(record => sameCleanupOwner(record, owner)).map(record => structuredClone(record)));
   }
 
-  private async purgeSelected(owner: ScheduleOwner, selection: SchedulePurgeSelection): Promise<SchedulePurgeResult> {
+  /** Preserve the last known original-session route while deletion is unresolved. */
+  hasCleanupContext(threadId: string): boolean {
+    return [...this.cleanup.values()].some(item => item.threadId === threadId && item.backend === 'claude' && !!item.attribution);
+  }
+
+  /** Freeze production request selection durably before acquiring a native lease.
+   * Keys bind authenticated ownership and the framework operation ID, not model proof. */
+  freezePurgeSelection(owner: ScheduleOwner, selection: SchedulePurgeSelection, requestId: string,
+    isCurrent: () => boolean): Promise<string[]> {
+    this.checkReady(); validateOwner(owner); validateScheduleId(requestId);
+    owner = structuredClone(owner); selection = structuredClone(selection);
+    return this.operation(this.serial(async () => {
+      if (!this.current(owner) || !isCurrent()) throw new Error('Schedule purge request context changed.');
+      const ids = this.purgeIds(owner, selection);
+      const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+      const key = hash([ownerOf(owner), requestId]);
+      const digest = hash('all' in selection ? { all: true } : { ids: [...selection.ids].sort() });
+      const previous = this.purgeRequests.get(key);
+      if (previous) {
+        if (previous.digest !== digest) throw new Error('Purge requestId was reused with a different selection.');
+        return [...previous.ids];
+      }
+      const references = [...this.purgeRequests.values()].reduce((count, receipt) => count + receipt.ids.length, 0);
+      if (this.purgeRequests.size >= MAX_PURGE_REQUESTS || references + ids.length > MAX_PURGE_SELECTION_IDS)
+        throw new Error('Durable purge request capacity reached (1000 requests / 20000 selected IDs); no retry selection was discarded.');
+      this.purgeRequests.set(key, { digest, ids });
+      try { await this.persist(); } catch (error) { this.purgeRequests.delete(key); throw error; }
+      return [...ids];
+    }));
+  }
+
+  private purgeIds(owner: ScheduleOwner, selection: SchedulePurgeSelection): string[] {
+    const value = object(selection, ['ids', 'all']);
+    if (value.all !== undefined ? value.all !== true || value.ids !== undefined : !Array.isArray(value.ids))
+      throw new Error('Select exact schedule IDs or all current-owner schedules.');
+    const ids = value.all === true ? [...this.records.values()].filter(record => sameOwner(record, owner)).map(record => record.id)
+      .concat([...this.cleanup.values()].filter(record => sameCleanupOwner(record, owner)).map(record => record.id))
+      : [...value.ids as string[]];
+    if (ids.length > this.maxRecords + MAX_CLEANUP_RECORDS || new Set(ids).size !== ids.length) throw new Error('Invalid schedule purge selection.');
+    ids.forEach(validateScheduleId);
+    return ids;
+  }
+
+  /** Cancel first. Remove eligible history independently of unresolved native
+   * absence, preserving a minimal deletion ledger and permanent replay fence. */
+  purge(owner: ScheduleOwner, selection: SchedulePurgeSelection, isCurrent: () => boolean = () => true): Promise<SchedulePurgeResult> {
+    return this.operation(this.purgeSelected(structuredClone(owner), structuredClone(selection), isCurrent));
+  }
+
+  private async purgeSelected(owner: ScheduleOwner, selection: SchedulePurgeSelection, isCurrent: () => boolean): Promise<SchedulePurgeResult> {
     this.checkReady(); validateOwner(owner);
     const selectedIds = await this.serial(async () => {
-      if (!this.current(owner)) throw new Error('Schedule purge owner is no longer current.');
-      const value = object(selection, ['ids', 'all']);
-      if (value.all !== undefined ? value.all !== true || value.ids !== undefined : !Array.isArray(value.ids)) {
-        throw new Error('Select exact schedule IDs or all current-owner schedules.');
-      }
-      const ids = value.all === true ? [...this.records.values()].filter(record => sameOwner(record, owner)).map(record => record.id)
-        : [...value.ids as string[]];
-      if (ids.length > this.maxRecords || new Set(ids).size !== ids.length) throw new Error('Invalid schedule purge selection.');
-      ids.forEach(validateScheduleId);
+      if (!this.current(owner) || !isCurrent()) throw new Error('Schedule purge owner is no longer current.');
+      const ids = this.purgeIds(owner, selection);
       let changed = false;
       for (const id of ids) {
         const record = this.records.get(id);
@@ -500,18 +561,18 @@ export class ScheduleService {
       if (changed) await this.persist();
       return ids;
     });
-    const result: SchedulePurgeResult = { selectedIds, removedIds: [], alreadyRemovedIds: [], pending: [], errors: [] };
+    const result: SchedulePurgeResult = { selectedIds, status: 'complete', removedIds: [], historyRemovedIds: [], nativeCleanupUnresolved: [], alreadyRemovedIds: [], pending: [], errors: [] };
     for (const id of selectedIds) {
       const previouslyPurged = this.purged.has(id);
       try {
         const record = this.records.get(id);
         const prior = this.purged.get(id);
-        if ((!record || !sameOwner(record, owner)) && (!prior || !sameOwner(prior, owner))) {
+        if ((!record || !sameOwner(record, owner)) && (!prior || !sameCleanupOwner(prior, owner))) {
           throw new Error('Schedule not found for this owner.');
         }
         let task = this.purges.get(id);
         if (!task) {
-          task = this.purgeRecord(owner, id);
+          task = this.purgeRecord(owner, id, isCurrent);
           this.purges.set(id, task);
           void task.finally(() => { if (this.purges.get(id) === task) this.purges.delete(id); }).catch(() => {});
         }
@@ -519,23 +580,59 @@ export class ScheduleService {
         if (outcome.status === 'pending') result.pending.push({ id, reason: outcome.reason, detail: outcome.detail });
         else (outcome.status === 'removed' ? result.removedIds : result.alreadyRemovedIds).push(id);
       } catch (error) {
-        if (!previouslyPurged && this.purged.has(id) && sameOwner(this.purged.get(id)!, owner)) result.removedIds.push(id);
+        if (this.purged.has(id) && sameCleanupOwner(this.purged.get(id)!, owner))
+          (previouslyPurged ? result.alreadyRemovedIds : result.removedIds).push(id);
         result.errors.push({ id, error: errorText(error) });
       }
     }
+    result.historyRemovedIds = [...result.removedIds];
+    result.nativeCleanupUnresolved = selectedIds.flatMap(id => {
+      const item = this.cleanup.get(id);
+      return item && sameCleanupOwner(item, owner) ? [cleanupSummary(item)] : [];
+    });
+    if (result.pending.length || result.errors.length || result.nativeCleanupUnresolved.length) result.status = 'partial';
     return result;
   }
 
-  private async purgeRecord(owner: ScheduleOwner, id: string): Promise<PurgeOutcome> {
+  private async retryCleanup(owner: ScheduleOwner, id: string, isCurrent: () => boolean): Promise<PurgeOutcome> {
+    const item = this.cleanup.get(id);
+    if (this.options.isNativeMutationPending?.(owner)) return { status: 'pending', reason: 'operation_pending', detail: 'A native mutation receipt is unsettled; retry after reconciliation.' };
+    if (!item || !this.options.withPurgeVerification) return { status: 'alreadyRemoved' };
+    const current = () => !this.closing && !this.fault && !this.suspending && isCurrent() && this.current(owner) && this.cleanup.get(id) === item;
+    let accepted = false;
+    return this.options.withPurgeVerification(structuredClone(item), { isCurrent: current }, async evidence => {
+      if (accepted) throw new Error('Purge verification was already consumed.');
+      accepted = true;
+      return this.serial(async () => {
+        this.checkReady();
+        if (!current()) throw new Error('Schedule cleanup context changed.');
+        if (evidence.status === 'unresolved') {
+          if (!['unattributed', 'native_absence_unknown', 'predecessor_unknown'].includes(evidence.reason))
+            return { status: 'pending', reason: evidence.reason, detail: bounded(evidence.detail, ERROR_BYTES) };
+          if (['unattributed', 'native_absence_unknown', 'predecessor_unknown'].includes(evidence.reason) && item.reason !== evidence.reason) {
+            const previous = item.reason; item.reason = evidence.reason as CleanupReason;
+            try { await this.persist(); } catch (error) { item.reason = previous; throw error; }
+          }
+          return { status: 'alreadyRemoved' };
+        }
+        if (evidence.status !== 'verified' || !evidence.isCurrent()) throw new Error('Schedule cleanup evidence expired.');
+        this.cleanup.delete(id);
+        try { await this.persist(); } catch (error) { this.cleanup.set(id, item); throw error; }
+        return { status: 'alreadyRemoved' };
+      });
+    });
+  }
+
+  private async purgeRecord(owner: ScheduleOwner, id: string, isCurrent: () => boolean): Promise<PurgeOutcome> {
     const pending = (reason: SchedulePurgeReason, detail: string): PurgeOutcome => ({ status: 'pending', reason, detail });
     this.checkReady();
-    if (!this.current(owner)) throw new Error('Schedule purge owner is no longer current.');
-    if (this.purged.has(id)) return { status: 'alreadyRemoved' };
+    if (!this.current(owner) || !isCurrent()) throw new Error('Schedule purge owner is no longer current.');
+    if (this.purged.has(id)) return this.retryCleanup(owner, id, isCurrent);
     const record = this.owned(owner, id);
-    const current = () => !this.closing && !this.fault && !this.suspending && this.current(owner)
+    const current = () => !this.closing && !this.fault && !this.suspending && isCurrent() && this.current(owner)
       && this.records.get(id) === record && record.cancelRequested === true;
     const busy = (): PurgeOutcome | undefined => {
-      if (this.recordOperations.has(id) || this.recoveryRun || this.refreshes || this.retainedCancellations.has(id)) {
+      if (this.options.isNativeMutationPending?.(owner) || this.recordOperations.has(id) || this.recoveryRun || this.refreshes || this.retainedCancellations.has(id)) {
         return pending('operation_pending', 'Creation, recovery, inspection or cleanup is still pending. Retry these same IDs.');
       }
       if (this.delivering.has(id)) return pending('delivery_pending', 'An external delivery is already in flight; its outcome cannot be revoked.');
@@ -556,7 +653,8 @@ export class ScheduleService {
       } catch (error) {
         // A failed receipt (including error-after-commit) is not absence proof.
         // Exact framework verification may still resolve it without recreating.
-        if (!this.options.withPurgeVerification) throw error;
+        // The settled failed mutation remains an unresolved cleanup obligation.
+        // It cannot veto deletion of text after all local work has retired.
       }
     }
     if (!current()) throw new Error('Schedule purge context changed during cleanup.');
@@ -565,7 +663,7 @@ export class ScheduleService {
     if (runtime && (!runtime.stopped || runtime.releaseAdmission)) return pending('operation_pending', 'Native runtime retirement is unconfirmed.');
 
     const handleProof = runtime?.removalConfirmed && runtime.handle?.nativeDefinitionAbsent !== false;
-    const erase = (evidence?: Extract<SchedulePurgeEvidence, { status: 'verified' }>): Promise<PurgeOutcome> => this.serial(async () => {
+    const erase = (evidence?: Extract<SchedulePurgeEvidence, { status: 'verified' }>, unresolved?: CleanupReason): Promise<PurgeOutcome> => this.serial(async () => {
       this.checkReady();
       if (!current() || evidence?.status === 'verified' && !evidence.isCurrent()) throw new Error('Schedule purge evidence expired before persistence.');
       const changed = busy(); if (changed) return changed;
@@ -574,14 +672,17 @@ export class ScheduleService {
         || handleProof && runtime?.handle?.nativeDefinitionAbsent === false) {
         return pending('operation_pending', 'Native ownership changed before history removal.');
       }
-      // The ID-only owner fence prevents delayed CREATE retries from resurrecting
-      // deleted history. Prompts, results and recovery identities are not retained.
+      if (unresolved && this.cleanup.size >= MAX_CLEANUP_RECORDS) return pending('fence_capacity',
+        'Native cleanup ledger capacity reached (1000); resolve existing cleanup before removing more history.');
+      // Commit history/output deletion, minimal operational selector and replay
+      // denial in the same atomic catalog replacement. Never retain user text.
       const outputs = [...this.pending].filter(([, entry]) => entry.scheduleId === id);
       this.purged.set(id, ownerOf(record));
+      if (unresolved) this.cleanup.set(id, cleanupRecord(record, unresolved));
       this.records.delete(id); this.dropPending(id);
       try { await this.persist(); }
       catch (error) {
-        this.records.set(id, record); this.purged.delete(id);
+        this.records.set(id, record); this.purged.delete(id); this.cleanup.delete(id);
         for (const [key, entry] of outputs) this.pending.set(key, entry);
         throw error;
       }
@@ -589,8 +690,7 @@ export class ScheduleService {
       return { status: 'removed' };
     });
     if (record.creationRefused || clean || retainedVerified || handleProof) return erase();
-    if (!this.options.withPurgeVerification) return pending('native_absence_unknown',
-      'Native absence and execution retirement require exact provider verification; terminal state and current-session absence alone are insufficient.');
+    if (!this.options.withPurgeVerification) return erase(undefined, 'native_absence_unknown');
     let accepted = false;
     // The framework keeps its native scope/lease open until accept() finishes
     // persisting removal. A receipt returned after closing that lease is unsafe.
@@ -598,7 +698,8 @@ export class ScheduleService {
       if (accepted) throw new Error('Purge verification was already consumed.');
       accepted = true;
       if (!current()) throw new Error('Schedule purge context changed during verification.');
-      if (evidence.status === 'unresolved') return pending(evidence.reason, bounded(evidence.detail, ERROR_BYTES));
+      if (evidence.status === 'unresolved') return ['unattributed', 'native_absence_unknown', 'predecessor_unknown'].includes(evidence.reason)
+        ? erase(undefined, evidence.reason as CleanupReason) : pending(evidence.reason, bounded(evidence.detail, ERROR_BYTES));
       if (evidence.status !== 'verified' || typeof evidence.isCurrent !== 'function') throw new Error('Invalid native purge verification.');
       return erase(evidence);
     });
@@ -1268,7 +1369,8 @@ export class ScheduleService {
     try {
       // JSON can expand one control byte to six bytes (for example, "\\u0001").
       const maxBytes = (this.maxRecords + this.maxPending) * (160 * 1024)
-        + this.maxRecords * this.maxOccurrences * 515 + MAX_PURGED_IDS * 2048 + 4096;
+        + this.maxRecords * this.maxOccurrences * 515 + MAX_PURGED_IDS * 2048
+        + MAX_CLEANUP_RECORDS * 8192 + MAX_PURGE_SELECTION_IDS * 1024 + 4096;
       const size = (await handle.stat()).size;
       if (size > maxBytes) throw new Error('Schedule catalog exceeds its size limit.');
       const buffer = Buffer.alloc(size + 1);
@@ -1287,8 +1389,8 @@ export class ScheduleService {
   }
 
   private load(data: unknown): void {
-    const catalog = object(data, ['version', 'records', 'pending', 'purged']);
-    if (![1, 2, 3, 4].includes(catalog.version as number) || !Array.isArray(catalog.records) || catalog.records.length > this.maxRecords
+    const catalog = object(data, ['version', 'records', 'pending', 'purged', 'cleanup', 'purgeRequests']);
+    if (![1, 2, 3, 4, 5].includes(catalog.version as number) || !Array.isArray(catalog.records) || catalog.records.length > this.maxRecords
       || !Array.isArray(catalog.pending) || catalog.pending.length > this.maxPending) throw new Error('Invalid schedule catalog envelope.');
     const records = new Map<string, ScheduleRecord>();
     const pending = new Map<string, PendingDelivery>();
@@ -1305,7 +1407,7 @@ export class ScheduleService {
       if (record.creationRefused !== undefined && (Number(catalog.version) < 3 || record.creationRefused !== true || record.nativeId !== undefined
         || !['failed', 'cancelled', 'interrupted'].includes(record.state as string)
         || record.completedOccurrences !== undefined)) throw new Error('Invalid native admission refusal.');
-      if (record.cleanupConfirmed !== undefined && (catalog.version !== 4 || record.cleanupConfirmed !== true
+      if (record.cleanupConfirmed !== undefined && (Number(catalog.version) < 4 || record.cleanupConfirmed !== true
         || record.cancelRequested !== true || record.state !== 'cancelled')) throw new Error('Invalid confirmed cleanup receipt.');
       if (record.execution !== undefined) {
         const execution = object(record.execution, ['command', 'model', 'effort']);
@@ -1356,7 +1458,44 @@ export class ScheduleService {
         purged.set(fence.id, ownerOf(fence as unknown as ScheduleOwner));
       }
     } else if (catalog.purged !== undefined) throw new Error('Purge fences require catalog version 3 or newer.');
-    this.records = records; this.pending = pending; this.purged = purged;
+    const cleanup = new Map<string, ScheduleCleanupRecord>();
+    const purgeRequests = new Map<string, { digest: string; ids: string[] }>();
+    if (catalog.version === 5) {
+      if (!Array.isArray(catalog.cleanup) || catalog.cleanup.length > MAX_CLEANUP_RECORDS) throw new Error('Invalid cleanup ledger.');
+      for (const value of catalog.cleanup) {
+        const entry = object(value, ['id', 'threadId', 'openId', 'generation', 'backend', 'cwd', 'nativeId', 'historyRemoved', 'reason', 'attribution']);
+        validateScheduleId(entry.id); validateOwner(entry as unknown as ScheduleOwner); text(entry.cwd, 4096);
+        const fence = purged.get(entry.id);
+        if (!fence || !sameOwner(fence, entry as unknown as ScheduleOwner) || cleanup.has(entry.id)
+          || !path.isAbsolute(entry.cwd) || !isNativeScheduleBackend(entry.backend) || entry.historyRemoved !== true
+          || !['unattributed', 'native_absence_unknown', 'predecessor_unknown'].includes(entry.reason as string)) throw new Error('Invalid cleanup selector.');
+        if (entry.nativeId !== undefined) text(entry.nativeId);
+        if (entry.attribution !== undefined) {
+          const a = object(entry.attribution, ['sessionId', 'marker', 'promptHash', 'rule']);
+          text(a.sessionId);
+          if (typeof a.promptHash !== 'string' || !/^[a-f0-9]{64}$/.test(a.promptHash)
+            || (entry.backend === 'claude' ? typeof a.marker !== 'string' || !/^[a-f0-9-]{36}$/.test(a.marker) : a.marker !== undefined)) throw new Error('Invalid cleanup attribution.');
+          const rule = object(a.rule, ['kind', 'at', 'expression', 'timezone']);
+          object(rule, rule.kind === 'once' ? ['kind', 'at'] : ['kind', 'expression', 'timezone']);
+          validateScheduleRule(rule as unknown as ScheduleRule);
+        }
+        cleanup.set(entry.id, structuredClone(entry) as unknown as ScheduleCleanupRecord);
+      }
+      if (catalog.purgeRequests !== undefined) {
+        if (!Array.isArray(catalog.purgeRequests) || catalog.purgeRequests.length > MAX_PURGE_REQUESTS) throw new Error('Invalid purge requests.');
+        let references = 0;
+        for (const value of catalog.purgeRequests) {
+          const receipt = object(value, ['key', 'digest', 'ids']);
+          if (typeof receipt.key !== 'string' || !/^[a-f0-9]{64}$/.test(receipt.key) || purgeRequests.has(receipt.key)
+            || typeof receipt.digest !== 'string' || !/^[a-f0-9]{64}$/.test(receipt.digest)
+            || !Array.isArray(receipt.ids) || new Set(receipt.ids).size !== receipt.ids.length
+            || (references += receipt.ids.length) > MAX_PURGE_SELECTION_IDS) throw new Error('Invalid purge request receipt.');
+          receipt.ids.forEach(validateScheduleId);
+          purgeRequests.set(receipt.key, { digest: receipt.digest, ids: [...receipt.ids] });
+        }
+      }
+    } else if (catalog.cleanup !== undefined || catalog.purgeRequests !== undefined) throw new Error('Cleanup ledger requires catalog version 5.');
+    this.records = records; this.pending = pending; this.purged = purged; this.cleanup = cleanup; this.purgeRequests = purgeRequests;
   }
 
   private async persist(): Promise<void> {
@@ -1372,8 +1511,10 @@ export class ScheduleService {
       const handle = await fs.open(temporary, 'wx', 0o600);
       try {
         const confirmedCleanup = [...this.records.values()].some(record => record.cleanupConfirmed);
-        const upgraded = confirmedCleanup || this.purged.size > 0 || [...this.records.values()].some(record => record.creationRefused);
-        await handle.writeFile(JSON.stringify({ version: confirmedCleanup ? 4 : upgraded ? 3 : 2, records: [...this.records.values()], pending: [...this.pending.values()],
+        const upgraded = this.purgeRequests.size > 0 || confirmedCleanup || this.purged.size > 0 || [...this.records.values()].some(record => record.creationRefused);
+        await handle.writeFile(JSON.stringify({ version: this.cleanup.size || this.purgeRequests.size ? 5 : confirmedCleanup ? 4 : upgraded ? 3 : 2, records: [...this.records.values()], pending: [...this.pending.values()],
+          ...(this.cleanup.size || this.purgeRequests.size ? { cleanup: [...this.cleanup.values()],
+            purgeRequests: [...this.purgeRequests].map(([key, receipt]) => ({ key, ...receipt })) } : {}),
           ...(upgraded ? { purged: [...this.purged].map(([id, owner]) => ({ id, ...owner })) } : {}) }), 'utf8');
         await handle.sync();
       } finally { await handle.close(); }

@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.244] - 2026-11-15
+
+### Fixed
+- Delete selected owned schedule history and queued results even when legacy native attribution is missing. History removal and unresolved native cleanup are separate results; running work, pending operations, in-flight delivery, owner generations, and sibling schedules remain protected.
+- Persist a bounded deletion-only cleanup ledger, durable request selections and permanent replay fences atomically with history removal (catalog format 5, requiring CLI 1.6.244 or newer while cleanup entries or request receipts are present). Keep no prompt/output text or execution-recovery permission. List remaining obligations and retry them through the existing purge command/tool; exact attributed Claude selectors retain prompt digests for deletion and fresh absence verification in the original bound session.
+- Keep deletion-only cleanup visible and retriable for the same authenticated user/thread across context generations without changing original provenance or live-record isolation. Avoid blocking DSH context reset where no supported cleanup route depends on retaining that session.
+- Preserve explicit native-cleanup limitations for missing session attribution, unconfirmed predecessors and unsupported backend capabilities. An empty unrelated session never proves global absence; Router upgrades alone do not change CLI cleanup behavior.
+
 ## [1.6.243] - 2026-11-15
 
 ### Fixed

@@ -77,6 +77,10 @@ export class ClaudeSessionSchedules {
     return !this.closed && !this.busy && !this.pending && !this.authorized.size
       && ![...this.jobs.values()].some(job => !job.retired && job.uncertain);
   }
+  get cleanupMutationPending(): boolean {
+    return !!this.pending && this.pending.action.tool !== 'CronList'
+      || [...this.authorized.values()].some(receipt => receipt.action.tool !== 'CronList');
+  }
   get hasJobs(): boolean { return [...this.jobs.values()].some(job => !job.retired); }
   get hasPendingMutation(): boolean { return !!this.scope?.mutations.size || [...this.jobs.values()].some(job => !job.retired && job.uncertain); }
 

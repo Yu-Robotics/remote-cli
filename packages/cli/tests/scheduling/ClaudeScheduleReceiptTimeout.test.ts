@@ -66,6 +66,7 @@ describe('Claude inventory receipt deadlines', () => {
     expect((error as Error).message).not.toContain('existing task');
     expect((error as Error).message).toContain('No inventory was verified');
     expect(h.adapter.hasJobs).toBe(false);
+    expect(h.adapter.cleanupMutationPending).toBe(false);
     expect(h.manage).toHaveBeenCalledTimes(stage === 'in-turn' ? 0 : 1);
   });
 
@@ -122,15 +123,18 @@ describe('Claude inventory receipt deadlines', () => {
     }, vi.fn(), () => true, 'UTC'));
     const failed = create.catch(error => error);
     const action = h.adapter.action('create')!;
+    expect(h.adapter.cleanupMutationPending).toBe(true);
     expect(h.hook('late-create', action.tool, action.input)).toEqual({});
     await vi.advanceTimersByTimeAsync(100);
     const error = await failed;
     expect(error.handle.nativeId).toBe('unconfirmed-synthetic-job');
+    expect(h.adapter.cleanupMutationPending).toBe(true);
     const rejected = expect(h.review('expired-read')).rejects.toThrow('timed out');
     h.hook('expired-read'); await vi.advanceTimersByTimeAsync(100); await rejected;
     h.receipt('late-create', undefined,
       'Scheduled recurring job native-created (every minute). Next run: later. Session-only (not written to disk, dies when Claude exits).');
     expect(error.handle.nativeId).toBe('native-created');
+    expect(h.adapter.cleanupMutationPending).toBe(false);
     expect(error.handle.nativeDefinitionAbsent).toBe(false);
     expect(h.manage).not.toHaveBeenCalled();
   });

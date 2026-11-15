@@ -228,7 +228,9 @@ describe('Claude production orderly recovery', () => {
       expect(response().output).toContain(retired ? 'Removed history: first.' : 'predecessor or admitted work is unconfirmed');
       expect([...inventory.keys()]).toEqual([sibling]);
       const catalog = JSON.parse(await fs.readFile(path.join(directory, 'schedule-catalog.json'), 'utf8'));
-      expect(catalog.records).toHaveLength(retired ? 0 : 1);
+      expect(catalog.records).toHaveLength(0);
+      expect(catalog.cleanup ?? []).toHaveLength(retired ? 0 : 1);
+      if (!retired) expect(catalog.cleanup[0]).toMatchObject({ historyRemoved: true, reason: 'predecessor_unknown' });
       const actions = child.stdin.write.mock.calls.map(([line]: [string]) => JSON.parse(line)).filter((packet: any) => packet.type === 'user');
       expect(actions.every((packet: any) => !JSON.stringify(packet).includes('select:CronCreate'))).toBe(true);
     } finally { await handler.destroy(); }

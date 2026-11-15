@@ -29,7 +29,7 @@ describe('ScheduleToolScope', () => {
     const f = fixture();
     const cleanup = { absentIds: ['native-a'], warning: 'Current host only' };
     const deleteCleanup = vi.fn(async () => cleanup);
-    const purge = vi.fn(async () => ({ selectedIds: ['managed-a'], removedIds: ['managed-a'], alreadyRemovedIds: [], pending: [], errors: [] }));
+    const purge = vi.fn(async () => ({ status: 'complete' as const, historyRemovedIds: ['managed-a'], nativeCleanupUnresolved: [], selectedIds: ['managed-a'], removedIds: ['managed-a'], alreadyRemovedIds: [], pending: [], errors: [] }));
     const scope = f.operations.scope({ ...f.options, backend, deleteCleanup, purge });
     const args = { requestId: 'delete-native', token: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', nativeIds: ['native-a'] };
     expect(await scope.invoke('remote_cli_schedule_cleanup_delete', args)).toMatchObject({ status: 'succeeded', cleanup });
@@ -46,7 +46,7 @@ describe('ScheduleToolScope', () => {
   it('keeps partial purge outcomes explicit and exposes each pending native deletion action', async () => {
     const f = fixture(); let finish!: (value: any) => void;
     const deleteCleanup = vi.fn(() => new Promise<any>(resolve => { finish = resolve; }));
-    const purge = vi.fn(async () => ({ selectedIds: ['blocked'], removedIds: [], alreadyRemovedIds: [],
+    const purge = vi.fn(async () => ({ status: 'partial' as const, historyRemovedIds: [], nativeCleanupUnresolved: [], selectedIds: ['blocked'], removedIds: [], alreadyRemovedIds: [],
       pending: [{ id: 'blocked', reason: 'predecessor_unknown' as const, detail: 'Prior execution remains unknown' }], errors: [] }));
     const scope = f.operations.scope({ ...f.options, deleteCleanup, purge, nativeAction: () => ({ tool: 'CronDelete', input: { id: 'native-a' } }) });
     expect(await scope.invoke('remote_cli_schedule_cleanup_delete', { requestId: 'delete', token: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', nativeIds: ['native-a'] })).toMatchObject({ status: 'pending', nativeAction: { tool: 'CronDelete' } });

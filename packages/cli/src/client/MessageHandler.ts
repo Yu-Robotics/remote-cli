@@ -1,3 +1,4 @@
+import { cleanupDetail, cleanupSummary } from '../scheduling/ScheduleCleanup';
 import { verifySchedulePurge } from '../scheduling/SchedulePurgeVerification';
 import { ReviewedNativeCleanup, type NativeCleanupReview, type NativeCleanupSession } from '../scheduling/ReviewedNativeCleanup';
 import { ScheduleToolOperations, type ScheduleToolScope, type ScheduleOperation } from '../scheduling/ScheduleToolScope';
@@ -1256,6 +1257,7 @@ export class MessageHandler {
     if (this.abortOperations.has(threadId)) throw new Error('Direct backend abort is still pending; retry /clear after it settles.');
     const existing = this.threadPool.getExistingExecutor(threadId);
     const destructiveRecovery = existing?.hasPendingCancellation?.() === true || existing?.hasPendingSettingsChange?.() === true;
+    await this.assertScheduleCleanupContext(threadId);
     if (!destructiveRecovery) await this.assertSchedulesIdle(threadId);
     this.conversationRevisions.set(threadId, (this.conversationRevisions.get(threadId) ?? 0) + 1);
     this.settingsService.invalidate(threadId);
@@ -1398,7 +1400,7 @@ export class MessageHandler {
     }
 
     if (trimmed === '/sandbox' || trimmed.startsWith('/sandbox ')) {
-      if (trimmed !== '/sandbox') await this.assertSchedulesIdle(threadId);
+      if (trimmed !== '/sandbox') await this.assertSchedulesIdle(threadId, false);
       if (!('getSandboxStatus' in executor) || !('configureSandbox' in executor)) {
         this.sendResponse(messageId, threadId, { success: false, error: '/sandbox is currently supported by the Codex and Claude Code backends.' });
         return true;
@@ -2795,6 +2797,7 @@ You can also use natural language commands to control Claude Code CLI.`,
         scheduleScope = this.scheduleToolOperations.scope({ owner, messageId, backend, current: context.current,
           nativeAction: id => executor.nativeScheduleAction?.(id),
           deleteCleanup: (command, id) => this.runReviewedNativeCleanup(owner, command, id, context.current) as Promise<{ absentIds: string[]; warning: string }>,
+          listCleanup: async () => (await (await this.initializeSchedules()).listCleanup(owner)).map(cleanupSummary),
           purge: (selection, id) => this.runSchedulePurge(owner, selection, id, context.current),
           reviewCleanup: id => this.runReviewedNativeCleanup(owner, { kind: 'cleanup-review' }, id, context.current) as Promise<NativeCleanupReview>,
           run: (command, id) => this.runScheduleOperation(owner, command, id, context),
@@ -3545,6 +3548,7 @@ You can also use natural language commands to control Claude Code CLI.`,
       if (!directory) throw new Error('Local schedule storage is unavailable.');
       const service = new ScheduleService({
         directory,
+        isNativeMutationPending: owner => this.threadPool.getExistingExecutor(owner.threadId)?.hasPendingScheduleMutation?.() ?? false,
         withPurgeVerification: (record, context, accept) => verifySchedulePurge(record,
           this.schedulePurgeHosts.get(record.threadId), context.isCurrent, accept),
         acquireRecovery: record => {
@@ -3645,7 +3649,24 @@ You can also use natural language commands to control Claude Code CLI.`,
     return active;
   }
 
-  private async assertSchedulesIdle(threadId: string): Promise<void> {
+  private async assertScheduleCleanupContext(threadId: string): Promise<void> {
+    if (!this.schedules) {
+      const directory = this.scheduleDirectory();
+      if (!directory) return;
+      try { await fs.promises.lstat(path.join(directory, SCHEDULE_CATALOG_FILE)); }
+      catch (error) {
+        if (['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) return;
+        throw error;
+      }
+      await this.initializeSchedules();
+    }
+    if (this.schedules?.hasCleanupContext(threadId)) {
+      throw new Error('Unresolved native cleanup still needs this original session. Use /schedule list and purge or cleanup review/delete before resetting, changing directory or deleting this context.');
+    }
+  }
+
+  private async assertSchedulesIdle(threadId: string, preserveCleanupContext = true): Promise<void> {
+    if (preserveCleanupContext) await this.assertScheduleCleanupContext(threadId);
     if (this.scheduleManagement.has(threadId) || this.schedules?.hasActiveSchedules(threadId)) {
       throw new Error('Cancel this thread\'s schedules with /schedule cancel <id> before resetting context, changing directory, or deleting the thread.');
     }
@@ -3807,16 +3828,17 @@ You can also use natural language commands to control Claude Code CLI.`,
       const service = await this.initializeSchedules();
       if (!current()) throw new Error('Schedule purge context changed.');
       // Freeze all before native calls; retries of this operation must not select new tasks.
-      const ids = 'all' in selection ? (await service.list(owner)).map(record => record.id) : [...selection.ids];
+      const cleanup = await service.listCleanup(owner);
+      const ids = await service.freezePurgeSelection(owner, selection, id, current);
       const run = async () => {
         if (!current()) throw new Error('Schedule purge context changed before cleanup.');
-        const result = await service.purge(owner, { ids });
+        const result = await service.purge(owner, { ids }, current);
         if (result.removedIds.length) this.scheduleCards.invalidate();
         return result;
       };
       const records = await service.list(owner);
-      const needsVerification = backend === 'claude' && !!executor.withReviewedNativeCleanup && records.some(record => ids.includes(record.id)
-        && record.backend === 'claude' && !!record.recovery && !!record.nativeId && !record.cleanupConfirmed && !record.creationRefused && !['active', 'running', 'creating'].includes(record.state));
+      const needsVerification = backend === 'claude' && !!executor.withReviewedNativeCleanup && (cleanup.some(item => ids.includes(item.id) && item.backend === 'claude' && !!item.attribution && !!item.nativeId) || records.some(record => ids.includes(record.id)
+        && record.backend === 'claude' && !!record.recovery && !!record.nativeId && !record.cleanupConfirmed && !record.creationRefused && !['active', 'running', 'creating'].includes(record.state)));
       const needsNative = needsVerification || backend === 'claude' && records.some(record => ids.includes(record.id)
         && record.backend === 'claude' && service.canCancel(owner, record.id));
       if (!needsNative) return await run();
@@ -3941,11 +3963,12 @@ You can also use natural language commands to control Claude Code CLI.`,
           createHash('sha256').update(message.messageId ?? uuidv4()).digest('hex'));
         const lines = [`Removed history: ${result.removedIds.join(', ') || 'none'}.`,
           `Already removed: ${result.alreadyRemovedIds.join(', ') || 'none'}.`,
+          ...result.nativeCleanupUnresolved.map(entry => `Native cleanup unresolved ${entry.id} (${entry.reason}): ${entry.detail}`),
           ...result.pending.map(entry => `Pending ${entry.id}: ${entry.detail}`),
           ...result.errors.map(entry => `Failed ${entry.id}: ${entry.error}`)];
-        if (result.pending.length || result.errors.length) lines.push('Cleanup is incomplete. Retry only the unresolved managed IDs; do not infer native absence from history state.');
+        if (result.nativeCleanupUnresolved.length || result.pending.length || result.errors.length) lines.push('Cleanup is incomplete. Retry only the unresolved managed IDs; do not infer native absence from history state.');
         lines.push('Native-only definitions require native cleanup review and deletion in their original session.');
-        respond({ success: !result.pending.length && !result.errors.length, output: lines.join('\n') }); return;
+        respond({ success: !result.nativeCleanupUnresolved.length && !result.pending.length && !result.errors.length, output: lines.join('\n') }); return;
       }
       const storedOnly = command.kind === 'list' && this.threadPool.getExistingExecutor(threadId)?.hasPendingCancellation?.();
       const updateSnapshot = this.automaticUpdateInProgress && command.kind === 'list';
@@ -3964,6 +3987,12 @@ You can also use natural language commands to control Claude Code CLI.`,
             : 'Queued and executing occurrences must finish before handoff.'}`
           : 'This host does not support automatic schedule recovery after process exit.';
         output = `Schedule ${record.id}: ${record.state}.\n${record.rule.kind === 'once' ? record.rule.at : `${record.rule.expression} (${record.rule.timezone})`}\n\nRuns in this thread's foreground ${NATIVE_SCHEDULE_CAPABILITIES[record.backend].label} conversation and returns results here. Keep the CLI running; native timing is approximate. ${lifecycle}\nUse /schedule list or /schedule cancel ${record.id}.`;
+      }
+      if (command.kind === 'list') {
+        const cleanup = await this.schedules?.listCleanup(owner) ?? [];
+        if (cleanup.length) output += '\n\nNative cleanup tracking (history removed; not execution-ready):\n'
+          + cleanup.map(item => `${item.id} (${item.backend}; ${item.reason}${item.nativeId ? `; native ID ${item.nativeId}` : ''}${item.attribution ? `; original session ${item.attribution.sessionId}` : ''}) — ${cleanupDetail(item.reason)}`).join('\n')
+          + '\nRetry /schedule purge <managed-id,...>; use cleanup review/delete for exact native definitions in their original bound session.';
       }
       if (storedOnly) output = `Native cancellation cleanup is pending. This is the stored catalog, not a fresh native inventory. Retry /abort; /clear stops the host and loses session-only schedules.\n\n${output}`;
       if (updateSnapshot) output = `Automatic update handoff: stored catalog only, not fresh native inventory. Unconfirmed work remains fenced; inspect the CLI diagnostic before an explicit service stop/restart.\n\n${output}`;

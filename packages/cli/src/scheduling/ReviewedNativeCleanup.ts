@@ -12,6 +12,8 @@ export interface NativeCleanupSession {
   /** Framework-captured location and retirement proof, never model arguments. */
   cwd?: string;
   retirementConfirmed?(): boolean;
+  /** Unsettled mutation receipts retain their operational record. */
+  mutationPending?(): boolean;
   current(): boolean;
   inventory(): Promise<NativeCleanupDefinition[]>;
   remove(target: NativeCleanupDefinition): Promise<void>;

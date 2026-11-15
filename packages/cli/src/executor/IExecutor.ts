@@ -122,6 +122,8 @@ export interface IExecutor {
   /** Retire the turn activation but retain native managed-tool registration during interrupt. */
   preservesProcessOnAbort?(): boolean;
   hasPendingCancellation?(): boolean;
+  /** Unsettled native scheduling mutation receipts, independent of foreground turns. */
+  hasPendingScheduleMutation?(): boolean;
   /** A native settings mutation still owns admission; abort must not retire its bridge. */
   hasPendingSettingsChange?(): boolean;
   /** Permit only an explicit retry of a settled-but-unconfirmed native setting. */

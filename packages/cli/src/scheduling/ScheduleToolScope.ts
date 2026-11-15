@@ -7,7 +7,7 @@ import type { ScheduleOwner, ScheduleRecord } from './types';
 
 export type ScheduleOperation = Extract<ScheduleCommand, { kind: 'create' | 'cancel' }> | { kind: 'list' };
 type PublicRecord = Pick<ScheduleRecord, 'id' | 'state' | 'backend' | 'rule' | 'prompt' | 'error'>;
-interface Result { status: 'pending' | 'succeeded' | 'failed'; requestId: string; scheduleId?: string; records?: PublicRecord[]; error?: string; card?: string; cleanupReview?: NativeCleanupReview; purge?: SchedulePurgeResult; cleanup?: { absentIds: string[]; warning: string } }
+interface Result { status: 'pending' | 'succeeded' | 'failed'; requestId: string; scheduleId?: string; records?: PublicRecord[]; nativeCleanupUnresolved?: { id: string; backend: string; reason: string; detail: string }[]; error?: string; card?: string; cleanupReview?: NativeCleanupReview; purge?: SchedulePurgeResult; cleanup?: { absentIds: string[]; warning: string } }
 interface Receipt { scope: string; settled: boolean; pendingObserved?: boolean; terminalObserved?: boolean; digest: string; sideEffect: boolean; result: Result; done: Promise<void> }
 interface Options {
   owner: ScheduleOwner;
@@ -17,6 +17,7 @@ interface Options {
   run(command: ScheduleOperation, scheduleId: string): Promise<ScheduleRecord[]>;
   reviewCleanup?(id: string): Promise<NativeCleanupReview>;
   deleteCleanup?(command: Extract<ScheduleCommand, { kind: 'cleanup-confirm' }>, id: string): Promise<{ absentIds: string[]; warning: string }>;
+  listCleanup?(): Promise<{ id: string; backend: string; reason: string; detail: string }[]>;
   purge?(selection: SchedulePurgeSelection, id: string): Promise<SchedulePurgeResult>;
   present(records: ScheduleRecord[], operationId: string): Promise<string>;
   nativeAction?(id: string): unknown;
@@ -142,6 +143,7 @@ export class ScheduleToolScope {
               id: record.id, state: record.state, backend: record.backend, rule: record.rule,
               prompt: record.prompt.slice(0, 240), error: record.error?.slice(0, 240),
             })) };
+            if (parsed.kind === 'list') admitted.result.nativeCleanupUnresolved = await this.options.listCleanup?.() ?? [];
             try { admitted.result.card = await this.options.present(records, key); }
             catch { admitted.result.card = 'Management card unavailable. Use /schedule list; do not recreate the task.'; }
           } catch (error) {
