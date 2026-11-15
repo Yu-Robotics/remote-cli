@@ -1111,12 +1111,18 @@ from the matching thread and workspace generation. The CLI
 waits for tool calls and worker cleanup, recognizes historical delivery, and reads
 validated durable receipts; reading a result or claiming completion is not enough.
 No-change, applied, and explicitly retained artifacts pass. Pending changes,
-failed collection, unavailable records, and unretained recovery state cause up to
-two additional coordinator rounds in the same session, without replaying the
-original request or attachments. New workers do not reset this budget. If unresolved,
-the final response fails with task IDs and available output commits; queued execution
-pauses and existing artifacts stay preserved. Coordinator failure, abort, or shutdown
-does not launch further closeout rounds. Retaining output is a deliberate decision
+failed collection, unavailable records, and unretained recovery state remain
+unresolved until verified closeout. From CLI 1.6.241, the coordinator continues
+in the same request and session without a fixed round limit, without replaying
+completed worker work, the original request, or its attachments. The first closeout
+continuation is immediate; repeated checks without a resolved obligation wait
+1 second, doubling up to 30 seconds between turns. Resolving an existing obligation
+resets that delay; adding workers does not. The request stays busy and queued work
+waits. Use `/abort` to stop, or `/clear` to retire the conversation; shutdown also
+cancels a pending wait without another model turn. Unrelated backend failures keep
+their existing failure/recovery behavior. Worker-launch and tool-call admission
+limits still apply across every continuation; exhaustion does not authorize
+extra calls, automatic integration, or discarding unavailable records. Retaining output is a deliberate decision
 not to integrate, not proof of delivery. Disposable checkout cleanup preserves the retained artifact. The check
 does not certify functional correctness, force cleanup, or replay old requests.
 Ownership coordinates cooperating CLI processes, not unmanaged programs; keep

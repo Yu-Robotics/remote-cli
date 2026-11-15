@@ -40,7 +40,7 @@ import { ActivityProgress } from '../utils/ActivityProgress';
 import { normalizeActivity } from '../executor/Activity';
 import { compareNoticeVersions, validNoticeVersion } from '../maintenance/Version';
 
-export const DELEGATION_LIMITS = { launches: 12, concurrent: 5, closeoutRounds: 2,
+export const DELEGATION_LIMITS = { launches: 12, concurrent: 5,
   idleTimeoutMs: 15 * 60_000, toolIdleTimeoutMs: 45 * 60_000,
   queueTimeoutMs: 60 * 60_000,
   resultBytes: 32 * 1024, continuationBytes: 64 * 1024, summaryBytes: 4 * 1024,

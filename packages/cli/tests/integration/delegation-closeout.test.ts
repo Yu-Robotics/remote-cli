@@ -7,13 +7,14 @@ import { MessageHandler } from '../../src/client/MessageHandler';
 import { ThreadManager } from '../../src/thread/ThreadManager';
 import { ThreadExecutorPool } from '../../src/thread/ThreadExecutorPool';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
-import { DelegationManager } from '../../src/delegation/DelegationManager';
+import { DELEGATION_LIMITS, DelegationManager } from '../../src/delegation/DelegationManager';
 import { DelegatedWorkspaceManager } from '../../src/delegation/DelegatedWorkspaceManager';
 import { BackendRegistry } from '../../src/delegation/BackendRegistry';
 import type { DelegationConnection } from '../../src/delegation/contract';
 import type { ExecuteOptions, ExecuteResult } from '../../src/executor/IExecutor';
 import { gitText, runGit } from '../../src/delegation/GitCheckpoint';
 import { gitFixture } from '../delegation/gitFixture';
+import * as closeout from '../../src/delegation/ArtifactCloseoutContinuation';
 
 vi.mock('../../src/delegation/OwnershipRuntime', async importOriginal => {
   const actual = await importOriginal<typeof import('../../src/delegation/OwnershipRuntime')>();
@@ -57,6 +58,21 @@ describe('code-enforced delegated artifact closeout', { timeout: 30_000 }, () =>
     return call('remote_cli_integrate', { taskId: id, action: 'retain', expectedRevision: view.revision });
   };
   const run = () => handler.handleMessage(message('parent', 'Original task'));
+  const holdWait = (after = 1) => {
+    let entered!: (delay: number) => void;
+    const waiting = new Promise<number>(resolve => { entered = resolve; });
+    const actual = closeout.waitForArtifactCloseout;
+    let calls = 0;
+    const spy = vi.spyOn(closeout, 'waitForArtifactCloseout').mockImplementation((delay, signal) => {
+      if (++calls < after) return actual(0, signal);
+      entered(delay);
+      return actual(30000, signal);
+    });
+    return { waiting, spy };
+  };
+  const enterWait = <T>(waiting: Promise<T>, active: Promise<void>) => Promise.race([
+    waiting, active.then(() => { throw new Error('Request ended before the closeout wait'); }),
+  ]);
 
   beforeEach(async () => {
     fixture = await gitFixture();
@@ -95,13 +111,22 @@ describe('code-enforced delegated artifact closeout', { timeout: 30_000 }, () =>
     await fs.rm(fixture.directory, { recursive: true, force: true });
   });
 
-  it('rejects prose-only completion after two rounds and preserves the pending artifact', async () => {
+  it('continues beyond two rounds and resolves without replaying completed work', async () => {
+    vi.spyOn(closeout, 'waitForArtifactCloseout').mockResolvedValue(undefined);
+    main.execute.mockResolvedValueOnce({ success: true }).mockResolvedValueOnce({ success: true })
+      .mockImplementationOnce(async (prompt: string, options: ExecuteOptions) => {
+        expect(prompt).toContain('closeout round 3');
+        expect(prompt).not.toContain('Original task');
+        expect(options.attachments).toBeUndefined();
+        expect(response()).toBeUndefined();
+        expect(pool.isThreadBusy(threads.getDefaultThread().id)).toBe(true);
+        await retain(); return { success: true };
+      });
     await run();
-    expect(main.execute).toHaveBeenCalledTimes(3);
+    expect(main.execute).toHaveBeenCalledTimes(4);
     expect(workerExecutions).toBe(1);
-    expect(response()).toMatchObject({ success: false, error: expect.stringContaining(taskId) });
-    expect(response().error).toContain('pending');
-    expect(await artifact()).toMatchObject({ disposition: 'pending' });
+    expect(response()).toMatchObject({ success: true });
+    expect(await artifact()).toMatchObject({ disposition: 'retained' });
     expect(await fs.readFile(path.join(fixture.root, 'source.txt'), 'utf8')).toBe('first\nsecond\nthird\n');
     expect(await gitText(fixture.root, ['rev-parse', 'HEAD'])).toBe(fixture.head);
     expect(pool.isThreadBusy(threads.getDefaultThread().id)).toBe(false);
@@ -181,14 +206,29 @@ describe('code-enforced delegated artifact closeout', { timeout: 30_000 }, () =>
       }
       return { success: true };
     }).mockResolvedValue({ success: true });
-    await run();
-    expect(main.execute).toHaveBeenCalledTimes(3);
-    expect(response()).toMatchObject({ success: false, error: expect.stringContaining('unavailable') });
+    const hold = holdWait();
+    const active = run();
+    await enterWait(hold.waiting, active);
+    expect(main.execute.mock.calls[1][0]).toContain('unavailable');
+    expect(response()).toBeUndefined();
+    expect(workerExecutions).toBe(1);
+    await handler.handleMessage(message('abort', '/abort'));
+    await active;
+    expect(main.execute).toHaveBeenCalledTimes(2);
+    expect(response()).toMatchObject({ success: false });
   });
 
   it('settles an unavailable failed-worker obligation after actual disposal without perpetual model rounds', async () => {
     vi.spyOn(DelegatedWorkspaceManager.prototype, 'collect').mockRejectedValue(new Error('Fixture storage failure'));
-    await run();
+    const hold = holdWait();
+    const active = run();
+    if (process.platform !== 'linux') {
+      await enterWait(hold.waiting, active);
+      expect(main.execute.mock.calls[1][0]).toContain('unavailable');
+      expect(response()).toBeUndefined();
+      await handler.handleMessage(message('abort', '/abort'));
+    }
+    await active;
     expect(workerExecutions).toBe(1);
     if (process.platform === 'linux') {
       expect(main.execute).toHaveBeenCalledOnce();
@@ -201,8 +241,8 @@ describe('code-enforced delegated artifact closeout', { timeout: 30_000 }, () =>
       expect(socket.send.mock.calls.map(([value]: any[]) => value).find((value: any) => value.type === 'response' && value.messageId === 'after-failure'))
         .toMatchObject({ success: true });
     } else {
-      expect(main.execute).toHaveBeenCalledTimes(3);
-      expect(response()).toMatchObject({ success: false, error: expect.stringContaining('unavailable') });
+      expect(main.execute).toHaveBeenCalledTimes(2);
+      expect(response()).toMatchObject({ success: false });
     }
   });
 
@@ -218,21 +258,28 @@ describe('code-enforced delegated artifact closeout', { timeout: 30_000 }, () =>
     expect(await fs.readFile(path.join(fixture.root, 'source.txt'), 'utf8')).toBe('first\nsecond\nthird\n');
   });
 
-  it('combines results and closeout but never resets the closeout budget for new workers', async () => {
+  it('keeps the request launch budget across closeout rounds and new workers', async () => {
+    vi.spyOn(closeout, 'waitForArtifactCloseout').mockResolvedValue(undefined);
+    const ids: string[] = [];
     main.execute.mockReset().mockImplementation(async (prompt: string) => {
       if (workerExecutions) {
         expect(prompt).toContain('Fixture worker result');
         expect(prompt).toContain('artifact closeout');
       }
-      await delegate(false);
+      if (ids.length < DELEGATION_LIMITS.launches) ids.push(await delegate(false));
+      else {
+        await expect(delegate(false)).rejects.toThrow('Delegated task limit reached');
+        for (const id of ids) await retain(id);
+      }
       return { success: true };
     });
     await run();
-    expect(main.execute).toHaveBeenCalledTimes(3);
-    expect(workerExecutions).toBe(3);
-    expect(response()).toMatchObject({ success: false, error: expect.stringContaining('after 2 rounds') });
-    expect(response().error.match(/: pending/g) ?? []).toHaveLength(3);
-  });
+    expect(main.execute).toHaveBeenCalledTimes(DELEGATION_LIMITS.launches + 1);
+    expect(workerExecutions).toBe(DELEGATION_LIMITS.launches);
+    expect(response()).toMatchObject({ success: true });
+    expect(main.configureDelegation).toHaveBeenCalledOnce();
+    for (const id of ids) expect(await artifact(id)).toMatchObject({ disposition: 'retained' });
+  }, (DELEGATION_LIMITS.launches + 1) * 30000);
 
   it('preserves compact retry semantics without consuming another closeout round', async () => {
     main.compactWhenFull = vi.fn(async () => ({ success: true }));
@@ -243,9 +290,79 @@ describe('code-enforced delegated artifact closeout', { timeout: 30_000 }, () =>
     expect(main.execute).toHaveBeenCalledTimes(4);
     expect(main.compactWhenFull).toHaveBeenCalledOnce();
     expect(main.execute.mock.calls[1][0]).toBe(main.execute.mock.calls[2][0]);
-    expect(main.execute.mock.calls[3][0]).toContain('round 2 of 2');
+    expect(main.execute.mock.calls[3][0]).toContain('closeout round 2');
     expect(response()).toMatchObject({ success: true });
     expect(workerExecutions).toBe(1);
+  });
+
+  it('preserves model recovery within the same closeout prompt and admission scope', async () => {
+    const threadId = threads.getDefaultThread().id;
+    await threads.updateThread(threadId, { models: { codex: 'synthetic-unavailable-model' } });
+    main.clearModel = vi.fn(async () => undefined);
+    main.execute.mockResolvedValueOnce({ success: false, error: 'Unknown Codex model' })
+      .mockImplementationOnce(async () => { await retain(); return { success: true }; });
+    await run();
+    expect(main.execute).toHaveBeenCalledTimes(3);
+    expect(main.execute.mock.calls[1][0]).toBe(main.execute.mock.calls[2][0]);
+    expect(main.execute.mock.calls[2][1].attachments).toBeUndefined();
+    expect(main.clearModel).toHaveBeenCalledOnce();
+    expect(threads.getThread(threadId)?.models?.codex).toBeUndefined();
+    expect(workerExecutions).toBe(1);
+    expect(response()).toMatchObject({ success: true });
+  });
+
+  it.each(['abort', 'shutdown', 'clear'])('cancels repeated unchanged closeout during backoff on %s', async action => {
+    const hold = holdWait(3);
+    const active = run();
+    expect(await enterWait(hold.waiting, active)).toBe(4000);
+    expect(hold.spy.mock.calls.map(([delay]) => delay)).toEqual([1000, 2000, 4000]);
+    expect(main.execute).toHaveBeenCalledTimes(4);
+    expect(response()).toBeUndefined();
+    const threadId = threads.getDefaultThread().id;
+    expect(pool.isThreadBusy(threadId)).toBe(true);
+    expect((handler as any).activeThreadOperations.get(threadId).messageId).toBe('parent');
+    expect(await artifact()).toMatchObject({ disposition: 'pending' });
+    expect(JSON.stringify(socket.send.mock.calls)).toContain('Continuing in 4s; use /abort to stop.');
+    if (action === 'abort') {
+      await handler.handleMessage(message('queued', 'Synthetic queued request'));
+      const confirmation = socket.send.mock.calls.map(([value]: any[]) => value)
+        .find((value: any) => value.messageId === 'queued' && value.queueConfirmation)?.queueConfirmation;
+      expect(confirmation).toBeDefined();
+      await handler.handleMessage(message('confirm', `/queue confirm ${confirmation.id}`));
+      expect((handler as any).threadQueues.get(threadId)).toHaveLength(1);
+      expect(main.execute).toHaveBeenCalledTimes(4);
+      expect(response()).toBeUndefined();
+    }
+    // The bridge is retired while waiting; it must not admit work between turns.
+    await expect(call('remote_cli_delegate', { backend: 'claude', objective: 'Must not run' })).rejects.toThrow();
+    if (action === 'shutdown') await handler.destroy();
+    else await handler.handleMessage(message('cancel', action === 'clear' ? '/clear' : '/abort'));
+    await active;
+    expect(hold.spy.mock.calls[2][1]?.aborted).toBe(true);
+    expect(main.execute).toHaveBeenCalledTimes(4);
+    expect(workerExecutions).toBe(1);
+    expect(response()).toMatchObject({ success: false });
+    expect(await artifact()).toMatchObject({ disposition: 'pending' });
+    expect(await gitText(fixture.root, ['rev-parse', 'HEAD'])).toBe(fixture.head);
+    expect((handler as any).activeThreadOperations.size).toBe(0);
+    expect((handler as any).coordinatorPreparations.size).toBe(0);
+    expect((handler as any).pausedQueues.size).toBe(0);
+    expect((handler as any).threadQueues.size).toBe(0);
+  });
+
+  it('rechecks a disposition resolved during backoff without an extra model turn', async () => {
+    vi.spyOn(closeout, 'waitForArtifactCloseout').mockImplementationOnce(async () => {
+      expect(response()).toBeUndefined();
+      const manager = new DelegatedWorkspaceManager();
+      const owner = { threadId: threads.getDefaultThread().id, cwd: fixture.root, workspaceGeneration: 0 };
+      const view = await manager.integrate(owner, taskId, 'inspect', undefined) as { revision: string };
+      await manager.integrate(owner, taskId, 'retain', view.revision);
+    });
+    await run();
+    expect(main.execute).toHaveBeenCalledTimes(2);
+    expect(workerExecutions).toBe(1);
+    expect(response()).toMatchObject({ success: true });
+    expect(await artifact()).toMatchObject({ disposition: 'retained' });
   });
 
   it('does not add closeout turns after coordinator failure', async () => {

@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.241] - 2026-11-15
+
+### Fixed
+- Continue unresolved delegated artifact closeout in the original coordinator request/session instead of failing after two rounds. Preserve explicit integration decisions, durable receipt and ancestry checks, worker-launch/tool-call admission limits, and existing backend failure handling; do not replay completed workers or original attachments.
+- Pace repeated unresolved closeout with a 1–30 second capped backoff. Cancel waits on abort, conversation retirement, or shutdown, retain request/queue ownership, and recheck durable disposition before another model turn.
+
+### Tests
+- Cover continuation beyond two rounds, capped pacing and timer cleanup, cancellation during waits, model/compaction retries, unchanged admission limits, and pending/unavailable artifact preservation with synthetic executors and real Git fixtures.
+
 ## [1.6.240] - 2026-11-15
 
 ### Fixed
