@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { isMainThread } from 'node:worker_threads';
 import { SCHEDULE_CATALOG_FILE, ScheduleService } from '../src/scheduling/ScheduleService';
 import type { ScheduleServiceOptions } from '../src/scheduling/ScheduleService';
 import { NativeScheduleCleanupError } from '../src/scheduling/types';
@@ -70,6 +71,9 @@ describe('ScheduleService', () => {
     deliver = vi.fn(async (_delivery: ScheduleDelivery) => {});
     current = vi.fn(() => true);
     services = [];
+    // Sibling worker threads can fork with this suite's native lock descriptors.
+    // Keep real release/reacquire checks in an independent process.
+    expect(isMainThread).toBe(true);
   });
   afterEach(async () => {
     await Promise.allSettled(services.map(service => service.destroy()));
