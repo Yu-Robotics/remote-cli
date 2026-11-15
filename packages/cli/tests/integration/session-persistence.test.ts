@@ -14,8 +14,10 @@ function createChild() {
     stdout: new EventEmitter(),
     stderr: new EventEmitter(),
     stdin: {
+      writable: true,
       write: vi.fn(),
       end: vi.fn(() => {
+        child.stdin.writable = false;
         queueMicrotask(() => {
           child.emit('exit', 0, null);
           child.emit('close', 0, null);
@@ -32,6 +34,7 @@ describe('Integration: Claude session persistence', () => {
   let guard: DirectoryGuard;
   let children: ReturnType<typeof createChild>[];
   let executors: ClaudePersistentExecutor[];
+  let turns: Promise<PromiseSettledResult<unknown>>[];
 
   beforeEach(() => {
     vi.useFakeTimers();
@@ -44,6 +47,7 @@ describe('Integration: Claude session persistence', () => {
     guard = new DirectoryGuard([home]);
     children = [];
     executors = [];
+    turns = [];
     vi.mocked(spawn).mockImplementation(() => {
       const child = createChild();
       children.push(child);
@@ -52,11 +56,16 @@ describe('Integration: Claude session persistence', () => {
   });
 
   afterEach(async () => {
-    await Promise.all(executors.map(executor => executor.destroy()));
-    vi.clearAllTimers();
-    vi.useRealTimers();
-    vi.restoreAllMocks();
-    fs.rmSync(home, { recursive: true, force: true });
+    try {
+      await Promise.all(executors.map(executor => executor.destroy()));
+      expect(await Promise.all(turns)).toEqual(turns.map(() => expect.objectContaining({ status: 'fulfilled' })));
+      for (const child of children) expect(child.stdin.end).toHaveBeenCalled();
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 
   function createExecutor(threadId?: string, cwd = project) {
@@ -73,10 +82,47 @@ describe('Integration: Claude session persistence', () => {
     child.stdout.emit('data', Buffer.from(JSON.stringify(message) + '\n'));
   }
 
+  function trackTurn<T>(result: Promise<T>): Promise<T> {
+    // Observe immediately, including when an assertion fails before the turn completes.
+    // Teardown drains and checks every outcome rather than suppressing rejected turns.
+    turns.push(result.then(
+      value => ({ status: 'fulfilled' as const, value }),
+      reason => ({ status: 'rejected' as const, reason }),
+    ));
+    return result;
+  }
+
+  function frames(child: ReturnType<typeof createChild>) {
+    return child.stdin.write.mock.calls.map(([line]) => JSON.parse(line));
+  }
+
+  async function acknowledgeStartup(child: ReturnType<typeof createChild>) {
+    const initialize = frames(child).find(frame => frame.request?.subtype === 'initialize');
+    if (!initialize) return; // Fresh, non-scheduling sessions do not need control initialization.
+    expect(frames(child).map(frame => frame.type)).toEqual(['control_request']);
+    expect(initialize.request.hooks).toMatchObject({
+      PreToolUse: expect.any(Array), UserPromptSubmit: expect.any(Array),
+    });
+    emit(child, { type: 'control_response', response: {
+      subtype: 'success', request_id: initialize.request_id, response: { models: [] },
+    } });
+    await vi.advanceTimersByTimeAsync(0);
+    const settings = frames(child).at(-1);
+    expect(frames(child).map(frame => frame.type)).toEqual(['control_request', 'control_request']);
+    expect(settings.request.subtype).toBe('get_settings');
+    expect(settings.request_id).not.toBe(initialize.request_id);
+    emit(child, { type: 'control_response', response: {
+      subtype: 'success', request_id: settings.request_id, response: { effective: { env: { TZ: 'UTC' } } },
+    } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(frames(child).map(frame => frame.type)).toEqual(['control_request', 'control_request', 'user']);
+  }
+
   async function executeTurn(executor: ClaudePersistentExecutor, sessionId: string) {
-    const result = executor.execute('Continue the task');
+    const result = trackTurn(executor.execute('Continue the task'));
     await vi.advanceTimersByTimeAsync(1000);
     const child = children.at(-1)!;
+    await acknowledgeStartup(child);
     expect(child.stdin.write).toHaveBeenCalledWith(expect.stringContaining('Continue the task'));
     emit(child, { type: 'system', subtype: 'init', session_id: sessionId });
     emit(child, { type: 'assistant', message: { content: [{ type: 'text', text: 'Done' }] } });
@@ -143,7 +189,7 @@ describe('Integration: Claude session persistence', () => {
     const current = { onStream: vi.fn(), onRedactedThinking: vi.fn(), onPlanMode: vi.fn() };
 
     for (const callbacks of [previous, current]) {
-      const result = executor.execute('Plan this task', callbacks);
+      const result = trackTurn(executor.execute('Plan this task', callbacks));
       await vi.advanceTimersByTimeAsync(1000);
       const child = children.at(-1)!;
       for (const block of [

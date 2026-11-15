@@ -5,6 +5,7 @@ import { AgyExecutor } from '../../src/executor/AgyExecutor';
 import { ClaudePersistentExecutor } from '../../src/executor/ClaudePersistentExecutor';
 import { DirectoryGuard } from '../../src/security/DirectoryGuard';
 import * as fs from 'node:fs/promises';
+import { spawn } from 'child_process';
 
 const fixture = vi.hoisted(() => ({ root: '' }));
 vi.mock('os', async (importOriginal) => {
@@ -16,6 +17,7 @@ vi.mock('os', async (importOriginal) => {
 // Prompts received by agy-format user events (recorded by the stdin mock below)
 const agyPrompts: string[] = [];
 const claudeInputs: Array<{ message: { content: string }; isSlashCommand?: boolean }> = [];
+const claudeControls: Array<{ request: { subtype: string; hooks?: unknown }; respond(): void }> = [];
 
 // Mock child_process for ClaudePersistentExecutor and AgyExecutor
 vi.mock('child_process', () => {
@@ -34,18 +36,34 @@ vi.mock('child_process', () => {
         child.emit('close', 0, null);
       };
       child.stdin = {
-        write: vi.fn((data: string) => {
-          try {
-            const parsed = JSON.parse(data);
-            if (parsed.event === 'user') agyPrompts.push(parsed.message?.content ?? '');
-            if (parsed.type === 'user') claudeInputs.push(parsed);
-          } catch { /* Not a user event. */ }
+        writable: true,
+        write: vi.fn((data: string, callback?: (error?: Error | null) => void) => {
+          const parsed = JSON.parse(data);
+          callback?.(null);
+          if (parsed.type === 'control_request') {
+            const response = parsed.request.subtype === 'initialize' ? { models: [] }
+              : parsed.request.subtype === 'get_settings' ? { effective: { env: { TZ: 'UTC' } } }
+                : undefined;
+            if (!response) throw new Error('Unexpected Claude control request in concurrency fixture.');
+            // Tests release each handshake stage explicitly; controls are never turn completions.
+            claudeControls.push({ request: parsed.request, respond: () => {
+              if (!closed) child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'control_response', response: {
+                subtype: 'success', request_id: parsed.request_id, response,
+              } }) + '\n'));
+            } });
+            return true;
+          }
+          if (parsed.event === 'user') agyPrompts.push(parsed.message?.content ?? '');
+          else if (parsed.type === 'user') claudeInputs.push(parsed);
+          else throw new Error('Unexpected input in concurrency fixture.');
           setTimeout(() => {
             if (closed) return;
-            child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'result', subtype: 'success' }) + '\n'));
-            child.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'result', result: {
+            const result = parsed.type === 'user' ? { type: 'result', subtype: 'success',
+              user_message_uuid: parsed.uuid, is_error: false, terminal_reason: 'completed', result: 'ok' }
+              : { event: 'result', result: {
               conversation_id: '', status: 'SUCCESS', response: 'ok', duration_seconds: 0, num_turns: 1, usage: {},
-            } }) + '\n'));
+            } };
+            child.stdout.emit('data', Buffer.from(JSON.stringify(result) + '\n'));
           }, 10);
           return true;
         }),
@@ -68,6 +86,7 @@ describe('Executor Concurrency & Rapid Commands', () => {
     vi.clearAllMocks();
     agyPrompts.length = 0;
     claudeInputs.length = 0;
+    claudeControls.length = 0;
     fixture.root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'executor-concurrency-')));
     vi.stubEnv('HOME', fixture.root);
     vi.stubEnv('USERPROFILE', fixture.root);
@@ -77,6 +96,7 @@ describe('Executor Concurrency & Rapid Commands', () => {
   });
 
   afterEach(async () => {
+    if (vi.isFakeTimers()) { vi.clearAllTimers(); vi.useRealTimers(); }
     vi.unstubAllEnvs();
     await fs.rm(fixture.root, { recursive: true, force: true });
   });
@@ -137,20 +157,61 @@ describe('Executor Concurrency & Rapid Commands', () => {
       }
     });
     
-    it('should queue multiple slash commands and regular commands', async () => {
+    it.each([false, true])('should queue multiple slash commands and regular commands (managed tools: %s)', async managed => {
+      vi.useFakeTimers();
       const executor = new ClaudePersistentExecutor(directoryGuard, fixture.root, 'synthetic-thread', undefined, undefined, 'synthetic-claude', false);
       (executor as any).sessionId = 'test-session';
-      
+      if (managed) await executor.configureManagedTools({ url: 'http://127.0.0.1:12345/', token: 'synthetic-token', groups: ['scheduling'] });
+
       // Sending multiple commands rapidly
       const p1 = executor.execute('/clear', { }); // Assuming we could pass it as prompt
       const p2 = executor.execute('normal prompt', { });
       const p3 = executor.compact();
-      
-      const results = await Promise.all([p1, p2, p3]);
-      expect(results.every(result => result.success)).toBe(true);
-      expect(claudeInputs.map(input => input.message.content)).toEqual(['/clear', 'normal prompt', '/compact']);
-      expect(claudeInputs[2].isSlashCommand).toBe(true);
-      await executor.destroy();
+      const completed: number[] = [];
+      const pending = [p1, p2, p3].map((promise, index) => promise.then(result => { completed.push(index); return result; }));
+      const drained = Promise.allSettled(pending);
+      try {
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(spawn).toHaveBeenCalledTimes(1);
+        const args = vi.mocked(spawn).mock.calls[0][1] as string[];
+        expect(args.includes('--await-initialize')).toBe(managed);
+        expect(claudeControls.map(control => control.request.subtype)).toEqual(['initialize']);
+        expect(claudeControls[0].request.hooks).toEqual(expect.objectContaining({
+          PreToolUse: expect.any(Array), UserPromptSubmit: expect.any(Array),
+        }));
+        expect(claudeInputs).toEqual([]);
+        expect(completed).toEqual([]);
+
+        claudeControls[0].respond();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(claudeControls.map(control => control.request.subtype)).toEqual(['initialize', 'get_settings']);
+        expect(claudeInputs).toEqual([]);
+        expect(completed).toEqual([]);
+
+        claudeControls[1].respond();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(claudeInputs.map(input => input.message.content)).toEqual(['/clear']);
+        for (let index = 0; index < 3; index++) {
+          await vi.advanceTimersByTimeAsync(10);
+          expect(completed).toEqual(Array.from({ length: index + 1 }, (_, value) => value));
+          expect(claudeInputs).toHaveLength(Math.min(index + 2, 3));
+        }
+        const results = await Promise.all(pending);
+        expect(results.every(result => result.success)).toBe(true);
+        expect(claudeInputs.map(input => input.message.content)).toEqual(['/clear', 'normal prompt', '/compact']);
+        expect(claudeInputs[2].isSlashCommand).toBe(true);
+        expect(executor.isBusy()).toBe(false);
+        expect(spawn).toHaveBeenCalledTimes(1);
+      } finally {
+        const cleanup = executor.destroy();
+        void cleanup.catch(() => undefined);
+        try {
+          await vi.advanceTimersByTimeAsync(1000);
+          await cleanup;
+        } finally {
+          await drained;
+        }
+      }
     });
   });
 });
