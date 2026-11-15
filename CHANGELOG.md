@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.245] - 2026-11-16
+
+### Fixed
+- Record verified pre-dispatch native schedule refusals so failed creation can be purged without leaving an unresolvable cleanup obligation. Preserve uncertainty after native admission or mutation.
+- Add exact-ID `forgetUnresolved: true` and `/schedule purge <managed-id,...> --forget-unresolved` for user-requested erasure of cleanup tracking whose history was already purged. Preserve durable replay fences, ownership, pending-work guards, and native-absence warnings; never invoke native tools or claim native deletion when forgetting metadata.
+
 ## [1.6.244] - 2026-11-15
 
 ### Fixed

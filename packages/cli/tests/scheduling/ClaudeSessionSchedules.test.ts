@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ScheduleToolOperations } from '../../src/scheduling/ScheduleToolScope';
 import { ClaudeSessionSchedules, SCHEDULE_HOOK, type NativeScheduleAction } from '../../src/scheduling/claude/ClaudeSessionSchedules';
-import { NativeScheduleCleanupError, type NativeScheduleEvent, type NativeScheduleInput } from '../../src/scheduling/types';
+import { NativeScheduleCleanupError, NativeScheduleNotAdmittedError, type NativeScheduleEvent, type NativeScheduleInput } from '../../src/scheduling/types';
 
 const input = (id = 'job-one'): NativeScheduleInput => ({ id, prompt: 'Use this conversation to report progress.', cwd: process.cwd(),
   rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } });
@@ -45,6 +45,58 @@ function harness() {
 afterEach(() => vi.useRealTimers());
 
 describe('Claude foreground native schedule protocol', () => {
+  it.each(['cron', 'timezone', 'mismatch', 'one-shot', 'marker-json', 'marker-shape', 'native-timezone'])(
+    'refuses invalid %s before requesting CronCreate or admitting an occurrence', async reason => {
+      const h = harness(); const value = input(); const admit = vi.fn(() => true); const events = vi.fn();
+      let timezone = 'UTC';
+      if (reason === 'cron') value.rule = { kind: 'cron', expression: '90 * * * *', timezone: 'UTC' };
+      if (reason === 'timezone') value.rule = { kind: 'cron', expression: '* * * * *', timezone: 'Invalid/Timezone' };
+      if (reason === 'mismatch') value.rule = { kind: 'cron', expression: '* * * * *', timezone: 'America/New_York' };
+      if (reason === 'one-shot') value.rule = { kind: 'once', at: 'not-a-timestamp' };
+      if (reason === 'marker-json' || reason === 'marker-shape') value.recovery = {
+        version: 1, provider: 'fixture', strategy: 'reconstruct', identity: reason === 'marker-json' ? '{' : '{}',
+      };
+      if (reason === 'native-timezone') timezone = 'Invalid/Timezone';
+      await expect(h.adapter.inToolOperation('refused', () => true,
+        () => h.adapter.create(value, events, () => true, timezone, false, undefined, admit)))
+        .rejects.toBeInstanceOf(NativeScheduleNotAdmittedError);
+      expect(h.adapter.action('refused')).toBeUndefined(); expect(h.adapter.hasJobs).toBe(false);
+      expect(h.send).not.toHaveBeenCalled(); expect(h.manage).not.toHaveBeenCalled();
+      expect(admit).not.toHaveBeenCalled(); expect(events).not.toHaveBeenCalled(); h.adapter.processClosed();
+    });
+
+  it.each(['closed', 'restart', 'capacity'])(
+    'refuses a fresh job before dispatch when the adapter is blocked by %s', async reason => {
+      const h = harness();
+      if (reason === 'closed') h.adapter.processClosed();
+      if (reason === 'restart') (h.adapter as any).definitionRemoval = { lease: { isCurrent: () => true } };
+      if (reason === 'capacity') for (let index = 0; index < 5; index++) await h.create(`existing-${index}`, `native-${index}`);
+      h.send.mockClear(); h.manage.mockClear();
+      await expect(h.adapter.create(input('fresh'), vi.fn())).rejects.toBeInstanceOf(NativeScheduleNotAdmittedError);
+      expect(h.send).not.toHaveBeenCalled(); expect(h.manage).not.toHaveBeenCalled(); h.adapter.processClosed();
+    });
+
+  it('does not classify a duplicate owned ID as harmless or revoke its existing callbacks', async () => {
+    const h = harness(); const existing = await h.create();
+    h.send.mockClear(); h.manage.mockClear();
+    const failure = await h.adapter.create(input(), vi.fn()).catch(error => error);
+    expect(failure).toBeInstanceOf(Error); expect(failure).not.toBeInstanceOf(NativeScheduleNotAdmittedError);
+    expect(h.send).not.toHaveBeenCalled(); expect(h.manage).not.toHaveBeenCalled();
+    expect(existing.handle.nativeDefinitionAbsent).toBe(false);
+    expect(h.occurrence(String(existing.action.input.prompt))).toEqual({}); h.complete();
+    expect(existing.onEvent).toHaveBeenCalledWith(expect.objectContaining({ type: 'completed' })); h.adapter.processClosed();
+  });
+
+  it.each([true, 'adopt', 'adopt-existing', 'expected-id'] as const)(
+    'keeps validation failure uncertain when restoring a possibly existing definition (%s)', async restore => {
+      const h = harness();
+      const failure = await h.adapter.create({ ...input(), rule: { kind: 'cron', expression: 'invalid', timezone: 'UTC' } },
+        vi.fn(), () => true, 'UTC', restore === 'expected-id' ? false : restore,
+        restore === 'expected-id' ? 'original-native' : undefined).catch(error => error);
+      expect(failure).toBeInstanceOf(Error); expect(failure).not.toBeInstanceOf(NativeScheduleNotAdmittedError);
+      expect(h.send).not.toHaveBeenCalled(); expect(h.manage).not.toHaveBeenCalled(); h.adapter.processClosed();
+    });
+
   it('inventories arbitrary reviewed native definitions without granting admission or accepting uncorrelated receipts', async () => {
     const h = harness(); let current = true;
     const target = { id: 'legacy-native', prompt: 'Synthetic unmarked native task', cron: '* * * * *', durable: false };
@@ -184,8 +236,10 @@ describe('Claude foreground native schedule protocol', () => {
   it('rejects one-shot clock rollback ambiguity rather than selecting an earlier native wall minute', async () => {
     vi.useFakeTimers(); vi.setSystemTime(Date.parse('2030-11-03T04:00:00Z'));
     const h = harness();
-    await expect(h.adapter.create({ ...input(), rule: { kind: 'once', at: '2030-11-03T06:30:00Z' } },
-      vi.fn(), () => true, 'America/New_York')).rejects.toThrow('clock rollback');
+    const pending = h.adapter.create({ ...input(), rule: { kind: 'once', at: '2030-11-03T06:30:00Z' } },
+      vi.fn(), () => true, 'America/New_York');
+    await expect(pending).rejects.toThrow('clock rollback');
+    await expect(pending).rejects.toBeInstanceOf(NativeScheduleNotAdmittedError);
     expect(h.manage).not.toHaveBeenCalled(); h.adapter.processClosed();
   });
 
@@ -313,6 +367,7 @@ describe('Claude foreground native schedule protocol', () => {
     await vi.advanceTimersByTimeAsync(101);
     const error = await failure;
     expect(error).toBeInstanceOf(NativeScheduleCleanupError);
+    expect(error).not.toBeInstanceOf(NativeScheduleNotAdmittedError);
     const cancel = h.adapter.inToolOperation('cancel', () => true, () => (error as NativeScheduleCleanupError).handle.cancel());
     let next = h.adapter.action('cancel')!;
     expect(next.tool).toBe('CronList'); h.hook(next.tool, next.input, 'list-tool');

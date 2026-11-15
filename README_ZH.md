@@ -729,7 +729,7 @@ execution recovery. The same authenticated user can still list and retry cleanup
 in the same thread after a context reset or directory change; original generation
 and attribution remain unchanged. Live history and execution retain exact generation
 checks. Attributed Claude cleanup preserves its supported original-session route
-until resolved. DSH cleanup without a supported session-bound retry does not block
+until resolved or explicitly forgotten. DSH cleanup without a supported session-bound retry does not block
 context reset. Ordinary chat and backend selection do not gain a new hurdle.
 A retry can delete an exact matching attributed Claude
 recurring session-only definition and verify fresh absence without recreating it.
@@ -742,6 +742,21 @@ reported stopped. DSH uses its live cancellation handle or previously confirmed
 cleanup/clean-handoff receipt; without these, history can be removed but native
 retirement remains unresolved. Other backends retain their actual capability
 limits; the permission to delete is backend-neutral, not a new native API.
+
+From CLI 1.6.245, you can explicitly forget residual cleanup tracking after its
+managed history has been purged. Ask the agent to forget the selected residual
+tracking, or run `/schedule purge <managed-id,...> --forget-unresolved`.
+The tool equivalent is `remote_cli_schedule_purge` with exact `scheduleIds` and
+`forgetUnresolved: true`; `all` is rejected. This removes only the selected
+cleanup metadata, including entries without original session attribution. It
+does not call native tools, confirm native absence, or stop unknown work.
+Inspect `forgottenCleanupIds` and the returned `warning`; `complete` confirms
+the requested metadata erasure only. Active history must be purged first, and
+unsettled native mutations or local work still block forgetting. ID/owner replay
+fences survive atomically, including across restart, so forgotten jobs cannot be
+recreated. Native cleanup review/delete remains necessary for any actual native
+definitions. Sibling cleanup tracking is preserved; forgetting also discards the
+selected original-session cleanup route, so it is never an automatic retry mode.
 
 The cleanup ledger is bounded to 1,000 entries and permanent replay fences to
 10,000 IDs. Capacity exhaustion blocks further removal explicitly rather than

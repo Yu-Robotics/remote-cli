@@ -12,7 +12,7 @@ import { DirectoryGuard } from '../src/security/DirectoryGuard';
 import { ThreadContextReset } from '../src/thread/ThreadContextReset';
 import type { Thread } from '../src/thread/types';
 import type { NativeScheduleEvent, NativeScheduleInput } from '../src/scheduling/types';
-import { NativeScheduleCleanupError } from '../src/scheduling/types';
+import { NativeScheduleCleanupError, NativeScheduleNotAdmittedError } from '../src/scheduling/types';
 import { ScheduleService, SCHEDULE_CATALOG_FILE } from '../src/scheduling/ScheduleService';
 
 const native = vi.hoisted(() => ({ create: vi.fn(), createDsh: vi.fn() }));
@@ -121,6 +121,69 @@ describe('MessageHandler native schedule closed loop', () => {
   const invoke = (name: string, args: Record<string, unknown>) => (f.handler as any).delegationBridges.get('thread-a').handler(name, args, 'native-call');
   const createArgs = { requestId: 'create-one', when: { kind: 'after', amount: 5, unit: 'm' }, prompt: 'Synthetic scheduled task' };
 
+  it.each(['backend', 'unsupported-executor'])(
+    'persists a %s refusal before executor creation and purges it without cleanup residue after reload', async reason => {
+      const service = await (f.handler as any).initializeSchedules() as ScheduleService;
+      const owner = { threadId: 'thread-a', openId: 'owner', generation: (f.handler as any).scheduleGeneration('thread-a') };
+      const create = f.executor.createNativeSchedule;
+      if (reason === 'backend') f.setBackend('dsh');
+      else Object.assign(f.executor, { createNativeSchedule: undefined });
+      await expect(service.create(owner, { id: 'preflight-refused', backend: 'claude', cwd: f.cwd, prompt: 'Synthetic task',
+        rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } })).rejects.toBeInstanceOf(NativeScheduleNotAdmittedError);
+      expect(create).not.toHaveBeenCalled(); expect(native.create).not.toHaveBeenCalled(); expect(native.createDsh).not.toHaveBeenCalled();
+      expect(await service.list(owner)).toEqual([expect.objectContaining({ creationRefused: true, state: 'failed' })]);
+      f.setBackend('claude'); Object.assign(f.executor, { createNativeSchedule: create });
+      await f.restart();
+      const restored = await (f.handler as any).initializeSchedules() as ScheduleService;
+      expect(await restored.purge(owner, { ids: ['preflight-refused'] })).toMatchObject({
+        removedIds: ['preflight-refused'], nativeCleanupUnresolved: [], errors: [],
+      });
+      expect(await restored.purge(owner, { ids: ['preflight-refused'] })).toMatchObject({
+        alreadyRemovedIds: ['preflight-refused'], nativeCleanupUnresolved: [], errors: [],
+      });
+      expect(await restored.listCleanup(owner)).toEqual([]); expect(create).not.toHaveBeenCalled();
+    });
+
+  it.each(['thread', 'backend', 'executor-lookup'])(
+    'propagates a provider %s guard failure without invoking native creation or admission', async reason => {
+      const service = await (f.handler as any).initializeSchedules();
+      const value = { id: 'guarded', backend: 'claude', threadId: 'thread-a', cwd: f.cwd, prompt: 'Synthetic task',
+        rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } };
+      if (reason === 'thread') value.threadId = '';
+      if (reason === 'backend') value.backend = 'unsupported-fixture';
+      if (reason === 'executor-lookup') vi.spyOn(f.pool, 'getExecutor').mockImplementation(() => { throw new Error('Synthetic lookup refusal'); });
+      const admit = vi.fn(() => true); const events = vi.fn();
+      expect(() => service.options.provider.create(value, events, admit)).toThrow(NativeScheduleNotAdmittedError);
+      expect(f.executor.createNativeSchedule).not.toHaveBeenCalled(); expect(native.create).not.toHaveBeenCalled();
+      expect(admit).not.toHaveBeenCalled(); expect(events).not.toHaveBeenCalled();
+    });
+
+  it('keeps an ordinary error after executor dispatch uncertain despite missing native metadata', async () => {
+    const service = await (f.handler as any).initializeSchedules() as ScheduleService;
+    const owner = { threadId: 'thread-a', openId: 'owner', generation: (f.handler as any).scheduleGeneration('thread-a') };
+    const failure = new Error('Synthetic error after native dispatch without a receipt');
+    f.executor.createNativeSchedule.mockRejectedValueOnce(failure);
+    await expect(service.create(owner, { id: 'uncertain', cwd: f.cwd, prompt: 'Synthetic task',
+      rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } })).rejects.toBe(failure);
+    expect(f.executor.createNativeSchedule).toHaveBeenCalledOnce();
+    expect((await service.list(owner))[0].creationRefused).toBeUndefined();
+    expect(await service.purge(owner, { ids: ['uncertain'] })).toMatchObject({
+      removedIds: ['uncertain'], nativeCleanupUnresolved: [{ id: 'uncertain', reason: 'unattributed' }],
+    });
+    expect(await service.listCleanup(owner)).toHaveLength(1);
+  });
+
+  it('forwards the exact cleanup handle when executor creation may have mutated native state', async () => {
+    const service = await (f.handler as any).initializeSchedules();
+    const handle = { nativeId: 'unconfirmed-synthetic', list: vi.fn(), cancel: vi.fn(), stop: vi.fn() };
+    const failure = new NativeScheduleCleanupError('Synthetic native mutation without a receipt', handle);
+    f.executor.createNativeSchedule.mockRejectedValueOnce(failure);
+    await expect(service.options.provider.create({ id: 'uncertain', threadId: 'thread-a', backend: 'claude', cwd: f.cwd,
+      prompt: 'Synthetic task', rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } }, vi.fn())).rejects.toBe(failure);
+    expect(failure.handle).toBe(handle); expect(failure).not.toBeInstanceOf(NativeScheduleNotAdmittedError);
+    expect(f.executor.createNativeSchedule).toHaveBeenCalledOnce();
+  });
+
   async function history(count = 1, attributed = true) {
     const owner = { threadId: 'thread-a', openId: 'owner', generation: (f.handler as any).scheduleGeneration('thread-a') };
     const records = Array.from({ length: count }, (_, index) => ({ ...owner, id: `historical-${index}`, backend: 'claude',
@@ -133,6 +196,56 @@ describe('MessageHandler native schedule closed loop', () => {
     await writeFile(path.join(directory, SCHEDULE_CATALOG_FILE), JSON.stringify({ version: 3, records, pending: [], purged: [] }));
     return { owner, records, directory };
   }
+
+  it.each(['claude', 'dsh'])('forgets exact residual tracking through text commands without native calls and retains replay fences', async backend => {
+    const { directory, records } = await history(2, false);
+    records.forEach(record => { record.backend = backend; });
+    await writeFile(path.join(directory, SCHEDULE_CATALOG_FILE), JSON.stringify({ version: 3, records, pending: [], purged: [] }));
+    f.setBackend(backend); await f.bind(); await f.send('/schedule purge all');
+    const review = vi.fn(async () => { throw new Error('Forgetting tracking must not inspect native sessions'); });
+    Object.assign(f.executor, { withReviewedNativeCleanup: review });
+    f.executor.withNativeScheduleOperation.mockClear();
+    await f.send('/schedule purge historical-0 --forget-unresolved', 'thread-a', { messageId: 'forget-fixed' });
+    expect(f.responses().at(-1)).toMatchObject({ success: true, output: expect.stringContaining('Forgotten cleanup tracking: historical-0.') });
+    expect(f.responses().at(-1).output).toContain('does not confirm native definition absence');
+    const catalog = JSON.parse(await readFile(path.join(directory, SCHEDULE_CATALOG_FILE), 'utf8'));
+    expect(catalog.cleanup.map((entry: any) => entry.id)).toEqual(['historical-1']);
+    expect(catalog.purged.map((entry: any) => entry.id)).toEqual(['historical-0', 'historical-1']);
+    expect(review).not.toHaveBeenCalled(); expect(f.executor.withNativeScheduleOperation).not.toHaveBeenCalled();
+    expect(native.create).not.toHaveBeenCalled(); expect(native.createDsh).not.toHaveBeenCalled();
+    await f.restart(); await f.bind(); await f.send('/schedule list');
+    expect(f.responses().at(-1).output).toContain('historical-1');
+    expect(f.responses().at(-1).output).not.toContain('historical-0');
+    await f.send('/schedule purge historical-0 --forget-unresolved', 'thread-a', { messageId: 'forget-fixed' });
+    expect(f.responses().at(-1).success).toBe(true);
+    expect(f.responses().at(-1).output).toContain('does not confirm native definition absence');
+    await f.send('/schedule purge historical-0', 'thread-a', { messageId: 'forget-fixed' });
+    expect(f.responses().at(-1).error).toContain('different selection');
+  });
+
+  it('routes model-requested forgetting without native admission and reports unresolved native status honestly', async () => {
+    const { directory } = await history(2, false);
+    await f.bind(); await f.send('/schedule purge all');
+    const review = vi.fn(); Object.assign(f.executor, { withReviewedNativeCleanup: review });
+    f.executor.withNativeScheduleOperation.mockClear();
+    let reply: any, repeated: any, listed: any;
+    f.executor.execute.mockImplementationOnce(async () => {
+      const args = { requestId: 'forget-residue', scheduleIds: ['historical-0'], forgetUnresolved: true };
+      reply = await invoke('remote_cli_schedule_purge', args);
+      repeated = await invoke('remote_cli_schedule_purge', args);
+      listed = await invoke('remote_cli_schedule_list', { requestId: 'remaining' });
+      return { success: true };
+    });
+    await f.send('Forget the selected synthetic residual tracking', 'thread-a', { isSlashCommand: false });
+    expect(reply).toMatchObject({ status: 'succeeded', purge: { status: 'complete', forgottenCleanupIds: ['historical-0'],
+      nativeCleanupUnresolved: [], warning: expect.stringContaining('does not confirm native definition absence') } });
+    expect(repeated).toEqual(reply);
+    expect(listed.nativeCleanupUnresolved.map((entry: any) => entry.id)).toEqual(['historical-1']);
+    expect(review).not.toHaveBeenCalled(); expect(f.executor.withNativeScheduleOperation).not.toHaveBeenCalled();
+    const catalog = JSON.parse(await readFile(path.join(directory, SCHEDULE_CATALOG_FILE), 'utf8'));
+    expect(catalog.cleanup.map((entry: any) => entry.id)).toEqual(['historical-1']);
+    expect(catalog.purged).toHaveLength(2);
+  });
 
   it.each(['claude', 'dsh'])('removes fifteen unattributed %s histories through production text and tool paths while keeping native uncertainty', async backend => {
     const { directory, records } = await history(15, false);

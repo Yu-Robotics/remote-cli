@@ -26,6 +26,16 @@ describe('ScheduleCommand', () => {
     }
   });
 
+  it('requires exact managed IDs to forget unresolved cleanup tracking', () => {
+    expect(parse('/schedule purge schedule-a,schedule-b --forget-unresolved')).toEqual({ kind: 'purge',
+      selection: { ids: ['schedule-a', 'schedule-b'], forgetUnresolved: true } });
+    expect(SCHEDULE_USAGE).toContain('--forget-unresolved');
+    for (const text of ['/schedule purge all --forget-unresolved', '/schedule purge --forget-unresolved',
+      '/schedule purge a,a --forget-unresolved', '/schedule purge a --forget-unresolved extra']) {
+      expect(parse(text)?.kind).toBe('invalid');
+    }
+  });
+
   it.each([
     ['1m', '2030-01-01T00:02:00.000Z'],
     ['2h', '2030-01-01T02:01:00.000Z'],

@@ -71,7 +71,7 @@ import { ScheduleService, SCHEDULE_CATALOG_FILE, type SchedulePurgeSelection, ty
 import { ScheduleDeliveryClient } from '../scheduling/ScheduleDeliveryClient';
 import { parseScheduleCommand, SCHEDULE_USAGE, type ScheduleCommand } from '../scheduling/ScheduleCommand';
 import { assertNativeScheduleBackend, NATIVE_SCHEDULE_CAPABILITIES, SCHEDULE_CAPABILITIES } from '../scheduling/ScheduleCapabilities';
-import type { ScheduleOwner, ScheduleRecord } from '../scheduling/types';
+import { NativeScheduleNotAdmittedError, type ScheduleOwner, type ScheduleRecord } from '../scheduling/types';
 import { ClaudeSandbox } from '../executor/claude/ClaudeSandbox';
 
 /**
@@ -3600,13 +3600,19 @@ You can also use natural language commands to control Claude Code CLI.`,
           } };
         }, create: (input, onEvent, canAdmitOccurrence) => {
           const backend = input.backend === undefined ? 'claude' : input.backend;
-          assertNativeScheduleBackend(backend);
-          if (!input.threadId) throw new Error('Native scheduling requires the original thread.');
-          if (this.threadPool.getBackendKey(input.threadId) !== backend) throw new Error('Foreground scheduling backend changed before native admission.');
-          const executor = this.threadPool.getExecutor(input.threadId);
-          if (!executor.createNativeSchedule) throw new Error('The original executor does not support native session scheduling.');
-          const generation = this.scheduleGeneration(input.threadId);
-          return executor.createNativeSchedule(input, event => {
+          let executor: IExecutor;
+          let generation: string;
+          try {
+            assertNativeScheduleBackend(backend);
+            if (!input.threadId) throw new Error('Native scheduling requires the original thread.');
+            if (this.threadPool.getBackendKey(input.threadId) !== backend) throw new Error('Foreground scheduling backend changed before native admission.');
+            executor = this.threadPool.getExecutor(input.threadId);
+            if (!executor.createNativeSchedule) throw new Error('The original executor does not support native session scheduling.');
+            generation = this.scheduleGeneration(input.threadId);
+          } catch (error) {
+            throw new NativeScheduleNotAdmittedError(error instanceof Error ? error.message : 'Native schedule provider refused admission.');
+          }
+          return executor.createNativeSchedule!(input, event => {
             onEvent(event);
             // A foreground message confirmed into the thread queue while an
             // autonomous native occurrence was running must be retried when
@@ -3832,10 +3838,12 @@ You can also use natural language commands to control Claude Code CLI.`,
       const ids = await service.freezePurgeSelection(owner, selection, id, current);
       const run = async () => {
         if (!current()) throw new Error('Schedule purge context changed before cleanup.');
-        const result = await service.purge(owner, { ids }, current);
+        const result = await service.purge(owner, { ids,
+          ...('forgetUnresolved' in selection && selection.forgetUnresolved ? { forgetUnresolved: true as const } : {}) }, current);
         if (result.removedIds.length) this.scheduleCards.invalidate();
         return result;
       };
+      if ('forgetUnresolved' in selection && selection.forgetUnresolved) return await run();
       const records = await service.list(owner);
       const needsVerification = backend === 'claude' && !!executor.withReviewedNativeCleanup && (cleanup.some(item => ids.includes(item.id) && item.backend === 'claude' && !!item.attribution && !!item.nativeId) || records.some(record => ids.includes(record.id)
         && record.backend === 'claude' && !!record.recovery && !!record.nativeId && !record.cleanupConfirmed && !record.creationRefused && !['active', 'running', 'creating'].includes(record.state)));
@@ -3963,6 +3971,8 @@ You can also use natural language commands to control Claude Code CLI.`,
           createHash('sha256').update(message.messageId ?? uuidv4()).digest('hex'));
         const lines = [`Removed history: ${result.removedIds.join(', ') || 'none'}.`,
           `Already removed: ${result.alreadyRemovedIds.join(', ') || 'none'}.`,
+          ...(result.forgottenCleanupIds ? [`Forgotten cleanup tracking: ${result.forgottenCleanupIds.join(', ') || 'none'}.`] : []),
+          ...(result.warning ? [result.warning] : []),
           ...result.nativeCleanupUnresolved.map(entry => `Native cleanup unresolved ${entry.id} (${entry.reason}): ${entry.detail}`),
           ...result.pending.map(entry => `Pending ${entry.id}: ${entry.detail}`),
           ...result.errors.map(entry => `Failed ${entry.id}: ${entry.error}`)];

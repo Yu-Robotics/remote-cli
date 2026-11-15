@@ -837,25 +837,31 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
   nativeScheduleAction(id: string) { return this.sessionSchedules?.action(id); }
   async createNativeSchedule(input: NativeScheduleInput, onEvent: (event: NativeScheduleEvent) => void, isOwnerCurrent?: () => boolean,
     canAdmitOccurrence?: () => boolean): Promise<NativeScheduleHandle> {
-    if (this.scheduleRestart || this.modelChange || this.delegationWorker || this.isDestroyed || this.isStopping || this.sandbox.isRestricted()
-      || input.cwd !== this.currentWorkingDirectory) throw new Error('Native schedule context or sandbox is unavailable.');
-    if (!this.scheduleHooksReady) throw new Error('Native scheduling hooks are not initialized.');
-    const timezone = await this.readNativeScheduleTimezone();
-    if (this.modelChange) throw new Error('Native model change is pending or unconfirmed.');
-    if (input.recovery && !this.turnLedger.supported(this.claudeProcess?.pid)) throw new Error('Claude recovery protocol is unsupported.');
-    if (input.recovery) this.scheduleHostOwnership().reserve(true);
+    let timezone: string;
+    try {
+      if (this.scheduleRestart || this.modelChange || this.delegationWorker || this.isDestroyed || this.isStopping || this.sandbox.isRestricted()
+        || input.cwd !== this.currentWorkingDirectory) throw new Error('Native schedule context or sandbox is unavailable.');
+      if (!this.scheduleHooksReady) throw new Error('Native scheduling hooks are not initialized.');
+      timezone = await this.readNativeScheduleTimezone();
+      if (this.modelChange) throw new Error('Native model change is pending or unconfirmed.');
+      if (input.recovery && !this.turnLedger.supported(this.claudeProcess?.pid)) throw new Error('Claude recovery protocol is unsupported.');
+      if (input.recovery) this.scheduleHostOwnership().reserve(true);
+    } catch (error) {
+      // No adapter admission or native schedule mutation has started here.
+      throw new NativeScheduleNotAdmittedError(error instanceof Error ? error.message : 'Native schedule preflight refused admission.');
+    }
     return this.recoverableScheduleHandle(await this.schedules().create(input, onEvent, isOwnerCurrent, timezone, false, undefined, canAdmitOccurrence), input);
   }
 
   /** Inspect only the effective TZ; never log, retain, or expose settings to a model. */
   private readNativeScheduleTimezone(): Promise<string> {
     const child = this.claudeProcess;
-    if (!child?.stdin?.writable) return Promise.reject(new Error('Native conversation is unavailable.'));
+    if (!child?.stdin?.writable) return Promise.reject(new NativeScheduleNotAdmittedError('Native conversation is unavailable.'));
     const stdin = child.stdin;
     const requestId = `schedule-timezone-${randomUUID()}`;
     return new Promise((resolve, reject) => {
       const failure = () => { this.pendingControlRequests.delete(requestId); clearTimeout(timer);
-        reject(new Error('Native session timezone could not be verified. No schedule was created.')); };
+        reject(new NativeScheduleNotAdmittedError('Native session timezone could not be verified. No schedule was created.')); };
       const timer = setTimeout(failure, 10_000);
       this.pendingControlRequests.set(requestId, {
         timer, reject: failure,
@@ -866,7 +872,7 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
             const response = value as { effective?: { env?: { TZ?: unknown }; disableAllHooks?: boolean; allowManagedHooksOnly?: boolean } };
             if (!response?.effective || typeof response.effective !== 'object') { failure(); return; }
             if (response.effective.disableAllHooks || response.effective.allowManagedHooksOnly) {
-              reject(new Error('Native scheduling requires active SDK callback hooks. Native hook policy was not changed.')); return;
+              reject(new NativeScheduleNotAdmittedError('Native scheduling requires active SDK callback hooks. Native hook policy was not changed.')); return;
             }
             const timezone = response.effective.env?.TZ ?? this.nativeScheduleTimezone;
             if (typeof timezone !== 'string' || !timezone || timezone.length > 128) { failure(); return; }
