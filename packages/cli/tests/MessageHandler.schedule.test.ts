@@ -121,6 +121,118 @@ describe('MessageHandler native schedule closed loop', () => {
   const invoke = (name: string, args: Record<string, unknown>) => (f.handler as any).delegationBridges.get('thread-a').handler(name, args, 'native-call');
   const createArgs = { requestId: 'create-one', when: { kind: 'after', amount: 5, unit: 'm' }, prompt: 'Synthetic scheduled task' };
 
+  async function history(count = 1, attributed = true) {
+    const owner = { threadId: 'thread-a', openId: 'owner', generation: (f.handler as any).scheduleGeneration('thread-a') };
+    const records = Array.from({ length: count }, (_, index) => ({ ...owner, id: `historical-${index}`, backend: 'claude',
+      cwd: f.cwd, state: 'interrupted', nativeId: `native-${index}`, prompt: 'Synthetic historical task', createdAt: Date.now(),
+      rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' },
+      ...(attributed ? { recovery: { version: 1, provider: 'claude-session-skip-unadmitted-v1', strategy: 'reconstruct', status: 'blocked',
+        identity: JSON.stringify({ marker: '11111111-1111-4111-8111-111111111111', sessionId: 'bound', threadId: owner.threadId, cwd: f.cwd }) } } : {}) }));
+    const directory = (f.handler as any).scheduleDirectory();
+    await mkdir(directory, { recursive: true });
+    await writeFile(path.join(directory, SCHEDULE_CATALOG_FILE), JSON.stringify({ version: 3, records, pending: [], purged: [] }));
+    return { owner, records, directory };
+  }
+
+  it('reports all fifteen unattributed historical rows honestly without scanning another session', async () => {
+    const { directory } = await history(15, false);
+    const cleanup = vi.fn(); Object.assign(f.executor, { withReviewedNativeCleanup: cleanup });
+    await f.bind(); await f.send('/schedule purge all');
+    const response = f.responses().at(-1);
+    expect(response.success).toBe(false);
+    expect(response.output.match(/Original native session\/definition attribution is missing/g)).toHaveLength(15);
+    expect(response.output).toContain('Removed history: none.');
+    const catalog = JSON.parse(await readFile(path.join(directory, SCHEDULE_CATALOG_FILE), 'utf8'));
+    expect(catalog.records).toHaveLength(15);
+    expect(catalog.records.every((row: any) => row.cancelRequested)).toBe(true);
+    expect(cleanup).not.toHaveBeenCalled(); expect(native.create).not.toHaveBeenCalled();
+  });
+
+  it.each(['predecessor', 'session', 'stale', 'present', 'timeout'])('keeps cleanup tracking for %s uncertainty in the production purge command', async reason => {
+    const { directory } = await history();
+    Object.assign(f.executor, { withReviewedNativeCleanup: async (_id: string, current: () => boolean, run: any) => run({
+      binding: 'host', sessionId: reason === 'session' ? 'different' : 'bound', cwd: f.cwd,
+      current, retirementConfirmed: () => reason !== 'predecessor', inventory: async () => {
+        if (reason === 'timeout') throw new Error('Synthetic native inventory receipt timeout');
+        if (reason === 'stale') f.disconnect();
+        return reason === 'present' ? [{ id: 'native-0', prompt: 'Changed definition', cron: '* * * * *' }] : [];
+      }, remove: vi.fn(),
+    }) });
+    await f.bind(); await f.send('/schedule purge historical-0');
+    const catalog = JSON.parse(await readFile(path.join(directory, SCHEDULE_CATALOG_FILE), 'utf8'));
+    expect(catalog.records).toHaveLength(1); expect(catalog.records[0].cancelRequested).toBe(true);
+    expect(catalog.purged ?? []).toEqual([]); expect(native.create).not.toHaveBeenCalled();
+    if (reason !== 'stale') expect(f.responses().at(-1).success).toBe(false);
+  });
+
+  it('keeps a model purge correlated to its pending native action and stable retry receipt', async () => {
+    await history();
+    let release!: () => void;
+    const ready = new Promise<void>(resolve => { release = resolve; });
+    let operation: string | undefined, queried = false;
+    const inventory = vi.fn(async () => { queried = true; await ready; return []; });
+    Object.assign(f.executor, {
+      nativeScheduleAction: (id: string) => id === operation && queried ? { tool: 'CronList', input: {} } : undefined,
+      withReviewedNativeCleanup: async (id: string, current: () => boolean, run: any, inTurn: boolean) => {
+        if (!inTurn) throw new Error('Expected the current managed turn');
+        operation = id;
+        return run({ binding: 'host', sessionId: 'bound', cwd: f.cwd, current, retirementConfirmed: () => true, inventory, remove: vi.fn() });
+      },
+    });
+    const replies: any[] = [];
+    f.executor.execute.mockImplementation(async () => {
+      try {
+        replies.push(await invoke('remote_cli_schedule_purge', { requestId: 'purge-history', scheduleIds: ['historical-0'] }));
+        release();
+        replies.push(await invoke('remote_cli_schedule_operation', { requestId: 'purge-history' }));
+        replies.push(await invoke('remote_cli_schedule_purge', { requestId: 'purge-history', scheduleIds: ['historical-0'] }));
+        return { success: true };
+      } finally { release(); }
+    });
+    await f.bind(); await f.send('Remove the synthetic selected history', 'thread-a', { isSlashCommand: false });
+    expect(f.responses().at(-1).success).toBe(true);
+    expect(replies[0]).toMatchObject({ status: 'pending', nativeAction: { tool: 'CronList', input: {} } });
+    expect(replies[1]).toMatchObject({ status: 'succeeded', purge: { removedIds: ['historical-0'], pending: [] } });
+    expect(replies[2]).toEqual(replies[1]); expect(inventory).toHaveBeenCalledOnce();
+  });
+
+  it.each([false, true])('purges persisted attributed history after reviewed deletion (restart before purge=%s)', async restartBeforePurge => {
+    const owner = { threadId: 'thread-a', openId: 'owner', generation: (f.handler as any).scheduleGeneration('thread-a') };
+    const marker = '11111111-1111-4111-8111-111111111111';
+    const record = { ...owner, id: 'legacy-attributed', backend: 'claude', cwd: f.cwd, state: 'interrupted', nativeId: 'native-old',
+      prompt: 'Synthetic historical task', createdAt: Date.now(), rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' },
+      recovery: { version: 1, provider: 'claude-session-skip-unadmitted-v1', strategy: 'reconstruct', status: 'blocked',
+        identity: JSON.stringify({ marker, sessionId: 'bound', threadId: owner.threadId, cwd: f.cwd }) } };
+    const directory = (f.handler as any).scheduleDirectory();
+    await mkdir(directory, { recursive: true });
+    await writeFile(path.join(directory, SCHEDULE_CATALOG_FILE), JSON.stringify({ version: 3, records: [record], pending: [], purged: [] }));
+    let rows = [{ id: 'native-old', prompt: `[remote-cli:${marker}]\n${record.prompt}`, cron: '* * * * *', recurring: true, durable: false },
+      { id: 'native-sibling', prompt: 'Synthetic unrelated task', cron: '* * * * *', recurring: true, durable: false }];
+    const inventory = vi.fn(async () => structuredClone(rows));
+    let retired = restartBeforePurge;
+    Object.assign(f.executor, { getSessionId: () => 'bound',
+      withReviewedNativeCleanup: async (_id: string, current: () => boolean, run: any) => run({ binding: 'host', sessionId: 'bound', cwd: f.cwd,
+        current, retirementConfirmed: () => retired, inventory, remove: async (target: any) => { rows = rows.filter(row => row.id !== target.id); } }) });
+    await f.bind();
+    await f.send('/schedule cleanup review');
+    const token = /cleanup confirm ([a-f0-9-]{36})/.exec(f.responses().at(-1).output)![1];
+    await f.send(`/schedule cleanup confirm ${token} delete-old native-old`);
+    expect(f.responses().at(-1).success).toBe(true);
+    if (restartBeforePurge) {
+      await f.restart(); await f.bind();
+      inventory.mockRejectedValue(new Error('Durable cleanup must not need another host inventory'));
+    }
+    retired = true;
+    await f.send('/schedule purge legacy-attributed');
+    expect(f.responses().at(-1)).toMatchObject({ success: true, output: expect.stringContaining('Removed history: legacy-attributed.') });
+    expect(rows.map(row => row.id)).toEqual(['native-sibling']);
+    expect(native.create).not.toHaveBeenCalled();
+    await f.restart(); await f.bind(); await f.send('/schedule list');
+    expect(f.responses().at(-1).output).toContain('No schedules');
+    await f.send('/schedule purge legacy-attributed');
+    expect(f.responses().at(-1).output).toContain('Already removed: legacy-attributed.');
+  });
+
   it.each(['claude', 'dsh'])('purges selected %s history through the text command and preserves siblings', async backend => {
     f.setBackend(backend); await f.bind(true, true);
     await f.send('/schedule after 5m -- Synthetic selected task');

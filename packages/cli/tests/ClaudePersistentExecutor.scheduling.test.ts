@@ -69,6 +69,25 @@ describe('Claude shared foreground scheduling integration', () => {
     await executor.destroy();
     vi.restoreAllMocks(); await fs.rm(root, { recursive: true, force: true });
   });
+  it('combines predecessor proof with current native work and host validity for purge', async () => {
+    raw.delegation = { groups: ['scheduling'] };
+    raw.scheduleHostOwnership().reserve(true);
+    await executor.withReviewedNativeCleanup('purge-proof', () => true, async host => {
+      expect(host.cwd).toBe(root); expect(host.retirementConfirmed?.()).toBe(true);
+      raw.sessionSchedules.submitted = { synthetic: true };
+      expect(host.retirementConfirmed?.()).toBe(false); raw.sessionSchedules.submitted = undefined;
+      raw.sessionSchedules.scope.mutations.add('synthetic-mutation');
+      expect(host.retirementConfirmed?.()).toBe(true); raw.sessionSchedules.scope.mutations.clear();
+      raw.sessionSchedules.authorized.set('unsettled', { action: { tool: 'CronDelete' } });
+      expect(host.retirementConfirmed?.()).toBe(false); raw.sessionSchedules.authorized.clear();
+      raw.sessionSchedules.jobs.set('uncertain', { retired: false, uncertain: true });
+      expect(host.retirementConfirmed?.()).toBe(false); raw.sessionSchedules.jobs.clear();
+      raw.sessionSchedules.pending = { synthetic: true };
+      expect(host.retirementConfirmed?.()).toBe(false); raw.sessionSchedules.pending = undefined;
+      expect(host.retirementConfirmed?.()).toBe(true);
+      raw.stopEpoch++; expect(host.retirementConfirmed?.()).toBe(false);
+    }, true);
+  });
   it('leases reviewed cleanup on the bound host without creating ownership proof or admitting ordinary work', async () => {
     raw.delegation = { url: 'http://127.0.0.1:1/', token: 'synthetic', groups: ['scheduling'] };
     const definition = { id: 'legacy', prompt: 'Synthetic legacy', cron: '* * * * *', durable: false };

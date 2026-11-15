@@ -9,6 +9,9 @@ export interface NativeCleanupSession {
   /** Opaque binding to one process, native session, cwd and configuration epoch. */
   binding: string;
   sessionId: string;
+  /** Framework-captured location and retirement proof, never model arguments. */
+  cwd?: string;
+  retirementConfirmed?(): boolean;
   current(): boolean;
   inventory(): Promise<NativeCleanupDefinition[]>;
   remove(target: NativeCleanupDefinition): Promise<void>;

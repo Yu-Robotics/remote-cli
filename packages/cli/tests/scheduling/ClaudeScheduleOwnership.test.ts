@@ -25,6 +25,20 @@ beforeEach(() => {
 afterEach(() => { for (const value of guards) value.close(); vi.restoreAllMocks(); fs.rmSync(root, { recursive: true, force: true }); });
 
 describe('Claude schedule predecessor ownership', () => {
+  it('reports retirement only from a live owned, clean, or later-boot receipt without rewriting it', () => {
+    const first = guard();
+    let lease = first.reviewedRemovalLease(); expect(lease.retirementConfirmed()).toBe(false); lease.close();
+    first.reserve(true); lease = first.reviewedRemovalLease(); expect(lease.retirementConfirmed()).toBe(true);
+    first.hostClosed(); expect(lease.retirementConfirmed()).toBe(false); lease.close(); first.close();
+    const second = guard(); const before = fs.readFileSync(second.filename, 'utf8');
+    lease = second.reviewedRemovalLease(); expect(lease.retirementConfirmed()).toBe(false);
+    boot = 'boot-two'; expect(lease.retirementConfirmed()).toBe(true);
+    host = 'another-host'; expect(lease.retirementConfirmed()).toBe(false); host = 'fixture-host';
+    expect(fs.readFileSync(second.filename, 'utf8')).toBe(before);
+    lease.close(); expect(() => lease.retirementConfirmed()).toThrow('Closed fixture gate');
+    second.reserve(false); second.hostClosed(); second.confirmClean(); second.close();
+    lease = guard().reviewedRemovalLease(); expect(lease.retirementConfirmed()).toBe(true); lease.close();
+  });
   it('leases explicit removal without a receipt and never creates execution proof', () => {
     const a = guard(), b = guard();
     const lease = a.reviewedRemovalLease(); lease.verify();

@@ -1,4 +1,5 @@
-import { ReviewedNativeCleanup, type NativeCleanupReview } from '../scheduling/ReviewedNativeCleanup';
+import { verifySchedulePurge } from '../scheduling/SchedulePurgeVerification';
+import { ReviewedNativeCleanup, type NativeCleanupReview, type NativeCleanupSession } from '../scheduling/ReviewedNativeCleanup';
 import { ScheduleToolOperations, type ScheduleToolScope, type ScheduleOperation } from '../scheduling/ScheduleToolScope';
 import { scheduleGuidance } from '../scheduling/toolContract';
 import { ScheduleCardService } from '../scheduling/ScheduleCardService';
@@ -283,6 +284,7 @@ export class MessageHandler {
   private scheduleRecoveryThreads = new Set<string>();
   private scheduleDelivery?: ScheduleDeliveryClient;
   private readonly reviewedNativeCleanup = new ReviewedNativeCleanup();
+  private readonly schedulePurgeHosts = new Map<string, NativeCleanupSession>();
   private readonly scheduleOwners = new Map<string, ScheduleOwner>();
   private readonly scheduleManagement = new Set<string>();
 
@@ -3543,6 +3545,8 @@ You can also use natural language commands to control Claude Code CLI.`,
       if (!directory) throw new Error('Local schedule storage is unavailable.');
       const service = new ScheduleService({
         directory,
+        withPurgeVerification: (record, context, accept) => verifySchedulePurge(record,
+          this.schedulePurgeHosts.get(record.threadId), context.isCurrent, accept),
         acquireRecovery: record => {
           if (this.scheduleRecoveryThreads.has(record.threadId)) throw new Error('Recovery thread admission unavailable.');
           this.scheduleRecoveryThreads.add(record.threadId);
@@ -3811,7 +3815,9 @@ You can also use natural language commands to control Claude Code CLI.`,
         return result;
       };
       const records = await service.list(owner);
-      const needsNative = backend === 'claude' && records.some(record => ids.includes(record.id)
+      const needsVerification = backend === 'claude' && !!executor.withReviewedNativeCleanup && records.some(record => ids.includes(record.id)
+        && record.backend === 'claude' && !!record.recovery && !!record.nativeId && !record.cleanupConfirmed && !record.creationRefused && !['active', 'running', 'creating'].includes(record.state));
+      const needsNative = needsVerification || backend === 'claude' && records.some(record => ids.includes(record.id)
         && record.backend === 'claude' && service.canCancel(owner, record.id));
       if (!needsNative) return await run();
       if (!executor.withNativeScheduleOperation) throw new Error('Native cleanup admission is unavailable.');
@@ -3823,6 +3829,11 @@ You can also use natural language commands to control Claude Code CLI.`,
         if (!current()) throw new Error('Schedule purge owner changed.');
         await executor.configureManagedTools(connection);
       }
+      if (needsVerification) return await executor.withReviewedNativeCleanup!(id, current, async host => {
+        this.schedulePurgeHosts.set(owner.threadId, host);
+        try { return await run(); }
+        finally { this.schedulePurgeHosts.delete(owner.threadId); }
+      }, !!inTurnCurrent);
       return await executor.withNativeScheduleOperation(id, current, run, !!inTurnCurrent);
     } finally { this.scheduleManagement.delete(owner.threadId); }
   }
@@ -3886,7 +3897,9 @@ You can also use natural language commands to control Claude Code CLI.`,
               } catch { return false; }
             }).map(record => record.id);
             if (!current()) throw new Error('Cleanup owner changed before catalog persistence.');
-            await service.recordReviewedCleanup(owner, attributable, absent);
+            await service.recordReviewedCleanup(owner, attributable, absent, () => current() && host.current()
+              && records.filter(record => attributable.includes(record.id)).every(record => record.cwd === host.cwd)
+              && host.retirementConfirmed?.() === true);
           });
       }, !!inTurnCurrent);
     } finally { this.scheduleManagement.delete(threadId); }

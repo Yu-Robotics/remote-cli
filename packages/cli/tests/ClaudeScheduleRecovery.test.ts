@@ -185,6 +185,55 @@ describe('Claude production orderly recovery', () => {
       provider: { recoveryFor: () => executor.nativeScheduleRecovery, create: (input, emit, admit) => executor.createNativeSchedule(input, emit, undefined, admit) }, deliver });
     await service.initialize();
   }
+  it.each([false, true])('uses production handler, native hooks and ownership proof for reviewed deletion then purge (retired=%s)', async retired => {
+    await create(); await create('second');
+    const target = [...inventory.keys()][0], sibling = [...inventory.keys()][1];
+    const original = (await service.list(owner))[0];
+    await abruptRestart(retired);
+    const thread: any = { id: owner.threadId, name: 'Synthetic', workingDirectory: root, delegation: false };
+    const manager: any = { contextResets: new ThreadContextReset(path.join(root, 'purge-resets')),
+      getThread: () => thread, getDefaultThread: () => thread, listThreads: () => [thread],
+      updateThread: vi.fn(async (_id, fields) => Object.assign(thread, fields)) };
+    const guard = new DirectoryGuard([root]);
+    const pool = new ThreadExecutorPool(manager, guard, { type: 'claude-persistent' }, () => executor);
+    const ws: any = { send: vi.fn(), isConnected: () => true, hasPendingTaskResults: () => false,
+      trackTask: vi.fn(), onClose: () => () => {}, onTaskResultAck: () => () => {} };
+    const config: any = { get: (key: string) => key === 'executor' ? { type: 'claude-persistent' } : undefined,
+      getConfigDir: () => path.join(root, 'purge-handler-config'), getSharedSymlinks: () => [] };
+    const handler = new MessageHandler(ws, pool, manager, guard, config);
+    vi.spyOn(handler as any, 'detectBackends').mockResolvedValue([{ id: 'auto', label: 'Claude', installed: true }]);
+    vi.spyOn((handler as any).delegation.registry, 'list').mockResolvedValue([]);
+    const directory = (handler as any).scheduleDirectory();
+    const identity = JSON.parse(original.recovery!.identity);
+    // Legacy attribution is sufficient for deletion/absence, but not execution recovery.
+    delete identity.effectiveModel;
+    const record = { ...original, generation: (handler as any).scheduleGeneration(thread.id), state: 'cancelled', cancelRequested: true,
+      recovery: { ...original.recovery, identity: JSON.stringify(identity), status: 'blocked' } };
+    await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(path.join(directory, 'schedule-catalog.json'), JSON.stringify({ version: 3, records: [record], pending: [], purged: [] }));
+    let sequence = 0;
+    const send = (content: string) => handler.handleMessage({ type: 'command', threadId: thread.id, openId: owner.openId,
+      messageId: `purge-${++sequence}`, content, isSlashCommand: true, timestamp: Date.now() } as any);
+    const response = () => ws.send.mock.calls.map(([message]: any[]) => message).filter((message: any) => message.type === 'response').at(-1);
+    try {
+      await send('/schedule cleanup review');
+      expect(response().success).toBe(true);
+      const token = /cleanup confirm ([a-f0-9-]{36})/.exec(response().output)![1];
+      await send(`/schedule cleanup confirm ${token} remove-original ${target}`);
+      expect(response().success).toBe(true); expect([...inventory.keys()]).toEqual([sibling]);
+      const deletionReceipt = JSON.parse(await fs.readFile(path.join(directory, 'schedule-catalog.json'), 'utf8')).records[0];
+      expect(deletionReceipt.cleanupConfirmed === true).toBe(retired);
+      await send('/schedule purge first');
+      expect(response().success).toBe(retired);
+      expect(response().output).toContain(retired ? 'Removed history: first.' : 'predecessor or admitted work is unconfirmed');
+      expect([...inventory.keys()]).toEqual([sibling]);
+      const catalog = JSON.parse(await fs.readFile(path.join(directory, 'schedule-catalog.json'), 'utf8'));
+      expect(catalog.records).toHaveLength(retired ? 0 : 1);
+      const actions = child.stdin.write.mock.calls.map(([line]: [string]) => JSON.parse(line)).filter((packet: any) => packet.type === 'user');
+      expect(actions.every((packet: any) => !JSON.stringify(packet).includes('select:CronCreate'))).toBe(true);
+    } finally { await handler.destroy(); }
+  });
+
   it('adopts two exact native definitions after verified reboot without CREATE or DELETE', async () => {
     await create(); await create('second'); const ids = [...inventory.keys()];
     await abruptRestart(true); await service.recover();

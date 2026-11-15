@@ -68,7 +68,7 @@ export class ClaudeScheduleOwnership {
     return saved.clean || saved.identity.boot !== current.boot || (this.live && saved.token === this.receipt?.token);
   }
   /** Explicit local definition removal does not invent predecessor proof. */
-  reviewedRemovalLease(): { verify(): void; close(): void } {
+  reviewedRemovalLease(): { verify(): void; retirementConfirmed(): boolean; close(): void } {
     const existing = this.gate;
     fs.mkdirSync(path.dirname(this.filename), { recursive: true, mode: 0o700 });
     const gate = existing ?? this.dependencies.gate(`${this.filename}.lock`);
@@ -79,7 +79,12 @@ export class ClaudeScheduleOwnership {
       if (saved && saved.identity.host !== this.dependencies.identity().host) {
         throw new Error('Native ownership receipt belongs to another machine.');
       }
-      return { verify: () => gate.verify(), close: () => { if (!existing) gate.close(); } };
+      return { verify: () => gate.verify(), retirementConfirmed: () => {
+        gate.verify();
+        const receipt = this.read(), current = this.dependencies.identity();
+        return !!receipt && receipt.identity.host === current.host
+          && (receipt.clean || receipt.identity.boot !== current.boot || (this.live && receipt.token === this.receipt?.token));
+      }, close: () => { if (!existing) gate.close(); } };
     } catch (error) { if (!existing) gate.close(); throw error; }
   }
   hostClosed(): void { this.live = false; }

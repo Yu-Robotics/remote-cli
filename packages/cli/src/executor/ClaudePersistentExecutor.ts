@@ -800,7 +800,8 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
       const adapter = this.schedules();
       return await adapter.inToolOperation(id, valid, () => run({
         binding: createHash('sha256').update(JSON.stringify([this.cleanupHosts.get(child), sessionId, cwd, epoch, settings])).digest('hex'),
-        sessionId, current: valid,
+        sessionId, cwd, current: valid,
+        retirementConfirmed: () => valid() && adapter.cleanupRetirementReady && lease!.retirementConfirmed(),
         inventory: () => adapter.reviewedInventory(valid), remove: target => adapter.reviewedDelete(target, valid),
       }), inTurn);
     } finally {

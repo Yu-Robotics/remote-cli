@@ -20,6 +20,14 @@ function fixture() {
 }
 afterEach(() => { vi.useRealTimers(); });
 describe('session schedule receipts', () => {
+  it('exposes only a confirmed live deletion receipt and invalidates it on host close', async () => {
+    const f = fixture(), handle = await f.created();
+    expect(handle.nativeDefinitionAbsent).toBe(false);
+    const cancelled = handle.cancel(); expect(handle.nativeDefinitionAbsent).toBe(false);
+    f.reply({ deleted: true }); await cancelled; expect(handle.nativeDefinitionAbsent).toBe(true);
+    f.client.close(); expect(handle.nativeDefinitionAbsent).toBe(false);
+    await handle.cancel(); expect(handle.nativeDefinitionAbsent).toBe(false);
+  });
   it('validates scope/session, deduplicates occurrences, and rejects malformed output', async () => {
     const f = fixture(), emit = vi.fn();
     const handle = await f.created(emit);

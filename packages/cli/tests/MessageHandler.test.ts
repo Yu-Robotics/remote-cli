@@ -1939,6 +1939,27 @@ describe('MessageHandler', () => {
   });
 
   describe('streaming output', () => {
+    it('sends public pre-tool commentary before the tool and before executor completion', async () => {
+      ctx.mockThreadManager.getDefaultThread().delegation = false;
+      let framesBeforeCompletion: unknown[] = [];
+      let responseSentBeforeCompletion: boolean | undefined;
+      ctx.mockExecutor.execute.mockImplementation(async (_prompt: string, options: any) => {
+        options.onStream("I'll inspect the fixture.\n");
+        options.onToolUse({ id: 'fixture-tool', name: 'Read', input: { file_path: 'fixture.txt' } });
+        framesBeforeCompletion = ctx.mockWsClient.send.mock.calls.map(([frame]) => frame)
+          .filter(frame => frame.type === 'stream' && ['text', 'tool_use'].includes(frame.streamType));
+        responseSentBeforeCompletion = ctx.mockWsClient.send.mock.calls.some(([frame]) => frame.type === 'response');
+        return { success: true, output: "I'll inspect the fixture.\n" };
+      });
+      await ctx.handler.handleMessage({ type: 'command', messageId: 'commentary-task', content: 'Inspect the fixture', timestamp: Date.now() });
+      expect(ctx.mockExecutor.execute).toHaveBeenCalledOnce();
+      expect(framesBeforeCompletion).toMatchObject([
+        { streamType: 'text', chunk: "I'll inspect the fixture.\n", messageId: 'commentary-task' },
+        { streamType: 'tool_use', toolUse: { id: 'fixture-tool' }, messageId: 'commentary-task' },
+      ]);
+      expect(responseSentBeforeCompletion).toBe(false);
+    });
+
     it('should send streaming chunks', async () => {
       ctx.mockExecutor.execute.mockImplementation(async (_prompt: string, options: any) => {
         options.onStream?.('chunk 1');

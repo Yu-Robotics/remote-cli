@@ -383,6 +383,50 @@ describe('AgyExecutor', () => {
 
   // ── Streaming and completion ──────────────────────────────────────────────
 
+  it.each(['ACTIVE', 'DONE'])('publishes documented %s response deltas before tools without waiting for the result', async state => {
+    // Official headless protocol: text_delta is incremental, including on DONE.
+    // Repeated text fragments are legitimate deltas, not cumulative snapshots.
+    const order: string[] = [];
+    const visible = vi.fn();
+    const activity = vi.fn();
+    const pending = executor.execute('Inspect the synthetic fixture', {
+      onStream: text => order.push(`text:${text}`),
+      onDisplayText: visible,
+      onActivity: activity,
+      onToolUse: tool => order.push(`tool:${tool.name}`),
+    });
+    await waitForSpawn(); emitInit();
+    const update = (step: Record<string, unknown>) => ({ event: 'step_update', step_update: {
+      conversation_id: 'conv-aaa', step_index: 1, state, step_type: 'agent_response', ...step,
+    } });
+    const narrative = "I'll inspect the fixture.\n";
+    const wire = Buffer.from(JSON.stringify(update({ text_delta: narrative })) + '\n');
+    proc.stdout.emit('data', wire.subarray(0, 21));
+    expect(order).toEqual([]);
+    proc.stdout.emit('data', wire.subarray(21));
+    // State-only updates and unrelated private fields must not become public text.
+    emitJson(update({ state: 'DONE' }));
+    emitJson(update({ text_delta: { text: 'Malformed payload' }, thinking: 'Private reasoning' }));
+    emitJson(update({ step_type: 'thinking', text_delta: 'Private reasoning' }));
+    emitJson(update({ step_type: 'system_message', text_delta: 'Internal state' }));
+    emitJson(update({ step_index: 2, step_type: 'tool', state: 'ACTIVE', tool_name: 'view_file',
+      tool_info: { parameters: { AbsolutePath: 'fixture.txt' } } }));
+    expect(order).toEqual([`text:${narrative}`, 'tool:Read']);
+    expect(visible.mock.calls).toEqual([[narrative]]);
+    expect(JSON.stringify(activity.mock.calls)).not.toMatch(/Private reasoning|Malformed payload|Internal state/);
+
+    emitJson(update({ step_index: 3, state: 'ACTIVE', text_delta: 'Check. ' }));
+    emitJson(update({ step_index: 3, state: 'DONE', text_delta: 'Check. ' }));
+    const output = narrative + 'Check. Check. ';
+    emitResult({ response: output });
+    await expect(pending).resolves.toMatchObject({ success: true, output });
+    expect(visible.mock.calls.map(([text]) => text).join('')).toBe(output);
+    expect(order).toEqual([`text:${narrative}`, 'tool:Read', 'text:Check. ', 'text:Check. ']);
+    emitJson(update({ step_index: 4, text_delta: 'Late text' }));
+    emitResult({ response: 'Late result' });
+    expect(visible.mock.calls).toHaveLength(3);
+  });
+
   it('forwards a native final-only assistant response without forwarding stderr or tools', async () => {
     const onDisplayText = vi.fn();
     const pending = executor.execute('Produce a deliverable', { onDisplayText });
@@ -393,6 +437,38 @@ describe('AgyExecutor', () => {
     emitResult({ response });
     await expect(pending).resolves.toMatchObject({ success: true, output: response });
     expect(onDisplayText.mock.calls.map(([text]) => text)).toEqual([response]);
+  });
+
+  it.each(['abort', 'resetContext'] as const)('keeps public text scoped to queued turns and ignores the old host after %s', async action => {
+    const firstText = vi.fn(), secondText = vi.fn(), freshText = vi.fn();
+    const first = executor.execute('First fixture turn', { onStream: firstText });
+    await waitForSpawn(); emitInit();
+    const second = executor.execute('Second fixture turn', { onStream: secondText });
+    const text = (value: string, target = proc) => emitJson({ event: 'step_update', step_update: {
+      conversation_id: 'conv-aaa', step_index: 1, state: 'DONE', step_type: 'agent_response', text_delta: value,
+    } }, target);
+    text('First public text');
+    expect(secondText).not.toHaveBeenCalled();
+    emitResult({ response: 'First public text' });
+    await expect(first).resolves.toMatchObject({ output: 'First public text' });
+    await waitForSpawn();
+    text('Second public text');
+    expect(firstText.mock.calls).toEqual([['First public text']]);
+    expect(secondText.mock.calls).toEqual([['Second public text']]);
+
+    const old = proc;
+    await executor[action]();
+    await expect(second).resolves.toMatchObject({ success: false });
+    old.emit('exit', 0, null); old.emit('close', 0, null);
+    const fresh = executor.execute('Fresh fixture turn', { onStream: freshText });
+    await waitForSpawn();
+    expect(proc).not.toBe(old);
+    text('Late old-host commentary', old);
+    emitResult({ response: 'Late old-host result' }, old);
+    expect(freshText).not.toHaveBeenCalled();
+    text('Fresh public text'); emitResult({ response: 'Fresh public text' });
+    await expect(fresh).resolves.toMatchObject({ success: true, output: 'Fresh public text' });
+    expect(freshText.mock.calls).toEqual([['Fresh public text']]);
   });
 
   it('streams agent_response text_delta chunks and resolves accumulated output on result SUCCESS', async () => {

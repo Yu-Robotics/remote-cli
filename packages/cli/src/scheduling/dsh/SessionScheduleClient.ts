@@ -69,7 +69,9 @@ export class SessionScheduleClient {
         if (!job.running.size) { this.jobs.delete(input.id); job.completed.clear(); }
       });
     };
+    const client = this;
     const handle: NativeScheduleHandle = { nativeId: input.id, cancellationKeepsRunning: true, cancel, stop: cancel,
+      get nativeDefinitionAbsent() { return !client.closed && job.cancelled; },
       releaseForRestart: async () => {
         if (this.closed) throw new Error('Native host exited before schedule handoff.');
         const receipt = await this.request(sessionId, 'release', { id: input.id });

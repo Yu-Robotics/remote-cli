@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.243] - 2026-11-15
+
+### Fixed
+- Wire production history purge to fresh original-session Claude inventory under the existing cleanup lease. Exact saved session, working directory, thread and marker attribution plus framework-confirmed predecessor retirement permit removal after reviewed native deletion, without requiring execution-recovery model metadata or recreating tasks.
+- Persist confirmed native cancellation and execution retirement for Claude and DSH so later history purge can survive a CLI restart. This optional cleanup receipt uses catalog format 4, never grants execution admission, and requires CLI 1.6.243 or newer to read while present.
+- Report missing attribution and uncertain predecessor work separately from native presence. Empty inventory in another session does not erase legacy history; unresolved cancellation tracking and sibling schedules remain intact.
+
 ## [1.6.242] - 2026-11-15
 
 ### Changed

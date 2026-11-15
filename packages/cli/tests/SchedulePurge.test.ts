@@ -72,6 +72,49 @@ async function reload(f: Awaited<ReturnType<typeof fixture>>) {
 }
 
 describe('ScheduleService purge', () => {
+  it.each([
+    { version: 3, state: 'cancelled', cancelRequested: true, cleanupConfirmed: true },
+    { version: 4, state: 'interrupted', cancelRequested: true, cleanupConfirmed: true },
+    { version: 4, state: 'cancelled', cleanupConfirmed: true },
+    { version: 4, state: 'cancelled', cancelRequested: true, cleanupConfirmed: false },
+  ])('rejects invalid durable cleanup evidence %#', async ({ version, ...fields }) => {
+    const directory = path.join(root, 'invalid-cleanup'); await fs.mkdir(directory);
+    await fs.writeFile(path.join(directory, SCHEDULE_CATALOG_FILE), JSON.stringify({ version, records: [{ ...row('invalid'), ...fields }], pending: [], purged: [] }));
+    const service = new ScheduleService({ directory, provider: { create: vi.fn() }, deliver: async () => {}, isOwnerCurrent: () => true });
+    services.push(service); await expect(service.initialize()).rejects.toThrow('Invalid confirmed cleanup receipt');
+  });
+
+  it('does not persist an undefined native absence claim from a retired cancellation handle', async () => {
+    const f = await fixture();
+    f.create.mockImplementationOnce(async () => ({ nativeId: 'unknown', cancel: async () => {}, stop: async () => {}, list: async () => false }));
+    await f.service.create(owner, input('unknown')); await f.service.cancel(owner, 'unknown');
+    expect((await f.read()).records[0]).not.toHaveProperty('cleanupConfirmed');
+    const restored = await reload(f);
+    expect(await restored.service.purge(owner, { all: true })).toMatchObject({ removedIds: [], pending: [{ reason: 'native_absence_unknown' }] });
+  });
+
+  it('keeps queued results across restart after reviewed cleanup until explicit history purge', async () => {
+    const record = row('reviewed', 'interrupted');
+    const f = await fixture({ deliver: async () => { throw new Error('Synthetic disconnected result transport'); } }, [record],
+      [{ id: 'reviewed:occurrence', scheduleId: 'reviewed', occurrenceId: 'occurrence', success: true, output: 'Synthetic retained result' }]);
+    await f.service.recordReviewedCleanup(owner, ['reviewed'], true, () => true);
+    expect((await f.read()).pending[0]).toMatchObject({ afterCancellation: true, output: 'Synthetic retained result' });
+    const restored = await reload(f);
+    expect((await restored.service.list(owner))[0]).toMatchObject({ cleanupConfirmed: true, state: 'cancelled' });
+    expect((restored.service as any).pending.size).toBe(1);
+    expect(await restored.service.purge(owner, { ids: ['reviewed'] })).toMatchObject({ removedIds: ['reviewed'] });
+  });
+
+  it.each(['claude', 'dsh'] as const)('retains a completed %s cancellation receipt across restart before purge', async backend => {
+    const f = await fixture();
+    await f.service.create(owner, { ...input('retired'), backend });
+    await f.service.cancel(owner, 'retired');
+    expect((await f.read()).records[0]).toMatchObject({ cleanupConfirmed: true, cancelRequested: true, state: 'cancelled' });
+    const restarted = await reload(f);
+    expect(await restarted.service.purge(owner, { ids: ['retired'] })).toMatchObject({ removedIds: ['retired'], pending: [], errors: [] });
+    expect(restarted.create).not.toHaveBeenCalled();
+  });
+
   it('cancels and removes selected active jobs, preserves siblings and fences replay after reload', async () => {
     const f = await fixture();
     await f.service.create(owner, input('a')); await f.service.create(owner, input('b'));

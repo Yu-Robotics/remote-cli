@@ -43,6 +43,17 @@ describe('DSH orderly recovery through production adapters', () => {
     vi.restoreAllMocks(); fs.rmSync(root, { recursive: true, force: true });
   });
 
+  it('persists real adapter deletion proof for history purge after a client restart', async () => {
+    await create(); await service.cancel(owner, 'job');
+    expect(catalog().records[0]).toMatchObject({ state: 'cancelled', cleanupConfirmed: true });
+    expect(catalog().version).toBe(4);
+    await service.destroy(); await executor.destroy();
+    const before = hosts.length;
+    executor = makeExecutor(); service = makeService(); await service.initialize();
+    expect(await service.purge(owner, { ids: ['job'] })).toMatchObject({ removedIds: ['job'], pending: [], errors: [] });
+    expect(hosts).toHaveLength(before); expect(catalog().records).toEqual([]);
+  });
+
   it('restores at startup without a prompt, retaining original session and future context', async () => {
     await executor.execute('Original foreground'); await create();
     expect(service.canSuspendForRestart()).toBe(true);

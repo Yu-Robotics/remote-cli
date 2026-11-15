@@ -151,6 +151,9 @@ export interface ScheduleRecord extends ScheduleOwner {
   /** Provider explicitly refused before any native admission; not inferred from
    * an error, missing native ID, process exit or terminal catalog state. */
   creationRefused?: true;
+  /** Framework-observed native deletion AND execution retirement, not a state inference.
+   * Cancellation remains permanent; this receipt never grants execution recovery. */
+  cleanupConfirmed?: true;
   recovery?: ScheduleRecoveryCheckpoint & { status: 'eligible' | 'pending' | 'blocked' };
   /** Bounded replay suppression; external delivery is not globally exactly-once. */
   completedOccurrences?: string[];

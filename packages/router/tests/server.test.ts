@@ -194,6 +194,10 @@ describe('RouterServer', () => {
     it('updates the original tool row while retaining surrounding assistant text', async () => {
       const { send, stream } = await connect();
       await send({ ...envelope, streamType: 'text', chunk: 'Before tool' });
+      // Public commentary must already reach the card while the turn is active,
+      // rather than appearing only when a tool or terminal result arrives.
+      expect(mockFeishuHandler.updateStreamingMessage.mock.calls.at(-1)[1])
+        .toEqual(expect.arrayContaining([expect.objectContaining({ content: 'Before tool' })]));
       await send(use('read-1'));
       const index = stream.toolCalls.get('read-1').elementIndex;
       expect(stream.elements[index].header.title.content).toContain("<font color='blue'>•</font>");

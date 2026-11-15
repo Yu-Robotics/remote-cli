@@ -191,6 +191,7 @@ export class DshExecutor extends AcpExecutor {
     if (!client.createNativeSchedule) throw new Error('This DSH transport does not support foreground-session scheduling.');
     const handle = await client.createNativeSchedule(sessionId, input, onEvent);
     return { ...handle,
+      get nativeDefinitionAbsent() { return handle.nativeDefinitionAbsent; },
       recoveryIdentity: JSON.stringify({ sessionId, cwd: input.cwd, threadId: input.threadId ?? 'default' }),
       ...(handle.releaseForRestart ? { releaseForRestart: async () => {
         this.scheduleHandoff = true;

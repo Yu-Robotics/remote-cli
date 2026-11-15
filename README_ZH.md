@@ -714,6 +714,25 @@ absence, attribution or predecessor execution stays visible, even for completed,
 failed, cancelled or interrupted history. Native-only definitions still require
 native cleanup review/delete; purge does not silently scan other sessions.
 
+From CLI 1.6.243, purge reconciles attributable Claude history with a fresh,
+complete inventory in the original bound session under the cleanup lease. A saved
+session/thread/working-directory/marker identity and framework-confirmed retirement
+are required; execution-recovery model metadata is not needed for this absence
+check. After native cleanup review/delete, retry the selected managed IDs with
+`/schedule purge` or `remote_cli_schedule_purge`. Native presence still requires
+exact reviewed deletion, not a sweep. Missing legacy session attribution remains
+pending: review/delete can remove selected definitions in the original bound
+session, but cannot prove that unrelated historical sessions or predecessor work
+are absent. No session search, recreation or new execution admission is performed.
+
+Confirmed cancellation and execution retirement are saved separately from recovery
+metadata for both Claude and DSH. These cleanup receipts let later history purge
+finish after restart and never authorize recovery. While such receipts exist,
+the catalog uses format 4 and requires CLI 1.6.243 or newer; do not downgrade.
+DSH history without a live cancellation handle, confirmed cleanup receipt or clean
+handoff remains unresolved because a current-session list cannot prove retirement
+of an earlier host. Updating the Router alone does not change CLI cleanup behavior.
+
 Deletion tools share one authorization policy across backend adapters: an agent
 can act on your cleanup request without a second human confirmation. Actual native
 capabilities remain backend-specific: managed cancellation/purge uses the original

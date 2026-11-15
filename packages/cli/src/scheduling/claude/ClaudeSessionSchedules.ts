@@ -71,6 +71,12 @@ export class ClaudeSessionSchedules {
   }) {}
 
   get busy(): boolean { return !!this.batch || !!this.submitted; }
+  /** Completed mutations remain in scope.mutations for foreground-abort cleanup.
+   * They are not unsettled receipts after fresh inventory has confirmed absence. */
+  get cleanupRetirementReady(): boolean {
+    return !this.closed && !this.busy && !this.pending && !this.authorized.size
+      && ![...this.jobs.values()].some(job => !job.retired && job.uncertain);
+  }
   get hasJobs(): boolean { return [...this.jobs.values()].some(job => !job.retired); }
   get hasPendingMutation(): boolean { return !!this.scope?.mutations.size || [...this.jobs.values()].some(job => !job.retired && job.uncertain); }
 

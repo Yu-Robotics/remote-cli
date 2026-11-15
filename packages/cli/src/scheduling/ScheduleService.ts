@@ -546,7 +546,7 @@ export class ScheduleService {
     // Do not interpret terminal state, an absent handle or a stopped process as
     // native definition absence. Existing cancelRetained owns its stronger proof.
     let retainedVerified = false;
-    const clean = !runtime && record.recovery?.handoff === 'clean' && record.recovery.nativeDefinitionAbsent === true;
+    const clean = !runtime && (record.cleanupConfirmed === true || record.recovery?.handoff === 'clean' && record.recovery.nativeDefinitionAbsent === true);
     if (runtime?.handle && !runtime.stopped) {
       await this.cancel(owner, id);
     } else if (!runtime && !record.creationRefused && !clean && record.recovery && this.supportsRetainedCancellation(record)) {
@@ -620,19 +620,29 @@ export class ScheduleService {
       || Boolean(runtime && !runtime.stopped);
   }
 
-  /** Newly observed local cleanup facts do not supply historical recovery proof. */
-  async recordReviewedCleanup(owner: ScheduleOwner, ids: string[], absent: boolean): Promise<void> {
+  /** Newly observed cleanup facts never supply historical recovery proof. The optional
+   * retirement callback is framework-owned and checked under the native cleanup lease. */
+  async recordReviewedCleanup(owner: ScheduleOwner, ids: string[], absent: boolean, retirementConfirmed?: () => boolean): Promise<void> {
     this.checkReady(); validateOwner(owner); ids.forEach(validateScheduleId);
     if (!ids.length) return;
     await this.serial(async () => {
       if (!this.options.isOwnerCurrent(owner)) throw new Error('Cleanup catalog owner changed.');
       for (const id of ids) {
         const record = this.owned(owner, id);
+        delete record.cleanupConfirmed;
         record.cancelRequested = true;
         if (record.recovery) record.recovery.status = 'blocked';
         if (record.state !== 'running') record.state = 'interrupted';
         record.error = absent ? 'Owner-reviewed native definition absent on current host; predecessor work remains unknown.'
           : 'Owner-reviewed native deletion requested; absence and predecessor work remain unconfirmed.';
+        const runtime = this.runtimes.get(id);
+        if (absent && retirementConfirmed?.() === true && (!runtime || runtime.stopped && !runtime.running.size)
+          && !this.recordOperations.has(id) && !this.recoveryRun && !this.refreshes && !this.retainedCancellations.has(id)) {
+          record.state = 'cancelled'; record.cleanupConfirmed = true; delete record.error;
+          // Native-only cleanup must not discard already-admitted output. History
+          // purge owns output removal after checking in-flight delivery fences.
+          for (const pending of this.pending.values()) if (pending.scheduleId === id) pending.afterCancellation = true;
+        }
       }
       await this.persist();
     });
@@ -755,7 +765,7 @@ export class ScheduleService {
       await provider.cancelRetained(structuredClone(record), { isCurrent: current });
       await this.serial(async () => {
         if (!current()) throw new Error('Native cancellation owner changed before its receipt was saved.');
-        record.state = 'cancelled'; delete record.error;
+        record.state = 'cancelled'; record.cleanupConfirmed = true; delete record.error;
         for (const [key, pending] of this.pending) if (pending.scheduleId === record.id && !pending.afterCancellation) this.pending.delete(key);
         await this.persist();
       });
@@ -1129,7 +1139,7 @@ export class ScheduleService {
 
   private stop(id: string, runtime: Runtime): Promise<void> {
     if (this.runtimes.get(id) !== runtime) return Promise.resolve();
-    if (runtime.stopped) return Promise.resolve();
+    if (runtime.stopped) return this.rememberCleanup(id, runtime);
     if (runtime.stopPromise) return runtime.recoveryAbort ? this.boundRecovery(runtime.stopPromise, 'Native cleanup remains unresolved; ownership retained.') : runtime.stopPromise;
     const operation = (async () => {
       try {
@@ -1145,7 +1155,10 @@ export class ScheduleService {
         // A shared session can delete future firings while an occurrence still
         // finishes. Keep ownership until its terminal stopped notification.
         if (!handle?.cancellationKeepsRunning || !runtime.running.size) runtime.stopped = true;
-        if (runtime.stopped) { runtime.releaseAdmission?.(); runtime.releaseAdmission = undefined; }
+        if (runtime.stopped) {
+          runtime.releaseAdmission?.(); runtime.releaseAdmission = undefined;
+          await this.rememberCleanup(id, runtime);
+        }
       } catch (error) {
         await this.serial(async () => {
           this.records.get(id)!.error = `Native process exit unconfirmed: ${errorText(error)}`.slice(0, ERROR_BYTES / 4);
@@ -1158,6 +1171,18 @@ export class ScheduleService {
     runtime.stopPromise = tracked;
     void operation.finally(() => { if (!runtime.stopped) runtime.stopPromise = undefined; }).catch(() => {});
     return runtime.recoveryAbort ? this.boundRecovery(tracked, 'Native cleanup remains unresolved; ownership retained.') : tracked;
+  }
+
+  private rememberCleanup(id: string, runtime: Runtime): Promise<void> {
+    return this.serial(async () => {
+      const record = this.records.get(id);
+      if (this.runtimes.get(id) === runtime && runtime.stopped && !runtime.running.size
+        && runtime.removalConfirmed && runtime.handle?.nativeDefinitionAbsent === true
+        && record?.cancelRequested && record.state === 'cancelled' && !record.cleanupConfirmed) {
+        record.cleanupConfirmed = true;
+        await this.persist();
+      }
+    });
   }
 
   private async boundRecovery<T>(operation: Promise<T>, message: string): Promise<T> {
@@ -1263,12 +1288,12 @@ export class ScheduleService {
 
   private load(data: unknown): void {
     const catalog = object(data, ['version', 'records', 'pending', 'purged']);
-    if (![1, 2, 3].includes(catalog.version as number) || !Array.isArray(catalog.records) || catalog.records.length > this.maxRecords
+    if (![1, 2, 3, 4].includes(catalog.version as number) || !Array.isArray(catalog.records) || catalog.records.length > this.maxRecords
       || !Array.isArray(catalog.pending) || catalog.pending.length > this.maxPending) throw new Error('Invalid schedule catalog envelope.');
     const records = new Map<string, ScheduleRecord>();
     const pending = new Map<string, PendingDelivery>();
     for (const value of catalog.records) {
-      const record = object(value, ['id', 'backend', 'cwd', 'prompt', 'rule', 'createdAt', 'nativeId', 'state', 'error', 'threadId', 'openId', 'generation', 'execution', 'cancelRequested', 'creationRefused', 'recovery', 'completedOccurrences', 'skippedOccurrences']);
+      const record = object(value, ['id', 'backend', 'cwd', 'prompt', 'rule', 'createdAt', 'nativeId', 'state', 'error', 'threadId', 'openId', 'generation', 'execution', 'cancelRequested', 'creationRefused', 'cleanupConfirmed', 'recovery', 'completedOccurrences', 'skippedOccurrences']);
       validateScheduleId(record.id); validateOwner(record as unknown as ScheduleOwner); validateSchedulePrompt(record.prompt);
       text(record.cwd, 4096);
       if (!path.isAbsolute(record.cwd) || !isNativeScheduleBackend(record.backend) || !STATES.has(record.state as ScheduleRecord['state'])
@@ -1277,9 +1302,11 @@ export class ScheduleService {
       if (record.nativeId !== undefined) text(record.nativeId);
       if (record.error !== undefined && (typeof record.error !== 'string' || Buffer.byteLength(record.error) > ERROR_BYTES)) throw new Error('Invalid schedule error.');
       if (record.cancelRequested !== undefined && record.cancelRequested !== true) throw new Error('Invalid cancellation intent.');
-      if (record.creationRefused !== undefined && (catalog.version !== 3 || record.creationRefused !== true || record.nativeId !== undefined
+      if (record.creationRefused !== undefined && (Number(catalog.version) < 3 || record.creationRefused !== true || record.nativeId !== undefined
         || !['failed', 'cancelled', 'interrupted'].includes(record.state as string)
         || record.completedOccurrences !== undefined)) throw new Error('Invalid native admission refusal.');
+      if (record.cleanupConfirmed !== undefined && (catalog.version !== 4 || record.cleanupConfirmed !== true
+        || record.cancelRequested !== true || record.state !== 'cancelled')) throw new Error('Invalid confirmed cleanup receipt.');
       if (record.execution !== undefined) {
         const execution = object(record.execution, ['command', 'model', 'effort']);
         for (const value of Object.values(execution)) if (value !== undefined) text(value, 4096);
@@ -1320,7 +1347,7 @@ export class ScheduleService {
       pending.set(item.id as string, structuredClone(item) as unknown as PendingDelivery);
     }
     const purged = new Map<string, ScheduleOwner>();
-    if (catalog.version === 3) {
+    if (Number(catalog.version) >= 3) {
       if (!Array.isArray(catalog.purged) || catalog.purged.length > MAX_PURGED_IDS) throw new Error('Invalid purge fences.');
       for (const value of catalog.purged) {
         const fence = object(value, ['id', 'threadId', 'openId', 'generation']);
@@ -1328,7 +1355,7 @@ export class ScheduleService {
         if (records.has(fence.id) || purged.has(fence.id)) throw new Error('Conflicting purge fence.');
         purged.set(fence.id, ownerOf(fence as unknown as ScheduleOwner));
       }
-    } else if (catalog.purged !== undefined) throw new Error('Purge fences require catalog version 3.');
+    } else if (catalog.purged !== undefined) throw new Error('Purge fences require catalog version 3 or newer.');
     this.records = records; this.pending = pending; this.purged = purged;
   }
 
@@ -1344,8 +1371,9 @@ export class ScheduleService {
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
       const handle = await fs.open(temporary, 'wx', 0o600);
       try {
-        const upgraded = this.purged.size > 0 || [...this.records.values()].some(record => record.creationRefused);
-        await handle.writeFile(JSON.stringify({ version: upgraded ? 3 : 2, records: [...this.records.values()], pending: [...this.pending.values()],
+        const confirmedCleanup = [...this.records.values()].some(record => record.cleanupConfirmed);
+        const upgraded = confirmedCleanup || this.purged.size > 0 || [...this.records.values()].some(record => record.creationRefused);
+        await handle.writeFile(JSON.stringify({ version: confirmedCleanup ? 4 : upgraded ? 3 : 2, records: [...this.records.values()], pending: [...this.pending.values()],
           ...(upgraded ? { purged: [...this.purged].map(([id, owner]) => ({ id, ...owner })) } : {}) }), 'utf8');
         await handle.sync();
       } finally { await handle.close(); }
