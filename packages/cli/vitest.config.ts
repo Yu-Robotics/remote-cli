@@ -1,5 +1,6 @@
 import { defineConfig } from 'vitest/config';
 import os from 'os';
+import path from 'path';
 
 export function testWorkerLimits(parallelism: number) {
   const cpus = Number.isFinite(parallelism) ? Math.max(1, Math.floor(parallelism)) : 1;
@@ -42,6 +43,13 @@ export const nativeOwnershipTestFiles = [
 ];
 export const processIsolatedTestFiles = [...realGitTestFiles, ...nativeOwnershipTestFiles];
 
+export function processIsolatedTestGlobs(root: string): [string, 'forks'][] {
+  // A leading ** does not match hidden ancestors, including delegated checkouts
+  // under .remote-cli. Match the literal checkout root, escaping glob syntax.
+  const literalRoot = root.replace(/\\/g, '/').replace(/[?*+@!()[\]{}]/g, '\\$&');
+  return processIsolatedTestFiles.map(file => [`${literalRoot}/${file}`, 'forks']);
+}
+
 export default defineConfig({
   test: {
     // Keep real Git process isolation, but do not serialize every expensive
@@ -50,7 +58,7 @@ export default defineConfig({
     minWorkers: 1,
     maxWorkers: workers.threads,
     // Vitest matches absolute test paths, not paths relative to this config.
-    poolMatchGlobs: processIsolatedTestFiles.map(file => [`**/${file}`, 'forks'] as [string, 'forks']),
+    poolMatchGlobs: processIsolatedTestGlobs(path.resolve(__dirname)),
     poolOptions: { forks: { minForks: 1, maxForks: workers.gitForks } },
   },
 });

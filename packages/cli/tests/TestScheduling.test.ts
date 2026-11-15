@@ -3,7 +3,13 @@ import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import { isMainThread } from 'worker_threads';
-import config, { processIsolatedTestFiles, realGitTestFiles, testWorkerLimits } from '../vitest.config';
+import { createRequire } from 'module';
+import config, { processIsolatedTestFiles, processIsolatedTestGlobs, realGitTestFiles, testWorkerLimits } from '../vitest.config';
+
+// Exercise the matcher used by the installed Vitest, including its dot-path defaults.
+const { isMatch } = createRequire(require.resolve('vitest/package.json'))('micromatch') as {
+  isMatch(file: string, glob: string): boolean;
+};
 
 describe('CLI test scheduling', () => {
   it('bounds real Git suites separately without raising ordinary test deadlines', () => {
@@ -15,7 +21,7 @@ describe('CLI test scheduling', () => {
     });
     expect(config.test?.testTimeout).toBeUndefined();
     expect(config.test?.hookTimeout).toBeUndefined();
-    expect(config.test?.poolMatchGlobs).toEqual(processIsolatedTestFiles.map(file => [`**/${file}`, 'forks']));
+    expect(config.test?.poolMatchGlobs).toEqual(processIsolatedTestGlobs(path.resolve('.')));
   });
 
   it.each([
@@ -23,7 +29,24 @@ describe('CLI test scheduling', () => {
     'tests/delegation/ManagedNativeSessionDeletion.test.ts',
     'tests/delegation/ManagedHistoryBackends.test.ts',
   ])('isolates native lock release and reacquisition in %s', file => {
-    expect(config.test?.poolMatchGlobs).toContainEqual([`**/${file}`, 'forks']);
+    expect(config.test?.poolMatchGlobs?.some(([glob, pool]) =>
+      pool === 'forks' && isMatch(path.resolve(file).split(path.sep).join('/'), glob))).toBe(true);
+  });
+
+  it.each([
+    path.posix.join('/fixture', 'checkout', 'packages', 'cli'),
+    path.posix.join('/fixture', '.remote-cli', 'checkout [one]', 'packages', 'cli'),
+    path.win32.join('C:\\', 'fixture', '.remote-cli', 'checkout [one]', 'packages', 'cli'),
+    path.win32.join('\\\\fixture-server\\share', '.remote-cli', 'checkout', 'packages', 'cli'),
+  ])('keeps native suites in forks under %s', root => {
+    const normalized = root.replace(/\\/g, '/');
+    const globs = processIsolatedTestGlobs(root);
+    const poolFor = (file: string) => globs.find(([glob]) => isMatch(file, glob))?.[1] ?? 'threads';
+    for (const file of processIsolatedTestFiles) {
+      expect(poolFor(`${normalized}/${file}`)).toBe('forks');
+      expect(poolFor(`${normalized}-other/${file}`)).toBe('threads');
+    }
+    expect(poolFor(`${normalized}/tests/TestScheduling.test.ts`)).toBe('threads');
   });
 
   it.each([

@@ -6,6 +6,11 @@ import { ScheduleService, SCHEDULE_CATALOG_FILE, type ScheduleServiceOptions } f
 import { NativeScheduleCleanupError, NativeScheduleNotAdmittedError, type NativeScheduleEvent, type NativeScheduleHandle, type NativeScheduleInput,
   type NativeScheduleProvider, type NativeScheduleRecovery, type ScheduleOwner, type ScheduleRecord } from '../src/scheduling/types';
 
+// Keep real filesystem persistence while allowing a controlled receipt-write barrier.
+vi.mock('node:fs/promises', async importOriginal => ({
+  ...await importOriginal<typeof import('node:fs/promises')>(),
+}));
+
 const owner: ScheduleOwner = { threadId: 'thread-a', openId: 'owner-a', generation: 'generation-a' };
 const epoch = Date.parse('2030-01-01T00:00:00Z');
 function deferred<T>() {
@@ -260,15 +265,61 @@ describe('durable provider-neutral schedule recovery', () => {
   });
 
   it('cleans a late error-after-commit receipt without releasing its admission early', async () => {
-    const release = vi.fn();
+    const released = deferred<void>();
+    const release = vi.fn(() => released.resolve());
     const next = await restart(await start(), { recoveryTimeoutMs: 20, acquireRecovery: () => release });
     const gate = deferred<void>();
-    native.hook = async () => { await gate.promise; throw new NativeScheduleCleanupError('Late commit', native.handle('job-a')); };
-    await next.recover(); expect(release).not.toHaveBeenCalled();
-    gate.resolve();
-    await vi.waitFor(() => expect(release).toHaveBeenCalledOnce());
-    expect(native.store.size).toBe(0);
-    expect((await catalog()).records[0].nativeId).toBe('native-job-a');
+    const replacing = deferred<void>(), persistReceipt = deferred<void>();
+    const stopping = deferred<void>(), finishStop = deferred<void>();
+    const handle = native.handle('job-a');
+    const stop = vi.fn(async () => {
+      stopping.resolve(); await finishStop.promise; await handle.stop();
+    });
+    native.hook = async () => {
+      await gate.promise;
+      throw new NativeScheduleCleanupError('Late commit', { ...handle, stop });
+    };
+    const rename = fs.rename.bind(fs);
+    let restoreRename: (() => void) | undefined;
+    let receiptReplaced = false;
+    try {
+      await next.recover(); expect(release).not.toHaveBeenCalled();
+      // Recovery has timed out; the next write adopts the eventual native receipt.
+      const replacement = vi.spyOn(fs, 'rename').mockImplementation(async (...args) => {
+        if (!receiptReplaced && args[1] === path.join(directory, SCHEDULE_CATALOG_FILE)) {
+          replacing.resolve(); await persistReceipt.promise;
+          await rename(...args); receiptReplaced = true;
+          return;
+        }
+        return rename(...args);
+      });
+      restoreRename = () => replacement.mockRestore();
+      gate.resolve();
+      await replacing.promise;
+      expect(release).not.toHaveBeenCalled();
+      expect(stop).not.toHaveBeenCalled();
+      expect(receiptReplaced).toBe(false);
+      expect(native.stops).toBe(0);
+      persistReceipt.resolve();
+      await stopping.promise;
+      expect(receiptReplaced).toBe(true);
+      expect(stop).toHaveBeenCalledOnce();
+      expect(release).not.toHaveBeenCalled();
+      expect(native.store.has('job-a')).toBe(true);
+      finishStop.resolve();
+      // The callback is the completion signal; polling it imposes an unrelated
+      // one-second deadline on real receipt persistence and native cleanup.
+      await released.promise;
+      expect(release).toHaveBeenCalledOnce();
+      expect(native.stops).toBe(1);
+      expect(native.store.size).toBe(0);
+      expect((await catalog()).records[0].nativeId).toBe('native-job-a');
+    } finally {
+      gate.resolve(); persistReceipt.resolve(); finishStop.resolve();
+      await released.promise;
+      await next.destroy();
+      restoreRename?.();
+    }
   });
 
   it('holds admission through inventory validation, not only the native receipt', async () => {

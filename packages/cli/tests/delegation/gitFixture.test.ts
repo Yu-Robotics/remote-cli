@@ -3,6 +3,7 @@ import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import * as childProcess from 'child_process';
+import { isMainThread } from 'worker_threads';
 import { gitText, runGit } from '../../src/delegation/GitCheckpoint';
 import { gitFixture, nestedGitFixture, repositoryState } from './gitFixture';
 
@@ -79,6 +80,7 @@ describe('pristine real-Git fixture templates', { timeout: 30_000 }, () => {
   });
 
   it('bootstraps lazily once and performs no Git launches for subsequent copies', async () => {
+    expect(isMainThread).toBe(true); // Real Git must run in a fork, even under hidden checkout ancestors.
     expect(cleanupHooks).toHaveLength(1);
     expect(gitCalls()).toHaveLength(0);
     const scratch = trackScratchDirectories();
