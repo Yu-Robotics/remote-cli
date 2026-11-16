@@ -17,6 +17,7 @@ import { ThreadExecutorPool } from '../src/thread/ThreadExecutorPool';
 import { ThreadManager } from '../src/thread/ThreadManager';
 import * as localImages from '../src/utils/LocalImageDetector';
 import { codexWebSearchResult } from '../src/executor/CodexWebSearch';
+import { FileInbox } from '../src/files/FileInbox';
 
 vi.mock('../src/client/WebSocketClient');
 
@@ -681,6 +682,48 @@ describe('MessageHandler', () => {
       reject(new Error('Attachment unavailable: download timed out.')); await task;
       expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
       expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'response', success: false, error: expect.stringContaining('download timed out') }));
+    });
+    it('does not let a reported oversized file block later text after inbox recreation', async () => {
+      const thread = ctx.mockThreadManager.getDefaultThread();
+      thread.workingDirectory = ctx.workingDirectory;
+      thread.delegation = false;
+      const fileId = 'd'.repeat(64);
+      const createInbox = () => new FileInbox(path.join(ctx.workingDirectory, 'attachments'), 'https://router.example.com', {
+        thread: () => thread,
+        send: vi.fn(),
+        extract: vi.fn(),
+      });
+      let inbox = createInbox();
+      (ctx.handler as any).fileInbox = inbox;
+      await inbox.accept({ fileId, name: 'report.xlsx', openId: 'owner', sourceMessageId: 'upload' });
+      await inbox.failed(fileId, 'File exceeds the 20 MiB limit.');
+      const command = (messageId: string, fileIds?: string[]) => ({
+        type: 'command', messageId, threadId: thread.id, openId: 'owner',
+        content: fileIds ? 'Read the referenced file' : 'Continue the conversation', fileIds, timestamp: Date.now(),
+      });
+      await ctx.handler.handleMessage(command('first-attachment-error') as any);
+      expect(ctx.mockExecutor.execute).not.toHaveBeenCalled();
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+        messageId: 'first-attachment-error', type: 'response', success: false,
+        error: expect.stringContaining('20 MiB'),
+      }));
+      await inbox.destroy();
+      inbox = createInbox();
+      (ctx.handler as any).fileInbox = inbox;
+      ctx.mockExecutor.execute.mockResolvedValue({ success: true, output: 'Conversation continued' });
+      await ctx.handler.handleMessage(command('text-after-restart') as any);
+      expect(ctx.mockExecutor.execute).toHaveBeenCalledTimes(1);
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+        messageId: 'text-after-restart', type: 'response', success: true,
+      }));
+      await ctx.handler.handleMessage(command('explicit-rejected-file', [fileId]) as any);
+      expect(ctx.mockExecutor.execute).toHaveBeenCalledTimes(1);
+      expect(ctx.mockWsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+        messageId: 'explicit-rejected-file', type: 'response', success: false,
+        error: expect.stringContaining('20 MiB'),
+      }));
+      await ctx.handler.handleMessage(command('text-after-explicit-error') as any);
+      expect(ctx.mockExecutor.execute).toHaveBeenCalledTimes(2);
     });
     it('rejects explicit file references when the optional capability was not negotiated', async () => {
       await ctx.handler.handleMessage({ type: 'command', messageId: 'old-peer', content: 'Read', openId: 'owner', fileIds: ['a'.repeat(64)], timestamp: Date.now() } as any);

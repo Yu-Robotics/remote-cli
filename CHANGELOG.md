@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.249] - 2026-11-16
+
+### Fixed
+- Persist consumption of reported attachment failures so oversized or rejected files do not block later ordinary messages after a client restart. Preserve the first associated command's error and explicit-reference rejection.
+
+### Tests
+- Cover failure reporting, inbox recreation, explicit rejected references, and subsequent ordinary-message execution with isolated attachment fixtures.
+
 ## [1.6.248] - 2026-11-16
 
 ### Fixed

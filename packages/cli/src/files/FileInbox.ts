@@ -14,12 +14,12 @@ interface Entry {
   id: string; name: string; sourceMessageId: string; openId: string; threadId: string;
   cwd: string; generation: number; destination: string; origin: string;
   expiresAt: number; state: string; consumed?: boolean; size?: number; sha256?: string;
-  detail?: string; textAvailable?: boolean;
+  detail?: string; textAvailable?: boolean; failureReported?: boolean;
 }
 interface Pending {
   entry: Entry; abort: AbortController; done: Promise<void>; finish: () => void;
   downloading?: boolean; timer?: NodeJS.Timeout;
-  admission?: Promise<void>; task?: Promise<void>; writes?: Promise<void>; removing?: boolean;
+  admission?: Promise<void>; task?: Promise<void>; writes?: Promise<void>; reporting?: Promise<void>; removing?: boolean;
   sequence: number;
 }
 export interface FileInboxDependencies {
@@ -75,6 +75,8 @@ export class FileInbox {
           } else if (!['saved', 'parsed', 'partial', 'unsupported', 'failed'].includes(entry.state)) {
             entry.state = 'failed'; entry.detail = 'CLI restarted during transfer. Please send the file again.';
           }
+          // A persisted reservation is not proof that a command reported the failure.
+          if (entry.state === 'failed' && entry.failureReported !== true) entry.consumed = false;
           const pending = this.pending(entry);
           pending.finish(); this.entries.set(id, pending);
         } catch { /* Never trust or remove a directory with an invalid manifest. */ }
@@ -262,6 +264,7 @@ export class FileInbox {
     const current = this.deps.thread(threadId);
     const ids = explicit ?? [...this.entries.values()].filter(p => p.sequence <= beforeSequence
       && p.entry.threadId === threadId && p.entry.openId === openId && !p.entry.consumed
+      && !(p.entry.state === 'failed' && p.entry.failureReported === true)
       && p.entry.expiresAt > Date.now() && p.entry.cwd === current?.workingDirectory
       && p.entry.generation === (current?.delegationWorkspaceGeneration ?? 0)).map(p => p.entry.id);
     if (ids.length > 20 || ids.some(id => !FILE_ID.test(id))) throw new Error('Invalid attachment references.');
@@ -276,15 +279,45 @@ export class FileInbox {
 
   hasClaim(messageId: string): boolean { return (this.claims.get(messageId)?.length ?? 0) > 0; }
 
+  private reportFailure(pending: Pending, assertClaim: () => void): Promise<void> {
+    // Explicit references can overlap; a cancelled reporter must not undo another's acknowledgement.
+    const operation = (pending.reporting ?? Promise.resolve()).catch(() => {}).then(async () => {
+      assertClaim();
+      const entry = pending.entry;
+      if (entry.failureReported === true) return;
+      entry.failureReported = true;
+      try {
+        await this.persist(pending);
+        assertClaim();
+      } catch (error) {
+        delete entry.failureReported;
+        if (![...this.claims.values()].some(ids => ids.includes(entry.id))) entry.consumed = false;
+        await this.persist(pending);
+        throw error;
+      }
+    });
+    pending.reporting = operation;
+    void operation.finally(() => { if (pending.reporting === operation) pending.reporting = undefined; }).catch(() => {});
+    return operation;
+  }
+
   async prepare(messageId: string): Promise<string> {
     const metadata: object[] = [];
-    for (const id of this.claims.get(messageId) ?? []) {
+    const claim = this.claims.get(messageId);
+    const assertClaim = () => {
+      if (this.claims.get(messageId) !== claim) throw new Error('Attachment task cancelled.');
+    };
+    for (const id of claim ?? []) {
       const pending = this.entries.get(id);
       if (!pending) throw new Error('Attachment expired. Please send it again.');
       await pending.done;
+      assertClaim();
       const entry = pending.entry;
       this.assertContext(entry);
-      if (entry.state === 'failed') throw new Error(`Attachment ${JSON.stringify(entry.name)} unavailable: ${entry.detail}`);
+      if (entry.state === 'failed') {
+        await this.reportFailure(pending, assertClaim);
+        throw new Error(`Attachment ${JSON.stringify(entry.name)} unavailable: ${entry.detail}`);
+      }
       const filename = this.original(entry);
       const stat = await fs.lstat(filename);
       if (!stat.isFile() || stat.isSymbolicLink() || stat.size !== entry.size) throw new Error('Saved attachment was removed or changed. Please upload it again.');
@@ -304,7 +337,7 @@ export class FileInbox {
     const pinned = new Set([...this.claims.values()].flat());
     for (const id of ids) {
       const pending = this.entries.get(id);
-      if (pending && pending.entry.state !== 'failed' && !pinned.has(id)) {
+      if (pending && !(pending.entry.state === 'failed' && pending.entry.failureReported === true) && !pinned.has(id)) {
         pending.entry.consumed = false;
         void this.persist(pending).catch(() => {});
       }
