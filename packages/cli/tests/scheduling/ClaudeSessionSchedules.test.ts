@@ -233,6 +233,21 @@ describe('Claude foreground native schedule protocol', () => {
     h.adapter.foregroundEnded(); await rejected;
   });
 
+  it('unwinds an uninvoked creation on abort without a terminal frame or native cleanup turn', async () => {
+    vi.useFakeTimers(); const h = harness();
+    const pending = h.adapter.inToolOperation('aborted', () => true, () => h.adapter.create(input(), vi.fn()));
+    const action = h.adapter.action('aborted')!;
+    const rejected = expect(pending).rejects.toThrow('aborted');
+    const cleanup = h.adapter.captureCancellation()(() => true);
+    expect(h.adapter.action('aborted')).toBeUndefined();
+    expect(h.hook(action.tool, action.input)).toHaveProperty('hookSpecificOutput.permissionDecision', 'deny');
+    await rejected; await cleanup;
+    expect(h.adapter.hasJobs).toBe(false);
+    expect(h.adapter.cleanupRetirementReady).toBe(true);
+    expect(h.manage).not.toHaveBeenCalled(); expect(vi.getTimerCount()).toBe(0);
+    await h.create('replacement'); h.adapter.processClosed();
+  });
+
   it('rejects one-shot clock rollback ambiguity rather than selecting an earlier native wall minute', async () => {
     vi.useFakeTimers(); vi.setSystemTime(Date.parse('2030-11-03T04:00:00Z'));
     const h = harness();

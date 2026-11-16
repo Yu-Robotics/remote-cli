@@ -282,24 +282,31 @@ describe('Claude production orderly recovery', () => {
     frame({ type: 'command_lifecycle', command_uuid: 'retained-after-absence', state: 'completed' });
     await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(1));
   });
-  it.each([false, true])('fences interrupted wakes even when cleanup fails, preserving siblings (recovered=%s)', async recovered => {
+  it.each([false, true])('preserves wakes after read errors and fences only explicit cleanup, preserving siblings (recovered=%s)', async recovered => {
     await create(); await create('second');
     if (recovered) { await abruptRestart(true); await service.recover(); }
     const [target, sibling] = [...inventory.values()];
     const handle = (service as any).runtimes.get('first').handle;
     const list = vi.spyOn(handle, 'list').mockRejectedValue(new Error('Synthetic inventory failure'));
     const stop = vi.spyOn(handle, 'stop').mockRejectedValue(new Error('Synthetic cleanup failure'));
-    await expect(service.refresh(owner)).rejects.toThrow('Synthetic cleanup failure');
+    await expect(service.refresh(owner)).rejects.toThrow('Synthetic inventory failure');
+    expect((await service.list(owner)).find(row => row.id === 'first')!.state).toBe('active');
+    expect(stop).not.toHaveBeenCalled();
+    wake('admitted-after-read-error', target);
+    expect(JSON.parse(child.stdin.write.mock.calls.at(-1)[0]).response.response).toEqual({});
+    terminal('admitted-after-read-error');
+    await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(1));
+    await service.recordReviewedCleanup(owner, ['first'], false);
     expect((await service.list(owner)).find(row => row.id === 'first')!.state).toBe('interrupted');
-    expect(stop).toHaveBeenCalled();
+    expect(stop).not.toHaveBeenCalled();
     wake('blocked-after-interruption', target);
     expect(JSON.parse(child.stdin.write.mock.calls.at(-1)[0]).response.response.decision).toBe('block');
     terminal('blocked-after-interruption'); await drain();
-    expect(deliver).not.toHaveBeenCalled();
+    expect(deliver).toHaveBeenCalledTimes(1);
     wake('sibling-still-admitted', sibling);
     expect(JSON.parse(child.stdin.write.mock.calls.at(-1)[0]).response.response).toEqual({});
     terminal('sibling-still-admitted');
-    await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(2));
     expect(inventory.size).toBe(2);
     list.mockRestore(); stop.mockRestore();
   });

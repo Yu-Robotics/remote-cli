@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.250] - 2026-11-16
+
+### Fixed
+- Keep schedule listing observational: inventory errors preserve active task state and admission, unresolved records never trigger automatic cleanup, and list receipts reject unexpected native mutations. Verified native absence remains distinct from execution completion.
+- Separate current-turn native invocation waiting from receipt deadlines so model and tool-discovery delays do not expire an uninvoked action. Preserve bounded native-result and out-of-turn management waits and retire actions on turn end, local errors, timeouts, abort, or owner loss without discarding uncertain mutation ownership.
+
+### Tests
+- Cover read-only listing through slash commands and managed tools, inventory uncertainty and absence, pending cleanup, delayed native invocation, result deadlines, foreground errors without native result frames, and late-receipt isolation with synthetic fixtures.
+- Isolate recovery catalog-lock release/reacquisition tests in the existing fork pool to prevent inherited descriptors from transiently retaining a released lock during concurrent test-worker startup.
+
 ## [1.6.249] - 2026-11-16
 
 ### Fixed

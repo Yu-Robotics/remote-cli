@@ -121,6 +121,45 @@ describe('MessageHandler native schedule closed loop', () => {
   const invoke = (name: string, args: Record<string, unknown>) => (f.handler as any).delegationBridges.get('thread-a').handler(name, args, 'native-call');
   const createArgs = { requestId: 'create-one', when: { kind: 'after', amount: 5, unit: 'm' }, prompt: 'Synthetic scheduled task' };
 
+  it.each(['claude', 'agy', 'dsh'])('keeps %s schedule-list failures observational through text and model tools', async backend => {
+    f.setBackend(backend); await f.bind();
+    const service = await (f.handler as any).initializeSchedules() as ScheduleService;
+    const owner = { threadId: 'thread-a', openId: 'owner', generation: (f.handler as any).scheduleGeneration('thread-a') };
+    let admit: (() => boolean) | undefined;
+    const create = f.executor.createNativeSchedule.getMockImplementation()!;
+    f.executor.createNativeSchedule.mockImplementationOnce((input, emit, current, canAdmit) => {
+      admit = canAdmit; return create(input, emit, current, canAdmit);
+    });
+    await service.create(owner, { id: 'read-only-task', backend: backend as 'claude' | 'agy' | 'dsh', cwd: f.cwd,
+      prompt: 'Synthetic waiting task', rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } });
+    const job = f.jobs[0];
+    job.handle.list.mockRejectedValue(new Error('Synthetic native inventory timeout'));
+    expect(admit?.()).toBe(true);
+    await f.send('/schedule list');
+    expect(f.responses().at(-1)).toMatchObject({ success: false, error: expect.stringContaining('Synthetic native inventory timeout') });
+    expect((await service.list(owner))[0]).toMatchObject({ state: 'active' });
+    expect(admit?.()).toBe(true);
+    let listed: any;
+    f.executor.execute.mockImplementationOnce(async () => {
+      listed = await invoke('remote_cli_schedule_list', { requestId: 'read-only-list' });
+      return { success: true };
+    });
+    await f.send('List the synthetic waiting task', 'thread-a', { isSlashCommand: false });
+    expect(listed).toMatchObject({ status: 'failed', error: expect.stringContaining('Synthetic native inventory timeout') });
+    expect((await service.list(owner))[0]).toMatchObject({ state: 'active' });
+    expect(listed.nativeAction).toBeUndefined();
+    expect(admit?.()).toBe(true);
+    expect(job.handle.cancel).not.toHaveBeenCalled(); expect(job.handle.stop).not.toHaveBeenCalled();
+    expect(job.handle.list).toHaveBeenCalledTimes(2);
+
+    await service.recordReviewedCleanup(owner, ['read-only-task'], false);
+    job.handle.list.mockClear();
+    await f.send('/schedule list');
+    expect((await service.list(owner))[0]).toMatchObject({ state: 'interrupted', cancelRequested: true });
+    expect(job.handle.list).not.toHaveBeenCalled();
+    expect(job.handle.cancel).not.toHaveBeenCalled(); expect(job.handle.stop).not.toHaveBeenCalled();
+  });
+
   it.each([false, true])('awaits AGY native identity persistence through the production dispatcher (failure=%s)', async fail => {
     f.setBackend('agy');
     const service = await (f.handler as any).initializeSchedules() as ScheduleService;
@@ -1038,6 +1077,19 @@ describe('MessageHandler native schedule closed loop', () => {
     timestamp: Date.now(), ...extra,
   } as any);
   const receipts = () => f.ws.send.mock.calls.map(([message]) => message).filter(message => message.type === 'schedule_action_result');
+
+  it.each(['claude', 'agy', 'dsh'])('preserves waiting %s tasks when card inventory refresh fails', async backend => {
+    f.setBackend(backend); await f.bind(true);
+    await f.send('/schedule after 2m -- Synthetic waiting task');
+    const menu = f.responses().at(-1).scheduleMenu;
+    f.jobs[0].handle.list.mockRejectedValue(new Error('Synthetic inventory receipt failure'));
+    await action(menu);
+    expect(receipts().at(-1)).toMatchObject({ success: false, error: expect.stringContaining('Status refresh failed'),
+      menu: { entries: [expect.objectContaining({ state: 'active', canCancel: true })] } });
+    expect(f.jobs[0].handle.list).toHaveBeenCalledOnce();
+    expect(f.jobs[0].handle.cancel).not.toHaveBeenCalled(); expect(f.jobs[0].handle.stop).not.toHaveBeenCalled();
+    expect(f.executor.execute).not.toHaveBeenCalled();
+  });
 
   it.each(['claude', 'dsh'])('refreshes and cancels %s through direct controls without a foreground turn', async backend => {
     f.setBackend(backend); await f.bind(true);

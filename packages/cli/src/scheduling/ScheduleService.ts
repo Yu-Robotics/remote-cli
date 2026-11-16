@@ -884,42 +884,52 @@ export class ScheduleService {
     });
   }
 
-  /** User-requested native reconciliation only; no background polling is installed. */
+  /** Observe native inventory without deleting definitions or retiring native work. */
   refresh(owner: ScheduleOwner): Promise<void> {
     this.refreshes++;
-    return this.operation(this.refreshNative(owner).finally(() => { this.refreshes--; }));
+    return this.operation(this.refreshNative(structuredClone(owner)).finally(() => { this.refreshes--; }));
   }
 
   private async refreshNative(owner: ScheduleOwner): Promise<void> {
     this.checkReady(); validateOwner(owner);
     const candidates = await this.serial(async () => [...this.records.values()]
       .filter(record => sameOwner(record, owner)).map(record => record.id));
+    let failure: Error | undefined;
     for (const id of candidates) {
+      const record = this.records.get(id);
       const runtime = this.runtimes.get(id);
-      if (!runtime?.handle || runtime.stopped || runtime.cancelling || runtime.running.size || !this.current(owner)) continue;
-      if (!LIVE.has(this.records.get(id)!.state)) { await this.stop(id, runtime); continue; }
+      const handle = runtime?.handle;
+      if (!record || !runtime || !handle) continue;
+      const nativeId = record.nativeId;
+      const completed = runtime.completed.size;
+      // Recheck after every read: cancellation, execution or rebound may have
+      // advanced while inventory was awaiting its native receipt.
+      const readable = () => !this.closing && !this.fault && !this.suspending && this.current(owner)
+        && this.records.get(id) === record && record.nativeId === nativeId && record.state === 'active' && !record.cancelRequested
+        && this.runtimes.get(id) === runtime && runtime.handle === handle && !runtime.stopped && !runtime.cancelling
+        && !runtime.running.size && runtime.completed.size === completed && !runtime.stopPromise && !runtime.releaseAdmission
+        && !this.recordOperations.has(id) && !this.retainedCancellations.has(id);
+      if (!readable()) continue;
+      let present: boolean;
       try {
-        const present = await runtime.handle.list();
-        if (present) continue;
-        await this.serial(async () => {
-          const record = this.records.get(id)!;
-          if (LIVE.has(record.state)) {
-            record.state = 'interrupted';
-            record.error = 'Native schedule is no longer listed; execution completion is not confirmed.';
-            await this.persist();
-          }
-        });
-        await this.stop(id, runtime);
+        present = await handle.list();
+        if (typeof present !== 'boolean') throw new Error('Native inventory returned no verified presence or absence.');
       } catch (error) {
-        await this.serial(async () => {
-          const record = this.records.get(id)!;
-          if (LIVE.has(record.state)) record.state = 'interrupted';
-          record.error = errorText(error);
-          if (!this.fault) await this.persist();
-        });
-        await this.stop(id, runtime);
+        // Read uncertainty is not absence or cancellation authority. Leave the
+        // durable record, recovery fences and future occurrence admission intact.
+        if (readable()) failure ??= new Error(`Native inventory could not be verified for ${id}: ${errorText(error)}`);
+        continue;
       }
+      if (present) continue;
+      await this.serial(async () => {
+        if (!readable()) return;
+        record.state = 'interrupted';
+        const detail = 'Native schedule is no longer listed; execution completion and cleanup are not confirmed.';
+        record.error = record.error ? `${bounded(record.error, ERROR_BYTES - Buffer.byteLength(detail) - 1)}\n${detail}` : detail;
+        await this.persist();
+      });
     }
+    if (failure) throw failure;
   }
 
   cancel(owner: ScheduleOwner, id: string): Promise<ScheduleRecord> {

@@ -165,6 +165,13 @@ export class ScheduleToolScope {
     if (receipt.result.status === 'pending') receipt.pendingObserved = true;
     else receipt.terminalObserved = true;
     const nativeAction = receipt.result.status === 'pending' ? this.options.nativeAction?.(`managed-${key.slice(0, 48)}`) : undefined;
+    if (nativeAction && !receipt.sideEffect) {
+      const readOnly = object(nativeAction) && object(nativeAction.input) && (
+        this.options.backend === 'claude' && nativeAction.tool === 'CronList' && Object.keys(nativeAction.input).length === 0
+        || this.options.backend === 'agy' && nativeAction.tool === 'manage_task'
+          && nativeAction.input.Action === 'list' && Object.keys(nativeAction.input).length === 1);
+      if (!readOnly) throw new Error('Read-only schedule listing cannot authorize this native action. No native action was returned.');
+    }
     return { ...structuredClone(receipt.result), ...(nativeAction ? { nativeAction,
       instruction: 'Call this exact authorized native tool now in this conversation, once. Do not report success until remote_cli_schedule_operation confirms its native receipt. Do not change any arguments.' } : {}) };
   }
