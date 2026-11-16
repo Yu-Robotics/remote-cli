@@ -11,6 +11,7 @@ function fixture(timeoutMs = 100) {
   adapters.push(adapter);
   adapter.accept({ type: 'system', subtype: 'init', tools: ['CronCreate', 'CronList', 'CronDelete'],
     capabilities: ['msg_lifecycle_v1', 'lifecycle_wakeup_source_v1'] });
+  adapter.foregroundDispatched('synthetic-foreground');
   const hook = (id: string, tool = 'CronList', input = {}) => {
     adapter.accept({ type: 'control_request', request_id: `hook-${id}`, request: {
       subtype: 'hook_callback', callback_id: SCHEDULE_HOOK, tool_use_id: id,
@@ -63,6 +64,22 @@ describe('Claude native invocation and receipt deadlines', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it.each(['terminal', 'replacement'] as const)('revokes foreground scope synchronously on %s before Promise continuations', async boundary => {
+    const h = fixture(); const lease = h.adapter.invocationLease();
+    const pending = h.review('stale'); const failed = expect(pending).rejects.toThrow('authorization ended');
+    if (boundary === 'terminal') h.adapter.accept({ type: 'command_lifecycle', command_uuid: 'synthetic-foreground', state: 'completed' });
+    else h.adapter.foregroundDispatched('replacement');
+    expect(lease()).toBe(false);
+    expect(h.adapter.action('stale')).toBeUndefined();
+    expect(h.hook('stale-list')).toHaveProperty('hookSpecificOutput.permissionDecision', 'deny');
+    await failed;
+    h.adapter.foregroundDispatched('next');
+    const next = h.review('fresh'); h.hook('fresh-list'); h.receipt('fresh-list');
+    expect(await next).toEqual([]);
+    expect(lease()).toBe(false);
+    expect(h.manage).not.toHaveBeenCalled();
+  });
+
   it('starts the result deadline at invocation after a delayed in-turn action', async () => {
     const h = fixture(60_000);
     const rejected = expect(h.review('delayed')).rejects.toThrow('authorized tool result missing');
@@ -99,6 +116,7 @@ describe('Claude native invocation and receipt deadlines', () => {
     expect(vi.getTimerCount()).toBe(0);
     expect(h.manage).not.toHaveBeenCalled();
     if (reason !== 'close') {
+      h.adapter.foregroundDispatched('retry-foreground');
       const retry = h.review('retry'); expect(h.hook('retry-read')).toEqual({});
       h.receipt('retry-read'); expect(await retry).toEqual([]);
     }
@@ -173,6 +191,7 @@ describe('Claude native invocation and receipt deadlines', () => {
     if (reason === 'abort') await h.adapter.captureCancellation()(() => true);
     if (reason === 'owner') { current = false; h.receipt('old-read'); }
     await rejected;
+    h.adapter.foregroundDispatched('new-foreground');
     const pending = h.review('new');
     expect(h.hook('new-read')).toEqual({});
     let complete = false;
@@ -203,6 +222,7 @@ describe('Claude native invocation and receipt deadlines', () => {
     await vi.advanceTimersByTimeAsync(99);
     h.receipt('management-read'); expect(await pending).toEqual([]);
     h.adapter.foregroundEnded();
+    h.adapter.foregroundDispatched('next-foreground');
     const next = h.review('next'); expect(h.hook('next-read')).toEqual({});
     const settled = vi.fn(); void next.then(settled, settled);
     await vi.advanceTimersByTimeAsync(99);
@@ -218,6 +238,7 @@ describe('Claude native invocation and receipt deadlines', () => {
     h.receipt('slash-read');
     expect(await pending).toEqual([]);
     h.adapter.foregroundEnded();
+    h.adapter.foregroundDispatched('next-foreground');
     const next = h.review('next-review');
     managementEnds.at(-1)!({ success: false });
     await vi.advanceTimersByTimeAsync(0);

@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.251] - 2026-11-16
+
+### Fixed
+- Preserve unreported attachment failures across cancellation, interrupted reporting and persistence errors instead of treating an unfinished report as acknowledged after restart.
+- Retire uninvoked native scheduling authorizations when their exact invocation ends, including autonomous scheduled work. Keep live-turn tool discovery independent from result deadlines and preserve ownership of already-invoked mutations and late receipts.
+
+### Tests
+- Add regressions for cancellation after attachment metadata publication with failed rollback, and for stale deletion authorization surviving a completed scheduled invocation into an unrelated foreground turn.
+
 ## [1.6.250] - 2026-11-16
 
 ### Fixed

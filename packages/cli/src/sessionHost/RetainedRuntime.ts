@@ -286,8 +286,11 @@ export class RetainedRuntime implements HostRuntime {
         if (scheduled && foreground) throw new Error('Concurrent native invocations cannot share a scheduling tool receipt. Retry after the foreground turn finishes.');
         const turn = scheduled?.id ?? foreground;
         if (!turn) throw new Error('No admitted native invocation owns this tool request.');
+        const current = () => !this.stopping && this.current(binding)
+          && (scheduled ? this.toolTurns.get(binding.threadId) === scheduled && !this.foregroundToolTurns.has(binding.threadId)
+            : this.foregroundToolTurns.get(binding.threadId) === foreground && !this.toolTurns.has(binding.threadId));
         const scope = this.tools.scope({ owner: binding, backend: binding.backend, messageId: turn,
-          current: () => this.current(binding), run: (command, id) => this.schedule(binding, command, id, true),
+          current, run: (command, id) => this.schedule(binding, command, id, true, current),
           nativeAction: id => executor.nativeScheduleAction?.(id),
           present: async () => 'Schedule ownership is retained by the native host. Use /schedule list.' });
         // Each request scope drains its accepted operation, while receipts remain
@@ -297,12 +300,14 @@ export class RetainedRuntime implements HostRuntime {
     }
     return executor;
   }
-  private async schedule(binding: RuntimeBinding, operation: ScheduleOperation, id: string, inTurn: boolean): Promise<ScheduleRecord[]> {
-    if (!object(operation) || !['create', 'list', 'cancel'].includes(operation.kind) || !this.current(binding)) throw new Error('Invalid schedule operation.');
+  private async schedule(binding: RuntimeBinding, operation: ScheduleOperation, id: string, inTurn: boolean,
+    invocationCurrent: () => boolean = () => true): Promise<ScheduleRecord[]> {
+    const current = () => !this.stopping && this.current(binding) && invocationCurrent();
+    if (!object(operation) || !['create', 'list', 'cancel'].includes(operation.kind) || !current()) throw new Error('Invalid schedule operation.');
     if (operation.kind === 'list') return this.schedules.list(binding);
     const executor = await this.executor(binding);
     const run = async () => {
-      if (!this.current(binding)) throw new Error('Schedule owner changed.');
+      if (!current()) throw new Error('Schedule owner or native invocation changed.');
       if (operation.kind === 'cancel') return [await this.schedules.cancel(binding, operation.id)];
       validateScheduleRule(operation.rule, Date.now()); validateSchedulePrompt(operation.prompt);
       if (!this.ready || !this.options.router.isConnected()) throw new Error('A Router with scheduled-result ACK support is required.');
@@ -312,7 +317,7 @@ export class RetainedRuntime implements HostRuntime {
         rule: operation.rule, prompt: operation.prompt, command: this.options.config[binding.backend]?.command,
         model: thread.models?.[binding.backend] ?? (binding.backend === 'claude' ? thread.model ?? undefined : this.options.config[binding.backend]?.model), effort: thread.efforts?.[binding.backend] })];
     };
-    return executor.withNativeScheduleOperation ? executor.withNativeScheduleOperation(id, () => this.current(binding), run, inTurn) : run();
+    return executor.withNativeScheduleOperation ? executor.withNativeScheduleOperation(id, current, run, inTurn) : run();
   }
   private scheduleId(id: string): string { return 'host-' + createHash('sha256').update(id).digest('hex').slice(0, 48); }
   assertCanStop(): void {

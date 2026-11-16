@@ -7,7 +7,8 @@ export interface NativeScheduleAction { tool: 'CronCreate' | 'CronList' | 'CronD
 /** Deliberately incompatible with NativeScheduleHandle.releaseForRestart. */
 export interface ClaudeDefinitionRemovalReceipt { ownedDefinitionsAbsent: true; quiescence: 'unverified' }
 type Frame = Record<string, any>;
-type Scope = { id: string; current: () => boolean; inTurn: boolean; ended?: boolean; mutations: Set<string>; done: Promise<void> };
+type Invocation = { ended?: boolean };
+type Scope = { id: string; current: () => boolean; inTurn: boolean; turn?: Invocation; ended?: boolean; mutations: Set<string>; done: Promise<void> };
 interface Job {
   id: string; marker: string; prompt: string; nativeId?: string; recurring: boolean; deadline?: number;
   current(): boolean; uncertain: boolean; retired: boolean; cancelled: boolean; emit(event: NativeScheduleEvent): void;
@@ -31,7 +32,7 @@ interface Pending {
   resolve(text: string): void; reject(error: Error): void; timer?: ReturnType<typeof setTimeout>;
 }
 interface Occurrence { admissible?: boolean; id: string; job?: Job; terminal?: string }
-interface NativeBatch { occurrences: Occurrence[]; result?: Frame }
+interface NativeBatch { occurrences: Occurrence[]; result?: Frame; ended?: boolean }
 export const SCHEDULE_HOOK = 'remote-cli-session-schedules';
 export const SCHEDULE_HOOKS = {
   PreToolUse: [{ matcher: '.*', hookCallbackIds: [SCHEDULE_HOOK], timeout: 10 }],
@@ -55,9 +56,13 @@ export class ClaudeSessionSchedules {
   private seen = new Set<string>();
   private resultIds = new Set<string>();
   private foregroundId?: string;
+  private foregroundTurn?: Invocation;
   private foregroundStarted = false;
   private definitionRemoval?: { lease: { isCurrent(): boolean }; operation?: Promise<ClaudeDefinitionRemovalReceipt> };
   foregroundDispatched(id: string, management = false): void {
+    this.endInvocation(this.foregroundTurn);
+    if (this.batch) this.endInvocation(this.batch);
+    this.foregroundTurn = {};
     this.foregroundId = id; this.foregroundStarted = false; this.managementTurn = management;
     if (management && this.pending && !this.pending.scope?.inTurn) this.pending.managementId = id;
   }
@@ -134,9 +139,31 @@ export class ClaudeSessionSchedules {
   }
   async inToolOperation<T>(id: string, current: () => boolean, run: () => Promise<T>, inTurn = true): Promise<T> {
     if (this.scope) throw new Error('A native schedule operation is already active.');
+    const turn = inTurn ? this.invocation() : undefined;
+    if (inTurn && !turn) throw new Error('No unambiguous native invocation owns this scheduling operation.');
     let finish!: () => void;
-    const scope: Scope = { id, current, inTurn, mutations: new Set(), done: new Promise(resolve => { finish = resolve; }) }; this.scope = scope;
+    const scope: Scope = { id, current: () => current() && (!inTurn || this.invocation() === turn), inTurn, turn,
+      mutations: new Set(), done: new Promise(resolve => { finish = resolve; }) }; this.scope = scope;
     try { return await run(); } finally { if (this.scope === scope) this.scope = undefined; finish(); }
+  }
+  private invocation(): Invocation | undefined {
+    if (this.closed) return undefined;
+    if (this.batch) return !this.foregroundId && !this.batch.ended && this.batch.occurrences.some(item => item.job) ? this.batch : undefined;
+    return this.foregroundId && !this.foregroundTurn?.ended ? this.foregroundTurn : undefined;
+  }
+  /** Capture once, before asynchronous caller preparation; never adopt a later turn. */
+  invocationLease(): () => boolean {
+    const turn = this.invocation();
+    if (!turn) throw new Error('No unambiguous native invocation owns this scheduling operation.');
+    return () => this.invocation() === turn;
+  }
+  private endInvocation(turn?: Invocation): void {
+    if (!turn) return;
+    turn.ended = true;
+    const scope = this.scope;
+    if (!scope?.inTurn || scope.turn !== turn) return;
+    scope.ended = true;
+    if (this.pending?.scope === scope) this.failPending('Native invocation scheduling authorization ended without the authorized tool receipt.');
   }
   /** Capture existing mutation ownership before revoking foreground authority. Never creates jobs. */
   captureCancellation(): (current: () => boolean) => Promise<void> {
@@ -461,12 +488,11 @@ export class ClaudeSessionSchedules {
   }
   /** Called before an ordinary command resolves so its unexecuted reservations cannot deadlock drain(). */
   foregroundEnded(): void {
-    if (this.scope?.inTurn) this.scope.ended = true;
-    if (this.pending && (this.pending.scope?.inTurn
-      || this.pending.managementId !== undefined && this.pending.managementId === this.foregroundId)) {
+    this.endInvocation(this.foregroundTurn);
+    if (this.pending && this.pending.managementId !== undefined && this.pending.managementId === this.foregroundId) {
       this.failPending('Foreground scheduling authorization ended without the native tool receipt.');
     }
-    this.managementTurn = false; this.foregroundId = undefined; this.foregroundStarted = false;
+    this.managementTurn = false; this.foregroundId = undefined; this.foregroundTurn = undefined; this.foregroundStarted = false;
   }
 
   /** Consume only schedule-owned frames. Ordinary user output continues through the existing executor. */
@@ -498,6 +524,7 @@ export class ClaudeSessionSchedules {
       if (frame.state === 'started') this.foregroundStarted = frame.command_uuid === this.foregroundId;
       if (frame.state === 'started' && frame.wakeup_source === 'schedule_wakeup') {
         if (typeof frame.command_uuid !== 'string' || !idPattern.test(frame.command_uuid) || this.seen.has(frame.command_uuid)) return true;
+        if (!this.batch) this.endInvocation(this.foregroundTurn);
         const batch = this.batch ??= { occurrences: [] };
         if (batch.occurrences.some(occurrence => occurrence.id === frame.command_uuid)) return true;
         // Native headless mode can batch several same-priority cron prompts.
@@ -512,19 +539,27 @@ export class ClaudeSessionSchedules {
       if (occurrence && ['completed', 'cancelled', 'discarded', 'refused'].includes(frame.state)) {
         // Keep failed terminals sticky even if a conflicting late receipt arrives.
         if (!occurrence.terminal || frame.state !== 'completed') occurrence.terminal = frame.state;
+        if (this.batch!.occurrences.every(item => item.terminal)) this.endInvocation(this.batch);
         this.completeOccurrence(); return true;
+      }
+      if (frame.command_uuid === this.foregroundId && ['completed', 'cancelled', 'discarded', 'refused'].includes(frame.state)) {
+        this.endInvocation(this.foregroundTurn); this.foregroundTurn = undefined;
       }
       if (this.submitted && !this.batch && ['cancelled', 'discarded', 'refused'].includes(frame.state)) {
         this.submitted = undefined; this.options.wake();
       }
       return false;
     }
+    // Tool receipts belong to exact authorized tool IDs even after their turn
+    // ended, including a late mutation receipt while another batch is active.
+    if (frame.type === 'user' && !frame.parent_tool_use_id) this.acceptReceipts(frame);
     if (this.batch) {
       if (frame.type === 'result' && !frame.parent_tool_use_id) {
         if (frame.user_message_uuid || frame.user_message_uuids?.length) {
           // A scheduled turn must never complete an unrelated foreground request.
           this.batch.result = { is_error: true, result: '', terminal_reason: 'ambiguous' };
         } else this.batch.result = frame;
+        this.endInvocation(this.batch);
         this.completeOccurrence(); return true;
       }
       if (['assistant', 'user', 'stream_event', 'thinking', 'message', 'redacted_thinking', 'result'].includes(frame.type)) return true;
@@ -540,26 +575,26 @@ export class ClaudeSessionSchedules {
         }
       }
     }
-    if (frame.type === 'user' && !frame.parent_tool_use_id) {
-      for (const block of frame.message?.content ?? []) {
-        if (block.type !== 'tool_result' || typeof block.tool_use_id !== 'string') continue;
-        const auth = this.authorized.get(block.tool_use_id);
-        if (!auth) continue;
-        this.authorized.delete(block.tool_use_id);
-        const pending = this.pending?.toolId === block.tool_use_id ? this.pending : undefined;
-        if (pending?.action.tool === 'CronList' && pending.scope && (pending.scope.ended || !pending.scope.current())) {
-          this.failPending('Scheduling owner or native turn is no longer current.');
-          continue;
-        }
-        try {
-          if (block.is_error || typeof block.content !== 'string') throw new Error('Native schedule tool failed or returned an invalid receipt.');
-          if (auth.action.tool === 'CronList' && auth.job.adopt) this.structuredInventory(auth.job, frame.tool_use_result);
-          this.receipt(auth.job, auth.action, block.content, auth.preserveOccurrences);
-          if (pending) { this.pending = undefined; clearTimeout(pending.timer); pending.resolve(block.content); }
-        } catch (error) { if (pending) this.failPending(error instanceof Error ? error.message : 'Invalid native receipt.'); }
-      }
-    }
     return false;
+  }
+  private acceptReceipts(frame: Frame): void {
+    for (const block of frame.message?.content ?? []) {
+      if (block.type !== 'tool_result' || typeof block.tool_use_id !== 'string') continue;
+      const auth = this.authorized.get(block.tool_use_id);
+      if (!auth) continue;
+      this.authorized.delete(block.tool_use_id);
+      const pending = this.pending?.toolId === block.tool_use_id ? this.pending : undefined;
+      if (pending?.action.tool === 'CronList' && pending.scope && (pending.scope.ended || !pending.scope.current())) {
+        this.failPending('Scheduling owner or native turn is no longer current.');
+        continue;
+      }
+      try {
+        if (block.is_error || typeof block.content !== 'string') throw new Error('Native schedule tool failed or returned an invalid receipt.');
+        if (auth.action.tool === 'CronList' && auth.job.adopt) this.structuredInventory(auth.job, frame.tool_use_result);
+        this.receipt(auth.job, auth.action, block.content, auth.preserveOccurrences);
+        if (pending) { this.pending = undefined; clearTimeout(pending.timer); pending.resolve(block.content); }
+      } catch (error) { if (pending) this.failPending(error instanceof Error ? error.message : 'Invalid native receipt.'); }
+    }
   }
   private receipt(job: Job, action: NativeScheduleAction, text: string, preserveOccurrences?: true): void {
     if (action.tool === 'CronCreate') {
@@ -594,10 +629,10 @@ export class ClaudeSessionSchedules {
       const p = this.pending;
       const toolId = frame.request.tool_use_id ?? input.tool_use_id;
       const allow = !!p && (p.scope?.inTurn || this.managementTurn && p.managementId === this.foregroundId)
-        && this.capable && !this.closed && !p.toolId && !this.busy
+        && this.capable && !this.closed && !p.toolId && (!this.busy || !!this.batch && p.scope?.turn === this.batch && !this.batch.ended)
         && input.agent_id === undefined && !frame.parent_tool_use_id
         && (!p.scope || !p.scope.ended && p.scope.current()) && (p.action.tool !== 'CronCreate' || p.job.current()) && (p.action.tool !== 'CronCreate' || !p.job.deadline || p.job.deadline > Date.now())
-        && this.authorized.size < 100 && typeof toolId === 'string' && idPattern.test(toolId) && input.tool_name === p.action.tool
+        && this.authorized.size < 100 && typeof toolId === 'string' && idPattern.test(toolId) && !this.authorized.has(toolId) && input.tool_name === p.action.tool
         && canonical(input.tool_input) === canonical(p.action.input);
       if (allow) {
         p.toolId = toolId;
@@ -654,6 +689,7 @@ export class ClaudeSessionSchedules {
   private completeOccurrence(): void {
     const batch = this.batch;
     if (!batch?.result || !batch.occurrences.every(occurrence => occurrence.terminal)) return;
+    this.endInvocation(batch);
     this.batch = undefined;
     for (const occurrence of batch.occurrences) {
       this.seen.add(occurrence.id);

@@ -158,6 +158,7 @@ describe('Claude definition removal without claiming native quiescence', () => {
 
   it('rejects closed, expired and active-mutation admission without changing native state', async () => {
     const f = fixture(); await f.create('one');
+    f.adapter.foregroundDispatched('synthetic-active-turn');
     await f.adapter.inToolOperation('active', () => true, async () => {
       await expect(f.adapter.removeFutureDefinitionsForRestart(f.lease)).rejects.toThrow('ownership');
     });

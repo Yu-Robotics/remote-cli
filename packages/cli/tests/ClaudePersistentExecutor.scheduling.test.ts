@@ -66,6 +66,8 @@ describe('Claude shared foreground scheduling integration', () => {
     await executor.listModels();
     frame({ type: 'system', subtype: 'init', session_id: 'original-native-session',
       tools: ['CronCreate', 'CronList', 'CronDelete'], capabilities: ['msg_lifecycle_v1', 'lifecycle_wakeup_source_v1'] });
+    // The injected host starts with an explicit synthetic MCP caller turn.
+    raw.sessionSchedules.foregroundDispatched('synthetic-tool-turn');
   });
   afterEach(async () => {
     raw.sessionSchedules?.processClosed();
@@ -139,7 +141,9 @@ describe('Claude shared foreground scheduling integration', () => {
     await vi.waitFor(() => expect(executor.nativeScheduleAction(id)).toBeDefined());
     const action = executor.nativeScheduleAction(id)!;
     hook(action, `tool-${id}`); receipt(created(`native-${id}`), `tool-${id}`);
-    return { handle: await pending, action, events };
+    const handle = await pending;
+    raw.sessionSchedules.foregroundEnded();
+    return { handle, action, events };
   }
 
   it('closes managed MCP creation in the caller turn and preserves subsequent user turns and session identity', async () => {

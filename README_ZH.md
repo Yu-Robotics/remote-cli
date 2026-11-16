@@ -749,7 +749,10 @@ Claude model-requested operations return an exact authorized native Cron action.
 The model executes that action in its current turn, and the adapter validates the
 native receipt. Waiting for the model to invoke an action does not consume its
 receipt timeout; the exact invocation starts that timeout. Turn end, local errors,
-and timeouts retire uninvoked actions. Slash commands and card controls use serialized management turns
+and timeouts retire uninvoked actions. Authorization also ends with its exact native
+invocation, including autonomous scheduled turns; later turns cannot reuse it.
+Already-invoked mutations retain their late-receipt ownership. Slash commands and
+card controls use serialized management turns
 in the same conversation. AGY uses the equivalent exact `schedule`/`manage_task`
 action and native transcript receipt path. DSH uses native host CRUD without an extra model turn.
 Native timing runs without polling prompts. Simultaneously due tasks can share a
@@ -1826,7 +1829,7 @@ File reception is **enabled by default on Router 1.6.114 or newer** and requires
 
 Feishu delivers ordinary files as separate messages, not as an inline image-like caption. Send the file first, then text (or a text-and-image message), or reply to its card. Observed preceding files are staged for the next normal command. Already-running tasks do not gain later uploads. Switching device or thread does not redirect admitted transfers. Changing working directory invalidates old references. Queued tasks pin their files; cancelling restores unused attachments. Failed or missing referenced files stop that task with an error rather than silently running without them.
 
-An attachment failure stops its associated command. Once reported, that failure is not automatically attached to later ordinary messages, including after a CLI restart. Explicitly referencing the rejected file still reports its failure; upload a supported file to use its contents.
+An attachment failure stops its associated command. Once preparation returns that error, the CLI records it so later ordinary messages do not keep claiming the same failure after restart. This is not a delivery acknowledgement from Feishu. Cancelled or incomplete reporting remains retryable; a crash or failed completion write can repeat the error rather than silently lose it. Explicitly referencing the rejected file still reports its failure; upload a supported file to use its contents.
 
 `/files` lists this thread's local attachments; `/files clear` removes unused terminal copies. Active downloads and queued/running references are preserved. Deleting a thread removes its attachment copies. Removal cannot be undone; re-upload to restore.
 

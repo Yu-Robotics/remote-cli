@@ -88,6 +88,7 @@ function completed(id: string) {
   frame({ type: 'command_lifecycle', command_uuid: id, state: 'completed' });
 }
 async function reserve() {
+  raw.sessionSchedules.foregroundDispatched('synthetic-create-turn');
   const events = vi.fn();
   const pending = executor.withNativeScheduleOperation('synthetic-job', () => true, () => executor.createNativeSchedule({
     id: 'synthetic-job', cwd: root, prompt: 'Synthetic recurring work',
@@ -99,7 +100,9 @@ async function reserve() {
     tool_use_id: 'create-tool', input: { hook_event_name: 'PreToolUse', tool_name: action.tool, tool_input: action.input } } });
   frame({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'create-tool',
     content: 'Scheduled recurring job native-job (every minute). Next run: later. Session-only (not written to disk, dies when Claude exits).', is_error: false }] } });
-  return { handle: await pending, action, events };
+  const handle = await pending;
+  raw.sessionSchedules.foregroundEnded();
+  return { handle, action, events };
 }
 function scheduled(job: Awaited<ReturnType<typeof reserve>>, end = true) {
   frame({ type: 'command_lifecycle', command_uuid: 'schedule-occurrence', state: 'started', wakeup_source: 'schedule_wakeup' });

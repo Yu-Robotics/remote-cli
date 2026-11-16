@@ -14,6 +14,7 @@ interface Entry {
   id: string; name: string; sourceMessageId: string; openId: string; threadId: string;
   cwd: string; generation: number; destination: string; origin: string;
   expiresAt: number; state: string; consumed?: boolean; size?: number; sha256?: string;
+  // Completion records a preparation rejection, not a user-delivery acknowledgement.
   detail?: string; textAvailable?: boolean; failureReported?: boolean;
 }
 interface Pending {
@@ -279,22 +280,32 @@ export class FileInbox {
 
   hasClaim(messageId: string): boolean { return (this.claims.get(messageId)?.length ?? 0) > 0; }
 
-  private reportFailure(pending: Pending, assertClaim: () => void): Promise<void> {
-    // Explicit references can overlap; a cancelled reporter must not undo another's acknowledgement.
+  private reportFailure(pending: Pending, assertClaim: () => void): Promise<never> {
+    // Serialize explicit reporters; cancellation must not undo another's completion.
     const operation = (pending.reporting ?? Promise.resolve()).catch(() => {}).then(async () => {
       assertClaim();
       const entry = pending.entry;
-      if (entry.failureReported === true) return;
-      entry.failureReported = true;
-      try {
-        await this.persist(pending);
-        assertClaim();
-      } catch (error) {
-        delete entry.failureReported;
-        if (![...this.claims.values()].some(ids => ids.includes(entry.id))) entry.consumed = false;
-        await this.persist(pending);
-        throw error;
+      this.assertContext(entry);
+      if (entry.failureReported !== true) {
+        // The awaited write is only a pending reservation. Cancellation or a
+        // crash after its rename remains retryable without any rollback write.
+        entry.failureReported = false;
+        try {
+          await this.persist(pending);
+          assertClaim();
+          this.assertContext(entry);
+        } catch (error) {
+          if (![...this.claims.values()].some(ids => ids.includes(entry.id))) entry.consumed = false;
+          throw error;
+        }
+        // Select the failure and queue its completion without another await:
+        // release cannot interleave a cancellation between these decisions.
+        // A failed write or crash before completion commits can repeat the
+        // error on restart. Neither this marker nor prepare is a delivery ACK.
+        entry.failureReported = true;
+        void this.persist(pending).catch(() => {});
       }
+      throw new Error(`Attachment ${JSON.stringify(entry.name)} unavailable: ${entry.detail}`);
     });
     pending.reporting = operation;
     void operation.finally(() => { if (pending.reporting === operation) pending.reporting = undefined; }).catch(() => {});
@@ -315,8 +326,7 @@ export class FileInbox {
       const entry = pending.entry;
       this.assertContext(entry);
       if (entry.state === 'failed') {
-        await this.reportFailure(pending, assertClaim);
-        throw new Error(`Attachment ${JSON.stringify(entry.name)} unavailable: ${entry.detail}`);
+        return this.reportFailure(pending, assertClaim);
       }
       const filename = this.original(entry);
       const stat = await fs.lstat(filename);

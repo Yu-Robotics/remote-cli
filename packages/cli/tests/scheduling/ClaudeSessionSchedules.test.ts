@@ -11,6 +11,7 @@ function harness() {
   const send = vi.fn(); const manage = vi.fn(async () => ({ success: true })); const wake = vi.fn();
   const adapter = new ClaudeSessionSchedules({ send, manage, wake, timezone: 'UTC', timeoutMs: 100 });
   adapter.accept(initialized);
+  adapter.foregroundDispatched('synthetic-foreground');
   const hook = (tool: string, value: unknown, id = 'tool-one') => {
     adapter.accept({ type: 'control_request', request_id: `hook-${id}`, request: { subtype: 'hook_callback', callback_id: SCHEDULE_HOOK,
       tool_use_id: id, input: { hook_event_name: 'PreToolUse', tool_name: tool, tool_input: value } } });
@@ -21,6 +22,7 @@ function harness() {
   ] } });
   const created = (id = 'native-one', recurring = true) => `Scheduled ${recurring ? 'recurring job' : 'one-shot task'} ${id} (every minute). Next run: later. Session-only (not written to disk, dies when Claude exits).`;
   const occurrence = (prompt: string, id = 'occurrence-one', hookFirst = false) => {
+    adapter.foregroundEnded();
     const submit = () => adapter.accept({ type: 'control_request', request_id: 'submit', request: { subtype: 'hook_callback', callback_id: SCHEDULE_HOOK,
       input: { hook_event_name: 'UserPromptSubmit', source: 'schedule_wakeup', prompt } } });
     if (hookFirst) submit();
@@ -45,6 +47,143 @@ function harness() {
 afterEach(() => vi.useRealTimers());
 
 describe('Claude foreground native schedule protocol', () => {
+  it('does not admit management tools while a submitted wake awaits its lifecycle frame', async () => {
+    const h = harness(); const job = await h.create(); h.adapter.foregroundEnded();
+    h.adapter.accept({ type: 'control_request', request_id: 'submitted-wake', request: {
+      subtype: 'hook_callback', callback_id: SCHEDULE_HOOK,
+      input: { hook_event_name: 'UserPromptSubmit', source: 'schedule_wakeup', prompt: job.action.input.prompt },
+    } });
+    expect(h.adapter.busy).toBe(true);
+    const pending = h.adapter.inToolOperation('outside-management', () => true, () => job.handle.list(), false);
+    const settled = pending.catch(() => {});
+    try {
+      h.adapter.foregroundDispatched('outside-management', true);
+      expect(h.hook('CronList', {}, 'outside-list')).toMatchObject({
+        hookSpecificOutput: { permissionDecision: 'deny' },
+      });
+    } finally { h.adapter.processClosed(); await settled; }
+  });
+
+  it('revokes uninvoked delete authorization synchronously when its scheduled invocation finishes', async () => {
+    vi.useFakeTimers();
+    const h = harness(); const created = await h.create();
+    h.occurrence(created.action.input.prompt as string);
+    const settled = vi.fn();
+    const pending = h.adapter.inToolOperation('scheduled-cancel', () => true, () => created.handle.cancel());
+    const done = pending.then(settled, settled);
+    try {
+      h.complete();
+      expect(h.adapter.action('scheduled-cancel')).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(300);
+      h.adapter.foregroundDispatched('unrelated-foreground', false);
+      const stale = h.adapter.action('scheduled-cancel');
+      const lateHook = h.hook('CronDelete', { id: 'native-one' }, 'unrelated-delete');
+      expect({ settled: settled.mock.calls.length, stale, lateHook }).toMatchObject({
+        settled: 1, stale: undefined,
+        lateHook: { hookSpecificOutput: { permissionDecision: 'deny' } },
+      });
+    } finally { h.adapter.processClosed(); await done; }
+  });
+
+  it.each(['result-first', 'terminals-first'] as const)('ends batch authorization at the first complete boundary (%s)', async order => {
+    const h = harness(); const a = await h.create('a', 'native-a'), b = await h.create('b', 'native-b');
+    h.adapter.foregroundEnded();
+    for (const id of ['wake-a', 'wake-b']) h.adapter.accept({ type: 'command_lifecycle', command_uuid: id,
+      state: 'started', wakeup_source: 'schedule_wakeup' });
+    h.adapter.accept({ type: 'control_request', request_id: 'batch-submit', request: { subtype: 'hook_callback', callback_id: SCHEDULE_HOOK,
+      input: { hook_event_name: 'UserPromptSubmit', source: 'schedule_wakeup', prompt: `${a.action.input.prompt}\n${b.action.input.prompt}` } } });
+    const lease = h.adapter.invocationLease();
+    const pending = h.adapter.inToolOperation('batch-cancel', () => true, () => a.handle.cancel());
+    const failed = expect(pending).rejects.toThrow('no longer current');
+    const result = () => h.adapter.accept({ type: 'result', uuid: 'batch-result', is_error: false, terminal_reason: 'completed', result: 'Combined output' });
+    const terminal = (id: string) => h.adapter.accept({ type: 'command_lifecycle', command_uuid: id, state: 'completed' });
+    if (order === 'result-first') result();
+    terminal('wake-a');
+    if (order === 'terminals-first') expect(h.adapter.action('batch-cancel')?.tool).toBe('CronDelete');
+    terminal('wake-b');
+    expect(lease()).toBe(false);
+    expect(h.adapter.action('batch-cancel')).toBeUndefined();
+    if (order === 'terminals-first') result();
+    await failed;
+    expect(a.onEvent).toHaveBeenCalledWith(expect.objectContaining({ type: 'completed', success: true }));
+    expect(b.onEvent).toHaveBeenCalledWith(expect.objectContaining({ type: 'completed', success: true }));
+    h.adapter.foregroundDispatched('later');
+    expect(lease()).toBe(false);
+    const review = h.adapter.inToolOperation('fresh-review', () => true, () => h.adapter.reviewedInventory(() => true));
+    expect(h.hook('CronList', {}, 'fresh-list')).toEqual({});
+    h.adapter.accept({ type: 'user', tool_use_result: { jobs: [] }, message: { content: [
+      { type: 'tool_result', tool_use_id: 'fresh-list', content: 'Synthetic inventory' },
+    ] } });
+    expect(await review).toEqual([]);
+    h.adapter.processClosed();
+  });
+
+  it('settles an invoked scheduled deletion and preserves its already admitted result', async () => {
+    const h = harness(); const a = await h.create();
+    h.occurrence(String(a.action.input.prompt));
+    const pending = h.adapter.inToolOperation('self-cancel', () => true, () => a.handle.cancel());
+    expect(h.hook('CronDelete', { id: 'native-one' }, 'scheduled-delete')).toEqual({});
+    h.receipt('Cancelled job native-one.', 'scheduled-delete'); await pending;
+    expect(a.handle.nativeDefinitionAbsent).toBe(true);
+    h.complete();
+    expect(a.onEvent).toHaveBeenCalledWith(expect.objectContaining({ type: 'completed', success: true }));
+    h.adapter.processClosed();
+  });
+
+  it('joins an exact late mutation receipt during another batch without renewing tool authority', async () => {
+    const h = harness(); const a = await h.create('a', 'native-a'), b = await h.create('b', 'native-b');
+    h.occurrence(String(a.action.input.prompt), 'wake-a');
+    const pending = h.adapter.inToolOperation('late-delete', () => true, () => a.handle.cancel());
+    const failed = expect(pending).rejects.toThrow('no longer current');
+    expect(h.hook('CronDelete', { id: 'native-a' }, 'authorized-delete')).toEqual({});
+    h.complete('wake-a'); await failed;
+    expect(a.handle.nativeDefinitionAbsent).toBe(false);
+    expect(h.adapter.cleanupMutationPending).toBe(true);
+    h.occurrence(String(b.action.input.prompt), 'wake-b');
+    expect(h.hook('CronDelete', { id: 'native-a' }, 'different-delete')).toHaveProperty('hookSpecificOutput.permissionDecision', 'deny');
+    h.receipt('Cancelled job native-a.', 'wrong-receipt');
+    expect(a.handle.nativeDefinitionAbsent).toBe(false);
+    h.receipt('Cancelled job native-a.', 'authorized-delete');
+    expect(a.handle.nativeDefinitionAbsent).toBe(true);
+    expect(h.adapter.cleanupMutationPending).toBe(false);
+    h.complete('wake-b');
+    expect(b.onEvent).toHaveBeenCalledWith(expect.objectContaining({ type: 'completed', success: true }));
+    h.adapter.processClosed();
+  });
+
+  it('cannot reuse an unresolved mutation tool ID for a later invocation', async () => {
+    const h = harness(); const a = await h.create('a', 'native-a'), b = await h.create('b', 'native-b');
+    h.occurrence(String(a.action.input.prompt), 'wake-a');
+    const old = h.adapter.inToolOperation('old-delete', () => true, () => a.handle.cancel());
+    const failed = expect(old).rejects.toThrow('no longer current');
+    h.hook('CronDelete', { id: 'native-a' }, 'held-tool-id'); h.complete('wake-a'); await failed;
+    h.occurrence(String(b.action.input.prompt), 'wake-b');
+    const next = h.adapter.inToolOperation('new-delete', () => true, () => b.handle.cancel());
+    expect(h.hook('CronDelete', { id: 'native-b' }, 'held-tool-id')).toHaveProperty('hookSpecificOutput.permissionDecision', 'deny');
+    h.receipt('Cancelled job native-a.', 'held-tool-id');
+    expect(a.handle.nativeDefinitionAbsent).toBe(true);
+    expect(b.handle.nativeDefinitionAbsent).toBe(false);
+    expect(h.adapter.action('new-delete')).toEqual({ tool: 'CronDelete', input: { id: 'native-b' } });
+    expect(h.hook('CronDelete', { id: 'native-b' }, 'new-tool-id')).toEqual({});
+    h.receipt('Cancelled job native-b.', 'new-tool-id'); await next;
+    h.complete('wake-b'); h.adapter.processClosed();
+  });
+
+  it('never revives foreground authority after an overlapping scheduled batch drains', async () => {
+    const h = harness(); const a = await h.create();
+    const lease = h.adapter.invocationLease();
+    h.adapter.accept({ type: 'command_lifecycle', command_uuid: 'overlap', state: 'started', wakeup_source: 'schedule_wakeup' });
+    expect(lease()).toBe(false);
+    await expect(h.adapter.inToolOperation('ambiguous', () => true, () => a.handle.cancel())).rejects.toThrow('unambiguous');
+    h.complete('overlap');
+    expect(lease()).toBe(false);
+    await expect(h.adapter.inToolOperation('ended', () => true, () => a.handle.cancel())).rejects.toThrow('unambiguous');
+    h.adapter.foregroundDispatched('synthetic-foreground');
+    expect(h.adapter.invocationLease()()).toBe(true);
+    expect(lease()).toBe(false);
+    h.adapter.processClosed();
+  });
+
   it.each(['cron', 'timezone', 'mismatch', 'one-shot', 'marker-json', 'marker-shape', 'native-timezone'])(
     'refuses invalid %s before requesting CronCreate or admitting an occurrence', async reason => {
       const h = harness(); const value = input(); const admit = vi.fn(() => true); const events = vi.fn();
@@ -109,6 +248,7 @@ describe('Claude foreground native schedule protocol', () => {
     expect(await pending).toEqual([target]);
     expect(h.adapter.hasJobs).toBe(false);
     expect(h.occurrence(target.prompt)).toMatchObject({ decision: 'block' }); h.complete();
+    h.adapter.foregroundDispatched('review-foreground');
     await expect(h.adapter.inToolOperation('project-delete', () => current, () => h.adapter.reviewedDelete({ ...target, durable: true }, () => current))).rejects.toThrow('session-only provenance');
     const deletion = h.adapter.inToolOperation('delete', () => current, () => h.adapter.reviewedDelete(target, () => current));
     expect(h.hook('CronDelete', { id: 'other' }, 'foreign')).toHaveProperty('hookSpecificOutput.permissionDecision', 'deny');
@@ -138,10 +278,11 @@ describe('Claude foreground native schedule protocol', () => {
     expect(h.occurrence(String(a.action.input.prompt), 'already-started')).toEqual({});
     const deletion = h.adapter.inToolOperation('delete', () => true, () => h.adapter.reviewedDelete({
       id: 'native-a', prompt: String(a.action.input.prompt), cron: '* * * * *', recurring: true, durable: false,
-    }, () => true));
+    }, () => true), false);
     expect(h.hook('CronDelete', { id: 'native-a' }, 'premature')).toHaveProperty('hookSpecificOutput.permissionDecision', 'deny');
     h.complete('already-started');
     expect(a.onEvent).toHaveBeenCalledWith(expect.objectContaining({ type: 'completed', occurrenceId: 'already-started', success: true }));
+    h.adapter.foregroundDispatched('review-management', true);
     expect(h.hook('CronDelete', { id: 'native-a' }, 'delete')).toEqual({});
     h.receipt('Cancelled job native-a.', 'delete'); await deletion;
     expect(h.occurrence(String(a.action.input.prompt), 'next')).toMatchObject({ decision: 'block' }); h.complete('next');
@@ -157,6 +298,7 @@ describe('Claude foreground native schedule protocol', () => {
     await failed;
     expect(a.handle.nativeDefinitionAbsent).toBe(false);
     expect(h.occurrence(target.prompt, 'denied-after-failure')).toMatchObject({ decision: 'block' }); h.complete('denied-after-failure');
+    h.adapter.foregroundDispatched('review-foreground');
     for (const present of [true, false]) {
       const query = h.adapter.inToolOperation(`verify-${present}`, () => true, () => h.adapter.reviewedInventory(() => true));
       h.hook('CronList', {}, 'list');
@@ -660,6 +802,7 @@ describe('Claude foreground native schedule protocol', () => {
       list(h, [row()], 'before'); await settle();
       h.hook('CronDelete', { id: 'original-native' }, 'late-delete');
       h.adapter.foregroundEnded(); await failure;
+      h.adapter.foregroundDispatched('retry-foreground');
       await expect(run()).rejects.toThrow('receipt remains unresolved');
       h.receipt('Cancelled job original-native.', 'late-delete');
       const retry = run(); list(h, [], 'retry-before'); await settle(); list(h, [], 'retry-after'); await retry;

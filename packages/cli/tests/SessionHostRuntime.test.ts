@@ -306,6 +306,42 @@ it('scopes native tool receipts to admitted occurrences instead of the whole hos
   expect((await tool(native.connection, 'remote_cli_schedule_list', { requestId: 'outside-turn' })).status).not.toBe('succeeded');
 });
 
+it.each(['scheduled', 'foreground'] as const)('fences a delayed MCP mutation to its original %s invocation across frontend replacement', async kind => {
+  const threadId = await newThread();
+  await command('/schedule cron "* * * * *" --tz UTC -- recurring content', threadId);
+  const job = [...jobs.values()][0], native = executors[0];
+  let foreground: Promise<any> | undefined;
+  if (kind === 'scheduled') await job.emit({ type: 'started', occurrenceId: 'old-turn' });
+  else { foreground = command('hold foreground', threadId); await vi.waitFor(() => expect(held).toBeDefined()); }
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let current: (() => boolean) | undefined;
+  native.withNativeScheduleOperation.mockImplementationOnce(async (_id: string, isCurrent: () => boolean, run: () => Promise<any>) => {
+    current = isCurrent; await gate; return run();
+  });
+  const request = tool(native.connection, 'remote_cli_schedule_cancel', { requestId: 'delayed-cancel', scheduleId: job.input.id });
+  try {
+    await vi.waitFor(() => expect(current).toBeDefined());
+    expect(current!()).toBe(true);
+    expect(frontend.tryBeginAutomaticUpdate()).toBe(true);
+    await frontend.prepareAutomaticUpdate(); await frontend.close();
+    const replacement = new RetainedFrontend({ connect: async () => connection }, '1.6.249');
+    frontends.push(replacement); await replacement.start(60_000); frontend = replacement;
+    expect(current!()).toBe(true);
+    if (kind === 'scheduled') {
+      const completed = job.emit({ type: 'completed', occurrenceId: 'old-turn', success: true, output: 'Old result' });
+      expect(current!()).toBe(false); await completed;
+    } else { held!(); held = undefined; await foreground; }
+    await job.emit({ type: 'started', occurrenceId: 'next-turn' });
+    expect(current!()).toBe(false);
+    release();
+    expect(await request).toEqual({ error: expect.stringContaining('Scheduling context changed') });
+    expect(jobs.has(job.input.id)).toBe(true);
+    expect(native.createNativeSchedule).toHaveBeenCalledTimes(1);
+    await job.emit({ type: 'completed', occurrenceId: 'next-turn', success: true, output: 'Next result' });
+  } finally { release(); held?.(); await request; await foreground; }
+});
+
 it('retains an accepted running foreground operation and refuses unsafe ownership/context or legacy adoption', async () => {
   const threadId = await newThread();
   const messageId = `running-${++serial}`;

@@ -515,6 +515,7 @@ describe('Claude abort cleanup ownership', () => {
       wake: vi.fn(), timezone: 'UTC', timeoutMs: 1000 });
     adapter.accept({ type: 'system', subtype: 'init', tools: ['CronCreate', 'CronList', 'CronDelete'],
       capabilities: ['msg_lifecycle_v1', 'lifecycle_wakeup_source_v1'] });
+    adapter.foregroundDispatched('synthetic-create-turn');
     let current = true;
     const reserved = deferred();
     const events = vi.fn();
@@ -685,6 +686,46 @@ async function retainedFixture() {
 describe('Claude retained cancellation integration', () => {
   const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
   const architecture = Object.getOwnPropertyDescriptor(process, 'arch')!;
+  it('revokes a scheduled reservation in the real output callback before a successor foreground can invoke it', async () => {
+    const f = await retainedFixture();
+    const initial = f.main.execute('Synthetic creation setup'); await Promise.resolve();
+    const initialId = f.frames.filter(row => row.type === 'user').at(-1).uuid;
+    const created = f.main.withNativeScheduleOperation('create', () => true, () => f.main.createNativeSchedule({
+      id: 'scheduled-job', cwd: root, prompt: 'Synthetic scheduled content',
+      rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' },
+    }, vi.fn()), true);
+    await vi.waitFor(() => expect(f.main.nativeScheduleAction('create')).toBeDefined());
+    const action = f.main.nativeScheduleAction('create')!;
+    f.hook(action, 'create-tool');
+    f.frame({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'create-tool',
+      content: 'Scheduled recurring job native-owned (every minute). Next run: later. Session-only (not written to disk, dies when Claude exits).' }] } });
+    const handle = await created; f.terminal(initialId); await initial;
+    f.frame({ type: 'command_lifecycle', command_uuid: 'scheduled-wake', wakeup_source: 'schedule_wakeup', state: 'started' });
+    f.frame({ type: 'control_request', request_id: 'submit', request: { subtype: 'hook_callback', callback_id: SCHEDULE_HOOK,
+      input: { hook_event_name: 'UserPromptSubmit', source: 'schedule_wakeup', prompt: action.input.prompt } } });
+    const pending = f.main.withNativeScheduleOperation('scheduled-cancel', () => true, () => handle.cancel(), true);
+    const failed = expect(pending).rejects.toThrow('no longer current');
+    expect(f.main.nativeScheduleAction('scheduled-cancel')).toEqual({ tool: 'CronDelete', input: { id: 'native-owned' } });
+    f.frame({ type: 'result', uuid: 'scheduled-result', result: 'Synthetic scheduled result' });
+    expect(f.main.nativeScheduleAction('scheduled-cancel')).toBeUndefined();
+    f.frame({ type: 'command_lifecycle', command_uuid: 'scheduled-wake', state: 'completed' });
+    await failed;
+    const next = f.main.execute('Unrelated next foreground'); await Promise.resolve();
+    const nextId = f.frames.filter(row => row.type === 'user').at(-1).uuid;
+    f.hook({ tool: 'CronDelete', input: { id: 'native-owned' } }, 'stale-delete');
+    expect(f.frames.at(-1).response.response).toHaveProperty('hookSpecificOutput.permissionDecision', 'deny');
+    const review = f.main.withNativeScheduleOperation('fresh', () => true, () => f.raw.schedules().reviewedInventory(() => true), true);
+    f.hook({ tool: 'CronList', input: {} }, 'fresh-list');
+    f.frame({ type: 'user', tool_use_result: { jobs: [] }, message: { content: [
+      { type: 'tool_result', tool_use_id: 'fresh-list', content: 'Synthetic inventory' },
+    ] } });
+    expect(await review).toEqual([]);
+    f.terminal(nextId); await next;
+    expect(f.frames.filter(row => row.type === 'user').map(row => row.message.content)).toEqual([
+      'Synthetic creation setup', 'Unrelated next foreground',
+    ]);
+  });
+
   it.each(['error', 'timeout'] as const)('drains a pending list after foreground %s without a native result frame', async reason => {
     const f = await retainedFixture();
     const foreground = f.main.execute('Synthetic inventory request', reason === 'timeout' ? { timeout: 500 } : {})

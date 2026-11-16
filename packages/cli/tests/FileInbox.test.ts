@@ -30,6 +30,20 @@ describe('file inbox lifecycle and references', () => {
     await fs.writeFile(path.join(root, 'files', id, 'original.txt'), 'data');
     await (inbox as any).persist(p); p.finish(); return p;
   }
+  function holdCommittedRename(failLater = false) {
+    const rename = fs.rename.bind(fs);
+    let resume!: () => void; let entered!: () => void;
+    const held = new Promise<void>(resolve => { resume = resolve; });
+    const committed = new Promise<void>(resolve => { entered = resolve; });
+    let calls = 0;
+    const spy = vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
+      if (++calls === 1) {
+        await rename(from, to); entered(); await held;
+      } else if (failLater) throw new Error('Synthetic metadata write failure.');
+      else await rename(from, to);
+    });
+    return { committed, resume, spy };
+  }
   it('does not start a task for file-only messages, sanitizes names and re-acknowledges duplicates', async () => {
     await inbox.accept({ ...message, name: '../AGENTS.md\u0000' });
     expect(send.mock.calls[0][0]).toMatchObject({ status: 'admitted', threadId: 'thread' });
@@ -186,7 +200,82 @@ describe('file inbox lifecycle and references', () => {
     await expect(inbox.prepare('retry')).rejects.toThrow('Transfer failed.'); inbox.release('retry');
     await recreate(); inbox.claim('plain', 'thread', 'owner'); expect(inbox.hasClaim('plain')).toBe(false);
   });
-  it('preserves another explicit reporter when a cancelled acknowledgement rolls back', async () => {
+  it('recovers a cancelled report after its first rename commits and all recovery writes fail', async () => {
+    await inbox.accept(message); await inbox.failed(id, 'Transfer failed.');
+    inbox.claim('cancelled', 'thread', 'owner');
+    const gate = holdCommittedRename(true);
+    const rejected = expect(inbox.prepare('cancelled')).rejects.toThrow('Attachment task cancelled.');
+    try {
+      await gate.committed;
+      inbox.release('cancelled');
+    } finally { gate.resume(); }
+    await rejected; await inbox.destroy(); gate.spy.mockRestore();
+    const metadata = JSON.parse(await fs.readFile(path.join(root, 'files', id, 'metadata.json'), 'utf8'));
+    expect(metadata.failureReported).toBe(false);
+    await recreate(); inbox.claim('retry', 'thread', 'owner');
+    await expect(inbox.prepare('retry')).rejects.toThrow('Transfer failed.');
+    inbox.release('retry');
+    await recreate(); inbox.claim('plain', 'thread', 'owner');
+    expect(inbox.hasClaim('plain')).toBe(false);
+  });
+  it('retries a crash snapshot taken after the pending rename but before preparation rejects', async () => {
+    await inbox.accept(message); await inbox.failed(id, 'Transfer failed.');
+    inbox.claim('interrupted', 'thread', 'owner');
+    const manifest = path.join(root, 'files', id, 'metadata.json');
+    const gate = holdCommittedRename();
+    const rejected = expect(inbox.prepare('interrupted')).rejects.toThrow();
+    let snapshot!: string;
+    try {
+      await gate.committed; snapshot = await fs.readFile(manifest, 'utf8');
+      inbox.release('interrupted');
+    } finally { gate.resume(); }
+    await rejected; await inbox.destroy(); gate.spy.mockRestore();
+    // Restore only the crash-time disk image, excluding graceful cleanup writes.
+    await fs.writeFile(manifest, snapshot);
+    inbox = createInbox(); await inbox.initialize();
+    inbox.claim('retry', 'thread', 'owner');
+    await expect(inbox.prepare('retry')).rejects.toThrow('Transfer failed.');
+  });
+  it('retries after restart when preparation rejected but the completion marker could not be written', async () => {
+    await inbox.accept(message); await inbox.failed(id, 'Transfer failed.');
+    inbox.claim('reporter', 'thread', 'owner');
+    const gate = holdCommittedRename(true);
+    const rejected = expect(inbox.prepare('reporter')).rejects.toThrow('Transfer failed.');
+    try { await gate.committed; } finally { gate.resume(); }
+    await rejected; inbox.release('reporter');
+    await inbox.destroy(); gate.spy.mockRestore();
+    await recreate(); inbox.claim('retry', 'thread', 'owner');
+    await expect(inbox.prepare('retry')).rejects.toThrow('Transfer failed.');
+  });
+  it('keeps the original failure retryable when the pending write itself fails', async () => {
+    await inbox.accept(message); await inbox.failed(id, 'Transfer failed.');
+    inbox.claim('reporter', 'thread', 'owner');
+    const spy = vi.spyOn(fs, 'rename').mockRejectedValueOnce(new Error('Synthetic pending write failure.'));
+    await expect(inbox.prepare('reporter')).rejects.toThrow('Synthetic pending write failure.');
+    spy.mockRestore(); inbox.release('reporter');
+    await recreate(); inbox.claim('retry', 'thread', 'owner');
+    await expect(inbox.prepare('retry')).rejects.toThrow('Transfer failed.');
+  });
+  it.each(['directory', 'generation', 'expiry'] as const)('does not complete a report when %s changes during the pending write', async change => {
+    await inbox.accept(message); await inbox.failed(id, 'Transfer failed.');
+    inbox.claim('stale', 'thread', 'owner');
+    const pending = (inbox as any).entries.get(id);
+    const originalThread = { ...thread! }; const expiresAt = pending.entry.expiresAt;
+    const gate = holdCommittedRename();
+    const rejected = expect(inbox.prepare('stale')).rejects.toThrow(change === 'expiry' ? 'expired' : 'earlier working directory');
+    try {
+      await gate.committed;
+      if (change === 'directory') thread!.workingDirectory = path.join(root, 'other');
+      if (change === 'generation') thread!.delegationWorkspaceGeneration = 1;
+      if (change === 'expiry') pending.entry.expiresAt = Date.now() - 1;
+    } finally { gate.resume(); }
+    await rejected; gate.spy.mockRestore();
+    expect(pending.entry.failureReported).toBe(false);
+    thread = originalThread; pending.entry.expiresAt = expiresAt;
+    inbox.release('stale'); await recreate(); inbox.claim('retry', 'thread', 'owner');
+    await expect(inbox.prepare('retry')).rejects.toThrow('Transfer failed.');
+  });
+  it('preserves another explicit reporter when the first reporter is cancelled', async () => {
     await inbox.accept(message); await inbox.failed(id, 'Transfer failed.'); inbox.claim('cancelled', 'thread', 'owner');
     const rename = fs.rename.bind(fs);
     let finish!: () => void; let entered!: () => void;

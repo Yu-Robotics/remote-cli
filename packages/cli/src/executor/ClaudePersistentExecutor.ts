@@ -816,7 +816,10 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
     if (!inTurn) await this.listModels();
     if (this.modelChange) throw new Error('Native model change is pending or unconfirmed.');
     if (!this.scheduleHooksReady) throw new Error('Native scheduling hooks are not initialized.');
-    return this.schedules().inToolOperation(id, current, run, inTurn);
+    const adapter = this.schedules(), child = this.claudeProcess;
+    const invocation = inTurn ? adapter.invocationLease() : () => true;
+    return adapter.inToolOperation(id, () => current() && invocation() && this.claudeProcess === child
+      && !this.isDestroyed && !this.isStopping && !this.abortOperation, run, inTurn);
   }
   async reconcileNativeSchedule<T>(id: string, current: () => boolean, run: () => Promise<T>): Promise<T> {
     if (!current() || this.isDestroyed || this.hasUncertainShutdown() || this.abortOperation
