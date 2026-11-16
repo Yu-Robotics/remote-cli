@@ -28,7 +28,7 @@ interface Pending {
   action: NativeScheduleAction; job: Job; scope?: Scope; toolId?: string;
   managementId?: string;
   preserveOccurrences?: true;
-  resolve(text: string): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout>;
+  resolve(text: string): void; reject(error: Error): void; timer?: ReturnType<typeof setTimeout>;
 }
 interface Occurrence { admissible?: boolean; id: string; job?: Job; terminal?: string }
 interface NativeBatch { occurrences: Occurrence[]; result?: Frame }
@@ -143,6 +143,12 @@ export class ClaudeSessionSchedules {
     const scope = this.scope;
     const ids = new Set(scope?.mutations);
     for (const job of this.jobs.values()) if (job.uncertain) ids.add(job.id);
+    // Abort revokes this turn before its terminal frame may arrive. Unwind the
+    // reservation now so cleanup cannot wait forever for scope.done.
+    if (scope) scope.ended = true;
+    if (this.pending && (scope && this.pending.scope === scope || this.pending.managementId === this.foregroundId)) {
+      this.failPending('The native turn was aborted without the authorized schedule tool receipt.');
+    }
     return async current => {
       await scope?.done;
       for (const id of ids) {
@@ -160,7 +166,7 @@ export class ClaudeSessionSchedules {
     };
   }
   action(id: string): NativeScheduleAction | undefined {
-    return this.pending?.scope?.inTurn && this.pending.scope.id === id && this.pending.scope.current() && !this.pending.toolId
+    return this.pending?.scope?.inTurn && !this.pending.scope.ended && this.pending.scope.id === id && this.pending.scope.current() && !this.pending.toolId
       ? structuredClone(this.pending.action) : undefined;
   }
 
@@ -403,10 +409,8 @@ export class ClaudeSessionSchedules {
     if (scope && (scope.ended || !scope.current())) return Promise.reject(new Error('Scheduling owner or native turn is no longer current.'));
     if (action.tool !== 'CronList') scope?.mutations.add(job.id);
     const result = new Promise<string>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        if (this.pending) this.failPending(this.receiptTimeout(this.pending));
-      }, this.options.timeoutMs ?? 60_000);
-      this.pending = { action, job, scope, resolve, reject, timer, preserveOccurrences };
+      this.pending = { action, job, scope, resolve, reject, preserveOccurrences };
+      this.watchPending(this.pending);
     });
     // A managed MCP call returns the action to its caller. Never execute a second
     // model turn while that caller is waiting for this MCP response.
@@ -417,6 +421,24 @@ export class ClaudeSessionSchedules {
         .then(result => { if (!result.success && this.pending === pending) this.failPending('Native schedule management turn failed.'); }, () => { if (this.pending === pending) this.failPending('Native schedule management turn failed.'); });
     }
     return result;
+  }
+  private watchPending(pending: Pending): void {
+    clearTimeout(pending.timer);
+    const awaitingCurrentTurn = pending.scope?.inTurn && !pending.toolId;
+    const timeout = this.options.timeoutMs ?? 60_000;
+    // Current-turn tool discovery and model reasoning have no separate deadline.
+    // Poll only scope liveness, so a disconnected owner cannot strand drain().
+    // Management invocation and authorized receipts each retain a full deadline.
+    pending.timer = setTimeout(() => {
+      if (this.pending !== pending) return;
+      let current = true;
+      try { current = !pending.scope || !pending.scope.ended && pending.scope.current(); }
+      catch { current = false; }
+      if (!current) {
+        this.failPending('Scheduling owner or native turn is no longer current.');
+      } else if (awaitingCurrentTurn) this.watchPending(pending);
+      else this.failPending(this.receiptTimeout(pending));
+    }, awaitingCurrentTurn ? Math.min(timeout, 1000) : timeout);
   }
   private receiptTimeout(pending: Pending): string {
     const stage = pending.toolId ? 'authorized tool result missing'
@@ -440,8 +462,9 @@ export class ClaudeSessionSchedules {
   /** Called before an ordinary command resolves so its unexecuted reservations cannot deadlock drain(). */
   foregroundEnded(): void {
     if (this.scope?.inTurn) this.scope.ended = true;
-    if (this.pending && (this.pending.scope?.inTurn || this.pending.managementId === this.foregroundId)) {
-      this.failPending('The native turn ended without the authorized schedule tool receipt.');
+    if (this.pending && (this.pending.scope?.inTurn
+      || this.pending.managementId !== undefined && this.pending.managementId === this.foregroundId)) {
+      this.failPending('Foreground scheduling authorization ended without the native tool receipt.');
     }
     this.managementTurn = false; this.foregroundId = undefined; this.foregroundStarted = false;
   }
@@ -524,6 +547,10 @@ export class ClaudeSessionSchedules {
         if (!auth) continue;
         this.authorized.delete(block.tool_use_id);
         const pending = this.pending?.toolId === block.tool_use_id ? this.pending : undefined;
+        if (pending?.action.tool === 'CronList' && pending.scope && (pending.scope.ended || !pending.scope.current())) {
+          this.failPending('Scheduling owner or native turn is no longer current.');
+          continue;
+        }
         try {
           if (block.is_error || typeof block.content !== 'string') throw new Error('Native schedule tool failed or returned an invalid receipt.');
           if (auth.action.tool === 'CronList' && auth.job.adopt) this.structuredInventory(auth.job, frame.tool_use_result);
@@ -576,6 +603,7 @@ export class ClaudeSessionSchedules {
         p.toolId = toolId;
         if (p.action.tool === 'CronCreate') p.job.uncertain = true;
         this.authorized.set(toolId, { action: p.action, job: p.job, preserveOccurrences: p.preserveOccurrences });
+        this.watchPending(p);
       } else response = { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'No matching current managed schedule authorization.' } };
     } else if (input?.hook_event_name === 'UserPromptSubmit'
       && (input.source === 'schedule_wakeup' || input.source === undefined && this.batch)) {

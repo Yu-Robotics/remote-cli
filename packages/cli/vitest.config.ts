@@ -40,6 +40,7 @@ export const nativeOwnershipTestFiles = [
   'tests/SessionHostProcess.test.ts',
   'tests/SessionHostRetainedProcess.test.ts',
   'tests/RetainedHostLauncher.test.ts',
+  'tests/ScheduleRecovery.test.ts',
   'tests/delegation/DelegationOwnership.test.ts',
   'tests/delegation/OwnershipRuntime.test.ts',
   'tests/delegation/ManagedNativeSessionDeletion.test.ts',

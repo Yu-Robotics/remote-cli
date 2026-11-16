@@ -23,6 +23,7 @@ import { ThreadContextReset } from '../src/thread/ThreadContextReset';
 import { ManagedToolBridge } from '../src/managed/ManagedToolBridge';
 import { ClaudeSessionSchedules, SCHEDULE_HOOK } from '../src/scheduling/claude/ClaudeSessionSchedules';
 import { ScheduleService } from '../src/scheduling/ScheduleService';
+import { ScheduleToolOperations } from '../src/scheduling/ScheduleToolScope';
 import { claudeCodeHooks } from '../src/hooks/ClaudeCodeHooks';
 
 function deferred<T = void>() {
@@ -684,6 +685,41 @@ async function retainedFixture() {
 describe('Claude retained cancellation integration', () => {
   const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
   const architecture = Object.getOwnPropertyDescriptor(process, 'arch')!;
+  it.each(['error', 'timeout'] as const)('drains a pending list after foreground %s without a native result frame', async reason => {
+    const f = await retainedFixture();
+    const foreground = f.main.execute('Synthetic inventory request', reason === 'timeout' ? { timeout: 500 } : {})
+      .catch(error => error as Error);
+    await Promise.resolve();
+    let operation: string | undefined;
+    const scope = new ScheduleToolOperations().scope({
+      owner: { threadId: 'thread', openId: 'synthetic-owner', generation: 'synthetic-generation' },
+      messageId: 'synthetic-list-message', backend: 'claude', current: () => true, waitMs: 1,
+      run: (_command, id) => f.main.withNativeScheduleOperation(id, () => true, async () => {
+        await f.raw.schedules().reviewedInventory(() => true); return [];
+      }, true),
+      present: async () => 'Synthetic card', nativeAction: id => { operation = id; return f.main.nativeScheduleAction(id); },
+    });
+    let drained = false;
+    const done = foreground.then(async result => { await scope.drain(); drained = true; return result; });
+    try {
+      expect(await scope.invoke('remote_cli_schedule_list', { requestId: 'pending-list' })).toMatchObject({
+        status: 'pending', nativeAction: { tool: 'CronList', input: {} },
+      });
+      if (reason === 'error') f.frame({ type: 'error', content: 'Synthetic foreground failure' });
+      await vi.waitFor(() => expect(drained).toBe(true));
+      expect(await done).toBeInstanceOf(Error);
+      expect(await scope.invoke('remote_cli_schedule_operation', { requestId: 'pending-list' })).toMatchObject({
+        status: 'failed', error: expect.stringContaining('scheduling authorization ended'),
+      });
+      expect(f.main.nativeScheduleAction(operation!)).toBeUndefined();
+      expect(f.child.stdin.end).not.toHaveBeenCalled(); expect(f.child.kill).not.toHaveBeenCalled();
+      expect(f.frames.filter(row => row.type === 'user')).toHaveLength(1);
+    } finally {
+      f.raw.schedules().foregroundEnded();
+      await done; await scope.close();
+    }
+  });
+
   it.each([['linux', 'arm64'], ['darwin', 'arm64'], ['win32', 'x64']] as const)(
     'accepts %s/%s capabilities and retains the actual filesystem host', async (hostPlatform, arch) => {
       const f = await retainedFixture();

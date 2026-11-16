@@ -2375,6 +2375,9 @@ export class ClaudePersistentExecutor extends EventEmitter implements IExecutor 
    * Reset current command state
    */
   private resetCurrentCommand(): void {
+    // Local errors and timeouts may have no native result frame. Release this
+    // turn's scheduling reservations before the handler waits for their drain.
+    this.sessionSchedules?.foregroundEnded();
     this.cancelInputWaiters();
     this.currentScheduleManagement = false;
     this.clearApprovals('Task is no longer active');

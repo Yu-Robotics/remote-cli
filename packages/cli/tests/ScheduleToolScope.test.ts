@@ -9,6 +9,45 @@ function fixture() {
   return { operations, options, scope: operations.scope(options) };
 }
 describe('ScheduleToolScope', () => {
+  it.each([
+    { backend: 'claude', action: { tool: 'CronDelete', input: { id: 'native-other' } } },
+    { backend: 'claude', action: { tool: 'CronCreate', input: { prompt: 'Synthetic unexpected mutation' } } },
+    { backend: 'claude', action: { tool: 'CronList', input: { unexpected: true } } },
+    { backend: 'agy', action: { tool: 'manage_task', input: { Action: 'delete', TaskId: 'native-other' } } },
+    { backend: 'agy', action: { tool: 'manage_task', input: { Action: 'list', TaskId: 'native-other' } } },
+    { backend: 'agy', action: { tool: 'CronList', input: {} } },
+    { backend: 'dsh', action: { tool: 'CronList', input: {} } },
+  ] as const)('never exposes an unexpected native action from list or its receipt: %j', async ({ backend, action }) => {
+    const f = fixture(); let finish!: (value: []) => void;
+    f.options.run.mockImplementation(() => new Promise<[]>(resolve => { finish = resolve; }));
+    const scope = f.operations.scope({ ...f.options, backend, nativeAction: () => action });
+    try {
+      await expect(scope.invoke('remote_cli_schedule_list', { requestId: 'read-only' })).rejects.toThrow('Read-only');
+      await expect(scope.invoke('remote_cli_schedule_operation', { requestId: 'read-only' })).rejects.toThrow('Read-only');
+      expect(scope.hasSideEffects).toBe(false);
+      expect(f.options.run).toHaveBeenCalledOnce();
+    } finally { finish([]); await scope.close(); }
+  });
+
+  it.each([
+    { backend: 'claude', action: { tool: 'CronList', input: {} } },
+    { backend: 'agy', action: { tool: 'manage_task', input: { Action: 'list' } } },
+  ] as const)('keeps $backend inventory actions correlated and read-only across receipt inspection', async ({ backend, action }) => {
+    const f = fixture(); let finish!: (value: []) => void;
+    f.options.run.mockImplementation(() => new Promise<[]>(resolve => { finish = resolve; }));
+    const nativeAction = vi.fn(() => action);
+    const scope = f.operations.scope({ ...f.options, backend, nativeAction });
+    try {
+      const first = await scope.invoke('remote_cli_schedule_list', { requestId: 'inventory' });
+      const repeated = await scope.invoke('remote_cli_schedule_operation', { requestId: 'inventory' });
+      expect(first).toMatchObject({ status: 'pending', nativeAction: action });
+      expect(repeated).toEqual(first);
+      expect(nativeAction.mock.calls[0]).toEqual(nativeAction.mock.calls[1]);
+      expect(scope.hasSideEffects).toBe(false);
+      expect(f.options.run).toHaveBeenCalledOnce();
+    } finally { finish([]); await scope.close(); }
+  });
+
   it('passes explicit forgetting through scoped receipts and preserves unverified-native warnings', async () => {
     const f = fixture();
     const purge = vi.fn(async () => ({ status: 'complete' as const, selectedIds: ['legacy'], removedIds: [], historyRemovedIds: [],

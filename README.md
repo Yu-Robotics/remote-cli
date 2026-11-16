@@ -748,7 +748,9 @@ effort, and tool policy; this is not a frozen snapshot of creation-time settings
 
 Claude model-requested operations return an exact authorized native Cron action.
 The model executes that action in its current turn, and the adapter validates the
-native receipt. Slash commands and card controls use serialized management turns
+native receipt. Waiting for the model to invoke an action does not consume its
+receipt timeout; the exact invocation starts that timeout. Turn end, local errors,
+and timeouts retire uninvoked actions. Slash commands and card controls use serialized management turns
 in the same conversation. AGY uses the equivalent exact `schedule`/`manage_task`
 action and native transcript receipt path. DSH uses native host CRUD without an extra model turn.
 Native timing runs without polling prompts. Simultaneously due tasks can share a
@@ -977,8 +979,11 @@ still activates the installed version only at the next manual start. No shell cl
 transcript copy, blind CREATE retry or backend switch is used as fallback. Claude
 retained-process `/abort` behavior is unchanged.
 
-`/schedule list` reconciles native expiry on demand and reports interrupted jobs
-without recreating them. Completed results are text-only in this first adapter.
+`/schedule list` and the model list tool inspect native state on demand without
+cancelling jobs. Inventory errors preserve existing task state and execution
+admission; verified native absence is reported as interrupted without claiming
+execution completion. Unresolved cleanup remains visible and requires explicit
+cancellation or cleanup. Completed results are text-only in this first adapter.
 
 Schedule and queue cards emphasize task content, with compact status and context
 information. Schedule identifiers remain available as secondary references, and
