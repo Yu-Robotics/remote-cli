@@ -202,6 +202,28 @@ describe('ThreadManager', () => {
   });
 
   describe('deleteThread', () => {
+    it('retains inactive AGY data until exact host retirement, then permits explicit deletion', async () => {
+      const thread = await manager.createThread('agy-retained', tmpDir, 'claude');
+      const directory = path.join(tmpDir, '.remote-cli', 'agy-sessions');
+      await fs.mkdir(directory, { recursive: true });
+      const journal = path.join(directory, `${thread.id}.json.native-schedules`);
+      const pointer = path.join(directory, `${thread.id}.json`);
+      await fs.writeFile(pointer, JSON.stringify({ id: 'synthetic-native-session' }));
+      const owner = { sessionId: 'synthetic-native-session', hostId: 'synthetic-host', retired: false };
+      await fs.writeFile(journal, JSON.stringify(owner));
+      await expect(manager.deleteThread(thread.id)).rejects.toThrow('retirement is unconfirmed');
+      expect(manager.getThread(thread.id)).toBeDefined(); expect(await fs.stat(pointer)).toBeDefined();
+      await fs.writeFile(journal, JSON.stringify({ ...owner, retired: true }));
+      await fs.writeFile(pointer + '.checkpoint', 'synthetic-checkpoint');
+      await fs.mkdir(pointer + '.checkpoint.lock');
+      await expect(manager.deleteThread(thread.id)).rejects.toThrow('checkpoint transition');
+      // Fixture-owned stale lock removal simulates an explicitly resolved transition.
+      await fs.rmdir(pointer + '.checkpoint.lock');
+      await manager.deleteThread(thread.id);
+      await expect(fs.stat(pointer + '.checkpoint')).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(fs.stat(journal)).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
     it('removes dormant AGY data even when the active backend is different', async () => {
       const thread = await manager.createThread('dormant-agy', tmpDir, 'claude');
       const dataDir = path.join(tmpDir, '.remote-cli');

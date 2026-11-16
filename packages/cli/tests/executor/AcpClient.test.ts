@@ -151,6 +151,27 @@ describe('AcpClient', () => {
     await expect(loading).resolves.toBeDefined();
   });
 
+  it.each(['load', 'config', 'cancel', 'delete', 'close'])('revokes local schedule admission before %s, including failed controls', async action => {
+    expect(client.sessionAdmission('synthetic-session')).toBeUndefined();
+    const creating = client.newSession(process.cwd());
+    fake.process.push({ jsonrpc: '2.0', id: request(fake.lines, 'session/new').id, result: { sessionId: 'synthetic-session' } });
+    await creating;
+    const identity = client.sessionAdmission('synthetic-session');
+    expect(identity).toBeDefined(); expect(client.sessionAdmission('synthetic-session')).toBe(identity);
+    let pending: Promise<unknown> | undefined;
+    if (action === 'load') pending = client.loadSession('synthetic-session', process.cwd());
+    if (action === 'config') pending = client.setConfigOption('synthetic-session', 'model', 'other');
+    if (action === 'delete') pending = client.deleteSession('synthetic-session');
+    if (action === 'cancel') client.sendCancel('synthetic-session');
+    if (action === 'close') fake.process.emit('close', 0, null);
+    expect(client.sessionAdmission('synthetic-session')).toBeUndefined();
+    if (pending) {
+      const sent = JSON.parse(fake.lines.at(-1)!);
+      fake.process.push({ jsonrpc: '2.0', id: sent.id, error: { code: -32603, message: 'Synthetic uncertain control' } });
+      await expect(pending).rejects.toThrow(); expect(client.sessionAdmission('synthetic-session')).toBeUndefined();
+    }
+  });
+
   it('sends native image content in prompts', async () => {
     const pending = client.prompt('ses-1', [
       { type: 'text', text: 'inspect' },

@@ -535,8 +535,8 @@ Once connected, use these commands in Feishu:
 
 ### Native scheduled tasks
 
-`/schedule` manages native scheduled work through Claude Code (runtime capability checks) and
-DeepSeek Harness (0.2.1-rc.5). All eight backends have an explicit eligibility entry:
+`/schedule` manages native scheduled work through Claude Code, fresh AGY ACP
+conversations (runtime capability checks), and DeepSeek Harness (0.2.1-rc.5). All eight backends have an explicit eligibility entry:
 `/schedule capabilities` shows the supported adapter and the specific reason
 for each temporarily unsupported backend. Creation on an unsupported backend
 returns that reason without switching backends or starting a fallback job.
@@ -545,9 +545,66 @@ backend transport. Product UI features, third-party schedulers, and unverified
 headless behavior do not qualify. Listing and cancelling existing tasks remain
 available after a backend switch.
 
-Scheduling stays dormant for users without a task catalog: ordinary connection,
-reconnection, chat, and control commands do not create scheduling files, start
-native schedule processes, or subscribe to schedule delivery receipts. Startup
+Fresh AGY conversations now use the original native ACP host for chat and
+`/schedule`, including managed scheduling tools with delegation disabled. Native
+one-shot and host-timezone cron tasks use exact tool receipts and authenticated
+hook-triggered transcript records; idle results use the existing original-thread
+catalog, outbox and Router acknowledgements. Equal-prompt tasks retain distinct
+native identities, and cancelling one task preserves its siblings. No executable
+version gate, client timer, model polling or alternate backend is used.
+
+Saved stream-json conversations and managed child workers keep their compatible
+transport and context; scheduling is unavailable there. No saved conversation is
+silently forked, reset or migrated. New ACP sessions require native handle support,
+working hooks and native tool receipts; failed pre-session initialization may fall
+back to compatible chat without scheduling. Per-thread authentication/config links,
+model/effort launch settings and session-scoped managed tools are preserved. User
+hook groups are retained in a private HOME overlay, never edited globally. Ordinary
+chat streams ACP text until a managed timer exists; afterwards foreground output
+uses the native terminal batch to avoid replaying buffered autonomous text.
+
+From CLI 1.6.246, AGY recovery is conditional. `/abort` can automatically continue eligible future
+jobs in the **same native conversation** when no owned timer has reached its first
+possible wake, no unknown native work or uncertain mutation has been observed, and
+the exact predecessor group exits before that deadline. The cancelled foreground
+request is not replayed. Native definition IDs change; catalog ownership and
+original-thread delivery remain stable.
+
+Orderly restart/update uses the shared durable recovery catalog: delete exact
+owned definitions, confirm group retirement within the same guarded interval,
+persist a clean checkpoint, and consume it once before loading the original
+conversation. Only future definitions are reconstructed. Lost output acknowledgements
+retain the existing outbox; no inference is repeated to recover a result. Expired
+one-shots and cancelled records are never recreated. Exact cancellation completed
+before any possible first wake can also retire that job independently, preserving
+eligible siblings. After every job has that receipt, a clean saved conversation
+can resume without the old scheduling fence. A completed invocation, empty
+native inventory or a PID disappearing alone is not a queue-drain checkpoint.
+
+Already-fired recurring jobs, due/unjoined notifications, unknown background tools,
+failed mutation receipts, missed cancellation terminals, deadline/clock races,
+changed settings/ownership and dirty exits remain explicitly blocked. There is no
+crash/reboot replay permission inferred from process absence. Pending native work
+still blocks automatic upgrades. Model/effort/tool changes and context deletion
+retain the existing ownership guards. Ordinary no-job abort/settings behavior
+remains compatible.
+
+A clean, checkpointed no-job ACP conversation automatically loads its exact saved
+ID on the next host, including its native context. Uninstrumented legacy stream-json
+sessions have no trusted pre-inference queue checkpoint and remain on their
+compatible transport; migration to managed ACP is refused before any inventory
+prompt. Their context is not reset, forked or copied. This is a remaining legacy
+migration limitation, not a claim that native `session/load` cannot load them.
+
+Native acceptance covers Linux with a disposable native AGY host, loopback fake
+model and local Router ACK fixture. Real account/provider traffic, Feishu delivery,
+macOS/Windows native execution and dirty reboot recovery remain unverified.
+
+The shared scheduling service stays dormant without a task catalog: ordinary
+connection, reconnection, chat and control commands do not create a catalog or
+subscribe to result receipts. Active fresh AGY chat hosts install their temporary
+hook relay before the first turn so later tasks share that exact conversation;
+inactive or other backends do not acquire AGY listeners or scheduling state. Startup
 only checks whether a catalog already exists. Existing catalogs are recovered
 for interrupted-job status and pending-result delivery; explicit `/schedule`
 management or an explicit scheduling tool call initializes the service on demand.
@@ -595,7 +652,7 @@ for example: "In ten minutes, check the build and summarize failures" or
 backend interprets the request through the shared `remote_cli_schedule_*` tools;
 ambiguous dates, task content, or timezones should be clarified first. Tool
 registration is independent of `/delegation`. Native creation currently supports
-Claude and DSH; other backends report their unsupported reason without switching
+Claude, fresh AGY ACP sessions, and DSH; other backends report their unsupported reason without switching
 execution backends. Native goal executions do not expose these tools.
 
 The framework captures the authenticated user, thread, working directory, model,
@@ -614,11 +671,12 @@ after restart, inspect durable task IDs with `/schedule list`. Do not repeat a
 natural-language creation request merely because its confirmation was lost.
 
 Replace the example date with a future instant within the next year. One-shot
-requests round up to the next whole minute. Recurring cron requires an explicit
+requests round up to the next whole minute; AGY one-shots must be within seven
+days. Native tool/model latency can delay installation. Recurring cron requires an explicit
 IANA timezone. Native timing is approximate, including Claude's jitter and
 seven-day recurring expiry; this is not an exact-time alarm service.
 
-Claude and DSH schedules execute in the original foreground native conversation.
+Claude, fresh AGY ACP, and DSH schedules execute in the original foreground native conversation.
 They use its earlier discussion, subsequent user messages, and previous scheduled
 occurrences, subject to native compaction and context limits. Multiple tasks in
 one thread share that context. The adapter does not copy a transcript, create a
@@ -628,7 +686,8 @@ effort, and tool policy; this is not a frozen snapshot of creation-time settings
 Claude model-requested operations return an exact authorized native Cron action.
 The model executes that action in its current turn, and the adapter validates the
 native receipt. Slash commands and card controls use serialized management turns
-in the same conversation. DSH uses native host CRUD without an extra model turn.
+in the same conversation. AGY uses the equivalent exact `schedule`/`manage_task`
+action and native transcript receipt path. DSH uses native host CRUD without an extra model turn.
 Native timing runs without polling prompts. Simultaneously due tasks can share a
 native turn and a labeled combined result; they are not separate model answers.
 
@@ -730,7 +789,7 @@ execution recovery. The same authenticated user can still list and retry cleanup
 in the same thread after a context reset or directory change; original generation
 and attribution remain unchanged. Live history and execution retain exact generation
 checks. Attributed Claude cleanup preserves its supported original-session route
-until resolved. DSH cleanup without a supported session-bound retry does not block
+until resolved or explicitly forgotten. DSH cleanup without a supported session-bound retry does not block
 context reset. Ordinary chat and backend selection do not gain a new hurdle.
 A retry can delete an exact matching attributed Claude
 recurring session-only definition and verify fresh absence without recreating it.
@@ -743,6 +802,21 @@ reported stopped. DSH uses its live cancellation handle or previously confirmed
 cleanup/clean-handoff receipt; without these, history can be removed but native
 retirement remains unresolved. Other backends retain their actual capability
 limits; the permission to delete is backend-neutral, not a new native API.
+
+From CLI 1.6.245, you can explicitly forget residual cleanup tracking after its
+managed history has been purged. Ask the agent to forget the selected residual
+tracking, or run `/schedule purge <managed-id,...> --forget-unresolved`.
+The tool equivalent is `remote_cli_schedule_purge` with exact `scheduleIds` and
+`forgetUnresolved: true`; `all` is rejected. This removes only the selected
+cleanup metadata, including entries without original session attribution. It
+does not call native tools, confirm native absence, or stop unknown work.
+Inspect `forgottenCleanupIds` and the returned `warning`; `complete` confirms
+the requested metadata erasure only. Active history must be purged first, and
+unsettled native mutations or local work still block forgetting. ID/owner replay
+fences survive atomically, including across restart, so forgotten jobs cannot be
+recreated. Native cleanup review/delete remains necessary for any actual native
+definitions. Sibling cleanup tracking is preserved; forgetting also discards the
+selected original-session cleanup route, so it is never an automatic retry mode.
 
 The cleanup ledger is bounded to 1,000 entries and permanent replay fences to
 10,000 IDs. Capacity exhaustion blocks further removal explicitly rather than

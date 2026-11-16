@@ -13,6 +13,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.246] - 2026-11-16
+
+### Added
+- Add a reusable original-session AGY ACP schedule host/provider and authenticated hook/transcript bridge. Join native tool-step receipts, SYSTEM sender provenance and native Stop batches; bound canonical native transcript reads and preserve user hook groups. Native AGY owns once/cron timing and inference.
+- Carry AGY identities through the existing schedule catalog, durable outbox, result ACKs and Router cards. Isolated Linux acceptance exercises the compiled adapter with real native timers and a deterministic loopback provider; external delivery is mocked. Fresh production AGY sessions now use this ACP path through the executor factory, MessageHandler commands and session-scoped MCP scheduling tools. Saved stream-json sessions remain compatible without silent migration. No AGY version restriction or client timer fallback is used.
+
+- Register AGY managed tools with standard ACP session-scoped MCP servers. Preserve user hook configuration in a private HOME overlay; retire the exact host group before catalog shutdown. Completed one-shots do not start cleanup inference from a terminal callback, and inactive-thread deletion checks retained AGY ownership. Explicit context reset after confirmed retirement discards, rather than replays, old work.
+
+### Fixed
+- Require matched native invocation start/completion evidence and stable completed output before settling an AGY batch. Recheck each new wake and management receipt against current ownership while retaining already admitted late results after cancellation; native execution counters are not treated as globally unique IDs.
+- Fence AGY successor prompts on the previous host's confirmed transport close, including abort, unexpected exit and model/effort recycling. A bounded exit timeout retains the original conversation and blocks execution until explicit retirement is confirmed; signalling a process is not completion evidence.
+- Join AGY shutdown before context reset, managed-tool reconfiguration or thread-data removal. Invalidate prompts waiting on a retired context and report stream-json abort's loss of session-only timers explicitly.
+- Add deadline-bounded original-conversation AGY continuation after foreground cancellation and orderly restart/update recovery through the shared catalog. Persist and exclusively consume clean handoff proof before loading; preserve exact task ownership and outbox identities across native definition rebinding. Exact cancellation before any possible first wake can retire an individual task, preserving sibling recovery and allowing clean chat restoration after all tasks are cancelled. Unknown queued work, dirty exits, expired one-shots and cancelled jobs are not replayed.
+- Restore checkpointed no-job AGY conversations on ACP without resetting their context. Uninstrumented saved stream-json sessions remain compatible and refuse unsafe migration before inference. Ordinary no-job abort/settings behavior is preserved.
+
+## [1.6.245] - 2026-11-16
+
+### Fixed
+- Record verified pre-dispatch native schedule refusals so failed creation can be purged without leaving an unresolvable cleanup obligation. Preserve uncertainty after native admission or mutation.
+- Add exact-ID `forgetUnresolved: true` and `/schedule purge <managed-id,...> --forget-unresolved` for user-requested erasure of cleanup tracking whose history was already purged. Preserve durable replay fences, ownership, pending-work guards, and native-absence warnings; never invoke native tools or claim native deletion when forgetting metadata.
+
 ## [1.6.244] - 2026-11-15
 
 ### Fixed

@@ -1,7 +1,7 @@
 import { cleanupInventory, type NativeCleanupDefinition } from '../ReviewedNativeCleanup';
 import { randomUUID } from 'crypto';
 import { nativeRule } from './rules';
-import { NativeScheduleAbsentError, NativeScheduleCleanupError, type NativeScheduleInput, type NativeScheduleHandle, type NativeScheduleEvent } from '../types';
+import { NativeScheduleAbsentError, NativeScheduleNotAdmittedError, NativeScheduleCleanupError, type NativeScheduleInput, type NativeScheduleHandle, type NativeScheduleEvent } from '../types';
 
 export interface NativeScheduleAction { tool: 'CronCreate' | 'CronList' | 'CronDelete'; input: Record<string, unknown> }
 /** Deliberately incompatible with NativeScheduleHandle.releaseForRestart. */
@@ -242,31 +242,44 @@ export class ClaudeSessionSchedules {
   async create(input: NativeScheduleInput, emit: Job['emit'], current: () => boolean = () => true,
     timezone = this.options.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone, restore: boolean | 'adopt' | 'adopt-existing' = false, expectedNativeId?: string,
     canAdmitOccurrence?: () => boolean): Promise<NativeScheduleHandle> {
-    if (this.closed || this.definitionRemoval || this.jobs.has(input.id) || this.jobs.size >= 100 || [...this.jobs.values()].filter(j => !j.retired).length >= 5) {
+    // An existing identity can still own native work from an earlier attempt.
+    if (this.jobs.has(input.id)) {
       throw new Error('Native session schedule identity or capacity is unavailable.');
     }
-    const rule = nativeRule(input.rule, Date.now());
-    let cron = rule.cron;
-    if (rule.at) {
-      const formatter = new Intl.DateTimeFormat('en-US', { timeZone: timezone, year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', hourCycle: 'h23' });
-      const parts = formatter.formatToParts(rule.at);
-      // During a daylight-saving rollback cron could select an earlier instance
-      // of the same wall minute. Refuse that ambiguity rather than fire early.
-      for (let minutes = 1; minutes <= 180; minutes++) {
-        const earlier = rule.at - minutes * 60_000;
-        if (earlier > Date.now() && formatter.format(earlier) === formatter.format(rule.at)) {
-          throw new Error('This one-shot time is ambiguous in the native session timezone. Choose a time outside the clock rollback.');
-        }
+    let rule: ReturnType<typeof nativeRule>;
+    let cron: string;
+    let marker: string;
+    try {
+      if (this.closed || this.definitionRemoval || this.jobs.size >= 100 || [...this.jobs.values()].filter(j => !j.retired).length >= 5) {
+        throw new Error('Native session schedule identity or capacity is unavailable.');
       }
-      const part = (name: string) => Number(parts.find(p => p.type === name)!.value);
-      cron = `${part('minute')} ${part('hour')} ${part('day')} ${part('month')} *`;
-    } else if (new Intl.DateTimeFormat('en', { timeZone: rule.timezone }).resolvedOptions().timeZone
-      !== new Intl.DateTimeFormat('en', { timeZone: timezone }).resolvedOptions().timeZone) {
-      throw new Error(`Shared Claude schedules use the native session timezone (${timezone}); choose that timezone. The conversation timezone was not changed.`);
+      rule = nativeRule(input.rule, Date.now());
+      cron = rule.cron;
+      if (rule.at) {
+        const formatter = new Intl.DateTimeFormat('en-US', { timeZone: timezone, year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', hourCycle: 'h23' });
+        const parts = formatter.formatToParts(rule.at);
+        // During a daylight-saving rollback cron could select an earlier instance
+        // of the same wall minute. Refuse that ambiguity rather than fire early.
+        for (let minutes = 1; minutes <= 180; minutes++) {
+          const earlier = rule.at - minutes * 60_000;
+          if (earlier > Date.now() && formatter.format(earlier) === formatter.format(rule.at)) {
+            throw new Error('This one-shot time is ambiguous in the native session timezone. Choose a time outside the clock rollback.');
+          }
+        }
+        const part = (name: string) => Number(parts.find(p => p.type === name)!.value);
+        cron = `${part('minute')} ${part('hour')} ${part('day')} ${part('month')} *`;
+      } else if (new Intl.DateTimeFormat('en', { timeZone: rule.timezone }).resolvedOptions().timeZone
+        !== new Intl.DateTimeFormat('en', { timeZone: timezone }).resolvedOptions().timeZone) {
+        throw new Error(`Shared Claude schedules use the native session timezone (${timezone}); choose that timezone. The conversation timezone was not changed.`);
+      }
+      const stable = input.recovery ? JSON.parse(input.recovery.identity).marker : undefined;
+      if (input.recovery && (typeof stable !== 'string' || !/^[a-f0-9-]{36}$/.test(stable))) throw new Error('Invalid durable native schedule marker.');
+      marker = `[remote-cli:${stable ?? randomUUID()}]`;
+    } catch (error) {
+      // Restored definitions may predate this attempt; validation proves no absence.
+      if (restore || expectedNativeId) throw error;
+      throw new NativeScheduleNotAdmittedError(error instanceof Error ? error.message : 'Native schedule validation refused admission.');
     }
-    const stable = input.recovery ? JSON.parse(input.recovery.identity).marker : undefined;
-    if (input.recovery && (typeof stable !== 'string' || !/^[a-f0-9-]{36}$/.test(stable))) throw new Error('Invalid durable native schedule marker.');
-    const marker = `[remote-cli:${stable ?? randomUUID()}]`;
     const job: Job = { id: input.id, marker, prompt: `${marker}\n${input.prompt}`, recurring: rule.recurring,
       deadline: rule.at, current, canAdmitOccurrence, recovering: !!restore, adopt: typeof restore === 'string', cron, expectedNativeId, uncertain: false, retired: false, cancelled: false, emit };
     this.jobs.set(job.id, job);

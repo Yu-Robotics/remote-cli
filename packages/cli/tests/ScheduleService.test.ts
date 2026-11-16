@@ -80,6 +80,23 @@ describe('ScheduleService', () => {
     await fs.rm(directory, { recursive: true, force: true });
   });
 
+  it('persists a native definition rebound before delivering the next occurrence', async () => {
+    const service = make(); await service.initialize(); await service.create(owner, input('schedule-a', true));
+    const handle = provider.handles.get('schedule-a')!;
+    Object.defineProperty(handle, 'nativeId', { value: 'native-successor', configurable: true });
+    provider.emit('schedule-a', { type: 'rebound', previousNativeId: 'native-schedule-a', nativeId: 'native-successor' });
+    provider.emit('schedule-a', { type: 'started', occurrenceId: 'successor-occurrence' });
+    complete('schedule-a', 'successor-occurrence'); await settled(service);
+    expect((await read()).records[0].nativeId).toBe('native-successor');
+    expect(deliver).toHaveBeenCalledWith(expect.objectContaining({ schedule: expect.objectContaining({ nativeId: 'native-successor' }), occurrenceId: 'successor-occurrence' }));
+  });
+
+  it('rejects rebound identity mismatches without changing the durable record', async () => {
+    const service = make(); await service.initialize(); await service.create(owner, input('schedule-a', true));
+    await expect((service as any).onEvent('schedule-a', { type: 'rebound', previousNativeId: 'foreign', nativeId: 'foreign-new' })).rejects.toThrow('ownership');
+    expect((await read()).records[0].nativeId).toBe('native-schedule-a');
+  });
+
   it('rejects a second catalog writer before reading or overwriting cancellation intent', async () => {
     const first = make(); await first.initialize(); await first.create(owner, input());
     await first.cancel(owner, 'schedule-a');
@@ -178,12 +195,12 @@ describe('ScheduleService', () => {
     expect(provider.create).toHaveBeenCalledOnce();
   });
 
-  it('preserves DSH identity across native creation, outbox persistence, and restart without recreating jobs', async () => {
+  it.each(['dsh', 'agy'] as const)('preserves %s identity across native creation, outbox persistence, and restart without recreating jobs', async backend => {
     deliver.mockRejectedValue(new Error('Disconnected'));
     const service = make(); await service.initialize();
-    const record = await service.create(owner, { ...input(), backend: 'dsh' });
-    expect(record.backend).toBe('dsh');
-    expect(provider.create.mock.calls[0][0].backend).toBe('dsh');
+    const record = await service.create(owner, { ...input(), backend });
+    expect(record.backend).toBe(backend);
+    expect(provider.create.mock.calls[0][0].backend).toBe(backend);
     provider.emit(record.id, { type: 'started', occurrenceId: 'native-dsh-occurrence' });
     complete(record.id, 'native-dsh-occurrence');
     await settled(service);
@@ -192,9 +209,21 @@ describe('ScheduleService', () => {
     const restored = make(); await restored.initialize();
     await restored.retryDeliveries();
     expect(deliver.mock.calls.at(-1)![0]).toMatchObject({ occurrenceId: 'native-dsh-occurrence',
-      schedule: { backend: 'dsh', threadId: owner.threadId, state: 'completed' } });
+      schedule: { backend, threadId: owner.threadId, state: 'completed' } });
     expect(provider.create).toHaveBeenCalledOnce();
-    expect((await read()).records[0].backend).toBe('dsh');
+    expect((await read()).records[0].backend).toBe(backend);
+  });
+
+  it('does not certify queued-work cleanup from an AGY definition-only deletion receipt', async () => {
+    const service = make(); await service.initialize();
+    await service.create(owner, { ...input('queued-agy', true), backend: 'agy' });
+    const handle = provider.handles.get('queued-agy')!;
+    Object.assign(handle, { cancellationKeepsRunning: true, nativeDefinitionAbsent: true, retirementConfirmed: false });
+    const cancelled = await service.cancel(owner, 'queued-agy');
+    expect(cancelled.state).toBe('cancelled'); expect(cancelled.cleanupConfirmed).toBeUndefined();
+    expect((await read()).records[0].cleanupConfirmed).toBeUndefined();
+    provider.emit('queued-agy', { type: 'stopped', reason: 'Exact synthetic group exit', exitConfirmed: true });
+    await service.list(owner);
   });
 
   it.each([true, false])('preserves shutdown outbox only for a current owner (%s)', async ownerCurrent => {

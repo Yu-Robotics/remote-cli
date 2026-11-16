@@ -2433,7 +2433,7 @@ export class RouterServer {
     return (message.type === 'queue_started' || message.type === MessageType.RESPONSE)
       && info?.source === 'schedule' && bounded(info.scheduleId, 256)
       && bounded(message.messageId, 256) && bounded(message.openId, 256) && bounded(message.threadId, 256)
-      && (info.backend === 'claude' || info.backend === 'dsh') && bounded(info.threadName, 100, true) && bounded(info.cwd, 4096)
+      && (info.backend === 'claude' || info.backend === 'dsh' || info.backend === 'agy') && bounded(info.threadName, 100, true) && bounded(info.cwd, 4096)
       && bounded(info.preview, 240, true) && info.remainingCount === 0
       && message.cwd === info.cwd;
   }

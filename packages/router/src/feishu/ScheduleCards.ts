@@ -63,7 +63,7 @@ export function parseScheduleMenu(value: unknown): ScheduleMenu | undefined {
   const values = new Set<string>();
   for (const entry of menu.entries) {
     if (!entry || !id(entry.value) || !id(entry.id) || values.has(entry.value)
-      || !['claude', 'dsh'].includes(entry.backend) || !['creating', 'active', 'running', 'completed', 'cancelled', 'interrupted', 'failed'].includes(entry.state)
+      || !['claude', 'dsh', 'agy'].includes(entry.backend) || !['creating', 'active', 'running', 'completed', 'cancelled', 'interrupted', 'failed'].includes(entry.state)
       || !text(entry.rule, 160) || !text(entry.prompt, 240) || typeof entry.canCancel !== 'boolean'
       || (entry.error !== undefined && !text(entry.error, 240))) return;
     values.add(entry.value);

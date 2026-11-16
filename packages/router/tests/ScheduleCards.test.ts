@@ -28,6 +28,12 @@ function fixture(count = 1, rule = '* * * * * (UTC)') {
 afterEach(() => { vi.useRealTimers(); });
 
 describe('ScheduleCards', () => {
+  it('accepts AGY catalog identities without making executor admission decisions', () => {
+    const f = fixture(); f.menu.entries[0].backend = 'agy';
+    expect(parseScheduleMenu(f.menu)?.entries[0].backend).toBe('agy');
+    f.cards.destroy();
+  });
+
   it('puts the prompt first, uses a readable status chip, and keeps the full ID in subdued metadata', () => {
     const f = fixture();
     const first = f.latest()[0];

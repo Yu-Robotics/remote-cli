@@ -72,6 +72,128 @@ async function reload(f: Awaited<ReturnType<typeof fixture>>) {
 }
 
 describe('ScheduleService purge', () => {
+  it('forgets selected unattributed residue, preserves siblings and fences replay after reload', async () => {
+    const failed = { ...row('failed', 'failed'), nativeId: undefined };
+    const f = await fixture({}, [failed, row('sibling')]);
+    const first = await f.service.purge(owner, { ids: ['failed'] });
+    expect(first).toMatchObject({ status: 'partial', nativeCleanupUnresolved: [{ id: 'failed', reason: 'native_absence_unknown' }] });
+    expect(await f.service.purge(owner, { ids: ['failed'] })).toMatchObject({ alreadyRemovedIds: ['failed'], nativeCleanupUnresolved: [{ id: 'failed' }] });
+    const forgotten = await f.service.purge(owner, { ids: ['failed'], forgetUnresolved: true });
+    expect(forgotten).toMatchObject({ status: 'complete', removedIds: [], historyRemovedIds: [], alreadyRemovedIds: ['failed'],
+      forgottenCleanupIds: ['failed'], nativeCleanupUnresolved: [], pending: [], errors: [], warning: expect.stringContaining('does not confirm native definition absence') });
+    expect(await f.service.listCleanup(owner)).toEqual([]);
+    expect((await f.service.list(owner)).map(record => record.id)).toEqual(['sibling']);
+    const stored = await f.read();
+    expect(stored.purged).toEqual([{ id: 'failed', ...owner }]);
+    expect(stored.cleanup ?? []).toEqual([]);
+    const restored = await reload(f);
+    expect(await restored.service.listCleanup(owner)).toEqual([]);
+    expect(await restored.service.purge(owner, { all: true })).toMatchObject({ selectedIds: ['sibling'] });
+    await expect(restored.service.create(owner, input('failed'))).rejects.toThrow('purged');
+    expect(restored.create).not.toHaveBeenCalled();
+    expect(f.create).not.toHaveBeenCalled(); expect(f.cancel).not.toHaveBeenCalled(); expect(f.stop).not.toHaveBeenCalled();
+  });
+
+  it('forgets an existing unattributed ledger without consulting native verification and is idempotent', async () => {
+    const verify = vi.fn(async (_record, _context, accept) => accept({ status: 'unresolved', reason: 'unattributed', detail: 'Missing original attribution' }));
+    const f = await fixture({ withPurgeVerification: verify }, [row('legacy')]);
+    await f.service.purge(owner, { ids: ['legacy'] });
+    const restored = await reload(f);
+    const selection = { ids: ['legacy'], forgetUnresolved: true as const };
+    const currentOwner = { ...owner, generation: 'after-context-reset' };
+    expect(await restored.service.purge(currentOwner, selection)).toMatchObject({ forgottenCleanupIds: ['legacy'], status: 'complete', nativeCleanupUnresolved: [] });
+    expect(await restored.service.purge(currentOwner, selection)).toMatchObject({ forgottenCleanupIds: [], alreadyRemovedIds: ['legacy'], nativeCleanupUnresolved: [],
+      warning: expect.stringContaining('does not confirm') });
+    expect(verify).toHaveBeenCalledOnce();
+    expect(restored.create).not.toHaveBeenCalled();
+  });
+
+  it('does not forget live history, unknown IDs or another owner\'s cleanup', async () => {
+    const f = await fixture();
+    await f.service.create(owner, input('active'));
+    await f.service.create({ ...owner, openId: 'other-user' }, input('foreign'));
+    await f.service.purge({ ...owner, openId: 'other-user' }, { ids: ['foreign'] });
+    const result = await f.service.purge(owner, { ids: ['active', 'foreign', 'missing'], forgetUnresolved: true });
+    expect(result).toMatchObject({ status: 'partial', forgottenCleanupIds: [], alreadyRemovedIds: [], removedIds: [] });
+    expect(result.errors.map(entry => entry.id)).toEqual(['active', 'foreign', 'missing']);
+    const active = (await f.service.list(owner))[0];
+    expect(active.state).toBe('active'); expect(active.cancelRequested).toBeUndefined();
+    expect(f.admissions.get('active')!()).toBe(true);
+    expect(f.native.has('active')).toBe(true);
+  });
+
+  it('keeps unresolved tracking during pending native mutations and stale owner contexts', async () => {
+    let pending = false;
+    const f = await fixture({ isNativeMutationPending: () => pending }, [row('legacy')]);
+    await f.service.purge(owner, { ids: ['legacy'] });
+    pending = true;
+    expect(await f.service.purge(owner, { ids: ['legacy'], forgetUnresolved: true })).toMatchObject({ status: 'partial', forgottenCleanupIds: [],
+      pending: [{ id: 'legacy', reason: 'operation_pending' }], nativeCleanupUnresolved: [{ id: 'legacy' }] });
+    pending = false;
+    await expect(f.service.purge(owner, { ids: ['legacy'], forgetUnresolved: true }, () => false)).rejects.toThrow('no longer current');
+    expect(await f.service.listCleanup(owner)).toHaveLength(1);
+  });
+
+  it('retains cleanup and its replay fence if forgetting cannot be persisted', async () => {
+    const f = await fixture({}, [row('legacy')]);
+    await f.service.purge(owner, { ids: ['legacy'] });
+    const before = await f.read();
+    vi.spyOn(fs, 'rename').mockRejectedValueOnce(new Error('Synthetic forget persistence failure'));
+    expect(await f.service.purge(owner, { ids: ['legacy'], forgetUnresolved: true })).toMatchObject({ status: 'partial', forgottenCleanupIds: [],
+      errors: [{ id: 'legacy', error: expect.stringContaining('forget persistence') }], nativeCleanupUnresolved: [{ id: 'legacy' }] });
+    expect(await f.read()).toEqual(before);
+    vi.restoreAllMocks();
+    const restored = await reload(f);
+    expect(await restored.service.listCleanup(owner)).toHaveLength(1);
+    await expect(restored.service.create(owner, input('legacy'))).rejects.toThrow('purged');
+  });
+
+  it('binds forget mode to durable request receipts and rejects broad or malformed forgetting', async () => {
+    const f = await fixture({}, [row('legacy')]);
+    const selection = { ids: ['legacy'], forgetUnresolved: true as const };
+    await f.service.freezePurgeSelection(owner, selection, 'forget', () => true);
+    const restored = await reload(f);
+    expect(await restored.service.freezePurgeSelection(owner, selection, 'forget', () => true)).toEqual(['legacy']);
+    await expect(restored.service.freezePurgeSelection(owner, { ids: ['legacy'] }, 'forget', () => true)).rejects.toThrow('different selection');
+    for (const value of [{ all: true, forgetUnresolved: true }, { ids: [], forgetUnresolved: true }, { ids: ['legacy'], forgetUnresolved: false }, { ids: ['legacy'], forgetUnresolved: 'true' }]) {
+      await expect(f.service.purge(owner, value as any)).rejects.toThrow('exact schedule IDs');
+    }
+  });
+
+  it('does not coalesce forgetting into an ordinary purge while native verification is pending', async () => {
+    const gate = deferred(); const entered = deferred(); cleanups.push(() => gate.resolve());
+    const verify = vi.fn(async (record, _context, accept) => {
+      if ('historyRemoved' in record) { entered.resolve(); await gate.promise; }
+      return accept({ status: 'unresolved', reason: 'unattributed', detail: 'Synthetic missing attribution' });
+    });
+    const f = await fixture({ withPurgeVerification: verify }, [row('legacy')]);
+    await f.service.purge(owner, { ids: ['legacy'] });
+    const normal = f.service.purge(owner, { ids: ['legacy'] }); await entered.promise;
+    expect(await f.service.purge(owner, { ids: ['legacy'], forgetUnresolved: true })).toMatchObject({ status: 'partial',
+      forgottenCleanupIds: [], removedIds: [], pending: [{ id: 'legacy', reason: 'operation_pending' }], nativeCleanupUnresolved: [{ id: 'legacy' }] });
+    expect(await f.service.listCleanup(owner)).toHaveLength(1);
+    gate.resolve(); await normal;
+    expect(await f.service.purge(owner, { ids: ['legacy'], forgetUnresolved: true })).toMatchObject({ status: 'complete', forgottenCleanupIds: ['legacy'] });
+  });
+
+  it('forgets attributed metadata only on explicit request without native calls or sibling route loss', async () => {
+    const attributed = (id: string) => ({ ...row(id), recovery: { version: 1 as const, strategy: 'reconstruct' as const,
+      provider: 'claude-session-skip-unadmitted-v1', status: 'blocked' as const,
+      identity: JSON.stringify({ threadId: owner.threadId, cwd: root, sessionId: `session-${id}`, marker: '11111111-1111-4111-8111-111111111111' }) } });
+    const f = await fixture({}, [attributed('first'), attributed('sibling')]);
+    await f.service.purge(owner, { all: true });
+    expect(f.service.hasCleanupContext(owner.threadId)).toBe(true);
+    expect(await f.service.purge(owner, { ids: ['first'], forgetUnresolved: true })).toMatchObject({ forgottenCleanupIds: ['first'], warning: expect.stringContaining('does not confirm') });
+    expect(f.service.hasCleanupContext(owner.threadId)).toBe(true);
+    expect((await f.service.listCleanup(owner)).map(entry => entry.id)).toEqual(['sibling']);
+    expect(await f.service.purge(owner, { ids: ['sibling'], forgetUnresolved: true })).toMatchObject({ forgottenCleanupIds: ['sibling'] });
+    expect(f.service.hasCleanupContext(owner.threadId)).toBe(false);
+    expect(f.create).not.toHaveBeenCalled(); expect(f.cancel).not.toHaveBeenCalled(); expect(f.stop).not.toHaveBeenCalled();
+    const restored = await reload(f);
+    await expect(restored.service.create(owner, input('first'))).rejects.toThrow('purged');
+    await expect(restored.service.create(owner, input('sibling'))).rejects.toThrow('purged');
+  });
+
   it('freezes owned selections durably, validates replay arguments and rejects stale request admission', async () => {
     const f = await fixture({}, [row('legacy')]);
     expect(await f.service.freezePurgeSelection(owner, { all: true }, 'request', () => true)).toEqual(['legacy']);

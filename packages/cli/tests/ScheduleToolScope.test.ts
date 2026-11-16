@@ -9,6 +9,24 @@ function fixture() {
   return { operations, options, scope: operations.scope(options) };
 }
 describe('ScheduleToolScope', () => {
+  it('passes explicit forgetting through scoped receipts and preserves unverified-native warnings', async () => {
+    const f = fixture();
+    const purge = vi.fn(async () => ({ status: 'complete' as const, selectedIds: ['legacy'], removedIds: [], historyRemovedIds: [],
+      alreadyRemovedIds: ['legacy'], nativeCleanupUnresolved: [], forgottenCleanupIds: ['legacy'], pending: [], errors: [], warning: 'Native absence is unverified.' }));
+    const scope = f.operations.scope({ ...f.options, purge });
+    const args = { requestId: 'forget', scheduleIds: ['legacy'], forgetUnresolved: true };
+    expect(await scope.invoke('remote_cli_schedule_purge', args)).toMatchObject({ status: 'succeeded',
+      purge: { forgottenCleanupIds: ['legacy'], warning: 'Native absence is unverified.' } });
+    expect(purge).toHaveBeenCalledWith({ ids: ['legacy'], forgetUnresolved: true }, expect.any(String));
+    await scope.invoke('remote_cli_schedule_purge', args);
+    expect(purge).toHaveBeenCalledOnce();
+    await expect(scope.invoke('remote_cli_schedule_purge', { requestId: 'forget', scheduleIds: ['legacy'] })).rejects.toThrow('different');
+    for (const change of [{ all: true, scheduleIds: undefined }, { forgetUnresolved: false }, { forgetUnresolved: 'true' }]) {
+      await expect(scope.invoke('remote_cli_schedule_purge', { ...args, ...change, requestId: 'invalid' })).rejects.toThrow();
+    }
+    expect(purge).toHaveBeenCalledOnce();
+  });
+
   it('exposes review receipts and correlated native actions and rejects unregistered tool names', async () => {
     const f = fixture(); let finish!: (value: any) => void;
     const reviewCleanup = vi.fn(() => new Promise<any>(resolve => { finish = resolve; }));

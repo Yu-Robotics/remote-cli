@@ -17,8 +17,8 @@ export const NATIVE_SCHEDULE_CAPABILITIES = {
     detail: 'Codex 0.167.0 app-server delegates automation tools to its client; it has no native scheduled-job engine. In-turn sleep is not a managed schedule.',
   },
   agy: {
-    label: 'AGY', supported: false,
-    detail: 'AGY 1.5.5 has native scheduling, but tested stream-json recurring results appeared only after another input, without separate occurrence completion.',
+    label: 'AGY', supported: true,
+    detail: 'Fresh or clean-checkpointed original ACP conversations, after native hook/receipt qualification. Saved stream-json conversations without a trusted checkpoint and managed workers stay on their compatible transport. Native once/cron, exact cancellation and idle batch delivery are supported; cron timezone must match the host. Foreground cancellation and orderly restart can restore never-fired future definitions only after exact host retirement before every possible first wake, with no unknown queued work. Due work, dirty exits and ambiguous operations remain blocked with ownership retained. No executable-version gate.',
   },
   dsh: {
     label: 'DSH', supported: true,
@@ -43,19 +43,19 @@ export const NATIVE_SCHEDULE_CAPABILITIES = {
 } as const satisfies Record<BackendKey, ScheduleCapability>;
 
 /** Historical catalog/result identities remain readable when new creation is disabled. */
-export type NativeScheduleBackend = 'claude' | 'dsh';
+export type NativeScheduleBackend = 'claude' | 'dsh' | 'agy';
 
 export function isNativeScheduleBackend(value: unknown): value is NativeScheduleBackend {
-  return value === 'claude' || value === 'dsh';
+  return value === 'claude' || value === 'dsh' || value === 'agy';
 }
 
-/** Validate catalog identities, including retained Claude jobs. Creation checks supported separately. */
+/** Foreground product admission; catalog identity and installed provider support are separate. */
 export function assertNativeScheduleBackend(backend: string): asserts backend is NativeScheduleBackend {
   if (!Object.hasOwn(NATIVE_SCHEDULE_CAPABILITIES, backend)) {
     throw new Error('Native scheduling is temporarily unsupported for this unknown backend. Use /schedule capabilities to inspect supported backends.');
   }
   const capability = NATIVE_SCHEDULE_CAPABILITIES[backend as BackendKey];
-  if (!isNativeScheduleBackend(backend)) {
+  if (!isNativeScheduleBackend(backend) || !capability.supported) {
     throw new Error(`${capability.label} scheduling is temporarily unsupported. ${capability.detail} Use /schedule capabilities to inspect supported backends.`);
   }
 }
@@ -66,7 +66,7 @@ export const SCHEDULE_CAPABILITIES = [
   ...Object.values(NATIVE_SCHEDULE_CAPABILITIES).map(capability =>
     `- ${capability.label}: ${capability.supported ? 'supported (runtime checks required)' : 'temporarily unsupported'}. ${capability.detail}`),
   '',
-  'Claude and DSH tasks share their original native conversation and later chat messages. Separate schedules in that thread share context; no transcript copy is made.',
+  'Claude, fresh AGY ACP and DSH tasks share their original native conversation and later chat messages. Separate schedules in that thread share context; no transcript copy is made.',
   'The native backend owns timing. No Router timer or periodic model polling is used.',
   'Keep the CLI running for native timing. Claude jobs with verified native runtime capabilities and DSH jobs recover after verified orderly handoff in the original session. New Claude recurring jobs can also adopt exact native definitions after verified same-machine reboot. Same-boot crashes, unexplained missing definitions and uncertain one-shots remain blocked.',
   'Restart recovery is a separate provider capability. Eligible waiting jobs permit verified handoff before automatic upgrades. Claude may skip fired but not-yet-admitted occurrences; admitted execution and background work must drain. DSH drains queued work. Running or unconfirmed work still blocks upgrades. Expired one-shots are not run late and missed cron firings are not replayed.',

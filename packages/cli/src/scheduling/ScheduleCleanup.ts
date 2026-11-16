@@ -28,7 +28,7 @@ export function cleanupRecord(record: ScheduleRecord, reason: CleanupReason): Sc
   try {
     const identity = JSON.parse(record.recovery?.identity ?? 'null');
     const provider = record.backend === 'claude' ? 'claude-session-skip-unadmitted-v1' : 'dsh-session-orderly-v1';
-    if (record.recovery?.provider === provider && record.recovery.strategy === 'reconstruct'
+    if ((record.backend === 'claude' || record.backend === 'dsh') && record.recovery?.provider === provider && record.recovery.strategy === 'reconstruct'
       && identity?.threadId === record.threadId && identity.cwd === record.cwd
       && typeof identity.sessionId === 'string' && identity.sessionId.length > 0 && identity.sessionId.length <= 256
       && !/[\x00-\x1f\x7f]/.test(identity.sessionId)

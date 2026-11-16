@@ -79,8 +79,9 @@ export function createExecutor(
   const executorType = executorConfig.type as string;
   switch (executorType) {
     case 'agy':
-      console.log('[ExecutorFactory] Using AGY CLI executor (stream-json)');
+      console.log('[ExecutorFactory] Using AGY CLI executor (fresh ACP / saved compatible session)');
       return new AgyExecutor(directoryGuard, {
+        nativeAcp: true,
         // Per-thread model (set via /model, persisted on the thread) wins.
         model: model ?? executorConfig.agy?.model,
         effort,

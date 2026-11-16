@@ -2,7 +2,7 @@
 export interface ScheduleCardEntry {
   value: string;
   id: string;
-  backend: 'claude' | 'dsh';
+  backend: 'claude' | 'dsh' | 'agy';
   state: 'creating' | 'active' | 'running' | 'completed' | 'cancelled' | 'interrupted' | 'failed';
   rule: string;
   prompt: string;

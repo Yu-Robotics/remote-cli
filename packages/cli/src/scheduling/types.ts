@@ -73,10 +73,11 @@ export interface NativeScheduleRecovery {
    * cleanup handle in NativeScheduleCleanupError for any uncertain mutation.
    */
   reconcile(record: ScheduleRecord, context: { notBefore: number; signal: AbortSignal; isCurrent(): boolean; isOwnerCurrent?(): boolean; canAdmitOccurrence?(): boolean },
-    onEvent: (event: NativeScheduleEvent) => void): Promise<NativeScheduleHandle>;
+    onEvent: (event: NativeScheduleEvent) => void | Promise<void>): Promise<NativeScheduleHandle>;
 }
 
 export type NativeScheduleEvent =
+  | { type: 'rebound'; previousNativeId: string; nativeId: string }
   | { type: 'started'; occurrenceId: string }
   | { type: 'skipped'; occurrenceId: string; reason: string }
   | { type: 'completed'; occurrenceId: string; success: boolean; output?: string; error?: string }
@@ -90,6 +91,10 @@ export interface NativeScheduleHandle {
   readonly onceDefinitionAlreadyAbsent?: true;
   /** Shared-session deletion leaves an already started occurrence running. */
   readonly cancellationKeepsRunning?: boolean;
+  /** False retains execution ownership even with no observed running occurrence.
+   * A native definition list may omit queued, not-yet-observed notifications.
+   * Undefined preserves the existing providers' retirement contract. */
+  readonly retirementConfirmed?: boolean;
   /** Fresh local absence evidence; invalidated when its native host exits. */
   readonly nativeDefinitionAbsent?: boolean;
   /**
@@ -113,7 +118,7 @@ export interface NativeScheduleProvider {
   /** Pure capability lookup; absent means restart recovery is unsupported. */
   recoveryFor?(input: NativeScheduleInput): NativeScheduleRecovery | undefined;
   /** Admission is checked at each future wake, independently of deletion authority and completion delivery. */
-  create(input: NativeScheduleInput, onEvent: (event: NativeScheduleEvent) => void,
+  create(input: NativeScheduleInput, onEvent: (event: NativeScheduleEvent) => void | Promise<void>,
     canAdmitOccurrence?: () => boolean): Promise<NativeScheduleHandle>;
 }
 

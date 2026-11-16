@@ -152,7 +152,7 @@ export interface IExecutor {
   nativeScheduleRecovery?: import('../scheduling/types').NativeScheduleRecovery;
   /** Native timing in the existing foreground conversation; never fork its history. */
   createNativeSchedule?(input: import('../scheduling/types').NativeScheduleInput,
-    onEvent: (event: import('../scheduling/types').NativeScheduleEvent) => void, isOwnerCurrent?: () => boolean,
+    onEvent: (event: import('../scheduling/types').NativeScheduleEvent) => void | Promise<void>, isOwnerCurrent?: () => boolean,
     canAdmitOccurrence?: () => boolean): Promise<import('../scheduling/types').NativeScheduleHandle>;
   /** Bind a management operation to its authenticated owner; in-turn tools receive a native action. */
   withReviewedNativeCleanup?<T>(id: string, current: () => boolean,

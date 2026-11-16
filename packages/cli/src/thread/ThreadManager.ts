@@ -202,10 +202,30 @@ export class ThreadManager {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
       throw new Error('Invalid thread ID for data cleanup');
     }
+    // An inactive backend can still own native work. A recorded exact group exit
+    // permits explicit data deletion, never automatic conversation replay.
+    const agyOwner = path.join(agyDataDir, 'agy-sessions', `${id}.json.native-schedules`);
+    const agyCheckpoint = path.join(agyDataDir, 'agy-sessions', `${id}.json.checkpoint`);
+    try {
+      await fs.lstat(agyCheckpoint + '.lock');
+      throw new Error('AGY checkpoint transition is unconfirmed; thread state was retained.');
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    try {
+      const pointer = JSON.parse(await fs.readFile(path.join(agyDataDir, 'agy-sessions', `${id}.json`), 'utf8'));
+      if (pointer.transport === 'acp' && pointer.retired !== true) throw new Error('AGY ACP host retirement is unconfirmed; session data was retained.');
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    try {
+      const owner = JSON.parse(await fs.readFile(agyOwner, 'utf8'));
+      if (typeof owner.sessionId !== 'string' || typeof owner.hostId !== 'string' || owner.retired !== true) {
+        throw new Error('AGY native host retirement is unconfirmed; thread data and schedule ownership were retained.');
+      }
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     // Revoke Codex grants and remove AGY data regardless of the active backend.
     await fs.rm(path.join(dataDir, 'codex-sandbox', `${id}.json`), { force: true });
     await fs.rm(path.join(agyDataDir, 'agy-sessions', `${id}.json`), { force: true });
     await fs.rm(path.join(agyDataDir, 'agy-homes', id), { recursive: true, force: true });
+    await fs.rm(agyOwner, { force: true });
+    await fs.rm(agyCheckpoint, { force: true });
     for (const root of new Set([dataDir, agyDataDir])) {
       await fs.rm(path.join(root, 'dsh-sessions', `${id}.json`), { force: true });
       await fs.rm(path.join(root, 'dsh-sessions', `${id}.handoff.json`), { force: true });

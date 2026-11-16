@@ -48,6 +48,9 @@ interface PendingRequest {
 }
 
 export interface AcpTransport {
+  /** Process-local original-session admission identity. Never a resume or recovery
+   * receipt. Revoked before load/configuration/cancel/delete, including failures. */
+  sessionAdmission?(sessionId: string): object | undefined;
   createNativeSchedule?(sessionId: string, input: import('../../scheduling/types').NativeScheduleInput,
     onEvent: (event: import('../../scheduling/types').NativeScheduleEvent) => void): Promise<import('../../scheduling/types').NativeScheduleHandle>;
   initialize(): Promise<unknown>;
@@ -78,6 +81,7 @@ export class AcpClient implements AcpTransport {
   private readonly pendingRequests = new Map<number, PendingRequest>();
   private readonly rl: readline.Interface;
   private nextId = 1;
+  private readonly sessionAdmissions = new Map<string, object | undefined>();
   private destroyed = false;
   private closed = false;
   private killTimer: ReturnType<typeof setTimeout> | null = null;
@@ -123,10 +127,15 @@ export class AcpClient implements AcpTransport {
   }
 
   async newSession(cwd: string, mcpServers: AcpMcpServer[] = []): Promise<AcpSessionResult> {
-    return this.sendRequest('session/new', { cwd, mcpServers }) as Promise<AcpSessionResult>;
+    for (const id of this.sessionAdmissions.keys()) this.sessionAdmissions.set(id, undefined);
+    const result = await this.sendRequest('session/new', { cwd, mcpServers }) as AcpSessionResult;
+    if (typeof result.sessionId === 'string' && !this.sessionAdmissions.has(result.sessionId)
+      && this.sessionAdmissions.size < 1000) this.sessionAdmissions.set(result.sessionId, Object.freeze({}));
+    return result;
   }
 
   async loadSession(sessionId: string, cwd: string, mcpServers: AcpMcpServer[] = []): Promise<AcpSessionResult> {
+    if (this.sessionAdmissions.has(sessionId)) this.sessionAdmissions.set(sessionId, undefined);
     return this.sendRequest('session/load', { sessionId, cwd, mcpServers }) as Promise<AcpSessionResult>;
   }
 
@@ -135,6 +144,7 @@ export class AcpClient implements AcpTransport {
   }
 
   async setConfigOption(sessionId: string, configId: string, value: string): Promise<AcpSessionResult> {
+    if (this.sessionAdmissions.has(sessionId)) this.sessionAdmissions.set(sessionId, undefined);
     return this.sendRequest('session/set_config_option', {
       sessionId,
       configId,
@@ -143,10 +153,12 @@ export class AcpClient implements AcpTransport {
   }
 
   async deleteSession(sessionId: string): Promise<void> {
+    if (this.sessionAdmissions.has(sessionId)) this.sessionAdmissions.set(sessionId, undefined);
     await this.sendRequest('session/delete', { sessionId });
   }
 
   sendCancel(sessionId: string): void {
+    if (this.sessionAdmissions.has(sessionId)) this.sessionAdmissions.set(sessionId, undefined);
     this.sendNotification('session/cancel', { sessionId });
   }
 
@@ -165,6 +177,10 @@ export class AcpClient implements AcpTransport {
       }, SIGKILL_GRACE_MS);
       this.killTimer.unref?.();
     }
+  }
+
+  sessionAdmission(sessionId: string): object | undefined {
+    return this.closed || this.destroyed ? undefined : this.sessionAdmissions.get(sessionId);
   }
 
   waitForExit(): Promise<void> { return this.exited; }

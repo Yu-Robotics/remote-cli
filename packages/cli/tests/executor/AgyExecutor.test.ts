@@ -86,7 +86,12 @@ describe('AgyExecutor', () => {
     p.stderr = new EventEmitter();
     // stdin must be a real EventEmitter so async socket errors (EPIPE) can be tested
     p.stdin = Object.assign(new EventEmitter(), { write: vi.fn(), end: vi.fn() });
-    p.kill = vi.fn();
+    // Normal fixtures acknowledge retirement. Race tests override this to hold
+    // exit/close independently; kill() returning true is never their receipt.
+    p.kill = vi.fn(() => {
+      queueMicrotask(() => { p.emit('exit', 0, null); p.emit('close', 0, null); });
+      return true;
+    });
     p.pid = 424242 + spawnedProcesses.length;
     return p;
   };
@@ -187,7 +192,8 @@ describe('AgyExecutor', () => {
     vi.mocked(process.kill).mockReturnValue(true);
     const running = executor.execute('Run a task');
     await waitForSpawn();
-    await executor.abort();
+    proc.kill.mockImplementation(() => true);
+    const aborted = executor.abort();
     if (process.platform === 'linux') expect(process.kill).toHaveBeenCalledWith(-proc.pid, 'SIGTERM');
     else expect(proc.kill).toHaveBeenCalled();
     let exited = false;
@@ -197,6 +203,7 @@ describe('AgyExecutor', () => {
     proc.emit('exit', 0, null);
     proc.emit('close', 0, null);
     await waiting;
+    await aborted;
     expect(await running).toMatchObject({ success: false });
   });
 
@@ -750,7 +757,7 @@ describe('AgyExecutor', () => {
   });
 
   it('loads persisted conversation id on construction and resumes with --conversation', async () => {
-    mockFs.existsSync.mockReturnValue(true);
+    mockFs.existsSync.mockImplementation((file: string) => !String(file).endsWith('.native-schedules'));
     mockFs.readFileSync.mockReturnValue(JSON.stringify({ id: 'conv-stored' }));
 
     await executor.destroy();
@@ -1030,7 +1037,7 @@ describe('AgyExecutor', () => {
     await p;
     expect(executor.getSessionId()).toBe('conv-old');
 
-    executor.resetContext();
+    await executor.resetContext();
     expect(executor.getSessionId()).toBeNull();
 
     const p2 = executor.execute('fresh');
@@ -1125,7 +1132,7 @@ describe('AgyExecutor', () => {
     await compactPromise;
 
     // User clears before sending another message
-    executor.resetContext();
+    await executor.resetContext();
 
     const p2 = executor.execute('fresh');
     await waitForSpawn();
@@ -1179,7 +1186,7 @@ describe('AgyExecutor', () => {
     emitResult();
     await p;
 
-    mockFs.existsSync.mockReturnValue(true);
+    mockFs.existsSync.mockImplementation((file: any) => !String(file).endsWith('.checkpoint.lock'));
     await executor.deleteThreadData('thread-1');
     expect(mockFs.unlinkSync).toHaveBeenCalledWith(expect.stringContaining('thread-1'));
   });
@@ -1268,6 +1275,195 @@ describe('AgyExecutor', () => {
   });
 
   // ── Lifecycle hardening ─────────────────────────────────────────────────
+
+  it('joins transport close before abort succeeds or a queued prompt resumes the original conversation', async () => {
+    const first = executor.execute('First');
+    await waitForSpawn(); emitInit();
+    const old = proc;
+    old.kill.mockImplementation(() => true);
+    const onStream = vi.fn();
+    const queued = executor.execute('Queued once', { onStream });
+    let abortDone = false;
+    const aborting = executor.abort().then(result => { abortDone = true; return result; });
+    await expect(first).resolves.toMatchObject({ success: false });
+    old.emit('exit', 0, null);
+    await waitForSpawn();
+    expect(abortDone).toBe(false);
+    expect(spawnedProcesses).toHaveLength(1);
+    expect(executor.isBusy()).toBe(true);
+    emitResult({ response: 'Stale result' }, old);
+    expect(onStream).not.toHaveBeenCalled();
+    old.emit('close', 0, null);
+    expect(await aborting).toBe(true);
+    await waitForSpawn();
+    expect(spawnedProcesses).toHaveLength(2);
+    expect(mockSpawn.mock.calls[1][1]).toContain('conv-aaa');
+    expect(proc.stdin.write).toHaveBeenCalledTimes(1);
+    expect(lastStdinLine().message.content).toBe('Queued once');
+    emitResult({ response: 'Fresh result' });
+    await expect(queued).resolves.toMatchObject({ success: true, output: 'Fresh result' });
+    expect(executor.abortStatusMessage()).toContain('timers are not restored');
+  });
+
+  it('keeps an unconfirmed exit fenced after a late close until an explicit abort retry', async () => {
+    vi.useFakeTimers();
+    try {
+      const running = executor.execute('Old host');
+      emitInit();
+      const old = proc;
+      old.kill.mockImplementation(() => true);
+      const aborting = executor.abort();
+      const rejected = expect(aborting).rejects.toThrow('exit could not be confirmed');
+      const blocked = executor.execute('Must not run');
+      await vi.advanceTimersByTimeAsync(8_001);
+      await rejected;
+      await expect(running).resolves.toMatchObject({ success: false });
+      await expect(blocked).resolves.toMatchObject({ success: false });
+      expect(executor.hasUncertainShutdown()).toBe(true);
+      expect(executor.getSessionId()).toBe('conv-aaa');
+      old.emit('exit', 0, null); old.emit('close', 0, null);
+      await Promise.resolve();
+      await expect(executor.execute('Still blocked')).resolves.toMatchObject({
+        success: false, error: expect.stringContaining('Retry /abort'),
+      });
+      expect(spawnedProcesses).toHaveLength(1);
+      expect(await executor.abort()).toBe(true);
+      expect(executor.hasUncertainShutdown()).toBe(false);
+      const fresh = executor.execute('Explicit fresh command');
+      expect(spawnedProcesses).toHaveLength(2);
+      emitResult();
+      await expect(fresh).resolves.toMatchObject({ success: true });
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each(['setModel', 'setEffort'] as const)('%s waits for the retiring host before applying settings on a successor', async setting => {
+    const initial = executor.execute('Initial');
+    await waitForSpawn(); emitInit(); emitResult(); await initial;
+    const old = proc;
+    old.kill.mockImplementation(() => true);
+    await executor[setting](setting === 'setModel' ? 'fixture-model' : 'high');
+    const next = executor.execute('New settings');
+    await waitForSpawn();
+    expect(spawnedProcesses).toHaveLength(1);
+    old.emit('exit', 0, null);
+    await waitForSpawn();
+    expect(spawnedProcesses).toHaveLength(1);
+    old.emit('close', 0, null);
+    await waitForSpawn();
+    expect(mockSpawn.mock.calls[1][1]).toEqual(expect.arrayContaining([
+      '--conversation', 'conv-aaa', setting === 'setModel' ? '--model' : '--effort',
+      setting === 'setModel' ? 'fixture-model' : 'high',
+    ]));
+    emitResult(); await next;
+  });
+
+  it('does not erase the original pointer or accept a replacement prompt while reset awaits exit', async () => {
+    const running = executor.execute('Before reset');
+    await waitForSpawn(); emitInit();
+    const old = proc;
+    old.kill.mockImplementation(() => true);
+    const reset = executor.resetContext();
+    await expect(running).resolves.toMatchObject({ success: false });
+    expect(executor.getSessionId()).toBe('conv-aaa');
+    expect(mockFs.unlinkSync).not.toHaveBeenCalled();
+    await expect(executor.execute('During reset')).resolves.toMatchObject({ success: false });
+    expect(spawnedProcesses).toHaveLength(1);
+    old.emit('exit', 0, null); old.emit('close', 0, null);
+    await reset;
+    expect(executor.getSessionId()).toBeNull();
+    const fresh = executor.execute('After reset');
+    expect(mockSpawn.mock.calls[1][1]).not.toContain('--conversation');
+    emitResult(); await fresh;
+  });
+
+  it('a second abort invalidates a prompt waiting on predecessor retirement', async () => {
+    const first = executor.execute('First');
+    await waitForSpawn(); emitInit();
+    const old = proc;
+    old.kill.mockImplementation(() => true);
+    const aborting = executor.abort();
+    await first;
+    const waiting = executor.execute('Never dispatch');
+    const retry = executor.abort();
+    old.emit('exit', 0, null); old.emit('close', 0, null);
+    await Promise.all([aborting, retry]);
+    await expect(waiting).resolves.toMatchObject({ success: false, error: expect.stringContaining('context retired') });
+    expect(spawnedProcesses).toHaveLength(1);
+  });
+
+  it('destroy invalidates a prompt waiting on retirement and joins before deleting thread data', async () => {
+    const first = executor.execute('First');
+    await waitForSpawn(); emitInit();
+    const old = proc;
+    old.kill.mockImplementation(() => true);
+    const aborting = executor.abort();
+    await first;
+    const waiting = executor.execute('Never dispatch');
+    let deleted = false;
+    const deletion = executor.deleteThreadData('thread-1').then(() => { deleted = true; });
+    await Promise.resolve();
+    expect(deleted).toBe(false);
+    expect(mockFs.rmSync).not.toHaveBeenCalled();
+    old.emit('exit', 0, null); old.emit('close', 0, null);
+    await Promise.all([aborting, deletion]);
+    await expect(waiting).resolves.toMatchObject({ success: false, error: expect.stringContaining('destroyed') });
+    expect(spawnedProcesses).toHaveLength(1);
+    expect(mockFs.rmSync).toHaveBeenCalledTimes(2);
+    expect(mockFs.rmSync).toHaveBeenCalledWith(expect.stringContaining('.checkpoint'), { force: true });
+  });
+
+  it('unexpected leader exit does not release a successor before transport close', async () => {
+    const first = executor.execute('First');
+    await waitForSpawn(); emitInit();
+    const old = proc;
+    old.emit('exit', 1, null);
+    await first;
+    const next = executor.execute('Next');
+    await waitForSpawn();
+    expect(spawnedProcesses).toHaveLength(1);
+    old.emit('close', 1, null);
+    await waitForSpawn();
+    expect(spawnedProcesses).toHaveLength(2);
+    emitResult(); await next;
+  });
+
+  it('blocks prompt dispatch while managed tools are being reconfigured after host retirement', async () => {
+    const first = executor.execute('First');
+    await waitForSpawn(); emitInit(); emitResult(); await first;
+    const old = proc;
+    old.kill.mockImplementation(() => true);
+    const configuring = executor.configureManagedTools();
+    await expect(executor.execute('During tool configuration')).resolves.toMatchObject({
+      success: false, error: expect.stringContaining('configuration is still in progress'),
+    });
+    expect(spawnedProcesses).toHaveLength(1);
+    old.emit('exit', 0, null); old.emit('close', 0, null);
+    await configuring;
+    const next = executor.execute('After tool configuration');
+    expect(mockSpawn.mock.calls[1][1]).toContain('conv-aaa');
+    emitResult(); await next;
+  });
+
+  it('preserves the original session pointer when reset times out, then permits an explicit reset retry', async () => {
+    vi.useFakeTimers();
+    try {
+      const running = executor.execute('Before reset');
+      emitInit();
+      const old = proc;
+      old.kill.mockImplementation(() => true);
+      const reset = executor.resetContext();
+      const refused = expect(reset).rejects.toThrow('exit could not be confirmed');
+      await vi.advanceTimersByTimeAsync(8_001);
+      await refused; await running;
+      expect(executor.getSessionId()).toBe('conv-aaa');
+      expect(mockFs.unlinkSync).not.toHaveBeenCalled();
+      expect(executor.hasUncertainShutdown()).toBe(true);
+      old.emit('exit', 0, null); old.emit('close', 0, null);
+      await executor.resetContext();
+      expect(executor.getSessionId()).toBeNull();
+      expect(executor.hasUncertainShutdown()).toBe(false);
+    } finally { vi.useRealTimers(); }
+  });
 
   it('destroy rejects queued commands and never respawns', async () => {
     const p1 = executor.execute('first');
@@ -1388,7 +1584,8 @@ describe('AgyExecutor', () => {
     await waitForSpawn();
     emitInit();
 
-    await executor.abort();
+    proc.kill.mockImplementation(() => true);
+    const aborting = executor.abort();
     const killCalls = proc.kill.mock.calls;
     expect(killCalls.length).toBe(1); // SIGTERM (default signal)
 
@@ -1398,6 +1595,8 @@ describe('AgyExecutor', () => {
 
     await p;
     proc.emit('exit', null, 'SIGKILL');
+    proc.emit('close', null, 'SIGKILL');
+    await aborting;
   });
 
   it('does not SIGKILL when the process exits promptly after SIGTERM', async () => {
@@ -1718,8 +1917,8 @@ describe('createExecutor factory - agy backend', () => {
     const p: any = new EventEmitter();
     p.stdout = new EventEmitter();
     p.stderr = new EventEmitter();
-    p.stdin = { write: vi.fn(), end: vi.fn() };
-    p.kill = vi.fn();
+    p.stdin = Object.assign(new EventEmitter(), { write: vi.fn(), end: vi.fn() });
+    p.kill = vi.fn(() => { p.emit('exit', 0, null); p.emit('close', 0, null); return true; });
     return p;
   };
 

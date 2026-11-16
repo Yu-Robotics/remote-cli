@@ -37,12 +37,15 @@ function command(name: string, args: Record<string, unknown>): ScheduleOperation
     return { kind: 'cleanup-confirm', token: args.token, requestId: args.requestId as string, ids: args.nativeIds };
   }
   if (name === 'remote_cli_schedule_purge') {
-    keys(args, ['requestId', 'scheduleIds', 'all']);
+    keys(args, ['requestId', 'scheduleIds', 'all', 'forgetUnresolved']);
+    if (args.forgetUnresolved !== undefined && (args.forgetUnresolved !== true || args.all !== undefined))
+      throw new Error('Forgetting unresolved cleanup requires exact scheduleIds and forgetUnresolved: true.');
     if (args.all === true && args.scheduleIds === undefined) return { kind: 'purge', selection: { all: true } };
     if (args.all !== undefined || !Array.isArray(args.scheduleIds) || !args.scheduleIds.length || args.scheduleIds.length > 500) throw new Error('Select exact managed scheduleIds or all: true.');
     args.scheduleIds.forEach(validateScheduleId);
     if (new Set(args.scheduleIds).size !== args.scheduleIds.length) throw new Error('Duplicate purge IDs.');
-    return { kind: 'purge', selection: { ids: args.scheduleIds } };
+    return { kind: 'purge', selection: { ids: args.scheduleIds,
+      ...(args.forgetUnresolved === true ? { forgetUnresolved: true } : {}) } };
   }
   if (name === 'remote_cli_schedule_cleanup_review') { keys(args, ['requestId']); return { kind: 'cleanup-review' }; }
   if (name === 'remote_cli_schedule_list') { keys(args, ['requestId']); return { kind: 'list' }; }

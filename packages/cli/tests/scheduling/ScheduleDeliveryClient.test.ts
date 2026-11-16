@@ -53,10 +53,10 @@ describe('ScheduleDeliveryClient', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it('labels DSH results with their captured backend and rejects unsupported metadata', async () => {
-    delivery.schedule.backend = 'dsh';
+  it.each(['dsh', 'agy'] as const)('labels %s results with their captured backend and rejects unsupported metadata', async backend => {
+    delivery.schedule.backend = backend;
     const pending = client.deliver(delivery, 'Original thread');
-    expect(ws.send.mock.calls.map(([frame]) => frame.queueStarted.backend)).toEqual(['dsh', 'dsh']);
+    expect(ws.send.mock.calls.map(([frame]) => frame.queueStarted.backend)).toEqual([backend, backend]);
     ack(delivery.id); await pending;
     ws.send.mockClear();
     (delivery.schedule as { backend: string }).backend = 'codex';

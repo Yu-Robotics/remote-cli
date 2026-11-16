@@ -24,6 +24,10 @@ function fixture(backend: 'claude' | 'dsh' = 'claude') {
 }
 
 describe('deletion-only schedule selectors', () => {
+  it('never treats AGY as the DSH recovery provider when deriving deletion attribution', () => {
+    const f = fixture('dsh'); f.record.backend = 'agy';
+    expect(cleanupRecord(f.record, 'unattributed').attribution).toBeUndefined();
+  });
   it.each(['claude', 'dsh'] as const)('retains only operational %s fields and a digest', backend => {
     const f = fixture(backend);
     expect(f.receipt.attribution?.sessionId).toBe('session');

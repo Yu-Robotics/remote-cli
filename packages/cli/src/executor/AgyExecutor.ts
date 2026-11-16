@@ -1,3 +1,7 @@
+import { AgyCheckpoint, definitionDigest, scheduleDigest, type AgyCheckpointData, type AgyResumePermit } from '../scheduling/agy/AgyCheckpoint';
+import type { NativeScheduleRecovery } from '../scheduling/types';
+import { AgyAcpRuntime } from './agy/AgyAcpRuntime';
+import type { NativeScheduleInput, NativeScheduleEvent, NativeScheduleHandle } from '../scheduling/types';
 import { spawnManaged } from './ManagedSpawn';
 import { ownedSpawn as spawn } from '../delegation/OwnershipRuntime';
 import { execFile, ChildProcess } from 'child_process';
@@ -13,13 +17,15 @@ import { COMPACT_HANDOFF_PROMPT, seedPromptWithHandoff } from './compactHandoff'
 import { stripAnsi } from '../utils/stripAnsi';
 import { assertWorkingDirectoryExists } from '../utils/WorkingDirectory';
 import { configureAgyDelegation } from './agy/AgyDelegationConfig';
-import { delegationEnvironment, sameConnection, type DelegationConnection } from '../delegation/contract';
+import { delegationSessionServers, delegationEnvironment, sameConnection, type DelegationConnection } from '../delegation/contract';
 import { ActivityTracker, sanitizeActivityText } from './Activity';
 import { parseAgyModels } from './agy/AgyModels';
 import type { AgyDeletionTarget } from '../delegation/AgySessionDeletion';
 import type { NativeDirectoryIdentity } from '../delegation/NativeSessionDeletion';
 
 export interface AgyExecutorOptions {
+  /** Production ACP entry, including clean original-session checkpoints. Unattested saved sessions and managed workers remain compatible. */
+  nativeAcp?: boolean;
   /** Model slug passed as --model. Leave unset to use agy's default. */
   model?: string;
   /** Reasoning effort passed as --effort. Leave unset to use agy's default. */
@@ -127,7 +133,9 @@ export { parseAgyModels };
  * IExecutor implementation for the Antigravity CLI (`agy`) — Google's
  * agentic CLI from the Antigravity suite.
  *
- * agy speaks a Claude-Code-style stream-json protocol: one persistent
+ * Fresh production conversations use AgyAcpRuntime for shared native scheduling.
+ * Saved conversations and managed workers retain the compatible transport below.
+ * The legacy path speaks a Claude-Code-style stream-json protocol: one persistent
  * process per conversation, NDJSON prompts in on stdin
  * ({"event":"user","message":{"content":"..."}}), NDJSON events out on
  * stdout (init / step_update / result). Conversations survive process
@@ -184,7 +192,12 @@ export class AgyExecutor implements IExecutor {
   private readonly managedProcesses = new WeakSet<ChildProcess>();
   private readonly workerGroups = new ManagedProcessGroups();
   private delegationConfigured = false;
+  private configuringTools = false;
   private readonly pendingExits = new Set<Promise<void>>();
+  /** A timeout is not exit evidence. Only an explicit joined retirement clears it. */
+  private shutdownUncertain = false;
+  /** Invalidates prompts waiting for a predecessor when abort/reset retires their context. */
+  private contextRevision = 0;
   /** Handoff summary from compactWhenFull, wrapped into the next prompt (consumed once). */
   private pendingContextSeed: string | null = null;
   private readonly activityTracker = new ActivityTracker();
@@ -198,9 +211,139 @@ export class AgyExecutor implements IExecutor {
   private preexistingNativeIds = new Set<string>();
   private observedNativeIds = new Set<string>();
   private resettingNativeContext = false;
+  private acp?: AgyAcpRuntime;
+  private acpEligible = false;
+  private acpLeaseUnconfirmed = false;
+  private readonly nativeAcp: boolean;
+  private resumePermit?: AgyResumePermit;
+  private restoringCheckpoint?: AgyCheckpointData;
+  private cleanCheckpoint(): AgyCheckpointData | undefined {
+    try { const value = this.checkpoint().read(); return value?.state === 'clean' ? value : undefined; }
+    catch { return; } // Incompatible proof never grants admission or breaks legacy chat.
+  }
+  private resumeCleanChat(): void {
+    if (this.acp || this.resumePermit || this.proc || this.acpLeaseUnconfirmed || this.scheduleOwner?.retired === false || !this.conversationId) return;
+    const proof = this.cleanCheckpoint();
+    if (proof?.sessionId === this.conversationId && Object.keys(proof.jobs).length === 0) {
+      this.resumePermit = this.checkpoint().consume(this.conversationId);
+      if (this.scheduleOwner) {
+        fs.rmSync(this.sessionFilePath + '.native-schedules', { force: true });
+        this.scheduleOwner = undefined;
+      }
+    }
+  }
+  private recoveryIdentity(): string { return JSON.stringify({ sessionId: this.conversationId, configuration: this.checkpoint().configuration }); }
+  private checkpoint(): AgyCheckpoint {
+    return new AgyCheckpoint(this.sessionFilePath + '.checkpoint', definitionDigest([this.threadId, this.currentWorkingDirectory, this.agyCommand, this.model ?? null, this.effort ?? null, this.autoApprove]));
+  }
+  get nativeScheduleRecovery(): NativeScheduleRecovery | undefined {
+    if (!this.nativeAcp || !this.threadId || this.delegationWorker) return;
+    return {
+      provider: 'agy-before-first-wake-v1', strategy: 'reconstruct', orderlyOnly: true,
+      describe: () => this.recoveryIdentity(),
+      finishRestart: async () => {
+        if (!this.acp?.checkpointClean) throw new Error('AGY exact deadline-bounded handoff is not clean.');
+        await this.acp.close(); this.acp = undefined; this.restoringCheckpoint = undefined;
+      },
+      reconcile: async (record, context, emit) => {
+        const checkpoint = this.checkpoint();
+        if (record.rule.kind === 'once' && Date.parse(record.rule.at) <= Date.now()) throw new Error('Expired AGY one-shot will not be reconstructed.');
+        if (record.recovery?.handoff !== 'clean' || record.recovery.identity !== this.recoveryIdentity()
+          || !context.isCurrent() || context.signal.aborted || record.cancelRequested) throw new Error('AGY clean recovery ownership changed.');
+        const input: NativeScheduleInput = { id: record.id, backend: record.backend, threadId: record.threadId, cwd: record.cwd,
+          prompt: record.prompt, rule: record.rule, ...record.execution, recovery: record.recovery };
+        const proof = this.restoringCheckpoint ?? checkpoint.read();
+        if (!proof || proof.jobs[record.id] !== scheduleDigest(input)) throw new Error('AGY definition has no exact handoff proof.');
+        if (!this.restoringCheckpoint) {
+          if (this.acp || this.proc || this.acpLeaseUnconfirmed || this.scheduleOwner?.retired === false) throw new Error('AGY predecessor retirement is not confirmed.');
+          this.resumePermit = checkpoint.consume(this.conversationId!);
+          this.restoringCheckpoint = proof;
+          this.acp = undefined;
+        }
+        // Consume per-job proof before mutation. A partial restore is not a retry permit.
+        delete this.restoringCheckpoint.jobs[record.id];
+        return this.createNativeSchedule(input, emit, () => context.isOwnerCurrent?.() ?? context.isCurrent(), context.canAdmitOccurrence);
+      },
+    };
+  }
+  private scheduleOwner?: { sessionId: string; hostId: string; retired: boolean };
+
+  private writeNativeState(file: string, data: unknown): void {
+    const temporary = file + '.tmp';
+    const fd = fs.openSync(temporary, 'w', 0o600);
+    try { fs.writeFileSync(fd, JSON.stringify(data)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    fs.renameSync(temporary, file);
+  }
+  private assertNoRetainedSchedules(): void {
+    if (this.acp?.hasJobs || this.scheduleOwner?.sessionId === this.conversationId) {
+      throw new Error('AGY native notifications may remain queued. Reconfiguration/recovery of this conversation is unavailable; keep its schedule evidence and use a new thread.');
+    }
+  }
+  private assertScheduleResettable(): void {
+    if (fs.existsSync(this.sessionFilePath + '.checkpoint.lock')) throw new Error('AGY checkpoint transition is unconfirmed; retained state cannot be discarded.');
+    if (this.acpLeaseUnconfirmed && !this.acp) throw new Error('Previous AGY ACP host retirement is unconfirmed; retained session and hook evidence cannot be discarded.');
+    if (this.scheduleOwner?.sessionId === this.conversationId && !this.scheduleOwner.retired) {
+      throw new Error('AGY native notifications have unresolved ownership; confirm exact host retirement before explicitly discarding this context.');
+    }
+  }
+  async stopForContextReset(): Promise<void> {
+    if (this.acp) await this.acp.close();
+    else await this.abort();
+  }
+  private acpRuntime(): AgyAcpRuntime {
+    if (this.acp) return this.acp;
+    this.resumeCleanChat();
+    if (((!this.acpEligible || this.conversationId) && !this.resumePermit) || !this.agyHome || !this.threadId || this.proc || this.isDestroyed) {
+      throw new Error('AGY scheduling requires a fresh ACP conversation. This saved/legacy conversation remains on its compatible transport; use a new AGY thread.');
+    }
+    const env = this.buildEnv();
+    // Both native HOME conventions must point to this thread on every platform.
+    env.HOME = this.agyHome; env.USERPROFILE = this.agyHome;
+    this.acp = new AgyAcpRuntime({ command: this.agyCommand, home: this.agyHome,
+      cwd: this.currentWorkingDirectory, threadId: this.threadId, model: this.model, effort: this.effort,
+      autoApprove: this.autoApprove, env, checkpoint: this.checkpoint(), resume: this.resumePermit, mcpServers: delegationSessionServers(this.delegationConnection), mapTool: mapAgyTool,
+      saveSession: id => {
+        // Unlike legacy best-effort persistence, native scheduling cannot proceed
+        // without an original-session pointer on disk.
+        this.writeNativeState(this.sessionFilePath, { id, transport: 'acp', retired: false, savedAt: new Date().toISOString() });
+        this.conversationId = id; this.acpLeaseUnconfirmed = true;
+      },
+      retireSession: id => {
+        this.writeNativeState(this.sessionFilePath, { id, transport: 'acp', retired: true, savedAt: new Date().toISOString() });
+        this.acpLeaseUnconfirmed = false;
+      },
+      retainScheduleOwner: (sessionId, hostId, retired) => {
+        const owner = { sessionId, hostId, retired };
+        const file = this.sessionFilePath + '.native-schedules';
+        this.writeNativeState(file, owner); this.scheduleOwner = owner;
+      },
+    });
+    this.resumePermit = undefined;
+    return this.acp;
+  }
+  async withNativeScheduleOperation<T>(id: string, current: () => boolean, run: () => Promise<T>, inTurn: boolean): Promise<T> {
+    if (this.configuringTools || this.resettingNativeContext || this.shutdownUncertain) throw new Error('AGY context transition is pending.');
+    return this.acpRuntime().withOperation(id, current, run, inTurn);
+  }
+  nativeScheduleAction(id: string) { return this.acp?.action(id); }
+  async createNativeSchedule(input: NativeScheduleInput, emit: (event: NativeScheduleEvent) => void | Promise<void>,
+    current: () => boolean = () => true, admit: () => boolean = () => true): Promise<NativeScheduleHandle> {
+    if (input.cwd !== this.currentWorkingDirectory || input.threadId !== this.threadId || input.model !== this.model || input.effort !== this.effort) {
+      throw new Error('AGY schedule configuration does not match the original session.');
+    }
+    const runtime = this.acpRuntime();
+    await runtime.start();
+    if (input.recovery) input = { ...input, recovery: { ...input.recovery, identity: this.recoveryIdentity() } };
+    return runtime.create(input, emit, () => !this.isDestroyed && current() && admit());
+  }
+  preservesProcessOnAbort(): boolean { return !!this.acp; }
+  hasPendingCancellation(): boolean { return !!this.acp?.hasJobs && !!this.acp.blocked; }
+  hasPendingScheduleMutation(): boolean { return this.acp?.pendingMutation ?? false; }
+
 
   constructor(directoryGuard: DirectoryGuard, options: AgyExecutorOptions = {}) {
     this.directoryGuard = directoryGuard;
+    this.nativeAcp = options.nativeAcp === true && !options.delegationWorker && options.autoApprove !== false;
     this.model = options.model;
     this.effort = options.effort;
     this.autoApprove = options.autoApprove ?? true;
@@ -233,6 +376,16 @@ export class AgyExecutor implements IExecutor {
       this.sessionFilePath = path.join(this.currentWorkingDirectory, '.agy-session');
     }
     this.loadConversationId();
+    this.acpEligible = this.nativeAcp && !!this.threadId && !this.conversationId;
+    try {
+      if (!fs.existsSync(this.sessionFilePath + '.native-schedules')) return;
+      const owner = JSON.parse(fs.readFileSync(this.sessionFilePath + '.native-schedules', 'utf8'));
+      if (typeof owner.sessionId !== 'string' || typeof owner.hostId !== 'string' || typeof owner.retired !== 'boolean') throw new Error('Invalid AGY schedule owner.');
+      if (!this.conversationId) throw new Error('Missing original AGY schedule conversation pointer.');
+      this.scheduleOwner = owner;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('AGY schedule ownership journal is unreadable; admission is blocked.');
+    }
   }
 
   // ─── Per-thread HOME isolation ────────────────────────────────────────────
@@ -322,19 +475,25 @@ export class AgyExecutor implements IExecutor {
   }
 
   async configureDelegation(connection?: DelegationConnection): Promise<void> {
+    if (this.configuringTools) throw new Error('AGY managed-tool configuration is already in progress');
     if (this.delegationConfigured && sameConnection(this.delegationConnection, connection)) return;
-    if (this.isProcessing) throw new Error('Cannot change delegation during an active turn');
+    if (this.isProcessing || this.resettingNativeContext) throw new Error('Cannot change delegation during an active turn or context reset');
     if (!this.agyHome) {
       if (connection) throw new Error('AGY delegation requires a thread-scoped HOME');
       return;
     }
-    this.killProcess();
-    await this.waitForExit();
-    if (this.isDestroyed) throw new Error('Executor has been destroyed');
-    this.ensureThreadHome();
-    await configureAgyDelegation(this.agyCommand, this.agyHome, !!connection);
-    this.delegationConnection = connection;
-    this.delegationConfigured = true;
+    if (!this.cleanCheckpoint()) this.assertNoRetainedSchedules();
+    this.configuringTools = true;
+    try {
+      if (this.acp) { await this.acp.close(); this.acp = undefined; this.acpEligible = false; }
+      this.killProcess();
+      await this.waitForExit();
+      if (this.isDestroyed) throw new Error('Executor has been destroyed');
+      this.ensureThreadHome();
+      await configureAgyDelegation(this.agyCommand, this.agyHome, !!connection);
+      this.delegationConnection = connection;
+      this.delegationConfigured = true;
+    } finally { this.configuringTools = false; }
   }
 
   async getAccountUsage(): Promise<string | null> {
@@ -380,7 +539,12 @@ export class AgyExecutor implements IExecutor {
   }
 
   isBusy(): boolean {
-    return this.isProcessing || this.activeCommand !== null || this.commandQueue.length > 0;
+    return !!this.acp?.busy || this.isProcessing || this.activeCommand !== null || this.commandQueue.length > 0
+      || this.resettingNativeContext || this.configuringTools || this.shutdownUncertain || !this.proc && this.pendingExits.size > 0;
+  }
+
+  hasUncertainShutdown(): boolean {
+    return this.shutdownUncertain;
   }
 
   async setWorkingDirectory(targetPath: string): Promise<void> {
@@ -392,31 +556,69 @@ export class AgyExecutor implements IExecutor {
   }
 
   async resetContext(): Promise<void> {
-    this.killProcess();
-    // /clear means a real fresh start — drop any carried-over compact seed
-    this.pendingContextSeed = null;
+    if (this.resettingNativeContext || this.configuringTools) throw new Error('AGY context reset or managed-tool configuration is already in progress');
+    this.assertScheduleResettable();
     this.resettingNativeContext = true;
+    this.contextRevision++;
     try {
+      if (this.acp) { await this.acp.close(); this.acp = undefined; }
+      this.killProcess();
+      await this.waitForExit();
       // Keep the old pointer until admitted observations finish. The caller must await reset.
       if (this.nativeObserver) await this.nativeReceiptOperations;
-      this.clearConversationId();
+      this.shutdownUncertain = false;
+      // /clear means a real fresh start. Do not erase resume evidence before exit.
+      this.pendingContextSeed = null;
+      this.clearConversationId(); this.acpLeaseUnconfirmed = false;
+      this.resumePermit = undefined; this.restoringCheckpoint = undefined;
+      fs.rmSync(this.sessionFilePath + '.checkpoint', { force: true });
+      if (this.scheduleOwner?.retired) { fs.rmSync(this.sessionFilePath + '.native-schedules', { force: true }); this.scheduleOwner = undefined; }
+      this.acpEligible = this.nativeAcp && !!this.threadId;
     } finally { this.resettingNativeContext = false; }
   }
 
   async abort(): Promise<boolean> {
-    if (!this.proc || !this.activeCommand) return false;
+    if (this.acp) {
+      const runtime = this.acp;
+      const cancelled = await runtime.abort();
+      // No managed native definitions/notifications have ever been admitted:
+      // ordinary abort may retire the host and resume the SAME saved conversation
+      // on its compatible transport. Scheduled sessions remain visibly fenced.
+      if (!runtime.hasJobs && (cancelled || runtime.blocked)) {
+        await runtime.close(); this.acp = undefined; this.acpEligible = false;
+      }
+      return cancelled;
+    }
+    const retiring = this.pendingExits.size > 0 && !this.proc;
+    if (!this.activeCommand && !this.isProcessing && !retiring && !this.shutdownUncertain) return false;
 
     // agy's stream-json protocol has no cancel request (control_request is
     // explicitly unsupported), so abort = kill the process. The conversation
     // id survives, so the next command resumes context.
     console.log('[AgyExecutor] Aborting: killing agy process');
+    this.contextRevision++;
     this.killProcess('Aborted by user');
+    await this.waitForExit();
+    this.shutdownUncertain = false;
     return true;
   }
 
+  abortStatusMessage(): string {
+    if (this.acp?.continuationSucceeded) return 'AGY foreground cancelled; eligible future schedules resumed automatically in the same conversation after deadline-bounded predecessor retirement.';
+    if (this.acp?.hasJobs && this.acp.blocked) return 'AGY foreground cancelled; native timers may still queue reminders. Dispatch is blocked. Original schedule ownership and recovery evidence are retained; use /schedule list. Uncertain work will not be replayed.';
+    if (this.acp?.hasJobs) return 'No foreground command was cancelled. Native schedules remain on their current host.';
+    return 'AGY stream-json abort stops its host. Conversation context can resume after confirmed exit; native session-only timers are not restored.';
+  }
+
   async destroy(): Promise<void> {
-    if (this.isDestroyed) return;
+    if (this.isDestroyed) {
+      if (this.acp) await this.acp.close();
+      await this.waitForExit();
+      return;
+    }
     this.isDestroyed = true;
+    this.contextRevision++;
+    if (this.acp) await this.acp.close();
 
     // Reject everything still queued — nothing may respawn after destroy
     const queued = this.commandQueue.splice(0);
@@ -431,6 +633,7 @@ export class AgyExecutor implements IExecutor {
       } catch { /* already closed */ }
     }
     this.killProcess('Executor destroyed');
+    await this.waitForExit();
     if (this.nativeObserver) await this.nativeReceiptOperations;
     if (this.agyHome && this.delegationConnection) {
       await configureAgyDelegation(this.agyCommand, this.agyHome, false);
@@ -456,6 +659,9 @@ export class AgyExecutor implements IExecutor {
       await Promise.race([Promise.all(this.pendingExits), new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new Error('AGY process exit could not be confirmed')), this.killEscalationMs + 5_000);
       })]);
+    } catch (error) {
+      this.shutdownUncertain = true;
+      throw error;
     } finally { if (timer) clearTimeout(timer); }
   }
 
@@ -466,7 +672,7 @@ export class AgyExecutor implements IExecutor {
   }
 
   isProcessRunning(): boolean {
-    return this.proc !== null;
+    return !!this.acp?.running || this.proc !== null;
   }
 
   getSessionId(): string | null {
@@ -486,6 +692,8 @@ export class AgyExecutor implements IExecutor {
    * passes it back via the factory on restarts.
    */
   async setModel(model: string, _onStream?: (chunk: string) => void): Promise<ExecuteResult> {
+    this.assertNoRetainedSchedules();
+    if (this.acp) { if (this.acp.busy) throw new Error('AGY is busy.'); await this.acp.close(); this.acp = undefined; this.acpEligible = false; }
     this.model = model;
     if (this.proc && !this.activeCommand) {
       console.log(`[AgyExecutor] Model set to ${model} — recycling idle process (conversation preserved)`);
@@ -511,6 +719,8 @@ export class AgyExecutor implements IExecutor {
       };
     }
 
+    this.assertNoRetainedSchedules();
+    if (this.acp) { if (this.acp.busy) throw new Error('AGY is busy.'); await this.acp.close(); this.acp = undefined; this.acpEligible = false; }
     this.effort = normalized === 'auto' ? undefined : normalized;
     if (this.proc && !this.activeCommand) {
       console.log(`[AgyExecutor] Reasoning effort set to ${normalized} — recycling idle process (conversation preserved)`);
@@ -530,7 +740,9 @@ export class AgyExecutor implements IExecutor {
     };
   }
 
-  clearModel(): void {
+  async clearModel(): Promise<void> {
+    this.assertNoRetainedSchedules();
+    if (this.acp) { if (this.acp.busy) throw new Error('AGY is busy.'); await this.acp.close(); this.acp = undefined; this.acpEligible = false; }
     this.model = undefined;
     if (this.proc && !this.activeCommand) {
       this.killProcess();
@@ -588,6 +800,7 @@ export class AgyExecutor implements IExecutor {
    * a plain reset and say so honestly.
    */
   async compactWhenFull(onStream?: (chunk: string) => void): Promise<ExecuteResult> {
+    this.assertNoRetainedSchedules();
     if (!this.proc && !this.conversationId) {
       return { success: true, output: 'No active conversation to compact.' };
     }
@@ -622,10 +835,13 @@ export class AgyExecutor implements IExecutor {
    * HOMEs) is left untouched.
    */
   async deleteThreadData(_threadId: string): Promise<void> {
+    this.assertScheduleResettable();
     await this.destroy();
     // Managed lanes retain brain deliverables and recovery evidence. Parent reset owns history cleanup.
     if (this.delegationWorker) return;
     this.clearConversationId();
+    fs.rmSync(this.sessionFilePath + '.checkpoint', { force: true });
+    if (this.scheduleOwner?.retired) fs.rmSync(this.sessionFilePath + '.native-schedules', { force: true });
     if (this.agyHome) {
       fs.rmSync(this.agyHome, { recursive: true, force: true });
     }
@@ -651,25 +867,57 @@ export class AgyExecutor implements IExecutor {
     }
   }
 
-  private executeQueued(prompt: string, options: ExecuteOptions): Promise<ExecuteResult> {
+  private async executeQueued(prompt: string, options: ExecuteOptions): Promise<ExecuteResult> {
+    if (options.attachments?.length && !this.attachmentWarningShown) {
+      this.attachmentWarningShown = true;
+      console.warn('[AgyExecutor] AGY input supports text only — attachments were dropped');
+    }
+
+    this.resumeCleanChat();
+    if (!this.acp && this.acpLeaseUnconfirmed) throw new Error('Previous AGY ACP host or hook restoration is unconfirmed. No saved conversation was resumed; retain its state for explicit recovery.');
+    if (!this.acp && this.scheduleOwner?.sessionId === this.conversationId) {
+      throw new Error('AGY native schedules from this saved conversation require unresolved queue recovery. No prompt was sent. Use /schedule list; automatic reconstruction is unavailable.');
+    }
+    if (this.acp || this.acpEligible || this.resumePermit) {
+      const runtime = this.acpRuntime();
+      // Do not silently abandon a newly allocated ACP conversation on error.
+      try { await runtime.start(); }
+      catch (error) {
+        if (runtime.safeFallback && !this.conversationId) {
+          this.acp = undefined; this.acpEligible = false;
+          console.warn('[AgyExecutor] Native ACP initialization unavailable; using compatible transport without scheduling.');
+          return this.executeQueued(prompt, options);
+        }
+        throw error;
+      }
+      if (this.pendingContextSeed) {
+        const seed = this.pendingContextSeed; this.pendingContextSeed = null;
+        const resolve = options.resolvePrompt;
+        options = { ...options, resolvePrompt: id => seedPromptWithHandoff(resolve?.(id) ?? prompt, seed) };
+      }
+      try { return await runtime.execute(prompt, { ...options, inactivityTimeout: options.inactivityTimeout ?? this.inactivityTimeoutMs }); }
+      finally {
+        if (!runtime.hasJobs && runtime.blocked) {
+          await runtime.close(); this.acp = undefined; this.acpEligible = false;
+        }
+      }
+    }
+
+    const revision = this.contextRevision;
+    let proc: ChildProcess;
+    try {
+      this.assertExecutionContext(revision);
+      if (!this.proc && this.pendingExits.size) await this.waitForExit();
+      proc = this.ensureProcess(revision);
+      prompt = options.resolvePrompt?.(this.conversationId) ?? prompt;
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+
     return new Promise((resolve) => {
-      if (options.attachments?.length && !this.attachmentWarningShown) {
-        this.attachmentWarningShown = true;
-        console.warn('[AgyExecutor] agy stream-json input supports text only — attachments were dropped');
-      }
-
-      let proc: ChildProcess;
-      try {
-        proc = this.ensureProcess();
-        prompt = options.resolvePrompt?.(this.conversationId) ?? prompt;
-      } catch (error) {
-        resolve({
-          success: false,
-          error: error instanceof Error ? error.message : String(error),
-        });
-        return;
-      }
-
       const active: ActiveCommand = { options, resolve, inactivityTimeoutMs: options.inactivityTimeout };
       this.activityTracker.setCallback(options.onActivity);
       this.activityTracker.reset();
@@ -769,14 +1017,28 @@ export class AgyExecutor implements IExecutor {
 
   // ─── Process lifecycle ────────────────────────────────────────────────────
 
-  private ensureProcess(): ChildProcess {
+  private assertExecutionContext(revision: number): void {
     if (this.isDestroyed) {
       throw new Error('Executor has been destroyed');
     }
-    if (this.resettingNativeContext) throw new Error('AGY context reset is still draining native receipts');
+    if (revision !== this.contextRevision || this.resettingNativeContext) throw new Error('AGY execution context retired before prompt dispatch');
+    if (this.configuringTools) throw new Error('AGY managed-tool configuration is still in progress');
+    if (this.shutdownUncertain) throw new Error('AGY process exit is unconfirmed. Retry /abort before sending more work.');
+  }
+
+  private ensureProcess(revision: number): ChildProcess {
+    this.assertExecutionContext(revision);
     assertWorkingDirectoryExists(this.currentWorkingDirectory);
     if (this.proc) return this.proc;
 
+    // Signalling, leader exit and transport close are different boundaries. The
+    // predecessor must close before a successor opens the same native database.
+    // This is a host/transport fence, not proof that escaped descendants retired.
+    if (this.pendingExits.size) throw new Error('AGY predecessor transport has not closed');
+
+    // Compatible transport can admit unobserved native work. Revoke any older
+    // clean ACP proof before spawning it, even when configuration later reverts.
+    if (this.sessionFilePath && fs.existsSync(this.sessionFilePath + '.checkpoint')) fs.rmSync(this.sessionFilePath + '.checkpoint', { force: true });
     const env = this.buildEnv();
     if (this.nativeObserver && this.agyHome) {
       const scope = path.join(this.agyHome, '.gemini', 'antigravity-cli');
@@ -833,11 +1095,10 @@ export class AgyExecutor implements IExecutor {
     proc.on('error', (error) => {
       if (proc !== this.proc) return;
       console.error('[AgyExecutor] Process error:', error);
-      this.proc = null;
       const friendly = error.message.includes('ENOENT')
         ? 'AGY CLI (agy) is not installed or not found on PATH. Install it from https://antigravity.google/cli, or use /backend to switch to another backend.'
         : `agy process error: ${error.message}`;
-      this.completeActiveCommand({ success: false, error: friendly });
+      this.killProcess(friendly);
     });
 
     proc.on('exit', (code, signal) => {
@@ -1045,10 +1306,12 @@ export class AgyExecutor implements IExecutor {
         const session = JSON.parse(data);
         if (session.id) {
           this.conversationId = session.id;
+          this.acpLeaseUnconfirmed = session.transport === 'acp' && session.retired !== true;
           console.log(`[AgyExecutor] Loaded conversation ID: ${this.conversationId}`);
         }
       }
     } catch (error) {
+      if (this.nativeAcp) throw new Error('Saved AGY conversation pointer is unreadable; no new conversation was allocated.');
       console.error('[AgyExecutor] Failed to load conversation ID:', error);
       this.conversationId = null;
     }

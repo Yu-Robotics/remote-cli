@@ -10,6 +10,14 @@ import { hasDelegationTools } from '../src/managed/contract';
 import { delegationEnvironment, sameConnection, delegationSessionServers } from '../src/delegation/contract';
 
 describe('managed tool registration', () => {
+  it('registers explicit cleanup tracking erasure separately from native deletion', () => {
+    const purge = managedTools({ url: 'http://127.0.0.1:1/', token: 'fixture-token', groups: ['scheduling'] })
+      .find(tool => tool.name === 'remote_cli_schedule_purge')!;
+    expect(purge.inputSchema.properties).toHaveProperty('forgetUnresolved', expect.objectContaining({ const: true }));
+    expect(purge.description).toContain('does not verify native absence');
+    expect(purge.description).toContain('after history is removed');
+  });
+
   const bridges: ManagedToolBridge[] = [];
   afterEach(async () => { vi.unstubAllEnvs(); await Promise.all(bridges.splice(0).map(bridge => bridge.close())); });
   it.each([ClaudePersistentExecutor, CodexAppServerExecutor, AcpExecutor, AgyExecutor, PiExecutor])('refuses control registration in managed child workers (%s)', async Executor => {

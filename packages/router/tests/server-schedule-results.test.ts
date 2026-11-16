@@ -21,7 +21,7 @@ type TestSocket = EventEmitter & {
   readyState: number;
 };
 
-describe.each(['claude', 'dsh'])('Scheduled %s result delivery', backend => {
+describe.each(['claude', 'dsh', 'agy'])('Scheduled %s result delivery', backend => {
   let directory: string;
   let server: RouterServer;
   let wss: EventEmitter;

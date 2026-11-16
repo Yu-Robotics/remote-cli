@@ -6,7 +6,8 @@ import { ClaudePersistentExecutor } from '../src/executor/ClaudePersistentExecut
 import { DirectoryGuard } from '../src/security/DirectoryGuard';
 import { ScheduleToolOperations } from '../src/scheduling/ScheduleToolScope';
 import { SCHEDULE_HOOK } from '../src/scheduling/claude/ClaudeSessionSchedules';
-import type { NativeScheduleInput } from '../src/scheduling/types';
+import { NativeScheduleCleanupError, NativeScheduleNotAdmittedError, type NativeScheduleInput } from '../src/scheduling/types';
+import { ScheduleService, SCHEDULE_CATALOG_FILE } from '../src/scheduling/ScheduleService';
 import { claudeCodeHooks } from '../src/hooks/ClaudeCodeHooks';
 
 /** In-memory native transport only. No backend executable or model is invoked. */
@@ -36,6 +37,9 @@ describe('Claude shared foreground scheduling integration', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     executor = new ClaudePersistentExecutor(new DirectoryGuard([root]), root, 'synthetic-thread');
     raw = executor as any; wire = []; nativeTools = []; nativeSettings = { effective: { env: {} }, sources: [] };
+    vi.spyOn(raw, 'startProcessImpl').mockImplementation(async () => {
+      if (!raw.claudeProcess) throw new Error('Unexpected native process launch in synthetic test');
+    });
     raw.sessionId = 'original-native-session';
     // This fixture injects the resumed host instead of executing startProcess.
     raw.scheduleGuardRequired = true;
@@ -259,11 +263,104 @@ describe('Claude shared foreground scheduling integration', () => {
     const input: NativeScheduleInput = { id: 'rejected', cwd: root, prompt: 'Synthetic',
       rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } };
     vi.spyOn(raw.sandbox, 'isRestricted').mockReturnValue(true);
-    await expect(executor.createNativeSchedule(input, vi.fn())).rejects.toThrow('sandbox');
+    const restricted = executor.createNativeSchedule(input, vi.fn());
+    await expect(restricted).rejects.toThrow('sandbox');
+    await expect(restricted).rejects.toBeInstanceOf(NativeScheduleNotAdmittedError);
     vi.spyOn(raw.sandbox, 'isRestricted').mockReturnValue(false); raw.delegationWorker = true;
     await expect(executor.withNativeScheduleOperation('worker', () => true, async () => {}, true)).rejects.toThrow('owner');
-    await expect(executor.createNativeSchedule(input, vi.fn())).rejects.toThrow('sandbox');
+    const worker = executor.createNativeSchedule(input, vi.fn());
+    await expect(worker).rejects.toThrow('sandbox');
+    await expect(worker).rejects.toBeInstanceOf(NativeScheduleNotAdmittedError);
     raw.delegationWorker = false; expect(nativeTools).toHaveLength(0);
+  });
+
+  it.each(['scheduleRestart', 'modelChange', 'isDestroyed', 'isStopping', 'hooks', 'cwd', 'protocol', 'ownership', 'model-race'])(
+    'refuses %s before calling the session adapter or admitting an occurrence', async reason => {
+      const input: NativeScheduleInput = { id: 'refused', cwd: root, prompt: 'Synthetic',
+        rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } };
+      const create = vi.spyOn(raw.sessionSchedules, 'create');
+      const admit = vi.fn(() => true); const events = vi.fn();
+      const original = { scheduleRestart: raw.scheduleRestart, modelChange: raw.modelChange,
+        isDestroyed: raw.isDestroyed, isStopping: raw.isStopping, scheduleHooksReady: raw.scheduleHooksReady };
+      if (['scheduleRestart', 'modelChange', 'isDestroyed', 'isStopping'].includes(reason)) raw[reason] = true;
+      if (reason === 'hooks') raw.scheduleHooksReady = false;
+      if (reason === 'cwd') input.cwd = path.join(root, 'different-directory');
+      if (reason === 'protocol' || reason === 'ownership') {
+        input.recovery = { version: 1, provider: 'fixture', strategy: 'reconstruct', identity: '{}' };
+        vi.spyOn(raw.turnLedger, 'supported').mockReturnValue(reason === 'ownership');
+        if (reason === 'ownership') vi.spyOn(raw, 'scheduleHostOwnership').mockReturnValue({
+          reserve: () => { throw new Error('Synthetic ownership reservation refused'); },
+        });
+      }
+      if (reason === 'model-race') vi.spyOn(raw, 'readNativeScheduleTimezone').mockImplementation(async () => {
+        raw.modelChange = true; return 'UTC';
+      });
+      try {
+        await expect(executor.createNativeSchedule(input, events, () => true, admit)).rejects.toBeInstanceOf(NativeScheduleNotAdmittedError);
+        expect(create).not.toHaveBeenCalled(); expect(admit).not.toHaveBeenCalled(); expect(events).not.toHaveBeenCalled();
+        expect(nativeTools).toEqual([]); expect(wire.filter(row => row.type === 'user')).toEqual([]);
+      } finally { Object.assign(raw, original); }
+    });
+
+  it.each(['unavailable', 'write-throw', 'write-callback', 'timeout', 'host-changed'])(
+    'classifies %s timezone preflight failure as never admitted', async reason => {
+      vi.useFakeTimers();
+      const child = raw.claudeProcess;
+      const create = vi.spyOn(raw.sessionSchedules, 'create');
+      if (reason === 'unavailable') child.stdin.writable = false;
+      else child.stdin.write.mockImplementation((line: string, callback?: (error?: Error) => void) => {
+        if (reason === 'write-throw') throw new Error('Synthetic settings write failed');
+        if (reason === 'write-callback') callback?.(new Error('Synthetic settings write failed'));
+        if (reason === 'host-changed') {
+          raw.claudeProcess = { ...child };
+          raw.pendingControlRequests.get(JSON.parse(line).request_id).resolve(nativeSettings);
+        }
+        return true;
+      });
+      try {
+        const failure = executor.createNativeSchedule({ id: 'timezone-refused', cwd: root, prompt: 'Synthetic',
+          rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } }, vi.fn()).catch(error => error);
+        if (reason === 'timeout') await vi.advanceTimersByTimeAsync(10_001);
+        expect(await failure).toBeInstanceOf(NativeScheduleNotAdmittedError);
+        expect(create).not.toHaveBeenCalled(); expect(raw.pendingControlRequests.size).toBe(0);
+        expect(nativeTools).toEqual([]);
+      } finally { raw.claudeProcess = child; child.stdin.writable = true; vi.useRealTimers(); }
+    });
+
+  it('persists an actual timezone refusal so history purge needs no invented native absence', async () => {
+    nativeSettings = {};
+    const directory = path.join(root, 'synthetic-schedule-catalog');
+    const options = { directory, provider: { create: (input: NativeScheduleInput, emit: any, admit?: () => boolean) =>
+      executor.createNativeSchedule(input, emit, undefined, admit) }, deliver: vi.fn(async () => {}), isOwnerCurrent: () => true };
+    const owner = { threadId: 'synthetic-thread', openId: 'synthetic-owner', generation: 'epoch' };
+    const service = new ScheduleService(options);
+    let restored: ScheduleService | undefined;
+    const create = vi.spyOn(raw.sessionSchedules, 'create');
+    try {
+      await service.initialize();
+      await expect(service.create(owner, { id: 'timezone-refused', cwd: root, prompt: 'Synthetic',
+        rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } })).rejects.toBeInstanceOf(NativeScheduleNotAdmittedError);
+      expect(await service.list(owner)).toEqual([expect.objectContaining({ creationRefused: true, state: 'failed' })]);
+      await service.destroy();
+      restored = new ScheduleService(options); await restored.initialize();
+      expect(await restored.purge(owner, { ids: ['timezone-refused'] })).toMatchObject({
+        removedIds: ['timezone-refused'], nativeCleanupUnresolved: [], errors: [],
+      });
+      expect(await restored.listCleanup(owner)).toEqual([]);
+      const catalog = JSON.parse(await fs.readFile(path.join(directory, SCHEDULE_CATALOG_FILE), 'utf8'));
+      expect(catalog.records).toEqual([]); expect(catalog.cleanup ?? []).toEqual([]);
+      expect(create).not.toHaveBeenCalled(); expect(nativeTools).toEqual([]);
+    } finally { await restored?.destroy(); await service.destroy(); }
+  });
+
+  it('preserves uncertain adapter creation errors and their original cleanup handle', async () => {
+    const handle = { nativeId: 'unconfirmed-synthetic', list: vi.fn(), cancel: vi.fn(), stop: vi.fn() };
+    const failure = new NativeScheduleCleanupError('Synthetic mutation without a receipt', handle);
+    const create = vi.spyOn(raw.sessionSchedules, 'create').mockRejectedValueOnce(failure);
+    await expect(executor.createNativeSchedule({ id: 'uncertain', cwd: root, prompt: 'Synthetic',
+      rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } }, vi.fn())).rejects.toBe(failure);
+    expect(create).toHaveBeenCalledOnce(); expect(failure.handle).toBe(handle);
+    expect(failure).not.toBeInstanceOf(NativeScheduleNotAdmittedError);
   });
 
   it('uses the effective native timezone without exposing unrelated native settings', async () => {
@@ -271,13 +368,19 @@ describe('Claude shared foreground scheduling integration', () => {
     const input: NativeScheduleInput = { id: 'timezone', cwd: root, prompt: 'Synthetic',
       rule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' } };
     await expect(executor.withNativeScheduleOperation('timezone', () => true,
-      () => executor.createNativeSchedule(input, vi.fn()), true)).rejects.toThrow('Pacific/Auckland');
+      () => executor.createNativeSchedule(input, vi.fn()), true)).rejects.toMatchObject({
+      constructor: NativeScheduleNotAdmittedError, message: expect.stringContaining('Pacific/Auckland'),
+    });
     expect(executor.nativeScheduleAction('timezone')).toBeUndefined();
     expect(console.log).not.toHaveBeenCalledWith(expect.stringContaining('do-not-forward-fixture'));
     nativeSettings = {};
-    await expect(executor.createNativeSchedule(input, vi.fn())).rejects.toThrow('timezone could not be verified');
+    const unverified = executor.createNativeSchedule(input, vi.fn());
+    await expect(unverified).rejects.toThrow('timezone could not be verified');
+    await expect(unverified).rejects.toBeInstanceOf(NativeScheduleNotAdmittedError);
     nativeSettings = { effective: { disableAllHooks: true } };
-    await expect(executor.createNativeSchedule(input, vi.fn())).rejects.toThrow('active SDK callback hooks');
+    await expect(executor.createNativeSchedule(input, vi.fn())).rejects.toMatchObject({
+      constructor: NativeScheduleNotAdmittedError, message: expect.stringContaining('active SDK callback hooks'),
+    });
     expect(nativeTools).toHaveLength(0);
   });
 
