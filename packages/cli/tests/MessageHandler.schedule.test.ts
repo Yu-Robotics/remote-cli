@@ -43,7 +43,7 @@ async function fixture() {
     getSandboxStatus: () => 'Unrestricted', configureSandbox: vi.fn(async () => ({ success: true })) };
   const pool = {
     getExistingExecutor: () => executor, getExecutor: () => executor, getBackendKey: () => backend,
-    getSummaries: () => threads.map(thread => ({ id: thread.id, name: thread.name, status: 'idle' })),
+    getSummaries: () => threads.map(thread => ({ id: thread.id, name: thread.name, status: 'idle', backend })),
     isThreadBusy: () => executorBusy, setThreadBusy: vi.fn(), setThreadError: vi.fn(), destroyAll: vi.fn(async () => {}),
     setWorkingDirectory: vi.fn(async () => ({ cwd, changed: false })),
     assertContextResettable: vi.fn(), clearThreadContext: vi.fn(async () => {}), destroyThread: vi.fn(async () => {}),
@@ -1397,9 +1397,9 @@ describe('MessageHandler native schedule closed loop', () => {
     await f.send('/schedule cron "15 9 * * 1-5" --tz Asia/Shanghai -- Return a synthetic summary');
     const job = f.jobs[0];
     f.disconnect();
-    job.emit({ type: 'completed', occurrenceId: 'shutdown-run', success: true, output: 'Retained across shutdown' });
+    await job.emit({ type: 'completed', occurrenceId: 'shutdown-run', success: true, output: 'Retained across shutdown' });
     const catalog = path.join((f.handler as any).scheduleDirectory(), SCHEDULE_CATALOG_FILE);
-    await vi.waitFor(async () => expect(JSON.parse(await readFile(catalog, 'utf8')).pending).toHaveLength(1));
+    expect(JSON.parse(await readFile(catalog, 'utf8')).pending).toHaveLength(1);
     job.handle.stop.mockImplementation(async () => {
       job.emit({ type: 'stopped', exitConfirmed: true, reason: 'Shutdown completed' });
     });
@@ -1407,10 +1407,15 @@ describe('MessageHandler native schedule closed loop', () => {
     expect(job.handle.stop).toHaveBeenCalledOnce();
     expect(JSON.parse(await readFile(catalog, 'utf8')).pending).toHaveLength(1);
     expect(f.scheduledResults()).toHaveLength(0);
+    const recover = vi.spyOn(f.handler as any, 'recoverSchedules');
     await f.reconnect();
-    await vi.waitFor(() => expect(f.scheduledResults()).toHaveLength(1));
+    expect(recover).toHaveBeenCalledOnce();
+    // A wire response precedes durable ACK settlement. Join recovery before
+    // opening the catalog so Windows readers cannot race its atomic replacement.
+    await recover.mock.results[0].value;
+    expect(f.scheduledResults()).toHaveLength(1);
     expect(f.scheduledResults()[0]).toMatchObject({ output: 'Retained across shutdown', threadId: 'thread-a' });
-    await vi.waitFor(async () => expect(JSON.parse(await readFile(catalog, 'utf8')).pending).toEqual([]));
+    expect(JSON.parse(await readFile(catalog, 'utf8')).pending).toEqual([]);
     await f.reconnect();
     await (f.handler as any).recoverSchedules();
     expect(f.scheduledResults()).toHaveLength(1);

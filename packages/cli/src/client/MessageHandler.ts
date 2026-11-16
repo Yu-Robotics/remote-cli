@@ -4347,8 +4347,10 @@ You can also use natural language commands to control Claude Code CLI.`,
       // Uncheckpointed AGY work has no queue-drain contract. Retire its exact owned
       // group before the catalog asks a handle to stop; never race a management
       // prompt against host teardown or mistake definition deletion for retirement.
-      for (const thread of this.threadManager.listThreads()) {
-        if (this.threadPool.getBackendKey(thread.id) === 'agy') {
+      // Teardown uses stored backend summaries, not execution admission. A
+      // corrupt reset generation must still block execution, but not host exit.
+      for (const thread of this.threadPool.getSummaries()) {
+        if (thread.backend === 'agy') {
           await this.threadPool.getExistingExecutor(thread.id)?.destroy();
         }
       }

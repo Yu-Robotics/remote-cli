@@ -587,7 +587,9 @@ changed settings/ownership and dirty exits remain explicitly blocked. There is n
 crash/reboot replay permission inferred from process absence. Pending native work
 still blocks automatic upgrades. Model/effort/tool changes and context deletion
 retain the existing ownership guards. Ordinary no-job abort/settings behavior
-remains compatible.
+remains compatible. From CLI 1.6.247, corrupt or unreadable reset-generation
+metadata still blocks execution but does not prevent shutdown from retiring the
+existing AGY host. Unconfirmed host exit continues to block catalog cleanup.
 
 A clean, checkpointed no-job ACP conversation automatically loads its exact saved
 ID on the next host, including its native context. Uninstrumented legacy stream-json

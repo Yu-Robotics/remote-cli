@@ -84,7 +84,7 @@ describe('Directory changes and backend session isolation', () => {
     expect(coordinator.getSessionId?.()).toBe(`old-${backend}`);
     expect(worker.getSessionId?.()).toBe(`worker-${backend}`);
     const savedCoordinator = await fs.readFile(pointerPath(backend), 'utf8');
-    worker.resetContext();
+    await worker.resetContext();
     expect(worker.getSessionId?.()).toBeNull();
     expect(coordinator.getSessionId?.()).toBe(`old-${backend}`);
     await expect(fs.access(pointerPath(backend, workerId))).rejects.toMatchObject({ code: 'ENOENT' });

@@ -41,7 +41,7 @@ describe.skipIf(process.platform === 'win32')('live discovery under an old servi
       config[backend] = { command };
     }
     const handler = new MessageHandler({ isConnected: () => false } as any,
-      { destroyAll: vi.fn() } as any, {} as any, new DirectoryGuard([f.home]),
+      { destroyAll: vi.fn(), getSummaries: () => [] } as any, {} as any, new DirectoryGuard([f.home]),
       { get: (key: string) => key === 'executor' ? config : undefined, getConfigDir: () => f.home } as any);
     handlers.push(handler);
     const mobile = await (handler as any).detectBackends();

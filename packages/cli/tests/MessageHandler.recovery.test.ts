@@ -111,6 +111,41 @@ describe('managed conversation recovery', () => {
     expect(() => loaded.getThread(sibling.id)).toThrow('generation');
   });
 
+  it.each([false, true])('retires an existing AGY host before catalog cleanup despite a corrupt generation (exit failure=%s)', async fail => {
+    await manager.updateThread(threadId, { backend: 'agy', delegation: false });
+    pool.getExecutor(threadId);
+    const generationFile = (manager.contextResets as any).file(threadId) + '.generation';
+    await fs.mkdir(path.dirname(generationFile), { recursive: true });
+    await fs.writeFile(generationFile, '{');
+    expect(() => pool.getExecutor(threadId)).toThrow('generation');
+    expect(() => pool.getBackendKey(threadId)).toThrow('generation');
+    const order: string[] = [];
+    const failure = new Error('Synthetic AGY retirement is unconfirmed');
+    vi.mocked(executor.destroy).mockImplementation(async () => {
+      order.push('host');
+      if (fail) throw failure;
+    });
+    const catalogDestroy = vi.fn(async () => { order.push('catalog'); });
+    (handler as any).scheduleInitialization = Promise.resolve({
+      requiresShutdownHandoff: () => false, destroy: catalogDestroy,
+    });
+    try {
+      if (fail) {
+        await expect(handler.destroy()).rejects.toBe(failure);
+        expect(catalogDestroy).not.toHaveBeenCalled();
+        expect(pool.getExistingExecutor(threadId)).toBe(executor);
+      } else {
+        await expect(handler.destroy()).resolves.toBeUndefined();
+        expect(order.indexOf('host')).toBeLessThan(order.indexOf('catalog'));
+        expect(pool.getExistingExecutor(threadId)).toBeUndefined();
+      }
+      expect(() => manager.getThread(threadId)).toThrow('generation');
+      expect(await fs.readFile(generationFile, 'utf8')).toBe('{');
+      expect(executor.execute).not.toHaveBeenCalled();
+      expect(executor.resetContext).not.toHaveBeenCalled();
+    } finally { vi.mocked(executor.destroy).mockResolvedValue(undefined); }
+  });
+
   it.each(['Ordinary request', '/status'])('finishes an invalidated %s waiting for abort cleanup exactly once', async content => {
     const cleanup = deferred<void>();
     (handler as any).abortOperations.set(threadId, cleanup.promise);

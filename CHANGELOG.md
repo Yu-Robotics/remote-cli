@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.247] - 2026-11-16
+
+### Fixed
+- Retire existing AGY hosts during shutdown even when a thread's reset generation is corrupt or unreadable. Use stored backend summaries only for teardown; retain execution admission checks, original context data and the requirement to confirm host retirement before schedule catalog cleanup.
+
+### Tests
+- Await asynchronous AGY context reset in backend-isolation fixtures and complete discovery/shutdown test doubles. Cover corrupt-generation shutdown and unconfirmed AGY exit without weakening lifecycle guards. Join schedule recovery and durable ACK settlement before reading the catalog in restart fixtures, avoiding concurrent readers during Windows file replacement.
+
 ## [1.6.246] - 2026-11-16
 
 ### Added
