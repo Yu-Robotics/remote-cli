@@ -1057,6 +1057,45 @@ describe('MessageHandler', () => {
   });
 
   describe('automatic update readiness', () => {
+    it('releases an update-specific fence only after service and executor readiness settle for the same generation', () => {
+      const handler = ctx.handler as any;
+      const id = 'default-thread-id';
+      const generation = handler.scheduleGeneration(id);
+      handler.automaticUpdateScheduleThreads.set(id, generation);
+      const service = {
+        hasUnresolvedHandoff: vi.fn(() => true), hasUnresolvedRecovery: vi.fn(() => false),
+        hasPendingRecovery: vi.fn(() => false), canSuspendForRestart: vi.fn(() => true),
+        hasActiveSchedules: vi.fn(() => false), recover: vi.fn(), suspendForRestart: vi.fn(),
+      };
+      handler.schedules = service;
+      const executor = { hasPendingScheduleMutation: vi.fn(() => true), hasUncertainShutdown: vi.fn(() => false) };
+      vi.spyOn(ctx.mockThreadPool, 'getExistingExecutor').mockReturnValue(executor as any);
+      expect(ctx.handler.tryBeginAutomaticUpdate()).toBe(false);
+      service.hasUnresolvedHandoff.mockReturnValue(false);
+      expect(ctx.handler.tryBeginAutomaticUpdate()).toBe(false);
+      executor.hasPendingScheduleMutation.mockReturnValue(false);
+      executor.hasUncertainShutdown.mockReturnValue(true);
+      expect(ctx.handler.tryBeginAutomaticUpdate()).toBe(false);
+      executor.hasUncertainShutdown.mockReturnValue(false);
+      handler.automaticUpdateScheduleThreads.set(id, 'different-owner-generation');
+      expect(ctx.handler.tryBeginAutomaticUpdate()).toBe(false);
+      handler.automaticUpdateScheduleThreads.set(id, generation);
+      service.hasUnresolvedRecovery.mockReturnValue(true);
+      expect(ctx.handler.tryBeginAutomaticUpdate()).toBe(false);
+      service.hasUnresolvedRecovery.mockReturnValue(false);
+      service.hasPendingRecovery.mockReturnValue(true);
+      expect(ctx.handler.tryBeginAutomaticUpdate()).toBe(false);
+      service.hasPendingRecovery.mockReturnValue(false);
+      service.canSuspendForRestart.mockReturnValue(false);
+      expect(ctx.handler.tryBeginAutomaticUpdate()).toBe(false);
+      service.canSuspendForRestart.mockReturnValue(true);
+      expect(ctx.handler.tryBeginAutomaticUpdate()).toBe(true);
+      expect(handler.automaticUpdateScheduleThreads.size).toBe(0);
+      expect(service.recover).not.toHaveBeenCalled();
+      expect(service.suspendForRestart).not.toHaveBeenCalled();
+      handler.schedules = undefined;
+    });
+
     it('resumes command execution after a manual-mode update without restarting', async () => {
       let finishInstall!: () => void;
       const beforeRestart = vi.fn();
@@ -1126,7 +1165,7 @@ describe('MessageHandler', () => {
 
     it('releases the update lock after a failed installation', async () => {
       expect(ctx.handler.tryBeginAutomaticUpdate()).toBe(true);
-      ctx.handler.endAutomaticUpdate();
+      await ctx.handler.endAutomaticUpdate();
       ctx.mockExecutor.execute.mockResolvedValue({ success: true, output: 'done' });
 
       await ctx.handler.handleMessage({

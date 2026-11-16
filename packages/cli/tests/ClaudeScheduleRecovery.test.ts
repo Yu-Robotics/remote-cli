@@ -146,8 +146,12 @@ describe('Claude production orderly recovery', () => {
     const handler = new MessageHandler(ws, pool, manager, guard, config);
     vi.spyOn(handler as any, 'detectBackends').mockResolvedValue([{ id: 'auto', label: 'Claude', installed: true }]);
     vi.spyOn((handler as any).delegation.registry, 'list').mockResolvedValue([]);
+    let installationHostCount = 0;
+    let installationWrites = 0;
     const install = vi.fn(async () => {
       expect(raw.claudeProcess).toBeNull(); expect(inventory.size).toBe(0);
+      installationHostCount = hosts.length;
+      installationWrites = hosts.reduce((count, host) => count + host.stdin.write.mock.calls.length, 0);
       if (fails) throw new Error('Synthetic installer unavailable');
     });
     const updater = new AutomaticUpdater('1.6.237', handler, { installVersion: install, restartAfterUpdate: false });
@@ -162,9 +166,25 @@ describe('Claude production orderly recovery', () => {
       if (skippedOnce) inventory.clear();
       await updater.handleRouterVersion('1.6.238');
       expect(install).toHaveBeenCalledOnce();
-      expect((await (handler as any).schedules.list((handler as any).scheduleOwners.get(thread.id)))[0].state).toBe(skippedOnce ? 'interrupted' : 'active');
+      expect((await (handler as any).schedules.list((handler as any).scheduleOwners.get(thread.id)))[0].state).toBe(fails || skippedOnce ? 'interrupted' : 'active');
       expect((handler as any).automaticUpdateInProgress).toBe(false);
       expect(old.kill).not.toHaveBeenCalled();
+      if (fails) {
+        // Installer failure must not start a model-mediated recovery to release
+        // global admission. Exercise the dispatcher rather than bypassing its fence.
+        await handler.handleMessage({ type: 'command', threadId: thread.id, messageId: 'synthetic-fenced',
+          openId: owner.openId, content: 'Synthetic next foreground', isSlashCommand: false, timestamp: Date.now() } as any);
+        expect(ws.send.mock.calls.map(([message]: any[]) => message).find((message: any) => message.messageId === 'synthetic-fenced')).toMatchObject({
+          success: false, error: expect.stringContaining('remain fenced'),
+        });
+        expect(handler.tryBeginAutomaticUpdate()).toBe(false);
+        await handler.handleMessage({ type: 'binding_confirm', data: { success: true,
+          capabilities: { scheduleResultsV1: true, taskRecovery: true } } } as any);
+        expect(hosts).toHaveLength(installationHostCount);
+        expect(hosts.reduce((count, host) => count + host.stdin.write.mock.calls.length, 0)).toBe(installationWrites);
+        expect(raw.claudeProcess).toBeNull();
+        return;
+      }
       expect((await executor.execute('Synthetic next foreground')).success).toBe(true);
       expect(child).not.toBe(old);
     } finally {

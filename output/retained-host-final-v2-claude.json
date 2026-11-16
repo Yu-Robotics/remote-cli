@@ -1,0 +1,2731 @@
+{
+  "backend": "claude",
+  "nativeSha256": "86dc1fcc69498159eaf15f446613e847010f9036bfbbdffd4c49350be8489ada",
+  "sourceRevision": "3716b77333737d22d400ebf9a999efa0aba144de",
+  "compiledSources": {
+    "RetainedRuntime": "abaf0c9b955a816c5ff3236d8ccaa9b5b9b6d17609f92a1241af2ad06606684a",
+    "RetainedFrontend": "8b0c537c343bbddad8101f3c9d1afa632293d6b480e9b74c7fa6981599cec1d9",
+    "HostServer": "e3313ddc93ad4c4711e9b15e0699b2f88d0dc1de12f31ac5610743e3180c8605",
+    "HostClient": "5e97029edc7ea4f34707e1ccc26b88ec59ec4dea4c708a06bae407fd7eb3ad35"
+  },
+  "fixtureVersion": "final-v2-invocation-scope-and-explicit-stop",
+  "scheduleServiceSha256": "5486b6553250d24cb7a2da15616bcf2e5923bc1a2d11ba870b2f33c63de3f241",
+  "fixtureSha256": {
+    "retained-host-native-final-v2-probe.py": "f36c9b94a04b60b0a52db0001d87dfad39a79086ff6a7ce90cac97776d708eca",
+    "retained-host-native-final-v2-runner.cjs": "3ec1451ed9c89522a85d7f1c79bfb8a4221429fcd4c32d8a6f3b16d606ba0805",
+    "retained-host-native-frontend.cjs": "4ba019dfb3a03e8d5fd672027ddc1f7eb66433dea0a73dc78cdf8cd92d3af827"
+  },
+  "namespaceExitCode": 0,
+  "namespaceStderrBytes": 0,
+  "platform": "Linux-only",
+  "transport": "synthetic Router ACK, no Feishu",
+  "assertions": [
+    "private network has no external route",
+    "host home is not mounted",
+    "command succeeded: /thread new synthetic claude <fixture>/home/workspace",
+    "command succeeded: Record synthetic original context.",
+    "command succeeded: /schedule at 2026-11-16T08:30:00.000Z -- SYNTHETIC_ONCE_CONTENT",
+    "command succeeded: /schedule cron \"* * * * *\" --tz UTC -- SYNTHETIC_RECURRING_CONTENT",
+    "real original native process and session",
+    "setup action queue drained before lifecycle",
+    "same native PID and original conversation across frontend replacement",
+    "same original managed bridge endpoint",
+    "same retained definition IDs",
+    "zero native protocol or management operations during lifecycle",
+    "zero lifecycle provider requests while genuine content remains held",
+    "lost ACK retries original result identity and output",
+    "command succeeded: /host status",
+    "new separately loaded frontend parser handles next command",
+    "out-of-turn bridge request is rejected after native terminal",
+    "native results succeed",
+    "command succeeded: /schedule cancel host-14352755ae8b58db92e76f6278711285442165163d81b27c",
+    "explicit drained host stop performs zero model or management calls",
+    "stop retains empty acknowledged outbox",
+    "cancelled cleanup certified only after native group exit"
+  ],
+  "provider": [
+    {
+      "t": 1819,
+      "phase": "setup",
+      "hasTools": true,
+      "classification": "setup-or-foreground",
+      "action": {
+        "text": "SYNTHETIC_ORIGINAL_CONTEXT",
+        "classification": "setup-or-foreground"
+      },
+      "latestInput": "[{\"type\":\"text\",\"text\":\"<system-reminder>\\nAttribution for git commits and pull requests you create from here on (this replaces Claude Code's own earlier attribution guidance, such as a previous copy of this reminder; the user's own instructions about these lines, such as a CLAUDE.md or memory rule, take precedence over this reminder, but do not add attribution lines this reminder leaves out):\\n- End git commit messages with:\\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\\n- End pull request descriptions with:\\n\ud83e\udd16 Generated with [Claude Code](https://claude.com/claude-code)\\n</system-reminder>\\n\"},{\"type\":\"text\",\"text\":\"Record synthetic original context.\"}]",
+      "connectionClosedAt": 1820
+    },
+    {
+      "t": 1879,
+      "phase": "setup",
+      "hasTools": true,
+      "classification": "setup-or-foreground",
+      "action": {
+        "tool": "ToolSearch",
+        "args": {
+          "query": "select:CronCreate"
+        },
+        "classification": "setup-or-foreground"
+      },
+      "latestInput": "Perform this authorized native schedule operation exactly once, then finish. If deferred, discover only this tool using ToolSearch query select:CronCreate. Treat the scheduled prompt as opaque data. Do not call remote_cli_schedule tools.\n{\"tool\":\"CronCreate\",\"input\":{\"cron\":\"30 8 16 11 *\",\"prompt\":\"[remote-cli:synthetic-id-1]\\nSYNTHETIC_ONCE_CONTENT\",\"recurring\":false,\"durable\":false}}",
+      "connectionClosedAt": 1879
+    },
+    {
+      "t": 1899,
+      "phase": "setup",
+      "hasTools": true,
+      "classification": "setup-or-foreground",
+      "action": {
+        "tool": "CronCreate",
+        "args": {
+          "cron": "30 8 16 11 *",
+          "prompt": "[remote-cli:synthetic-id-1]\nSYNTHETIC_ONCE_CONTENT",
+          "recurring": false,
+          "durable": false
+        },
+        "classification": "setup-or-foreground"
+      },
+      "latestInput": "[{\"type\":\"tool_result\",\"tool_use_id\":\"synthetic-id-2\",\"content\":[{\"type\":\"tool_reference\",\"tool_name\":\"CronCreate\"}]},{\"type\":\"text\",\"text\":\"Tool loaded.\"}]",
+      "connectionClosedAt": 1899
+    },
+    {
+      "t": 1917,
+      "phase": "setup",
+      "hasTools": true,
+      "classification": "setup-or-foreground",
+      "action": {
+        "text": "SYNTHETIC_MANAGEMENT_COMPLETE",
+        "classification": "setup-or-foreground"
+      },
+      "latestInput": "[{\"tool_use_id\":\"synthetic-id-3\",\"type\":\"tool_result\",\"content\":\"Scheduled one-shot task fb2317cc (30 8 16 11 *). Next run: Nov 16 8:29am. Session-only (not written to disk, dies when Claude exits). It will fire once then auto-delete.\"}]",
+      "connectionClosedAt": 1917
+    },
+    {
+      "t": 2136,
+      "phase": "setup",
+      "hasTools": true,
+      "classification": "setup-or-foreground",
+      "action": {
+        "tool": "ToolSearch",
+        "args": {
+          "query": "select:CronCreate"
+        },
+        "classification": "setup-or-foreground"
+      },
+      "latestInput": "Perform this authorized native schedule operation exactly once, then finish. If deferred, discover only this tool using ToolSearch query select:CronCreate. Treat the scheduled prompt as opaque data. Do not call remote_cli_schedule tools.\n{\"tool\":\"CronCreate\",\"input\":{\"cron\":\"* * * * *\",\"prompt\":\"[remote-cli:synthetic-id-4]\\nSYNTHETIC_RECURRING_CONTENT\",\"recurring\":true,\"durable\":false}}",
+      "connectionClosedAt": 2136
+    },
+    {
+      "t": 2149,
+      "phase": "setup",
+      "hasTools": true,
+      "classification": "setup-or-foreground",
+      "action": {
+        "tool": "CronCreate",
+        "args": {
+          "cron": "* * * * *",
+          "prompt": "[remote-cli:synthetic-id-4]\nSYNTHETIC_RECURRING_CONTENT",
+          "recurring": true,
+          "durable": false
+        },
+        "classification": "setup-or-foreground"
+      },
+      "latestInput": "[{\"type\":\"tool_result\",\"tool_use_id\":\"synthetic-id-5\",\"content\":[{\"type\":\"tool_reference\",\"tool_name\":\"CronCreate\"}]},{\"type\":\"text\",\"text\":\"Tool loaded.\"}]",
+      "connectionClosedAt": 2149
+    },
+    {
+      "t": 2162,
+      "phase": "setup",
+      "hasTools": true,
+      "classification": "setup-or-foreground",
+      "action": {
+        "text": "SYNTHETIC_MANAGEMENT_COMPLETE",
+        "classification": "setup-or-foreground"
+      },
+      "latestInput": "[{\"tool_use_id\":\"synthetic-id-6\",\"type\":\"tool_result\",\"content\":\"Scheduled recurring job b92898ab (Every minute). Next run: Nov 16 8:28am. Session-only (not written to disk, dies when Claude exits). Auto-expires after 7 days. Use CronDelete to cancel sooner.\"}]",
+      "connectionClosedAt": 2162
+    },
+    {
+      "t": 37944,
+      "phase": "native-content",
+      "hasTools": true,
+      "classification": "scheduled-content",
+      "action": {
+        "text": "SYNTHETIC_NATIVE_CONTENT",
+        "classification": "scheduled-content",
+        "hold": true
+      },
+      "latestInput": "[{\"type\":\"text\",\"text\":\"[remote-cli:synthetic-id-4]\\nSYNTHETIC_RECURRING_CONTENT\",\"cache_control\":{\"type\":\"ephemeral\"}}]",
+      "connectionClosedAt": 140760
+    },
+    {
+      "t": 140960,
+      "phase": "native-content",
+      "hasTools": true,
+      "classification": "scheduled-content",
+      "action": {
+        "tool": "ToolSearch",
+        "args": {
+          "query": "select:mcp__remote-cli-delegation__remote_cli_schedule_list"
+        },
+        "classification": "scheduled-content"
+      },
+      "latestInput": "[{\"type\":\"text\",\"text\":\"[remote-cli:synthetic-id-1]\\nSYNTHETIC_ONCE_CONTENT\\n[remote-cli:synthetic-id-4]\\nSYNTHETIC_RECURRING_CONTENT\",\"cache_control\":{\"type\":\"ephemeral\"}}]",
+      "connectionClosedAt": 140960
+    },
+    {
+      "t": 140977,
+      "phase": "native-content",
+      "hasTools": true,
+      "classification": "scheduled-content",
+      "action": {
+        "tool": "mcp__remote-cli-delegation__remote_cli_schedule_list",
+        "args": {
+          "requestId": "synthetic-native-gap-mcp"
+        },
+        "classification": "scheduled-content"
+      },
+      "latestInput": "[{\"type\":\"tool_result\",\"tool_use_id\":\"synthetic-id-7\",\"content\":[{\"type\":\"tool_reference\",\"tool_name\":\"mcp__remote-cli-delegation__remote_cli_schedule_list\"}]},{\"type\":\"text\",\"text\":\"Tool loaded.\"}]",
+      "connectionClosedAt": 140977
+    },
+    {
+      "t": 141021,
+      "phase": "native-content",
+      "hasTools": true,
+      "classification": "scheduled-content",
+      "action": {
+        "text": "SYNTHETIC_NATIVE_MCP_COMPLETE",
+        "classification": "scheduled-content"
+      },
+      "latestInput": "[{\"tool_use_id\":\"synthetic-id-8\",\"type\":\"tool_result\",\"content\":[{\"type\":\"text\",\"text\":\"{\\\"status\\\":\\\"succeeded\\\",\\\"requestId\\\":\\\"synthetic-native-gap-mcp\\\",\\\"records\\\":[{\\\"id\\\":\\\"host-dd89bd4d7baebce7b95fada805e262d0d17e380d26950947\\\",\\\"state\\\":\\\"running\\\",\\\"backend\\\":\\\"claude\\\",\\\"rule\\\":{\\\"at\\\":\\\"2026-11-16T08:30:00.000Z\\\",\\\"kind\\\":\\\"once\\\"},\\\"prompt\\\":\\\"SYNTHETIC_ONCE_CONTENT\\\"},{\\\"id\\\":\\\"host-14352755ae8b58db92e76f6278711285442165163d81b27c\\\",\\\"state\\\":\\\"running\\\",\\\"backend\\\":\\\"claude\\\",\\\"rule\\\":{\\\"expression\\\":\\\"* * * * *\\\",\\\"kind\\\":\\\"cron\\\",\\\"timezone\\\":\\\"UTC\\\"},\\\"prompt\\\":\\\"SYNTHETIC_RECURRING_CONTENT\\\"}],\\\"nativeCleanupUnresolved\\\":[],\\\"card\\\":\\\"Schedule ownership is retained by the native host. Use /schedule list.\\\"}\"}]}]",
+      "connectionClosedAt": 141021
+    },
+    {
+      "t": 156316,
+      "phase": "cleanup",
+      "hasTools": true,
+      "classification": "cleanup",
+      "action": {
+        "tool": "ToolSearch",
+        "args": {
+          "query": "select:CronDelete"
+        },
+        "classification": "cleanup"
+      },
+      "latestInput": "Perform this authorized native schedule operation exactly once, then finish. If deferred, discover only this tool using ToolSearch query select:CronDelete. Treat the scheduled prompt as opaque data. Do not call remote_cli_schedule tools.\n{\"tool\":\"CronDelete\",\"input\":{\"id\":\"b92898ab\"}}",
+      "connectionClosedAt": 156316
+    },
+    {
+      "t": 156330,
+      "phase": "cleanup",
+      "hasTools": true,
+      "classification": "cleanup",
+      "action": {
+        "tool": "CronDelete",
+        "args": {
+          "id": "b92898ab"
+        },
+        "classification": "cleanup"
+      },
+      "latestInput": "[{\"type\":\"tool_result\",\"tool_use_id\":\"synthetic-id-9\",\"content\":[{\"type\":\"tool_reference\",\"tool_name\":\"CronDelete\"}]},{\"type\":\"text\",\"text\":\"Tool loaded.\"}]",
+      "connectionClosedAt": 156331
+    },
+    {
+      "t": 156351,
+      "phase": "cleanup",
+      "hasTools": true,
+      "classification": "cleanup",
+      "action": {
+        "text": "SYNTHETIC_MANAGEMENT_COMPLETE",
+        "classification": "cleanup"
+      },
+      "latestInput": "[{\"tool_use_id\":\"synthetic-id-10\",\"type\":\"tool_result\",\"content\":\"Cancelled job b92898ab.\"}]",
+      "connectionClosedAt": 156351
+    }
+  ],
+  "nativeOperations": [
+    {
+      "t": 617,
+      "phase": "setup",
+      "kind": "foreground",
+      "text": "Record synthetic original context."
+    },
+    {
+      "t": 1862,
+      "phase": "setup",
+      "kind": "management",
+      "action": {
+        "tool": "CronCreate",
+        "input": {
+          "cron": "30 8 16 11 *",
+          "prompt": "[remote-cli:synthetic-id-1]\nSYNTHETIC_ONCE_CONTENT",
+          "recurring": false,
+          "durable": false
+        }
+      }
+    },
+    {
+      "t": 1908,
+      "phase": "setup",
+      "kind": "created",
+      "id": "host-dd89bd4d7baebce7b95fada805e262d0d17e380d26950947",
+      "nativeId": "fb2317cc",
+      "rule": {
+        "at": "2026-11-16T08:30:00.000Z",
+        "kind": "once"
+      }
+    },
+    {
+      "t": 2123,
+      "phase": "setup",
+      "kind": "management",
+      "action": {
+        "tool": "CronCreate",
+        "input": {
+          "cron": "* * * * *",
+          "prompt": "[remote-cli:synthetic-id-4]\nSYNTHETIC_RECURRING_CONTENT",
+          "recurring": true,
+          "durable": false
+        }
+      }
+    },
+    {
+      "t": 2155,
+      "phase": "setup",
+      "kind": "created",
+      "id": "host-14352755ae8b58db92e76f6278711285442165163d81b27c",
+      "nativeId": "b92898ab",
+      "rule": {
+        "expression": "* * * * *",
+        "kind": "cron",
+        "timezone": "UTC"
+      }
+    },
+    {
+      "t": 156301,
+      "phase": "cleanup",
+      "kind": "management",
+      "action": {
+        "tool": "CronDelete",
+        "input": {
+          "id": "b92898ab"
+        }
+      }
+    },
+    {
+      "t": 156301,
+      "phase": "cleanup",
+      "kind": "claude-wire",
+      "type": "user"
+    }
+  ],
+  "callbacks": [
+    {
+      "t": 37933,
+      "phase": "native-content",
+      "id": "host-14352755ae8b58db92e76f6278711285442165163d81b27c",
+      "event": {
+        "type": "started",
+        "occurrenceId": "synthetic-id-11"
+      }
+    },
+    {
+      "t": 140769,
+      "phase": "native-content",
+      "id": "host-14352755ae8b58db92e76f6278711285442165163d81b27c",
+      "event": {
+        "type": "completed",
+        "occurrenceId": "synthetic-id-11",
+        "success": true,
+        "output": "SYNTHETIC_NATIVE_CONTENTSYNTHETIC_RETAINED_COMPLETION"
+      }
+    },
+    {
+      "t": 140946,
+      "phase": "native-content",
+      "id": "host-dd89bd4d7baebce7b95fada805e262d0d17e380d26950947",
+      "event": {
+        "type": "started",
+        "occurrenceId": "synthetic-id-12"
+      }
+    },
+    {
+      "t": 140948,
+      "phase": "native-content",
+      "id": "host-14352755ae8b58db92e76f6278711285442165163d81b27c",
+      "event": {
+        "type": "started",
+        "occurrenceId": "synthetic-id-13"
+      }
+    },
+    {
+      "t": 141027,
+      "phase": "native-content",
+      "id": "host-dd89bd4d7baebce7b95fada805e262d0d17e380d26950947",
+      "event": {
+        "type": "completed",
+        "occurrenceId": "synthetic-id-12",
+        "success": true,
+        "output": "Native combined result for concurrently due tasks:\nSYNTHETIC_NATIVE_MCP_COMPLETE"
+      }
+    },
+    {
+      "t": 141028,
+      "phase": "native-content",
+      "id": "host-dd89bd4d7baebce7b95fada805e262d0d17e380d26950947",
+      "event": {
+        "type": "stopped",
+        "reason": "Native schedule finished; shared conversation remains running.",
+        "exitConfirmed": true
+      }
+    },
+    {
+      "t": 141031,
+      "phase": "native-content",
+      "id": "host-14352755ae8b58db92e76f6278711285442165163d81b27c",
+      "event": {
+        "type": "completed",
+        "occurrenceId": "synthetic-id-13",
+        "success": true,
+        "output": "Native combined result for concurrently due tasks:\nSYNTHETIC_NATIVE_MCP_COMPLETE"
+      }
+    },
+    {
+      "t": 156345,
+      "phase": "cleanup",
+      "id": "host-14352755ae8b58db92e76f6278711285442165163d81b27c",
+      "event": {
+        "type": "stopped",
+        "reason": "Native job retired; shared conversation remains running.",
+        "exitConfirmed": true
+      }
+    }
+  ],
+  "nativeReceipts": [
+    {
+      "t": 1735,
+      "phase": "setup",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "command_lifecycle",
+        "command_uuid": "synthetic-id-14",
+        "state": "queued",
+        "uuid": "synthetic-id-15",
+        "session_id": "synthetic-id-16"
+      }
+    },
+    {
+      "t": 1757,
+      "phase": "setup",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "command_lifecycle",
+        "command_uuid": "synthetic-id-14",
+        "state": "started",
+        "uuid": "synthetic-id-17",
+        "session_id": "synthetic-id-16"
+      }
+    },
+    {
+      "t": 1784,
+      "phase": "setup",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "control_request",
+        "request_id": "synthetic-id-18",
+        "request": {
+          "subtype": "hook_callback",
+          "callback_id": "remote-cli-session-schedules",
+          "input": {
+            "session_id": "synthetic-id-16",
+            "transcript_path": "<fixture>/config/projects/-probe-home-workspace/synthetic-id-16.jsonl",
+            "cwd": "<fixture>/home/workspace",
+            "prompt_id": "synthetic-id-19",
+            "permission_mode": "bypassPermissions",
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "Record synthetic original context."
+          },
+          "tool_use_id": "synthetic-id-20"
+        }
+      }
+    },
+    {
+      "t": 1834,
+      "phase": "setup",
+      "kind": "claude-frame",
+      "frame": {
+        "duration_api_ms": 12,
+        "stop_reason": "end_turn",
+        "session_id": "synthetic-id-16",
+        "total_cost_usd": 0.00014000000000000001,
+        "usage": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "output_tokens": 5,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "server_tool_use": {
+            "web_search_requests": 0,
+            "web_fetch_requests": 0
+          },
+          "service_tier": "standard",
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "inference_geo": "",
+          "iterations": [],
+          "speed": "standard",
+          "fallback_credit": null
+        },
+        "modelUsage": {
+          "claude-opus-5-5": {
+            "inputTokens": 10,
+            "outputTokens": 5,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0,
+            "webSearchRequests": 0,
+            "costUSD": 0.00014000000000000001,
+            "contextWindow": 1000000,
+            "maxOutputTokens": 128000,
+            "thinkingTokens": 0,
+            "cacheCreationEphemeral5mInputTokens": 0,
+            "cacheCreationEphemeral1hInputTokens": 0,
+            "canonicalModel": "claude-opus-5-5",
+            "provider": "firstParty",
+            "costBasis": "list"
+          }
+        },
+        "permission_denials": [],
+        "terminal_reason": "completed",
+        "fast_mode_state": "off",
+        "fast_mode_disabled_reason": "sdk_opt_in_required",
+        "subagent_stats": {
+          "spawned": 0,
+          "requested": {
+            "background": 0,
+            "foreground": 0,
+            "unset": 0
+          },
+          "started_in_background": 0,
+          "max_depth": 0,
+          "spawned_by_subagents": 0,
+          "completed": 0,
+          "failed": 0,
+          "killed": {
+            "parent": 0,
+            "user": 0,
+            "system": 0
+          },
+          "refused": {
+            "depth_limit": 0,
+            "concurrency_limit": 0,
+            "budget": 0
+          },
+          "by_type": {}
+        },
+        "safety_stops": 0,
+        "is_error": false,
+        "num_turns": 1,
+        "subtype": "success",
+        "api_error_status": null,
+        "result": "SYNTHETIC_ORIGINAL_CONTEXT",
+        "ttft_ms": 64,
+        "type": "result",
+        "duration_ms": 69,
+        "uuid": "synthetic-id-21",
+        "ttft_stream_ms": 63,
+        "time_to_request_ms": 58,
+        "first_content_frame_ms": 63,
+        "user_message_uuid": "synthetic-id-14",
+        "user_message_uuids": [
+          "synthetic-id-14"
+        ],
+        "request_sent_wall_ms": 1794817665610,
+        "first_request_input_tokens": 10,
+        "queued_turn_count": 0,
+        "result_index": 0,
+        "model_usage_since_last_result": {
+          "claude-opus-5-5": {
+            "inputTokens": 10,
+            "outputTokens": 5,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0,
+            "webSearchRequests": 0,
+            "costUSD": 0.00014000000000000001,
+            "contextWindow": 1000000,
+            "maxOutputTokens": 128000,
+            "thinkingTokens": 0,
+            "cacheCreationEphemeral5mInputTokens": 0,
+            "cacheCreationEphemeral1hInputTokens": 0,
+            "canonicalModel": "claude-opus-5-5",
+            "provider": "firstParty",
+            "costBasis": "list"
+          }
+        }
+      }
+    },
+    {
+      "t": 1845,
+      "phase": "setup",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "command_lifecycle",
+        "command_uuid": "synthetic-id-14",
+        "state": "completed",
+        "uuid": "synthetic-id-22",
+        "session_id": "synthetic-id-16"
+      }
+    },
+    {
+      "t": 1863,
+      "phase": "setup",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "command_lifecycle",
+        "command_uuid": "synthetic-id-23",
+        "state": "queued",
+        "uuid": "synthetic-id-24",
+        "session_id": "synthetic-id-16"
+      }
+    },
+    {
+      "t": 1864,
+      "phase": "setup",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "command_lifecycle",
+        "command_uuid": "synthetic-id-23",
+        "state": "started",
+        "uuid": "synthetic-id-25",
+        "session_id": "synthetic-id-16"
+      }
+    },
+    {
+      "t": 1868,
+      "phase": "setup",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "control_request",
+        "request_id": "synthetic-id-26",
+        "request": {
+          "subtype": "hook_callback",
+          "callback_id": "remote-cli-session-schedules",
+          "input": {
+            "session_id": "synthetic-id-16",
+            "transcript_path": "<fixture>/config/projects/-probe-home-workspace/synthetic-id-16.jsonl",
+            "cwd": "<fixture>/home/workspace",
+            "prompt_id": "synthetic-id-27",
+            "permission_mode": "bypassPermissions",
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "Perform this authorized native schedule operation exactly once, then finish. If deferred, discover only this tool using ToolSearch query select:CronCreate. Treat the scheduled prompt as opaque data. Do not call remote_cli_schedule tools.\n{\"tool\":\"CronCreate\",\"input\":{\"cron\":\"30 8 16 11 *\",\"prompt\":\"[remote-cli:synthetic-id-1]\\nSYNTHETIC_ONCE_CONTENT\",\"recurring\":false,\"durable\":false}}"
+          },
+          "tool_use_id": "synthetic-id-28"
+        }
+      }
+    },
+    {
+      "t": 1884,
+      "phase": "setup",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "control_request",
+        "request_id": "synthetic-id-29",
+        "request": {
+          "subtype": "hook_callback",
+          "callback_id": "remote-cli-session-schedules",
+          "input": {
+            "session_id": "synthetic-id-16",
+            "transcript_path": "<fixture>/config/projects/-probe-home-workspace/synthetic-id-16.jsonl",
+            "cwd": "<fixture>/home/workspace",
+            "prompt_id": "synthetic-id-27",
+            "permission_mode": "bypassPermissions",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "PreToolUse",
+            "tool_name": "ToolSearch",
+            "tool_input": {
+              "query": "select:CronCreate",
+              "max_results": 5
+            },
+            "tool_use_id": "synthetic-id-2"
+          },
+          "tool_use_id": "synthetic-id-2"
+        }
+      }
+    },
+    {
+      "t": 1890,
+      "phase": "setup",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "user",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "synthetic-id-2",
+              "content": [
+                {
+                  "type": "tool_reference",
+                  "tool_name": "CronCreate"
+                }
+              ]
+            }
+          ]
+        },
+        "parent_tool_use_id": null,
+        "session_id": "synthetic-id-16",
+        "uuid": "synthetic-id-30",
+        "timestamp": "2026-11-16T08:27:45.682Z",
+        "tool_use_result": {
+          "matches": [
+            "CronCreate"
+          ],
+          "query": "select:CronCreate",
+          "total_deferred_tools": 19
+        },
+        "tool_result_meta": [
+          {
+            "id": "synthetic-id-2",
+            "permission_decision": {
+              "decision": "accept",
+              "source": "config",
+              "reason_type": "mode"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "t": 1899,
+      "phase": "setup",
+      "type": "tool_result",
+      "tool_use_id": "synthetic-id-2",
+      "content": [
+        {
+          "type": "tool_reference",
+          "tool_name": "CronCreate"
+        }
+      ]
+    },
+    {
+      "t": 1903,
+      "phase": "setup",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "control_request",
+        "request_id": "synthetic-id-31",
+        "request": {
+          "subtype": "hook_callback",
+          "callback_id": "remote-cli-session-schedules",
+          "input": {
+            "session_id": "synthetic-id-16",
+            "transcript_path": "<fixture>/config/projects/-probe-home-workspace/synthetic-id-16.jsonl",
+            "cwd": "<fixture>/home/workspace",
+            "prompt_id": "synthetic-id-27",
+            "permission_mode": "bypassPermissions",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "PreToolUse",
+            "tool_name": "CronCreate",
+            "tool_input": {
+              "cron": "30 8 16 11 *",
+              "prompt": "[remote-cli:synthetic-id-1]\nSYNTHETIC_ONCE_CONTENT",
+              "recurring": false,
+              "durable": false
+            },
+            "tool_use_id": "synthetic-id-3"
+          },
+          "tool_use_id": "synthetic-id-3"
+        }
+      }
+    },
+    {
+      "t": 1907,
+      "phase": "setup",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "user",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "tool_use_id": "synthetic-id-3",
+              "type": "tool_result",
+              "content": "Scheduled one-shot task fb2317cc (30 8 16 11 *). Next run: Nov 16 8:29am. Session-only (not written to disk, dies when Claude exits). It will fire once then auto-delete."
+            }
+          ]
+        },
+        "parent_tool_use_id": null,
+        "session_id": "synthetic-id-16",
+        "uuid": "synthetic-id-32",
+        "timestamp": "2026-11-16T08:27:45.699Z",
+        "tool_use_result": {
+          "id": "fb2317cc",
+          "humanSchedule": "30 8 16 11 *",
+          "recurring": false,
+          "durable": false,
+          "nextFireAt": 1794817711709.6196
+        },
+        "tool_result_meta": [
+          {
+            "id": "synthetic-id-3",
+            "permission_decision": {
+              "decision": "accept",
+              "source": "config",
+              "reason_type": "mode"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "t": 1917,
+      "phase": "setup",
+      "tool_use_id": "synthetic-id-3",
+      "type": "tool_result",
+      "content": "Scheduled one-shot task fb2317cc (30 8 16 11 *). Next run: Nov 16 8:29am. Session-only (not written to disk, dies when Claude exits). It will fire once then auto-delete."
+    },
+    {
+      "t": 1922,
+      "phase": "setup",
+      "kind": "claude-frame",
+      "frame": {
+        "duration_api_ms": 34,
+        "stop_reason": "end_turn",
+        "session_id": "synthetic-id-16",
+        "total_cost_usd": 0.0005600000000000001,
+        "usage": {
+          "input_tokens": 30,
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "output_tokens": 15,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "server_tool_use": {
+            "web_search_requests": 0,
+            "web_fetch_requests": 0
+          },
+          "service_tier": "standard",
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "inference_geo": "",
+          "iterations": [],
+          "speed": "standard",
+          "fallback_credit": null
+        },
+        "modelUsage": {
+          "claude-opus-5-5": {
+            "inputTokens": 40,
+            "outputTokens": 20,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0,
+            "webSearchRequests": 0,
+            "costUSD": 0.0005600000000000001,
+            "contextWindow": 1000000,
+            "maxOutputTokens": 128000,
+            "thinkingTokens": 0,
+            "cacheCreationEphemeral5mInputTokens": 0,
+            "cacheCreationEphemeral1hInputTokens": 0,
+            "canonicalModel": "claude-opus-5-5",
+            "provider": "firstParty",
+            "costBasis": "list"
+          }
+        },
+        "permission_denials": [],
+        "terminal_reason": "completed",
+        "fast_mode_state": "off",
+        "fast_mode_disabled_reason": "sdk_opt_in_required",
+        "subagent_stats": {
+          "spawned": 0,
+          "requested": {
+            "background": 0,
+            "foreground": 0,
+            "unset": 0
+          },
+          "started_in_background": 0,
+          "max_depth": 0,
+          "spawned_by_subagents": 0,
+          "completed": 0,
+          "failed": 0,
+          "killed": {
+            "parent": 0,
+            "user": 0,
+            "system": 0
+          },
+          "refused": {
+            "depth_limit": 0,
+            "concurrency_limit": 0,
+            "budget": 0
+          },
+          "by_type": {}
+        },
+        "safety_stops": 0,
+        "is_error": false,
+        "num_turns": 3,
+        "subtype": "success",
+        "api_error_status": null,
+        "result": "SYNTHETIC_MANAGEMENT_COMPLETE",
+        "ttft_ms": 16,
+        "type": "result",
+        "duration_ms": 57,
+        "uuid": "synthetic-id-33",
+        "ttft_stream_ms": 15,
+        "time_to_request_ms": 14,
+        "first_content_frame_ms": 16,
+        "user_message_uuid": "synthetic-id-23",
+        "user_message_uuids": [
+          "synthetic-id-23"
+        ],
+        "request_sent_wall_ms": 1794817665671,
+        "first_request_input_tokens": 10,
+        "queued_turn_count": 0,
+        "result_index": 1,
+        "model_usage_since_last_result": {
+          "claude-opus-5-5": {
+            "inputTokens": 30,
+            "outputTokens": 15,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0,
+            "webSearchRequests": 0,
+            "costUSD": 0.00042,
+            "contextWindow": 1000000,
+            "maxOutputTokens": 128000,
+            "thinkingTokens": 0,
+            "cacheCreationEphemeral5mInputTokens": 0,
+            "cacheCreationEphemeral1hInputTokens": 0,
+            "canonicalModel": "claude-opus-5-5",
+            "provider": "firstParty",
+            "costBasis": "list"
+          }
+        }
+      }
+    },
+    {
+      "t": 1923,
+      "phase": "setup",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "command_lifecycle",
+        "command_uuid": "synthetic-id-23",
+        "state": "completed",
+        "uuid": "synthetic-id-34",
+        "session_id": "synthetic-id-16"
+      }
+    },
+    {
+      "t": 2124,
+      "phase": "setup",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "command_lifecycle",
+        "command_uuid": "synthetic-id-35",
+        "state": "queued",
+        "uuid": "synthetic-id-36",
+        "session_id": "synthetic-id-16"
+      }
+    },
+    {
+      "t": 2125,
+      "phase": "setup",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "command_lifecycle",
+        "command_uuid": "synthetic-id-35",
+        "state": "started",
+        "uuid": "synthetic-id-37",
+        "session_id": "synthetic-id-16"
+      }
+    },
+    {
+      "t": 2128,
+      "phase": "setup",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "control_request",
+        "request_id": "synthetic-id-38",
+        "request": {
+          "subtype": "hook_callback",
+          "callback_id": "remote-cli-session-schedules",
+          "input": {
+            "session_id": "synthetic-id-16",
+            "transcript_path": "<fixture>/config/projects/-probe-home-workspace/synthetic-id-16.jsonl",
+            "cwd": "<fixture>/home/workspace",
+            "prompt_id": "synthetic-id-39",
+            "permission_mode": "bypassPermissions",
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "Perform this authorized native schedule operation exactly once, then finish. If deferred, discover only this tool using ToolSearch query select:CronCreate. Treat the scheduled prompt as opaque data. Do not call remote_cli_schedule tools.\n{\"tool\":\"CronCreate\",\"input\":{\"cron\":\"* * * * *\",\"prompt\":\"[remote-cli:synthetic-id-4]\\nSYNTHETIC_RECURRING_CONTENT\",\"recurring\":true,\"durable\":false}}"
+          },
+          "tool_use_id": "synthetic-id-40"
+        }
+      }
+    },
+    {
+      "t": 2138,
+      "phase": "setup",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "control_request",
+        "request_id": "synthetic-id-41",
+        "request": {
+          "subtype": "hook_callback",
+          "callback_id": "remote-cli-session-schedules",
+          "input": {
+            "session_id": "synthetic-id-16",
+            "transcript_path": "<fixture>/config/projects/-probe-home-workspace/synthetic-id-16.jsonl",
+            "cwd": "<fixture>/home/workspace",
+            "prompt_id": "synthetic-id-39",
+            "permission_mode": "bypassPermissions",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "PreToolUse",
+            "tool_name": "ToolSearch",
+            "tool_input": {
+              "query": "select:CronCreate",
+              "max_results": 5
+            },
+            "tool_use_id": "synthetic-id-5"
+          },
+          "tool_use_id": "synthetic-id-5"
+        }
+      }
+    },
+    {
+      "t": 2142,
+      "phase": "setup",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "user",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "synthetic-id-5",
+              "content": [
+                {
+                  "type": "tool_reference",
+                  "tool_name": "CronCreate"
+                }
+              ]
+            }
+          ]
+        },
+        "parent_tool_use_id": null,
+        "session_id": "synthetic-id-16",
+        "uuid": "synthetic-id-42",
+        "timestamp": "2026-11-16T08:27:45.934Z",
+        "tool_use_result": {
+          "matches": [
+            "CronCreate"
+          ],
+          "query": "select:CronCreate",
+          "total_deferred_tools": 19
+        },
+        "tool_result_meta": [
+          {
+            "id": "synthetic-id-5",
+            "permission_decision": {
+              "decision": "accept",
+              "source": "config",
+              "reason_type": "mode"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "t": 2149,
+      "phase": "setup",
+      "type": "tool_result",
+      "tool_use_id": "synthetic-id-5",
+      "content": [
+        {
+          "type": "tool_reference",
+          "tool_name": "CronCreate"
+        }
+      ]
+    },
+    {
+      "t": 2152,
+      "phase": "setup",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "control_request",
+        "request_id": "synthetic-id-43",
+        "request": {
+          "subtype": "hook_callback",
+          "callback_id": "remote-cli-session-schedules",
+          "input": {
+            "session_id": "synthetic-id-16",
+            "transcript_path": "<fixture>/config/projects/-probe-home-workspace/synthetic-id-16.jsonl",
+            "cwd": "<fixture>/home/workspace",
+            "prompt_id": "synthetic-id-39",
+            "permission_mode": "bypassPermissions",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "PreToolUse",
+            "tool_name": "CronCreate",
+            "tool_input": {
+              "cron": "* * * * *",
+              "prompt": "[remote-cli:synthetic-id-4]\nSYNTHETIC_RECURRING_CONTENT",
+              "recurring": true,
+              "durable": false
+            },
+            "tool_use_id": "synthetic-id-6"
+          },
+          "tool_use_id": "synthetic-id-6"
+        }
+      }
+    },
+    {
+      "t": 2154,
+      "phase": "setup",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "user",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "tool_use_id": "synthetic-id-6",
+              "type": "tool_result",
+              "content": "Scheduled recurring job b92898ab (Every minute). Next run: Nov 16 8:28am. Session-only (not written to disk, dies when Claude exits). Auto-expires after 7 days. Use CronDelete to cancel sooner."
+            }
+          ]
+        },
+        "parent_tool_use_id": null,
+        "session_id": "synthetic-id-16",
+        "uuid": "synthetic-id-44",
+        "timestamp": "2026-11-16T08:27:45.947Z",
+        "tool_use_result": {
+          "id": "b92898ab",
+          "humanSchedule": "Every minute",
+          "recurring": true,
+          "durable": false,
+          "nextFireAt": 1794817701698.271
+        },
+        "tool_result_meta": [
+          {
+            "id": "synthetic-id-6",
+            "permission_decision": {
+              "decision": "accept",
+              "source": "config",
+              "reason_type": "mode"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "t": 2162,
+      "phase": "setup",
+      "tool_use_id": "synthetic-id-6",
+      "type": "tool_result",
+      "content": "Scheduled recurring job b92898ab (Every minute). Next run: Nov 16 8:28am. Session-only (not written to disk, dies when Claude exits). Auto-expires after 7 days. Use CronDelete to cancel sooner."
+    },
+    {
+      "t": 2165,
+      "phase": "setup",
+      "kind": "claude-frame",
+      "frame": {
+        "duration_api_ms": 50,
+        "stop_reason": "end_turn",
+        "session_id": "synthetic-id-16",
+        "total_cost_usd": 0.0009800000000000002,
+        "usage": {
+          "input_tokens": 30,
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "output_tokens": 15,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "server_tool_use": {
+            "web_search_requests": 0,
+            "web_fetch_requests": 0
+          },
+          "service_tier": "standard",
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "inference_geo": "",
+          "iterations": [],
+          "speed": "standard",
+          "fallback_credit": null
+        },
+        "modelUsage": {
+          "claude-opus-5-5": {
+            "inputTokens": 70,
+            "outputTokens": 35,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0,
+            "webSearchRequests": 0,
+            "costUSD": 0.0009800000000000002,
+            "contextWindow": 1000000,
+            "maxOutputTokens": 128000,
+            "thinkingTokens": 0,
+            "cacheCreationEphemeral5mInputTokens": 0,
+            "cacheCreationEphemeral1hInputTokens": 0,
+            "canonicalModel": "claude-opus-5-5",
+            "provider": "firstParty",
+            "costBasis": "list"
+          }
+        },
+        "permission_denials": [],
+        "terminal_reason": "completed",
+        "fast_mode_state": "off",
+        "fast_mode_disabled_reason": "sdk_opt_in_required",
+        "subagent_stats": {
+          "spawned": 0,
+          "requested": {
+            "background": 0,
+            "foreground": 0,
+            "unset": 0
+          },
+          "started_in_background": 0,
+          "max_depth": 0,
+          "spawned_by_subagents": 0,
+          "completed": 0,
+          "failed": 0,
+          "killed": {
+            "parent": 0,
+            "user": 0,
+            "system": 0
+          },
+          "refused": {
+            "depth_limit": 0,
+            "concurrency_limit": 0,
+            "budget": 0
+          },
+          "by_type": {}
+        },
+        "safety_stops": 0,
+        "is_error": false,
+        "num_turns": 3,
+        "subtype": "success",
+        "api_error_status": null,
+        "result": "SYNTHETIC_MANAGEMENT_COMPLETE",
+        "ttft_ms": 12,
+        "type": "result",
+        "duration_ms": 40,
+        "uuid": "synthetic-id-45",
+        "ttft_stream_ms": 12,
+        "time_to_request_ms": 10,
+        "first_content_frame_ms": 12,
+        "user_message_uuid": "synthetic-id-35",
+        "user_message_uuids": [
+          "synthetic-id-35"
+        ],
+        "request_sent_wall_ms": 1794817665928,
+        "first_request_input_tokens": 10,
+        "queued_turn_count": 0,
+        "result_index": 2,
+        "model_usage_since_last_result": {
+          "claude-opus-5-5": {
+            "inputTokens": 30,
+            "outputTokens": 15,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0,
+            "webSearchRequests": 0,
+            "costUSD": 0.00042,
+            "contextWindow": 1000000,
+            "maxOutputTokens": 128000,
+            "thinkingTokens": 0,
+            "cacheCreationEphemeral5mInputTokens": 0,
+            "cacheCreationEphemeral1hInputTokens": 0,
+            "canonicalModel": "claude-opus-5-5",
+            "provider": "firstParty",
+            "costBasis": "list"
+          }
+        }
+      }
+    },
+    {
+      "t": 2166,
+      "phase": "setup",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "command_lifecycle",
+        "command_uuid": "synthetic-id-35",
+        "state": "completed",
+        "uuid": "synthetic-id-46",
+        "session_id": "synthetic-id-16"
+      }
+    },
+    {
+      "t": 37933,
+      "phase": "native-content",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "command_lifecycle",
+        "command_uuid": "synthetic-id-11",
+        "state": "started",
+        "wakeup_source": "schedule_wakeup",
+        "uuid": "synthetic-id-47",
+        "session_id": "synthetic-id-16"
+      }
+    },
+    {
+      "t": 37933,
+      "phase": "native-content",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "control_request",
+        "request_id": "synthetic-id-48",
+        "request": {
+          "subtype": "hook_callback",
+          "callback_id": "remote-cli-session-schedules",
+          "input": {
+            "session_id": "synthetic-id-16",
+            "transcript_path": "<fixture>/config/projects/-probe-home-workspace/synthetic-id-16.jsonl",
+            "cwd": "<fixture>/home/workspace",
+            "prompt_id": "synthetic-id-49",
+            "permission_mode": "bypassPermissions",
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "[remote-cli:synthetic-id-4]\nSYNTHETIC_RECURRING_CONTENT"
+          },
+          "tool_use_id": "synthetic-id-50"
+        }
+      }
+    },
+    {
+      "t": 140767,
+      "phase": "native-content",
+      "kind": "claude-frame",
+      "frame": {
+        "duration_api_ms": 102874,
+        "stop_reason": "end_turn",
+        "session_id": "synthetic-id-16",
+        "total_cost_usd": 0.0011200000000000001,
+        "usage": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "output_tokens": 5,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "server_tool_use": {
+            "web_search_requests": 0,
+            "web_fetch_requests": 0
+          },
+          "service_tier": "standard",
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "inference_geo": "",
+          "iterations": [],
+          "speed": "standard",
+          "fallback_credit": null
+        },
+        "modelUsage": {
+          "claude-opus-5-5": {
+            "inputTokens": 80,
+            "outputTokens": 40,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0,
+            "webSearchRequests": 0,
+            "costUSD": 0.0011200000000000001,
+            "contextWindow": 1000000,
+            "maxOutputTokens": 128000,
+            "thinkingTokens": 0,
+            "cacheCreationEphemeral5mInputTokens": 0,
+            "cacheCreationEphemeral1hInputTokens": 0,
+            "canonicalModel": "claude-opus-5-5",
+            "provider": "firstParty",
+            "costBasis": "list"
+          }
+        },
+        "permission_denials": [],
+        "terminal_reason": "completed",
+        "fast_mode_state": "off",
+        "fast_mode_disabled_reason": "sdk_opt_in_required",
+        "subagent_stats": {
+          "spawned": 0,
+          "requested": {
+            "background": 0,
+            "foreground": 0,
+            "unset": 0
+          },
+          "started_in_background": 0,
+          "max_depth": 0,
+          "spawned_by_subagents": 0,
+          "completed": 0,
+          "failed": 0,
+          "killed": {
+            "parent": 0,
+            "user": 0,
+            "system": 0
+          },
+          "refused": {
+            "depth_limit": 0,
+            "concurrency_limit": 0,
+            "budget": 0
+          },
+          "by_type": {}
+        },
+        "safety_stops": 0,
+        "is_error": false,
+        "num_turns": 1,
+        "subtype": "success",
+        "api_error_status": null,
+        "result": "SYNTHETIC_NATIVE_CONTENTSYNTHETIC_RETAINED_COMPLETION",
+        "ttft_ms": 102834,
+        "type": "result",
+        "duration_ms": 102840,
+        "uuid": "synthetic-id-51",
+        "ttft_stream_ms": 18,
+        "time_to_request_ms": 16,
+        "first_content_frame_ms": 18,
+        "queued_turn_count": 0,
+        "result_index": 3,
+        "model_usage_since_last_result": {
+          "claude-opus-5-5": {
+            "inputTokens": 10,
+            "outputTokens": 5,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0,
+            "webSearchRequests": 0,
+            "costUSD": 0.00014000000000000001,
+            "contextWindow": 1000000,
+            "maxOutputTokens": 128000,
+            "thinkingTokens": 0,
+            "cacheCreationEphemeral5mInputTokens": 0,
+            "cacheCreationEphemeral1hInputTokens": 0,
+            "canonicalModel": "claude-opus-5-5",
+            "provider": "firstParty",
+            "costBasis": "list"
+          }
+        }
+      }
+    },
+    {
+      "t": 140768,
+      "phase": "native-content",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "command_lifecycle",
+        "command_uuid": "synthetic-id-11",
+        "state": "completed",
+        "uuid": "synthetic-id-52",
+        "session_id": "synthetic-id-16"
+      }
+    },
+    {
+      "t": 140944,
+      "phase": "native-content",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "command_lifecycle",
+        "command_uuid": "synthetic-id-12",
+        "state": "started",
+        "wakeup_source": "schedule_wakeup",
+        "uuid": "synthetic-id-53",
+        "session_id": "synthetic-id-16"
+      }
+    },
+    {
+      "t": 140944,
+      "phase": "native-content",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "command_lifecycle",
+        "command_uuid": "synthetic-id-13",
+        "state": "started",
+        "wakeup_source": "schedule_wakeup",
+        "uuid": "synthetic-id-54",
+        "session_id": "synthetic-id-16"
+      }
+    },
+    {
+      "t": 140946,
+      "phase": "native-content",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "control_request",
+        "request_id": "synthetic-id-55",
+        "request": {
+          "subtype": "hook_callback",
+          "callback_id": "remote-cli-session-schedules",
+          "input": {
+            "session_id": "synthetic-id-16",
+            "transcript_path": "<fixture>/config/projects/-probe-home-workspace/synthetic-id-16.jsonl",
+            "cwd": "<fixture>/home/workspace",
+            "prompt_id": "synthetic-id-56",
+            "permission_mode": "bypassPermissions",
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "[remote-cli:synthetic-id-1]\nSYNTHETIC_ONCE_CONTENT\n[remote-cli:synthetic-id-4]\nSYNTHETIC_RECURRING_CONTENT"
+          },
+          "tool_use_id": "synthetic-id-57"
+        }
+      }
+    },
+    {
+      "t": 140964,
+      "phase": "native-content",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "control_request",
+        "request_id": "synthetic-id-58",
+        "request": {
+          "subtype": "hook_callback",
+          "callback_id": "remote-cli-session-schedules",
+          "input": {
+            "session_id": "synthetic-id-16",
+            "transcript_path": "<fixture>/config/projects/-probe-home-workspace/synthetic-id-16.jsonl",
+            "cwd": "<fixture>/home/workspace",
+            "prompt_id": "synthetic-id-56",
+            "permission_mode": "bypassPermissions",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "PreToolUse",
+            "tool_name": "ToolSearch",
+            "tool_input": {
+              "query": "select:mcp__remote-cli-delegation__remote_cli_schedule_list",
+              "max_results": 5
+            },
+            "tool_use_id": "synthetic-id-7"
+          },
+          "tool_use_id": "synthetic-id-7"
+        }
+      }
+    },
+    {
+      "t": 140969,
+      "phase": "native-content",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "user",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "synthetic-id-7",
+              "content": [
+                {
+                  "type": "tool_reference",
+                  "tool_name": "mcp__remote-cli-delegation__remote_cli_schedule_list"
+                }
+              ]
+            }
+          ]
+        },
+        "parent_tool_use_id": null,
+        "session_id": "synthetic-id-16",
+        "uuid": "synthetic-id-59",
+        "timestamp": "2026-11-16T08:30:04.760Z",
+        "tool_use_result": {
+          "matches": [
+            "mcp__remote-cli-delegation__remote_cli_schedule_list"
+          ],
+          "query": "select:mcp__remote-cli-delegation__remote_cli_schedule_list",
+          "total_deferred_tools": 19
+        },
+        "tool_result_meta": [
+          {
+            "id": "synthetic-id-7",
+            "permission_decision": {
+              "decision": "accept",
+              "source": "config",
+              "reason_type": "mode"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "t": 140977,
+      "phase": "native-content",
+      "type": "tool_result",
+      "tool_use_id": "synthetic-id-7",
+      "content": [
+        {
+          "type": "tool_reference",
+          "tool_name": "mcp__remote-cli-delegation__remote_cli_schedule_list"
+        }
+      ]
+    },
+    {
+      "t": 140981,
+      "phase": "native-content",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "control_request",
+        "request_id": "synthetic-id-60",
+        "request": {
+          "subtype": "hook_callback",
+          "callback_id": "remote-cli-session-schedules",
+          "input": {
+            "session_id": "synthetic-id-16",
+            "transcript_path": "<fixture>/config/projects/-probe-home-workspace/synthetic-id-16.jsonl",
+            "cwd": "<fixture>/home/workspace",
+            "prompt_id": "synthetic-id-56",
+            "permission_mode": "bypassPermissions",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "PreToolUse",
+            "tool_name": "mcp__remote-cli-delegation__remote_cli_schedule_list",
+            "tool_input": {
+              "requestId": "synthetic-native-gap-mcp"
+            },
+            "tool_use_id": "synthetic-id-8",
+            "mcp_server": {
+              "name": "remote-cli-delegation",
+              "source": "dynamic"
+            }
+          },
+          "tool_use_id": "synthetic-id-8"
+        }
+      }
+    },
+    {
+      "t": 141017,
+      "phase": "native-content",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "user",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "tool_use_id": "synthetic-id-8",
+              "type": "tool_result",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "{\"status\":\"succeeded\",\"requestId\":\"synthetic-native-gap-mcp\",\"records\":[{\"id\":\"host-dd89bd4d7baebce7b95fada805e262d0d17e380d26950947\",\"state\":\"running\",\"backend\":\"claude\",\"rule\":{\"at\":\"2026-11-16T08:30:00.000Z\",\"kind\":\"once\"},\"prompt\":\"SYNTHETIC_ONCE_CONTENT\"},{\"id\":\"host-14352755ae8b58db92e76f6278711285442165163d81b27c\",\"state\":\"running\",\"backend\":\"claude\",\"rule\":{\"expression\":\"* * * * *\",\"kind\":\"cron\",\"timezone\":\"UTC\"},\"prompt\":\"SYNTHETIC_RECURRING_CONTENT\"}],\"nativeCleanupUnresolved\":[],\"card\":\"Schedule ownership is retained by the native host. Use /schedule list.\"}"
+                }
+              ]
+            }
+          ]
+        },
+        "parent_tool_use_id": null,
+        "session_id": "synthetic-id-16",
+        "uuid": "synthetic-id-61",
+        "timestamp": "2026-11-16T08:30:04.806Z",
+        "tool_use_result": [
+          {
+            "type": "text",
+            "text": "{\"status\":\"succeeded\",\"requestId\":\"synthetic-native-gap-mcp\",\"records\":[{\"id\":\"host-dd89bd4d7baebce7b95fada805e262d0d17e380d26950947\",\"state\":\"running\",\"backend\":\"claude\",\"rule\":{\"at\":\"2026-11-16T08:30:00.000Z\",\"kind\":\"once\"},\"prompt\":\"SYNTHETIC_ONCE_CONTENT\"},{\"id\":\"host-14352755ae8b58db92e76f6278711285442165163d81b27c\",\"state\":\"running\",\"backend\":\"claude\",\"rule\":{\"expression\":\"* * * * *\",\"kind\":\"cron\",\"timezone\":\"UTC\"},\"prompt\":\"SYNTHETIC_RECURRING_CONTENT\"}],\"nativeCleanupUnresolved\":[],\"card\":\"Schedule ownership is retained by the native host. Use /schedule list.\"}"
+          }
+        ],
+        "tool_result_meta": [
+          {
+            "id": "synthetic-id-8",
+            "permission_decision": {
+              "decision": "accept",
+              "source": "config",
+              "reason_type": "mode"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "t": 141021,
+      "phase": "native-content",
+      "tool_use_id": "synthetic-id-8",
+      "type": "tool_result",
+      "content": [
+        {
+          "type": "text",
+          "text": "{\"status\":\"succeeded\",\"requestId\":\"synthetic-native-gap-mcp\",\"records\":[{\"id\":\"host-dd89bd4d7baebce7b95fada805e262d0d17e380d26950947\",\"state\":\"running\",\"backend\":\"claude\",\"rule\":{\"at\":\"2026-11-16T08:30:00.000Z\",\"kind\":\"once\"},\"prompt\":\"SYNTHETIC_ONCE_CONTENT\"},{\"id\":\"host-14352755ae8b58db92e76f6278711285442165163d81b27c\",\"state\":\"running\",\"backend\":\"claude\",\"rule\":{\"expression\":\"* * * * *\",\"kind\":\"cron\",\"timezone\":\"UTC\"},\"prompt\":\"SYNTHETIC_RECURRING_CONTENT\"}],\"nativeCleanupUnresolved\":[],\"card\":\"Schedule ownership is retained by the native host. Use /schedule list.\"}"
+        }
+      ]
+    },
+    {
+      "t": 141026,
+      "phase": "native-content",
+      "kind": "claude-frame",
+      "frame": {
+        "duration_api_ms": 102894,
+        "stop_reason": "end_turn",
+        "session_id": "synthetic-id-16",
+        "total_cost_usd": 0.00154,
+        "usage": {
+          "input_tokens": 30,
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "output_tokens": 15,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "server_tool_use": {
+            "web_search_requests": 0,
+            "web_fetch_requests": 0
+          },
+          "service_tier": "standard",
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "inference_geo": "",
+          "iterations": [],
+          "speed": "standard",
+          "fallback_credit": null
+        },
+        "modelUsage": {
+          "claude-opus-5-5": {
+            "inputTokens": 110,
+            "outputTokens": 55,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0,
+            "webSearchRequests": 0,
+            "costUSD": 0.00154,
+            "contextWindow": 1000000,
+            "maxOutputTokens": 128000,
+            "thinkingTokens": 0,
+            "cacheCreationEphemeral5mInputTokens": 0,
+            "cacheCreationEphemeral1hInputTokens": 0,
+            "canonicalModel": "claude-opus-5-5",
+            "provider": "firstParty",
+            "costBasis": "list"
+          }
+        },
+        "permission_denials": [],
+        "terminal_reason": "completed",
+        "fast_mode_state": "off",
+        "fast_mode_disabled_reason": "sdk_opt_in_required",
+        "subagent_stats": {
+          "spawned": 0,
+          "requested": {
+            "background": 0,
+            "foreground": 0,
+            "unset": 0
+          },
+          "started_in_background": 0,
+          "max_depth": 0,
+          "spawned_by_subagents": 0,
+          "completed": 0,
+          "failed": 0,
+          "killed": {
+            "parent": 0,
+            "user": 0,
+            "system": 0
+          },
+          "refused": {
+            "depth_limit": 0,
+            "concurrency_limit": 0,
+            "budget": 0
+          },
+          "by_type": {}
+        },
+        "safety_stops": 0,
+        "is_error": false,
+        "num_turns": 3,
+        "subtype": "success",
+        "api_error_status": null,
+        "result": "SYNTHETIC_NATIVE_MCP_COMPLETE",
+        "ttft_ms": 17,
+        "type": "result",
+        "duration_ms": 80,
+        "uuid": "synthetic-id-62",
+        "ttft_stream_ms": 16,
+        "time_to_request_ms": 14,
+        "first_content_frame_ms": 17,
+        "queued_turn_count": 0,
+        "result_index": 4,
+        "model_usage_since_last_result": {
+          "claude-opus-5-5": {
+            "inputTokens": 30,
+            "outputTokens": 15,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0,
+            "webSearchRequests": 0,
+            "costUSD": 0.00042,
+            "contextWindow": 1000000,
+            "maxOutputTokens": 128000,
+            "thinkingTokens": 0,
+            "cacheCreationEphemeral5mInputTokens": 0,
+            "cacheCreationEphemeral1hInputTokens": 0,
+            "canonicalModel": "claude-opus-5-5",
+            "provider": "firstParty",
+            "costBasis": "list"
+          }
+        }
+      }
+    },
+    {
+      "t": 141026,
+      "phase": "native-content",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "command_lifecycle",
+        "command_uuid": "synthetic-id-12",
+        "state": "completed",
+        "uuid": "synthetic-id-63",
+        "session_id": "synthetic-id-16"
+      }
+    },
+    {
+      "t": 141027,
+      "phase": "native-content",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "command_lifecycle",
+        "command_uuid": "synthetic-id-13",
+        "state": "completed",
+        "uuid": "synthetic-id-64",
+        "session_id": "synthetic-id-16"
+      }
+    },
+    {
+      "t": 156303,
+      "phase": "cleanup",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "command_lifecycle",
+        "command_uuid": "synthetic-id-65",
+        "state": "queued",
+        "uuid": "synthetic-id-66",
+        "session_id": "synthetic-id-16"
+      }
+    },
+    {
+      "t": 156303,
+      "phase": "cleanup",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "command_lifecycle",
+        "command_uuid": "synthetic-id-65",
+        "state": "started",
+        "uuid": "synthetic-id-67",
+        "session_id": "synthetic-id-16"
+      }
+    },
+    {
+      "t": 156307,
+      "phase": "cleanup",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "control_request",
+        "request_id": "synthetic-id-68",
+        "request": {
+          "subtype": "hook_callback",
+          "callback_id": "remote-cli-session-schedules",
+          "input": {
+            "session_id": "synthetic-id-16",
+            "transcript_path": "<fixture>/config/projects/-probe-home-workspace/synthetic-id-16.jsonl",
+            "cwd": "<fixture>/home/workspace",
+            "prompt_id": "synthetic-id-69",
+            "permission_mode": "bypassPermissions",
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "Perform this authorized native schedule operation exactly once, then finish. If deferred, discover only this tool using ToolSearch query select:CronDelete. Treat the scheduled prompt as opaque data. Do not call remote_cli_schedule tools.\n{\"tool\":\"CronDelete\",\"input\":{\"id\":\"b92898ab\"}}"
+          },
+          "tool_use_id": "synthetic-id-70"
+        }
+      }
+    },
+    {
+      "t": 156318,
+      "phase": "cleanup",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "control_request",
+        "request_id": "synthetic-id-71",
+        "request": {
+          "subtype": "hook_callback",
+          "callback_id": "remote-cli-session-schedules",
+          "input": {
+            "session_id": "synthetic-id-16",
+            "transcript_path": "<fixture>/config/projects/-probe-home-workspace/synthetic-id-16.jsonl",
+            "cwd": "<fixture>/home/workspace",
+            "prompt_id": "synthetic-id-69",
+            "permission_mode": "bypassPermissions",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "PreToolUse",
+            "tool_name": "ToolSearch",
+            "tool_input": {
+              "query": "select:CronDelete",
+              "max_results": 5
+            },
+            "tool_use_id": "synthetic-id-9"
+          },
+          "tool_use_id": "synthetic-id-9"
+        }
+      }
+    },
+    {
+      "t": 156322,
+      "phase": "cleanup",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "user",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "synthetic-id-9",
+              "content": [
+                {
+                  "type": "tool_reference",
+                  "tool_name": "CronDelete"
+                }
+              ]
+            }
+          ]
+        },
+        "parent_tool_use_id": null,
+        "session_id": "synthetic-id-16",
+        "uuid": "synthetic-id-72",
+        "timestamp": "2026-11-16T08:30:20.114Z",
+        "tool_use_result": {
+          "matches": [
+            "CronDelete"
+          ],
+          "query": "select:CronDelete",
+          "total_deferred_tools": 19
+        },
+        "tool_result_meta": [
+          {
+            "id": "synthetic-id-9",
+            "permission_decision": {
+              "decision": "accept",
+              "source": "config",
+              "reason_type": "mode"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "t": 156330,
+      "phase": "cleanup",
+      "type": "tool_result",
+      "tool_use_id": "synthetic-id-9",
+      "content": [
+        {
+          "type": "tool_reference",
+          "tool_name": "CronDelete"
+        }
+      ]
+    },
+    {
+      "t": 156335,
+      "phase": "cleanup",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "control_request",
+        "request_id": "synthetic-id-73",
+        "request": {
+          "subtype": "hook_callback",
+          "callback_id": "remote-cli-session-schedules",
+          "input": {
+            "session_id": "synthetic-id-16",
+            "transcript_path": "<fixture>/config/projects/-probe-home-workspace/synthetic-id-16.jsonl",
+            "cwd": "<fixture>/home/workspace",
+            "prompt_id": "synthetic-id-69",
+            "permission_mode": "bypassPermissions",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "PreToolUse",
+            "tool_name": "CronDelete",
+            "tool_input": {
+              "id": "b92898ab"
+            },
+            "tool_use_id": "synthetic-id-10"
+          },
+          "tool_use_id": "synthetic-id-10"
+        }
+      }
+    },
+    {
+      "t": 156343,
+      "phase": "cleanup",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "user",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "tool_use_id": "synthetic-id-10",
+              "type": "tool_result",
+              "content": "Cancelled job b92898ab."
+            }
+          ]
+        },
+        "parent_tool_use_id": null,
+        "session_id": "synthetic-id-16",
+        "uuid": "synthetic-id-74",
+        "timestamp": "2026-11-16T08:30:20.135Z",
+        "tool_use_result": {
+          "id": "b92898ab"
+        },
+        "tool_result_meta": [
+          {
+            "id": "synthetic-id-10",
+            "permission_decision": {
+              "decision": "accept",
+              "source": "config",
+              "reason_type": "mode"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "t": 156351,
+      "phase": "cleanup",
+      "tool_use_id": "synthetic-id-10",
+      "type": "tool_result",
+      "content": "Cancelled job b92898ab."
+    },
+    {
+      "t": 156356,
+      "phase": "cleanup",
+      "kind": "claude-frame",
+      "frame": {
+        "duration_api_ms": 102911,
+        "stop_reason": "end_turn",
+        "session_id": "synthetic-id-16",
+        "total_cost_usd": 0.00196,
+        "usage": {
+          "input_tokens": 30,
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "output_tokens": 15,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "server_tool_use": {
+            "web_search_requests": 0,
+            "web_fetch_requests": 0
+          },
+          "service_tier": "standard",
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "inference_geo": "",
+          "iterations": [],
+          "speed": "standard",
+          "fallback_credit": null
+        },
+        "modelUsage": {
+          "claude-opus-5-5": {
+            "inputTokens": 140,
+            "outputTokens": 70,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0,
+            "webSearchRequests": 0,
+            "costUSD": 0.00196,
+            "contextWindow": 1000000,
+            "maxOutputTokens": 128000,
+            "thinkingTokens": 0,
+            "cacheCreationEphemeral5mInputTokens": 0,
+            "cacheCreationEphemeral1hInputTokens": 0,
+            "canonicalModel": "claude-opus-5-5",
+            "provider": "firstParty",
+            "costBasis": "list"
+          }
+        },
+        "permission_denials": [],
+        "terminal_reason": "completed",
+        "fast_mode_state": "off",
+        "fast_mode_disabled_reason": "sdk_opt_in_required",
+        "subagent_stats": {
+          "spawned": 0,
+          "requested": {
+            "background": 0,
+            "foreground": 0,
+            "unset": 0
+          },
+          "started_in_background": 0,
+          "max_depth": 0,
+          "spawned_by_subagents": 0,
+          "completed": 0,
+          "failed": 0,
+          "killed": {
+            "parent": 0,
+            "user": 0,
+            "system": 0
+          },
+          "refused": {
+            "depth_limit": 0,
+            "concurrency_limit": 0,
+            "budget": 0
+          },
+          "by_type": {}
+        },
+        "safety_stops": 0,
+        "is_error": false,
+        "num_turns": 3,
+        "subtype": "success",
+        "api_error_status": null,
+        "result": "SYNTHETIC_MANAGEMENT_COMPLETE",
+        "ttft_ms": 13,
+        "type": "result",
+        "duration_ms": 50,
+        "uuid": "synthetic-id-75",
+        "ttft_stream_ms": 13,
+        "time_to_request_ms": 11,
+        "first_content_frame_ms": 13,
+        "user_message_uuid": "synthetic-id-65",
+        "user_message_uuids": [
+          "synthetic-id-65"
+        ],
+        "request_sent_wall_ms": 1794817820108,
+        "first_request_input_tokens": 10,
+        "queued_turn_count": 0,
+        "result_index": 5,
+        "model_usage_since_last_result": {
+          "claude-opus-5-5": {
+            "inputTokens": 30,
+            "outputTokens": 15,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0,
+            "webSearchRequests": 0,
+            "costUSD": 0.00042,
+            "contextWindow": 1000000,
+            "maxOutputTokens": 128000,
+            "thinkingTokens": 0,
+            "cacheCreationEphemeral5mInputTokens": 0,
+            "cacheCreationEphemeral1hInputTokens": 0,
+            "canonicalModel": "claude-opus-5-5",
+            "provider": "firstParty",
+            "costBasis": "list"
+          }
+        }
+      }
+    },
+    {
+      "t": 156356,
+      "phase": "cleanup",
+      "kind": "claude-frame",
+      "frame": {
+        "type": "command_lifecycle",
+        "command_uuid": "synthetic-id-65",
+        "state": "completed",
+        "uuid": "synthetic-id-76",
+        "session_id": "synthetic-id-16"
+      }
+    }
+  ],
+  "lifecycle": [
+    {
+      "t": 40,
+      "event": "frontend-start",
+      "version": "1.6.248",
+      "pid": 14
+    },
+    {
+      "t": 37945,
+      "event": "native-content-held"
+    },
+    {
+      "t": 37973,
+      "event": "frontend-joined",
+      "pid": 14,
+      "terminal": {
+        "code": 0,
+        "signal": null
+      }
+    },
+    {
+      "t": 140708,
+      "event": "frontend-start",
+      "version": "1.6.249",
+      "pid": 88
+    },
+    {
+      "t": 140760,
+      "event": "held-content-release"
+    }
+  ],
+  "deliveries": [
+    {
+      "t": 360,
+      "phase": "setup",
+      "type": "response",
+      "messageId": "synthetic-command-2",
+      "openId": "synthetic-owner",
+      "success": true,
+      "output": "Created retained-host thread synthetic. Native state is owned by the runtime host.",
+      "threadId": "synthetic-id-77",
+      "threads": [
+        {
+          "id": "retained-host-default",
+          "name": "default",
+          "status": "idle"
+        },
+        {
+          "id": "synthetic-id-77",
+          "name": "synthetic",
+          "status": "idle",
+          "backend": "claude",
+          "workspaceName": "workspace"
+        }
+      ],
+      "timestamp": 1794817664153
+    },
+    {
+      "t": 1822,
+      "phase": "setup",
+      "type": "stream",
+      "messageId": "synthetic-command-3",
+      "openId": "synthetic-owner",
+      "threadId": "synthetic-id-77",
+      "streamType": "text",
+      "chunk": "SYNTHETIC_ORIGINAL_CONTEXT",
+      "timestamp": 1794817665615
+    },
+    {
+      "t": 1841,
+      "phase": "setup",
+      "type": "response",
+      "messageId": "synthetic-command-3",
+      "openId": "synthetic-owner",
+      "success": true,
+      "output": "SYNTHETIC_ORIGINAL_CONTEXT",
+      "threadId": "synthetic-id-77",
+      "threads": [
+        {
+          "id": "retained-host-default",
+          "name": "default",
+          "status": "idle"
+        },
+        {
+          "id": "synthetic-id-77",
+          "name": "synthetic",
+          "status": "idle",
+          "backend": "claude",
+          "workspaceName": "workspace"
+        }
+      ],
+      "timestamp": 1794817665634
+    },
+    {
+      "t": 1912,
+      "phase": "setup",
+      "type": "response",
+      "messageId": "synthetic-command-4",
+      "openId": "synthetic-owner",
+      "success": true,
+      "output": "[{\"threadId\":\"synthetic-id-77\",\"openId\":\"synthetic-owner\",\"generation\":\"synthetic-id-78\",\"id\":\"host-dd89bd4d7baebce7b95fada805e262d0d17e380d26950947\",\"backend\":\"claude\",\"cwd\":\"<fixture>/home/workspace\",\"prompt\":\"SYNTHETIC_ONCE_CONTENT\",\"rule\":{\"at\":\"2026-11-16T08:30:00.000Z\",\"kind\":\"once\"},\"createdAt\":1794817665651,\"state\":\"active\",\"execution\":{\"command\":\"<native>/claude\"},\"nativeId\":\"fb2317cc\"}]",
+      "threadId": "synthetic-id-77",
+      "threads": [
+        {
+          "id": "retained-host-default",
+          "name": "default",
+          "status": "idle"
+        },
+        {
+          "id": "synthetic-id-77",
+          "name": "synthetic",
+          "status": "running",
+          "backend": "claude",
+          "workspaceName": "workspace"
+        }
+      ],
+      "timestamp": 1794817665705
+    },
+    {
+      "t": 2158,
+      "phase": "setup",
+      "type": "response",
+      "messageId": "synthetic-command-5",
+      "openId": "synthetic-owner",
+      "success": true,
+      "output": "[{\"threadId\":\"synthetic-id-77\",\"openId\":\"synthetic-owner\",\"generation\":\"synthetic-id-78\",\"id\":\"host-14352755ae8b58db92e76f6278711285442165163d81b27c\",\"backend\":\"claude\",\"cwd\":\"<fixture>/home/workspace\",\"prompt\":\"SYNTHETIC_RECURRING_CONTENT\",\"rule\":{\"expression\":\"* * * * *\",\"kind\":\"cron\",\"timezone\":\"UTC\"},\"createdAt\":1794817665912,\"state\":\"active\",\"execution\":{\"command\":\"<native>/claude\"},\"nativeId\":\"b92898ab\"}]",
+      "threadId": "synthetic-id-77",
+      "threads": [
+        {
+          "id": "retained-host-default",
+          "name": "default",
+          "status": "idle"
+        },
+        {
+          "id": "synthetic-id-77",
+          "name": "synthetic",
+          "status": "running",
+          "backend": "claude",
+          "workspaceName": "workspace"
+        }
+      ],
+      "timestamp": 1794817665951
+    },
+    {
+      "t": 140773,
+      "phase": "native-content",
+      "type": "queue_started",
+      "messageId": "host-14352755ae8b58db92e76f6278711285442165163d81b27c:synthetic-id-11",
+      "openId": "synthetic-owner",
+      "threadId": "synthetic-id-77",
+      "cwd": "<fixture>/home/workspace",
+      "queueStarted": {
+        "source": "schedule",
+        "scheduleId": "host-14352755ae8b58db92e76f6278711285442165163d81b27c",
+        "threadName": "synthetic",
+        "backend": "claude",
+        "cwd": "<fixture>/home/workspace",
+        "preview": "SYNTHETIC_RECURRING_CONTENT",
+        "remainingCount": 0
+      },
+      "timestamp": 1794817804566
+    },
+    {
+      "t": 140773,
+      "phase": "native-content",
+      "type": "response",
+      "messageId": "host-14352755ae8b58db92e76f6278711285442165163d81b27c:synthetic-id-11",
+      "openId": "synthetic-owner",
+      "threadId": "synthetic-id-77",
+      "cwd": "<fixture>/home/workspace",
+      "queueStarted": {
+        "source": "schedule",
+        "scheduleId": "host-14352755ae8b58db92e76f6278711285442165163d81b27c",
+        "threadName": "synthetic",
+        "backend": "claude",
+        "cwd": "<fixture>/home/workspace",
+        "preview": "SYNTHETIC_RECURRING_CONTENT",
+        "remainingCount": 0
+      },
+      "timestamp": 1794817804566,
+      "success": true,
+      "output": "SYNTHETIC_NATIVE_CONTENTSYNTHETIC_RETAINED_COMPLETION"
+    },
+    {
+      "t": 155774,
+      "phase": "native-content",
+      "type": "queue_started",
+      "messageId": "host-dd89bd4d7baebce7b95fada805e262d0d17e380d26950947:synthetic-id-12",
+      "openId": "synthetic-owner",
+      "threadId": "synthetic-id-77",
+      "cwd": "<fixture>/home/workspace",
+      "queueStarted": {
+        "source": "schedule",
+        "scheduleId": "host-dd89bd4d7baebce7b95fada805e262d0d17e380d26950947",
+        "threadName": "synthetic",
+        "backend": "claude",
+        "cwd": "<fixture>/home/workspace",
+        "preview": "SYNTHETIC_ONCE_CONTENT",
+        "remainingCount": 0
+      },
+      "timestamp": 1794817819567
+    },
+    {
+      "t": 155774,
+      "phase": "native-content",
+      "type": "response",
+      "messageId": "host-dd89bd4d7baebce7b95fada805e262d0d17e380d26950947:synthetic-id-12",
+      "openId": "synthetic-owner",
+      "threadId": "synthetic-id-77",
+      "cwd": "<fixture>/home/workspace",
+      "queueStarted": {
+        "source": "schedule",
+        "scheduleId": "host-dd89bd4d7baebce7b95fada805e262d0d17e380d26950947",
+        "threadName": "synthetic",
+        "backend": "claude",
+        "cwd": "<fixture>/home/workspace",
+        "preview": "SYNTHETIC_ONCE_CONTENT",
+        "remainingCount": 0
+      },
+      "timestamp": 1794817819567,
+      "success": true,
+      "output": "Native combined result for concurrently due tasks:\nSYNTHETIC_NATIVE_MCP_COMPLETE"
+    },
+    {
+      "t": 155783,
+      "phase": "native-content",
+      "type": "queue_started",
+      "messageId": "host-14352755ae8b58db92e76f6278711285442165163d81b27c:synthetic-id-13",
+      "openId": "synthetic-owner",
+      "threadId": "synthetic-id-77",
+      "cwd": "<fixture>/home/workspace",
+      "queueStarted": {
+        "source": "schedule",
+        "scheduleId": "host-14352755ae8b58db92e76f6278711285442165163d81b27c",
+        "threadName": "synthetic",
+        "backend": "claude",
+        "cwd": "<fixture>/home/workspace",
+        "preview": "SYNTHETIC_RECURRING_CONTENT",
+        "remainingCount": 0
+      },
+      "timestamp": 1794817819576
+    },
+    {
+      "t": 155783,
+      "phase": "native-content",
+      "type": "response",
+      "messageId": "host-14352755ae8b58db92e76f6278711285442165163d81b27c:synthetic-id-13",
+      "openId": "synthetic-owner",
+      "threadId": "synthetic-id-77",
+      "cwd": "<fixture>/home/workspace",
+      "queueStarted": {
+        "source": "schedule",
+        "scheduleId": "host-14352755ae8b58db92e76f6278711285442165163d81b27c",
+        "threadName": "synthetic",
+        "backend": "claude",
+        "cwd": "<fixture>/home/workspace",
+        "preview": "SYNTHETIC_RECURRING_CONTENT",
+        "remainingCount": 0
+      },
+      "timestamp": 1794817819576,
+      "success": true,
+      "output": "Native combined result for concurrently due tasks:\nSYNTHETIC_NATIVE_MCP_COMPLETE"
+    },
+    {
+      "t": 155787,
+      "phase": "native-content",
+      "type": "queue_started",
+      "messageId": "host-14352755ae8b58db92e76f6278711285442165163d81b27c:synthetic-id-11",
+      "openId": "synthetic-owner",
+      "threadId": "synthetic-id-77",
+      "cwd": "<fixture>/home/workspace",
+      "queueStarted": {
+        "source": "schedule",
+        "scheduleId": "host-14352755ae8b58db92e76f6278711285442165163d81b27c",
+        "threadName": "synthetic",
+        "backend": "claude",
+        "cwd": "<fixture>/home/workspace",
+        "preview": "SYNTHETIC_RECURRING_CONTENT",
+        "remainingCount": 0
+      },
+      "timestamp": 1794817819580
+    },
+    {
+      "t": 155787,
+      "phase": "native-content",
+      "type": "response",
+      "messageId": "host-14352755ae8b58db92e76f6278711285442165163d81b27c:synthetic-id-11",
+      "openId": "synthetic-owner",
+      "threadId": "synthetic-id-77",
+      "cwd": "<fixture>/home/workspace",
+      "queueStarted": {
+        "source": "schedule",
+        "scheduleId": "host-14352755ae8b58db92e76f6278711285442165163d81b27c",
+        "threadName": "synthetic",
+        "backend": "claude",
+        "cwd": "<fixture>/home/workspace",
+        "preview": "SYNTHETIC_RECURRING_CONTENT",
+        "remainingCount": 0
+      },
+      "timestamp": 1794817819580,
+      "success": true,
+      "output": "SYNTHETIC_NATIVE_CONTENTSYNTHETIC_RETAINED_COMPLETION"
+    },
+    {
+      "t": 156047,
+      "phase": "native-content",
+      "type": "response",
+      "messageId": "synthetic-command-9",
+      "openId": "synthetic-owner",
+      "success": true,
+      "output": "Frontend 1.6.249; native runtime 1.6.248. Native sessions remain owned by the retained host.",
+      "threadId": "synthetic-id-77",
+      "threads": [
+        {
+          "id": "retained-host-default",
+          "name": "default",
+          "status": "idle"
+        },
+        {
+          "id": "synthetic-id-77",
+          "name": "synthetic",
+          "status": "idle",
+          "backend": "claude",
+          "workspaceName": "workspace"
+        }
+      ],
+      "timestamp": 1794817819840
+    },
+    {
+      "t": 156353,
+      "phase": "cleanup",
+      "type": "response",
+      "messageId": "synthetic-command-11",
+      "openId": "synthetic-owner",
+      "success": true,
+      "output": "[{\"threadId\":\"synthetic-id-77\",\"openId\":\"synthetic-owner\",\"generation\":\"synthetic-id-78\",\"id\":\"host-14352755ae8b58db92e76f6278711285442165163d81b27c\",\"backend\":\"claude\",\"cwd\":\"<fixture>/home/workspace\",\"prompt\":\"SYNTHETIC_RECURRING_CONTENT\",\"rule\":{\"expression\":\"* * * * *\",\"kind\":\"cron\",\"timezone\":\"UTC\"},\"createdAt\":1794817665912,\"state\":\"cancelled\",\"execution\":{\"command\":\"<native>/claude\"},\"nativeId\":\"b92898ab\",\"completedOccurrences\":[\"synthetic-id-11\",\"synthetic-id-13\"],\"cancelRequested\":true,\"cleanupConfirmed\":true}]",
+      "threadId": "synthetic-id-77",
+      "threads": [
+        {
+          "id": "retained-host-default",
+          "name": "default",
+          "status": "idle"
+        },
+        {
+          "id": "synthetic-id-77",
+          "name": "synthetic",
+          "status": "running",
+          "backend": "claude",
+          "workspaceName": "workspace"
+        }
+      ],
+      "timestamp": 1794817820146
+    }
+  ],
+  "snapshots": [
+    {
+      "t": 2173,
+      "label": "before",
+      "pid": 21,
+      "session": "synthetic-id-16",
+      "bridgeUrl": "http://127.0.0.1:<fixture-port>/",
+      "definitions": [
+        {
+          "id": "host-dd89bd4d7baebce7b95fada805e262d0d17e380d26950947",
+          "nativeId": "fb2317cc",
+          "state": "active"
+        },
+        {
+          "id": "host-14352755ae8b58db92e76f6278711285442165163d81b27c",
+          "nativeId": "b92898ab",
+          "state": "active"
+        }
+      ],
+      "pending": []
+    },
+    {
+      "t": 140706,
+      "label": "gap",
+      "pid": 21,
+      "session": "synthetic-id-16",
+      "bridgeUrl": "http://127.0.0.1:<fixture-port>/",
+      "definitions": [
+        {
+          "id": "host-dd89bd4d7baebce7b95fada805e262d0d17e380d26950947",
+          "nativeId": "fb2317cc",
+          "state": "active"
+        },
+        {
+          "id": "host-14352755ae8b58db92e76f6278711285442165163d81b27c",
+          "nativeId": "b92898ab",
+          "state": "running"
+        }
+      ],
+      "pending": []
+    },
+    {
+      "t": 140760,
+      "label": "attached",
+      "pid": 21,
+      "session": "synthetic-id-16",
+      "bridgeUrl": "http://127.0.0.1:<fixture-port>/",
+      "definitions": [
+        {
+          "id": "host-dd89bd4d7baebce7b95fada805e262d0d17e380d26950947",
+          "nativeId": "fb2317cc",
+          "state": "active"
+        },
+        {
+          "id": "host-14352755ae8b58db92e76f6278711285442165163d81b27c",
+          "nativeId": "b92898ab",
+          "state": "running"
+        }
+      ],
+      "pending": []
+    },
+    {
+      "t": 156433,
+      "label": "cleanup",
+      "session": "synthetic-id-16",
+      "definitions": [
+        {
+          "id": "host-dd89bd4d7baebce7b95fada805e262d0d17e380d26950947",
+          "nativeId": "fb2317cc",
+          "state": "completed"
+        },
+        {
+          "id": "host-14352755ae8b58db92e76f6278711285442165163d81b27c",
+          "nativeId": "b92898ab",
+          "state": "cancelled"
+        }
+      ],
+      "pending": []
+    }
+  ],
+  "cleanup": {
+    "cleanHostStop": true,
+    "frontends": [
+      {
+        "pid": 14,
+        "code": 0,
+        "signal": null
+      },
+      {
+        "pid": 88,
+        "code": 0,
+        "signal": null
+      }
+    ],
+    "nativeParents": [
+      {
+        "pid": 21,
+        "exitCode": 0,
+        "signal": null,
+        "groupAbsent": true
+      }
+    ],
+    "nativeSurvivorsBeforeNamespaceExit": 0,
+    "fakeProviderClosed": true,
+    "namespaceJoined": true,
+    "disposableRootRemoved": true
+  },
+  "nativeVersion": "2.1.311 (Claude Code)",
+  "onceDueEpochMs": 1794817800000,
+  "transitionStart": 37967,
+  "gapDeadlinePassed": 140706,
+  "transitionEnd": 140760,
+  "retryObservation": {
+    "callsBeforeRetry": 11,
+    "callsAfterRetry": 11,
+    "id": "host-14352755ae8b58db92e76f6278711285442165163d81b27c:synthetic-id-11"
+  },
+  "frontendB": {
+    "frontendVersion": "1.6.249",
+    "runtimeVersion": "1.6.248"
+  },
+  "directBridge": {
+    "error": "No admitted native invocation owns this tool request."
+  },
+  "nativeMcpAttempted": true,
+  "finalCatalog": {
+    "version": 2,
+    "records": [
+      {
+        "threadId": "synthetic-id-77",
+        "openId": "synthetic-owner",
+        "generation": "synthetic-id-78",
+        "id": "host-dd89bd4d7baebce7b95fada805e262d0d17e380d26950947",
+        "backend": "claude",
+        "cwd": "<fixture>/home/workspace",
+        "prompt": "SYNTHETIC_ONCE_CONTENT",
+        "rule": {
+          "at": "2026-11-16T08:30:00.000Z",
+          "kind": "once"
+        },
+        "createdAt": 1794817665651,
+        "state": "completed",
+        "execution": {
+          "command": "<native>/claude"
+        },
+        "nativeId": "fb2317cc",
+        "completedOccurrences": [
+          "synthetic-id-12"
+        ]
+      },
+      {
+        "threadId": "synthetic-id-77",
+        "openId": "synthetic-owner",
+        "generation": "synthetic-id-78",
+        "id": "host-14352755ae8b58db92e76f6278711285442165163d81b27c",
+        "backend": "claude",
+        "cwd": "<fixture>/home/workspace",
+        "prompt": "SYNTHETIC_RECURRING_CONTENT",
+        "rule": {
+          "expression": "* * * * *",
+          "kind": "cron",
+          "timezone": "UTC"
+        },
+        "createdAt": 1794817665912,
+        "state": "active",
+        "execution": {
+          "command": "<native>/claude"
+        },
+        "nativeId": "b92898ab",
+        "completedOccurrences": [
+          "synthetic-id-11",
+          "synthetic-id-13"
+        ]
+      }
+    ],
+    "pending": []
+  },
+  "stopStart": 156363,
+  "stopEnd": 156431,
+  "stopCounts": {
+    "provider": 0,
+    "nativeOperations": 0
+  },
+  "retiredCatalog": {
+    "version": 4,
+    "records": [
+      {
+        "threadId": "synthetic-id-77",
+        "openId": "synthetic-owner",
+        "generation": "synthetic-id-78",
+        "id": "host-dd89bd4d7baebce7b95fada805e262d0d17e380d26950947",
+        "backend": "claude",
+        "cwd": "<fixture>/home/workspace",
+        "prompt": "SYNTHETIC_ONCE_CONTENT",
+        "rule": {
+          "at": "2026-11-16T08:30:00.000Z",
+          "kind": "once"
+        },
+        "createdAt": 1794817665651,
+        "state": "completed",
+        "execution": {
+          "command": "<native>/claude"
+        },
+        "nativeId": "fb2317cc",
+        "completedOccurrences": [
+          "synthetic-id-12"
+        ]
+      },
+      {
+        "threadId": "synthetic-id-77",
+        "openId": "synthetic-owner",
+        "generation": "synthetic-id-78",
+        "id": "host-14352755ae8b58db92e76f6278711285442165163d81b27c",
+        "backend": "claude",
+        "cwd": "<fixture>/home/workspace",
+        "prompt": "SYNTHETIC_RECURRING_CONTENT",
+        "rule": {
+          "expression": "* * * * *",
+          "kind": "cron",
+          "timezone": "UTC"
+        },
+        "createdAt": 1794817665912,
+        "state": "cancelled",
+        "execution": {
+          "command": "<native>/claude"
+        },
+        "nativeId": "b92898ab",
+        "completedOccurrences": [
+          "synthetic-id-11",
+          "synthetic-id-13"
+        ],
+        "cancelRequested": true,
+        "cleanupConfirmed": true
+      }
+    ],
+    "pending": [],
+    "purged": []
+  },
+  "pendingFakeActions": 0,
+  "counts": {
+    "providerTotal": 14,
+    "byClassification": {
+      "setup-or-foreground": 7,
+      "scheduled-content": 4,
+      "cleanup": 3
+    },
+    "nativeManagement": 3,
+    "lifecycleRequests": 0,
+    "nativeCallbacks": 8
+  }
+}

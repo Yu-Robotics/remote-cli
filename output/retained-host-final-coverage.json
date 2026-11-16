@@ -1,0 +1,86 @@
+{
+  "total": {
+    "lines": {
+      "total": 2037,
+      "covered": 1994,
+      "skipped": 0,
+      "pct": 97.88
+    },
+    "statements": {
+      "total": 2037,
+      "covered": 1994,
+      "skipped": 0,
+      "pct": 97.88
+    },
+    "functions": {
+      "total": 115,
+      "covered": 112,
+      "skipped": 0,
+      "pct": 97.39
+    },
+    "branches": {
+      "total": 1564,
+      "covered": 1400,
+      "skipped": 0,
+      "pct": 89.51
+    },
+    "branchesTrue": {
+      "total": 0,
+      "covered": 0,
+      "skipped": 0,
+      "pct": 100
+    }
+  },
+  "src/scheduling/ScheduleService.ts": {
+    "lines": {
+      "total": 1677,
+      "covered": 1640,
+      "skipped": 0,
+      "pct": 97.79
+    },
+    "functions": {
+      "total": 86,
+      "covered": 84,
+      "skipped": 0,
+      "pct": 97.67
+    },
+    "statements": {
+      "total": 1677,
+      "covered": 1640,
+      "skipped": 0,
+      "pct": 97.79
+    },
+    "branches": {
+      "total": 1320,
+      "covered": 1204,
+      "skipped": 0,
+      "pct": 91.21
+    }
+  },
+  "src/sessionHost/RetainedRuntime.ts": {
+    "lines": {
+      "total": 360,
+      "covered": 354,
+      "skipped": 0,
+      "pct": 98.33
+    },
+    "functions": {
+      "total": 29,
+      "covered": 28,
+      "skipped": 0,
+      "pct": 96.55
+    },
+    "statements": {
+      "total": 360,
+      "covered": 354,
+      "skipped": 0,
+      "pct": 98.33
+    },
+    "branches": {
+      "total": 244,
+      "covered": 196,
+      "skipped": 0,
+      "pct": 80.32
+    }
+  }
+}

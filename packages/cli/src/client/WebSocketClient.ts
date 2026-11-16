@@ -11,6 +11,8 @@ import { AutomaticFileEnrollment } from '../files/AutomaticFileEnrollment';
  * WebSocket client configuration
  */
 export interface WebSocketClientOptions {
+  /** A retained command frontend negotiates only its implemented wire features. */
+  capabilityProfile?: 'retained-runtime';
   identityLoader?: () => Promise<DeviceIdentity | undefined>;
   automaticFileEnrollment?: AutomaticFileEnrollment;
   /** Reconnect interval (milliseconds), default 5000 */
@@ -48,6 +50,7 @@ export class WebSocketClient {
   private connectionEpoch = 0;
   private lastReceivedAt = 0;
   private identity?: DeviceIdentity;
+  private readonly retainedRuntime: boolean;
   private readonly identityLoader?: () => Promise<DeviceIdentity | undefined>;
   private readonly automaticFileEnrollment?: AutomaticFileEnrollment;
   private readonly maintenanceCapabilities: { updateNotice: boolean; subscriptionInspection: boolean };
@@ -59,6 +62,7 @@ export class WebSocketClient {
   private taskResultAckHandlers = new Set<(messageId: string) => void>();
 
   constructor(serverUrl: string, deviceId: string, options: WebSocketClientOptions = {}) {
+    this.retainedRuntime = options.capabilityProfile === 'retained-runtime';
     this.serverUrl = serverUrl;
     this.deviceId = deviceId;
     this.identityLoader = options.identityLoader;
@@ -358,7 +362,7 @@ export class WebSocketClient {
           deviceId: this.deviceId,
           protocolVersion: PROTOCOL_VERSION,
           ...(signature ? { deviceSignature: signature } : {}),
-          capabilities: {
+          capabilities: this.retainedRuntime ? { queueStarted: true, taskRecovery: true, scheduleResultsV1: true } : {
             ...(this.automaticFileEnrollment ? { automaticFileEnrollmentV1: true } : {}),
             queueStarted: true,
             outputAttachmentHintsV1: true,

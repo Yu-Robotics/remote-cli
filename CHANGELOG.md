@@ -13,6 +13,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Corrected deployment, protocol, security, backend-switching, and release instructions; marked superseded plans and test reports as historical.
 
+## [1.6.248] - 2026-11-16
+
+### Fixed
+- Separate automatic-update preparation from installation in logs. Failed finalization releases global update admission while preserving affected schedule-thread fences; unrelated chat remains available, and retries check readiness without replaying uncertain handoff operations or starting model-mediated recovery.
+- Remember successful package installation across finalization failures so retries do not reinstall the same version. Installation and restart still require confirmed preparation.
+- Separate drained-host retirement admission from native exit proof. Explicit stop joins original executor groups, persists late callbacks and releases ownership only after confirmation; failed exits retain the same handles for retry.
+
+### Added
+- Add an opt-in retained native host with a separately updated command frontend, authenticated local epochs, durable operation receipts, scheduled result delivery and single-writer storage. Frontend replacement keeps the original host and does not invoke native schedule management. Existing monolithic sessions are not imported; the opt-in command profile and host failure/restart limitations are explicit.
+- Connect private retained-host launch records to verified immutable runtime bundles and independently named Linux/macOS service supervisors. Reusing a running owner does not restart it; uncertain or previously stopped owners require reconciliation. Windows supervision is unsupported. Actual service-manager, package-installation and live Router acceptance remain required before deployment.
+
+### Tests
+- Isolate retained-host and schedule-handler native lock tests in separate test processes, preventing unrelated child creation from transiently inheriting their locks.
+- Verify real Claude/AGY continuity in isolated Linux namespaces with deterministic loopback providers: stable native identities, once/cron execution across frontend replacement, ACK replay without execution replay, and zero inference or management calls during replacement and drained-host stop. This does not verify live services or macOS/Windows.
+- Align the legacy Claude installer-failure regression with retained thread fences and assert no recovery requests after failure or reconnect.
+
 ## [1.6.247] - 2026-11-16
 
 ### Fixed

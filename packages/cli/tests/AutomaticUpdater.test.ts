@@ -49,6 +49,34 @@ describe('AutomaticUpdater', () => {
     expect(installVersion).toHaveBeenCalledWith('1.6.26');
     expect(beforeRestart).toHaveBeenCalledOnce();
     expect(exitProcess).toHaveBeenCalledWith(0);
+    const phases = vi.mocked(console.log).mock.calls.map(([message]) => String(message));
+    expect(phases.findIndex(message => message.includes('Preparing ')))
+      .toBeLessThan(phases.findIndex(message => message.includes('Installing ')));
+  });
+
+  it('honors failure backoff despite repeated Router version notifications', async () => {
+    vi.useFakeTimers();
+    installVersion.mockRejectedValue(new Error('Synthetic install failure'));
+    const updater = createUpdater({ failureRetryDelayMs: 60_000 });
+    await updater.handleRouterVersion('1.6.26');
+    for (let index = 0; index < 5; index++) await updater.handleRouterVersion('1.6.26');
+    await updater.handleRouterVersion('1.6.27');
+    expect(installVersion).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(installVersion).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(installVersion).toHaveBeenCalledTimes(2);
+    expect(installVersion).toHaveBeenLastCalledWith('1.6.27');
+  });
+
+  it('uses the default installer and restart callbacks with synthetic subprocess receipts', async () => {
+    vi.mocked(execFile).mockImplementation(((command: string, args: string[], _options: unknown, callback: Function) => {
+      callback(null, command === 'npm' ? args[0] === 'view' ? '"1.6.26"' : '' : '1.6.26', '');
+    }) as any);
+    const exit = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never);
+    await new AutomaticUpdater('1.6.25', readiness).handleRouterVersion('1.6.26');
+    expect(execFile).toHaveBeenCalledTimes(3);
+    expect(exit).toHaveBeenCalledWith(0);
   });
 
   it('keeps manual clients running and releases the lock after installing an update', async () => {
@@ -128,6 +156,99 @@ describe('AutomaticUpdater', () => {
     expect(readiness.endAutomaticUpdate).toHaveBeenCalledOnce();
     expect(beforeRestart).not.toHaveBeenCalled();
     expect(exitProcess).not.toHaveBeenCalled();
+  });
+
+  it('reports preparation before installation and never installs a rejected preparation', async () => {
+    vi.useFakeTimers();
+    let reject!: (error: Error) => void;
+    readiness.prepareAutomaticUpdate = vi.fn(() => new Promise<void>((_resolve, fail) => { reject = fail; }));
+    const update = createUpdater().handleRouterVersion('1.6.26');
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Preparing '));
+    expect(console.log).not.toHaveBeenCalledWith(expect.stringContaining('Installing '));
+    expect(installVersion).not.toHaveBeenCalled();
+    reject(new Error('Synthetic preparation timeout'));
+    await update;
+    expect(installVersion).not.toHaveBeenCalled();
+    expect(beforeRestart).not.toHaveBeenCalled();
+    expect(readiness.endAutomaticUpdate).toHaveBeenCalledWith(true);
+    vi.clearAllTimers();
+  });
+
+  it('keeps retrying readiness after finalizer rejection without repeating pending native preparation', async () => {
+    vi.useFakeTimers();
+    readiness.prepareAutomaticUpdate = vi.fn().mockRejectedValue(new Error('Synthetic handoff timeout'));
+    readiness.endAutomaticUpdate = vi.fn().mockRejectedValue(new Error('Unresolved owner'));
+    vi.mocked(readiness.tryBeginAutomaticUpdate).mockReturnValueOnce(true).mockReturnValue(false);
+    const updater = createUpdater();
+    await updater.handleRouterVersion('1.6.26');
+    await vi.advanceTimersByTimeAsync(40);
+    expect(readiness.tryBeginAutomaticUpdate).toHaveBeenCalledTimes(4);
+    expect(readiness.prepareAutomaticUpdate).toHaveBeenCalledOnce();
+    expect(installVersion).not.toHaveBeenCalled();
+    expect(beforeRestart).not.toHaveBeenCalled();
+    expect(exitProcess).not.toHaveBeenCalled();
+    vi.mocked(readiness.tryBeginAutomaticUpdate).mockReturnValue(true);
+    vi.mocked(readiness.prepareAutomaticUpdate).mockResolvedValue(undefined);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(installVersion).toHaveBeenCalledOnce();
+    expect(readiness.prepareAutomaticUpdate).toHaveBeenCalledTimes(2);
+    vi.clearAllTimers();
+  });
+
+  it('serializes Router notices while failed-attempt finalization is still pending', async () => {
+    vi.useFakeTimers();
+    installVersion.mockRejectedValueOnce(new Error('Synthetic installer failure'));
+    let finish!: () => void;
+    readiness.endAutomaticUpdate = vi.fn(() => new Promise<void>(resolve => { finish = resolve; }));
+    const updater = createUpdater();
+    const first = updater.handleRouterVersion('1.6.26');
+    await vi.waitFor(() => expect(readiness.endAutomaticUpdate).toHaveBeenCalledOnce());
+    await updater.handleRouterVersion('1.6.27');
+    expect(readiness.tryBeginAutomaticUpdate).toHaveBeenCalledOnce();
+    expect(installVersion).toHaveBeenCalledOnce();
+    finish(); await first;
+    await vi.advanceTimersByTimeAsync(20);
+    expect(installVersion).toHaveBeenLastCalledWith('1.6.27');
+    vi.clearAllTimers();
+  });
+
+  it('retries failed install-only finalization without reinstalling or repeating native preparation', async () => {
+    vi.useFakeTimers();
+    readiness.prepareAutomaticUpdate = vi.fn(async () => {});
+    readiness.endAutomaticUpdate = vi.fn().mockRejectedValue(new Error('Synthetic recovery failure'));
+    const updater = createUpdater({ restartAfterUpdate: false });
+    await updater.handleRouterVersion('1.6.26');
+    vi.mocked(readiness.tryBeginAutomaticUpdate).mockReturnValue(false);
+    await vi.advanceTimersByTimeAsync(20);
+    expect(readiness.tryBeginAutomaticUpdate).toHaveBeenCalledTimes(2);
+    expect(installVersion).toHaveBeenCalledOnce();
+    expect(readiness.prepareAutomaticUpdate).toHaveBeenCalledOnce();
+    vi.mocked(readiness.tryBeginAutomaticUpdate).mockReturnValue(true);
+    vi.mocked(readiness.endAutomaticUpdate).mockResolvedValue(undefined);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(installVersion).toHaveBeenCalledOnce();
+    expect(readiness.prepareAutomaticUpdate).toHaveBeenCalledOnce();
+    expect(exitProcess).not.toHaveBeenCalled();
+    vi.clearAllTimers();
+  });
+
+  it('requires fresh preparation before retrying a failed restart even when installation already succeeded', async () => {
+    vi.useFakeTimers();
+    readiness.prepareAutomaticUpdate = vi.fn(async () => {});
+    beforeRestart.mockRejectedValueOnce(new Error('Synthetic restart failure'));
+    const updater = createUpdater();
+    await updater.handleRouterVersion('1.6.26');
+    vi.mocked(readiness.prepareAutomaticUpdate).mockRejectedValueOnce(new Error('New ownership is unresolved'));
+    await vi.advanceTimersByTimeAsync(20);
+    expect(installVersion).toHaveBeenCalledOnce();
+    expect(beforeRestart).toHaveBeenCalledOnce();
+    expect(exitProcess).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(20);
+    expect(readiness.prepareAutomaticUpdate).toHaveBeenCalledTimes(3);
+    expect(installVersion).toHaveBeenCalledOnce();
+    expect(beforeRestart).toHaveBeenCalledTimes(2);
+    expect(exitProcess).toHaveBeenCalledWith(0);
+    vi.clearAllTimers();
   });
 
   it.each([true, false])('retries a failed installation without another reconnect (restart: %s)', async (restartAfterUpdate) => {

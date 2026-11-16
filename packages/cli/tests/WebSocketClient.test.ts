@@ -41,6 +41,16 @@ describe('WebSocketClient', () => {
   });
 
   describe('connection management', () => {
+    it('advertises only implemented retained-runtime gateway capabilities', async () => {
+      client.disconnect();
+      client = new WebSocketClient(serverUrl, deviceId, { capabilityProfile: 'retained-runtime' });
+      const connected = client.connect();
+      mockWs.on.mock.calls.find((call: any) => call[0] === 'open')[1](); await connected;
+      const frames = mockWs.send.mock.calls.map((call: any[]) => JSON.parse(call[0]));
+      expect(frames.find((frame: any) => frame.type === 'binding_request').data.capabilities)
+        .toEqual({ queueStarted: true, taskRecovery: true, scheduleResultsV1: true });
+    });
+
     it.each([false, true])('recovers ordinary tasks and consumes receipts without schedule subscribers (capability %s)', async scheduleCapability => {
       const connected = client.connect();
       mockWs.on.mock.calls.find((call: any) => call[0] === 'open')[1](); await connected;

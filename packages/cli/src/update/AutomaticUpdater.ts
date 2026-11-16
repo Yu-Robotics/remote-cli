@@ -8,7 +8,8 @@ const CLI_PACKAGE = '@yu_robotics/remote-cli';
 export interface UpdateReadiness {
   tryBeginAutomaticUpdate(): boolean;
   prepareAutomaticUpdate?(): Promise<void>;
-  endAutomaticUpdate(): void | Promise<void>;
+  /** Failure releases update admission without starting new native recovery. */
+  endAutomaticUpdate(failed?: boolean): void | Promise<void>;
 }
 
 export interface AutomaticUpdaterDependencies {
@@ -79,7 +80,9 @@ export class AutomaticUpdater {
       this.pendingVersion = routerVersion;
       console.log(`[AutoUpdate] Router ${routerVersion} is newer than running CLI ${this.currentVersion}.`);
     }
-    await this.attemptUpdate();
+    // Repeated registration/poll notifications must honor the existing backoff.
+    // Remember a newer target, but let the scheduled readiness attempt own retry.
+    if (!this.retryTimer) await this.attemptUpdate();
   }
 
   async handleProtocolMismatch(serverUrl: string): Promise<void> {
@@ -110,15 +113,23 @@ export class AutomaticUpdater {
       this.retryTimer = undefined;
     }
     const targetVersion = this.pendingVersion;
-    console.log(`[AutoUpdate] Installing ${CLI_PACKAGE}@${targetVersion}...`);
     try {
-      await this.readiness.prepareAutomaticUpdate?.();
-      await this.dependencies.installVersion(targetVersion);
-      if (!this.restartAfterUpdate) {
+      const needsInstall = isNewerVersion(targetVersion, this.installedVersion);
+      // A restart retry needs fresh preparation: unrelated work may have been
+      // admitted since the previous failure even if npm already succeeded.
+      if (needsInstall || this.restartAfterUpdate) {
+        console.log(`[AutoUpdate] Preparing ${CLI_PACKAGE}@${targetVersion}...`);
+        await this.readiness.prepareAutomaticUpdate?.();
+      }
+      if (needsInstall) {
+        console.log(`[AutoUpdate] Installing ${CLI_PACKAGE}@${targetVersion}...`);
+        await this.dependencies.installVersion(targetVersion);
         this.installedVersion = targetVersion;
+      }
+      if (!this.restartAfterUpdate) {
+        await this.readiness.endAutomaticUpdate();
         if (this.pendingVersion === targetVersion) this.pendingVersion = undefined;
         this.updating = false;
-        await this.readiness.endAutomaticUpdate();
         console.log(`[AutoUpdate] CLI ${targetVersion} installed. Running CLI ${this.currentVersion} will continue; the new version takes effect the next time you start remote-cli.`);
         if (this.pendingVersion) this.scheduleAttempt(this.dependencies.retryDelayMs);
         return;
@@ -129,14 +140,16 @@ export class AutomaticUpdater {
     } catch (error) {
       console.error('[AutoUpdate] Upgrade did not finish:', error instanceof Error ? error.message : error);
       console.error(`[AutoUpdate] To update manually: npm install -g ${CLI_PACKAGE}@${targetVersion}`);
-      this.updating = false;
-      try { await this.readiness.endAutomaticUpdate(); }
+      // Retain attempt serialization until finalization settles. A Router
+      // notification during cleanup must not start a second installer.
+      try { await this.readiness.endAutomaticUpdate(true); }
       catch {
-        console.error('[AutoUpdate] Schedule recovery or shutdown remains unresolved. Work is fenced; inspect schedule status before retrying.');
-        return;
+        console.error('[AutoUpdate] Schedule recovery or shutdown remains unresolved. Affected work stays fenced; update readiness will be checked again.');
+      } finally {
+        this.updating = false;
+        this.scheduleAttempt(this.dependencies.failureRetryDelayMs);
       }
-      console.error('[AutoUpdate] The current process can continue; retrying the update later.');
-      this.scheduleAttempt(this.dependencies.failureRetryDelayMs);
+      console.error('[AutoUpdate] Retrying update admission later; installation still requires successful preparation.');
     }
   }
 

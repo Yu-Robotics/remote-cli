@@ -26,6 +26,9 @@ describe('CLI test scheduling', () => {
 
   it.each([
     'tests/ScheduleService.test.ts',
+    'tests/MessageHandler.schedule.test.ts',
+    'tests/SessionHostRuntime.test.ts',
+    'tests/RetainedHostLauncher.test.ts',
     'tests/delegation/ManagedNativeSessionDeletion.test.ts',
     'tests/delegation/ManagedHistoryBackends.test.ts',
   ])('isolates native lock release and reacquisition in %s', file => {

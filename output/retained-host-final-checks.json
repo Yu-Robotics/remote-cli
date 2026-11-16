@@ -1,0 +1,74 @@
+{
+  "claude": {
+    "backend": "claude",
+    "lifecycle_ms": 102793,
+    "lifecycle_provider_calls": 0,
+    "lifecycle_native_operations": 0,
+    "native_terminals": 3,
+    "once_terminals": 1,
+    "cron_terminals": 2,
+    "provider_by_classification": {
+      "setup-or-foreground": 7,
+      "scheduled-content": 4,
+      "cleanup": 3
+    },
+    "native_mcp_success": true,
+    "ack_retry_count": 2,
+    "provider_calls_in_retry_observation": 0,
+    "clean_product_host_stop": true,
+    "explicit_stop_ms": 68,
+    "explicit_stop_provider_calls": 0,
+    "explicit_stop_native_management_calls": 0,
+    "local_native_groups_absent": true,
+    "namespace_cleanup": true
+  },
+  "agy": {
+    "backend": "agy",
+    "lifecycle_ms": 124503,
+    "lifecycle_provider_calls": 0,
+    "lifecycle_native_operations": 0,
+    "native_terminals": 3,
+    "once_terminals": 1,
+    "cron_terminals": 2,
+    "provider_by_classification": {
+      "auxiliary": 1,
+      "setup-or-foreground": 7,
+      "scheduled-content": 3,
+      "cleanup": 6
+    },
+    "native_mcp_success": true,
+    "ack_retry_count": 2,
+    "provider_calls_in_retry_observation": 0,
+    "clean_product_host_stop": true,
+    "explicit_stop_ms": 41,
+    "explicit_stop_provider_calls": 0,
+    "explicit_stop_native_management_calls": 0,
+    "local_native_groups_absent": true,
+    "namespace_cleanup": true
+  },
+  "validation": {
+    "focusedTests": {
+      "passed": 330,
+      "failed": 0
+    },
+    "broadTests": {
+      "passed": 476,
+      "failed": 1,
+      "failure": "ClaudeScheduleRecovery.test.ts:165, installation failure expects active but remains interrupted",
+      "reproducedWithOriginalScheduleService": true
+    },
+    "nativeVerifier": {
+      "validArtifacts": 2,
+      "rejectedCorruptions": 30
+    },
+    "builds": {
+      "cli": true,
+      "router": true
+    },
+    "platform": "Linux x64 only"
+  },
+  "sourceSha256": {
+    "packages/cli/src/scheduling/ScheduleService.ts": "7014aeeeb4fec2b67b001f13315d8fdbdd493630917c978189b6bec27b650c23",
+    "packages/cli/src/sessionHost/RetainedRuntime.ts": "2e76c68515aa03ae8c0b8aa3172b3ef88b2269435ca42bb3578f90f06c407574"
+  }
+}

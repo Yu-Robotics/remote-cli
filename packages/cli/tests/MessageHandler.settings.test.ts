@@ -97,6 +97,35 @@ describe('settings cards command integration', () => {
   });
   afterEach(async () => { await f.handler.destroy(); await rm(f.cwd, { recursive: true, force: true }); vi.restoreAllMocks(); });
 
+  it('keeps existing settings and directory cards fenced after the global update lock is released', async () => {
+    const model = await f.open('model');
+    const effort = await f.open('effort');
+    const backend = await f.open('backend');
+    await f.send('/backend', 'thread-b');
+    const otherBackend = f.responses().at(-1)!.settingsMenu;
+    const directory = await directoryMenu();
+    const handler = f.handler as any;
+    handler.automaticUpdateScheduleThreads.set('thread-a', handler.scheduleGeneration('thread-a'));
+    handler.automaticUpdateFailed = true;
+    await expect(f.handler.endAutomaticUpdate(true)).rejects.toThrow('affected thread admission is retained');
+    expect(handler.automaticUpdateInProgress).toBe(false);
+    expect((await f.action(model)).success).toBe(false);
+    expect((await f.action(effort, { value: 'high' })).success).toBe(false);
+    expect((await f.action(backend, { value: 'agy', scope: 'thread' })).success).toBe(false);
+    expect((await f.action(backend, { operation: 'follow_global', value: undefined })).success).toBe(false);
+    expect((await f.action(otherBackend, { value: 'agy', scope: 'all' })).success).toBe(false);
+    expect((await f.action(directory, { value: directory.directory!.apply })).success).toBe(false);
+    expect(f.executor.setModel).not.toHaveBeenCalled();
+    expect(f.executor.setEffort).not.toHaveBeenCalled();
+    expect(f.pool.switchBackend).not.toHaveBeenCalled();
+    expect(f.pool.switchThreadBackend).not.toHaveBeenCalled();
+    expect(f.pool.destroyThread).not.toHaveBeenCalled();
+    expect(f.pool.setWorkingDirectory).not.toHaveBeenCalled();
+    await f.send('Unrelated chat', 'thread-b');
+    expect(f.responses().at(-1)!.success).toBe(true);
+    expect(f.executor.execute).toHaveBeenCalledOnce();
+  });
+
   it('persists speed separately per backend and rejects speed on old connections', async () => {
     const setSpeed = vi.fn(async () => ({ success: true }));
     Object.assign(f.executor, { setSpeed });

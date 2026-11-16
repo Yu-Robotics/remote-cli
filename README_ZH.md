@@ -182,6 +182,67 @@ systemd can still kill remaining children. Timeout or failed cleanup is not a cl
 recovery checkpoint. The limited same-machine reboot reconciliation described below
 does not make same-boot crashes safe.
 
+From CLI 1.6.248, a failed automatic update releases global update admission
+while retaining fences on the affected schedule threads. Unrelated threads can
+continue chatting. `/schedule list` on a fenced thread shows stored status;
+conflicting operations and installation remain blocked until ownership is proven
+safe. Retried readiness checks do not repeat an uncertain handoff or start model
+recovery to unlock chat. Logs distinguish preparation from package installation.
+This failure-handling fix does not yet provide model-free schedule handoff.
+
+### Retained native host (experimental opt-in)
+
+The retained-host path separates a replaceable command frontend from an independently
+supervised native runtime. Frontend update preparation and attachment do not list,
+delete, recreate, cancel or resume native schedules. Original native processes,
+hooks/MCP, the schedule catalog and the Router result outbox stay with the host.
+`/host status` reports frontend and native-runtime versions separately; updating
+the frontend does not replace the pinned native-runtime code.
+
+Provision an installation with `prepareRetainedHostInstallation()` from
+`dist/sessionHost/RetainedHostLauncher.js`, passing an explicit verified distribution
+inventory for the package, complete runtime dependencies and Node interpreter. The
+API prepares private immutable metadata and a pinned bundle; it does not start a
+service or scan user configuration for packaging inputs. Its returned `launch.json`
+can be supplied to the frontend:
+
+```bash
+remote-cli start --retained-host /absolute/path/to/launch.json --non-interactive
+```
+
+The frontend's own supervisor must preserve that argument across upgrades.
+`REMOTE_CLI_SESSION_HOST_LAUNCH` is an equivalent selection mechanism. Do not combine
+it with `REMOTE_CLI_SESSION_HOST_DESCRIPTOR`, which connects only to an already
+running, separately provisioned host. The supervisor launches the pinned entry with
+`--config` and authenticates through a private descriptor; credentials do not appear
+in service arguments. Linux uses a separate user unit and macOS a separate
+LaunchAgent. Windows supervision is unsupported. This path is not enabled by default.
+
+Only newly created retained-host threads are supported. The command profile includes
+plain prompts, `/thread new <name> <claude|agy|dsh> <directory>`, `/thread list`,
+`/t <name>`, schedule create/list/cancel and `/host status`; other context changes,
+attachments, approvals and delegation are not implemented in this profile. Existing
+monolithic sessions cannot be silently imported. A running monolithic client must
+not share the device Router connection with the new host.
+
+Frontend replacement is distinct from host shutdown or machine reboot. The host is
+not automatically restarted after failure, and its saved journal is not treated as
+proof that native timers or execution queues can be recreated. Explicit host shutdown
+requires native work and output to drain. Unknown outcomes remain held, and ingress
+history has an explicit capacity bound. Drained-host shutdown fences new work,
+joins the original native process groups and persists late callbacks before releasing
+ownership; uncertain exit or persistence failure retains that ownership for retry.
+
+Isolated Linux experiments with real Claude and AGY executables and a deterministic
+loopback provider verified frontend replacement with unchanged native process,
+session, task IDs and MCP endpoint, continuing once/cron execution, and output ACK
+retry without replaying work. Frontend replacement and drained-host shutdown made
+zero model or native-management calls. Explicit schedule cancellation is a separate
+operation and can still use the backend's model-mediated management flow. Actual
+package installation, OS-supervised replacement, live Router/Feishu delivery and
+macOS/Windows acceptance remain unverified; complete that deployment acceptance
+before enabling this experimental path in production.
+
 Use the updated CLI's `remote-cli service start`, `stop`, or `install` to apply the
 shutdown policy to an existing generated unit before stopping it. Start/stop migrate
 only the exact legacy generated layout, preserving captured paths and environment;

@@ -34,6 +34,12 @@ export const realGitTestFiles = [
 // exec, so release/reacquire assertions require an independent process.
 export const nativeOwnershipTestFiles = [
   'tests/ScheduleService.test.ts',
+  'tests/MessageHandler.schedule.test.ts',
+  'tests/SessionHost.test.ts',
+  'tests/SessionHostRuntime.test.ts',
+  'tests/SessionHostProcess.test.ts',
+  'tests/SessionHostRetainedProcess.test.ts',
+  'tests/RetainedHostLauncher.test.ts',
   'tests/delegation/DelegationOwnership.test.ts',
   'tests/delegation/OwnershipRuntime.test.ts',
   'tests/delegation/ManagedNativeSessionDeletion.test.ts',
