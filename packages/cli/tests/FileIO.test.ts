@@ -16,6 +16,29 @@ describe('bounded attachment IO', () => {
     if (extra) yield Buffer.from('x');
   })());
 
+  it('rejects a Windows short-name alias until the fixture uses the native canonical path', async () => {
+    // Synthetic Windows path semantics, independent of host OS or symlink privileges.
+    const alias = String.raw`C:\fixtures\SHORT~1\attachments`;
+    const canonical = String.raw`C:\fixtures\short-name-home\attachments`;
+    const stat = await fs.lstat(root);
+    expect(stat.isDirectory()).toBe(true);
+    expect(stat.isSymbolicLink()).toBe(false);
+    const resolveWindows = path.win32.resolve.bind(path.win32);
+    const spies = [
+      vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined),
+      vi.spyOn(fs, 'lstat').mockResolvedValue(stat),
+      vi.spyOn(fs, 'realpath').mockResolvedValue(canonical),
+      vi.spyOn(path, 'resolve').mockImplementation((...parts) => resolveWindows(...parts)),
+    ];
+    const chmod = vi.spyOn(fs, 'chmod').mockResolvedValue(undefined);
+    try {
+      await expect(privateDirectory(alias)).rejects.toThrow('Unsafe attachment directory');
+      expect(chmod).not.toHaveBeenCalled();
+      await expect(privateDirectory(canonical)).resolves.toBeUndefined();
+      expect(chmod).toHaveBeenCalledWith(canonical, 0o700);
+    } finally { chmod.mockRestore(); spies.reverse().forEach(spy => spy.mockRestore()); }
+  });
+
   it('reads complete bounded metadata across short reads and rejects oversized or symlinked manifests', async () => {
     const filename = path.join(root, 'metadata.json'); await atomicJson(filename, { name: 'complete metadata' });
     const open = fs.open.bind(fs);

@@ -3,7 +3,7 @@ import { ThreadContextReset } from '../src/thread/ThreadContextReset';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'events';
 import { spawn } from 'child_process';
-import { mkdtemp, rm, writeFile } from 'fs/promises';
+import { mkdtemp, realpath, rm, writeFile } from 'fs/promises';
 import { mkdtempSync, realpathSync } from 'fs';
 import os from 'os';
 import { tmpdir } from 'os';
@@ -47,7 +47,8 @@ function fakeChild() {
  */
 function buildHandler(mockExecutorOverrides: Record<string, any> = {}) {
   // The working-directory guard stats this path, so the fixture must exist.
-  const workingDirectory = realpathSync(mkdtempSync(path.join(tmpdir(), 'message-handler-cwd-')));
+  // Match fs.promises.realpath, including Windows short-name expansion.
+  const workingDirectory = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'message-handler-cwd-')));
   vi.spyOn(os, 'homedir').mockReturnValue(workingDirectory);
   const mockExecutor: any = {
     execute: vi.fn(),
@@ -685,6 +686,7 @@ describe('MessageHandler', () => {
     });
     it('does not let a reported oversized file block later text after inbox recreation', async () => {
       const thread = ctx.mockThreadManager.getDefaultThread();
+      expect(await realpath(ctx.workingDirectory)).toBe(ctx.workingDirectory);
       thread.workingDirectory = ctx.workingDirectory;
       thread.delegation = false;
       const fileId = 'd'.repeat(64);

@@ -47,7 +47,9 @@ const executors: any[] = [];
 let held: (() => void) | undefined;
 beforeEach(async () => {
   jobs.clear(); executors.length = 0; held = undefined;
-  root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'retained-runtime-')));
+  // Runtime admission uses the native realpath API, which expands Windows aliases.
+  root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'retained-runtime-')));
+  expect(await fs.promises.realpath(root)).toBe(root);
   vi.spyOn(os, 'homedir').mockReturnValue(root);
   threads = await ThreadManager.initialize(root); router = new Router();
   const guard = new DirectoryGuard([root]);
@@ -99,8 +101,26 @@ async function command(text: string, threadId?: string, openId = 'synthetic-owne
   return router.messages.find(row => row.type === 'response' && row.messageId === messageId);
 }
 async function newThread() {
-  const result = await command(`/thread new retained-${++serial} agy ${root}`); expect(result.success).toBe(true); return result.threadId as string;
+  const result = await command(`/thread new retained-${++serial} agy ${root}`); expect(result).toMatchObject({ success: true }); return result.threadId as string;
 }
+
+it('refuses a native canonical cwd outside the fixture allowlist without creating an owner', async () => {
+  const realpath = fs.promises.realpath.bind(fs.promises);
+  // Model a native alias expansion that differs from the configured home.
+  // No access to the synthetic sibling is performed.
+  const canonical = path.join(path.dirname(root), 'synthetic-expanded-home');
+  const spy = vi.spyOn(fs.promises, 'realpath').mockImplementation(async (target: any, options: any) => {
+    if (target === root) return canonical;
+    return realpath(target, options);
+  });
+  try {
+    const result = await command(`/thread new alias-boundary agy ${root}`);
+    expect(result).toMatchObject({ success: false, error: expect.stringContaining('not allowed') });
+    expect(runtime.journal.snapshot().owners).toEqual([]);
+    expect(executors).toHaveLength(0);
+  } finally { spy.mockRestore(); }
+  await newThread();
+});
 
 it('drains bounded ingress pages and explicitly rejects commands too large after transport encoding', async () => {
   const threadId = await newThread();
@@ -502,7 +522,7 @@ it('refuses reimport after native host exit and preserves bounded journal state 
 it.each(['claude', 'dsh'] as const)('keeps %s adapter ownership and sibling schedules across frontend replacement and exact cancellation', async backend => {
   const first = await command(`/thread new first-${++serial} ${backend} ${root}`);
   const second = await command(`/thread new sibling-${++serial} ${backend} ${root}`);
-  expect(first.success).toBe(true); expect(second.success).toBe(true);
+  expect(first).toMatchObject({ success: true }); expect(second).toMatchObject({ success: true });
   expect((await command('/schedule after 60m -- first task', first.threadId)).success).toBe(true);
   expect((await command('/schedule after 60m -- sibling task', second.threadId)).success).toBe(true);
   const before = [...jobs.entries()];

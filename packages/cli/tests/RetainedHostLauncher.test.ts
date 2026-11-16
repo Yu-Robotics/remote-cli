@@ -8,7 +8,10 @@ import { hostConfigArgument } from '../src/sessionHost/entry';
 import { HostServer } from '../src/sessionHost/HostServer';
 import { HostClient } from '../src/sessionHost/HostClient';
 import { SessionHostSupervisor } from '../src/service/SessionHostSupervisor';
+import * as pinned from '../src/update/PinnedHostBundle';
 import type { VerifiedHostFile } from '../src/update/PinnedHostBundle';
+
+const prepareRealBundle = pinned.preparePinnedHostBundle;
 
 const digest = (data: string) => createHash('sha256').update(data).digest('hex');
 let root: string;
@@ -21,7 +24,7 @@ function file(base: string, name: string, content: string, mode = 0o644): Verifi
   return { path: name, sha256: digest(content), mode: fs.statSync(filename).mode & 0o777 };
 }
 beforeEach(() => {
-  root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'retained-launch-')));
+  root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'retained-launch-')));
   const pkg = path.join(root, 'distribution');
   const files = [file(pkg, 'package.json', '{"name":"synthetic-runtime"}'),
     file(pkg, 'dist/sessionHost/entry.js', 'module.exports = {};')];
@@ -30,6 +33,16 @@ beforeEach(() => {
     storeRoot: path.join(root, 'bundles'), package: { root: pkg, files }, dependencies: [], entry: 'dist/sessionHost/entry.js',
     node: { path: path.join(root, 'node'), sha256: node.sha256, mode: node.mode },
   } };
+  // Metadata and authenticated IPC are portable. This stub supplies bundle
+  // metadata only; it does not claim Windows can pin or supervise a host.
+  vi.spyOn(pinned, 'preparePinnedHostBundle').mockImplementation(async bundle => {
+    const hash = digest(JSON.stringify(bundle));
+    const bundleRoot = path.join(root, 'synthetic-bundles', hash);
+    const packageRoot = path.join(bundleRoot, 'package');
+    return { digest: hash, root: bundleRoot, packageRoot,
+      entryPath: path.join(packageRoot, bundle.entry), nodePath: path.join(bundleRoot, 'node'),
+      assetsRoot: packageRoot, manifestPath: path.join(bundleRoot, 'manifest.json') };
+  });
 });
 afterEach(async () => {
   client?.close(); client = undefined;
@@ -115,7 +128,17 @@ it('rejects mismatched connection metadata and manager uncertainty', async () =>
   await expect(supervisedLauncher(launch, { supervisor: () => unknown }).connect()).rejects.toThrow('launch is unresolved');
 });
 
-describe.skipIf(process.platform === 'win32')('supported production supervisor selection', () => {
+describe.skipIf(process.platform === 'win32')('supported production provisioning and supervisor selection', () => {
+  beforeEach(() => { vi.mocked(pinned.preparePinnedHostBundle).mockRestore(); });
+  it('prepares and verifies an actual pinned bundle before publishing launch metadata', async () => {
+    const launch = await prepareRetainedHostInstallation(input);
+    const fixture = installation(launch);
+    const bundle = fixture.record.context.bundle;
+    await expect(pinned.verifyPinnedHostBundle(bundle.root, bundle.digest)).resolves.toEqual(bundle);
+    expect(await prepareRetainedHostInstallation(input)).toBe(launch);
+    input.bundle.package.files[1] = file(input.bundle.package.root, 'dist/sessionHost/entry.js', 'module.exports = { changed: true };');
+    await expect(prepareRetainedHostInstallation(input)).rejects.toThrow('cannot be replaced');
+  });
   it('uses the actual supervisor API when no fixture launcher is injected', async () => {
     const launch = await prepareRetainedHostInstallation(input);
     const fixture = installation(launch); fixture.publish();
@@ -134,4 +157,17 @@ it('rejects malformed options and CLI arguments before any startup', async () =>
   const launch = await prepareRetainedHostInstallation(input);
   fs.writeFileSync(launch, JSON.stringify({ version: 2, context: {} }));
   await expect(supervisedLauncher(launch).connect()).rejects.toThrow('format');
+});
+
+it('explicitly refuses Windows bundle provisioning before filesystem work', async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  let result: Promise<unknown>;
+  try {
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    // The real API rejects synchronously before its first await. Restore the
+    // actual platform before any asynchronous fixture persistence or cleanup.
+    result = prepareRealBundle(input.bundle);
+  } finally { Object.defineProperty(process, 'platform', descriptor); }
+  await expect(result!).rejects.toThrow('unsupported on Windows');
+  expect(fs.existsSync(input.bundle.storeRoot)).toBe(false);
 });

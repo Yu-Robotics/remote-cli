@@ -9,7 +9,7 @@ const originalHomedir = os.homedir();
 vi.spyOn(os, 'homedir').mockImplementation(() => process.env.HOME || originalHomedir);
 
 import { initCommand } from '../../src/commands/init';
-import { startCommand } from '../../src/commands/start';
+import { startCommand, type StartCommandOptions } from '../../src/commands/start';
 import { stopCommand } from '../../src/commands/stop';
 import { statusCommand } from '../../src/commands/status';
 import { ConfigManager } from '../../src/config/ConfigManager';
@@ -18,6 +18,15 @@ import { WebSocketClient } from '../../src/client/WebSocketClient';
 // Mock dependencies
 vi.mock('axios');
 vi.mock('../../src/client/WebSocketClient');
+vi.mock('child_process', async importOriginal => ({
+  ...await importOriginal<typeof import('child_process')>(),
+  execFile: vi.fn((_command, _args, _options, callback) => callback(null, 'Synthetic CLI version', '')),
+}));
+vi.mock('../../src/service/ServiceManager', () => ({
+  createServiceManager: vi.fn(() => ({
+    status: vi.fn().mockResolvedValue({ installed: false, running: false }),
+  })),
+}));
 vi.mock('../../src/maintenance/MaintenanceClient', () => ({
   MaintenanceClient: vi.fn(() => ({ started: vi.fn().mockResolvedValue(undefined), handle: vi.fn().mockResolvedValue(false), stop: vi.fn().mockResolvedValue(undefined) })),
 }));
@@ -39,6 +48,16 @@ describe('Integration: Full Workflow', () => {
   let mockWsClient: any;
   let tempConfigDir: string;
   let originalPath: string | undefined;
+  let shutdown: (() => Promise<void>) | undefined;
+
+  function startService(options: StartCommandOptions) {
+    return startCommand({ ...options, onShutdownReady: close => { shutdown = close; } });
+  }
+
+  async function closeService() {
+    await shutdown?.();
+    shutdown = undefined;
+  }
 
   beforeEach(async () => {
     originalPath = process.env.PATH;
@@ -66,17 +85,24 @@ describe('Integration: Full Workflow', () => {
     fs.mkdirSync(testHome, { recursive: true });
     vi.stubEnv('HOME', testHome);
     vi.stubEnv('USERPROFILE', testHome);
+    vi.stubEnv('XDG_CONFIG_HOME', path.join(testHome, '.config'));
+    vi.stubEnv('REMOTE_CLI_SESSION_HOST_LAUNCH', '');
+    vi.stubEnv('REMOTE_CLI_SESSION_HOST_DESCRIPTOR', '');
   });
 
-  afterEach(() => {
-    // Cleanup temp config directory
-    if (fs.existsSync(tempConfigDir)) {
-      fs.rmSync(tempConfigDir, { recursive: true, force: true });
+  afterEach(async () => {
+    try {
+      await closeService();
+      // Remove fixture storage only after its client releases native ownership.
+      if (fs.existsSync(tempConfigDir)) {
+        fs.rmSync(tempConfigDir, { recursive: true, force: true });
+      }
+    } finally {
+      vi.unstubAllEnvs();
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      vi.clearAllMocks();
     }
-    vi.unstubAllEnvs();
-    if (originalPath === undefined) delete process.env.PATH;
-    else process.env.PATH = originalPath;
-    vi.clearAllMocks();
   });
 
   describe('Complete user journey', () => {
@@ -108,7 +134,7 @@ describe('Integration: Full Workflow', () => {
       expect(config.get('security.allowedDirectories')).toEqual(['~/test-project']);
 
       // Step 2: Start service
-      const startResult = await startCommand({ daemon: false });
+      const startResult = await startService({ daemon: false });
 
       expect(startResult.success).toBe(true);
       expect(mockWsClient.connect).toHaveBeenCalled();
@@ -132,6 +158,7 @@ describe('Integration: Full Workflow', () => {
       expect(statusResult.status?.uptime).toBeGreaterThanOrEqual(0);
 
       // Step 4: Stop service
+      await closeService();
       const stopResult = await stopCommand();
 
       expect(stopResult.success).toBe(true);
@@ -250,15 +277,27 @@ describe('Integration: Full Workflow', () => {
       });
 
       // Start service
-      await startCommand({ daemon: false });
+      const started = await startService({ daemon: false });
+      expect(started.error).toBeUndefined();
+      expect(started.success).toBe(true);
 
-      // Stop service
-      await stopCommand();
+      // Saved status alone cannot retire an embedded client's Router ownership.
+      expect(await stopCommand()).toMatchObject({ success: true });
+      expect(await startService({ daemon: false })).toEqual({
+        success: false, error: 'Another client owns this device Router connection.',
+      });
+      expect(mockWsClient.connect).toHaveBeenCalledTimes(1);
+
+      // The real CLI invokes this callback on process shutdown. Embedded tests
+      // must do the same before restarting or deleting the fixture directory.
+      await closeService();
+      expect(mockWsClient.disconnect).toHaveBeenCalledTimes(1);
 
       // Start service again
-      const restartResult = await startCommand({ daemon: false });
+      const restartResult = await startService({ daemon: false });
 
-      expect(restartResult.success).toBe(true);
+      expect(restartResult).toMatchObject({ success: true });
+      expect(mockWsClient.connect).toHaveBeenCalledTimes(2);
 
       // Verify configuration persisted
       const config = await ConfigManager.initialize();
@@ -317,7 +356,7 @@ describe('Integration: Full Workflow', () => {
       // Mock WebSocket connection failure
       mockWsClient.connect.mockRejectedValueOnce(new Error('Connection refused'));
 
-      const result = await startCommand({ daemon: false });
+      const result = await startService({ daemon: false });
 
       expect(result.success).toBe(false);
       expect(result.error).toContain('Connection refused');

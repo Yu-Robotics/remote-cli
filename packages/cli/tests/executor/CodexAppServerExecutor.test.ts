@@ -1450,9 +1450,11 @@ describe('CodexAppServerExecutor', () => {
 
       const command = { messageId: 'queued-command', content: 'retain me', openId: 'owner', timestamp: Date.now() };
       const queue = [command];
-      const admission = {
+      // Borrow the real admission methods, including their schedule guards.
+      const admission = Object.assign(Object.create(MessageHandler.prototype), {
         settingsAdmission: { isBlocked: () => false },
         scheduleRecoveryThreads: new Set<string>(),
+        automaticUpdateScheduleThreads: new Map<string, number>(),
         threadPool: pool,
         pausedQueues: new Set<string>(),
         abortOperations: new Map(),
@@ -1467,7 +1469,7 @@ describe('CodexAppServerExecutor', () => {
         trackTask: vi.fn(),
         expandCommandShortcuts: (content: string) => content,
         executeCommand,
-      };
+      });
       await (MessageHandler.prototype as any).startNextQueuedCommand.call(admission, threadId);
 
       expect(pool.isThreadBusy(threadId)).toBe(true);
