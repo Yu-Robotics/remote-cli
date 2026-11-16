@@ -175,27 +175,49 @@ describe('multiple accepted delegated tasks', () => {
     parent.backend = backend;
     const exited = deferred<void>();
     const ready = deferred<void>();
+    const exitEntered = deferred<void>();
+    const readyEntered = deferred<void>();
+    const secondStarted = deferred<void>();
     const markReady = manager.laneStore.markReady.bind(manager.laneStore);
-    vi.spyOn(manager.laneStore, 'markReady').mockImplementationOnce(async id => { await ready.promise; return markReady(id); });
+    vi.spyOn(manager.laneStore, 'markReady').mockImplementationOnce(async id => {
+      readyEntered.resolve();
+      await ready.promise;
+      return markReady(id);
+    });
     const scope = manager.begin(parent);
-    await delegate(scope, 'first');
-    vi.mocked(workers[0].executor.waitForExit!).mockReturnValue(exited.promise);
-    const second = await delegate(scope, 'second');
-    workers[0].finish({ success: true });
-    await vi.waitFor(() => expect(workers[0].executor.waitForExit).toHaveBeenCalled());
-    expect(factory).toHaveBeenCalledTimes(1);
-    expect(manager.blocksWorkspace(directory, 'other')).toBe(true);
-    exited.resolve();
-    await vi.waitFor(() => expect(manager.laneStore.markReady).toHaveBeenCalled());
-    expect(factory).toHaveBeenCalledTimes(1);
-    expect(await status(scope, second.taskId)).toMatchObject({ state: 'queued' });
-    ready.resolve();
-    await vi.waitFor(() => expect(workers).toHaveLength(2));
-    expect(factory.mock.calls[1][3]).toBe(factory.mock.calls[0][3]);
-    expect(factory.mock.calls[1][3]).not.toBe(parent.thread.id);
-    workers[1].finish({ success: true });
-    await scope.collectPendingResults();
-    expect(manager.blocksWorkspace(directory, 'other')).toBe(false);
+    try {
+      await delegate(scope, 'first');
+      vi.mocked(workers[0].executor.waitForExit!).mockImplementation(async () => {
+        exitEntered.resolve();
+        await exited.promise;
+      });
+      const second = await delegate(scope, 'second');
+      vi.mocked(parent.onProgress!).mockImplementation(event => {
+        if (event.taskId === second.taskId && event.phase === 'started') secondStarted.resolve();
+        return true;
+      });
+      workers[0].finish({ success: true });
+      await exitEntered.promise;
+      expect(factory).toHaveBeenCalledTimes(1);
+      expect(manager.blocksWorkspace(directory, 'other')).toBe(true);
+      exited.resolve();
+      await readyEntered.promise;
+      expect(factory).toHaveBeenCalledTimes(1);
+      expect(await status(scope, second.taskId)).toMatchObject({ state: 'queued' });
+      ready.resolve();
+      // Native exit, durable lane readiness and successor startup are separate
+      // phases. Join their events under the test deadline, not a 1s polling wait.
+      await secondStarted.promise;
+      expect(workers).toHaveLength(2);
+      expect(factory.mock.calls[1][3]).toBe(factory.mock.calls[0][3]);
+      expect(factory.mock.calls[1][3]).not.toBe(parent.thread.id);
+      workers[1].finish({ success: true });
+      await scope.collectPendingResults();
+      expect(manager.blocksWorkspace(directory, 'other')).toBe(false);
+    } finally {
+      exited.resolve(); ready.resolve();
+      await scope.close();
+    }
   });
 
   it('quarantines uncertain exits and terminates queued siblings without starting them', async () => {
